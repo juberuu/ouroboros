@@ -229,14 +229,18 @@ class OuroborosAgent:
 
     # ---------- telegram helpers (direct API calls) ----------
 
-    def _telegram_api_post(self, method: str, data: Dict[str, Any]) -> None:
+    def _telegram_api_post(self, method: str, data: Dict[str, Any]) -> Tuple[bool, str]:
         """Best-effort Telegram Bot API call.
 
         We intentionally do not log request URLs or payloads verbatim to avoid any chance of leaking secrets.
+
+        Returns: (ok, status)
+          - ok: True if request succeeded
+          - status: "ok" | "no_token" | "error"
         """
         token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
         if not token:
-            return
+            return False, "no_token"
 
         url = f"https://api.telegram.org/bot{token}/{method}"
         payload = urllib.parse.urlencode({k: str(v) for k, v in data.items()}).encode("utf-8")
@@ -244,35 +248,60 @@ class OuroborosAgent:
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
                 resp.read()
+            return True, "ok"
         except Exception as e:
             append_jsonl(
                 self.env.drive_path("logs") / "events.jsonl",
                 {"ts": utc_now_iso(), "type": "telegram_api_error", "method": method, "error": repr(e)},
             )
+            return False, "error"
 
     def _send_chat_action(self, chat_id: int, action: str = "typing", log: bool = False) -> None:
-        self._telegram_api_post("sendChatAction", {"chat_id": chat_id, "action": action})
+        ok, status = self._telegram_api_post("sendChatAction", {"chat_id": chat_id, "action": action})
         if log:
             append_jsonl(
                 self.env.drive_path("logs") / "events.jsonl",
-                {"ts": utc_now_iso(), "type": "telegram_chat_action", "chat_id": chat_id, "action": action},
+                {
+                    "ts": utc_now_iso(),
+                    "type": "telegram_chat_action",
+                    "chat_id": chat_id,
+                    "action": action,
+                    "ok": ok,
+                    "status": status,
+                },
             )
 
     def _start_typing_loop(self, chat_id: int) -> threading.Event:
-        """Start a background loop that periodically sends 'typing…' while the task is being processed."""
+        """Start a background loop that periodically sends 'typing…' while the task is being processed.
+
+        Why there is a start delay:
+        - Supervisor often sends an immediate "accepted/started" message.
+        - Telegram clients may not show typing if a bot just sent a message; delaying the first logged "typing"
+          increases the chance it becomes visible.
+
+        Settings:
+        - OUROBOROS_TG_TYPING=0/1
+        - OUROBOROS_TG_TYPING_INTERVAL (seconds)
+        - OUROBOROS_TG_TYPING_START_DELAY (seconds)
+        """
         stop = threading.Event()
         interval = float(os.environ.get("OUROBOROS_TG_TYPING_INTERVAL", "4"))
+        start_delay = float(os.environ.get("OUROBOROS_TG_TYPING_START_DELAY", "1.0"))
 
-        # Send immediately once (and log this start).
-        self._send_chat_action(chat_id, "typing", log=True)
+        # Best effort: send immediately once (not logged).
+        self._send_chat_action(chat_id, "typing", log=False)
 
         def _loop() -> None:
-            # Telegram clients typically show typing for a few seconds; refresh periodically.
-            # Don't spam logs: only the initial call is logged.
-            while not stop.is_set():
-                stop.wait(interval)
+            # Wait a bit, then send the first logged typing action.
+            if start_delay > 0:
+                stop.wait(start_delay)
                 if stop.is_set():
-                    break
+                    return
+
+            self._send_chat_action(chat_id, "typing", log=True)
+
+            # Telegram clients typically show typing for a few seconds; refresh periodically.
+            while not stop.wait(interval):
                 self._send_chat_action(chat_id, "typing", log=False)
 
         threading.Thread(target=_loop, daemon=True).start()
