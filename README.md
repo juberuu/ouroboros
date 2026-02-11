@@ -71,3 +71,9 @@
 
 Пока используется одна модель через OpenRouter: `openai/gpt-5.2` (по умолчанию).
 Дальше можно развести на 3 модели (fast / chat / big).
+
+## Smoke test (self-update)
+
+Этот блок добавлен как «игрушечный» коммит для проверки пайплайна self-update.
+
+- Last README self-commit: 2026-02-11
