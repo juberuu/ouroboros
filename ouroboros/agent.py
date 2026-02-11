@@ -1,4 +1,3 @@
-
 """
 Ouroboros agent core (modifiable).
 
@@ -14,7 +13,10 @@ import json
 import os
 import pathlib
 import subprocess
+import threading
 import time
+import urllib.parse
+import urllib.request
 import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
@@ -127,65 +129,95 @@ class OuroborosAgent:
         drive_logs = self.env.drive_path("logs")
         append_jsonl(drive_logs / "events.jsonl", {"ts": utc_now_iso(), "type": "task_received", "task": task})
 
-        base_prompt = read_text(self.env.repo_path("prompts/BASE.md"))
-        world_md = read_text(self.env.repo_path("WORLD.md")) if self.env.repo_path("WORLD.md").exists() else ""
-        readme_md = read_text(self.env.repo_path("README.md")) if self.env.repo_path("README.md").exists() else ""
+        # Telegram typing indicator (best-effort).
+        # Note: we can't show typing at the exact moment of message receipt (handled by supervisor),
+        # but we can show it as soon as a worker starts processing the task.
+        typing_stop: Optional[threading.Event] = None
+        if os.environ.get("OUROBOROS_TG_TYPING", "1").lower() not in ("0", "false", "no", "off", ""):
+            try:
+                chat_id = int(task.get("chat_id"))
+                typing_stop = self._start_typing_loop(chat_id)
+            except Exception as e:
+                append_jsonl(
+                    drive_logs / "events.jsonl",
+                    {"ts": utc_now_iso(), "type": "typing_start_error", "task_id": task.get("id"), "error": repr(e)},
+                )
 
-        notes_path = self.env.drive_path("NOTES.md")
-        notes_md = read_text(notes_path) if notes_path.exists() else ""
+        try:
+            base_prompt = read_text(self.env.repo_path("prompts/BASE.md"))
+            world_md = read_text(self.env.repo_path("WORLD.md")) if self.env.repo_path("WORLD.md").exists() else ""
+            readme_md = read_text(self.env.repo_path("README.md")) if self.env.repo_path("README.md").exists() else ""
 
-        state_path = self.env.drive_path("state/state.json")
-        state_json = read_text(state_path) if state_path.exists() else "{}"
+            notes_path = self.env.drive_path("NOTES.md")
+            notes_md = read_text(notes_path) if notes_path.exists() else ""
 
-        index_summaries_path = self.env.drive_path("index/summaries.json")
-        index_summaries = read_text(index_summaries_path) if index_summaries_path.exists() else ""
+            state_path = self.env.drive_path("state/state.json")
+            state_json = read_text(state_path) if state_path.exists() else "{}"
 
-        chat_log_path = self.env.drive_path("logs/chat.jsonl")
-        chat_log = read_text(chat_log_path) if chat_log_path.exists() else ""
+            index_summaries_path = self.env.drive_path("index/summaries.json")
+            index_summaries = read_text(index_summaries_path) if index_summaries_path.exists() else ""
 
-        runtime_ctx = {
-            "utc_now": utc_now_iso(),
-            "repo_dir": str(self.env.repo_dir),
-            "drive_root": str(self.env.drive_root),
-            "git_head": self._git_head(),
-            "git_branch": self._git_branch(),
-            "task": {"id": task.get("id"), "type": task.get("type")},
-        }
+            chat_log_path = self.env.drive_path("logs/chat.jsonl")
+            chat_log = read_text(chat_log_path) if chat_log_path.exists() else ""
 
-        messages = [
-            {"role": "system", "content": base_prompt},
-            {"role": "system", "content": "## WORLD.md\n\n" + world_md},
-            {"role": "system", "content": "## README.md\n\n" + readme_md},
-            {"role": "system", "content": "## Drive state (state/state.json)\n\n" + state_json},
-            {"role": "system", "content": "## NOTES.md (Drive)\n\n" + notes_md},
-            {"role": "system", "content": "## Index summaries (Drive: index/summaries.json)\n\n" + index_summaries},
-            {"role": "system", "content": "## Runtime context (JSON)\n\n" + json.dumps(runtime_ctx, ensure_ascii=False, indent=2)},
-            {"role": "system", "content": "## Raw chat log (Drive: logs/chat.jsonl)\n\n" + chat_log},
-            {"role": "user", "content": task.get("text", "")},
-        ]
+            runtime_ctx = {
+                "utc_now": utc_now_iso(),
+                "repo_dir": str(self.env.repo_dir),
+                "drive_root": str(self.env.drive_root),
+                "git_head": self._git_head(),
+                "git_branch": self._git_branch(),
+                "task": {"id": task.get("id"), "type": task.get("type")},
+            }
 
-        tools = self._tools_schema()
-        text, usage = self._llm_with_tools(messages=messages, tools=tools)
+            messages = [
+                {"role": "system", "content": base_prompt},
+                {"role": "system", "content": "## WORLD.md\n\n" + world_md},
+                {"role": "system", "content": "## README.md\n\n" + readme_md},
+                {"role": "system", "content": "## Drive state (state/state.json)\n\n" + state_json},
+                {"role": "system", "content": "## NOTES.md (Drive)\n\n" + notes_md},
+                {"role": "system", "content": "## Index summaries (Drive: index/summaries.json)\n\n" + index_summaries},
+                {"role": "system", "content": "## Runtime context (JSON)\n\n" + json.dumps(runtime_ctx, ensure_ascii=False, indent=2)},
+                {"role": "system", "content": "## Raw chat log (Drive: logs/chat.jsonl)\n\n" + chat_log},
+                {"role": "user", "content": task.get("text", "")},
+            ]
 
-        self._pending_events.append({
-            "type": "llm_usage",
-            "task_id": task.get("id"),
-            "provider": "openrouter",
-            "usage": usage,
-            "ts": utc_now_iso(),
-        })
+            tools = self._tools_schema()
 
-        self._pending_events.append({
-            "type": "send_message",
-            "chat_id": task["chat_id"],
-            "text": text,
-            "task_id": task.get("id"),
-            "ts": utc_now_iso(),
-        })
+            usage: Dict[str, Any] = {}
+            try:
+                text, usage = self._llm_with_tools(messages=messages, tools=tools)
+            except Exception as e:
+                append_jsonl(
+                    drive_logs / "events.jsonl",
+                    {"ts": utc_now_iso(), "type": "task_error", "task_id": task.get("id"), "error": repr(e)},
+                )
+                text = (
+                    "⚠️ Внутренняя ошибка воркера при обработке сообщения. "
+                    "Я залогировал ошибку. Попробуй /restart или повтори запрос."
+                )
 
-        self._pending_events.append({"type": "task_done", "task_id": task.get("id"), "ts": utc_now_iso()})
-        append_jsonl(drive_logs / "events.jsonl", {"ts": utc_now_iso(), "type": "task_done", "task_id": task.get("id")})
-        return list(self._pending_events)
+            self._pending_events.append({
+                "type": "llm_usage",
+                "task_id": task.get("id"),
+                "provider": "openrouter",
+                "usage": usage,
+                "ts": utc_now_iso(),
+            })
+
+            self._pending_events.append({
+                "type": "send_message",
+                "chat_id": task["chat_id"],
+                "text": text,
+                "task_id": task.get("id"),
+                "ts": utc_now_iso(),
+            })
+
+            self._pending_events.append({"type": "task_done", "task_id": task.get("id"), "ts": utc_now_iso()})
+            append_jsonl(drive_logs / "events.jsonl", {"ts": utc_now_iso(), "type": "task_done", "task_id": task.get("id")})
+            return list(self._pending_events)
+        finally:
+            if typing_stop is not None:
+                typing_stop.set()
 
     # ---------- git helpers ----------
 
@@ -194,6 +226,57 @@ class OuroborosAgent:
 
     def _git_branch(self) -> str:
         return run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=self.env.repo_dir)
+
+    # ---------- telegram helpers (direct API calls) ----------
+
+    def _telegram_api_post(self, method: str, data: Dict[str, Any]) -> None:
+        """Best-effort Telegram Bot API call.
+
+        We intentionally do not log request URLs or payloads verbatim to avoid any chance of leaking secrets.
+        """
+        token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        if not token:
+            return
+
+        url = f"https://api.telegram.org/bot{token}/{method}"
+        payload = urllib.parse.urlencode({k: str(v) for k, v in data.items()}).encode("utf-8")
+        req = urllib.request.Request(url, data=payload, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                resp.read()
+        except Exception as e:
+            append_jsonl(
+                self.env.drive_path("logs") / "events.jsonl",
+                {"ts": utc_now_iso(), "type": "telegram_api_error", "method": method, "error": repr(e)},
+            )
+
+    def _send_chat_action(self, chat_id: int, action: str = "typing", log: bool = False) -> None:
+        self._telegram_api_post("sendChatAction", {"chat_id": chat_id, "action": action})
+        if log:
+            append_jsonl(
+                self.env.drive_path("logs") / "events.jsonl",
+                {"ts": utc_now_iso(), "type": "telegram_chat_action", "chat_id": chat_id, "action": action},
+            )
+
+    def _start_typing_loop(self, chat_id: int) -> threading.Event:
+        """Start a background loop that periodically sends 'typing…' while the task is being processed."""
+        stop = threading.Event()
+        interval = float(os.environ.get("OUROBOROS_TG_TYPING_INTERVAL", "4"))
+
+        # Send immediately once (and log this start).
+        self._send_chat_action(chat_id, "typing", log=True)
+
+        def _loop() -> None:
+            # Telegram clients typically show typing for a few seconds; refresh periodically.
+            # Don't spam logs: only the initial call is logged.
+            while not stop.is_set():
+                stop.wait(interval)
+                if stop.is_set():
+                    break
+                self._send_chat_action(chat_id, "typing", log=False)
+
+        threading.Thread(target=_loop, daemon=True).start()
+        return stop
 
     # ---------- tools + LLM loop ----------
 
