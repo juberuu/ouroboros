@@ -700,6 +700,111 @@ class OuroborosAgent:
 
     # ---------- deterministic tool narration ----------
 
+    @staticmethod
+    def _tool_action_hint(fn_name: str, args: Dict[str, Any]) -> str:
+        """Generate a short human-readable hint of what we're doing.
+
+        Used only as a fallback when the model didn't provide progress text
+        alongside tool calls.
+        """
+        try:
+            name = str(fn_name or "?")
+            a = args or {}
+
+            if name in ("repo_read", "drive_read"):
+                path = str(a.get("path") or "").strip()
+                where = "(Drive)" if name == "drive_read" else "(repo)"
+                return f"Читаю файл {where}: {path or '?'}"
+
+            if name in ("repo_list", "drive_list"):
+                d = str(a.get("dir") or "").strip()
+                where = "(Drive)" if name == "drive_list" else "(repo)"
+                return f"Сканирую папку {where}: {d or '.'}"
+
+            if name == "drive_write":
+                path = str(a.get("path") or "").strip()
+                mode = str(a.get("mode") or "").strip()
+                mode_txt = f" ({mode})" if mode else ""
+                return f"Пишу файл (Drive){mode_txt}: {path or '?'}"
+
+            if name == "run_shell":
+                cmd = a.get("cmd")
+                if isinstance(cmd, list):
+                    cmd_s = " ".join(str(x) for x in cmd).strip()
+                else:
+                    cmd_s = str(cmd or "").strip()
+                if len(cmd_s) > 120:
+                    cmd_s = cmd_s[:117].rstrip() + "..."
+                return f"Запускаю команду: {cmd_s or '?'}"
+
+            if name == "web_search":
+                q = str(a.get("query") or "").strip()
+                if len(q) > 120:
+                    q = q[:117].rstrip() + "..."
+                return f"Запускаю web_search: {q or '?'}"
+
+            if name == "git_status":
+                return "Проверяю git status"
+            if name == "git_diff":
+                return "Смотрю git diff"
+
+            if name == "repo_commit_push":
+                msg = str(a.get("commit_message") or "").strip()
+                if msg:
+                    if len(msg) > 120:
+                        msg = msg[:117].rstrip() + "..."
+                    return f"Коммичу и пушу изменения: {msg}"
+                return "Коммичу и пушу изменения"
+
+            if name == "repo_write_commit":
+                path = str(a.get("path") or "").strip()
+                msg = str(a.get("commit_message") or "").strip()
+                if msg:
+                    return f"Записываю файл и коммичу: {path or '?'} ({msg[:80]})"
+                return f"Записываю файл и коммичу: {path or '?'}"
+
+            if name == "request_restart":
+                return "Запрашиваю перезапуск рантайма"
+
+            if name == "claude_code_edit":
+                instr = str(a.get("instruction") or "").strip()
+                if len(instr) > 120:
+                    instr = instr[:117].rstrip() + "..."
+                return f"Запускаю Claude Code CLI: {instr or 'edit'}"
+
+            if name == "telegram_send_voice":
+                return "Отправляю voice note в Telegram"
+
+            # generic fallback
+            return f"Выполняю инструмент: {name}"
+        except Exception:
+            return f"Выполняю инструмент: {fn_name}"
+
+    def _fallback_progress_from_tool_calls(self, tool_calls: List[Dict[str, Any]]) -> str:
+        hints: List[str] = []
+        for tc in tool_calls or []:
+            try:
+                fn = str(((tc.get("function") or {}).get("name")) or "?")
+                args_raw = ((tc.get("function") or {}).get("arguments")) or "{}"
+                try:
+                    args = json.loads(args_raw) if isinstance(args_raw, str) else (args_raw or {})
+                except Exception:
+                    args = {}
+                hints.append(self._tool_action_hint(fn, args if isinstance(args, dict) else {}))
+            except Exception:
+                continue
+
+        hints = self._dedupe_keep_order(hints, max_items=6)
+        if not hints:
+            return "Выполняю инструменты…"
+        if len(hints) == 1:
+            return hints[0]
+        head = "; ".join(hints[:3])
+        tail_n = max(0, len(hints) - 3)
+        if tail_n:
+            return f"Делаю: {head}; +{tail_n}"
+        return f"Делаю: {head}"
+
     def _narrate_tool(self, fn_name: str, args: Dict[str, Any], result: str, success: bool) -> str:
         """Compact deterministic narration used for errors/fallback only."""
         try:
@@ -1569,14 +1674,14 @@ class OuroborosAgent:
                         },
                     )
                 elif not has_model_progress:
-                    fallback_text = f"🔧 Выполнил {len(tool_calls)} инструмент(ов), продолжаю."
+                    fallback_text = self._fallback_progress_from_tool_calls(tool_calls)
                     self._emit_progress(fallback_text)
                     append_jsonl(
                         drive_logs / "narration.jsonl",
                         {
                             "ts": utc_now_iso(),
                             "round": round_idx,
-                            "mode": "deterministic_fallback",
+                            "mode": "deterministic_fallback_descriptive",
                             "narration": [fallback_text],
                         },
                     )
