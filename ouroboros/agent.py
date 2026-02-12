@@ -277,6 +277,31 @@ class OuroborosAgent:
             pass
         return fallback
 
+    def _safe_tail(self, path: pathlib.Path, max_lines: int = 200, max_chars: int = 50000) -> str:
+        """Read a recent bounded tail from a text file, returning empty string on errors."""
+        try:
+            if not path.exists():
+                return ""
+            txt = path.read_text(encoding="utf-8")
+        except Exception:
+            return ""
+
+        if not txt:
+            return ""
+
+        lines = txt.splitlines()
+        total_lines = len(lines)
+        if max_lines > 0 and total_lines > max_lines:
+            lines = lines[-max_lines:]
+
+        out = "\n".join(lines)
+        if max_chars > 0 and len(out) > max_chars:
+            out = out[-max_chars:]
+            out = "...(truncated tail)...\n" + out
+        elif max_lines > 0 and total_lines > max_lines:
+            out = "...(truncated tail)...\n" + out
+        return out
+
     def handle_task(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
         self._pending_events = []
         self._current_chat_id = int(task.get("chat_id") or 0) or None
@@ -310,18 +335,33 @@ class OuroborosAgent:
             notes_md = self._safe_read(self.env.drive_path("NOTES.md"))
             state_json = self._safe_read(self.env.drive_path("state/state.json"), fallback="{}")
             index_summaries = self._safe_read(self.env.drive_path("index/summaries.json"))
-            chat_log = self._safe_read(self.env.drive_path("logs/chat.jsonl"))
 
-            # Recent narration history (last 20 rounds) for agent self-context
-            narration_context = ""
-            try:
-                _narr_path = self.env.drive_path("logs/narration.jsonl")
-                if _narr_path.exists():
-                    _narr_lines = _narr_path.read_text(encoding="utf-8").strip().splitlines()
-                    _recent = _narr_lines[-20:]  # last 20 entries
-                    narration_context = "\n".join(_recent)
-            except Exception:
-                pass
+            def _env_int(name: str, default: int) -> int:
+                try:
+                    return int(os.environ.get(name, str(default)))
+                except Exception:
+                    return default
+
+            chat_lines = max(40, min(_env_int("OUROBOROS_CONTEXT_CHAT_LINES", 220), 2000))
+            artifact_lines = max(20, min(_env_int("OUROBOROS_CONTEXT_ARTIFACT_LINES", 160), 2000))
+            chat_chars = max(5000, min(_env_int("OUROBOROS_CONTEXT_CHAT_CHARS", 60000), 300000))
+            artifact_chars = max(3000, min(_env_int("OUROBOROS_CONTEXT_ARTIFACT_CHARS", 35000), 200000))
+
+            chat_log_recent = self._safe_tail(
+                self.env.drive_path("logs/chat.jsonl"), max_lines=chat_lines, max_chars=chat_chars
+            )
+            narration_context = self._safe_tail(
+                self.env.drive_path("logs/narration.jsonl"), max_lines=artifact_lines, max_chars=artifact_chars
+            )
+            tools_recent = self._safe_tail(
+                self.env.drive_path("logs/tools.jsonl"), max_lines=artifact_lines, max_chars=artifact_chars
+            )
+            events_recent = self._safe_tail(
+                self.env.drive_path("logs/events.jsonl"), max_lines=artifact_lines, max_chars=artifact_chars
+            )
+            supervisor_recent = self._safe_tail(
+                self.env.drive_path("logs/supervisor.jsonl"), max_lines=artifact_lines, max_chars=artifact_chars
+            )
 
             # Git context (non-fatal if unavailable)
             ctx_warnings: List[str] = []
@@ -347,7 +387,7 @@ class OuroborosAgent:
             if ctx_warnings:
                 runtime_ctx["context_loading_warnings"] = ctx_warnings
 
-            messages = [
+            messages: List[Dict[str, Any]] = [
                 {"role": "system", "content": base_prompt},
                 {"role": "system", "content": "## WORLD.md\n\n" + world_md},
                 {"role": "system", "content": "## README.md\n\n" + readme_md},
@@ -355,10 +395,20 @@ class OuroborosAgent:
                 {"role": "system", "content": "## NOTES.md (Drive)\n\n" + notes_md},
                 {"role": "system", "content": "## Index summaries (Drive: index/summaries.json)\n\n" + index_summaries},
                 {"role": "system", "content": "## Runtime context (JSON)\n\n" + json.dumps(runtime_ctx, ensure_ascii=False, indent=2)},
-                {"role": "system", "content": "## Raw chat log (Drive: logs/chat.jsonl)\n\n" + chat_log},
-                {"role": "system", "content": "## Недавняя история действий (Drive: logs/narration.jsonl)\n\n" + narration_context},
-                {"role": "user", "content": task.get("text", "")},
             ]
+            if chat_log_recent:
+                messages.append({"role": "system", "content": "## Recent chat log tail (Drive: logs/chat.jsonl)\n\n" + chat_log_recent})
+            if narration_context:
+                messages.append({"role": "system", "content": "## Recent narration tail (Drive: logs/narration.jsonl)\n\n" + narration_context})
+            if tools_recent:
+                messages.append({"role": "system", "content": "## Recent tools tail (Drive: logs/tools.jsonl)\n\n" + tools_recent})
+            if events_recent:
+                messages.append({"role": "system", "content": "## Recent events tail (Drive: logs/events.jsonl)\n\n" + events_recent})
+            if supervisor_recent:
+                messages.append(
+                    {"role": "system", "content": "## Recent supervisor tail (Drive: logs/supervisor.jsonl)\n\n" + supervisor_recent}
+                )
+            messages.append({"role": "user", "content": task.get("text", "")})
 
             tools = self._tools_schema()
 
@@ -437,6 +487,7 @@ class OuroborosAgent:
                     "type": "send_message",
                     "chat_id": task["chat_id"],
                     "text": text_for_supervisor,
+                    "log_text": text or "",
                     "task_id": task.get("id"),
                     "ts": utc_now_iso(),
                 }

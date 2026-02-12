@@ -9,7 +9,7 @@
 
 import os, sys, json, time, uuid, pathlib, subprocess, datetime
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -296,23 +296,46 @@ class TelegramClient:
         self.base = f"https://api.telegram.org/bot{token}"
 
     def get_updates(self, offset: int, timeout: int = 10) -> List[Dict[str, Any]]:
-        r = requests.get(
-            f"{self.base}/getUpdates",
-            params={"offset": offset, "timeout": timeout, "allowed_updates": ["message", "edited_message"]},
-            timeout=timeout + 5,
-        )
-        data = r.json()
-        assert data.get("ok") is True, f"Telegram getUpdates failed: {data}"
-        return data.get("result") or []
+        last_err = "unknown"
+        for attempt in range(3):
+            try:
+                r = requests.get(
+                    f"{self.base}/getUpdates",
+                    params={"offset": offset, "timeout": timeout, "allowed_updates": ["message", "edited_message"]},
+                    timeout=timeout + 5,
+                )
+                r.raise_for_status()
+                data = r.json()
+                if data.get("ok") is not True:
+                    raise RuntimeError(f"Telegram getUpdates failed: {data}")
+                return data.get("result") or []
+            except Exception as e:
+                last_err = repr(e)
+                if attempt < 2:
+                    time.sleep(0.8 * (attempt + 1))
+        raise RuntimeError(f"Telegram getUpdates failed after retries: {last_err}")
 
-    def send_message(self, chat_id: int, text: str) -> None:
-        r = requests.post(
-            f"{self.base}/sendMessage",
-            data={"chat_id": chat_id, "text": text, "disable_web_page_preview": True},
-            timeout=30,
-        )
-        data = r.json()
-        assert data.get("ok") is True, f"Telegram sendMessage failed: {data}"
+    def send_message(self, chat_id: int, text: str) -> Tuple[bool, str]:
+        last_err = "unknown"
+        for attempt in range(3):
+            try:
+                r = requests.post(
+                    f"{self.base}/sendMessage",
+                    data={"chat_id": chat_id, "text": text, "disable_web_page_preview": True},
+                    timeout=30,
+                )
+                r.raise_for_status()
+                data = r.json()
+                if data.get("ok") is True:
+                    return True, "ok"
+                last_err = f"telegram_api_error: {data}"
+            except Exception as e:
+                last_err = repr(e)
+
+            if attempt < 2:
+                time.sleep(0.8 * (attempt + 1))
+
+        return False, last_err
 
 TG = TelegramClient(str(TELEGRAM_BOT_TOKEN))
 
@@ -347,13 +370,25 @@ def log_chat(direction: str, chat_id: int, user_id: int, text: str) -> None:
         "text": text,
     })
 
-def send_with_budget(chat_id: int, text: str) -> None:
+def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None) -> None:
     st = load_state()
     owner_id = int(st.get("owner_id") or 0)
-    log_chat("out", chat_id, owner_id, text)
+    log_chat("out", chat_id, owner_id, text if log_text is None else log_text)
     full = text.rstrip() + "\n\n" + budget_line()
-    for part in split_telegram(full):
-        TG.send_message(chat_id, part)
+    for idx, part in enumerate(split_telegram(full)):
+        ok, err = TG.send_message(chat_id, part)
+        if not ok:
+            append_jsonl(
+                DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "type": "telegram_send_error",
+                    "chat_id": chat_id,
+                    "part_index": idx,
+                    "error": err,
+                },
+            )
+            break
 
 # ----------------------------
 # 4.5) Router: direct answer vs full agent task
@@ -366,7 +401,7 @@ ANSWER DIRECTLY (just write the answer) if:
 - Casual conversation, greetings, thanks
 - General knowledge questions
 - Explaining concepts
-- Questions about yourself that don't need reading files/logs
+- Questions about yourself ONLY when they are generic and don't require checking runtime state
 
 RESPOND WITH EXACTLY "NEEDS_TASK" on the FIRST LINE if the message requires:
 - Reading or writing files, code, configs
@@ -377,6 +412,7 @@ RESPOND WITH EXACTLY "NEEDS_TASK" on the FIRST LINE if the message requires:
 - Running shell commands
 - Any tool or system access
 - Analyzing repository contents
+- Checking current runtime state/capabilities (available tools, CLI presence, current branch/version, recent action results)
 - Anything you're unsure about
 
 When answering directly, respond in the user's language. Be concise and helpful.
@@ -633,7 +669,22 @@ while True:
             continue
 
         if et == "send_message":
-            send_with_budget(int(evt["chat_id"]), str(evt.get("text") or ""))
+            try:
+                _log_text = evt.get("log_text")
+                send_with_budget(
+                    int(evt["chat_id"]),
+                    str(evt.get("text") or ""),
+                    log_text=(str(_log_text) if isinstance(_log_text, str) else None),
+                )
+            except Exception as e:
+                append_jsonl(
+                    DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                    {
+                        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        "type": "send_message_event_error",
+                        "error": repr(e),
+                    },
+                )
             continue
 
         if et == "task_done":
@@ -681,7 +732,20 @@ while True:
     assign_tasks()
 
     # Poll Telegram
-    updates = TG.get_updates(offset=offset, timeout=10)
+    try:
+        updates = TG.get_updates(offset=offset, timeout=10)
+    except Exception as e:
+        append_jsonl(
+            DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "telegram_poll_error",
+                "offset": offset,
+                "error": repr(e),
+            },
+        )
+        time.sleep(1.5)
+        continue
     for upd in updates:
         offset = int(upd["update_id"]) + 1
         msg = upd.get("message") or upd.get("edited_message") or {}
