@@ -45,6 +45,8 @@
 
 - `state/state.json` — состояние, владелец, бюджет, approvals
 - `logs/` — raw JSONL логи (chat, events, tools, supervisor)
+  - `logs/tools.jsonl` — хранит аргументы инструментов в sanitized/redacted виде
+  - `logs/tool_args/` — длинные блобы могут быть сохранены отдельно как текстовые артефакты
 - `memory/` — долговременная и рабочая память
   - `memory/scratchpad.md` — рабочий контекст между задачами/рестартами
   - `memory/scratchpad_journal.jsonl` — журнал обновлений scratchpad

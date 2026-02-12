@@ -235,6 +235,124 @@ def _sanitize_task_for_event(task: Dict[str, Any], drive_logs: pathlib.Path, thr
         return task
 
 
+def _sanitize_tool_args_for_log(
+    fn_name: str, args: Dict[str, Any], drive_logs: pathlib.Path, tool_call_id: str = "", threshold: int = 2000
+) -> Dict[str, Any]:
+    """
+    Sanitize tool arguments for logging: redact secrets, truncate large strings, persist full data.
+
+    Args:
+        fn_name: Tool function name
+        args: Original tool arguments
+        drive_logs: Path to logs directory on Drive
+        tool_call_id: Tool call ID for filename generation (optional)
+        threshold: Max chars before truncation (default 2000)
+
+    Returns:
+        Sanitized args dict (JSON-serializable, secrets redacted, large strings truncated)
+    """
+    # Secret key patterns (case-insensitive)
+    SECRET_KEYS = frozenset([
+        "token", "api_key", "apikey", "authorization", "auth", "secret", "password", "passwd", "passphrase", "bearer"
+    ])
+
+    def _is_secret_key(key: str) -> bool:
+        """Check if key name looks like a secret."""
+        return key.lower() in SECRET_KEYS
+
+    def _sanitize_value(key: str, value: Any, depth: int) -> Any:
+        """Recursively sanitize a value."""
+        # Depth limit to avoid infinite recursion
+        if depth > 3:
+            return {"_depth_limit": True}
+
+        # Redact secret values
+        if _is_secret_key(key):
+            return "*** REDACTED ***"
+
+        # Handle strings: truncate if large
+        if isinstance(value, str):
+            if len(value) > threshold:
+                value_hash = sha256_text(value)
+                truncated = truncate_for_log(value, threshold)
+
+                # Best-effort: persist full value to Drive
+                full_path_rel = None
+                try:
+                    # Build safe filename
+                    safe_fn_name = re.sub(r'[^a-zA-Z0-9_-]', '_', fn_name)[:40]
+                    safe_key = re.sub(r'[^a-zA-Z0-9_-]', '_', key)[:40]
+                    if tool_call_id:
+                        safe_id = re.sub(r'[^a-zA-Z0-9_-]', '_', tool_call_id)[:20]
+                        filename = f"{safe_fn_name}_{safe_id}_{safe_key}.txt"
+                    else:
+                        filename = f"{safe_fn_name}_{value_hash[:12]}_{safe_key}.txt"
+
+                    full_path = drive_logs / "tool_args" / filename
+                    write_text(full_path, value)
+                    full_path_rel = f"tool_args/{filename}"
+                except Exception:
+                    # Best-effort: don't fail if we can't persist
+                    pass
+
+                # Return metadata + truncated value
+                result = {
+                    key: truncated,
+                    f"{key}_len": len(value),
+                    f"{key}_sha256": value_hash,
+                    f"{key}_truncated": True,
+                }
+                if full_path_rel:
+                    result[f"{key}_full_path"] = full_path_rel
+                return result
+            return value
+
+        # Handle dicts recursively
+        if isinstance(value, dict):
+            sanitized_dict = {}
+            for k, v in value.items():
+                result = _sanitize_value(k, v, depth + 1)
+                # If result is a dict with metadata keys, merge them
+                if isinstance(result, dict) and any(kk.startswith(k + "_") for kk in result.keys()):
+                    sanitized_dict.update(result)
+                else:
+                    sanitized_dict[k] = result
+            return sanitized_dict
+
+        # Handle lists recursively (with cap)
+        if isinstance(value, list):
+            max_items = 50
+            sanitized_list = [_sanitize_value(key, item, depth + 1) for item in value[:max_items]]
+            if len(value) > max_items:
+                sanitized_list.append({"_truncated": f"... {len(value) - max_items} more items"})
+            return sanitized_list
+
+        # For other types, try JSON serialization
+        try:
+            json.dumps(value, ensure_ascii=False)
+            return value
+        except (TypeError, ValueError):
+            return {"_repr": repr(value)}
+
+    try:
+        # Sanitize top-level args
+        sanitized = {}
+        for key, value in args.items():
+            result = _sanitize_value(key, value, 0)
+            # If result is a dict with metadata keys, merge them
+            if isinstance(result, dict) and any(k.startswith(key + "_") for k in result.keys()):
+                sanitized.update(result)
+            else:
+                sanitized[key] = result
+        return sanitized
+    except Exception:
+        # Never raise; return best-effort representation
+        try:
+            return json.loads(json.dumps(args, ensure_ascii=False, default=str))
+        except Exception:
+            return {"_error": "sanitization_failed", "_repr": repr(args)}
+
+
 def _format_tool_rounds_exceeded_message(max_tool_rounds: int, llm_trace: Dict[str, Any]) -> str:
     """
     Форматирует информативное сообщение при превышении лимита tool rounds.
@@ -2608,6 +2726,11 @@ class OuroborosAgent:
                         deterministic_errors.append(self._narrate_tool(fn_name, {}, result, False))
                         continue
 
+                    # ---- Sanitize args for logging ----
+                    args_for_log = _sanitize_tool_args_for_log(
+                        fn_name, args if isinstance(args, dict) else {}, drive_logs, tool_call_id=str(tc.get('id', ''))
+                    )
+
                     # ---- Check tool exists ----
                     if fn_name not in tool_name_to_fn:
                         result = (
@@ -2622,7 +2745,7 @@ class OuroborosAgent:
                         llm_trace["tool_calls"].append(
                             {
                                 "tool": fn_name,
-                                "args": _safe_args(args),
+                                "args": _safe_args(args_for_log),
                                 "result": truncate_for_log(result, 600),
                                 "is_error": True,
                             }
@@ -2648,7 +2771,7 @@ class OuroborosAgent:
                                 "ts": utc_now_iso(),
                                 "type": "tool_error",
                                 "tool": fn_name,
-                                "args": args,
+                                "args": args_for_log,
                                 "error": repr(e),
                                 "traceback": truncate_for_log(tb, 2000),
                             },
@@ -2659,7 +2782,7 @@ class OuroborosAgent:
                         {
                             "ts": utc_now_iso(),
                             "tool": fn_name,
-                            "args": args,
+                            "args": args_for_log,
                             "result_preview": truncate_for_log(result, 2000),
                         },
                     )
@@ -2667,7 +2790,7 @@ class OuroborosAgent:
                     llm_trace["tool_calls"].append(
                         {
                             "tool": fn_name,
-                            "args": _safe_args(args),
+                            "args": _safe_args(args_for_log),
                             "result": truncate_for_log(result, 700),
                             "is_error": (not tool_ok) or str(result).startswith("⚠️"),
                         }
