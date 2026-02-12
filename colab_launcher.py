@@ -308,13 +308,103 @@ def ensure_repo_present() -> None:
     subprocess.run(["git", "config", "user.email", "ouroboros@users.noreply.github.com"], cwd=str(REPO_DIR), check=True)
     subprocess.run(["git", "fetch", "origin"], cwd=str(REPO_DIR), check=True)
 
-def checkout_and_reset(branch: str) -> None:
+def _git_capture(cmd: List[str]) -> Tuple[int, str, str]:
+    r = subprocess.run(cmd, cwd=str(REPO_DIR), capture_output=True, text=True)
+    return r.returncode, (r.stdout or "").strip(), (r.stderr or "").strip()
+
+def _collect_repo_sync_state() -> Dict[str, Any]:
+    state: Dict[str, Any] = {
+        "current_branch": "unknown",
+        "dirty_lines": [],
+        "unpushed_lines": [],
+        "warnings": [],
+    }
+
+    rc, branch, err = _git_capture(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+    if rc == 0 and branch:
+        state["current_branch"] = branch
+    elif err:
+        state["warnings"].append(f"branch_error:{err}")
+
+    rc, dirty, err = _git_capture(["git", "status", "--porcelain"])
+    if rc == 0 and dirty:
+        state["dirty_lines"] = [ln for ln in dirty.splitlines() if ln.strip()]
+    elif rc != 0 and err:
+        state["warnings"].append(f"status_error:{err}")
+
+    upstream = ""
+    rc, up, err = _git_capture(["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+    if rc == 0 and up:
+        upstream = up
+    else:
+        current_branch = str(state.get("current_branch") or "")
+        if current_branch not in ("", "HEAD", "unknown"):
+            upstream = f"origin/{current_branch}"
+        elif err:
+            state["warnings"].append(f"upstream_error:{err}")
+
+    if upstream:
+        rc, unpushed, err = _git_capture(["git", "log", "--oneline", f"{upstream}..HEAD"])
+        if rc == 0 and unpushed:
+            state["unpushed_lines"] = [ln for ln in unpushed.splitlines() if ln.strip()]
+        elif rc != 0 and err:
+            state["warnings"].append(f"unpushed_error:{err}")
+
+    return state
+
+def checkout_and_reset(branch: str, reason: str = "unspecified", guard_unsynced: bool = False) -> Tuple[bool, str]:
+    # Always refresh refs before any reset-to-origin action.
+    rc, _, err = _git_capture(["git", "fetch", "origin"])
+    if rc != 0:
+        msg = f"git fetch failed: {err or 'unknown error'}"
+        append_jsonl(
+            DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "reset_fetch_failed",
+                "target_branch": branch,
+                "reason": reason,
+                "error": msg,
+            },
+        )
+        return False, msg
+
+    if guard_unsynced:
+        repo_state = _collect_repo_sync_state()
+        dirty_lines = list(repo_state.get("dirty_lines") or [])
+        unpushed_lines = list(repo_state.get("unpushed_lines") or [])
+        if dirty_lines or unpushed_lines:
+            bits: List[str] = []
+            if unpushed_lines:
+                bits.append(f"unpushed={len(unpushed_lines)}")
+            if dirty_lines:
+                bits.append(f"dirty={len(dirty_lines)}")
+            detail = ", ".join(bits) if bits else "unsynced"
+            msg = f"Reset blocked ({detail}) to protect local changes."
+            append_jsonl(
+                DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "type": "reset_blocked_unsynced_state",
+                    "target_branch": branch,
+                    "reason": reason,
+                    "current_branch": repo_state.get("current_branch"),
+                    "dirty_count": len(dirty_lines),
+                    "unpushed_count": len(unpushed_lines),
+                    "dirty_preview": dirty_lines[:20],
+                    "unpushed_preview": unpushed_lines[:20],
+                    "warnings": list(repo_state.get("warnings") or []),
+                },
+            )
+            return False, msg
+
     subprocess.run(["git", "checkout", branch], cwd=str(REPO_DIR), check=True)
     subprocess.run(["git", "reset", "--hard", f"origin/{branch}"], cwd=str(REPO_DIR), check=True)
     st = load_state()
     st["current_branch"] = branch
     st["current_sha"] = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(REPO_DIR), capture_output=True, text=True, check=True).stdout.strip()
     save_state(st)
+    return True, "ok"
 
 def import_test() -> Dict[str, Any]:
     r = subprocess.run(
@@ -326,7 +416,8 @@ def import_test() -> Dict[str, Any]:
     return {"ok": (r.returncode == 0), "stdout": r.stdout, "stderr": r.stderr, "returncode": r.returncode}
 
 ensure_repo_present()
-checkout_and_reset(BRANCH_DEV)
+ok_dev, err_dev = checkout_and_reset(BRANCH_DEV, reason="bootstrap_dev", guard_unsynced=False)
+assert ok_dev, f"Failed to prepare {BRANCH_DEV}: {err_dev}"
 t = import_test()
 if not t["ok"]:
     append_jsonl(DRIVE_ROOT / "logs" / "supervisor.jsonl", {
@@ -335,7 +426,8 @@ if not t["ok"]:
         "stdout": t["stdout"],
         "stderr": t["stderr"],
     })
-    checkout_and_reset(BRANCH_STABLE)
+    ok_stable, err_stable = checkout_and_reset(BRANCH_STABLE, reason="bootstrap_fallback_stable", guard_unsynced=False)
+    assert ok_stable, f"Failed to prepare {BRANCH_STABLE}: {err_stable}"
     t2 = import_test()
     assert t2["ok"], f"Stable branch also failed import.\n\nSTDOUT:\n{t2['stdout']}\n\nSTDERR:\n{t2['stderr']}"
 
@@ -576,6 +668,7 @@ WORKERS: Dict[int, Worker] = {}
 PENDING: List[Dict[str, Any]] = []
 RUNNING: Dict[str, Dict[str, Any]] = {}
 CRASH_TS: List[float] = []
+LAST_EVOLUTION_SKIP_SIGNATURE: Optional[Tuple[int, int]] = None
 
 def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str) -> None:
     import sys as _sys
@@ -602,12 +695,23 @@ def spawn_workers(n: int) -> None:
         WORKERS[i] = Worker(wid=i, proc=proc, in_q=in_q, busy_task_id=None)
 
 def kill_workers() -> None:
+    cleared_running = len(RUNNING)
     for w in WORKERS.values():
         if w.proc.is_alive():
             w.proc.terminate()
     for w in WORKERS.values():
         w.proc.join(timeout=5)
     WORKERS.clear()
+    RUNNING.clear()
+    if cleared_running:
+        append_jsonl(
+            DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "running_cleared_on_kill",
+                "count": cleared_running,
+            },
+        )
 
 def assign_tasks() -> None:
     for w in WORKERS.values():
@@ -688,8 +792,25 @@ def build_evolution_task_text(cycle: int) -> str:
     )
 
 def enqueue_evolution_task_if_needed() -> None:
+    global LAST_EVOLUTION_SKIP_SIGNATURE
     if PENDING or RUNNING:
+        st = load_state()
+        if bool(st.get("evolution_mode_enabled")):
+            sig = (len(PENDING), len(RUNNING))
+            if LAST_EVOLUTION_SKIP_SIGNATURE != sig:
+                append_jsonl(
+                    DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                    {
+                        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        "type": "evolution_enqueue_skipped",
+                        "reason": "pending_or_running",
+                        "pending": len(PENDING),
+                        "running": len(RUNNING),
+                    },
+                )
+                LAST_EVOLUTION_SKIP_SIGNATURE = sig
         return
+    LAST_EVOLUTION_SKIP_SIGNATURE = None
 
     st = load_state()
     if not bool(st.get("evolution_mode_enabled")):
@@ -855,7 +976,23 @@ def ensure_workers_healthy() -> None:
         st = load_state()
         if st.get("owner_chat_id"):
             send_with_budget(int(st["owner_chat_id"]), "⚠️ Частые падения воркеров. Переключаюсь на ouroboros-stable и перезапускаюсь.")
-        checkout_and_reset(BRANCH_STABLE)
+        ok_reset, msg_reset = checkout_and_reset(BRANCH_STABLE, reason="crash_storm_fallback", guard_unsynced=True)
+        if not ok_reset:
+            append_jsonl(
+                DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "type": "crash_storm_reset_blocked",
+                    "error": msg_reset,
+                },
+            )
+            if st.get("owner_chat_id"):
+                send_with_budget(
+                    int(st["owner_chat_id"]),
+                    f"⚠️ Fallback reset в {BRANCH_STABLE} пропущен: {msg_reset}",
+                )
+            CRASH_TS.clear()
+            return
         kill_workers()
         spawn_workers(MAX_WORKERS)
         CRASH_TS.clear()
@@ -877,13 +1014,19 @@ def status_text() -> str:
     lines.append(f"owner_id: {st.get('owner_id')}")
     lines.append(f"session_id: {st.get('session_id')}")
     lines.append(f"version: {st.get('current_branch')}@{(st.get('current_sha') or '')[:8]}")
-    lines.append(f"workers: {len(WORKERS)} (busy: {sum(1 for w in WORKERS.values() if w.busy_task_id is not None)})")
+    busy_count = sum(1 for w in WORKERS.values() if w.busy_task_id is not None)
+    lines.append(f"workers: {len(WORKERS)} (busy: {busy_count})")
     lines.append(f"pending: {len(PENDING)}")
+    lines.append(f"running: {len(RUNNING)}")
     if PENDING:
         lines.append("pending_ids: " + ", ".join([t["id"] for t in PENDING[:10]]))
+    if RUNNING:
+        lines.append("running_ids: " + ", ".join(list(RUNNING.keys())[:10]))
     busy = [f"{w.wid}:{w.busy_task_id}" for w in WORKERS.values() if w.busy_task_id]
     if busy:
         lines.append("busy: " + ", ".join(busy))
+    if RUNNING and busy_count == 0:
+        lines.append("queue_warning: running>0 while busy=0")
     lines.append(f"spent_usd: {st.get('spent_usd')}")
     lines.append(f"spent_calls: {st.get('spent_calls')}")
     lines.append(f"prompt_tokens: {st.get('spent_tokens_prompt')}, completion_tokens: {st.get('spent_tokens_completion')}")
@@ -1029,10 +1172,24 @@ while True:
             st = load_state()
             if st.get("owner_chat_id"):
                 send_with_budget(int(st["owner_chat_id"]), f"♻️ Restart requested by agent: {evt.get('reason')}")
-            checkout_and_reset(BRANCH_DEV)
+            ok_reset, msg_reset = checkout_and_reset(BRANCH_DEV, reason="agent_restart_request", guard_unsynced=True)
+            if not ok_reset:
+                if st.get("owner_chat_id"):
+                    send_with_budget(
+                        int(st["owner_chat_id"]),
+                        f"⚠️ Restart пропущен: {msg_reset} Сначала синхронизируй/очисти repo.",
+                    )
+                continue
             it = import_test()
             if not it["ok"]:
-                checkout_and_reset(BRANCH_STABLE)
+                ok_stable, msg_stable = checkout_and_reset(BRANCH_STABLE, reason="agent_restart_import_fail", guard_unsynced=False)
+                if not ok_stable:
+                    if st.get("owner_chat_id"):
+                        send_with_budget(
+                            int(st["owner_chat_id"]),
+                            f"⚠️ Не удалось переключиться на {BRANCH_STABLE}: {msg_stable}",
+                        )
+                    continue
             kill_workers()
             spawn_workers(MAX_WORKERS)
             continue
@@ -1184,10 +1341,16 @@ while True:
             st2["session_id"] = uuid.uuid4().hex
             save_state(st2)
             send_with_budget(chat_id, "♻️ Restarting (soft).")
-            checkout_and_reset(BRANCH_DEV)
+            ok_reset, msg_reset = checkout_and_reset(BRANCH_DEV, reason="owner_restart", guard_unsynced=True)
+            if not ok_reset:
+                send_with_budget(chat_id, f"⚠️ Restart отменен: {msg_reset} Сначала синхронизируй/очисти repo.")
+                continue
             it = import_test()
             if not it["ok"]:
-                checkout_and_reset(BRANCH_STABLE)
+                ok_stable, msg_stable = checkout_and_reset(BRANCH_STABLE, reason="owner_restart_import_fail", guard_unsynced=False)
+                if not ok_stable:
+                    send_with_budget(chat_id, f"⚠️ Не удалось переключиться на {BRANCH_STABLE}: {msg_stable}")
+                    continue
             kill_workers()
             spawn_workers(MAX_WORKERS)
             continue

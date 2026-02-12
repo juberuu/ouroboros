@@ -131,6 +131,7 @@ class OuroborosAgent:
         self._event_queue: Any = event_queue  # multiprocessing.Queue for real-time progress
         self._current_chat_id: Optional[int] = None
         self._current_task_type: Optional[str] = None
+        self._last_push_succeeded: bool = False
 
     SCRATCHPAD_SECTIONS: Tuple[str, ...] = (
         "CurrentProjects",
@@ -263,6 +264,7 @@ class OuroborosAgent:
             "# Scratchpad",
             "",
             f"UpdatedAt: {utc_now_iso()}",
+            "ContextPolicy: keep relevant detail; trim only near large-context limits (~200k input tokens).",
             "",
         ]
         for section in self.SCRATCHPAD_SECTIONS:
@@ -283,6 +285,7 @@ class OuroborosAgent:
             "- (collecting data)\n\n"
             "## CurrentGrowthFocus\n"
             "- Build a stronger evidence base from real tasks.\n"
+            "- Preserve full relevant context; optimize only near high token limits.\n"
         )
 
     def _ensure_memory_files(self) -> None:
@@ -359,7 +362,7 @@ class OuroborosAgent:
         return None
 
     def _normalize_delta_obj(self, obj: Dict[str, Any]) -> Dict[str, List[str]]:
-        def _clean_list(field: str, max_items: int, max_len: int = 220) -> List[str]:
+        def _clean_list(field: str, max_items: int, max_len: int = 420) -> List[str]:
             raw = obj.get(field, [])
             if isinstance(raw, str):
                 raw = [raw]
@@ -376,10 +379,10 @@ class OuroborosAgent:
             return self._dedupe_keep_order(out, max_items=max_items)
 
         return {
-            "project_updates": _clean_list("project_updates", max_items=8),
-            "open_threads": _clean_list("open_threads", max_items=10),
-            "investigate_later": _clean_list("investigate_later", max_items=12),
-            "evidence_quotes": _clean_list("evidence_quotes", max_items=12),
+            "project_updates": _clean_list("project_updates", max_items=12),
+            "open_threads": _clean_list("open_threads", max_items=16),
+            "investigate_later": _clean_list("investigate_later", max_items=20),
+            "evidence_quotes": _clean_list("evidence_quotes", max_items=24),
             "drop_items": _clean_list("drop_items", max_items=20),
         }
 
@@ -391,15 +394,15 @@ class OuroborosAgent:
 
         project_updates: List[str] = []
         if task_text:
-            project_updates.append(f"Task focus: {task_text[:160]}")
+            project_updates.append(f"Task focus: {task_text[:320]}")
         if answer:
-            project_updates.append(f"Latest result: {answer[:160]}")
+            project_updates.append(f"Latest result: {answer[:320]}")
 
         open_threads: List[str] = []
         investigate_later: List[str] = []
         evidence_quotes: List[str] = []
 
-        for call in (llm_trace.get("tool_calls") or [])[:16]:
+        for call in (llm_trace.get("tool_calls") or [])[:24]:
             tool_name = str(call.get("tool") or "?")
             args = call.get("args") or {}
             result = str(call.get("result") or "")
@@ -414,11 +417,11 @@ class OuroborosAgent:
 
             first_line = result.splitlines()[0].strip() if result else ""
             if first_line:
-                if len(first_line) > 180:
-                    first_line = first_line[:177] + "..."
+                if len(first_line) > 300:
+                    first_line = first_line[:297] + "..."
                 if is_error or first_line.startswith("⚠️"):
                     evidence_quotes.append(f"`{tool_name}` -> {first_line}")
-                    open_threads.append(f"Resolve {tool_name} issue: {first_line[:120]}")
+                    open_threads.append(f"Resolve {tool_name} issue: {first_line[:220]}")
                 else:
                     evidence_quotes.append(f"`{tool_name}` -> {first_line}")
 
@@ -447,15 +450,15 @@ class OuroborosAgent:
             "task": {
                 "id": task.get("id"),
                 "type": task.get("type"),
-                "text": str(task.get("text") or "")[:1600],
+                "text": str(task.get("text") or "")[:6000],
             },
-            "assistant_final_answer": str(final_text or "")[:2500],
-            "assistant_notes": [str(x)[:300] for x in (llm_trace.get("assistant_notes") or [])[:10]],
-            "tool_calls": (llm_trace.get("tool_calls") or [])[:20],
+            "assistant_final_answer": str(final_text or "")[:15000],
+            "assistant_notes": [str(x)[:1000] for x in (llm_trace.get("assistant_notes") or [])[:30]],
+            "tool_calls": (llm_trace.get("tool_calls") or [])[:50],
         }
 
         model = os.environ.get("OUROBOROS_MEMORY_MODEL", os.environ.get("OUROBOROS_MODEL", "openai/gpt-5.2"))
-        max_tokens = max(250, min(self._env_int("OUROBOROS_SCRATCHPAD_SUMMARY_MAX_TOKENS", 700), 2000))
+        max_tokens = max(400, min(self._env_int("OUROBOROS_SCRATCHPAD_SUMMARY_MAX_TOKENS", 2000), 4000))
         usage: Dict[str, Any] = {}
 
         try:
@@ -557,13 +560,13 @@ class OuroborosAgent:
     def _build_identity_from_data(self, scratchpad_sections: Dict[str, List[str]]) -> str:
         tools_tail = self._safe_tail(
             self.env.drive_path("logs/tools.jsonl"),
-            max_lines=max(100, min(self._env_int("OUROBOROS_IDENTITY_TOOLS_LINES", 450), 2000)),
-            max_chars=max(15000, min(self._env_int("OUROBOROS_IDENTITY_TOOLS_CHARS", 120000), 300000)),
+            max_lines=max(200, min(self._env_int("OUROBOROS_IDENTITY_TOOLS_LINES", 1000), 5000)),
+            max_chars=max(30000, min(self._env_int("OUROBOROS_IDENTITY_TOOLS_CHARS", 260000), 600000)),
         )
         journal_tail = self._safe_tail(
             self._scratchpad_journal_path(),
-            max_lines=max(60, min(self._env_int("OUROBOROS_IDENTITY_JOURNAL_LINES", 240), 2000)),
-            max_chars=max(10000, min(self._env_int("OUROBOROS_IDENTITY_JOURNAL_CHARS", 90000), 250000)),
+            max_lines=max(120, min(self._env_int("OUROBOROS_IDENTITY_JOURNAL_LINES", 800), 4000)),
+            max_chars=max(20000, min(self._env_int("OUROBOROS_IDENTITY_JOURNAL_CHARS", 220000), 500000)),
         )
 
         tool_success: Counter[str] = Counter()
@@ -1037,10 +1040,75 @@ class OuroborosAgent:
                     lines.append(OuroborosAgent._short(text, 200))
         return "\n".join(lines)
 
+    @staticmethod
+    def _estimate_token_count_text(text: str) -> int:
+        """Rough token estimate without tokenizer dependency (chars/4 heuristic)."""
+        txt = str(text or "")
+        if not txt:
+            return 0
+        return max(1, (len(txt) + 3) // 4)
+
+    def _estimate_messages_tokens(self, messages: List[Dict[str, Any]]) -> int:
+        total = 0
+        for msg in messages or []:
+            content = msg.get("content")
+            if isinstance(content, str):
+                total += self._estimate_token_count_text(content)
+            elif isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict):
+                        total += self._estimate_token_count_text(part.get("text", ""))
+                    else:
+                        total += self._estimate_token_count_text(str(part))
+            elif content is not None:
+                total += self._estimate_token_count_text(str(content))
+            # per-message structural overhead
+            total += 6
+        return total
+
+    def _apply_message_token_soft_cap(
+        self, messages: List[Dict[str, Any]], soft_cap_tokens: int
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        estimated = self._estimate_messages_tokens(messages)
+        info: Dict[str, Any] = {
+            "estimated_tokens_before": estimated,
+            "estimated_tokens_after": estimated,
+            "soft_cap_tokens": soft_cap_tokens,
+            "trimmed_sections": [],
+        }
+        if soft_cap_tokens <= 0 or estimated <= soft_cap_tokens:
+            return messages, info
+
+        prunable_prefixes = [
+            "## Recent chat log tail",
+            "## Recent narration tail",
+            "## Recent tools tail",
+            "## Recent events tail",
+            "## Recent supervisor tail",
+        ]
+
+        trimmed_sections: List[str] = []
+        pruned = list(messages)
+        for prefix in prunable_prefixes:
+            if estimated <= soft_cap_tokens:
+                break
+            for i, msg in enumerate(pruned):
+                content = msg.get("content")
+                if isinstance(content, str) and content.startswith(prefix):
+                    pruned.pop(i)
+                    trimmed_sections.append(prefix)
+                    estimated = self._estimate_messages_tokens(pruned)
+                    break
+
+        info["estimated_tokens_after"] = estimated
+        info["trimmed_sections"] = trimmed_sections
+        return pruned, info
+
     def handle_task(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
         self._pending_events = []
         self._current_chat_id = int(task.get("chat_id") or 0) or None
         self._current_task_type = str(task.get("type") or "")
+        self._last_push_succeeded = False
 
         drive_logs = self.env.drive_path("logs")
         append_jsonl(drive_logs / "events.jsonl", {"ts": utc_now_iso(), "type": "task_received", "task": task})
@@ -1075,17 +1143,21 @@ class OuroborosAgent:
             scratchpad_raw = self._safe_read(self._scratchpad_path(), fallback=self._default_scratchpad())
             identity_raw = self._safe_read(self._identity_path(), fallback=self._default_identity())
 
-            chat_lines = max(40, min(self._env_int("OUROBOROS_CONTEXT_CHAT_LINES", 220), 2000))
-            artifact_lines = max(20, min(self._env_int("OUROBOROS_CONTEXT_ARTIFACT_LINES", 160), 2000))
-            chat_chars = max(5000, min(self._env_int("OUROBOROS_CONTEXT_CHAT_CHARS", 60000), 300000))
-            artifact_chars = max(3000, min(self._env_int("OUROBOROS_CONTEXT_ARTIFACT_CHARS", 35000), 200000))
-            scratchpad_chars = max(1500, min(self._env_int("OUROBOROS_CONTEXT_SCRATCHPAD_CHARS", 12000), 120000))
-            identity_chars = max(1200, min(self._env_int("OUROBOROS_CONTEXT_IDENTITY_CHARS", 9000), 120000))
-            world_chars = max(3000, min(self._env_int("OUROBOROS_CONTEXT_WORLD_CHARS", 50000), 200000))
-            readme_chars = max(3000, min(self._env_int("OUROBOROS_CONTEXT_README_CHARS", 50000), 200000))
-            notes_chars = max(2000, min(self._env_int("OUROBOROS_CONTEXT_NOTES_CHARS", 30000), 150000))
-            state_chars = max(1000, min(self._env_int("OUROBOROS_CONTEXT_STATE_CHARS", 20000), 100000))
-            index_chars = max(1000, min(self._env_int("OUROBOROS_CONTEXT_INDEX_CHARS", 20000), 100000))
+            chat_lines = max(80, min(self._env_int("OUROBOROS_CONTEXT_CHAT_LINES", 800), 6000))
+            artifact_lines = max(60, min(self._env_int("OUROBOROS_CONTEXT_ARTIFACT_LINES", 600), 6000))
+            chat_chars = max(20000, min(self._env_int("OUROBOROS_CONTEXT_CHAT_CHARS", 280000), 1000000))
+            artifact_chars = max(10000, min(self._env_int("OUROBOROS_CONTEXT_ARTIFACT_CHARS", 220000), 900000))
+            scratchpad_chars = max(5000, min(self._env_int("OUROBOROS_CONTEXT_SCRATCHPAD_CHARS", 90000), 400000))
+            identity_chars = max(5000, min(self._env_int("OUROBOROS_CONTEXT_IDENTITY_CHARS", 80000), 400000))
+            world_chars = max(8000, min(self._env_int("OUROBOROS_CONTEXT_WORLD_CHARS", 180000), 600000))
+            readme_chars = max(8000, min(self._env_int("OUROBOROS_CONTEXT_README_CHARS", 180000), 600000))
+            notes_chars = max(6000, min(self._env_int("OUROBOROS_CONTEXT_NOTES_CHARS", 120000), 500000))
+            state_chars = max(4000, min(self._env_int("OUROBOROS_CONTEXT_STATE_CHARS", 90000), 400000))
+            index_chars = max(4000, min(self._env_int("OUROBOROS_CONTEXT_INDEX_CHARS", 90000), 400000))
+            input_soft_cap_tokens = max(
+                50000,
+                min(self._env_int("OUROBOROS_CONTEXT_INPUT_TOKEN_SOFT_CAP", 200000), 350000),
+            )
 
             scratchpad_ctx = self._clip_text(scratchpad_raw, max_chars=scratchpad_chars)
             identity_ctx = self._clip_text(identity_raw, max_chars=identity_chars)
@@ -1095,8 +1167,8 @@ class OuroborosAgent:
             state_ctx = self._clip_text(state_json, max_chars=state_chars)
             index_ctx = self._clip_text(index_summaries, max_chars=index_chars)
 
-            # Context compaction: summarize Drive logs instead of raw tails (opt-out via env)
-            summarize_logs = self._env_bool("OUROBOROS_CONTEXT_SUMMARIZE_LOGS", True)
+            # Default behavior favors full context. Summarization is opt-in.
+            summarize_logs = self._env_bool("OUROBOROS_CONTEXT_SUMMARIZE_LOGS", False)
 
             if summarize_logs:
                 # Load and summarize JSONL tails
@@ -1172,6 +1244,9 @@ class OuroborosAgent:
                 "git_head": git_head,
                 "git_branch": git_branch,
                 "task": {"id": task.get("id"), "type": task.get("type")},
+                "context_policy": "full_context_first",
+                "context_soft_cap_tokens": input_soft_cap_tokens,
+                "context_logs_summarized": bool(summarize_logs),
             }
             if ctx_warnings:
                 runtime_ctx["context_loading_warnings"] = ctx_warnings
@@ -1200,6 +1275,21 @@ class OuroborosAgent:
                     {"role": "system", "content": "## Recent supervisor tail (Drive: logs/supervisor.jsonl)\n\n" + supervisor_recent}
                 )
             messages.append({"role": "user", "content": task.get("text", "")})
+
+            messages, cap_info = self._apply_message_token_soft_cap(messages, input_soft_cap_tokens)
+            if cap_info.get("trimmed_sections"):
+                append_jsonl(
+                    drive_logs / "events.jsonl",
+                    {
+                        "ts": utc_now_iso(),
+                        "type": "context_soft_cap_trim",
+                        "task_id": task.get("id"),
+                        "soft_cap_tokens": cap_info.get("soft_cap_tokens"),
+                        "estimated_tokens_before": cap_info.get("estimated_tokens_before"),
+                        "estimated_tokens_after": cap_info.get("estimated_tokens_after"),
+                        "trimmed_sections": cap_info.get("trimmed_sections"),
+                    },
+                )
 
             tools = self._tools_schema()
 
@@ -2344,7 +2434,7 @@ class OuroborosAgent:
                 "type": "function",
                 "function": {
                     "name": "repo_commit_push",
-                    "description": "Commit and push already-made repo changes to ouroboros branch (without rewriting files).",
+                    "description": "Commit and push already-made repo changes to ouroboros branch (without rewriting files). Required before request_restart in evolution mode.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -2379,7 +2469,7 @@ class OuroborosAgent:
                 "type": "function",
                 "function": {
                     "name": "claude_code_edit",
-                    "description": "Preferred/default code editing engine when available: delegate edits to Anthropic Claude Code CLI (headless). Especially for multi-file changes, refactors, and uncertain edit scope. Use repo_commit_push afterwards.",
+                    "description": "Preferred/default code editing engine when available: delegate edits to Anthropic Claude Code CLI (headless). Especially for multi-file changes, refactors, and uncertain edit scope. Always follow with repo_commit_push before reporting success.",
                     "parameters": {
                         "type": "object",
                         "properties": {"instruction": {"type": "string"}, "max_turns": {"type": "integer"}},
@@ -2401,7 +2491,7 @@ class OuroborosAgent:
             },
             {
                 "type": "function",
-                "function": {"name": "request_restart", "description": "Ask supervisor to restart Ouroboros runtime (apply new code).", "parameters": {"type": "object", "properties": {"reason": {"type": "string"}}, "required": ["reason"]}},
+                "function": {"name": "request_restart", "description": "Ask supervisor to restart Ouroboros runtime (apply new code). In evolution mode this is allowed only after successful push.", "parameters": {"type": "object", "properties": {"reason": {"type": "string"}}, "required": ["reason"]}},
             },
             {
                 "type": "function",
@@ -2514,6 +2604,7 @@ class OuroborosAgent:
             lock_path.unlink()
 
     def _tool_repo_write_commit(self, path: str, content: str, commit_message: str) -> str:
+        self._last_push_succeeded = False
         if not commit_message.strip():
             return "⚠️ ERROR: commit_message must be non-empty."
 
@@ -2555,9 +2646,11 @@ class OuroborosAgent:
         finally:
             self._release_git_lock(lock)
 
+        self._last_push_succeeded = True
         return f"OK: committed and pushed to {self.env.branch_dev}: {commit_message}"
 
     def _tool_repo_commit_push(self, commit_message: str, paths: Optional[List[str]] = None) -> str:
+        self._last_push_succeeded = False
         if not commit_message.strip():
             return "⚠️ ERROR: commit_message must be non-empty."
 
@@ -2608,6 +2701,7 @@ class OuroborosAgent:
         finally:
             self._release_git_lock(lock)
 
+        self._last_push_succeeded = True
         return f"OK: committed existing changes and pushed to {self.env.branch_dev}: {commit_message}"
 
     def _tool_git_status(self) -> str:
@@ -2746,7 +2840,7 @@ class OuroborosAgent:
         # mark the subprocess as sandboxed.
         perm_mode = os.environ.get("OUROBOROS_CLAUDE_CODE_PERMISSION_MODE", "bypassPermissions").strip() or "bypassPermissions"
 
-        cmd: List[str] = [
+        base_cmd: List[str] = [
             claude_bin,
             "-p",
             prompt,
@@ -2756,17 +2850,15 @@ class OuroborosAgent:
             str(turns),
             "--tools",
             "Read,Edit,Grep,Glob",
-            "--permission-mode",
-            perm_mode,
         ]
 
         model = os.environ.get("OUROBOROS_CLAUDE_CODE_MODEL", "").strip()
         if model:
-            cmd.extend(["--model", model])
+            base_cmd.extend(["--model", model])
 
         max_budget = os.environ.get("OUROBOROS_CLAUDE_CODE_MAX_BUDGET_USD", "").strip()
         if max_budget:
-            cmd.extend(["--max-budget-usd", max_budget])
+            base_cmd.extend(["--max-budget-usd", max_budget])
 
         env = os.environ.copy()
 
@@ -2782,6 +2874,9 @@ class OuroborosAgent:
         if local_bin not in env.get("PATH", ""):
             env["PATH"] = f"{local_bin}:{env.get('PATH', '')}"
 
+        primary_cmd = base_cmd + ["--permission-mode", perm_mode]
+        legacy_cmd = base_cmd + ["--dangerously-skip-permissions"]
+
         lock = self._acquire_git_lock()
         try:
             try:
@@ -2789,31 +2884,61 @@ class OuroborosAgent:
             except Exception as e:
                 return f"⚠️ GIT_ERROR (checkout {self.env.branch_dev}): {e}"
 
-            res = subprocess.run(
-                cmd,
-                cwd=str(self.env.repo_dir),
-                capture_output=True,
-                text=True,
-                timeout=600,
-                env=env,
-            )
+            def _run_claude(cmd_args: List[str]) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    cmd_args,
+                    cwd=str(self.env.repo_dir),
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                    env=env,
+                )
+
+            used_mode = "permission_mode"
+            res = _run_claude(primary_cmd)
+
+            if res.returncode != 0:
+                combined = ((res.stdout or "") + "\n" + (res.stderr or "")).lower()
+                unsupported_permission_flag = ("--permission-mode" in combined) and any(
+                    marker in combined
+                    for marker in (
+                        "unknown option",
+                        "unknown argument",
+                        "unrecognized option",
+                        "unexpected argument",
+                    )
+                )
+                if unsupported_permission_flag:
+                    used_mode = "dangerously_skip_permissions"
+                    append_jsonl(
+                        self.env.drive_path("logs") / "events.jsonl",
+                        {
+                            "ts": utc_now_iso(),
+                            "type": "claude_code_permission_fallback",
+                            "from": "permission_mode",
+                            "to": "dangerously_skip_permissions",
+                            "reason": truncate_for_log((res.stderr or res.stdout or ""), 800),
+                        },
+                    )
+                    res = _run_claude(legacy_cmd)
+
+            stdout = (res.stdout or "").strip()
+            stderr = (res.stderr or "").strip()
+            if res.returncode != 0:
+                return (
+                    f"⚠️ CLAUDE_CODE_ERROR ({used_mode}): exit={res.returncode}\n\n"
+                    f"STDOUT:\n{stdout}\n\nSTDERR:\n{stderr}"
+                )
+
+            if not stdout:
+                return "OK: Claude Code completed with empty output."
+
         except subprocess.TimeoutExpired:
             return "⚠️ CLAUDE_CODE_TIMEOUT: command timed out after 600s."
         except Exception as e:
             return f"⚠️ CLAUDE_CODE_FAILED: {type(e).__name__}: {e}"
         finally:
             self._release_git_lock(lock)
-
-        stdout = (res.stdout or "").strip()
-        stderr = (res.stderr or "").strip()
-        if res.returncode != 0:
-            return (
-                f"⚠️ CLAUDE_CODE_ERROR: exit={res.returncode}\n\n"
-                f"STDOUT:\n{stdout}\n\nSTDERR:\n{stderr}"
-            )
-
-        if not stdout:
-            return "OK: Claude Code completed with empty output."
 
         try:
             payload = json.loads(stdout)
@@ -2876,7 +3001,21 @@ class OuroborosAgent:
         return json.dumps(out, ensure_ascii=False, indent=2)
 
     def _tool_request_restart(self, reason: str) -> str:
+        if str(self._current_task_type or "") == "evolution" and not self._last_push_succeeded:
+            append_jsonl(
+                self.env.drive_path("logs") / "events.jsonl",
+                {
+                    "ts": utc_now_iso(),
+                    "type": "restart_blocked_no_push",
+                    "reason": reason,
+                },
+            )
+            return (
+                "⚠️ RESTART_BLOCKED: in evolution mode call repo_commit_push/repo_write_commit and "
+                "ensure push succeeds before request_restart."
+            )
         self._pending_events.append({"type": "restart_request", "reason": reason, "ts": utc_now_iso()})
+        self._last_push_succeeded = False
         return f"Restart requested: {reason}"
 
     def _tool_request_stable_promotion(self, reason: str) -> str:

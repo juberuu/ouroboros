@@ -116,19 +116,21 @@ Telegram по умолчанию рендерит разметку только 
 ## Контекст и устойчивость
 
 - Воркеры подмешивают в контекст хвосты `logs/chat.jsonl`, `logs/tools.jsonl`, `logs/events.jsonl`, `logs/supervisor.jsonl`, `logs/narration.jsonl`, чтобы лучше помнить фактические результаты прошлых шагов.
-- Для экономии токенов по умолчанию хвосты логов Drive **суммаризуются** перед подачей в промпт, а не вставляются как сырой JSONL.
-  - Отключить: `OUROBOROS_CONTEXT_SUMMARIZE_LOGS=0` (по умолчанию `1`).
+- По умолчанию хвосты логов подмешиваются как raw-tail; суммаризация логов включается только при явном флаге.
+  - Включить: `OUROBOROS_CONTEXT_SUMMARIZE_LOGS=1` (по умолчанию `0`).
 - Воркеры также подмешивают `memory/scratchpad.md` и `memory/identity.md`, чтобы сохранять рабочий фокус и self-model между задачами и после рестартов.
-- Для контроля размера промпта все контекстные файлы обрезаются по лимитам символов (начало + конец, середина заменяется на `...(truncated)...`):
-  - `OUROBOROS_CONTEXT_WORLD_CHARS` (по умолчанию `50000`)
-  - `OUROBOROS_CONTEXT_README_CHARS` (по умолчанию `50000`)
-  - `OUROBOROS_CONTEXT_NOTES_CHARS` (по умолчанию `30000`)
-  - `OUROBOROS_CONTEXT_STATE_CHARS` (по умолчанию `20000`)
-  - `OUROBOROS_CONTEXT_INDEX_CHARS` (по умолчанию `20000`)
-  - `OUROBOROS_CONTEXT_SCRATCHPAD_CHARS` (по умолчанию `12000`)
-  - `OUROBOROS_CONTEXT_IDENTITY_CHARS` (по умолчанию `9000`)
-  - Лимиты можно увеличить (до разумных пределов) или уменьшить для дальнейшей экономии токенов.
-- После каждой задачи агент обновляет `scratchpad` через отдельный промпт `prompts/SCRATCHPAD_SUMMARY.md` (компактно, без воды, с краткими evidence-цитатами команд/ошибок).
+- Для контроля размера промпта контекстные файлы обрезаются по лимитам символов (начало + конец, середина заменяется на `...(truncated)...`):
+  - `OUROBOROS_CONTEXT_WORLD_CHARS` (по умолчанию `180000`)
+  - `OUROBOROS_CONTEXT_README_CHARS` (по умолчанию `180000`)
+  - `OUROBOROS_CONTEXT_NOTES_CHARS` (по умолчанию `120000`)
+  - `OUROBOROS_CONTEXT_STATE_CHARS` (по умолчанию `90000`)
+  - `OUROBOROS_CONTEXT_INDEX_CHARS` (по умолчанию `90000`)
+  - `OUROBOROS_CONTEXT_SCRATCHPAD_CHARS` (по умолчанию `90000`)
+  - `OUROBOROS_CONTEXT_IDENTITY_CHARS` (по умолчанию `80000`)
+- Мягкий ориентир экономии: `OUROBOROS_CONTEXT_INPUT_TOKEN_SOFT_CAP` (по умолчанию `200000` токенов).
+  - До этого уровня приоритет у полноты контекста.
+  - При превышении сначала убираются менее критичные блоки `Recent ... tail`.
+- После каждой задачи агент обновляет `scratchpad` через отдельный промпт `prompts/SCRATCHPAD_SUMMARY.md` (факты и релевантные детали, включая evidence-цитаты команд/ошибок).
 - При direct-send форматированного ответа в Telegram полный текст всё равно логируется в `chat.jsonl` для следующих задач.
 - Long polling Telegram и отправка сообщений обрабатываются с ретраями; кратковременные сетевые таймауты не должны валить супервизор.
 
