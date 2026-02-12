@@ -87,6 +87,16 @@ Telegram по умолчанию рендерит разметку только 
 - `` `inline code` ``
 - fenced code blocks ```...```
 
+## Telegram: voice notes (TTS)
+
+Поддерживается отправка **voice notes** в Telegram (метод Bot API `sendVoice`).
+
+Есть 2 режима TTS:
+- **local**: `ffmpeg` + фильтр `flite` → OGG/OPUS (работает оффлайн, но качество/язык могут быть ограничены)
+- **openai**: OpenAI Text-to-Speech API (`POST /v1/audio/speech`) → OGG/OPUS (лучше для рус/англ, зависит от `OPENAI_API_KEY`)
+
+Встроенный tool (для воркера): `telegram_send_voice(chat_id, text, ..., tts='local'|'openai')`.
+
 ## Контекст и устойчивость
 
 - Воркеры подмешивают в контекст хвосты `logs/chat.jsonl`, `logs/tools.jsonl`, `logs/events.jsonl`, `logs/supervisor.jsonl`, `logs/narration.jsonl`, чтобы лучше помнить фактические результаты прошлых шагов.

@@ -351,14 +351,66 @@ def split_telegram(text: str, limit: int = 3800) -> List[str]:
     chunks.append(s)
     return chunks
 
-def budget_line() -> str:
-    st = load_state()
+def _format_budget_line(st: Dict[str, Any]) -> str:
     spent = float(st.get("spent_usd") or 0.0)
     total = float(get_secret("TOTAL_BUDGET", default=str(TOTAL_BUDGET_DEFAULT)) or TOTAL_BUDGET_DEFAULT)
     pct = (spent / total * 100.0) if total > 0 else 0.0
     sha = (st.get("current_sha") or "")[:8]
     branch = st.get("current_branch") or "?"
     return f"—\nBudget: ${spent:.4f} / ${total:.2f} ({pct:.2f}%) | {branch}@{sha}"
+
+
+def budget_line(force: bool = False) -> str:
+    '''Return budget line sometimes (gated), not on every message.
+
+    Policy:
+    - Show budget when spent_usd increased by >= OUROBOROS_BUDGET_REPORT_DELTA (default $1.0)
+      relative to the last printed value stored in state as budget_last_reported_usd.
+    - If the baseline is missing (first run after upgrade), we initialize it to current spent and do NOT print.
+    - If force=True, always show.
+
+    Setting:
+    - OUROBOROS_BUDGET_REPORT_DELTA: float, default 1.0. Use 0 to always show.
+    '''
+    try:
+        st = load_state()
+        spent = float(st.get("spent_usd") or 0.0)
+
+        # delta threshold
+        try:
+            delta = float(get_secret("OUROBOROS_BUDGET_REPORT_DELTA", default="1.0") or "1.0")
+        except Exception:
+            delta = 1.0
+
+        if force or delta <= 0:
+            st["budget_last_reported_usd"] = spent
+            save_state(st)
+            return _format_budget_line(st)
+
+        if "budget_last_reported_usd" not in st:
+            # Establish baseline, do not print immediately.
+            st["budget_last_reported_usd"] = spent
+            save_state(st)
+            return ""
+
+        last = float(st.get("budget_last_reported_usd") or 0.0)
+
+        should = False
+        if spent < last - 1e-9:
+            # state reset / rollback
+            should = True
+        elif (spent - last) >= delta:
+            should = True
+
+        if not should:
+            return ""
+
+        st["budget_last_reported_usd"] = spent
+        save_state(st)
+        return _format_budget_line(st)
+    except Exception:
+        # Never fail message sending because of budget reporting.
+        return ""
 
 def log_chat(direction: str, chat_id: int, user_id: int, text: str) -> None:
     append_jsonl(DRIVE_ROOT / "logs" / "chat.jsonl", {
@@ -370,11 +422,24 @@ def log_chat(direction: str, chat_id: int, user_id: int, text: str) -> None:
         "text": text,
     })
 
-def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None) -> None:
+def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None, force_budget: bool = False) -> None:
     st = load_state()
     owner_id = int(st.get("owner_id") or 0)
     log_chat("out", chat_id, owner_id, text if log_text is None else log_text)
-    full = text.rstrip() + "\n\n" + budget_line()
+    budget = budget_line(force=force_budget)
+    _text = str(text or "")
+    # If we already sent the main message directly from the worker, it may pass a zero-width space (\u200b)
+    # to ask the supervisor to send only the budget line. If budget is not due, skip sending to avoid blank messages.
+    if not budget:
+        if _text.strip() in ("", "\u200b"):
+            return
+        full = _text
+    else:
+        base = _text.rstrip()
+        if base in ("", "\u200b"):
+            full = budget
+        else:
+            full = base + "\n\n" + budget
     for idx, part in enumerate(split_telegram(full)):
         ok, err = TG.send_message(chat_id, part)
         if not ok:
@@ -794,7 +859,7 @@ while True:
             continue
 
         if text.strip().lower().startswith("/status"):
-            send_with_budget(chat_id, status_text())
+            send_with_budget(chat_id, status_text(), force_budget=True)
             continue
 
         if handle_approval(chat_id, text):

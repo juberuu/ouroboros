@@ -578,6 +578,127 @@ class OuroborosAgent:
             },
         )
 
+    def _telegram_send_voice(self, chat_id: int, ogg_bytes: bytes, caption: str = "") -> tuple[bool, str]:
+        """Send a Telegram voice note (OGG/OPUS) via sendVoice.
+
+        Returns: (ok, status)
+          - status: "ok" | "no_token" | "error"
+        """
+        token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        if not token:
+            return False, "no_token"
+
+        try:
+            import requests  # lazy import
+        except Exception as e:
+            append_jsonl(
+                self.env.drive_path("logs") / "events.jsonl",
+                {"ts": utc_now_iso(), "type": "telegram_api_error", "method": "sendVoice", "error": f"requests_import: {repr(e)}"},
+            )
+            return False, "error"
+
+        url = f"https://api.telegram.org/bot{token}/sendVoice"
+        data: Dict[str, Any] = {"chat_id": str(chat_id)}
+        if caption:
+            data["caption"] = caption
+        files = {"voice": ("voice.ogg", ogg_bytes, "audio/ogg")}
+
+        try:
+            r = requests.post(url, data=data, files=files, timeout=30)
+            try:
+                j = r.json()
+                ok = bool(j.get("ok"))
+            except Exception:
+                ok = bool(r.ok)
+            return (ok, "ok" if ok else "error")
+        except Exception as e:
+            append_jsonl(
+                self.env.drive_path("logs") / "events.jsonl",
+                {"ts": utc_now_iso(), "type": "telegram_api_error", "method": "sendVoice", "error": repr(e)},
+            )
+            return False, "error"
+
+    def _tts_to_ogg_opus(self, text: str, voice: str = "kal") -> bytes:
+        """Local TTS: ffmpeg flite -> OGG/OPUS bytes.
+
+        No external APIs. Requires ffmpeg with libflite filter.
+        """
+        text = (text or "").strip()
+        if not text:
+            raise ValueError("TTS text must be non-empty")
+
+        tmp_dir = pathlib.Path("/tmp")
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        h = sha256_text(text)[:10]
+        txt_path = tmp_dir / f"tts_{h}.txt"
+        ogg_path = tmp_dir / f"tts_{h}.ogg"
+        txt_path.write_text(text, encoding="utf-8")
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            f"flite=textfile={txt_path}:voice={voice}",
+            "-ac",
+            "1",
+            "-ar",
+            "48000",
+            "-c:a",
+            "libopus",
+            "-b:a",
+            "32k",
+            str(ogg_path),
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode != 0 or not ogg_path.exists():
+            raise RuntimeError(
+                "TTS synthesis failed via ffmpeg/flite. "
+                f"Return code={res.returncode}. STDERR={truncate_for_log(res.stderr, 1500)}"
+            )
+        return ogg_path.read_bytes()
+
+    def _tts_to_ogg_opus_openai(
+        self,
+        text: str,
+        model: str = "gpt-4o-mini-tts",
+        voice: str = "alloy",
+        format: str = "opus",
+    ) -> bytes:
+        """Cloud TTS via OpenAI: POST /v1/audio/speech -> audio bytes.
+
+        We return raw bytes (typically OPUS-in-OGG when format='opus').
+        """
+        text = (text or "").strip()
+        if not text:
+            raise ValueError("TTS text must be non-empty")
+
+        api_key = os.environ.get("OPENAI_API_KEY", "")
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY is not set")
+
+        try:
+            import requests  # lazy import
+        except Exception as e:
+            raise RuntimeError(f"requests import failed: {repr(e)}")
+
+        url = "https://api.openai.com/v1/audio/speech"
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        payload = {
+            "model": model or "gpt-4o-mini-tts",
+            "voice": voice or "alloy",
+            "input": text,
+            "format": format or "opus",
+        }
+        r = requests.post(url, headers=headers, json=payload, timeout=60)
+        if not r.ok:
+            # Do not log full body (may include internal error details). Keep it short.
+            raise RuntimeError(f"OpenAI TTS failed: HTTP {r.status_code}: {truncate_for_log(r.text, 500)}")
+        return r.content
+
     def _telegram_api_post(self, method: str, data: Dict[str, Any]) -> Tuple[bool, str]:
         """Best-effort Telegram Bot API call.
 
@@ -691,6 +812,7 @@ class OuroborosAgent:
             "schedule_task": self._tool_schedule_task,
             "cancel_task": self._tool_cancel_task,
             "reindex_request": self._tool_reindex_request,
+            "telegram_send_voice": self._tool_telegram_send_voice,
         }
 
         max_tool_rounds = int(os.environ.get("OUROBOROS_MAX_TOOL_ROUNDS", "20"))
@@ -989,6 +1111,27 @@ class OuroborosAgent:
             {
                 "type": "function",
                 "function": {"name": "reindex_request", "description": "Request owner approval to run full reindexing of summaries.", "parameters": {"type": "object", "properties": {"reason": {"type": "string"}}, "required": ["reason"]}},
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "telegram_send_voice",
+                    "description": "Send a Telegram voice note (OGG/OPUS) generated locally via ffmpeg+flite TTS.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "chat_id": {"type": "integer"},
+                            "text": {"type": "string"},
+                            "caption": {"type": "string"},
+                            "voice": {"type": "string"},
+                            "tts": {"type": "string", "description": "'local' (ffmpeg+flite) or 'openai' (OpenAI /v1/audio/speech)"},
+                            "openai_model": {"type": "string"},
+                            "openai_voice": {"type": "string"},
+                            "openai_format": {"type": "string"}
+                        },
+                        "required": ["chat_id", "text"]
+                    }
+                },
             },
         ]
 
@@ -1296,6 +1439,59 @@ class OuroborosAgent:
 
         out = {"answer": d.get("output_text", ""), "sources": sources}
         return json.dumps(out, ensure_ascii=False, indent=2)
+
+    def _tool_telegram_send_voice(
+        self,
+        chat_id: int,
+        text: str,
+        caption: str = "",
+        voice: str = "kal",
+        tts: str = "local",
+        openai_model: str = "gpt-4o-mini-tts",
+        openai_voice: str = "alloy",
+        openai_format: str = "opus",
+    ) -> str:
+        """Tool: synthesize text -> OGG/OPUS voice note and send to Telegram.
+
+        Args:
+          - tts: "local" (ffmpeg+flite) or "openai" (OpenAI /v1/audio/speech)
+          - voice: for local flite voice (default 'kal')
+          - openai_*: for OpenAI TTS
+        """
+        method = ""
+        try:
+            if (tts or "").lower() == "openai":
+                ogg = self._tts_to_ogg_opus_openai(
+                    text=text,
+                    model=openai_model,
+                    voice=openai_voice,
+                    format=openai_format,
+                )
+                method = f"openai:{openai_model}:{openai_voice}:{openai_format}"
+            else:
+                ogg = self._tts_to_ogg_opus(text=text, voice=(voice or "kal"))
+                method = f"ffmpeg_flite:{voice or 'kal'}"
+        except Exception as e:
+            append_jsonl(
+                self.env.drive_path("logs") / "events.jsonl",
+                {"ts": utc_now_iso(), "type": "tts_error", "tts": tts, "error": repr(e)},
+            )
+            return f"⚠️ TTS_ERROR: {type(e).__name__}: {e}"
+
+        ok, status = self._telegram_send_voice(int(chat_id), ogg, caption=caption or "")
+        append_jsonl(
+            self.env.drive_path("logs") / "events.jsonl",
+            {
+                "ts": utc_now_iso(),
+                "type": "telegram_send_voice",
+                "chat_id": int(chat_id),
+                "method": method,
+                "ok": bool(ok),
+                "status": status,
+                "bytes": len(ogg),
+            },
+        )
+        return "OK: voice sent" if ok else f"⚠️ TELEGRAM_SEND_VOICE_FAILED: {status}"
 
 def make_agent(repo_dir: str, drive_root: str, event_queue: Any = None) -> OuroborosAgent:
     env = Env(repo_dir=pathlib.Path(repo_dir), drive_root=pathlib.Path(drive_root))
