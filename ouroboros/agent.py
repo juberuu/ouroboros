@@ -1081,9 +1081,19 @@ class OuroborosAgent:
             artifact_chars = max(3000, min(self._env_int("OUROBOROS_CONTEXT_ARTIFACT_CHARS", 35000), 200000))
             scratchpad_chars = max(1500, min(self._env_int("OUROBOROS_CONTEXT_SCRATCHPAD_CHARS", 12000), 120000))
             identity_chars = max(1200, min(self._env_int("OUROBOROS_CONTEXT_IDENTITY_CHARS", 9000), 120000))
+            world_chars = max(3000, min(self._env_int("OUROBOROS_CONTEXT_WORLD_CHARS", 50000), 200000))
+            readme_chars = max(3000, min(self._env_int("OUROBOROS_CONTEXT_README_CHARS", 50000), 200000))
+            notes_chars = max(2000, min(self._env_int("OUROBOROS_CONTEXT_NOTES_CHARS", 30000), 150000))
+            state_chars = max(1000, min(self._env_int("OUROBOROS_CONTEXT_STATE_CHARS", 20000), 100000))
+            index_chars = max(1000, min(self._env_int("OUROBOROS_CONTEXT_INDEX_CHARS", 20000), 100000))
 
             scratchpad_ctx = self._clip_text(scratchpad_raw, max_chars=scratchpad_chars)
             identity_ctx = self._clip_text(identity_raw, max_chars=identity_chars)
+            world_ctx = self._clip_text(world_md, max_chars=world_chars)
+            readme_ctx = self._clip_text(readme_md, max_chars=readme_chars)
+            notes_ctx = self._clip_text(notes_md, max_chars=notes_chars)
+            state_ctx = self._clip_text(state_json, max_chars=state_chars)
+            index_ctx = self._clip_text(index_summaries, max_chars=index_chars)
 
             # Context compaction: summarize Drive logs instead of raw tails (opt-out via env)
             summarize_logs = self._env_bool("OUROBOROS_CONTEXT_SUMMARIZE_LOGS", True)
@@ -1168,13 +1178,13 @@ class OuroborosAgent:
 
             messages: List[Dict[str, Any]] = [
                 {"role": "system", "content": base_prompt},
-                {"role": "system", "content": "## WORLD.md\n\n" + world_md},
-                {"role": "system", "content": "## README.md\n\n" + readme_md},
-                {"role": "system", "content": "## Drive state (state/state.json)\n\n" + state_json},
-                {"role": "system", "content": "## NOTES.md (Drive)\n\n" + notes_md},
+                {"role": "system", "content": "## WORLD.md\n\n" + world_ctx},
+                {"role": "system", "content": "## README.md\n\n" + readme_ctx},
+                {"role": "system", "content": "## Drive state (state/state.json)\n\n" + state_ctx},
+                {"role": "system", "content": "## NOTES.md (Drive)\n\n" + notes_ctx},
                 {"role": "system", "content": "## Working scratchpad (Drive: memory/scratchpad.md)\n\n" + scratchpad_ctx},
                 {"role": "system", "content": "## Self-model identity (Drive: memory/identity.md)\n\n" + identity_ctx},
-                {"role": "system", "content": "## Index summaries (Drive: index/summaries.json)\n\n" + index_summaries},
+                {"role": "system", "content": "## Index summaries (Drive: index/summaries.json)\n\n" + index_ctx},
                 {"role": "system", "content": "## Runtime context (JSON)\n\n" + json.dumps(runtime_ctx, ensure_ascii=False, indent=2)},
             ]
             if chat_log_recent:
