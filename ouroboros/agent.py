@@ -142,6 +142,118 @@ class OuroborosAgent:
         except Exception:
             pass  # best-effort; never crash on progress
 
+    # ---------- deterministic tool narration ----------
+
+    def _narrate_tool(self, fn_name: str, args: Dict[str, Any], result: str, success: bool) -> str:
+        """Generate a human-readable one-liner for a tool call (deterministic, no LLM cost)."""
+        is_error = not success or result.startswith("⚠️")
+        try:
+            if fn_name == "repo_read":
+                path = args.get("path", "?")
+                if is_error:
+                    # Extract short error reason
+                    err = result.split("\n")[0][:80] if result else "ошибка"
+                    return f"📖 Читаю `{path}` — {err}"
+                lines = result.count("\n") + (1 if result and not result.endswith("\n") else 0)
+                return f"📖 Читаю `{path}`… {lines} строк"
+
+            if fn_name == "repo_list":
+                d = args.get("dir", ".")
+                if is_error:
+                    return f"📂 Список `{d}` — ошибка"
+                try:
+                    count = json.loads(result).get("count", "?")
+                except Exception:
+                    count = "?"
+                return f"📂 Список файлов `{d}` — {count} элементов"
+
+            if fn_name == "drive_read":
+                path = args.get("path", "?")
+                if is_error:
+                    err = result.split("\n")[0][:80] if result else "ошибка"
+                    return f"📖 Читаю (Drive) `{path}` — {err}"
+                lines = result.count("\n") + (1 if result and not result.endswith("\n") else 0)
+                return f"📖 Читаю (Drive) `{path}`… {lines} строк"
+
+            if fn_name == "drive_list":
+                d = args.get("dir", ".")
+                if is_error:
+                    return f"📂 Список (Drive) `{d}` — ошибка"
+                try:
+                    count = json.loads(result).get("count", "?")
+                except Exception:
+                    count = "?"
+                return f"📂 Список файлов (Drive) `{d}` — {count} элементов"
+
+            if fn_name == "drive_write":
+                path = args.get("path", "?")
+                mode = args.get("mode", "overwrite")
+                chars = len(args.get("content", ""))
+                if is_error:
+                    return f"✏️ Запись (Drive) `{path}` — ошибка"
+                return f"✏️ Записал (Drive) `{path}` ({mode}, {chars} символов)"
+
+            if fn_name == "repo_write_commit":
+                path = args.get("path", "?")
+                msg = args.get("commit_message", "")[:60]
+                if is_error:
+                    err = result.split("\n")[0][:80] if result else "ошибка"
+                    return f"💾 Коммит `{path}` — {err}"
+                return f"💾 Записал и запушил `{path}`: {msg}"
+
+            if fn_name == "git_status":
+                if is_error:
+                    return "🔍 git status — ошибка"
+                if not result.strip():
+                    return "🔍 git status — чисто, нет изменений"
+                changed = len(result.strip().splitlines())
+                return f"🔍 git status — {changed} изменённых файлов"
+
+            if fn_name == "git_diff":
+                if is_error:
+                    return "🔍 git diff — ошибка"
+                if not result.strip():
+                    return "🔍 git diff — нет различий"
+                diff_lines = len(result.strip().splitlines())
+                return f"🔍 git diff — {diff_lines} строк различий"
+
+            if fn_name == "run_shell":
+                cmd = args.get("cmd", [])
+                cmd_str = " ".join(cmd)[:60]
+                if is_error:
+                    return f"⚙️ `{cmd_str}` — ошибка"
+                out_lines = len(result.strip().splitlines()) if result.strip() else 0
+                return f"⚙️ `{cmd_str}` — OK ({out_lines} строк вывода)"
+
+            if fn_name == "web_search":
+                query = args.get("query", "?")[:50]
+                if is_error:
+                    return f"🔎 Поиск «{query}» — ошибка"
+                return f"🔎 Поиск «{query}» — результаты получены"
+
+            if fn_name == "request_restart":
+                reason = args.get("reason", "")[:50]
+                return f"🔄 Запрос перезапуска: {reason}"
+
+            if fn_name == "request_stable_promotion":
+                return "🏷️ Запрос промоута в stable"
+
+            if fn_name == "schedule_task":
+                desc = args.get("description", "")[:50]
+                return f"📋 Планирую задачу: {desc}"
+
+            if fn_name == "cancel_task":
+                tid = args.get("task_id", "?")
+                return f"❌ Отменяю задачу {tid}"
+
+            if fn_name == "reindex_request":
+                return "🗂️ Запрос переиндексации"
+
+            # Fallback for any unknown/new tool
+            return f"🔧 {fn_name}({', '.join(f'{k}=…' for k in args)})"
+        except Exception:
+            return f"🔧 {fn_name} — выполнено"
+
     def _safe_read(self, path: pathlib.Path, fallback: str = "") -> str:
         """Read a text file, returning *fallback* on any error (file missing, permission, encoding, etc.)."""
         try:
@@ -186,6 +298,17 @@ class OuroborosAgent:
             index_summaries = self._safe_read(self.env.drive_path("index/summaries.json"))
             chat_log = self._safe_read(self.env.drive_path("logs/chat.jsonl"))
 
+            # Recent narration history (last 20 rounds) for agent self-context
+            narration_context = ""
+            try:
+                _narr_path = self.env.drive_path("logs/narration.jsonl")
+                if _narr_path.exists():
+                    _narr_lines = _narr_path.read_text(encoding="utf-8").strip().splitlines()
+                    _recent = _narr_lines[-20:]  # last 20 entries
+                    narration_context = "\n".join(_recent)
+            except Exception:
+                pass
+
             # Git context (non-fatal if unavailable)
             ctx_warnings: List[str] = []
             try:
@@ -219,6 +342,7 @@ class OuroborosAgent:
                 {"role": "system", "content": "## Index summaries (Drive: index/summaries.json)\n\n" + index_summaries},
                 {"role": "system", "content": "## Runtime context (JSON)\n\n" + json.dumps(runtime_ctx, ensure_ascii=False, indent=2)},
                 {"role": "system", "content": "## Raw chat log (Drive: logs/chat.jsonl)\n\n" + chat_log},
+                {"role": "system", "content": "## Недавняя история действий (Drive: logs/narration.jsonl)\n\n" + narration_context},
                 {"role": "user", "content": task.get("text", "")},
             ]
 
@@ -563,6 +687,8 @@ class OuroborosAgent:
                 if content and content.strip():
                     self._emit_progress(content.strip())
 
+                round_narrations: List[str] = []
+
                 for tc in tool_calls:
                     fn_name = tc["function"]["name"]
 
@@ -580,6 +706,7 @@ class OuroborosAgent:
                             {"ts": utc_now_iso(), "tool": fn_name, "error": "json_parse", "detail": repr(e)},
                         )
                         messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+                        round_narrations.append(self._narrate_tool(fn_name, {}, result, False))
                         continue
 
                     # ---- Check tool exists ----
@@ -593,12 +720,15 @@ class OuroborosAgent:
                             {"ts": utc_now_iso(), "tool": fn_name, "error": "unknown_tool"},
                         )
                         messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+                        round_narrations.append(self._narrate_tool(fn_name, args, result, False))
                         continue
 
                     # ---- Execute tool safely ----
+                    tool_ok = True
                     try:
                         result = tool_name_to_fn[fn_name](**args)
                     except Exception as e:
+                        tool_ok = False
                         tb = traceback.format_exc()
                         result = (
                             f"⚠️ TOOL_ERROR ({fn_name}): {type(e).__name__}: {e}\n\n"
@@ -616,10 +746,6 @@ class OuroborosAgent:
                                 "traceback": truncate_for_log(tb, 2000),
                             },
                         )
-                        self._emit_progress(
-                            f"Tool '{fn_name}' вернул ошибку: {type(e).__name__}: {e}\n"
-                            f"Анализирую и пробую другой подход..."
-                        )
 
                     append_jsonl(
                         drive_logs / "tools.jsonl",
@@ -631,6 +757,17 @@ class OuroborosAgent:
                         },
                     )
                     messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+                    round_narrations.append(self._narrate_tool(fn_name, args, result, tool_ok))
+
+                # ---- Batch-send narration for this tool round ----
+                if round_narrations:
+                    narration_text = "\n".join(round_narrations)
+                    self._emit_progress(narration_text)
+                    append_jsonl(
+                        drive_logs / "narration.jsonl",
+                        {"ts": utc_now_iso(), "round": round_idx, "narration": round_narrations},
+                    )
+
                 continue
 
             return (content or ""), last_usage
