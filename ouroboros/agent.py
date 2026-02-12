@@ -776,9 +776,9 @@ class OuroborosAgent:
                 cmd = args.get("cmd", [])
                 cmd_str = " ".join(cmd)[:60]
                 if is_error:
-                    return f"⚙️ `{cmd_str}` — ошибка"
+                    return f"💻 `{cmd_str}` — ошибка"
                 out_lines = len(result.strip().splitlines()) if result.strip() else 0
-                return f"⚙️ `{cmd_str}` — OK ({out_lines} строк вывода)"
+                return f"💻 `{cmd_str}` — OK ({out_lines} строк вывода)"
 
             if fn_name == "claude_code_edit":
                 if is_error:
