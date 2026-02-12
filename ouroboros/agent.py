@@ -31,6 +31,11 @@ from typing import Any, Dict, List, Optional, Tuple
 # Utilities
 # -----------------------------
 
+# Module-level guard for one-time worker boot logging
+_worker_boot_logged = False
+_worker_boot_lock = threading.Lock()
+
+
 def utc_now_iso() -> str:
     return _dt.datetime.now(tz=_dt.timezone.utc).isoformat()
 
@@ -97,6 +102,42 @@ def list_dir(root: pathlib.Path, rel: str, max_entries: int = 500) -> Dict[str, 
     return {"base": str(base), "count": len(out), "items": out, "truncated": (len(out) >= max_entries)}
 
 
+def get_git_info(repo_dir: pathlib.Path) -> Tuple[str, str]:
+    """
+    Best-effort retrieval of git branch and SHA.
+    Returns (git_branch, git_sha). Empty strings on failure.
+    """
+    git_branch = ""
+    git_sha = ""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=str(repo_dir),
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if result.returncode == 0:
+            git_branch = result.stdout.strip()
+    except Exception:
+        pass
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(repo_dir),
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if result.returncode == 0:
+            git_sha = result.stdout.strip()
+    except Exception:
+        pass
+
+    return git_branch, git_sha
+
+
 # -----------------------------
 # Environment + Paths
 # -----------------------------
@@ -133,6 +174,25 @@ class OuroborosAgent:
         self._current_chat_id: Optional[int] = None
         self._current_task_type: Optional[str] = None
         self._last_push_succeeded: bool = False
+        self._log_worker_boot_once()
+
+    def _log_worker_boot_once(self) -> None:
+        global _worker_boot_logged
+        try:
+            with _worker_boot_lock:
+                if _worker_boot_logged:
+                    return
+                _worker_boot_logged = True
+            git_branch, git_sha = get_git_info(self.env.repo_dir)
+            append_jsonl(self.env.drive_path('logs') / 'events.jsonl', {
+                'ts': utc_now_iso(),
+                'type': 'worker_boot',
+                'pid': os.getpid(),
+                'git_branch': git_branch,
+                'git_sha': git_sha,
+            })
+        except Exception:
+            return
 
     SCRATCHPAD_SECTIONS: Tuple[str, ...] = (
         "CurrentProjects",
