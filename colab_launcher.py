@@ -16,8 +16,7 @@ import requests
 # ----------------------------
 # 0) Install deps
 # ----------------------------
-subprocess.run([sys.executable, "-m", "pip", "install", "-q", "openai>=1.0.0", "requests", "playwright>=1.40.0"], check=True)
-subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+subprocess.run([sys.executable, "-m", "pip", "install", "-q", "openai>=1.0.0", "requests"], check=True)
 
 # ----------------------------
 # 0.1) provide apply_patch shim (so LLM "apply_patch<<PATCH" won't crash)
@@ -175,7 +174,7 @@ if not pathlib.Path("/content/drive/MyDrive").exists():
 DRIVE_ROOT = pathlib.Path("/content/drive/MyDrive/Ouroboros").resolve()
 REPO_DIR = pathlib.Path("/content/ouroboros_repo").resolve()
 
-for sub in ["state", "logs", "memory", "index", "artifacts", "locks", "archive"]:
+for sub in ["state", "logs", "memory", "index", "locks", "archive"]:
     (DRIVE_ROOT / sub).mkdir(parents=True, exist_ok=True)
 REPO_DIR.mkdir(parents=True, exist_ok=True)
 

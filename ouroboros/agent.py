@@ -6,7 +6,6 @@ This module is intentionally self-contained (minimal dependencies) so that Ourob
 
 from __future__ import annotations
 
-import base64
 import datetime as _dt
 import hashlib
 import html
@@ -20,7 +19,6 @@ import time
 import traceback
 import urllib.parse
 import urllib.request
-import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -497,7 +495,6 @@ class OuroborosAgent:
             "git_diff": self._tool_git_diff,
             "run_shell": self._tool_run_shell,
             "web_search": self._tool_web_search,
-            "computer_use_browser": self._tool_computer_use_browser,
             "request_restart": self._tool_request_restart,
             "request_stable_promotion": self._tool_request_stable_promotion,
             "schedule_task": self._tool_schedule_task,
@@ -739,14 +736,6 @@ class OuroborosAgent:
             },
             {
                 "type": "function",
-                "function": {
-                    "name": "computer_use_browser",
-                    "description": "OpenAI computer use loop (browser) executed via Playwright. Returns JSON with result + artifacts.",
-                    "parameters": {"type": "object", "properties": {"goal": {"type": "string"}, "max_steps": {"type": "integer"}}, "required": ["goal"]},
-                },
-            },
-            {
-                "type": "function",
                 "function": {"name": "request_restart", "description": "Ask supervisor to restart Ouroboros runtime (apply new code).", "parameters": {"type": "object", "properties": {"reason": {"type": "string"}}, "required": ["reason"]}},
             },
             {
@@ -926,118 +915,6 @@ class OuroborosAgent:
 
         out = {"answer": d.get("output_text", ""), "sources": sources}
         return json.dumps(out, ensure_ascii=False, indent=2)
-
-    def _tool_computer_use_browser(self, goal: str, max_steps: int = 40) -> str:
-        api_key = os.environ.get("OPENAI_API_KEY", "")
-        if not api_key:
-            return json.dumps({"error": "OPENAI_API_KEY is not set; computer_use unavailable."}, ensure_ascii=False)
-
-        from openai import OpenAI
-
-        client = OpenAI(api_key=api_key)
-
-        from playwright.sync_api import sync_playwright
-
-        display_width = int(os.environ.get("OUROBOROS_BROWSER_W", "1024"))
-        display_height = int(os.environ.get("OUROBOROS_BROWSER_H", "768"))
-
-        tool = {
-            "type": "computer_use_preview",
-            "display_width": display_width,
-            "display_height": display_height,
-            "environment": "browser",
-        }
-
-        artifacts_dir = self.env.drive_path("artifacts") / f"computer_use_{uuid.uuid4().hex[:8]}"
-        artifacts_dir.mkdir(parents=True, exist_ok=True)
-
-        def _b64_png(png_bytes: bytes) -> str:
-            return base64.b64encode(png_bytes).decode("ascii")
-
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
-            page = browser.new_page(viewport={"width": display_width, "height": display_height})
-            page.goto("about:blank")
-
-            png0 = page.screenshot(full_page=False)
-            screenshot0_url = f"data:image/png;base64,{_b64_png(png0)}"
-
-            last = client.responses.create(
-                model=os.environ.get("OUROBOROS_COMPUTER_MODEL", "computer-use-preview"),
-                tools=[tool],
-                reasoning={"summary": "concise"},
-                truncation="auto",
-                input=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "input_text", "text": goal},
-                            {"type": "input_image", "image_url": screenshot0_url},
-                        ],
-                    }
-                ],
-            )
-
-            for step in range(max_steps):
-                d = last.model_dump()
-                computer_calls = [it for it in (d.get("output") or []) if it.get("type") == "computer_call"]
-                if not computer_calls:
-                    browser.close()
-                    return json.dumps(
-                        {"result": d.get("output_text", ""), "artifacts_dir": str(artifacts_dir), "steps": step},
-                        ensure_ascii=False,
-                        indent=2,
-                    )
-
-                call = computer_calls[0]
-                call_id = call.get("call_id")
-                action = call.get("action") or {}
-                pending_checks = call.get("pending_safety_checks") or []
-
-                atype = action.get("type")
-                if atype == "click":
-                    page.mouse.click(action["x"], action["y"], button=action.get("button", "left"))
-                elif atype == "double_click":
-                    page.mouse.dblclick(action["x"], action["y"], button=action.get("button", "left"))
-                elif atype == "scroll":
-                    page.mouse.move(action.get("x", 1), action.get("y", 1))
-                    page.evaluate(f"window.scrollBy({int(action.get('scrollX', 0))}, {int(action.get('scrollY', 0))})")
-                elif atype == "type":
-                    page.keyboard.type(action.get("text", ""))
-                elif atype == "keypress":
-                    page.keyboard.press(action.get("key", "Enter"))
-                elif atype == "wait":
-                    time.sleep(float(action.get("seconds", 1)))
-                else:
-                    pass
-
-                png = page.screenshot(full_page=False)
-                (artifacts_dir / f"step_{step:03d}.png").write_bytes(png)
-
-                last = client.responses.create(
-                    model=os.environ.get("OUROBOROS_COMPUTER_MODEL", "computer-use-preview"),
-                    previous_response_id=last.id,
-                    tools=[tool],
-                    truncation="auto",
-                    input=[
-                        {
-                            "type": "computer_call_output",
-                            "call_id": call_id,
-                            "acknowledged_safety_checks": pending_checks,
-                            "output": {"type": "computer_screenshot", "image_url": f"data:image/png;base64,{_b64_png(png)}"},
-                        }
-                    ],
-                )
-
-            browser.close()
-
-        d = last.model_dump()
-        return json.dumps(
-            {"result": d.get("output_text", ""), "warning": "max_steps reached", "artifacts_dir": str(artifacts_dir)},
-            ensure_ascii=False,
-            indent=2,
-        )
-
 
 def make_agent(repo_dir: str, drive_root: str, event_queue: Any = None) -> OuroborosAgent:
     env = Env(repo_dir=pathlib.Path(repo_dir), drive_root=pathlib.Path(drive_root))

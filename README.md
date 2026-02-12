@@ -13,7 +13,7 @@
 - `TELEGRAM_BOT_TOKEN`
 - `TOTAL_BUDGET` (например `100`)
 - `GITHUB_TOKEN`
-- (опционально) `OPENAI_API_KEY` (для web_search + computer_use)
+- (опционально) `OPENAI_API_KEY` (для web_search)
 - (опционально) `GITHUB_USER` (по умолчанию `razzant`)
 - (опционально) `GITHUB_REPO` (по умолчанию `ouroboros`)
 - (опционально) `OUROBOROS_MODEL` (по умолчанию `openai/gpt-5.2`)
@@ -38,7 +38,6 @@
 - `memory/` — долговременная память
 - `index/` — summaries.json и другие индексы
 - `NOTES.md` — заметки «что работает / что не работает»
-- `artifacts/` — артефакты browser/computer-use
 
 ## Команды (Telegram)
 
