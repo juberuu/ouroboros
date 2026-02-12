@@ -2370,8 +2370,18 @@ class OuroborosAgent:
                     ok = bool(j.get("ok"))
                     if ok:
                         return True, "ok"
-                    desc = str(j.get("description") or "api_ok_false")
-                    return False, truncate_for_log(desc, 300)
+                    desc = str(j.get("description", ""))
+                    if desc:
+                        status_msg = truncate_for_log(f"tg_ok_false: {desc}", 300)
+                        error_msg = truncate_for_log(f"ok_false: {desc}", 300)
+                    else:
+                        status_msg = "tg_ok_false"
+                        error_msg = "ok_false"
+                    append_jsonl(
+                        self.env.drive_path("logs") / "events.jsonl",
+                        {"ts": utc_now_iso(), "type": "telegram_api_error", "method": method, "error": error_msg},
+                    )
+                    return False, status_msg
             except Exception:
                 pass
 
