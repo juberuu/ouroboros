@@ -1603,6 +1603,27 @@ class OuroborosAgent:
             )
             return False, "error"
 
+        url = f"https://api.telegram.org/bot{token}/sendVoice"
+        data: Dict[str, Any] = {"chat_id": str(chat_id)}
+        if caption:
+            data["caption"] = caption
+        files = {"voice": ("voice.ogg", ogg_bytes, "audio/ogg")}
+
+        try:
+            r = requests.post(url, data=data, files=files, timeout=60)
+            try:
+                j = r.json()
+                ok = bool(j.get("ok"))
+            except Exception:
+                ok = bool(r.ok)
+            return (ok, "ok" if ok else "error")
+        except Exception as e:
+            append_jsonl(
+                self.env.drive_path("logs") / "events.jsonl",
+                {"ts": utc_now_iso(), "type": "telegram_api_error", "method": "sendVoice", "error": repr(e)},
+            )
+            return False, "error"
+
     def _telegram_send_photo(
         self,
         chat_id: int,
@@ -1652,27 +1673,6 @@ class OuroborosAgent:
             append_jsonl(
                 self.env.drive_path("logs") / "events.jsonl",
                 {"ts": utc_now_iso(), "type": "telegram_api_error", "method": "sendPhoto", "error": repr(e)},
-            )
-            return False, "error"
-
-        url = f"https://api.telegram.org/bot{token}/sendVoice"
-        data: Dict[str, Any] = {"chat_id": str(chat_id)}
-        if caption:
-            data["caption"] = caption
-        files = {"voice": ("voice.ogg", ogg_bytes, "audio/ogg")}
-
-        try:
-            r = requests.post(url, data=data, files=files, timeout=30)
-            try:
-                j = r.json()
-                ok = bool(j.get("ok"))
-            except Exception:
-                ok = bool(r.ok)
-            return (ok, "ok" if ok else "error")
-        except Exception as e:
-            append_jsonl(
-                self.env.drive_path("logs") / "events.jsonl",
-                {"ts": utc_now_iso(), "type": "telegram_api_error", "method": "sendVoice", "error": repr(e)},
             )
             return False, "error"
 
