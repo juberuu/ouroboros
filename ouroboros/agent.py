@@ -82,6 +82,37 @@ def truncate_for_log(s: str, max_chars: int = 4000) -> str:
     return s[: max_chars // 2] + "\n...\n" + s[-max_chars // 2 :]
 
 
+def _format_tool_rounds_exceeded_message(max_tool_rounds: int, llm_trace: Dict[str, Any]) -> str:
+    """
+    Форматирует информативное сообщение при превышении лимита tool rounds.
+
+    Args:
+        max_tool_rounds: лимит итераций
+        llm_trace: dict с ключом 'tool_calls' (список вызовов инструментов)
+
+    Returns:
+        Краткое сообщение с последними вызовами и подсказкой.
+    """
+    tool_calls = llm_trace.get("tool_calls", [])
+    last_tools = tool_calls[-5:] if len(tool_calls) > 5 else tool_calls
+
+    lines = [f"⚠️ Превышен лимит tool rounds ({max_tool_rounds})."]
+
+    if last_tools:
+        lines.append(f"\nПоследние вызовы ({len(last_tools)} из {len(tool_calls)}):")
+        for tc in last_tools:
+            tool_name = tc.get("tool", "?")
+            is_error = tc.get("is_error", False)
+            status = "❌" if is_error else "✅"
+            result_preview = truncate_for_log(str(tc.get("result", "")), 120)
+            lines.append(f"  {status} {tool_name}: {result_preview}")
+
+    lines.append("\n💡 Подсказка: увеличь OUROBOROS_MAX_TOOL_ROUNDS или упрости запрос.")
+
+    message = "\n".join(lines)
+    return truncate_for_log(message, 1200)
+
+
 def list_dir(root: pathlib.Path, rel: str, max_entries: int = 500) -> Dict[str, Any]:
     base = (root / safe_relpath(rel)).resolve()
     if not base.exists():
@@ -2459,7 +2490,21 @@ class OuroborosAgent:
                 )
             return (content or ""), last_usage, llm_trace
 
-        return "⚠️ Превышен лимит tool rounds. Остановился.", last_usage, llm_trace
+        # Tool rounds limit exceeded: log event and return informative message
+        tool_calls = llm_trace.get("tool_calls", [])
+        last_tools = [{"tool": tc.get("tool"), "is_error": tc.get("is_error")} for tc in tool_calls[-5:]]
+        append_jsonl(
+            drive_logs / "events.jsonl",
+            {
+                "ts": utc_now_iso(),
+                "type": "tool_rounds_exceeded",
+                "max_tool_rounds": max_tool_rounds,
+                "rounds_executed": max_tool_rounds,
+                "last_tools": last_tools,
+                "taskless_ok": True,
+            },
+        )
+        return _format_tool_rounds_exceeded_message(max_tool_rounds, llm_trace), last_usage, llm_trace
 
     def _tools_schema(self) -> List[Dict[str, Any]]:
         return [

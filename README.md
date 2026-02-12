@@ -25,6 +25,7 @@
 - (опционально) `OUROBOROS_EVOLUTION_ENABLED_BY_DEFAULT` (`1`/`0`, по умолчанию `0`)
 - (опционально) `OUROBOROS_BUDGET_REPORT_EVERY_MESSAGES` (по умолчанию `10`)
 - (опционально) `OUROBOROS_GIT_LOCK_STALE_SEC` (по умолчанию `600`) — таймаут для автоудаления зависшего git lock
+- (опционально) `OUROBOROS_MAX_TOOL_ROUNDS` (по умолчанию `20`) — лимит итераций tool-calls на один запрос (защита от зацикливания)
 
 2) Запусти единственную boot-ячейку в Colab.
 3) Напиши своему Telegram-боту. Первый написавший становится владельцем.
