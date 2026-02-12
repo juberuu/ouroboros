@@ -15,6 +15,7 @@ import pathlib
 import subprocess
 import threading
 import time
+import traceback
 import urllib.parse
 import urllib.request
 import uuid
@@ -123,6 +124,15 @@ class OuroborosAgent:
         self.env = env
         self._pending_events: List[Dict[str, Any]] = []
 
+    def _safe_read(self, path: pathlib.Path, fallback: str = "") -> str:
+        """Read a text file, returning *fallback* on any error (file missing, permission, encoding, etc.)."""
+        try:
+            if path.exists():
+                return read_text(path)
+        except Exception:
+            pass
+        return fallback
+
     def handle_task(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
         self._pending_events = []
 
@@ -144,30 +154,42 @@ class OuroborosAgent:
                 )
 
         try:
-            base_prompt = read_text(self.env.repo_path("prompts/BASE.md"))
-            world_md = read_text(self.env.repo_path("WORLD.md")) if self.env.repo_path("WORLD.md").exists() else ""
-            readme_md = read_text(self.env.repo_path("README.md")) if self.env.repo_path("README.md").exists() else ""
+            # --- Load context (resilient: errors produce fallbacks, not crashes) ---
+            _fallback_prompt = (
+                "You are Ouroboros. Your base prompt could not be loaded. "
+                "Analyze available context, help the owner, and report the loading issue."
+            )
+            base_prompt = self._safe_read(self.env.repo_path("prompts/BASE.md"), fallback=_fallback_prompt)
+            world_md = self._safe_read(self.env.repo_path("WORLD.md"))
+            readme_md = self._safe_read(self.env.repo_path("README.md"))
+            notes_md = self._safe_read(self.env.drive_path("NOTES.md"))
+            state_json = self._safe_read(self.env.drive_path("state/state.json"), fallback="{}")
+            index_summaries = self._safe_read(self.env.drive_path("index/summaries.json"))
+            chat_log = self._safe_read(self.env.drive_path("logs/chat.jsonl"))
 
-            notes_path = self.env.drive_path("NOTES.md")
-            notes_md = read_text(notes_path) if notes_path.exists() else ""
+            # Git context (non-fatal if unavailable)
+            ctx_warnings: List[str] = []
+            try:
+                git_head = self._git_head()
+            except Exception as e:
+                git_head = "unknown"
+                ctx_warnings.append(f"git HEAD: {e}")
+            try:
+                git_branch = self._git_branch()
+            except Exception as e:
+                git_branch = "unknown"
+                ctx_warnings.append(f"git branch: {e}")
 
-            state_path = self.env.drive_path("state/state.json")
-            state_json = read_text(state_path) if state_path.exists() else "{}"
-
-            index_summaries_path = self.env.drive_path("index/summaries.json")
-            index_summaries = read_text(index_summaries_path) if index_summaries_path.exists() else ""
-
-            chat_log_path = self.env.drive_path("logs/chat.jsonl")
-            chat_log = read_text(chat_log_path) if chat_log_path.exists() else ""
-
-            runtime_ctx = {
+            runtime_ctx: Dict[str, Any] = {
                 "utc_now": utc_now_iso(),
                 "repo_dir": str(self.env.repo_dir),
                 "drive_root": str(self.env.drive_root),
-                "git_head": self._git_head(),
-                "git_branch": self._git_branch(),
+                "git_head": git_head,
+                "git_branch": git_branch,
                 "task": {"id": task.get("id"), "type": task.get("type")},
             }
+            if ctx_warnings:
+                runtime_ctx["context_loading_warnings"] = ctx_warnings
 
             messages = [
                 {"role": "system", "content": base_prompt},
@@ -187,13 +209,19 @@ class OuroborosAgent:
             try:
                 text, usage = self._llm_with_tools(messages=messages, tools=tools)
             except Exception as e:
+                tb = traceback.format_exc()
                 append_jsonl(
                     drive_logs / "events.jsonl",
-                    {"ts": utc_now_iso(), "type": "task_error", "task_id": task.get("id"), "error": repr(e)},
+                    {
+                        "ts": utc_now_iso(), "type": "task_error",
+                        "task_id": task.get("id"), "error": repr(e),
+                        "traceback": truncate_for_log(tb, 2000),
+                    },
                 )
                 text = (
-                    "⚠️ Внутренняя ошибка воркера при обработке сообщения. "
-                    "Я залогировал ошибку. Попробуй /restart или повтори запрос."
+                    f"⚠️ Ошибка при обработке: {type(e).__name__}: {e}\n\n"
+                    f"Залогировал traceback. Попробуй повторить запрос — "
+                    f"я постараюсь обработать его по-другому."
                 )
 
             self._pending_events.append({
@@ -317,6 +345,7 @@ class OuroborosAgent:
     def _llm_with_tools(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> Tuple[str, Dict[str, Any]]:
         model = os.environ.get("OUROBOROS_MODEL", "openai/gpt-5.2")
         client = self._openrouter_client()
+        drive_logs = self.env.drive_path("logs")
 
         tool_name_to_fn = {
             "repo_read": self._tool_repo_read,
@@ -338,16 +367,45 @@ class OuroborosAgent:
         }
 
         max_tool_rounds = int(os.environ.get("OUROBOROS_MAX_TOOL_ROUNDS", "20"))
+        llm_max_retries = int(os.environ.get("OUROBOROS_LLM_MAX_RETRIES", "3"))
         last_usage: Dict[str, Any] = {}
 
-        for _ in range(max_tool_rounds):
-            resp = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                tools=tools,
-                tool_choice="auto",
-            )
-            resp_dict = resp.model_dump()
+        for round_idx in range(max_tool_rounds):
+            # ---- LLM call with retry on transient errors ----
+            resp_dict = None
+            last_llm_error: Optional[Exception] = None
+
+            for attempt in range(llm_max_retries):
+                try:
+                    resp = client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        tools=tools,
+                        tool_choice="auto",
+                    )
+                    resp_dict = resp.model_dump()
+                    break
+                except Exception as e:
+                    last_llm_error = e
+                    append_jsonl(
+                        drive_logs / "events.jsonl",
+                        {
+                            "ts": utc_now_iso(), "type": "llm_api_error",
+                            "round": round_idx, "attempt": attempt + 1,
+                            "max_retries": llm_max_retries, "error": repr(e),
+                        },
+                    )
+                    if attempt < llm_max_retries - 1:
+                        wait_sec = min(2 ** attempt * 2, 30)
+                        time.sleep(wait_sec)
+
+            if resp_dict is None:
+                return (
+                    f"⚠️ Не удалось получить ответ от модели после {llm_max_retries} попыток.\n"
+                    f"Ошибка: {type(last_llm_error).__name__}: {last_llm_error}\n"
+                    f"Попробуй повторить запрос через минуту."
+                ), last_usage
+
             last_usage = resp_dict.get("usage", {}) or {}
 
             choice = (resp_dict.get("choices") or [{}])[0]
@@ -358,12 +416,59 @@ class OuroborosAgent:
             if tool_calls:
                 messages.append({"role": "assistant", "content": content or "", "tool_calls": tool_calls})
                 for tc in tool_calls:
-                    fn = tc["function"]["name"]
-                    args = json.loads(tc["function"]["arguments"] or "{}")
-                    result = tool_name_to_fn[fn](**args)
+                    fn_name = tc["function"]["name"]
+
+                    # ---- Parse arguments safely ----
+                    try:
+                        args = json.loads(tc["function"]["arguments"] or "{}")
+                    except (json.JSONDecodeError, ValueError) as e:
+                        result = (
+                            f"⚠️ TOOL_ARG_ERROR: Could not parse arguments for '{fn_name}': {e}\n"
+                            f"Raw: {truncate_for_log(tc['function'].get('arguments', ''), 500)}\n"
+                            f"Retry with valid JSON arguments."
+                        )
+                        append_jsonl(
+                            drive_logs / "tools.jsonl",
+                            {"ts": utc_now_iso(), "tool": fn_name, "error": "json_parse", "detail": repr(e)},
+                        )
+                        messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+                        continue
+
+                    # ---- Check tool exists ----
+                    if fn_name not in tool_name_to_fn:
+                        result = (
+                            f"⚠️ UNKNOWN_TOOL: '{fn_name}' does not exist.\n"
+                            f"Available: {', '.join(sorted(tool_name_to_fn.keys()))}"
+                        )
+                        append_jsonl(
+                            drive_logs / "tools.jsonl",
+                            {"ts": utc_now_iso(), "tool": fn_name, "error": "unknown_tool"},
+                        )
+                        messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+                        continue
+
+                    # ---- Execute tool safely ----
+                    try:
+                        result = tool_name_to_fn[fn_name](**args)
+                    except Exception as e:
+                        tb = traceback.format_exc()
+                        result = (
+                            f"⚠️ TOOL_ERROR ({fn_name}): {type(e).__name__}: {e}\n\n"
+                            f"Traceback (last 2000 chars):\n{truncate_for_log(tb, 2000)}\n\n"
+                            f"The tool raised an exception. Analyze the error and try a different approach."
+                        )
+                        append_jsonl(
+                            drive_logs / "events.jsonl",
+                            {
+                                "ts": utc_now_iso(), "type": "tool_error", "tool": fn_name,
+                                "args": args, "error": repr(e),
+                                "traceback": truncate_for_log(tb, 2000),
+                            },
+                        )
+
                     append_jsonl(
-                        self.env.drive_path("logs") / "tools.jsonl",
-                        {"ts": utc_now_iso(), "tool": fn, "args": args, "result_preview": truncate_for_log(result, 2000)},
+                        drive_logs / "tools.jsonl",
+                        {"ts": utc_now_iso(), "tool": fn_name, "args": args, "result_preview": truncate_for_log(result, 2000)},
                     )
                     messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
                 continue
@@ -542,30 +647,76 @@ class OuroborosAgent:
             lock_path.unlink()
 
     def _tool_repo_write_commit(self, path: str, content: str, commit_message: str) -> str:
-        assert commit_message.strip(), "commit_message must be non-empty"
+        if not commit_message.strip():
+            return "⚠️ ERROR: commit_message must be non-empty."
+
         lock = self._acquire_git_lock()
         try:
-            run(["git", "checkout", self.env.branch_dev], cwd=self.env.repo_dir)
-            write_text(self.env.repo_path(path), content)
-            run(["git", "add", safe_relpath(path)], cwd=self.env.repo_dir)
-            run(["git", "commit", "-m", commit_message], cwd=self.env.repo_dir)
-            run(["git", "push", "origin", self.env.branch_dev], cwd=self.env.repo_dir)
+            # Step 1: checkout
+            try:
+                run(["git", "checkout", self.env.branch_dev], cwd=self.env.repo_dir)
+            except Exception as e:
+                return f"⚠️ GIT_ERROR (checkout {self.env.branch_dev}): {e}"
+
+            # Step 2: write file
+            try:
+                write_text(self.env.repo_path(path), content)
+            except Exception as e:
+                return f"⚠️ FILE_WRITE_ERROR ({path}): {e}"
+
+            # Step 3: git add
+            try:
+                run(["git", "add", safe_relpath(path)], cwd=self.env.repo_dir)
+            except Exception as e:
+                return f"⚠️ GIT_ERROR (add {path}): {e}"
+
+            # Step 4: git commit
+            try:
+                run(["git", "commit", "-m", commit_message], cwd=self.env.repo_dir)
+            except Exception as e:
+                return f"⚠️ GIT_ERROR (commit): {e}\nFile was written and staged but not committed."
+
+            # Step 5: git push
+            try:
+                run(["git", "push", "origin", self.env.branch_dev], cwd=self.env.repo_dir)
+            except Exception as e:
+                return (
+                    f"⚠️ GIT_ERROR (push): {e}\n"
+                    f"Committed locally but NOT pushed. "
+                    f"Retry with: run_shell(['git', 'push', 'origin', '{self.env.branch_dev}'])"
+                )
         finally:
             self._release_git_lock(lock)
+
         return f"OK: committed and pushed to {self.env.branch_dev}: {commit_message}"
 
     def _tool_git_status(self) -> str:
-        return run(["git", "status", "--porcelain"], cwd=self.env.repo_dir)
+        try:
+            return run(["git", "status", "--porcelain"], cwd=self.env.repo_dir)
+        except Exception as e:
+            return f"⚠️ GIT_ERROR (status): {e}"
 
     def _tool_git_diff(self) -> str:
-        return run(["git", "diff"], cwd=self.env.repo_dir)
+        try:
+            return run(["git", "diff"], cwd=self.env.repo_dir)
+        except Exception as e:
+            return f"⚠️ GIT_ERROR (diff): {e}"
 
     def _tool_run_shell(self, cmd: List[str], cwd: str = "") -> str:
         wd = self.env.repo_dir if not cwd else (self.env.repo_dir / safe_relpath(cwd)).resolve()
-        res = subprocess.run(cmd, cwd=str(wd), capture_output=True, text=True)
+        try:
+            res = subprocess.run(cmd, cwd=str(wd), capture_output=True, text=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            return f"⚠️ Command timed out after 120s: {' '.join(cmd)}"
+        except Exception as e:
+            return f"⚠️ Failed to execute command: {type(e).__name__}: {e}"
+        output = (res.stdout + "\n" + res.stderr).strip()
         if res.returncode != 0:
-            raise RuntimeError(f"Shell failed: {' '.join(cmd)}\n\nSTDOUT:\n{res.stdout}\n\nSTDERR:\n{res.stderr}")
-        return (res.stdout + "\n" + res.stderr).strip()
+            return (
+                f"⚠️ Command exited with code {res.returncode}: {' '.join(cmd)}\n\n"
+                f"STDOUT:\n{res.stdout}\n\nSTDERR:\n{res.stderr}"
+            )
+        return output
 
     def _tool_request_restart(self, reason: str) -> str:
         self._pending_events.append({"type": "restart_request", "reason": reason, "ts": utc_now_iso()})
