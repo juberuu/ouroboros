@@ -1021,18 +1021,87 @@ class OuroborosAgent:
             if os.environ.get("OUROBOROS_TG_MARKDOWN", "1").lower() not in ("0", "false", "no", "off", ""):
                 try:
                     chat_id_int = int(task["chat_id"])
-                    # Chunk on markdown first, then render per chunk.
-                    md_chunks = self._chunk_markdown_for_telegram(text or "", max_chars=3500)
+                    # Chunk on markdown first (smaller chunks to account for HTML expansion), then render per chunk.
+                    md_chunks = self._chunk_markdown_for_telegram(text or "", max_chars=2500)
                     all_ok = True
                     last_status = "ok"
-                    for part in md_chunks:
+                    failed_at_index = -1
+
+                    for i, part in enumerate(md_chunks):
                         html_text = self._markdown_to_telegram_html(part)
                         ok, status = self._telegram_send_message_html(chat_id_int, html_text)
                         last_status = status
                         if not ok:
                             all_ok = False
+                            failed_at_index = i
+                            # Log HTML send failure
+                            append_jsonl(
+                                self.env.drive_path("logs") / "events.jsonl",
+                                {
+                                    "ts": utc_now_iso(),
+                                    "type": "telegram_send_direct_html_failed",
+                                    "task_id": task.get("id"),
+                                    "chat_id": chat_id_int,
+                                    "status": last_status,
+                                    "part": i,
+                                    "parts_total": len(md_chunks),
+                                },
+                            )
                             break
-                    direct_sent = bool(all_ok)
+
+                    # If HTML sending failed, try fallback to plain text for remaining chunks
+                    if not all_ok and failed_at_index >= 0:
+                        try:
+                            # Build remaining markdown from unsent chunks
+                            remaining_md = "".join(md_chunks[failed_at_index:])
+                            # Strip markdown formatting for plain text
+                            remaining_plain = self._strip_markdown(remaining_md)
+                            # Chunk plain text
+                            plain_chunks = self._chunk_plain_text(remaining_plain, max_chars=3500)
+
+                            # Send plain text chunks
+                            fallback_ok = True
+                            fallback_status = "ok"
+                            for plain_part in plain_chunks:
+                                ok, status = self._telegram_send_message_plain(chat_id_int, plain_part)
+                                fallback_status = status
+                                if not ok:
+                                    fallback_ok = False
+                                    break
+
+                            # Log fallback result
+                            append_jsonl(
+                                self.env.drive_path("logs") / "events.jsonl",
+                                {
+                                    "ts": utc_now_iso(),
+                                    "type": "telegram_send_direct_fallback_plain",
+                                    "task_id": task.get("id"),
+                                    "chat_id": chat_id_int,
+                                    "ok": fallback_ok,
+                                    "status": fallback_status,
+                                    "parts": len(plain_chunks),
+                                    "from_part": failed_at_index,
+                                },
+                            )
+
+                            # If fallback succeeded, treat as direct_sent
+                            if fallback_ok:
+                                direct_sent = True
+                        except Exception as fallback_e:
+                            append_jsonl(
+                                self.env.drive_path("logs") / "events.jsonl",
+                                {
+                                    "ts": utc_now_iso(),
+                                    "type": "telegram_send_fallback_error",
+                                    "task_id": task.get("id"),
+                                    "error": repr(fallback_e),
+                                },
+                            )
+                    else:
+                        # All HTML chunks sent successfully
+                        direct_sent = bool(all_ok)
+
+                    # Log overall direct send result
                     append_jsonl(
                         self.env.drive_path("logs") / "events.jsonl",
                         {
@@ -1040,7 +1109,7 @@ class OuroborosAgent:
                             "type": "telegram_send_direct",
                             "task_id": task.get("id"),
                             "chat_id": chat_id_int,
-                            "ok": bool(all_ok),
+                            "ok": direct_sent,
                             "status": last_status,
                             "parts": len(md_chunks),
                         },
@@ -1245,6 +1314,62 @@ class OuroborosAgent:
                 "disable_web_page_preview": "1",
             },
         )
+
+    def _telegram_send_message_plain(self, chat_id: int, text: str) -> tuple[bool, str]:
+        """Send plain text message via Telegram sendMessage (no parse_mode)."""
+        return self._telegram_api_post(
+            "sendMessage",
+            {
+                "chat_id": chat_id,
+                "text": text,
+                "disable_web_page_preview": "1",
+            },
+        )
+
+    @staticmethod
+    def _chunk_plain_text(text: str, max_chars: int = 3500) -> List[str]:
+        """Split plain text into chunks safe for Telegram.
+
+        Simple chunking that splits on newlines when possible.
+        """
+        text = text or ""
+        try:
+            max_chars_i = int(max_chars)
+        except Exception:
+            max_chars_i = 3500
+        max_chars_i = max(256, min(4096, max_chars_i))
+
+        if len(text) <= max_chars_i:
+            return [text] if text else []
+
+        chunks: List[str] = []
+        lines = text.splitlines(keepends=True)
+        cur = ""
+
+        for line in lines:
+            # If single line is too long, hard split it
+            if len(line) > max_chars_i:
+                if cur:
+                    chunks.append(cur)
+                    cur = ""
+                # Hard split the long line
+                while line:
+                    chunks.append(line[:max_chars_i])
+                    line = line[max_chars_i:]
+                continue
+
+            # If adding this line would exceed limit, flush current chunk
+            if len(cur) + len(line) > max_chars_i:
+                if cur:
+                    chunks.append(cur)
+                cur = line
+            else:
+                cur += line
+
+        if cur:
+            chunks.append(cur)
+
+        return chunks or [text]
 
     def _telegram_send_voice(self, chat_id: int, ogg_bytes: bytes, caption: str = "") -> tuple[bool, str]:
         """Send a Telegram voice note (OGG/OPUS) via sendVoice.
