@@ -1813,6 +1813,22 @@ class OuroborosAgent:
                                 if fallback_ok:
                                     # Fallback succeeded; continue with next chunks
                                     html_fallback_to_plain_count += 1
+                                    # Log per-chunk HTML→plain fallback event for observability
+                                    append_jsonl(
+                                        self.env.drive_path("logs") / "events.jsonl",
+                                        {
+                                            "ts": utc_now_iso(),
+                                            "type": "telegram_send_direct_html_fallback",
+                                            "task_id": task.get("id"),
+                                            "chat_id": chat_id_int,
+                                            "part": i,
+                                            "parts_total": len(chunks),
+                                            "html_status": status,
+                                            "plain_parts": len(plain_chunks),
+                                            "html_len": len(chunk_text),
+                                            "plain_fallback_len": len(plain_fallback_text),
+                                        },
+                                    )
                                 else:
                                     # Fallback also failed; abort
                                     all_ok = False
