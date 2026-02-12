@@ -1881,8 +1881,25 @@ class OuroborosAgent:
         _flush()
         return chunks or [md]
 
+    @staticmethod
+    def _sanitize_telegram_text(text: str) -> str:
+        """Sanitize text for Telegram to avoid HTML parse failures.
+
+        Telegram HTML parse sometimes fails on hidden control characters;
+        sanitizing reduces "can't parse entities" and similar errors.
+        """
+        if text is None:
+            return ""
+        # Normalize newlines: convert \r\n to \n, drop standalone \r
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        # Remove ASCII control chars (codepoints < 32) except \n and \t
+        text = "".join(c for c in text if ord(c) >= 32 or c in ("\n", "\t"))
+        return text
+
     def _telegram_send_message_html(self, chat_id: int, html_text: str) -> tuple[bool, str]:
         """Send formatted message via Telegram sendMessage(parse_mode=HTML)."""
+        # Sanitize to avoid HTML parse failures from control characters
+        html_text = self._sanitize_telegram_text(html_text)
         return self._telegram_api_post(
             "sendMessage",
             {
@@ -1895,6 +1912,8 @@ class OuroborosAgent:
 
     def _telegram_send_message_plain(self, chat_id: int, text: str) -> tuple[bool, str]:
         """Send plain text message via Telegram sendMessage (no parse_mode)."""
+        # Sanitize to avoid parse failures from control characters
+        text = self._sanitize_telegram_text(text)
         return self._telegram_api_post(
             "sendMessage",
             {
