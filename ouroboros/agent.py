@@ -1995,11 +1995,87 @@ class OuroborosAgent:
             return f"⚠️ GIT_ERROR (diff): {e}"
 
     def _tool_run_shell(self, cmd: List[str], cwd: str = "") -> str:
-        wd = self.env.repo_dir if not cwd else (self.env.repo_dir / safe_relpath(cwd)).resolve()
+        def _is_within_repo(p: pathlib.Path) -> bool:
+            try:
+                p.resolve().relative_to(self.env.repo_dir.resolve())
+                return True
+            except Exception:
+                return False
+
+        def _normalize_cwd(raw: str) -> pathlib.Path:
+            raw = (raw or "").strip()
+            if not raw or raw in (".", "./"):
+                return self.env.repo_dir
+
+            # If user passed an absolute path (common LLM mistake), accept it only if it is inside repo_dir.
+            if raw.startswith("/"):
+                ap = pathlib.Path(raw).resolve()
+                if _is_within_repo(ap) and ap.exists() and ap.is_dir():
+                    return ap
+                append_jsonl(
+                    self.env.drive_path("logs") / "events.jsonl",
+                    {
+                        "ts": utc_now_iso(),
+                        "type": "run_shell_cwd_ignored",
+                        "cwd": raw,
+                        "reason": "absolute_not_within_repo_or_missing",
+                    },
+                )
+                return self.env.repo_dir
+
+            # Otherwise treat as repo-relative.
+            try:
+                rel = safe_relpath(raw)
+            except Exception as e:
+                append_jsonl(
+                    self.env.drive_path("logs") / "events.jsonl",
+                    {"ts": utc_now_iso(), "type": "run_shell_cwd_ignored", "cwd": raw, "reason": f"invalid:{type(e).__name__}"},
+                )
+                return self.env.repo_dir
+
+            wd2 = (self.env.repo_dir / rel).resolve()
+            if not _is_within_repo(wd2) or not wd2.exists() or not wd2.is_dir():
+                append_jsonl(
+                    self.env.drive_path("logs") / "events.jsonl",
+                    {
+                        "ts": utc_now_iso(),
+                        "type": "run_shell_cwd_fallback",
+                        "cwd": raw,
+                        "resolved": str(wd2),
+                        "reason": "not_found_or_not_dir_or_escape",
+                    },
+                )
+                return self.env.repo_dir
+
+            return wd2
+
+        wd = _normalize_cwd(cwd)
+
         try:
             res = subprocess.run(cmd, cwd=str(wd), capture_output=True, text=True, timeout=120)
         except subprocess.TimeoutExpired:
             return f"⚠️ Command timed out after 120s: {' '.join(cmd)}"
+        except FileNotFoundError as e:
+            # Some environments occasionally surface a cwd-related FileNotFoundError.
+            # Retry once from repo_dir to avoid flakiness.
+            if str(wd) != str(self.env.repo_dir):
+                append_jsonl(
+                    self.env.drive_path("logs") / "events.jsonl",
+                    {
+                        "ts": utc_now_iso(),
+                        "type": "run_shell_retry_no_cwd",
+                        "cwd": str(wd),
+                        "error": truncate_for_log(repr(e), 300),
+                    },
+                )
+                try:
+                    res = subprocess.run(cmd, cwd=str(self.env.repo_dir), capture_output=True, text=True, timeout=120)
+                except subprocess.TimeoutExpired:
+                    return f"⚠️ Command timed out after 120s: {' '.join(cmd)}"
+                except Exception as e2:
+                    return f"⚠️ Failed to execute command: {type(e2).__name__}: {e2}"
+            else:
+                return f"⚠️ Failed to execute command: {type(e).__name__}: {e}"
         except Exception as e:
             return f"⚠️ Failed to execute command: {type(e).__name__}: {e}"
         output = (res.stdout + "\n" + res.stderr).strip()
