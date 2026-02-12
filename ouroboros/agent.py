@@ -7,6 +7,7 @@ This module is intentionally self-contained (minimal dependencies) so that Ourob
 from __future__ import annotations
 
 import datetime as _dt
+import base64
 from collections import Counter
 import hashlib
 import html
@@ -775,6 +776,15 @@ class OuroborosAgent:
             if name == "telegram_send_voice":
                 return "Отправляю voice note в Telegram"
 
+            if name == "telegram_send_photo":
+                return "Отправляю фото в Telegram"
+
+            if name == "telegram_generate_and_send_image":
+                p = str(a.get("prompt") or "").strip()
+                if len(p) > 80:
+                    p = p[:77].rstrip() + "..."
+                return f"Генерирую и отправляю картинку: {p or '?'}"
+
             # generic fallback
             return f"Выполняю инструмент: {name}"
         except Exception:
@@ -1255,6 +1265,58 @@ class OuroborosAgent:
             )
             return False, "error"
 
+    def _telegram_send_photo(
+        self,
+        chat_id: int,
+        photo_bytes: bytes,
+        caption: str = "",
+        filename: str = "image.png",
+        mime: str = "image/png",
+    ) -> tuple[bool, str]:
+        """Send a Telegram photo via sendPhoto.
+
+        Returns: (ok, status)
+          - status: "ok" | "no_token" | "error"
+        """
+        token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        if not token:
+            return False, "no_token"
+
+        try:
+            import requests  # lazy import
+        except Exception as e:
+            append_jsonl(
+                self.env.drive_path("logs") / "events.jsonl",
+                {
+                    "ts": utc_now_iso(),
+                    "type": "telegram_api_error",
+                    "method": "sendPhoto",
+                    "error": f"requests_import: {repr(e)}",
+                },
+            )
+            return False, "error"
+
+        url = f"https://api.telegram.org/bot{token}/sendPhoto"
+        data: Dict[str, Any] = {"chat_id": str(chat_id)}
+        if caption:
+            data["caption"] = caption
+        files = {"photo": (filename or "image.png", photo_bytes, mime or "image/png")}
+
+        try:
+            r = requests.post(url, data=data, files=files, timeout=60)
+            try:
+                j = r.json()
+                ok = bool(j.get("ok"))
+            except Exception:
+                ok = bool(r.ok)
+            return (ok, "ok" if ok else "error")
+        except Exception as e:
+            append_jsonl(
+                self.env.drive_path("logs") / "events.jsonl",
+                {"ts": utc_now_iso(), "type": "telegram_api_error", "method": "sendPhoto", "error": repr(e)},
+            )
+            return False, "error"
+
         url = f"https://api.telegram.org/bot{token}/sendVoice"
         data: Dict[str, Any] = {"chat_id": str(chat_id)}
         if caption:
@@ -1461,6 +1523,133 @@ class OuroborosAgent:
             default_headers=headers,
         )
 
+    @staticmethod
+    def _extract_base64_image_payload(s: str) -> str:
+        """Extract base64 payload from either raw base64 or data URL.
+
+        OpenRouter /responses for image models may return:
+          - raw base64 png bytes
+          - or a data URL like: data:image/png;base64,AAAA...
+        """
+        s = (s or "").strip()
+        if not s:
+            return ""
+        if s.startswith("data:"):
+            # data:image/png;base64,....
+            comma = s.find(",")
+            if comma >= 0:
+                return s[comma + 1 :].strip()
+        return s
+
+    @staticmethod
+    def _b64decode_robust(b64: str) -> bytes:
+        """Decode base64 with best-effort fixes (whitespace + padding).
+
+        Some providers return data URLs or omit proper padding.
+        """
+        b64 = re.sub(r"\s+", "", (b64 or ""))
+        if not b64:
+            return b""
+        # normalize padding
+        b64 = b64.rstrip("=")
+        pad = (-len(b64)) % 4
+        b64 = b64 + ("=" * pad)
+        return base64.b64decode(b64)
+
+    def _openrouter_generate_image_via_curl(
+        self,
+        prompt: str,
+        model: str = "openai/gpt-5-image",
+        image_config: Optional[Dict[str, Any]] = None,
+        timeout_sec: int = 180,
+    ) -> bytes:
+        """Generate an image via OpenRouter /responses using CLI curl.
+
+        Security: token is passed as a subprocess arg; never logged.
+        Returns raw image bytes.
+        """
+        api_key = os.environ.get("OPENROUTER_API_KEY", "")
+        if not api_key:
+            raise RuntimeError("OPENROUTER_API_KEY is not set")
+
+        prompt = (prompt or "").strip()
+        if not prompt:
+            raise ValueError("prompt must be non-empty")
+
+        if image_config is None:
+            image_config = {"size": "1024x1024"}
+
+        payload = {
+            "model": model,
+            "input": prompt,
+            "modalities": ["image"],
+            "image_config": image_config,
+        }
+
+        cmd = [
+            "curl",
+            "-sS",
+            "-L",
+            "--max-time",
+            str(int(timeout_sec)),
+            "-H",
+            "Accept: application/json",
+            "-H",
+            "Content-Type: application/json",
+            "-H",
+            f"Authorization: Bearer {api_key}",
+            "-H",
+            "HTTP-Referer: https://colab.research.google.com/",
+            "-H",
+            "X-Title: Ouroboros",
+            "https://openrouter.ai/api/v1/responses",
+            "--data-binary",
+            json.dumps(payload, ensure_ascii=False),
+        ]
+
+        # shell=False, capture_output: do not print token
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode != 0:
+            raise RuntimeError(
+                "OpenRouter image curl failed. "
+                f"Return code={res.returncode}. STDERR={truncate_for_log(res.stderr, 1500)}"
+            )
+
+        raw = (res.stdout or "").strip()
+        try:
+            d = json.loads(raw)
+        except Exception as e:
+            raise RuntimeError(
+                "OpenRouter returned non-JSON for /responses. "
+                f"Error={type(e).__name__}: {e}. Body head={truncate_for_log(raw, 300)}"
+            )
+
+        output = d.get("output") or []
+        img_item = None
+        for it in output:
+            if isinstance(it, dict) and it.get("type") == "image_generation_call":
+                img_item = it
+                if (it.get("status") or "").lower() == "completed":
+                    break
+
+        if not img_item:
+            raise RuntimeError("OpenRouter /responses did not return image_generation_call")
+
+        result = img_item.get("result")
+        if not isinstance(result, str) or not result.strip():
+            raise RuntimeError(f"Image result is missing. status={img_item.get('status')}")
+
+        b64 = self._extract_base64_image_payload(result)
+        img_bytes = self._b64decode_robust(b64)
+        if not img_bytes:
+            raise RuntimeError("Decoded image bytes are empty")
+
+        append_jsonl(
+            self.env.drive_path("logs") / "events.jsonl",
+            {"ts": utc_now_iso(), "type": "openrouter_image_generated", "model": model, "bytes": len(img_bytes)},
+        )
+        return img_bytes
+
     def _llm_with_tools(
         self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]
     ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
@@ -1487,6 +1676,8 @@ class OuroborosAgent:
             "cancel_task": self._tool_cancel_task,
             "reindex_request": self._tool_reindex_request,
             "telegram_send_voice": self._tool_telegram_send_voice,
+            "telegram_send_photo": self._tool_telegram_send_photo,
+            "telegram_generate_and_send_image": self._tool_telegram_generate_and_send_image,
         }
 
         max_tool_rounds = int(os.environ.get("OUROBOROS_MAX_TOOL_ROUNDS", "20"))
@@ -1865,6 +2056,40 @@ class OuroborosAgent:
                         },
                         "required": ["chat_id", "text"]
                     }
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "telegram_send_photo",
+                    "description": "Send a Telegram photo from a local file path (PNG/JPEG).",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "chat_id": {"type": "integer"},
+                            "path": {"type": "string", "description": "Local filesystem path to image (e.g., /tmp/x.png or Drive-mounted path)."},
+                            "caption": {"type": "string"},
+                        },
+                        "required": ["chat_id", "path"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "telegram_generate_and_send_image",
+                    "description": "Generate an image via OpenRouter (CLI curl /responses) and send it to Telegram as a photo.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "chat_id": {"type": "integer"},
+                            "prompt": {"type": "string"},
+                            "caption": {"type": "string"},
+                            "model": {"type": "string", "description": "OpenRouter image model", "default": "openai/gpt-5-image"},
+                            "size": {"type": "string", "description": "e.g. 1024x1024", "default": "1024x1024"},
+                        },
+                        "required": ["chat_id", "prompt"],
+                    },
                 },
             },
         ]
@@ -2355,6 +2580,76 @@ class OuroborosAgent:
             },
         )
         return "OK: voice sent" if ok else f"⚠️ TELEGRAM_SEND_VOICE_FAILED: {status}"
+
+    def _tool_telegram_send_photo(self, chat_id: int, path: str, caption: str = "") -> str:
+        """Tool: send a local image file to Telegram as a photo."""
+        p = pathlib.Path(str(path or "").strip())
+        if not p.exists() or not p.is_file():
+            return f"⚠️ FILE_NOT_FOUND: {p}"
+        data = p.read_bytes()
+        # Best-effort mime by extension
+        ext = p.suffix.lower().lstrip(".")
+        mime = "image/png" if ext in ("png",) else ("image/jpeg" if ext in ("jpg", "jpeg") else "application/octet-stream")
+
+        ok, status = self._telegram_send_photo(int(chat_id), data, caption=caption or "", filename=p.name, mime=mime)
+        append_jsonl(
+            self.env.drive_path("logs") / "events.jsonl",
+            {
+                "ts": utc_now_iso(),
+                "type": "telegram_send_photo",
+                "chat_id": int(chat_id),
+                "ok": bool(ok),
+                "status": status,
+                "bytes": len(data),
+                "path": str(p),
+            },
+        )
+        return "OK: photo sent" if ok else f"⚠️ TELEGRAM_SEND_PHOTO_FAILED: {status}"
+
+    def _tool_telegram_generate_and_send_image(
+        self,
+        chat_id: int,
+        prompt: str,
+        caption: str = "",
+        model: str = "openai/gpt-5-image",
+        size: str = "1024x1024",
+    ) -> str:
+        """Tool: generate image via OpenRouter (curl /responses) and send it to Telegram."""
+        try:
+            img_bytes = self._openrouter_generate_image_via_curl(
+                prompt=prompt,
+                model=model or "openai/gpt-5-image",
+                image_config={"size": (size or "1024x1024")},
+                timeout_sec=180,
+            )
+        except Exception as e:
+            append_jsonl(
+                self.env.drive_path("logs") / "events.jsonl",
+                {"ts": utc_now_iso(), "type": "openrouter_image_error", "model": model, "error": repr(e)},
+            )
+            return f"⚠️ OPENROUTER_IMAGE_ERROR: {type(e).__name__}: {e}"
+
+        ok, status = self._telegram_send_photo(
+            int(chat_id),
+            img_bytes,
+            caption=caption or "",
+            filename="ouroboros.png",
+            mime="image/png",
+        )
+        append_jsonl(
+            self.env.drive_path("logs") / "events.jsonl",
+            {
+                "ts": utc_now_iso(),
+                "type": "telegram_generate_and_send_image",
+                "chat_id": int(chat_id),
+                "ok": bool(ok),
+                "status": status,
+                "bytes": len(img_bytes),
+                "model": model,
+                "size": size,
+            },
+        )
+        return "OK: image generated and sent" if ok else f"⚠️ TELEGRAM_SEND_PHOTO_FAILED: {status}"
 
 def make_agent(repo_dir: str, drive_root: str, event_queue: Any = None) -> OuroborosAgent:
     env = Env(repo_dir=pathlib.Path(repo_dir), drive_root=pathlib.Path(drive_root))
