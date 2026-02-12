@@ -9,7 +9,9 @@ from __future__ import annotations
 import base64
 import datetime as _dt
 import hashlib
+import html
 import json
+import re
 import os
 import pathlib
 import subprocess
@@ -213,8 +215,10 @@ class OuroborosAgent:
                 append_jsonl(
                     drive_logs / "events.jsonl",
                     {
-                        "ts": utc_now_iso(), "type": "task_error",
-                        "task_id": task.get("id"), "error": repr(e),
+                        "ts": utc_now_iso(),
+                        "type": "task_error",
+                        "task_id": task.get("id"),
+                        "error": repr(e),
                         "traceback": truncate_for_log(tb, 2000),
                     },
                 )
@@ -224,24 +228,65 @@ class OuroborosAgent:
                     f"я постараюсь обработать его по-другому."
                 )
 
-            self._pending_events.append({
-                "type": "llm_usage",
-                "task_id": task.get("id"),
-                "provider": "openrouter",
-                "usage": usage,
-                "ts": utc_now_iso(),
-            })
+            self._pending_events.append(
+                {
+                    "type": "llm_usage",
+                    "task_id": task.get("id"),
+                    "provider": "openrouter",
+                    "usage": usage,
+                    "ts": utc_now_iso(),
+                }
+            )
 
-            self._pending_events.append({
-                "type": "send_message",
-                "chat_id": task["chat_id"],
-                "text": text,
-                "task_id": task.get("id"),
-                "ts": utc_now_iso(),
-            })
+            # Telegram formatting: render Markdown -> Telegram HTML directly from the worker (best-effort).
+            # Rationale: supervisor currently sends plain text; parse_mode is not guaranteed there.
+            direct_sent = False
+            if os.environ.get("OUROBOROS_TG_MARKDOWN", "1").lower() not in ("0", "false", "no", "off", ""):
+                try:
+                    chat_id_int = int(task["chat_id"])
+                    html_text = self._markdown_to_telegram_html(text)
+                    ok, status = self._telegram_send_message_html(chat_id_int, html_text)
+                    direct_sent = bool(ok)
+                    append_jsonl(
+                        self.env.drive_path("logs") / "events.jsonl",
+                        {
+                            "ts": utc_now_iso(),
+                            "type": "telegram_send_direct",
+                            "task_id": task.get("id"),
+                            "chat_id": chat_id_int,
+                            "ok": ok,
+                            "status": status,
+                        },
+                    )
+                except Exception as e:
+                    append_jsonl(
+                        self.env.drive_path("logs") / "events.jsonl",
+                        {
+                            "ts": utc_now_iso(),
+                            "type": "telegram_send_direct_error",
+                            "task_id": task.get("id"),
+                            "error": repr(e),
+                        },
+                    )
+
+            # If we sent the formatted message directly, ask supervisor to send only the budget line.
+            # We must send a non-empty text, otherwise Telegram rejects it.
+            text_for_supervisor = "\u200b" if direct_sent else text
+
+            self._pending_events.append(
+                {
+                    "type": "send_message",
+                    "chat_id": task["chat_id"],
+                    "text": text_for_supervisor,
+                    "task_id": task.get("id"),
+                    "ts": utc_now_iso(),
+                }
+            )
 
             self._pending_events.append({"type": "task_done", "task_id": task.get("id"), "ts": utc_now_iso()})
-            append_jsonl(drive_logs / "events.jsonl", {"ts": utc_now_iso(), "type": "task_done", "task_id": task.get("id")})
+            append_jsonl(
+                drive_logs / "events.jsonl", {"ts": utc_now_iso(), "type": "task_done", "task_id": task.get("id")}
+            )
             return list(self._pending_events)
         finally:
             if typing_stop is not None:
@@ -256,6 +301,61 @@ class OuroborosAgent:
         return run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=self.env.repo_dir)
 
     # ---------- telegram helpers (direct API calls) ----------
+
+    def _markdown_to_telegram_html(self, md: str) -> str:
+        """Convert a small, safe subset of Markdown into Telegram-compatible HTML.
+
+        Supported (best-effort):
+          - **bold** -> <b>
+          - `inline code` -> <code>
+          - ```code blocks``` -> <pre><code>
+
+        Everything else is HTML-escaped.
+        """
+        md = md or ""
+
+        fence_re = re.compile(r"```[^\n]*\n([\s\S]*?)```", re.MULTILINE)
+        inline_code_re = re.compile(r"`([^`\n]+)`")
+        bold_re = re.compile(r"\*\*([^*\n]+)\*\*")
+
+        parts: list[str] = []
+        last = 0
+        for m in fence_re.finditer(md):
+            # text before code block
+            parts.append(md[last : m.start()])
+            code = m.group(1)
+            code_esc = html.escape(code)
+            parts.append(f"<pre><code>{code_esc}</code></pre>")
+            last = m.end()
+        parts.append(md[last:])
+
+        def _render_span(text: str) -> str:
+            # Inline code first
+            out: list[str] = []
+            pos = 0
+            for mm in inline_code_re.finditer(text):
+                out.append(html.escape(text[pos : mm.start()]))
+                out.append(f"<code>{html.escape(mm.group(1))}</code>")
+                pos = mm.end()
+            out.append(html.escape(text[pos:]))
+            s = "".join(out)
+            # Bold
+            s = bold_re.sub(r"<b>\1</b>", s)
+            return s
+
+        return "".join(_render_span(p) if not p.startswith("<pre><code>") else p for p in parts)
+
+    def _telegram_send_message_html(self, chat_id: int, html_text: str) -> tuple[bool, str]:
+        """Send formatted message via Telegram sendMessage(parse_mode=HTML)."""
+        return self._telegram_api_post(
+            "sendMessage",
+            {
+                "chat_id": chat_id,
+                "text": html_text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": "true",
+            },
+        )
 
     def _telegram_api_post(self, method: str, data: Dict[str, Any]) -> Tuple[bool, str]:
         """Best-effort Telegram Bot API call.
@@ -339,8 +439,13 @@ class OuroborosAgent:
 
     def _openrouter_client(self):
         from openai import OpenAI
+
         headers = {"HTTP-Referer": "https://colab.research.google.com/", "X-Title": "Ouroboros"}
-        return OpenAI(base_url="https://openrouter.ai/api/v1", api_key=os.environ["OPENROUTER_API_KEY"], default_headers=headers)
+        return OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=os.environ["OPENROUTER_API_KEY"],
+            default_headers=headers,
+        )
 
     def _llm_with_tools(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> Tuple[str, Dict[str, Any]]:
         model = os.environ.get("OUROBOROS_MODEL", "openai/gpt-5.2")
@@ -390,13 +495,16 @@ class OuroborosAgent:
                     append_jsonl(
                         drive_logs / "events.jsonl",
                         {
-                            "ts": utc_now_iso(), "type": "llm_api_error",
-                            "round": round_idx, "attempt": attempt + 1,
-                            "max_retries": llm_max_retries, "error": repr(e),
+                            "ts": utc_now_iso(),
+                            "type": "llm_api_error",
+                            "round": round_idx,
+                            "attempt": attempt + 1,
+                            "max_retries": llm_max_retries,
+                            "error": repr(e),
                         },
                     )
                     if attempt < llm_max_retries - 1:
-                        wait_sec = min(2 ** attempt * 2, 30)
+                        wait_sec = min(2**attempt * 2, 30)
                         time.sleep(wait_sec)
 
             if resp_dict is None:
@@ -460,15 +568,23 @@ class OuroborosAgent:
                         append_jsonl(
                             drive_logs / "events.jsonl",
                             {
-                                "ts": utc_now_iso(), "type": "tool_error", "tool": fn_name,
-                                "args": args, "error": repr(e),
+                                "ts": utc_now_iso(),
+                                "type": "tool_error",
+                                "tool": fn_name,
+                                "args": args,
+                                "error": repr(e),
                                 "traceback": truncate_for_log(tb, 2000),
                             },
                         )
 
                     append_jsonl(
                         drive_logs / "tools.jsonl",
-                        {"ts": utc_now_iso(), "tool": fn_name, "args": args, "result_preview": truncate_for_log(result, 2000)},
+                        {
+                            "ts": utc_now_iso(),
+                            "tool": fn_name,
+                            "args": args,
+                            "result_preview": truncate_for_log(result, 2000),
+                        },
                     )
                     messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
                 continue
@@ -744,6 +860,7 @@ class OuroborosAgent:
             return json.dumps({"error": "OPENAI_API_KEY is not set; web_search unavailable."}, ensure_ascii=False)
 
         from openai import OpenAI
+
         client = OpenAI(api_key=api_key)
 
         tool: Dict[str, Any] = {"type": "web_search"}
@@ -774,6 +891,7 @@ class OuroborosAgent:
             return json.dumps({"error": "OPENAI_API_KEY is not set; computer_use unavailable."}, ensure_ascii=False)
 
         from openai import OpenAI
+
         client = OpenAI(api_key=api_key)
 
         from playwright.sync_api import sync_playwright
@@ -781,7 +899,12 @@ class OuroborosAgent:
         display_width = int(os.environ.get("OUROBOROS_BROWSER_W", "1024"))
         display_height = int(os.environ.get("OUROBOROS_BROWSER_H", "768"))
 
-        tool = {"type": "computer_use_preview", "display_width": display_width, "display_height": display_height, "environment": "browser"}
+        tool = {
+            "type": "computer_use_preview",
+            "display_width": display_width,
+            "display_height": display_height,
+            "environment": "browser",
+        }
 
         artifacts_dir = self.env.drive_path("artifacts") / f"computer_use_{uuid.uuid4().hex[:8]}"
         artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -802,7 +925,15 @@ class OuroborosAgent:
                 tools=[tool],
                 reasoning={"summary": "concise"},
                 truncation="auto",
-                input=[{"role": "user", "content": [{"type": "input_text", "text": goal}, {"type": "input_image", "image_url": screenshot0_url}]}],
+                input=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": goal},
+                            {"type": "input_image", "image_url": screenshot0_url},
+                        ],
+                    }
+                ],
             )
 
             for step in range(max_steps):
@@ -810,11 +941,15 @@ class OuroborosAgent:
                 computer_calls = [it for it in (d.get("output") or []) if it.get("type") == "computer_call"]
                 if not computer_calls:
                     browser.close()
-                    return json.dumps({"result": d.get("output_text", ""), "artifacts_dir": str(artifacts_dir), "steps": step}, ensure_ascii=False, indent=2)
+                    return json.dumps(
+                        {"result": d.get("output_text", ""), "artifacts_dir": str(artifacts_dir), "steps": step},
+                        ensure_ascii=False,
+                        indent=2,
+                    )
 
                 call = computer_calls[0]
                 call_id = call.get("call_id")
-                action = (call.get("action") or {})
+                action = call.get("action") or {}
                 pending_checks = call.get("pending_safety_checks") or []
 
                 atype = action.get("type")
@@ -842,18 +977,24 @@ class OuroborosAgent:
                     previous_response_id=last.id,
                     tools=[tool],
                     truncation="auto",
-                    input=[{
-                        "type": "computer_call_output",
-                        "call_id": call_id,
-                        "acknowledged_safety_checks": pending_checks,
-                        "output": {"type": "computer_screenshot", "image_url": f"data:image/png;base64,{_b64_png(png)}"},
-                    }],
+                    input=[
+                        {
+                            "type": "computer_call_output",
+                            "call_id": call_id,
+                            "acknowledged_safety_checks": pending_checks,
+                            "output": {"type": "computer_screenshot", "image_url": f"data:image/png;base64,{_b64_png(png)}"},
+                        }
+                    ],
                 )
 
             browser.close()
 
         d = last.model_dump()
-        return json.dumps({"result": d.get("output_text", ""), "warning": "max_steps reached", "artifacts_dir": str(artifacts_dir)}, ensure_ascii=False, indent=2)
+        return json.dumps(
+            {"result": d.get("output_text", ""), "warning": "max_steps reached", "artifacts_dir": str(artifacts_dir)},
+            ensure_ascii=False,
+            indent=2,
+        )
 
 
 def make_agent(repo_dir: str, drive_root: str) -> OuroborosAgent:
