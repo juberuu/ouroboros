@@ -1011,9 +1011,18 @@ class OuroborosAgent:
             if os.environ.get("OUROBOROS_TG_MARKDOWN", "1").lower() not in ("0", "false", "no", "off", ""):
                 try:
                     chat_id_int = int(task["chat_id"])
-                    html_text = self._markdown_to_telegram_html(text)
-                    ok, status = self._telegram_send_message_html(chat_id_int, html_text)
-                    direct_sent = bool(ok)
+                    # Chunk on markdown first, then render per chunk.
+                    md_chunks = self._chunk_markdown_for_telegram(text or "", max_chars=3500)
+                    all_ok = True
+                    last_status = "ok"
+                    for part in md_chunks:
+                        html_text = self._markdown_to_telegram_html(part)
+                        ok, status = self._telegram_send_message_html(chat_id_int, html_text)
+                        last_status = status
+                        if not ok:
+                            all_ok = False
+                            break
+                    direct_sent = bool(all_ok)
                     append_jsonl(
                         self.env.drive_path("logs") / "events.jsonl",
                         {
@@ -1021,8 +1030,9 @@ class OuroborosAgent:
                             "type": "telegram_send_direct",
                             "task_id": task.get("id"),
                             "chat_id": chat_id_int,
-                            "ok": ok,
-                            "status": status,
+                            "ok": bool(all_ok),
+                            "status": last_status,
+                            "parts": len(md_chunks),
                         },
                     )
                 except Exception as e:
@@ -1128,6 +1138,91 @@ class OuroborosAgent:
 
         return "".join(_render_span(p) if not p.startswith("<pre><code>") else p for p in parts)
 
+    @staticmethod
+    def _chunk_markdown_for_telegram(md: str, max_chars: int = 3500) -> List[str]:
+        """Split Markdown into chunks safe for Telegram.
+
+        We chunk the *Markdown* (not HTML) to avoid breaking HTML tags/entities,
+        then render each chunk to HTML.
+
+        Behavior:
+        - tries to preserve fenced code blocks (```...```) by closing/reopening fences
+          when splitting inside a fence.
+        - hard-splits very long lines if needed.
+        """
+        md = md or ""
+        try:
+            max_chars_i = int(max_chars)
+        except Exception:
+            max_chars_i = 3500
+        max_chars_i = max(256, min(4096, max_chars_i))
+
+        lines = md.splitlines(keepends=True)
+        chunks: List[str] = []
+        cur = ""
+        in_fence = False
+        fence_open_line = "```\n"
+
+        def _flush() -> None:
+            nonlocal cur
+            if cur and cur.strip():
+                chunks.append(cur)
+            cur = ""
+
+        def _append_piece(piece: str) -> None:
+            nonlocal cur
+            # When inside a fence, reserve room for closing fence at end of chunk.
+            fence_close = "```\n"
+            reserve = len(fence_close) if in_fence else 0
+            effective_limit = max_chars_i - reserve
+
+            if len(cur) + len(piece) <= effective_limit:
+                cur += piece
+                return
+
+            # If splitting while in a fence, close the fence before flushing.
+            if in_fence and cur:
+                # cur was kept <= (max_chars_i - len(fence_close)), so this fits.
+                cur += fence_close
+                _flush()
+                cur = fence_open_line
+
+            # Hard split remaining piece.
+            s = piece
+            while s:
+                reserve2 = len(fence_close) if in_fence else 0
+                effective_limit2 = max_chars_i - reserve2
+                space = effective_limit2 - len(cur)
+                if space <= 0:
+                    if in_fence and cur and not cur.rstrip().endswith("```"):
+                        if len(cur) <= max_chars_i - len(fence_close):
+                            cur += fence_close
+                    _flush()
+                    cur = fence_open_line if in_fence else ""
+                    reserve3 = len(fence_close) if in_fence else 0
+                    effective_limit3 = max_chars_i - reserve3
+                    space = effective_limit3 - len(cur)
+                take = s[:space]
+                cur += take
+                s = s[len(take) :]
+
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("```"):
+                if not in_fence:
+                    in_fence = True
+                    fence_open_line = line if line.endswith("\n") else (line + "\n")
+                else:
+                    in_fence = False
+            _append_piece(line)
+
+        if in_fence:
+            _append_piece("```\n")
+            in_fence = False
+
+        _flush()
+        return chunks or [md]
+
     def _telegram_send_message_html(self, chat_id: int, html_text: str) -> tuple[bool, str]:
         """Send formatted message via Telegram sendMessage(parse_mode=HTML)."""
         return self._telegram_api_post(
@@ -1136,7 +1231,7 @@ class OuroborosAgent:
                 "chat_id": chat_id,
                 "text": html_text,
                 "parse_mode": "HTML",
-                "disable_web_page_preview": "true",
+                "disable_web_page_preview": "1",
             },
         )
 
@@ -1279,7 +1374,21 @@ class OuroborosAgent:
         req = urllib.request.Request(url, data=payload, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
-                resp.read()
+                body = resp.read()
+
+            # Telegram may return HTTP 200 with {"ok": false, ...}.
+            # If we don't parse it, direct-send will be treated as success and fallback won't trigger.
+            try:
+                j = json.loads(body.decode("utf-8", errors="replace"))
+                if isinstance(j, dict) and ("ok" in j):
+                    ok = bool(j.get("ok"))
+                    if ok:
+                        return True, "ok"
+                    desc = str(j.get("description") or "api_ok_false")
+                    return False, truncate_for_log(desc, 300)
+            except Exception:
+                pass
+
             return True, "ok"
         except Exception as e:
             append_jsonl(
