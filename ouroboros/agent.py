@@ -558,6 +558,11 @@ class OuroborosAgent:
 
             if tool_calls:
                 messages.append({"role": "assistant", "content": content or "", "tool_calls": tool_calls})
+
+                # Emit the LLM's reasoning/plan as a progress message (human-readable narration)
+                if content and content.strip():
+                    self._emit_progress(content.strip())
+
                 for tc in tool_calls:
                     fn_name = tc["function"]["name"]
 

@@ -329,6 +329,82 @@ def send_with_budget(chat_id: int, text: str) -> None:
         TG.send_message(chat_id, part)
 
 # ----------------------------
+# 4.5) Router: direct answer vs full agent task
+# ----------------------------
+ROUTER_SYSTEM_PROMPT = """You are Ouroboros (Уроборос), a self-modifying AI agent.
+Your job RIGHT NOW: decide whether to answer the user directly or route to the full agent pipeline.
+
+ANSWER DIRECTLY (just write the answer) if:
+- Simple questions (math, facts, definitions, opinions)
+- Casual conversation, greetings, thanks
+- General knowledge questions
+- Explaining concepts
+- Questions about yourself that don't need reading files/logs
+
+RESPOND WITH EXACTLY "NEEDS_TASK" on the FIRST LINE if the message requires:
+- Reading or writing files, code, configs
+- Git operations (commit, push, diff, status)
+- Web search for fresh/current information
+- Log analysis, examining Drive files
+- Code changes or self-modification
+- Running shell commands
+- Any tool or system access
+- Analyzing repository contents
+- Anything you're unsure about
+
+When answering directly, respond in the user's language. Be concise and helpful.
+When routing to task, write NEEDS_TASK on the first line, then optionally a brief reason."""
+
+def route_and_maybe_answer(text: str) -> Optional[str]:
+    """Quick LLM call: return direct answer or None (meaning 'create a full task')."""
+    try:
+        from openai import OpenAI
+        client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=os.environ["OPENROUTER_API_KEY"],
+            default_headers={"HTTP-Referer": "https://colab.research.google.com/", "X-Title": "Ouroboros-Router"},
+        )
+
+        # Minimal context: last ~10 chat messages for conversational continuity
+        recent_chat = ""
+        if CHAT_LOG_PATH.exists():
+            try:
+                lines = CHAT_LOG_PATH.read_text(encoding="utf-8").strip().split("\n")
+                recent_lines = lines[-10:] if len(lines) > 10 else lines
+                recent_chat = "\n".join(recent_lines)
+            except Exception:
+                pass
+
+        messages = [
+            {"role": "system", "content": ROUTER_SYSTEM_PROMPT},
+        ]
+        if recent_chat:
+            messages.append({"role": "system", "content": f"Recent chat context (JSONL):\n{recent_chat}"})
+        messages.append({"role": "user", "content": text})
+
+        resp = client.chat.completions.create(
+            model=os.environ.get("OUROBOROS_MODEL", "openai/gpt-5.2"),
+            messages=messages,
+            max_tokens=2000,
+        )
+
+        # Track router cost
+        usage = (resp.model_dump().get("usage") or {})
+        update_budget_from_usage(usage)
+
+        answer = (resp.choices[0].message.content or "").strip()
+        if answer.startswith("NEEDS_TASK"):
+            return None
+        return answer
+    except Exception as e:
+        # On any error, fall through to task creation
+        append_jsonl(DRIVE_ROOT / "logs" / "events.jsonl", {
+            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "type": "router_error", "error": repr(e),
+        })
+        return None
+
+# ----------------------------
 # 5) Workers + strict FIFO queue
 # ----------------------------
 import multiprocessing as mp
@@ -640,9 +716,14 @@ while True:
             send_with_budget(chat_id, f"{'✅' if ok else '❌'} cancel {parts[1]}")
             continue
 
-        tid = uuid.uuid4().hex[:8]
-        PENDING.append({"id": tid, "type": "task", "chat_id": chat_id, "text": text})
-        send_with_budget(chat_id, f"🧾 Принято. В очереди: {tid}. (workers={MAX_WORKERS}, pending={len(PENDING)})")
+        # Route: direct answer or full agent task
+        direct = route_and_maybe_answer(text)
+        if direct is not None:
+            send_with_budget(chat_id, direct)
+        else:
+            tid = uuid.uuid4().hex[:8]
+            PENDING.append({"id": tid, "type": "task", "chat_id": chat_id, "text": text})
+            send_with_budget(chat_id, f"🧾 Принято. В очереди: {tid}. (workers={MAX_WORKERS}, pending={len(PENDING)})")
 
     st = load_state()
     st["tg_offset"] = offset
