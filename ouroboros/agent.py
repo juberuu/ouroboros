@@ -200,6 +200,40 @@ class OuroborosAgent:
         half = max(200, max_chars // 2)
         return text[:half] + "\n...(truncated)...\n" + text[-half:]
 
+    @staticmethod
+    def _extract_responses_output_text(resp: Any, dump_dict: Dict[str, Any]) -> str:
+        """Extract output_text from OpenAI Responses API response.
+
+        Tries in order:
+        1. resp.output_text attribute
+        2. dump_dict["output_text"]
+        3. Iterate dump_dict["output"] for message items with text content
+
+        Returns stripped joined text.
+        """
+        # Try attribute first
+        text = getattr(resp, "output_text", "")
+        if text:
+            return str(text).strip()
+
+        # Try direct key
+        text = dump_dict.get("output_text", "")
+        if text:
+            return str(text).strip()
+
+        # Iterate output array for message items with text content
+        parts: List[str] = []
+        for item in dump_dict.get("output", []) or []:
+            if item.get("type") == "message":
+                for content_item in item.get("content", []) or []:
+                    content_type = content_item.get("type", "")
+                    if content_type in ("output_text", "text"):
+                        content_text = content_item.get("text", "")
+                        if content_text:
+                            parts.append(str(content_text))
+
+        return " ".join(parts).strip()
+
     def _memory_path(self, rel: str) -> pathlib.Path:
         return self.env.drive_path(f"memory/{safe_relpath(rel)}")
 
@@ -2660,13 +2694,40 @@ class OuroborosAgent:
         )
         d = resp.model_dump()
 
+        # Extract answer robustly
+        answer = self._extract_responses_output_text(resp, d)
+
+        # Extract sources from web_search_call action
         sources: List[Dict[str, Any]] = []
         for item in d.get("output", []) or []:
             if item.get("type") == "web_search_call":
                 action = item.get("action") or {}
                 sources = action.get("sources") or []
 
-        out = {"answer": d.get("output_text", ""), "sources": sources}
+        # Fallback: if answer is empty but sources exist, build minimal answer from sources
+        if not answer and sources:
+            fallback_lines: List[str] = []
+            for src in sources[:5]:  # Up to 5 sources
+                parts: List[str] = []
+                title = src.get("title", "").strip()
+                url = src.get("url", "").strip()
+                snippet = src.get("snippet", "").strip()
+
+                # Use title or url as identifier
+                identifier = title if title else url
+                if identifier:
+                    if snippet:
+                        parts.append(f"- {identifier}: {snippet}")
+                    else:
+                        parts.append(f"- {identifier}")
+
+                if parts:
+                    fallback_lines.append(parts[0])
+
+            if fallback_lines:
+                answer = "\n".join(fallback_lines)
+
+        out = {"answer": answer, "sources": sources}
         return json.dumps(out, ensure_ascii=False, indent=2)
 
     def _tool_telegram_send_voice(
