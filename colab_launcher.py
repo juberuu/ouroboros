@@ -352,7 +352,7 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str)
     import sys as _sys
     _sys.path.insert(0, repo_dir)
     from ouroboros.agent import make_agent  # type: ignore
-    agent = make_agent(repo_dir=repo_dir, drive_root=drive_root)
+    agent = make_agent(repo_dir=repo_dir, drive_root=drive_root, event_queue=out_q)
     while True:
         task = in_q.get()
         if task is None or task.get("type") == "shutdown":
@@ -490,6 +490,17 @@ def handle_approval(chat_id: int, text: str) -> bool:
     st["approvals"] = approvals
     save_state(st)
     send_with_budget(chat_id, f"OK: {cmd} {approval_id}")
+
+    # Execute approved actions
+    if cmd == "/approve" and approvals[approval_id].get("type") == "stable_promotion":
+        try:
+            subprocess.run(["git", "fetch", "origin"], cwd=str(REPO_DIR), check=True)
+            subprocess.run(["git", "push", "origin", f"{BRANCH_DEV}:{BRANCH_STABLE}"], cwd=str(REPO_DIR), check=True)
+            new_sha = subprocess.run(["git", "rev-parse", f"origin/{BRANCH_STABLE}"], cwd=str(REPO_DIR), capture_output=True, text=True, check=True).stdout.strip()
+            send_with_budget(chat_id, f"✅ Промоут выполнен: {BRANCH_DEV} → {BRANCH_STABLE} ({new_sha[:8]})")
+        except Exception as e:
+            send_with_budget(chat_id, f"❌ Ошибка промоута в stable: {e}")
+
     return True
 
 # start
@@ -542,6 +553,27 @@ while True:
                 checkout_and_reset(BRANCH_STABLE)
             kill_workers()
             spawn_workers(MAX_WORKERS)
+            continue
+
+        if et == "stable_promotion_request":
+            approval_id = uuid.uuid4().hex[:8]
+            st = load_state()
+            approvals = st.get("approvals") or {}
+            approvals[approval_id] = {
+                "type": "stable_promotion",
+                "reason": evt.get("reason", ""),
+                "status": "pending",
+                "requested_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            }
+            st["approvals"] = approvals
+            save_state(st)
+            if st.get("owner_chat_id"):
+                send_with_budget(
+                    int(st["owner_chat_id"]),
+                    f"🔄 Запрос на промоут в stable:\n{evt.get('reason', '')}\n\n"
+                    f"Подтвердить: /approve {approval_id}\n"
+                    f"Отклонить: /deny {approval_id}"
+                )
             continue
 
     assign_tasks()

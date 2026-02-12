@@ -77,8 +77,10 @@ def truncate_for_log(s: str, max_chars: int = 4000) -> str:
 
 def list_dir(root: pathlib.Path, rel: str, max_entries: int = 500) -> Dict[str, Any]:
     base = (root / safe_relpath(rel)).resolve()
-    assert base.exists(), f"Path does not exist: {base}"
-    assert base.is_dir(), f"Not a directory: {base}"
+    if not base.exists():
+        return {"error": f"Path does not exist: {rel}", "hint": "Use repo_list('.') or drive_list('.') to see available paths."}
+    if not base.is_dir():
+        return {"error": f"Not a directory: {rel}", "hint": "This is a file, not a directory. Use repo_read or drive_read instead."}
     out: List[Dict[str, Any]] = []
     for i, p in enumerate(sorted(base.rglob("*"))):
         if i >= max_entries:
@@ -122,9 +124,25 @@ class OuroborosAgent:
     Mostly stateless; long-term state lives on Drive.
     """
 
-    def __init__(self, env: Env):
+    def __init__(self, env: Env, event_queue: Any = None):
         self.env = env
         self._pending_events: List[Dict[str, Any]] = []
+        self._event_queue: Any = event_queue  # multiprocessing.Queue for real-time progress
+        self._current_chat_id: Optional[int] = None
+
+    def _emit_progress(self, text: str) -> None:
+        """Push a progress message to the supervisor queue (best-effort, non-blocking)."""
+        if self._event_queue is None or self._current_chat_id is None:
+            return
+        try:
+            self._event_queue.put({
+                "type": "send_message",
+                "chat_id": self._current_chat_id,
+                "text": f"💬 {text}",
+                "ts": utc_now_iso(),
+            })
+        except Exception:
+            pass  # best-effort; never crash on progress
 
     def _safe_read(self, path: pathlib.Path, fallback: str = "") -> str:
         """Read a text file, returning *fallback* on any error (file missing, permission, encoding, etc.)."""
@@ -137,6 +155,7 @@ class OuroborosAgent:
 
     def handle_task(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
         self._pending_events = []
+        self._current_chat_id = int(task.get("chat_id") or 0) or None
 
         drive_logs = self.env.drive_path("logs")
         append_jsonl(drive_logs / "events.jsonl", {"ts": utc_now_iso(), "type": "task_received", "task": task})
@@ -271,7 +290,11 @@ class OuroborosAgent:
 
             # If we sent the formatted message directly, ask supervisor to send only the budget line.
             # We must send a non-empty text, otherwise Telegram rejects it.
-            text_for_supervisor = "\u200b" if direct_sent else text
+            if direct_sent:
+                text_for_supervisor = "\u200b"
+            else:
+                # Strip markdown for plain-text fallback so raw ** and ``` don't clutter the message
+                text_for_supervisor = self._strip_markdown(text) if text else text
 
             self._pending_events.append(
                 {
@@ -301,6 +324,17 @@ class OuroborosAgent:
         return run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=self.env.repo_dir)
 
     # ---------- telegram helpers (direct API calls) ----------
+
+    @staticmethod
+    def _strip_markdown(text: str) -> str:
+        """Remove common markdown formatting for plain-text fallback."""
+        # Remove code fences (```lang\n...\n```)
+        text = re.sub(r"```[^\n]*\n([\s\S]*?)```", r"\1", text)
+        # Remove bold **text**
+        text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+        # Remove inline code `text`
+        text = re.sub(r"`([^`]+)`", r"\1", text)
+        return text
 
     def _markdown_to_telegram_html(self, md: str) -> str:
         """Convert a small, safe subset of Markdown into Telegram-compatible HTML.
@@ -505,6 +539,10 @@ class OuroborosAgent:
                     )
                     if attempt < llm_max_retries - 1:
                         wait_sec = min(2**attempt * 2, 30)
+                        self._emit_progress(
+                            f"Ошибка LLM API (попытка {attempt + 1}/{llm_max_retries}): "
+                            f"{type(e).__name__}. Повторяю через {wait_sec}с..."
+                        )
                         time.sleep(wait_sec)
 
             if resp_dict is None:
@@ -575,6 +613,10 @@ class OuroborosAgent:
                                 "error": repr(e),
                                 "traceback": truncate_for_log(tb, 2000),
                             },
+                        )
+                        self._emit_progress(
+                            f"Tool '{fn_name}' вернул ошибку: {type(e).__name__}: {e}\n"
+                            f"Анализирую и пробую другой подход..."
                         )
 
                     append_jsonl(
@@ -997,9 +1039,9 @@ class OuroborosAgent:
         )
 
 
-def make_agent(repo_dir: str, drive_root: str) -> OuroborosAgent:
+def make_agent(repo_dir: str, drive_root: str, event_queue: Any = None) -> OuroborosAgent:
     env = Env(repo_dir=pathlib.Path(repo_dir), drive_root=pathlib.Path(drive_root))
-    return OuroborosAgent(env)
+    return OuroborosAgent(env, event_queue=event_queue)
 
 
 def smoke_test() -> str:
