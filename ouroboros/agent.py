@@ -56,8 +56,79 @@ def write_text(path: pathlib.Path, content: str) -> None:
 def append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(obj, ensure_ascii=False)
-    with path.open("a", encoding="utf-8") as f:
-        f.write(line + "\n")
+    data = (line + "\n").encode("utf-8")
+
+    # Per-file lock for multi-process concurrency
+    path_hash = hashlib.sha256(str(path.resolve()).encode("utf-8")).hexdigest()[:12]
+    lock_path = path.parent / f".append_jsonl_{path_hash}.lock"
+    lock_fd = None
+    lock_acquired = False
+
+    try:
+        # Attempt to acquire lock with timeout (~2s total)
+        start = time.time()
+        timeout = 2.0
+        while time.time() - start < timeout:
+            try:
+                lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                lock_acquired = True
+                break
+            except FileExistsError:
+                # Check if lock is stale (>10s old)
+                try:
+                    stat = lock_path.stat()
+                    age = time.time() - stat.st_mtime
+                    if age > 10:
+                        try:
+                            lock_path.unlink()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                time.sleep(0.01)
+            except Exception:
+                break
+
+        # Primary path: atomic append via os.open/write (single syscall) with retries
+        for attempt in range(3):
+            try:
+                fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+                try:
+                    os.write(fd, data)
+                finally:
+                    os.close(fd)
+                return
+            except Exception:
+                if attempt < 2:
+                    time.sleep(0.01 * (2 ** attempt))  # 0.01s, 0.02s
+                # Continue to next attempt or fall through
+
+        # Fallback: use standard file open (may interleave under concurrency) with retries
+        for attempt in range(3):
+            try:
+                with path.open("a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+                return
+            except Exception:
+                if attempt < 2:
+                    time.sleep(0.01 * (2 ** attempt))  # 0.01s, 0.02s
+                # Continue to next attempt or fall through
+
+        # Best effort: silently ignore if all attempts fail
+    except Exception:
+        pass
+    finally:
+        # Release lock
+        if lock_fd is not None:
+            try:
+                os.close(lock_fd)
+            except Exception:
+                pass
+        if lock_acquired:
+            try:
+                lock_path.unlink()
+            except Exception:
+                pass
 
 
 def run(cmd: List[str], cwd: Optional[pathlib.Path] = None) -> str:
