@@ -147,6 +147,15 @@ class OuroborosAgent:
             return default
 
     @staticmethod
+    def _env_bool(name: str, default: bool) -> bool:
+        val = os.environ.get(name, "").strip().lower()
+        if val in ("1", "true", "yes", "on"):
+            return True
+        if val in ("0", "false", "no", "off"):
+            return False
+        return default
+
+    @staticmethod
     def _norm_item(value: str) -> str:
         return re.sub(r"\s+", " ", str(value or "").strip()).lower()
 
@@ -899,6 +908,135 @@ class OuroborosAgent:
             out = "...(truncated tail)...\n" + out
         return out
 
+    @staticmethod
+    def _read_jsonl_tail(path: pathlib.Path, max_lines: int) -> List[Dict[str, Any]]:
+        """Read last N lines from a JSONL file as parsed dicts, skipping parse failures."""
+        try:
+            if not path.exists():
+                return []
+            txt = path.read_text(encoding="utf-8")
+        except Exception:
+            return []
+        lines = txt.splitlines()
+        if max_lines > 0:
+            lines = lines[-max_lines:]
+        entries = []
+        for line in lines:
+            try:
+                entries.append(json.loads(line))
+            except Exception:
+                pass
+        return entries
+
+    @staticmethod
+    def _short(s: Any, n: int) -> str:
+        """Return a short string representation, truncated to n chars."""
+        text = str(s)
+        return text[:n] + "..." if len(text) > n else text
+
+    @staticmethod
+    def _one_line(s: Any) -> str:
+        """Convert to string and collapse to single line."""
+        return " ".join(str(s).split())
+
+    @staticmethod
+    def _summarize_chat_jsonl(entries: List[Dict[str, Any]]) -> str:
+        """Summarize chat.jsonl tail: direction, timestamp (HH:MM), first 160 chars."""
+        if not entries:
+            return ""
+        lines = []
+        for e in entries[-8:]:
+            # Historical logs use direction in {"in","out"}; be permissive.
+            dir_raw = str(e.get("direction") or "").lower()
+            direction = "→" if dir_raw in ("out", "outgoing") else "←"
+            ts_full = e.get("ts", "")
+            ts_hhmm = ts_full[11:16] if len(ts_full) >= 16 else ""
+            text = e.get("text", "")
+            short_text = OuroborosAgent._short(text, 160)
+            lines.append(f"{direction} {ts_hhmm} {short_text}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _summarize_tools_jsonl(entries: List[Dict[str, Any]]) -> str:
+        """Summarize tools.jsonl tail: tool name + safe arg hints (no secrets, no full env)."""
+        if not entries:
+            return ""
+        lines = []
+        for e in entries[-10:]:
+            tool = e.get("tool") or e.get("tool_name") or "?"
+            args = e.get("args", {})
+            hints = []
+            for key in ("path", "dir", "commit_message", "query"):
+                if key in args:
+                    hints.append(f"{key}={OuroborosAgent._short(args[key], 60)}")
+            if "cmd" in args:
+                hints.append(f"cmd={OuroborosAgent._short(args['cmd'], 80)}")
+            hint_str = ", ".join(hints) if hints else ""
+            # Tools log schema varies; use a best-effort success heuristic.
+            status = "✓" if ("result_preview" in e and not str(e.get("result_preview") or "").lstrip().startswith("⚠️")) else "·"
+            lines.append(f"{status} {tool} {hint_str}".strip())
+        return "\n".join(lines)
+
+    @staticmethod
+    def _summarize_events_jsonl(entries: List[Dict[str, Any]]) -> str:
+        """Summarize events.jsonl tail: counts by type + last error-ish events."""
+        if not entries:
+            return ""
+        type_counts: Counter[str] = Counter()
+        for e in entries:
+            type_counts[e.get("type", "unknown")] += 1
+        top_types = type_counts.most_common(10)
+        lines = ["Event counts:"]
+        for evt_type, count in top_types:
+            lines.append(f"  {evt_type}: {count}")
+
+        error_types = {"tool_error", "telegram_api_error", "task_error", "typing_start_error"}
+        errors = [e for e in entries if e.get("type") in error_types]
+        if errors:
+            lines.append("\nRecent errors:")
+            for e in errors[-10:]:
+                evt_type = e.get("type", "?")
+                err_msg = OuroborosAgent._short(e.get("error", ""), 120)
+                lines.append(f"  {evt_type}: {err_msg}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _summarize_supervisor_jsonl(entries: List[Dict[str, Any]]) -> str:
+        """Summarize supervisor.jsonl tail: last launcher_start/restart + branch/sha."""
+        if not entries:
+            return ""
+        lines = []
+        for e in reversed(entries):
+            evt_type = e.get("type", "")
+            if evt_type in ("launcher_start", "restart", "boot"):
+                lines.append(f"{evt_type}: {e.get('ts', '')}")
+                branch = e.get("branch") or e.get("git_branch")
+                sha = e.get("sha") or e.get("git_sha")
+                if branch:
+                    lines.append(f"  branch: {branch}")
+                if sha:
+                    lines.append(f"  sha: {OuroborosAgent._short(sha, 12)}")
+                break
+        return "\n".join(lines)
+
+    @staticmethod
+    def _summarize_narration_jsonl(entries: List[Dict[str, Any]]) -> str:
+        """Summarize narration.jsonl tail: last ~8 narration lines."""
+        if not entries:
+            return ""
+        lines = []
+        for e in entries[-8:]:
+            # narration.jsonl stores narration as a list of strings under key 'narration'
+            narration = e.get("narration")
+            if isinstance(narration, list):
+                for item in narration[:3]:
+                    lines.append(OuroborosAgent._short(item, 200))
+            else:
+                text = e.get("text", "")
+                if text:
+                    lines.append(OuroborosAgent._short(text, 200))
+        return "\n".join(lines)
+
     def handle_task(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
         self._pending_events = []
         self._current_chat_id = int(task.get("chat_id") or 0) or None
@@ -947,21 +1085,62 @@ class OuroborosAgent:
             scratchpad_ctx = self._clip_text(scratchpad_raw, max_chars=scratchpad_chars)
             identity_ctx = self._clip_text(identity_raw, max_chars=identity_chars)
 
-            chat_log_recent = self._safe_tail(
-                self.env.drive_path("logs/chat.jsonl"), max_lines=chat_lines, max_chars=chat_chars
-            )
-            narration_context = self._safe_tail(
-                self.env.drive_path("logs/narration.jsonl"), max_lines=artifact_lines, max_chars=artifact_chars
-            )
-            tools_recent = self._safe_tail(
-                self.env.drive_path("logs/tools.jsonl"), max_lines=artifact_lines, max_chars=artifact_chars
-            )
-            events_recent = self._safe_tail(
-                self.env.drive_path("logs/events.jsonl"), max_lines=artifact_lines, max_chars=artifact_chars
-            )
-            supervisor_recent = self._safe_tail(
-                self.env.drive_path("logs/supervisor.jsonl"), max_lines=artifact_lines, max_chars=artifact_chars
-            )
+            # Context compaction: summarize Drive logs instead of raw tails (opt-out via env)
+            summarize_logs = self._env_bool("OUROBOROS_CONTEXT_SUMMARIZE_LOGS", True)
+
+            if summarize_logs:
+                # Load and summarize JSONL tails
+                chat_entries = self._read_jsonl_tail(self.env.drive_path("logs/chat.jsonl"), chat_lines)
+                chat_log_recent = self._summarize_chat_jsonl(chat_entries)
+                if not chat_log_recent:
+                    chat_log_recent = self._safe_tail(
+                        self.env.drive_path("logs/chat.jsonl"), max_lines=chat_lines, max_chars=chat_chars
+                    )
+
+                narration_entries = self._read_jsonl_tail(self.env.drive_path("logs/narration.jsonl"), artifact_lines)
+                narration_context = self._summarize_narration_jsonl(narration_entries)
+                if not narration_context:
+                    narration_context = self._safe_tail(
+                        self.env.drive_path("logs/narration.jsonl"), max_lines=artifact_lines, max_chars=artifact_chars
+                    )
+
+                tools_entries = self._read_jsonl_tail(self.env.drive_path("logs/tools.jsonl"), artifact_lines)
+                tools_recent = self._summarize_tools_jsonl(tools_entries)
+                if not tools_recent:
+                    tools_recent = self._safe_tail(
+                        self.env.drive_path("logs/tools.jsonl"), max_lines=artifact_lines, max_chars=artifact_chars
+                    )
+
+                events_entries = self._read_jsonl_tail(self.env.drive_path("logs/events.jsonl"), artifact_lines)
+                events_recent = self._summarize_events_jsonl(events_entries)
+                if not events_recent:
+                    events_recent = self._safe_tail(
+                        self.env.drive_path("logs/events.jsonl"), max_lines=artifact_lines, max_chars=artifact_chars
+                    )
+
+                supervisor_entries = self._read_jsonl_tail(self.env.drive_path("logs/supervisor.jsonl"), artifact_lines)
+                supervisor_recent = self._summarize_supervisor_jsonl(supervisor_entries)
+                if not supervisor_recent:
+                    supervisor_recent = self._safe_tail(
+                        self.env.drive_path("logs/supervisor.jsonl"), max_lines=artifact_lines, max_chars=artifact_chars
+                    )
+            else:
+                # Raw tails (original behavior)
+                chat_log_recent = self._safe_tail(
+                    self.env.drive_path("logs/chat.jsonl"), max_lines=chat_lines, max_chars=chat_chars
+                )
+                narration_context = self._safe_tail(
+                    self.env.drive_path("logs/narration.jsonl"), max_lines=artifact_lines, max_chars=artifact_chars
+                )
+                tools_recent = self._safe_tail(
+                    self.env.drive_path("logs/tools.jsonl"), max_lines=artifact_lines, max_chars=artifact_chars
+                )
+                events_recent = self._safe_tail(
+                    self.env.drive_path("logs/events.jsonl"), max_lines=artifact_lines, max_chars=artifact_chars
+                )
+                supervisor_recent = self._safe_tail(
+                    self.env.drive_path("logs/supervisor.jsonl"), max_lines=artifact_lines, max_chars=artifact_chars
+                )
 
             # Git context (non-fatal if unavailable)
             ctx_warnings: List[str] = []
