@@ -58,6 +58,32 @@ def append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> None:
     line = json.dumps(obj, ensure_ascii=False)
     data = (line + "\n").encode("utf-8")
 
+    # Read optional env vars for concurrency/locking settings (best-effort, never raise)
+    try:
+        lock_enabled = int(os.environ.get("OUROBOROS_APPEND_JSONL_LOCK_ENABLED", "1")) != 0
+    except Exception:
+        lock_enabled = True
+    try:
+        timeout = max(0.0, float(os.environ.get("OUROBOROS_APPEND_JSONL_LOCK_TIMEOUT_SEC", "2.0")))
+    except Exception:
+        timeout = 2.0
+    try:
+        stale_age = max(0.0, float(os.environ.get("OUROBOROS_APPEND_JSONL_LOCK_STALE_SEC", "10.0")))
+    except Exception:
+        stale_age = 10.0
+    try:
+        lock_sleep = max(0.0, float(os.environ.get("OUROBOROS_APPEND_JSONL_LOCK_SLEEP_SEC", "0.01")))
+    except Exception:
+        lock_sleep = 0.01
+    try:
+        write_retries = max(1, int(os.environ.get("OUROBOROS_APPEND_JSONL_WRITE_RETRIES", "3")))
+    except Exception:
+        write_retries = 3
+    try:
+        retry_sleep_base = max(0.0, float(os.environ.get("OUROBOROS_APPEND_JSONL_RETRY_SLEEP_BASE_SEC", "0.01")))
+    except Exception:
+        retry_sleep_base = 0.01
+
     # Per-file lock for multi-process concurrency
     path_hash = hashlib.sha256(str(path.resolve()).encode("utf-8")).hexdigest()[:12]
     lock_path = path.parent / f".append_jsonl_{path_hash}.lock"
@@ -65,32 +91,32 @@ def append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> None:
     lock_acquired = False
 
     try:
-        # Attempt to acquire lock with timeout (~2s total)
-        start = time.time()
-        timeout = 2.0
-        while time.time() - start < timeout:
-            try:
-                lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-                lock_acquired = True
-                break
-            except FileExistsError:
-                # Check if lock is stale (>10s old)
+        # Attempt to acquire lock with timeout if enabled
+        if lock_enabled:
+            start = time.time()
+            while time.time() - start < timeout:
                 try:
-                    stat = lock_path.stat()
-                    age = time.time() - stat.st_mtime
-                    if age > 10:
-                        try:
-                            lock_path.unlink()
-                        except Exception:
-                            pass
+                    lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                    lock_acquired = True
+                    break
+                except FileExistsError:
+                    # Check if lock is stale
+                    try:
+                        stat = lock_path.stat()
+                        age = time.time() - stat.st_mtime
+                        if age > stale_age:
+                            try:
+                                lock_path.unlink()
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                    time.sleep(lock_sleep)
                 except Exception:
-                    pass
-                time.sleep(0.01)
-            except Exception:
-                break
+                    break
 
         # Primary path: atomic append via os.open/write (single syscall) with retries
-        for attempt in range(3):
+        for attempt in range(write_retries):
             try:
                 fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
                 try:
@@ -99,19 +125,19 @@ def append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> None:
                     os.close(fd)
                 return
             except Exception:
-                if attempt < 2:
-                    time.sleep(0.01 * (2 ** attempt))  # 0.01s, 0.02s
+                if attempt < write_retries - 1:
+                    time.sleep(retry_sleep_base * (2 ** attempt))
                 # Continue to next attempt or fall through
 
         # Fallback: use standard file open (may interleave under concurrency) with retries
-        for attempt in range(3):
+        for attempt in range(write_retries):
             try:
                 with path.open("a", encoding="utf-8") as f:
                     f.write(line + "\n")
                 return
             except Exception:
-                if attempt < 2:
-                    time.sleep(0.01 * (2 ** attempt))  # 0.01s, 0.02s
+                if attempt < write_retries - 1:
+                    time.sleep(retry_sleep_base * (2 ** attempt))
                 # Continue to next attempt or fall through
 
         # Best effort: silently ignore if all attempts fail

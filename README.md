@@ -26,6 +26,7 @@
 - (опционально) `OUROBOROS_BUDGET_REPORT_EVERY_MESSAGES` (по умолчанию `10`)
 - (опционально) `OUROBOROS_GIT_LOCK_STALE_SEC` (по умолчанию `600`) — таймаут для автоудаления зависшего git lock
 - (опционально) `OUROBOROS_MAX_TOOL_ROUNDS` (по умолчанию `20`) — лимит итераций tool-calls на один запрос (защита от зацикливания)
+- (опционально) `OUROBOROS_APPEND_JSONL_LOCK_ENABLED` (`0`/`1`, по умолчанию `1`), `OUROBOROS_APPEND_JSONL_LOCK_TIMEOUT_SEC` (по умолчанию `2.0`), `OUROBOROS_APPEND_JSONL_LOCK_STALE_SEC` (по умолчанию `10.0`), `OUROBOROS_APPEND_JSONL_LOCK_SLEEP_SEC` (по умолчанию `0.01`), `OUROBOROS_APPEND_JSONL_WRITE_RETRIES` (по умолчанию `3`), `OUROBOROS_APPEND_JSONL_RETRY_SLEEP_BASE_SEC` (по умолчанию `0.01`) — параметры конкурентной записи JSONL логов
 
 2) Запусти единственную boot-ячейку в Colab.
 3) Напиши своему Telegram-боту. Первый написавший становится владельцем.
