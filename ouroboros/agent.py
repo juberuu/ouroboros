@@ -20,6 +20,7 @@ import subprocess
 import threading
 import time
 import traceback
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -1341,8 +1342,9 @@ class OuroborosAgent:
                     failed_at_index = -1
                     html_oversized_count = 0
                     plain_fallback_count = 0
+                    html_fallback_to_plain_count = 0
 
-                    for i, (chunk_text, is_plain) in enumerate(chunks):
+                    for i, (chunk_text, is_plain, plain_fallback_text) in enumerate(chunks):
                         if is_plain:
                             # Pre-determined plain text fallback (HTML was too large even after re-split)
                             plain_fallback_count += 1
@@ -1388,22 +1390,37 @@ class OuroborosAgent:
                             ok, status = self._telegram_send_message_html(chat_id_int, chunk_text)
                             last_status = status
                             if not ok:
-                                all_ok = False
-                                failed_at_index = i
-                                # Log HTML send failure
-                                append_jsonl(
-                                    self.env.drive_path("logs") / "events.jsonl",
-                                    {
-                                        "ts": utc_now_iso(),
-                                        "type": "telegram_send_direct_html_failed",
-                                        "task_id": task.get("id"),
-                                        "chat_id": chat_id_int,
-                                        "status": last_status,
-                                        "part": i,
-                                        "parts_total": len(chunks),
-                                    },
-                                )
-                                break
+                                # HTML send failed; try plain fallback for this chunk (handles HTML parse errors)
+                                plain_chunks = self._chunk_plain_text(plain_fallback_text, max_chars=3500)
+                                fallback_ok = True
+                                for plain_part in plain_chunks:
+                                    ok_plain, status_plain = self._telegram_send_message_plain(chat_id_int, plain_part)
+                                    last_status = status_plain
+                                    if not ok_plain:
+                                        fallback_ok = False
+                                        break
+                                if fallback_ok:
+                                    # Fallback succeeded; continue with next chunks
+                                    html_fallback_to_plain_count += 1
+                                else:
+                                    # Fallback also failed; abort
+                                    all_ok = False
+                                    failed_at_index = i
+                                    # Log HTML send failure (original error)
+                                    append_jsonl(
+                                        self.env.drive_path("logs") / "events.jsonl",
+                                        {
+                                            "ts": utc_now_iso(),
+                                            "type": "telegram_send_direct_html_failed",
+                                            "task_id": task.get("id"),
+                                            "chat_id": chat_id_int,
+                                            "status": status,  # original HTML error
+                                            "fallback_status": last_status,  # plain fallback error
+                                            "part": i,
+                                            "parts_total": len(chunks),
+                                        },
+                                    )
+                                    break
 
                     # If sending failed mid-stream, note it but don't retry (chunks already processed)
                     if all_ok:
@@ -1422,6 +1439,7 @@ class OuroborosAgent:
                             "parts": len(chunks),
                             "plain_fallback_count": plain_fallback_count,
                             "html_oversized_count": html_oversized_count,
+                            "html_fallback_to_plain_count": html_fallback_to_plain_count,
                         },
                     )
                 except Exception as e:
@@ -1530,12 +1548,13 @@ class OuroborosAgent:
 
     def _iter_markdown_chunks_for_html(
         self, md: str, primary_max: int = 2500, secondary_max: int = 1200, html_max_chars: int = 3800
-    ) -> List[tuple[str, bool]]:
+    ) -> List[tuple[str, bool, str]]:
         """Adaptively chunk Markdown for HTML rendering, handling expansion.
 
-        Returns a list of (chunk_text, is_plain) tuples:
-        - chunk_text: the text to send
-        - is_plain: True if fallback to plain text (HTML too large), False if HTML is safe
+        Returns a list of (payload_text, is_plain, plain_fallback_text) tuples:
+        - payload_text: the text to send (HTML or plain)
+        - is_plain: True if pre-determined fallback to plain text (HTML too large), False if HTML
+        - plain_fallback_text: plain text version for runtime fallback if HTML send fails
 
         Strategy:
         1. Split markdown with primary_max
@@ -1544,24 +1563,26 @@ class OuroborosAgent:
         """
         md = md or ""
         primary_chunks = self._chunk_markdown_for_telegram(md, max_chars=primary_max)
-        result: List[tuple[str, bool]] = []
+        result: List[tuple[str, bool, str]] = []
 
         for md_chunk in primary_chunks:
             html_chunk = self._markdown_to_telegram_html(md_chunk)
             if len(html_chunk) <= html_max_chars:
-                # HTML is safe to send
-                result.append((html_chunk, False))
+                # HTML is safe to send; provide plain fallback for runtime errors
+                plain_fallback = self._strip_markdown(md_chunk)
+                result.append((html_chunk, False, plain_fallback))
             else:
                 # HTML too large; try re-splitting with smaller max_chars
                 secondary_chunks = self._chunk_markdown_for_telegram(md_chunk, max_chars=secondary_max)
                 for sub_md in secondary_chunks:
                     sub_html = self._markdown_to_telegram_html(sub_md)
                     if len(sub_html) <= html_max_chars:
-                        result.append((sub_html, False))
+                        plain_fallback = self._strip_markdown(sub_md)
+                        result.append((sub_html, False, plain_fallback))
                     else:
-                        # Still too large; fall back to plain text
+                        # Still too large; pre-determined plain text fallback
                         plain = self._strip_markdown(sub_md)
-                        result.append((plain, True))
+                        result.append((plain, True, plain))
 
         return result
 
@@ -1898,7 +1919,7 @@ class OuroborosAgent:
 
         Returns: (ok, status)
           - ok: True if request succeeded
-          - status: "ok" | "no_token" | "error"
+          - status: "ok" | "no_token" | "http_<code>: <description>" | "exc_<Type>: <message>"
         """
         token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
         if not token:
@@ -1925,12 +1946,32 @@ class OuroborosAgent:
                 pass
 
             return True, "ok"
-        except Exception as e:
+        except urllib.error.HTTPError as e:
+            # Parse Telegram error response from HTTP error body
+            status_msg = f"http_{e.code}"
+            try:
+                body = e.read()
+                j = json.loads(body.decode("utf-8", errors="replace"))
+                if isinstance(j, dict) and "description" in j:
+                    desc = str(j["description"])
+                    status_msg = truncate_for_log(f"http_{e.code}: {desc}", 300)
+            except Exception:
+                pass
             append_jsonl(
                 self.env.drive_path("logs") / "events.jsonl",
                 {"ts": utc_now_iso(), "type": "telegram_api_error", "method": method, "error": repr(e)},
             )
-            return False, "error"
+            return False, status_msg
+        except Exception as e:
+            # Generic exception with type and message
+            exc_type = type(e).__name__
+            exc_msg = str(e)
+            status_msg = truncate_for_log(f"exc_{exc_type}: {exc_msg}", 300)
+            append_jsonl(
+                self.env.drive_path("logs") / "events.jsonl",
+                {"ts": utc_now_iso(), "type": "telegram_api_error", "method": method, "error": repr(e)},
+            )
+            return False, status_msg
 
     def _send_chat_action(self, chat_id: int, action: str = "typing", log: bool = False) -> None:
         ok, status = self._telegram_api_post("sendChatAction", {"chat_id": chat_id, "action": action})
