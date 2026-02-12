@@ -81,6 +81,18 @@ Telegram по умолчанию рендерит разметку только 
 - `` `inline code` ``
 - fenced code blocks ```...```
 
+## Telegram: voice messages (TTS)
+
+Воркеры умеют отправлять **voice messages** (OGG/OPUS) напрямую через Telegram Bot API `sendVoice`.
+
+Реализация:
+- локальный TTS через `ffmpeg` фильтр `flite` (без внешних API),
+- затем загрузка результата через `sendVoice`.
+
+Ограничения:
+- голос и качество зависят от сборки `ffmpeg` и доступных flite voices,
+- если `ffmpeg`/`flite` недоступны — отправка аудио не сработает (будет залогировано в `logs/events.jsonl`).
+
 ## Модели
 
 Пока используется одна модель через OpenRouter: `openai/gpt-5.2` (по умолчанию).
