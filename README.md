@@ -66,6 +66,22 @@
 - `OUROBOROS_TG_TYPING=0/1` (по умолчанию `1`)
 - `OUROBOROS_TG_TYPING_INTERVAL` (сек, по умолчанию `4`)
 
+## Telegram: Markdown / formatting
+
+Telegram по умолчанию рендерит разметку только если `sendMessage` вызывается с `parse_mode`.
+
+Так как супервизор (boot-ячейка) сейчас отправляет сообщения как plain text, воркер делает **best-effort** форматирование:
+- преобразует небольшой безопасный поднабор Markdown в Telegram HTML (`parse_mode=HTML`),
+- и отправляет сообщение **напрямую** через Bot API.
+
+Настройка через env:
+- `OUROBOROS_TG_MARKDOWN=0/1` (по умолчанию `1`)
+
+Поддерживаемое (best-effort):
+- `**bold**`
+- `` `inline code` ``
+- fenced code blocks ```...```
+
 ## Модели
 
 Пока используется одна модель через OpenRouter: `openai/gpt-5.2` (по умолчанию).
