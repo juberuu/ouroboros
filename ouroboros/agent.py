@@ -129,6 +129,7 @@ class OuroborosAgent:
         self._pending_events: List[Dict[str, Any]] = []
         self._event_queue: Any = event_queue  # multiprocessing.Queue for real-time progress
         self._current_chat_id: Optional[int] = None
+        self._current_task_type: Optional[str] = None
 
     SCRATCHPAD_SECTIONS: Tuple[str, ...] = (
         "CurrentProjects",
@@ -700,127 +701,20 @@ class OuroborosAgent:
     # ---------- deterministic tool narration ----------
 
     def _narrate_tool(self, fn_name: str, args: Dict[str, Any], result: str, success: bool) -> str:
-        """Generate a human-readable one-liner for a tool call (deterministic, no LLM cost)."""
-        is_error = not success or result.startswith("⚠️")
+        """Compact deterministic narration used for errors/fallback only."""
         try:
-            if fn_name == "repo_read":
-                path = args.get("path", "?")
-                if is_error:
-                    # Extract short error reason
-                    err = result.split("\n")[0][:80] if result else "ошибка"
-                    return f"📖 Читаю `{path}` — {err}"
-                lines = result.count("\n") + (1 if result and not result.endswith("\n") else 0)
-                return f"📖 Читаю `{path}`… {lines} строк"
+            is_error = (not success) or str(result).startswith("⚠️")
+            if not is_error:
+                return f"✅ {fn_name}"
 
-            if fn_name == "repo_list":
-                d = args.get("dir", ".")
-                if is_error:
-                    return f"📂 Список `{d}` — ошибка"
-                try:
-                    count = json.loads(result).get("count", "?")
-                except Exception:
-                    count = "?"
-                return f"📂 Список файлов `{d}` — {count} элементов"
-
-            if fn_name == "drive_read":
-                path = args.get("path", "?")
-                if is_error:
-                    err = result.split("\n")[0][:80] if result else "ошибка"
-                    return f"📖 Читаю (Drive) `{path}` — {err}"
-                lines = result.count("\n") + (1 if result and not result.endswith("\n") else 0)
-                return f"📖 Читаю (Drive) `{path}`… {lines} строк"
-
-            if fn_name == "drive_list":
-                d = args.get("dir", ".")
-                if is_error:
-                    return f"📂 Список (Drive) `{d}` — ошибка"
-                try:
-                    count = json.loads(result).get("count", "?")
-                except Exception:
-                    count = "?"
-                return f"📂 Список файлов (Drive) `{d}` — {count} элементов"
-
-            if fn_name == "drive_write":
-                path = args.get("path", "?")
-                mode = args.get("mode", "overwrite")
-                chars = len(args.get("content", ""))
-                if is_error:
-                    return f"✏️ Запись (Drive) `{path}` — ошибка"
-                return f"✏️ Записал (Drive) `{path}` ({mode}, {chars} символов)"
-
-            if fn_name == "repo_write_commit":
-                path = args.get("path", "?")
-                msg = args.get("commit_message", "")[:60]
-                if is_error:
-                    err = result.split("\n")[0][:80] if result else "ошибка"
-                    return f"💾 Коммит `{path}` — {err}"
-                return f"💾 Записал и запушил `{path}`: {msg}"
-
-            if fn_name == "git_status":
-                if is_error:
-                    return "🔍 git status — ошибка"
-                if not result.strip():
-                    return "🔍 git status — чисто, нет изменений"
-                changed = len(result.strip().splitlines())
-                return f"🔍 git status — {changed} изменённых файлов"
-
-            if fn_name == "git_diff":
-                if is_error:
-                    return "🔍 git diff — ошибка"
-                if not result.strip():
-                    return "🔍 git diff — нет различий"
-                diff_lines = len(result.strip().splitlines())
-                return f"🔍 git diff — {diff_lines} строк различий"
-
-            if fn_name == "run_shell":
-                cmd = args.get("cmd", [])
-                cmd_str = " ".join(cmd)[:60]
-                if is_error:
-                    return f"⚙️ `{cmd_str}` — ошибка"
-                out_lines = len(result.strip().splitlines()) if result.strip() else 0
-                return f"⚙️ `{cmd_str}` — OK ({out_lines} строк вывода)"
-
-            if fn_name == "claude_code_edit":
-                if is_error:
-                    err = result.split("\n")[0][:80] if result else "ошибка"
-                    return f"🤖 Claude Code edit — {err}"
-                return "🤖 Claude Code edit — правки применены"
-
-            if fn_name == "repo_commit_push":
-                msg = args.get("commit_message", "")[:60]
-                if is_error:
-                    err = result.split("\n")[0][:80] if result else "ошибка"
-                    return f"🚀 Коммит/пуш — {err}"
-                return f"🚀 Коммит и пуш в {self.env.branch_dev}: {msg}"
-
-            if fn_name == "web_search":
-                query = args.get("query", "?")[:50]
-                if is_error:
-                    return f"🔎 Поиск «{query}» — ошибка"
-                return f"🔎 Поиск «{query}» — результаты получены"
-
-            if fn_name == "request_restart":
-                reason = args.get("reason", "")[:50]
-                return f"🔄 Запрос перезапуска: {reason}"
-
-            if fn_name == "request_stable_promotion":
-                return "🏷️ Запрос промоута в stable"
-
-            if fn_name == "schedule_task":
-                desc = args.get("description", "")[:50]
-                return f"📋 Планирую задачу: {desc}"
-
-            if fn_name == "cancel_task":
-                tid = args.get("task_id", "?")
-                return f"❌ Отменяю задачу {tid}"
-
-            if fn_name == "reindex_request":
-                return "🗂️ Запрос переиндексации"
-
-            # Fallback for any unknown/new tool
-            return f"🔧 {fn_name}({', '.join(f'{k}=…' for k in args)})"
+            first_line = str(result or "").splitlines()[0].strip()
+            if len(first_line) > 180:
+                first_line = first_line[:177] + "..."
+            if not first_line:
+                first_line = "ошибка"
+            return f"⚠️ {fn_name}: {first_line}"
         except Exception:
-            return f"🔧 {fn_name} — выполнено"
+            return f"⚠️ {fn_name}: error"
 
     def _safe_read(self, path: pathlib.Path, fallback: str = "") -> str:
         """Read a text file, returning *fallback* on any error (file missing, permission, encoding, etc.)."""
@@ -859,6 +753,7 @@ class OuroborosAgent:
     def handle_task(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
         self._pending_events = []
         self._current_chat_id = int(task.get("chat_id") or 0) or None
+        self._current_task_type = str(task.get("type") or "")
 
         drive_logs = self.env.drive_path("logs")
         append_jsonl(drive_logs / "events.jsonl", {"ts": utc_now_iso(), "type": "task_received", "task": task})
@@ -1011,9 +906,18 @@ class OuroborosAgent:
             if os.environ.get("OUROBOROS_TG_MARKDOWN", "1").lower() not in ("0", "false", "no", "off", ""):
                 try:
                     chat_id_int = int(task["chat_id"])
-                    html_text = self._markdown_to_telegram_html(text)
-                    ok, status = self._telegram_send_message_html(chat_id_int, html_text)
-                    direct_sent = bool(ok)
+                    # Chunk on markdown first, then render per chunk.
+                    md_chunks = self._chunk_markdown_for_telegram(text or "", max_chars=3500)
+                    all_ok = True
+                    last_status = "ok"
+                    for part in md_chunks:
+                        html_text = self._markdown_to_telegram_html(part)
+                        ok, status = self._telegram_send_message_html(chat_id_int, html_text)
+                        last_status = status
+                        if not ok:
+                            all_ok = False
+                            break
+                    direct_sent = bool(all_ok)
                     append_jsonl(
                         self.env.drive_path("logs") / "events.jsonl",
                         {
@@ -1021,8 +925,9 @@ class OuroborosAgent:
                             "type": "telegram_send_direct",
                             "task_id": task.get("id"),
                             "chat_id": chat_id_int,
-                            "ok": ok,
-                            "status": status,
+                            "ok": bool(all_ok),
+                            "status": last_status,
+                            "parts": len(md_chunks),
                         },
                     )
                 except Exception as e:
@@ -1063,6 +968,7 @@ class OuroborosAgent:
         finally:
             if typing_stop is not None:
                 typing_stop.set()
+            self._current_task_type = None
 
     # ---------- git helpers ----------
 
@@ -1128,6 +1034,91 @@ class OuroborosAgent:
 
         return "".join(_render_span(p) if not p.startswith("<pre><code>") else p for p in parts)
 
+    @staticmethod
+    def _chunk_markdown_for_telegram(md: str, max_chars: int = 3500) -> List[str]:
+        """Split Markdown into chunks safe for Telegram.
+
+        We chunk the *Markdown* (not HTML) to avoid breaking HTML tags/entities,
+        then render each chunk to HTML.
+
+        Behavior:
+        - tries to preserve fenced code blocks (```...```) by closing/reopening fences
+          when splitting inside a fence.
+        - hard-splits very long lines if needed.
+        """
+        md = md or ""
+        try:
+            max_chars_i = int(max_chars)
+        except Exception:
+            max_chars_i = 3500
+        max_chars_i = max(256, min(4096, max_chars_i))
+
+        lines = md.splitlines(keepends=True)
+        chunks: List[str] = []
+        cur = ""
+        in_fence = False
+        fence_open_line = "```\n"
+
+        def _flush() -> None:
+            nonlocal cur
+            if cur and cur.strip():
+                chunks.append(cur)
+            cur = ""
+
+        def _append_piece(piece: str) -> None:
+            nonlocal cur
+            # When inside a fence, reserve room for closing fence at end of chunk.
+            fence_close = "```\n"
+            reserve = len(fence_close) if in_fence else 0
+            effective_limit = max_chars_i - reserve
+
+            if len(cur) + len(piece) <= effective_limit:
+                cur += piece
+                return
+
+            # If splitting while in a fence, close the fence before flushing.
+            if in_fence and cur:
+                # cur was kept <= (max_chars_i - len(fence_close)), so this fits.
+                cur += fence_close
+                _flush()
+                cur = fence_open_line
+
+            # Hard split remaining piece.
+            s = piece
+            while s:
+                reserve2 = len(fence_close) if in_fence else 0
+                effective_limit2 = max_chars_i - reserve2
+                space = effective_limit2 - len(cur)
+                if space <= 0:
+                    if in_fence and cur and not cur.rstrip().endswith("```"):
+                        if len(cur) <= max_chars_i - len(fence_close):
+                            cur += fence_close
+                    _flush()
+                    cur = fence_open_line if in_fence else ""
+                    reserve3 = len(fence_close) if in_fence else 0
+                    effective_limit3 = max_chars_i - reserve3
+                    space = effective_limit3 - len(cur)
+                take = s[:space]
+                cur += take
+                s = s[len(take) :]
+
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("```"):
+                if not in_fence:
+                    in_fence = True
+                    fence_open_line = line if line.endswith("\n") else (line + "\n")
+                else:
+                    in_fence = False
+            _append_piece(line)
+
+        if in_fence:
+            _append_piece("```\n")
+            in_fence = False
+
+        _flush()
+        return chunks or [md]
+
     def _telegram_send_message_html(self, chat_id: int, html_text: str) -> tuple[bool, str]:
         """Send formatted message via Telegram sendMessage(parse_mode=HTML)."""
         return self._telegram_api_post(
@@ -1136,7 +1127,7 @@ class OuroborosAgent:
                 "chat_id": chat_id,
                 "text": html_text,
                 "parse_mode": "HTML",
-                "disable_web_page_preview": "true",
+                "disable_web_page_preview": "1",
             },
         )
 
@@ -1279,7 +1270,21 @@ class OuroborosAgent:
         req = urllib.request.Request(url, data=payload, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
-                resp.read()
+                body = resp.read()
+
+            # Telegram may return HTTP 200 with {"ok": false, ...}.
+            # If we don't parse it, direct-send will be treated as success and fallback won't trigger.
+            try:
+                j = json.loads(body.decode("utf-8", errors="replace"))
+                if isinstance(j, dict) and ("ok" in j):
+                    ok = bool(j.get("ok"))
+                    if ok:
+                        return True, "ok"
+                    desc = str(j.get("description") or "api_ok_false")
+                    return False, truncate_for_log(desc, 300)
+            except Exception:
+                pass
+
             return True, "ok"
         except Exception as e:
             append_jsonl(
@@ -1444,14 +1449,15 @@ class OuroborosAgent:
                 messages.append({"role": "assistant", "content": content or "", "tool_calls": tool_calls})
 
                 # Emit the LLM's reasoning/plan as a progress message (human-readable narration)
-                if content and content.strip():
-                    self._emit_progress(content.strip())
+                has_model_progress = bool(content and content.strip())
+                if has_model_progress:
+                    self._emit_progress(str(content).strip())
                     llm_trace["assistant_notes"] = self._dedupe_keep_order(
-                        list(llm_trace.get("assistant_notes") or []) + [content.strip()[:320]],
+                        list(llm_trace.get("assistant_notes") or []) + [str(content).strip()[:320]],
                         max_items=20,
                     )
 
-                round_narrations: List[str] = []
+                deterministic_errors: List[str] = []
 
                 for tc in tool_calls:
                     fn_name = tc["function"]["name"]
@@ -1478,7 +1484,7 @@ class OuroborosAgent:
                                 "is_error": True,
                             }
                         )
-                        round_narrations.append(self._narrate_tool(fn_name, {}, result, False))
+                        deterministic_errors.append(self._narrate_tool(fn_name, {}, result, False))
                         continue
 
                     # ---- Check tool exists ----
@@ -1500,7 +1506,7 @@ class OuroborosAgent:
                                 "is_error": True,
                             }
                         )
-                        round_narrations.append(self._narrate_tool(fn_name, args, result, False))
+                        deterministic_errors.append(self._narrate_tool(fn_name, args, result, False))
                         continue
 
                     # ---- Execute tool safely ----
@@ -1545,15 +1551,34 @@ class OuroborosAgent:
                             "is_error": (not tool_ok) or str(result).startswith("⚠️"),
                         }
                     )
-                    round_narrations.append(self._narrate_tool(fn_name, args, result, tool_ok))
+                    if (not tool_ok) or str(result).startswith("⚠️"):
+                        deterministic_errors.append(self._narrate_tool(fn_name, args, result, tool_ok))
 
-                # ---- Batch-send narration for this tool round ----
-                if round_narrations:
-                    narration_text = "\n".join(round_narrations)
+                # Prefer model-written progress. Deterministic messages are fallback/errors only.
+                if deterministic_errors:
+                    compact_errors = deterministic_errors[:4]
+                    narration_text = "Инструментальные ошибки:\n" + "\n".join(compact_errors)
                     self._emit_progress(narration_text)
                     append_jsonl(
                         drive_logs / "narration.jsonl",
-                        {"ts": utc_now_iso(), "round": round_idx, "narration": round_narrations},
+                        {
+                            "ts": utc_now_iso(),
+                            "round": round_idx,
+                            "mode": "deterministic_errors",
+                            "narration": compact_errors,
+                        },
+                    )
+                elif not has_model_progress:
+                    fallback_text = f"🔧 Выполнил {len(tool_calls)} инструмент(ов), продолжаю."
+                    self._emit_progress(fallback_text)
+                    append_jsonl(
+                        drive_logs / "narration.jsonl",
+                        {
+                            "ts": utc_now_iso(),
+                            "round": round_idx,
+                            "mode": "deterministic_fallback",
+                            "narration": [fallback_text],
+                        },
                     )
 
                 continue
@@ -1629,7 +1654,7 @@ class OuroborosAgent:
                 "type": "function",
                 "function": {
                     "name": "repo_write_commit",
-                    "description": "Write a UTF-8 text file in repo, then git add/commit/push to ouroboros branch. Canonical self-modification.",
+                    "description": "Fallback path: write one deterministic UTF-8 file, then git add/commit/push to ouroboros. Prefer claude_code_edit for most code changes.",
                     "parameters": {
                         "type": "object",
                         "properties": {"path": {"type": "string"}, "content": {"type": "string"}, "commit_message": {"type": "string"}},
@@ -1676,7 +1701,7 @@ class OuroborosAgent:
                 "type": "function",
                 "function": {
                     "name": "claude_code_edit",
-                    "description": "Delegate multi-file code edits to Anthropic Claude Code CLI in headless mode. It edits files in-place; use repo_commit_push afterwards.",
+                    "description": "Preferred/default code editing engine when available: delegate edits to Anthropic Claude Code CLI (headless). Especially for multi-file changes, refactors, and uncertain edit scope. Use repo_commit_push afterwards.",
                     "parameters": {
                         "type": "object",
                         "properties": {"instruction": {"type": "string"}, "max_turns": {"type": "integer"}},
@@ -1886,11 +1911,94 @@ class OuroborosAgent:
             return f"⚠️ GIT_ERROR (diff): {e}"
 
     def _tool_run_shell(self, cmd: List[str], cwd: str = "") -> str:
-        wd = self.env.repo_dir if not cwd else (self.env.repo_dir / safe_relpath(cwd)).resolve()
+        if str(self._current_task_type or "") == "evolution":
+            if isinstance(cmd, list) and cmd and str(cmd[0]).lower() == "git":
+                return (
+                    "⚠️ EVOLUTION_GIT_RESTRICTED: git shell commands are blocked in evolution mode. "
+                    "Use repo_write_commit/repo_commit_push (they are pinned to branch ouroboros)."
+                )
+
+        def _is_within_repo(p: pathlib.Path) -> bool:
+            try:
+                p.resolve().relative_to(self.env.repo_dir.resolve())
+                return True
+            except Exception:
+                return False
+
+        def _normalize_cwd(raw: str) -> pathlib.Path:
+            raw = (raw or "").strip()
+            if not raw or raw in (".", "./"):
+                return self.env.repo_dir
+
+            # If user passed an absolute path (common LLM mistake), accept it only if it is inside repo_dir.
+            if raw.startswith("/"):
+                ap = pathlib.Path(raw).resolve()
+                if _is_within_repo(ap) and ap.exists() and ap.is_dir():
+                    return ap
+                append_jsonl(
+                    self.env.drive_path("logs") / "events.jsonl",
+                    {
+                        "ts": utc_now_iso(),
+                        "type": "run_shell_cwd_ignored",
+                        "cwd": raw,
+                        "reason": "absolute_not_within_repo_or_missing",
+                    },
+                )
+                return self.env.repo_dir
+
+            # Otherwise treat as repo-relative.
+            try:
+                rel = safe_relpath(raw)
+            except Exception as e:
+                append_jsonl(
+                    self.env.drive_path("logs") / "events.jsonl",
+                    {"ts": utc_now_iso(), "type": "run_shell_cwd_ignored", "cwd": raw, "reason": f"invalid:{type(e).__name__}"},
+                )
+                return self.env.repo_dir
+
+            wd2 = (self.env.repo_dir / rel).resolve()
+            if not _is_within_repo(wd2) or not wd2.exists() or not wd2.is_dir():
+                append_jsonl(
+                    self.env.drive_path("logs") / "events.jsonl",
+                    {
+                        "ts": utc_now_iso(),
+                        "type": "run_shell_cwd_fallback",
+                        "cwd": raw,
+                        "resolved": str(wd2),
+                        "reason": "not_found_or_not_dir_or_escape",
+                    },
+                )
+                return self.env.repo_dir
+
+            return wd2
+
+        wd = _normalize_cwd(cwd)
+
         try:
             res = subprocess.run(cmd, cwd=str(wd), capture_output=True, text=True, timeout=120)
         except subprocess.TimeoutExpired:
             return f"⚠️ Command timed out after 120s: {' '.join(cmd)}"
+        except FileNotFoundError as e:
+            # Some environments occasionally surface a cwd-related FileNotFoundError.
+            # Retry once from repo_dir to avoid flakiness.
+            if str(wd) != str(self.env.repo_dir):
+                append_jsonl(
+                    self.env.drive_path("logs") / "events.jsonl",
+                    {
+                        "ts": utc_now_iso(),
+                        "type": "run_shell_retry_no_cwd",
+                        "cwd": str(wd),
+                        "error": truncate_for_log(repr(e), 300),
+                    },
+                )
+                try:
+                    res = subprocess.run(cmd, cwd=str(self.env.repo_dir), capture_output=True, text=True, timeout=120)
+                except subprocess.TimeoutExpired:
+                    return f"⚠️ Command timed out after 120s: {' '.join(cmd)}"
+                except Exception as e2:
+                    return f"⚠️ Failed to execute command: {type(e2).__name__}: {e2}"
+            else:
+                return f"⚠️ Failed to execute command: {type(e).__name__}: {e}"
         except Exception as e:
             return f"⚠️ Failed to execute command: {type(e).__name__}: {e}"
         output = (res.stdout + "\n" + res.stderr).strip()
@@ -1991,6 +2099,52 @@ class OuroborosAgent:
         }
         if "total_cost_usd" in payload:
             out["total_cost_usd"] = payload.get("total_cost_usd")
+
+        # Account Claude Code CLI cost in shared supervisor budget.
+        try:
+            def _to_float_maybe(v: Any) -> Optional[float]:
+                try:
+                    return float(v)
+                except Exception:
+                    return None
+
+            def _to_int_maybe(v: Any) -> Optional[int]:
+                try:
+                    return int(v)
+                except Exception:
+                    return None
+
+            usage_obj = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+            raw_cost = payload.get("total_cost_usd", None)
+            cost_val = _to_float_maybe(raw_cost) if raw_cost is not None else None
+            usage_event: Dict[str, Any] = {}
+            if cost_val is not None:
+                usage_event["cost"] = cost_val
+
+            if isinstance(usage_obj, dict):
+                p_tok = usage_obj.get("prompt_tokens", usage_obj.get("input_tokens"))
+                c_tok = usage_obj.get("completion_tokens", usage_obj.get("output_tokens"))
+                if p_tok is not None:
+                    p_tok_i = _to_int_maybe(p_tok)
+                    if p_tok_i is not None:
+                        usage_event["prompt_tokens"] = p_tok_i
+                if c_tok is not None:
+                    c_tok_i = _to_int_maybe(c_tok)
+                    if c_tok_i is not None:
+                        usage_event["completion_tokens"] = c_tok_i
+
+            if usage_event:
+                self._pending_events.append(
+                    {
+                        "type": "llm_usage",
+                        "provider": "claude_code_cli",
+                        "usage": usage_event,
+                        "source": "claude_code_edit",
+                        "ts": utc_now_iso(),
+                    }
+                )
+        except Exception:
+            pass
         return json.dumps(out, ensure_ascii=False, indent=2)
 
     def _tool_request_restart(self, reason: str) -> str:
