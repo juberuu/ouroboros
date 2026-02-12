@@ -13,6 +13,7 @@ import json
 import re
 import os
 import pathlib
+import shutil
 import subprocess
 import threading
 import time
@@ -224,6 +225,19 @@ class OuroborosAgent:
                     return f"⚙️ `{cmd_str}` — ошибка"
                 out_lines = len(result.strip().splitlines()) if result.strip() else 0
                 return f"⚙️ `{cmd_str}` — OK ({out_lines} строк вывода)"
+
+            if fn_name == "claude_code_edit":
+                if is_error:
+                    err = result.split("\n")[0][:80] if result else "ошибка"
+                    return f"🤖 Claude Code edit — {err}"
+                return "🤖 Claude Code edit — правки применены"
+
+            if fn_name == "repo_commit_push":
+                msg = args.get("commit_message", "")[:60]
+                if is_error:
+                    err = result.split("\n")[0][:80] if result else "ошибка"
+                    return f"🚀 Коммит/пуш — {err}"
+                return f"🚀 Коммит и пуш в {self.env.branch_dev}: {msg}"
 
             if fn_name == "web_search":
                 query = args.get("query", "?")[:50]
@@ -615,9 +629,11 @@ class OuroborosAgent:
             "drive_list": self._tool_drive_list,
             "drive_write": self._tool_drive_write,
             "repo_write_commit": self._tool_repo_write_commit,
+            "repo_commit_push": self._tool_repo_commit_push,
             "git_status": self._tool_git_status,
             "git_diff": self._tool_git_diff,
             "run_shell": self._tool_run_shell,
+            "claude_code_edit": self._tool_claude_code_edit,
             "web_search": self._tool_web_search,
             "request_restart": self._tool_request_restart,
             "request_stable_promotion": self._tool_request_stable_promotion,
@@ -846,6 +862,21 @@ class OuroborosAgent:
             },
             {
                 "type": "function",
+                "function": {
+                    "name": "repo_commit_push",
+                    "description": "Commit and push already-made repo changes to ouroboros branch (without rewriting files).",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "commit_message": {"type": "string"},
+                            "paths": {"type": "array", "items": {"type": "string"}},
+                        },
+                        "required": ["commit_message"],
+                    },
+                },
+            },
+            {
+                "type": "function",
                 "function": {"name": "git_status", "description": "Run git status --porcelain in repo.", "parameters": {"type": "object", "properties": {}, "required": []}},
             },
             {
@@ -861,6 +892,18 @@ class OuroborosAgent:
                         "type": "object",
                         "properties": {"cmd": {"type": "array", "items": {"type": "string"}}, "cwd": {"type": "string"}},
                         "required": ["cmd"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "claude_code_edit",
+                    "description": "Delegate multi-file code edits to Anthropic Claude Code CLI in headless mode. It edits files in-place; use repo_commit_push afterwards.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"instruction": {"type": "string"}, "max_turns": {"type": "integer"}},
+                        "required": ["instruction"],
                     },
                 },
             },
@@ -979,6 +1022,59 @@ class OuroborosAgent:
 
         return f"OK: committed and pushed to {self.env.branch_dev}: {commit_message}"
 
+    def _tool_repo_commit_push(self, commit_message: str, paths: Optional[List[str]] = None) -> str:
+        if not commit_message.strip():
+            return "⚠️ ERROR: commit_message must be non-empty."
+
+        lock = self._acquire_git_lock()
+        try:
+            try:
+                run(["git", "checkout", self.env.branch_dev], cwd=self.env.repo_dir)
+            except Exception as e:
+                return f"⚠️ GIT_ERROR (checkout {self.env.branch_dev}): {e}"
+
+            add_cmd: List[str]
+            if paths:
+                try:
+                    safe_paths = [safe_relpath(p) for p in paths if str(p).strip()]
+                except ValueError as e:
+                    return f"⚠️ PATH_ERROR: {e}"
+                if not safe_paths:
+                    return "⚠️ ERROR: paths is empty after validation."
+                add_cmd = ["git", "add"] + safe_paths
+            else:
+                add_cmd = ["git", "add", "-A"]
+
+            try:
+                run(add_cmd, cwd=self.env.repo_dir)
+            except Exception as e:
+                return f"⚠️ GIT_ERROR (add): {e}"
+
+            try:
+                status = run(["git", "status", "--porcelain"], cwd=self.env.repo_dir)
+            except Exception as e:
+                return f"⚠️ GIT_ERROR (status): {e}"
+            if not status.strip():
+                return "⚠️ GIT_NO_CHANGES: nothing to commit."
+
+            try:
+                run(["git", "commit", "-m", commit_message], cwd=self.env.repo_dir)
+            except Exception as e:
+                return f"⚠️ GIT_ERROR (commit): {e}"
+
+            try:
+                run(["git", "push", "origin", self.env.branch_dev], cwd=self.env.repo_dir)
+            except Exception as e:
+                return (
+                    f"⚠️ GIT_ERROR (push): {e}\n"
+                    f"Committed locally but NOT pushed. "
+                    f"Retry with: run_shell(['git', 'push', 'origin', '{self.env.branch_dev}'])"
+                )
+        finally:
+            self._release_git_lock(lock)
+
+        return f"OK: committed existing changes and pushed to {self.env.branch_dev}: {commit_message}"
+
     def _tool_git_status(self) -> str:
         try:
             return run(["git", "status", "--porcelain"], cwd=self.env.repo_dir)
@@ -1006,6 +1102,98 @@ class OuroborosAgent:
                 f"STDOUT:\n{res.stdout}\n\nSTDERR:\n{res.stderr}"
             )
         return output
+
+    def _tool_claude_code_edit(self, instruction: str, max_turns: int = 12) -> str:
+        prompt = (instruction or "").strip()
+        if not prompt:
+            return "⚠️ ERROR: instruction must be non-empty."
+
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        if not api_key:
+            return "⚠️ CLAUDE_CODE_UNAVAILABLE: ANTHROPIC_API_KEY is not set."
+
+        claude_bin = shutil.which("claude")
+        if not claude_bin:
+            return "⚠️ CLAUDE_CODE_UNAVAILABLE: claude CLI is not installed or not in PATH."
+
+        try:
+            turns = int(max_turns)
+        except Exception:
+            turns = 12
+        turns = max(1, min(turns, 30))
+
+        cmd: List[str] = [
+            claude_bin,
+            "-p",
+            prompt,
+            "--output-format",
+            "json",
+            "--max-turns",
+            str(turns),
+            "--tools",
+            "Read,Edit,Grep,Glob",
+            "--dangerously-skip-permissions",
+        ]
+
+        model = os.environ.get("OUROBOROS_CLAUDE_CODE_MODEL", "").strip()
+        if model:
+            cmd.extend(["--model", model])
+
+        max_budget = os.environ.get("OUROBOROS_CLAUDE_CODE_MAX_BUDGET_USD", "").strip()
+        if max_budget:
+            cmd.extend(["--max-budget-usd", max_budget])
+
+        env = os.environ.copy()
+        local_bin = str(pathlib.Path.home() / ".local" / "bin")
+        if local_bin not in env.get("PATH", ""):
+            env["PATH"] = f"{local_bin}:{env.get('PATH', '')}"
+
+        lock = self._acquire_git_lock()
+        try:
+            try:
+                run(["git", "checkout", self.env.branch_dev], cwd=self.env.repo_dir)
+            except Exception as e:
+                return f"⚠️ GIT_ERROR (checkout {self.env.branch_dev}): {e}"
+
+            res = subprocess.run(
+                cmd,
+                cwd=str(self.env.repo_dir),
+                capture_output=True,
+                text=True,
+                timeout=600,
+                env=env,
+            )
+        except subprocess.TimeoutExpired:
+            return "⚠️ CLAUDE_CODE_TIMEOUT: command timed out after 600s."
+        except Exception as e:
+            return f"⚠️ CLAUDE_CODE_FAILED: {type(e).__name__}: {e}"
+        finally:
+            self._release_git_lock(lock)
+
+        stdout = (res.stdout or "").strip()
+        stderr = (res.stderr or "").strip()
+        if res.returncode != 0:
+            return (
+                f"⚠️ CLAUDE_CODE_ERROR: exit={res.returncode}\n\n"
+                f"STDOUT:\n{stdout}\n\nSTDERR:\n{stderr}"
+            )
+
+        if not stdout:
+            return "OK: Claude Code completed with empty output."
+
+        try:
+            payload = json.loads(stdout)
+        except Exception:
+            return stdout
+
+        out: Dict[str, Any] = {
+            "result": payload.get("result", ""),
+            "session_id": payload.get("session_id"),
+            "usage": payload.get("usage", {}),
+        }
+        if "total_cost_usd" in payload:
+            out["total_cost_usd"] = payload.get("total_cost_usd")
+        return json.dumps(out, ensure_ascii=False, indent=2)
 
     def _tool_request_restart(self, reason: str) -> str:
         self._pending_events.append({"type": "restart_request", "reason": reason, "ts": utc_now_iso()})

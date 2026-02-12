@@ -18,6 +18,27 @@ import requests
 # ----------------------------
 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "openai>=1.0.0", "requests"], check=True)
 
+def ensure_claude_code_cli() -> bool:
+    """Best-effort install of Claude Code CLI for Anthropic-powered code edits."""
+    local_bin = str(pathlib.Path.home() / ".local" / "bin")
+    if local_bin not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = f"{local_bin}:{os.environ.get('PATH', '')}"
+
+    has_cli = subprocess.run(["bash", "-lc", "command -v claude >/dev/null 2>&1"], check=False).returncode == 0
+    if has_cli:
+        return True
+
+    # Preferred install method (native binary installer).
+    subprocess.run(["bash", "-lc", "curl -fsSL https://claude.ai/install.sh | bash"], check=False)
+    has_cli = subprocess.run(["bash", "-lc", "command -v claude >/dev/null 2>&1"], check=False).returncode == 0
+    if has_cli:
+        return True
+
+    # Fallback path for environments where native installer is unavailable.
+    subprocess.run(["bash", "-lc", "command -v npm >/dev/null 2>&1 && npm install -g @anthropic-ai/claude-code"], check=False)
+    has_cli = subprocess.run(["bash", "-lc", "command -v claude >/dev/null 2>&1"], check=False).returncode == 0
+    return has_cli
+
 # ----------------------------
 # 0.1) provide apply_patch shim (so LLM "apply_patch<<PATCH" won't crash)
 # ----------------------------
@@ -152,6 +173,7 @@ TOTAL_BUDGET_DEFAULT = get_secret("TOTAL_BUDGET", required=True)
 GITHUB_TOKEN = get_secret("GITHUB_TOKEN", required=True)
 
 OPENAI_API_KEY = get_secret("OPENAI_API_KEY", default="")  # optional
+ANTHROPIC_API_KEY = get_secret("ANTHROPIC_API_KEY", default="")  # optional; enables Claude Code CLI tool
 
 GITHUB_USER = get_secret("GITHUB_USER", default="razzant")
 GITHUB_REPO = get_secret("GITHUB_REPO", default="ouroboros")
@@ -162,8 +184,13 @@ MODEL_MAIN = get_secret("OUROBOROS_MODEL", default="openai/gpt-5.2")
 # expose needed env to workers (do not print)
 os.environ["OPENROUTER_API_KEY"] = str(OPENROUTER_API_KEY)
 os.environ["OPENAI_API_KEY"] = str(OPENAI_API_KEY or "")
+os.environ["ANTHROPIC_API_KEY"] = str(ANTHROPIC_API_KEY or "")
 os.environ["OUROBOROS_MODEL"] = str(MODEL_MAIN or "openai/gpt-5.2")
 os.environ["TELEGRAM_BOT_TOKEN"] = str(TELEGRAM_BOT_TOKEN)  # to support agent-side UX like typing indicator
+
+# Install Claude Code CLI only when Anthropic API access is configured.
+if str(ANTHROPIC_API_KEY or "").strip():
+    ensure_claude_code_cli()
 
 # ----------------------------
 # 2) Mount Drive (quietly)

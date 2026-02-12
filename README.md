@@ -14,6 +14,7 @@
 - `TOTAL_BUDGET` (например `100`)
 - `GITHUB_TOKEN`
 - (опционально) `OPENAI_API_KEY` (для web_search)
+- (опционально) `ANTHROPIC_API_KEY` (для `claude_code_edit` через Claude Code CLI)
 - (опционально) `GITHUB_USER` (по умолчанию `razzant`)
 - (опционально) `GITHUB_REPO` (по умолчанию `ouroboros`)
 - (опционально) `OUROBOROS_MODEL` (по умолчанию `openai/gpt-5.2`)
@@ -51,6 +52,11 @@
 Канонический способ менять себя:
 - использовать tool `repo_write_commit(...)` (запись файла + commit + push в `ouroboros`)
 - затем tool `request_restart(...)` (чтобы супервизор перезапустил runtime и подхватил изменения)
+
+Для более качественных многофайловых правок доступен дополнительный путь:
+- `claude_code_edit(...)` — делегирует редактирование Claude Code CLI (headless), правит файлы in-place
+- `repo_commit_push(...)` — коммитит и пушит уже внесённые изменения (без перезаписи файла целиком)
+- `request_restart(...)` — применяет обновлённый код после push
 
 Продвижение в `ouroboros-stable` требует явного подтверждения владельца (approval в чате).
 
