@@ -293,6 +293,54 @@ class OuroborosAgent:
                 'git_branch': git_branch,
                 'git_sha': git_sha,
             })
+
+            # Attempt to claim and process pending restart verification (best-effort)
+            try:
+                pending_path = self.env.drive_path('state') / 'pending_restart_verify.json'
+                claim_path = pending_path.with_name(f"pending_restart_verify.claimed.{os.getpid()}.json")
+
+                # Atomic claim via rename
+                try:
+                    os.rename(str(pending_path), str(claim_path))
+                except FileNotFoundError:
+                    # No pending verification
+                    return
+                except Exception:
+                    # Could not claim (e.g., already claimed by another worker)
+                    return
+
+                # Read and parse claimed file
+                try:
+                    claim_data = json.loads(read_text(claim_path))
+                    expected_sha = str(claim_data.get("expected_sha", "")).strip()
+                    expected_branch = str(claim_data.get("expected_branch", "")).strip()
+
+                    # Verify: ok if expected_sha is non-empty and matches observed
+                    ok = bool(expected_sha and expected_sha == git_sha)
+
+                    # Log verification event
+                    append_jsonl(self.env.drive_path('logs') / 'events.jsonl', {
+                        'ts': utc_now_iso(),
+                        'type': 'restart_verify',
+                        'pid': os.getpid(),
+                        'ok': ok,
+                        'expected_sha': expected_sha,
+                        'expected_branch': expected_branch,
+                        'observed_sha': git_sha,
+                        'observed_branch': git_branch,
+                    })
+                except Exception:
+                    pass
+
+                # Clean up claim file
+                try:
+                    claim_path.unlink()
+                except Exception:
+                    pass
+
+            except Exception:
+                pass
+
         except Exception:
             return
 
@@ -3263,6 +3311,33 @@ class OuroborosAgent:
                 "⚠️ RESTART_BLOCKED: in evolution mode call repo_commit_push/repo_write_commit and "
                 "ensure push succeeds before request_restart."
             )
+
+        # Persist expected git info for post-restart verification (best-effort)
+        try:
+            expected_sha = ""
+            expected_branch = ""
+            try:
+                expected_sha = self._git_head().strip()
+            except Exception:
+                pass
+            try:
+                expected_branch = self._git_branch().strip()
+            except Exception:
+                pass
+
+            pending_path = self.env.drive_path("state") / "pending_restart_verify.json"
+            write_text(
+                pending_path,
+                json.dumps({
+                    "ts": utc_now_iso(),
+                    "expected_sha": expected_sha,
+                    "expected_branch": expected_branch,
+                    "reason": reason,
+                }, ensure_ascii=False, indent=2)
+            )
+        except Exception:
+            pass  # Never raise; verification is best-effort
+
         self._pending_events.append({"type": "restart_request", "reason": reason, "ts": utc_now_iso()})
         self._last_push_succeeded = False
         return f"Restart requested: {reason}"
