@@ -2358,6 +2358,12 @@ class OuroborosAgent:
             turns = 12
         turns = max(1, min(turns, 30))
 
+        # NOTE: In Colab we typically run as root. Some Claude Code CLI versions
+        # refuse the most permissive "skip permissions" mode under root/sudo.
+        # We rely on `--permission-mode bypassPermissions` (configurable) and
+        # mark the subprocess as sandboxed.
+        perm_mode = os.environ.get("OUROBOROS_CLAUDE_CODE_PERMISSION_MODE", "bypassPermissions").strip() or "bypassPermissions"
+
         cmd: List[str] = [
             claude_bin,
             "-p",
@@ -2368,7 +2374,8 @@ class OuroborosAgent:
             str(turns),
             "--tools",
             "Read,Edit,Grep,Glob",
-            "--dangerously-skip-permissions",
+            "--permission-mode",
+            perm_mode,
         ]
 
         model = os.environ.get("OUROBOROS_CLAUDE_CODE_MODEL", "").strip()
@@ -2380,6 +2387,15 @@ class OuroborosAgent:
             cmd.extend(["--max-budget-usd", max_budget])
 
         env = os.environ.copy()
+
+        # Workaround for root/sudo environments (e.g. Colab):
+        # many Claude Code versions refuse certain permission bypass flags unless
+        # the environment is explicitly marked sandboxed.
+        try:
+            if hasattr(os, "geteuid") and os.geteuid() == 0:
+                env.setdefault("IS_SANDBOX", "1")
+        except Exception:
+            pass
         local_bin = str(pathlib.Path.home() / ".local" / "bin")
         if local_bin not in env.get("PATH", ""):
             env["PATH"] = f"{local_bin}:{env.get('PATH', '')}"
