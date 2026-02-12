@@ -179,6 +179,62 @@ def truncate_for_log(s: str, max_chars: int = 4000) -> str:
     return s[: max_chars // 2] + "\n...\n" + s[-max_chars // 2 :]
 
 
+def _sanitize_task_for_event(task: Dict[str, Any], drive_logs: pathlib.Path, threshold: int = 4000) -> Dict[str, Any]:
+    """
+    Sanitize task for event logging: truncate large text and persist full text to Drive.
+
+    Args:
+        task: Original task dict
+        drive_logs: Path to logs directory on Drive
+        threshold: Max chars before truncation (default 4000)
+
+    Returns:
+        Sanitized task dict with metadata about text handling
+    """
+    try:
+        sanitized = task.copy()
+        text = task.get("text")
+
+        if not isinstance(text, str):
+            return sanitized
+
+        text_len = len(text)
+        text_hash = sha256_text(text)
+
+        # Add metadata
+        sanitized["text_len"] = text_len
+        sanitized["text_sha256"] = text_hash
+
+        if text_len > threshold:
+            # Truncate text for event log
+            sanitized["text"] = truncate_for_log(text, threshold)
+            sanitized["text_truncated"] = True
+
+            # Best-effort: persist full text to Drive
+            try:
+                task_id = task.get("id")
+                if task_id:
+                    filename = f"task_{task_id}.txt"
+                else:
+                    filename = f"task_{text_hash[:12]}.txt"
+
+                full_path = drive_logs / "tasks" / filename
+                write_text(full_path, text)
+
+                # Store relative path from logs directory
+                sanitized["text_full_path"] = f"tasks/{filename}"
+            except Exception:
+                # Best-effort: don't fail if we can't persist
+                pass
+        else:
+            sanitized["text_truncated"] = False
+
+        return sanitized
+    except Exception:
+        # Never raise from this helper; return original task
+        return task
+
+
 def _format_tool_rounds_exceeded_message(max_tool_rounds: int, llm_trace: Dict[str, Any]) -> str:
     """
     Форматирует информативное сообщение при превышении лимита tool rounds.
@@ -1348,7 +1404,8 @@ class OuroborosAgent:
         self._last_push_succeeded = False
 
         drive_logs = self.env.drive_path("logs")
-        append_jsonl(drive_logs / "events.jsonl", {"ts": utc_now_iso(), "type": "task_received", "task": task})
+        sanitized_task = _sanitize_task_for_event(task, drive_logs)
+        append_jsonl(drive_logs / "events.jsonl", {"ts": utc_now_iso(), "type": "task_received", "task": sanitized_task})
 
         # Telegram typing indicator (best-effort).
         # Note: we can't show typing at the exact moment of message receipt (handled by supervisor),
