@@ -2594,10 +2594,42 @@ class OuroborosAgent:
         lock_dir = self.env.drive_path("locks")
         lock_dir.mkdir(parents=True, exist_ok=True)
         lock_path = lock_dir / "git.lock"
-        while lock_path.exists():
-            time.sleep(0.5)
-        lock_path.write_text(f"locked_at={utc_now_iso()}\n", encoding="utf-8")
-        return lock_path
+        stale_sec = int(os.environ.get("OUROBOROS_GIT_LOCK_STALE_SEC", "600"))
+
+        while True:
+            # Check for stale lock
+            if lock_path.exists():
+                try:
+                    stat = lock_path.stat()
+                    age_sec = time.time() - stat.st_mtime
+                    if age_sec > stale_sec:
+                        # Remove stale lock and log event
+                        lock_path.unlink()
+                        drive_logs = self.env.drive_path("logs")
+                        append_jsonl(
+                            drive_logs / "events.jsonl",
+                            {
+                                "ts": utc_now_iso(),
+                                "type": "git_lock_stale_removed",
+                                "age_sec": round(age_sec, 2),
+                            },
+                        )
+                        continue
+                except (FileNotFoundError, OSError):
+                    # Lock was removed by another process, retry
+                    pass
+
+            # Atomic lock acquisition with O_CREAT | O_EXCL
+            try:
+                fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                try:
+                    os.write(fd, f"locked_at={utc_now_iso()}\n".encode("utf-8"))
+                finally:
+                    os.close(fd)
+                return lock_path
+            except FileExistsError:
+                # Lock held by another process, wait and retry
+                time.sleep(0.5)
 
     def _release_git_lock(self, lock_path: pathlib.Path) -> None:
         if lock_path.exists():
