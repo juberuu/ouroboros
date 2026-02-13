@@ -2,7 +2,7 @@
 # Ouroboros — Runtime launcher (executed from repository)
 # ============================
 
-import os, sys, json, time, uuid, pathlib, subprocess, datetime, re, shutil
+import os, sys, json, time, uuid, pathlib, subprocess, datetime, re, shutil, threading
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -1200,6 +1200,65 @@ def enqueue_evolution_task_if_needed() -> None:
     save_state(st)
     send_with_budget(int(owner_chat_id), f"🧬 Evolution #{cycle}: {tid}")
 
+# ----------------------------
+# Прямой чат (Принцип 1: Уроборос — собеседник, не система заявок)
+# ----------------------------
+_chat_lock = threading.Lock()
+_chat_agent = None
+
+def _get_chat_agent():
+    """Ленивое создание агента для прямого чата (в процессе launcher-а)."""
+    global _chat_agent
+    if _chat_agent is None:
+        sys.path.insert(0, str(REPO_DIR))
+        from ouroboros.agent import make_agent
+        _chat_agent = make_agent(
+            repo_dir=str(REPO_DIR),
+            drive_root=str(DRIVE_ROOT),
+            event_queue=EVENT_Q,
+        )
+    return _chat_agent
+
+def _reset_chat_agent() -> None:
+    """Сбрасывает агента (при restart/reload кода)."""
+    global _chat_agent
+    _chat_agent = None
+
+def _handle_chat_direct(chat_id: int, text: str) -> None:
+    """Прямой диалог с Уроборосом — без очереди, без воркеров.
+
+    Работает в отдельном потоке. Сериализовано через _chat_lock.
+    Фоновые задачи (эволюция, review) по-прежнему идут через воркеры.
+    """
+    with _chat_lock:
+        try:
+            agent = _get_chat_agent()
+            task = {
+                "id": uuid.uuid4().hex[:8],
+                "type": "task",
+                "chat_id": chat_id,
+                "text": text,
+            }
+            events = agent.handle_task(task)
+            for e in events:
+                EVENT_Q.put(e)
+        except Exception as e:
+            import traceback
+            err_msg = f"⚠️ Ошибка: {type(e).__name__}: {e}"
+            append_jsonl(
+                DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "type": "direct_chat_error",
+                    "error": repr(e),
+                    "traceback": str(traceback.format_exc())[:2000],
+                },
+            )
+            try:
+                TG.send_message(chat_id, err_msg)
+            except Exception:
+                pass
+
 def respawn_worker(wid: int) -> None:
     in_q = CTX.Queue()
     proc = CTX.Process(target=worker_main, args=(wid, in_q, EVENT_Q, str(REPO_DIR), str(DRIVE_ROOT)))
@@ -1614,6 +1673,7 @@ while True:
                         )
                     continue
             kill_workers()
+            _reset_chat_agent()
             spawn_workers(MAX_WORKERS)
             continue
 
@@ -1767,6 +1827,7 @@ while True:
                     send_with_budget(chat_id, f"⚠️ Не удалось установить зависимости в {BRANCH_STABLE}: {deps_msg_stable}")
                     continue
             kill_workers()
+            _reset_chat_agent()
             spawn_workers(MAX_WORKERS)
             continue
 
@@ -1797,10 +1858,12 @@ while True:
                 send_with_budget(chat_id, "🛑 Эволюция: OFF.")
             continue
 
-        # Все остальные сообщения → Уроборос (LLM-first, без роутера)
-        tid = uuid.uuid4().hex[:8]
-        enqueue_task({"id": tid, "type": "task", "chat_id": chat_id, "text": text})
-        persist_queue_snapshot(reason="owner_task_enqueued")
+        # Все остальные сообщения → прямой диалог с Уробороса (Принцип 1: собеседник)
+        threading.Thread(
+            target=_handle_chat_direct,
+            args=(chat_id, text),
+            daemon=True,
+        ).start()
 
     st = load_state()
     st["tg_offset"] = offset
