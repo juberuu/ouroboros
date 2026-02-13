@@ -1973,7 +1973,8 @@ class OuroborosAgent:
             # text before code block
             parts.append(md[last : m.start()])
             code = m.group(1)
-            code_esc = html.escape(code)
+            # quote=False: no attributes, avoid &#x27;/&quot; entities that Telegram may reject
+            code_esc = html.escape(code, quote=False)
             parts.append(f"<pre><code>{code_esc}</code></pre>")
             last = m.end()
         parts.append(md[last:])
@@ -1983,10 +1984,11 @@ class OuroborosAgent:
             out: list[str] = []
             pos = 0
             for mm in inline_code_re.finditer(text):
-                out.append(html.escape(text[pos : mm.start()]))
-                out.append(f"<code>{html.escape(mm.group(1))}</code>")
+                # quote=False: no attributes, avoid &#x27;/&quot; entities that Telegram may reject
+                out.append(html.escape(text[pos : mm.start()], quote=False))
+                out.append(f"<code>{html.escape(mm.group(1), quote=False)}</code>")
                 pos = mm.end()
-            out.append(html.escape(text[pos:]))
+            out.append(html.escape(text[pos:], quote=False))
             s = "".join(out)
             # Bold
             s = bold_re.sub(r"<b>\1</b>", s)
