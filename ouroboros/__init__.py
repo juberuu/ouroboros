@@ -7,4 +7,4 @@
 """
 
 __all__ = ['agent', 'tools', 'llm', 'memory', 'review']
-__version__ = '0.1.0'
+__version__ = '0.1.1'

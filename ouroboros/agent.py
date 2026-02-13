@@ -3318,6 +3318,7 @@ class OuroborosAgent:
             "schedule_task": self._tool_schedule_task,
             "cancel_task": self._tool_cancel_task,
             "chat_history": self._tool_chat_history,
+            "telegram_send_voice": self._tool_telegram_send_voice,
         }
         code_tools = {"repo_write_commit", "repo_commit_push", "git_status", "git_diff", "run_shell", "claude_code_edit"}
 
@@ -3775,6 +3776,27 @@ class OuroborosAgent:
                             "search": {"type": "string", "default": "", "description": "Фильтр по тексту"},
                         },
                         "required": [],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "telegram_send_voice",
+                    "description": "Send voice message via TTS (local ffmpeg/flite or OpenAI).",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "chat_id": {"type": "integer"},
+                            "text": {"type": "string"},
+                            "caption": {"type": "string"},
+                            "tts": {"type": "string", "enum": ["local", "openai"]},
+                            "voice": {"type": "string"},
+                            "openai_model": {"type": "string"},
+                            "openai_voice": {"type": "string"},
+                            "openai_format": {"type": "string"},
+                        },
+                        "required": ["chat_id", "text"],
                     },
                 },
             },

@@ -67,6 +67,7 @@
 - `promote_to_stable` — промоутить ouroboros → ouroboros-stable
 - `schedule_task` — запланировать фоновую задачу
 - `cancel_task` — отменить задачу
+- `telegram_send_voice` — отправить голосовое сообщение через TTS
 
 ### Стратегия правок кода
 
