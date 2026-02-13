@@ -1404,14 +1404,31 @@ class OuroborosAgent:
         for evt_type, count in top_types:
             lines.append(f"  {evt_type}: {count}")
 
-        error_types = {"tool_error", "telegram_api_error", "task_error", "typing_start_error"}
+        error_types = {"tool_error", "telegram_api_error", "task_error", "typing_start_error", "tool_rounds_exceeded"}
         errors = [e for e in entries if e.get("type") in error_types]
         if errors:
             lines.append("\nRecent errors:")
             for e in errors[-10:]:
                 evt_type = e.get("type", "?")
-                err_msg = OuroborosAgent._short(e.get("error", ""), 120)
+                if evt_type == "tool_rounds_exceeded":
+                    max_rounds = e.get("max_tool_rounds", "?")
+                    rounds_exec = e.get("rounds_executed", "?")
+                    err_msg = f"max={max_rounds} exec={rounds_exec}"
+                else:
+                    err_msg = OuroborosAgent._short(e.get("error", ""), 120)
                 lines.append(f"  {evt_type}: {err_msg}")
+
+        task_evals = [e for e in entries if e.get("type") == "task_eval"]
+        if task_evals:
+            lines.append("\nRecent evals:")
+            for e in task_evals[-8:]:
+                ok = e.get("ok", 0)
+                dur = e.get("duration_sec", 0.0)
+                tools = e.get("tool_calls", 0)
+                errs = e.get("tool_errors", 0)
+                direct = e.get("direct_send_ok", 0)
+                task_id = OuroborosAgent._short(e.get("task_id", ""), 7)
+                lines.append(f"  ok={ok} dur={dur:.3f}s tools={tools} err={errs} direct={direct} id={task_id}")
         return "\n".join(lines)
 
     @staticmethod
