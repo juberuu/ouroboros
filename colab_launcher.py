@@ -286,7 +286,7 @@ def ensure_state_defaults(st: Dict[str, Any]) -> Dict[str, Any]:
     st.setdefault("last_evolution_task_at", "")
     st.setdefault("idle_cursor", 0)
     st.setdefault("budget_messages_since_report", 0)
-    st.setdefault("evolution_mode_enabled", EVOLUTION_ENABLED_BY_DEFAULT)
+    st.setdefault("evolution_mode_enabled", False)
     st.setdefault("evolution_cycle", 0)
     st.setdefault("last_auto_review_at", "")
     st.setdefault("last_review_task_id", "")
@@ -314,7 +314,7 @@ def _default_state_dict() -> Dict[str, Any]:
         "last_evolution_task_at": "",
         "idle_cursor": 0,
         "budget_messages_since_report": 0,
-        "evolution_mode_enabled": EVOLUTION_ENABLED_BY_DEFAULT,
+        "evolution_mode_enabled": False,
         "evolution_cycle": 0,
         "idle_stats": {},
         "last_auto_review_at": "",
@@ -980,8 +980,7 @@ def persist_queue_snapshot(reason: str = "") -> None:
                 "worker_id": meta.get("worker_id"),
                 "runtime_sec": round(max(0.0, now - started), 2) if started > 0 else 0.0,
                 "heartbeat_lag_sec": round(max(0.0, now - hb), 2) if hb > 0 else None,
-                "soft5_sent": bool(meta.get("soft5_sent")),
-                "soft10_sent": bool(meta.get("soft10_sent")),
+                    "soft_sent": bool(meta.get("soft_sent")),
                 "task": task,
             }
         )
@@ -1093,8 +1092,7 @@ def assign_tasks() -> None:
                 "worker_id": w.wid,
                 "started_at": now_ts,
                 "last_heartbeat_at": now_ts,
-                "soft5_sent": False,
-                "soft10_sent": False,
+                "soft_sent": False,
                 "attempt": int(task.get("_attempt") or 1),
             }
             st = load_state()
