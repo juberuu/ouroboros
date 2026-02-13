@@ -1056,81 +1056,6 @@ class OuroborosAgent:
         )
         return out
 
-    def _compose_natural_notice(self, technical_text: str) -> Tuple[str, Dict[str, Any]]:
-        if not self._env_bool("OUROBOROS_LLM_NOTICE_ENABLED", True):
-            return str(technical_text or "").strip(), {}
-        seed = str(technical_text or "").strip()
-        if not seed:
-            return "", {}
-        usage: Dict[str, Any] = {}
-        try:
-            client = self._openrouter_client()
-            prof = self._model_profile("notice")
-            resp = client.chat.completions.create(
-                model=prof["model"],
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "Rewrite the technical status note into one concise natural Russian sentence "
-                            "for the owner. Keep all key facts (model, reasoning effort, reason)."
-                        ),
-                    },
-                    {"role": "user", "content": seed},
-                ],
-                max_tokens=120,
-                extra_body={"reasoning": {"effort": prof["effort"], "exclude": True}},
-            )
-            dump = resp.model_dump()
-            usage = dump.get("usage", {}) or {}
-            content = str((((dump.get("choices") or [{}])[0].get("message") or {}).get("content")) or "").strip()
-            if content:
-                return content, usage
-        except Exception:
-            pass
-        return seed, usage
-
-    def _emit_model_notice(
-        self,
-        profile: str,
-        model: str,
-        effort: str,
-        reason: str,
-        previous_model: str = "",
-        previous_effort: str = "",
-    ) -> None:
-        tech = (
-            f"Перехожу на профиль {profile}: модель={model}, reasoning={effort}. Причина: {reason}. "
-            + (f"Ранее было: модель={previous_model}, reasoning={previous_effort}." if previous_model or previous_effort else "")
-        ).strip()
-        text, usage = self._compose_natural_notice(tech)
-        self._emit_progress(text)
-        append_jsonl(
-            self.env.drive_path("logs") / "events.jsonl",
-            {
-                "ts": utc_now_iso(),
-                "type": "model_profile_notice",
-                "profile": profile,
-                "model": model,
-                "reasoning_effort": effort,
-                "reason": reason,
-                "previous_model": previous_model,
-                "previous_effort": previous_effort,
-                "text": truncate_for_log(text, 600),
-            },
-        )
-        if usage:
-            self._pending_events.append(
-                {
-                    "type": "llm_usage",
-                    "task_id": None,
-                    "provider": "openrouter",
-                    "usage": usage,
-                    "source": "model_notice",
-                    "ts": utc_now_iso(),
-                }
-            )
-
     def _emit_task_heartbeat(self, task_id: str, phase: str) -> None:
         if self._event_queue is None:
             return
@@ -1203,136 +1128,6 @@ class OuroborosAgent:
         )
 
     # ---------- deterministic tool narration ----------
-
-    @staticmethod
-    def _tool_action_hint(fn_name: str, args: Dict[str, Any]) -> str:
-        """Generate a short human-readable hint of what we're doing.
-
-        Used only as a fallback when the model didn't provide progress text
-        alongside tool calls.
-        """
-        try:
-            name = str(fn_name or "?")
-            a = args or {}
-
-            if name in ("repo_read", "drive_read"):
-                path = str(a.get("path") or "").strip()
-                where = "(Drive)" if name == "drive_read" else "(repo)"
-                return f"Читаю файл {where}: {path or '?'}"
-
-            if name in ("repo_list", "drive_list"):
-                d = str(a.get("dir") or "").strip()
-                where = "(Drive)" if name == "drive_list" else "(repo)"
-                return f"Сканирую папку {where}: {d or '.'}"
-
-            if name == "drive_write":
-                path = str(a.get("path") or "").strip()
-                mode = str(a.get("mode") or "").strip()
-                mode_txt = f" ({mode})" if mode else ""
-                return f"Пишу файл (Drive){mode_txt}: {path or '?'}"
-
-            if name == "run_shell":
-                cmd = a.get("cmd")
-                if isinstance(cmd, list):
-                    cmd_s = " ".join(str(x) for x in cmd).strip()
-                else:
-                    cmd_s = str(cmd or "").strip()
-                if len(cmd_s) > 120:
-                    cmd_s = cmd_s[:117].rstrip() + "..."
-                return f"Запускаю команду: {cmd_s or '?'}"
-
-            if name == "web_search":
-                q = str(a.get("query") or "").strip()
-                if len(q) > 120:
-                    q = q[:117].rstrip() + "..."
-                return f"Запускаю web_search: {q or '?'}"
-
-            if name == "git_status":
-                return "Проверяю git status"
-            if name == "git_diff":
-                return "Смотрю git diff"
-
-            if name == "repo_commit_push":
-                msg = str(a.get("commit_message") or "").strip()
-                if msg:
-                    if len(msg) > 120:
-                        msg = msg[:117].rstrip() + "..."
-                    return f"Коммичу и пушу изменения: {msg}"
-                return "Коммичу и пушу изменения"
-
-            if name == "repo_write_commit":
-                path = str(a.get("path") or "").strip()
-                msg = str(a.get("commit_message") or "").strip()
-                if msg:
-                    return f"Записываю файл и коммичу: {path or '?'} ({msg[:80]})"
-                return f"Записываю файл и коммичу: {path or '?'}"
-
-            if name == "request_restart":
-                return "Запрашиваю перезапуск рантайма"
-
-            if name == "claude_code_edit":
-                instr = str(a.get("instruction") or "").strip()
-                if len(instr) > 120:
-                    instr = instr[:117].rstrip() + "..."
-                return f"Запускаю Claude Code CLI: {instr or 'edit'}"
-
-            if name == "telegram_send_voice":
-                return "Отправляю voice note в Telegram"
-
-            if name == "telegram_send_photo":
-                return "Отправляю фото в Telegram"
-
-            if name == "telegram_generate_and_send_image":
-                p = str(a.get("prompt") or "").strip()
-                if len(p) > 80:
-                    p = p[:77].rstrip() + "..."
-                return f"Генерирую и отправляю картинку: {p or '?'}"
-
-            # generic fallback
-            return f"Выполняю инструмент: {name}"
-        except Exception:
-            return f"Выполняю инструмент: {fn_name}"
-
-    def _fallback_progress_from_tool_calls(self, tool_calls: List[Dict[str, Any]]) -> str:
-        hints: List[str] = []
-        for tc in tool_calls or []:
-            try:
-                fn = str(((tc.get("function") or {}).get("name")) or "?")
-                args_raw = ((tc.get("function") or {}).get("arguments")) or "{}"
-                try:
-                    args = json.loads(args_raw) if isinstance(args_raw, str) else (args_raw or {})
-                except Exception:
-                    args = {}
-                hints.append(self._tool_action_hint(fn, args if isinstance(args, dict) else {}))
-            except Exception:
-                continue
-
-        hints = self._dedupe_keep_order(hints, max_items=6)
-        if not hints:
-            return "Выполняю инструменты…"
-        if len(hints) == 1:
-            return hints[0]
-        head = "; ".join(hints[:3])
-        tail_n = max(0, len(hints) - 3)
-        if tail_n:
-            return f"Делаю: {head}; +{tail_n}"
-        return f"Делаю: {head}"
-
-    def _narrate_tool(self, fn_name: str, args: Dict[str, Any], result: str, success: bool) -> str:
-        """Compact deterministic narration used for errors/fallback only."""
-        try:
-            is_error = (not success) or str(result).startswith("⚠️")
-            if not is_error:
-                return f"✅ {fn_name}"
-
-            first_line = str(result or "").splitlines()[0].strip()
-            if len(first_line) > 180:
-                first_line = first_line[:177] + "..."
-            if not first_line:
-                first_line = "ошибка"
-            return f"⚠️ {fn_name}: {first_line}"
-        except Exception:
-            return f"⚠️ {fn_name}: error"
 
     def _safe_read(self, path: pathlib.Path, fallback: str = "") -> str:
         """Read a text file, returning *fallback* on any error (file missing, permission, encoding, etc.)."""
@@ -1736,12 +1531,7 @@ class OuroborosAgent:
         profile = self._model_profile("deep_review")
         model = profile["model"]
         effort = profile["effort"]
-        self._emit_model_notice(
-            profile="deep_review",
-            model=model,
-            effort=effort,
-            reason="запущен deep system review",
-        )
+        # Профиль логируется, но не отправляется отдельным сообщением (LLM сама опишет)
 
         sections, stats = self._collect_review_sections()
         chunk_token_cap = max(20_000, min(self._env_int("OUROBOROS_REVIEW_CHUNK_TOKEN_CAP", 140_000), 220_000))
@@ -3123,13 +2913,6 @@ class OuroborosAgent:
         active_model = profile_cfg["model"]
         active_effort = profile_cfg["effort"]
 
-        self._emit_model_notice(
-            profile=active_profile,
-            model=active_model,
-            effort=active_effort,
-            reason="старт задачи",
-        )
-
         tool_name_to_fn = {
             "repo_read": self._tool_repo_read,
             "repo_list": self._tool_repo_list,
@@ -3170,14 +2953,6 @@ class OuroborosAgent:
                 return
             prev_effort = active_effort
             active_effort = target_effort
-            self._emit_model_notice(
-                profile=active_profile,
-                model=active_model,
-                effort=active_effort,
-                reason=reason,
-                previous_model=active_model,
-                previous_effort=prev_effort,
-            )
 
         def _switch_to_code_profile(reason: str) -> None:
             nonlocal active_model, active_effort, active_profile
@@ -3186,19 +2961,9 @@ class OuroborosAgent:
             new_effort = code_cfg["effort"]
             if new_model == active_model and self._reasoning_rank(new_effort) <= self._reasoning_rank(active_effort):
                 return
-            prev_model = active_model
-            prev_effort = active_effort
             active_profile = "code_task"
             active_model = new_model
             active_effort = new_effort if self._reasoning_rank(new_effort) >= self._reasoning_rank(active_effort) else active_effort
-            self._emit_model_notice(
-                profile=active_profile,
-                model=active_model,
-                effort=active_effort,
-                reason=reason,
-                previous_model=prev_model,
-                previous_effort=prev_effort,
-            )
 
         round_idx = 0
         while True:
@@ -3297,15 +3062,15 @@ class OuroborosAgent:
                         max_items=20,
                     )
 
-                deterministic_errors: List[str] = []
                 saw_code_tool = False
+                error_count = 0
 
                 for tc in tool_calls:
                     fn_name = tc["function"]["name"]
                     if fn_name in code_tools:
                         saw_code_tool = True
 
-                    # ---- Parse arguments safely ----
+                    # ---- Парсим аргументы ----
                     try:
                         args = json.loads(tc["function"]["arguments"] or "{}")
                     except (json.JSONDecodeError, ValueError) as e:
@@ -3314,50 +3079,24 @@ class OuroborosAgent:
                             f"Raw: {truncate_for_log(tc['function'].get('arguments', ''), 500)}\n"
                             f"Retry with valid JSON arguments."
                         )
-                        append_jsonl(
-                            drive_logs / "tools.jsonl",
-                            {"ts": utc_now_iso(), "tool": fn_name, "error": "json_parse", "detail": repr(e)},
-                        )
                         messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
-                        llm_trace["tool_calls"].append(
-                            {
-                                "tool": fn_name,
-                                "args": {},
-                                "result": truncate_for_log(result, 600),
-                                "is_error": True,
-                            }
-                        )
-                        deterministic_errors.append(self._narrate_tool(fn_name, {}, result, False))
+                        llm_trace["tool_calls"].append({"tool": fn_name, "args": {}, "result": truncate_for_log(result, 600), "is_error": True})
+                        error_count += 1
                         continue
 
-                    # ---- Sanitize args for logging ----
                     args_for_log = _sanitize_tool_args_for_log(
                         fn_name, args if isinstance(args, dict) else {}, drive_logs, tool_call_id=str(tc.get('id', ''))
                     )
 
-                    # ---- Check tool exists ----
+                    # ---- Проверяем существование ----
                     if fn_name not in tool_name_to_fn:
-                        result = (
-                            f"⚠️ UNKNOWN_TOOL: '{fn_name}' does not exist.\n"
-                            f"Available: {', '.join(sorted(tool_name_to_fn.keys()))}"
-                        )
-                        append_jsonl(
-                            drive_logs / "tools.jsonl",
-                            {"ts": utc_now_iso(), "tool": fn_name, "error": "unknown_tool"},
-                        )
+                        result = f"⚠️ UNKNOWN_TOOL: '{fn_name}'. Available: {', '.join(sorted(tool_name_to_fn.keys()))}"
                         messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
-                        llm_trace["tool_calls"].append(
-                            {
-                                "tool": fn_name,
-                                "args": _safe_args(args_for_log),
-                                "result": truncate_for_log(result, 600),
-                                "is_error": True,
-                            }
-                        )
-                        deterministic_errors.append(self._narrate_tool(fn_name, args, result, False))
+                        llm_trace["tool_calls"].append({"tool": fn_name, "args": _safe_args(args_for_log), "result": result, "is_error": True})
+                        error_count += 1
                         continue
 
-                    # ---- Execute tool safely ----
+                    # ---- Выполняем ----
                     tool_ok = True
                     try:
                         result = tool_name_to_fn[fn_name](**args)
@@ -3366,75 +3105,34 @@ class OuroborosAgent:
                         tb = traceback.format_exc()
                         result = (
                             f"⚠️ TOOL_ERROR ({fn_name}): {type(e).__name__}: {e}\n\n"
-                            f"Traceback (last 2000 chars):\n{truncate_for_log(tb, 2000)}\n\n"
-                            f"The tool raised an exception. Analyze the error and try a different approach."
+                            f"Traceback:\n{truncate_for_log(tb, 2000)}\n\n"
+                            f"Analyze the error and try a different approach."
                         )
-                        append_jsonl(
-                            drive_logs / "events.jsonl",
-                            {
-                                "ts": utc_now_iso(),
-                                "type": "tool_error",
-                                "tool": fn_name,
-                                "args": args_for_log,
-                                "error": repr(e),
-                                "traceback": truncate_for_log(tb, 2000),
-                            },
-                        )
+                        append_jsonl(drive_logs / "events.jsonl", {
+                            "ts": utc_now_iso(), "type": "tool_error", "tool": fn_name,
+                            "args": args_for_log, "error": repr(e),
+                        })
 
-                    append_jsonl(
-                        drive_logs / "tools.jsonl",
-                        {
-                            "ts": utc_now_iso(),
-                            "tool": fn_name,
-                            "args": args_for_log,
-                            "result_preview": truncate_for_log(result, 2000),
-                        },
-                    )
+                    append_jsonl(drive_logs / "tools.jsonl", {
+                        "ts": utc_now_iso(), "tool": fn_name, "args": args_for_log,
+                        "result_preview": truncate_for_log(result, 2000),
+                    })
                     messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
-                    llm_trace["tool_calls"].append(
-                        {
-                            "tool": fn_name,
-                            "args": _safe_args(args_for_log),
-                            "result": truncate_for_log(result, 700),
-                            "is_error": (not tool_ok) or str(result).startswith("⚠️"),
-                        }
-                    )
-                    if (not tool_ok) or str(result).startswith("⚠️"):
-                        deterministic_errors.append(self._narrate_tool(fn_name, args, result, tool_ok))
+                    is_error = (not tool_ok) or str(result).startswith("⚠️")
+                    llm_trace["tool_calls"].append({
+                        "tool": fn_name, "args": _safe_args(args_for_log),
+                        "result": truncate_for_log(result, 700), "is_error": is_error,
+                    })
+                    if is_error:
+                        error_count += 1
 
-                # Prefer model-written progress. Deterministic messages are fallback/errors only.
-                if deterministic_errors:
-                    compact_errors = deterministic_errors[:4]
-                    narration_text = "Инструментальные ошибки:\n" + "\n".join(compact_errors)
-                    self._emit_progress(narration_text)
-                    append_jsonl(
-                        drive_logs / "narration.jsonl",
-                        {
-                            "ts": utc_now_iso(),
-                            "round": round_idx,
-                            "mode": "deterministic_errors",
-                            "narration": compact_errors,
-                        },
-                    )
-                elif not has_model_progress:
-                    fallback_text = self._fallback_progress_from_tool_calls(tool_calls)
-                    self._emit_progress(fallback_text)
-                    append_jsonl(
-                        drive_logs / "narration.jsonl",
-                        {
-                            "ts": utc_now_iso(),
-                            "round": round_idx,
-                            "mode": "deterministic_fallback_descriptive",
-                            "narration": [fallback_text],
-                        },
-                    )
-
+                # LLM сама опишет ошибки в следующем content (LLM-first, без механических сообщений)
                 if saw_code_tool and active_profile not in ("code_task", "evolution_task", "deep_review"):
                     _switch_to_code_profile(reason="обнаружены кодовые действия в ходе решения")
-                if len(deterministic_errors) >= 2:
-                    _maybe_raise_effort("high", reason="много инструментальных ошибок, усиливаю reasoning")
-                if len(deterministic_errors) >= 4:
-                    _maybe_raise_effort("xhigh", reason="повторные ошибки, требуется более глубокий reasoning")
+                if error_count >= 2:
+                    _maybe_raise_effort("high", reason="много ошибок")
+                if error_count >= 4:
+                    _maybe_raise_effort("xhigh", reason="повторные ошибки")
 
                 continue
 
