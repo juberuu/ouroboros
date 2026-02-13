@@ -589,14 +589,13 @@ class OuroborosAgent:
         }
         return dict(profiles.get(profile, profiles["default_task"]))
 
-    def _select_task_profile(self, task_type: str, task_text: str) -> str:
+    def _select_task_profile(self, task_type: str, task_text: str = "") -> str:
+        """Выбор профиля по типу задачи. Без keyword routing (LLM-first)."""
         tt = str(task_type or "").strip().lower()
         if tt == "review":
             return "deep_review"
         if tt == "evolution":
             return "evolution_task"
-        if self._is_code_intent_text(task_text):
-            return "code_task"
         return "default_task"
 
     @staticmethod
@@ -1459,12 +1458,6 @@ class OuroborosAgent:
                     p = p[:77].rstrip() + "..."
                 return f"Генерирую и отправляю картинку: {p or '?'}"
 
-            if name == "telegram_send_video":
-                return "Отправляю видео в Telegram"
-
-            if name == "telegram_generate_and_send_video":
-                return "Генерирую и отправляю видео"
-
             # generic fallback
             return f"Выполняю инструмент: {name}"
         except Exception:
@@ -1582,7 +1575,7 @@ class OuroborosAgent:
         if not entries:
             return ""
         lines = []
-        for e in entries[-8:]:
+        for e in entries[-100:]:
             # Historical logs use direction in {"in","out"}; be permissive.
             dir_raw = str(e.get("direction") or "").lower()
             direction = "→" if dir_raw in ("out", "outgoing") else "←"
@@ -2151,8 +2144,8 @@ class OuroborosAgent:
                 "You are Ouroboros. Your base prompt could not be loaded. "
                 "Analyze available context, help the owner, and report the loading issue."
             )
-            base_prompt = self._safe_read(self.env.repo_path("prompts/BASE.md"), fallback=_fallback_prompt)
-            world_md = self._safe_read(self.env.repo_path("WORLD.md"))
+            base_prompt = self._safe_read(self.env.repo_path("prompts/SYSTEM.md"), fallback=_fallback_prompt)
+            world_md = self._safe_read(self.env.repo_path("BIBLE.md"))
             readme_md = self._safe_read(self.env.repo_path("README.md"))
             notes_md = self._safe_read(self.env.drive_path("NOTES.md"))
             state_json = self._safe_read(self.env.drive_path("state/state.json"), fallback="{}")
@@ -2271,7 +2264,7 @@ class OuroborosAgent:
 
             messages: List[Dict[str, Any]] = [
                 {"role": "system", "content": base_prompt},
-                {"role": "system", "content": "## WORLD.md\n\n" + world_ctx},
+                {"role": "system", "content": "## BIBLE.md\n\n" + world_ctx},
                 {"role": "system", "content": "## README.md\n\n" + readme_ctx},
                 {"role": "system", "content": "## Drive state (state/state.json)\n\n" + state_ctx},
                 {"role": "system", "content": "## NOTES.md (Drive)\n\n" + notes_ctx},
@@ -2942,58 +2935,6 @@ class OuroborosAgent:
             )
             return False, "error"
 
-    def _telegram_send_video(
-        self,
-        chat_id: int,
-        video_bytes: bytes,
-        caption: str = "",
-        filename: str = "video.mp4",
-        mime: str = "video/mp4",
-    ) -> tuple[bool, str]:
-        """Send a Telegram video via sendVideo.
-
-        Returns: (ok, status)
-          - status: "ok" | "no_token" | "error"
-        """
-        token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-        if not token:
-            return False, "no_token"
-
-        try:
-            import requests  # lazy import
-        except Exception as e:
-            append_jsonl(
-                self.env.drive_path("logs") / "events.jsonl",
-                {
-                    "ts": utc_now_iso(),
-                    "type": "telegram_api_error",
-                    "method": "sendVideo",
-                    "error": f"requests_import: {repr(e)}",
-                },
-            )
-            return False, "error"
-
-        url = f"https://api.telegram.org/bot{token}/sendVideo"
-        data: Dict[str, Any] = {"chat_id": str(chat_id)}
-        if caption:
-            data["caption"] = caption
-        files = {"video": (filename or "video.mp4", video_bytes, mime or "video/mp4")}
-
-        try:
-            r = requests.post(url, data=data, files=files, timeout=120)
-            try:
-                j = r.json()
-                ok = bool(j.get("ok"))
-            except Exception:
-                ok = bool(r.ok)
-            return (ok, "ok" if ok else "error")
-        except Exception as e:
-            append_jsonl(
-                self.env.drive_path("logs") / "events.jsonl",
-                {"ts": utc_now_iso(), "type": "telegram_api_error", "method": "sendVideo", "error": repr(e)},
-            )
-            return False, "error"
-
     def _tts_to_ogg_opus(self, text: str, voice: str = "kal") -> bytes:
         """Local TTS: ffmpeg flite -> OGG/OPUS bytes.
 
@@ -3373,19 +3314,14 @@ class OuroborosAgent:
             "claude_code_edit": self._tool_claude_code_edit,
             "web_search": self._tool_web_search,
             "request_restart": self._tool_request_restart,
-            "request_stable_promotion": self._tool_request_stable_promotion,
+            "promote_to_stable": self._tool_promote_to_stable,
             "schedule_task": self._tool_schedule_task,
             "cancel_task": self._tool_cancel_task,
-            "reindex_request": self._tool_reindex_request,
-            "telegram_send_voice": self._tool_telegram_send_voice,
-            "telegram_send_photo": self._tool_telegram_send_photo,
-            "telegram_generate_and_send_image": self._tool_telegram_generate_and_send_image,
-            "telegram_send_video": self._tool_telegram_send_video,
-            "telegram_generate_and_send_video": self._tool_telegram_generate_and_send_video,
+            "chat_history": self._tool_chat_history,
         }
         code_tools = {"repo_write_commit", "repo_commit_push", "git_status", "git_diff", "run_shell", "claude_code_edit"}
 
-        max_tool_rounds = int(os.environ.get("OUROBOROS_MAX_TOOL_ROUNDS", "20"))
+        soft_check_interval = 15  # LLM soft-check каждые N раундов (по BIBLE: LLM-first)
         llm_max_retries = int(os.environ.get("OUROBOROS_LLM_MAX_RETRIES", "3"))
         last_usage: Dict[str, Any] = {}
         llm_trace: Dict[str, Any] = {"assistant_notes": [], "tool_calls": []}
@@ -3433,11 +3369,25 @@ class OuroborosAgent:
                 previous_effort=prev_effort,
             )
 
-        for round_idx in range(max_tool_rounds):
-            # Long-running task escalation by round count.
-            if round_idx >= 4:
+        round_idx = 0
+        while True:
+            round_idx += 1
+
+            # Soft LLM-check каждые N раундов (Принцип 1: LLM-first)
+            if round_idx > 1 and round_idx % soft_check_interval == 0:
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        f"[Self-check] Ты выполнил {round_idx} раундов. "
+                        "Оцени свой прогресс: движешься ли к цели? "
+                        "Если застрял — смени подход. Если нерешаемо — сообщи владельцу."
+                    ),
+                })
+
+            # Эскалация reasoning effort при длинных задачах
+            if round_idx >= 5:
                 _maybe_raise_effort("high", reason="задача оказалась длиннее обычной")
-            if round_idx >= 8:
+            if round_idx >= 10:
                 _maybe_raise_effort("xhigh", reason="длительный multi-round reasoning")
 
             # ---- LLM call with retry on transient errors ----
@@ -3664,24 +3614,8 @@ class OuroborosAgent:
                 )
             return (content or ""), last_usage, llm_trace
 
-        # Tool rounds limit exceeded: log event and return informative message
-        tool_calls = llm_trace.get("tool_calls", [])
-        last_tools = [{"tool": tc.get("tool"), "is_error": tc.get("is_error")} for tc in tool_calls[-5:]]
-        append_jsonl(
-            drive_logs / "events.jsonl",
-            {
-                "ts": utc_now_iso(),
-                "type": "tool_rounds_exceeded",
-                "max_tool_rounds": max_tool_rounds,
-                "rounds_executed": max_tool_rounds,
-                "last_tools": last_tools,
-                "profile": active_profile,
-                "model": active_model,
-                "reasoning_effort": active_effort,
-                "taskless_ok": True,
-            },
-        )
-        return _format_tool_rounds_exceeded_message(max_tool_rounds, llm_trace), last_usage, llm_trace
+        # Цикл завершён (LLM вернула ответ без tool calls)
+        return "", last_usage, llm_trace
 
     def _tools_schema(self) -> List[Dict[str, Any]]:
         return [
@@ -3818,108 +3752,29 @@ class OuroborosAgent:
             },
             {
                 "type": "function",
-                "function": {"name": "request_stable_promotion", "description": "Ask owner approval to promote current ouroboros HEAD to ouroboros-stable.", "parameters": {"type": "object", "properties": {"reason": {"type": "string"}}, "required": ["reason"]}},
+                "function": {"name": "promote_to_stable", "description": "Промоутить ouroboros → ouroboros-stable. Вызывай когда считаешь код стабильным.", "parameters": {"type": "object", "properties": {"reason": {"type": "string"}}, "required": ["reason"]}},
             },
             {
                 "type": "function",
-                "function": {"name": "schedule_task", "description": "Schedule a background task (queued by supervisor).", "parameters": {"type": "object", "properties": {"description": {"type": "string"}}, "required": ["description"]}},
+                "function": {"name": "schedule_task", "description": "Запланировать фоновую задачу.", "parameters": {"type": "object", "properties": {"description": {"type": "string"}}, "required": ["description"]}},
             },
             {
                 "type": "function",
-                "function": {"name": "cancel_task", "description": "Request supervisor to cancel a task by id.", "parameters": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]}},
-            },
-            {
-                "type": "function",
-                "function": {"name": "reindex_request", "description": "Request owner approval to run full reindexing of summaries.", "parameters": {"type": "object", "properties": {"reason": {"type": "string"}}, "required": ["reason"]}},
+                "function": {"name": "cancel_task", "description": "Отменить задачу по ID.", "parameters": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]}},
             },
             {
                 "type": "function",
                 "function": {
-                    "name": "telegram_send_voice",
-                    "description": "Send a Telegram voice note (OGG/OPUS) generated locally via ffmpeg+flite TTS.",
+                    "name": "chat_history",
+                    "description": "Подтянуть произвольное количество сообщений из истории чата. Поддерживает поиск.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "chat_id": {"type": "integer"},
-                            "text": {"type": "string"},
-                            "caption": {"type": "string"},
-                            "voice": {"type": "string"},
-                            "tts": {"type": "string", "description": "'local' (ffmpeg+flite) or 'openai' (OpenAI /v1/audio/speech)"},
-                            "openai_model": {"type": "string"},
-                            "openai_voice": {"type": "string"},
-                            "openai_format": {"type": "string"}
+                            "count": {"type": "integer", "default": 100, "description": "Сколько сообщений"},
+                            "offset": {"type": "integer", "default": 0, "description": "Пропустить N от конца"},
+                            "search": {"type": "string", "default": "", "description": "Фильтр по тексту"},
                         },
-                        "required": ["chat_id", "text"]
-                    }
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "telegram_send_photo",
-                    "description": "Send a Telegram photo from a local file path (PNG/JPEG).",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "chat_id": {"type": "integer"},
-                            "path": {"type": "string", "description": "Local filesystem path to image (e.g., /tmp/x.png or Drive-mounted path)."},
-                            "caption": {"type": "string"},
-                        },
-                        "required": ["chat_id", "path"],
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "telegram_generate_and_send_image",
-                    "description": "Generate an image via OpenRouter (CLI curl /responses) and send it to Telegram as a photo.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "chat_id": {"type": "integer"},
-                            "prompt": {"type": "string"},
-                            "caption": {"type": "string"},
-                            "model": {"type": "string", "description": "OpenRouter image model", "default": "openai/gpt-5-image"},
-                            "size": {"type": "string", "description": "e.g. 1024x1024", "default": "1024x1024"},
-                        },
-                        "required": ["chat_id", "prompt"],
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "telegram_send_video",
-                    "description": "Send a Telegram video from a local file path (MP4/MPEG).",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "chat_id": {"type": "integer"},
-                            "path": {"type": "string", "description": "Local filesystem path to video (e.g., /tmp/x.mp4)."},
-                            "caption": {"type": "string"},
-                        },
-                        "required": ["chat_id", "path"],
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "telegram_generate_and_send_video",
-                    "description": "Generate a short video via frame-based OpenRouter image generation + ffmpeg assembly, then send to Telegram.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "chat_id": {"type": "integer"},
-                            "prompt": {"type": "string"},
-                            "caption": {"type": "string"},
-                            "model": {"type": "string", "description": "OpenRouter image model", "default": "openai/gpt-5-image"},
-                            "size": {"type": "string", "description": "e.g. 1024x1024", "default": "1024x1024"},
-                            "num_frames": {"type": "integer", "default": 8},
-                            "fps": {"type": "integer", "default": 4},
-                        },
-                        "required": ["chat_id", "prompt"],
+                        "required": [],
                     },
                 },
             },
@@ -4080,6 +3935,12 @@ class OuroborosAgent:
                 run(["git", "commit", "-m", commit_message], cwd=self.env.repo_dir)
             except Exception as e:
                 return f"⚠️ GIT_ERROR (commit): {e}"
+
+            # Pull --rebase перед push (предотвращает конфликты между воркерами)
+            try:
+                run(["git", "pull", "--rebase", "origin", self.env.branch_dev], cwd=self.env.repo_dir)
+            except Exception:
+                pass  # Если не удалось — попробуем push всё равно
 
             try:
                 run(["git", "push", "origin", self.env.branch_dev], cwd=self.env.repo_dir)
@@ -4475,9 +4336,10 @@ class OuroborosAgent:
         self._last_push_succeeded = False
         return f"Restart requested: {reason}"
 
-    def _tool_request_stable_promotion(self, reason: str) -> str:
-        self._pending_events.append({"type": "stable_promotion_request", "reason": reason, "ts": utc_now_iso()})
-        return f"Stable promotion requested (needs owner approval): {reason}"
+    def _tool_promote_to_stable(self, reason: str) -> str:
+        """Промоут ouroboros → ouroboros-stable. Уроборос сам решает когда (LLM-first)."""
+        self._pending_events.append({"type": "promote_to_stable", "reason": reason, "ts": utc_now_iso()})
+        return f"Promote to stable requested: {reason}"
 
     def _tool_schedule_task(self, description: str) -> str:
         self._pending_events.append({"type": "schedule_task", "description": description, "ts": utc_now_iso()})
@@ -4487,9 +4349,11 @@ class OuroborosAgent:
         self._pending_events.append({"type": "cancel_task", "task_id": task_id, "ts": utc_now_iso()})
         return f"Cancel requested for task_id={task_id}"
 
-    def _tool_reindex_request(self, reason: str) -> str:
-        self._pending_events.append({"type": "reindex_request", "reason": reason, "ts": utc_now_iso()})
-        return f"Reindex requested (needs owner approval): {reason}"
+    def _tool_chat_history(self, count: int = 100, offset: int = 0, search: str = "") -> str:
+        """Подтянуть произвольное количество сообщений из chat.jsonl."""
+        from ouroboros.memory import Memory
+        mem = Memory(drive_root=self.env.drive_root, repo_dir=self.env.repo_dir)
+        return mem.chat_history(count=count, offset=offset, search=search)
 
     def _tool_web_search(self, query: str, allowed_domains: Optional[List[str]] = None) -> str:
         api_key = os.environ.get("OPENAI_API_KEY", "")
@@ -4671,155 +4535,6 @@ class OuroborosAgent:
             },
         )
         return "OK: image generated and sent" if ok else f"⚠️ TELEGRAM_SEND_PHOTO_FAILED: {status}"
-
-    def _tool_telegram_send_video(self, chat_id: int, path: str, caption: str = "") -> str:
-        """Tool: send a local video file to Telegram as a video."""
-        p = pathlib.Path(str(path or "").strip())
-        if not p.exists() or not p.is_file():
-            return f"⚠️ FILE_NOT_FOUND: {p}"
-        data = p.read_bytes()
-        # Best-effort mime by extension
-        ext = p.suffix.lower().lstrip(".")
-        mime = "video/mp4" if ext in ("mp4",) else ("video/mpeg" if ext in ("mpeg", "mpg") else "application/octet-stream")
-
-        ok, status = self._telegram_send_video(int(chat_id), data, caption=caption or "", filename=p.name, mime=mime)
-        append_jsonl(
-            self.env.drive_path("logs") / "events.jsonl",
-            {
-                "ts": utc_now_iso(),
-                "type": "telegram_send_video",
-                "chat_id": int(chat_id),
-                "ok": bool(ok),
-                "status": status,
-                "bytes": len(data),
-                "path": str(p),
-            },
-        )
-        return "OK: video sent" if ok else f"⚠️ TELEGRAM_SEND_VIDEO_FAILED: {status}"
-
-    def _tool_telegram_generate_and_send_video(
-        self,
-        chat_id: int,
-        prompt: str,
-        caption: str = "",
-        model: str = "openai/gpt-5-image",
-        size: str = "1024x1024",
-        num_frames: int = 8,
-        fps: int = 4,
-    ) -> str:
-        """Tool: generate video via frame-based OpenRouter image generation + ffmpeg assembly, then send to Telegram."""
-        # Validate inputs
-        prompt = (prompt or "").strip()
-        if not prompt:
-            return "⚠️ PROMPT_EMPTY"
-
-        num_frames = max(2, min(16, int(num_frames)))
-        fps = max(1, min(12, int(fps)))
-
-        # Create temp dir
-        import tempfile
-        import shutil
-
-        h = sha256_text(prompt)[:10]
-        ts = int(time.time())
-        tmp_dir = pathlib.Path(f"/tmp/video_{h}_{ts}")
-        tmp_dir.mkdir(parents=True, exist_ok=True)
-
-        try:
-            # Generate frames
-            for i in range(num_frames):
-                frame_prompt = f"{prompt} (frame {i+1}/{num_frames}, maintain consistent scene/subject/camera angle throughout sequence)"
-                try:
-                    img_bytes = self._openrouter_generate_image_via_curl(
-                        prompt=frame_prompt,
-                        model=model or "openai/gpt-5-image",
-                        image_config={"size": (size or "1024x1024")},
-                        timeout_sec=180,
-                    )
-                except Exception as e:
-                    append_jsonl(
-                        self.env.drive_path("logs") / "events.jsonl",
-                        {
-                            "ts": utc_now_iso(),
-                            "type": "openrouter_image_error",
-                            "model": model,
-                            "frame": i,
-                            "error": repr(e),
-                        },
-                    )
-                    return f"⚠️ OPENROUTER_IMAGE_ERROR (frame {i}): {type(e).__name__}: {e}"
-
-                frame_path = tmp_dir / f"frame_{i:03d}.png"
-                frame_path.write_bytes(img_bytes)
-
-            # Assemble video with ffmpeg
-            mp4_path = tmp_dir / "output.mp4"
-            ffmpeg_cmd = [
-                "ffmpeg",
-                "-y",
-                "-v", "error",
-                "-framerate", str(fps),
-                "-i", str(tmp_dir / "frame_%03d.png"),
-                "-vf", "scale='if(mod(iw,2),iw+1,iw)':'if(mod(ih,2),ih+1,ih)',format=yuv420p",
-                "-c:v", "libx264",
-                "-movflags", "+faststart",
-                str(mp4_path),
-            ]
-
-            result = subprocess.run(
-                ffmpeg_cmd,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-
-            if result.returncode != 0:
-                stderr = result.stderr.strip()
-                append_jsonl(
-                    self.env.drive_path("logs") / "events.jsonl",
-                    {
-                        "ts": utc_now_iso(),
-                        "type": "ffmpeg_error",
-                        "stderr": stderr,
-                        "returncode": result.returncode,
-                    },
-                )
-                return f"⚠️ FFMPEG_ERROR: {stderr[:200]}"
-
-            # Send video
-            video_bytes = mp4_path.read_bytes()
-            ok, status = self._telegram_send_video(
-                int(chat_id),
-                video_bytes,
-                caption=caption or "",
-                filename="ouroboros.mp4",
-                mime="video/mp4",
-            )
-
-            append_jsonl(
-                self.env.drive_path("logs") / "events.jsonl",
-                {
-                    "ts": utc_now_iso(),
-                    "type": "telegram_generate_and_send_video",
-                    "chat_id": int(chat_id),
-                    "ok": bool(ok),
-                    "status": status,
-                    "bytes": len(video_bytes),
-                    "model": model,
-                    "size": size,
-                    "num_frames": num_frames,
-                    "fps": fps,
-                },
-            )
-
-            return "OK: video generated and sent" if ok else f"⚠️ TELEGRAM_SEND_VIDEO_FAILED: {status}"
-
-        finally:
-            # Cleanup temp dir (best-effort)
-            try:
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-            except Exception:
-                pass
 
 def make_agent(repo_dir: str, drive_root: str, event_queue: Any = None) -> OuroborosAgent:
     env = Env(repo_dir=pathlib.Path(repo_dir), drive_root=pathlib.Path(drive_root))

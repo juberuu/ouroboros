@@ -216,14 +216,6 @@ MAX_WORKERS = int(get_cfg("OUROBOROS_MAX_WORKERS", default="5", allow_legacy_sec
 MODEL_MAIN = get_cfg("OUROBOROS_MODEL", default="openai/gpt-5.2", allow_legacy_secret=True)
 MODEL_CODE = get_cfg("OUROBOROS_MODEL_CODE", default="openai/gpt-5.2-codex", allow_legacy_secret=True)
 MODEL_REVIEW = get_cfg("OUROBOROS_MODEL_REVIEW", default="openai/gpt-5.2", allow_legacy_secret=True)
-MODEL_ROUTER = get_cfg("OUROBOROS_ROUTER_MODEL", default=str(MODEL_MAIN or "openai/gpt-5.2"), allow_legacy_secret=True)
-ROUTER_REASONING_EFFORT = str(get_cfg("OUROBOROS_ROUTER_REASONING_EFFORT", default="low", allow_legacy_secret=True) or "low").strip().lower()
-REASONING_DEFAULT_TASK = str(get_cfg("OUROBOROS_REASONING_DEFAULT_TASK", default="medium", allow_legacy_secret=True) or "medium").strip().lower()
-REASONING_CODE_TASK = str(get_cfg("OUROBOROS_REASONING_CODE_TASK", default="high", allow_legacy_secret=True) or "high").strip().lower()
-REASONING_EVOLUTION_TASK = str(get_cfg("OUROBOROS_REASONING_EVOLUTION_TASK", default="high", allow_legacy_secret=True) or "high").strip().lower()
-REASONING_DEEP_REVIEW = str(get_cfg("OUROBOROS_REASONING_DEEP_REVIEW", default="xhigh", allow_legacy_secret=True) or "xhigh").strip().lower()
-REASONING_MEMORY_SUMMARY = str(get_cfg("OUROBOROS_REASONING_MEMORY_SUMMARY", default="low", allow_legacy_secret=True) or "low").strip().lower()
-REASONING_NOTICE = str(get_cfg("OUROBOROS_REASONING_NOTICE", default="low", allow_legacy_secret=True) or "low").strip().lower()
 
 def as_bool(v: Any, default: bool = False) -> bool:
     if v is None:
@@ -235,24 +227,14 @@ def as_bool(v: Any, default: bool = False) -> bool:
         return False
     return default
 
-IDLE_ENABLED = as_bool(get_cfg("OUROBOROS_IDLE_ENABLED", default="1", allow_legacy_secret=True), default=True)
-IDLE_COOLDOWN_SEC = max(60, int(get_cfg("OUROBOROS_IDLE_COOLDOWN_SEC", default="900", allow_legacy_secret=True) or "900"))
-IDLE_BUDGET_PCT_CAP = max(1.0, min(float(get_cfg("OUROBOROS_IDLE_BUDGET_PCT_CAP", default="35", allow_legacy_secret=True) or "35"), 100.0))
-IDLE_MAX_PER_DAY = max(1, int(get_cfg("OUROBOROS_IDLE_MAX_PER_DAY", default="8", allow_legacy_secret=True) or "8"))
-EVOLUTION_ENABLED_BY_DEFAULT = as_bool(get_cfg("OUROBOROS_EVOLUTION_ENABLED_BY_DEFAULT", default="0", allow_legacy_secret=True), default=False)
 BUDGET_REPORT_EVERY_MESSAGES = max(1, int(get_cfg("OUROBOROS_BUDGET_REPORT_EVERY_MESSAGES", default="10", allow_legacy_secret=True) or "10"))
-QUEUE_SOFT_TIMEOUT_1_SEC = max(60, int(get_cfg("OUROBOROS_TASK_SOFT_TIMEOUT_1_SEC", default="300", allow_legacy_secret=True) or "300"))
-QUEUE_SOFT_TIMEOUT_2_SEC = max(120, int(get_cfg("OUROBOROS_TASK_SOFT_TIMEOUT_2_SEC", default="600", allow_legacy_secret=True) or "600"))
-QUEUE_HARD_TIMEOUT_SEC = max(180, int(get_cfg("OUROBOROS_TASK_HARD_TIMEOUT_SEC", default="900", allow_legacy_secret=True) or "900"))
+SOFT_TIMEOUT_SEC = max(60, int(get_cfg("OUROBOROS_SOFT_TIMEOUT_SEC", default="600", allow_legacy_secret=True) or "600"))
+HARD_TIMEOUT_SEC = max(120, int(get_cfg("OUROBOROS_HARD_TIMEOUT_SEC", default="1800", allow_legacy_secret=True) or "1800"))
 QUEUE_MAX_RETRIES = max(0, int(get_cfg("OUROBOROS_TASK_MAX_RETRIES", default="1", allow_legacy_secret=True) or "1"))
 HEARTBEAT_STALE_SEC = max(30, int(get_cfg("OUROBOROS_TASK_HEARTBEAT_STALE_SEC", default="120", allow_legacy_secret=True) or "120"))
-AUTO_REVIEW_MIN_GAP_SEC = max(60, int(get_cfg("OUROBOROS_AUTO_REVIEW_MIN_GAP_SEC", default="300", allow_legacy_secret=True) or "300"))
-REVIEW_COMPLEX_MIN_DURATION_SEC = max(60, int(get_cfg("OUROBOROS_REVIEW_COMPLEX_MIN_DURATION_SEC", default="180", allow_legacy_secret=True) or "180"))
-REVIEW_COMPLEX_MIN_TOOL_CALLS = max(2, int(get_cfg("OUROBOROS_REVIEW_COMPLEX_MIN_TOOL_CALLS", default="8", allow_legacy_secret=True) or "8"))
-REVIEW_COMPLEX_MIN_TOOL_ERRORS = max(1, int(get_cfg("OUROBOROS_REVIEW_COMPLEX_MIN_TOOL_ERRORS", default="2", allow_legacy_secret=True) or "2"))
 TASK_HEARTBEAT_SEC = max(10, int(get_cfg("OUROBOROS_TASK_HEARTBEAT_SEC", default="30", allow_legacy_secret=True) or "30"))
 
-# expose needed env to workers (do not print)
+# Передаём необходимое воркерам через env (не выводить в логи)
 os.environ["OPENROUTER_API_KEY"] = str(OPENROUTER_API_KEY)
 os.environ["OPENAI_API_KEY"] = str(OPENAI_API_KEY or "")
 os.environ["ANTHROPIC_API_KEY"] = str(ANTHROPIC_API_KEY or "")
@@ -261,19 +243,8 @@ os.environ["GITHUB_REPO"] = str(GITHUB_REPO or "ouroboros")
 os.environ["OUROBOROS_MODEL"] = str(MODEL_MAIN or "openai/gpt-5.2")
 os.environ["OUROBOROS_MODEL_CODE"] = str(MODEL_CODE or "openai/gpt-5.2-codex")
 os.environ["OUROBOROS_MODEL_REVIEW"] = str(MODEL_REVIEW or "openai/gpt-5.2")
-os.environ["OUROBOROS_ROUTER_MODEL"] = str(MODEL_ROUTER or "openai/gpt-5.2")
-os.environ["OUROBOROS_ROUTER_REASONING_EFFORT"] = str(ROUTER_REASONING_EFFORT or "low")
-os.environ["OUROBOROS_REASONING_DEFAULT_TASK"] = str(REASONING_DEFAULT_TASK or "medium")
-os.environ["OUROBOROS_REASONING_CODE_TASK"] = str(REASONING_CODE_TASK or "high")
-os.environ["OUROBOROS_REASONING_EVOLUTION_TASK"] = str(REASONING_EVOLUTION_TASK or "high")
-os.environ["OUROBOROS_REASONING_DEEP_REVIEW"] = str(REASONING_DEEP_REVIEW or "xhigh")
-os.environ["OUROBOROS_REASONING_MEMORY_SUMMARY"] = str(REASONING_MEMORY_SUMMARY or "low")
-os.environ["OUROBOROS_REASONING_NOTICE"] = str(REASONING_NOTICE or "low")
 os.environ["OUROBOROS_TASK_HEARTBEAT_SEC"] = str(TASK_HEARTBEAT_SEC)
-os.environ["OUROBOROS_REVIEW_COMPLEX_MIN_DURATION_SEC"] = str(REVIEW_COMPLEX_MIN_DURATION_SEC)
-os.environ["OUROBOROS_REVIEW_COMPLEX_MIN_TOOL_CALLS"] = str(REVIEW_COMPLEX_MIN_TOOL_CALLS)
-os.environ["OUROBOROS_REVIEW_COMPLEX_MIN_TOOL_ERRORS"] = str(REVIEW_COMPLEX_MIN_TOOL_ERRORS)
-os.environ["TELEGRAM_BOT_TOKEN"] = str(TELEGRAM_BOT_TOKEN)  # to support agent-side UX like typing indicator
+os.environ["TELEGRAM_BOT_TOKEN"] = str(TELEGRAM_BOT_TOKEN)
 
 # Install Claude Code CLI only when Anthropic API access is configured.
 if str(ANTHROPIC_API_KEY or "").strip():
@@ -904,109 +875,7 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None, fo
             break
 
 # ----------------------------
-# 4.5) Router: direct answer vs full agent task
-# ----------------------------
-ROUTER_SYSTEM_PROMPT = """You are Ouroboros (Уроборос), a self-modifying AI agent.
-Your job RIGHT NOW: decide whether to answer the user directly or route to the full agent pipeline.
-
-ANSWER DIRECTLY (just write the answer) if:
-- Simple questions (math, facts, definitions, opinions)
-- Casual conversation, greetings, thanks
-- General knowledge questions
-- Explaining concepts
-- Questions about yourself ONLY when they are generic and don't require checking runtime state
-
-RESPOND WITH EXACTLY "NEEDS_TASK" on the FIRST LINE if the message requires:
-- Reading or writing files, code, configs
-- Git operations (commit, push, diff, status)
-- Web search for fresh/current information
-- Log analysis, examining Drive files
-- Code changes or self-modification
-- Running shell commands
-- Any tool or system access
-- Analyzing repository contents
-- Requesting deep system review / health audit / full context inspection
-- Checking current runtime state/capabilities (available tools, CLI presence, current branch/version, recent action results)
-- Anything you're unsure about
-
-Use available conversation context to avoid mistaken direct answers when tool access is required.
-When answering directly, respond in the user's language. Be concise and helpful.
-When routing to task, write NEEDS_TASK on the first line, then optionally a brief reason."""
-
-def _normalize_reasoning_effort(v: str, default: str = "medium") -> str:
-    allowed = {"none", "minimal", "low", "medium", "high", "xhigh"}
-    s = str(v or "").strip().lower()
-    return s if s in allowed else default
-
-def route_and_maybe_answer(text: str) -> Optional[str]:
-    """Quick LLM call: return direct answer or None (meaning 'create a full task')."""
-    try:
-        from openai import OpenAI
-        client = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=os.environ["OPENROUTER_API_KEY"],
-            default_headers={"HTTP-Referer": "https://colab.research.google.com/", "X-Title": "Ouroboros-Router"},
-        )
-
-        # Minimal context: last ~10 chat messages for conversational continuity
-        recent_chat = ""
-        if CHAT_LOG_PATH.exists():
-            try:
-                lines = CHAT_LOG_PATH.read_text(encoding="utf-8").strip().split("\n")
-                recent_lines = lines[-10:] if len(lines) > 10 else lines
-                recent_chat = "\n".join(recent_lines)
-            except Exception:
-                pass
-
-        messages = [
-            {"role": "system", "content": ROUTER_SYSTEM_PROMPT},
-        ]
-        if recent_chat:
-            messages.append({"role": "system", "content": f"Recent chat context (JSONL):\n{recent_chat}"})
-        messages.append({"role": "user", "content": text})
-
-        router_model = os.environ.get("OUROBOROS_ROUTER_MODEL", os.environ.get("OUROBOROS_MODEL", "openai/gpt-5.2"))
-        router_effort = _normalize_reasoning_effort(
-            os.environ.get("OUROBOROS_ROUTER_REASONING_EFFORT", ROUTER_REASONING_EFFORT),
-            default="low",
-        )
-
-        resp = client.chat.completions.create(
-            model=router_model,
-            messages=messages,
-            max_tokens=2000,
-            extra_body={"reasoning": {"effort": router_effort, "exclude": True}},
-        )
-        resp_dict = resp.model_dump()
-
-        # Track router cost
-        usage = (resp_dict.get("usage") or {})
-        update_budget_from_usage(usage)
-
-        answer = (resp.choices[0].message.content or "").strip()
-        append_jsonl(
-            DRIVE_ROOT / "logs" / "events.jsonl",
-            {
-                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                "type": "router_profile_used",
-                "model": router_model,
-                "reasoning_effort": router_effort,
-                "answered_directly": (not answer.startswith("NEEDS_TASK")),
-            },
-        )
-        if answer.startswith("NEEDS_TASK"):
-            return None
-        return answer
-    except Exception as e:
-        # On any error, fall through to task creation
-        append_jsonl(DRIVE_ROOT / "logs" / "events.jsonl", {
-            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "type": "router_error", "error": repr(e),
-        })
-        return None
-
-# ----------------------------
-# 5) Workers + prioritized queue
+# 5) Воркеры и очередь (LLM-first: без роутера, все сообщения через Уробороса)
 # ----------------------------
 import multiprocessing as mp
 CTX = mp.get_context("fork")
@@ -1023,7 +892,6 @@ WORKERS: Dict[int, Worker] = {}
 PENDING: List[Dict[str, Any]] = []
 RUNNING: Dict[str, Dict[str, Any]] = {}
 CRASH_TS: List[float] = []
-LAST_EVOLUTION_SKIP_SIGNATURE: Optional[Tuple[int, int]] = None
 QUEUE_SEQ_COUNTER = 0
 
 def _task_priority(task_type: str) -> int:
@@ -1280,291 +1148,59 @@ def budget_pct(st: Dict[str, Any]) -> float:
         return 0.0
     return (spent / total) * 100.0
 
-def _load_evolution_prompt_text() -> str:
-    p = REPO_DIR / "prompts" / "evolution.md"
-    try:
-        txt = p.read_text(encoding="utf-8").strip()
-        if txt:
-            return txt
-    except Exception:
-        pass
-    return (
-        "Endless evolution mode is active.\n"
-        "- Do one high-impact self-improvement step per cycle.\n"
-        "- Use LLM-based reasoning over hardcoded response templates.\n"
-        "- Commit+push only to branch ouroboros, then request_restart.\n"
-        "- Report: done/result/next.\n"
-    )
-
 def build_evolution_task_text(cycle: int) -> str:
-    return (
-        f"ENDLESS EVOLUTION CYCLE #{cycle}\n\n"
-        "Mode is active until owner asks to stop.\n"
-        "Start with `repo_read('prompts/evolution.md')` and follow it exactly.\n"
-        "Before choosing the next change, check latest deep-review findings in chat/logs/scratchpad and adjust plan.\n"
-        "Do one high-leverage self-improvement step now.\n"
-        "Strict branch rule: only `ouroboros` for any write/commit/push; never touch `main` or `ouroboros-stable`.\n"
-        "After changes: verify, commit+push, request_restart, then report concise Done/Result/Next.\n\n"
-        "Prompt snapshot:\n"
-        + _load_evolution_prompt_text()
-    )
+    """Минимальный текст задачи эволюции. Детали — в промпте SYSTEM.md (LLM-first)."""
+    return f"EVOLUTION CYCLE #{cycle}\n\nСледуй инструкциям из prompts/SYSTEM.md, раздел «Режим эволюции»."
 
-def build_review_task_text(reason: str, source_task_id: str = "", source_text: str = "") -> str:
-    hint = str(source_text or "").strip()
-    if len(hint) > 800:
-        hint = hint[:800].rstrip() + "..."
-    return (
-        "SYSTEM REVIEW TASK\n\n"
-        "Run deep full-system review in fit-or-chunk mode.\n"
-        "Include repository files, prompts, state, memory, logs, and runtime context.\n"
-        "Before analysis: estimate input tokens and report the estimate.\n"
-        "After analysis: report total review cost and key risks.\n"
-        "Output sections:\n"
-        "1) Health verdict\n"
-        "2) Major problems\n"
-        "3) Drift/hanging risks\n"
-        "4) Action plan\n"
-        "5) Optional immediate follow-ups\n\n"
-        f"Reason: {reason or 'unspecified'}\n"
-        f"Source task id: {source_task_id or '-'}\n"
-        f"Source text: {hint or '-'}\n"
-    )
+def build_review_task_text(reason: str) -> str:
+    """Минимальный текст задачи ревью. Scope — на усмотрение Уробороса."""
+    return f"DEEP REVIEW\n\nПричина: {reason or 'по запросу владельца'}\nScope и глубина — на твоё усмотрение."
 
-def _is_review_request_text(text: str) -> bool:
-    s = str(text or "").strip().lower()
-    if not s:
-        return False
-    phrases = (
-        "сделай ревью",
-        "сделай review",
-        "проведи ревью",
-        "прогони ревью",
-        "проверь всё ли ок",
-        "проверь все ли ок",
-        "аудит системы",
-        "system review",
-        "deep review",
-        "health check",
-        "review всей системы",
-    )
-    return any(p in s for p in phrases)
-
-def queue_review_task(
-    reason: str,
-    source_task_id: str = "",
-    source_text: str = "",
-    force: bool = False,
-    notify: bool = True,
-) -> Optional[str]:
+def queue_review_task(reason: str, force: bool = False) -> Optional[str]:
     st = load_state()
     owner_chat_id = st.get("owner_chat_id")
     if not owner_chat_id:
         return None
     if (not force) and _queue_has_task_type("review"):
         return None
-
     tid = uuid.uuid4().hex[:8]
-    queued = enqueue_task(
-        {
-            "id": tid,
-            "type": "review",
-            "chat_id": int(owner_chat_id),
-            "text": build_review_task_text(reason=reason, source_task_id=source_task_id, source_text=source_text),
-            "review_reason": reason,
-            "review_source_task_id": source_task_id,
-        }
-    )
-    st["last_review_task_id"] = tid
-    st["last_auto_review_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    save_state(st)
-
-    append_jsonl(
-        DRIVE_ROOT / "logs" / "supervisor.jsonl",
-        {
-            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "type": "review_task_enqueued",
-            "task_id": tid,
-            "reason": reason,
-            "source_task_id": source_task_id,
-            "priority": queued.get("priority"),
-            "force": bool(force),
-        },
-    )
+    enqueue_task({
+        "id": tid,
+        "type": "review",
+        "chat_id": int(owner_chat_id),
+        "text": build_review_task_text(reason=reason),
+    })
     persist_queue_snapshot(reason="review_enqueued")
-    if notify:
-        send_with_budget(
-            int(owner_chat_id),
-            (
-                f"🔎 Review queued: {tid}\n"
-                f"reason={reason or '-'}; source_task_id={source_task_id or '-'}; "
-                f"priority={queued.get('priority')}"
-            ),
-        )
+    send_with_budget(int(owner_chat_id), f"🔎 Review в очереди: {tid} ({reason})")
     return tid
 
 def enqueue_evolution_task_if_needed() -> None:
-    global LAST_EVOLUTION_SKIP_SIGNATURE
+    """Ставит задачу эволюции когда нет активных задач и режим включён."""
     if PENDING or RUNNING:
-        st = load_state()
-        if bool(st.get("evolution_mode_enabled")):
-            sig = (len(PENDING), len(RUNNING))
-            if LAST_EVOLUTION_SKIP_SIGNATURE != sig:
-                append_jsonl(
-                    DRIVE_ROOT / "logs" / "supervisor.jsonl",
-                    {
-                        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                        "type": "evolution_enqueue_skipped",
-                        "reason": "pending_or_running",
-                        "pending": len(PENDING),
-                        "running": len(RUNNING),
-                    },
-                )
-                LAST_EVOLUTION_SKIP_SIGNATURE = sig
         return
-    LAST_EVOLUTION_SKIP_SIGNATURE = None
-
     st = load_state()
     if not bool(st.get("evolution_mode_enabled")):
         return
-
     owner_chat_id = st.get("owner_chat_id")
     if not owner_chat_id:
         return
-
     if budget_pct(st) >= 100.0:
         st["evolution_mode_enabled"] = False
         save_state(st)
-        append_jsonl(
-            DRIVE_ROOT / "logs" / "supervisor.jsonl",
-            {
-                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                "type": "evolution_mode_auto_stopped",
-                "reason": "budget_exhausted",
-                "budget_pct": budget_pct(st),
-            },
-        )
-        send_with_budget(int(owner_chat_id), "💸 Endless evolution остановлен: бюджет достиг лимита.")
+        send_with_budget(int(owner_chat_id), "💸 Эволюция остановлена: бюджет исчерпан.")
         return
-
     cycle = int(st.get("evolution_cycle") or 0) + 1
     tid = uuid.uuid4().hex[:8]
-    queued = enqueue_task(
-        {
-            "id": tid,
-            "type": "evolution",
-            "chat_id": int(owner_chat_id),
-            "text": build_evolution_task_text(cycle),
-        }
-    )
-
-    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    enqueue_task({
+        "id": tid,
+        "type": "evolution",
+        "chat_id": int(owner_chat_id),
+        "text": build_evolution_task_text(cycle),
+    })
     st["evolution_cycle"] = cycle
-    st["last_evolution_task_at"] = now_iso
+    st["last_evolution_task_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     save_state(st)
-
-    append_jsonl(
-        DRIVE_ROOT / "logs" / "supervisor.jsonl",
-        {
-            "ts": now_iso,
-            "type": "evolution_task_enqueued",
-            "task_id": tid,
-            "cycle": cycle,
-            "budget_pct": budget_pct(st),
-            "priority": queued.get("priority"),
-        },
-    )
-    send_with_budget(int(owner_chat_id), f"🧬 Evolution task queued: {tid} (cycle {cycle})")
-
-def idle_task_catalog() -> List[Tuple[str, str]]:
-    return [
-        (
-            "memory_consolidation",
-            "Idle internal task: consolidate working memory. Update memory/scratchpad.md from recent logs and add compact evidence quotes.",
-        ),
-        (
-            "performance_analysis",
-            "Idle internal task: analyze recent tools/events logs and report key bottlenecks, recurring failures, and optimization opportunities.",
-        ),
-        (
-            "code_improvement_idea",
-            "Idle internal task: inspect your own codebase and propose one high-impact improvement with rationale and validation plan.",
-        ),
-        (
-            "web_learning",
-            "Idle internal task: use web_search for one focused topic that can improve reliability/efficiency of this system, then summarize practical takeaways.",
-        ),
-        (
-            "owner_idea_proposal",
-            "Idle internal task: prepare one concise proactive idea for the owner based on current priorities and unresolved threads.",
-        ),
-    ]
-
-def enqueue_idle_task_if_needed() -> None:
-    if not IDLE_ENABLED:
-        return
-    if PENDING or RUNNING:
-        return
-
-    st = load_state()
-    if bool(st.get("evolution_mode_enabled")):
-        return
-    owner_chat_id = st.get("owner_chat_id")
-    if not owner_chat_id:
-        return
-
-    now = time.time()
-    last_owner_ts = parse_iso_to_ts(str(st.get("last_owner_message_at") or ""))
-    if last_owner_ts is not None and (now - last_owner_ts) < IDLE_COOLDOWN_SEC:
-        return
-
-    last_idle_ts = parse_iso_to_ts(str(st.get("last_idle_task_at") or ""))
-    if last_idle_ts is not None and (now - last_idle_ts) < IDLE_COOLDOWN_SEC:
-        return
-
-    if budget_pct(st) >= IDLE_BUDGET_PCT_CAP:
-        return
-
-    today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
-    idle_stats = st.get("idle_stats") if isinstance(st.get("idle_stats"), dict) else {}
-    day_stat = idle_stats.get(today) if isinstance(idle_stats.get(today), dict) else {}
-    day_count = int(day_stat.get("count") or 0)
-    if day_count >= IDLE_MAX_PER_DAY:
-        return
-
-    catalog = idle_task_catalog()
-    cursor = int(st.get("idle_cursor") or 0)
-    kind, text = catalog[cursor % len(catalog)]
-    tid = uuid.uuid4().hex[:8]
-    queued = enqueue_task({"id": tid, "type": "idle", "chat_id": int(owner_chat_id), "text": text})
-
-    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    st["idle_cursor"] = cursor + 1
-    st["last_idle_task_at"] = now_iso
-    idle_stats[today] = {
-        "count": day_count + 1,
-        "last_task_id": tid,
-        "last_kind": kind,
-        "last_at": now_iso,
-    }
-    # Keep recent days only.
-    if len(idle_stats) > 14:
-        for d in sorted(idle_stats.keys())[:-14]:
-            idle_stats.pop(d, None)
-    st["idle_stats"] = idle_stats
-    save_state(st)
-
-    append_jsonl(
-        DRIVE_ROOT / "logs" / "supervisor.jsonl",
-        {
-            "ts": now_iso,
-            "type": "idle_task_enqueued",
-            "task_id": tid,
-            "kind": kind,
-            "budget_pct": budget_pct(st),
-            "priority": queued.get("priority"),
-        },
-    )
-    send_with_budget(int(owner_chat_id), f"🧠 Idle task queued: {tid} ({kind})")
+    send_with_budget(int(owner_chat_id), f"🧬 Evolution #{cycle}: {tid}")
 
 def respawn_worker(wid: int) -> None:
     in_q = CTX.Queue()
@@ -1635,6 +1271,7 @@ def ensure_workers_healthy() -> None:
         CRASH_TS.clear()
 
 def enforce_task_timeouts() -> None:
+    """Один soft-таймаут (уведомление) + один hard-таймаут (kill+respawn, crash-safety)."""
     if not RUNNING:
         return
     now = time.time()
@@ -1656,63 +1293,17 @@ def enforce_task_timeouts() -> None:
         task_type = str(task.get("type") or "")
         attempt = int(meta.get("attempt") or task.get("_attempt") or 1)
 
-        if runtime_sec >= QUEUE_SOFT_TIMEOUT_1_SEC and not bool(meta.get("soft5_sent")):
-            meta["soft5_sent"] = True
-            append_jsonl(
-                DRIVE_ROOT / "logs" / "supervisor.jsonl",
-                {
-                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                    "type": "task_soft_timeout",
-                    "level": 1,
-                    "task_id": task_id,
-                    "task_type": task_type,
-                    "worker_id": worker_id,
-                    "runtime_sec": round(runtime_sec, 2),
-                    "heartbeat_lag_sec": round(hb_lag_sec, 2),
-                    "heartbeat_stale": hb_stale,
-                    "attempt": attempt,
-                },
-            )
+        # Soft: уведомление владельцу
+        if runtime_sec >= SOFT_TIMEOUT_SEC and not bool(meta.get("soft_sent")):
+            meta["soft_sent"] = True
             if owner_chat_id:
                 send_with_budget(
                     owner_chat_id,
-                    (
-                        f"⏱️ Задача {task_id} выполняется {int(runtime_sec)}с (soft-5).\n"
-                        f"worker={worker_id}, type={task_type}, attempt={attempt}, "
-                        f"heartbeat_lag={int(hb_lag_sec)}с, stale={int(hb_stale)}.\n"
-                        "Пока продолжаю выполнение и наблюдение."
-                    ),
+                    f"⏱️ Задача {task_id} работает {int(runtime_sec)}с. "
+                    f"type={task_type}, heartbeat_lag={int(hb_lag_sec)}с. Продолжаю.",
                 )
 
-        if runtime_sec >= QUEUE_SOFT_TIMEOUT_2_SEC and not bool(meta.get("soft10_sent")):
-            meta["soft10_sent"] = True
-            append_jsonl(
-                DRIVE_ROOT / "logs" / "supervisor.jsonl",
-                {
-                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                    "type": "task_soft_timeout",
-                    "level": 2,
-                    "task_id": task_id,
-                    "task_type": task_type,
-                    "worker_id": worker_id,
-                    "runtime_sec": round(runtime_sec, 2),
-                    "heartbeat_lag_sec": round(hb_lag_sec, 2),
-                    "heartbeat_stale": hb_stale,
-                    "attempt": attempt,
-                },
-            )
-            if owner_chat_id:
-                send_with_budget(
-                    owner_chat_id,
-                    (
-                        f"⏱️ Задача {task_id} выполняется {int(runtime_sec)}с (soft-10).\n"
-                        f"worker={worker_id}, type={task_type}, attempt={attempt}, "
-                        f"heartbeat_lag={int(hb_lag_sec)}с, stale={int(hb_stale)}.\n"
-                        "Готовлюсь к принудительному restart worker на hard-timeout."
-                    ),
-                )
-
-        if runtime_sec < QUEUE_HARD_TIMEOUT_SEC:
+        if runtime_sec < HARD_TIMEOUT_SEC:
             continue
 
         # Hard timeout: force-kill worker, optionally requeue with bounded retries.
@@ -1835,26 +1426,13 @@ def status_text() -> str:
     lines.append(f"spent_usd: {st.get('spent_usd')}")
     lines.append(f"spent_calls: {st.get('spent_calls')}")
     lines.append(f"prompt_tokens: {st.get('spent_tokens_prompt')}, completion_tokens: {st.get('spent_tokens_completion')}")
-    lines.append(f"budget_report_every_messages: {BUDGET_REPORT_EVERY_MESSAGES}")
-    lines.append(
-        "idle: "
-        + f"enabled={int(IDLE_ENABLED)}, cooldown_sec={IDLE_COOLDOWN_SEC}, "
-        + f"budget_cap_pct={IDLE_BUDGET_PCT_CAP:.1f}, max_per_day={IDLE_MAX_PER_DAY}"
-    )
     lines.append(
         "evolution: "
         + f"enabled={int(bool(st.get('evolution_mode_enabled')))}, "
         + f"cycle={int(st.get('evolution_cycle') or 0)}"
     )
     lines.append(f"last_owner_message_at: {st.get('last_owner_message_at') or '-'}")
-    lines.append(f"last_idle_task_at: {st.get('last_idle_task_at') or '-'}")
-    lines.append(f"last_evolution_task_at: {st.get('last_evolution_task_at') or '-'}")
-    lines.append(
-        "timeouts: "
-        + f"soft1={QUEUE_SOFT_TIMEOUT_1_SEC}s, soft2={QUEUE_SOFT_TIMEOUT_2_SEC}s, "
-        + f"hard={QUEUE_HARD_TIMEOUT_SEC}s, max_retries={QUEUE_MAX_RETRIES}, hb_stale={HEARTBEAT_STALE_SEC}s"
-    )
-    lines.append(f"queue_priority_counts_running: {json.dumps(_running_task_type_counts(), ensure_ascii=False)}")
+    lines.append(f"timeouts: soft={SOFT_TIMEOUT_SEC}s, hard={HARD_TIMEOUT_SEC}s")
     return "\n".join(lines)
 
 def cancel_task_by_id(task_id: str) -> bool:
@@ -1873,53 +1451,6 @@ def cancel_task_by_id(task_id: str) -> bool:
             persist_queue_snapshot(reason="cancel_running")
             return True
     return False
-
-def handle_approval(chat_id: int, text: str) -> bool:
-    parts = text.strip().split()
-    if not parts:
-        return False
-    cmd = parts[0].lower()
-    if cmd not in ("/approve", "/deny"):
-        return False
-    assert len(parts) >= 2, "Usage: /approve <approval_id> or /deny <approval_id>"
-    approval_id = parts[1].strip()
-    st = load_state()
-    approvals = st.get("approvals") or {}
-    assert approval_id in approvals, f"Unknown approval_id: {approval_id}"
-    approvals[approval_id]["status"] = "approved" if cmd == "/approve" else "denied"
-    st["approvals"] = approvals
-    save_state(st)
-    send_with_budget(chat_id, f"OK: {cmd} {approval_id}")
-
-    # Execute approved actions
-    if cmd == "/approve" and approvals[approval_id].get("type") == "stable_promotion":
-        try:
-            subprocess.run(["git", "fetch", "origin"], cwd=str(REPO_DIR), check=True)
-            subprocess.run(["git", "push", "origin", f"{BRANCH_DEV}:{BRANCH_STABLE}"], cwd=str(REPO_DIR), check=True)
-            new_sha = subprocess.run(["git", "rev-parse", f"origin/{BRANCH_STABLE}"], cwd=str(REPO_DIR), capture_output=True, text=True, check=True).stdout.strip()
-            send_with_budget(chat_id, f"✅ Промоут выполнен: {BRANCH_DEV} → {BRANCH_STABLE} ({new_sha[:8]})")
-        except Exception as e:
-            send_with_budget(chat_id, f"❌ Ошибка промоута в stable: {e}")
-
-    if cmd == "/approve" and approvals[approval_id].get("type") == "reindex":
-        reason = str(approvals[approval_id].get("reason") or "").strip()
-        tid = uuid.uuid4().hex[:8]
-        enqueue_task(
-            {
-                "id": tid,
-                "type": "task",
-                "chat_id": chat_id,
-                "text": (
-                    "Approved internal task: run full reindex of drive/index/summaries.json. "
-                    "Rebuild summaries carefully, report what changed, and include validation checks. "
-                    f"Reason: {reason}"
-                ).strip(),
-            }
-        )
-        persist_queue_snapshot(reason="reindex_approved")
-        send_with_budget(chat_id, f"✅ Reindex approval accepted. Queued task {tid}.")
-
-    return True
 
 # start
 kill_workers()
@@ -1940,27 +1471,11 @@ append_jsonl(DRIVE_ROOT / "logs" / "supervisor.jsonl", {
     "branch": load_state().get("current_branch"),
     "sha": load_state().get("current_sha"),
     "max_workers": MAX_WORKERS,
-    "idle_enabled": IDLE_ENABLED,
-    "idle_cooldown_sec": IDLE_COOLDOWN_SEC,
-    "idle_budget_pct_cap": IDLE_BUDGET_PCT_CAP,
-    "idle_max_per_day": IDLE_MAX_PER_DAY,
-    "evolution_enabled_by_default": int(EVOLUTION_ENABLED_BY_DEFAULT),
-    "budget_report_every_messages": BUDGET_REPORT_EVERY_MESSAGES,
     "model_default": MODEL_MAIN,
     "model_code": MODEL_CODE,
     "model_review": MODEL_REVIEW,
-    "model_router": MODEL_ROUTER,
-    "router_reasoning_effort": ROUTER_REASONING_EFFORT,
-    "reasoning_default_task": REASONING_DEFAULT_TASK,
-    "reasoning_code_task": REASONING_CODE_TASK,
-    "reasoning_evolution_task": REASONING_EVOLUTION_TASK,
-    "reasoning_deep_review": REASONING_DEEP_REVIEW,
-    "reasoning_memory_summary": REASONING_MEMORY_SUMMARY,
-    "task_soft_timeout_1_sec": QUEUE_SOFT_TIMEOUT_1_SEC,
-    "task_soft_timeout_2_sec": QUEUE_SOFT_TIMEOUT_2_SEC,
-    "task_hard_timeout_sec": QUEUE_HARD_TIMEOUT_SEC,
-    "task_max_retries": QUEUE_MAX_RETRIES,
-    "task_heartbeat_sec": TASK_HEARTBEAT_SEC,
+    "soft_timeout_sec": SOFT_TIMEOUT_SEC,
+    "hard_timeout_sec": HARD_TIMEOUT_SEC,
 })
 
 offset = int(load_state().get("tg_offset") or 0)
@@ -2024,14 +1539,6 @@ while True:
                 WORKERS[wid].busy_task_id = None
             persist_queue_snapshot(reason="task_done")
 
-            if task_type == "evolution":
-                queue_review_task(
-                    reason="post_evolution_cycle",
-                    source_task_id=str(task_id or ""),
-                    source_text=task_text,
-                    force=False,
-                    notify=True,
-                )
             continue
 
         if et == "task_metrics":
@@ -2056,28 +1563,10 @@ while True:
                     "complexity_reason": reason,
                 },
             )
-            if complexity_trigger_review and task_type not in ("review", "evolution"):
-                st2 = load_state()
-                last_auto = parse_iso_to_ts(str(st2.get("last_auto_review_at") or ""))
-                now_ts = time.time()
-                if (last_auto is None) or ((now_ts - last_auto) >= AUTO_REVIEW_MIN_GAP_SEC):
-                    queue_review_task(
-                        reason=("complex_task:" + (reason or "auto")),
-                        source_task_id=task_id,
-                        source_text=str(evt.get("task_text") or ""),
-                        force=False,
-                        notify=True,
-                    )
             continue
 
         if et == "review_request":
-            queue_review_task(
-                reason=str(evt.get("reason") or "agent_review_request"),
-                source_task_id=str(evt.get("source_task_id") or ""),
-                source_text=str(evt.get("source_text") or ""),
-                force=False,
-                notify=True,
-            )
+            queue_review_task(reason=str(evt.get("reason") or "agent_review_request"), force=False)
             continue
 
         if et == "restart_request":
@@ -2130,25 +1619,19 @@ while True:
             spawn_workers(MAX_WORKERS)
             continue
 
-        if et == "stable_promotion_request":
-            approval_id = uuid.uuid4().hex[:8]
-            st = load_state()
-            approvals = st.get("approvals") or {}
-            approvals[approval_id] = {
-                "type": "stable_promotion",
-                "reason": evt.get("reason", ""),
-                "status": "pending",
-                "requested_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            }
-            st["approvals"] = approvals
-            save_state(st)
-            if st.get("owner_chat_id"):
-                send_with_budget(
-                    int(st["owner_chat_id"]),
-                    f"🔄 Запрос на промоут в stable:\n{evt.get('reason', '')}\n\n"
-                    f"Подтвердить: /approve {approval_id}\n"
-                    f"Отклонить: /deny {approval_id}"
-                )
+        if et == "promote_to_stable":
+            # Уроборос сам решает когда промоутить (LLM-first, без approval)
+            try:
+                subprocess.run(["git", "fetch", "origin"], cwd=str(REPO_DIR), check=True)
+                subprocess.run(["git", "push", "origin", f"{BRANCH_DEV}:{BRANCH_STABLE}"], cwd=str(REPO_DIR), check=True)
+                new_sha = subprocess.run(["git", "rev-parse", f"origin/{BRANCH_STABLE}"], cwd=str(REPO_DIR), capture_output=True, text=True, check=True).stdout.strip()
+                st = load_state()
+                if st.get("owner_chat_id"):
+                    send_with_budget(int(st["owner_chat_id"]), f"✅ Промоут: {BRANCH_DEV} → {BRANCH_STABLE} ({new_sha[:8]})")
+            except Exception as e:
+                st = load_state()
+                if st.get("owner_chat_id"):
+                    send_with_budget(int(st["owner_chat_id"]), f"❌ Ошибка промоута в stable: {e}")
             continue
 
         if et == "schedule_task":
@@ -2195,30 +1678,9 @@ while True:
             )
             continue
 
-        if et == "reindex_request":
-            approval_id = uuid.uuid4().hex[:8]
-            st = load_state()
-            approvals = st.get("approvals") or {}
-            approvals[approval_id] = {
-                "type": "reindex",
-                "reason": evt.get("reason", ""),
-                "status": "pending",
-                "requested_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            }
-            st["approvals"] = approvals
-            save_state(st)
-            if st.get("owner_chat_id"):
-                send_with_budget(
-                    int(st["owner_chat_id"]),
-                    f"🗂️ Запрос на полную реиндексацию:\n{evt.get('reason', '')}\n\n"
-                    f"Подтвердить: /approve {approval_id}\n"
-                    f"Отклонить: /deny {approval_id}",
-                )
-            continue
 
     enforce_task_timeouts()
     enqueue_evolution_task_if_needed()
-    enqueue_idle_task_if_needed()
     assign_tasks()
     persist_queue_snapshot(reason="main_loop")
 
@@ -2315,15 +1777,7 @@ while True:
             continue
 
         if text.strip().lower().startswith("/review"):
-            queued_id = queue_review_task(
-                reason="owner_command:/review",
-                source_task_id="",
-                source_text=text,
-                force=True,
-                notify=True,
-            )
-            if queued_id is None:
-                send_with_budget(chat_id, "⚠️ Не удалось поставить review в очередь (owner_chat_id не установлен).")
+            queue_review_task(reason="owner:/review", force=True)
             continue
 
         lowered = text.strip().lower()
@@ -2331,106 +1785,24 @@ while True:
             parts = lowered.split()
             action = parts[1] if len(parts) > 1 else "on"
             turn_on = action not in ("off", "stop", "0")
-
             st2 = load_state()
             st2["evolution_mode_enabled"] = bool(turn_on)
             save_state(st2)
-
-            removed_pending = 0
             if not turn_on:
                 before = len(PENDING)
                 PENDING[:] = [t for t in PENDING if str(t.get("type")) != "evolution"]
                 _sort_pending()
-                removed_pending = before - len(PENDING)
-                persist_queue_snapshot(reason="evolve_off_remove_pending")
-
-            append_jsonl(
-                DRIVE_ROOT / "logs" / "supervisor.jsonl",
-                {
-                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                    "type": "evolution_mode_toggle",
-                    "enabled": bool(turn_on),
-                    "removed_pending": removed_pending,
-                    "source_text": text,
-                },
-            )
-
+                persist_queue_snapshot(reason="evolve_off")
             if turn_on:
-                send_with_budget(
-                    chat_id,
-                    "🧬 Endless evolution: ON.\n"
-                    "Буду крутить self-improvement циклы до твоей остановки или конца бюджета.\n"
-                    "Отключить: /evolve stop",
-                )
+                send_with_budget(chat_id, "🧬 Эволюция: ON. Отключить: /evolve stop")
             else:
-                send_with_budget(
-                    chat_id,
-                    f"🛑 Endless evolution: OFF. Снято pending evolution tasks: {removed_pending}.",
-                )
+                send_with_budget(chat_id, "🛑 Эволюция: OFF.")
             continue
 
-        if lowered in ("останови эволюцию", "остановить эволюцию", "стоп эволюции", "stop evolution"):
-            st2 = load_state()
-            st2["evolution_mode_enabled"] = False
-            save_state(st2)
-            before = len(PENDING)
-            PENDING[:] = [t for t in PENDING if str(t.get("type")) != "evolution"]
-            _sort_pending()
-            removed_pending = before - len(PENDING)
-            persist_queue_snapshot(reason="evolution_stop_natural")
-            append_jsonl(
-                DRIVE_ROOT / "logs" / "supervisor.jsonl",
-                {
-                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                    "type": "evolution_mode_toggle",
-                    "enabled": False,
-                    "removed_pending": removed_pending,
-                    "source_text": text,
-                },
-            )
-            send_with_budget(
-                chat_id,
-                f"🛑 Endless evolution остановлен. Снято pending evolution tasks: {removed_pending}.",
-            )
-            continue
-
-        if handle_approval(chat_id, text):
-            continue
-
-        if _is_review_request_text(text):
-            queued_id = queue_review_task(
-                reason="owner_natural_review_request",
-                source_task_id="",
-                source_text=text,
-                force=False,
-                notify=True,
-            )
-            if queued_id is None:
-                send_with_budget(chat_id, "ℹ️ Review уже в очереди или выполняется.")
-            continue
-
-        if text.strip().lower().startswith("/cancel"):
-            parts = text.strip().split()
-            assert len(parts) >= 2, "Usage: /cancel <task_id>"
-            ok = cancel_task_by_id(parts[1])
-            send_with_budget(chat_id, f"{'✅' if ok else '❌'} cancel {parts[1]}")
-            continue
-
-        # Route: direct answer or full agent task
-        direct = route_and_maybe_answer(text)
-        if direct is not None:
-            send_with_budget(chat_id, direct)
-        else:
-            tid = uuid.uuid4().hex[:8]
-            queued = enqueue_task({"id": tid, "type": "task", "chat_id": chat_id, "text": text})
-            persist_queue_snapshot(reason="owner_task_enqueued")
-            send_with_budget(
-                chat_id,
-                (
-                    f"🧾 Принято. В очереди: {tid}. "
-                    f"(workers={MAX_WORKERS}, pending={len(PENDING)}, priority={queued.get('priority')})"
-                ),
-            )
+        # Все остальные сообщения → Уроборос (LLM-first, без роутера)
+        tid = uuid.uuid4().hex[:8]
+        enqueue_task({"id": tid, "type": "task", "chat_id": chat_id, "text": text})
+        persist_queue_snapshot(reason="owner_task_enqueued")
 
     st = load_state()
     st["tg_offset"] = offset
