@@ -1516,6 +1516,7 @@ class OuroborosAgent:
         return pruned, info
 
     def handle_task(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
+        start_time = time.time()
         self._pending_events = []
         self._current_chat_id = int(task.get("chat_id") or 0) or None
         self._current_task_type = str(task.get("type") or "")
@@ -1726,6 +1727,36 @@ class OuroborosAgent:
                     f"Залогировал traceback. Попробуй повторить запрос — "
                     f"я постараюсь обработать его по-другому."
                 )
+                # Best-effort task_eval event (exception path)
+                try:
+                    duration_sec = round(time.time() - start_time, 3)
+                    tool_calls_count = len(llm_trace.get("tool_calls", [])) if isinstance(llm_trace, dict) else 0
+                    tool_errors_count = sum(
+                        1 for tc in llm_trace.get("tool_calls", []) if isinstance(tc, dict) and tc.get("is_error")
+                    ) if isinstance(llm_trace, dict) else 0
+                    response_len = len(text) if isinstance(text, str) else 0
+                    response_sha256 = sha256_text(text) if isinstance(text, str) and text else ""
+                    append_jsonl(
+                        drive_logs / "events.jsonl",
+                        {
+                            "ts": utc_now_iso(),
+                            "type": "task_eval",
+                            "ok": False,
+                            "task_id": task.get("id"),
+                            "task_type": task.get("type"),
+                            "duration_sec": duration_sec,
+                            "tool_calls": tool_calls_count,
+                            "tool_errors": tool_errors_count,
+                            "response_len": response_len,
+                            "response_sha256": response_sha256,
+                            "direct_send_attempted": False,
+                            "direct_send_ok": False,
+                            "direct_send_parts": 0,
+                            "direct_send_status": "",
+                        },
+                    )
+                except Exception:
+                    pass  # Never fail on eval emission
 
             # Detect empty model response (successful call but no text)
             # Also detect "visually empty" responses (Markdown-only / formatting-only)
@@ -1784,13 +1815,18 @@ class OuroborosAgent:
             # Telegram formatting: render Markdown -> Telegram HTML directly from the worker (best-effort).
             # Rationale: supervisor currently sends plain text; parse_mode is not guaranteed there.
             direct_sent = False
+            direct_send_attempted = False
+            direct_send_parts = 0
+            direct_send_status = ""
             if os.environ.get("OUROBOROS_TG_MARKDOWN", "1").lower() not in ("0", "false", "no", "off", ""):
                 try:
+                    direct_send_attempted = True
                     chat_id_int = int(task["chat_id"])
                     # Adaptively chunk: renders HTML and re-splits if needed to avoid 4096 char limit.
                     chunks = self._iter_markdown_chunks_for_html(text or "", primary_max=2500, secondary_max=1200)
                     # Filter out whitespace-only chunks to prevent Telegram rejecting empty messages
                     chunks = [(payload, is_plain, fallback) for payload, is_plain, fallback in chunks if payload.strip()]
+                    direct_send_parts = len(chunks)
 
                     # If no non-empty chunks remain, treat direct-send as failed
                     if not chunks:
@@ -1986,7 +2022,11 @@ class OuroborosAgent:
                                 "html_fallback_to_plain_count": html_fallback_to_plain_count,
                             },
                         )
+                        direct_send_status = last_status
                 except Exception as e:
+                    direct_send_attempted = True
+                    direct_send_parts = 0
+                    direct_send_status = "exc"
                     append_jsonl(
                         self.env.drive_path("logs") / "events.jsonl",
                         {
@@ -2019,6 +2059,32 @@ class OuroborosAgent:
                     "ts": utc_now_iso(),
                 }
             )
+
+            # Success-path task_eval event (best-effort, never raise)
+            try:
+                append_jsonl(
+                    drive_logs / "events.jsonl",
+                    {
+                        "ts": utc_now_iso(),
+                        "type": "task_eval",
+                        "ok": True,
+                        "task_id": task.get("id"),
+                        "task_type": task.get("type"),
+                        "duration_sec": round(time.time() - start_time, 3),
+                        "tool_calls": len(llm_trace.get("tool_calls", [])) if isinstance(llm_trace, dict) else 0,
+                        "tool_errors": sum(
+                            1 for tc in llm_trace.get("tool_calls", []) if isinstance(tc, dict) and tc.get("is_error")
+                        ) if isinstance(llm_trace, dict) else 0,
+                        "direct_send_attempted": bool(direct_send_attempted),
+                        "direct_send_ok": bool(direct_sent),
+                        "direct_send_parts": int(direct_send_parts) if direct_send_attempted else 0,
+                        "direct_send_status": str(direct_send_status) if direct_send_attempted else "",
+                        "response_len": len(text) if isinstance(text, str) else 0,
+                        "response_sha256": sha256_text(text) if isinstance(text, str) and text else "",
+                    },
+                )
+            except Exception:
+                pass  # Never fail on eval emission
 
             self._pending_events.append({"type": "task_done", "task_id": task.get("id"), "ts": utc_now_iso()})
             append_jsonl(
