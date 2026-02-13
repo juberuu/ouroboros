@@ -57,63 +57,40 @@ def append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(obj, ensure_ascii=False)
     data = (line + "\n").encode("utf-8")
+    # Fixed, conservative settings for concurrent writers.
+    # We intentionally keep these internal (no env-level tuning complexity).
+    lock_timeout_sec = 2.0
+    lock_stale_sec = 10.0
+    lock_sleep_sec = 0.01
+    write_retries = 3
+    retry_sleep_base_sec = 0.01
 
-    # Read optional env vars for concurrency/locking settings (best-effort, never raise)
-    try:
-        lock_enabled = int(os.environ.get("OUROBOROS_APPEND_JSONL_LOCK_ENABLED", "1")) != 0
-    except Exception:
-        lock_enabled = True
-    try:
-        timeout = max(0.0, float(os.environ.get("OUROBOROS_APPEND_JSONL_LOCK_TIMEOUT_SEC", "2.0")))
-    except Exception:
-        timeout = 2.0
-    try:
-        stale_age = max(0.0, float(os.environ.get("OUROBOROS_APPEND_JSONL_LOCK_STALE_SEC", "10.0")))
-    except Exception:
-        stale_age = 10.0
-    try:
-        lock_sleep = max(0.0, float(os.environ.get("OUROBOROS_APPEND_JSONL_LOCK_SLEEP_SEC", "0.01")))
-    except Exception:
-        lock_sleep = 0.01
-    try:
-        write_retries = max(1, int(os.environ.get("OUROBOROS_APPEND_JSONL_WRITE_RETRIES", "3")))
-    except Exception:
-        write_retries = 3
-    try:
-        retry_sleep_base = max(0.0, float(os.environ.get("OUROBOROS_APPEND_JSONL_RETRY_SLEEP_BASE_SEC", "0.01")))
-    except Exception:
-        retry_sleep_base = 0.01
-
-    # Per-file lock for multi-process concurrency
+    # Per-file lock for multi-process concurrency.
     path_hash = hashlib.sha256(str(path.resolve()).encode("utf-8")).hexdigest()[:12]
     lock_path = path.parent / f".append_jsonl_{path_hash}.lock"
     lock_fd = None
     lock_acquired = False
 
     try:
-        # Attempt to acquire lock with timeout if enabled
-        if lock_enabled:
-            start = time.time()
-            while time.time() - start < timeout:
+        # Try to acquire lock for bounded time; fallback still attempts append.
+        start = time.time()
+        while time.time() - start < lock_timeout_sec:
+            try:
+                lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                lock_acquired = True
+                break
+            except FileExistsError:
                 try:
-                    lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-                    lock_acquired = True
-                    break
-                except FileExistsError:
-                    # Check if lock is stale
-                    try:
-                        stat = lock_path.stat()
-                        age = time.time() - stat.st_mtime
-                        if age > stale_age:
-                            try:
-                                lock_path.unlink()
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
-                    time.sleep(lock_sleep)
+                    stat = lock_path.stat()
+                    age = time.time() - stat.st_mtime
+                    if age > lock_stale_sec:
+                        lock_path.unlink()
+                        continue
                 except Exception:
-                    break
+                    pass
+                time.sleep(lock_sleep_sec)
+            except Exception:
+                break
 
         # Primary path: atomic append via os.open/write (single syscall) with retries
         for attempt in range(write_retries):
@@ -126,7 +103,7 @@ def append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> None:
                 return
             except Exception:
                 if attempt < write_retries - 1:
-                    time.sleep(retry_sleep_base * (2 ** attempt))
+                    time.sleep(retry_sleep_base_sec * (2 ** attempt))
                 # Continue to next attempt or fall through
 
         # Fallback: use standard file open (may interleave under concurrency) with retries
@@ -137,7 +114,7 @@ def append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> None:
                 return
             except Exception:
                 if attempt < write_retries - 1:
-                    time.sleep(retry_sleep_base * (2 ** attempt))
+                    time.sleep(retry_sleep_base_sec * (2 ** attempt))
                 # Continue to next attempt or fall through
 
         # Best effort: silently ignore if all attempts fail
@@ -236,24 +213,25 @@ def _sanitize_task_for_event(task: Dict[str, Any], drive_logs: pathlib.Path, thr
 
 
 def _sanitize_tool_args_for_log(
-    fn_name: str, args: Dict[str, Any], drive_logs: pathlib.Path, tool_call_id: str = "", threshold: int = 2000
+    fn_name: str, args: Dict[str, Any], drive_logs: pathlib.Path, tool_call_id: str = "", threshold: int = 3000
 ) -> Dict[str, Any]:
     """
-    Sanitize tool arguments for logging: redact secrets, truncate large strings, persist full data.
+    Sanitize tool arguments for logging: redact secrets and truncate oversized fields.
 
     Args:
         fn_name: Tool function name
         args: Original tool arguments
         drive_logs: Path to logs directory on Drive
         tool_call_id: Tool call ID for filename generation (optional)
-        threshold: Max chars before truncation (default 2000)
+        threshold: Max chars before truncation (default 3000)
 
     Returns:
         Sanitized args dict (JSON-serializable, secrets redacted, large strings truncated)
     """
-    # Secret key patterns (case-insensitive)
+    _ = fn_name, drive_logs, tool_call_id  # kept for call compatibility / future use
+    # Conservative exact-match secret keys to avoid over-redaction.
     SECRET_KEYS = frozenset([
-        "token", "api_key", "apikey", "authorization", "auth", "secret", "password", "passwd", "passphrase", "bearer"
+        "token", "api_key", "apikey", "authorization", "secret", "password", "passwd", "passphrase"
     ])
 
     def _is_secret_key(key: str) -> bool:
@@ -276,35 +254,13 @@ def _sanitize_tool_args_for_log(
                 value_hash = sha256_text(value)
                 truncated = truncate_for_log(value, threshold)
 
-                # Best-effort: persist full value to Drive
-                full_path_rel = None
-                try:
-                    # Build safe filename
-                    safe_fn_name = re.sub(r'[^a-zA-Z0-9_-]', '_', fn_name)[:40]
-                    safe_key = re.sub(r'[^a-zA-Z0-9_-]', '_', key)[:40]
-                    if tool_call_id:
-                        safe_id = re.sub(r'[^a-zA-Z0-9_-]', '_', tool_call_id)[:20]
-                        filename = f"{safe_fn_name}_{safe_id}_{safe_key}.txt"
-                    else:
-                        filename = f"{safe_fn_name}_{value_hash[:12]}_{safe_key}.txt"
-
-                    full_path = drive_logs / "tool_args" / filename
-                    write_text(full_path, value)
-                    full_path_rel = f"tool_args/{filename}"
-                except Exception:
-                    # Best-effort: don't fail if we can't persist
-                    pass
-
                 # Return metadata + truncated value
-                result = {
+                return {
                     key: truncated,
                     f"{key}_len": len(value),
                     f"{key}_sha256": value_hash,
                     f"{key}_truncated": True,
                 }
-                if full_path_rel:
-                    result[f"{key}_full_path"] = full_path_rel
-                return result
             return value
 
         # Handle dicts recursively
@@ -1597,8 +1553,8 @@ class OuroborosAgent:
             state_ctx = self._clip_text(state_json, max_chars=state_chars)
             index_ctx = self._clip_text(index_summaries, max_chars=index_chars)
 
-            # Default behavior favors full context. Summarization is opt-in.
-            summarize_logs = self._env_bool("OUROBOROS_CONTEXT_SUMMARIZE_LOGS", False)
+            # Use log summarization by default; allow explicit raw-tail fallback via env=0.
+            summarize_logs = self._env_bool("OUROBOROS_CONTEXT_SUMMARIZE_LOGS", True)
 
             if summarize_logs:
                 # Load and summarize JSONL tails
@@ -1839,207 +1795,53 @@ class OuroborosAgent:
                 try:
                     direct_send_attempted = True
                     chat_id_int = int(task["chat_id"])
-                    # Adaptively chunk: renders HTML and re-splits if needed to avoid 4096 char limit.
-                    chunks = self._iter_markdown_chunks_for_html(text or "", primary_max=2500, secondary_max=1200)
-                    # Filter out whitespace-only chunks to prevent Telegram rejecting empty messages
-                    chunks = [(payload, is_plain, fallback) for payload, is_plain, fallback in chunks if payload.strip()]
-                    direct_send_parts = len(chunks)
-
-                    # If no non-empty chunks remain, treat direct-send as failed
-                    if not chunks:
-                        all_ok = False
-                        direct_sent = False
-                        last_status = "empty_chunks"
-                        append_jsonl(
-                            drive_logs / "events.jsonl",
-                            {
-                                "ts": utc_now_iso(),
-                                "type": "telegram_send_direct_empty_chunks",
-                                "task_id": task.get("id"),
-                                "chat_id": chat_id_int,
-                                "original_text_len": len(text or ""),
-                                "original_text_sha256": sha256_text(text or ""),
-                            },
-                        )
-                    else:
-                        all_ok = True
-                        last_status = "ok"
-
-                    failed_at_index = -1
-                    html_oversized_count = 0
+                    md_chunks = [
+                        c
+                        for c in self._chunk_markdown_for_telegram(text or "", max_chars=3200)
+                        if isinstance(c, str) and c.strip()
+                    ]
+                    direct_send_parts = len(md_chunks)
+                    all_ok = bool(md_chunks)
+                    last_status = "ok" if md_chunks else "empty_chunks"
                     plain_fallback_count = 0
-                    html_fallback_to_plain_count = 0
 
-                    if chunks:
-                        for i, (chunk_text, is_plain, plain_fallback_text) in enumerate(chunks):
-                            if is_plain:
-                                # Pre-determined plain text fallback (HTML was too large even after re-split)
-                                plain_fallback_count += 1
-                                # Further chunk plain text if needed
-                                plain_chunks = self._chunk_plain_text(chunk_text, max_chars=3500)
-                                # Filter out whitespace-only chunks
-                                plain_chunks = [p for p in plain_chunks if isinstance(p, str) and p.strip()]
-                                if not plain_chunks:
-                                    # All chunks were whitespace-only; treat as failure
-                                    all_ok = False
-                                    failed_at_index = i
-                                    last_status = 'plain_empty'
-                                    append_jsonl(
-                                        self.env.drive_path("logs") / "events.jsonl",
-                                        {
-                                            "ts": utc_now_iso(),
-                                            "type": "telegram_send_direct_plain_empty",
-                                            "task_id": task.get("id"),
-                                            "chat_id": chat_id_int,
-                                            "part": i,
-                                            "parts_total": len(chunks),
-                                            "payload_len": len(chunk_text),
-                                            "payload_sha256": sha256_text(chunk_text),
-                                        },
-                                    )
-                                    break
-                                for plain_part in plain_chunks:
-                                    ok, status = self._telegram_send_message_plain(chat_id_int, plain_part)
-                                    last_status = status
-                                    if not ok:
-                                        all_ok = False
-                                        failed_at_index = i
-                                        # Log plain send failure
-                                        append_jsonl(
-                                            self.env.drive_path("logs") / "events.jsonl",
-                                            {
-                                                "ts": utc_now_iso(),
-                                                "type": "telegram_send_direct_plain_failed",
-                                                "task_id": task.get("id"),
-                                                "chat_id": chat_id_int,
-                                                "status": last_status,
-                                                "part": i,
-                                                "parts_total": len(chunks),
-                                                "payload_len": len(chunk_text),
-                                                "payload_sha256": sha256_text(chunk_text),
-                                                "plain_part_len": len(plain_part),
-                                                "plain_part_sha256": sha256_text(plain_part),
-                                            },
-                                        )
-                                        break
-                                if not all_ok:
-                                    break
-                            else:
-                                # Send HTML
-                                if len(chunk_text) > 3800:
-                                    # Should not happen (adaptive chunking prevents this), but log if it does
-                                    html_oversized_count += 1
-                                    append_jsonl(
-                                        self.env.drive_path("logs") / "events.jsonl",
-                                        {
-                                            "ts": utc_now_iso(),
-                                            "type": "telegram_html_chunk_oversized",
-                                            "task_id": task.get("id"),
-                                            "html_len": len(chunk_text),
-                                            "part": i,
-                                        },
-                                    )
-                                ok, status = self._telegram_send_message_html(chat_id_int, chunk_text)
-                                last_status = status
-                                if not ok:
-                                    # HTML send failed; try plain fallback for this chunk (handles HTML parse errors)
-                                    plain_chunks = self._chunk_plain_text(plain_fallback_text, max_chars=3500)
-                                    # Filter out whitespace-only chunks
-                                    plain_chunks = [p for p in plain_chunks if isinstance(p, str) and p.strip()]
-                                    if not plain_chunks:
-                                        # Fallback resulted in empty chunks; treat as failure
-                                        all_ok = False
-                                        failed_at_index = i
-                                        last_status = 'plain_empty'
-                                        append_jsonl(
-                                            self.env.drive_path("logs") / "events.jsonl",
-                                            {
-                                                "ts": utc_now_iso(),
-                                                "type": "telegram_send_direct_plain_empty",
-                                                "task_id": task.get("id"),
-                                                "chat_id": chat_id_int,
-                                                "part": i,
-                                                "parts_total": len(chunks),
-                                                "payload_len": len(chunk_text),
-                                                "payload_sha256": sha256_text(chunk_text),
-                                                "plain_fallback_len": len(plain_fallback_text),
-                                                "plain_fallback_sha256": sha256_text(plain_fallback_text),
-                                            },
-                                        )
-                                        break
-                                    fallback_ok = True
-                                    for plain_part in plain_chunks:
-                                        ok_plain, status_plain = self._telegram_send_message_plain(chat_id_int, plain_part)
-                                        last_status = status_plain
-                                        if not ok_plain:
-                                            fallback_ok = False
-                                            break
-                                    if fallback_ok:
-                                        # Fallback succeeded; continue with next chunks
-                                        html_fallback_to_plain_count += 1
-                                        # Log per-chunk HTML→plain fallback event for observability
-                                        append_jsonl(
-                                            self.env.drive_path("logs") / "events.jsonl",
-                                            {
-                                                "ts": utc_now_iso(),
-                                                "type": "telegram_send_direct_html_fallback",
-                                                "task_id": task.get("id"),
-                                                "chat_id": chat_id_int,
-                                                "part": i,
-                                                "parts_total": len(chunks),
-                                                "html_status": status,
-                                                "plain_parts": len(plain_chunks),
-                                                "html_len": len(chunk_text),
-                                                "plain_fallback_len": len(plain_fallback_text),
-                                                "html_sha256": sha256_text(chunk_text),
-                                                "plain_fallback_sha256": sha256_text(plain_fallback_text),
-                                            },
-                                        )
-                                    else:
-                                        # Fallback also failed; abort
-                                        all_ok = False
-                                        failed_at_index = i
-                                        # Log HTML send failure (original error)
-                                        append_jsonl(
-                                            self.env.drive_path("logs") / "events.jsonl",
-                                            {
-                                                "ts": utc_now_iso(),
-                                                "type": "telegram_send_direct_html_failed",
-                                                "task_id": task.get("id"),
-                                                "chat_id": chat_id_int,
-                                                "status": status,  # original HTML error
-                                                "fallback_status": last_status,  # plain fallback error
-                                                "part": i,
-                                                "parts_total": len(chunks),
-                                                "html_len": len(chunk_text),
-                                                "html_sha256": sha256_text(chunk_text),
-                                                "plain_fallback_len": len(plain_fallback_text),
-                                                "plain_fallback_sha256": sha256_text(plain_fallback_text),
-                                            },
-                                        )
-                                        break
+                    for md_part in md_chunks:
+                        html_text = self._markdown_to_telegram_html(md_part)
+                        ok, status = self._telegram_send_message_html(chat_id_int, html_text)
+                        last_status = status
+                        if ok:
+                            continue
 
-                        # If sending failed mid-stream, note it but don't retry (chunks already processed)
-                        if all_ok:
-                            direct_sent = True
+                        plain_text = self._strip_markdown(md_part)
+                        if not plain_text.strip():
+                            all_ok = False
+                            last_status = "plain_empty"
+                            break
 
-                        # Log overall direct send result
-                        append_jsonl(
-                            self.env.drive_path("logs") / "events.jsonl",
-                            {
-                                "ts": utc_now_iso(),
-                                "type": "telegram_send_direct",
-                                "task_id": task.get("id"),
-                                "chat_id": chat_id_int,
-                                "ok": direct_sent,
-                                "status": last_status,
-                                "parts": len(chunks),
-                                "plain_fallback_count": plain_fallback_count,
-                                "html_oversized_count": html_oversized_count,
-                                "html_fallback_to_plain_count": html_fallback_to_plain_count,
-                            },
-                        )
-                        direct_send_status = last_status
+                        ok_plain, status_plain = self._telegram_send_message_plain(chat_id_int, plain_text)
+                        last_status = status_plain
+                        if ok_plain:
+                            plain_fallback_count += 1
+                            continue
+
+                        all_ok = False
+                        break
+
+                    direct_sent = all_ok
+                    direct_send_status = last_status
+                    append_jsonl(
+                        drive_logs / "events.jsonl",
+                        {
+                            "ts": utc_now_iso(),
+                            "type": "telegram_send_direct",
+                            "task_id": task.get("id"),
+                            "chat_id": chat_id_int,
+                            "ok": direct_sent,
+                            "status": last_status,
+                            "parts": direct_send_parts,
+                            "plain_fallback_count": plain_fallback_count,
+                        },
+                    )
                 except Exception as e:
                     direct_send_attempted = True
                     direct_send_parts = 0
@@ -2222,48 +2024,6 @@ class OuroborosAgent:
             return text[:idx]
         except Exception:
             return text
-
-    def _iter_markdown_chunks_for_html(
-        self, md: str, primary_max: int = 2500, secondary_max: int = 1200, html_max_chars: int = 3800
-    ) -> List[tuple[str, bool, str]]:
-        """Adaptively chunk Markdown for HTML rendering, handling expansion.
-
-        Returns a list of (payload_text, is_plain, plain_fallback_text) tuples:
-        - payload_text: the text to send (HTML or plain)
-        - is_plain: True if pre-determined fallback to plain text (HTML too large), False if HTML
-        - plain_fallback_text: plain text version for runtime fallback if HTML send fails
-
-        Strategy:
-        1. Split markdown with primary_max
-        2. Render each chunk to HTML; if HTML > html_max_chars (UTF-16 units), re-split with secondary_max
-        3. If still too large after re-split, mark for plain-text fallback
-
-        Note: html_max_chars is measured in UTF-16 code units (Telegram's limit).
-        """
-        md = md or ""
-        primary_chunks = self._chunk_markdown_for_telegram(md, max_chars=primary_max)
-        result: List[tuple[str, bool, str]] = []
-
-        for md_chunk in primary_chunks:
-            html_chunk = self._markdown_to_telegram_html(md_chunk)
-            if self._tg_utf16_len(html_chunk) <= html_max_chars:
-                # HTML is safe to send; provide plain fallback for runtime errors
-                plain_fallback = self._strip_markdown(md_chunk)
-                result.append((html_chunk, False, plain_fallback))
-            else:
-                # HTML too large; try re-splitting with smaller max_chars
-                secondary_chunks = self._chunk_markdown_for_telegram(md_chunk, max_chars=secondary_max)
-                for sub_md in secondary_chunks:
-                    sub_html = self._markdown_to_telegram_html(sub_md)
-                    if self._tg_utf16_len(sub_html) <= html_max_chars:
-                        plain_fallback = self._strip_markdown(sub_md)
-                        result.append((sub_html, False, plain_fallback))
-                    else:
-                        # Still too large; pre-determined plain text fallback
-                        plain = self._strip_markdown(sub_md)
-                        result.append((plain, True, plain))
-
-        return result
 
     @staticmethod
     def _chunk_markdown_for_telegram(md: str, max_chars: int = 3500) -> List[str]:

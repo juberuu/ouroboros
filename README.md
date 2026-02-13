@@ -26,7 +26,6 @@
 - (опционально) `OUROBOROS_BUDGET_REPORT_EVERY_MESSAGES` (по умолчанию `10`)
 - (опционально) `OUROBOROS_GIT_LOCK_STALE_SEC` (по умолчанию `600`) — таймаут для автоудаления зависшего git lock
 - (опционально) `OUROBOROS_MAX_TOOL_ROUNDS` (по умолчанию `20`) — лимит итераций tool-calls на один запрос (защита от зацикливания)
-- (опционально) `OUROBOROS_APPEND_JSONL_LOCK_ENABLED` (`0`/`1`, по умолчанию `1`), `OUROBOROS_APPEND_JSONL_LOCK_TIMEOUT_SEC` (по умолчанию `2.0`), `OUROBOROS_APPEND_JSONL_LOCK_STALE_SEC` (по умолчанию `10.0`), `OUROBOROS_APPEND_JSONL_LOCK_SLEEP_SEC` (по умолчанию `0.01`), `OUROBOROS_APPEND_JSONL_WRITE_RETRIES` (по умолчанию `3`), `OUROBOROS_APPEND_JSONL_RETRY_SLEEP_BASE_SEC` (по умолчанию `0.01`) — параметры конкурентной записи JSONL логов
 
 2) Запусти единственную boot-ячейку в Colab.
 3) Напиши своему Telegram-боту. Первый написавший становится владельцем.
@@ -45,8 +44,7 @@
 
 - `state/state.json` — состояние, владелец, бюджет, approvals
 - `logs/` — raw JSONL логи (chat, events, tools, supervisor)
-  - `logs/tools.jsonl` — хранит аргументы инструментов в sanitized/redacted виде
-  - `logs/tool_args/` — длинные блобы могут быть сохранены отдельно как текстовые артефакты
+  - `logs/tools.jsonl` — хранит аргументы инструментов в sanitized/redacted и self-truncated виде
 - `memory/` — долговременная и рабочая память
   - `memory/scratchpad.md` — рабочий контекст между задачами/рестартами
   - `memory/scratchpad_journal.jsonl` — журнал обновлений scratchpad
@@ -125,8 +123,8 @@ Telegram по умолчанию рендерит разметку только 
 ## Контекст и устойчивость
 
 - Воркеры подмешивают в контекст хвосты `logs/chat.jsonl`, `logs/tools.jsonl`, `logs/events.jsonl`, `logs/supervisor.jsonl`, `logs/narration.jsonl`, чтобы лучше помнить фактические результаты прошлых шагов.
-- По умолчанию хвосты логов подмешиваются как raw-tail; суммаризация логов включается только при явном флаге.
-  - Включить: `OUROBOROS_CONTEXT_SUMMARIZE_LOGS=1` (по умолчанию `0`).
+- По умолчанию хвосты логов суммаризуются перед подмешиванием в контекст.
+  - Отключить и вернуть raw-tail: `OUROBOROS_CONTEXT_SUMMARIZE_LOGS=0` (по умолчанию `1`).
 - Воркеры также подмешивают `memory/scratchpad.md` и `memory/identity.md`, чтобы сохранять рабочий фокус и self-model между задачами и после рестартов.
 - Для контроля размера промпта контекстные файлы обрезаются по лимитам символов (начало + конец, середина заменяется на `...(truncated)...`):
   - `OUROBOROS_CONTEXT_WORLD_CHARS` (по умолчанию `180000`)
