@@ -269,6 +269,7 @@ STATE_LOCK_PATH = DRIVE_ROOT / "locks" / "state.lock"
 QUEUE_SNAPSHOT_PATH = DRIVE_ROOT / "state" / "queue_snapshot.json"
 
 def ensure_state_defaults(st: Dict[str, Any]) -> Dict[str, Any]:
+    # Clean state: no legacy fields (approvals, idle_*, etc.)
     st.setdefault("created_at", datetime.datetime.now(datetime.timezone.utc).isoformat())
     st.setdefault("owner_id", None)
     st.setdefault("owner_chat_id", None)
@@ -277,22 +278,19 @@ def ensure_state_defaults(st: Dict[str, Any]) -> Dict[str, Any]:
     st.setdefault("spent_calls", 0)
     st.setdefault("spent_tokens_prompt", 0)
     st.setdefault("spent_tokens_completion", 0)
-    st.setdefault("approvals", {})
     st.setdefault("session_id", uuid.uuid4().hex)
     st.setdefault("current_branch", None)
     st.setdefault("current_sha", None)
     st.setdefault("last_owner_message_at", "")
-    st.setdefault("last_idle_task_at", "")
     st.setdefault("last_evolution_task_at", "")
-    st.setdefault("idle_cursor", 0)
     st.setdefault("budget_messages_since_report", 0)
     st.setdefault("evolution_mode_enabled", False)
     st.setdefault("evolution_cycle", 0)
-    st.setdefault("last_auto_review_at", "")
-    st.setdefault("last_review_task_id", "")
     st.setdefault("queue_seq", 0)
-    if not isinstance(st.get("idle_stats"), dict):
-        st["idle_stats"] = {}
+    # Remove legacy keys if present (clean break)
+    for legacy_key in ("approvals", "idle_cursor", "idle_stats", "last_idle_task_at",
+                        "last_auto_review_at", "last_review_task_id"):
+        st.pop(legacy_key, None)
     return st
 
 def _default_state_dict() -> Dict[str, Any]:
@@ -305,20 +303,14 @@ def _default_state_dict() -> Dict[str, Any]:
         "spent_calls": 0,
         "spent_tokens_prompt": 0,
         "spent_tokens_completion": 0,
-        "approvals": {},
         "session_id": uuid.uuid4().hex,
         "current_branch": None,
         "current_sha": None,
         "last_owner_message_at": "",
-        "last_idle_task_at": "",
         "last_evolution_task_at": "",
-        "idle_cursor": 0,
         "budget_messages_since_report": 0,
         "evolution_mode_enabled": False,
         "evolution_cycle": 0,
-        "idle_stats": {},
-        "last_auto_review_at": "",
-        "last_review_task_id": "",
         "queue_seq": 0,
     }
 
@@ -1095,16 +1087,16 @@ def assign_tasks() -> None:
                 "soft_sent": False,
                 "attempt": int(task.get("_attempt") or 1),
             }
-            st = load_state()
-            if st.get("owner_chat_id"):
-                pr = int(task.get("priority") or _task_priority(str(task.get("type") or "")))
-                send_with_budget(
-                    int(st["owner_chat_id"]),
-                    (
-                        f"▶️ Стартую задачу {task['id']} (worker {w.wid}, type={task.get('type')}, "
-                        f"priority={pr}, attempt={int(task.get('_attempt') or 1)})"
-                    ),
-                )
+            # No mechanical "starting task" messages for user chat (Bible Principle 1).
+            # Only background tasks (evolution/review) get logged to supervisor.
+            task_type = str(task.get("type") or "")
+            if task_type in ("evolution", "review"):
+                st = load_state()
+                if st.get("owner_chat_id"):
+                    send_with_budget(
+                        int(st["owner_chat_id"]),
+                        f"{'🧬' if task_type == 'evolution' else '🔎'} {task_type.capitalize()} task {task['id']} started.",
+                    )
             persist_queue_snapshot(reason="assign_task")
 
 def update_budget_from_usage(usage: Dict[str, Any]) -> None:

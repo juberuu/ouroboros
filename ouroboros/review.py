@@ -1,55 +1,20 @@
 """
 Уроборос — Deep Review.
 
-Полный review всего кода, промптов, состояния, логов.
+Полный review кода, промптов, состояния, логов.
 Контракт: run_review(task) -> (text, usage, trace).
 """
 
 from __future__ import annotations
 
-import json
 import os
 import pathlib
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 from ouroboros.llm import LLMClient
-
-
-def _utc_now_iso() -> str:
-    import datetime as _dt
-    return _dt.datetime.now(tz=_dt.timezone.utc).isoformat()
-
-
-def _estimate_tokens(text: str) -> int:
-    """Грубая оценка токенов (chars/4)."""
-    return max(1, (len(str(text or "")) + 3) // 4)
-
-
-def _clip_text(s: str, max_chars: int = 50000) -> str:
-    if len(s) <= max_chars:
-        return s
-    half = max_chars // 2
-    return s[:half] + "\n...(truncated)...\n" + s[-half:]
-
-
-def _truncate(s: str, max_chars: int = 4000) -> str:
-    if len(s) <= max_chars:
-        return s
-    return s[:max_chars // 2] + "\n...\n" + s[-max_chars // 2:]
-
-
-def _append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    data = (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
-    try:
-        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
-        try:
-            os.write(fd, data)
-        finally:
-            os.close(fd)
-    except Exception:
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+from ouroboros.utils import (
+    utc_now_iso, append_jsonl, truncate_for_log, clip_text, estimate_tokens,
+)
 
 
 _SKIP_EXT = {
@@ -63,7 +28,7 @@ _SKIP_EXT = {
 class ReviewEngine:
     """Deep review система.
 
-    Собирает все текстовые файлы из repo и drive, разбивает на чанки,
+    Собирает текстовые файлы из repo и drive, разбивает на чанки,
     делает multi-pass review через LLM, синтезирует результат.
     """
 
@@ -73,7 +38,6 @@ class ReviewEngine:
         self.drive_root = drive_root
 
     def collect_sections(self) -> Tuple[List[Tuple[str, str]], Dict[str, Any]]:
-        """Собирает все текстовые файлы для ревью."""
         max_file_chars = 600_000
         max_total_chars = 8_000_000
         sections: List[Tuple[str, str]] = []
@@ -99,13 +63,13 @@ class ReviewEngine:
                         continue
                     rel = p.relative_to(root).as_posix()
                     if len(content) > max_file_chars:
-                        content = _clip_text(content, max_file_chars)
+                        content = clip_text(content, max_file_chars)
                         truncated += 1
                     if total_chars >= max_total_chars:
                         dropped += 1
                         continue
                     if (total_chars + len(content)) > max_total_chars:
-                        content = _clip_text(content, max(2000, max_total_chars - total_chars))
+                        content = clip_text(content, max(2000, max_total_chars - total_chars))
                         truncated += 1
                     sections.append((f"{prefix}/{rel}", content))
                     total_chars += len(content)
@@ -119,7 +83,6 @@ class ReviewEngine:
         return sections, stats
 
     def chunk_sections(self, sections: List[Tuple[str, str]], chunk_token_cap: int = 140_000) -> List[str]:
-        """Разбивает секции на чанки по токенному лимиту."""
         cap = max(20_000, min(chunk_token_cap, 220_000))
         cap_chars = cap * 4
         chunks: List[str] = []
@@ -131,7 +94,7 @@ class ReviewEngine:
                 continue
             header = f"\n## FILE: {path}\n"
             part = header + content + "\n"
-            part_tokens = _estimate_tokens(part)
+            part_tokens = estimate_tokens(part)
             if current_parts and (current_tokens + part_tokens) > cap:
                 chunks.append("\n".join(current_parts))
                 current_parts = []
@@ -144,10 +107,7 @@ class ReviewEngine:
         return chunks or ["(No reviewable content found.)"]
 
     def run_review(self, task: Dict[str, Any]) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
-        """Полный deep review.
-
-        Возвращает: (report_text, usage_total, llm_trace)
-        """
+        """Полный deep review. Возвращает: (report_text, usage_total, llm_trace)."""
         reason = str(task.get("text") or "manual_review")
         profile = self.llm.model_profile("deep_review")
         model = profile["model"]
@@ -155,19 +115,15 @@ class ReviewEngine:
 
         sections, stats = self.collect_sections()
         chunks = self.chunk_sections(sections)
-        total_tokens_est = sum(_estimate_tokens(c) for c in chunks)
+        total_tokens_est = sum(estimate_tokens(c) for c in chunks)
 
-        _append_jsonl(
+        append_jsonl(
             self.drive_root / "logs" / "events.jsonl",
             {
-                "ts": _utc_now_iso(),
-                "type": "review_started",
-                "task_id": task.get("id"),
-                "tokens_est": total_tokens_est,
-                "chunks": len(chunks),
-                "files": stats["files"],
-                "model": model,
-                "effort": effort,
+                "ts": utc_now_iso(), "type": "review_started",
+                "task_id": task.get("id"), "tokens_est": total_tokens_est,
+                "chunks": len(chunks), "files": stats["files"],
+                "model": model, "effort": effort,
             },
         )
 
@@ -183,21 +139,20 @@ class ReviewEngine:
 
         for idx, chunk_text in enumerate(chunks, start=1):
             user_prompt = (
-                f"Review reason: {_truncate(reason, 300)}\n"
+                f"Review reason: {truncate_for_log(reason, 300)}\n"
                 f"Chunk {idx}/{len(chunks)}\n\n"
                 "Return: 1) Critical risks 2) High-impact improvements "
                 "3) Evidence references 4) Suggested next actions\n\n"
                 + chunk_text
             )
-            messages = [
-                {"role": "system", "content": chunk_system},
-                {"role": "user", "content": user_prompt},
-            ]
             try:
-                msg, usage = self.llm.chat(messages, model=model, reasoning_effort=effort, max_tokens=3800)
+                msg, usage = self.llm.chat(
+                    [{"role": "system", "content": chunk_system},
+                     {"role": "user", "content": user_prompt}],
+                    model=model, reasoning_effort=effort, max_tokens=3800,
+                )
                 text = msg.get("content", "") or ""
                 chunk_reports.append(f"=== Chunk {idx}/{len(chunks)} ===\n{text}")
-                # Суммируем usage
                 for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
                     usage_total[k] = int(usage_total.get(k) or 0) + int(usage.get(k) or 0)
                 if usage.get("cost"):
@@ -205,7 +160,6 @@ class ReviewEngine:
             except Exception as e:
                 chunk_reports.append(f"=== Chunk {idx} ERROR: {e} ===")
 
-        # Синтез если несколько чанков
         if len(chunk_reports) > 1:
             synthesis_prompt = (
                 "Consolidate these multi-chunk review results into a single coherent report.\n"
@@ -231,15 +185,11 @@ class ReviewEngine:
         cost = usage_total.get("cost", 0)
         final_report += f"\n\n---\nReview cost: ~${cost:.4f}, tokens: {usage_total.get('total_tokens', 0)}"
 
-        _append_jsonl(
+        append_jsonl(
             self.drive_root / "logs" / "events.jsonl",
             {
-                "ts": _utc_now_iso(),
-                "type": "review_completed",
-                "task_id": task.get("id"),
-                "chunks": len(chunks),
-                "usage": usage_total,
+                "ts": utc_now_iso(), "type": "review_completed",
+                "task_id": task.get("id"), "chunks": len(chunks), "usage": usage_total,
             },
         )
-
         return final_report, usage_total, llm_trace

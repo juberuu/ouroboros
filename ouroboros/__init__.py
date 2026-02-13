@@ -2,9 +2,12 @@
 Уроборос — самомодифицирующийся агент.
 
 Философия: BIBLE.md
-Структура: agent.py (ядро), tools.py (инструменты), llm.py (LLM),
-           memory.py (память), review.py (deep review).
+Архитектура: agent.py (оркестратор), tools.py (SSOT инструменты),
+             llm.py (LLM), memory.py (память), review.py (deep review),
+             utils.py (общие утилиты).
 """
 
-__all__ = ['agent', 'tools', 'llm', 'memory', 'review']
-__version__ = '0.1.1'
+from ouroboros.agent import make_agent
+
+__all__ = ['make_agent', 'agent', 'tools', 'llm', 'memory', 'review', 'utils']
+__version__ = '1.0.0'

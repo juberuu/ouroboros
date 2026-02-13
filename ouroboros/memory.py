@@ -1,63 +1,18 @@
 """
 Уроборос — Память.
 
-Scratchpad, identity, chat history, суммаризация логов.
-Контракт: load/save scratchpad и identity, chat_history(), summarize_logs().
+Scratchpad, identity, chat history.
+Контракт: load/save scratchpad и identity, chat_history().
 """
 
 from __future__ import annotations
 
 import json
 import pathlib
-import traceback
 from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple
 
-# Общие утилиты — импортируются из agent.py (чтобы не дублировать)
-# При рефакторинге Уроборос может вынести их в отдельный utils.py
-from ouroboros.llm import LLMClient
-
-
-def _utc_now_iso() -> str:
-    import datetime as _dt
-    return _dt.datetime.now(tz=_dt.timezone.utc).isoformat()
-
-
-def _read_text(path: pathlib.Path) -> str:
-    return path.read_text(encoding="utf-8")
-
-
-def _write_text(path: pathlib.Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
-
-
-def _append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> None:
-    import os
-    path.parent.mkdir(parents=True, exist_ok=True)
-    data = (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
-    try:
-        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
-        try:
-            os.write(fd, data)
-        finally:
-            os.close(fd)
-    except Exception:
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(obj, ensure_ascii=False) + "\n")
-
-
-def _short(s: str, max_len: int = 120) -> str:
-    t = str(s or "")
-    if len(t) <= max_len:
-        return t
-    return t[: max_len - 3] + "..."
-
-
-def _truncate_for_log(s: str, max_chars: int = 4000) -> str:
-    if len(s) <= max_chars:
-        return s
-    return s[: max_chars // 2] + "\n...\n" + s[-max_chars // 2:]
+from ouroboros.utils import utc_now_iso, read_text, write_text, append_jsonl, short
 
 
 SCRATCHPAD_SECTIONS: Tuple[str, ...] = (
@@ -97,33 +52,33 @@ class Memory:
     def load_scratchpad(self) -> str:
         p = self.scratchpad_path()
         if p.exists():
-            return _read_text(p)
+            return read_text(p)
         default = self._default_scratchpad()
-        _write_text(p, default)
+        write_text(p, default)
         return default
 
     def save_scratchpad(self, content: str) -> None:
-        _write_text(self.scratchpad_path(), content)
+        write_text(self.scratchpad_path(), content)
 
     def load_identity(self) -> str:
         p = self.identity_path()
         if p.exists():
-            return _read_text(p)
+            return read_text(p)
         default = self._default_identity()
-        _write_text(p, default)
+        write_text(p, default)
         return default
 
     def save_identity(self, content: str) -> None:
-        _write_text(self.identity_path(), content)
+        write_text(self.identity_path(), content)
 
     def ensure_files(self) -> None:
         """Создаёт файлы памяти если их нет."""
         if not self.scratchpad_path().exists():
-            _write_text(self.scratchpad_path(), self._default_scratchpad())
+            write_text(self.scratchpad_path(), self._default_scratchpad())
         if not self.identity_path().exists():
-            _write_text(self.identity_path(), self._default_identity())
+            write_text(self.identity_path(), self._default_identity())
         if not self.journal_path().exists():
-            _write_text(self.journal_path(), "")
+            write_text(self.journal_path(), "")
 
     # --- Chat history (инструмент для Уробороса) ---
 
@@ -145,16 +100,13 @@ class Memory:
                 except Exception:
                     continue
 
-            # Фильтр по тексту
             if search:
                 search_lower = search.lower()
                 entries = [e for e in entries if search_lower in str(e.get("text", "")).lower()]
 
-            # Offset от конца
             if offset > 0:
                 entries = entries[:-offset] if offset < len(entries) else []
 
-            # Последние count
             entries = entries[-count:] if count < len(entries) else entries
 
             if not entries:
@@ -165,14 +117,14 @@ class Memory:
                 dir_raw = str(e.get("direction", "")).lower()
                 direction = "→" if dir_raw in ("out", "outgoing") else "←"
                 ts = str(e.get("ts", ""))[:16]
-                text = _short(str(e.get("text", "")), 300)
+                text = short(str(e.get("text", "")), 300)
                 lines.append(f"{direction} [{ts}] {text}")
 
             return f"Показано {len(entries)} сообщений:\n\n" + "\n".join(lines)
         except Exception as e:
             return f"(ошибка чтения истории: {e})"
 
-    # --- Суммаризация логов ---
+    # --- JSONL tail reading ---
 
     def read_jsonl_tail(self, log_name: str, max_entries: int = 100) -> List[Dict[str, Any]]:
         """Читает последние max_entries записей из JSONL файла."""
@@ -195,6 +147,8 @@ class Memory:
         except Exception:
             return []
 
+    # --- Log summarization ---
+
     def summarize_chat(self, entries: List[Dict[str, Any]]) -> str:
         if not entries:
             return ""
@@ -204,7 +158,7 @@ class Memory:
             direction = "→" if dir_raw in ("out", "outgoing") else "←"
             ts_full = e.get("ts", "")
             ts_hhmm = ts_full[11:16] if len(ts_full) >= 16 else ""
-            text = _short(str(e.get("text", "")), 160)
+            text = short(str(e.get("text", "")), 160)
             lines.append(f"{direction} {ts_hhmm} {text}")
         return "\n".join(lines)
 
@@ -218,9 +172,9 @@ class Memory:
             hints = []
             for key in ("path", "dir", "commit_message", "query"):
                 if key in args:
-                    hints.append(f"{key}={_short(str(args[key]), 60)}")
+                    hints.append(f"{key}={short(str(args[key]), 60)}")
             if "cmd" in args:
-                hints.append(f"cmd={_short(str(args['cmd']), 80)}")
+                hints.append(f"cmd={short(str(args['cmd']), 80)}")
             hint_str = ", ".join(hints) if hints else ""
             status = "✓" if ("result_preview" in e and not str(e.get("result_preview", "")).lstrip().startswith("⚠️")) else "·"
             lines.append(f"{status} {tool} {hint_str}".strip())
@@ -241,7 +195,7 @@ class Memory:
         if errors:
             lines.append("\nRecent errors:")
             for e in errors[-10:]:
-                lines.append(f"  {e.get('type', '?')}: {_short(str(e.get('error', '')), 120)}")
+                lines.append(f"  {e.get('type', '?')}: {short(str(e.get('error', '')), 120)}")
         return "\n".join(lines)
 
     def summarize_supervisor(self, entries: List[Dict[str, Any]]) -> str:
@@ -250,9 +204,24 @@ class Memory:
         for e in reversed(entries):
             if e.get("type") in ("launcher_start", "restart", "boot"):
                 branch = e.get("branch") or e.get("git_branch") or "?"
-                sha = _short(str(e.get("sha") or e.get("git_sha") or ""), 12)
+                sha = short(str(e.get("sha") or e.get("git_sha") or ""), 12)
                 return f"{e['type']}: {e.get('ts', '')} branch={branch} sha={sha}"
         return ""
+
+    def summarize_narration(self, entries: List[Dict[str, Any]]) -> str:
+        if not entries:
+            return ""
+        lines = []
+        for e in entries[-8:]:
+            narration = e.get("narration")
+            if isinstance(narration, list):
+                for item in narration[:3]:
+                    lines.append(short(item, 200))
+            else:
+                text = e.get("text", "")
+                if text:
+                    lines.append(short(text, 200))
+        return "\n".join(lines)
 
     # --- Scratchpad operations ---
 
@@ -272,7 +241,7 @@ class Memory:
         return sections
 
     def render_scratchpad(self, sections: Dict[str, List[str]]) -> str:
-        lines = ["# Scratchpad", "", f"UpdatedAt: {_utc_now_iso()}", ""]
+        lines = ["# Scratchpad", "", f"UpdatedAt: {utc_now_iso()}", ""]
         for section in SCRATCHPAD_SECTIONS:
             lines.append(f"## {section}")
             items = sections.get(section) or []
@@ -285,12 +254,12 @@ class Memory:
         return "\n".join(lines).rstrip() + "\n"
 
     def append_journal(self, entry: Dict[str, Any]) -> None:
-        _append_jsonl(self.journal_path(), entry)
+        append_jsonl(self.journal_path(), entry)
 
     # --- Defaults ---
 
     def _default_scratchpad(self) -> str:
-        lines = ["# Scratchpad", "", f"UpdatedAt: {_utc_now_iso()}", ""]
+        lines = ["# Scratchpad", "", f"UpdatedAt: {utc_now_iso()}", ""]
         for section in SCRATCHPAD_SECTIONS:
             lines.extend([f"## {section}", "- (empty)", ""])
         return "\n".join(lines).rstrip() + "\n"

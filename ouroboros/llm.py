@@ -54,11 +54,9 @@ class LLMClient:
         tools: Optional[List[Dict[str, Any]]] = None,
         reasoning_effort: str = "medium",
         max_tokens: int = 16384,
+        tool_choice: str = "auto",
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """Один вызов LLM.
-
-        Возвращает: (response_message_dict, usage_dict)
-        """
+        """Один вызов LLM. Возвращает: (response_message_dict, usage_dict)."""
         client = self._get_client()
         effort = normalize_reasoning_effort(reasoning_effort)
 
@@ -70,6 +68,7 @@ class LLMClient:
         }
         if tools:
             kwargs["tools"] = tools
+            kwargs["tool_choice"] = tool_choice
 
         resp = client.chat.completions.create(**kwargs)
         resp_dict = resp.model_dump()
@@ -77,22 +76,47 @@ class LLMClient:
         msg = resp_dict.get("choices", [{}])[0].get("message", {})
         return msg, usage
 
+    def chat_raw(
+        self,
+        messages: List[Dict[str, Any]],
+        model: str,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        reasoning_effort: str = "medium",
+        max_tokens: int = 16384,
+        tool_choice: str = "auto",
+    ) -> Dict[str, Any]:
+        """Один вызов LLM. Возвращает полный resp_dict."""
+        client = self._get_client()
+        effort = normalize_reasoning_effort(reasoning_effort)
+
+        kwargs: Dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "extra_body": {"reasoning": {"effort": effort, "exclude": True}},
+        }
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = tool_choice
+
+        resp = client.chat.completions.create(**kwargs)
+        return resp.model_dump()
+
     def model_profile(self, profile: str) -> Dict[str, str]:
         """Возвращает {"model": ..., "effort": ...} для типа задачи.
 
         Профили читают env-переменные, но имеют разумные дефолты.
+        Минимум env — в соответствии с Принципом 3 (Минимализм).
         """
         main_model = os.environ.get("OUROBOROS_MODEL", "openai/gpt-5.2")
         code_model = os.environ.get("OUROBOROS_MODEL_CODE", main_model)
-        review_model = os.environ.get("OUROBOROS_MODEL_REVIEW", main_model)
 
         profiles: Dict[str, Dict[str, str]] = {
             "default_task": {"model": main_model, "effort": "medium"},
             "code_task": {"model": code_model, "effort": "high"},
             "evolution_task": {"model": code_model, "effort": "high"},
-            "deep_review": {"model": review_model, "effort": "xhigh"},
+            "deep_review": {"model": main_model, "effort": "xhigh"},
             "memory_summary": {"model": main_model, "effort": "low"},
-            "notice": {"model": main_model, "effort": "low"},
         }
         return dict(profiles.get(profile, profiles["default_task"]))
 
