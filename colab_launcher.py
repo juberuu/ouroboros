@@ -1,22 +1,25 @@
 # ============================
-# Ouroboros — Colab Launcher Cell (pull existing repo + run)
-# Fixes: apply_patch shim + no "Drive already mounted" spam
-#
-# This file is a reference copy of the immutable Colab boot cell.
-# The actual boot cell lives in the Colab notebook and must not be
-# modified by the agent.  Keep this file in sync manually.
+# Ouroboros — Runtime launcher (executed from repository)
 # ============================
 
-import os, sys, json, time, uuid, pathlib, subprocess, datetime, re
+import os, sys, json, time, uuid, pathlib, subprocess, datetime, re, shutil
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+# ----------------------------
+# 0) Install launcher deps
+# ----------------------------
+def install_launcher_deps() -> None:
+    # Keep launcher bootstrap minimal and stable.
+    subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-q", "openai>=1.0.0", "requests"],
+        check=True,
+    )
+
+
+install_launcher_deps()
 
 import requests
-
-# ----------------------------
-# 0) Install deps
-# ----------------------------
-subprocess.run([sys.executable, "-m", "pip", "install", "-q", "openai>=1.0.0", "requests"], check=True)
 
 def ensure_claude_code_cli() -> bool:
     """Best-effort install of Claude Code CLI for Anthropic-powered code edits."""
@@ -154,18 +157,44 @@ APPLY_PATCH_PATH.write_text(APPLY_PATCH_CODE, encoding="utf-8")
 APPLY_PATCH_PATH.chmod(0o755)
 
 # ----------------------------
-# 1) Secrets (Colab userdata -> env fallback)
+# 1) Secrets + runtime config
 # ----------------------------
 from google.colab import userdata  # type: ignore
 from google.colab import drive  # type: ignore
 
+
+_LEGACY_CFG_WARNED: Set[str] = set()
+
+
+def _userdata_get(name: str) -> Optional[str]:
+    try:
+        return userdata.get(name)
+    except Exception:
+        return None
+
+
 def get_secret(name: str, default: Optional[str] = None, required: bool = False) -> Optional[str]:
-    v = userdata.get(name)
-    if v is None:
+    v = _userdata_get(name)
+    if v is None or str(v).strip() == "":
         v = os.environ.get(name, default)
     if required:
         assert v is not None and str(v).strip() != "", f"Missing required secret: {name}"
     return v
+
+
+def get_cfg(name: str, default: Optional[str] = None, allow_legacy_secret: bool = False) -> Optional[str]:
+    v = os.environ.get(name)
+    if v is not None and str(v).strip() != "":
+        return v
+    if allow_legacy_secret:
+        legacy = _userdata_get(name)
+        if legacy is not None and str(legacy).strip() != "":
+            if name not in _LEGACY_CFG_WARNED:
+                print(f"[cfg] DEPRECATED: move {name} from Colab Secrets to config cell/env.")
+                _LEGACY_CFG_WARNED.add(name)
+            return legacy
+    return default
+
 
 OPENROUTER_API_KEY = get_secret("OPENROUTER_API_KEY", required=True)
 TELEGRAM_BOT_TOKEN = get_secret("TELEGRAM_BOT_TOKEN", required=True)
@@ -180,21 +209,21 @@ except Exception:
 OPENAI_API_KEY = get_secret("OPENAI_API_KEY", default="")  # optional
 ANTHROPIC_API_KEY = get_secret("ANTHROPIC_API_KEY", default="")  # optional; enables Claude Code CLI tool
 
-GITHUB_USER = get_secret("GITHUB_USER", default="razzant")
-GITHUB_REPO = get_secret("GITHUB_REPO", default="ouroboros")
+GITHUB_USER = get_cfg("GITHUB_USER", default="razzant", allow_legacy_secret=True)
+GITHUB_REPO = get_cfg("GITHUB_REPO", default="ouroboros", allow_legacy_secret=True)
 
-MAX_WORKERS = int(get_secret("OUROBOROS_MAX_WORKERS", default="5") or "5")
-MODEL_MAIN = get_secret("OUROBOROS_MODEL", default="openai/gpt-5.2")
-MODEL_CODE = get_secret("OUROBOROS_MODEL_CODE", default="openai/gpt-5.2-codex")
-MODEL_REVIEW = get_secret("OUROBOROS_MODEL_REVIEW", default="openai/gpt-5.2")
-MODEL_ROUTER = get_secret("OUROBOROS_ROUTER_MODEL", default=str(MODEL_MAIN or "openai/gpt-5.2"))
-ROUTER_REASONING_EFFORT = str(get_secret("OUROBOROS_ROUTER_REASONING_EFFORT", default="low") or "low").strip().lower()
-REASONING_DEFAULT_TASK = str(get_secret("OUROBOROS_REASONING_DEFAULT_TASK", default="medium") or "medium").strip().lower()
-REASONING_CODE_TASK = str(get_secret("OUROBOROS_REASONING_CODE_TASK", default="high") or "high").strip().lower()
-REASONING_EVOLUTION_TASK = str(get_secret("OUROBOROS_REASONING_EVOLUTION_TASK", default="high") or "high").strip().lower()
-REASONING_DEEP_REVIEW = str(get_secret("OUROBOROS_REASONING_DEEP_REVIEW", default="xhigh") or "xhigh").strip().lower()
-REASONING_MEMORY_SUMMARY = str(get_secret("OUROBOROS_REASONING_MEMORY_SUMMARY", default="low") or "low").strip().lower()
-REASONING_NOTICE = str(get_secret("OUROBOROS_REASONING_NOTICE", default="low") or "low").strip().lower()
+MAX_WORKERS = int(get_cfg("OUROBOROS_MAX_WORKERS", default="5", allow_legacy_secret=True) or "5")
+MODEL_MAIN = get_cfg("OUROBOROS_MODEL", default="openai/gpt-5.2", allow_legacy_secret=True)
+MODEL_CODE = get_cfg("OUROBOROS_MODEL_CODE", default="openai/gpt-5.2-codex", allow_legacy_secret=True)
+MODEL_REVIEW = get_cfg("OUROBOROS_MODEL_REVIEW", default="openai/gpt-5.2", allow_legacy_secret=True)
+MODEL_ROUTER = get_cfg("OUROBOROS_ROUTER_MODEL", default=str(MODEL_MAIN or "openai/gpt-5.2"), allow_legacy_secret=True)
+ROUTER_REASONING_EFFORT = str(get_cfg("OUROBOROS_ROUTER_REASONING_EFFORT", default="low", allow_legacy_secret=True) or "low").strip().lower()
+REASONING_DEFAULT_TASK = str(get_cfg("OUROBOROS_REASONING_DEFAULT_TASK", default="medium", allow_legacy_secret=True) or "medium").strip().lower()
+REASONING_CODE_TASK = str(get_cfg("OUROBOROS_REASONING_CODE_TASK", default="high", allow_legacy_secret=True) or "high").strip().lower()
+REASONING_EVOLUTION_TASK = str(get_cfg("OUROBOROS_REASONING_EVOLUTION_TASK", default="high", allow_legacy_secret=True) or "high").strip().lower()
+REASONING_DEEP_REVIEW = str(get_cfg("OUROBOROS_REASONING_DEEP_REVIEW", default="xhigh", allow_legacy_secret=True) or "xhigh").strip().lower()
+REASONING_MEMORY_SUMMARY = str(get_cfg("OUROBOROS_REASONING_MEMORY_SUMMARY", default="low", allow_legacy_secret=True) or "low").strip().lower()
+REASONING_NOTICE = str(get_cfg("OUROBOROS_REASONING_NOTICE", default="low", allow_legacy_secret=True) or "low").strip().lower()
 
 def as_bool(v: Any, default: bool = False) -> bool:
     if v is None:
@@ -206,27 +235,29 @@ def as_bool(v: Any, default: bool = False) -> bool:
         return False
     return default
 
-IDLE_ENABLED = as_bool(get_secret("OUROBOROS_IDLE_ENABLED", default="1"), default=True)
-IDLE_COOLDOWN_SEC = max(60, int(get_secret("OUROBOROS_IDLE_COOLDOWN_SEC", default="900") or "900"))
-IDLE_BUDGET_PCT_CAP = max(1.0, min(float(get_secret("OUROBOROS_IDLE_BUDGET_PCT_CAP", default="35") or "35"), 100.0))
-IDLE_MAX_PER_DAY = max(1, int(get_secret("OUROBOROS_IDLE_MAX_PER_DAY", default="8") or "8"))
-EVOLUTION_ENABLED_BY_DEFAULT = as_bool(get_secret("OUROBOROS_EVOLUTION_ENABLED_BY_DEFAULT", default="0"), default=False)
-BUDGET_REPORT_EVERY_MESSAGES = max(1, int(get_secret("OUROBOROS_BUDGET_REPORT_EVERY_MESSAGES", default="10") or "10"))
-QUEUE_SOFT_TIMEOUT_1_SEC = max(60, int(get_secret("OUROBOROS_TASK_SOFT_TIMEOUT_1_SEC", default="300") or "300"))
-QUEUE_SOFT_TIMEOUT_2_SEC = max(120, int(get_secret("OUROBOROS_TASK_SOFT_TIMEOUT_2_SEC", default="600") or "600"))
-QUEUE_HARD_TIMEOUT_SEC = max(180, int(get_secret("OUROBOROS_TASK_HARD_TIMEOUT_SEC", default="900") or "900"))
-QUEUE_MAX_RETRIES = max(0, int(get_secret("OUROBOROS_TASK_MAX_RETRIES", default="1") or "1"))
-HEARTBEAT_STALE_SEC = max(30, int(get_secret("OUROBOROS_TASK_HEARTBEAT_STALE_SEC", default="120") or "120"))
-AUTO_REVIEW_MIN_GAP_SEC = max(60, int(get_secret("OUROBOROS_AUTO_REVIEW_MIN_GAP_SEC", default="300") or "300"))
-REVIEW_COMPLEX_MIN_DURATION_SEC = max(60, int(get_secret("OUROBOROS_REVIEW_COMPLEX_MIN_DURATION_SEC", default="180") or "180"))
-REVIEW_COMPLEX_MIN_TOOL_CALLS = max(2, int(get_secret("OUROBOROS_REVIEW_COMPLEX_MIN_TOOL_CALLS", default="8") or "8"))
-REVIEW_COMPLEX_MIN_TOOL_ERRORS = max(1, int(get_secret("OUROBOROS_REVIEW_COMPLEX_MIN_TOOL_ERRORS", default="2") or "2"))
-TASK_HEARTBEAT_SEC = max(10, int(get_secret("OUROBOROS_TASK_HEARTBEAT_SEC", default="30") or "30"))
+IDLE_ENABLED = as_bool(get_cfg("OUROBOROS_IDLE_ENABLED", default="1", allow_legacy_secret=True), default=True)
+IDLE_COOLDOWN_SEC = max(60, int(get_cfg("OUROBOROS_IDLE_COOLDOWN_SEC", default="900", allow_legacy_secret=True) or "900"))
+IDLE_BUDGET_PCT_CAP = max(1.0, min(float(get_cfg("OUROBOROS_IDLE_BUDGET_PCT_CAP", default="35", allow_legacy_secret=True) or "35"), 100.0))
+IDLE_MAX_PER_DAY = max(1, int(get_cfg("OUROBOROS_IDLE_MAX_PER_DAY", default="8", allow_legacy_secret=True) or "8"))
+EVOLUTION_ENABLED_BY_DEFAULT = as_bool(get_cfg("OUROBOROS_EVOLUTION_ENABLED_BY_DEFAULT", default="0", allow_legacy_secret=True), default=False)
+BUDGET_REPORT_EVERY_MESSAGES = max(1, int(get_cfg("OUROBOROS_BUDGET_REPORT_EVERY_MESSAGES", default="10", allow_legacy_secret=True) or "10"))
+QUEUE_SOFT_TIMEOUT_1_SEC = max(60, int(get_cfg("OUROBOROS_TASK_SOFT_TIMEOUT_1_SEC", default="300", allow_legacy_secret=True) or "300"))
+QUEUE_SOFT_TIMEOUT_2_SEC = max(120, int(get_cfg("OUROBOROS_TASK_SOFT_TIMEOUT_2_SEC", default="600", allow_legacy_secret=True) or "600"))
+QUEUE_HARD_TIMEOUT_SEC = max(180, int(get_cfg("OUROBOROS_TASK_HARD_TIMEOUT_SEC", default="900", allow_legacy_secret=True) or "900"))
+QUEUE_MAX_RETRIES = max(0, int(get_cfg("OUROBOROS_TASK_MAX_RETRIES", default="1", allow_legacy_secret=True) or "1"))
+HEARTBEAT_STALE_SEC = max(30, int(get_cfg("OUROBOROS_TASK_HEARTBEAT_STALE_SEC", default="120", allow_legacy_secret=True) or "120"))
+AUTO_REVIEW_MIN_GAP_SEC = max(60, int(get_cfg("OUROBOROS_AUTO_REVIEW_MIN_GAP_SEC", default="300", allow_legacy_secret=True) or "300"))
+REVIEW_COMPLEX_MIN_DURATION_SEC = max(60, int(get_cfg("OUROBOROS_REVIEW_COMPLEX_MIN_DURATION_SEC", default="180", allow_legacy_secret=True) or "180"))
+REVIEW_COMPLEX_MIN_TOOL_CALLS = max(2, int(get_cfg("OUROBOROS_REVIEW_COMPLEX_MIN_TOOL_CALLS", default="8", allow_legacy_secret=True) or "8"))
+REVIEW_COMPLEX_MIN_TOOL_ERRORS = max(1, int(get_cfg("OUROBOROS_REVIEW_COMPLEX_MIN_TOOL_ERRORS", default="2", allow_legacy_secret=True) or "2"))
+TASK_HEARTBEAT_SEC = max(10, int(get_cfg("OUROBOROS_TASK_HEARTBEAT_SEC", default="30", allow_legacy_secret=True) or "30"))
 
 # expose needed env to workers (do not print)
 os.environ["OPENROUTER_API_KEY"] = str(OPENROUTER_API_KEY)
 os.environ["OPENAI_API_KEY"] = str(OPENAI_API_KEY or "")
 os.environ["ANTHROPIC_API_KEY"] = str(ANTHROPIC_API_KEY or "")
+os.environ["GITHUB_USER"] = str(GITHUB_USER or "razzant")
+os.environ["GITHUB_REPO"] = str(GITHUB_REPO or "ouroboros")
 os.environ["OUROBOROS_MODEL"] = str(MODEL_MAIN or "openai/gpt-5.2")
 os.environ["OUROBOROS_MODEL_CODE"] = str(MODEL_CODE or "openai/gpt-5.2-codex")
 os.environ["OUROBOROS_MODEL_REVIEW"] = str(MODEL_REVIEW or "openai/gpt-5.2")
@@ -484,7 +515,95 @@ def _collect_repo_sync_state() -> Dict[str, Any]:
 
     return state
 
-def checkout_and_reset(branch: str, reason: str = "unspecified", guard_unsynced: bool = False) -> Tuple[bool, str]:
+def _copy_untracked_for_rescue(dst_root: pathlib.Path, max_files: int = 200, max_total_bytes: int = 12_000_000) -> Dict[str, Any]:
+    out: Dict[str, Any] = {
+        "copied_files": 0,
+        "skipped_files": 0,
+        "copied_bytes": 0,
+        "truncated": False,
+    }
+    rc, txt, err = _git_capture(["git", "ls-files", "--others", "--exclude-standard"])
+    if rc != 0:
+        out["error"] = err or "git ls-files failed"
+        return out
+
+    lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
+    if not lines:
+        return out
+
+    dst_root.mkdir(parents=True, exist_ok=True)
+    for rel in lines:
+        if out["copied_files"] >= max_files:
+            out["truncated"] = True
+            break
+        src = (REPO_DIR / rel).resolve()
+        try:
+            # Avoid path traversal and weird symlink surprises.
+            src.relative_to(REPO_DIR.resolve())
+        except Exception:
+            out["skipped_files"] += 1
+            continue
+        if not src.exists() or not src.is_file():
+            out["skipped_files"] += 1
+            continue
+        try:
+            size = int(src.stat().st_size)
+        except Exception:
+            out["skipped_files"] += 1
+            continue
+        if (out["copied_bytes"] + size) > max_total_bytes:
+            out["truncated"] = True
+            break
+        dst = dst_root / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(src, dst)
+            out["copied_files"] += 1
+            out["copied_bytes"] += size
+        except Exception:
+            out["skipped_files"] += 1
+    return out
+
+
+def _create_rescue_snapshot(branch: str, reason: str, repo_state: Dict[str, Any]) -> Dict[str, Any]:
+    now = datetime.datetime.now(datetime.timezone.utc)
+    ts = now.strftime("%Y%m%d_%H%M%S")
+    rescue_dir = DRIVE_ROOT / "archive" / "rescue" / f"{ts}_{uuid.uuid4().hex[:8]}"
+    rescue_dir.mkdir(parents=True, exist_ok=True)
+
+    info: Dict[str, Any] = {
+        "ts": now.isoformat(),
+        "target_branch": branch,
+        "reason": reason,
+        "current_branch": repo_state.get("current_branch"),
+        "dirty_count": len(repo_state.get("dirty_lines") or []),
+        "unpushed_count": len(repo_state.get("unpushed_lines") or []),
+        "warnings": list(repo_state.get("warnings") or []),
+        "path": str(rescue_dir),
+    }
+
+    rc_status, status_txt, _ = _git_capture(["git", "status", "--porcelain"])
+    if rc_status == 0:
+        _atomic_write_text(rescue_dir / "status.porcelain.txt", status_txt + ("\n" if status_txt else ""))
+
+    rc_diff, diff_txt, diff_err = _git_capture(["git", "diff", "--binary", "HEAD"])
+    if rc_diff == 0:
+        _atomic_write_text(rescue_dir / "changes.diff", diff_txt + ("\n" if diff_txt else ""))
+    else:
+        info["diff_error"] = diff_err or "git diff failed"
+
+    untracked_meta = _copy_untracked_for_rescue(rescue_dir / "untracked")
+    info["untracked"] = untracked_meta
+
+    unpushed_lines = [ln for ln in (repo_state.get("unpushed_lines") or []) if str(ln).strip()]
+    if unpushed_lines:
+        _atomic_write_text(rescue_dir / "unpushed_commits.txt", "\n".join(unpushed_lines) + "\n")
+
+    _atomic_write_text(rescue_dir / "rescue_meta.json", json.dumps(info, ensure_ascii=False, indent=2))
+    return info
+
+
+def checkout_and_reset(branch: str, reason: str = "unspecified", unsynced_policy: str = "ignore") -> Tuple[bool, str]:
     # Always refresh refs before any reset-to-origin action.
     rc, _, err = _git_capture(["git", "fetch", "origin"])
     if rc != 0:
@@ -501,34 +620,72 @@ def checkout_and_reset(branch: str, reason: str = "unspecified", guard_unsynced:
         )
         return False, msg
 
-    if guard_unsynced:
+    policy = str(unsynced_policy or "ignore").strip().lower()
+    if policy not in {"ignore", "block", "rescue_and_block", "rescue_and_reset"}:
+        policy = "ignore"
+
+    if policy != "ignore":
         repo_state = _collect_repo_sync_state()
         dirty_lines = list(repo_state.get("dirty_lines") or [])
         unpushed_lines = list(repo_state.get("unpushed_lines") or [])
         if dirty_lines or unpushed_lines:
+            rescue_info: Dict[str, Any] = {}
+            if policy in {"rescue_and_block", "rescue_and_reset"}:
+                try:
+                    rescue_info = _create_rescue_snapshot(branch=branch, reason=reason, repo_state=repo_state)
+                except Exception as e:
+                    rescue_info = {"error": repr(e)}
             bits: List[str] = []
             if unpushed_lines:
                 bits.append(f"unpushed={len(unpushed_lines)}")
             if dirty_lines:
                 bits.append(f"dirty={len(dirty_lines)}")
             detail = ", ".join(bits) if bits else "unsynced"
-            msg = f"Reset blocked ({detail}) to protect local changes."
+            rescue_suffix = ""
+            rescue_path = str(rescue_info.get("path") or "").strip()
+            if rescue_path:
+                rescue_suffix = f" Rescue saved to {rescue_path}."
+            elif policy in {"rescue_and_block", "rescue_and_reset"} and rescue_info.get("error"):
+                rescue_suffix = f" Rescue failed: {rescue_info.get('error')}."
+
+            if policy in {"block", "rescue_and_block"}:
+                msg = f"Reset blocked ({detail}) to protect local changes.{rescue_suffix}"
+                append_jsonl(
+                    DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                    {
+                        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        "type": "reset_blocked_unsynced_state",
+                        "target_branch": branch,
+                        "reason": reason,
+                        "policy": policy,
+                        "current_branch": repo_state.get("current_branch"),
+                        "dirty_count": len(dirty_lines),
+                        "unpushed_count": len(unpushed_lines),
+                        "dirty_preview": dirty_lines[:20],
+                        "unpushed_preview": unpushed_lines[:20],
+                        "warnings": list(repo_state.get("warnings") or []),
+                        "rescue": rescue_info,
+                    },
+                )
+                return False, msg
+
             append_jsonl(
                 DRIVE_ROOT / "logs" / "supervisor.jsonl",
                 {
                     "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                    "type": "reset_blocked_unsynced_state",
+                    "type": "reset_unsynced_rescued_then_reset",
                     "target_branch": branch,
                     "reason": reason,
+                    "policy": policy,
                     "current_branch": repo_state.get("current_branch"),
                     "dirty_count": len(dirty_lines),
                     "unpushed_count": len(unpushed_lines),
                     "dirty_preview": dirty_lines[:20],
                     "unpushed_preview": unpushed_lines[:20],
                     "warnings": list(repo_state.get("warnings") or []),
+                    "rescue": rescue_info,
                 },
             )
-            return False, msg
 
     subprocess.run(["git", "checkout", branch], cwd=str(REPO_DIR), check=True)
     subprocess.run(["git", "reset", "--hard", f"origin/{branch}"], cwd=str(REPO_DIR), check=True)
@@ -537,6 +694,43 @@ def checkout_and_reset(branch: str, reason: str = "unspecified", guard_unsynced:
     st["current_sha"] = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(REPO_DIR), capture_output=True, text=True, check=True).stdout.strip()
     save_state(st)
     return True, "ok"
+
+
+def sync_runtime_dependencies(reason: str) -> Tuple[bool, str]:
+    req_path = REPO_DIR / "requirements.txt"
+    cmd: List[str] = [sys.executable, "-m", "pip", "install", "-q"]
+    source = ""
+    if req_path.exists():
+        cmd += ["-r", str(req_path)]
+        source = f"requirements:{req_path}"
+    else:
+        cmd += ["openai>=1.0.0", "requests"]
+        source = "fallback:minimal"
+    try:
+        subprocess.run(cmd, cwd=str(REPO_DIR), check=True)
+        append_jsonl(
+            DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "deps_sync_ok",
+                "reason": reason,
+                "source": source,
+            },
+        )
+        return True, source
+    except Exception as e:
+        msg = repr(e)
+        append_jsonl(
+            DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "deps_sync_error",
+                "reason": reason,
+                "source": source,
+                "error": msg,
+            },
+        )
+        return False, msg
 
 def import_test() -> Dict[str, Any]:
     r = subprocess.run(
@@ -548,8 +742,10 @@ def import_test() -> Dict[str, Any]:
     return {"ok": (r.returncode == 0), "stdout": r.stdout, "stderr": r.stderr, "returncode": r.returncode}
 
 ensure_repo_present()
-ok_dev, err_dev = checkout_and_reset(BRANCH_DEV, reason="bootstrap_dev", guard_unsynced=False)
+ok_dev, err_dev = checkout_and_reset(BRANCH_DEV, reason="bootstrap_dev", unsynced_policy="rescue_and_reset")
 assert ok_dev, f"Failed to prepare {BRANCH_DEV}: {err_dev}"
+deps_ok, deps_msg = sync_runtime_dependencies(reason="bootstrap_dev")
+assert deps_ok, f"Failed to install runtime dependencies for {BRANCH_DEV}: {deps_msg}"
 t = import_test()
 if not t["ok"]:
     append_jsonl(DRIVE_ROOT / "logs" / "supervisor.jsonl", {
@@ -558,8 +754,10 @@ if not t["ok"]:
         "stdout": t["stdout"],
         "stderr": t["stderr"],
     })
-    ok_stable, err_stable = checkout_and_reset(BRANCH_STABLE, reason="bootstrap_fallback_stable", guard_unsynced=False)
+    ok_stable, err_stable = checkout_and_reset(BRANCH_STABLE, reason="bootstrap_fallback_stable", unsynced_policy="rescue_and_reset")
     assert ok_stable, f"Failed to prepare {BRANCH_STABLE}: {err_stable}"
+    deps_ok_stable, deps_msg_stable = sync_runtime_dependencies(reason="bootstrap_fallback_stable")
+    assert deps_ok_stable, f"Failed to install runtime dependencies for {BRANCH_STABLE}: {deps_msg_stable}"
     t2 = import_test()
     assert t2["ok"], f"Stable branch also failed import.\n\nSTDOUT:\n{t2['stdout']}\n\nSTDERR:\n{t2['stderr']}"
 
@@ -1394,7 +1592,11 @@ def ensure_workers_healthy() -> None:
         st = load_state()
         if st.get("owner_chat_id"):
             send_with_budget(int(st["owner_chat_id"]), "⚠️ Частые падения воркеров. Переключаюсь на ouroboros-stable и перезапускаюсь.")
-        ok_reset, msg_reset = checkout_and_reset(BRANCH_STABLE, reason="crash_storm_fallback", guard_unsynced=True)
+        ok_reset, msg_reset = checkout_and_reset(
+            BRANCH_STABLE,
+            reason="crash_storm_fallback",
+            unsynced_policy="rescue_and_reset",
+        )
         if not ok_reset:
             append_jsonl(
                 DRIVE_ROOT / "logs" / "supervisor.jsonl",
@@ -1408,6 +1610,23 @@ def ensure_workers_healthy() -> None:
                 send_with_budget(
                     int(st["owner_chat_id"]),
                     f"⚠️ Fallback reset в {BRANCH_STABLE} пропущен: {msg_reset}",
+                )
+            CRASH_TS.clear()
+            return
+        deps_ok, deps_msg = sync_runtime_dependencies(reason="crash_storm_fallback")
+        if not deps_ok:
+            append_jsonl(
+                DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "type": "crash_storm_deps_sync_failed",
+                    "error": deps_msg,
+                },
+            )
+            if st.get("owner_chat_id"):
+                send_with_budget(
+                    int(st["owner_chat_id"]),
+                    f"⚠️ Fallback в {BRANCH_STABLE} применён, но установка зависимостей упала: {deps_msg}",
                 )
             CRASH_TS.clear()
             return
@@ -1865,22 +2084,46 @@ while True:
             st = load_state()
             if st.get("owner_chat_id"):
                 send_with_budget(int(st["owner_chat_id"]), f"♻️ Restart requested by agent: {evt.get('reason')}")
-            ok_reset, msg_reset = checkout_and_reset(BRANCH_DEV, reason="agent_restart_request", guard_unsynced=True)
+            ok_reset, msg_reset = checkout_and_reset(
+                BRANCH_DEV,
+                reason="agent_restart_request",
+                unsynced_policy="rescue_and_block",
+            )
             if not ok_reset:
                 if st.get("owner_chat_id"):
                     send_with_budget(
                         int(st["owner_chat_id"]),
-                        f"⚠️ Restart пропущен: {msg_reset} Сначала синхронизируй/очисти repo.",
+                        f"⚠️ Restart пропущен: {msg_reset} Сначала закоммить/запушь изменения или очисти repo.",
+                    )
+                continue
+            deps_ok, deps_msg = sync_runtime_dependencies(reason="agent_restart_request")
+            if not deps_ok:
+                if st.get("owner_chat_id"):
+                    send_with_budget(
+                        int(st["owner_chat_id"]),
+                        f"⚠️ Restart отменен: не удалось установить зависимости ({deps_msg}).",
                     )
                 continue
             it = import_test()
             if not it["ok"]:
-                ok_stable, msg_stable = checkout_and_reset(BRANCH_STABLE, reason="agent_restart_import_fail", guard_unsynced=False)
+                ok_stable, msg_stable = checkout_and_reset(
+                    BRANCH_STABLE,
+                    reason="agent_restart_import_fail",
+                    unsynced_policy="rescue_and_reset",
+                )
                 if not ok_stable:
                     if st.get("owner_chat_id"):
                         send_with_budget(
                             int(st["owner_chat_id"]),
                             f"⚠️ Не удалось переключиться на {BRANCH_STABLE}: {msg_stable}",
+                        )
+                    continue
+                deps_ok_stable, deps_msg_stable = sync_runtime_dependencies(reason="agent_restart_import_fail_stable")
+                if not deps_ok_stable:
+                    if st.get("owner_chat_id"):
+                        send_with_budget(
+                            int(st["owner_chat_id"]),
+                            f"⚠️ Не удалось установить зависимости в {BRANCH_STABLE}: {deps_msg_stable}",
                         )
                     continue
             kill_workers()
@@ -2023,7 +2266,7 @@ while True:
         st["last_owner_message_at"] = now_iso
         save_state(st)
 
-        # immutable supervisor commands
+        # core supervisor commands
         if text.strip().lower().startswith("/panic"):
             send_with_budget(chat_id, "🛑 PANIC: stopping everything now.")
             kill_workers()
@@ -2037,15 +2280,31 @@ while True:
             st2["session_id"] = uuid.uuid4().hex
             save_state(st2)
             send_with_budget(chat_id, "♻️ Restarting (soft).")
-            ok_reset, msg_reset = checkout_and_reset(BRANCH_DEV, reason="owner_restart", guard_unsynced=True)
+            ok_reset, msg_reset = checkout_and_reset(
+                BRANCH_DEV,
+                reason="owner_restart",
+                unsynced_policy="rescue_and_block",
+            )
             if not ok_reset:
-                send_with_budget(chat_id, f"⚠️ Restart отменен: {msg_reset} Сначала синхронизируй/очисти repo.")
+                send_with_budget(chat_id, f"⚠️ Restart отменен: {msg_reset} Сначала закоммить/запушь изменения или очисти repo.")
+                continue
+            deps_ok, deps_msg = sync_runtime_dependencies(reason="owner_restart")
+            if not deps_ok:
+                send_with_budget(chat_id, f"⚠️ Restart отменен: не удалось установить зависимости ({deps_msg}).")
                 continue
             it = import_test()
             if not it["ok"]:
-                ok_stable, msg_stable = checkout_and_reset(BRANCH_STABLE, reason="owner_restart_import_fail", guard_unsynced=False)
+                ok_stable, msg_stable = checkout_and_reset(
+                    BRANCH_STABLE,
+                    reason="owner_restart_import_fail",
+                    unsynced_policy="rescue_and_reset",
+                )
                 if not ok_stable:
                     send_with_budget(chat_id, f"⚠️ Не удалось переключиться на {BRANCH_STABLE}: {msg_stable}")
+                    continue
+                deps_ok_stable, deps_msg_stable = sync_runtime_dependencies(reason="owner_restart_import_fail_stable")
+                if not deps_ok_stable:
+                    send_with_budget(chat_id, f"⚠️ Не удалось установить зависимости в {BRANCH_STABLE}: {deps_msg_stable}")
                     continue
             kill_workers()
             spawn_workers(MAX_WORKERS)
