@@ -12,7 +12,6 @@ import json
 import os
 import pathlib
 import re
-import subprocess
 import threading
 import time
 import traceback
@@ -23,13 +22,13 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.utils import (
-    utc_now_iso, sha256_text, read_text, write_text, append_jsonl,
+    utc_now_iso, read_text, append_jsonl,
     safe_relpath, truncate_for_log, clip_text, estimate_tokens,
-    get_git_info, run_cmd, sanitize_task_for_event, sanitize_tool_args_for_log,
+    get_git_info, sanitize_task_for_event, sanitize_tool_args_for_log,
 )
 from ouroboros.llm import LLMClient, normalize_reasoning_effort, reasoning_rank
 from ouroboros.tools import ToolRegistry, ToolContext
-from ouroboros.memory import Memory, SCRATCHPAD_SECTIONS
+from ouroboros.memory import Memory
 from ouroboros.review import ReviewEngine
 
 
@@ -49,7 +48,6 @@ class Env:
     repo_dir: pathlib.Path
     drive_root: pathlib.Path
     branch_dev: str = "ouroboros"
-    branch_stable: str = "ouroboros-stable"
 
     def repo_path(self, rel: str) -> pathlib.Path:
         return (self.repo_dir / safe_relpath(rel)).resolve()
@@ -263,19 +261,30 @@ class OuroborosAgent:
 
             # Task eval event
             duration_sec = round(time.time() - start_time, 3)
+            n_tool_calls = len(llm_trace.get("tool_calls", []))
+            n_tool_errors = sum(1 for tc in llm_trace.get("tool_calls", [])
+                                if isinstance(tc, dict) and tc.get("is_error"))
             try:
                 append_jsonl(drive_logs / "events.jsonl", {
                     "ts": utc_now_iso(), "type": "task_eval", "ok": True,
                     "task_id": task.get("id"), "task_type": task.get("type"),
                     "duration_sec": duration_sec,
-                    "tool_calls": len(llm_trace.get("tool_calls", [])),
-                    "tool_errors": sum(1 for tc in llm_trace.get("tool_calls", [])
-                                       if isinstance(tc, dict) and tc.get("is_error")),
+                    "tool_calls": n_tool_calls,
+                    "tool_errors": n_tool_errors,
                     "direct_send_ok": direct_sent,
                     "response_len": len(text),
                 })
             except Exception:
                 pass
+
+            # Task metrics for supervisor
+            self._pending_events.append({
+                "type": "task_metrics",
+                "task_id": task.get("id"), "task_type": task.get("type"),
+                "duration_sec": duration_sec,
+                "tool_calls": n_tool_calls, "tool_errors": n_tool_errors,
+                "ts": utc_now_iso(),
+            })
 
             self._pending_events.append({"type": "task_done", "task_id": task.get("id"), "ts": utc_now_iso()})
             append_jsonl(drive_logs / "events.jsonl", {"ts": utc_now_iso(), "type": "task_done", "task_id": task.get("id")})
@@ -480,6 +489,16 @@ class OuroborosAgent:
             "task_id": task.get("id"), "task_type": "review",
             "duration_sec": duration_sec, "tool_calls": 0, "tool_errors": 0,
         })
+
+        # Task metrics for supervisor
+        self._pending_events.append({
+            "type": "task_metrics",
+            "task_id": task.get("id"), "task_type": "review",
+            "duration_sec": duration_sec,
+            "tool_calls": 0, "tool_errors": 0,
+            "ts": utc_now_iso(),
+        })
+
         self._pending_events.append({"type": "task_done", "task_id": task.get("id"), "ts": utc_now_iso()})
         append_jsonl(drive_logs / "events.jsonl", {"ts": utc_now_iso(), "type": "task_done", "task_id": task.get("id")})
         return list(self._pending_events)
@@ -650,20 +669,6 @@ class OuroborosAgent:
         if not text:
             return 0
         return sum(2 if ord(c) > 0xFFFF else 1 for c in text)
-
-    @staticmethod
-    def _slice_by_utf16_units(text: str, max_units: int) -> str:
-        if not text or max_units <= 0:
-            return ""
-        count = 0
-        idx = 0
-        for c in text:
-            units = 2 if ord(c) > 0xFFFF else 1
-            if count + units > max_units:
-                break
-            count += units
-            idx += 1
-        return text[:idx]
 
     @staticmethod
     def _chunk_markdown_for_telegram(md: str, max_chars: int = 3500) -> List[str]:

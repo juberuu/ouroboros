@@ -215,24 +215,12 @@ GITHUB_REPO = get_cfg("GITHUB_REPO", default="ouroboros", allow_legacy_secret=Tr
 MAX_WORKERS = int(get_cfg("OUROBOROS_MAX_WORKERS", default="5", allow_legacy_secret=True) or "5")
 MODEL_MAIN = get_cfg("OUROBOROS_MODEL", default="openai/gpt-5.2", allow_legacy_secret=True)
 MODEL_CODE = get_cfg("OUROBOROS_MODEL_CODE", default="openai/gpt-5.2-codex", allow_legacy_secret=True)
-MODEL_REVIEW = get_cfg("OUROBOROS_MODEL_REVIEW", default="openai/gpt-5.2", allow_legacy_secret=True)
-
-def as_bool(v: Any, default: bool = False) -> bool:
-    if v is None:
-        return default
-    s = str(v).strip().lower()
-    if s in ("1", "true", "yes", "on"):
-        return True
-    if s in ("0", "false", "no", "off", ""):
-        return False
-    return default
 
 BUDGET_REPORT_EVERY_MESSAGES = max(1, int(get_cfg("OUROBOROS_BUDGET_REPORT_EVERY_MESSAGES", default="10", allow_legacy_secret=True) or "10"))
 SOFT_TIMEOUT_SEC = max(60, int(get_cfg("OUROBOROS_SOFT_TIMEOUT_SEC", default="600", allow_legacy_secret=True) or "600"))
 HARD_TIMEOUT_SEC = max(120, int(get_cfg("OUROBOROS_HARD_TIMEOUT_SEC", default="1800", allow_legacy_secret=True) or "1800"))
 QUEUE_MAX_RETRIES = max(0, int(get_cfg("OUROBOROS_TASK_MAX_RETRIES", default="1", allow_legacy_secret=True) or "1"))
 HEARTBEAT_STALE_SEC = max(30, int(get_cfg("OUROBOROS_TASK_HEARTBEAT_STALE_SEC", default="120", allow_legacy_secret=True) or "120"))
-TASK_HEARTBEAT_SEC = max(10, int(get_cfg("OUROBOROS_TASK_HEARTBEAT_SEC", default="30", allow_legacy_secret=True) or "30"))
 
 # Передаём необходимое воркерам через env (не выводить в логи)
 os.environ["OPENROUTER_API_KEY"] = str(OPENROUTER_API_KEY)
@@ -242,8 +230,6 @@ os.environ["GITHUB_USER"] = str(GITHUB_USER or "razzant")
 os.environ["GITHUB_REPO"] = str(GITHUB_REPO or "ouroboros")
 os.environ["OUROBOROS_MODEL"] = str(MODEL_MAIN or "openai/gpt-5.2")
 os.environ["OUROBOROS_MODEL_CODE"] = str(MODEL_CODE or "openai/gpt-5.2-codex")
-os.environ["OUROBOROS_MODEL_REVIEW"] = str(MODEL_REVIEW or "openai/gpt-5.2")
-os.environ["OUROBOROS_TASK_HEARTBEAT_SEC"] = str(TASK_HEARTBEAT_SEC)
 os.environ["TELEGRAM_BOT_TOKEN"] = str(TELEGRAM_BOT_TOKEN)
 
 # Install Claude Code CLI only when Anthropic API access is configured.
@@ -286,7 +272,6 @@ def ensure_state_defaults(st: Dict[str, Any]) -> Dict[str, Any]:
     st.setdefault("budget_messages_since_report", 0)
     st.setdefault("evolution_mode_enabled", False)
     st.setdefault("evolution_cycle", 0)
-    st.setdefault("queue_seq", 0)
     # Remove legacy keys if present (clean break)
     for legacy_key in ("approvals", "idle_cursor", "idle_stats", "last_idle_task_at",
                         "last_auto_review_at", "last_review_task_id"):
@@ -311,7 +296,6 @@ def _default_state_dict() -> Dict[str, Any]:
         "budget_messages_since_report": 0,
         "evolution_mode_enabled": False,
         "evolution_cycle": 0,
-        "queue_seq": 0,
     }
 
 def _acquire_file_lock(lock_path: pathlib.Path, timeout_sec: float = 4.0, stale_sec: float = 90.0) -> Optional[int]:
@@ -892,9 +876,7 @@ def _task_priority(task_type: str) -> int:
         return 0
     if t == "evolution":
         return 1
-    if t == "idle":
-        return 2
-    return 3
+    return 2
 
 def _queue_sort_key(task: Dict[str, Any]) -> Tuple[int, int]:
     pr = int(task.get("priority") or _task_priority(str(task.get("type") or "")))
@@ -925,14 +907,6 @@ def _queue_has_task_type(task_type: str) -> bool:
         if isinstance(task, dict) and str(task.get("type") or "") == tt:
             return True
     return False
-
-def _running_task_type_counts() -> Dict[str, int]:
-    out: Dict[str, int] = {}
-    for meta in RUNNING.values():
-        task = meta.get("task") if isinstance(meta, dict) else None
-        tt = str((task or {}).get("type") or "")
-        out[tt] = int(out.get(tt) or 0) + 1
-    return out
 
 def persist_queue_snapshot(reason: str = "") -> None:
     pending_rows = []
@@ -1522,7 +1496,6 @@ append_jsonl(DRIVE_ROOT / "logs" / "supervisor.jsonl", {
     "max_workers": MAX_WORKERS,
     "model_default": MODEL_MAIN,
     "model_code": MODEL_CODE,
-    "model_review": MODEL_REVIEW,
     "soft_timeout_sec": SOFT_TIMEOUT_SEC,
     "hard_timeout_sec": HARD_TIMEOUT_SEC,
 })

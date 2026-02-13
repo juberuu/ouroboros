@@ -49,7 +49,6 @@ class ToolRegistry:
         self.repo_dir = repo_dir
         self.drive_root = drive_root
         self.branch_dev = "ouroboros"
-        self.branch_stable = "ouroboros-stable"
         self._ctx: Optional[ToolContext] = None
 
     def set_context(self, ctx: ToolContext) -> None:
@@ -100,6 +99,7 @@ class ToolRegistry:
             "schedule_task": self._tool_schedule_task,
             "cancel_task": self._tool_cancel_task,
             "chat_history": self._tool_chat_history,
+            "request_review": self._tool_request_review,
         }
 
     CODE_TOOLS = frozenset({
@@ -223,6 +223,13 @@ class ToolRegistry:
                     "offset": {"type": "integer", "default": 0, "description": "Skip N from end (pagination)"},
                     "search": {"type": "string", "default": "", "description": "Text filter"},
                 }, "required": []},
+            }},
+            {"type": "function", "function": {
+                "name": "request_review",
+                "description": "Request a deep review of code, prompts, and state. You decide when a review is needed.",
+                "parameters": {"type": "object", "properties": {
+                    "reason": {"type": "string", "description": "Why you want a review (context for the reviewer)"},
+                }, "required": ["reason"]},
             }},
         ]
 
@@ -589,7 +596,13 @@ class ToolRegistry:
         self._ctx.pending_events.append({"type": "cancel_task", "task_id": task_id, "ts": utc_now_iso()})
         return f"Cancel requested: {task_id}"
 
+    def _tool_request_review(self, reason: str) -> str:
+        if not self._ctx:
+            return "⚠️ No context."
+        self._ctx.pending_events.append({"type": "review_request", "reason": reason, "ts": utc_now_iso()})
+        return f"Review requested: {reason}"
+
     def _tool_chat_history(self, count: int = 100, offset: int = 0, search: str = "") -> str:
         from ouroboros.memory import Memory
-        mem = Memory(drive_root=self.drive_root, repo_dir=self.repo_dir)
+        mem = Memory(drive_root=self.drive_root)
         return mem.chat_history(count=count, offset=offset, search=search)

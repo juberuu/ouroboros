@@ -2,7 +2,7 @@
 Уроборос — Память.
 
 Scratchpad, identity, chat history.
-Контракт: load/save scratchpad и identity, chat_history().
+Контракт: load scratchpad/identity, chat_history().
 """
 
 from __future__ import annotations
@@ -26,9 +26,8 @@ SCRATCHPAD_SECTIONS: Tuple[str, ...] = (
 class Memory:
     """Управление памятью Уробороса: scratchpad, identity, chat history, логи."""
 
-    def __init__(self, drive_root: pathlib.Path, repo_dir: pathlib.Path):
+    def __init__(self, drive_root: pathlib.Path, **_kwargs: Any):
         self.drive_root = drive_root
-        self.repo_dir = repo_dir
 
     # --- Пути ---
 
@@ -67,9 +66,6 @@ class Memory:
         default = self._default_identity()
         write_text(p, default)
         return default
-
-    def save_identity(self, content: str) -> None:
-        write_text(self.identity_path(), content)
 
     def ensure_files(self) -> None:
         """Создаёт файлы памяти если их нет."""
@@ -207,21 +203,6 @@ class Memory:
                 sha = short(str(e.get("sha") or e.get("git_sha") or ""), 12)
                 return f"{e['type']}: {e.get('ts', '')} branch={branch} sha={sha}"
         return ""
-
-    def summarize_narration(self, entries: List[Dict[str, Any]]) -> str:
-        if not entries:
-            return ""
-        lines = []
-        for e in entries[-8:]:
-            narration = e.get("narration")
-            if isinstance(narration, list):
-                for item in narration[:3]:
-                    lines.append(short(item, 200))
-            else:
-                text = e.get("text", "")
-                if text:
-                    lines.append(short(text, 200))
-        return "\n".join(lines)
 
     # --- Scratchpad operations ---
 

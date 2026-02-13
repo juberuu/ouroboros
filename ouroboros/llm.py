@@ -76,32 +76,6 @@ class LLMClient:
         msg = resp_dict.get("choices", [{}])[0].get("message", {})
         return msg, usage
 
-    def chat_raw(
-        self,
-        messages: List[Dict[str, Any]],
-        model: str,
-        tools: Optional[List[Dict[str, Any]]] = None,
-        reasoning_effort: str = "medium",
-        max_tokens: int = 16384,
-        tool_choice: str = "auto",
-    ) -> Dict[str, Any]:
-        """Один вызов LLM. Возвращает полный resp_dict."""
-        client = self._get_client()
-        effort = normalize_reasoning_effort(reasoning_effort)
-
-        kwargs: Dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "extra_body": {"reasoning": {"effort": effort, "exclude": True}},
-        }
-        if tools:
-            kwargs["tools"] = tools
-            kwargs["tool_choice"] = tool_choice
-
-        resp = client.chat.completions.create(**kwargs)
-        return resp.model_dump()
-
     def model_profile(self, profile: str) -> Dict[str, str]:
         """Возвращает {"model": ..., "effort": ...} для типа задачи.
 
@@ -116,7 +90,6 @@ class LLMClient:
             "code_task": {"model": code_model, "effort": "high"},
             "evolution_task": {"model": code_model, "effort": "high"},
             "deep_review": {"model": main_model, "effort": "xhigh"},
-            "memory_summary": {"model": main_model, "effort": "low"},
         }
         return dict(profiles.get(profile, profiles["default_task"]))
 

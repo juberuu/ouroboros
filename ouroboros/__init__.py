@@ -10,4 +10,4 @@
 from ouroboros.agent import make_agent
 
 __all__ = ['make_agent', 'agent', 'tools', 'llm', 'memory', 'review', 'utils']
-__version__ = '1.0.0'
+__version__ = '1.1.0'
