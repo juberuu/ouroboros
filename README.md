@@ -18,6 +18,15 @@
 - (опционально) `GITHUB_USER` (по умолчанию `razzant`)
 - (опционально) `GITHUB_REPO` (по умолчанию `ouroboros`)
 - (опционально) `OUROBOROS_MODEL` (по умолчанию `openai/gpt-5.2`)
+- (опционально) `OUROBOROS_MODEL_CODE` (по умолчанию `openai/gpt-5.2-codex`)
+- (опционально) `OUROBOROS_MODEL_REVIEW` (по умолчанию `openai/gpt-5.2`)
+- (опционально) `OUROBOROS_ROUTER_MODEL` (по умолчанию `OUROBOROS_MODEL`)
+- (опционально) `OUROBOROS_ROUTER_REASONING_EFFORT` (`low` по умолчанию)
+- (опционально) `OUROBOROS_REASONING_DEFAULT_TASK` (`medium`)
+- (опционально) `OUROBOROS_REASONING_CODE_TASK` (`high`)
+- (опционально) `OUROBOROS_REASONING_EVOLUTION_TASK` (`high`)
+- (опционально) `OUROBOROS_REASONING_DEEP_REVIEW` (`xhigh`)
+- (опционально) `OUROBOROS_REASONING_MEMORY_SUMMARY` (`low`)
 - (опционально) `OUROBOROS_IDLE_ENABLED` (`1`/`0`, по умолчанию `1`)
 - (опционально) `OUROBOROS_IDLE_COOLDOWN_SEC` (по умолчанию `900`)
 - (опционально) `OUROBOROS_IDLE_BUDGET_PCT_CAP` (по умолчанию `35`)
@@ -26,6 +35,11 @@
 - (опционально) `OUROBOROS_BUDGET_REPORT_EVERY_MESSAGES` (по умолчанию `10`)
 - (опционально) `OUROBOROS_GIT_LOCK_STALE_SEC` (по умолчанию `600`) — таймаут для автоудаления зависшего git lock
 - (опционально) `OUROBOROS_MAX_TOOL_ROUNDS` (по умолчанию `20`) — лимит итераций tool-calls на один запрос (защита от зацикливания)
+- (опционально) `OUROBOROS_TASK_SOFT_TIMEOUT_1_SEC` (по умолчанию `300`)
+- (опционально) `OUROBOROS_TASK_SOFT_TIMEOUT_2_SEC` (по умолчанию `600`)
+- (опционально) `OUROBOROS_TASK_HARD_TIMEOUT_SEC` (по умолчанию `900`)
+- (опционально) `OUROBOROS_TASK_MAX_RETRIES` (по умолчанию `1`)
+- (опционально) `OUROBOROS_TASK_HEARTBEAT_SEC` (по умолчанию `30`)
 
 2) Запусти единственную boot-ячейку в Colab.
 3) Напиши своему Telegram-боту. Первый написавший становится владельцем.
@@ -58,6 +72,7 @@
 - `/panic` — мгновенно остановить всё (супервизор завершит работу)
 - `/restart` — мягко остановить активные задачи, очистить текущий runtime-контекст и перезапустить текущую версию
 - `/status` — статус задач/версии/бюджета
+- `/review` — поставить deep system review в очередь
 - `/evolve` — включить endless evolution mode
 - `/evolve stop` — выключить endless evolution mode
 
@@ -76,6 +91,7 @@
 - если Claude Code CLI доступен, по умолчанию сначала пробуй `claude_code_edit(...)`;
 - `repo_write_commit(...)` оставляй для маленьких точечных правок с заранее очевидным финальным содержимым;
 - для сложных правок и рефакторинга используй `claude_code_edit(...)` как primary path.
+- не ломай инвариант self-modification: агент должен сохранять способность менять собственный код и промпты.
 
 Продвижение в `ouroboros-stable` требует явного подтверждения владельца (approval в чате).
 
@@ -140,6 +156,15 @@ Telegram по умолчанию рендерит разметку только 
 - После каждой задачи агент обновляет `scratchpad` через отдельный промпт `prompts/SCRATCHPAD_SUMMARY.md` (факты и релевантные детали, включая evidence-цитаты команд/ошибок).
 - При direct-send форматированного ответа в Telegram полный текст всё равно логируется в `chat.jsonl` для следующих задач.
 - Long polling Telegram и отправка сообщений обрабатываются с ретраями; кратковременные сетевые таймауты не должны валить супервизор.
+- Для state используется hardened JSON-подход (lock + atomic write + last_good backup), чтобы снизить риск повреждения `state.json`.
+- Состояние очереди периодически пишется в snapshot (`state/queue_snapshot.json`) для наблюдаемости и восстановления pending-задач после падений супервизора.
+
+## Очередь, heartbeat и таймауты
+
+- Очередь приоритетная: `task/review` > `evolution` > `idle` (FIFO внутри приоритета).
+- Воркеры отправляют heartbeat во время выполнения; `/status` показывает runtime и heartbeat lag.
+- Soft-timeout (5/10 мин по умолчанию): уведомления владельцу и диагностика.
+- Hard-timeout (15 мин по умолчанию): kill worker, respawn и bounded retry задачи.
 
 ## Idle режим (саморазвитие в простое)
 
@@ -166,14 +191,34 @@ Guardrails:
 
 В этом режиме агент должен максимально часто опираться на `claude_code_edit(...)` для кодовых изменений, если CLI доступен.
 
+После каждого evolution-цикла автоматически ставится deep-review задачи.
+
 Базовый промпт режима: `prompts/evolution.md`.
 
 ## Бюджет и отчётность
 
 - В `state/state.json` учитывается расход из OpenRouter и событий `llm_usage` от инструментов (включая Claude Code CLI, если инструмент передаёт стоимость).
 - В чат бюджетная строка отправляется не на каждое сообщение, а по cadence `OUROBOROS_BUDGET_REPORT_EVERY_MESSAGES` (по умолчанию раз в 10 сообщений).
+- `TOTAL_BUDGET` читается супервизором при запуске (это убирает нестабильные повторные запросы Colab secrets во время долгих сессий); после изменения секрета перезапусти runtime.
 
 ## Модели
 
-Пока используется одна модель через OpenRouter: `openai/gpt-5.2` (по умолчанию).
-Дальше можно развести на 3 модели (fast / chat / big).
+Система использует профильный роутинг моделей OpenRouter:
+- базовые задачи: `openai/gpt-5.2` + `reasoning.effort=medium`;
+- кодовые/evolution задачи: `openai/gpt-5.2-codex` + `reasoning.effort=high`;
+- deep-review: `openai/gpt-5.2` + `reasoning.effort=xhigh`;
+- память/scratchpad summary: low-effort профиль.
+
+При эскалации сложности агент может повышать effort и переключать профиль; такие переходы логируются и отправляются в Telegram естественным языком.
+
+## Deep review
+
+- Запуск: `/review`, естественный запрос владельца, post-evolution и после сложных задач.
+- Стратегия: fit-or-chunk (один большой запрос, либо несколько chunk-проходов с финальной сводкой).
+- Перед запуском сообщается оценка input токенов.
+- После завершения сообщается финальная стоимость review.
+- Результаты review попадают в чат, логи и память (`scratchpad`) и влияют на дальнейшие self-improvement решения.
+
+## Инженерная простота
+
+Старайся не раздувать репозиторий без необходимости: лишний код замедляет разработку и повышает риск ошибок/дрифта.

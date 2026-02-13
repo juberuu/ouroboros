@@ -7,7 +7,7 @@
 # modified by the agent.  Keep this file in sync manually.
 # ============================
 
-import os, sys, json, time, uuid, pathlib, subprocess, datetime
+import os, sys, json, time, uuid, pathlib, subprocess, datetime, re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -172,6 +172,11 @@ TELEGRAM_BOT_TOKEN = get_secret("TELEGRAM_BOT_TOKEN", required=True)
 TOTAL_BUDGET_DEFAULT = get_secret("TOTAL_BUDGET", required=True)
 GITHUB_TOKEN = get_secret("GITHUB_TOKEN", required=True)
 
+try:
+    TOTAL_BUDGET_LIMIT = float(TOTAL_BUDGET_DEFAULT)
+except Exception:
+    TOTAL_BUDGET_LIMIT = 0.0
+
 OPENAI_API_KEY = get_secret("OPENAI_API_KEY", default="")  # optional
 ANTHROPIC_API_KEY = get_secret("ANTHROPIC_API_KEY", default="")  # optional; enables Claude Code CLI tool
 
@@ -180,6 +185,16 @@ GITHUB_REPO = get_secret("GITHUB_REPO", default="ouroboros")
 
 MAX_WORKERS = int(get_secret("OUROBOROS_MAX_WORKERS", default="5") or "5")
 MODEL_MAIN = get_secret("OUROBOROS_MODEL", default="openai/gpt-5.2")
+MODEL_CODE = get_secret("OUROBOROS_MODEL_CODE", default="openai/gpt-5.2-codex")
+MODEL_REVIEW = get_secret("OUROBOROS_MODEL_REVIEW", default="openai/gpt-5.2")
+MODEL_ROUTER = get_secret("OUROBOROS_ROUTER_MODEL", default=str(MODEL_MAIN or "openai/gpt-5.2"))
+ROUTER_REASONING_EFFORT = str(get_secret("OUROBOROS_ROUTER_REASONING_EFFORT", default="low") or "low").strip().lower()
+REASONING_DEFAULT_TASK = str(get_secret("OUROBOROS_REASONING_DEFAULT_TASK", default="medium") or "medium").strip().lower()
+REASONING_CODE_TASK = str(get_secret("OUROBOROS_REASONING_CODE_TASK", default="high") or "high").strip().lower()
+REASONING_EVOLUTION_TASK = str(get_secret("OUROBOROS_REASONING_EVOLUTION_TASK", default="high") or "high").strip().lower()
+REASONING_DEEP_REVIEW = str(get_secret("OUROBOROS_REASONING_DEEP_REVIEW", default="xhigh") or "xhigh").strip().lower()
+REASONING_MEMORY_SUMMARY = str(get_secret("OUROBOROS_REASONING_MEMORY_SUMMARY", default="low") or "low").strip().lower()
+REASONING_NOTICE = str(get_secret("OUROBOROS_REASONING_NOTICE", default="low") or "low").strip().lower()
 
 def as_bool(v: Any, default: bool = False) -> bool:
     if v is None:
@@ -197,12 +212,36 @@ IDLE_BUDGET_PCT_CAP = max(1.0, min(float(get_secret("OUROBOROS_IDLE_BUDGET_PCT_C
 IDLE_MAX_PER_DAY = max(1, int(get_secret("OUROBOROS_IDLE_MAX_PER_DAY", default="8") or "8"))
 EVOLUTION_ENABLED_BY_DEFAULT = as_bool(get_secret("OUROBOROS_EVOLUTION_ENABLED_BY_DEFAULT", default="0"), default=False)
 BUDGET_REPORT_EVERY_MESSAGES = max(1, int(get_secret("OUROBOROS_BUDGET_REPORT_EVERY_MESSAGES", default="10") or "10"))
+QUEUE_SOFT_TIMEOUT_1_SEC = max(60, int(get_secret("OUROBOROS_TASK_SOFT_TIMEOUT_1_SEC", default="300") or "300"))
+QUEUE_SOFT_TIMEOUT_2_SEC = max(120, int(get_secret("OUROBOROS_TASK_SOFT_TIMEOUT_2_SEC", default="600") or "600"))
+QUEUE_HARD_TIMEOUT_SEC = max(180, int(get_secret("OUROBOROS_TASK_HARD_TIMEOUT_SEC", default="900") or "900"))
+QUEUE_MAX_RETRIES = max(0, int(get_secret("OUROBOROS_TASK_MAX_RETRIES", default="1") or "1"))
+HEARTBEAT_STALE_SEC = max(30, int(get_secret("OUROBOROS_TASK_HEARTBEAT_STALE_SEC", default="120") or "120"))
+AUTO_REVIEW_MIN_GAP_SEC = max(60, int(get_secret("OUROBOROS_AUTO_REVIEW_MIN_GAP_SEC", default="300") or "300"))
+REVIEW_COMPLEX_MIN_DURATION_SEC = max(60, int(get_secret("OUROBOROS_REVIEW_COMPLEX_MIN_DURATION_SEC", default="180") or "180"))
+REVIEW_COMPLEX_MIN_TOOL_CALLS = max(2, int(get_secret("OUROBOROS_REVIEW_COMPLEX_MIN_TOOL_CALLS", default="8") or "8"))
+REVIEW_COMPLEX_MIN_TOOL_ERRORS = max(1, int(get_secret("OUROBOROS_REVIEW_COMPLEX_MIN_TOOL_ERRORS", default="2") or "2"))
+TASK_HEARTBEAT_SEC = max(10, int(get_secret("OUROBOROS_TASK_HEARTBEAT_SEC", default="30") or "30"))
 
 # expose needed env to workers (do not print)
 os.environ["OPENROUTER_API_KEY"] = str(OPENROUTER_API_KEY)
 os.environ["OPENAI_API_KEY"] = str(OPENAI_API_KEY or "")
 os.environ["ANTHROPIC_API_KEY"] = str(ANTHROPIC_API_KEY or "")
 os.environ["OUROBOROS_MODEL"] = str(MODEL_MAIN or "openai/gpt-5.2")
+os.environ["OUROBOROS_MODEL_CODE"] = str(MODEL_CODE or "openai/gpt-5.2-codex")
+os.environ["OUROBOROS_MODEL_REVIEW"] = str(MODEL_REVIEW or "openai/gpt-5.2")
+os.environ["OUROBOROS_ROUTER_MODEL"] = str(MODEL_ROUTER or "openai/gpt-5.2")
+os.environ["OUROBOROS_ROUTER_REASONING_EFFORT"] = str(ROUTER_REASONING_EFFORT or "low")
+os.environ["OUROBOROS_REASONING_DEFAULT_TASK"] = str(REASONING_DEFAULT_TASK or "medium")
+os.environ["OUROBOROS_REASONING_CODE_TASK"] = str(REASONING_CODE_TASK or "high")
+os.environ["OUROBOROS_REASONING_EVOLUTION_TASK"] = str(REASONING_EVOLUTION_TASK or "high")
+os.environ["OUROBOROS_REASONING_DEEP_REVIEW"] = str(REASONING_DEEP_REVIEW or "xhigh")
+os.environ["OUROBOROS_REASONING_MEMORY_SUMMARY"] = str(REASONING_MEMORY_SUMMARY or "low")
+os.environ["OUROBOROS_REASONING_NOTICE"] = str(REASONING_NOTICE or "low")
+os.environ["OUROBOROS_TASK_HEARTBEAT_SEC"] = str(TASK_HEARTBEAT_SEC)
+os.environ["OUROBOROS_REVIEW_COMPLEX_MIN_DURATION_SEC"] = str(REVIEW_COMPLEX_MIN_DURATION_SEC)
+os.environ["OUROBOROS_REVIEW_COMPLEX_MIN_TOOL_CALLS"] = str(REVIEW_COMPLEX_MIN_TOOL_CALLS)
+os.environ["OUROBOROS_REVIEW_COMPLEX_MIN_TOOL_ERRORS"] = str(REVIEW_COMPLEX_MIN_TOOL_ERRORS)
 os.environ["TELEGRAM_BOT_TOKEN"] = str(TELEGRAM_BOT_TOKEN)  # to support agent-side UX like typing indicator
 
 # Install Claude Code CLI only when Anthropic API access is configured.
@@ -223,6 +262,9 @@ for sub in ["state", "logs", "memory", "index", "locks", "archive"]:
 REPO_DIR.mkdir(parents=True, exist_ok=True)
 
 STATE_PATH = DRIVE_ROOT / "state" / "state.json"
+STATE_LAST_GOOD_PATH = DRIVE_ROOT / "state" / "state.last_good.json"
+STATE_LOCK_PATH = DRIVE_ROOT / "locks" / "state.lock"
+QUEUE_SNAPSHOT_PATH = DRIVE_ROOT / "state" / "queue_snapshot.json"
 
 def ensure_state_defaults(st: Dict[str, Any]) -> Dict[str, Any]:
     st.setdefault("created_at", datetime.datetime.now(datetime.timezone.utc).isoformat())
@@ -244,15 +286,15 @@ def ensure_state_defaults(st: Dict[str, Any]) -> Dict[str, Any]:
     st.setdefault("budget_messages_since_report", 0)
     st.setdefault("evolution_mode_enabled", EVOLUTION_ENABLED_BY_DEFAULT)
     st.setdefault("evolution_cycle", 0)
+    st.setdefault("last_auto_review_at", "")
+    st.setdefault("last_review_task_id", "")
+    st.setdefault("queue_seq", 0)
     if not isinstance(st.get("idle_stats"), dict):
         st["idle_stats"] = {}
     return st
 
-def load_state() -> Dict[str, Any]:
-    if STATE_PATH.exists():
-        st = ensure_state_defaults(json.loads(STATE_PATH.read_text(encoding="utf-8")))
-        return st
-    st = {
+def _default_state_dict() -> Dict[str, Any]:
+    return {
         "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "owner_id": None,
         "owner_chat_id": None,
@@ -273,13 +315,103 @@ def load_state() -> Dict[str, Any]:
         "evolution_mode_enabled": EVOLUTION_ENABLED_BY_DEFAULT,
         "evolution_cycle": 0,
         "idle_stats": {},
+        "last_auto_review_at": "",
+        "last_review_task_id": "",
+        "queue_seq": 0,
     }
-    STATE_PATH.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
-    return st
+
+def _acquire_file_lock(lock_path: pathlib.Path, timeout_sec: float = 4.0, stale_sec: float = 90.0) -> Optional[int]:
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    started = time.time()
+    while (time.time() - started) < timeout_sec:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            try:
+                os.write(fd, f"pid={os.getpid()} ts={datetime.datetime.now(datetime.timezone.utc).isoformat()}\n".encode("utf-8"))
+            except Exception:
+                pass
+            return fd
+        except FileExistsError:
+            try:
+                age = time.time() - lock_path.stat().st_mtime
+                if age > stale_sec:
+                    lock_path.unlink()
+                    continue
+            except Exception:
+                pass
+            time.sleep(0.05)
+        except Exception:
+            break
+    return None
+
+def _release_file_lock(lock_path: pathlib.Path, lock_fd: Optional[int]) -> None:
+    if lock_fd is None:
+        return
+    try:
+        os.close(lock_fd)
+    except Exception:
+        pass
+    try:
+        if lock_path.exists():
+            lock_path.unlink()
+    except Exception:
+        pass
+
+def _atomic_write_text(path: pathlib.Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp.{uuid.uuid4().hex}")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    try:
+        data = content.encode("utf-8")
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(str(tmp), str(path))
+
+def _json_load_file(path: pathlib.Path) -> Optional[Dict[str, Any]]:
+    try:
+        if not path.exists():
+            return None
+        obj = json.loads(path.read_text(encoding="utf-8"))
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        return None
+
+def load_state() -> Dict[str, Any]:
+    lock_fd = _acquire_file_lock(STATE_LOCK_PATH)
+    try:
+        recovered = False
+        st_obj = _json_load_file(STATE_PATH)
+        if st_obj is None:
+            st_obj = _json_load_file(STATE_LAST_GOOD_PATH)
+            recovered = st_obj is not None
+
+        if st_obj is None:
+            st = ensure_state_defaults(_default_state_dict())
+            payload = json.dumps(st, ensure_ascii=False, indent=2)
+            _atomic_write_text(STATE_PATH, payload)
+            _atomic_write_text(STATE_LAST_GOOD_PATH, payload)
+            return st
+
+        st = ensure_state_defaults(st_obj)
+        if recovered:
+            payload = json.dumps(st, ensure_ascii=False, indent=2)
+            _atomic_write_text(STATE_PATH, payload)
+            _atomic_write_text(STATE_LAST_GOOD_PATH, payload)
+        return st
+    finally:
+        _release_file_lock(STATE_LOCK_PATH, lock_fd)
 
 def save_state(st: Dict[str, Any]) -> None:
     st = ensure_state_defaults(st)
-    STATE_PATH.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
+    lock_fd = _acquire_file_lock(STATE_LOCK_PATH)
+    try:
+        payload = json.dumps(st, ensure_ascii=False, indent=2)
+        _atomic_write_text(STATE_PATH, payload)
+        _atomic_write_text(STATE_LAST_GOOD_PATH, payload)
+    finally:
+        _release_file_lock(STATE_LOCK_PATH, lock_fd)
 
 def append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -496,7 +628,7 @@ def split_telegram(text: str, limit: int = 3800) -> List[str]:
 
 def _format_budget_line(st: Dict[str, Any]) -> str:
     spent = float(st.get("spent_usd") or 0.0)
-    total = float(get_secret("TOTAL_BUDGET", default=str(TOTAL_BUDGET_DEFAULT)) or TOTAL_BUDGET_DEFAULT)
+    total = float(TOTAL_BUDGET_LIMIT or 0.0)
     pct = (spent / total * 100.0) if total > 0 else 0.0
     sha = (st.get("current_sha") or "")[:8]
     branch = st.get("current_branch") or "?"
@@ -595,11 +727,18 @@ RESPOND WITH EXACTLY "NEEDS_TASK" on the FIRST LINE if the message requires:
 - Running shell commands
 - Any tool or system access
 - Analyzing repository contents
+- Requesting deep system review / health audit / full context inspection
 - Checking current runtime state/capabilities (available tools, CLI presence, current branch/version, recent action results)
 - Anything you're unsure about
 
+Use available conversation context to avoid mistaken direct answers when tool access is required.
 When answering directly, respond in the user's language. Be concise and helpful.
 When routing to task, write NEEDS_TASK on the first line, then optionally a brief reason."""
+
+def _normalize_reasoning_effort(v: str, default: str = "medium") -> str:
+    allowed = {"none", "minimal", "low", "medium", "high", "xhigh"}
+    s = str(v or "").strip().lower()
+    return s if s in allowed else default
 
 def route_and_maybe_answer(text: str) -> Optional[str]:
     """Quick LLM call: return direct answer or None (meaning 'create a full task')."""
@@ -628,17 +767,35 @@ def route_and_maybe_answer(text: str) -> Optional[str]:
             messages.append({"role": "system", "content": f"Recent chat context (JSONL):\n{recent_chat}"})
         messages.append({"role": "user", "content": text})
 
-        resp = client.chat.completions.create(
-            model=os.environ.get("OUROBOROS_MODEL", "openai/gpt-5.2"),
-            messages=messages,
-            max_tokens=2000,
+        router_model = os.environ.get("OUROBOROS_ROUTER_MODEL", os.environ.get("OUROBOROS_MODEL", "openai/gpt-5.2"))
+        router_effort = _normalize_reasoning_effort(
+            os.environ.get("OUROBOROS_ROUTER_REASONING_EFFORT", ROUTER_REASONING_EFFORT),
+            default="low",
         )
 
+        resp = client.chat.completions.create(
+            model=router_model,
+            messages=messages,
+            max_tokens=2000,
+            extra_body={"reasoning": {"effort": router_effort, "exclude": True}},
+        )
+        resp_dict = resp.model_dump()
+
         # Track router cost
-        usage = (resp.model_dump().get("usage") or {})
+        usage = (resp_dict.get("usage") or {})
         update_budget_from_usage(usage)
 
         answer = (resp.choices[0].message.content or "").strip()
+        append_jsonl(
+            DRIVE_ROOT / "logs" / "events.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "router_profile_used",
+                "model": router_model,
+                "reasoning_effort": router_effort,
+                "answered_directly": (not answer.startswith("NEEDS_TASK")),
+            },
+        )
         if answer.startswith("NEEDS_TASK"):
             return None
         return answer
@@ -651,7 +808,7 @@ def route_and_maybe_answer(text: str) -> Optional[str]:
         return None
 
 # ----------------------------
-# 5) Workers + strict FIFO queue
+# 5) Workers + prioritized queue
 # ----------------------------
 import multiprocessing as mp
 CTX = mp.get_context("fork")
@@ -669,6 +826,149 @@ PENDING: List[Dict[str, Any]] = []
 RUNNING: Dict[str, Dict[str, Any]] = {}
 CRASH_TS: List[float] = []
 LAST_EVOLUTION_SKIP_SIGNATURE: Optional[Tuple[int, int]] = None
+QUEUE_SEQ_COUNTER = 0
+
+def _task_priority(task_type: str) -> int:
+    t = str(task_type or "").strip().lower()
+    if t in ("task", "review"):
+        return 0
+    if t == "evolution":
+        return 1
+    if t == "idle":
+        return 2
+    return 3
+
+def _queue_sort_key(task: Dict[str, Any]) -> Tuple[int, int]:
+    pr = int(task.get("priority") or _task_priority(str(task.get("type") or "")))
+    seq = int(task.get("_queue_seq") or 0)
+    return pr, seq
+
+def _sort_pending() -> None:
+    PENDING.sort(key=_queue_sort_key)
+
+def enqueue_task(task: Dict[str, Any], front: bool = False) -> Dict[str, Any]:
+    global QUEUE_SEQ_COUNTER
+    t = dict(task)
+    QUEUE_SEQ_COUNTER += 1
+    t.setdefault("priority", _task_priority(str(t.get("type") or "")))
+    t.setdefault("_attempt", int(t.get("_attempt") or 1))
+    t["_queue_seq"] = -QUEUE_SEQ_COUNTER if front else QUEUE_SEQ_COUNTER
+    t["queued_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    PENDING.append(t)
+    _sort_pending()
+    return t
+
+def _queue_has_task_type(task_type: str) -> bool:
+    tt = str(task_type or "")
+    if any(str(t.get("type") or "") == tt for t in PENDING):
+        return True
+    for meta in RUNNING.values():
+        task = meta.get("task") if isinstance(meta, dict) else None
+        if isinstance(task, dict) and str(task.get("type") or "") == tt:
+            return True
+    return False
+
+def _running_task_type_counts() -> Dict[str, int]:
+    out: Dict[str, int] = {}
+    for meta in RUNNING.values():
+        task = meta.get("task") if isinstance(meta, dict) else None
+        tt = str((task or {}).get("type") or "")
+        out[tt] = int(out.get(tt) or 0) + 1
+    return out
+
+def persist_queue_snapshot(reason: str = "") -> None:
+    pending_rows = []
+    for t in PENDING:
+        pending_rows.append(
+            {
+                "id": t.get("id"),
+                "type": t.get("type"),
+                "priority": t.get("priority"),
+                "attempt": t.get("_attempt"),
+                "queued_at": t.get("queued_at"),
+                "queue_seq": t.get("_queue_seq"),
+                "task": {
+                    "id": t.get("id"),
+                    "type": t.get("type"),
+                    "chat_id": t.get("chat_id"),
+                    "text": t.get("text"),
+                    "priority": t.get("priority"),
+                    "_attempt": t.get("_attempt"),
+                    "review_reason": t.get("review_reason"),
+                    "review_source_task_id": t.get("review_source_task_id"),
+                },
+            }
+        )
+    running_rows = []
+    now = time.time()
+    for task_id, meta in RUNNING.items():
+        task = meta.get("task") if isinstance(meta, dict) else {}
+        started = float(meta.get("started_at") or 0.0) if isinstance(meta, dict) else 0.0
+        hb = float(meta.get("last_heartbeat_at") or 0.0) if isinstance(meta, dict) else 0.0
+        running_rows.append(
+            {
+                "id": task_id,
+                "type": task.get("type"),
+                "priority": task.get("priority"),
+                "attempt": meta.get("attempt"),
+                "worker_id": meta.get("worker_id"),
+                "runtime_sec": round(max(0.0, now - started), 2) if started > 0 else 0.0,
+                "heartbeat_lag_sec": round(max(0.0, now - hb), 2) if hb > 0 else None,
+                "soft5_sent": bool(meta.get("soft5_sent")),
+                "soft10_sent": bool(meta.get("soft10_sent")),
+                "task": task,
+            }
+        )
+    payload = {
+        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "reason": reason,
+        "pending_count": len(PENDING),
+        "running_count": len(RUNNING),
+        "pending": pending_rows,
+        "running": running_rows,
+    }
+    try:
+        _atomic_write_text(QUEUE_SNAPSHOT_PATH, json.dumps(payload, ensure_ascii=False, indent=2))
+    except Exception:
+        pass
+
+def restore_pending_from_snapshot(max_age_sec: int = 900) -> int:
+    if PENDING:
+        return 0
+    try:
+        if not QUEUE_SNAPSHOT_PATH.exists():
+            return 0
+        snap = json.loads(QUEUE_SNAPSHOT_PATH.read_text(encoding="utf-8"))
+        if not isinstance(snap, dict):
+            return 0
+        ts = str(snap.get("ts") or "")
+        ts_unix = parse_iso_to_ts(ts)
+        if ts_unix is None:
+            return 0
+        if (time.time() - ts_unix) > max_age_sec:
+            return 0
+        restored = 0
+        for row in (snap.get("pending") or []):
+            task = row.get("task") if isinstance(row, dict) else None
+            if not isinstance(task, dict):
+                continue
+            if not task.get("id") or not task.get("chat_id"):
+                continue
+            enqueue_task(task)
+            restored += 1
+        if restored > 0:
+            append_jsonl(
+                DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "type": "queue_restored_from_snapshot",
+                    "restored_pending": restored,
+                },
+            )
+            persist_queue_snapshot(reason="queue_restored")
+        return restored
+    except Exception:
+        return 0
 
 def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str) -> None:
     import sys as _sys
@@ -703,6 +1003,7 @@ def kill_workers() -> None:
         w.proc.join(timeout=5)
     WORKERS.clear()
     RUNNING.clear()
+    persist_queue_snapshot(reason="kill_workers")
     if cleared_running:
         append_jsonl(
             DRIVE_ROOT / "logs" / "supervisor.jsonl",
@@ -716,13 +1017,31 @@ def kill_workers() -> None:
 def assign_tasks() -> None:
     for w in WORKERS.values():
         if w.busy_task_id is None and PENDING:
+            _sort_pending()
             task = PENDING.pop(0)
             w.busy_task_id = task["id"]
             w.in_q.put(task)
-            RUNNING[task["id"]] = task
+            now_ts = time.time()
+            RUNNING[task["id"]] = {
+                "task": dict(task),
+                "worker_id": w.wid,
+                "started_at": now_ts,
+                "last_heartbeat_at": now_ts,
+                "soft5_sent": False,
+                "soft10_sent": False,
+                "attempt": int(task.get("_attempt") or 1),
+            }
             st = load_state()
             if st.get("owner_chat_id"):
-                send_with_budget(int(st["owner_chat_id"]), f"▶️ Стартую задачу {task['id']} (worker {w.wid})")
+                pr = int(task.get("priority") or _task_priority(str(task.get("type") or "")))
+                send_with_budget(
+                    int(st["owner_chat_id"]),
+                    (
+                        f"▶️ Стартую задачу {task['id']} (worker {w.wid}, type={task.get('type')}, "
+                        f"priority={pr}, attempt={int(task.get('_attempt') or 1)})"
+                    ),
+                )
+            persist_queue_snapshot(reason="assign_task")
 
 def update_budget_from_usage(usage: Dict[str, Any]) -> None:
     def _to_float(v: Any, default: float = 0.0) -> float:
@@ -758,7 +1077,7 @@ def parse_iso_to_ts(iso_ts: str) -> Optional[float]:
 
 def budget_pct(st: Dict[str, Any]) -> float:
     spent = float(st.get("spent_usd") or 0.0)
-    total = float(get_secret("TOTAL_BUDGET", default=str(TOTAL_BUDGET_DEFAULT)) or TOTAL_BUDGET_DEFAULT)
+    total = float(TOTAL_BUDGET_LIMIT or 0.0)
     if total <= 0:
         return 0.0
     return (spent / total) * 100.0
@@ -784,12 +1103,106 @@ def build_evolution_task_text(cycle: int) -> str:
         f"ENDLESS EVOLUTION CYCLE #{cycle}\n\n"
         "Mode is active until owner asks to stop.\n"
         "Start with `repo_read('prompts/evolution.md')` and follow it exactly.\n"
+        "Before choosing the next change, check latest deep-review findings in chat/logs/scratchpad and adjust plan.\n"
         "Do one high-leverage self-improvement step now.\n"
         "Strict branch rule: only `ouroboros` for any write/commit/push; never touch `main` or `ouroboros-stable`.\n"
         "After changes: verify, commit+push, request_restart, then report concise Done/Result/Next.\n\n"
         "Prompt snapshot:\n"
         + _load_evolution_prompt_text()
     )
+
+def build_review_task_text(reason: str, source_task_id: str = "", source_text: str = "") -> str:
+    hint = str(source_text or "").strip()
+    if len(hint) > 800:
+        hint = hint[:800].rstrip() + "..."
+    return (
+        "SYSTEM REVIEW TASK\n\n"
+        "Run deep full-system review in fit-or-chunk mode.\n"
+        "Include repository files, prompts, state, memory, logs, and runtime context.\n"
+        "Before analysis: estimate input tokens and report the estimate.\n"
+        "After analysis: report total review cost and key risks.\n"
+        "Output sections:\n"
+        "1) Health verdict\n"
+        "2) Major problems\n"
+        "3) Drift/hanging risks\n"
+        "4) Action plan\n"
+        "5) Optional immediate follow-ups\n\n"
+        f"Reason: {reason or 'unspecified'}\n"
+        f"Source task id: {source_task_id or '-'}\n"
+        f"Source text: {hint or '-'}\n"
+    )
+
+def _is_review_request_text(text: str) -> bool:
+    s = str(text or "").strip().lower()
+    if not s:
+        return False
+    phrases = (
+        "сделай ревью",
+        "сделай review",
+        "проведи ревью",
+        "прогони ревью",
+        "проверь всё ли ок",
+        "проверь все ли ок",
+        "аудит системы",
+        "system review",
+        "deep review",
+        "health check",
+        "review всей системы",
+    )
+    return any(p in s for p in phrases)
+
+def queue_review_task(
+    reason: str,
+    source_task_id: str = "",
+    source_text: str = "",
+    force: bool = False,
+    notify: bool = True,
+) -> Optional[str]:
+    st = load_state()
+    owner_chat_id = st.get("owner_chat_id")
+    if not owner_chat_id:
+        return None
+    if (not force) and _queue_has_task_type("review"):
+        return None
+
+    tid = uuid.uuid4().hex[:8]
+    queued = enqueue_task(
+        {
+            "id": tid,
+            "type": "review",
+            "chat_id": int(owner_chat_id),
+            "text": build_review_task_text(reason=reason, source_task_id=source_task_id, source_text=source_text),
+            "review_reason": reason,
+            "review_source_task_id": source_task_id,
+        }
+    )
+    st["last_review_task_id"] = tid
+    st["last_auto_review_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    save_state(st)
+
+    append_jsonl(
+        DRIVE_ROOT / "logs" / "supervisor.jsonl",
+        {
+            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "type": "review_task_enqueued",
+            "task_id": tid,
+            "reason": reason,
+            "source_task_id": source_task_id,
+            "priority": queued.get("priority"),
+            "force": bool(force),
+        },
+    )
+    persist_queue_snapshot(reason="review_enqueued")
+    if notify:
+        send_with_budget(
+            int(owner_chat_id),
+            (
+                f"🔎 Review queued: {tid}\n"
+                f"reason={reason or '-'}; source_task_id={source_task_id or '-'}; "
+                f"priority={queued.get('priority')}"
+            ),
+        )
+    return tid
 
 def enqueue_evolution_task_if_needed() -> None:
     global LAST_EVOLUTION_SKIP_SIGNATURE
@@ -837,7 +1250,7 @@ def enqueue_evolution_task_if_needed() -> None:
 
     cycle = int(st.get("evolution_cycle") or 0) + 1
     tid = uuid.uuid4().hex[:8]
-    PENDING.append(
+    queued = enqueue_task(
         {
             "id": tid,
             "type": "evolution",
@@ -859,6 +1272,7 @@ def enqueue_evolution_task_if_needed() -> None:
             "task_id": tid,
             "cycle": cycle,
             "budget_pct": budget_pct(st),
+            "priority": queued.get("priority"),
         },
     )
     send_with_budget(int(owner_chat_id), f"🧬 Evolution task queued: {tid} (cycle {cycle})")
@@ -923,7 +1337,7 @@ def enqueue_idle_task_if_needed() -> None:
     cursor = int(st.get("idle_cursor") or 0)
     kind, text = catalog[cursor % len(catalog)]
     tid = uuid.uuid4().hex[:8]
-    PENDING.append({"id": tid, "type": "idle", "chat_id": int(owner_chat_id), "text": text})
+    queued = enqueue_task({"id": tid, "type": "idle", "chat_id": int(owner_chat_id), "text": text})
 
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     st["idle_cursor"] = cursor + 1
@@ -949,6 +1363,7 @@ def enqueue_idle_task_if_needed() -> None:
             "task_id": tid,
             "kind": kind,
             "budget_pct": budget_pct(st),
+            "priority": queued.get("priority"),
         },
     )
     send_with_budget(int(owner_chat_id), f"🧠 Idle task queued: {tid} ({kind})")
@@ -965,9 +1380,12 @@ def ensure_workers_healthy() -> None:
         if not w.proc.is_alive():
             CRASH_TS.append(time.time())
             if w.busy_task_id and w.busy_task_id in RUNNING:
-                task = RUNNING.pop(w.busy_task_id)
-                PENDING.insert(0, task)
+                meta = RUNNING.pop(w.busy_task_id) or {}
+                task = meta.get("task") if isinstance(meta, dict) else None
+                if isinstance(task, dict):
+                    enqueue_task(task, front=True)
             respawn_worker(wid)
+            persist_queue_snapshot(reason="worker_respawn_after_crash")
 
     now = time.time()
     CRASH_TS[:] = [t for t in CRASH_TS if (now - t) < 60.0]
@@ -997,6 +1415,151 @@ def ensure_workers_healthy() -> None:
         spawn_workers(MAX_WORKERS)
         CRASH_TS.clear()
 
+def enforce_task_timeouts() -> None:
+    if not RUNNING:
+        return
+    now = time.time()
+    st = load_state()
+    owner_chat_id = int(st.get("owner_chat_id") or 0)
+
+    for task_id, meta in list(RUNNING.items()):
+        if not isinstance(meta, dict):
+            continue
+        task = meta.get("task") if isinstance(meta.get("task"), dict) else {}
+        started_at = float(meta.get("started_at") or 0.0)
+        if started_at <= 0:
+            continue
+        last_hb = float(meta.get("last_heartbeat_at") or started_at)
+        runtime_sec = max(0.0, now - started_at)
+        hb_lag_sec = max(0.0, now - last_hb)
+        hb_stale = hb_lag_sec >= HEARTBEAT_STALE_SEC
+        worker_id = int(meta.get("worker_id") or -1)
+        task_type = str(task.get("type") or "")
+        attempt = int(meta.get("attempt") or task.get("_attempt") or 1)
+
+        if runtime_sec >= QUEUE_SOFT_TIMEOUT_1_SEC and not bool(meta.get("soft5_sent")):
+            meta["soft5_sent"] = True
+            append_jsonl(
+                DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "type": "task_soft_timeout",
+                    "level": 1,
+                    "task_id": task_id,
+                    "task_type": task_type,
+                    "worker_id": worker_id,
+                    "runtime_sec": round(runtime_sec, 2),
+                    "heartbeat_lag_sec": round(hb_lag_sec, 2),
+                    "heartbeat_stale": hb_stale,
+                    "attempt": attempt,
+                },
+            )
+            if owner_chat_id:
+                send_with_budget(
+                    owner_chat_id,
+                    (
+                        f"⏱️ Задача {task_id} выполняется {int(runtime_sec)}с (soft-5).\n"
+                        f"worker={worker_id}, type={task_type}, attempt={attempt}, "
+                        f"heartbeat_lag={int(hb_lag_sec)}с, stale={int(hb_stale)}.\n"
+                        "Пока продолжаю выполнение и наблюдение."
+                    ),
+                )
+
+        if runtime_sec >= QUEUE_SOFT_TIMEOUT_2_SEC and not bool(meta.get("soft10_sent")):
+            meta["soft10_sent"] = True
+            append_jsonl(
+                DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "type": "task_soft_timeout",
+                    "level": 2,
+                    "task_id": task_id,
+                    "task_type": task_type,
+                    "worker_id": worker_id,
+                    "runtime_sec": round(runtime_sec, 2),
+                    "heartbeat_lag_sec": round(hb_lag_sec, 2),
+                    "heartbeat_stale": hb_stale,
+                    "attempt": attempt,
+                },
+            )
+            if owner_chat_id:
+                send_with_budget(
+                    owner_chat_id,
+                    (
+                        f"⏱️ Задача {task_id} выполняется {int(runtime_sec)}с (soft-10).\n"
+                        f"worker={worker_id}, type={task_type}, attempt={attempt}, "
+                        f"heartbeat_lag={int(hb_lag_sec)}с, stale={int(hb_stale)}.\n"
+                        "Готовлюсь к принудительному restart worker на hard-timeout."
+                    ),
+                )
+
+        if runtime_sec < QUEUE_HARD_TIMEOUT_SEC:
+            continue
+
+        # Hard timeout: force-kill worker, optionally requeue with bounded retries.
+        RUNNING.pop(task_id, None)
+        if worker_id in WORKERS and WORKERS[worker_id].busy_task_id == task_id:
+            WORKERS[worker_id].busy_task_id = None
+
+        if worker_id in WORKERS:
+            w = WORKERS[worker_id]
+            try:
+                if w.proc.is_alive():
+                    w.proc.terminate()
+                w.proc.join(timeout=5)
+            except Exception:
+                pass
+            respawn_worker(worker_id)
+
+        requeued = False
+        new_attempt = attempt
+        if attempt <= QUEUE_MAX_RETRIES and isinstance(task, dict):
+            retried = dict(task)
+            retried["_attempt"] = attempt + 1
+            retried["timeout_retry_from"] = task_id
+            retried["timeout_retry_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            enqueue_task(retried, front=True)
+            requeued = True
+            new_attempt = attempt + 1
+
+        append_jsonl(
+            DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "task_hard_timeout",
+                "task_id": task_id,
+                "task_type": task_type,
+                "worker_id": worker_id,
+                "runtime_sec": round(runtime_sec, 2),
+                "heartbeat_lag_sec": round(hb_lag_sec, 2),
+                "heartbeat_stale": hb_stale,
+                "attempt": attempt,
+                "requeued": requeued,
+                "new_attempt": new_attempt,
+                "max_retries": QUEUE_MAX_RETRIES,
+            },
+        )
+
+        if owner_chat_id:
+            if requeued:
+                send_with_budget(
+                    owner_chat_id,
+                    (
+                        f"🛑 Hard-timeout: задача {task_id} убита после {int(runtime_sec)}с.\n"
+                        f"Worker {worker_id} перезапущен. Задача поставлена на retry attempt={new_attempt}."
+                    ),
+                )
+            else:
+                send_with_budget(
+                    owner_chat_id,
+                    (
+                        f"🛑 Hard-timeout: задача {task_id} убита после {int(runtime_sec)}с.\n"
+                        f"Worker {worker_id} перезапущен. Лимит retry исчерпан, задача остановлена."
+                    ),
+                )
+
+        persist_queue_snapshot(reason="task_hard_timeout")
+
 def rotate_chat_log_if_needed(max_bytes: int = 800_000) -> None:
     chat = DRIVE_ROOT / "logs" / "chat.jsonl"
     if not chat.exists():
@@ -1010,6 +1573,7 @@ def rotate_chat_log_if_needed(max_bytes: int = 800_000) -> None:
 
 def status_text() -> str:
     st = load_state()
+    now = time.time()
     lines = []
     lines.append(f"owner_id: {st.get('owner_id')}")
     lines.append(f"session_id: {st.get('session_id')}")
@@ -1019,12 +1583,34 @@ def status_text() -> str:
     lines.append(f"pending: {len(PENDING)}")
     lines.append(f"running: {len(RUNNING)}")
     if PENDING:
-        lines.append("pending_ids: " + ", ".join([t["id"] for t in PENDING[:10]]))
+        preview = []
+        for t in PENDING[:10]:
+            preview.append(
+                f"{t.get('id')}:{t.get('type')}:pr{t.get('priority')}:a{int(t.get('_attempt') or 1)}"
+            )
+        lines.append("pending_queue: " + ", ".join(preview))
     if RUNNING:
         lines.append("running_ids: " + ", ".join(list(RUNNING.keys())[:10]))
     busy = [f"{w.wid}:{w.busy_task_id}" for w in WORKERS.values() if w.busy_task_id]
     if busy:
         lines.append("busy: " + ", ".join(busy))
+    if RUNNING:
+        details: List[str] = []
+        for task_id, meta in list(RUNNING.items())[:10]:
+            task = meta.get("task") if isinstance(meta, dict) else {}
+            started = float(meta.get("started_at") or 0.0) if isinstance(meta, dict) else 0.0
+            hb = float(meta.get("last_heartbeat_at") or 0.0) if isinstance(meta, dict) else 0.0
+            runtime_sec = int(max(0.0, now - started)) if started > 0 else 0
+            hb_lag_sec = int(max(0.0, now - hb)) if hb > 0 else -1
+            details.append(
+                (
+                    f"{task_id}:type={task.get('type')} pr={task.get('priority')} "
+                    f"attempt={meta.get('attempt')} runtime={runtime_sec}s hb_lag={hb_lag_sec}s"
+                )
+            )
+        if details:
+            lines.append("running_details:")
+            lines.extend([f"  - {d}" for d in details])
     if RUNNING and busy_count == 0:
         lines.append("queue_warning: running>0 while busy=0")
     lines.append(f"spent_usd: {st.get('spent_usd')}")
@@ -1044,12 +1630,19 @@ def status_text() -> str:
     lines.append(f"last_owner_message_at: {st.get('last_owner_message_at') or '-'}")
     lines.append(f"last_idle_task_at: {st.get('last_idle_task_at') or '-'}")
     lines.append(f"last_evolution_task_at: {st.get('last_evolution_task_at') or '-'}")
+    lines.append(
+        "timeouts: "
+        + f"soft1={QUEUE_SOFT_TIMEOUT_1_SEC}s, soft2={QUEUE_SOFT_TIMEOUT_2_SEC}s, "
+        + f"hard={QUEUE_HARD_TIMEOUT_SEC}s, max_retries={QUEUE_MAX_RETRIES}, hb_stale={HEARTBEAT_STALE_SEC}s"
+    )
+    lines.append(f"queue_priority_counts_running: {json.dumps(_running_task_type_counts(), ensure_ascii=False)}")
     return "\n".join(lines)
 
 def cancel_task_by_id(task_id: str) -> bool:
     for i, t in enumerate(list(PENDING)):
         if t["id"] == task_id:
             PENDING.pop(i)
+            persist_queue_snapshot(reason="cancel_pending")
             return True
     for w in WORKERS.values():
         if w.busy_task_id == task_id:
@@ -1058,6 +1651,7 @@ def cancel_task_by_id(task_id: str) -> bool:
                 w.proc.terminate()
             w.proc.join(timeout=5)
             respawn_worker(w.wid)
+            persist_queue_snapshot(reason="cancel_running")
             return True
     return False
 
@@ -1091,7 +1685,7 @@ def handle_approval(chat_id: int, text: str) -> bool:
     if cmd == "/approve" and approvals[approval_id].get("type") == "reindex":
         reason = str(approvals[approval_id].get("reason") or "").strip()
         tid = uuid.uuid4().hex[:8]
-        PENDING.append(
+        enqueue_task(
             {
                 "id": tid,
                 "type": "task",
@@ -1103,6 +1697,7 @@ def handle_approval(chat_id: int, text: str) -> bool:
                 ).strip(),
             }
         )
+        persist_queue_snapshot(reason="reindex_approved")
         send_with_budget(chat_id, f"✅ Reindex approval accepted. Queued task {tid}.")
 
     return True
@@ -1110,6 +1705,15 @@ def handle_approval(chat_id: int, text: str) -> bool:
 # start
 kill_workers()
 spawn_workers(MAX_WORKERS)
+restored_pending = restore_pending_from_snapshot()
+persist_queue_snapshot(reason="startup")
+if restored_pending > 0:
+    st_boot = load_state()
+    if st_boot.get("owner_chat_id"):
+        send_with_budget(
+            int(st_boot["owner_chat_id"]),
+            f"♻️ Восстановил pending queue из snapshot: {restored_pending} задач.",
+        )
 
 append_jsonl(DRIVE_ROOT / "logs" / "supervisor.jsonl", {
     "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -1123,6 +1727,21 @@ append_jsonl(DRIVE_ROOT / "logs" / "supervisor.jsonl", {
     "idle_max_per_day": IDLE_MAX_PER_DAY,
     "evolution_enabled_by_default": int(EVOLUTION_ENABLED_BY_DEFAULT),
     "budget_report_every_messages": BUDGET_REPORT_EVERY_MESSAGES,
+    "model_default": MODEL_MAIN,
+    "model_code": MODEL_CODE,
+    "model_review": MODEL_REVIEW,
+    "model_router": MODEL_ROUTER,
+    "router_reasoning_effort": ROUTER_REASONING_EFFORT,
+    "reasoning_default_task": REASONING_DEFAULT_TASK,
+    "reasoning_code_task": REASONING_CODE_TASK,
+    "reasoning_evolution_task": REASONING_EVOLUTION_TASK,
+    "reasoning_deep_review": REASONING_DEEP_REVIEW,
+    "reasoning_memory_summary": REASONING_MEMORY_SUMMARY,
+    "task_soft_timeout_1_sec": QUEUE_SOFT_TIMEOUT_1_SEC,
+    "task_soft_timeout_2_sec": QUEUE_SOFT_TIMEOUT_2_SEC,
+    "task_hard_timeout_sec": QUEUE_HARD_TIMEOUT_SEC,
+    "task_max_retries": QUEUE_MAX_RETRIES,
+    "task_heartbeat_sec": TASK_HEARTBEAT_SEC,
 })
 
 offset = int(load_state().get("tg_offset") or 0)
@@ -1138,6 +1757,17 @@ while True:
 
         if et == "llm_usage":
             update_budget_from_usage(evt.get("usage") or {})
+            continue
+
+        if et == "task_heartbeat":
+            task_id = str(evt.get("task_id") or "")
+            if task_id and task_id in RUNNING:
+                meta = RUNNING.get(task_id) or {}
+                meta["last_heartbeat_at"] = time.time()
+                phase = str(evt.get("phase") or "")
+                if phase:
+                    meta["heartbeat_phase"] = phase
+                RUNNING[task_id] = meta
             continue
 
         if et == "send_message":
@@ -1162,10 +1792,73 @@ while True:
         if et == "task_done":
             task_id = evt.get("task_id")
             wid = evt.get("worker_id")
+            done_meta: Dict[str, Any] = {}
+            task_type = ""
+            task_text = ""
             if task_id:
-                RUNNING.pop(str(task_id), None)
+                done_meta = RUNNING.pop(str(task_id), None) or {}
+                done_task = done_meta.get("task") if isinstance(done_meta, dict) else {}
+                if isinstance(done_task, dict):
+                    task_type = str(done_task.get("type") or "")
+                    task_text = str(done_task.get("text") or "")
             if wid in WORKERS and WORKERS[wid].busy_task_id == task_id:
                 WORKERS[wid].busy_task_id = None
+            persist_queue_snapshot(reason="task_done")
+
+            if task_type == "evolution":
+                queue_review_task(
+                    reason="post_evolution_cycle",
+                    source_task_id=str(task_id or ""),
+                    source_text=task_text,
+                    force=False,
+                    notify=True,
+                )
+            continue
+
+        if et == "task_metrics":
+            task_id = str(evt.get("task_id") or "")
+            task_type = str(evt.get("task_type") or "")
+            duration_sec = float(evt.get("duration_sec") or 0.0)
+            tool_calls = int(evt.get("tool_calls") or 0)
+            tool_errors = int(evt.get("tool_errors") or 0)
+            complexity_trigger_review = bool(evt.get("complexity_trigger_review"))
+            reason = str(evt.get("complexity_reason") or "").strip()
+            append_jsonl(
+                DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "type": "task_metrics_event",
+                    "task_id": task_id,
+                    "task_type": task_type,
+                    "duration_sec": round(duration_sec, 3),
+                    "tool_calls": tool_calls,
+                    "tool_errors": tool_errors,
+                    "complexity_trigger_review": complexity_trigger_review,
+                    "complexity_reason": reason,
+                },
+            )
+            if complexity_trigger_review and task_type not in ("review", "evolution"):
+                st2 = load_state()
+                last_auto = parse_iso_to_ts(str(st2.get("last_auto_review_at") or ""))
+                now_ts = time.time()
+                if (last_auto is None) or ((now_ts - last_auto) >= AUTO_REVIEW_MIN_GAP_SEC):
+                    queue_review_task(
+                        reason=("complex_task:" + (reason or "auto")),
+                        source_task_id=task_id,
+                        source_text=str(evt.get("task_text") or ""),
+                        force=False,
+                        notify=True,
+                    )
+            continue
+
+        if et == "review_request":
+            queue_review_task(
+                reason=str(evt.get("reason") or "agent_review_request"),
+                source_task_id=str(evt.get("source_task_id") or ""),
+                source_text=str(evt.get("source_text") or ""),
+                force=False,
+                notify=True,
+            )
             continue
 
         if et == "restart_request":
@@ -1221,7 +1914,7 @@ while True:
             desc = str(evt.get("description") or "").strip()
             if owner_chat_id and desc:
                 tid = uuid.uuid4().hex[:8]
-                PENDING.append(
+                enqueue_task(
                     {
                         "id": tid,
                         "type": "task",
@@ -1230,6 +1923,7 @@ while True:
                     }
                 )
                 send_with_budget(int(owner_chat_id), f"🗓️ Запланировал задачу {tid}: {desc}")
+                persist_queue_snapshot(reason="schedule_task_event")
             append_jsonl(
                 DRIVE_ROOT / "logs" / "supervisor.jsonl",
                 {
@@ -1279,9 +1973,11 @@ while True:
                 )
             continue
 
+    enforce_task_timeouts()
     enqueue_evolution_task_if_needed()
     enqueue_idle_task_if_needed()
     assign_tasks()
+    persist_queue_snapshot(reason="main_loop")
 
     # Poll Telegram
     try:
@@ -1359,6 +2055,18 @@ while True:
             send_with_budget(chat_id, status_text(), force_budget=True)
             continue
 
+        if text.strip().lower().startswith("/review"):
+            queued_id = queue_review_task(
+                reason="owner_command:/review",
+                source_task_id="",
+                source_text=text,
+                force=True,
+                notify=True,
+            )
+            if queued_id is None:
+                send_with_budget(chat_id, "⚠️ Не удалось поставить review в очередь (owner_chat_id не установлен).")
+            continue
+
         lowered = text.strip().lower()
         if lowered.startswith("/evolve"):
             parts = lowered.split()
@@ -1373,7 +2081,9 @@ while True:
             if not turn_on:
                 before = len(PENDING)
                 PENDING[:] = [t for t in PENDING if str(t.get("type")) != "evolution"]
+                _sort_pending()
                 removed_pending = before - len(PENDING)
+                persist_queue_snapshot(reason="evolve_off_remove_pending")
 
             append_jsonl(
                 DRIVE_ROOT / "logs" / "supervisor.jsonl",
@@ -1406,7 +2116,9 @@ while True:
             save_state(st2)
             before = len(PENDING)
             PENDING[:] = [t for t in PENDING if str(t.get("type")) != "evolution"]
+            _sort_pending()
             removed_pending = before - len(PENDING)
+            persist_queue_snapshot(reason="evolution_stop_natural")
             append_jsonl(
                 DRIVE_ROOT / "logs" / "supervisor.jsonl",
                 {
@@ -1426,6 +2138,18 @@ while True:
         if handle_approval(chat_id, text):
             continue
 
+        if _is_review_request_text(text):
+            queued_id = queue_review_task(
+                reason="owner_natural_review_request",
+                source_task_id="",
+                source_text=text,
+                force=False,
+                notify=True,
+            )
+            if queued_id is None:
+                send_with_budget(chat_id, "ℹ️ Review уже в очереди или выполняется.")
+            continue
+
         if text.strip().lower().startswith("/cancel"):
             parts = text.strip().split()
             assert len(parts) >= 2, "Usage: /cancel <task_id>"
@@ -1439,8 +2163,15 @@ while True:
             send_with_budget(chat_id, direct)
         else:
             tid = uuid.uuid4().hex[:8]
-            PENDING.append({"id": tid, "type": "task", "chat_id": chat_id, "text": text})
-            send_with_budget(chat_id, f"🧾 Принято. В очереди: {tid}. (workers={MAX_WORKERS}, pending={len(PENDING)})")
+            queued = enqueue_task({"id": tid, "type": "task", "chat_id": chat_id, "text": text})
+            persist_queue_snapshot(reason="owner_task_enqueued")
+            send_with_budget(
+                chat_id,
+                (
+                    f"🧾 Принято. В очереди: {tid}. "
+                    f"(workers={MAX_WORKERS}, pending={len(PENDING)}, priority={queued.get('priority')})"
+                ),
+            )
 
     st = load_state()
     st["tg_offset"] = offset

@@ -524,6 +524,82 @@ class OuroborosAgent:
         return default
 
     @staticmethod
+    def _normalize_reasoning_effort(value: str, default: str = "medium") -> str:
+        allowed = {"none", "minimal", "low", "medium", "high", "xhigh"}
+        v = str(value or "").strip().lower()
+        return v if v in allowed else default
+
+    @staticmethod
+    def _reasoning_rank(value: str) -> int:
+        order = {"none": 0, "minimal": 1, "low": 2, "medium": 3, "high": 4, "xhigh": 5}
+        return int(order.get(str(value or "").strip().lower(), 3))
+
+    @staticmethod
+    def _is_code_intent_text(text: str) -> bool:
+        s = str(text or "").lower()
+        patterns = (
+            r"\bcode\b",
+            r"\bbug\b",
+            r"\brefactor\b",
+            r"\bcommit\b",
+            r"\bpush\b",
+            r"\bgit\b",
+            r"\bfile\b",
+            r"\bpython\b",
+            r"\bscript\b",
+            r"код",
+            r"файл",
+            r"коммит",
+            r"рефактор",
+            r"исправ",
+        )
+        return any(re.search(p, s) for p in patterns)
+
+    def _model_profile(self, profile: str) -> Dict[str, str]:
+        main_model = os.environ.get("OUROBOROS_MODEL", "openai/gpt-5.2")
+        code_model = os.environ.get("OUROBOROS_MODEL_CODE", os.environ.get("OUROBOROS_MODEL", "openai/gpt-5.2-codex"))
+        review_model = os.environ.get("OUROBOROS_MODEL_REVIEW", os.environ.get("OUROBOROS_MODEL", "openai/gpt-5.2"))
+        memory_model = os.environ.get("OUROBOROS_MEMORY_MODEL", main_model)
+
+        profiles: Dict[str, Dict[str, str]] = {
+            "default_task": {
+                "model": main_model,
+                "effort": self._normalize_reasoning_effort(os.environ.get("OUROBOROS_REASONING_DEFAULT_TASK", "medium"), "medium"),
+            },
+            "code_task": {
+                "model": code_model,
+                "effort": self._normalize_reasoning_effort(os.environ.get("OUROBOROS_REASONING_CODE_TASK", "high"), "high"),
+            },
+            "evolution_task": {
+                "model": code_model,
+                "effort": self._normalize_reasoning_effort(os.environ.get("OUROBOROS_REASONING_EVOLUTION_TASK", "high"), "high"),
+            },
+            "deep_review": {
+                "model": review_model,
+                "effort": self._normalize_reasoning_effort(os.environ.get("OUROBOROS_REASONING_DEEP_REVIEW", "xhigh"), "xhigh"),
+            },
+            "memory_summary": {
+                "model": memory_model,
+                "effort": self._normalize_reasoning_effort(os.environ.get("OUROBOROS_REASONING_MEMORY_SUMMARY", "low"), "low"),
+            },
+            "notice": {
+                "model": os.environ.get("OUROBOROS_NOTICE_MODEL", main_model),
+                "effort": self._normalize_reasoning_effort(os.environ.get("OUROBOROS_REASONING_NOTICE", "low"), "low"),
+            },
+        }
+        return dict(profiles.get(profile, profiles["default_task"]))
+
+    def _select_task_profile(self, task_type: str, task_text: str) -> str:
+        tt = str(task_type or "").strip().lower()
+        if tt == "review":
+            return "deep_review"
+        if tt == "evolution":
+            return "evolution_task"
+        if self._is_code_intent_text(task_text):
+            return "code_task"
+        return "default_task"
+
+    @staticmethod
     def _norm_item(value: str) -> str:
         return re.sub(r"\s+", " ", str(value or "").strip()).lower()
 
@@ -824,7 +900,9 @@ class OuroborosAgent:
             "tool_calls": (llm_trace.get("tool_calls") or [])[:50],
         }
 
-        model = os.environ.get("OUROBOROS_MEMORY_MODEL", os.environ.get("OUROBOROS_MODEL", "openai/gpt-5.2"))
+        memory_prof = self._model_profile("memory_summary")
+        model = memory_prof["model"]
+        reasoning_effort = memory_prof["effort"]
         max_tokens = max(400, min(self._env_int("OUROBOROS_SCRATCHPAD_SUMMARY_MAX_TOKENS", 2000), 4000))
         usage: Dict[str, Any] = {}
 
@@ -840,9 +918,19 @@ class OuroborosAgent:
                     },
                 ],
                 max_tokens=max_tokens,
+                extra_body={"reasoning": {"effort": reasoning_effort, "exclude": True}},
             )
             resp_dict = resp.model_dump()
             usage = resp_dict.get("usage", {}) or {}
+            append_jsonl(
+                self.env.drive_path("logs") / "events.jsonl",
+                {
+                    "ts": utc_now_iso(),
+                    "type": "memory_summary_profile_used",
+                    "model": model,
+                    "reasoning_effort": reasoning_effort,
+                },
+            )
             content = str((((resp_dict.get("choices") or [{}])[0].get("message") or {}).get("content")) or "")
             parsed = self._extract_json_object(content)
             if not parsed:
@@ -1111,6 +1199,179 @@ class OuroborosAgent:
             })
         except Exception:
             pass  # best-effort; never crash on progress
+
+    @staticmethod
+    def _merge_usage_totals(total: Dict[str, Any], usage: Dict[str, Any]) -> Dict[str, Any]:
+        out = dict(total or {})
+        if not isinstance(usage, dict):
+            return out
+
+        def _to_float(v: Any) -> float:
+            try:
+                return float(v)
+            except Exception:
+                return 0.0
+
+        def _to_int(v: Any) -> int:
+            try:
+                return int(v)
+            except Exception:
+                return 0
+
+        out["cost"] = _to_float(out.get("cost")) + _to_float(usage.get("cost"))
+        out["prompt_tokens"] = _to_int(out.get("prompt_tokens")) + _to_int(
+            usage.get("prompt_tokens", usage.get("input_tokens"))
+        )
+        out["completion_tokens"] = _to_int(out.get("completion_tokens")) + _to_int(
+            usage.get("completion_tokens", usage.get("output_tokens"))
+        )
+        return out
+
+    def _compose_natural_notice(self, technical_text: str) -> Tuple[str, Dict[str, Any]]:
+        if not self._env_bool("OUROBOROS_LLM_NOTICE_ENABLED", True):
+            return str(technical_text or "").strip(), {}
+        seed = str(technical_text or "").strip()
+        if not seed:
+            return "", {}
+        usage: Dict[str, Any] = {}
+        try:
+            client = self._openrouter_client()
+            prof = self._model_profile("notice")
+            resp = client.chat.completions.create(
+                model=prof["model"],
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Rewrite the technical status note into one concise natural Russian sentence "
+                            "for the owner. Keep all key facts (model, reasoning effort, reason)."
+                        ),
+                    },
+                    {"role": "user", "content": seed},
+                ],
+                max_tokens=120,
+                extra_body={"reasoning": {"effort": prof["effort"], "exclude": True}},
+            )
+            dump = resp.model_dump()
+            usage = dump.get("usage", {}) or {}
+            content = str((((dump.get("choices") or [{}])[0].get("message") or {}).get("content")) or "").strip()
+            if content:
+                return content, usage
+        except Exception:
+            pass
+        return seed, usage
+
+    def _emit_model_notice(
+        self,
+        profile: str,
+        model: str,
+        effort: str,
+        reason: str,
+        previous_model: str = "",
+        previous_effort: str = "",
+    ) -> None:
+        tech = (
+            f"Перехожу на профиль {profile}: модель={model}, reasoning={effort}. Причина: {reason}. "
+            + (f"Ранее было: модель={previous_model}, reasoning={previous_effort}." if previous_model or previous_effort else "")
+        ).strip()
+        text, usage = self._compose_natural_notice(tech)
+        self._emit_progress(text)
+        append_jsonl(
+            self.env.drive_path("logs") / "events.jsonl",
+            {
+                "ts": utc_now_iso(),
+                "type": "model_profile_notice",
+                "profile": profile,
+                "model": model,
+                "reasoning_effort": effort,
+                "reason": reason,
+                "previous_model": previous_model,
+                "previous_effort": previous_effort,
+                "text": truncate_for_log(text, 600),
+            },
+        )
+        if usage:
+            self._pending_events.append(
+                {
+                    "type": "llm_usage",
+                    "task_id": None,
+                    "provider": "openrouter",
+                    "usage": usage,
+                    "source": "model_notice",
+                    "ts": utc_now_iso(),
+                }
+            )
+
+    def _emit_task_heartbeat(self, task_id: str, phase: str) -> None:
+        if self._event_queue is None:
+            return
+        try:
+            self._event_queue.put(
+                {
+                    "type": "task_heartbeat",
+                    "task_id": str(task_id or ""),
+                    "phase": str(phase or "running"),
+                    "ts": utc_now_iso(),
+                }
+            )
+        except Exception:
+            pass
+
+    def _start_task_heartbeat_loop(self, task_id: str) -> Optional[threading.Event]:
+        if self._event_queue is None or not str(task_id or "").strip():
+            return None
+        interval = max(10, min(self._env_int("OUROBOROS_TASK_HEARTBEAT_SEC", 30), 180))
+        stop = threading.Event()
+        self._emit_task_heartbeat(task_id=str(task_id), phase="start")
+
+        def _loop() -> None:
+            while not stop.wait(interval):
+                self._emit_task_heartbeat(task_id=str(task_id), phase="running")
+
+        threading.Thread(target=_loop, daemon=True).start()
+        return stop
+
+    def _emit_task_metrics_event(
+        self,
+        task: Dict[str, Any],
+        duration_sec: float,
+        llm_trace: Dict[str, Any],
+        force_review: bool = False,
+    ) -> None:
+        tool_calls = len(llm_trace.get("tool_calls", [])) if isinstance(llm_trace, dict) else 0
+        tool_errors = (
+            sum(1 for tc in llm_trace.get("tool_calls", []) if isinstance(tc, dict) and tc.get("is_error"))
+            if isinstance(llm_trace, dict)
+            else 0
+        )
+        duration_thr = max(30, self._env_int("OUROBOROS_REVIEW_COMPLEX_MIN_DURATION_SEC", 180))
+        tools_thr = max(2, self._env_int("OUROBOROS_REVIEW_COMPLEX_MIN_TOOL_CALLS", 8))
+        errors_thr = max(1, self._env_int("OUROBOROS_REVIEW_COMPLEX_MIN_TOOL_ERRORS", 2))
+
+        reasons: List[str] = []
+        if duration_sec >= duration_thr:
+            reasons.append(f"duration>={duration_thr}s")
+        if tool_calls >= tools_thr:
+            reasons.append(f"tool_calls>={tools_thr}")
+        if tool_errors >= errors_thr:
+            reasons.append(f"tool_errors>={errors_thr}")
+        if force_review:
+            reasons.append("force_review")
+
+        self._pending_events.append(
+            {
+                "type": "task_metrics",
+                "task_id": task.get("id"),
+                "task_type": task.get("type"),
+                "task_text": truncate_for_log(str(task.get("text") or ""), 1200),
+                "duration_sec": round(float(duration_sec), 3),
+                "tool_calls": tool_calls,
+                "tool_errors": tool_errors,
+                "complexity_trigger_review": bool(reasons),
+                "complexity_reason": ", ".join(reasons),
+                "ts": utc_now_iso(),
+            }
+        )
 
     # ---------- deterministic tool narration ----------
 
@@ -1488,6 +1749,367 @@ class OuroborosAgent:
         info["trimmed_sections"] = trimmed_sections
         return pruned, info
 
+    @staticmethod
+    def _is_probably_text_file(path: pathlib.Path) -> bool:
+        skip_ext = {
+            ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".pdf", ".zip", ".tar", ".gz",
+            ".bz2", ".xz", ".7z", ".rar", ".mp3", ".mp4", ".mov", ".avi", ".wav", ".ogg", ".opus",
+            ".woff", ".woff2", ".ttf", ".otf", ".class", ".so", ".dylib", ".bin",
+        }
+        return path.suffix.lower() not in skip_ext
+
+    def _collect_review_sections(self) -> Tuple[List[Tuple[str, str]], Dict[str, Any]]:
+        max_file_chars = max(20_000, min(self._env_int("OUROBOROS_REVIEW_MAX_FILE_CHARS", 600_000), 4_000_000))
+        max_total_chars = max(200_000, min(self._env_int("OUROBOROS_REVIEW_MAX_TOTAL_CHARS", 8_000_000), 40_000_000))
+        sections: List[Tuple[str, str]] = []
+        total_chars = 0
+        truncated_files = 0
+        dropped_by_total_cap = 0
+
+        def _collect_from_root(root: pathlib.Path, prefix: str, skip_dirs: set[str]) -> None:
+            nonlocal total_chars, truncated_files, dropped_by_total_cap
+            for dirpath, dirnames, filenames in os.walk(str(root)):
+                dirnames[:] = [d for d in sorted(dirnames) if d not in skip_dirs]
+                for fn in sorted(filenames):
+                    p = pathlib.Path(dirpath) / fn
+                    if not p.is_file() or p.is_symlink():
+                        continue
+                    if not self._is_probably_text_file(p):
+                        continue
+                    try:
+                        content = p.read_text(encoding="utf-8", errors="replace")
+                    except Exception:
+                        continue
+                    if not content.strip():
+                        continue
+
+                    rel = p.relative_to(root).as_posix()
+                    if len(content) > max_file_chars:
+                        content = self._clip_text(content, max_chars=max_file_chars)
+                        truncated_files += 1
+
+                    if total_chars >= max_total_chars:
+                        dropped_by_total_cap += 1
+                        continue
+                    if (total_chars + len(content)) > max_total_chars:
+                        remain = max_total_chars - total_chars
+                        if remain <= 0:
+                            dropped_by_total_cap += 1
+                            continue
+                        content = self._clip_text(content, max_chars=max(2000, remain))
+                        truncated_files += 1
+
+                    sections.append((f"{prefix}/{rel}", content))
+                    total_chars += len(content)
+
+        _collect_from_root(
+            self.env.repo_dir,
+            "repo",
+            skip_dirs={".git", "__pycache__", ".pytest_cache", ".mypy_cache", "node_modules", ".venv", "venv"},
+        )
+        _collect_from_root(
+            self.env.drive_root,
+            "drive",
+            skip_dirs={"archive", "locks"},
+        )
+
+        stats = {
+            "files": len(sections),
+            "chars": total_chars,
+            "truncated_files": truncated_files,
+            "dropped_by_total_cap": dropped_by_total_cap,
+            "max_file_chars": max_file_chars,
+            "max_total_chars": max_total_chars,
+        }
+        return sections, stats
+
+    def _chunk_review_sections(self, sections: List[Tuple[str, str]], chunk_token_cap: int) -> List[str]:
+        cap = max(20_000, min(int(chunk_token_cap), 220_000))
+        cap_chars = max(80_000, cap * 4)
+        chunks: List[str] = []
+        current_parts: List[str] = []
+        current_tokens = 0
+
+        for path, content in sections:
+            if not isinstance(content, str) or not content:
+                continue
+            header = f"\n## FILE: {path}\n"
+            if len(content) > cap_chars:
+                # Split oversized file content into deterministic slices.
+                start = 0
+                part_idx = 0
+                while start < len(content):
+                    part_idx += 1
+                    piece = content[start : start + cap_chars]
+                    part = header + f"[part {part_idx}]\n" + piece + "\n"
+                    part_tokens = self._estimate_token_count_text(part)
+                    if current_parts and (current_tokens + part_tokens) > cap:
+                        chunks.append("\n".join(current_parts))
+                        current_parts = []
+                        current_tokens = 0
+                    current_parts.append(part)
+                    current_tokens += part_tokens
+                    start += cap_chars
+                continue
+
+            part = header + content + "\n"
+            part_tokens = self._estimate_token_count_text(part)
+            if current_parts and (current_tokens + part_tokens) > cap:
+                chunks.append("\n".join(current_parts))
+                current_parts = []
+                current_tokens = 0
+            current_parts.append(part)
+            current_tokens += part_tokens
+
+        if current_parts:
+            chunks.append("\n".join(current_parts))
+        if not chunks:
+            chunks = ["(No reviewable text content found.)"]
+        return chunks
+
+    def _extract_chat_content_text(self, dump: Dict[str, Any]) -> str:
+        msg = (((dump.get("choices") or [{}])[0].get("message")) or {})
+        content = msg.get("content")
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts: List[str] = []
+            for item in content:
+                if isinstance(item, dict):
+                    if isinstance(item.get("text"), str):
+                        parts.append(str(item.get("text")))
+                elif isinstance(item, str):
+                    parts.append(item)
+            return "\n".join([p for p in parts if p]).strip()
+        return str(content or "").strip()
+
+    def _review_chat_completion(
+        self,
+        model: str,
+        effort: str,
+        messages: List[Dict[str, Any]],
+        max_tokens: int = 3800,
+    ) -> Tuple[str, Dict[str, Any]]:
+        client = self._openrouter_client()
+        resp = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            max_tokens=max_tokens,
+            extra_body={"reasoning": {"effort": effort, "exclude": True}},
+        )
+        dump = resp.model_dump()
+        text = self._extract_chat_content_text(dump)
+        usage = dump.get("usage", {}) or {}
+        return text, usage
+
+    def _run_system_review(self, task: Dict[str, Any]) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+        reason = str(task.get("review_reason") or task.get("text") or "manual_review")
+        profile = self._model_profile("deep_review")
+        model = profile["model"]
+        effort = profile["effort"]
+        self._emit_model_notice(
+            profile="deep_review",
+            model=model,
+            effort=effort,
+            reason="запущен deep system review",
+        )
+
+        sections, stats = self._collect_review_sections()
+        chunk_token_cap = max(20_000, min(self._env_int("OUROBOROS_REVIEW_CHUNK_TOKEN_CAP", 140_000), 220_000))
+        chunks = self._chunk_review_sections(sections, chunk_token_cap=chunk_token_cap)
+        total_tokens_est = sum(self._estimate_token_count_text(c) for c in chunks)
+
+        self._emit_progress(
+            (
+                f"Перед review: оценка входа ~{total_tokens_est} токенов, "
+                f"chunks={len(chunks)}, files={stats.get('files')}, model={model}, reasoning={effort}."
+            )
+        )
+        append_jsonl(
+            self.env.drive_path("logs") / "events.jsonl",
+            {
+                "ts": utc_now_iso(),
+                "type": "system_review_started",
+                "task_id": task.get("id"),
+                "reason": truncate_for_log(reason, 300),
+                "model": model,
+                "reasoning_effort": effort,
+                "total_tokens_est": total_tokens_est,
+                "chunks": len(chunks),
+                "stats": stats,
+            },
+        )
+
+        usage_total: Dict[str, Any] = {}
+        chunk_reports: List[str] = []
+        llm_trace: Dict[str, Any] = {"assistant_notes": [], "tool_calls": []}
+
+        chunk_system = (
+            "You are principal reliability reviewer for a self-modifying agent. "
+            "Analyze the provided snapshot chunk and return concise actionable findings. "
+            "Focus on hangs, deadlocks, queue visibility, model routing mistakes, drift, and safety regressions."
+        )
+        for idx, chunk_text in enumerate(chunks, start=1):
+            user_prompt = (
+                f"Review reason: {reason}\n"
+                f"Chunk {idx}/{len(chunks)}\n\n"
+                "Return sections:\n"
+                "1) Critical risks\n"
+                "2) High-impact improvements\n"
+                "3) Evidence references\n"
+                "4) Suggested next actions\n\n"
+                "Snapshot chunk:\n"
+                + chunk_text
+            )
+            text, usage = self._review_chat_completion(
+                model=model,
+                effort=effort,
+                messages=[
+                    {"role": "system", "content": chunk_system},
+                    {"role": "user", "content": user_prompt},
+                ],
+                max_tokens=max(1000, min(self._env_int("OUROBOROS_REVIEW_CHUNK_MAX_TOKENS", 3200), 6000)),
+            )
+            usage_total = self._merge_usage_totals(usage_total, usage)
+            chunk_reports.append(text or f"(empty chunk report {idx})")
+            llm_trace["assistant_notes"] = self._dedupe_keep_order(
+                list(llm_trace.get("assistant_notes") or []) + [truncate_for_log(text or "", 320)],
+                max_items=30,
+            )
+            append_jsonl(
+                self.env.drive_path("logs") / "events.jsonl",
+                {
+                    "ts": utc_now_iso(),
+                    "type": "system_review_chunk_done",
+                    "task_id": task.get("id"),
+                    "chunk_idx": idx,
+                    "chunk_total": len(chunks),
+                    "usage_cost": usage.get("cost") if isinstance(usage, dict) else None,
+                },
+            )
+            self._emit_progress(f"Review chunk {idx}/{len(chunks)} завершен.")
+
+        if len(chunk_reports) > 1:
+            synthesis_prompt = (
+                "You are consolidating multi-chunk system review results.\n"
+                "Return final report with sections:\n"
+                "A) Overall verdict\n"
+                "B) Top 5 systemic issues\n"
+                "C) Drift/hanging risk assessment\n"
+                "D) Concrete roadmap (next 5 actions)\n"
+                "E) Evolution adjustment guidance\n\n"
+                "Chunk findings:\n\n"
+                + "\n\n---\n\n".join(chunk_reports)
+            )
+            final_report, usage = self._review_chat_completion(
+                model=model,
+                effort=effort,
+                messages=[
+                    {"role": "system", "content": "Consolidate findings into one actionable system review report."},
+                    {"role": "user", "content": synthesis_prompt},
+                ],
+                max_tokens=max(1200, min(self._env_int("OUROBOROS_REVIEW_FINAL_MAX_TOKENS", 4200), 8000)),
+            )
+            usage_total = self._merge_usage_totals(usage_total, usage)
+        else:
+            final_report = chunk_reports[0] if chunk_reports else "(empty review report)"
+
+        total_cost = float(usage_total.get("cost") or 0.0)
+        final_text = (
+            "System deep review completed.\n"
+            f"Input estimate: ~{total_tokens_est} tokens\n"
+            f"Model: {model}\n"
+            f"Reasoning effort: {effort}\n"
+            f"Chunks: {len(chunks)}\n"
+            f"Files reviewed: {int(stats.get('files') or 0)} "
+            f"(truncated={int(stats.get('truncated_files') or 0)}, dropped_by_cap={int(stats.get('dropped_by_total_cap') or 0)})\n"
+            f"Final review cost: ${total_cost:.4f}\n\n"
+            + (final_report or "(empty)")
+        )
+        append_jsonl(
+            self.env.drive_path("logs") / "events.jsonl",
+            {
+                "ts": utc_now_iso(),
+                "type": "system_review_completed",
+                "task_id": task.get("id"),
+                "model": model,
+                "reasoning_effort": effort,
+                "chunks": len(chunks),
+                "input_tokens_est": total_tokens_est,
+                "usage": usage_total,
+            },
+        )
+        return final_text, usage_total, llm_trace
+
+    def _handle_review_task_direct(
+        self, task: Dict[str, Any], start_time: float, drive_logs: pathlib.Path
+    ) -> List[Dict[str, Any]]:
+        text = ""
+        usage: Dict[str, Any] = {}
+        llm_trace: Dict[str, Any] = {"assistant_notes": [], "tool_calls": []}
+        try:
+            text, usage, llm_trace = self._run_system_review(task)
+        except Exception as e:
+            append_jsonl(
+                drive_logs / "events.jsonl",
+                {
+                    "ts": utc_now_iso(),
+                    "type": "review_task_error",
+                    "task_id": task.get("id"),
+                    "error": repr(e),
+                    "traceback": truncate_for_log(traceback.format_exc(), 2500),
+                },
+            )
+            text = f"⚠️ REVIEW_TASK_ERROR: {type(e).__name__}: {e}"
+
+        if usage:
+            self._pending_events.append(
+                {
+                    "type": "llm_usage",
+                    "task_id": task.get("id"),
+                    "provider": "openrouter",
+                    "usage": usage,
+                    "source": "system_deep_review",
+                    "ts": utc_now_iso(),
+                }
+            )
+
+        self._update_memory_after_task(task=task, final_text=text or "", llm_trace=llm_trace)
+        self._pending_events.append(
+            {
+                "type": "send_message",
+                "chat_id": task["chat_id"],
+                "text": self._strip_markdown(text) if text else "\u200b",
+                "log_text": text or "",
+                "task_id": task.get("id"),
+                "ts": utc_now_iso(),
+            }
+        )
+        duration_sec = round(time.time() - start_time, 3)
+        append_jsonl(
+            drive_logs / "events.jsonl",
+            {
+                "ts": utc_now_iso(),
+                "type": "task_eval",
+                "ok": True,
+                "task_id": task.get("id"),
+                "task_type": task.get("type"),
+                "duration_sec": duration_sec,
+                "tool_calls": 0,
+                "tool_errors": 0,
+                "direct_send_attempted": False,
+                "direct_send_ok": False,
+                "direct_send_parts": 0,
+                "direct_send_status": "review_direct",
+                "response_len": len(text) if isinstance(text, str) else 0,
+                "response_sha256": sha256_text(text) if isinstance(text, str) and text else "",
+            },
+        )
+        self._emit_task_metrics_event(task=task, duration_sec=duration_sec, llm_trace=llm_trace, force_review=False)
+        self._pending_events.append({"type": "task_done", "task_id": task.get("id"), "ts": utc_now_iso()})
+        append_jsonl(drive_logs / "events.jsonl", {"ts": utc_now_iso(), "type": "task_done", "task_id": task.get("id")})
+        return list(self._pending_events)
+
     def handle_task(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
         start_time = time.time()
         self._pending_events = []
@@ -1503,6 +2125,7 @@ class OuroborosAgent:
         # Note: we can't show typing at the exact moment of message receipt (handled by supervisor),
         # but we can show it as soon as a worker starts processing the task.
         typing_stop: Optional[threading.Event] = None
+        heartbeat_stop: Optional[threading.Event] = self._start_task_heartbeat_loop(str(task.get("id") or ""))
         if os.environ.get("OUROBOROS_TG_TYPING", "1").lower() not in ("0", "false", "no", "off", ""):
             try:
                 chat_id = int(task.get("chat_id"))
@@ -1514,6 +2137,9 @@ class OuroborosAgent:
                 )
 
         try:
+            if str(task.get("type") or "") == "review":
+                return self._handle_review_task_direct(task=task, start_time=start_time, drive_logs=drive_logs)
+
             # --- Load context (resilient: errors produce fallbacks, not crashes) ---
             _fallback_prompt = (
                 "You are Ouroboros. Your base prompt could not be loaded. "
@@ -1682,7 +2308,12 @@ class OuroborosAgent:
             usage: Dict[str, Any] = {}
             llm_trace: Dict[str, Any] = {"assistant_notes": [], "tool_calls": []}
             try:
-                text, usage, llm_trace = self._llm_with_tools(messages=messages, tools=tools)
+                text, usage, llm_trace = self._llm_with_tools(
+                    messages=messages,
+                    tools=tools,
+                    task_type=str(task.get("type") or ""),
+                    task_text=str(task.get("text") or ""),
+                )
             except Exception as e:
                 tb = traceback.format_exc()
                 append_jsonl(
@@ -1880,6 +2511,7 @@ class OuroborosAgent:
             )
 
             # Success-path task_eval event (best-effort, never raise)
+            duration_sec = round(time.time() - start_time, 3)
             try:
                 append_jsonl(
                     drive_logs / "events.jsonl",
@@ -1889,7 +2521,7 @@ class OuroborosAgent:
                         "ok": True,
                         "task_id": task.get("id"),
                         "task_type": task.get("type"),
-                        "duration_sec": round(time.time() - start_time, 3),
+                        "duration_sec": duration_sec,
                         "tool_calls": len(llm_trace.get("tool_calls", [])) if isinstance(llm_trace, dict) else 0,
                         "tool_errors": sum(
                             1 for tc in llm_trace.get("tool_calls", []) if isinstance(tc, dict) and tc.get("is_error")
@@ -1905,6 +2537,7 @@ class OuroborosAgent:
             except Exception:
                 pass  # Never fail on eval emission
 
+            self._emit_task_metrics_event(task=task, duration_sec=duration_sec, llm_trace=llm_trace, force_review=False)
             self._pending_events.append({"type": "task_done", "task_id": task.get("id"), "ts": utc_now_iso()})
             append_jsonl(
                 drive_logs / "events.jsonl", {"ts": utc_now_iso(), "type": "task_done", "task_id": task.get("id")}
@@ -1913,6 +2546,9 @@ class OuroborosAgent:
         finally:
             if typing_stop is not None:
                 typing_stop.set()
+            if heartbeat_stop is not None:
+                heartbeat_stop.set()
+            self._emit_task_heartbeat(task_id=str(task.get("id") or ""), phase="done")
             self._current_task_type = None
 
     # ---------- git helpers ----------
@@ -2643,11 +3279,27 @@ class OuroborosAgent:
         return img_bytes
 
     def _llm_with_tools(
-        self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]
+        self,
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]],
+        task_type: str = "",
+        task_text: str = "",
     ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
-        model = os.environ.get("OUROBOROS_MODEL", "openai/gpt-5.2")
         client = self._openrouter_client()
         drive_logs = self.env.drive_path("logs")
+
+        base_profile = self._select_task_profile(task_type=task_type, task_text=task_text)
+        active_profile = base_profile
+        profile_cfg = self._model_profile(active_profile)
+        active_model = profile_cfg["model"]
+        active_effort = profile_cfg["effort"]
+
+        self._emit_model_notice(
+            profile=active_profile,
+            model=active_model,
+            effort=active_effort,
+            reason="старт задачи",
+        )
 
         tool_name_to_fn = {
             "repo_read": self._tool_repo_read,
@@ -2671,6 +3323,7 @@ class OuroborosAgent:
             "telegram_send_photo": self._tool_telegram_send_photo,
             "telegram_generate_and_send_image": self._tool_telegram_generate_and_send_image,
         }
+        code_tools = {"repo_write_commit", "repo_commit_push", "git_status", "git_diff", "run_shell", "claude_code_edit"}
 
         max_tool_rounds = int(os.environ.get("OUROBOROS_MAX_TOOL_ROUNDS", "20"))
         llm_max_retries = int(os.environ.get("OUROBOROS_LLM_MAX_RETRIES", "3"))
@@ -2683,7 +3336,50 @@ class OuroborosAgent:
             except Exception:
                 return {"_repr": repr(v)}
 
+        def _maybe_raise_effort(target: str, reason: str) -> None:
+            nonlocal active_effort
+            target_effort = self._normalize_reasoning_effort(target, default=active_effort)
+            if self._reasoning_rank(target_effort) <= self._reasoning_rank(active_effort):
+                return
+            prev_effort = active_effort
+            active_effort = target_effort
+            self._emit_model_notice(
+                profile=active_profile,
+                model=active_model,
+                effort=active_effort,
+                reason=reason,
+                previous_model=active_model,
+                previous_effort=prev_effort,
+            )
+
+        def _switch_to_code_profile(reason: str) -> None:
+            nonlocal active_model, active_effort, active_profile
+            code_cfg = self._model_profile("code_task")
+            new_model = code_cfg["model"]
+            new_effort = code_cfg["effort"]
+            if new_model == active_model and self._reasoning_rank(new_effort) <= self._reasoning_rank(active_effort):
+                return
+            prev_model = active_model
+            prev_effort = active_effort
+            active_profile = "code_task"
+            active_model = new_model
+            active_effort = new_effort if self._reasoning_rank(new_effort) >= self._reasoning_rank(active_effort) else active_effort
+            self._emit_model_notice(
+                profile=active_profile,
+                model=active_model,
+                effort=active_effort,
+                reason=reason,
+                previous_model=prev_model,
+                previous_effort=prev_effort,
+            )
+
         for round_idx in range(max_tool_rounds):
+            # Long-running task escalation by round count.
+            if round_idx >= 4:
+                _maybe_raise_effort("high", reason="задача оказалась длиннее обычной")
+            if round_idx >= 8:
+                _maybe_raise_effort("xhigh", reason="длительный multi-round reasoning")
+
             # ---- LLM call with retry on transient errors ----
             resp_dict = None
             last_llm_error: Optional[Exception] = None
@@ -2691,10 +3387,11 @@ class OuroborosAgent:
             for attempt in range(llm_max_retries):
                 try:
                     resp = client.chat.completions.create(
-                        model=model,
+                        model=active_model,
                         messages=messages,
                         tools=tools,
                         tool_choice="auto",
+                        extra_body={"reasoning": {"effort": active_effort, "exclude": True}},
                     )
                     resp_dict = resp.model_dump()
                     break
@@ -2708,6 +3405,8 @@ class OuroborosAgent:
                             "round": round_idx,
                             "attempt": attempt + 1,
                             "max_retries": llm_max_retries,
+                            "model": active_model,
+                            "reasoning_effort": active_effort,
                             "error": repr(e),
                         },
                     )
@@ -2727,6 +3426,18 @@ class OuroborosAgent:
                 ), last_usage, llm_trace
 
             last_usage = resp_dict.get("usage", {}) or {}
+            append_jsonl(
+                drive_logs / "events.jsonl",
+                {
+                    "ts": utc_now_iso(),
+                    "type": "llm_profile_call",
+                    "round": round_idx,
+                    "profile": active_profile,
+                    "model": active_model,
+                    "reasoning_effort": active_effort,
+                    "usage_cost": (last_usage.get("cost") if isinstance(last_usage, dict) else None),
+                },
+            )
 
             choice = (resp_dict.get("choices") or [{}])[0]
             msg = choice.get("message") or {}
@@ -2746,9 +3457,12 @@ class OuroborosAgent:
                     )
 
                 deterministic_errors: List[str] = []
+                saw_code_tool = False
 
                 for tc in tool_calls:
                     fn_name = tc["function"]["name"]
+                    if fn_name in code_tools:
+                        saw_code_tool = True
 
                     # ---- Parse arguments safely ----
                     try:
@@ -2874,6 +3588,13 @@ class OuroborosAgent:
                         },
                     )
 
+                if saw_code_tool and active_profile not in ("code_task", "evolution_task", "deep_review"):
+                    _switch_to_code_profile(reason="обнаружены кодовые действия в ходе решения")
+                if len(deterministic_errors) >= 2:
+                    _maybe_raise_effort("high", reason="много инструментальных ошибок, усиливаю reasoning")
+                if len(deterministic_errors) >= 4:
+                    _maybe_raise_effort("xhigh", reason="повторные ошибки, требуется более глубокий reasoning")
+
                 continue
 
             if content and content.strip():
@@ -2894,6 +3615,9 @@ class OuroborosAgent:
                 "max_tool_rounds": max_tool_rounds,
                 "rounds_executed": max_tool_rounds,
                 "last_tools": last_tools,
+                "profile": active_profile,
+                "model": active_model,
+                "reasoning_effort": active_effort,
                 "taskless_ok": True,
             },
         )
@@ -3423,7 +4147,46 @@ class OuroborosAgent:
             "Read,Edit,Grep,Glob",
         ]
 
-        model = os.environ.get("OUROBOROS_CLAUDE_CODE_MODEL", "").strip()
+        default_model = os.environ.get("OUROBOROS_CLAUDE_CODE_MODEL", "").strip()
+        task_type = str(self._current_task_type or "").strip().lower()
+        model = default_model
+        if task_type == "evolution":
+            model = os.environ.get("OUROBOROS_CLAUDE_CODE_MODEL_EVOLUTION", default_model).strip()
+        elif task_type == "review":
+            model = os.environ.get("OUROBOROS_CLAUDE_CODE_MODEL_REVIEW", default_model).strip()
+        elif task_type in ("task", "idle"):
+            model = os.environ.get("OUROBOROS_CLAUDE_CODE_MODEL_TASK", default_model).strip()
+
+        if not model:
+            model = os.environ.get("OUROBOROS_CLAUDE_CODE_MODEL_CODE", "").strip()
+
+        note_seed = (
+            "Выбираю модель для Claude Code CLI. "
+            f"task_type={task_type or '-'}, selected_model={model or 'cli_default'}."
+        )
+        note_text, note_usage = self._compose_natural_notice(note_seed)
+        self._emit_progress(note_text)
+        append_jsonl(
+            self.env.drive_path("logs") / "events.jsonl",
+            {
+                "ts": utc_now_iso(),
+                "type": "claude_code_model_selected",
+                "task_type": task_type,
+                "model": model or "cli_default",
+                "text": truncate_for_log(note_text, 400),
+            },
+        )
+        if note_usage:
+            self._pending_events.append(
+                {
+                    "type": "llm_usage",
+                    "task_id": None,
+                    "provider": "openrouter",
+                    "usage": note_usage,
+                    "source": "claude_code_model_notice",
+                    "ts": utc_now_iso(),
+                }
+            )
         if model:
             base_cmd.extend(["--model", model])
 
