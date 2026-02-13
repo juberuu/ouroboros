@@ -698,9 +698,6 @@ class OuroborosAgent:
     def _identity_path(self) -> pathlib.Path:
         return self._memory_path("identity.md")
 
-    def _identity_meta_path(self) -> pathlib.Path:
-        return self._memory_path("identity_meta.json")
-
     def _default_scratchpad(self) -> str:
         lines = [
             "# Scratchpad",
@@ -715,41 +712,25 @@ class OuroborosAgent:
 
     def _default_identity(self) -> str:
         return (
-            "# Identity\n\n"
-            f"UpdatedAt: {utc_now_iso()}\n\n"
-            "## Strengths\n"
-            "- (collecting data)\n\n"
-            "## Weaknesses\n"
-            "- (collecting data)\n\n"
-            "## FrequentMistakes\n"
-            "- (collecting data)\n\n"
-            "## PreferredApproaches\n"
-            "- (collecting data)\n\n"
-            "## CurrentGrowthFocus\n"
-            "- Build a stronger evidence base from real tasks.\n"
-            "- Preserve full relevant context; optimize only near high token limits.\n"
+            "# Кто я\n\n"
+            "Я — Уроборос. Этот файл — моя персистентная самоидентификация.\n"
+            "Я могу писать сюда что угодно: как я вижу себя, как хочу общаться,\n"
+            "что для меня важно, что я понял о себе.\n\n"
+            "Этот файл читается при каждом диалоге и влияет на мои ответы.\n"
+            "Я обновляю его когда чувствую потребность, через drive_write.\n"
         )
 
     def _ensure_memory_files(self) -> None:
         scratchpad = self._scratchpad_path()
         identity = self._identity_path()
         journal = self._scratchpad_journal_path()
-        identity_meta = self._identity_meta_path()
 
         if not scratchpad.exists():
             write_text(scratchpad, self._default_scratchpad())
         if not identity.exists():
             write_text(identity, self._default_identity())
         if not journal.exists():
-            write_text(journal, "")
-        if not identity_meta.exists():
-            write_text(
-                identity_meta,
-                json.dumps(
-                    {"tasks_since_update": 0, "last_updated_at": "", "last_reason": "init"},
-                    ensure_ascii=False,
-                    indent=2,
-                ),
+            write_text(journal, ""
             )
 
     def _parse_scratchpad(self, content: str) -> Dict[str, List[str]]:
@@ -978,156 +959,6 @@ class OuroborosAgent:
 
         return self._render_scratchpad(merged), merged
 
-    def _load_identity_meta(self) -> Dict[str, Any]:
-        path = self._identity_meta_path()
-        raw = self._safe_read(path, fallback="")
-        if raw.strip():
-            try:
-                obj = json.loads(raw)
-                if isinstance(obj, dict):
-                    return {
-                        "tasks_since_update": int(obj.get("tasks_since_update") or 0),
-                        "last_updated_at": str(obj.get("last_updated_at") or ""),
-                        "last_reason": str(obj.get("last_reason") or ""),
-                    }
-            except Exception:
-                pass
-        return {"tasks_since_update": 0, "last_updated_at": "", "last_reason": ""}
-
-    def _save_identity_meta(self, meta: Dict[str, Any]) -> None:
-        write_text(self._identity_meta_path(), json.dumps(meta, ensure_ascii=False, indent=2))
-
-    def _should_update_identity(self, meta: Dict[str, Any]) -> bool:
-        task_cadence = max(1, min(self._env_int("OUROBOROS_IDENTITY_UPDATE_EVERY_TASKS", 5), 200))
-        hour_cadence = max(1, min(self._env_int("OUROBOROS_IDENTITY_UPDATE_EVERY_HOURS", 12), 24 * 30))
-
-        if int(meta.get("tasks_since_update") or 0) >= task_cadence:
-            return True
-
-        last_ts = self._parse_iso_to_unix(str(meta.get("last_updated_at") or ""))
-        if last_ts is None:
-            return True
-
-        age_sec = time.time() - last_ts
-        return age_sec >= (hour_cadence * 3600)
-
-    def _build_identity_from_data(self, scratchpad_sections: Dict[str, List[str]]) -> str:
-        tools_tail = self._safe_tail(
-            self.env.drive_path("logs/tools.jsonl"),
-            max_lines=max(200, min(self._env_int("OUROBOROS_IDENTITY_TOOLS_LINES", 1000), 5000)),
-            max_chars=max(30000, min(self._env_int("OUROBOROS_IDENTITY_TOOLS_CHARS", 260000), 600000)),
-        )
-        journal_tail = self._safe_tail(
-            self._scratchpad_journal_path(),
-            max_lines=max(120, min(self._env_int("OUROBOROS_IDENTITY_JOURNAL_LINES", 800), 4000)),
-            max_chars=max(20000, min(self._env_int("OUROBOROS_IDENTITY_JOURNAL_CHARS", 220000), 500000)),
-        )
-
-        tool_success: Counter[str] = Counter()
-        tool_errors: Counter[str] = Counter()
-        error_signatures: Counter[str] = Counter()
-        investigate_counter: Counter[str] = Counter()
-
-        for row in self._parse_jsonl_lines(tools_tail):
-            tool = str(row.get("tool") or "unknown")
-            preview = str(row.get("result_preview") or "").strip()
-            is_error = preview.startswith("⚠️")
-            if is_error:
-                tool_errors[tool] += 1
-                first = preview.splitlines()[0].strip() if preview else ""
-                if first:
-                    error_signatures[first[:160]] += 1
-            else:
-                tool_success[tool] += 1
-
-        for row in self._parse_jsonl_lines(journal_tail):
-            delta = row.get("delta")
-            if not isinstance(delta, dict):
-                continue
-            items = delta.get("investigate_later") or []
-            if isinstance(items, list):
-                for item in items:
-                    txt = re.sub(r"\s+", " ", str(item or "").strip())
-                    if txt:
-                        investigate_counter[txt[:160]] += 1
-
-        strengths = [f"{tool}: {count} successful runs" for tool, count in tool_success.most_common(4)]
-        if not strengths:
-            strengths = ["Collecting stable success patterns from recent tasks."]
-
-        weaknesses = [f"{tool}: {count} recent errors" for tool, count in tool_errors.most_common(4)]
-        if not weaknesses:
-            weaknesses = ["No recurring tool failures detected in the latest window."]
-
-        mistakes = [f"{msg} (x{count})" for msg, count in error_signatures.most_common(4)]
-        if not mistakes:
-            mistakes = ["No repeated error signature detected yet."]
-
-        preferred: List[str] = []
-        for tool, _count in tool_success.most_common(4):
-            if tool == "repo_list":
-                preferred.append("Map directories first with `repo_list`, then do targeted reads.")
-            elif tool == "repo_read":
-                preferred.append("Inspect exact files with `repo_read` before proposing edits.")
-            elif tool == "run_shell":
-                preferred.append("Use shell checks to verify runtime state before assumptions.")
-            elif tool == "git_status":
-                preferred.append("Check git cleanliness before and after repository operations.")
-            elif tool == "web_search":
-                preferred.append("Use web search only for truly fresh external facts.")
-        if not preferred:
-            preferred = ["Use small verifiable steps and log outcomes before next action."]
-
-        growth_focus = []
-        growth_focus.extend([x for x in (scratchpad_sections.get("OpenThreads") or [])[:2]])
-        growth_focus.extend([x for x, _ in investigate_counter.most_common(2)])
-        if not growth_focus:
-            growth_focus = ["Improve robustness of multi-step tasks with less context bloat."]
-        growth_focus = self._dedupe_keep_order(growth_focus, max_items=4)
-
-        lines = [
-            "# Identity",
-            "",
-            f"UpdatedAt: {utc_now_iso()}",
-            "",
-            "## Strengths",
-        ]
-        lines.extend([f"- {x}" for x in strengths])
-        lines.extend(["", "## Weaknesses"])
-        lines.extend([f"- {x}" for x in weaknesses])
-        lines.extend(["", "## FrequentMistakes"])
-        lines.extend([f"- {x}" for x in mistakes])
-        lines.extend(["", "## PreferredApproaches"])
-        lines.extend([f"- {x}" for x in self._dedupe_keep_order(preferred, max_items=4)])
-        lines.extend(["", "## CurrentGrowthFocus"])
-        lines.extend([f"- {x}" for x in growth_focus])
-        lines.append("")
-        return "\n".join(lines)
-
-    def _maybe_update_identity(self, scratchpad_sections: Dict[str, List[str]], reason: str = "task_complete") -> None:
-        meta = self._load_identity_meta()
-        meta["tasks_since_update"] = int(meta.get("tasks_since_update") or 0) + 1
-
-        if not self._should_update_identity(meta):
-            self._save_identity_meta(meta)
-            return
-
-        identity_md = self._build_identity_from_data(scratchpad_sections)
-        write_text(self._identity_path(), identity_md)
-        meta["tasks_since_update"] = 0
-        meta["last_updated_at"] = utc_now_iso()
-        meta["last_reason"] = reason
-        self._save_identity_meta(meta)
-
-        append_jsonl(
-            self.env.drive_path("logs") / "events.jsonl",
-            {
-                "ts": utc_now_iso(),
-                "type": "identity_updated",
-                "reason": reason,
-            },
-        )
-
     def _update_memory_after_task(self, task: Dict[str, Any], final_text: str, llm_trace: Dict[str, Any]) -> None:
         drive_logs = self.env.drive_path("logs")
         try:
@@ -1172,7 +1003,6 @@ class OuroborosAgent:
                 },
             )
 
-            self._maybe_update_identity(merged_sections, reason="task_complete")
         except Exception as e:
             append_jsonl(
                 drive_logs / "events.jsonl",
