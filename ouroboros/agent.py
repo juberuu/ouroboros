@@ -1459,6 +1459,12 @@ class OuroborosAgent:
                     p = p[:77].rstrip() + "..."
                 return f"Генерирую и отправляю картинку: {p or '?'}"
 
+            if name == "telegram_send_video":
+                return "Отправляю видео в Telegram"
+
+            if name == "telegram_generate_and_send_video":
+                return "Генерирую и отправляю видео"
+
             # generic fallback
             return f"Выполняю инструмент: {name}"
         except Exception:
@@ -2936,6 +2942,58 @@ class OuroborosAgent:
             )
             return False, "error"
 
+    def _telegram_send_video(
+        self,
+        chat_id: int,
+        video_bytes: bytes,
+        caption: str = "",
+        filename: str = "video.mp4",
+        mime: str = "video/mp4",
+    ) -> tuple[bool, str]:
+        """Send a Telegram video via sendVideo.
+
+        Returns: (ok, status)
+          - status: "ok" | "no_token" | "error"
+        """
+        token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        if not token:
+            return False, "no_token"
+
+        try:
+            import requests  # lazy import
+        except Exception as e:
+            append_jsonl(
+                self.env.drive_path("logs") / "events.jsonl",
+                {
+                    "ts": utc_now_iso(),
+                    "type": "telegram_api_error",
+                    "method": "sendVideo",
+                    "error": f"requests_import: {repr(e)}",
+                },
+            )
+            return False, "error"
+
+        url = f"https://api.telegram.org/bot{token}/sendVideo"
+        data: Dict[str, Any] = {"chat_id": str(chat_id)}
+        if caption:
+            data["caption"] = caption
+        files = {"video": (filename or "video.mp4", video_bytes, mime or "video/mp4")}
+
+        try:
+            r = requests.post(url, data=data, files=files, timeout=120)
+            try:
+                j = r.json()
+                ok = bool(j.get("ok"))
+            except Exception:
+                ok = bool(r.ok)
+            return (ok, "ok" if ok else "error")
+        except Exception as e:
+            append_jsonl(
+                self.env.drive_path("logs") / "events.jsonl",
+                {"ts": utc_now_iso(), "type": "telegram_api_error", "method": "sendVideo", "error": repr(e)},
+            )
+            return False, "error"
+
     def _tts_to_ogg_opus(self, text: str, voice: str = "kal") -> bytes:
         """Local TTS: ffmpeg flite -> OGG/OPUS bytes.
 
@@ -3322,6 +3380,8 @@ class OuroborosAgent:
             "telegram_send_voice": self._tool_telegram_send_voice,
             "telegram_send_photo": self._tool_telegram_send_photo,
             "telegram_generate_and_send_image": self._tool_telegram_generate_and_send_image,
+            "telegram_send_video": self._tool_telegram_send_video,
+            "telegram_generate_and_send_video": self._tool_telegram_generate_and_send_video,
         }
         code_tools = {"repo_write_commit", "repo_commit_push", "git_status", "git_diff", "run_shell", "claude_code_edit"}
 
@@ -3822,6 +3882,42 @@ class OuroborosAgent:
                             "caption": {"type": "string"},
                             "model": {"type": "string", "description": "OpenRouter image model", "default": "openai/gpt-5-image"},
                             "size": {"type": "string", "description": "e.g. 1024x1024", "default": "1024x1024"},
+                        },
+                        "required": ["chat_id", "prompt"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "telegram_send_video",
+                    "description": "Send a Telegram video from a local file path (MP4/MPEG).",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "chat_id": {"type": "integer"},
+                            "path": {"type": "string", "description": "Local filesystem path to video (e.g., /tmp/x.mp4)."},
+                            "caption": {"type": "string"},
+                        },
+                        "required": ["chat_id", "path"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "telegram_generate_and_send_video",
+                    "description": "Generate a short video via frame-based OpenRouter image generation + ffmpeg assembly, then send to Telegram.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "chat_id": {"type": "integer"},
+                            "prompt": {"type": "string"},
+                            "caption": {"type": "string"},
+                            "model": {"type": "string", "description": "OpenRouter image model", "default": "openai/gpt-5-image"},
+                            "size": {"type": "string", "description": "e.g. 1024x1024", "default": "1024x1024"},
+                            "num_frames": {"type": "integer", "default": 8},
+                            "fps": {"type": "integer", "default": 4},
                         },
                         "required": ["chat_id", "prompt"],
                     },
@@ -4575,6 +4671,155 @@ class OuroborosAgent:
             },
         )
         return "OK: image generated and sent" if ok else f"⚠️ TELEGRAM_SEND_PHOTO_FAILED: {status}"
+
+    def _tool_telegram_send_video(self, chat_id: int, path: str, caption: str = "") -> str:
+        """Tool: send a local video file to Telegram as a video."""
+        p = pathlib.Path(str(path or "").strip())
+        if not p.exists() or not p.is_file():
+            return f"⚠️ FILE_NOT_FOUND: {p}"
+        data = p.read_bytes()
+        # Best-effort mime by extension
+        ext = p.suffix.lower().lstrip(".")
+        mime = "video/mp4" if ext in ("mp4",) else ("video/mpeg" if ext in ("mpeg", "mpg") else "application/octet-stream")
+
+        ok, status = self._telegram_send_video(int(chat_id), data, caption=caption or "", filename=p.name, mime=mime)
+        append_jsonl(
+            self.env.drive_path("logs") / "events.jsonl",
+            {
+                "ts": utc_now_iso(),
+                "type": "telegram_send_video",
+                "chat_id": int(chat_id),
+                "ok": bool(ok),
+                "status": status,
+                "bytes": len(data),
+                "path": str(p),
+            },
+        )
+        return "OK: video sent" if ok else f"⚠️ TELEGRAM_SEND_VIDEO_FAILED: {status}"
+
+    def _tool_telegram_generate_and_send_video(
+        self,
+        chat_id: int,
+        prompt: str,
+        caption: str = "",
+        model: str = "openai/gpt-5-image",
+        size: str = "1024x1024",
+        num_frames: int = 8,
+        fps: int = 4,
+    ) -> str:
+        """Tool: generate video via frame-based OpenRouter image generation + ffmpeg assembly, then send to Telegram."""
+        # Validate inputs
+        prompt = (prompt or "").strip()
+        if not prompt:
+            return "⚠️ PROMPT_EMPTY"
+
+        num_frames = max(2, min(16, int(num_frames)))
+        fps = max(1, min(12, int(fps)))
+
+        # Create temp dir
+        import tempfile
+        import shutil
+
+        h = sha256_text(prompt)[:10]
+        ts = int(time.time())
+        tmp_dir = pathlib.Path(f"/tmp/video_{h}_{ts}")
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            # Generate frames
+            for i in range(num_frames):
+                frame_prompt = f"{prompt} (frame {i+1}/{num_frames}, maintain consistent scene/subject/camera angle throughout sequence)"
+                try:
+                    img_bytes = self._openrouter_generate_image_via_curl(
+                        prompt=frame_prompt,
+                        model=model or "openai/gpt-5-image",
+                        image_config={"size": (size or "1024x1024")},
+                        timeout_sec=180,
+                    )
+                except Exception as e:
+                    append_jsonl(
+                        self.env.drive_path("logs") / "events.jsonl",
+                        {
+                            "ts": utc_now_iso(),
+                            "type": "openrouter_image_error",
+                            "model": model,
+                            "frame": i,
+                            "error": repr(e),
+                        },
+                    )
+                    return f"⚠️ OPENROUTER_IMAGE_ERROR (frame {i}): {type(e).__name__}: {e}"
+
+                frame_path = tmp_dir / f"frame_{i:03d}.png"
+                frame_path.write_bytes(img_bytes)
+
+            # Assemble video with ffmpeg
+            mp4_path = tmp_dir / "output.mp4"
+            ffmpeg_cmd = [
+                "ffmpeg",
+                "-y",
+                "-v", "error",
+                "-framerate", str(fps),
+                "-i", str(tmp_dir / "frame_%03d.png"),
+                "-vf", "scale='if(mod(iw,2),iw+1,iw)':'if(mod(ih,2),ih+1,ih)',format=yuv420p",
+                "-c:v", "libx264",
+                "-movflags", "+faststart",
+                str(mp4_path),
+            ]
+
+            result = subprocess.run(
+                ffmpeg_cmd,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+
+            if result.returncode != 0:
+                stderr = result.stderr.strip()
+                append_jsonl(
+                    self.env.drive_path("logs") / "events.jsonl",
+                    {
+                        "ts": utc_now_iso(),
+                        "type": "ffmpeg_error",
+                        "stderr": stderr,
+                        "returncode": result.returncode,
+                    },
+                )
+                return f"⚠️ FFMPEG_ERROR: {stderr[:200]}"
+
+            # Send video
+            video_bytes = mp4_path.read_bytes()
+            ok, status = self._telegram_send_video(
+                int(chat_id),
+                video_bytes,
+                caption=caption or "",
+                filename="ouroboros.mp4",
+                mime="video/mp4",
+            )
+
+            append_jsonl(
+                self.env.drive_path("logs") / "events.jsonl",
+                {
+                    "ts": utc_now_iso(),
+                    "type": "telegram_generate_and_send_video",
+                    "chat_id": int(chat_id),
+                    "ok": bool(ok),
+                    "status": status,
+                    "bytes": len(video_bytes),
+                    "model": model,
+                    "size": size,
+                    "num_frames": num_frames,
+                    "fps": fps,
+                },
+            )
+
+            return "OK: video generated and sent" if ok else f"⚠️ TELEGRAM_SEND_VIDEO_FAILED: {status}"
+
+        finally:
+            # Cleanup temp dir (best-effort)
+            try:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            except Exception:
+                pass
 
 def make_agent(repo_dir: str, drive_root: str, event_queue: Any = None) -> OuroborosAgent:
     env = Env(repo_dir=pathlib.Path(repo_dir), drive_root=pathlib.Path(drive_root))

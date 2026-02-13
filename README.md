@@ -148,6 +148,14 @@ Telegram по умолчанию рендерит разметку только 
 
 Встроенный tool (для воркера): `telegram_send_voice(chat_id, text, ..., tts='local'|'openai')`.
 
+## Telegram: video
+
+Поддерживается отправка видео в Telegram (метод Bot API `sendVideo`).
+
+Встроенные tools:
+- `telegram_send_video(chat_id, path, caption="")` — отправить локальный видеофайл (например, MP4).
+- `telegram_generate_and_send_video(chat_id, prompt, caption="", model="openai/gpt-5-image", size="1024x1024", num_frames=8, fps=4)` — сгенерировать короткое видео через последовательность кадров (OpenRouter image) + сборка ffmpeg, затем отправить.
+
 ## Контекст и устойчивость
 
 - Воркеры подмешивают в контекст хвосты `logs/chat.jsonl`, `logs/tools.jsonl`, `logs/events.jsonl`, `logs/supervisor.jsonl`, `logs/narration.jsonl`, чтобы лучше помнить фактические результаты прошлых шагов.
