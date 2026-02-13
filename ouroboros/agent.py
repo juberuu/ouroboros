@@ -2096,6 +2096,50 @@ class OuroborosAgent:
 
         return "".join(_render_span(p) if not p.startswith("<pre><code>") else p for p in parts)
 
+    @staticmethod
+    def _tg_utf16_len(text: str) -> int:
+        """Compute Telegram character length in UTF-16 code units.
+
+        Telegram measures text length in UTF-16 code units (not Python len()).
+        Codepoints > 0xFFFF (astral plane, emoji, etc.) count as 2 units.
+        Surrogates count as 1 unit each.
+        """
+        if not text:
+            return 0
+        try:
+            count = 0
+            for c in text:
+                cp = ord(c)
+                if cp > 0xFFFF:
+                    count += 2
+                else:
+                    count += 1
+            return count
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _slice_by_utf16_units(text: str, max_units: int) -> str:
+        """Return prefix of text with UTF-16 length <= max_units.
+
+        Slices string by UTF-16 code units without exceeding limit.
+        """
+        if not text or max_units <= 0:
+            return ""
+        try:
+            count = 0
+            idx = 0
+            for c in text:
+                cp = ord(c)
+                units = 2 if cp > 0xFFFF else 1
+                if count + units > max_units:
+                    break
+                count += units
+                idx += 1
+            return text[:idx]
+        except Exception:
+            return text
+
     def _iter_markdown_chunks_for_html(
         self, md: str, primary_max: int = 2500, secondary_max: int = 1200, html_max_chars: int = 3800
     ) -> List[tuple[str, bool, str]]:
@@ -2108,8 +2152,10 @@ class OuroborosAgent:
 
         Strategy:
         1. Split markdown with primary_max
-        2. Render each chunk to HTML; if HTML > html_max_chars, re-split with secondary_max
+        2. Render each chunk to HTML; if HTML > html_max_chars (UTF-16 units), re-split with secondary_max
         3. If still too large after re-split, mark for plain-text fallback
+
+        Note: html_max_chars is measured in UTF-16 code units (Telegram's limit).
         """
         md = md or ""
         primary_chunks = self._chunk_markdown_for_telegram(md, max_chars=primary_max)
@@ -2117,7 +2163,7 @@ class OuroborosAgent:
 
         for md_chunk in primary_chunks:
             html_chunk = self._markdown_to_telegram_html(md_chunk)
-            if len(html_chunk) <= html_max_chars:
+            if self._tg_utf16_len(html_chunk) <= html_max_chars:
                 # HTML is safe to send; provide plain fallback for runtime errors
                 plain_fallback = self._strip_markdown(md_chunk)
                 result.append((html_chunk, False, plain_fallback))
@@ -2126,7 +2172,7 @@ class OuroborosAgent:
                 secondary_chunks = self._chunk_markdown_for_telegram(md_chunk, max_chars=secondary_max)
                 for sub_md in secondary_chunks:
                     sub_html = self._markdown_to_telegram_html(sub_md)
-                    if len(sub_html) <= html_max_chars:
+                    if self._tg_utf16_len(sub_html) <= html_max_chars:
                         plain_fallback = self._strip_markdown(sub_md)
                         result.append((sub_html, False, plain_fallback))
                     else:
@@ -2147,6 +2193,8 @@ class OuroborosAgent:
         - tries to preserve fenced code blocks (```...```) by closing/reopening fences
           when splitting inside a fence.
         - hard-splits very long lines if needed.
+
+        Note: max_chars is measured in UTF-16 code units (Telegram's limit).
         """
         md = md or ""
         try:
@@ -2171,10 +2219,10 @@ class OuroborosAgent:
             nonlocal cur
             # When inside a fence, reserve room for closing fence at end of chunk.
             fence_close = "```\n"
-            reserve = len(fence_close) if in_fence else 0
+            reserve = OuroborosAgent._tg_utf16_len(fence_close) if in_fence else 0
             effective_limit = max_chars_i - reserve
 
-            if len(cur) + len(piece) <= effective_limit:
+            if OuroborosAgent._tg_utf16_len(cur) + OuroborosAgent._tg_utf16_len(piece) <= effective_limit:
                 cur += piece
                 return
 
@@ -2188,19 +2236,19 @@ class OuroborosAgent:
             # Hard split remaining piece.
             s = piece
             while s:
-                reserve2 = len(fence_close) if in_fence else 0
+                reserve2 = OuroborosAgent._tg_utf16_len(fence_close) if in_fence else 0
                 effective_limit2 = max_chars_i - reserve2
-                space = effective_limit2 - len(cur)
+                space = effective_limit2 - OuroborosAgent._tg_utf16_len(cur)
                 if space <= 0:
                     if in_fence and cur and not cur.rstrip().endswith("```"):
-                        if len(cur) <= max_chars_i - len(fence_close):
+                        if OuroborosAgent._tg_utf16_len(cur) <= max_chars_i - OuroborosAgent._tg_utf16_len(fence_close):
                             cur += fence_close
                     _flush()
                     cur = fence_open_line if in_fence else ""
-                    reserve3 = len(fence_close) if in_fence else 0
+                    reserve3 = OuroborosAgent._tg_utf16_len(fence_close) if in_fence else 0
                     effective_limit3 = max_chars_i - reserve3
-                    space = effective_limit3 - len(cur)
-                take = s[:space]
+                    space = effective_limit3 - OuroborosAgent._tg_utf16_len(cur)
+                take = OuroborosAgent._slice_by_utf16_units(s, space)
                 cur += take
                 s = s[len(take) :]
 
@@ -2273,6 +2321,8 @@ class OuroborosAgent:
         """Split plain text into chunks safe for Telegram.
 
         Simple chunking that splits on newlines when possible.
+
+        Note: max_chars is measured in UTF-16 code units (Telegram's limit).
         """
         text = text or ""
         try:
@@ -2281,7 +2331,7 @@ class OuroborosAgent:
             max_chars_i = 3500
         max_chars_i = max(256, min(4096, max_chars_i))
 
-        if len(text) <= max_chars_i:
+        if OuroborosAgent._tg_utf16_len(text) <= max_chars_i:
             return [text] if text else []
 
         chunks: List[str] = []
@@ -2290,18 +2340,20 @@ class OuroborosAgent:
 
         for line in lines:
             # If single line is too long, hard split it
-            if len(line) > max_chars_i:
+            line_len = OuroborosAgent._tg_utf16_len(line)
+            if line_len > max_chars_i:
                 if cur:
                     chunks.append(cur)
                     cur = ""
                 # Hard split the long line
                 while line:
-                    chunks.append(line[:max_chars_i])
-                    line = line[max_chars_i:]
+                    chunk = OuroborosAgent._slice_by_utf16_units(line, max_chars_i)
+                    chunks.append(chunk)
+                    line = line[len(chunk):]
                 continue
 
             # If adding this line would exceed limit, flush current chunk
-            if len(cur) + len(line) > max_chars_i:
+            if OuroborosAgent._tg_utf16_len(cur) + line_len > max_chars_i:
                 if cur:
                     chunks.append(cur)
                 cur = line
