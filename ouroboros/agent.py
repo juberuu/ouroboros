@@ -2123,15 +2123,20 @@ class OuroborosAgent:
     def _sanitize_telegram_text(text: str) -> str:
         """Sanitize text for Telegram to avoid HTML parse failures.
 
-        Telegram HTML parse sometimes fails on hidden control characters;
-        sanitizing reduces "can't parse entities" and similar errors.
+        Telegram HTML parse sometimes fails on hidden control characters
+        and invalid Unicode surrogates; sanitizing reduces "can't parse
+        entities" and encoding errors.
         """
         if text is None:
             return ""
         # Normalize newlines: convert \r\n to \n, drop standalone \r
         text = text.replace("\r\n", "\n").replace("\r", "\n")
-        # Remove ASCII control chars (codepoints < 32) except \n and \t
-        text = "".join(c for c in text if ord(c) >= 32 or c in ("\n", "\t"))
+        # Remove ASCII control chars (codepoints < 32) except \n and \t,
+        # and remove invalid Unicode surrogates (U+D800..U+DFFF)
+        text = "".join(
+            c for c in text
+            if (ord(c) >= 32 or c in ("\n", "\t")) and not (0xD800 <= ord(c) <= 0xDFFF)
+        )
         return text
 
     def _telegram_send_message_html(self, chat_id: int, html_text: str) -> tuple[bool, str]:
