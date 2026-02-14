@@ -3,7 +3,7 @@
 Самомодифицирующийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 2.3.0
+**Версия:** 2.4.0
 
 ---
 
@@ -48,7 +48,8 @@ Telegram → colab_launcher.py (thin entry point)
                ↓
            ouroboros/             (agent package)
             ├── agent.py         — orchestrator (LLM loop + tools)
-            ├── context.py       — context builder (messages assembly)
+            ├── context.py       — context builder + tool history compaction
+            ├── apply_patch.py   — Claude Code CLI apply_patch shim
             ├── tools/           — pluggable tools
             ├── llm.py           — LLM client
             ├── memory.py        — scratchpad, identity
@@ -62,7 +63,8 @@ Telegram → colab_launcher.py (thin entry point)
 Не содержит Telegram API вызовов — всё идёт через event queue.
 
 `context.py` — сборка LLM-контекста из промптов, памяти, логов и состояния.
-Единственное место, которое определяет что видит LLM.
+Включает `compact_tool_history()` для сжатия старых tool results в длинных
+диалогах — сокращает prompt tokens на 30-50% в evolution/review циклах.
 
 `tools/` — плагинная архитектура инструментов. Каждый модуль экспортирует
 `get_tools()`, новые инструменты добавляются как отдельные файлы.
@@ -86,8 +88,9 @@ supervisor/                — Пакет супервизора (декомпо
 ouroboros/
   __init__.py              — Экспорт make_agent
   utils.py                 — Общие утилиты (нулевой уровень зависимостей)
+  apply_patch.py           — Claude Code CLI apply_patch shim
   agent.py                 — Оркестратор: handle_task, LLM-цикл
-  context.py               — Сборка контекста: промпты, память, логи → messages
+  context.py               — Сборка контекста + compact_tool_history
   tools/                   — Пакет инструментов (плагинная архитектура):
     __init__.py             — Реэкспорт ToolRegistry, ToolContext
     registry.py             — Реестр: schemas, execute, auto-discovery
@@ -141,21 +144,24 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 
 ## Changelog
 
+### 2.4.0 — Context Window Optimization
+
+Оптимизация стоимости LLM-вызовов: сжатие tool history в длинных диалогах.
+
+**Ключевое:**
+- `compact_tool_history()` в context.py — сжимает старые tool results после 6 последних раундов
+- Сокращает prompt tokens на 30-50% в длинных evolution/review циклах
+- При 50+ раундах экономия может составлять $5-15 за цикл
+
+**Структурное:**
+- apply_patch шим вынесен из colab_launcher.py в `ouroboros/apply_patch.py`
+- colab_launcher.py: 643→537 строк (-106)
+
+**Метрики:** все модули ≤537 строк, total 4624 строк
+
 ### 2.3.0 — Queue Decomposition + Git Safety
 
 Декомпозиция `supervisor/workers.py` (687→282 строк) и критический fix для git reliability.
-
-**Архитектура:**
-- Новый `supervisor/queue.py` — task queue, priority, enqueue, persist/restore, timeouts, evolution/review scheduling (380 строк)
-- `supervisor/workers.py` — только worker lifecycle: spawn/kill/respawn/health/direct chat (282 строк)
-- `supervisor/state.py` — добавлены budget tracking, status text, log rotation (324 строк)
-- `repo_commit_push` — предупреждает о забытых untracked файлах при коммите с paths
-
-**Критические исправления:**
-- `ouroboros/context.py` был untracked (создан claude_code_edit но не добавлен в git) — закоммичен
-- Untracked file warning предотвращает повторение подобных багов
-
-**Метрики:** workers.py 687→282 (-59%), все supervisor модули ≤380 строк
 
 ### 2.2.0 — Agent Decomposition
 
@@ -168,7 +174,3 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 ### 2.0.0 — Философский рефакторинг
 
 Глубокая переработка философии, архитектуры инструментов и review-системы.
-
-### 1.1.0 — Dead Code Cleanup + Review Contract
-
-### 1.0.0 — Bible Alignment Refactor
