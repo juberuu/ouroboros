@@ -3,7 +3,7 @@
 Самомодифицирующийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 2.1.0
+**Версия:** 2.2.0
 
 ---
 
@@ -41,12 +41,13 @@ Telegram → colab_launcher.py (thin entry point)
                ↓
            supervisor/           (package)
             ├── state.py         — persistent state
-            ├── telegram.py      — TG client + formatting
+            ├── telegram.py      — TG client + formatting + typing
             ├── git_ops.py       — checkout, sync, rescue
             └── workers.py       — workers, queue, timeouts
                ↓
            ouroboros/             (agent package)
-            ├── agent.py         — orchestrator
+            ├── agent.py         — orchestrator (LLM loop + tools)
+            ├── context.py       — context builder (messages assembly)
             ├── tools/           — pluggable tools
             ├── llm.py           — LLM client
             ├── memory.py        — scratchpad, identity
@@ -56,8 +57,11 @@ Telegram → colab_launcher.py (thin entry point)
 `colab_launcher.py` — тонкий entry point: секреты, bootstrap, main loop.
 Вся логика супервизора декомпозирована в `supervisor/` пакет.
 
-`agent.py` — тонкий оркестратор. Вся логика инструментов, LLM-вызовов,
-памяти и review вынесена в соответствующие модули (SSOT-принцип).
+`agent.py` — тонкий оркестратор. Знает только про LLM и tools.
+Не содержит Telegram API вызовов — всё идёт через event queue.
+
+`context.py` — сборка LLM-контекста из промптов, памяти, логов и состояния.
+Единственное место, которое определяет что видит LLM.
 
 `tools/` — плагинная архитектура инструментов. Каждый модуль экспортирует
 `get_tools()`, новые инструменты добавляются как отдельные файлы.
@@ -74,13 +78,14 @@ prompts/
 supervisor/                — Пакет супервизора (декомпозированный launcher):
   __init__.py               — Экспорты
   state.py                  — State management: load/save, atomic writes, locks
-  telegram.py               — TG client, markdown→HTML, send_with_budget
+  telegram.py               — TG client, markdown→HTML, send_with_budget, typing
   git_ops.py                — Git: checkout, reset, rescue, deps sync, import test
   workers.py                — Workers, queue, timeouts, evolution/review scheduling
 ouroboros/
   __init__.py              — Экспорт make_agent
   utils.py                 — Общие утилиты (нулевой уровень зависимостей)
-  agent.py                 — Оркестратор: handle_task, LLM-цикл, контекст, Telegram
+  agent.py                 — Оркестратор: handle_task, LLM-цикл
+  context.py               — Сборка контекста: промпты, память, логи → messages
   tools/                   — Пакет инструментов (плагинная архитектура):
     __init__.py             — Реэкспорт ToolRegistry, ToolContext
     registry.py             — Реестр: schemas, execute, auto-discovery
@@ -134,6 +139,18 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 
 ## Changelog
 
+### 2.2.0 — Agent Decomposition
+
+Вынос context building из agent.py в context.py, удаление прямых Telegram API вызовов.
+
+**Архитектура:**
+- Новый `ouroboros/context.py` — сборка LLM-контекста (build_llm_messages, soft-cap trimming)
+- `agent.py` — чистый оркестратор: LLM loop + tools, без Telegram API
+- Typing indicators теперь через event queue → supervisor, не прямые HTTP вызовы
+- `TelegramClient.send_chat_action()` — новый метод для typing в supervisor
+
+**Метрики:** agent.py 502→502 строк (структура чище), +163 строк в context.py, net complexity ~= neutral
+
 ### 2.1.0 — Supervisor Decomposition
 
 Декомпозиция 900-строчного монолита `colab_launcher.py` в модульный пакет `supervisor/`.
@@ -145,30 +162,12 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 - `supervisor/workers.py` — worker/queue management, timeouts, evolution/review scheduling
 - `colab_launcher.py` — теперь тонкий entry point (~300 строк реальной логики)
 
-**Метрики:** ни один модуль не превышает 700 строк. Бюджет сложности из Библии соблюдён.
-
 ### 2.0.0 — Философский рефакторинг
 
 Глубокая переработка философии, архитектуры инструментов и review-системы.
 
-**Философия (BIBLE.md v2.0):**
-- Новый принцип: Дерзость — смелые действия вместо осторожных микрофиксов.
-- Минимализм: бюджет сложности (~500 строк/модуль) вместо "один файл".
-- Итерации: когерентные трансформации вместо "маленьких шагов".
-- Bible check: обязательная проверка перед каждым коммитом.
-
-**Архитектура:**
-- `tools.py` → `tools/` (плагинный пакет: registry, core, git, shell, search, control).
-- `review.py` — написан с нуля: стратегическая рефлексия + метрики сложности.
-
 ### 1.1.0 — Dead Code Cleanup + Review Contract
-
-Удаление мёртвого кода и восстановление контракта review.
 
 ### 1.0.0 — Bible Alignment Refactor
 
-Полный архитектурный рефактор на соответствие BIBLE.md.
-
 ### 0.2.0 — Уроборос-собеседник
-
-Прямой диалог вместо системы обработки заявок.
