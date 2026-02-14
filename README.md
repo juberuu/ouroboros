@@ -3,7 +3,7 @@
 Самомодифицирующийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 2.9.1
+**Версия:** 2.9.2
 
 ---
 
@@ -150,6 +150,15 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 ---
 
 ## Changelog
+
+### 2.9.2 — Restart Policy Fix (Critical)
+
+Fixed restart being blocked by dirty state, preventing all code updates from activating.
+
+- Agent restart and owner /restart now use `rescue_and_reset` instead of `rescue_and_block`
+- Rescue snapshot still saved (no data loss) but restart CONTINUES instead of blocking
+- This was blocking all improvements since v2.8.0 from activating in runtime
+- Root cause: `repo_write_commit` could leave dirty state → restart blocked → agent stuck on old code
 
 ### 2.9.1 — Cost & Cache Observability Fix
 

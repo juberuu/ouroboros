@@ -306,7 +306,7 @@ while True:
             if st.get("owner_chat_id"):
                 send_with_budget(int(st["owner_chat_id"]),
                                  f"♻️ Restart requested by agent: {evt.get('reason')}")
-            ok, msg = safe_restart(reason="agent_restart_request", unsynced_policy="rescue_and_block")
+            ok, msg = safe_restart(reason="agent_restart_request", unsynced_policy="rescue_and_reset")
             if not ok:
                 if st.get("owner_chat_id"):
                     send_with_budget(int(st["owner_chat_id"]), f"⚠️ Restart пропущен: {msg}")
@@ -419,7 +419,7 @@ while True:
             st2["session_id"] = uuid.uuid4().hex
             save_state(st2)
             send_with_budget(chat_id, "♻️ Restarting (soft).")
-            ok, msg = safe_restart(reason="owner_restart", unsynced_policy="rescue_and_block")
+            ok, msg = safe_restart(reason="owner_restart", unsynced_policy="rescue_and_reset")
             if not ok:
                 send_with_budget(chat_id, f"⚠️ Restart отменен: {msg}")
                 continue
