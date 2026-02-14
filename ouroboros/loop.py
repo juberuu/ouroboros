@@ -1,0 +1,203 @@
+"""
+Ouroboros — LLM tool loop.
+
+Core loop: send messages to LLM, execute tool calls, repeat until final response.
+Extracted from agent.py to keep the agent thin.
+"""
+
+from __future__ import annotations
+
+import json
+import pathlib
+import queue
+import time
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from ouroboros.llm import LLMClient, normalize_reasoning_effort, reasoning_rank, add_usage
+from ouroboros.tools.registry import ToolRegistry
+from ouroboros.context import compact_tool_history
+from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log
+
+
+def run_llm_loop(
+    messages: List[Dict[str, Any]],
+    tools: ToolRegistry,
+    llm: LLMClient,
+    drive_logs: pathlib.Path,
+    emit_progress: Callable[[str], None],
+    incoming_messages: queue.Queue,
+    task_type: str = "",
+) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+    """
+    Core LLM-with-tools loop.
+
+    Sends messages to LLM, executes tool calls, retries on errors,
+    escalates reasoning effort for long tasks.
+
+    Returns: (final_text, accumulated_usage, llm_trace)
+    """
+    profile_name = llm.select_task_profile(task_type)
+    profile_cfg = llm.model_profile(profile_name)
+    active_model = profile_cfg["model"]
+    active_effort = profile_cfg["effort"]
+
+    llm_trace: Dict[str, Any] = {"assistant_notes": [], "tool_calls": []}
+    accumulated_usage: Dict[str, Any] = {}
+    max_retries = 3
+    soft_check_interval = 15
+
+    tool_schemas = tools.schemas()
+
+    def _maybe_raise_effort(target: str) -> None:
+        nonlocal active_effort
+        t = normalize_reasoning_effort(target, default=active_effort)
+        if reasoning_rank(t) > reasoning_rank(active_effort):
+            active_effort = t
+
+    def _switch_to_code_profile() -> None:
+        nonlocal active_model, active_effort
+        code_cfg = llm.model_profile("code_task")
+        if code_cfg["model"] != active_model or reasoning_rank(code_cfg["effort"]) > reasoning_rank(active_effort):
+            active_model = code_cfg["model"]
+            active_effort = max(active_effort, code_cfg["effort"], key=reasoning_rank)
+
+    round_idx = 0
+    while True:
+        round_idx += 1
+
+        # Inject owner messages received during task execution
+        while not incoming_messages.empty():
+            try:
+                injected = incoming_messages.get_nowait()
+                messages.append({"role": "user", "content": injected})
+            except queue.Empty:
+                break
+
+        # Self-check
+        if round_idx > 1 and round_idx % soft_check_interval == 0:
+            messages.append({"role": "system", "content":
+                f"[Self-check] {round_idx} раундов. Оцени прогресс. Если застрял — смени подход."})
+
+        # Escalate reasoning effort for long tasks
+        if round_idx >= 5:
+            _maybe_raise_effort("high")
+        if round_idx >= 10:
+            _maybe_raise_effort("xhigh")
+
+        # Compact old tool history to save tokens on long conversations
+        if round_idx > 1:
+            messages = compact_tool_history(messages, keep_recent=6)
+
+        # --- LLM call with retry ---
+        msg = None
+        last_error: Optional[Exception] = None
+        for attempt in range(max_retries):
+            try:
+                resp_msg, usage = llm.chat(
+                    messages=messages, model=active_model, tools=tool_schemas,
+                    reasoning_effort=active_effort,
+                )
+                msg = resp_msg
+                add_usage(accumulated_usage, usage)
+                # Log per-round metrics
+                append_jsonl(drive_logs / "events.jsonl", {
+                    "ts": utc_now_iso(), "type": "llm_round",
+                    "round": round_idx, "model": active_model,
+                    "reasoning_effort": active_effort,
+                    "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+                    "completion_tokens": int(usage.get("completion_tokens") or 0),
+                    "cached_tokens": int(usage.get("cached_tokens") or 0),
+                })
+                break
+            except Exception as e:
+                last_error = e
+                append_jsonl(drive_logs / "events.jsonl", {
+                    "ts": utc_now_iso(), "type": "llm_api_error",
+                    "round": round_idx, "attempt": attempt + 1,
+                    "model": active_model, "error": repr(e),
+                })
+                if attempt < max_retries - 1:
+                    time.sleep(min(2 ** attempt * 2, 30))
+
+        if msg is None:
+            return (
+                f"⚠️ Не удалось получить ответ от модели после {max_retries} попыток.\n"
+                f"Ошибка: {last_error}"
+            ), accumulated_usage, llm_trace
+
+        tool_calls = msg.get("tool_calls") or []
+        content = msg.get("content")
+
+        # No tool calls — final response
+        if not tool_calls:
+            if content and content.strip():
+                llm_trace["assistant_notes"].append(content.strip()[:320])
+            return (content or ""), accumulated_usage, llm_trace
+
+        # Process tool calls
+        messages.append({"role": "assistant", "content": content or "", "tool_calls": tool_calls})
+
+        if content and content.strip():
+            emit_progress(content.strip())
+            llm_trace["assistant_notes"].append(content.strip()[:320])
+
+        saw_code_tool = False
+        error_count = 0
+
+        for tc in tool_calls:
+            fn_name = tc["function"]["name"]
+            if fn_name in tools.CODE_TOOLS:
+                saw_code_tool = True
+
+            try:
+                args = json.loads(tc["function"]["arguments"] or "{}")
+            except (json.JSONDecodeError, ValueError) as e:
+                result = f"⚠️ TOOL_ARG_ERROR: Could not parse arguments for '{fn_name}': {e}"
+                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+                llm_trace["tool_calls"].append({"tool": fn_name, "args": {}, "result": result, "is_error": True})
+                error_count += 1
+                continue
+
+            args_for_log = sanitize_tool_args_for_log(fn_name, args if isinstance(args, dict) else {})
+
+            tool_ok = True
+            try:
+                result = tools.execute(fn_name, args)
+            except Exception as e:
+                tool_ok = False
+                result = f"⚠️ TOOL_ERROR ({fn_name}): {type(e).__name__}: {e}"
+                append_jsonl(drive_logs / "events.jsonl", {
+                    "ts": utc_now_iso(), "type": "tool_error",
+                    "tool": fn_name, "args": args_for_log, "error": repr(e),
+                })
+
+            append_jsonl(drive_logs / "tools.jsonl", {
+                "ts": utc_now_iso(), "tool": fn_name,
+                "args": args_for_log, "result_preview": truncate_for_log(result, 2000),
+            })
+            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+            is_error = (not tool_ok) or str(result).startswith("⚠️")
+            llm_trace["tool_calls"].append({
+                "tool": fn_name, "args": _safe_args(args_for_log),
+                "result": truncate_for_log(result, 700), "is_error": is_error,
+            })
+            if is_error:
+                error_count += 1
+
+        if saw_code_tool:
+            _switch_to_code_profile()
+        if error_count >= 2:
+            _maybe_raise_effort("high")
+        if error_count >= 4:
+            _maybe_raise_effort("xhigh")
+
+    # Unreachable but keeps type checkers happy
+    return "", accumulated_usage, llm_trace
+
+
+def _safe_args(v: Any) -> Any:
+    """Ensure args are JSON-serializable for trace logging."""
+    try:
+        return json.loads(json.dumps(v, ensure_ascii=False, default=str))
+    except Exception:
+        return {"_repr": repr(v)}
