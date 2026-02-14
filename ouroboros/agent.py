@@ -2,7 +2,8 @@
 Ouroboros agent core — thin orchestrator.
 
 Delegates to: tools/ (tool schemas/execution), llm.py (LLM calls),
-memory.py (scratchpad/identity), review.py (code collection/metrics).
+memory.py (scratchpad/identity), context.py (context building),
+review.py (code collection/metrics).
 """
 
 from __future__ import annotations
@@ -11,25 +12,22 @@ import json
 import os
 import pathlib
 import queue
-import re
 import threading
 import time
 import traceback
-import urllib.error
-import urllib.parse
-import urllib.request
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.utils import (
     utc_now_iso, read_text, append_jsonl,
-    safe_relpath, truncate_for_log, clip_text, estimate_tokens,
+    safe_relpath, truncate_for_log,
     get_git_info, sanitize_task_for_event, sanitize_tool_args_for_log,
 )
 from ouroboros.llm import LLMClient, normalize_reasoning_effort, reasoning_rank, add_usage
 from ouroboros.tools import ToolRegistry
 from ouroboros.tools.registry import ToolContext
 from ouroboros.memory import Memory
+from ouroboros.context import build_llm_messages
 
 
 # ---------------------------------------------------------------------------
@@ -152,78 +150,19 @@ class OuroborosAgent:
         )
         self.tools.set_context(ctx)
 
-        # Typing indicator
-        typing_stop: Optional[threading.Event] = None
+        # Typing indicator via event queue (no direct Telegram API)
+        self._emit_typing_start()
         heartbeat_stop = self._start_task_heartbeat_loop(str(task.get("id") or ""))
-        try:
-            chat_id = int(task.get("chat_id"))
-            typing_stop = self._start_typing_loop(chat_id)
-        except Exception:
-            pass
 
         try:
-            # --- Build context ---
-            base_prompt = self._safe_read(self.env.repo_path("prompts/SYSTEM.md"),
-                                          fallback="You are Ouroboros. Your base prompt could not be loaded.")
-            bible_md = self._safe_read(self.env.repo_path("BIBLE.md"))
-            readme_md = self._safe_read(self.env.repo_path("README.md"))
-            state_json = self._safe_read(self.env.drive_path("state/state.json"), fallback="{}")
-            self.memory.ensure_files()
-            scratchpad_raw = self.memory.load_scratchpad()
-            identity_raw = self.memory.load_identity()
+            # --- Build context (delegated to context.py) ---
+            messages, cap_info = build_llm_messages(
+                env=self.env,
+                memory=self.memory,
+                task=task,
+                review_context_builder=self._build_review_context,
+            )
 
-            # Summarize logs
-            chat_summary = self.memory.summarize_chat(
-                self.memory.read_jsonl_tail("chat.jsonl", 200))
-            tools_summary = self.memory.summarize_tools(
-                self.memory.read_jsonl_tail("tools.jsonl", 200))
-            events_summary = self.memory.summarize_events(
-                self.memory.read_jsonl_tail("events.jsonl", 200))
-            supervisor_summary = self.memory.summarize_supervisor(
-                self.memory.read_jsonl_tail("supervisor.jsonl", 200))
-
-            # Git context
-            try:
-                git_branch, git_sha = get_git_info(self.env.repo_dir)
-            except Exception:
-                git_branch, git_sha = "unknown", "unknown"
-
-            runtime_ctx = json.dumps({
-                "utc_now": utc_now_iso(),
-                "repo_dir": str(self.env.repo_dir),
-                "drive_root": str(self.env.drive_root),
-                "git_head": git_sha, "git_branch": git_branch,
-                "task": {"id": task.get("id"), "type": task.get("type")},
-            }, ensure_ascii=False, indent=2)
-
-            messages: List[Dict[str, Any]] = [
-                {"role": "system", "content": base_prompt},
-                {"role": "system", "content": "## BIBLE.md\n\n" + clip_text(bible_md, 180000)},
-                {"role": "system", "content": "## README.md\n\n" + clip_text(readme_md, 180000)},
-                {"role": "system", "content": "## Drive state\n\n" + clip_text(state_json, 90000)},
-                {"role": "system", "content": "## Scratchpad\n\n" + clip_text(scratchpad_raw, 90000)},
-                {"role": "system", "content": "## Identity\n\n" + clip_text(identity_raw, 80000)},
-                {"role": "system", "content": "## Runtime context\n\n" + runtime_ctx},
-            ]
-            if chat_summary:
-                messages.append({"role": "system", "content": "## Recent chat\n\n" + chat_summary})
-            if tools_summary:
-                messages.append({"role": "system", "content": "## Recent tools\n\n" + tools_summary})
-            if events_summary:
-                messages.append({"role": "system", "content": "## Recent events\n\n" + events_summary})
-            if supervisor_summary:
-                messages.append({"role": "system", "content": "## Supervisor\n\n" + supervisor_summary})
-
-            # Review tasks: inject code snapshot + metrics into context
-            if str(task.get("type") or "") == "review":
-                review_ctx = self._build_review_context()
-                if review_ctx:
-                    messages.append({"role": "system", "content": review_ctx})
-
-            messages.append({"role": "user", "content": task.get("text", "")})
-
-            # Soft-cap token trimming
-            messages, cap_info = self._apply_message_token_soft_cap(messages, 200000)
             if cap_info.get("trimmed_sections"):
                 append_jsonl(drive_logs / "events.jsonl", {
                     "ts": utc_now_iso(), "type": "context_soft_cap_trim",
@@ -258,7 +197,7 @@ class OuroborosAgent:
                 "provider": "openrouter", "usage": usage, "ts": utc_now_iso(),
             })
 
-            # Send response via supervisor (single path — Bible Principle 4: Minimalism)
+            # Send response via supervisor
             self._pending_events.append({
                 "type": "send_message", "chat_id": task["chat_id"],
                 "text": text or "\u200b", "log_text": text or "",
@@ -283,7 +222,6 @@ class OuroborosAgent:
             except Exception:
                 pass
 
-            # Task metrics for supervisor
             self._pending_events.append({
                 "type": "task_metrics",
                 "task_id": task.get("id"), "task_type": task.get("type"),
@@ -298,14 +236,11 @@ class OuroborosAgent:
 
         finally:
             self._busy = False
-            # Drain leftover injected messages
             while not self._incoming_messages.empty():
                 try:
                     self._incoming_messages.get_nowait()
                 except queue.Empty:
                     break
-            if typing_stop is not None:
-                typing_stop.set()
             if heartbeat_stop is not None:
                 heartbeat_stop.set()
             self._current_task_type = None
@@ -431,7 +366,6 @@ class OuroborosAgent:
 
                     args_for_log = sanitize_tool_args_for_log(fn_name, args if isinstance(args, dict) else {})
 
-                    # Execute via ToolRegistry (SSOT)
                     tool_ok = True
                     try:
                         result = self.tools.execute(fn_name, args)
@@ -483,7 +417,6 @@ class OuroborosAgent:
             sections, stats = collect_sections(self.env.repo_dir, self.env.drive_root)
             metrics = compute_complexity_metrics(sections)
 
-            # Build a code snapshot string within token budget
             parts = [
                 "## Code Review Context\n",
                 format_metrics(metrics),
@@ -492,7 +425,6 @@ class OuroborosAgent:
                 "Use run_shell for tests. Key files below:\n",
             ]
 
-            # Include file listing and short previews (cap total to ~80k chars)
             total_chars = 0
             max_chars = 80_000
             for path, content in sections:
@@ -509,17 +441,6 @@ class OuroborosAgent:
             return f"## Code Review Context\n\n(Failed to collect: {e})\nUse repo_read and repo_list to inspect code."
 
     # =====================================================================
-    # Text helpers
-    # =====================================================================
-
-    @staticmethod
-    def _strip_markdown(text: str) -> str:
-        text = re.sub(r"```[^\n]*\n([\s\S]*?)```", r"\1", text)
-        text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
-        text = re.sub(r"`([^`]+)`", r"\1", text)
-        return text
-
-    # =====================================================================
     # Event emission helpers
     # =====================================================================
 
@@ -530,6 +451,18 @@ class OuroborosAgent:
             self._event_queue.put({
                 "type": "send_message", "chat_id": self._current_chat_id,
                 "text": f"💬 {text}", "ts": utc_now_iso(),
+            })
+        except Exception:
+            pass
+
+    def _emit_typing_start(self) -> None:
+        """Signal supervisor to start typing indicator for current chat."""
+        if self._event_queue is None or self._current_chat_id is None:
+            return
+        try:
+            self._event_queue.put({
+                "type": "typing_start", "chat_id": self._current_chat_id,
+                "ts": utc_now_iso(),
             })
         except Exception:
             pass
@@ -558,85 +491,6 @@ class OuroborosAgent:
 
         threading.Thread(target=_loop, daemon=True).start()
         return stop
-
-    def _telegram_api_post(self, method: str, data: Dict[str, Any]) -> Tuple[bool, str]:
-        token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-        if not token:
-            return False, "no_token"
-        url = f"https://api.telegram.org/bot{token}/{method}"
-        payload = urllib.parse.urlencode({k: str(v) for k, v in data.items()}).encode("utf-8")
-        req = urllib.request.Request(url, data=payload, method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                body = resp.read()
-            try:
-                j = json.loads(body.decode("utf-8", errors="replace"))
-                if isinstance(j, dict) and j.get("ok") is False:
-                    desc = str(j.get("description", ""))
-                    return False, f"tg_ok_false: {desc}"
-            except Exception:
-                pass
-            return True, "ok"
-        except Exception as e:
-            return False, f"exc_{type(e).__name__}: {e}"
-
-    def _send_chat_action(self, chat_id: int, action: str = "typing") -> None:
-        self._telegram_api_post("sendChatAction", {"chat_id": chat_id, "action": action})
-
-    def _start_typing_loop(self, chat_id: int) -> threading.Event:
-        stop = threading.Event()
-        self._send_chat_action(chat_id, "typing")
-
-        def _loop() -> None:
-            stop.wait(1.0)
-            if stop.is_set():
-                return
-            self._send_chat_action(chat_id, "typing")
-            while not stop.wait(4):
-                self._send_chat_action(chat_id, "typing")
-
-        threading.Thread(target=_loop, daemon=True).start()
-        return stop
-
-    # =====================================================================
-    # Helpers
-    # =====================================================================
-
-    @staticmethod
-    def _safe_read(path: pathlib.Path, fallback: str = "") -> str:
-        try:
-            if path.exists():
-                return read_text(path)
-        except Exception:
-            pass
-        return fallback
-
-    def _apply_message_token_soft_cap(
-        self, messages: List[Dict[str, Any]], soft_cap_tokens: int,
-    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-        estimated = sum(estimate_tokens(str(m.get("content", ""))) + 6 for m in messages)
-        info: Dict[str, Any] = {
-            "estimated_tokens_before": estimated, "estimated_tokens_after": estimated,
-            "soft_cap_tokens": soft_cap_tokens, "trimmed_sections": [],
-        }
-        if soft_cap_tokens <= 0 or estimated <= soft_cap_tokens:
-            return messages, info
-
-        prunable = ["## Recent chat", "## Recent tools", "## Recent events", "## Supervisor"]
-        pruned = list(messages)
-        for prefix in prunable:
-            if estimated <= soft_cap_tokens:
-                break
-            for i, msg in enumerate(pruned):
-                content = msg.get("content")
-                if isinstance(content, str) and content.startswith(prefix):
-                    pruned.pop(i)
-                    info["trimmed_sections"].append(prefix)
-                    estimated = sum(estimate_tokens(str(m.get("content", ""))) + 6 for m in pruned)
-                    break
-
-        info["estimated_tokens_after"] = estimated
-        return pruned, info
 
 
 # ---------------------------------------------------------------------------
