@@ -1,0 +1,339 @@
+"""
+Supervisor — Git operations.
+
+Clone, checkout, reset, rescue snapshots, dependency sync, import test.
+"""
+
+from __future__ import annotations
+
+import datetime
+import json
+import os
+import pathlib
+import shutil
+import subprocess
+import sys
+import uuid
+from typing import Any, Dict, List, Optional, Tuple
+
+from supervisor.state import (
+    load_state, save_state, append_jsonl, atomic_write_text,
+)
+
+
+# ---------------------------------------------------------------------------
+# Module-level config (set via init())
+# ---------------------------------------------------------------------------
+REPO_DIR: pathlib.Path = pathlib.Path("/content/ouroboros_repo")
+DRIVE_ROOT: pathlib.Path = pathlib.Path("/content/drive/MyDrive/Ouroboros")
+REMOTE_URL: str = ""
+BRANCH_DEV: str = "ouroboros"
+BRANCH_STABLE: str = "ouroboros-stable"
+
+
+def init(repo_dir: pathlib.Path, drive_root: pathlib.Path, remote_url: str,
+         branch_dev: str = "ouroboros", branch_stable: str = "ouroboros-stable") -> None:
+    global REPO_DIR, DRIVE_ROOT, REMOTE_URL, BRANCH_DEV, BRANCH_STABLE
+    REPO_DIR = repo_dir
+    DRIVE_ROOT = drive_root
+    REMOTE_URL = remote_url
+    BRANCH_DEV = branch_dev
+    BRANCH_STABLE = branch_stable
+
+
+# ---------------------------------------------------------------------------
+# Git helpers
+# ---------------------------------------------------------------------------
+
+def git_capture(cmd: List[str]) -> Tuple[int, str, str]:
+    r = subprocess.run(cmd, cwd=str(REPO_DIR), capture_output=True, text=True)
+    return r.returncode, (r.stdout or "").strip(), (r.stderr or "").strip()
+
+
+def ensure_repo_present() -> None:
+    if not (REPO_DIR / ".git").exists():
+        subprocess.run(["rm", "-rf", str(REPO_DIR)], check=False)
+        subprocess.run(["git", "clone", REMOTE_URL, str(REPO_DIR)], check=True)
+    else:
+        subprocess.run(["git", "remote", "set-url", "origin", REMOTE_URL],
+                        cwd=str(REPO_DIR), check=True)
+    subprocess.run(["git", "config", "user.name", "Ouroboros"], cwd=str(REPO_DIR), check=True)
+    subprocess.run(["git", "config", "user.email", "ouroboros@users.noreply.github.com"],
+                    cwd=str(REPO_DIR), check=True)
+    subprocess.run(["git", "fetch", "origin"], cwd=str(REPO_DIR), check=True)
+
+
+# ---------------------------------------------------------------------------
+# Repo sync state collection
+# ---------------------------------------------------------------------------
+
+def _collect_repo_sync_state() -> Dict[str, Any]:
+    state: Dict[str, Any] = {
+        "current_branch": "unknown",
+        "dirty_lines": [],
+        "unpushed_lines": [],
+        "warnings": [],
+    }
+
+    rc, branch, err = git_capture(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+    if rc == 0 and branch:
+        state["current_branch"] = branch
+    elif err:
+        state["warnings"].append(f"branch_error:{err}")
+
+    rc, dirty, err = git_capture(["git", "status", "--porcelain"])
+    if rc == 0 and dirty:
+        state["dirty_lines"] = [ln for ln in dirty.splitlines() if ln.strip()]
+    elif rc != 0 and err:
+        state["warnings"].append(f"status_error:{err}")
+
+    upstream = ""
+    rc, up, err = git_capture(["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+    if rc == 0 and up:
+        upstream = up
+    else:
+        current_branch = str(state.get("current_branch") or "")
+        if current_branch not in ("", "HEAD", "unknown"):
+            upstream = f"origin/{current_branch}"
+        elif err:
+            state["warnings"].append(f"upstream_error:{err}")
+
+    if upstream:
+        rc, unpushed, err = git_capture(["git", "log", "--oneline", f"{upstream}..HEAD"])
+        if rc == 0 and unpushed:
+            state["unpushed_lines"] = [ln for ln in unpushed.splitlines() if ln.strip()]
+        elif rc != 0 and err:
+            state["warnings"].append(f"unpushed_error:{err}")
+
+    return state
+
+
+def _copy_untracked_for_rescue(dst_root: pathlib.Path, max_files: int = 200,
+                                max_total_bytes: int = 12_000_000) -> Dict[str, Any]:
+    out: Dict[str, Any] = {
+        "copied_files": 0, "skipped_files": 0, "copied_bytes": 0, "truncated": False,
+    }
+    rc, txt, err = git_capture(["git", "ls-files", "--others", "--exclude-standard"])
+    if rc != 0:
+        out["error"] = err or "git ls-files failed"
+        return out
+
+    lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
+    if not lines:
+        return out
+
+    dst_root.mkdir(parents=True, exist_ok=True)
+    for rel in lines:
+        if out["copied_files"] >= max_files:
+            out["truncated"] = True
+            break
+        src = (REPO_DIR / rel).resolve()
+        try:
+            src.relative_to(REPO_DIR.resolve())
+        except Exception:
+            out["skipped_files"] += 1
+            continue
+        if not src.exists() or not src.is_file():
+            out["skipped_files"] += 1
+            continue
+        try:
+            size = int(src.stat().st_size)
+        except Exception:
+            out["skipped_files"] += 1
+            continue
+        if (out["copied_bytes"] + size) > max_total_bytes:
+            out["truncated"] = True
+            break
+        dst = dst_root / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(src, dst)
+            out["copied_files"] += 1
+            out["copied_bytes"] += size
+        except Exception:
+            out["skipped_files"] += 1
+    return out
+
+
+def _create_rescue_snapshot(branch: str, reason: str,
+                             repo_state: Dict[str, Any]) -> Dict[str, Any]:
+    now = datetime.datetime.now(datetime.timezone.utc)
+    ts = now.strftime("%Y%m%d_%H%M%S")
+    rescue_dir = DRIVE_ROOT / "archive" / "rescue" / f"{ts}_{uuid.uuid4().hex[:8]}"
+    rescue_dir.mkdir(parents=True, exist_ok=True)
+
+    info: Dict[str, Any] = {
+        "ts": now.isoformat(),
+        "target_branch": branch,
+        "reason": reason,
+        "current_branch": repo_state.get("current_branch"),
+        "dirty_count": len(repo_state.get("dirty_lines") or []),
+        "unpushed_count": len(repo_state.get("unpushed_lines") or []),
+        "warnings": list(repo_state.get("warnings") or []),
+        "path": str(rescue_dir),
+    }
+
+    rc_status, status_txt, _ = git_capture(["git", "status", "--porcelain"])
+    if rc_status == 0:
+        atomic_write_text(rescue_dir / "status.porcelain.txt",
+                          status_txt + ("\n" if status_txt else ""))
+
+    rc_diff, diff_txt, diff_err = git_capture(["git", "diff", "--binary", "HEAD"])
+    if rc_diff == 0:
+        atomic_write_text(rescue_dir / "changes.diff",
+                          diff_txt + ("\n" if diff_txt else ""))
+    else:
+        info["diff_error"] = diff_err or "git diff failed"
+
+    untracked_meta = _copy_untracked_for_rescue(rescue_dir / "untracked")
+    info["untracked"] = untracked_meta
+
+    unpushed_lines = [ln for ln in (repo_state.get("unpushed_lines") or []) if str(ln).strip()]
+    if unpushed_lines:
+        atomic_write_text(rescue_dir / "unpushed_commits.txt",
+                          "\n".join(unpushed_lines) + "\n")
+
+    atomic_write_text(rescue_dir / "rescue_meta.json",
+                      json.dumps(info, ensure_ascii=False, indent=2))
+    return info
+
+
+# ---------------------------------------------------------------------------
+# Checkout + reset
+# ---------------------------------------------------------------------------
+
+def checkout_and_reset(branch: str, reason: str = "unspecified",
+                       unsynced_policy: str = "ignore") -> Tuple[bool, str]:
+    rc, _, err = git_capture(["git", "fetch", "origin"])
+    if rc != 0:
+        msg = f"git fetch failed: {err or 'unknown error'}"
+        append_jsonl(
+            DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "reset_fetch_failed",
+                "target_branch": branch, "reason": reason, "error": msg,
+            },
+        )
+        return False, msg
+
+    policy = str(unsynced_policy or "ignore").strip().lower()
+    if policy not in {"ignore", "block", "rescue_and_block", "rescue_and_reset"}:
+        policy = "ignore"
+
+    if policy != "ignore":
+        repo_state = _collect_repo_sync_state()
+        dirty_lines = list(repo_state.get("dirty_lines") or [])
+        unpushed_lines = list(repo_state.get("unpushed_lines") or [])
+        if dirty_lines or unpushed_lines:
+            rescue_info: Dict[str, Any] = {}
+            if policy in {"rescue_and_block", "rescue_and_reset"}:
+                try:
+                    rescue_info = _create_rescue_snapshot(
+                        branch=branch, reason=reason, repo_state=repo_state)
+                except Exception as e:
+                    rescue_info = {"error": repr(e)}
+            bits: List[str] = []
+            if unpushed_lines:
+                bits.append(f"unpushed={len(unpushed_lines)}")
+            if dirty_lines:
+                bits.append(f"dirty={len(dirty_lines)}")
+            detail = ", ".join(bits) if bits else "unsynced"
+            rescue_suffix = ""
+            rescue_path = str(rescue_info.get("path") or "").strip()
+            if rescue_path:
+                rescue_suffix = f" Rescue saved to {rescue_path}."
+            elif policy in {"rescue_and_block", "rescue_and_reset"} and rescue_info.get("error"):
+                rescue_suffix = f" Rescue failed: {rescue_info.get('error')}."
+
+            if policy in {"block", "rescue_and_block"}:
+                msg = f"Reset blocked ({detail}) to protect local changes.{rescue_suffix}"
+                append_jsonl(
+                    DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                    {
+                        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        "type": "reset_blocked_unsynced_state",
+                        "target_branch": branch, "reason": reason, "policy": policy,
+                        "current_branch": repo_state.get("current_branch"),
+                        "dirty_count": len(dirty_lines),
+                        "unpushed_count": len(unpushed_lines),
+                        "dirty_preview": dirty_lines[:20],
+                        "unpushed_preview": unpushed_lines[:20],
+                        "warnings": list(repo_state.get("warnings") or []),
+                        "rescue": rescue_info,
+                    },
+                )
+                return False, msg
+
+            append_jsonl(
+                DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "type": "reset_unsynced_rescued_then_reset",
+                    "target_branch": branch, "reason": reason, "policy": policy,
+                    "current_branch": repo_state.get("current_branch"),
+                    "dirty_count": len(dirty_lines),
+                    "unpushed_count": len(unpushed_lines),
+                    "dirty_preview": dirty_lines[:20],
+                    "unpushed_preview": unpushed_lines[:20],
+                    "warnings": list(repo_state.get("warnings") or []),
+                    "rescue": rescue_info,
+                },
+            )
+
+    subprocess.run(["git", "checkout", branch], cwd=str(REPO_DIR), check=True)
+    subprocess.run(["git", "reset", "--hard", f"origin/{branch}"], cwd=str(REPO_DIR), check=True)
+    st = load_state()
+    st["current_branch"] = branch
+    st["current_sha"] = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(REPO_DIR),
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    save_state(st)
+    return True, "ok"
+
+
+# ---------------------------------------------------------------------------
+# Dependencies + import test
+# ---------------------------------------------------------------------------
+
+def sync_runtime_dependencies(reason: str) -> Tuple[bool, str]:
+    req_path = REPO_DIR / "requirements.txt"
+    cmd: List[str] = [sys.executable, "-m", "pip", "install", "-q"]
+    source = ""
+    if req_path.exists():
+        cmd += ["-r", str(req_path)]
+        source = f"requirements:{req_path}"
+    else:
+        cmd += ["openai>=1.0.0", "requests"]
+        source = "fallback:minimal"
+    try:
+        subprocess.run(cmd, cwd=str(REPO_DIR), check=True)
+        append_jsonl(
+            DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "deps_sync_ok", "reason": reason, "source": source,
+            },
+        )
+        return True, source
+    except Exception as e:
+        msg = repr(e)
+        append_jsonl(
+            DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "deps_sync_error", "reason": reason, "source": source, "error": msg,
+            },
+        )
+        return False, msg
+
+
+def import_test() -> Dict[str, Any]:
+    r = subprocess.run(
+        ["python3", "-c", "import ouroboros, ouroboros.agent; print('import_ok')"],
+        cwd=str(REPO_DIR),
+        capture_output=True, text=True,
+    )
+    return {"ok": (r.returncode == 0), "stdout": r.stdout, "stderr": r.stderr,
+            "returncode": r.returncode}
