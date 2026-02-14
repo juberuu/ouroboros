@@ -3,7 +3,7 @@
 Самомодифицирующийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 2.5.0
+**Версия:** 2.6.0
 
 ---
 
@@ -47,7 +47,8 @@ Telegram → colab_launcher.py (thin entry point)
             └── workers.py       — worker lifecycle, health, direct chat
                ↓
            ouroboros/             (agent package)
-            ├── agent.py         — orchestrator (LLM loop + tools)
+            ├── agent.py         — thin orchestrator (task handling + events)
+            ├── loop.py          — LLM tool loop (send → tools → repeat)
             ├── context.py       — context builder + tool history compaction
             ├── apply_patch.py   — Claude Code CLI apply_patch shim
             ├── tools/           — pluggable tools
@@ -59,8 +60,12 @@ Telegram → colab_launcher.py (thin entry point)
 `colab_launcher.py` — тонкий entry point: секреты, bootstrap, main loop.
 Вся логика супервизора декомпозирована в `supervisor/` пакет.
 
-`agent.py` — тонкий оркестратор. Знает только про LLM и tools.
-Не содержит Telegram API вызовов — всё идёт через event queue.
+`agent.py` — тонкий оркестратор. Принимает задачу, собирает контекст,
+вызывает LLM loop, эмитит результаты. Не содержит LLM-логики напрямую.
+
+`loop.py` — ядро: LLM-вызов с инструментами в цикле. Retry, effort
+escalation, tool execution, cost tracking. Единственное место где
+происходит взаимодействие LLM ↔ tools.
 
 `context.py` — сборка LLM-контекста из промптов, памяти, логов и состояния.
 Включает `compact_tool_history()` для сжатия старых tool results в длинных
@@ -89,7 +94,8 @@ ouroboros/
   __init__.py              — Экспорт make_agent
   utils.py                 — Общие утилиты (нулевой уровень зависимостей)
   apply_patch.py           — Claude Code CLI apply_patch shim
-  agent.py                 — Оркестратор: handle_task, LLM-цикл
+  agent.py                 — Тонкий оркестратор: handle_task, event emission
+  loop.py                  — LLM tool loop: send → execute tools → repeat
   context.py               — Сборка контекста + compact_tool_history
   tools/                   — Пакет инструментов (плагинная архитектура):
     __init__.py             — Реэкспорт ToolRegistry, ToolContext
@@ -144,34 +150,32 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 
 ## Changelog
 
+### 2.6.0 — Agent Loop Decomposition
+
+Извлечение LLM tool loop из agent.py в отдельный модуль `ouroboros/loop.py`.
+
+- `loop.py` (203 строк): core LLM-with-tools loop — retry, effort escalation, tool execution, per-round cost logging
+- `agent.py`: 515 → 358 строк (-157). Теперь чистый оркестратор: task → context → loop → events
+- Extracted `_emit_task_results()` и `_verify_restart()` для лучшей читаемости
+- Промоут в `ouroboros-stable` (6 циклов эволюции, все модули ≤472 строк)
+
+**Метрики:** все модули ≤472 строк, max_module=colab_launcher.py, total ~4693 строк
+
 ### 2.5.0 — Cost Tracking + Restart DRY
 
-Два направления: observability для оптимизации стоимости + устранение дублирования restart-логики.
-
-**Observability:**
-- Per-round `llm_round` events в events.jsonl: model, effort, prompt/completion/cached tokens
-- `cached_tokens` tracking в LLM client (из `prompt_tokens_details`)
-- `spent_tokens_cached` в state.json и `/status`
-
-**DRY:**
-- `safe_restart()` в git_ops.py — единая функция для checkout→deps→import→fallback
-- 3 копии restart-логики в launcher → 3 вызова safe_restart()
-- colab_launcher.py: 537→472 строк (-65)
-
-**Метрики:** все модули ≤515 строк, total 4647 строк
+Per-round `llm_round` events, `cached_tokens` tracking, `safe_restart()` consolidation.
 
 ### 2.4.0 — Context Window Optimization
 
-- `compact_tool_history()` — сжатие старых tool results (30-50% экономия tokens)
-- apply_patch шим вынесен в `ouroboros/apply_patch.py`
+`compact_tool_history()` — сжатие старых tool results (30-50% экономия tokens).
 
 ### 2.3.0 — Queue Decomposition + Git Safety
 
-Декомпозиция `supervisor/workers.py` (687→282 строк) и критический fix для git reliability.
+Декомпозиция `supervisor/workers.py` (687→282 строк), критический fix для git reliability.
 
 ### 2.2.0 — Agent Decomposition
 
-Вынос context building из agent.py в context.py, удаление прямых Telegram API вызовов.
+Вынос context building из agent.py в context.py.
 
 ### 2.1.0 — Supervisor Decomposition
 
