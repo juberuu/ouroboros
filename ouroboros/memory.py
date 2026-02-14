@@ -26,8 +26,9 @@ SCRATCHPAD_SECTIONS: Tuple[str, ...] = (
 class Memory:
     """Управление памятью Уробороса: scratchpad, identity, chat history, логи."""
 
-    def __init__(self, drive_root: pathlib.Path, **_kwargs: Any):
+    def __init__(self, drive_root: pathlib.Path, repo_dir: Optional[pathlib.Path] = None):
         self.drive_root = drive_root
+        self.repo_dir = repo_dir
 
     # --- Пути ---
 

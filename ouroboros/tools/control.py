@@ -1,4 +1,4 @@
-"""Управляющие инструменты: restart, promote, schedule, cancel, review, chat_history."""
+"""Управляющие инструменты: restart, promote, schedule, cancel, review, chat_history, update_scratchpad."""
 
 from __future__ import annotations
 
@@ -54,6 +54,15 @@ def _chat_history(ctx: ToolContext, count: int = 100, offset: int = 0, search: s
     return mem.chat_history(count=count, offset=offset, search=search)
 
 
+def _update_scratchpad(ctx: ToolContext, content: str) -> str:
+    """LLM-driven scratchpad update (Bible Principle 1: LLM-first)."""
+    from ouroboros.memory import Memory
+    mem = Memory(drive_root=ctx.drive_root)
+    mem.ensure_files()
+    mem.save_scratchpad(content)
+    return f"OK: scratchpad updated ({len(content)} chars)"
+
+
 def get_tools() -> List[ToolEntry]:
     return [
         ToolEntry("request_restart", {
@@ -92,4 +101,13 @@ def get_tools() -> List[ToolEntry]:
                 "search": {"type": "string", "default": "", "description": "Text filter"},
             }, "required": []},
         }, _chat_history),
+        ToolEntry("update_scratchpad", {
+            "name": "update_scratchpad",
+            "description": "Update your working memory (scratchpad). Write the full new content. "
+                           "Sections: CurrentProjects, OpenThreads, InvestigateLater, RecentEvidence. "
+                           "Call after significant tasks to persist what you learned.",
+            "parameters": {"type": "object", "properties": {
+                "content": {"type": "string", "description": "Full scratchpad content (markdown with ## sections)"},
+            }, "required": ["content"]},
+        }, _update_scratchpad),
     ]

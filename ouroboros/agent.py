@@ -1,16 +1,16 @@
 """
 Ouroboros agent core — thin orchestrator.
 
-Delegates to: tools.py (tool schemas/execution), llm.py (LLM calls),
-memory.py (scratchpad/identity), review.py (deep review).
+Delegates to: tools/ (tool schemas/execution), llm.py (LLM calls),
+memory.py (scratchpad/identity), review.py (code collection/metrics).
 """
 
 from __future__ import annotations
 
-import html
 import json
 import os
 import pathlib
+import queue
 import re
 import threading
 import time
@@ -26,11 +26,10 @@ from ouroboros.utils import (
     safe_relpath, truncate_for_log, clip_text, estimate_tokens,
     get_git_info, sanitize_task_for_event, sanitize_tool_args_for_log,
 )
-from ouroboros.llm import LLMClient, normalize_reasoning_effort, reasoning_rank
+from ouroboros.llm import LLMClient, normalize_reasoning_effort, reasoning_rank, add_usage
 from ouroboros.tools import ToolRegistry
 from ouroboros.tools.registry import ToolContext
 from ouroboros.memory import Memory
-from ouroboros.review import ReviewEngine
 
 
 # ---------------------------------------------------------------------------
@@ -71,13 +70,20 @@ class OuroborosAgent:
         self._current_chat_id: Optional[int] = None
         self._current_task_type: Optional[str] = None
 
+        # Message injection: owner can send messages while agent is busy
+        self._incoming_messages: queue.Queue = queue.Queue()
+        self._busy = False
+
         # SSOT modules
         self.llm = LLMClient()
         self.tools = ToolRegistry(repo_dir=env.repo_dir, drive_root=env.drive_root)
         self.memory = Memory(drive_root=env.drive_root, repo_dir=env.repo_dir)
-        self.review = ReviewEngine(llm=self.llm, repo_dir=env.repo_dir, drive_root=env.drive_root)
 
         self._log_worker_boot_once()
+
+    def inject_message(self, text: str) -> None:
+        """Thread-safe: inject owner message into the active conversation."""
+        self._incoming_messages.put(text)
 
     def _log_worker_boot_once(self) -> None:
         global _worker_boot_logged
@@ -124,6 +130,7 @@ class OuroborosAgent:
     # =====================================================================
 
     def handle_task(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
+        self._busy = True
         start_time = time.time()
         self._pending_events = []
         self._current_chat_id = int(task.get("chat_id") or 0) or None
@@ -155,10 +162,6 @@ class OuroborosAgent:
             pass
 
         try:
-            # Review tasks use dedicated pipeline
-            if str(task.get("type") or "") == "review":
-                return self._handle_review_task(task, start_time, drive_logs)
-
             # --- Build context ---
             base_prompt = self._safe_read(self.env.repo_path("prompts/SYSTEM.md"),
                                           fallback="You are Ouroboros. Your base prompt could not be loaded.")
@@ -210,6 +213,13 @@ class OuroborosAgent:
                 messages.append({"role": "system", "content": "## Recent events\n\n" + events_summary})
             if supervisor_summary:
                 messages.append({"role": "system", "content": "## Supervisor\n\n" + supervisor_summary})
+
+            # Review tasks: inject code snapshot + metrics into context
+            if str(task.get("type") or "") == "review":
+                review_ctx = self._build_review_context()
+                if review_ctx:
+                    messages.append({"role": "system", "content": review_ctx})
+
             messages.append({"role": "user", "content": task.get("text", "")})
 
             # Soft-cap token trimming
@@ -248,18 +258,11 @@ class OuroborosAgent:
                 "provider": "openrouter", "usage": usage, "ts": utc_now_iso(),
             })
 
-            # Memory update (best-effort)
-            self._update_memory_after_task(task, text, llm_trace)
-
-            # Send response via Telegram (direct HTML if possible)
-            direct_sent = self._try_direct_send(task, text)
-            text_for_supervisor = "\u200b" if direct_sent else self._strip_markdown(text)
-            if not text_for_supervisor or not text_for_supervisor.strip():
-                text_for_supervisor = "\u200b"
-
+            # Send response via supervisor (single path — Bible Principle 4: Minimalism)
             self._pending_events.append({
                 "type": "send_message", "chat_id": task["chat_id"],
-                "text": text_for_supervisor, "log_text": text or "",
+                "text": text or "\u200b", "log_text": text or "",
+                "format": "markdown",
                 "task_id": task.get("id"), "ts": utc_now_iso(),
             })
 
@@ -275,7 +278,6 @@ class OuroborosAgent:
                     "duration_sec": duration_sec,
                     "tool_calls": n_tool_calls,
                     "tool_errors": n_tool_errors,
-                    "direct_send_ok": direct_sent,
                     "response_len": len(text),
                 })
             except Exception:
@@ -295,6 +297,13 @@ class OuroborosAgent:
             return list(self._pending_events)
 
         finally:
+            self._busy = False
+            # Drain leftover injected messages
+            while not self._incoming_messages.empty():
+                try:
+                    self._incoming_messages.get_nowait()
+                except queue.Empty:
+                    break
             if typing_stop is not None:
                 typing_stop.set()
             if heartbeat_stop is not None:
@@ -319,7 +328,7 @@ class OuroborosAgent:
         active_effort = profile_cfg["effort"]
 
         llm_trace: Dict[str, Any] = {"assistant_notes": [], "tool_calls": []}
-        last_usage: Dict[str, Any] = {}
+        accumulated_usage: Dict[str, Any] = {}
         max_retries = 3
         soft_check_interval = 15
 
@@ -346,6 +355,14 @@ class OuroborosAgent:
         while True:
             round_idx += 1
 
+            # Inject owner messages received during task execution
+            while not self._incoming_messages.empty():
+                try:
+                    injected = self._incoming_messages.get_nowait()
+                    messages.append({"role": "user", "content": injected})
+                except queue.Empty:
+                    break
+
             # Self-check
             if round_idx > 1 and round_idx % soft_check_interval == 0:
                 messages.append({"role": "system", "content":
@@ -367,7 +384,7 @@ class OuroborosAgent:
                         reasoning_effort=active_effort,
                     )
                     msg = resp_msg
-                    last_usage = usage
+                    add_usage(accumulated_usage, usage)
                     break
                 except Exception as e:
                     last_error = e
@@ -383,7 +400,7 @@ class OuroborosAgent:
                 return (
                     f"⚠️ Не удалось получить ответ от модели после {max_retries} попыток.\n"
                     f"Ошибка: {last_error}"
-                ), last_usage, llm_trace
+                ), accumulated_usage, llm_trace
 
             tool_calls = msg.get("tool_calls") or []
             content = msg.get("content")
@@ -451,177 +468,49 @@ class OuroborosAgent:
             # No tool calls — final response
             if content and content.strip():
                 llm_trace["assistant_notes"].append(content.strip()[:320])
-            return (content or ""), last_usage, llm_trace
+            return (content or ""), accumulated_usage, llm_trace
 
-        return "", last_usage, llm_trace
+        return "", accumulated_usage, llm_trace
 
     # =====================================================================
-    # Review task
+    # Review context builder
     # =====================================================================
 
-    def _handle_review_task(
-        self, task: Dict[str, Any], start_time: float, drive_logs: pathlib.Path,
-    ) -> List[Dict[str, Any]]:
-        text = ""
-        usage: Dict[str, Any] = {}
-        llm_trace: Dict[str, Any] = {"assistant_notes": [], "tool_calls": []}
+    def _build_review_context(self) -> str:
+        """Collect code snapshot + complexity metrics for review tasks."""
         try:
-            text, usage, llm_trace = self.review.run_review(task)
+            from ouroboros.review import collect_sections, compute_complexity_metrics, format_metrics
+            sections, stats = collect_sections(self.env.repo_dir, self.env.drive_root)
+            metrics = compute_complexity_metrics(sections)
+
+            # Build a code snapshot string within token budget
+            parts = [
+                "## Code Review Context\n",
+                format_metrics(metrics),
+                f"\nFiles: {stats['files']}, chars: {stats['chars']}\n",
+                "\nUse repo_read to inspect specific files. "
+                "Use run_shell for tests. Key files below:\n",
+            ]
+
+            # Include file listing and short previews (cap total to ~80k chars)
+            total_chars = 0
+            max_chars = 80_000
+            for path, content in sections:
+                if total_chars >= max_chars:
+                    parts.append(f"\n... ({len(sections) - len(parts)} more files, use repo_read)")
+                    break
+                preview = content[:2000] if len(content) > 2000 else content
+                file_block = f"\n### {path}\n```\n{preview}\n```\n"
+                total_chars += len(file_block)
+                parts.append(file_block)
+
+            return "\n".join(parts)
         except Exception as e:
-            append_jsonl(drive_logs / "events.jsonl", {
-                "ts": utc_now_iso(), "type": "review_task_error",
-                "task_id": task.get("id"), "error": repr(e),
-            })
-            text = f"⚠️ REVIEW_ERROR: {type(e).__name__}: {e}"
-
-        if usage:
-            self._pending_events.append({
-                "type": "llm_usage", "task_id": task.get("id"),
-                "provider": "openrouter", "usage": usage, "ts": utc_now_iso(),
-            })
-
-        self._update_memory_after_task(task, text, llm_trace)
-        self._pending_events.append({
-            "type": "send_message", "chat_id": task["chat_id"],
-            "text": self._strip_markdown(text) if text else "\u200b",
-            "log_text": text or "", "task_id": task.get("id"), "ts": utc_now_iso(),
-        })
-
-        duration_sec = round(time.time() - start_time, 3)
-        append_jsonl(drive_logs / "events.jsonl", {
-            "ts": utc_now_iso(), "type": "task_eval", "ok": True,
-            "task_id": task.get("id"), "task_type": "review",
-            "duration_sec": duration_sec, "tool_calls": 0, "tool_errors": 0,
-        })
-
-        # Task metrics for supervisor
-        self._pending_events.append({
-            "type": "task_metrics",
-            "task_id": task.get("id"), "task_type": "review",
-            "duration_sec": duration_sec,
-            "tool_calls": 0, "tool_errors": 0,
-            "ts": utc_now_iso(),
-        })
-
-        self._pending_events.append({"type": "task_done", "task_id": task.get("id"), "ts": utc_now_iso()})
-        append_jsonl(drive_logs / "events.jsonl", {"ts": utc_now_iso(), "type": "task_done", "task_id": task.get("id")})
-        return list(self._pending_events)
+            return f"## Code Review Context\n\n(Failed to collect: {e})\nUse repo_read and repo_list to inspect code."
 
     # =====================================================================
-    # Memory update after task (deterministic, no extra LLM call)
+    # Text helpers
     # =====================================================================
-
-    def _update_memory_after_task(self, task: Dict[str, Any], final_text: str, llm_trace: Dict[str, Any]) -> None:
-        try:
-            self.memory.ensure_files()
-            delta = self._deterministic_scratchpad_delta(task, final_text, llm_trace)
-            current = self.memory.load_scratchpad()
-            merged = self.memory.parse_scratchpad(current)
-
-            # Apply delta
-            field_map = {
-                "CurrentProjects": "project_updates",
-                "OpenThreads": "open_threads",
-                "InvestigateLater": "investigate_later",
-                "RecentEvidence": "evidence_quotes",
-            }
-            limits = {"CurrentProjects": 12, "OpenThreads": 18, "InvestigateLater": 24, "RecentEvidence": 20}
-
-            for section, field in field_map.items():
-                new_items = delta.get(field) or []
-                combined = (merged.get(section) or []) + new_items
-                # Dedupe
-                seen: set[str] = set()
-                deduped: List[str] = []
-                for item in combined:
-                    key = re.sub(r"\s+", " ", item.strip()).lower()
-                    if key not in seen:
-                        seen.add(key)
-                        deduped.append(item)
-                merged[section] = deduped[:limits[section]]
-
-            new_text = self.memory.render_scratchpad(merged)
-            self.memory.save_scratchpad(new_text)
-            self.memory.append_journal({
-                "ts": utc_now_iso(), "task_id": task.get("id"),
-                "task_type": task.get("type"),
-                "task_text_preview": truncate_for_log(str(task.get("text") or ""), 600),
-                "delta": delta,
-            })
-        except Exception as e:
-            append_jsonl(self.env.drive_path("logs") / "events.jsonl", {
-                "ts": utc_now_iso(), "type": "memory_update_error",
-                "task_id": task.get("id"), "error": repr(e),
-            })
-
-    @staticmethod
-    def _deterministic_scratchpad_delta(
-        task: Dict[str, Any], final_text: str, llm_trace: Dict[str, Any],
-    ) -> Dict[str, List[str]]:
-        task_text = re.sub(r"\s+", " ", str(task.get("text") or "").strip())
-        answer = re.sub(r"\s+", " ", str(final_text or "").strip())
-
-        project_updates: List[str] = []
-        if task_text:
-            project_updates.append(f"Task: {task_text[:320]}")
-        if answer:
-            project_updates.append(f"Result: {answer[:320]}")
-
-        evidence_quotes: List[str] = []
-        open_threads: List[str] = []
-
-        for call in (llm_trace.get("tool_calls") or [])[:24]:
-            tool_name = str(call.get("tool") or "?")
-            result = str(call.get("result") or "")
-            is_error = bool(call.get("is_error"))
-            first_line = result.splitlines()[0].strip() if result else ""
-            if first_line:
-                if len(first_line) > 300:
-                    first_line = first_line[:297] + "..."
-                evidence_quotes.append(f"`{tool_name}` -> {first_line}")
-                if is_error or first_line.startswith("⚠️"):
-                    open_threads.append(f"Resolve {tool_name} issue: {first_line[:220]}")
-
-        return {
-            "project_updates": project_updates[:12],
-            "open_threads": open_threads[:16],
-            "investigate_later": [],
-            "evidence_quotes": evidence_quotes[:20],
-        }
-
-    # =====================================================================
-    # Telegram helpers
-    # =====================================================================
-
-    def _try_direct_send(self, task: Dict[str, Any], text: str) -> bool:
-        """Try to send formatted message directly via Telegram HTML. Returns True if successful."""
-        try:
-            chat_id = int(task["chat_id"])
-            chunks = self._chunk_markdown_for_telegram(text or "", max_chars=3200)
-            chunks = [c for c in chunks if isinstance(c, str) and c.strip()]
-            if not chunks:
-                return False
-
-            for md_part in chunks:
-                html_text = self._markdown_to_telegram_html(md_part)
-                ok, _ = self._telegram_api_post("sendMessage", {
-                    "chat_id": chat_id, "text": self._sanitize_telegram_text(html_text),
-                    "parse_mode": "HTML", "disable_web_page_preview": "1",
-                })
-                if not ok:
-                    # Fallback to plain text
-                    plain = self._strip_markdown(md_part)
-                    if not plain.strip():
-                        return False
-                    ok2, _ = self._telegram_api_post("sendMessage", {
-                        "chat_id": chat_id, "text": self._sanitize_telegram_text(plain),
-                        "disable_web_page_preview": "1",
-                    })
-                    if not ok2:
-                        return False
-            return True
-        except Exception:
-            return False
 
     @staticmethod
     def _strip_markdown(text: str) -> str:
@@ -629,87 +518,6 @@ class OuroborosAgent:
         text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
         text = re.sub(r"`([^`]+)`", r"\1", text)
         return text
-
-    @staticmethod
-    def _markdown_to_telegram_html(md: str) -> str:
-        md = md or ""
-        fence_re = re.compile(r"```[^\n]*\n([\s\S]*?)```", re.MULTILINE)
-        inline_code_re = re.compile(r"`([^`\n]+)`")
-        bold_re = re.compile(r"\*\*([^*\n]+)\*\*")
-
-        parts: list[str] = []
-        last = 0
-        for m in fence_re.finditer(md):
-            parts.append(md[last:m.start()])
-            code_esc = html.escape(m.group(1), quote=False)
-            parts.append(f"<pre><code>{code_esc}</code></pre>")
-            last = m.end()
-        parts.append(md[last:])
-
-        def _render_span(text: str) -> str:
-            out: list[str] = []
-            pos = 0
-            for mm in inline_code_re.finditer(text):
-                out.append(html.escape(text[pos:mm.start()], quote=False))
-                out.append(f"<code>{html.escape(mm.group(1), quote=False)}</code>")
-                pos = mm.end()
-            out.append(html.escape(text[pos:], quote=False))
-            return bold_re.sub(r"<b>\1</b>", "".join(out))
-
-        return "".join(_render_span(p) if not p.startswith("<pre><code>") else p for p in parts)
-
-    @staticmethod
-    def _sanitize_telegram_text(text: str) -> str:
-        if text is None:
-            return ""
-        text = text.replace("\r\n", "\n").replace("\r", "\n")
-        return "".join(
-            c for c in text
-            if (ord(c) >= 32 or c in ("\n", "\t")) and not (0xD800 <= ord(c) <= 0xDFFF)
-        )
-
-    @staticmethod
-    def _tg_utf16_len(text: str) -> int:
-        if not text:
-            return 0
-        return sum(2 if ord(c) > 0xFFFF else 1 for c in text)
-
-    @staticmethod
-    def _chunk_markdown_for_telegram(md: str, max_chars: int = 3500) -> List[str]:
-        md = md or ""
-        max_chars = max(256, min(4096, int(max_chars)))
-        lines = md.splitlines(keepends=True)
-        chunks: List[str] = []
-        cur = ""
-        in_fence = False
-        fence_open = "```\n"
-        fence_close = "```\n"
-
-        def _flush() -> None:
-            nonlocal cur
-            if cur and cur.strip():
-                chunks.append(cur)
-            cur = ""
-
-        for line in lines:
-            stripped = line.strip()
-            if stripped.startswith("```"):
-                in_fence = not in_fence
-                if in_fence:
-                    fence_open = line if line.endswith("\n") else (line + "\n")
-
-            reserve = OuroborosAgent._tg_utf16_len(fence_close) if in_fence else 0
-            if OuroborosAgent._tg_utf16_len(cur) + OuroborosAgent._tg_utf16_len(line) > max_chars - reserve:
-                if in_fence and cur:
-                    cur += fence_close
-                _flush()
-                cur = fence_open if in_fence else ""
-            cur += line
-
-        if in_fence:
-            cur += fence_close
-        _flush()
-        return chunks or [md]
 
     # =====================================================================
     # Event emission helpers

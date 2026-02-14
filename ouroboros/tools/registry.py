@@ -61,11 +61,20 @@ class ToolRegistry:
         self._load_modules()
 
     def _load_modules(self) -> None:
-        """Загрузить все встроенные модули инструментов."""
-        from ouroboros.tools import core, git, shell, search, control
-        for mod in [core, git, shell, search, control]:
-            for entry in mod.get_tools():
-                self._entries[entry.name] = entry
+        """Auto-discover tool modules in ouroboros/tools/ that export get_tools()."""
+        import importlib
+        import pkgutil
+        import ouroboros.tools as tools_pkg
+        for _importer, modname, _ispkg in pkgutil.iter_modules(tools_pkg.__path__):
+            if modname.startswith("_") or modname == "registry":
+                continue
+            try:
+                mod = importlib.import_module(f"ouroboros.tools.{modname}")
+                if hasattr(mod, "get_tools"):
+                    for entry in mod.get_tools():
+                        self._entries[entry.name] = entry
+            except Exception:
+                pass  # Skip broken modules so the agent can still boot
 
     def set_context(self, ctx: ToolContext) -> None:
         self._ctx = ctx

@@ -2,12 +2,13 @@
 Уроборос — LLM-клиент.
 
 Единственный модуль, который общается с LLM API (OpenRouter).
-Контракт: chat(), model_profile(), select_task_profile().
+Контракт: chat(), model_profile(), select_task_profile(), add_usage().
 """
 
 from __future__ import annotations
 
 import os
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -20,6 +21,14 @@ def normalize_reasoning_effort(value: str, default: str = "medium") -> str:
 def reasoning_rank(value: str) -> int:
     order = {"none": 0, "minimal": 1, "low": 2, "medium": 3, "high": 4, "xhigh": 5}
     return int(order.get(str(value or "").strip().lower(), 3))
+
+
+def add_usage(total: Dict[str, Any], usage: Dict[str, Any]) -> None:
+    """Accumulate usage from one LLM call into a running total."""
+    for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        total[k] = int(total.get(k) or 0) + int(usage.get(k) or 0)
+    if usage.get("cost"):
+        total["cost"] = float(total.get("cost") or 0) + float(usage["cost"])
 
 
 class LLMClient:
@@ -47,6 +56,29 @@ class LLMClient:
             )
         return self._client
 
+    def _fetch_generation_cost(self, generation_id: str) -> Optional[float]:
+        """Fetch cost from OpenRouter Generation API as fallback."""
+        try:
+            import requests
+            url = f"{self._base_url.rstrip('/')}/generation?id={generation_id}"
+            resp = requests.get(url, headers={"Authorization": f"Bearer {self._api_key}"}, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json().get("data") or {}
+                cost = data.get("total_cost") or data.get("usage", {}).get("cost")
+                if cost is not None:
+                    return float(cost)
+            # Generation might not be ready yet — retry once after short delay
+            time.sleep(0.5)
+            resp = requests.get(url, headers={"Authorization": f"Bearer {self._api_key}"}, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json().get("data") or {}
+                cost = data.get("total_cost") or data.get("usage", {}).get("cost")
+                if cost is not None:
+                    return float(cost)
+        except Exception:
+            pass
+        return None
+
     def chat(
         self,
         messages: List[Dict[str, Any]],
@@ -56,7 +88,7 @@ class LLMClient:
         max_tokens: int = 16384,
         tool_choice: str = "auto",
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """Один вызов LLM. Возвращает: (response_message_dict, usage_dict)."""
+        """Один вызов LLM. Возвращает: (response_message_dict, usage_dict с cost)."""
         client = self._get_client()
         effort = normalize_reasoning_effort(reasoning_effort)
 
@@ -74,6 +106,15 @@ class LLMClient:
         resp_dict = resp.model_dump()
         usage = resp_dict.get("usage") or {}
         msg = resp_dict.get("choices", [{}])[0].get("message", {})
+
+        # Ensure cost is present in usage (OpenRouter includes it, but fallback if missing)
+        if not usage.get("cost"):
+            gen_id = resp_dict.get("id") or ""
+            if gen_id:
+                cost = self._fetch_generation_cost(gen_id)
+                if cost is not None:
+                    usage["cost"] = cost
+
         return msg, usage
 
     def model_profile(self, profile: str) -> Dict[str, str]:

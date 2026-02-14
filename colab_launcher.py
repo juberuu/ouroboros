@@ -216,11 +216,13 @@ MAX_WORKERS = int(get_cfg("OUROBOROS_MAX_WORKERS", default="5", allow_legacy_sec
 MODEL_MAIN = get_cfg("OUROBOROS_MODEL", default="openai/gpt-5.2", allow_legacy_secret=True)
 MODEL_CODE = get_cfg("OUROBOROS_MODEL_CODE", default="openai/gpt-5.2-codex", allow_legacy_secret=True)
 
-BUDGET_REPORT_EVERY_MESSAGES = max(1, int(get_cfg("OUROBOROS_BUDGET_REPORT_EVERY_MESSAGES", default="10", allow_legacy_secret=True) or "10"))
+# Hardcoded defaults (Bible Principle 4: Minimalism — no env vars for rarely-changed values)
+BUDGET_REPORT_EVERY_MESSAGES = 10
+QUEUE_MAX_RETRIES = 1
+HEARTBEAT_STALE_SEC = 120
+# Timeouts are operationally important — keep configurable
 SOFT_TIMEOUT_SEC = max(60, int(get_cfg("OUROBOROS_SOFT_TIMEOUT_SEC", default="600", allow_legacy_secret=True) or "600"))
 HARD_TIMEOUT_SEC = max(120, int(get_cfg("OUROBOROS_HARD_TIMEOUT_SEC", default="1800", allow_legacy_secret=True) or "1800"))
-QUEUE_MAX_RETRIES = max(0, int(get_cfg("OUROBOROS_TASK_MAX_RETRIES", default="1", allow_legacy_secret=True) or "1"))
-HEARTBEAT_STALE_SEC = max(30, int(get_cfg("OUROBOROS_TASK_HEARTBEAT_STALE_SEC", default="120", allow_legacy_secret=True) or "120"))
 
 # Передаём необходимое воркерам через env (не выводить в логи)
 os.environ["OPENROUTER_API_KEY"] = str(OPENROUTER_API_KEY)
@@ -392,6 +394,8 @@ def save_state(st: Dict[str, Any]) -> None:
         _release_file_lock(STATE_LOCK_PATH, lock_fd)
 
 def append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> None:
+    # Simplified version for supervisor process (runs in main thread, no concurrency).
+    # See ouroboros/utils.py for the worker version with file locks and retries.
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
@@ -735,13 +739,16 @@ class TelegramClient:
                     time.sleep(0.8 * (attempt + 1))
         raise RuntimeError(f"Telegram getUpdates failed after retries: {last_err}")
 
-    def send_message(self, chat_id: int, text: str) -> Tuple[bool, str]:
+    def send_message(self, chat_id: int, text: str, parse_mode: str = "") -> Tuple[bool, str]:
         last_err = "unknown"
         for attempt in range(3):
             try:
+                payload: Dict[str, Any] = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
+                if parse_mode:
+                    payload["parse_mode"] = parse_mode
                 r = requests.post(
                     f"{self.base}/sendMessage",
-                    data={"chat_id": chat_id, "text": text, "disable_web_page_preview": True},
+                    data=payload,
                     timeout=30,
                 )
                 r.raise_for_status()
@@ -770,6 +777,120 @@ def split_telegram(text: str, limit: int = 3800) -> List[str]:
         s = s[cut:]
     chunks.append(s)
     return chunks
+
+
+# ---------------------------------------------------------------------------
+# Telegram formatting (single path — all formatting lives in supervisor)
+# ---------------------------------------------------------------------------
+
+def _sanitize_telegram_text(text: str) -> str:
+    if text is None:
+        return ""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return "".join(
+        c for c in text
+        if (ord(c) >= 32 or c in ("\n", "\t")) and not (0xD800 <= ord(c) <= 0xDFFF)
+    )
+
+
+def _tg_utf16_len(text: str) -> int:
+    if not text:
+        return 0
+    return sum(2 if ord(c) > 0xFFFF else 1 for c in text)
+
+
+def _strip_markdown(text: str) -> str:
+    text = re.sub(r"```[^\n]*\n([\s\S]*?)```", r"\1", text)
+    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    return text
+
+
+def _markdown_to_telegram_html(md: str) -> str:
+    import html as _html
+    md = md or ""
+    fence_re = re.compile(r"```[^\n]*\n([\s\S]*?)```", re.MULTILINE)
+    inline_code_re = re.compile(r"`([^`\n]+)`")
+    bold_re = re.compile(r"\*\*([^*\n]+)\*\*")
+
+    parts: list = []
+    last = 0
+    for m in fence_re.finditer(md):
+        parts.append(md[last:m.start()])
+        code_esc = _html.escape(m.group(1), quote=False)
+        parts.append(f"<pre><code>{code_esc}</code></pre>")
+        last = m.end()
+    parts.append(md[last:])
+
+    def _render_span(text: str) -> str:
+        out: list = []
+        pos = 0
+        for mm in inline_code_re.finditer(text):
+            out.append(_html.escape(text[pos:mm.start()], quote=False))
+            out.append(f"<code>{_html.escape(mm.group(1), quote=False)}</code>")
+            pos = mm.end()
+        out.append(_html.escape(text[pos:], quote=False))
+        return bold_re.sub(r"<b>\1</b>", "".join(out))
+
+    return "".join(_render_span(p) if not p.startswith("<pre><code>") else p for p in parts)
+
+
+def _chunk_markdown_for_telegram(md: str, max_chars: int = 3500) -> List[str]:
+    md = md or ""
+    max_chars = max(256, min(4096, int(max_chars)))
+    lines = md.splitlines(keepends=True)
+    chunks: List[str] = []
+    cur = ""
+    in_fence = False
+    fence_open = "```\n"
+    fence_close = "```\n"
+
+    def _flush() -> None:
+        nonlocal cur
+        if cur and cur.strip():
+            chunks.append(cur)
+        cur = ""
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            if in_fence:
+                fence_open = line if line.endswith("\n") else (line + "\n")
+
+        reserve = _tg_utf16_len(fence_close) if in_fence else 0
+        if _tg_utf16_len(cur) + _tg_utf16_len(line) > max_chars - reserve:
+            if in_fence and cur:
+                cur += fence_close
+            _flush()
+            cur = fence_open if in_fence else ""
+        cur += line
+
+    if in_fence:
+        cur += fence_close
+    _flush()
+    return chunks or [md]
+
+
+def _send_markdown_telegram(chat_id: int, text: str) -> Tuple[bool, str]:
+    """Send markdown text as Telegram HTML, with plain-text fallback."""
+    chunks = _chunk_markdown_for_telegram(text or "", max_chars=3200)
+    chunks = [c for c in chunks if isinstance(c, str) and c.strip()]
+    if not chunks:
+        return False, "empty_chunks"
+    last_err = "ok"
+    for md_part in chunks:
+        html_text = _markdown_to_telegram_html(md_part)
+        ok, err = TG.send_message(chat_id, _sanitize_telegram_text(html_text), parse_mode="HTML")
+        if not ok:
+            plain = _strip_markdown(md_part)
+            if not plain.strip():
+                return False, err
+            ok2, err2 = TG.send_message(chat_id, _sanitize_telegram_text(plain))
+            if not ok2:
+                return False, err2
+        last_err = err
+    return True, last_err
 
 def _format_budget_line(st: Dict[str, Any]) -> str:
     spent = float(st.get("spent_usd") or 0.0)
@@ -817,14 +938,13 @@ def log_chat(direction: str, chat_id: int, user_id: int, text: str) -> None:
         "text": text,
     })
 
-def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None, force_budget: bool = False) -> None:
+def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
+                     force_budget: bool = False, fmt: str = "") -> None:
     st = load_state()
     owner_id = int(st.get("owner_id") or 0)
     log_chat("out", chat_id, owner_id, text if log_text is None else log_text)
     budget = budget_line(force=force_budget)
     _text = str(text or "")
-    # If we already sent the main message directly from the worker, it may pass a zero-width space (\u200b)
-    # to ask the supervisor to send only the budget line. If budget is not due, skip sending to avoid blank messages.
     if not budget:
         if _text.strip() in ("", "\u200b"):
             return
@@ -835,6 +955,24 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None, fo
             full = budget
         else:
             full = base + "\n\n" + budget
+
+    # Markdown-formatted messages get sent as Telegram HTML (single formatting path)
+    if fmt == "markdown":
+        ok, err = _send_markdown_telegram(chat_id, full)
+        if not ok:
+            append_jsonl(
+                DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "type": "telegram_send_error",
+                    "chat_id": chat_id,
+                    "error": err,
+                    "format": "markdown",
+                },
+            )
+        return
+
+    # Plain text path (supervisor commands, system messages)
     for idx, part in enumerate(split_telegram(full)):
         ok, err = TG.send_message(chat_id, part)
         if not ok:
@@ -1048,7 +1186,6 @@ def kill_workers() -> None:
 def assign_tasks() -> None:
     for w in WORKERS.values():
         if w.busy_task_id is None and PENDING:
-            _sort_pending()
             task = PENDING.pop(0)
             w.busy_task_id = task["id"]
             w.in_q.put(task)
@@ -1168,8 +1305,8 @@ def enqueue_evolution_task_if_needed() -> None:
 
 # ----------------------------
 # Прямой чат (Принцип 1: Уроборос — собеседник, не система заявок)
+# Message injection: если агент занят, новые сообщения инъецируются в текущий диалог.
 # ----------------------------
-_chat_lock = threading.Lock()
 _chat_agent = None
 
 def _get_chat_agent():
@@ -1193,37 +1330,36 @@ def _reset_chat_agent() -> None:
 def _handle_chat_direct(chat_id: int, text: str) -> None:
     """Прямой диалог с Уроборосом — без очереди, без воркеров.
 
-    Работает в отдельном потоке. Сериализовано через _chat_lock.
-    Фоновые задачи (эволюция, review) по-прежнему идут через воркеры.
+    Работает в отдельном потоке. busy flag на агенте предотвращает
+    параллельный запуск — новые сообщения инъецируются через inject_message.
     """
-    with _chat_lock:
+    try:
+        agent = _get_chat_agent()
+        task = {
+            "id": uuid.uuid4().hex[:8],
+            "type": "task",
+            "chat_id": chat_id,
+            "text": text,
+        }
+        events = agent.handle_task(task)
+        for e in events:
+            EVENT_Q.put(e)
+    except Exception as e:
+        import traceback
+        err_msg = f"⚠️ Ошибка: {type(e).__name__}: {e}"
+        append_jsonl(
+            DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "direct_chat_error",
+                "error": repr(e),
+                "traceback": str(traceback.format_exc())[:2000],
+            },
+        )
         try:
-            agent = _get_chat_agent()
-            task = {
-                "id": uuid.uuid4().hex[:8],
-                "type": "task",
-                "chat_id": chat_id,
-                "text": text,
-            }
-            events = agent.handle_task(task)
-            for e in events:
-                EVENT_Q.put(e)
-        except Exception as e:
-            import traceback
-            err_msg = f"⚠️ Ошибка: {type(e).__name__}: {e}"
-            append_jsonl(
-                DRIVE_ROOT / "logs" / "supervisor.jsonl",
-                {
-                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                    "type": "direct_chat_error",
-                    "error": repr(e),
-                    "traceback": str(traceback.format_exc())[:2000],
-                },
-            )
-            try:
-                TG.send_message(chat_id, err_msg)
-            except Exception:
-                pass
+            TG.send_message(chat_id, err_msg)
+        except Exception:
+            pass
 
 def respawn_worker(wid: int) -> None:
     in_q = CTX.Queue()
@@ -1529,10 +1665,12 @@ while True:
         if et == "send_message":
             try:
                 _log_text = evt.get("log_text")
+                _fmt = str(evt.get("format") or "")
                 send_with_budget(
                     int(evt["chat_id"]),
                     str(evt.get("text") or ""),
                     log_text=(str(_log_text) if isinstance(_log_text, str) else None),
+                    fmt=_fmt,
                 )
             except Exception as e:
                 append_jsonl(
@@ -1823,12 +1961,18 @@ while True:
                 send_with_budget(chat_id, "🛑 Эволюция: OFF.")
             continue
 
-        # Все остальные сообщения → прямой диалог с Уробороса (Принцип 1: собеседник)
-        threading.Thread(
-            target=_handle_chat_direct,
-            args=(chat_id, text),
-            daemon=True,
-        ).start()
+        # Все остальные сообщения → прямой диалог с Уроборосом (Принцип 1: собеседник)
+        # Если агент занят — инъецируем сообщение в текущий диалог (message injection).
+        # LLM увидит его в следующем раунде и сама решит как реагировать (LLM-first).
+        agent = _get_chat_agent()
+        if agent._busy:
+            agent.inject_message(text)
+        else:
+            threading.Thread(
+                target=_handle_chat_direct,
+                args=(chat_id, text),
+                daemon=True,
+            ).start()
 
     st = load_state()
     st["tg_offset"] = offset

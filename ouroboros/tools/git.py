@@ -134,9 +134,12 @@ def _git_status(ctx: ToolContext) -> str:
         return f"⚠️ GIT_ERROR: {e}"
 
 
-def _git_diff(ctx: ToolContext) -> str:
+def _git_diff(ctx: ToolContext, staged: bool = False) -> str:
     try:
-        return run_cmd(["git", "diff"], cwd=ctx.repo_dir)
+        cmd = ["git", "diff"]
+        if staged:
+            cmd.append("--staged")
+        return run_cmd(cmd, cwd=ctx.repo_dir)
     except Exception as e:
         return f"⚠️ GIT_ERROR: {e}"
 
@@ -167,7 +170,9 @@ def get_tools() -> List[ToolEntry]:
         }, _git_status, is_code_tool=True),
         ToolEntry("git_diff", {
             "name": "git_diff",
-            "description": "git diff",
-            "parameters": {"type": "object", "properties": {}, "required": []},
+            "description": "git diff (use staged=true to see staged changes after git add)",
+            "parameters": {"type": "object", "properties": {
+                "staged": {"type": "boolean", "default": False, "description": "If true, show staged changes (--staged)"},
+            }, "required": []},
         }, _git_diff, is_code_tool=True),
     ]
