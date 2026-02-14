@@ -153,6 +153,73 @@ def apply_message_token_soft_cap(
     return pruned, info
 
 
+def compact_tool_history(messages: list, keep_recent: int = 6) -> list:
+    """
+    Compress old tool call/result message pairs into compact summaries.
+
+    Keeps the last `keep_recent` tool-call rounds intact (they may be
+    referenced by the LLM). Older rounds get their tool results truncated
+    to a short summary line.
+
+    This dramatically reduces prompt tokens in long tool-use conversations
+    without losing important context (the tool names and whether they succeeded
+    are preserved).
+    """
+    # Find all indices that are tool-call assistant messages
+    # (messages with tool_calls field)
+    tool_round_starts = []
+    for i, msg in enumerate(messages):
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            tool_round_starts.append(i)
+
+    if len(tool_round_starts) <= keep_recent:
+        return messages  # Nothing to compact
+
+    # Rounds to compact: all except the last keep_recent
+    rounds_to_compact = set(tool_round_starts[:-keep_recent])
+
+    # Build compacted message list
+    result = []
+    for i, msg in enumerate(messages):
+        if msg.get("role") == "tool" and i > 0:
+            # Check if the preceding assistant message (with tool_calls)
+            # is one we want to compact
+            # Find which round this tool result belongs to
+            parent_round = None
+            for rs in reversed(tool_round_starts):
+                if rs < i:
+                    parent_round = rs
+                    break
+
+            if parent_round is not None and parent_round in rounds_to_compact:
+                # Compact this tool result
+                content = str(msg.get("content") or "")
+                is_error = content.startswith("⚠️")
+                # Create a short summary
+                if is_error:
+                    summary = content[:200]  # Keep error details
+                else:
+                    # Keep first line or first 80 chars
+                    first_line = content.split('\n')[0][:120]
+                    char_count = len(content)
+                    summary = f"{first_line}... ({char_count} chars)" if char_count > 120 else content[:200]
+
+                result.append({**msg, "content": summary})
+                continue
+
+        # For compacted assistant messages, also trim the content (progress notes)
+        if i in rounds_to_compact and msg.get("role") == "assistant":
+            content = msg.get("content") or ""
+            if len(content) > 200:
+                content = content[:200] + "..."
+            result.append({**msg, "content": content})
+            continue
+
+        result.append(msg)
+
+    return result
+
+
 def _safe_read(path: pathlib.Path, fallback: str = "") -> str:
     """Read a file, returning fallback if it doesn't exist or errors."""
     try:

@@ -27,7 +27,7 @@ from ouroboros.llm import LLMClient, normalize_reasoning_effort, reasoning_rank,
 from ouroboros.tools import ToolRegistry
 from ouroboros.tools.registry import ToolContext
 from ouroboros.memory import Memory
-from ouroboros.context import build_llm_messages
+from ouroboros.context import build_llm_messages, compact_tool_history
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +308,10 @@ class OuroborosAgent:
                 _maybe_raise_effort("high")
             if round_idx >= 10:
                 _maybe_raise_effort("xhigh")
+
+            # Compact old tool history to save tokens on long conversations
+            if round_idx > 1:
+                messages = compact_tool_history(messages, keep_recent=6)
 
             # --- LLM call with retry ---
             msg = None
