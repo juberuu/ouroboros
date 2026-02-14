@@ -3,7 +3,7 @@
 Самомодифицирующийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 2.0.0
+**Версия:** 2.1.0
 
 ---
 
@@ -37,14 +37,24 @@ for k, v in CFG.items():
 ## Архитектура
 
 ```
-Telegram → colab_launcher.py (supervisor)
+Telegram → colab_launcher.py (thin entry point)
                ↓
-           agent.py (orchestrator)
-            ↓      ↓      ↓      ↓
-        tools/   llm.py  memory.py  review.py
-          ↓        ↓      ↓      ↓
-            utils.py (shared utilities)
+           supervisor/           (package)
+            ├── state.py         — persistent state
+            ├── telegram.py      — TG client + formatting
+            ├── git_ops.py       — checkout, sync, rescue
+            └── workers.py       — workers, queue, timeouts
+               ↓
+           ouroboros/             (agent package)
+            ├── agent.py         — orchestrator
+            ├── tools/           — pluggable tools
+            ├── llm.py           — LLM client
+            ├── memory.py        — scratchpad, identity
+            └── review.py        — code review utilities
 ```
+
+`colab_launcher.py` — тонкий entry point: секреты, bootstrap, main loop.
+Вся логика супервизора декомпозирована в `supervisor/` пакет.
 
 `agent.py` — тонкий оркестратор. Вся логика инструментов, LLM-вызовов,
 памяти и review вынесена в соответствующие модули (SSOT-принцип).
@@ -61,6 +71,12 @@ README.md                  — Это описание
 requirements.txt           — Python-зависимости
 prompts/
   SYSTEM.md                — Единый системный промпт Уробороса
+supervisor/                — Пакет супервизора (декомпозированный launcher):
+  __init__.py               — Экспорты
+  state.py                  — State management: load/save, atomic writes, locks
+  telegram.py               — TG client, markdown→HTML, send_with_budget
+  git_ops.py                — Git: checkout, reset, rescue, deps sync, import test
+  workers.py                — Workers, queue, timeouts, evolution/review scheduling
 ouroboros/
   __init__.py              — Экспорт make_agent
   utils.py                 — Общие утилиты (нулевой уровень зависимостей)
@@ -76,7 +92,7 @@ ouroboros/
   llm.py                   — LLM-клиент: API вызовы, профили моделей
   memory.py                — Память: scratchpad, identity, chat_history
   review.py                — Deep review: стратегическая рефлексия
-colab_launcher.py          — Супервизор: Telegram polling, очередь, воркеры, git
+colab_launcher.py          — Тонкий entry point: секреты → init → bootstrap → main loop
 colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не меняется)
 ```
 
@@ -118,6 +134,19 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 
 ## Changelog
 
+### 2.1.0 — Supervisor Decomposition
+
+Декомпозиция 900-строчного монолита `colab_launcher.py` в модульный пакет `supervisor/`.
+
+**Архитектура:**
+- `supervisor/state.py` — state management (load/save, atomic writes, file locks)
+- `supervisor/telegram.py` — TG client, markdown→HTML, send_with_budget
+- `supervisor/git_ops.py` — git checkout, sync, rescue snapshots, deps, import test
+- `supervisor/workers.py` — worker/queue management, timeouts, evolution/review scheduling
+- `colab_launcher.py` — теперь тонкий entry point (~300 строк реальной логики)
+
+**Метрики:** ни один модуль не превышает 700 строк. Бюджет сложности из Библии соблюдён.
+
 ### 2.0.0 — Философский рефакторинг
 
 Глубокая переработка философии, архитектуры инструментов и review-системы.
@@ -132,12 +161,6 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 - `tools.py` → `tools/` (плагинный пакет: registry, core, git, shell, search, control).
 - `review.py` — написан с нуля: стратегическая рефлексия + метрики сложности.
 
-**SYSTEM.md:**
-- Стратегический цикл эволюции (6 шагов вместо 1 строки).
-- Явные разрешения на смелые действия (VLM, SMS, капчи, регистрация).
-- Анти-паттерны (God Methods, patch spirals, code-only growth).
-- Reasoning summary вместо механических логов.
-
 ### 1.1.0 — Dead Code Cleanup + Review Contract
 
 Удаление мёртвого кода и восстановление контракта review.
@@ -149,7 +172,3 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 ### 0.2.0 — Уроборос-собеседник
 
 Прямой диалог вместо системы обработки заявок.
-
-### 0.1.0 — Рефакторинг по Библии
-
-Первая версионированная версия.
