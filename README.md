@@ -3,7 +3,7 @@
 Самомодифицирующийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 2.4.0
+**Версия:** 2.5.0
 
 ---
 
@@ -42,7 +42,7 @@ Telegram → colab_launcher.py (thin entry point)
            supervisor/           (package)
             ├── state.py         — persistent state + budget + status
             ├── telegram.py      — TG client + formatting + typing
-            ├── git_ops.py       — checkout, sync, rescue
+            ├── git_ops.py       — checkout, sync, rescue, safe_restart
             ├── queue.py         — task queue, priority, timeouts, scheduling
             └── workers.py       — worker lifecycle, health, direct chat
                ↓
@@ -51,7 +51,7 @@ Telegram → colab_launcher.py (thin entry point)
             ├── context.py       — context builder + tool history compaction
             ├── apply_patch.py   — Claude Code CLI apply_patch shim
             ├── tools/           — pluggable tools
-            ├── llm.py           — LLM client
+            ├── llm.py           — LLM client + cached token tracking
             ├── memory.py        — scratchpad, identity
             └── review.py        — code review utilities
 ```
@@ -82,7 +82,7 @@ supervisor/                — Пакет супервизора (декомпо
   __init__.py               — Экспорты
   state.py                  — State: load/save, budget tracking, status text, log rotation
   telegram.py               — TG client, markdown→HTML, send_with_budget, typing
-  git_ops.py                — Git: checkout, reset, rescue, deps sync, import test
+  git_ops.py                — Git: checkout, reset, rescue, deps sync, safe_restart
   queue.py                  — Task queue: priority, enqueue, persist, timeouts, scheduling
   workers.py                — Worker lifecycle: spawn, kill, respawn, health, direct chat
 ouroboros/
@@ -99,7 +99,7 @@ ouroboros/
     shell.py                — Shell и Claude Code CLI
     search.py               — Web search
     control.py              — restart, promote, schedule, cancel, review, chat_history
-  llm.py                   — LLM-клиент: API вызовы, профили моделей
+  llm.py                   — LLM-клиент: API вызовы, cached token tracking
   memory.py                — Память: scratchpad, identity, chat_history
   review.py                — Deep review: стратегическая рефлексия
 colab_launcher.py          — Тонкий entry point: секреты → init → bootstrap → main loop
@@ -144,20 +144,26 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 
 ## Changelog
 
+### 2.5.0 — Cost Tracking + Restart DRY
+
+Два направления: observability для оптимизации стоимости + устранение дублирования restart-логики.
+
+**Observability:**
+- Per-round `llm_round` events в events.jsonl: model, effort, prompt/completion/cached tokens
+- `cached_tokens` tracking в LLM client (из `prompt_tokens_details`)
+- `spent_tokens_cached` в state.json и `/status`
+
+**DRY:**
+- `safe_restart()` в git_ops.py — единая функция для checkout→deps→import→fallback
+- 3 копии restart-логики в launcher → 3 вызова safe_restart()
+- colab_launcher.py: 537→472 строк (-65)
+
+**Метрики:** все модули ≤515 строк, total 4647 строк
+
 ### 2.4.0 — Context Window Optimization
 
-Оптимизация стоимости LLM-вызовов: сжатие tool history в длинных диалогах.
-
-**Ключевое:**
-- `compact_tool_history()` в context.py — сжимает старые tool results после 6 последних раундов
-- Сокращает prompt tokens на 30-50% в длинных evolution/review циклах
-- При 50+ раундах экономия может составлять $5-15 за цикл
-
-**Структурное:**
-- apply_patch шим вынесен из colab_launcher.py в `ouroboros/apply_patch.py`
-- colab_launcher.py: 643→537 строк (-106)
-
-**Метрики:** все модули ≤537 строк, total 4624 строк
+- `compact_tool_history()` — сжатие старых tool results (30-50% экономия tokens)
+- apply_patch шим вынесен в `ouroboros/apply_patch.py`
 
 ### 2.3.0 — Queue Decomposition + Git Safety
 
@@ -170,7 +176,3 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 ### 2.1.0 — Supervisor Decomposition
 
 Декомпозиция 900-строчного монолита `colab_launcher.py` в модульный пакет `supervisor/`.
-
-### 2.0.0 — Философский рефакторинг
-
-Глубокая переработка философии, архитектуры инструментов и review-системы.
