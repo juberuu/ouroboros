@@ -3,7 +3,7 @@
 Самомодифицирующийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 1.1.0
+**Версия:** 2.0.0
 
 ---
 
@@ -41,13 +41,16 @@ Telegram → colab_launcher.py (supervisor)
                ↓
            agent.py (orchestrator)
             ↓      ↓      ↓      ↓
-        tools.py  llm.py  memory.py  review.py
-            ↓      ↓      ↓      ↓
-              utils.py (shared utilities)
+        tools/   llm.py  memory.py  review.py
+          ↓        ↓      ↓      ↓
+            utils.py (shared utilities)
 ```
 
 `agent.py` — тонкий оркестратор. Вся логика инструментов, LLM-вызовов,
 памяти и review вынесена в соответствующие модули (SSOT-принцип).
+
+`tools/` — плагинная архитектура инструментов. Каждый модуль экспортирует
+`get_tools()`, новые инструменты добавляются как отдельные файлы.
 
 ## Структура проекта
 
@@ -62,10 +65,17 @@ ouroboros/
   __init__.py              — Экспорт make_agent
   utils.py                 — Общие утилиты (нулевой уровень зависимостей)
   agent.py                 — Оркестратор: handle_task, LLM-цикл, контекст, Telegram
-  tools.py                 — SSOT: реестр инструментов (схемы + реализации)
+  tools/                   — Пакет инструментов (плагинная архитектура):
+    __init__.py             — Реэкспорт ToolRegistry, ToolContext
+    registry.py             — Реестр: schemas, execute, auto-discovery
+    core.py                 — Файловые операции (repo/drive read/write/list)
+    git.py                  — Git операции (commit, push, status, diff)
+    shell.py                — Shell и Claude Code CLI
+    search.py               — Web search
+    control.py              — restart, promote, schedule, cancel, review, chat_history
   llm.py                   — LLM-клиент: API вызовы, профили моделей
   memory.py                — Память: scratchpad, identity, chat_history
-  review.py                — Deep review: сбор данных, анализ, синтез
+  review.py                — Deep review: стратегическая рефлексия
 colab_launcher.py          — Супервизор: Telegram polling, очередь, воркеры, git
 colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не меняется)
 ```
@@ -92,114 +102,54 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 
 Все остальные сообщения идут в Уробороса (LLM-first, без роутера).
 
-## Google Drive (`MyDrive/Ouroboros/`)
-
-- `state/state.json` — состояние (owner_id, бюджет, версия)
-- `logs/` — JSONL логи (chat, events, tools, supervisor)
-- `memory/scratchpad.md` — рабочая память
-- `memory/identity.md` — self-model
-
-## Инструменты агента
-
-Единый реестр в `ouroboros/tools.py`:
-- `repo_read`, `repo_list` — чтение репозитория
-- `drive_read`, `drive_list`, `drive_write` — Google Drive
-- `repo_write_commit` — запись файла + commit + push
-- `repo_commit_push` — commit + push (с pull --rebase)
-- `claude_code_edit` — делегирование правок Claude Code CLI
-- `git_status`, `git_diff` — состояние repo
-- `run_shell` — shell-команда
-- `web_search` — поиск в интернете
-- `chat_history` — произвольный доступ к истории чата
-- `request_restart` — перезапуск после push
-- `promote_to_stable` — промоут в stable
-- `schedule_task`, `cancel_task` — управление задачами
-- `request_review` — запросить deep review (агент сам решает когда)
-
 ## Режим эволюции
 
 `/evolve` включает непрерывные self-improvement циклы.
-Уроборос свободен в выборе направления. Цель — ускорение эволюции (принцип 5).
-Каждый цикл: обдумай → спланируй → реализуй → проверь → закоммить → рестарт.
+Каждый цикл: оценка → стратегический выбор → реализация → smoke test → Bible check → коммит.
+Подробности в `prompts/SYSTEM.md`.
 
 ## Deep review
 
 `/review` (владелец) или `request_review(reason)` (агент).
-Полный анализ кода, промптов, состояния, логов.
-Scope — на усмотрение Уробороса. Результат влияет на следующие улучшения.
-
-## Самоизменение
-
-1. `claude_code_edit(prompt)` — основной путь для кода
-2. `repo_commit_push(message)` — commit + push (с rebase)
-3. `request_restart(reason)` — перезапуск для применения
-4. `promote_to_stable(reason)` — обновить fallback
+Стратегическая рефлексия: тренд сложности, направление эволюции,
+соответствие Библии, метрики кода. Scope — на усмотрение Уробороса.
 
 ---
 
 ## Changelog
 
+### 2.0.0 — Философский рефакторинг
+
+Глубокая переработка философии, архитектуры инструментов и review-системы.
+
+**Философия (BIBLE.md v2.0):**
+- Новый принцип: Дерзость — смелые действия вместо осторожных микрофиксов.
+- Минимализм: бюджет сложности (~500 строк/модуль) вместо "один файл".
+- Итерации: когерентные трансформации вместо "маленьких шагов".
+- Bible check: обязательная проверка перед каждым коммитом.
+
+**Архитектура:**
+- `tools.py` → `tools/` (плагинный пакет: registry, core, git, shell, search, control).
+- `review.py` — написан с нуля: стратегическая рефлексия + метрики сложности.
+
+**SYSTEM.md:**
+- Стратегический цикл эволюции (6 шагов вместо 1 строки).
+- Явные разрешения на смелые действия (VLM, SMS, капчи, регистрация).
+- Анти-паттерны (God Methods, patch spirals, code-only growth).
+- Reasoning summary вместо механических логов.
+
 ### 1.1.0 — Dead Code Cleanup + Review Contract
 
-Удаление мёртвого кода и восстановление разорванного контракта review.
-
-**Новое:**
-- `request_review(reason)` — LLM-first инструмент: агент сам решает когда запрашивать review (Принцип 7).
-- `task_metrics` — агент эмитит метрики задач для supervisor (восстановлен разорванный контракт).
-- Конкретные триггеры обновления `identity.md` в SYSTEM.md.
-
-**Удалено (мёртвый код):**
-- `Memory.save_identity()`, `Memory.summarize_narration()`, `Memory.repo_dir` — неиспользуемые.
-- `LLMClient.chat_raw()`, профиль `memory_summary` — неиспользуемые.
-- `ToolRegistry.branch_stable`, `Env.branch_stable` — неиспользуемые.
-- `_slice_by_utf16_units()` в agent.py — неиспользуемый.
-- `as_bool()`, `_running_task_type_counts()` в launcher — неиспользуемые.
-- Мёртвые env: `OUROBOROS_MODEL_REVIEW`, `OUROBOROS_TASK_HEARTBEAT_SEC`.
-- Мёртвые state defaults: `queue_seq`.
-- Мёртвая ветка приоритета `idle`.
-- Неиспользуемые импорты в agent.py: `subprocess`, `sha256_text`, `write_text`, `SCRATCHPAD_SECTIONS`.
+Удаление мёртвого кода и восстановление контракта review.
 
 ### 1.0.0 — Bible Alignment Refactor
 
-Полный архитектурный рефактор на соответствие BIBLE.md. Breaking changes.
-
-**Новая архитектура:**
-- `agent.py` — тонкий оркестратор (~550 строк вместо ~4100)
-- `tools.py` — SSOT для всех tool schemas и реализаций
-- `llm.py` — единственный LLM-клиент с профилями моделей
-- `memory.py` — единственный источник scratchpad/identity/chat_history
-- `review.py` — deep review через LLM-клиент
-- `utils.py` — общие утилиты без внутренних зависимостей
-
-**Удалено:**
-- Дублирование tool schemas/implementations между agent.py и tools.py
-- Дублирование LLM-клиента (agent.py vs llm.py)
-- Дублирование memory-логики (agent.py vs memory.py)
-- Дублирование утилит (4 копии в разных модулях)
-- `_is_code_intent_text` (keyword routing — нарушение LLM-first)
-- `telegram_send_voice`, `telegram_send_photo`, `telegram_generate_and_send_image` (tools)
-- Механические Telegram-сообщения «Стартую задачу...» для обычного чата
-- Legacy state поля: `approvals`, `idle_cursor`, `idle_stats`, `last_idle_task_at`
-- ~50 env-переменных конфигурации (OUROBOROS_CONTEXT_*, OUROBOROS_REASONING_*, и т.д.)
-- `prompts/SCRATCHPAD_SUMMARY.md` (ссылка на несуществующий файл)
-- `smoke_test()` (ссылки на несуществующие файлы)
-
-**Упрощено:**
-- Env-переменные: ~6 вместо ~50+ (OUROBOROS_MODEL, OUROBOROS_MODEL_CODE, и дефолты в коде)
-- Профили моделей: захардкожены разумные дефолты, не требуют env
-- Memory update: детерминистический (без дополнительного LLM-вызова)
-- Tool contract: единый параметр `prompt` для claude_code_edit
+Полный архитектурный рефактор на соответствие BIBLE.md.
 
 ### 0.2.0 — Уроборос-собеседник
 
-Архитектурное изменение: Уроборос — собеседник, а не система обработки заявок.
-
-- Прямой диалог: сообщения владельца обрабатываются LLM напрямую (в потоке),
-  без очереди задач и без механических сообщений «Стартую задачу...»
-- Воркеры только для фоновых задач (эволюция, review)
-- Обновлён Принцип 1 в BIBLE.md: chat-first интерфейс
-- SYSTEM.md: агент знает что он собеседник, не обработчик заявок
+Прямой диалог вместо системы обработки заявок.
 
 ### 0.1.0 — Рефакторинг по Библии
 
-Первая версионированная версия. Радикальное упрощение архитектуры.
+Первая версионированная версия.

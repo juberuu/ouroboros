@@ -1,0 +1,98 @@
+"""
+Уроборос — Реестр инструментов (SSOT).
+
+Плагинная архитектура: каждый модуль в tools/ экспортирует get_tools().
+ToolRegistry собирает все инструменты, предоставляет schemas() и execute().
+"""
+
+from __future__ import annotations
+
+import json
+import pathlib
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional
+
+from ouroboros.utils import safe_relpath
+
+
+@dataclass
+class ToolContext:
+    """Контекст выполнения инструмента — передаётся из агента перед каждой задачей."""
+
+    repo_dir: pathlib.Path
+    drive_root: pathlib.Path
+    branch_dev: str = "ouroboros"
+    pending_events: List[Dict[str, Any]] = field(default_factory=list)
+    current_chat_id: Optional[int] = None
+    current_task_type: Optional[str] = None
+    last_push_succeeded: bool = False
+    emit_progress_fn: Callable[[str], None] = field(default=lambda _: None)
+
+    def repo_path(self, rel: str) -> pathlib.Path:
+        return (self.repo_dir / safe_relpath(rel)).resolve()
+
+    def drive_path(self, rel: str) -> pathlib.Path:
+        return (self.drive_root / safe_relpath(rel)).resolve()
+
+    def drive_logs(self) -> pathlib.Path:
+        return (self.drive_root / "logs").resolve()
+
+
+@dataclass
+class ToolEntry:
+    """Описание одного инструмента: имя, schema, handler, метаданные."""
+
+    name: str
+    schema: Dict[str, Any]
+    handler: Callable  # fn(ctx: ToolContext, **args) -> str
+    is_code_tool: bool = False
+
+
+class ToolRegistry:
+    """Реестр инструментов Уробороса (SSOT).
+
+    Добавить инструмент: создать модуль в ouroboros/tools/,
+    экспортировать get_tools() -> List[ToolEntry].
+    """
+
+    def __init__(self, repo_dir: pathlib.Path, drive_root: pathlib.Path):
+        self._entries: Dict[str, ToolEntry] = {}
+        self._ctx = ToolContext(repo_dir=repo_dir, drive_root=drive_root)
+        self._load_modules()
+
+    def _load_modules(self) -> None:
+        """Загрузить все встроенные модули инструментов."""
+        from ouroboros.tools import core, git, shell, search, control
+        for mod in [core, git, shell, search, control]:
+            for entry in mod.get_tools():
+                self._entries[entry.name] = entry
+
+    def set_context(self, ctx: ToolContext) -> None:
+        self._ctx = ctx
+
+    def register(self, entry: ToolEntry) -> None:
+        """Зарегистрировать новый инструмент (для расширения Уроборосом)."""
+        self._entries[entry.name] = entry
+
+    # --- Контракт ---
+
+    def available_tools(self) -> List[str]:
+        return [e.name for e in self._entries.values()]
+
+    def schemas(self) -> List[Dict[str, Any]]:
+        return [{"type": "function", "function": e.schema} for e in self._entries.values()]
+
+    def execute(self, name: str, args: Dict[str, Any]) -> str:
+        entry = self._entries.get(name)
+        if entry is None:
+            return f"⚠️ Unknown tool: {name}. Available: {', '.join(sorted(self._entries.keys()))}"
+        try:
+            return entry.handler(self._ctx, **args)
+        except TypeError as e:
+            return f"⚠️ TOOL_ARG_ERROR ({name}): {e}"
+        except Exception as e:
+            return f"⚠️ TOOL_ERROR ({name}): {e}"
+
+    @property
+    def CODE_TOOLS(self) -> frozenset:
+        return frozenset(e.name for e in self._entries.values() if e.is_code_tool)

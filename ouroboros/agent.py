@@ -27,7 +27,8 @@ from ouroboros.utils import (
     get_git_info, sanitize_task_for_event, sanitize_tool_args_for_log,
 )
 from ouroboros.llm import LLMClient, normalize_reasoning_effort, reasoning_rank
-from ouroboros.tools import ToolRegistry, ToolContext
+from ouroboros.tools import ToolRegistry
+from ouroboros.tools.registry import ToolContext
 from ouroboros.memory import Memory
 from ouroboros.review import ReviewEngine
 
@@ -134,6 +135,9 @@ class OuroborosAgent:
 
         # Set tool context for this task
         ctx = ToolContext(
+            repo_dir=self.env.repo_dir,
+            drive_root=self.env.drive_root,
+            branch_dev=self.env.branch_dev,
             pending_events=self._pending_events,
             current_chat_id=self._current_chat_id,
             current_task_type=self._current_task_type,

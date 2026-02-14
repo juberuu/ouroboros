@@ -1,0 +1,167 @@
+"""Shell инструменты: run_shell, claude_code_edit."""
+
+from __future__ import annotations
+
+import json
+import os
+import pathlib
+import shutil
+import subprocess
+from typing import Any, Dict, List
+
+from ouroboros.tools.registry import ToolContext, ToolEntry
+from ouroboros.utils import utc_now_iso, run_cmd
+
+
+def _run_shell(ctx: ToolContext, cmd: List[str], cwd: str = "") -> str:
+    # Block git in evolution mode
+    if str(ctx.current_task_type or "") == "evolution":
+        if isinstance(cmd, list) and cmd and str(cmd[0]).lower() == "git":
+            return "⚠️ EVOLUTION_GIT_RESTRICTED: use repo_write_commit/repo_commit_push."
+
+    work_dir = ctx.repo_dir
+    if cwd and cwd.strip() not in ("", ".", "./"):
+        candidate = (ctx.repo_dir / cwd).resolve()
+        if candidate.exists() and candidate.is_dir():
+            work_dir = candidate
+
+    try:
+        res = subprocess.run(
+            cmd, cwd=str(work_dir),
+            capture_output=True, text=True, timeout=120,
+        )
+        out = res.stdout + ("\n--- STDERR ---\n" + res.stderr if res.stderr else "")
+        if len(out) > 50000:
+            out = out[:25000] + "\n...(truncated)...\n" + out[-25000:]
+        prefix = f"exit_code={res.returncode}\n"
+        return prefix + out
+    except subprocess.TimeoutExpired:
+        return "⚠️ TIMEOUT: command exceeded 120s."
+    except Exception as e:
+        return f"⚠️ SHELL_ERROR: {e}"
+
+
+def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
+    """Delegate code edits to Claude Code CLI."""
+    from ouroboros.tools.git import _acquire_git_lock, _release_git_lock
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return "⚠️ ANTHROPIC_API_KEY not set, claude_code_edit unavailable."
+
+    work_dir = str(ctx.repo_dir)
+    if cwd and cwd.strip() not in ("", ".", "./"):
+        candidate = (ctx.repo_dir / cwd).resolve()
+        if candidate.exists():
+            work_dir = str(candidate)
+
+    claude_bin = shutil.which("claude")
+    if not claude_bin:
+        return "⚠️ Claude CLI not found. Ensure ANTHROPIC_API_KEY is set."
+
+    ctx.emit_progress_fn("Delegating to Claude Code CLI...")
+
+    lock = _acquire_git_lock(ctx)
+    try:
+        try:
+            run_cmd(["git", "checkout", ctx.branch_dev], cwd=ctx.repo_dir)
+        except Exception as e:
+            return f"⚠️ GIT_ERROR (checkout): {e}"
+
+        full_prompt = (
+            f"STRICT: Only modify files inside {work_dir}. "
+            f"Git branch: {ctx.branch_dev}. Do NOT commit or push.\n\n"
+            f"{prompt}"
+        )
+
+        env = os.environ.copy()
+        env["ANTHROPIC_API_KEY"] = api_key
+        try:
+            if hasattr(os, "geteuid") and os.geteuid() == 0:
+                env.setdefault("IS_SANDBOX", "1")
+        except Exception:
+            pass
+        local_bin = str(pathlib.Path.home() / ".local" / "bin")
+        if local_bin not in env.get("PATH", ""):
+            env["PATH"] = f"{local_bin}:{env.get('PATH', '')}"
+
+        cmd = [
+            claude_bin, "-p", full_prompt,
+            "--output-format", "json",
+            "--max-turns", "12",
+            "--tools", "Read,Edit,Grep,Glob",
+        ]
+
+        # Try --permission-mode first, fallback to --dangerously-skip-permissions
+        perm_mode = os.environ.get("OUROBOROS_CLAUDE_CODE_PERMISSION_MODE", "bypassPermissions").strip()
+        primary_cmd = cmd + ["--permission-mode", perm_mode]
+        legacy_cmd = cmd + ["--dangerously-skip-permissions"]
+
+        res = subprocess.run(
+            primary_cmd, cwd=work_dir,
+            capture_output=True, text=True, timeout=600, env=env,
+        )
+
+        if res.returncode != 0:
+            combined = ((res.stdout or "") + "\n" + (res.stderr or "")).lower()
+            if "--permission-mode" in combined and any(
+                m in combined for m in ("unknown option", "unknown argument", "unrecognized option", "unexpected argument")
+            ):
+                res = subprocess.run(
+                    legacy_cmd, cwd=work_dir,
+                    capture_output=True, text=True, timeout=600, env=env,
+                )
+
+        stdout = (res.stdout or "").strip()
+        stderr = (res.stderr or "").strip()
+        if res.returncode != 0:
+            return f"⚠️ CLAUDE_CODE_ERROR: exit={res.returncode}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
+        if not stdout:
+            return "OK: Claude Code completed with empty output."
+
+    except subprocess.TimeoutExpired:
+        return "⚠️ CLAUDE_CODE_TIMEOUT: exceeded 600s."
+    except Exception as e:
+        return f"⚠️ CLAUDE_CODE_FAILED: {type(e).__name__}: {e}"
+    finally:
+        _release_git_lock(lock)
+
+    # Parse JSON output and account cost
+    try:
+        payload = json.loads(stdout)
+        out: Dict[str, Any] = {
+            "result": payload.get("result", ""),
+            "session_id": payload.get("session_id"),
+        }
+        if isinstance(payload.get("total_cost_usd"), (int, float)):
+            ctx.pending_events.append({
+                "type": "llm_usage",
+                "provider": "claude_code_cli",
+                "usage": {"cost": float(payload["total_cost_usd"])},
+                "source": "claude_code_edit",
+                "ts": utc_now_iso(),
+            })
+        return json.dumps(out, ensure_ascii=False, indent=2)
+    except Exception:
+        return stdout
+
+
+def get_tools() -> List[ToolEntry]:
+    return [
+        ToolEntry("run_shell", {
+            "name": "run_shell",
+            "description": "Run a shell command (list of args) inside the repo. Returns stdout+stderr.",
+            "parameters": {"type": "object", "properties": {
+                "cmd": {"type": "array", "items": {"type": "string"}},
+                "cwd": {"type": "string", "default": ""},
+            }, "required": ["cmd"]},
+        }, _run_shell, is_code_tool=True),
+        ToolEntry("claude_code_edit", {
+            "name": "claude_code_edit",
+            "description": "Delegate code edits to Claude Code CLI. Preferred for multi-file changes and refactors. Follow with repo_commit_push.",
+            "parameters": {"type": "object", "properties": {
+                "prompt": {"type": "string"},
+                "cwd": {"type": "string", "default": ""},
+            }, "required": ["prompt"]},
+        }, _claude_code_edit, is_code_tool=True),
+    ]
