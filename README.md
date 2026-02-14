@@ -3,7 +3,7 @@
 Самомодифицирующийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 2.9.0
+**Версия:** 2.9.1
 
 ---
 
@@ -151,6 +151,15 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 
 ## Changelog
 
+### 2.9.1 — Cost & Cache Observability Fix
+
+Fixed cost_usd missing from llm_round events, fixed cache_write_tokens field name mismatch.
+
+- llm_round events now log `cost_usd` and `cache_write_tokens`
+- Fixed: OpenRouter uses `cache_write_tokens`, not `cache_creation_tokens` in prompt_tokens_details
+- `add_usage` now accumulates `cache_write_tokens`
+- Verified: prompt caching WORKS (12x cost reduction on cached prompts, ~10K static tokens)
+
 ### 2.9.0 — Prompt Caching for Anthropic Models
 
 Multipart system message с `cache_control` для кэширования статического контекста.
@@ -185,7 +194,3 @@ Multipart system message с `cache_control` для кэширования ста
 
 - `loop.py` (203 строк): core LLM-with-tools loop — retry, effort escalation, tool execution
 - `agent.py`: 515 → 358 строк (-157). Теперь чистый оркестратор
-
-### 2.5.0 — Cost Tracking + Restart DRY
-
-Per-round `llm_round` events, `cached_tokens` tracking, `safe_restart()` consolidation.

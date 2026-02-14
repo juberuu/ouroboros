@@ -168,6 +168,8 @@ def run_llm_loop(
                     "prompt_tokens": int(usage.get("prompt_tokens") or 0),
                     "completion_tokens": int(usage.get("completion_tokens") or 0),
                     "cached_tokens": int(usage.get("cached_tokens") or 0),
+                    "cache_write_tokens": int(usage.get("cache_write_tokens") or 0),
+                    "cost_usd": float(usage.get("cost") or 0),
                 })
                 break
             except Exception as e:

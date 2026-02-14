@@ -25,7 +25,7 @@ def reasoning_rank(value: str) -> int:
 
 def add_usage(total: Dict[str, Any], usage: Dict[str, Any]) -> None:
     """Accumulate usage from one LLM call into a running total."""
-    for k in ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens"):
+    for k in ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens", "cache_write_tokens"):
         total[k] = int(total.get(k) or 0) + int(usage.get(k) or 0)
     if usage.get("cost"):
         total["cost"] = float(total.get("cost") or 0) + float(usage["cost"])
@@ -112,6 +112,16 @@ class LLMClient:
             prompt_details = usage.get("prompt_tokens_details") or {}
             if isinstance(prompt_details, dict) and prompt_details.get("cached_tokens"):
                 usage["cached_tokens"] = int(prompt_details["cached_tokens"])
+
+        # Extract cache_write_tokens from prompt_tokens_details if available
+        # OpenRouter uses "cache_write_tokens", native Anthropic uses "cache_creation_tokens"
+        if not usage.get("cache_write_tokens"):
+            prompt_details_for_write = usage.get("prompt_tokens_details") or {}
+            if isinstance(prompt_details_for_write, dict):
+                cache_write = (prompt_details_for_write.get("cache_write_tokens")
+                              or prompt_details_for_write.get("cache_creation_tokens"))
+                if cache_write:
+                    usage["cache_write_tokens"] = int(cache_write)
 
         # Ensure cost is present in usage (OpenRouter includes it, but fallback if missing)
         if not usage.get("cost"):
