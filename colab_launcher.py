@@ -245,8 +245,11 @@ REMOTE_URL = f"https://{GITHUB_TOKEN}:x-oauth-basic@github.com/{GITHUB_USER}/{GI
 # ----------------------------
 # 4) Initialize supervisor modules
 # ----------------------------
-from supervisor.state import init as state_init, load_state, save_state, append_jsonl
-state_init(DRIVE_ROOT)
+from supervisor.state import (
+    init as state_init, load_state, save_state, append_jsonl,
+    update_budget_from_usage, status_text, rotate_chat_log_if_needed,
+)
+state_init(DRIVE_ROOT, TOTAL_BUDGET_LIMIT)
 
 from supervisor.telegram import (
     init as telegram_init, TelegramClient, send_with_budget, log_chat,
@@ -268,15 +271,16 @@ git_ops_init(
     branch_dev=BRANCH_DEV, branch_stable=BRANCH_STABLE,
 )
 
+from supervisor.queue import (
+    enqueue_task, enforce_task_timeouts, enqueue_evolution_task_if_needed,
+    persist_queue_snapshot, restore_pending_from_snapshot,
+    cancel_task_by_id, queue_review_task, sort_pending,
+)
+
 from supervisor.workers import (
     init as workers_init, EVENT_Q, WORKERS, PENDING, RUNNING,
     spawn_workers, kill_workers, assign_tasks, ensure_workers_healthy,
-    enforce_task_timeouts, enqueue_task, enqueue_evolution_task_if_needed,
-    persist_queue_snapshot, restore_pending_from_snapshot,
-    update_budget_from_usage, status_text, cancel_task_by_id,
-    queue_review_task, rotate_chat_log_if_needed,
     handle_chat_direct, reset_chat_agent, _get_chat_agent,
-    _sort_pending,
 )
 workers_init(
     repo_dir=REPO_DIR, drive_root=DRIVE_ROOT, max_workers=MAX_WORKERS,
@@ -337,7 +341,7 @@ append_jsonl(DRIVE_ROOT / "logs" / "supervisor.jsonl", {
 offset = int(load_state().get("tg_offset") or 0)
 
 while True:
-    rotate_chat_log_if_needed()
+    rotate_chat_log_if_needed(DRIVE_ROOT)
     ensure_workers_healthy()
 
     # Drain worker events
@@ -596,7 +600,7 @@ while True:
             continue
 
         if text.strip().lower().startswith("/status"):
-            send_with_budget(chat_id, status_text(), force_budget=True)
+            send_with_budget(chat_id, status_text(WORKERS, PENDING, RUNNING, SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC), force_budget=True)
             continue
 
         if text.strip().lower().startswith("/review"):
@@ -613,7 +617,7 @@ while True:
             save_state(st2)
             if not turn_on:
                 PENDING[:] = [t for t in PENDING if str(t.get("type")) != "evolution"]
-                _sort_pending()
+                sort_pending()
                 persist_queue_snapshot(reason="evolve_off")
             if turn_on:
                 send_with_budget(chat_id, "🧬 Эволюция: ON. Отключить: /evolve stop")

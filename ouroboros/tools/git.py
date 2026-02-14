@@ -124,7 +124,16 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str, paths: Optional[Lis
     finally:
         _release_git_lock(lock)
     ctx.last_push_succeeded = True
-    return f"OK: committed and pushed to {ctx.branch_dev}: {commit_message}"
+    result = f"OK: committed and pushed to {ctx.branch_dev}: {commit_message}"
+    if paths is not None:
+        try:
+            untracked = run_cmd(["git", "ls-files", "--others", "--exclude-standard"], cwd=ctx.repo_dir)
+            if untracked.strip():
+                files = ", ".join(untracked.strip().split("\n"))
+                result += f"\n⚠️ WARNING: untracked files remain: {files} — they are NOT in git. Use repo_commit_push without paths to add everything."
+        except Exception:
+            pass
+    return result
 
 
 def _git_status(ctx: ToolContext) -> str:
