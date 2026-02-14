@@ -1,10 +1,12 @@
-"""Файловые инструменты: repo_read, repo_list, drive_read, drive_list, drive_write."""
+"""Файловые инструменты: repo_read, repo_list, drive_read, drive_list, drive_write, codebase_digest."""
 
 from __future__ import annotations
 
+import ast
 import json
+import os
 import pathlib
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import read_text, safe_relpath
@@ -56,6 +58,111 @@ def _drive_write(ctx: ToolContext, path: str, content: str, mode: str = "overwri
     return f"OK: wrote {mode} {path} ({len(content)} chars)"
 
 
+# ---------------------------------------------------------------------------
+# Codebase digest
+# ---------------------------------------------------------------------------
+
+_SKIP_DIRS = frozenset({
+    ".git", "__pycache__", "node_modules", ".venv", "venv",
+    ".pytest_cache", ".mypy_cache", ".tox", "build", "dist",
+})
+
+
+def _extract_python_symbols(file_path: pathlib.Path) -> Tuple[List[str], List[str]]:
+    """Extract class and function names from a Python file using AST."""
+    try:
+        code = file_path.read_text(encoding="utf-8")
+        tree = ast.parse(code, filename=str(file_path))
+        classes = []
+        functions = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                classes.append(node.name)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                functions.append(node.name)
+        return list(dict.fromkeys(classes)), list(dict.fromkeys(functions))
+    except Exception:
+        return [], []
+
+
+def _codebase_digest(ctx: ToolContext) -> str:
+    """Generate a compact digest of the codebase: files, sizes, classes, functions."""
+    repo_dir = ctx.repo_dir
+    py_files: List[pathlib.Path] = []
+    md_files: List[pathlib.Path] = []
+    other_files: List[pathlib.Path] = []
+
+    for dirpath, dirnames, filenames in os.walk(str(repo_dir)):
+        # Skip excluded directories
+        dirnames[:] = [d for d in sorted(dirnames) if d not in _SKIP_DIRS]
+        for fn in sorted(filenames):
+            p = pathlib.Path(dirpath) / fn
+            if not p.is_file():
+                continue
+            if p.suffix == ".py":
+                py_files.append(p)
+            elif p.suffix == ".md":
+                md_files.append(p)
+            elif p.suffix in (".txt", ".cfg", ".toml", ".yml", ".yaml", ".json"):
+                other_files.append(p)
+
+    total_lines = 0
+    total_functions = 0
+    sections: List[str] = []
+
+    # Python files
+    for pf in py_files:
+        try:
+            lines = pf.read_text(encoding="utf-8").splitlines()
+            line_count = len(lines)
+            total_lines += line_count
+            classes, functions = _extract_python_symbols(pf)
+            total_functions += len(functions)
+            rel = pf.relative_to(repo_dir).as_posix()
+            parts = [f"\n== {rel} ({line_count} lines) =="]
+            if classes:
+                cl = ", ".join(classes[:10])
+                if len(classes) > 10:
+                    cl += f", ... ({len(classes)} total)"
+                parts.append(f"  Classes: {cl}")
+            if functions:
+                fn = ", ".join(functions[:20])
+                if len(functions) > 20:
+                    fn += f", ... ({len(functions)} total)"
+                parts.append(f"  Functions: {fn}")
+            sections.append("\n".join(parts))
+        except Exception:
+            pass
+
+    # Markdown files
+    for mf in md_files:
+        try:
+            line_count = len(mf.read_text(encoding="utf-8").splitlines())
+            total_lines += line_count
+            rel = mf.relative_to(repo_dir).as_posix()
+            sections.append(f"\n== {rel} ({line_count} lines) ==")
+        except Exception:
+            pass
+
+    # Other config files (just names + sizes)
+    for of in other_files:
+        try:
+            line_count = len(of.read_text(encoding="utf-8").splitlines())
+            total_lines += line_count
+            rel = of.relative_to(repo_dir).as_posix()
+            sections.append(f"\n== {rel} ({line_count} lines) ==")
+        except Exception:
+            pass
+
+    total_files = len(py_files) + len(md_files) + len(other_files)
+    header = f"Codebase Digest ({total_files} files, {total_lines} lines, {total_functions} functions)"
+    return header + "\n" + "\n".join(sections)
+
+
+# ---------------------------------------------------------------------------
+# Tool registration
+# ---------------------------------------------------------------------------
+
 def get_tools() -> List[ToolEntry]:
     return [
         ToolEntry("repo_read", {
@@ -93,4 +200,9 @@ def get_tools() -> List[ToolEntry]:
                 "mode": {"type": "string", "enum": ["overwrite", "append"], "default": "overwrite"},
             }, "required": ["path", "content"]},
         }, _drive_write),
+        ToolEntry("codebase_digest", {
+            "name": "codebase_digest",
+            "description": "Get a compact digest of the entire codebase: files, sizes, classes, functions. One call instead of many repo_read calls.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        }, _codebase_digest),
     ]
