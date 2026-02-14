@@ -337,3 +337,72 @@ def import_test() -> Dict[str, Any]:
     )
     return {"ok": (r.returncode == 0), "stdout": r.stdout, "stderr": r.stderr,
             "returncode": r.returncode}
+
+
+# ---------------------------------------------------------------------------
+# Safe restart orchestration
+# ---------------------------------------------------------------------------
+
+def safe_restart(
+    reason: str,
+    unsynced_policy: str = "rescue_and_reset",
+) -> Tuple[bool, str]:
+    """
+    Attempt to checkout dev branch, sync deps, and verify imports.
+    Falls back to stable branch if dev fails.
+
+    Args:
+        reason: Human-readable reason for the restart (logged to supervisor.jsonl)
+        unsynced_policy: Policy for handling unsynced state (default: "rescue_and_reset")
+
+    Returns:
+        Tuple of (ok: bool, message: str)
+        - If successful: (True, "OK: <branch>")
+        - If failed: (False, "<error description>")
+    """
+    # Try dev branch
+    ok, err = checkout_and_reset(BRANCH_DEV, reason=reason, unsynced_policy=unsynced_policy)
+    if not ok:
+        return False, f"Failed checkout {BRANCH_DEV}: {err}"
+
+    deps_ok, deps_msg = sync_runtime_dependencies(reason=reason)
+    if not deps_ok:
+        return False, f"Failed deps for {BRANCH_DEV}: {deps_msg}"
+
+    t = import_test()
+    if t["ok"]:
+        return True, f"OK: {BRANCH_DEV}"
+
+    # Dev branch failed import — log the failure and fall back to stable
+    append_jsonl(
+        DRIVE_ROOT / "logs" / "supervisor.jsonl",
+        {
+            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "type": "safe_restart_dev_import_failed",
+            "reason": reason,
+            "branch": BRANCH_DEV,
+            "stdout": t.get("stdout", ""),
+            "stderr": t.get("stderr", ""),
+            "returncode": t.get("returncode", -1),
+        },
+    )
+
+    # Fallback to stable
+    ok_s, err_s = checkout_and_reset(
+        BRANCH_STABLE,
+        reason=f"{reason}_fallback_stable",
+        unsynced_policy="rescue_and_reset",
+    )
+    if not ok_s:
+        return False, f"Failed checkout {BRANCH_STABLE}: {err_s}"
+
+    deps_ok_s, deps_msg_s = sync_runtime_dependencies(reason=f"{reason}_fallback_stable")
+    if not deps_ok_s:
+        return False, f"Failed deps for {BRANCH_STABLE}: {deps_msg_s}"
+
+    t2 = import_test()
+    if t2["ok"]:
+        return True, f"OK: fell back to {BRANCH_STABLE}"
+
+    # Both branches failed
+    return False, f"Both branches failed import (dev and stable)"

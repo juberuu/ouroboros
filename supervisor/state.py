@@ -129,6 +129,7 @@ def ensure_state_defaults(st: Dict[str, Any]) -> Dict[str, Any]:
     st.setdefault("spent_calls", 0)
     st.setdefault("spent_tokens_prompt", 0)
     st.setdefault("spent_tokens_completion", 0)
+    st.setdefault("spent_tokens_cached", 0)
     st.setdefault("session_id", uuid.uuid4().hex)
     st.setdefault("current_branch", None)
     st.setdefault("current_sha", None)
@@ -153,6 +154,7 @@ def default_state_dict() -> Dict[str, Any]:
         "spent_calls": 0,
         "spent_tokens_prompt": 0,
         "spent_tokens_completion": 0,
+        "spent_tokens_cached": 0,
         "session_id": uuid.uuid4().hex,
         "current_branch": None,
         "current_sha": None,
@@ -250,6 +252,8 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> None:
         usage.get("prompt_tokens") if isinstance(usage, dict) else 0)
     st["spent_tokens_completion"] = _to_int(st.get("spent_tokens_completion") or 0) + _to_int(
         usage.get("completion_tokens") if isinstance(usage, dict) else 0)
+    st["spent_tokens_cached"] = _to_int(st.get("spent_tokens_cached") or 0) + _to_int(
+        usage.get("cached_tokens") if isinstance(usage, dict) else 0)
     save_state(st)
 
 
@@ -300,7 +304,7 @@ def status_text(workers_dict: Dict[int, Any], pending_list: list, running_dict: 
         lines.append("queue_warning: running>0 while busy=0")
     lines.append(f"spent_usd: {st.get('spent_usd')}")
     lines.append(f"spent_calls: {st.get('spent_calls')}")
-    lines.append(f"prompt_tokens: {st.get('spent_tokens_prompt')}, completion_tokens: {st.get('spent_tokens_completion')}")
+    lines.append(f"prompt_tokens: {st.get('spent_tokens_prompt')}, completion_tokens: {st.get('spent_tokens_completion')}, cached_tokens: {st.get('spent_tokens_cached')}")
     lines.append(
         "evolution: "
         + f"enabled={int(bool(st.get('evolution_mode_enabled')))}, "

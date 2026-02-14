@@ -25,7 +25,7 @@ def reasoning_rank(value: str) -> int:
 
 def add_usage(total: Dict[str, Any], usage: Dict[str, Any]) -> None:
     """Accumulate usage from one LLM call into a running total."""
-    for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
+    for k in ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens"):
         total[k] = int(total.get(k) or 0) + int(usage.get(k) or 0)
     if usage.get("cost"):
         total["cost"] = float(total.get("cost") or 0) + float(usage["cost"])
@@ -106,6 +106,12 @@ class LLMClient:
         resp_dict = resp.model_dump()
         usage = resp_dict.get("usage") or {}
         msg = resp_dict.get("choices", [{}])[0].get("message", {})
+
+        # Extract cached_tokens from prompt_tokens_details if available
+        if not usage.get("cached_tokens"):
+            prompt_details = usage.get("prompt_tokens_details") or {}
+            if isinstance(prompt_details, dict) and prompt_details.get("cached_tokens"):
+                usage["cached_tokens"] = int(prompt_details["cached_tokens"])
 
         # Ensure cost is present in usage (OpenRouter includes it, but fallback if missing)
         if not usage.get("cost"):

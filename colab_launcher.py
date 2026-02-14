@@ -158,7 +158,7 @@ telegram_init(
 
 from supervisor.git_ops import (
     init as git_ops_init, ensure_repo_present, checkout_and_reset,
-    sync_runtime_dependencies, import_test,
+    sync_runtime_dependencies, import_test, safe_restart,
 )
 git_ops_init(
     repo_dir=REPO_DIR, drive_root=DRIVE_ROOT, remote_url=REMOTE_URL,
@@ -187,24 +187,8 @@ workers_init(
 # 5) Bootstrap repo
 # ----------------------------
 ensure_repo_present()
-ok_dev, err_dev = checkout_and_reset(BRANCH_DEV, reason="bootstrap_dev", unsynced_policy="rescue_and_reset")
-assert ok_dev, f"Failed to prepare {BRANCH_DEV}: {err_dev}"
-deps_ok, deps_msg = sync_runtime_dependencies(reason="bootstrap_dev")
-assert deps_ok, f"Failed to install runtime dependencies for {BRANCH_DEV}: {deps_msg}"
-t = import_test()
-if not t["ok"]:
-    append_jsonl(DRIVE_ROOT / "logs" / "supervisor.jsonl", {
-        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "type": "import_fail_dev",
-        "stdout": t["stdout"], "stderr": t["stderr"],
-    })
-    ok_stable, err_stable = checkout_and_reset(BRANCH_STABLE, reason="bootstrap_fallback_stable",
-                                                unsynced_policy="rescue_and_reset")
-    assert ok_stable, f"Failed to prepare {BRANCH_STABLE}: {err_stable}"
-    deps_ok_stable, deps_msg_stable = sync_runtime_dependencies(reason="bootstrap_fallback_stable")
-    assert deps_ok_stable, f"Failed to install runtime dependencies for {BRANCH_STABLE}: {deps_msg_stable}"
-    t2 = import_test()
-    assert t2["ok"], f"Stable branch also failed import.\n\nSTDOUT:\n{t2['stdout']}\n\nSTDERR:\n{t2['stderr']}"
+ok, msg = safe_restart(reason="bootstrap", unsynced_policy="rescue_and_reset")
+assert ok, f"Bootstrap failed: {msg}"
 
 # ----------------------------
 # 6) Start workers
@@ -322,39 +306,11 @@ while True:
             if st.get("owner_chat_id"):
                 send_with_budget(int(st["owner_chat_id"]),
                                  f"♻️ Restart requested by agent: {evt.get('reason')}")
-            ok_reset, msg_reset = checkout_and_reset(
-                BRANCH_DEV, reason="agent_restart_request",
-                unsynced_policy="rescue_and_block",
-            )
-            if not ok_reset:
+            ok, msg = safe_restart(reason="agent_restart_request", unsynced_policy="rescue_and_block")
+            if not ok:
                 if st.get("owner_chat_id"):
-                    send_with_budget(int(st["owner_chat_id"]),
-                                     f"⚠️ Restart пропущен: {msg_reset}")
+                    send_with_budget(int(st["owner_chat_id"]), f"⚠️ Restart пропущен: {msg}")
                 continue
-            deps_ok, deps_msg = sync_runtime_dependencies(reason="agent_restart_request")
-            if not deps_ok:
-                if st.get("owner_chat_id"):
-                    send_with_budget(int(st["owner_chat_id"]),
-                                     f"⚠️ Restart отменен: не удалось установить зависимости ({deps_msg}).")
-                continue
-            it = import_test()
-            if not it["ok"]:
-                ok_stable, msg_stable = checkout_and_reset(
-                    BRANCH_STABLE, reason="agent_restart_import_fail",
-                    unsynced_policy="rescue_and_reset",
-                )
-                if not ok_stable:
-                    if st.get("owner_chat_id"):
-                        send_with_budget(int(st["owner_chat_id"]),
-                                         f"⚠️ Не удалось переключиться на {BRANCH_STABLE}: {msg_stable}")
-                    continue
-                deps_ok_stable, deps_msg_stable = sync_runtime_dependencies(
-                    reason="agent_restart_import_fail_stable")
-                if not deps_ok_stable:
-                    if st.get("owner_chat_id"):
-                        send_with_budget(int(st["owner_chat_id"]),
-                                         f"⚠️ Не удалось установить зависимости в {BRANCH_STABLE}: {deps_msg_stable}")
-                    continue
             kill_workers()
             reset_chat_agent()
             spawn_workers(MAX_WORKERS)
@@ -463,31 +419,10 @@ while True:
             st2["session_id"] = uuid.uuid4().hex
             save_state(st2)
             send_with_budget(chat_id, "♻️ Restarting (soft).")
-            ok_reset, msg_reset = checkout_and_reset(
-                BRANCH_DEV, reason="owner_restart",
-                unsynced_policy="rescue_and_block",
-            )
-            if not ok_reset:
-                send_with_budget(chat_id, f"⚠️ Restart отменен: {msg_reset}")
+            ok, msg = safe_restart(reason="owner_restart", unsynced_policy="rescue_and_block")
+            if not ok:
+                send_with_budget(chat_id, f"⚠️ Restart отменен: {msg}")
                 continue
-            deps_ok, deps_msg = sync_runtime_dependencies(reason="owner_restart")
-            if not deps_ok:
-                send_with_budget(chat_id, f"⚠️ Restart отменен: зависимости ({deps_msg}).")
-                continue
-            it = import_test()
-            if not it["ok"]:
-                ok_stable, msg_stable = checkout_and_reset(
-                    BRANCH_STABLE, reason="owner_restart_import_fail",
-                    unsynced_policy="rescue_and_reset",
-                )
-                if not ok_stable:
-                    send_with_budget(chat_id, f"⚠️ Не удалось переключиться на {BRANCH_STABLE}: {msg_stable}")
-                    continue
-                deps_ok_s, deps_msg_s = sync_runtime_dependencies(
-                    reason="owner_restart_import_fail_stable")
-                if not deps_ok_s:
-                    send_with_budget(chat_id, f"⚠️ Зависимости в {BRANCH_STABLE}: {deps_msg_s}")
-                    continue
             kill_workers()
             reset_chat_agent()
             spawn_workers(MAX_WORKERS)

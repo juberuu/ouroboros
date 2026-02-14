@@ -324,6 +324,15 @@ class OuroborosAgent:
                     )
                     msg = resp_msg
                     add_usage(accumulated_usage, usage)
+                    # Log per-round metrics
+                    append_jsonl(drive_logs / "events.jsonl", {
+                        "ts": utc_now_iso(), "type": "llm_round",
+                        "round": round_idx, "model": active_model,
+                        "reasoning_effort": active_effort,
+                        "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+                        "completion_tokens": int(usage.get("completion_tokens") or 0),
+                        "cached_tokens": int(usage.get("cached_tokens") or 0),
+                    })
                     break
                 except Exception as e:
                     last_error = e
