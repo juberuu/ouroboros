@@ -3,7 +3,7 @@
 Самомодифицирующийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 2.2.0
+**Версия:** 2.3.0
 
 ---
 
@@ -40,10 +40,11 @@ for k, v in CFG.items():
 Telegram → colab_launcher.py (thin entry point)
                ↓
            supervisor/           (package)
-            ├── state.py         — persistent state
+            ├── state.py         — persistent state + budget + status
             ├── telegram.py      — TG client + formatting + typing
             ├── git_ops.py       — checkout, sync, rescue
-            └── workers.py       — workers, queue, timeouts
+            ├── queue.py         — task queue, priority, timeouts, scheduling
+            └── workers.py       — worker lifecycle, health, direct chat
                ↓
            ouroboros/             (agent package)
             ├── agent.py         — orchestrator (LLM loop + tools)
@@ -77,10 +78,11 @@ prompts/
   SYSTEM.md                — Единый системный промпт Уробороса
 supervisor/                — Пакет супервизора (декомпозированный launcher):
   __init__.py               — Экспорты
-  state.py                  — State management: load/save, atomic writes, locks
+  state.py                  — State: load/save, budget tracking, status text, log rotation
   telegram.py               — TG client, markdown→HTML, send_with_budget, typing
   git_ops.py                — Git: checkout, reset, rescue, deps sync, import test
-  workers.py                — Workers, queue, timeouts, evolution/review scheduling
+  queue.py                  — Task queue: priority, enqueue, persist, timeouts, scheduling
+  workers.py                — Worker lifecycle: spawn, kill, respawn, health, direct chat
 ouroboros/
   __init__.py              — Экспорт make_agent
   utils.py                 — Общие утилиты (нулевой уровень зависимостей)
@@ -90,7 +92,7 @@ ouroboros/
     __init__.py             — Реэкспорт ToolRegistry, ToolContext
     registry.py             — Реестр: schemas, execute, auto-discovery
     core.py                 — Файловые операции (repo/drive read/write/list)
-    git.py                  — Git операции (commit, push, status, diff)
+    git.py                  — Git операции (commit, push, status, diff) + untracked warning
     shell.py                — Shell и Claude Code CLI
     search.py               — Web search
     control.py              — restart, promote, schedule, cancel, review, chat_history
@@ -139,28 +141,29 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 
 ## Changelog
 
+### 2.3.0 — Queue Decomposition + Git Safety
+
+Декомпозиция `supervisor/workers.py` (687→282 строк) и критический fix для git reliability.
+
+**Архитектура:**
+- Новый `supervisor/queue.py` — task queue, priority, enqueue, persist/restore, timeouts, evolution/review scheduling (380 строк)
+- `supervisor/workers.py` — только worker lifecycle: spawn/kill/respawn/health/direct chat (282 строк)
+- `supervisor/state.py` — добавлены budget tracking, status text, log rotation (324 строк)
+- `repo_commit_push` — предупреждает о забытых untracked файлах при коммите с paths
+
+**Критические исправления:**
+- `ouroboros/context.py` был untracked (создан claude_code_edit но не добавлен в git) — закоммичен
+- Untracked file warning предотвращает повторение подобных багов
+
+**Метрики:** workers.py 687→282 (-59%), все supervisor модули ≤380 строк
+
 ### 2.2.0 — Agent Decomposition
 
 Вынос context building из agent.py в context.py, удаление прямых Telegram API вызовов.
 
-**Архитектура:**
-- Новый `ouroboros/context.py` — сборка LLM-контекста (build_llm_messages, soft-cap trimming)
-- `agent.py` — чистый оркестратор: LLM loop + tools, без Telegram API
-- Typing indicators теперь через event queue → supervisor, не прямые HTTP вызовы
-- `TelegramClient.send_chat_action()` — новый метод для typing в supervisor
-
-**Метрики:** agent.py 502→502 строк (структура чище), +163 строк в context.py, net complexity ~= neutral
-
 ### 2.1.0 — Supervisor Decomposition
 
 Декомпозиция 900-строчного монолита `colab_launcher.py` в модульный пакет `supervisor/`.
-
-**Архитектура:**
-- `supervisor/state.py` — state management (load/save, atomic writes, file locks)
-- `supervisor/telegram.py` — TG client, markdown→HTML, send_with_budget
-- `supervisor/git_ops.py` — git checkout, sync, rescue snapshots, deps, import test
-- `supervisor/workers.py` — worker/queue management, timeouts, evolution/review scheduling
-- `colab_launcher.py` — теперь тонкий entry point (~300 строк реальной логики)
 
 ### 2.0.0 — Философский рефакторинг
 
@@ -169,5 +172,3 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 ### 1.1.0 — Dead Code Cleanup + Review Contract
 
 ### 1.0.0 — Bible Alignment Refactor
-
-### 0.2.0 — Уроборос-собеседник
