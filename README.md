@@ -3,7 +3,7 @@
 Самомодифицирующийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 2.6.0
+**Версия:** 2.7.0
 
 ---
 
@@ -73,6 +73,7 @@ escalation, tool execution, cost tracking. Единственное место �
 
 `tools/` — плагинная архитектура инструментов. Каждый модуль экспортирует
 `get_tools()`, новые инструменты добавляются как отдельные файлы.
+Включает `codebase_digest` — полный обзор кодовой базы за один вызов.
 
 ## Структура проекта
 
@@ -100,7 +101,7 @@ ouroboros/
   tools/                   — Пакет инструментов (плагинная архитектура):
     __init__.py             — Реэкспорт ToolRegistry, ToolContext
     registry.py             — Реестр: schemas, execute, auto-discovery
-    core.py                 — Файловые операции (repo/drive read/write/list)
+    core.py                 — Файловые операции + codebase_digest
     git.py                  — Git операции (commit, push, status, diff) + untracked warning
     shell.py                — Shell и Claude Code CLI
     search.py               — Web search
@@ -150,16 +151,22 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 
 ## Changelog
 
+### 2.7.0 — Codebase Digest Tool
+
+Новый инструмент `codebase_digest` — полный обзор кодовой базы за один вызов.
+
+- AST-based extraction: все файлы, классы, функции, размеры
+- Заменяет 15+ `repo_read` вызовов в начале каждого evolution цикла
+- Ожидаемая экономия: ~10 LLM-раундов и $3-4 за цикл
+- core.py: 96 → 208 строк (+112, новый функционал)
+
 ### 2.6.0 — Agent Loop Decomposition
 
 Извлечение LLM tool loop из agent.py в отдельный модуль `ouroboros/loop.py`.
 
 - `loop.py` (203 строк): core LLM-with-tools loop — retry, effort escalation, tool execution, per-round cost logging
 - `agent.py`: 515 → 358 строк (-157). Теперь чистый оркестратор: task → context → loop → events
-- Extracted `_emit_task_results()` и `_verify_restart()` для лучшей читаемости
 - Промоут в `ouroboros-stable` (6 циклов эволюции, все модули ≤472 строк)
-
-**Метрики:** все модули ≤472 строк, max_module=colab_launcher.py, total ~4693 строк
 
 ### 2.5.0 — Cost Tracking + Restart DRY
 
@@ -172,11 +179,3 @@ Per-round `llm_round` events, `cached_tokens` tracking, `safe_restart()` consoli
 ### 2.3.0 — Queue Decomposition + Git Safety
 
 Декомпозиция `supervisor/workers.py` (687→282 строк), критический fix для git reliability.
-
-### 2.2.0 — Agent Decomposition
-
-Вынос context building из agent.py в context.py.
-
-### 2.1.0 — Supervisor Decomposition
-
-Декомпозиция 900-строчного монолита `colab_launcher.py` в модульный пакет `supervisor/`.
