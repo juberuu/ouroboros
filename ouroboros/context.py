@@ -77,37 +77,61 @@ def build_llm_messages(
         "task": {"id": task.get("id"), "type": task.get("type")},
     }, ensure_ascii=False, indent=2)
     
-    # --- Assemble messages ---
-    messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": base_prompt},
-        {"role": "system", "content": "## BIBLE.md\n\n" + clip_text(bible_md, 180000)},
-        {"role": "system", "content": "## README.md\n\n" + clip_text(readme_md, 180000)},
-        {"role": "system", "content": "## Drive state\n\n" + clip_text(state_json, 90000)},
-        {"role": "system", "content": "## Scratchpad\n\n" + clip_text(scratchpad_raw, 90000)},
-        {"role": "system", "content": "## Identity\n\n" + clip_text(identity_raw, 80000)},
-        {"role": "system", "content": "## Runtime context\n\n" + runtime_ctx},
+    # --- Assemble messages with prompt caching ---
+    # Static content that doesn't change between rounds — cacheable
+    static_text = (
+        base_prompt + "\n\n"
+        + "## BIBLE.md\n\n" + clip_text(bible_md, 180000) + "\n\n"
+        + "## README.md\n\n" + clip_text(readme_md, 180000)
+    )
+
+    # Dynamic content that changes every round
+    dynamic_parts = [
+        "## Drive state\n\n" + clip_text(state_json, 90000),
+        "## Scratchpad\n\n" + clip_text(scratchpad_raw, 90000),
+        "## Identity\n\n" + clip_text(identity_raw, 80000),
+        "## Runtime context\n\n" + runtime_ctx,
     ]
-    
+
+    # Log summaries (optional)
     if chat_summary:
-        messages.append({"role": "system", "content": "## Recent chat\n\n" + chat_summary})
+        dynamic_parts.append("## Recent chat\n\n" + chat_summary)
     if tools_summary:
-        messages.append({"role": "system", "content": "## Recent tools\n\n" + tools_summary})
+        dynamic_parts.append("## Recent tools\n\n" + tools_summary)
     if events_summary:
-        messages.append({"role": "system", "content": "## Recent events\n\n" + events_summary})
+        dynamic_parts.append("## Recent events\n\n" + events_summary)
     if supervisor_summary:
-        messages.append({"role": "system", "content": "## Supervisor\n\n" + supervisor_summary})
-    
-    # --- Review tasks: inject code snapshot + metrics ---
+        dynamic_parts.append("## Supervisor\n\n" + supervisor_summary)
+
+    # Review context
     if str(task.get("type") or "") == "review" and review_context_builder is not None:
         try:
             review_ctx = review_context_builder()
             if review_ctx:
-                messages.append({"role": "system", "content": review_ctx})
+                dynamic_parts.append(review_ctx)
         except Exception:
             pass
-    
-    # --- User message ---
-    messages.append({"role": "user", "content": task.get("text", "")})
+
+    dynamic_text = "\n\n".join(dynamic_parts)
+
+    # Single system message with multipart content for prompt caching
+    messages: List[Dict[str, Any]] = [
+        {
+            "role": "system",
+            "content": [
+                {
+                    "type": "text",
+                    "text": static_text,
+                    "cache_control": {"type": "ephemeral"},
+                },
+                {
+                    "type": "text",
+                    "text": dynamic_text,
+                },
+            ],
+        },
+        {"role": "user", "content": task.get("text", "")},
+    ]
     
     # --- Soft-cap token trimming ---
     messages, cap_info = apply_message_token_soft_cap(messages, 200000)
@@ -121,21 +145,33 @@ def apply_message_token_soft_cap(
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Trim prunable context sections if estimated tokens exceed soft cap.
-    
+
     Returns (pruned_messages, cap_info_dict).
     """
-    estimated = sum(estimate_tokens(str(m.get("content", ""))) + 6 for m in messages)
+    def _estimate_message_tokens(msg: Dict[str, Any]) -> int:
+        """Estimate tokens for a message, handling multipart content."""
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            # Multipart content: sum tokens from all text blocks
+            total = 0
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    total += estimate_tokens(str(block.get("text", "")))
+            return total + 6
+        return estimate_tokens(str(content)) + 6
+
+    estimated = sum(_estimate_message_tokens(m) for m in messages)
     info: Dict[str, Any] = {
         "estimated_tokens_before": estimated,
         "estimated_tokens_after": estimated,
         "soft_cap_tokens": soft_cap_tokens,
         "trimmed_sections": [],
     }
-    
+
     if soft_cap_tokens <= 0 or estimated <= soft_cap_tokens:
         return messages, info
-    
-    # Prune log summaries first (least critical)
+
+    # Prune log summaries from the dynamic text block in multipart system messages
     prunable = ["## Recent chat", "## Recent tools", "## Recent events", "## Supervisor"]
     pruned = list(messages)
     for prefix in prunable:
@@ -143,12 +179,42 @@ def apply_message_token_soft_cap(
             break
         for i, msg in enumerate(pruned):
             content = msg.get("content")
-            if isinstance(content, str) and content.startswith(prefix):
+
+            # Handle multipart content (trim from dynamic text block)
+            if isinstance(content, list) and msg.get("role") == "system":
+                # Find the dynamic text block (second block without cache_control)
+                for j, block in enumerate(content):
+                    if (isinstance(block, dict) and
+                        block.get("type") == "text" and
+                        "cache_control" not in block):
+                        text = block.get("text", "")
+                        if prefix in text:
+                            # Remove this section from the dynamic text
+                            lines = text.split("\n\n")
+                            new_lines = []
+                            skip_section = False
+                            for line in lines:
+                                if line.startswith(prefix):
+                                    skip_section = True
+                                    info["trimmed_sections"].append(prefix)
+                                    continue
+                                if line.startswith("##"):
+                                    skip_section = False
+                                if not skip_section:
+                                    new_lines.append(line)
+
+                            block["text"] = "\n\n".join(new_lines)
+                            estimated = sum(_estimate_message_tokens(m) for m in pruned)
+                            break
+                break
+
+            # Handle legacy string content (for backwards compatibility)
+            elif isinstance(content, str) and content.startswith(prefix):
                 pruned.pop(i)
                 info["trimmed_sections"].append(prefix)
-                estimated = sum(estimate_tokens(str(m.get("content", ""))) + 6 for m in pruned)
+                estimated = sum(_estimate_message_tokens(m) for m in pruned)
                 break
-    
+
     info["estimated_tokens_after"] = estimated
     return pruned, info
 
@@ -181,6 +247,11 @@ def compact_tool_history(messages: list, keep_recent: int = 6) -> list:
     # Build compacted message list
     result = []
     for i, msg in enumerate(messages):
+        # Skip system messages with multipart content (prompt caching format)
+        if msg.get("role") == "system" and isinstance(msg.get("content"), list):
+            result.append(msg)
+            continue
+
         if msg.get("role") == "tool" and i > 0:
             # Check if the preceding assistant message (with tool_calls)
             # is one we want to compact
