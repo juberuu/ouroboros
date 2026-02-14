@@ -11,12 +11,73 @@ import json
 import pathlib
 import queue
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ouroboros.llm import LLMClient, normalize_reasoning_effort, reasoning_rank, add_usage
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.context import compact_tool_history
 from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log
+
+
+def _execute_single_tool(
+    tools: ToolRegistry,
+    tc: Dict[str, Any],
+    drive_logs: pathlib.Path,
+) -> Dict[str, Any]:
+    """
+    Execute a single tool call and return all needed info.
+
+    Returns dict with: tool_call_id, fn_name, result, is_error, args_for_log, is_code_tool
+    """
+    fn_name = tc["function"]["name"]
+    tool_call_id = tc["id"]
+    is_code_tool = fn_name in tools.CODE_TOOLS
+
+    # Parse arguments
+    try:
+        args = json.loads(tc["function"]["arguments"] or "{}")
+    except (json.JSONDecodeError, ValueError) as e:
+        result = f"⚠️ TOOL_ARG_ERROR: Could not parse arguments for '{fn_name}': {e}"
+        return {
+            "tool_call_id": tool_call_id,
+            "fn_name": fn_name,
+            "result": result,
+            "is_error": True,
+            "args_for_log": {},
+            "is_code_tool": is_code_tool,
+        }
+
+    args_for_log = sanitize_tool_args_for_log(fn_name, args if isinstance(args, dict) else {})
+
+    # Execute tool
+    tool_ok = True
+    try:
+        result = tools.execute(fn_name, args)
+    except Exception as e:
+        tool_ok = False
+        result = f"⚠️ TOOL_ERROR ({fn_name}): {type(e).__name__}: {e}"
+        append_jsonl(drive_logs / "events.jsonl", {
+            "ts": utc_now_iso(), "type": "tool_error",
+            "tool": fn_name, "args": args_for_log, "error": repr(e),
+        })
+
+    # Log tool execution
+    append_jsonl(drive_logs / "tools.jsonl", {
+        "ts": utc_now_iso(), "tool": fn_name,
+        "args": args_for_log, "result_preview": truncate_for_log(result, 2000),
+    })
+
+    is_error = (not tool_ok) or str(result).startswith("⚠️")
+
+    return {
+        "tool_call_id": tool_call_id,
+        "fn_name": fn_name,
+        "result": result,
+        "is_error": is_error,
+        "args_for_log": args_for_log,
+        "is_code_tool": is_code_tool,
+    }
 
 
 def run_llm_loop(
@@ -144,45 +205,51 @@ def run_llm_loop(
         saw_code_tool = False
         error_count = 0
 
-        for tc in tool_calls:
-            fn_name = tc["function"]["name"]
-            if fn_name in tools.CODE_TOOLS:
+        # Execute tool calls concurrently if multiple, preserve order in results
+        if len(tool_calls) == 1:
+            # Single tool call — execute directly
+            exec_result = _execute_single_tool(tools, tool_calls[0], drive_logs)
+            results = [exec_result]
+        else:
+            # Multiple tool calls — execute concurrently
+            max_workers = min(len(tool_calls), 8)
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Submit all tool calls and track their original index
+                future_to_index = {
+                    executor.submit(_execute_single_tool, tools, tc, drive_logs): idx
+                    for idx, tc in enumerate(tool_calls)
+                }
+                # Collect results in original order
+                results = [None] * len(tool_calls)
+                for future in as_completed(future_to_index):
+                    idx = future_to_index[future]
+                    results[idx] = future.result()
+
+        # Process results in original order
+        for exec_result in results:
+            fn_name = exec_result["fn_name"]
+            is_code_tool = exec_result["is_code_tool"]
+            is_error = exec_result["is_error"]
+
+            if is_code_tool:
                 saw_code_tool = True
-
-            try:
-                args = json.loads(tc["function"]["arguments"] or "{}")
-            except (json.JSONDecodeError, ValueError) as e:
-                result = f"⚠️ TOOL_ARG_ERROR: Could not parse arguments for '{fn_name}': {e}"
-                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
-                llm_trace["tool_calls"].append({"tool": fn_name, "args": {}, "result": result, "is_error": True})
-                error_count += 1
-                continue
-
-            args_for_log = sanitize_tool_args_for_log(fn_name, args if isinstance(args, dict) else {})
-
-            tool_ok = True
-            try:
-                result = tools.execute(fn_name, args)
-            except Exception as e:
-                tool_ok = False
-                result = f"⚠️ TOOL_ERROR ({fn_name}): {type(e).__name__}: {e}"
-                append_jsonl(drive_logs / "events.jsonl", {
-                    "ts": utc_now_iso(), "type": "tool_error",
-                    "tool": fn_name, "args": args_for_log, "error": repr(e),
-                })
-
-            append_jsonl(drive_logs / "tools.jsonl", {
-                "ts": utc_now_iso(), "tool": fn_name,
-                "args": args_for_log, "result_preview": truncate_for_log(result, 2000),
-            })
-            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
-            is_error = (not tool_ok) or str(result).startswith("⚠️")
-            llm_trace["tool_calls"].append({
-                "tool": fn_name, "args": _safe_args(args_for_log),
-                "result": truncate_for_log(result, 700), "is_error": is_error,
-            })
             if is_error:
                 error_count += 1
+
+            # Append tool result message
+            messages.append({
+                "role": "tool",
+                "tool_call_id": exec_result["tool_call_id"],
+                "content": exec_result["result"]
+            })
+
+            # Append to LLM trace
+            llm_trace["tool_calls"].append({
+                "tool": fn_name,
+                "args": _safe_args(exec_result["args_for_log"]),
+                "result": truncate_for_log(exec_result["result"], 700),
+                "is_error": is_error,
+            })
 
         if saw_code_tool:
             _switch_to_code_profile()
