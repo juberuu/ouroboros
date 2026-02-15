@@ -95,6 +95,7 @@ GITHUB_REPO = get_cfg("GITHUB_REPO", default="ouroboros", allow_legacy_secret=Tr
 MAX_WORKERS = int(get_cfg("OUROBOROS_MAX_WORKERS", default="5", allow_legacy_secret=True) or "5")
 MODEL_MAIN = get_cfg("OUROBOROS_MODEL", default="openai/gpt-5.2", allow_legacy_secret=True)
 MODEL_CODE = get_cfg("OUROBOROS_MODEL_CODE", default="openai/gpt-5.2-codex", allow_legacy_secret=True)
+MODEL_LIGHT = get_cfg("OUROBOROS_MODEL_LIGHT", default=None, allow_legacy_secret=True)
 
 BUDGET_REPORT_EVERY_MESSAGES = 10
 SOFT_TIMEOUT_SEC = max(60, int(get_cfg("OUROBOROS_SOFT_TIMEOUT_SEC", default="600", allow_legacy_secret=True) or "600"))
@@ -107,6 +108,8 @@ os.environ["GITHUB_USER"] = str(GITHUB_USER or "razzant")
 os.environ["GITHUB_REPO"] = str(GITHUB_REPO or "ouroboros")
 os.environ["OUROBOROS_MODEL"] = str(MODEL_MAIN or "openai/gpt-5.2")
 os.environ["OUROBOROS_MODEL_CODE"] = str(MODEL_CODE or "openai/gpt-5.2-codex")
+if MODEL_LIGHT:
+    os.environ["OUROBOROS_MODEL_LIGHT"] = str(MODEL_LIGHT)
 os.environ["TELEGRAM_BOT_TOKEN"] = str(TELEGRAM_BOT_TOKEN)
 
 if str(ANTHROPIC_API_KEY or "").strip():
@@ -209,7 +212,7 @@ append_jsonl(DRIVE_ROOT / "logs" / "supervisor.jsonl", {
     "branch": load_state().get("current_branch"),
     "sha": load_state().get("current_sha"),
     "max_workers": MAX_WORKERS,
-    "model_default": MODEL_MAIN, "model_code": MODEL_CODE,
+    "model_default": MODEL_MAIN, "model_code": MODEL_CODE, "model_light": MODEL_LIGHT,
     "soft_timeout_sec": SOFT_TIMEOUT_SEC, "hard_timeout_sec": HARD_TIMEOUT_SEC,
 })
 

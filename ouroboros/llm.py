@@ -138,12 +138,18 @@ class LLMClient:
 
         Профили читают env-переменные, но имеют разумные дефолты.
         Минимум env — в соответствии с Принципом 3 (Минимализм).
+
+        Env vars:
+        - OUROBOROS_MODEL: main model for deep_review (default: openai/gpt-5.2)
+        - OUROBOROS_MODEL_CODE: model for code/evolution tasks (default: same as OUROBOROS_MODEL)
+        - OUROBOROS_MODEL_LIGHT: model for simple user chat (default: same as OUROBOROS_MODEL)
         """
         main_model = os.environ.get("OUROBOROS_MODEL", "openai/gpt-5.2")
         code_model = os.environ.get("OUROBOROS_MODEL_CODE", main_model)
+        light_model = os.environ.get("OUROBOROS_MODEL_LIGHT", main_model)
 
         profiles: Dict[str, Dict[str, str]] = {
-            "default_task": {"model": main_model, "effort": "medium"},
+            "default_task": {"model": light_model, "effort": "medium"},
             "code_task": {"model": code_model, "effort": "high"},
             "evolution_task": {"model": code_model, "effort": "high"},
             "deep_review": {"model": main_model, "effort": "xhigh"},

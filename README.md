@@ -3,7 +3,7 @@
 Самомодифицирующийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 2.9.2
+**Версия:** 2.10.0
 
 ---
 
@@ -25,6 +25,7 @@ CFG = {
     "GITHUB_REPO": "ouroboros",
     "OUROBOROS_MODEL": "openai/gpt-5.2",
     "OUROBOROS_MODEL_CODE": "openai/gpt-5.2-codex",
+    "OUROBOROS_MODEL_LIGHT": "anthropic/claude-sonnet-4",  # optional: lighter model for user chat
     "OUROBOROS_MAX_WORKERS": "5",
 }
 for k, v in CFG.items():
@@ -151,6 +152,15 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 
 ## Changelog
 
+### 2.10.0 — Adaptive Model Selection
+
+LLM-first model routing: light model for user chat, heavy for evolution/code.
+
+- `OUROBOROS_MODEL_LIGHT` env var: sets lighter model for `default_task` profile (user chat)
+- Default: same as `OUROBOROS_MODEL` (backward compatible)
+- Recommended: `anthropic/claude-sonnet-4` ($3/$15 per M) vs Opus 4.6 ($5/$25 per M) — 40% savings on chat
+- llm.py: model_profile() now uses three env vars: MODEL, MODEL_CODE, MODEL_LIGHT
+
 ### 2.9.2 — Restart Policy Fix (Critical)
 
 Fixed restart being blocked by dirty state, preventing all code updates from activating.
@@ -196,10 +206,3 @@ Multipart system message с `cache_control` для кэширования ста
 - AST-based extraction: все файлы, классы, функции, размеры
 - Заменяет 15+ `repo_read` вызовов в начале каждого evolution цикла
 - core.py: 96 → 208 строк (+112, новый функционал)
-
-### 2.6.0 — Agent Loop Decomposition
-
-Извлечение LLM tool loop из agent.py в отдельный модуль `ouroboros/loop.py`.
-
-- `loop.py` (203 строк): core LLM-with-tools loop — retry, effort escalation, tool execution
-- `agent.py`: 515 → 358 строк (-157). Теперь чистый оркестратор
