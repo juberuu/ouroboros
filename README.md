@@ -3,7 +3,7 @@
 Самомодифицирующийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 2.10.0
+**Версия:** 2.11.0
 
 ---
 
@@ -152,6 +152,15 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 
 ## Changelog
 
+### 2.11.0 — Module Cache Purge on Restart (Critical)
+
+Fixed: restart never activated new code because fork'd workers inherited stale sys.modules.
+
+- `worker_main()`: purges all `ouroboros.*` from sys.modules before import (workers get fresh code)
+- `reset_chat_agent()`: purges `ouroboros.*` so chat agent reimports after restart
+- Root cause: `mp.get_context("fork")` copies parent's sys.modules → `import ouroboros` was no-op
+- This means ALL improvements since v2.8.0 were never active in runtime until manual /restart from Colab
+
 ### 2.10.0 — Adaptive Model Selection
 
 LLM-first model routing: light model for user chat, heavy for evolution/code.
@@ -198,11 +207,3 @@ Multipart system message с `cache_control` для кэширования ста
 - Порядок результатов сохраняется (LLM ожидает tool results в порядке запроса)
 - Извлечена `_execute_single_tool()` для тестируемости
 - loop.py: 203 → 270 строк (+67)
-
-### 2.7.0 — Codebase Digest Tool
-
-Новый инструмент `codebase_digest` — полный обзор кодовой базы за один вызов.
-
-- AST-based extraction: все файлы, классы, функции, размеры
-- Заменяет 15+ `repo_read` вызовов в начале каждого evolution цикла
-- core.py: 96 → 208 строк (+112, новый функционал)

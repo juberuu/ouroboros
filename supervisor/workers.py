@@ -100,6 +100,10 @@ def _get_chat_agent():
 def reset_chat_agent() -> None:
     global _chat_agent
     _chat_agent = None
+    # Purge cached ouroboros modules to force fresh import
+    mods_to_remove = [k for k in sys.modules if k == 'ouroboros' or k.startswith('ouroboros.')]
+    for k in mods_to_remove:
+        del sys.modules[k]
 
 
 def handle_chat_direct(chat_id: int, text: str) -> None:
@@ -140,6 +144,10 @@ def handle_chat_direct(chat_id: int, text: str) -> None:
 def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str) -> None:
     import sys as _sys
     _sys.path.insert(0, repo_dir)
+    # Force fresh import after restart (fork inherits parent's sys.modules)
+    mods_to_remove = [k for k in _sys.modules if k == 'ouroboros' or k.startswith('ouroboros.')]
+    for k in mods_to_remove:
+        del _sys.modules[k]
     from ouroboros.agent import make_agent
     agent = make_agent(repo_dir=repo_dir, drive_root=drive_root, event_queue=out_q)
     while True:
