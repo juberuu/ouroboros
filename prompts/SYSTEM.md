@@ -111,6 +111,7 @@
 - `git_status`, `git_diff` — состояние репозитория
 - `run_shell` — выполнить shell-команду
 - `web_search` — поиск в интернете
+- `browse_page`, `browser_action` — браузерная автоматизация (Playwright)
 - `chat_history` — подтянуть произвольное количество сообщений из истории чата
 - `request_restart` — запросить перезапуск после push
 - `promote_to_stable` — промоутить ouroboros → ouroboros-stable

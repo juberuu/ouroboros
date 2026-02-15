@@ -19,6 +19,7 @@ log = logging.getLogger(__name__)
 # Module-level state: persistent browser/page within a task
 _browser = None
 _page = None
+_playwright_ready = False
 
 
 def _get_or_create_loop():
@@ -34,9 +35,41 @@ def _get_or_create_loop():
         return loop
 
 
+def _ensure_playwright_installed():
+    """Install Playwright and Chromium if not already available."""
+    global _playwright_ready
+    if _playwright_ready:
+        return
+
+    import subprocess
+    import sys
+
+    # Try importing playwright
+    try:
+        import playwright
+    except ImportError:
+        log.info("Playwright not found, installing...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright"])
+
+    # Check if chromium binary exists
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as pw:
+            pw.chromium.executable_path
+        log.info("Playwright chromium binary found")
+    except Exception:
+        log.info("Installing Playwright chromium binary...")
+        subprocess.check_call([sys.executable, "-m", "playwright", "install", "chromium"])
+        subprocess.check_call([sys.executable, "-m", "playwright", "install-deps", "chromium"])
+
+    _playwright_ready = True
+
+
 async def _ensure_browser():
     """Ensure browser and page are ready."""
     global _browser, _page
+    _ensure_playwright_installed()
+
     if _browser and _browser.is_connected():
         return _page
 

@@ -3,7 +3,7 @@
 Самомодифицирующийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 2.12.0
+**Версия:** 2.13.0
 
 ---
 
@@ -74,7 +74,8 @@ logging. Единственное место где происходит вза�
 
 `tools/` — плагинная архитектура инструментов. Каждый модуль экспортирует
 `get_tools()`, новые инструменты добавляются как отдельные файлы.
-Включает `codebase_digest` — полный обзор кодовой базы за один вызов.
+Включает `codebase_digest` — полный обзор кодовой базы за один вызов,
+`browser.py` — browser automation (Playwright).
 
 ## Структура проекта
 
@@ -107,6 +108,7 @@ ouroboros/
     shell.py                — Shell и Claude Code CLI
     search.py               — Web search
     control.py              — restart, promote, schedule, cancel, review, chat_history
+    browser.py              — Browser: browse_page, browser_action (Playwright)
   llm.py                   — LLM-клиент: API вызовы, cached token tracking
   memory.py                — Память: scratchpad, identity, chat_history
   review.py                — Deep review: стратегическая рефлексия
@@ -152,6 +154,17 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 
 ## Changelog
 
+### 2.13.0 — Browser Automation (Playwright)
+
+Agent can now browse the web, interact with pages, and take screenshots.
+
+- `ouroboros/tools/browser.py`: New tool module with `browse_page` and `browser_action`
+- `browse_page`: Open URL, get page content as text/html/markdown/screenshot (base64 PNG)
+- `browser_action`: Click, fill forms, select options, evaluate JS, scroll, take screenshots
+- Headless Chromium with persistent browser session across tool calls within a task
+- Auto-discovered via ToolEntry pattern — 22 tools total
+- Playwright + deps auto-installed in Colab environment
+
 ### 2.12.0 — Vision: Image Support
 
 Agent can now see images sent in Telegram (photos and image documents).
@@ -171,50 +184,3 @@ Fixed: restart never activated new code because fork'd workers inherited stale s
 - `reset_chat_agent()`: purges `ouroboros.*` so chat agent reimports after restart
 - Root cause: `mp.get_context("fork")` copies parent's sys.modules → `import ouroboros` was no-op
 - This means ALL improvements since v2.8.0 were never active in runtime until manual /restart from Colab
-
-### 2.10.0 — Adaptive Model Selection
-
-LLM-first model routing: light model for user chat, heavy for evolution/code.
-
-- `OUROBOROS_MODEL_LIGHT` env var: sets lighter model for `default_task` profile (user chat)
-- Default: same as `OUROBOROS_MODEL` (backward compatible)
-- Recommended: `anthropic/claude-sonnet-4` ($3/$15 per M) vs Opus 4.6 ($5/$25 per M) — 40% savings on chat
-- llm.py: model_profile() now uses three env vars: MODEL, MODEL_CODE, MODEL_LIGHT
-
-### 2.9.2 — Restart Policy Fix (Critical)
-
-Fixed restart being blocked by dirty state, preventing all code updates from activating.
-
-- Agent restart and owner /restart now use `rescue_and_reset` instead of `rescue_and_block`
-- Rescue snapshot still saved (no data loss) but restart CONTINUES instead of blocking
-- This was blocking all improvements since v2.8.0 from activating in runtime
-- Root cause: `repo_write_commit` could leave dirty state → restart blocked → agent stuck on old code
-
-### 2.9.1 — Cost & Cache Observability Fix
-
-Fixed cost_usd missing from llm_round events, fixed cache_write_tokens field name mismatch.
-
-- llm_round events now log `cost_usd` and `cache_write_tokens`
-- Fixed: OpenRouter uses `cache_write_tokens`, not `cache_creation_tokens` in prompt_tokens_details
-- `add_usage` now accumulates `cache_write_tokens`
-- Verified: prompt caching WORKS (12x cost reduction on cached prompts, ~10K static tokens)
-
-### 2.9.0 — Prompt Caching for Anthropic Models
-
-Multipart system message с `cache_control` для кэширования статического контекста.
-
-- Статический контент (SYSTEM.md + BIBLE.md + README.md ~10K tokens) помечен `cache_control: {"type": "ephemeral"}`
-- Динамический контент (state, scratchpad, identity, logs) — отдельный блок без кэша
-- 11+ system messages → 1 multipart system message (cleaner API contract)
-- `apply_message_token_soft_cap` обновлён для multipart content
-- Ожидаемая экономия: ~50% prompt costs при multi-round диалогах (Anthropic pricing: cached tokens = 10% cost)
-- context.py: 250 → 301 строк (+51)
-
-### 2.9.2 — Restart Policy Fix (Critical)
-
-Fixed restart being blocked by dirty state, preventing all code updates from activating.
-
-- Agent restart and owner /restart now use `rescue_and_reset` instead of `rescue_and_block`
-- Rescue snapshot still saved (no data loss) but restart CONTINUES instead of blocking
-- This was blocking all improvements since v2.8.0 from activating in runtime
-- Root cause: `repo_write_commit` could leave dirty state → restart blocked → agent stuck on old code
