@@ -17,7 +17,13 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from ouroboros.llm import LLMClient, normalize_reasoning_effort, reasoning_rank, add_usage
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.context import compact_tool_history
-from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log
+from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log, sanitize_tool_result_for_log
+
+READ_ONLY_PARALLEL_TOOLS = frozenset({
+    "repo_read", "repo_list",
+    "drive_read", "drive_list",
+    "web_search", "codebase_digest", "chat_history",
+})
 
 
 def _truncate_tool_result(result: Any) -> str:
@@ -36,6 +42,7 @@ def _execute_single_tool(
     tools: ToolRegistry,
     tc: Dict[str, Any],
     drive_logs: pathlib.Path,
+    task_id: str = "",
 ) -> Dict[str, Any]:
     """
     Execute a single tool call and return all needed info.
@@ -70,14 +77,15 @@ def _execute_single_tool(
         tool_ok = False
         result = f"⚠️ TOOL_ERROR ({fn_name}): {type(e).__name__}: {e}"
         append_jsonl(drive_logs / "events.jsonl", {
-            "ts": utc_now_iso(), "type": "tool_error",
+            "ts": utc_now_iso(), "type": "tool_error", "task_id": task_id,
             "tool": fn_name, "args": args_for_log, "error": repr(e),
         })
 
-    # Log tool execution
+    # Log tool execution (sanitize secrets from result before persisting)
     append_jsonl(drive_logs / "tools.jsonl", {
-        "ts": utc_now_iso(), "tool": fn_name,
-        "args": args_for_log, "result_preview": truncate_for_log(result, 2000),
+        "ts": utc_now_iso(), "tool": fn_name, "task_id": task_id,
+        "args": args_for_log,
+        "result_preview": sanitize_tool_result_for_log(truncate_for_log(result, 2000)),
     })
 
     is_error = (not tool_ok) or str(result).startswith("⚠️")
@@ -100,6 +108,7 @@ def run_llm_loop(
     emit_progress: Callable[[str], None],
     incoming_messages: queue.Queue,
     task_type: str = "",
+    task_id: str = "",
     max_rounds: int = 50,
     budget_remaining_usd: Optional[float] = None,
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
@@ -159,8 +168,8 @@ def run_llm_loop(
             cached = accumulated_usage.get("cached_tokens", 0)
             cache_pct = f" ({cached*100//max(task_tokens,1)}% cached)" if cached > 0 else ""
             messages.append({"role": "system", "content":
-                f"[Self-check] {round_idx} раундов. Оцени прогресс. Если застрял — смени подход."
-                f"[Self-check] {round_idx} rounds, ${task_cost:.3f} spent, {task_tokens:,} prompt tokens{cache_pct}."})
+                f"[Self-check] {round_idx} раундов, ${task_cost:.3f} потрачено, "
+                f"{task_tokens:,} prompt tokens{cache_pct}. Оцени прогресс. Если застрял — смени подход."})
 
         # Escalate reasoning effort for long tasks
         if round_idx >= 5:
@@ -187,6 +196,7 @@ def run_llm_loop(
                 # Log per-round metrics
                 _round_event = {
                     "ts": utc_now_iso(), "type": "llm_round",
+                    "task_id": task_id,
                     "round": round_idx, "model": active_model,
                     "reasoning_effort": active_effort,
                     "prompt_tokens": int(usage.get("prompt_tokens") or 0),
@@ -201,6 +211,7 @@ def run_llm_loop(
                 last_error = e
                 append_jsonl(drive_logs / "events.jsonl", {
                     "ts": utc_now_iso(), "type": "llm_api_error",
+                    "task_id": task_id,
                     "round": round_idx, "attempt": attempt + 1,
                     "model": active_model, "error": repr(e),
                 })
@@ -232,21 +243,24 @@ def run_llm_loop(
         saw_code_tool = False
         error_count = 0
 
-        # Execute tool calls concurrently if multiple, preserve order in results
-        if len(tool_calls) == 1:
-            # Single tool call — execute directly
-            exec_result = _execute_single_tool(tools, tool_calls[0], drive_logs)
-            results = [exec_result]
+        # Parallelize only for a strict read-only whitelist.
+        can_parallel = (
+            len(tool_calls) > 1 and
+            all(
+                tc.get("function", {}).get("name") in READ_ONLY_PARALLEL_TOOLS
+                for tc in tool_calls
+            )
+        )
+
+        if not can_parallel:
+            results = [_execute_single_tool(tools, tc, drive_logs, task_id) for tc in tool_calls]
         else:
-            # Multiple tool calls — execute concurrently
             max_workers = min(len(tool_calls), 8)
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                # Submit all tool calls and track their original index
                 future_to_index = {
-                    executor.submit(_execute_single_tool, tools, tc, drive_logs): idx
+                    executor.submit(_execute_single_tool, tools, tc, drive_logs, task_id): idx
                     for idx, tc in enumerate(tool_calls)
                 }
-                # Collect results in original order
                 results = [None] * len(tool_calls)
                 for future in as_completed(future_to_index):
                     idx = future_to_index[future]

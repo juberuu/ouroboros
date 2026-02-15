@@ -239,6 +239,24 @@ _SECRET_KEYS = frozenset([
     "token", "api_key", "apikey", "authorization", "secret", "password", "passwd", "passphrase",
 ])
 
+# Patterns that indicate leaked secrets in tool output
+import re as _re
+_SECRET_PATTERNS = _re.compile(
+    r'ghp_[A-Za-z0-9]{30,}'       # GitHub personal access token
+    r'|sk-ant-[A-Za-z0-9\-]{30,}' # Anthropic API key
+    r'|sk-or-[A-Za-z0-9\-]{30,}'  # OpenRouter API key
+    r'|gsk_[A-Za-z0-9]{30,}'      # Groq API key
+    r'|sk-[A-Za-z0-9]{40,}'       # OpenAI API key
+    r'|\b[0-9]{8,}:[A-Za-z0-9_\-]{30,}\b'  # Telegram bot token (digits:alphanum)
+)
+
+
+def sanitize_tool_result_for_log(result: str) -> str:
+    """Redact potential secrets from tool result before logging."""
+    if not isinstance(result, str) or len(result) < 20:
+        return result
+    return _SECRET_PATTERNS.sub("***REDACTED***", result)
+
 
 def sanitize_tool_args_for_log(
     fn_name: str, args: Dict[str, Any], threshold: int = 3000,

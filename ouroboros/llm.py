@@ -126,12 +126,14 @@ class LLMClient:
                 usage["cached_tokens"] = int(prompt_details["cached_tokens"])
 
         # Extract cache_write_tokens from prompt_tokens_details if available
-        # OpenRouter uses "cache_write_tokens", native Anthropic uses "cache_creation_tokens"
+        # OpenRouter: "cache_write_tokens"
+        # Native Anthropic: "cache_creation_tokens" or "cache_creation_input_tokens"
         if not usage.get("cache_write_tokens"):
             prompt_details_for_write = usage.get("prompt_tokens_details") or {}
             if isinstance(prompt_details_for_write, dict):
                 cache_write = (prompt_details_for_write.get("cache_write_tokens")
-                              or prompt_details_for_write.get("cache_creation_tokens"))
+                              or prompt_details_for_write.get("cache_creation_tokens")
+                              or prompt_details_for_write.get("cache_creation_input_tokens"))
                 if cache_write:
                     usage["cache_write_tokens"] = int(cache_write)
 

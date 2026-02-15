@@ -120,16 +120,15 @@ def build_llm_messages(
     
     # --- Assemble messages with prompt caching ---
     # Static content that doesn't change between rounds — cacheable
-    # Adaptive context: user chat needs only SYSTEM.md; evolution/review need full context
+    # BIBLE.md always included (Constitution requires it for every decision)
+    # README.md only for evolution/review (architecture context)
     needs_full_context = task_type in ("evolution", "review", "scheduled")
+    static_text = (
+        base_prompt + "\n\n"
+        + "## BIBLE.md\n\n" + clip_text(bible_md, 180000)
+    )
     if needs_full_context:
-        static_text = (
-            base_prompt + "\n\n"
-            + "## BIBLE.md\n\n" + clip_text(bible_md, 180000) + "\n\n"
-            + "## README.md\n\n" + clip_text(readme_md, 180000)
-        )
-    else:
-        static_text = base_prompt
+        static_text += "\n\n## README.md\n\n" + clip_text(readme_md, 180000)
 
     # Dynamic content that changes every round
     dynamic_parts = [

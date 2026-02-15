@@ -197,6 +197,7 @@ class OuroborosAgent:
                     emit_progress=self._emit_progress,
                     incoming_messages=self._incoming_messages,
                     task_type=str(task.get("type") or ""),
+                    task_id=str(task.get("id") or ""),
                     budget_remaining_usd=budget_remaining,
                 )
             except Exception as e:
@@ -342,7 +343,8 @@ class OuroborosAgent:
         try:
             self._event_queue.put({
                 "type": "send_message", "chat_id": self._current_chat_id,
-                "text": f"💬 {text}", "ts": utc_now_iso(),
+                "text": f"💬 {text}", "is_progress": True,
+                "ts": utc_now_iso(),
             })
         except Exception:
             pass

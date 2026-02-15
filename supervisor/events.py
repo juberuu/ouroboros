@@ -45,11 +45,13 @@ def _handle_send_message(evt: Dict[str, Any], ctx: Any) -> None:
     try:
         log_text = evt.get("log_text")
         fmt = str(evt.get("format") or "")
+        is_progress = bool(evt.get("is_progress"))
         ctx.send_with_budget(
             int(evt["chat_id"]),
             str(evt.get("text") or ""),
             log_text=(str(log_text) if isinstance(log_text, str) else None),
             fmt=fmt,
+            is_progress=is_progress,
         )
     except Exception as e:
         ctx.append_jsonl(
@@ -107,6 +109,11 @@ def _handle_restart_request(evt: Dict[str, Any], ctx: Any) -> None:
             ctx.send_with_budget(int(st["owner_chat_id"]), f"⚠️ Restart пропущен: {msg}")
         return
     ctx.kill_workers()
+    # Persist tg_offset/session_id before execv to avoid duplicate Telegram updates.
+    st2 = ctx.load_state()
+    st2["session_id"] = uuid.uuid4().hex
+    st2["tg_offset"] = int(st2.get("tg_offset") or st.get("tg_offset") or 0)
+    ctx.save_state(st2)
     ctx.persist_queue_snapshot(reason="pre_restart_exit")
     # Replace current process with fresh Python — loads all modules from scratch
     launcher = os.path.join(os.getcwd(), "colab_launcher.py")
@@ -185,6 +192,53 @@ EVENT_HANDLERS = {
 
 def dispatch_event(evt: Dict[str, Any], ctx: Any) -> None:
     """Dispatch a single worker event to its handler."""
-    handler = EVENT_HANDLERS.get(evt.get("type"))
-    if handler is not None:
+    if not isinstance(evt, dict):
+        ctx.append_jsonl(
+            ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "invalid_worker_event",
+                "error": "event is not dict",
+                "event_repr": repr(evt)[:1000],
+            },
+        )
+        return
+
+    event_type = str(evt.get("type") or "").strip()
+    if not event_type:
+        ctx.append_jsonl(
+            ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "invalid_worker_event",
+                "error": "missing event.type",
+                "event_repr": repr(evt)[:1000],
+            },
+        )
+        return
+
+    handler = EVENT_HANDLERS.get(event_type)
+    if handler is None:
+        ctx.append_jsonl(
+            ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "unknown_worker_event",
+                "event_type": event_type,
+                "event_repr": repr(evt)[:1000],
+            },
+        )
+        return
+
+    try:
         handler(evt, ctx)
+    except Exception as e:
+        ctx.append_jsonl(
+            ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "worker_event_handler_error",
+                "event_type": event_type,
+                "error": repr(e),
+            },
+        )

@@ -10,10 +10,44 @@ import subprocess
 from typing import Any, Dict, List
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.utils import utc_now_iso, run_cmd
+from ouroboros.utils import utc_now_iso, run_cmd, append_jsonl, truncate_for_log
 
 
-def _run_shell(ctx: ToolContext, cmd: List[str], cwd: str = "") -> str:
+def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
+    # Recover from LLM sending cmd as JSON string instead of list
+    if isinstance(cmd, str):
+        raw_cmd = cmd
+        warning = "run_shell_cmd_string"
+        try:
+            parsed = json.loads(cmd)
+            if isinstance(parsed, list):
+                cmd = parsed
+                warning = "run_shell_cmd_string_json_list_recovered"
+            elif isinstance(parsed, str):
+                cmd = parsed.split()
+                warning = "run_shell_cmd_string_json_string_split"
+            else:
+                cmd = cmd.split()
+                warning = "run_shell_cmd_string_json_non_list_split"
+        except Exception:
+            cmd = cmd.split()
+            warning = "run_shell_cmd_string_split_fallback"
+
+        try:
+            append_jsonl(ctx.drive_logs() / "events.jsonl", {
+                "ts": utc_now_iso(),
+                "type": "tool_warning",
+                "tool": "run_shell",
+                "warning": warning,
+                "cmd_preview": truncate_for_log(raw_cmd, 500),
+            })
+        except Exception:
+            pass
+
+    if not isinstance(cmd, list):
+        return "⚠️ SHELL_ARG_ERROR: cmd must be a list of strings."
+    cmd = [str(x) for x in cmd]
+
     # Block git in evolution mode
     if str(ctx.current_task_type or "") == "evolution":
         if isinstance(cmd, list) and cmd and str(cmd[0]).lower() == "git":

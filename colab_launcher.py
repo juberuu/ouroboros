@@ -177,7 +177,7 @@ from supervisor.queue import (
 from supervisor.workers import (
     init as workers_init, get_event_q, WORKERS, PENDING, RUNNING,
     spawn_workers, kill_workers, assign_tasks, ensure_workers_healthy,
-    handle_chat_direct, reset_chat_agent, _get_chat_agent,
+    handle_chat_direct, _get_chat_agent,
 )
 workers_init(
     repo_dir=REPO_DIR, drive_root=DRIVE_ROOT, max_workers=MAX_WORKERS,
@@ -244,7 +244,6 @@ _event_ctx = types.SimpleNamespace(
     safe_restart=safe_restart,
     kill_workers=kill_workers,
     spawn_workers=spawn_workers,
-    reset_chat_agent=reset_chat_agent,
 )
 
 offset = int(load_state().get("tg_offset") or 0)

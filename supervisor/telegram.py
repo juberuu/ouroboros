@@ -310,10 +310,20 @@ def log_chat(direction: str, chat_id: int, user_id: int, text: str) -> None:
 
 
 def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
-                     force_budget: bool = False, fmt: str = "") -> None:
+                     force_budget: bool = False, fmt: str = "",
+                     is_progress: bool = False) -> None:
     st = load_state()
     owner_id = int(st.get("owner_id") or 0)
-    log_chat("out", chat_id, owner_id, text if log_text is None else log_text)
+    # Progress messages go to progress.jsonl instead of chat.jsonl
+    # This keeps chat history clean for context building
+    if is_progress:
+        append_jsonl(DRIVE_ROOT / "logs" / "progress.jsonl", {
+            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "direction": "out", "chat_id": chat_id, "user_id": owner_id,
+            "text": text if log_text is None else log_text,
+        })
+    else:
+        log_chat("out", chat_id, owner_id, text if log_text is None else log_text)
     budget = budget_line(force=force_budget)
     _text = str(text or "")
     if not budget:

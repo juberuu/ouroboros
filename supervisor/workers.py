@@ -8,6 +8,7 @@ Queue operations moved to supervisor.queue.
 from __future__ import annotations
 
 import datetime
+import json
 import multiprocessing as mp
 import pathlib
 import sys
@@ -115,15 +116,6 @@ def _get_chat_agent():
     return _chat_agent
 
 
-def reset_chat_agent() -> None:
-    global _chat_agent
-    _chat_agent = None
-    # Purge cached ouroboros modules to force fresh import
-    mods_to_remove = [k for k in sys.modules if k == 'ouroboros' or k.startswith('ouroboros.')]
-    for k in mods_to_remove:
-        del sys.modules[k]
-
-
 def handle_chat_direct(chat_id: int, text: str, image_data: Optional[Tuple[str, str]] = None) -> None:
     try:
         agent = _get_chat_agent()
@@ -178,11 +170,98 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str)
             out_q.put(e2)
 
 
+def _first_worker_boot_event_since(offset_bytes: int) -> Optional[Dict[str, Any]]:
+    """Read first worker_boot event written after the given file offset."""
+    path = DRIVE_ROOT / "logs" / "events.jsonl"
+    if not path.exists():
+        return None
+    try:
+        with path.open("rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            safe_offset = offset_bytes if 0 <= offset_bytes <= size else 0
+            f.seek(safe_offset)
+            data = f.read().decode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+    for line in data.splitlines():
+        raw = line.strip()
+        if not raw:
+            continue
+        try:
+            evt = json.loads(raw)
+        except Exception:
+            continue
+        if isinstance(evt, dict) and str(evt.get("type") or "") == "worker_boot":
+            return evt
+    return None
+
+
+def _verify_worker_sha_after_spawn(events_offset: int, timeout_sec: float = 15.0) -> None:
+    """Verify that newly spawned workers booted with expected current_sha."""
+    st = load_state()
+    expected_sha = str(st.get("current_sha") or "").strip()
+    if not expected_sha:
+        append_jsonl(
+            DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "worker_sha_verify_skipped",
+                "reason": "missing_current_sha",
+            },
+        )
+        return
+
+    deadline = time.time() + max(float(timeout_sec), 1.0)
+    boot_evt = None
+    while time.time() < deadline:
+        boot_evt = _first_worker_boot_event_since(events_offset)
+        if boot_evt is not None:
+            break
+        time.sleep(0.25)
+
+    if boot_evt is None:
+        append_jsonl(
+            DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "worker_sha_verify_timeout",
+                "expected_sha": expected_sha,
+            },
+        )
+        return
+
+    observed_sha = str(boot_evt.get("git_sha") or "").strip()
+    ok = bool(observed_sha and observed_sha == expected_sha)
+    append_jsonl(
+        DRIVE_ROOT / "logs" / "supervisor.jsonl",
+        {
+            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "type": "worker_sha_verify",
+            "ok": ok,
+            "expected_sha": expected_sha,
+            "observed_sha": observed_sha,
+            "worker_pid": boot_evt.get("pid"),
+        },
+    )
+    if not ok and st.get("owner_chat_id"):
+        send_with_budget(
+            int(st["owner_chat_id"]),
+            f"⚠️ Worker SHA mismatch after spawn: expected {expected_sha[:8]}, got {(observed_sha or 'unknown')[:8]}",
+        )
+
+
 def spawn_workers(n: int = 0) -> None:
     global _CTX, _EVENT_Q
     # Force fresh spawn context to ensure workers use latest code
     _CTX = mp.get_context("spawn")
     _EVENT_Q = _CTX.Queue()
+    events_path = DRIVE_ROOT / "logs" / "events.jsonl"
+    try:
+        events_offset = int(events_path.stat().st_size)
+    except Exception:
+        events_offset = 0
 
     count = n or MAX_WORKERS
     WORKERS.clear()
@@ -193,6 +272,7 @@ def spawn_workers(n: int = 0) -> None:
         proc.daemon = True
         proc.start()
         WORKERS[i] = Worker(wid=i, proc=proc, in_q=in_q, busy_task_id=None)
+    _verify_worker_sha_after_spawn(events_offset)
 
 
 def kill_workers() -> None:
@@ -228,9 +308,14 @@ def respawn_worker(wid: int) -> None:
 
 def assign_tasks() -> None:
     from supervisor import queue
+    from supervisor.state import budget_pct
     for w in WORKERS.values():
         if w.busy_task_id is None and PENDING:
             task = PENDING.pop(0)
+            # Drop evolution tasks if budget exhausted (supervisor-level guard)
+            if str(task.get("type") or "") == "evolution" and budget_pct(load_state()) >= 95.0:
+                queue.persist_queue_snapshot(reason="evolution_dropped_budget")
+                continue
             w.busy_task_id = task["id"]
             w.in_q.put(task)
             now_ts = time.time()
@@ -307,7 +392,12 @@ def ensure_workers_healthy() -> None:
             CRASH_TS.clear()
             return
         kill_workers()
-        spawn_workers()
         CRASH_TS.clear()
+        from supervisor import queue
+        queue.persist_queue_snapshot(reason="crash_storm_execv")
+        # Replace entire process to ensure supervisor also picks up stable code
+        import os as _os, sys as _sys
+        launcher = _os.path.join(_os.getcwd(), "colab_launcher.py")
+        _os.execv(_sys.executable, [_sys.executable, launcher])
 
 

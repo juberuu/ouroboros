@@ -55,11 +55,16 @@ def _chat_history(ctx: ToolContext, count: int = 100, offset: int = 0, search: s
 
 
 def _update_scratchpad(ctx: ToolContext, content: str) -> str:
-    """LLM-driven scratchpad update (Bible Principle 1: LLM-first)."""
+    """LLM-driven scratchpad update (Constitution P3: LLM-first)."""
     from ouroboros.memory import Memory
     mem = Memory(drive_root=ctx.drive_root)
     mem.ensure_files()
     mem.save_scratchpad(content)
+    mem.append_journal({
+        "ts": utc_now_iso(),
+        "content_preview": content[:500],
+        "content_len": len(content),
+    })
     return f"OK: scratchpad updated ({len(content)} chars)"
 
 
