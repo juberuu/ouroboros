@@ -478,10 +478,18 @@ while True:
             continue
 
         # All other messages → direct chat with Ouroboros
+        if not text and not image_data:
+            continue  # empty message, skip
+
         agent = _get_chat_agent()
         if agent._busy:
-            # Can't inject images into active conversation yet — just inject text
-            if text:
+            # Inject into active conversation
+            if image_data:
+                # Can't inject images mid-conversation yet; notify user
+                if text:
+                    agent.inject_message(text)
+                send_with_budget(chat_id, "📎 Фото получено, но сейчас идёт задача. Отправь ещё раз когда освобожусь.")
+            elif text:
                 agent.inject_message(text)
         else:
             threading.Thread(
