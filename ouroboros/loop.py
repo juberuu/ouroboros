@@ -189,13 +189,6 @@ def run_llm_loop(
                     "cache_write_tokens": int(usage.get("cache_write_tokens") or 0),
                     "cost_usd": float(usage.get("cost") or 0),
                 }
-                # DEBUG: write raw event + usage to debug file (remove after verification)
-                try:
-                    with open(str(drive_logs / "_debug_llm_round.jsonl"), "a") as _dbg:
-                        import json as _json
-                        _dbg.write(_json.dumps({"event_keys": sorted(_round_event.keys()), "usage_keys": sorted(usage.keys()), "usage_raw": {k: str(v) for k, v in usage.items()}}) + "\n")
-                except Exception:
-                    pass
                 append_jsonl(drive_logs / "events.jsonl", _round_event)
                 break
             except Exception as e:

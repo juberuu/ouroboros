@@ -155,6 +155,9 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str)
     mods_to_remove = [k for k in _sys.modules if k == 'ouroboros' or k.startswith('ouroboros.')]
     for k in mods_to_remove:
         del _sys.modules[k]
+    # Invalidate import caches to ensure no cached metadata persists
+    import importlib
+    importlib.invalidate_caches()
     from ouroboros.agent import make_agent
     agent = make_agent(repo_dir=repo_dir, drive_root=drive_root, event_queue=out_q)
     while True:

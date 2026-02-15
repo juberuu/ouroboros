@@ -3,7 +3,7 @@
 Самомодифицирующийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 2.17.2
+**Версия:** 2.18.0
 
 ---
 
@@ -155,6 +155,16 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 ---
 
 ## Changelog
+
+### 2.18.0 — Lazy Init: Fork-Safe Hot Reload
+
+Fixed critical root cause of stale code in forked workers. All features since v2.14.0 now truly active in production.
+
+- `ouroboros/__init__.py`: Removed eager `from ouroboros.agent import make_agent` — supervisor no longer loads full ouroboros package
+- `supervisor/workers.py`: Added `importlib.invalidate_caches()` after sys.modules cleanup
+- `ouroboros/loop.py`: Removed debug trace from v2.17.2 investigation
+- Root cause: `__init__.py` eager import → supervisor loads loop.py at startup → forked workers inherit stale code objects that persist despite `del sys.modules` + reimport
+- Fix: lazy `__init__.py` means supervisor only loads `ouroboros.apply_patch`, workers get genuinely fresh imports
 
 ### 2.17.2 — Stale Bytecode Nuclear Fix
 

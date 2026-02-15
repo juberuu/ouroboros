@@ -7,7 +7,11 @@
              utils.py (общие утилиты).
 """
 
-from ouroboros.agent import make_agent
+# IMPORTANT: Do NOT import agent/loop/llm/etc here!
+# colab_launcher.py imports ouroboros.apply_patch, which triggers __init__.py.
+# Any eager imports here get loaded into supervisor's memory and persist
+# in forked worker processes as stale code, preventing hot-reload.
+# Workers import make_agent directly from ouroboros.agent.
 
-__all__ = ['make_agent', 'agent', 'tools', 'llm', 'memory', 'review', 'utils']
+__all__ = ['agent', 'tools', 'llm', 'memory', 'review', 'utils']
 __version__ = '2.0.0'
