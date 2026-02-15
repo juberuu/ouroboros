@@ -136,8 +136,11 @@ def run_llm_loop(
 
         # Self-check
         if round_idx > 1 and round_idx % soft_check_interval == 0:
+            task_cost = accumulated_usage.get("cost", 0)
+            task_tokens = accumulated_usage.get("prompt_tokens", 0)
             messages.append({"role": "system", "content":
-                f"[Self-check] {round_idx} раундов. Оцени прогресс. Если застрял — смени подход."})
+                f"[Self-check] {round_idx} раундов. Оцени прогресс. Если застрял — смени подход."
+                f"[Self-check] {round_idx} rounds, ${task_cost:.3f} spent, {task_tokens:,} prompt tokens total."})
 
         # Escalate reasoning effort for long tasks
         if round_idx >= 5:
@@ -147,7 +150,7 @@ def run_llm_loop(
 
         # Compact old tool history to save tokens on long conversations
         if round_idx > 1:
-            messages = compact_tool_history(messages, keep_recent=6)
+            messages = compact_tool_history(messages)
 
         # --- LLM call with retry ---
         msg = None

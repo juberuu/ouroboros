@@ -3,7 +3,7 @@
 Самомодифицирующийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 2.13.0
+**Версия:** 2.14.0
 
 ---
 
@@ -153,6 +153,16 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 ---
 
 ## Changelog
+
+### 2.14.0 — Context Efficiency & Cost Awareness
+
+Aggressive context compaction to keep prompts under 35K tokens even in long tasks.
+
+- `ouroboros/context.py`: `_truncate_tool_result()` — hard cap 3K chars on any tool result
+- `ouroboros/context.py`: `compact_tool_history()` — keep_recent 6→4, old summaries capped at 80 chars
+- `ouroboros/loop.py`: Self-check now shows per-task cost and token usage
+- `ouroboros/loop.py`: Uses new compact defaults (keep_recent=4)
+- Expected savings: ~40% fewer prompt tokens on long evolution tasks
 
 ### 2.13.0 — Browser Automation (Playwright)
 
