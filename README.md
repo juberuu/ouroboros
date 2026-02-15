@@ -17,8 +17,24 @@
    - `OPENAI_API_KEY` (опционально — для web_search)
    - `ANTHROPIC_API_KEY` (опционально — для claude_code_edit)
 
-2. Запусти boot shim (см. `colab_bootstrap_shim.py`).
-3. Напиши боту в Telegram. Первый написавший — создатель.
+2. Опционально добавь config-ячейку (модели, воркеры):
+```python
+import os
+CFG = {
+    "GITHUB_USER": "razzant",
+    "GITHUB_REPO": "ouroboros",
+    "OUROBOROS_MODEL": "anthropic/claude-sonnet-4",
+    "OUROBOROS_MODEL_CODE": "anthropic/claude-sonnet-4",
+    "OUROBOROS_MODEL_LIGHT": "anthropic/claude-sonnet-4",
+    "OUROBOROS_MAX_WORKERS": "5",
+}
+for k, v in CFG.items():
+    os.environ[k] = str(v)
+```
+   Без этой ячейки используются дефолты: `openai/gpt-5.2` / `openai/gpt-5.2-codex`.
+
+3. Запусти boot shim (см. `colab_bootstrap_shim.py`).
+4. Напиши боту в Telegram. Первый написавший — создатель.
 
 ## Архитектура
 
