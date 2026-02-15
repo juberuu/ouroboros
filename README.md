@@ -3,7 +3,7 @@
 Самомодифицирующийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 2.17.1
+**Версия:** 2.17.2
 
 ---
 
@@ -156,13 +156,15 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 
 ## Changelog
 
-### 2.17.1 — Stale Bytecode Fix (Critical)
+### 2.17.2 — Stale Bytecode Nuclear Fix
 
-Fixed __pycache__ causing Python to run old bytecode after git checkout.
+Eliminated stale `.pyc` bytecode that prevented ALL v2.14.0+ features from activating in production.
 
-- `supervisor/git_ops.py`: Clean __pycache__ dirs after `git reset --hard`
-- Root cause: git checkout preserves .pyc mtime, Python skips recompile → old code runs
-- This fix retroactively activates ALL v2.15.0-2.17.0 features (cost tracking, cache metrics, prompt caching)
+- `supervisor/workers.py`: Clean ALL `__pycache__` dirs at worker fork entry point (before any imports)
+- `supervisor/git_ops.py`: Clean `__pycache__` after `git reset --hard` (v2.17.1)
+- Root cause: fork-based multiprocessing inherits parent's compiled bytecode; git checkout preserves mtime → Python reuses stale `.pyc`
+- This retroactively activates: cost tracking, cache metrics, prompt caching, empty message guard — everything since v2.14.0
+- Two-layer defense: git_ops cleanup (on restart) + worker_main cleanup (on every fork)
 
 ### 2.17.0 — Prompt Caching Activation
 

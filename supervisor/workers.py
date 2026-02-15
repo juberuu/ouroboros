@@ -147,6 +147,10 @@ def handle_chat_direct(chat_id: int, text: str, image_data: Optional[Tuple[str, 
 def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str) -> None:
     import sys as _sys
     _sys.path.insert(0, repo_dir)
+    # Clean __pycache__ to prevent stale bytecode from fork parent
+    import shutil, pathlib
+    for pycache in pathlib.Path(repo_dir).rglob("__pycache__"):
+        shutil.rmtree(pycache, ignore_errors=True)
     # Force fresh import after restart (fork inherits parent's sys.modules)
     mods_to_remove = [k for k in _sys.modules if k == 'ouroboros' or k.startswith('ouroboros.')]
     for k in mods_to_remove:
