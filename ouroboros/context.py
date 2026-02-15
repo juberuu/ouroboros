@@ -61,6 +61,9 @@ def build_llm_messages(
             - messages: List of message dicts ready for LLM
             - cap_info: Dict with token trimming metadata
     """
+    # --- Extract task type for adaptive context ---
+    task_type = str(task.get("type") or "user")
+
     # --- Read base prompts and state ---
     base_prompt = _safe_read(
         env.repo_path("prompts/SYSTEM.md"),
@@ -117,11 +120,16 @@ def build_llm_messages(
     
     # --- Assemble messages with prompt caching ---
     # Static content that doesn't change between rounds — cacheable
-    static_text = (
-        base_prompt + "\n\n"
-        + "## BIBLE.md\n\n" + clip_text(bible_md, 180000) + "\n\n"
-        + "## README.md\n\n" + clip_text(readme_md, 180000)
-    )
+    # Adaptive context: user chat needs only SYSTEM.md; evolution/review need full context
+    needs_full_context = task_type in ("evolution", "review", "scheduled")
+    if needs_full_context:
+        static_text = (
+            base_prompt + "\n\n"
+            + "## BIBLE.md\n\n" + clip_text(bible_md, 180000) + "\n\n"
+            + "## README.md\n\n" + clip_text(readme_md, 180000)
+        )
+    else:
+        static_text = base_prompt
 
     # Dynamic content that changes every round
     dynamic_parts = [

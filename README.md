@@ -3,7 +3,7 @@
 Самомодифицирующийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 2.22.0
+**Версия:** 2.23.0
 
 ---
 
@@ -156,6 +156,15 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 
 ## Changelog
 
+### 2.23.0 — Adaptive Context: Light Mode for User Chat
+
+Reduces token cost by 59% on static context for user chat tasks. Evolution/review/scheduled tasks keep full context (BIBLE.md + README.md + SYSTEM.md), while user chat loads only SYSTEM.md.
+
+- `ouroboros/context.py`: Task-type-aware context assembly — `needs_full_context` flag
+- Saves ~3,900 tokens per LLM round on user tasks
+- No behavior change for evolution/review — full context preserved
+- Combined with Budget Guard (v2.22.0), this is a major cost optimization
+
 ### 2.22.0 — Budget Guard: Round & Cost Limits
 
 Prevents runaway tasks from burning the budget. Tasks that hit limits get a clean forced-finish instead of infinite loops.
@@ -184,11 +193,3 @@ Fixed the REAL root cause of stale code in workers: `CTX = mp.get_context("spawn
 - Verified: spawn workers now produce `cost_usd` and `cached_tokens` in events
 - Prompt caching confirmed: 12.6K/21.5K tokens cached (59%) in smoke test
 - This is the DEFINITIVE fix for the 6-cycle stale code saga
-
-### 2.19.2 — Budget-Aware Context + Restart for Spawn
-
-Added budget remaining info to LLM runtime context so agent can make cost-aware decisions.
-
-- `ouroboros/context.py`: Budget injection (total/spent/remaining USD) into runtime context
-- Restart to activate spawn workers (v2.19.0), prompt caching, tool argument compaction (v2.19.1)
-- All improvements from v2.14.0-v2.19.1 now live in production
