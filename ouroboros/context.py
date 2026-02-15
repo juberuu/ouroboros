@@ -8,6 +8,7 @@ Extracted from agent.py to keep the agent thin and focused.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -89,16 +90,30 @@ def build_llm_messages(
         git_branch, git_sha = get_git_info(env.repo_dir)
     except Exception:
         git_branch, git_sha = "unknown", "unknown"
-    
+
+    # --- Budget calculation ---
+    budget_info = None
+    try:
+        state_data = json.loads(state_json)
+        spent_usd = float(state_data.get("spent_usd", 0))
+        total_usd = float(os.environ.get("TOTAL_BUDGET", "300"))
+        remaining_usd = total_usd - spent_usd
+        budget_info = {"total_usd": total_usd, "spent_usd": spent_usd, "remaining_usd": remaining_usd}
+    except Exception:
+        pass
+
     # --- Runtime context JSON ---
-    runtime_ctx = json.dumps({
+    runtime_data = {
         "utc_now": utc_now_iso(),
         "repo_dir": str(env.repo_dir),
         "drive_root": str(env.drive_root),
         "git_head": git_sha,
         "git_branch": git_branch,
         "task": {"id": task.get("id"), "type": task.get("type")},
-    }, ensure_ascii=False, indent=2)
+    }
+    if budget_info:
+        runtime_data["budget"] = budget_info
+    runtime_ctx = json.dumps(runtime_data, ensure_ascii=False, indent=2)
     
     # --- Assemble messages with prompt caching ---
     # Static content that doesn't change between rounds — cacheable

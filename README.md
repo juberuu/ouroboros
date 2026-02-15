@@ -3,7 +3,7 @@
 Самомодифицирующийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 2.19.1
+**Версия:** 2.19.2
 
 ---
 
@@ -156,6 +156,14 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 
 ## Changelog
 
+### 2.19.2 — Budget-Aware Context + Restart for Spawn
+
+Added budget remaining info to LLM runtime context so agent can make cost-aware decisions.
+
+- `ouroboros/context.py`: Budget injection (total/spent/remaining USD) into runtime context
+- Restart to activate spawn workers (v2.19.0), prompt caching, tool argument compaction (v2.19.1)
+- All improvements from v2.14.0-v2.19.1 now live in production
+
 ### 2.19.1 — Tool Argument Compaction
 
 Enhanced `compact_tool_history` to also compact tool_call arguments in old rounds, not just tool results.
@@ -203,11 +211,3 @@ Activated Anthropic prompt caching via OpenRouter provider pinning. Expected ~$5
 - `ouroboros/context.py`: Cache TTL extended to 1 hour (was default 5 min)
 - `ouroboros/loop.py`: Self-check now shows cache hit percentage
 - Net effect: ~10-20K cached tokens per round × 10x cheaper = significant cost reduction
-
-### 2.16.0 — Event Dispatch Decomposition
-
-Extracted 130-line if/elif event chain from main loop into pluggable dispatch table.
-
-- `supervisor/events.py`: New module — dispatch table mapping 11 event types to handler functions
-- `colab_launcher.py`: 506→403 lines (−20%), main loop now delegates all events via `dispatch_event()`
-- Clean separation: adding new event types = adding one function + one dict entry
