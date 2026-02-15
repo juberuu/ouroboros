@@ -3,7 +3,7 @@
 Самомодифицирующийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 2.16.0
+**Версия:** 2.17.0
 
 ---
 
@@ -156,6 +156,15 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 
 ## Changelog
 
+### 2.17.0 — Prompt Caching Activation
+
+Activated Anthropic prompt caching via OpenRouter provider pinning. Expected ~$50-80 savings.
+
+- `ouroboros/llm.py`: Provider pinning for Anthropic models (order: ["Anthropic"], require_parameters: true)
+- `ouroboros/context.py`: Cache TTL extended to 1 hour (was default 5 min)
+- `ouroboros/loop.py`: Self-check now shows cache hit percentage
+- Net effect: ~10-20K cached tokens per round × 10x cheaper = significant cost reduction
+
 ### 2.16.0 — Event Dispatch Decomposition
 
 Extracted 130-line if/elif event chain from main loop into pluggable dispatch table.
@@ -190,12 +199,3 @@ Aggressive context compaction to keep prompts under 35K tokens even in long task
 - `ouroboros/loop.py`: Self-check now shows per-task cost and token usage
 - `ouroboros/loop.py`: Uses new compact defaults (keep_recent=4)
 - Expected savings: ~40% fewer prompt tokens on long evolution tasks
-
-### 2.13.0 — Browser Automation
-
-Added headless browser capabilities for web scraping and automation.
-
-- `ouroboros/tools/browser.py`: New tool — Playwright-based browser automation
-- `browse_page(url)`: Fetch and return page content (HTML + text)
-- `browser_action(action, data)`: Navigate, click, type, screenshot
-- Automatic Playwright installation on first use

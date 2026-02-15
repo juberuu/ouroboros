@@ -150,9 +150,11 @@ def run_llm_loop(
         if round_idx > 1 and round_idx % soft_check_interval == 0:
             task_cost = accumulated_usage.get("cost", 0)
             task_tokens = accumulated_usage.get("prompt_tokens", 0)
+            cached = accumulated_usage.get("cached_tokens", 0)
+            cache_pct = f" ({cached*100//max(task_tokens,1)}% cached)" if cached > 0 else ""
             messages.append({"role": "system", "content":
                 f"[Self-check] {round_idx} раундов. Оцени прогресс. Если застрял — смени подход."
-                f"[Self-check] {round_idx} rounds, ${task_cost:.3f} spent, {task_tokens:,} prompt tokens total."})
+                f"[Self-check] {round_idx} rounds, ${task_cost:.3f} spent, {task_tokens:,} prompt tokens{cache_pct}."})
 
         # Escalate reasoning effort for long tasks
         if round_idx >= 5:

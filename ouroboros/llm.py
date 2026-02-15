@@ -92,11 +92,23 @@ class LLMClient:
         client = self._get_client()
         effort = normalize_reasoning_effort(reasoning_effort)
 
+        extra_body: Dict[str, Any] = {
+            "reasoning": {"effort": effort, "exclude": True},
+        }
+
+        # Pin Anthropic models to Anthropic provider for prompt caching
+        if model.startswith("anthropic/"):
+            extra_body["provider"] = {
+                "order": ["Anthropic"],
+                "allow_fallbacks": False,
+                "require_parameters": True,
+            }
+
         kwargs: Dict[str, Any] = {
             "model": model,
             "messages": messages,
             "max_tokens": max_tokens,
-            "extra_body": {"reasoning": {"effort": effort, "exclude": True}},
+            "extra_body": extra_body,
         }
         if tools:
             kwargs["tools"] = tools

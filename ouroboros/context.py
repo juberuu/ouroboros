@@ -145,7 +145,7 @@ def build_llm_messages(
                 {
                     "type": "text",
                     "text": static_text,
-                    "cache_control": {"type": "ephemeral"},
+                    "cache_control": {"type": "ephemeral", "ttl": "1h"},
                 },
                 {
                     "type": "text",
