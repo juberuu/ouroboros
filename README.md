@@ -3,7 +3,7 @@
 Самомодифицирующийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 2.19.0
+**Версия:** 2.19.1
 
 ---
 
@@ -155,6 +155,15 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 ---
 
 ## Changelog
+
+### 2.19.1 — Tool Argument Compaction
+
+Enhanced `compact_tool_history` to also compact tool_call arguments in old rounds, not just tool results.
+
+- `ouroboros/context.py`: New `_compact_tool_call_arguments()` function strips large payloads from `repo_write_commit`, `drive_write`, `claude_code_edit`, `update_scratchpad`
+- For other tools, arguments > 500 chars are truncated
+- Smoke test shows 41% context size reduction on typical long evolution sessions
+- Reduces prompt tokens → saves budget → enables more rounds per cycle
 
 ### 2.19.0 — Fork→Spawn: Clean Process Model
 

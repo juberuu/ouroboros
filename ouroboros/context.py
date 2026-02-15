@@ -248,7 +248,7 @@ def compact_tool_history(messages: list, keep_recent: int = 6) -> list:
 
     Keeps the last `keep_recent` tool-call rounds intact (they may be
     referenced by the LLM). Older rounds get their tool results truncated
-    to a short summary line.
+    to a short summary line, and tool_call arguments are compacted.
 
     This dramatically reduces prompt tokens in long tool-use conversations
     without losing important context (the tool names and whether they succeeded
@@ -302,16 +302,92 @@ def compact_tool_history(messages: list, keep_recent: int = 6) -> list:
                 continue
 
         # For compacted assistant messages, also trim the content (progress notes)
+        # AND compact tool_call arguments
         if i in rounds_to_compact and msg.get("role") == "assistant":
+            compacted_msg = dict(msg)
+
+            # Trim content (progress notes)
             content = msg.get("content") or ""
             if len(content) > 200:
                 content = content[:200] + "..."
-            result.append({**msg, "content": content})
+            compacted_msg["content"] = content
+
+            # Compact tool_call arguments
+            if msg.get("tool_calls"):
+                compacted_tool_calls = []
+                for tc in msg["tool_calls"]:
+                    compacted_tc = dict(tc)
+
+                    # Always preserve id and function name
+                    if "function" in compacted_tc:
+                        func = dict(compacted_tc["function"])
+                        args_str = func.get("arguments", "")
+
+                        if args_str:
+                            compacted_tc["function"] = _compact_tool_call_arguments(
+                                func["name"], args_str
+                            )
+                        else:
+                            compacted_tc["function"] = func
+
+                    compacted_tool_calls.append(compacted_tc)
+
+                compacted_msg["tool_calls"] = compacted_tool_calls
+
+            result.append(compacted_msg)
             continue
 
         result.append(msg)
 
     return result
+
+
+def _compact_tool_call_arguments(tool_name: str, args_json: str) -> Dict[str, Any]:
+    """
+    Compact tool call arguments for old rounds.
+
+    For tools with large content payloads, remove the large field and add _truncated marker.
+    For other tools, truncate arguments if > 500 chars.
+
+    Args:
+        tool_name: Name of the tool
+        args_json: JSON string of tool arguments
+
+    Returns:
+        Dict with 'name' and 'arguments' (JSON string, possibly compacted)
+    """
+    # Tools with large content fields that should be stripped
+    LARGE_CONTENT_TOOLS = {
+        "repo_write_commit": "content",
+        "drive_write": "content",
+        "claude_code_edit": "prompt",
+        "update_scratchpad": "content",
+    }
+
+    try:
+        args = json.loads(args_json)
+
+        # Check if this tool has a large content field to remove
+        if tool_name in LARGE_CONTENT_TOOLS:
+            large_field = LARGE_CONTENT_TOOLS[tool_name]
+            if large_field in args and args[large_field]:
+                args[large_field] = {"_truncated": True}
+                return {"name": tool_name, "arguments": json.dumps(args, ensure_ascii=False)}
+
+        # For other tools, if args JSON is > 500 chars, truncate
+        if len(args_json) > 500:
+            truncated = args_json[:200] + "..."
+            return {"name": tool_name, "arguments": truncated}
+
+        # Otherwise return unchanged
+        return {"name": tool_name, "arguments": args_json}
+
+    except (json.JSONDecodeError, Exception):
+        # If we can't parse JSON, leave it unchanged
+        # But still truncate if too long
+        if len(args_json) > 500:
+            return {"name": tool_name, "arguments": args_json[:200] + "..."}
+        return {"name": tool_name, "arguments": args_json}
 
 
 def _safe_read(path: pathlib.Path, fallback: str = "") -> str:
