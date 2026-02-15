@@ -339,6 +339,7 @@ while True:
         if text.strip().lower().startswith("/restart"):
             st2 = load_state()
             st2["session_id"] = uuid.uuid4().hex
+            st2["tg_offset"] = offset
             save_state(st2)
             send_with_budget(chat_id, "♻️ Restarting (soft).")
             ok, msg = safe_restart(reason="owner_restart", unsynced_policy="rescue_and_reset")
@@ -346,9 +347,8 @@ while True:
                 send_with_budget(chat_id, f"⚠️ Restart отменен: {msg}")
                 continue
             kill_workers()
-            reset_chat_agent()
-            spawn_workers(MAX_WORKERS)
-            continue
+            # Replace current process with fresh Python — loads all modules from scratch
+            os.execv(sys.executable, [sys.executable, __file__])
 
         if text.strip().lower().startswith("/status"):
             send_with_budget(chat_id, status_text(WORKERS, PENDING, RUNNING, SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC), force_budget=True)

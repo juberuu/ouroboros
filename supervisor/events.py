@@ -8,6 +8,8 @@ Extracted from colab_launcher.py main loop to keep it under 500 lines.
 from __future__ import annotations
 
 import datetime
+import os
+import sys
 import time
 import uuid
 from typing import Any, Dict
@@ -105,8 +107,10 @@ def _handle_restart_request(evt: Dict[str, Any], ctx: Any) -> None:
             ctx.send_with_budget(int(st["owner_chat_id"]), f"⚠️ Restart пропущен: {msg}")
         return
     ctx.kill_workers()
-    ctx.reset_chat_agent()
-    ctx.spawn_workers(ctx.MAX_WORKERS)
+    ctx.persist_queue_snapshot(reason="pre_restart_exit")
+    # Replace current process with fresh Python — loads all modules from scratch
+    launcher = os.path.join(os.getcwd(), "colab_launcher.py")
+    os.execv(sys.executable, [sys.executable, launcher])
 
 
 def _handle_promote_to_stable(evt: Dict[str, Any], ctx: Any) -> None:

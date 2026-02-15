@@ -3,7 +3,7 @@
 Самомодифицирующийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 2.20.0
+**Версия:** 2.21.0
 
 ---
 
@@ -156,6 +156,16 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 
 ## Changelog
 
+### 2.21.0 — True Process Restart via os.execv
+
+Fixed the fundamental restart problem: `safe_restart` only updated code on disk but the supervisor kept old modules in memory. Workers spawned after restart still used stale code.
+
+- `supervisor/events.py`: Agent `request_restart` now calls `os.execv()` to replace the entire process with fresh Python
+- `colab_launcher.py`: Owner `/restart` also uses `os.execv()` for clean restart
+- No boot shim changes needed — `os.execv()` keeps the same PID, `subprocess.run` in shim continues waiting
+- Saves `tg_offset` and queue state before restart to prevent data loss
+- This finally ensures ALL code changes take effect after restart — no more stale modules
+
 ### 2.20.0 — Lazy Spawn Context: True Hot-Reload
 
 Fixed the REAL root cause of stale code in workers: `CTX = mp.get_context("spawn")` was cached at module import time. After `safe_restart`, supervisor reused the old context object, so workers were still spawned with stale state.
@@ -174,11 +184,11 @@ Added budget remaining info to LLM runtime context so agent can make cost-aware 
 - Restart to activate spawn workers (v2.19.0), prompt caching, tool argument compaction (v2.19.1)
 - All improvements from v2.14.0-v2.19.1 now live in production
 
-### 2.19.1 — Tool Argument Compaction
+### 2.19.0 — Fork→Spawn Process Model
 
-Enhanced `compact_tool_history` to also compact tool_call arguments in old rounds, not just tool results.
+Switched worker process model from `fork` to `spawn` to eliminate stale code inheritance.
 
-- `ouroboros/context.py`: New `_compact_tool_call_arguments()` function strips large payloads from `repo_write_commit`, `drive_write`, `claude_code_edit`, `update_scratchpad`
-- For other tools, arguments > 500 chars are truncated
-- Smoke test shows 41% context size reduction on typical long evolution sessions
-- Reduces prompt tokens → saves budget → enables more rounds per cycle
+- `supervisor/workers.py`: `mp.get_context("spawn")` ensures fresh Python interpreter for each worker
+- Workers now start from clean slate, no inherited modules/state from supervisor
+- Combined with `safe_restart`, this should fix the persistent stale code issue
+- Prompt caching support added to context builder (cache_control on static content)
