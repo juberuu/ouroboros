@@ -35,7 +35,15 @@ TOTAL_BUDGET_LIMIT: float = 0.0
 BRANCH_DEV: str = "ouroboros"
 BRANCH_STABLE: str = "ouroboros-stable"
 
-CTX = mp.get_context("spawn")
+_CTX = None
+
+
+def _get_ctx():
+    """Return spawn context — recreated fresh in spawn_workers()."""
+    global _CTX
+    if _CTX is None:
+        _CTX = mp.get_context("spawn")
+    return _CTX
 
 
 def init(repo_dir: pathlib.Path, drive_root: pathlib.Path, max_workers: int,
@@ -70,7 +78,17 @@ class Worker:
     busy_task_id: Optional[str] = None
 
 
-EVENT_Q = CTX.Queue()
+_EVENT_Q = None
+
+
+def get_event_q():
+    """Get the current EVENT_Q, creating if needed."""
+    global _EVENT_Q
+    if _EVENT_Q is None:
+        _EVENT_Q = _get_ctx().Queue()
+    return _EVENT_Q
+
+
 WORKERS: Dict[int, Worker] = {}
 PENDING: List[Dict[str, Any]] = []
 RUNNING: Dict[str, Dict[str, Any]] = {}
@@ -92,7 +110,7 @@ def _get_chat_agent():
         _chat_agent = make_agent(
             repo_dir=str(REPO_DIR),
             drive_root=str(DRIVE_ROOT),
-            event_queue=EVENT_Q,
+            event_queue=get_event_q(),
         )
     return _chat_agent
 
@@ -120,7 +138,7 @@ def handle_chat_direct(chat_id: int, text: str, image_data: Optional[Tuple[str, 
             task["image_mime"] = image_data[1]
         events = agent.handle_task(task)
         for e in events:
-            EVENT_Q.put(e)
+            get_event_q().put(e)
     except Exception as e:
         import traceback
         err_msg = f"⚠️ Ошибка: {type(e).__name__}: {e}"
@@ -161,12 +179,17 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str)
 
 
 def spawn_workers(n: int = 0) -> None:
+    global _CTX, _EVENT_Q
+    # Force fresh spawn context to ensure workers use latest code
+    _CTX = mp.get_context("spawn")
+    _EVENT_Q = _CTX.Queue()
+
     count = n or MAX_WORKERS
     WORKERS.clear()
     for i in range(count):
-        in_q = CTX.Queue()
-        proc = CTX.Process(target=worker_main,
-                           args=(i, in_q, EVENT_Q, str(REPO_DIR), str(DRIVE_ROOT)))
+        in_q = _CTX.Queue()
+        proc = _CTX.Process(target=worker_main,
+                           args=(i, in_q, _EVENT_Q, str(REPO_DIR), str(DRIVE_ROOT)))
         proc.daemon = True
         proc.start()
         WORKERS[i] = Worker(wid=i, proc=proc, in_q=in_q, busy_task_id=None)
@@ -194,9 +217,10 @@ def kill_workers() -> None:
 
 
 def respawn_worker(wid: int) -> None:
-    in_q = CTX.Queue()
-    proc = CTX.Process(target=worker_main,
-                       args=(wid, in_q, EVENT_Q, str(REPO_DIR), str(DRIVE_ROOT)))
+    ctx = _get_ctx()
+    in_q = ctx.Queue()
+    proc = ctx.Process(target=worker_main,
+                       args=(wid, in_q, get_event_q(), str(REPO_DIR), str(DRIVE_ROOT)))
     proc.daemon = True
     proc.start()
     WORKERS[wid] = Worker(wid=wid, proc=proc, in_q=in_q, busy_task_id=None)

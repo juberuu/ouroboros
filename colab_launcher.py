@@ -175,7 +175,7 @@ from supervisor.queue import (
 )
 
 from supervisor.workers import (
-    init as workers_init, EVENT_Q, WORKERS, PENDING, RUNNING,
+    init as workers_init, get_event_q, WORKERS, PENDING, RUNNING,
     spawn_workers, kill_workers, assign_tasks, ensure_workers_healthy,
     handle_chat_direct, reset_chat_agent, _get_chat_agent,
 )
@@ -254,8 +254,9 @@ while True:
     ensure_workers_healthy()
 
     # Drain worker events
-    while EVENT_Q.qsize() > 0:
-        evt = EVENT_Q.get()
+    event_q = get_event_q()
+    while event_q.qsize() > 0:
+        evt = event_q.get()
         dispatch_event(evt, _event_ctx)
 
     enforce_task_timeouts()

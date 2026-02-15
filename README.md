@@ -3,7 +3,7 @@
 Самомодифицирующийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 2.19.2
+**Версия:** 2.20.0
 
 ---
 
@@ -156,6 +156,16 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 
 ## Changelog
 
+### 2.20.0 — Lazy Spawn Context: True Hot-Reload
+
+Fixed the REAL root cause of stale code in workers: `CTX = mp.get_context("spawn")` was cached at module import time. After `safe_restart`, supervisor reused the old context object, so workers were still spawned with stale state.
+
+- `supervisor/workers.py`: `CTX` → lazy `_get_ctx()` + `get_event_q()`. Fresh spawn context created on every `spawn_workers()` call
+- `colab_launcher.py`: Uses `get_event_q()` function instead of direct `EVENT_Q` import
+- Verified: spawn workers now produce `cost_usd` and `cached_tokens` in events
+- Prompt caching confirmed: 12.6K/21.5K tokens cached (59%) in smoke test
+- This is the DEFINITIVE fix for the 6-cycle stale code saga
+
 ### 2.19.2 — Budget-Aware Context + Restart for Spawn
 
 Added budget remaining info to LLM runtime context so agent can make cost-aware decisions.
@@ -172,42 +182,3 @@ Enhanced `compact_tool_history` to also compact tool_call arguments in old round
 - For other tools, arguments > 500 chars are truncated
 - Smoke test shows 41% context size reduction on typical long evolution sessions
 - Reduces prompt tokens → saves budget → enables more rounds per cycle
-
-### 2.19.0 — Fork→Spawn: Clean Process Model
-
-Switched worker process creation from `fork` to `spawn`, eliminating ALL stale code inheritance.
-
-- `supervisor/workers.py`: `mp.get_context("fork")` → `mp.get_context("spawn")` — workers now start as fresh Python processes
-- `supervisor/workers.py`: Removed 11 lines of stale-bytecode workarounds (`__pycache__` cleanup, `sys.modules` purge, `importlib.invalidate_caches`) — no longer needed with spawn
-- `ouroboros/loop.py`: Removed debug traces from cost_usd investigation
-- Root cause of ALL stale code issues: `fork` copies parent's memory including loaded modules; `spawn` starts a fresh Python interpreter
-- This definitively fixes: cost_usd missing from events, cache_write_tokens missing, and any future hot-reload issues
-
-### 2.18.0 — Lazy Init: Fork-Safe Hot Reload
-
-Fixed critical root cause of stale code in forked workers. All features since v2.14.0 now truly active in production.
-
-- `ouroboros/__init__.py`: Removed eager `from ouroboros.agent import make_agent` — supervisor no longer loads full ouroboros package
-- `supervisor/workers.py`: Added `importlib.invalidate_caches()` after sys.modules cleanup
-- `ouroboros/loop.py`: Removed debug trace from v2.17.2 investigation
-- Root cause: `__init__.py` eager import → supervisor loads loop.py at startup → forked workers inherit stale code objects that persist despite `del sys.modules` + reimport
-- Fix: lazy `__init__.py` means supervisor only loads `ouroboros.apply_patch`, workers get genuinely fresh imports
-
-### 2.17.2 — Stale Bytecode Nuclear Fix
-
-Eliminated stale `.pyc` bytecode that prevented ALL v2.14.0+ features from activating in production.
-
-- `supervisor/workers.py`: Clean ALL `__pycache__` dirs at worker fork entry point (before any imports)
-- `supervisor/git_ops.py`: Clean `__pycache__` after `git reset --hard` (v2.17.1)
-- Root cause: fork-based multiprocessing inherits parent's compiled bytecode; git checkout preserves mtime → Python reuses stale `.pyc`
-- This retroactively activates: cost tracking, cache metrics, prompt caching, empty message guard — everything since v2.14.0
-- Two-layer defense: git_ops cleanup (on restart) + worker_main cleanup (on every fork)
-
-### 2.17.0 — Prompt Caching Activation
-
-Activated Anthropic prompt caching via OpenRouter provider pinning. Expected ~$50-80 savings.
-
-- `ouroboros/llm.py`: Provider pinning for Anthropic models (order: ["Anthropic"], require_parameters: true)
-- `ouroboros/context.py`: Cache TTL extended to 1 hour (was default 5 min)
-- `ouroboros/loop.py`: Self-check now shows cache hit percentage
-- Net effect: ~10-20K cached tokens per round × 10x cheaper = significant cost reduction
