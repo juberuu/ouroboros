@@ -3,7 +3,7 @@
 Самомодифицирующийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 2.23.0
+**Версия:** 2.23.1
 
 ---
 
@@ -155,6 +155,14 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 ---
 
 ## Changelog
+
+### 2.23.1 — Evolution Auto-Stop at 95% Budget
+
+Prevents evolution from burning the last 5% of budget. Reserves remaining funds for owner conversations.
+
+- `supervisor/queue.py`: `enqueue_evolution_task_if_needed` now stops at 95% budget (was 100%)
+- Shows remaining $ amount in the stop message
+- Critical for budget conservation: without this, evolution would run until $0
 
 ### 2.23.0 — Adaptive Context: Light Mode for User Chat
 

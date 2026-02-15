@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from supervisor.state import (
     load_state, save_state, append_jsonl, atomic_write_text,
-    QUEUE_SNAPSHOT_PATH, budget_pct,
+    QUEUE_SNAPSHOT_PATH, budget_pct, TOTAL_BUDGET_LIMIT,
 )
 from supervisor.telegram import send_with_budget
 
@@ -362,10 +362,11 @@ def enqueue_evolution_task_if_needed() -> None:
     owner_chat_id = st.get("owner_chat_id")
     if not owner_chat_id:
         return
-    if budget_pct(st) >= 100.0:
+    if budget_pct(st) >= 95.0:
         st["evolution_mode_enabled"] = False
         save_state(st)
-        send_with_budget(int(owner_chat_id), "💸 Эволюция остановлена: бюджет исчерпан.")
+        remaining = max(0, TOTAL_BUDGET_LIMIT - float(st.get("spent_usd") or 0)) if TOTAL_BUDGET_LIMIT > 0 else 0
+        send_with_budget(int(owner_chat_id), f"💸 Эволюция остановлена: осталось ${remaining:.2f} — резервирую для разговоров.")
         return
     cycle = int(st.get("evolution_cycle") or 0) + 1
     tid = uuid.uuid4().hex[:8]
