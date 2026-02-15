@@ -45,6 +45,7 @@ def get_tg() -> "TelegramClient":
 class TelegramClient:
     def __init__(self, token: str):
         self.base = f"https://api.telegram.org/bot{token}"
+        self._token = token
 
     def get_updates(self, offset: int, timeout: int = 10) -> List[Dict[str, Any]]:
         last_err = "unknown"
@@ -100,6 +101,38 @@ class TelegramClient:
             return r.status_code == 200
         except Exception:
             return False
+
+    def download_file_base64(self, file_id: str, max_bytes: int = 10_000_000) -> Tuple[Optional[str], str]:
+        """Download a file from Telegram and return (base64_data, mime_type). Returns (None, "") on failure."""
+        try:
+            # Get file path
+            r = requests.get(f"{self.base}/getFile", params={"file_id": file_id}, timeout=10)
+            r.raise_for_status()
+            data = r.json()
+            if not data.get("ok"):
+                return None, ""
+            file_path = data["result"].get("file_path", "")
+            file_size = int(data["result"].get("file_size") or 0)
+            if file_size > max_bytes:
+                return None, ""
+
+            # Download file
+            download_url = f"https://api.telegram.org/file/bot{self._token}/{file_path}"
+            r2 = requests.get(download_url, timeout=30)
+            r2.raise_for_status()
+
+            import base64
+            b64 = base64.b64encode(r2.content).decode("ascii")
+
+            # Guess mime type from extension
+            ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else ""
+            mime_map = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+                        "gif": "image/gif", "webp": "image/webp", "bmp": "image/bmp"}
+            mime = mime_map.get(ext, "image/jpeg")  # default to jpeg
+
+            return b64, mime
+        except Exception:
+            return None, ""
 
 
 # ---------------------------------------------------------------------------

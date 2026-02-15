@@ -388,8 +388,28 @@ while True:
         chat_id = int(msg["chat"]["id"])
         from_user = msg.get("from") or {}
         user_id = int(from_user.get("id") or 0)
-        text = str(msg.get("text") or "")
+        text = str(msg.get("text") or msg.get("caption") or "")
         now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+        # Extract image if present
+        image_data = None  # Will be (base64, mime_type) or None
+        if msg.get("photo"):
+            # photo is array of PhotoSize, last one is largest
+            best_photo = msg["photo"][-1]
+            file_id = best_photo.get("file_id")
+            if file_id:
+                b64, mime = TG.download_file_base64(file_id)
+                if b64:
+                    image_data = (b64, mime)
+        elif msg.get("document"):
+            doc = msg["document"]
+            mime_type = str(doc.get("mime_type") or "")
+            if mime_type.startswith("image/"):
+                file_id = doc.get("file_id")
+                if file_id:
+                    b64, mime = TG.download_file_base64(file_id)
+                    if b64:
+                        image_data = (b64, mime)
 
         st = load_state()
         if st.get("owner_id") is None:
@@ -460,11 +480,13 @@ while True:
         # All other messages → direct chat with Ouroboros
         agent = _get_chat_agent()
         if agent._busy:
-            agent.inject_message(text)
+            # Can't inject images into active conversation yet — just inject text
+            if text:
+                agent.inject_message(text)
         else:
             threading.Thread(
                 target=handle_chat_direct,
-                args=(chat_id, text),
+                args=(chat_id, text, image_data),
                 daemon=True,
             ).start()
 

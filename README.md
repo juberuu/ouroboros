@@ -3,7 +3,7 @@
 Самомодифицирующийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 2.11.0
+**Версия:** 2.12.0
 
 ---
 
@@ -152,6 +152,17 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 
 ## Changelog
 
+### 2.12.0 — Vision: Image Support
+
+Agent can now see images sent in Telegram (photos and image documents).
+
+- `supervisor/telegram.py`: `download_file_base64()` downloads Telegram photos as base64
+- `colab_launcher.py`: Extracts photos/image-documents from updates, passes to agent
+- `supervisor/workers.py`: `handle_chat_direct` accepts `image_data` parameter
+- `ouroboros/context.py`: `_build_user_content()` builds multipart user messages (text + image_url)
+- Supports OpenAI Vision API format (`image_url` with `data:` URI) — works with all vision-capable models via OpenRouter
+- Max 10MB per image, auto-detects MIME type from file extension
+
 ### 2.11.0 — Module Cache Purge on Restart (Critical)
 
 Fixed: restart never activated new code because fork'd workers inherited stale sys.modules.
@@ -199,11 +210,11 @@ Multipart system message с `cache_control` для кэширования ста
 - Ожидаемая экономия: ~50% prompt costs при multi-round диалогах (Anthropic pricing: cached tokens = 10% cost)
 - context.py: 250 → 301 строк (+51)
 
-### 2.8.0 — Concurrent Tool Execution
+### 2.9.2 — Restart Policy Fix (Critical)
 
-Параллельное выполнение tool calls через ThreadPoolExecutor.
+Fixed restart being blocked by dirty state, preventing all code updates from activating.
 
-- 2.8x speedup на параллельных shell/IO вызовах (benchmark: 3×sleep 0.5s)
-- Порядок результатов сохраняется (LLM ожидает tool results в порядке запроса)
-- Извлечена `_execute_single_tool()` для тестируемости
-- loop.py: 203 → 270 строк (+67)
+- Agent restart and owner /restart now use `rescue_and_reset` instead of `rescue_and_block`
+- Rescue snapshot still saved (no data loss) but restart CONTINUES instead of blocking
+- This was blocking all improvements since v2.8.0 from activating in runtime
+- Root cause: `repo_write_commit` could leave dirty state → restart blocked → agent stuck on old code

@@ -17,6 +17,26 @@ from ouroboros.utils import (
 from ouroboros.memory import Memory
 
 
+def _build_user_content(task: Dict[str, Any]) -> Any:
+    """Build user message content. Supports text + optional image."""
+    text = task.get("text", "")
+    image_b64 = task.get("image_base64")
+    image_mime = task.get("image_mime", "image/jpeg")
+
+    if not image_b64:
+        return text
+
+    # Multipart content with text + image
+    parts = []
+    if text:
+        parts.append({"type": "text", "text": text})
+    parts.append({
+        "type": "image_url",
+        "image_url": {"url": f"data:{image_mime};base64,{image_b64}"}
+    })
+    return parts
+
+
 def build_llm_messages(
     env: Any,
     memory: Memory,
@@ -25,13 +45,13 @@ def build_llm_messages(
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Build the full LLM message context for a task.
-    
+
     Args:
         env: Env instance with repo_path/drive_path helpers
         memory: Memory instance for scratchpad/identity/logs
         task: Task dict with id, type, text, etc.
         review_context_builder: Optional callable for review tasks (signature: () -> str)
-    
+
     Returns:
         (messages, cap_info) tuple:
             - messages: List of message dicts ready for LLM
@@ -130,7 +150,7 @@ def build_llm_messages(
                 },
             ],
         },
-        {"role": "user", "content": task.get("text", "")},
+        {"role": "user", "content": _build_user_content(task)},
     ]
     
     # --- Soft-cap token trimming ---
