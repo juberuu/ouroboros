@@ -179,7 +179,7 @@ def run_llm_loop(
                 add_usage(accumulated_usage, usage)
                 accumulated_usage["rounds"] = accumulated_usage.get("rounds", 0) + 1
                 # Log per-round metrics
-                append_jsonl(drive_logs / "events.jsonl", {
+                _round_event = {
                     "ts": utc_now_iso(), "type": "llm_round",
                     "round": round_idx, "model": active_model,
                     "reasoning_effort": active_effort,
@@ -188,7 +188,15 @@ def run_llm_loop(
                     "cached_tokens": int(usage.get("cached_tokens") or 0),
                     "cache_write_tokens": int(usage.get("cache_write_tokens") or 0),
                     "cost_usd": float(usage.get("cost") or 0),
-                })
+                }
+                # DEBUG: write raw event + usage to debug file (remove after verification)
+                try:
+                    with open(str(drive_logs / "_debug_llm_round.jsonl"), "a") as _dbg:
+                        import json as _json
+                        _dbg.write(_json.dumps({"event_keys": sorted(_round_event.keys()), "usage_keys": sorted(usage.keys()), "usage_raw": {k: str(v) for k, v in usage.items()}}) + "\n")
+                except Exception:
+                    pass
+                append_jsonl(drive_logs / "events.jsonl", _round_event)
                 break
             except Exception as e:
                 last_error = e
