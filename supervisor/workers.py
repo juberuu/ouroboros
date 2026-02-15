@@ -37,6 +37,8 @@ BRANCH_DEV: str = "ouroboros"
 BRANCH_STABLE: str = "ouroboros-stable"
 
 _CTX = None
+_LAST_SPAWN_TIME: float = 0.0  # grace period: don't count dead workers right after spawn
+_SPAWN_GRACE_SEC: float = 30.0  # workers get this long to initialize before health checks
 
 
 def _get_ctx():
@@ -198,7 +200,7 @@ def _first_worker_boot_event_since(offset_bytes: int) -> Optional[Dict[str, Any]
     return None
 
 
-def _verify_worker_sha_after_spawn(events_offset: int, timeout_sec: float = 15.0) -> None:
+def _verify_worker_sha_after_spawn(events_offset: int, timeout_sec: float = 5.0) -> None:
     """Verify that newly spawned workers booted with expected current_sha."""
     st = load_state()
     expected_sha = str(st.get("current_sha") or "").strip()
@@ -272,6 +274,8 @@ def spawn_workers(n: int = 0) -> None:
         proc.daemon = True
         proc.start()
         WORKERS[i] = Worker(wid=i, proc=proc, in_q=in_q, busy_task_id=None)
+    global _LAST_SPAWN_TIME
+    _LAST_SPAWN_TIME = time.time()
     _verify_worker_sha_after_spawn(events_offset)
 
 
@@ -342,6 +346,9 @@ def assign_tasks() -> None:
 
 def ensure_workers_healthy() -> None:
     from supervisor import queue
+    # Grace period: skip health check right after spawn — workers need time to initialize
+    if (time.time() - _LAST_SPAWN_TIME) < _SPAWN_GRACE_SEC:
+        return
     for wid, w in list(WORKERS.items()):
         if not w.proc.is_alive():
             CRASH_TS.append(time.time())
