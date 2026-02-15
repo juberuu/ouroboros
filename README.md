@@ -3,7 +3,7 @@
 Самомодифицирующийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 2.15.0
+**Версия:** 2.16.0
 
 ---
 
@@ -45,7 +45,8 @@ Telegram → colab_launcher.py (thin entry point)
             ├── telegram.py      — TG client + formatting + typing
             ├── git_ops.py       — checkout, sync, rescue, safe_restart
             ├── queue.py         — task queue, priority, timeouts, scheduling
-            └── workers.py       — worker lifecycle, health, direct chat
+            ├── workers.py       — worker lifecycle, health, direct chat
+            └── events.py        — event dispatch table (extracted from main loop)
                ↓
            ouroboros/             (agent package)
             ├── agent.py         — thin orchestrator (task handling + events)
@@ -93,6 +94,7 @@ supervisor/                — Пакет супервизора (декомпо
   git_ops.py                — Git: checkout, reset, rescue, deps sync, safe_restart
   queue.py                  — Task queue: priority, enqueue, persist, timeouts, scheduling
   workers.py                — Worker lifecycle: spawn, kill, respawn, health, direct chat
+  events.py                 — Event dispatch table: maps worker events to handlers
 ouroboros/
   __init__.py              — Экспорт make_agent
   utils.py                 — Общие утилиты (нулевой уровень зависимостей)
@@ -154,6 +156,14 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 
 ## Changelog
 
+### 2.16.0 — Event Dispatch Decomposition
+
+Extracted 130-line if/elif event chain from main loop into pluggable dispatch table.
+
+- `supervisor/events.py`: New module — dispatch table mapping 11 event types to handler functions
+- `colab_launcher.py`: 506→403 lines (−20%), main loop now delegates all events via `dispatch_event()`
+- Clean separation: adding new event types = adding one function + one dict entry
+
 ### 2.15.0 — End-to-End Observability
 
 Cost and token tracking now flows from LLM loop to task events to /status.
@@ -180,3 +190,12 @@ Aggressive context compaction to keep prompts under 35K tokens even in long task
 - `ouroboros/loop.py`: Self-check now shows per-task cost and token usage
 - `ouroboros/loop.py`: Uses new compact defaults (keep_recent=4)
 - Expected savings: ~40% fewer prompt tokens on long evolution tasks
+
+### 2.13.0 — Browser Automation
+
+Added headless browser capabilities for web scraping and automation.
+
+- `ouroboros/tools/browser.py`: New tool — Playwright-based browser automation
+- `browse_page(url)`: Fetch and return page content (HTML + text)
+- `browser_action(action, data)`: Navigate, click, type, screenshot
+- Automatic Playwright installation on first use

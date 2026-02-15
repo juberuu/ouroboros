@@ -186,6 +186,8 @@ workers_init(
     branch_dev=BRANCH_DEV, branch_stable=BRANCH_STABLE,
 )
 
+from supervisor.events import dispatch_event
+
 # ----------------------------
 # 5) Bootstrap repo
 # ----------------------------
@@ -219,6 +221,32 @@ append_jsonl(DRIVE_ROOT / "logs" / "supervisor.jsonl", {
 # ----------------------------
 # 7) Main loop
 # ----------------------------
+import types
+_event_ctx = types.SimpleNamespace(
+    DRIVE_ROOT=DRIVE_ROOT,
+    REPO_DIR=REPO_DIR,
+    BRANCH_DEV=BRANCH_DEV,
+    BRANCH_STABLE=BRANCH_STABLE,
+    TG=TG,
+    WORKERS=WORKERS,
+    PENDING=PENDING,
+    RUNNING=RUNNING,
+    MAX_WORKERS=MAX_WORKERS,
+    send_with_budget=send_with_budget,
+    load_state=load_state,
+    save_state=save_state,
+    update_budget_from_usage=update_budget_from_usage,
+    append_jsonl=append_jsonl,
+    enqueue_task=enqueue_task,
+    cancel_task_by_id=cancel_task_by_id,
+    queue_review_task=queue_review_task,
+    persist_queue_snapshot=persist_queue_snapshot,
+    safe_restart=safe_restart,
+    kill_workers=kill_workers,
+    spawn_workers=spawn_workers,
+    reset_chat_agent=reset_chat_agent,
+)
+
 offset = int(load_state().get("tg_offset") or 0)
 
 while True:
@@ -228,137 +256,7 @@ while True:
     # Drain worker events
     while EVENT_Q.qsize() > 0:
         evt = EVENT_Q.get()
-        et = evt.get("type")
-
-        if et == "llm_usage":
-            update_budget_from_usage(evt.get("usage") or {})
-            continue
-
-        if et == "task_heartbeat":
-            task_id = str(evt.get("task_id") or "")
-            if task_id and task_id in RUNNING:
-                meta = RUNNING.get(task_id) or {}
-                meta["last_heartbeat_at"] = time.time()
-                phase = str(evt.get("phase") or "")
-                if phase:
-                    meta["heartbeat_phase"] = phase
-                RUNNING[task_id] = meta
-            continue
-
-        if et == "typing_start":
-            try:
-                _chat_id = int(evt.get("chat_id") or 0)
-                if _chat_id:
-                    # Send typing action — supervisor handles it directly
-                    TG.send_chat_action(_chat_id, "typing")
-            except Exception:
-                pass
-            continue
-
-        if et == "send_message":
-            try:
-                _log_text = evt.get("log_text")
-                _fmt = str(evt.get("format") or "")
-                send_with_budget(
-                    int(evt["chat_id"]),
-                    str(evt.get("text") or ""),
-                    log_text=(str(_log_text) if isinstance(_log_text, str) else None),
-                    fmt=_fmt,
-                )
-            except Exception as e:
-                append_jsonl(
-                    DRIVE_ROOT / "logs" / "supervisor.jsonl",
-                    {
-                        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                        "type": "send_message_event_error", "error": repr(e),
-                    },
-                )
-            continue
-
-        if et == "task_done":
-            task_id = evt.get("task_id")
-            wid = evt.get("worker_id")
-            if task_id:
-                RUNNING.pop(str(task_id), None)
-            if wid in WORKERS and WORKERS[wid].busy_task_id == task_id:
-                WORKERS[wid].busy_task_id = None
-            persist_queue_snapshot(reason="task_done")
-            continue
-
-        if et == "task_metrics":
-            append_jsonl(
-                DRIVE_ROOT / "logs" / "supervisor.jsonl",
-                {
-                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                    "type": "task_metrics_event",
-                    "task_id": str(evt.get("task_id") or ""),
-                    "task_type": str(evt.get("task_type") or ""),
-                    "duration_sec": round(float(evt.get("duration_sec") or 0.0), 3),
-                    "tool_calls": int(evt.get("tool_calls") or 0),
-                    "tool_errors": int(evt.get("tool_errors") or 0),
-                },
-            )
-            continue
-
-        if et == "review_request":
-            queue_review_task(reason=str(evt.get("reason") or "agent_review_request"), force=False)
-            continue
-
-        if et == "restart_request":
-            st = load_state()
-            if st.get("owner_chat_id"):
-                send_with_budget(int(st["owner_chat_id"]),
-                                 f"♻️ Restart requested by agent: {evt.get('reason')}")
-            ok, msg = safe_restart(reason="agent_restart_request", unsynced_policy="rescue_and_reset")
-            if not ok:
-                if st.get("owner_chat_id"):
-                    send_with_budget(int(st["owner_chat_id"]), f"⚠️ Restart пропущен: {msg}")
-                continue
-            kill_workers()
-            reset_chat_agent()
-            spawn_workers(MAX_WORKERS)
-            continue
-
-        if et == "promote_to_stable":
-            try:
-                import subprocess as sp
-                sp.run(["git", "fetch", "origin"], cwd=str(REPO_DIR), check=True)
-                sp.run(["git", "push", "origin", f"{BRANCH_DEV}:{BRANCH_STABLE}"],
-                       cwd=str(REPO_DIR), check=True)
-                new_sha = sp.run(["git", "rev-parse", f"origin/{BRANCH_STABLE}"],
-                                  cwd=str(REPO_DIR), capture_output=True, text=True,
-                                  check=True).stdout.strip()
-                st = load_state()
-                if st.get("owner_chat_id"):
-                    send_with_budget(int(st["owner_chat_id"]),
-                                     f"✅ Промоут: {BRANCH_DEV} → {BRANCH_STABLE} ({new_sha[:8]})")
-            except Exception as e:
-                st = load_state()
-                if st.get("owner_chat_id"):
-                    send_with_budget(int(st["owner_chat_id"]),
-                                     f"❌ Ошибка промоута в stable: {e}")
-            continue
-
-        if et == "schedule_task":
-            st = load_state()
-            owner_chat_id = st.get("owner_chat_id")
-            desc = str(evt.get("description") or "").strip()
-            if owner_chat_id and desc:
-                tid = uuid.uuid4().hex[:8]
-                enqueue_task({"id": tid, "type": "task", "chat_id": int(owner_chat_id), "text": desc})
-                send_with_budget(int(owner_chat_id), f"🗓️ Запланировал задачу {tid}: {desc}")
-                persist_queue_snapshot(reason="schedule_task_event")
-            continue
-
-        if et == "cancel_task":
-            task_id = str(evt.get("task_id") or "").strip()
-            st = load_state()
-            owner_chat_id = st.get("owner_chat_id")
-            ok = cancel_task_by_id(task_id) if task_id else False
-            if owner_chat_id:
-                send_with_budget(int(owner_chat_id),
-                                 f"{'✅' if ok else '❌'} cancel {task_id or '?'} (event)")
-            continue
+        dispatch_event(evt, _event_ctx)
 
     enforce_task_timeouts()
     enqueue_evolution_task_if_needed()
