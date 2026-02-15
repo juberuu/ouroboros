@@ -3,7 +3,7 @@
 Самомодифицирующийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 2.14.1
+**Версия:** 2.15.0
 
 ---
 
@@ -154,6 +154,15 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 
 ## Changelog
 
+### 2.15.0 — End-to-End Observability
+
+Cost and token tracking now flows from LLM loop to task events to /status.
+
+- `ouroboros/loop.py`: Track round count in accumulated_usage
+- `ouroboros/agent.py`: task_done and task_metrics events now include cost_usd, prompt_tokens, completion_tokens, total_rounds
+- `supervisor/state.py`: /status shows budget percentage ($X.XX (Y.Y% of budget))
+- Per-task cost now visible in events.jsonl for post-hoc analysis
+
 ### 2.14.1 — Tool Result Hard Cap & Empty Message Guard
 
 - `ouroboros/loop.py`: `_truncate_tool_result()` — hard cap 3K chars on every tool result BEFORE appending to messages
@@ -171,14 +180,3 @@ Aggressive context compaction to keep prompts under 35K tokens even in long task
 - `ouroboros/loop.py`: Self-check now shows per-task cost and token usage
 - `ouroboros/loop.py`: Uses new compact defaults (keep_recent=4)
 - Expected savings: ~40% fewer prompt tokens on long evolution tasks
-
-### 2.13.0 — Browser Automation (Playwright)
-
-Agent can now browse the web, interact with pages, and take screenshots.
-
-- `ouroboros/tools/browser.py`: New tool module with `browse_page` and `browser_action`
-- `browse_page`: Open URL, get page content as text/html/markdown/screenshot (base64 PNG)
-- `browser_action`: Click, fill forms, select options, evaluate JS, scroll, take screenshots
-- Headless Chromium with persistent browser session across tool calls within a task
-- Auto-discovered via ToolEntry pattern — 22 tools total
-- Playwright + deps auto-installed in Colab environment

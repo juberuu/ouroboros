@@ -302,7 +302,12 @@ def status_text(workers_dict: Dict[int, Any], pending_list: list, running_dict: 
             lines.extend([f"  - {d}" for d in details])
     if running_dict and busy_count == 0:
         lines.append("queue_warning: running>0 while busy=0")
-    lines.append(f"spent_usd: {st.get('spent_usd')}")
+    spent = float(st.get("spent_usd") or 0.0)
+    pct = budget_pct(st)
+    if pct > 0:
+        lines.append(f"spent_usd: ${spent:.2f} ({pct:.1f}% of budget)")
+    else:
+        lines.append(f"spent_usd: ${spent:.2f}")
     lines.append(f"spent_calls: {st.get('spent_calls')}")
     lines.append(f"prompt_tokens: {st.get('spent_tokens_prompt')}, completion_tokens: {st.get('spent_tokens_completion')}, cached_tokens: {st.get('spent_tokens_cached')}")
     lines.append(

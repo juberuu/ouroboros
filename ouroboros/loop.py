@@ -175,6 +175,7 @@ def run_llm_loop(
                 )
                 msg = resp_msg
                 add_usage(accumulated_usage, usage)
+                accumulated_usage["rounds"] = accumulated_usage.get("rounds", 0) + 1
                 # Log per-round metrics
                 append_jsonl(drive_logs / "events.jsonl", {
                     "ts": utc_now_iso(), "type": "llm_round",

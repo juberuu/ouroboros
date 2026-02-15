@@ -257,11 +257,33 @@ class OuroborosAgent:
             "task_id": task.get("id"), "task_type": task.get("type"),
             "duration_sec": duration_sec,
             "tool_calls": n_tool_calls, "tool_errors": n_tool_errors,
+            "cost_usd": round(float(usage.get("cost") or 0), 6),
+            "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+            "completion_tokens": int(usage.get("completion_tokens") or 0),
+            "total_rounds": int(usage.get("rounds") or 0),
             "ts": utc_now_iso(),
         })
 
-        self._pending_events.append({"type": "task_done", "task_id": task.get("id"), "ts": utc_now_iso()})
-        append_jsonl(drive_logs / "events.jsonl", {"ts": utc_now_iso(), "type": "task_done", "task_id": task.get("id")})
+        self._pending_events.append({
+            "type": "task_done",
+            "task_id": task.get("id"),
+            "task_type": task.get("type"),
+            "cost_usd": round(float(usage.get("cost") or 0), 6),
+            "total_rounds": int(usage.get("rounds") or 0),
+            "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+            "completion_tokens": int(usage.get("completion_tokens") or 0),
+            "ts": utc_now_iso(),
+        })
+        append_jsonl(drive_logs / "events.jsonl", {
+            "ts": utc_now_iso(),
+            "type": "task_done",
+            "task_id": task.get("id"),
+            "task_type": task.get("type"),
+            "cost_usd": round(float(usage.get("cost") or 0), 6),
+            "total_rounds": int(usage.get("rounds") or 0),
+            "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+            "completion_tokens": int(usage.get("completion_tokens") or 0),
+        })
 
     # =====================================================================
     # Review context builder
