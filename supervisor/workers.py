@@ -35,7 +35,7 @@ TOTAL_BUDGET_LIMIT: float = 0.0
 BRANCH_DEV: str = "ouroboros"
 BRANCH_STABLE: str = "ouroboros-stable"
 
-CTX = mp.get_context("fork")
+CTX = mp.get_context("spawn")
 
 
 def init(repo_dir: pathlib.Path, drive_root: pathlib.Path, max_workers: int,
@@ -147,17 +147,6 @@ def handle_chat_direct(chat_id: int, text: str, image_data: Optional[Tuple[str, 
 def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str) -> None:
     import sys as _sys
     _sys.path.insert(0, repo_dir)
-    # Clean __pycache__ to prevent stale bytecode from fork parent
-    import shutil, pathlib
-    for pycache in pathlib.Path(repo_dir).rglob("__pycache__"):
-        shutil.rmtree(pycache, ignore_errors=True)
-    # Force fresh import after restart (fork inherits parent's sys.modules)
-    mods_to_remove = [k for k in _sys.modules if k == 'ouroboros' or k.startswith('ouroboros.')]
-    for k in mods_to_remove:
-        del _sys.modules[k]
-    # Invalidate import caches to ensure no cached metadata persists
-    import importlib
-    importlib.invalidate_caches()
     from ouroboros.agent import make_agent
     agent = make_agent(repo_dir=repo_dir, drive_root=drive_root, event_queue=out_q)
     while True:

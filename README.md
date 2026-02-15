@@ -3,7 +3,7 @@
 Самомодифицирующийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 2.18.0
+**Версия:** 2.19.0
 
 ---
 
@@ -156,6 +156,16 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 
 ## Changelog
 
+### 2.19.0 — Fork→Spawn: Clean Process Model
+
+Switched worker process creation from `fork` to `spawn`, eliminating ALL stale code inheritance.
+
+- `supervisor/workers.py`: `mp.get_context("fork")` → `mp.get_context("spawn")` — workers now start as fresh Python processes
+- `supervisor/workers.py`: Removed 11 lines of stale-bytecode workarounds (`__pycache__` cleanup, `sys.modules` purge, `importlib.invalidate_caches`) — no longer needed with spawn
+- `ouroboros/loop.py`: Removed debug traces from cost_usd investigation
+- Root cause of ALL stale code issues: `fork` copies parent's memory including loaded modules; `spawn` starts a fresh Python interpreter
+- This definitively fixes: cost_usd missing from events, cache_write_tokens missing, and any future hot-reload issues
+
 ### 2.18.0 — Lazy Init: Fork-Safe Hot Reload
 
 Fixed critical root cause of stale code in forked workers. All features since v2.14.0 now truly active in production.
@@ -192,30 +202,3 @@ Extracted 130-line if/elif event chain from main loop into pluggable dispatch ta
 - `supervisor/events.py`: New module — dispatch table mapping 11 event types to handler functions
 - `colab_launcher.py`: 506→403 lines (−20%), main loop now delegates all events via `dispatch_event()`
 - Clean separation: adding new event types = adding one function + one dict entry
-
-### 2.15.0 — End-to-End Observability
-
-Cost and token tracking now flows from LLM loop to task events to /status.
-
-- `ouroboros/loop.py`: Track round count in accumulated_usage
-- `ouroboros/agent.py`: task_done and task_metrics events now include cost_usd, prompt_tokens, completion_tokens, total_rounds
-- `supervisor/state.py`: /status shows budget percentage ($X.XX (Y.Y% of budget))
-- Per-task cost now visible in events.jsonl for post-hoc analysis
-
-### 2.14.1 — Tool Result Hard Cap & Empty Message Guard
-
-- `ouroboros/loop.py`: `_truncate_tool_result()` — hard cap 3K chars on every tool result BEFORE appending to messages
-- `ouroboros/loop.py`: `compact_tool_history()` now uses `keep_recent=4` (was 6)
-- `ouroboros/context.py`: `_build_user_content()` returns "(пустое сообщение)" for empty text+no image (prevents API errors)
-- `ouroboros/context.py`: Old round summaries capped at 80 chars (was 120)
-- Net effect: ~50% fewer prompt tokens on long tasks
-
-### 2.14.0 — Context Efficiency & Cost Awareness
-
-Aggressive context compaction to keep prompts under 35K tokens even in long tasks.
-
-- `ouroboros/context.py`: `_truncate_tool_result()` — hard cap 3K chars on any tool result
-- `ouroboros/context.py`: `compact_tool_history()` — keep_recent 6→4, old summaries capped at 80 chars
-- `ouroboros/loop.py`: Self-check now shows per-task cost and token usage
-- `ouroboros/loop.py`: Uses new compact defaults (keep_recent=4)
-- Expected savings: ~40% fewer prompt tokens on long evolution tasks

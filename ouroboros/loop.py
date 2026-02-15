@@ -189,13 +189,6 @@ def run_llm_loop(
                     "cache_write_tokens": int(usage.get("cache_write_tokens") or 0),
                     "cost_usd": float(usage.get("cost") or 0),
                 }
-                # DEBUG v2.18.1: Trace event keys before write
-                import pathlib as _dbg_pathlib
-                _dbg_pathlib.Path(drive_logs / "_debug_event_keys.txt").write_text(
-                    f"round={round_idx} keys={len(_round_event)} list={list(_round_event.keys())}\n"
-                    f"usage_keys={list(usage.keys())}\n"
-                    f"event={json.dumps(_round_event)}\n"
-                )
                 append_jsonl(drive_logs / "events.jsonl", _round_event)
                 break
             except Exception as e:
