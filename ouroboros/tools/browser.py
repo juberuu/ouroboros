@@ -5,8 +5,14 @@ Provides browse_page (open URL, get content/screenshot)
 and browser_action (click, fill, evaluate JS on current page).
 """
 
-import asyncio, base64, logging
-from typing import Any
+from __future__ import annotations
+
+import asyncio
+import base64
+import logging
+from typing import Any, Dict, List
+
+from ouroboros.tools.registry import ToolContext, ToolEntry
 
 log = logging.getLogger(__name__)
 
@@ -50,8 +56,8 @@ async def _ensure_browser():
     return _page
 
 
-async def _browse_page(url: str, output: str = "text",
-                       wait_for: str = "", timeout: int = 30000) -> str:
+async def _browse_page_async(url: str, output: str = "text",
+                              wait_for: str = "", timeout: int = 30000) -> str:
     page = await _ensure_browser()
     await page.goto(url, timeout=timeout, wait_until="domcontentloaded")
 
@@ -65,9 +71,8 @@ async def _browse_page(url: str, output: str = "text",
         html = await page.content()
         return html[:50000] + ("... [truncated]" if len(html) > 50000 else "")
     elif output == "markdown":
-        # Simple text extraction with structure
         text = await page.evaluate("""() => {
-            const walk = (el, depth=0) => {
+            const walk = (el) => {
                 let out = '';
                 for (const child of el.childNodes) {
                     if (child.nodeType === 3) {
@@ -81,7 +86,7 @@ async def _browse_page(url: str, output: str = "text",
                         if (tag === 'P' || tag === 'DIV' || tag === 'BR') out += '\\n';
                         if (tag === 'LI') out += '\\n- ';
                         if (tag === 'A') out += '[';
-                        out += walk(child, depth+1);
+                        out += walk(child);
                         if (tag === 'A') out += '](' + (child.href||'') + ')';
                     }
                 }
@@ -95,40 +100,35 @@ async def _browse_page(url: str, output: str = "text",
         return text[:30000] + ("... [truncated]" if len(text) > 30000 else "")
 
 
-async def _browser_action(action: str, selector: str = "",
-                          value: str = "", timeout: int = 5000) -> str:
+async def _browser_action_async(action: str, selector: str = "",
+                                 value: str = "", timeout: int = 5000) -> str:
     page = await _ensure_browser()
 
     if action == "click":
         if not selector:
             return "Error: selector required for click"
         await page.click(selector, timeout=timeout)
-        await page.wait_for_timeout(500)  # brief wait for page update
+        await page.wait_for_timeout(500)
         return f"Clicked: {selector}"
-
     elif action == "fill":
         if not selector:
             return "Error: selector required for fill"
         await page.fill(selector, value, timeout=timeout)
         return f"Filled {selector} with: {value}"
-
     elif action == "select":
         if not selector:
             return "Error: selector required for select"
         await page.select_option(selector, value, timeout=timeout)
         return f"Selected {value} in {selector}"
-
     elif action == "screenshot":
         data = await page.screenshot(type="png", full_page=False)
         return base64.b64encode(data).decode()
-
     elif action == "evaluate":
         if not value:
             return "Error: value (JS code) required for evaluate"
         result = await page.evaluate(value)
         out = str(result)
         return out[:20000] + ("... [truncated]" if len(out) > 20000 else "")
-
     elif action == "scroll":
         direction = value or "down"
         if direction == "down":
@@ -140,7 +140,6 @@ async def _browser_action(action: str, selector: str = "",
         elif direction == "bottom":
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
         return f"Scrolled {direction}"
-
     else:
         return f"Unknown action: {action}. Use: click, fill, select, screenshot, evaluate, scroll"
 
@@ -151,81 +150,84 @@ def _run_async(coro):
     return loop.run_until_complete(coro)
 
 
-def _browse_page_sync(ctx, url: str, output: str = "text",
-                      wait_for: str = "", timeout: int = 30000) -> str:
-    return _run_async(_browse_page(url, output, wait_for, timeout))
+def _browse_page(ctx: ToolContext, url: str, output: str = "text",
+                 wait_for: str = "", timeout: int = 30000) -> str:
+    return _run_async(_browse_page_async(url, output, wait_for, timeout))
 
 
-def _browser_action_sync(ctx, action: str, selector: str = "",
-                         value: str = "", timeout: int = 5000) -> str:
-    return _run_async(_browser_action(action, selector, value, timeout))
+def _browser_action(ctx: ToolContext, action: str, selector: str = "",
+                    value: str = "", timeout: int = 5000) -> str:
+    return _run_async(_browser_action_async(action, selector, value, timeout))
 
 
-def get_tools():
+def get_tools() -> List[ToolEntry]:
     return [
-        {
-            "name": "browse_page",
-            "description": (
-                "Open a URL in headless browser. Returns page content as text, "
-                "html, markdown, or screenshot (base64 PNG). "
-                "Browser persists across calls within a task."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "url": {
-                        "type": "string",
-                        "description": "URL to open",
+        ToolEntry(
+            name="browse_page",
+            schema={
+                "name": "browse_page",
+                "description": (
+                    "Open a URL in headless browser. Returns page content as text, "
+                    "html, markdown, or screenshot (base64 PNG). "
+                    "Browser persists across calls within a task."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string", "description": "URL to open"},
+                        "output": {
+                            "type": "string",
+                            "enum": ["text", "html", "markdown", "screenshot"],
+                            "description": "Output format (default: text)",
+                        },
+                        "wait_for": {
+                            "type": "string",
+                            "description": "CSS selector to wait for before extraction",
+                        },
+                        "timeout": {
+                            "type": "integer",
+                            "description": "Page load timeout in ms (default: 30000)",
+                        },
                     },
-                    "output": {
-                        "type": "string",
-                        "enum": ["text", "html", "markdown", "screenshot"],
-                        "description": "Output format (default: text)",
-                    },
-                    "wait_for": {
-                        "type": "string",
-                        "description": "CSS selector to wait for before extraction",
-                    },
-                    "timeout": {
-                        "type": "integer",
-                        "description": "Page load timeout in ms (default: 30000)",
-                    },
+                    "required": ["url"],
                 },
-                "required": ["url"],
             },
-            "handler": _browse_page_sync,
-        },
-        {
-            "name": "browser_action",
-            "description": (
-                "Perform action on current browser page. Actions: "
-                "click (selector), fill (selector + value), select (selector + value), "
-                "screenshot (base64 PNG), evaluate (JS code in value), "
-                "scroll (value: up/down/top/bottom)."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["click", "fill", "select", "screenshot", "evaluate", "scroll"],
-                        "description": "Action to perform",
+            handler=_browse_page,
+        ),
+        ToolEntry(
+            name="browser_action",
+            schema={
+                "name": "browser_action",
+                "description": (
+                    "Perform action on current browser page. Actions: "
+                    "click (selector), fill (selector + value), select (selector + value), "
+                    "screenshot (base64 PNG), evaluate (JS code in value), "
+                    "scroll (value: up/down/top/bottom)."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["click", "fill", "select", "screenshot", "evaluate", "scroll"],
+                            "description": "Action to perform",
+                        },
+                        "selector": {
+                            "type": "string",
+                            "description": "CSS selector for click/fill/select",
+                        },
+                        "value": {
+                            "type": "string",
+                            "description": "Value for fill/select, JS for evaluate, direction for scroll",
+                        },
+                        "timeout": {
+                            "type": "integer",
+                            "description": "Action timeout in ms (default: 5000)",
+                        },
                     },
-                    "selector": {
-                        "type": "string",
-                        "description": "CSS selector for click/fill/select",
-                    },
-                    "value": {
-                        "type": "string",
-                        "description": "Value for fill/select, JS for evaluate, direction for scroll",
-                    },
-                    "timeout": {
-                        "type": "integer",
-                        "description": "Action timeout in ms (default: 5000)",
-                    },
+                    "required": ["action"],
                 },
-                "required": ["action"],
             },
-            "handler": _browser_action_sync,
-        },
+            handler=_browser_action,
+        ),
     ]
