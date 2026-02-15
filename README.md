@@ -3,7 +3,7 @@
 Самомодифицирующийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 2.14.0
+**Версия:** 2.14.1
 
 ---
 
@@ -154,6 +154,14 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 
 ## Changelog
 
+### 2.14.1 — Tool Result Hard Cap & Empty Message Guard
+
+- `ouroboros/loop.py`: `_truncate_tool_result()` — hard cap 3K chars on every tool result BEFORE appending to messages
+- `ouroboros/loop.py`: `compact_tool_history()` now uses `keep_recent=4` (was 6)
+- `ouroboros/context.py`: `_build_user_content()` returns "(пустое сообщение)" for empty text+no image (prevents API errors)
+- `ouroboros/context.py`: Old round summaries capped at 80 chars (was 120)
+- Net effect: ~50% fewer prompt tokens on long tasks
+
 ### 2.14.0 — Context Efficiency & Cost Awareness
 
 Aggressive context compaction to keep prompts under 35K tokens even in long tasks.
@@ -174,23 +182,3 @@ Agent can now browse the web, interact with pages, and take screenshots.
 - Headless Chromium with persistent browser session across tool calls within a task
 - Auto-discovered via ToolEntry pattern — 22 tools total
 - Playwright + deps auto-installed in Colab environment
-
-### 2.12.0 — Vision: Image Support
-
-Agent can now see images sent in Telegram (photos and image documents).
-
-- `supervisor/telegram.py`: `download_file_base64()` downloads Telegram photos as base64
-- `colab_launcher.py`: Extracts photos/image-documents from updates, passes to agent
-- `supervisor/workers.py`: `handle_chat_direct` accepts `image_data` parameter
-- `ouroboros/context.py`: `_build_user_content()` builds multipart user messages (text + image_url)
-- Supports OpenAI Vision API format (`image_url` with `data:` URI) — works with all vision-capable models via OpenRouter
-- Max 10MB per image, auto-detects MIME type from file extension
-
-### 2.11.0 — Module Cache Purge on Restart (Critical)
-
-Fixed: restart never activated new code because fork'd workers inherited stale sys.modules.
-
-- `worker_main()`: purges all `ouroboros.*` from sys.modules before import (workers get fresh code)
-- `reset_chat_agent()`: purges `ouroboros.*` so chat agent reimports after restart
-- Root cause: `mp.get_context("fork")` copies parent's sys.modules → `import ouroboros` was no-op
-- This means ALL improvements since v2.8.0 were never active in runtime until manual /restart from Colab

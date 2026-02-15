@@ -20,6 +20,18 @@ from ouroboros.context import compact_tool_history
 from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log
 
 
+def _truncate_tool_result(result: Any) -> str:
+    """
+    Hard-cap tool result string to 3000 characters.
+    If truncated, append a note with the original length.
+    """
+    result_str = str(result)
+    if len(result_str) <= 3000:
+        return result_str
+    original_len = len(result_str)
+    return result_str[:3000] + f"\n... (truncated from {original_len} chars)"
+
+
 def _execute_single_tool(
     tools: ToolRegistry,
     tc: Dict[str, Any],
@@ -150,7 +162,7 @@ def run_llm_loop(
 
         # Compact old tool history to save tokens on long conversations
         if round_idx > 1:
-            messages = compact_tool_history(messages)
+            messages = compact_tool_history(messages, keep_recent=4)
 
         # --- LLM call with retry ---
         msg = None
@@ -241,11 +253,14 @@ def run_llm_loop(
             if is_error:
                 error_count += 1
 
+            # Truncate tool result before appending to messages
+            truncated_result = _truncate_tool_result(exec_result["result"])
+
             # Append tool result message
             messages.append({
                 "role": "tool",
                 "tool_call_id": exec_result["tool_call_id"],
-                "content": exec_result["result"]
+                "content": truncated_result
             })
 
             # Append to LLM trace

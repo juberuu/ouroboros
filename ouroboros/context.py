@@ -24,6 +24,9 @@ def _build_user_content(task: Dict[str, Any]) -> Any:
     image_mime = task.get("image_mime", "image/jpeg")
 
     if not image_b64:
+        # Return fallback text if both text and image are empty
+        if not text:
+            return "(пустое сообщение)"
         return text
 
     # Multipart content with text + image
@@ -291,9 +294,9 @@ def compact_tool_history(messages: list, keep_recent: int = 6) -> list:
                     summary = content[:200]  # Keep error details
                 else:
                     # Keep first line or first 80 chars
-                    first_line = content.split('\n')[0][:120]
+                    first_line = content.split('\n')[0][:80]
                     char_count = len(content)
-                    summary = f"{first_line}... ({char_count} chars)" if char_count > 120 else content[:200]
+                    summary = f"{first_line}... ({char_count} chars)" if char_count > 80 else content[:200]
 
                 result.append({**msg, "content": summary})
                 continue
