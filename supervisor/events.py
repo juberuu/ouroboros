@@ -18,7 +18,22 @@ from typing import Any, Dict
 
 
 def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
-    ctx.update_budget_from_usage(evt.get("usage") or {})
+    usage = evt.get("usage") or {}
+    ctx.update_budget_from_usage(usage)
+
+    # Log to events.jsonl for audit trail
+    from ouroboros.utils import utc_now_iso, append_jsonl
+    try:
+        append_jsonl(ctx.DRIVE_ROOT / "logs" / "events.jsonl", {
+            "ts": evt.get("ts", utc_now_iso()),
+            "type": "llm_usage",
+            "task_id": evt.get("task_id", ""),
+            "cost": usage.get("cost", 0),
+            "prompt_tokens": usage.get("prompt_tokens", 0),
+            "completion_tokens": usage.get("completion_tokens", 0),
+        })
+    except Exception:
+        pass
 
 
 def _handle_task_heartbeat(evt: Dict[str, Any], ctx: Any) -> None:

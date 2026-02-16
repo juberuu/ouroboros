@@ -219,6 +219,34 @@ def set_budget_limit(limit: float) -> None:
     TOTAL_BUDGET_LIMIT = limit
 
 
+def check_openrouter_ground_truth() -> Optional[Dict[str, float]]:
+    """
+    Call OpenRouter API to get ground truth usage.
+
+    Returns dict with total_usd and daily_usd spent according to OpenRouter, or None on error.
+    """
+    try:
+        import urllib.request
+        api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+        if not api_key:
+            return None
+        req = urllib.request.Request(
+            "https://openrouter.ai/api/v1/auth/key",
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        # OpenRouter API returns usage already in dollars (not cents)
+        usage_total = data.get("data", {}).get("usage", 0)
+        usage_daily = data.get("data", {}).get("usage_daily", 0)
+        return {
+            "total_usd": float(usage_total),
+            "daily_usd": float(usage_daily),
+        }
+    except Exception:
+        return None
+
+
 def budget_pct(st: Dict[str, Any]) -> float:
     """Calculate budget percentage used."""
     spent = float(st.get("spent_usd") or 0.0)
@@ -233,6 +261,8 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> None:
 
     Uses a single lock scope for the read-modify-write cycle to prevent
     concurrent writes from losing budget updates.
+
+    Every 50 calls, fetches OpenRouter ground truth for comparison.
     """
     def _to_float(v: Any, default: float = 0.0) -> float:
         try:
@@ -261,6 +291,15 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> None:
             usage.get("completion_tokens") if isinstance(usage, dict) else 0)
         st["spent_tokens_cached"] = _to_int(st.get("spent_tokens_cached") or 0) + _to_int(
             usage.get("cached_tokens") if isinstance(usage, dict) else 0)
+
+        # Periodically check OpenRouter ground truth (every 50 calls)
+        if st["spent_calls"] % 50 == 0:
+            ground_truth = check_openrouter_ground_truth()
+            if ground_truth is not None:
+                st["openrouter_total_usd"] = ground_truth["total_usd"]
+                st["openrouter_daily_usd"] = ground_truth["daily_usd"]
+                st["openrouter_last_check_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
         _save_state_unlocked(st)
     finally:
         release_file_lock(STATE_LOCK_PATH, lock_fd)

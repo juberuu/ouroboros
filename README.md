@@ -3,7 +3,7 @@
 Самосоздающийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 4.1.2
+**Версия:** 4.2.0
 
 ---
 
@@ -137,6 +137,11 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 ---
 
 ## Changelog
+
+### 4.2.0 — Real-time budget tracking
+- **Fix**: Budget was only updated after task completion; now updates per-LLM-call in real-time via event_queue
+- **Fix**: Added OpenRouter ground truth API check as fallback for budget drift detection
+- **Fix**: llm_usage events now logged to events.jsonl for auditability
 
 ### 4.1.2
 - Robust Markdown→HTML conversion for Telegram (handles nested formatting, special characters, proper tag escaping)

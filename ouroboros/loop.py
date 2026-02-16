@@ -238,6 +238,7 @@ def run_llm_loop(
     task_type: str = "",
     task_id: str = "",
     budget_remaining_usd: Optional[float] = None,
+    event_queue: Optional[queue.Queue] = None,
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """
     Core LLM-with-tools loop.
@@ -301,6 +302,19 @@ def run_llm_loop(
                     msg = resp_msg
                     add_usage(accumulated_usage, usage)
                     accumulated_usage["rounds"] = accumulated_usage.get("rounds", 0) + 1
+
+                    # Real-time budget update
+                    if event_queue and usage.get("cost"):
+                        try:
+                            event_queue.put_nowait({
+                                "type": "llm_usage",
+                                "ts": utc_now_iso(),
+                                "task_id": task_id,
+                                "usage": usage,  # single-call usage, not accumulated
+                            })
+                        except Exception:
+                            pass
+
                     # Log per-round metrics
                     _round_event = {
                         "ts": utc_now_iso(), "type": "llm_round",
@@ -424,6 +438,17 @@ def run_llm_loop(
                             reasoning_effort=active_effort,
                         )
                         add_usage(accumulated_usage, usage)
+                        # Real-time budget update
+                        if event_queue and usage.get("cost"):
+                            try:
+                                event_queue.put_nowait({
+                                    "type": "llm_usage",
+                                    "ts": utc_now_iso(),
+                                    "task_id": task_id,
+                                    "usage": usage,
+                                })
+                            except Exception:
+                                pass
                         return (resp_msg.get("content") or finish_reason), accumulated_usage, llm_trace
                     except Exception:
                         return finish_reason, accumulated_usage, llm_trace

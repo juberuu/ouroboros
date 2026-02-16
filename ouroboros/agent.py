@@ -207,6 +207,7 @@ class OuroborosAgent:
                     task_type=str(task.get("type") or ""),
                     task_id=str(task.get("id") or ""),
                     budget_remaining_usd=budget_remaining,
+                    event_queue=self._event_queue,
                 )
             except Exception as e:
                 tb = traceback.format_exc()
