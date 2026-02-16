@@ -197,7 +197,7 @@ from supervisor.queue import (
 from supervisor.workers import (
     init as workers_init, get_event_q, WORKERS, PENDING, RUNNING,
     spawn_workers, kill_workers, assign_tasks, ensure_workers_healthy,
-    handle_chat_direct, _get_chat_agent,
+    handle_chat_direct, _get_chat_agent, auto_resume_after_restart,
 )
 workers_init(
     repo_dir=REPO_DIR, drive_root=DRIVE_ROOT, max_workers=MAX_WORKERS,
@@ -242,7 +242,12 @@ append_jsonl(DRIVE_ROOT / "logs" / "supervisor.jsonl", {
 })
 
 # ----------------------------
-# 6.1) Direct-mode watchdog
+# 6.1) Auto-resume after restart
+# ----------------------------
+auto_resume_after_restart()
+
+# ----------------------------
+# 6.2) Direct-mode watchdog
 # ----------------------------
 def _chat_watchdog_loop():
     """Monitor direct-mode chat agent for hangs. Runs as daemon thread."""
@@ -285,6 +290,31 @@ def _chat_watchdog_loop():
 
 _watchdog_thread = threading.Thread(target=_chat_watchdog_loop, daemon=True)
 _watchdog_thread.start()
+
+# ----------------------------
+# 6.3) Background consciousness
+# ----------------------------
+from ouroboros.consciousness import BackgroundConsciousness
+
+def _get_owner_chat_id() -> Optional[int]:
+    try:
+        st = load_state()
+        cid = st.get("owner_chat_id")
+        return int(cid) if cid else None
+    except Exception:
+        return None
+
+_consciousness = BackgroundConsciousness(
+    drive_root=DRIVE_ROOT,
+    repo_dir=REPO_DIR,
+    event_queue=get_event_q(),
+    owner_chat_id_fn=_get_owner_chat_id,
+)
+
+def reset_chat_agent():
+    """Reset the direct-mode chat agent (called by watchdog on hangs)."""
+    import supervisor.workers as _w
+    _w._chat_agent = None
 
 # ----------------------------
 # 7) Main loop
@@ -453,9 +483,26 @@ while True:
                 send_with_budget(chat_id, "🛑 Эволюция: OFF.")
             continue
 
+        if lowered.startswith("/bg"):
+            parts = lowered.split()
+            action = parts[1] if len(parts) > 1 else "status"
+            if action in ("start", "on", "1"):
+                result = _consciousness.start()
+                send_with_budget(chat_id, f"🧠 {result}")
+            elif action in ("stop", "off", "0"):
+                result = _consciousness.stop()
+                send_with_budget(chat_id, f"🧠 {result}")
+            else:
+                status = "running" if _consciousness.is_running else "stopped"
+                send_with_budget(chat_id, f"🧠 Background consciousness: {status}")
+            continue
+
         # All other messages → direct chat with Ouroboros
         if not text and not image_data:
             continue  # empty message, skip
+
+        # Feed observation to consciousness
+        _consciousness.inject_observation(f"Owner message: {text[:100]}")
 
         agent = _get_chat_agent()
         if agent._busy:
@@ -468,8 +515,14 @@ while True:
             elif text:
                 agent.inject_message(text)
         else:
+            _consciousness.pause()
+            def _run_task_and_resume(cid, txt, img):
+                try:
+                    handle_chat_direct(cid, txt, img)
+                finally:
+                    _consciousness.resume()
             threading.Thread(
-                target=handle_chat_direct,
+                target=_run_task_and_resume,
                 args=(chat_id, text, image_data),
                 daemon=True,
             ).start()

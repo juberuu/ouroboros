@@ -17,6 +17,12 @@ import sys
 import threading
 from typing import Any, Dict, List
 
+try:
+    from playwright_stealth import Stealth
+    _HAS_STEALTH = True
+except ImportError:
+    _HAS_STEALTH = False
+
 from ouroboros.tools.registry import ToolContext, ToolEntry
 
 log = logging.getLogger(__name__)
@@ -135,15 +141,26 @@ def _ensure_browser(ctx: ToolContext):
 
     ctx._browser = _pw_instance.chromium.launch(
         headless=True,
-        args=["--no-sandbox", "--disable-dev-shm-usage"],
+        args=[
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-blink-features=AutomationControlled",
+            "--disable-features=site-per-process",
+            "--window-size=1920,1080",
+        ],
     )
     ctx._page = ctx._browser.new_page(
-        viewport={"width": 1280, "height": 720},
+        viewport={"width": 1920, "height": 1080},
         user_agent=(
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
         ),
     )
+
+    if _HAS_STEALTH:
+        stealth = Stealth()
+        stealth.apply_stealth_sync(ctx._page)
+
     ctx._page.set_default_timeout(30000)
     return ctx._page
 

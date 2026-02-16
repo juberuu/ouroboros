@@ -324,13 +324,13 @@ def enforce_task_timeouts() -> None:
 # ---------------------------------------------------------------------------
 
 def build_evolution_task_text(cycle: int) -> str:
-    """Build evolution task text."""
-    return f"EVOLUTION CYCLE #{cycle}\n\nСледуй инструкциям из prompts/SYSTEM.md, раздел «Режим эволюции»."
+    """Build evolution task text. Minimal trigger — SYSTEM.md has the full instructions."""
+    return f"EVOLUTION #{cycle}"
 
 
 def build_review_task_text(reason: str) -> str:
-    """Build review task text."""
-    return f"DEEP REVIEW\n\nПричина: {reason or 'по запросу владельца'}\nScope и глубина — на твоё усмотрение."
+    """Build review task text. Minimal trigger — LLM decides scope and depth."""
+    return f"REVIEW: {reason or 'owner request'}"
 
 
 def queue_review_task(reason: str, force: bool = False) -> Optional[str]:

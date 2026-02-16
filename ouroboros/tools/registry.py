@@ -28,6 +28,10 @@ class ToolContext:
     last_push_succeeded: bool = False
     emit_progress_fn: Callable[[str], None] = field(default=lambda _: None)
 
+    # LLM-driven model/effort switch (set by switch_model tool, read by loop.py)
+    active_model_override: Optional[str] = None
+    active_effort_override: Optional[str] = None
+
     # Per-task browser lifecycle (created by browser.py, cleaned by agent.py)
     _pw_instance: Any = None
     _browser: Any = None

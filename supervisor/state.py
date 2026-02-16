@@ -106,14 +106,8 @@ def release_file_lock(lock_path: pathlib.Path, lock_fd: Optional[int]) -> None:
         pass
 
 
-# ---------------------------------------------------------------------------
-# JSONL append (simplified supervisor version, no concurrency)
-# ---------------------------------------------------------------------------
-
-def append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+# Re-export append_jsonl from ouroboros.utils (single source of truth)
+from ouroboros.utils import append_jsonl  # noqa: F401
 
 
 # ---------------------------------------------------------------------------

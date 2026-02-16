@@ -14,7 +14,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from ouroboros.llm import LLMClient, normalize_reasoning_effort, reasoning_rank, add_usage
+from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.context import compact_tool_history
 from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log, sanitize_tool_result_for_log
@@ -166,42 +166,36 @@ def run_llm_loop(
     """
     Core LLM-with-tools loop.
 
-    Sends messages to LLM, executes tool calls, retries on errors,
-    escalates reasoning effort for long tasks.
+    Sends messages to LLM, executes tool calls, retries on errors.
+    LLM controls model/effort via switch_model tool (LLM-first, Bible P3).
 
     Args:
         budget_remaining_usd: If set, forces completion when task cost exceeds 50% of this budget
 
     Returns: (final_text, accumulated_usage, llm_trace)
     """
-    profile_name = llm.select_task_profile(task_type)
-    profile_cfg = llm.model_profile(profile_name)
-    active_model = profile_cfg["model"]
-    active_effort = profile_cfg["effort"]
+    # LLM-first: single default model, LLM switches via tool if needed
+    active_model = llm.default_model()
+    active_effort = "medium"
 
     llm_trace: Dict[str, Any] = {"assistant_notes": [], "tool_calls": []}
     accumulated_usage: Dict[str, Any] = {}
     max_retries = 3
-    soft_check_interval = 20
 
     tool_schemas = tools.schemas()
-
-    def _maybe_raise_effort(target: str) -> None:
-        nonlocal active_effort
-        t = normalize_reasoning_effort(target, default=active_effort)
-        if reasoning_rank(t) > reasoning_rank(active_effort):
-            active_effort = t
-
-    def _switch_to_code_profile() -> None:
-        nonlocal active_model, active_effort
-        code_cfg = llm.model_profile("code_task")
-        if code_cfg["model"] != active_model or reasoning_rank(code_cfg["effort"]) > reasoning_rank(active_effort):
-            active_model = code_cfg["model"]
-            active_effort = max(active_effort, code_cfg["effort"], key=reasoning_rank)
 
     round_idx = 0
     while True:
         round_idx += 1
+
+        # Apply LLM-driven model/effort switch (via switch_model tool)
+        ctx = tools._ctx
+        if ctx.active_model_override:
+            active_model = ctx.active_model_override
+            ctx.active_model_override = None
+        if ctx.active_effort_override:
+            active_effort = normalize_reasoning_effort(ctx.active_effort_override, default=active_effort)
+            ctx.active_effort_override = None
 
         # Inject owner messages received during task execution
         while not incoming_messages.empty():
@@ -210,34 +204,6 @@ def run_llm_loop(
                 messages.append({"role": "user", "content": injected})
             except queue.Empty:
                 break
-
-        # Self-check: soft cost-awareness, LLM decides whether to continue
-        if round_idx > 1 and round_idx % soft_check_interval == 0:
-            task_cost = accumulated_usage.get("cost", 0)
-            task_tokens = accumulated_usage.get("prompt_tokens", 0)
-            cached = accumulated_usage.get("cached_tokens", 0)
-            cache_pct = int(cached * 100 / max(task_tokens, 1)) if cached > 0 else 0
-            cache_str = f" ({cache_pct}% cached)" if cache_pct > 0 else ""
-            self_check_msg = (
-                f"[Self-check] {round_idx} rounds, ${task_cost:.2f} spent, "
-                f"{task_tokens:,} prompt tokens{cache_str}. Assess progress. "
-                f"If stuck, change approach."
-            )
-            messages.append({"role": "system", "content": self_check_msg})
-            # Log self-check injection to supervisor
-            append_jsonl(drive_logs / "events.jsonl", {
-                "ts": utc_now_iso(), "type": "self_check",
-                "task_id": task_id, "round": round_idx,
-                "message": self_check_msg,
-                "cost_usd": task_cost, "prompt_tokens": task_tokens,
-                "cache_pct": cache_pct,
-            })
-
-        # Escalate reasoning effort for long tasks
-        if round_idx >= 5:
-            _maybe_raise_effort("high")
-        if round_idx >= 10:
-            _maybe_raise_effort("xhigh")
 
         # Compact old tool history to save tokens on long conversations
         if round_idx > 1:
@@ -302,7 +268,6 @@ def run_llm_loop(
             emit_progress(content.strip())
             llm_trace["assistant_notes"].append(content.strip()[:320])
 
-        saw_code_tool = False
         error_count = 0
 
         # Parallelize only for a strict read-only whitelist; all calls wrapped with timeout.
@@ -338,11 +303,8 @@ def run_llm_loop(
         # Process results in original order
         for exec_result in results:
             fn_name = exec_result["fn_name"]
-            is_code_tool = exec_result["is_code_tool"]
             is_error = exec_result["is_error"]
 
-            if is_code_tool:
-                saw_code_tool = True
             if is_error:
                 error_count += 1
 
@@ -363,13 +325,6 @@ def run_llm_loop(
                 "result": truncate_for_log(exec_result["result"], 700),
                 "is_error": is_error,
             })
-
-        if saw_code_tool:
-            _switch_to_code_profile()
-        if error_count >= 2:
-            _maybe_raise_effort("high")
-        if error_count >= 4:
-            _maybe_raise_effort("xhigh")
 
         # --- Budget guard ---
         # LLM decides when to stop (Bible П0, П3). We only enforce hard budget limit.

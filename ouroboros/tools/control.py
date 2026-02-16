@@ -1,8 +1,9 @@
-"""Управляющие инструменты: restart, promote, schedule, cancel, review, chat_history, update_scratchpad."""
+"""Управляющие инструменты: restart, promote, schedule, cancel, review, chat_history, update_scratchpad, switch_model."""
 
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, Dict, List
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
@@ -68,6 +69,60 @@ def _update_scratchpad(ctx: ToolContext, content: str) -> str:
     return f"OK: scratchpad updated ({len(content)} chars)"
 
 
+def _send_owner_message(ctx: ToolContext, text: str, reason: str = "") -> str:
+    """Send a proactive message to the owner (not as reply to a task).
+
+    Use when you have something genuinely worth saying — an insight,
+    a question, a status update, or an invitation to collaborate.
+    """
+    if not ctx.current_chat_id:
+        return "⚠️ No active chat — cannot send proactive message."
+    if not text or not text.strip():
+        return "⚠️ Empty message."
+
+    from ouroboros.utils import append_jsonl
+    ctx.pending_events.append({
+        "type": "send_message",
+        "chat_id": ctx.current_chat_id,
+        "text": text,
+        "is_progress": False,
+        "ts": utc_now_iso(),
+    })
+    append_jsonl(ctx.drive_logs() / "events.jsonl", {
+        "ts": utc_now_iso(),
+        "type": "proactive_message",
+        "reason": reason,
+        "text_preview": text[:200],
+    })
+    return "OK: message queued for delivery."
+
+
+def _switch_model(ctx: ToolContext, model: str = "", effort: str = "") -> str:
+    """LLM-driven model/effort switch (Constitution P3: LLM-first).
+
+    Stored in ToolContext, applied on the next LLM call in the loop.
+    """
+    from ouroboros.llm import LLMClient, normalize_reasoning_effort
+    available = LLMClient().available_models()
+    changes = []
+
+    if model:
+        if model not in available:
+            return f"⚠️ Unknown model: {model}. Available: {', '.join(available)}"
+        ctx.active_model_override = model
+        changes.append(f"model={model}")
+
+    if effort:
+        normalized = normalize_reasoning_effort(effort, default="medium")
+        ctx.active_effort_override = normalized
+        changes.append(f"effort={normalized}")
+
+    if not changes:
+        return f"Current available models: {', '.join(available)}. Pass model and/or effort to switch."
+
+    return f"OK: switching to {', '.join(changes)} on next round."
+
+
 def get_tools() -> List[ToolEntry]:
     return [
         ToolEntry("request_restart", {
@@ -108,11 +163,31 @@ def get_tools() -> List[ToolEntry]:
         }, _chat_history),
         ToolEntry("update_scratchpad", {
             "name": "update_scratchpad",
-            "description": "Update your working memory (scratchpad). Write the full new content. "
-                           "Sections: CurrentProjects, OpenThreads, InvestigateLater, RecentEvidence. "
-                           "Call after significant tasks to persist what you learned.",
+            "description": "Update your working memory. Write freely — any format you find useful. "
+                           "This persists across sessions and is read at every task start.",
             "parameters": {"type": "object", "properties": {
-                "content": {"type": "string", "description": "Full scratchpad content (markdown with ## sections)"},
+                "content": {"type": "string", "description": "Full scratchpad content"},
             }, "required": ["content"]},
         }, _update_scratchpad),
+        ToolEntry("send_owner_message", {
+            "name": "send_owner_message",
+            "description": "Send a proactive message to the owner. Use when you have something "
+                           "genuinely worth saying — an insight, a question, or an invitation to collaborate. "
+                           "This is NOT for task responses (those go automatically).",
+            "parameters": {"type": "object", "properties": {
+                "text": {"type": "string", "description": "Message text"},
+                "reason": {"type": "string", "description": "Why you're reaching out (logged, not sent)"},
+            }, "required": ["text"]},
+        }, _send_owner_message),
+        ToolEntry("switch_model", {
+            "name": "switch_model",
+            "description": "Switch to a different LLM model or reasoning effort level. "
+                           "Use when you need more power (complex code, deep reasoning) "
+                           "or want to save budget (simple tasks). Takes effect on next round.",
+            "parameters": {"type": "object", "properties": {
+                "model": {"type": "string", "description": "Model name (e.g. anthropic/claude-sonnet-4). Leave empty to keep current."},
+                "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh"],
+                           "description": "Reasoning effort level. Leave empty to keep current."},
+            }, "required": []},
+        }, _switch_model),
     ]

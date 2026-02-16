@@ -162,6 +162,93 @@ def handle_chat_direct(chat_id: int, text: str, image_data: Optional[Tuple[str, 
 
 
 # ---------------------------------------------------------------------------
+# Auto-resume after restart
+# ---------------------------------------------------------------------------
+
+def auto_resume_after_restart() -> None:
+    """If recent restart left open work, auto-resume without waiting for owner message.
+
+    Checks: scratchpad content, recent restart events, pending_restart_verify.
+    Background consciousness will subsume this eventually, but auto-resume is
+    needed immediately after a restart so the agent doesn't go silent.
+    """
+    try:
+        st = load_state()
+        chat_id = st.get("owner_chat_id")
+        if not chat_id:
+            return
+
+        # Check for recent restart (within 2 minutes)
+        restart_verify_path = DRIVE_ROOT / "state" / "pending_restart_verify.json"
+        recent_restart = False
+        if restart_verify_path.exists():
+            recent_restart = True
+        else:
+            # Check supervisor.jsonl for recent restart event
+            sup_log = DRIVE_ROOT / "logs" / "supervisor.jsonl"
+            if sup_log.exists():
+                try:
+                    lines = sup_log.read_text(encoding="utf-8").strip().split("\n")
+                    for line in reversed(lines[-20:]):
+                        if not line.strip():
+                            continue
+                        evt = json.loads(line)
+                        if evt.get("type") in ("launcher_start", "restart"):
+                            recent_restart = True
+                            break
+                except Exception:
+                    pass
+
+        if not recent_restart:
+            return
+
+        # Check if scratchpad has meaningful content
+        scratchpad_path = DRIVE_ROOT / "memory" / "scratchpad.md"
+        if not scratchpad_path.exists():
+            return
+
+        scratchpad = scratchpad_path.read_text(encoding="utf-8")
+        # Skip if scratchpad is empty or default
+        stripped = scratchpad.strip()
+        if not stripped or stripped == "# Scratchpad" or "(empty" in stripped.lower():
+            # Check if it's just the default template with all empty sections
+            content_lines = [
+                ln.strip() for ln in stripped.splitlines()
+                if ln.strip() and not ln.strip().startswith("#") and ln.strip() != "- (empty)"
+            ]
+            # Filter out UpdatedAt lines
+            content_lines = [ln for ln in content_lines if not ln.startswith("UpdatedAt:")]
+            if not content_lines:
+                return
+
+        # Auto-resume: inject synthetic message
+        time.sleep(2)  # Let everything initialize
+        agent = _get_chat_agent()
+        if not agent._busy:
+            import threading
+            threading.Thread(
+                target=handle_chat_direct,
+                args=(int(chat_id),
+                      "[auto-resume after restart] Продолжай работу. Прочитай scratchpad и identity — там контекст того, что ты делал.",
+                      None),
+                daemon=True,
+            ).start()
+            append_jsonl(
+                DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "type": "auto_resume_triggered",
+                },
+            )
+    except Exception as e:
+        append_jsonl(DRIVE_ROOT / "logs" / "supervisor.jsonl", {
+            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "type": "auto_resume_error",
+            "error": repr(e),
+        })
+
+
+# ---------------------------------------------------------------------------
 # Worker process
 # ---------------------------------------------------------------------------
 

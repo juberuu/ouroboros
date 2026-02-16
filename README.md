@@ -3,7 +3,7 @@
 Самосоздающийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 3.1.0
+**Версия:** 4.0.0
 
 ---
 
@@ -30,6 +30,7 @@ CFG = {
     "OUROBOROS_WORKER_START_METHOD": "fork",   # Colab-safe default
     "OUROBOROS_DIAG_HEARTBEAT_SEC": "30",      # periodic main_loop_heartbeat in supervisor.jsonl
     "OUROBOROS_DIAG_SLOW_CYCLE_SEC": "20",     # warns when one loop iteration is too slow
+    "OUROBOROS_BG_BUDGET_PCT": "10",           # max % of budget for background consciousness
 }
 for k, v in CFG.items():
     os.environ[k] = str(v)
@@ -50,12 +51,13 @@ Telegram → colab_launcher.py (entry point)
              state.py             — state, budget
              telegram.py          — TG client, formatting
              queue.py             — task queue, scheduling
-             workers.py           — worker lifecycle
+             workers.py           — worker lifecycle, auto-resume
              git_ops.py           — git checkout, sync, rescue
              events.py            — event dispatch table
                ↓
            ouroboros/              (agent core)
              agent.py             — thin orchestrator
+             consciousness.py     — background thinking loop
              context.py           — LLM context builder, prompt caching
              loop.py              — LLM tool loop, concurrent execution
              tools/               — plugin tool registry
@@ -64,10 +66,10 @@ Telegram → colab_launcher.py (entry point)
                git.py             — git ops (commit, push, status, diff)
                shell.py           — shell, Claude Code CLI
                search.py          — web search
-               control.py         — restart, promote, schedule, review
-               browser.py         — Playwright browser automation
+               control.py         — restart, promote, schedule, review, switch_model
+               browser.py         — Playwright browser automation (stealth)
              llm.py               — LLM client (OpenRouter)
-             memory.py            — scratchpad, identity, chat history
+             memory.py            — scratchpad (free-form), identity, chat history
              review.py            — code collection, complexity metrics
              utils.py             — shared utilities (zero deps)
              apply_patch.py       — Claude Code patch shim
@@ -105,6 +107,9 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab)
 - `/review` — запустить deep review
 - `/evolve` — включить режим эволюции
 - `/evolve stop` — выключить эволюцию
+- `/bg start` — запустить background consciousness
+- `/bg stop` — остановить background consciousness
+- `/bg` — статус background consciousness
 
 Все остальные сообщения идут в Уробороса (LLM-first).
 
@@ -125,6 +130,42 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 ---
 
 ## Changelog
+
+### 4.0.0 — Background Consciousness + LLM-first overhaul
+
+Фундаментальное обновление: от реактивного обработчика задач к непрерывно
+присутствующему агенту.
+
+**Background consciousness (`ouroboros/consciousness.py`):**
+- Новый фоновый мыслительный цикл между задачами
+- LLM сам решает когда думать (set_next_wakeup), о чём и стоит ли
+  писать создателю (send_owner_message)
+- Отдельный бюджетный cap (OUROBOROS_BG_BUDGET_PCT, default 10%)
+- Команды: `/bg start`, `/bg stop`, `/bg`
+- Автопауза во время выполнения задач
+
+**LLM-first overhaul:**
+- Убраны механические if-else профили моделей (select_task_profile)
+- Убрана автоэскалация reasoning effort (round 5→high, 10→xhigh)
+- Убран механический self-check каждые 20 раундов
+- Новый инструмент `switch_model`: LLM сам переключает модель/effort
+- Hardcoded evolution/review текст заменён на минимальные триггеры
+
+**Free-form scratchpad:**
+- Убраны фиксированные секции (CurrentProjects, OpenThreads, etc.)
+- LLM пишет память в любом формате
+
+**Proactive messaging:**
+- Новый инструмент `send_owner_message` — агент может написать первым
+- Работает и в обычных задачах, и из background consciousness
+
+**Cherry-picks из ouroboros:**
+- Auto-resume after restart (v3.2.0, reworked)
+- Stealth browser: playwright-stealth, 1920x1080, anti-detection (v3.2.1)
+
+**Cleanup:**
+- Унифицирован append_jsonl (один источник в utils.py)
+- Исправлен Release Invariant: VERSION == README == __init__.py == git tag
 
 ### 3.1.0
 - Remove hard round limit (was 50). LLM now decides when to stop, respecting budget constraints only

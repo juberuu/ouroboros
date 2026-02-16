@@ -2,7 +2,7 @@
 Уроборос — LLM-клиент.
 
 Единственный модуль, который общается с LLM API (OpenRouter).
-Контракт: chat(), model_profile(), select_task_profile(), add_usage().
+Контракт: chat(), default_model(), available_models(), add_usage().
 """
 
 from __future__ import annotations
@@ -147,34 +147,18 @@ class LLMClient:
 
         return msg, usage
 
-    def model_profile(self, profile: str) -> Dict[str, str]:
-        """Возвращает {"model": ..., "effort": ...} для типа задачи.
+    def default_model(self) -> str:
+        """Return the single default model from env. LLM switches via tool if needed."""
+        return os.environ.get("OUROBOROS_MODEL", "openai/gpt-5.2")
 
-        Профили читают env-переменные, но имеют разумные дефолты.
-        Минимум env — в соответствии с Принципом 3 (Минимализм).
-
-        Env vars:
-        - OUROBOROS_MODEL: main model for deep_review (default: openai/gpt-5.2)
-        - OUROBOROS_MODEL_CODE: model for code/evolution tasks (default: same as OUROBOROS_MODEL)
-        - OUROBOROS_MODEL_LIGHT: model for simple user chat (default: same as OUROBOROS_MODEL)
-        """
-        main_model = os.environ.get("OUROBOROS_MODEL", "openai/gpt-5.2")
-        code_model = os.environ.get("OUROBOROS_MODEL_CODE", main_model)
-        light_model = os.environ.get("OUROBOROS_MODEL_LIGHT", main_model)
-
-        profiles: Dict[str, Dict[str, str]] = {
-            "default_task": {"model": light_model, "effort": "medium"},
-            "code_task": {"model": code_model, "effort": "high"},
-            "evolution_task": {"model": code_model, "effort": "high"},
-            "deep_review": {"model": main_model, "effort": "xhigh"},
-        }
-        return dict(profiles.get(profile, profiles["default_task"]))
-
-    def select_task_profile(self, task_type: str) -> str:
-        """Выбирает профиль по типу задачи. Без keyword routing (LLM-first)."""
-        tt = str(task_type or "").strip().lower()
-        if tt == "review":
-            return "deep_review"
-        if tt == "evolution":
-            return "evolution_task"
-        return "default_task"
+    def available_models(self) -> List[str]:
+        """Return list of available models from env (for switch_model tool schema)."""
+        main = os.environ.get("OUROBOROS_MODEL", "openai/gpt-5.2")
+        code = os.environ.get("OUROBOROS_MODEL_CODE", "")
+        light = os.environ.get("OUROBOROS_MODEL_LIGHT", "")
+        models = [main]
+        if code and code != main:
+            models.append(code)
+        if light and light != main and light != code:
+            models.append(light)
+        return models

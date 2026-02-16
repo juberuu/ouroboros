@@ -10,17 +10,9 @@ from __future__ import annotations
 import json
 import pathlib
 from collections import Counter
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from ouroboros.utils import utc_now_iso, read_text, write_text, append_jsonl, short
-
-
-SCRATCHPAD_SECTIONS: Tuple[str, ...] = (
-    "CurrentProjects",
-    "OpenThreads",
-    "InvestigateLater",
-    "RecentEvidence",
-)
 
 
 class Memory:
@@ -205,46 +197,13 @@ class Memory:
                 return f"{e['type']}: {e.get('ts', '')} branch={branch} sha={sha}"
         return ""
 
-    # --- Scratchpad operations ---
-
-    def parse_scratchpad(self, content: str) -> Dict[str, List[str]]:
-        sections: Dict[str, List[str]] = {name: [] for name in SCRATCHPAD_SECTIONS}
-        current: Optional[str] = None
-        for raw_line in (content or "").splitlines():
-            line = raw_line.strip()
-            if line.startswith("## "):
-                name = line[3:].strip()
-                current = name if name in sections else None
-                continue
-            if current and line.startswith("- "):
-                item = line[2:].strip()
-                if item and item != "(empty)":
-                    sections[current].append(item)
-        return sections
-
-    def render_scratchpad(self, sections: Dict[str, List[str]]) -> str:
-        lines = ["# Scratchpad", "", f"UpdatedAt: {utc_now_iso()}", ""]
-        for section in SCRATCHPAD_SECTIONS:
-            lines.append(f"## {section}")
-            items = sections.get(section) or []
-            if items:
-                for item in items:
-                    lines.append(f"- {item}")
-            else:
-                lines.append("- (empty)")
-            lines.append("")
-        return "\n".join(lines).rstrip() + "\n"
-
     def append_journal(self, entry: Dict[str, Any]) -> None:
         append_jsonl(self.journal_path(), entry)
 
     # --- Defaults ---
 
     def _default_scratchpad(self) -> str:
-        lines = ["# Scratchpad", "", f"UpdatedAt: {utc_now_iso()}", ""]
-        for section in SCRATCHPAD_SECTIONS:
-            lines.extend([f"## {section}", "- (empty)", ""])
-        return "\n".join(lines).rstrip() + "\n"
+        return f"# Scratchpad\n\nUpdatedAt: {utc_now_iso()}\n\n(empty — write anything here)\n"
 
     def _default_identity(self) -> str:
         return (
