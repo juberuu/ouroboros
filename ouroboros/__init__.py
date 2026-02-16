@@ -14,4 +14,6 @@
 # Workers import make_agent directly from ouroboros.agent.
 
 __all__ = ['agent', 'tools', 'llm', 'memory', 'review', 'utils']
-__version__ = '4.0.1'
+
+from pathlib import Path as _Path
+__version__ = (_Path(__file__).resolve().parent.parent / 'VERSION').read_text(encoding='utf-8').strip()

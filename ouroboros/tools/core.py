@@ -70,9 +70,9 @@ def _send_photo(ctx: ToolContext, image_base64: str, caption: str = "") -> str:
     # Resolve screenshot reference from stash
     actual_b64 = image_base64
     if image_base64 == "__last_screenshot__":
-        if not ctx._last_screenshot_b64:
+        if not ctx.browser_state.last_screenshot_b64:
             return "⚠️ No screenshot stored. Take one first with browse_page(output='screenshot')."
-        actual_b64 = ctx._last_screenshot_b64
+        actual_b64 = ctx.browser_state.last_screenshot_b64
 
     if not actual_b64 or len(actual_b64) < 100:
         return "⚠️ image_base64 is empty or too short. Take a screenshot first with browse_page(output='screenshot')."

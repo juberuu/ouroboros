@@ -10,11 +10,14 @@ from __future__ import annotations
 import datetime as _dt
 import hashlib
 import json
+import logging
 import os
 import pathlib
 import subprocess
 import time
 from typing import Any, Dict, List, Optional
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +106,7 @@ def append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> None:
                 if attempt < write_retries - 1:
                     time.sleep(retry_sleep_base_sec * (2 ** attempt))
     except Exception:
-        pass
+        log.warning("append_jsonl: all write attempts failed for %s", path, exc_info=True)
     finally:
         if lock_fd is not None:
             try:

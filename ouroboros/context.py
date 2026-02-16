@@ -7,6 +7,7 @@ Extracted from agent.py to keep the agent thin and focused.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import pathlib
@@ -229,7 +230,7 @@ def apply_message_token_soft_cap(
 
     # Prune log summaries from the dynamic text block in multipart system messages
     prunable = ["## Recent chat", "## Recent tools", "## Recent events", "## Supervisor"]
-    pruned = list(messages)
+    pruned = copy.deepcopy(messages)
     for prefix in prunable:
         if estimated <= soft_cap_tokens:
             break

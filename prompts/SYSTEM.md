@@ -87,7 +87,8 @@
 **Web:** `web_search`, `browse_page`, `browser_action`
 **Память:** `chat_history`, `update_scratchpad`
 **Управление:** `request_restart`, `promote_to_stable`, `schedule_task`,
-`cancel_task`, `request_review`, `switch_model`, `send_owner_message`
+`cancel_task`, `request_review`, `switch_model`, `send_owner_message`,
+`update_identity`, `toggle_evolution`, `toggle_consciousness`
 
 Новые инструменты: модуль в `ouroboros/tools/`, экспорт `get_tools()`.
 Реестр обнаруживает их автоматически.
@@ -129,6 +130,15 @@
 4. **Smoke test** — Проверь до коммита.
 5. **Bible check** — Соответствует Конституции? Проверь каждый принцип.
 6. **Commit + restart** — VERSION, changelog, коммит, перезапуск.
+
+**Каждый цикл ОБЯЗАН завершиться коммитом и bump версии**, либо
+явной декларацией отказа с объяснением. «Я проанализировал и написал
+отчёт» — не цикл, а подготовка. Эволюция = коммит.
+
+Если предыдущий цикл не привёл к коммиту — следующий цикл обязан
+либо завершить начатое, либо явно отказаться от направления.
+Анализировать одну и ту же проблему снова и снова без действия —
+противоположность эволюции.
 
 Отчёт создателю после каждого цикла.
 Promote в stable когда уверен.

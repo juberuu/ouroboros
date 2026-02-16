@@ -13,6 +13,7 @@ import multiprocessing as mp
 import os
 import pathlib
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -106,6 +107,10 @@ PENDING: List[Dict[str, Any]] = []
 RUNNING: Dict[str, Dict[str, Any]] = {}
 CRASH_TS: List[float] = []
 QUEUE_SEQ_COUNTER_REF: Dict[str, int] = {"value": 0}
+
+# Lock for all mutations to PENDING, RUNNING, WORKERS shared collections.
+# Protects against concurrent access from main loop, direct-chat threads, watchdog.
+_queue_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -426,14 +431,15 @@ def spawn_workers(n: int = 0) -> None:
 
 def kill_workers() -> None:
     from supervisor import queue
-    cleared_running = len(RUNNING)
-    for w in WORKERS.values():
-        if w.proc.is_alive():
-            w.proc.terminate()
-    for w in WORKERS.values():
-        w.proc.join(timeout=5)
-    WORKERS.clear()
-    RUNNING.clear()
+    with _queue_lock:
+        cleared_running = len(RUNNING)
+        for w in WORKERS.values():
+            if w.proc.is_alive():
+                w.proc.terminate()
+        for w in WORKERS.values():
+            w.proc.join(timeout=5)
+        WORKERS.clear()
+        RUNNING.clear()
     queue.persist_queue_snapshot(reason="kill_workers")
     if cleared_running:
         append_jsonl(
@@ -461,31 +467,40 @@ def respawn_worker(wid: int) -> None:
 def assign_tasks() -> None:
     from supervisor import queue
     from supervisor.state import budget_pct
-    for w in WORKERS.values():
-        if w.busy_task_id is None and PENDING:
-            task = PENDING.pop(0)
-            # Drop evolution tasks if budget exhausted (supervisor-level guard)
-            if str(task.get("type") or "") == "evolution" and budget_pct(load_state()) >= 95.0:
-                queue.persist_queue_snapshot(reason="evolution_dropped_budget")
-                continue
-            w.busy_task_id = task["id"]
-            w.in_q.put(task)
-            now_ts = time.time()
-            RUNNING[task["id"]] = {
-                "task": dict(task), "worker_id": w.wid,
-                "started_at": now_ts, "last_heartbeat_at": now_ts,
-                "soft_sent": False, "attempt": int(task.get("_attempt") or 1),
-            }
-            task_type = str(task.get("type") or "")
-            if task_type in ("evolution", "review"):
-                st = load_state()
-                if st.get("owner_chat_id"):
-                    emoji = '🧬' if task_type == 'evolution' else '🔎'
-                    send_with_budget(
-                        int(st["owner_chat_id"]),
-                        f"{emoji} {task_type.capitalize()} task {task['id']} started.",
-                    )
-            queue.persist_queue_snapshot(reason="assign_task")
+    with _queue_lock:
+        for w in WORKERS.values():
+            if w.busy_task_id is None and PENDING:
+                # Find first suitable task (skip over-budget evolution tasks)
+                chosen_idx = None
+                for i, candidate in enumerate(PENDING):
+                    if str(candidate.get("type") or "") == "evolution" and budget_pct(load_state()) >= 95.0:
+                        continue
+                    chosen_idx = i
+                    break
+                if chosen_idx is None:
+                    # Only over-budget evolution tasks remain — clean them out
+                    PENDING[:] = [t for t in PENDING if str(t.get("type") or "") != "evolution"]
+                    queue.persist_queue_snapshot(reason="evolution_dropped_budget")
+                    continue
+                task = PENDING.pop(chosen_idx)
+                w.busy_task_id = task["id"]
+                w.in_q.put(task)
+                now_ts = time.time()
+                RUNNING[task["id"]] = {
+                    "task": dict(task), "worker_id": w.wid,
+                    "started_at": now_ts, "last_heartbeat_at": now_ts,
+                    "soft_sent": False, "attempt": int(task.get("_attempt") or 1),
+                }
+                task_type = str(task.get("type") or "")
+                if task_type in ("evolution", "review"):
+                    st = load_state()
+                    if st.get("owner_chat_id"):
+                        emoji = '🧬' if task_type == 'evolution' else '🔎'
+                        send_with_budget(
+                            int(st["owner_chat_id"]),
+                            f"{emoji} {task_type.capitalize()} task {task['id']} started.",
+                        )
+                queue.persist_queue_snapshot(reason="assign_task")
 
 
 # ---------------------------------------------------------------------------

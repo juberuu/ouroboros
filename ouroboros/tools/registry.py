@@ -16,6 +16,16 @@ from ouroboros.utils import safe_relpath
 
 
 @dataclass
+class BrowserState:
+    """Per-task browser lifecycle state (Playwright). Isolated from generic ToolContext."""
+
+    pw_instance: Any = None
+    browser: Any = None
+    page: Any = None
+    last_screenshot_b64: Optional[str] = None
+
+
+@dataclass
 class ToolContext:
     """Контекст выполнения инструмента — передаётся из агента перед каждой задачей."""
 
@@ -32,13 +42,8 @@ class ToolContext:
     active_model_override: Optional[str] = None
     active_effort_override: Optional[str] = None
 
-    # Per-task browser lifecycle (created by browser.py, cleaned by agent.py)
-    _pw_instance: Any = None
-    _browser: Any = None
-    _page: Any = None
-
-    # Screenshot stash: browse_page stores base64 here, send_photo reads from here
-    _last_screenshot_b64: Optional[str] = None
+    # Per-task browser state
+    browser_state: BrowserState = field(default_factory=BrowserState)
 
     def repo_path(self, rel: str) -> pathlib.Path:
         return (self.repo_dir / safe_relpath(rel)).resolve()
@@ -87,7 +92,9 @@ class ToolRegistry:
                     for entry in mod.get_tools():
                         self._entries[entry.name] = entry
             except Exception:
-                pass  # Skip broken modules so the agent can still boot
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Failed to load tool module %s", modname, exc_info=True)
 
     def set_context(self, ctx: ToolContext) -> None:
         self._ctx = ctx

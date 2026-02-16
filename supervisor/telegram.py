@@ -196,38 +196,75 @@ def _tg_utf16_len(text: str) -> int:
 
 def _strip_markdown(text: str) -> str:
     text = re.sub(r"```[^\n]*\n([\s\S]*?)```", r"\1", text)
+    text = re.sub(r"\*\*\*([^*]+)\*\*\*", r"\1", text)
     text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+    text = re.sub(r"(?<!\*)\*(?!\*)([^*]+?)(?<!\*)\*(?!\*)", r"\1", text)
     text = re.sub(r"`([^`]+)`", r"\1", text)
+    text = re.sub(r"~~(.+?)~~", r"\1", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
     return text
 
 
 def _markdown_to_telegram_html(md: str) -> str:
+    """Convert Markdown to Telegram-safe HTML.
+
+    Supported: fenced code, inline code, **bold**, *italic*, _italic_,
+    ~~strikethrough~~, [links](url), # headers.
+    """
     import html as _html
     md = md or ""
+
+    # --- Step 1: extract fenced code blocks into placeholders ---
     fence_re = re.compile(r"```[^\n]*\n([\s\S]*?)```", re.MULTILINE)
-    inline_code_re = re.compile(r"`([^`\n]+)`")
-    bold_re = re.compile(r"\*\*([^*\n]+)\*\*")
+    fenced: list = []
 
-    parts: list = []
-    last = 0
-    for m in fence_re.finditer(md):
-        parts.append(md[last:m.start()])
+    def _save_fence(m: re.Match) -> str:
         code_esc = _html.escape(m.group(1), quote=False)
-        parts.append(f"<pre><code>{code_esc}</code></pre>")
-        last = m.end()
-    parts.append(md[last:])
+        placeholder = f"\x00FENCE{len(fenced)}\x00"
+        fenced.append(f"<pre><code>{code_esc}</code></pre>")
+        return placeholder
 
-    def _render_span(text: str) -> str:
-        out: list = []
-        pos = 0
-        for mm in inline_code_re.finditer(text):
-            out.append(_html.escape(text[pos:mm.start()], quote=False))
-            out.append(f"<code>{_html.escape(mm.group(1), quote=False)}</code>")
-            pos = mm.end()
-        out.append(_html.escape(text[pos:], quote=False))
-        return bold_re.sub(r"<b>\\1</b>", "".join(out))
+    text = fence_re.sub(_save_fence, md)
 
-    return "".join(_render_span(p) if not p.startswith("<pre><code>") else p for p in parts)
+    # --- Step 2: extract inline code into placeholders ---
+    inline_code_re = re.compile(r"`([^`\n]+)`")
+    inlines: list = []
+
+    def _save_inline(m: re.Match) -> str:
+        code_esc = _html.escape(m.group(1), quote=False)
+        placeholder = f"\x00CODE{len(inlines)}\x00"
+        inlines.append(f"<code>{code_esc}</code>")
+        return placeholder
+
+    text = inline_code_re.sub(_save_inline, text)
+
+    # --- Step 3: HTML-escape remaining text ---
+    text = _html.escape(text, quote=False)
+
+    # --- Step 4: apply markdown formatting (order matters) ---
+    # Headers: # at start of line -> bold
+    text = re.sub(r"^#{1,6}\s+(.+)$", r"<b>\1</b>", text, flags=re.MULTILINE)
+    # Links: [text](url)
+    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', text)
+    # Bold+italic: ***text***
+    text = re.sub(r"\*\*\*(.+?)\*\*\*", r"<b><i>\1</i></b>", text)
+    # Bold: **text**
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    # Strikethrough: ~~text~~
+    text = re.sub(r"~~(.+?)~~", r"<s>\1</s>", text)
+    # Italic: *text* (single *, not adjacent to another *)
+    text = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", text)
+    # Italic: _text_ (word-boundary to avoid matching snake_case)
+    text = re.sub(r"(?<!\w)_(.+?)_(?!\w)", r"<i>\1</i>", text)
+
+    # --- Step 5: restore placeholders ---
+    for i, code in enumerate(inlines):
+        text = text.replace(f"\x00CODE{i}\x00", code)
+    for i, block in enumerate(fenced):
+        text = text.replace(f"\x00FENCE{i}\x00", block)
+
+    return text
 
 
 def _chunk_markdown_for_telegram(md: str, max_chars: int = 3500) -> List[str]:

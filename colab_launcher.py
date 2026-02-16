@@ -435,7 +435,7 @@ while True:
         st["last_owner_message_at"] = now_iso
         save_state(st)
 
-        # Supervisor commands
+        # --- Safety rails (hardcoded, no LLM) ---
         if text.strip().lower().startswith("/panic"):
             send_with_budget(chat_id, "🛑 PANIC: stopping everything now.")
             kill_workers()
@@ -452,22 +452,25 @@ while True:
             send_with_budget(chat_id, "♻️ Restarting (soft).")
             ok, msg = safe_restart(reason="owner_restart", unsynced_policy="rescue_and_reset")
             if not ok:
-                send_with_budget(chat_id, f"⚠️ Restart отменен: {msg}")
+                send_with_budget(chat_id, f"⚠️ Restart cancelled: {msg}")
                 continue
             kill_workers()
-            # Replace current process with fresh Python — loads all modules from scratch
             os.execv(sys.executable, [sys.executable, __file__])
 
-        if text.strip().lower().startswith("/status"):
-            send_with_budget(chat_id, status_text(WORKERS, PENDING, RUNNING, SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC), force_budget=True)
-            continue
-
-        if text.strip().lower().startswith("/review"):
-            queue_review_task(reason="owner:/review", force=True)
-            continue
-
+        # --- Dual-path commands: supervisor acts + message goes to LLM ---
+        supervisor_note = ""
         lowered = text.strip().lower()
-        if lowered.startswith("/evolve"):
+
+        if lowered.startswith("/status"):
+            status = status_text(WORKERS, PENDING, RUNNING, SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC)
+            send_with_budget(chat_id, status, force_budget=True)
+            supervisor_note = f"[Supervisor handled /status — status text already sent to chat]\n"
+
+        elif lowered.startswith("/review"):
+            queue_review_task(reason="owner:/review", force=True)
+            supervisor_note = "[Supervisor handled /review — review task queued]\n"
+
+        elif lowered.startswith("/evolve"):
             parts = lowered.split()
             action = parts[1] if len(parts) > 1 else "on"
             turn_on = action not in ("off", "stop", "0")
@@ -478,13 +481,11 @@ while True:
                 PENDING[:] = [t for t in PENDING if str(t.get("type")) != "evolution"]
                 sort_pending()
                 persist_queue_snapshot(reason="evolve_off")
-            if turn_on:
-                send_with_budget(chat_id, "🧬 Эволюция: ON. Отключить: /evolve stop")
-            else:
-                send_with_budget(chat_id, "🛑 Эволюция: OFF.")
-            continue
+            state_str = "ON" if turn_on else "OFF"
+            send_with_budget(chat_id, f"🧬 Evolution: {state_str}")
+            supervisor_note = f"[Supervisor handled /evolve — evolution toggled {state_str}]\n"
 
-        if lowered.startswith("/bg"):
+        elif lowered.startswith("/bg"):
             parts = lowered.split()
             action = parts[1] if len(parts) > 1 else "status"
             if action in ("start", "on", "1"):
@@ -494,11 +495,15 @@ while True:
                 result = _consciousness.stop()
                 send_with_budget(chat_id, f"🧠 {result}")
             else:
-                status = "running" if _consciousness.is_running else "stopped"
-                send_with_budget(chat_id, f"🧠 Background consciousness: {status}")
-            continue
+                bg_status = "running" if _consciousness.is_running else "stopped"
+                send_with_budget(chat_id, f"🧠 Background consciousness: {bg_status}")
+            supervisor_note = f"[Supervisor handled /bg {action}]\n"
 
-        # All other messages → direct chat with Ouroboros
+        # Prepend supervisor note for dual-path commands
+        if supervisor_note:
+            text = supervisor_note + text
+
+        # All other messages (and dual-path commands) → direct chat with Ouroboros
         if not text and not image_data:
             continue  # empty message, skip
 

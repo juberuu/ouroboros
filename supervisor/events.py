@@ -172,6 +172,36 @@ def _handle_cancel_task(evt: Dict[str, Any], ctx: Any) -> None:
         )
 
 
+def _handle_toggle_evolution(evt: Dict[str, Any], ctx: Any) -> None:
+    """Toggle evolution mode from LLM tool call."""
+    enabled = bool(evt.get("enabled"))
+    st = ctx.load_state()
+    st["evolution_mode_enabled"] = enabled
+    ctx.save_state(st)
+    if not enabled:
+        ctx.PENDING[:] = [t for t in ctx.PENDING if str(t.get("type")) != "evolution"]
+        ctx.sort_pending()
+        ctx.persist_queue_snapshot(reason="evolve_off_via_tool")
+    if st.get("owner_chat_id"):
+        state_str = "ON" if enabled else "OFF"
+        ctx.send_with_budget(int(st["owner_chat_id"]), f"🧬 Evolution: {state_str} (via agent tool)")
+
+
+def _handle_toggle_consciousness(evt: Dict[str, Any], ctx: Any) -> None:
+    """Toggle background consciousness from LLM tool call."""
+    action = str(evt.get("action") or "status")
+    if action in ("start", "on"):
+        result = ctx.consciousness.start()
+    elif action in ("stop", "off"):
+        result = ctx.consciousness.stop()
+    else:
+        status = "running" if ctx.consciousness.is_running else "stopped"
+        result = f"Background consciousness: {status}"
+    st = ctx.load_state()
+    if st.get("owner_chat_id"):
+        ctx.send_with_budget(int(st["owner_chat_id"]), f"🧠 {result}")
+
+
 def _handle_send_photo(evt: Dict[str, Any], ctx: Any) -> None:
     """Send a photo (base64 PNG) to a Telegram chat."""
     import base64 as b64mod
@@ -218,6 +248,8 @@ EVENT_HANDLERS = {
     "schedule_task": _handle_schedule_task,
     "cancel_task": _handle_cancel_task,
     "send_photo": _handle_send_photo,
+    "toggle_evolution": _handle_toggle_evolution,
+    "toggle_consciousness": _handle_toggle_consciousness,
 }
 
 

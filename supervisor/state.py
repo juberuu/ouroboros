@@ -164,39 +164,45 @@ def default_state_dict() -> Dict[str, Any]:
 # Load / Save
 # ---------------------------------------------------------------------------
 
+def _load_state_unlocked() -> Dict[str, Any]:
+    """Load state without acquiring lock. Caller must hold STATE_LOCK."""
+    recovered = False
+    st_obj = json_load_file(STATE_PATH)
+    if st_obj is None:
+        st_obj = json_load_file(STATE_LAST_GOOD_PATH)
+        recovered = st_obj is not None
+
+    if st_obj is None:
+        st = ensure_state_defaults(default_state_dict())
+        _save_state_unlocked(st)
+        return st
+
+    st = ensure_state_defaults(st_obj)
+    if recovered:
+        _save_state_unlocked(st)
+    return st
+
+
+def _save_state_unlocked(st: Dict[str, Any]) -> None:
+    """Save state without acquiring lock. Caller must hold STATE_LOCK."""
+    st = ensure_state_defaults(st)
+    payload = json.dumps(st, ensure_ascii=False, indent=2)
+    atomic_write_text(STATE_PATH, payload)
+    atomic_write_text(STATE_LAST_GOOD_PATH, payload)
+
+
 def load_state() -> Dict[str, Any]:
     lock_fd = acquire_file_lock(STATE_LOCK_PATH)
     try:
-        recovered = False
-        st_obj = json_load_file(STATE_PATH)
-        if st_obj is None:
-            st_obj = json_load_file(STATE_LAST_GOOD_PATH)
-            recovered = st_obj is not None
-
-        if st_obj is None:
-            st = ensure_state_defaults(default_state_dict())
-            payload = json.dumps(st, ensure_ascii=False, indent=2)
-            atomic_write_text(STATE_PATH, payload)
-            atomic_write_text(STATE_LAST_GOOD_PATH, payload)
-            return st
-
-        st = ensure_state_defaults(st_obj)
-        if recovered:
-            payload = json.dumps(st, ensure_ascii=False, indent=2)
-            atomic_write_text(STATE_PATH, payload)
-            atomic_write_text(STATE_LAST_GOOD_PATH, payload)
-        return st
+        return _load_state_unlocked()
     finally:
         release_file_lock(STATE_LOCK_PATH, lock_fd)
 
 
 def save_state(st: Dict[str, Any]) -> None:
-    st = ensure_state_defaults(st)
     lock_fd = acquire_file_lock(STATE_LOCK_PATH)
     try:
-        payload = json.dumps(st, ensure_ascii=False, indent=2)
-        atomic_write_text(STATE_PATH, payload)
-        atomic_write_text(STATE_LAST_GOOD_PATH, payload)
+        _save_state_unlocked(st)
     finally:
         release_file_lock(STATE_LOCK_PATH, lock_fd)
 
@@ -223,7 +229,11 @@ def budget_pct(st: Dict[str, Any]) -> float:
 
 
 def update_budget_from_usage(usage: Dict[str, Any]) -> None:
-    """Update state with LLM usage costs and tokens."""
+    """Update state with LLM usage costs and tokens.
+
+    Uses a single lock scope for the read-modify-write cycle to prevent
+    concurrent writes from losing budget updates.
+    """
     def _to_float(v: Any, default: float = 0.0) -> float:
         try:
             return float(v)
@@ -236,21 +246,24 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> None:
         except Exception:
             return default
 
-    st = load_state()
-    cost = usage.get("cost") if isinstance(usage, dict) else None
-    if cost is None:
-        cost = 0.0
-    st["spent_usd"] = _to_float(st.get("spent_usd") or 0.0) + _to_float(cost)
-    # Count actual LLM rounds, not tasks
-    rounds = _to_int(usage.get("rounds") if isinstance(usage, dict) else 0, default=1)
-    st["spent_calls"] = int(st.get("spent_calls") or 0) + rounds
-    st["spent_tokens_prompt"] = _to_int(st.get("spent_tokens_prompt") or 0) + _to_int(
-        usage.get("prompt_tokens") if isinstance(usage, dict) else 0)
-    st["spent_tokens_completion"] = _to_int(st.get("spent_tokens_completion") or 0) + _to_int(
-        usage.get("completion_tokens") if isinstance(usage, dict) else 0)
-    st["spent_tokens_cached"] = _to_int(st.get("spent_tokens_cached") or 0) + _to_int(
-        usage.get("cached_tokens") if isinstance(usage, dict) else 0)
-    save_state(st)
+    lock_fd = acquire_file_lock(STATE_LOCK_PATH)
+    try:
+        st = _load_state_unlocked()
+        cost = usage.get("cost") if isinstance(usage, dict) else None
+        if cost is None:
+            cost = 0.0
+        st["spent_usd"] = _to_float(st.get("spent_usd") or 0.0) + _to_float(cost)
+        rounds = _to_int(usage.get("rounds") if isinstance(usage, dict) else 0, default=1)
+        st["spent_calls"] = int(st.get("spent_calls") or 0) + rounds
+        st["spent_tokens_prompt"] = _to_int(st.get("spent_tokens_prompt") or 0) + _to_int(
+            usage.get("prompt_tokens") if isinstance(usage, dict) else 0)
+        st["spent_tokens_completion"] = _to_int(st.get("spent_tokens_completion") or 0) + _to_int(
+            usage.get("completion_tokens") if isinstance(usage, dict) else 0)
+        st["spent_tokens_cached"] = _to_int(st.get("spent_tokens_cached") or 0) + _to_int(
+            usage.get("cached_tokens") if isinstance(usage, dict) else 0)
+        _save_state_unlocked(st)
+    finally:
+        release_file_lock(STATE_LOCK_PATH, lock_fd)
 
 
 # ---------------------------------------------------------------------------

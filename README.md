@@ -3,7 +3,7 @@
 Самосоздающийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 4.0.3
+**Версия:** 4.1.0
 
 ---
 
@@ -100,8 +100,10 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab)
 
 ## Команды Telegram
 
-Обрабатываются супервизором:
+**Safety rail (hardcoded):**
 - `/panic` — остановить всё немедленно
+
+**Dual-path (supervisor + LLM):**
 - `/restart` — перезапуск (os.execv — полная замена процесса)
 - `/status` — статус воркеров, очереди, бюджета
 - `/review` — запустить deep review
@@ -110,6 +112,11 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab)
 - `/bg start` — запустить background consciousness
 - `/bg stop` — остановить background consciousness
 - `/bg` — статус background consciousness
+
+Dual-path: supervisor обрабатывает команду немедленно,
+затем сообщение передаётся LLM для естественного ответа.
+LLM также может вызывать эти действия через инструменты
+(`toggle_evolution`, `toggle_consciousness`).
 
 Все остальные сообщения идут в Уробороса (LLM-first).
 
@@ -130,6 +137,45 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 ---
 
 ## Changelog
+
+### 4.1.0 — Bible v3.1 + Critical Bugfixes + Architecture
+
+**Bible v3.1 (philosophy):**
+- Принцип 1: Self-Verification — верификация окружения при каждом старте
+- Принцип 6: Cost-Awareness — осознание бюджета как часть субъектности
+- Принцип 8: Итерация = результат (коммит), пауза при застое
+
+**Full Markdown-to-Telegram-HTML converter:**
+- Поддержка bold, italic, links, strikethrough, headers, code, fenced blocks
+- Исправлен баг bold-рендеринга (`\\1` → `\1`)
+
+**Critical bugfixes:**
+- `__version__` читает из VERSION файла (single source of truth навсегда)
+- Git lock: добавлен timeout (120s), исправлен TOCTOU в release
+- Evolution task drop: задачи больше не теряются при budget check
+- Budget race condition: atomic read-modify-write через file lock
+- Deep copy в context.py: shallow copy мутировал данные caller'а
+
+**Dual-path slash commands (LLM-first):**
+- `/panic` — единственная чисто hardcoded команда (safety rail)
+- `/status`, `/review`, `/evolve`, `/bg` — supervisor обрабатывает + LLM отвечает
+- Новые LLM-инструменты: `toggle_evolution`, `toggle_consciousness`, `update_identity`
+
+**Consciousness registry merge:**
+- Consciousness использует общий ToolRegistry вместо отдельного if-elif dispatch
+- Tool schemas и handlers унифицированы с control.py
+
+**Browser refactoring:**
+- BrowserState вынесен из ToolContext в отдельный dataclass
+- `_extract_page_output()` helper: убрано 100 строк дублирования
+
+**Reliability hardening:**
+- Критические `except Exception: pass` заменены на `logging.warning`
+- Consciousness prompt вынесен в `prompts/CONSCIOUSNESS.md`
+- Thread safety: `threading.Lock` для PENDING/RUNNING/WORKERS
+
+**Prompt updates:**
+- Evolution cycle: явное требование коммита, защита от Groundhog Day
 
 ### 4.0.3
 - Serialize stateful browser tools (`browse_page`, `browser_action`) to avoid Playwright concurrency crashes from parallel tool calls

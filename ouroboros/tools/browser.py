@@ -105,10 +105,10 @@ def _ensure_browser(ctx: ToolContext):
         log.info(f"Thread switch detected (old={_pw_thread_id}, new={current_thread_id}). Resetting Playwright...")
         _reset_playwright_greenlet()
 
-    if ctx._browser is not None:
+    if ctx.browser_state.browser is not None:
         try:
-            if ctx._browser.is_connected():
-                return ctx._page
+            if ctx.browser_state.browser.is_connected():
+                return ctx.browser_state.page
         except Exception:
             pass
         # Browser died — clean up and recreate
@@ -137,9 +137,9 @@ def _ensure_browser(ctx: ToolContext):
                 raise
 
     # Store reference in ctx for cleanup
-    ctx._pw_instance = _pw_instance
+    ctx.browser_state.pw_instance = _pw_instance
 
-    ctx._browser = _pw_instance.chromium.launch(
+    ctx.browser_state.browser = _pw_instance.chromium.launch(
         headless=True,
         args=[
             "--no-sandbox",
@@ -149,7 +149,7 @@ def _ensure_browser(ctx: ToolContext):
             "--window-size=1920,1080",
         ],
     )
-    ctx._page = ctx._browser.new_page(
+    ctx.browser_state.page = ctx.browser_state.browser.new_page(
         viewport={"width": 1920, "height": 1080},
         user_agent=(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -159,10 +159,10 @@ def _ensure_browser(ctx: ToolContext):
 
     if _HAS_STEALTH:
         stealth = Stealth()
-        stealth.apply_stealth_sync(ctx._page)
+        stealth.apply_stealth_sync(ctx.browser_state.page)
 
-    ctx._page.set_default_timeout(30000)
-    return ctx._page
+    ctx.browser_state.page.set_default_timeout(30000)
+    return ctx.browser_state.page
 
 
 def cleanup_browser(ctx: ToolContext) -> None:
@@ -174,13 +174,13 @@ def cleanup_browser(ctx: ToolContext) -> None:
     global _pw_instance
 
     try:
-        if ctx._page is not None:
-            ctx._page.close()
+        if ctx.browser_state.page is not None:
+            ctx.browser_state.page.close()
     except Exception:
         pass
     try:
-        if ctx._browser is not None:
-            ctx._browser.close()
+        if ctx.browser_state.browser is not None:
+            ctx.browser_state.browser.close()
     except Exception as e:
         # If browser cleanup fails with thread error, reset everything
         if "cannot switch" in str(e) or "different thread" in str(e):
@@ -188,9 +188,55 @@ def cleanup_browser(ctx: ToolContext) -> None:
             _reset_playwright_greenlet()
 
     # Clear ctx references but keep module-level _pw_instance alive for reuse
-    ctx._page = None
-    ctx._browser = None
-    ctx._pw_instance = None
+    ctx.browser_state.page = None
+    ctx.browser_state.browser = None
+    ctx.browser_state.pw_instance = None
+
+
+_MARKDOWN_JS = """() => {
+    const walk = (el) => {
+        let out = '';
+        for (const child of el.childNodes) {
+            if (child.nodeType === 3) {
+                const t = child.textContent.trim();
+                if (t) out += t + ' ';
+            } else if (child.nodeType === 1) {
+                const tag = child.tagName;
+                if (['SCRIPT','STYLE','NOSCRIPT'].includes(tag)) continue;
+                if (['H1','H2','H3','H4','H5','H6'].includes(tag))
+                    out += '\\n' + '#'.repeat(parseInt(tag[1])) + ' ';
+                if (tag === 'P' || tag === 'DIV' || tag === 'BR') out += '\\n';
+                if (tag === 'LI') out += '\\n- ';
+                if (tag === 'A') out += '[';
+                out += walk(child);
+                if (tag === 'A') out += '](' + (child.href||'') + ')';
+            }
+        }
+        return out;
+    };
+    return walk(document.body);
+}"""
+
+
+def _extract_page_output(page: Any, output: str, ctx: ToolContext) -> str:
+    """Extract page content in the requested format."""
+    if output == "screenshot":
+        data = page.screenshot(type="png", full_page=False)
+        b64 = base64.b64encode(data).decode()
+        ctx.browser_state.last_screenshot_b64 = b64
+        return (
+            f"Screenshot captured ({len(b64)} bytes base64). "
+            f"Call send_photo(image_base64='__last_screenshot__') to deliver it to the owner."
+        )
+    elif output == "html":
+        html = page.content()
+        return html[:50000] + ("... [truncated]" if len(html) > 50000 else "")
+    elif output == "markdown":
+        text = page.evaluate(_MARKDOWN_JS)
+        return text[:30000] + ("... [truncated]" if len(text) > 30000 else "")
+    else:  # text
+        text = page.inner_text("body")
+        return text[:30000] + ("... [truncated]" if len(text) > 30000 else "")
 
 
 def _browse_page(ctx: ToolContext, url: str, output: str = "text",
@@ -198,103 +244,20 @@ def _browse_page(ctx: ToolContext, url: str, output: str = "text",
     try:
         page = _ensure_browser(ctx)
         page.goto(url, timeout=timeout, wait_until="domcontentloaded")
-
         if wait_for:
             page.wait_for_selector(wait_for, timeout=timeout)
-
-        if output == "screenshot":
-            data = page.screenshot(type="png", full_page=False)
-            b64 = base64.b64encode(data).decode()
-            ctx._last_screenshot_b64 = b64
-            return (
-                f"Screenshot captured ({len(b64)} bytes base64). "
-                f"Call send_photo(image_base64='__last_screenshot__') to deliver it to the owner."
-            )
-        elif output == "html":
-            html = page.content()
-            return html[:50000] + ("... [truncated]" if len(html) > 50000 else "")
-        elif output == "markdown":
-            text = page.evaluate("""() => {
-                const walk = (el) => {
-                    let out = '';
-                    for (const child of el.childNodes) {
-                        if (child.nodeType === 3) {
-                            const t = child.textContent.trim();
-                            if (t) out += t + ' ';
-                        } else if (child.nodeType === 1) {
-                            const tag = child.tagName;
-                            if (['SCRIPT','STYLE','NOSCRIPT'].includes(tag)) continue;
-                            if (['H1','H2','H3','H4','H5','H6'].includes(tag))
-                                out += '\\n' + '#'.repeat(parseInt(tag[1])) + ' ';
-                            if (tag === 'P' || tag === 'DIV' || tag === 'BR') out += '\\n';
-                            if (tag === 'LI') out += '\\n- ';
-                            if (tag === 'A') out += '[';
-                            out += walk(child);
-                            if (tag === 'A') out += '](' + (child.href||'') + ')';
-                        }
-                    }
-                    return out;
-                };
-                return walk(document.body);
-            }""")
-            return text[:30000] + ("... [truncated]" if len(text) > 30000 else "")
-        else:  # text
-            text = page.inner_text("body")
-            return text[:30000] + ("... [truncated]" if len(text) > 30000 else "")
-    except (RuntimeError, Exception) as e:
-        # Catch greenlet threading errors and reset Playwright completely
+        return _extract_page_output(page, output, ctx)
+    except Exception as e:
         if "cannot switch" in str(e) or "different thread" in str(e) or "greenlet" in str(e).lower():
             log.warning(f"Browser thread error detected: {e}. Resetting Playwright and retrying...")
             cleanup_browser(ctx)
             _reset_playwright_greenlet()
-            # Retry once with fresh state
             page = _ensure_browser(ctx)
             page.goto(url, timeout=timeout, wait_until="domcontentloaded")
-
             if wait_for:
                 page.wait_for_selector(wait_for, timeout=timeout)
-
-            if output == "screenshot":
-                data = page.screenshot(type="png", full_page=False)
-                b64 = base64.b64encode(data).decode()
-                ctx._last_screenshot_b64 = b64
-                return (
-                    f"Screenshot captured ({len(b64)} bytes base64). "
-                    f"Call send_photo(image_base64='__last_screenshot__') to deliver it to the owner."
-                )
-            elif output == "html":
-                html = page.content()
-                return html[:50000] + ("... [truncated]" if len(html) > 50000 else "")
-            elif output == "markdown":
-                text = page.evaluate("""() => {
-                    const walk = (el) => {
-                        let out = '';
-                        for (const child of el.childNodes) {
-                            if (child.nodeType === 3) {
-                                const t = child.textContent.trim();
-                                if (t) out += t + ' ';
-                            } else if (child.nodeType === 1) {
-                                const tag = child.tagName;
-                                if (['SCRIPT','STYLE','NOSCRIPT'].includes(tag)) continue;
-                                if (['H1','H2','H3','H4','H5','H6'].includes(tag))
-                                    out += '\\n' + '#'.repeat(parseInt(tag[1])) + ' ';
-                                if (tag === 'P' || tag === 'DIV' || tag === 'BR') out += '\\n';
-                                if (tag === 'LI') out += '\\n- ';
-                                if (tag === 'A') out += '[';
-                                out += walk(child);
-                                if (tag === 'A') out += '](' + (child.href||'') + ')';
-                            }
-                        }
-                        return out;
-                    };
-                    return walk(document.body);
-                }""")
-                return text[:30000] + ("... [truncated]" if len(text) > 30000 else "")
-            else:  # text
-                text = page.inner_text("body")
-                return text[:30000] + ("... [truncated]" if len(text) > 30000 else "")
-        else:
-            raise
+            return _extract_page_output(page, output, ctx)
+        raise
 
 
 def _browser_action(ctx: ToolContext, action: str, selector: str = "",
@@ -321,7 +284,7 @@ def _browser_action(ctx: ToolContext, action: str, selector: str = "",
         elif action == "screenshot":
             data = page.screenshot(type="png", full_page=False)
             b64 = base64.b64encode(data).decode()
-            ctx._last_screenshot_b64 = b64
+            ctx.browser_state.last_screenshot_b64 = b64
             return (
                 f"Screenshot captured ({len(b64)} bytes base64). "
                 f"Call send_photo(image_base64='__last_screenshot__') to deliver it to the owner."

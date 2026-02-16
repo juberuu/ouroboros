@@ -9,6 +9,7 @@ context.py (context building), review.py (code collection/metrics).
 from __future__ import annotations
 
 import json
+import logging
 import os
 import pathlib
 import queue
@@ -17,6 +18,8 @@ import time
 import traceback
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
+
+log = logging.getLogger(__name__)
 
 from ouroboros.utils import (
     utc_now_iso, read_text, append_jsonl,
@@ -100,6 +103,7 @@ class OuroborosAgent:
             })
             self._verify_restart(git_sha)
         except Exception:
+            log.warning("Worker boot logging failed", exc_info=True)
             return
 
     def _verify_restart(self, git_sha: str) -> None:

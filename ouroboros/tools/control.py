@@ -97,6 +97,35 @@ def _send_owner_message(ctx: ToolContext, text: str, reason: str = "") -> str:
     return "OK: message queued for delivery."
 
 
+def _update_identity(ctx: ToolContext, content: str) -> str:
+    """Update identity manifest (who you are, who you want to become)."""
+    path = ctx.drive_root / "memory" / "identity.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return f"OK: identity updated ({len(content)} chars)"
+
+
+def _toggle_evolution(ctx: ToolContext, enabled: bool) -> str:
+    """Toggle evolution mode on/off via supervisor event."""
+    ctx.pending_events.append({
+        "type": "toggle_evolution",
+        "enabled": bool(enabled),
+        "ts": utc_now_iso(),
+    })
+    state_str = "ON" if enabled else "OFF"
+    return f"OK: evolution mode toggled {state_str}."
+
+
+def _toggle_consciousness(ctx: ToolContext, action: str = "status") -> str:
+    """Control background consciousness: start, stop, or status."""
+    ctx.pending_events.append({
+        "type": "toggle_consciousness",
+        "action": action,
+        "ts": utc_now_iso(),
+    })
+    return f"OK: consciousness '{action}' requested."
+
+
 def _switch_model(ctx: ToolContext, model: str = "", effort: str = "") -> str:
     """LLM-driven model/effort switch (Constitution P3: LLM-first).
 
@@ -179,6 +208,28 @@ def get_tools() -> List[ToolEntry]:
                 "reason": {"type": "string", "description": "Why you're reaching out (logged, not sent)"},
             }, "required": ["text"]},
         }, _send_owner_message),
+        ToolEntry("update_identity", {
+            "name": "update_identity",
+            "description": "Update your identity manifest (who you are, who you want to become). "
+                           "Persists across sessions. Obligation to yourself (Principle 1: Continuity).",
+            "parameters": {"type": "object", "properties": {
+                "content": {"type": "string", "description": "Full identity content"},
+            }, "required": ["content"]},
+        }, _update_identity),
+        ToolEntry("toggle_evolution", {
+            "name": "toggle_evolution",
+            "description": "Enable or disable evolution mode. When enabled, Ouroboros runs continuous self-improvement cycles.",
+            "parameters": {"type": "object", "properties": {
+                "enabled": {"type": "boolean", "description": "true to enable, false to disable"},
+            }, "required": ["enabled"]},
+        }, _toggle_evolution),
+        ToolEntry("toggle_consciousness", {
+            "name": "toggle_consciousness",
+            "description": "Control background consciousness: 'start', 'stop', or 'status'.",
+            "parameters": {"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["start", "stop", "status"], "description": "Action to perform"},
+            }, "required": ["action"]},
+        }, _toggle_consciousness),
         ToolEntry("switch_model", {
             "name": "switch_model",
             "description": "Switch to a different LLM model or reasoning effort level. "

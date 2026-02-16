@@ -13,12 +13,13 @@ from ouroboros.utils import utc_now_iso, write_text, safe_relpath, run_cmd
 
 # --- Git lock ---
 
-def _acquire_git_lock(ctx: ToolContext) -> pathlib.Path:
+def _acquire_git_lock(ctx: ToolContext, timeout_sec: int = 120) -> pathlib.Path:
     lock_dir = ctx.drive_path("locks")
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_path = lock_dir / "git.lock"
     stale_sec = 600
-    while True:
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
         if lock_path.exists():
             try:
                 age = time.time() - lock_path.stat().st_mtime
@@ -36,11 +37,14 @@ def _acquire_git_lock(ctx: ToolContext) -> pathlib.Path:
             return lock_path
         except FileExistsError:
             time.sleep(0.5)
+    raise TimeoutError(f"Git lock not acquired within {timeout_sec}s: {lock_path}")
 
 
 def _release_git_lock(lock_path: pathlib.Path) -> None:
-    if lock_path.exists():
+    try:
         lock_path.unlink()
+    except FileNotFoundError:
+        pass
 
 
 # --- Tool implementations ---
