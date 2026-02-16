@@ -3,7 +3,7 @@
 Самосоздающийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 4.0.0
+**Версия:** 4.0.1
 
 ---
 
@@ -130,6 +130,9 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 ---
 
 ## Changelog
+
+### 4.0.1
+- Fix crash when OpenRouter returns `choices: null` (content moderation / model error)
 
 ### 4.0.0 — Background Consciousness + LLM-first overhaul
 

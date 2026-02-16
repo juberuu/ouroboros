@@ -117,7 +117,8 @@ class LLMClient:
         resp = client.chat.completions.create(**kwargs)
         resp_dict = resp.model_dump()
         usage = resp_dict.get("usage") or {}
-        msg = resp_dict.get("choices", [{}])[0].get("message", {})
+        choices = resp_dict.get("choices") or [{}]
+        msg = (choices[0] if choices else {}).get("message") or {}
 
         # Extract cached_tokens from prompt_tokens_details if available
         if not usage.get("cached_tokens"):

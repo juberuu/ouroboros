@@ -14,4 +14,4 @@
 # Workers import make_agent directly from ouroboros.agent.
 
 __all__ = ['agent', 'tools', 'llm', 'memory', 'review', 'utils']
-__version__ = '4.0.0'
+__version__ = '4.0.1'
