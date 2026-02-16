@@ -195,14 +195,29 @@ def _tg_utf16_len(text: str) -> int:
 
 
 def _strip_markdown(text: str) -> str:
+    """Strip all markdown formatting markers, leaving only plain text."""
+    # Fenced code blocks (keep content)
     text = re.sub(r"```[^\n]*\n([\s\S]*?)```", r"\1", text)
-    text = re.sub(r"\*\*\*([^*]+)\*\*\*", r"\1", text)
-    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
-    text = re.sub(r"(?<!\*)\*(?!\*)([^*]+?)(?<!\*)\*(?!\*)", r"\1", text)
+    # Inline code (keep content)
     text = re.sub(r"`([^`]+)`", r"\1", text)
+    # Bold+italic (***text***)
+    text = re.sub(r"\*\*\*(.+?)\*\*\*", r"\1", text)
+    # Bold (**text**)
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    # Italic (*text* or _text_)
+    text = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"\1", text)
+    text = re.sub(r"(?<!\w)_(.+?)_(?!\w)", r"\1", text)
+    # Strikethrough (~~text~~)
     text = re.sub(r"~~(.+?)~~", r"\1", text)
+    # Links [text](url) -> text
     text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    # Headers (# text -> text)
     text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+    # List markers (- or * at start of line, keep bullet but remove markdown)
+    text = re.sub(r"^[\*\-]\s+", "• ", text, flags=re.MULTILINE)
+    # Clean up any remaining stray markdown markers
+    text = text.replace("**", "").replace("__", "").replace("~~", "")
+    text = text.replace("`", "")
     return text
 
 
@@ -210,19 +225,25 @@ def _markdown_to_telegram_html(md: str) -> str:
     """Convert Markdown to Telegram-safe HTML.
 
     Supported: fenced code, inline code, **bold**, *italic*, _italic_,
-    ~~strikethrough~~, [links](url), # headers.
+    ~~strikethrough~~, [links](url), # headers, list items.
+    Handles unmatched markers gracefully. Telegram only allows: b, i, u, s, code, pre, a.
     """
     import html as _html
     md = md or ""
 
     # --- Step 1: extract fenced code blocks into placeholders ---
+    # Match ``` with optional language, then content, then closing ```
     fence_re = re.compile(r"```[^\n]*\n([\s\S]*?)```", re.MULTILINE)
     fenced: list = []
 
     def _save_fence(m: re.Match) -> str:
-        code_esc = _html.escape(m.group(1), quote=False)
+        code_content = m.group(1)
+        # Remove trailing newline if present
+        if code_content.endswith("\n"):
+            code_content = code_content[:-1]
+        code_esc = _html.escape(code_content, quote=False)
         placeholder = f"\x00FENCE{len(fenced)}\x00"
-        fenced.append(f"<pre><code>{code_esc}</code></pre>")
+        fenced.append(f"<pre>{code_esc}</pre>")
         return placeholder
 
     text = fence_re.sub(_save_fence, md)
@@ -239,24 +260,42 @@ def _markdown_to_telegram_html(md: str) -> str:
 
     text = inline_code_re.sub(_save_inline, text)
 
-    # --- Step 3: HTML-escape remaining text ---
+    # --- Step 3: HTML-escape remaining text (before adding HTML tags) ---
     text = _html.escape(text, quote=False)
 
     # --- Step 4: apply markdown formatting (order matters) ---
-    # Headers: # at start of line -> bold
+    # Headers: # at start of line -> bold with newline
     text = re.sub(r"^#{1,6}\s+(.+)$", r"<b>\1</b>", text, flags=re.MULTILINE)
-    # Links: [text](url)
-    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', text)
-    # Bold+italic: ***text***
-    text = re.sub(r"\*\*\*(.+?)\*\*\*", r"<b><i>\1</i></b>", text)
-    # Bold: **text**
-    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
-    # Strikethrough: ~~text~~
-    text = re.sub(r"~~(.+?)~~", r"<s>\1</s>", text)
-    # Italic: *text* (single *, not adjacent to another *)
-    text = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", text)
-    # Italic: _text_ (word-boundary to avoid matching snake_case)
-    text = re.sub(r"(?<!\w)_(.+?)_(?!\w)", r"<i>\1</i>", text)
+
+    # Links: [text](url) - escape the URL too
+    def _replace_link(m: re.Match) -> str:
+        link_text = m.group(1)
+        url = m.group(2)
+        # URL must not contain quotes or special chars that break HTML
+        url_safe = url.replace('"', '%22').replace('<', '%3C').replace('>', '%3E')
+        return f'<a href="{url_safe}">{link_text}</a>'
+
+    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", _replace_link, text)
+
+    # Bold+italic: ***text*** (must come before ** and *)
+    # Use non-greedy match, handle line breaks
+    text = re.sub(r"\*\*\*([^*\n]+?)\*\*\*", r"<b><i>\1</i></b>", text)
+
+    # Bold: **text** (non-greedy, single line)
+    text = re.sub(r"\*\*([^*\n]+?)\*\*", r"<b>\1</b>", text)
+
+    # Strikethrough: ~~text~~ (non-greedy, single line)
+    text = re.sub(r"~~([^~\n]+?)~~", r"<s>\1</s>", text)
+
+    # Italic: *text* (single *, not adjacent to another *, single line)
+    # Lookahead/lookbehind to avoid matching ** or *** remnants
+    text = re.sub(r"(?<![*\w])\*([^*\n]+?)\*(?![*\w])", r"<i>\1</i>", text)
+
+    # Italic: _text_ (word-boundary to avoid matching snake_case, single line)
+    text = re.sub(r"\b_([^_\n]+?)_\b", r"<i>\1</i>", text)
+
+    # List items: convert - or * at line start to •
+    text = re.sub(r"^[\*\-]\s+", "• ", text, flags=re.MULTILINE)
 
     # --- Step 5: restore placeholders ---
     for i, code in enumerate(inlines):
