@@ -85,6 +85,7 @@ def _send_owner_message(ctx: ToolContext, text: str, reason: str = "") -> str:
         "type": "send_message",
         "chat_id": ctx.current_chat_id,
         "text": text,
+        "format": "markdown",
         "is_progress": False,
         "ts": utc_now_iso(),
     })
