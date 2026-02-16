@@ -3,7 +3,7 @@
 Самосоздающийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 3.0.0
+**Версия:** 3.1.0
 
 ---
 
@@ -125,6 +125,12 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 ---
 
 ## Changelog
+
+### 3.1.0
+- Remove hard round limit (was 50). LLM now decides when to stop, respecting budget constraints only
+- Fix budget tracking: `update_budget_from_usage` now correctly reads `cost_usd` field from usage data
+- Self-check messages now include event logging and are in English for consistency
+- Align architecture with BIBLE.md Principle 0 (Subjectivity) and Principle 3 (LLM-first)
 
 ### 3.0.0 — Конституция v3.0 + инфраструктурный overhaul
 

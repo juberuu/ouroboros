@@ -247,7 +247,9 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> None:
     if cost is None:
         cost = 0.0
     st["spent_usd"] = _to_float(st.get("spent_usd") or 0.0) + _to_float(cost)
-    st["spent_calls"] = int(st.get("spent_calls") or 0) + 1
+    # Count actual LLM rounds, not tasks
+    rounds = _to_int(usage.get("rounds") if isinstance(usage, dict) else 0, default=1)
+    st["spent_calls"] = int(st.get("spent_calls") or 0) + rounds
     st["spent_tokens_prompt"] = _to_int(st.get("spent_tokens_prompt") or 0) + _to_int(
         usage.get("prompt_tokens") if isinstance(usage, dict) else 0)
     st["spent_tokens_completion"] = _to_int(st.get("spent_tokens_completion") or 0) + _to_int(

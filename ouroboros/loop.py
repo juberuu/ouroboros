@@ -161,7 +161,6 @@ def run_llm_loop(
     incoming_messages: queue.Queue,
     task_type: str = "",
     task_id: str = "",
-    max_rounds: int = 50,
     budget_remaining_usd: Optional[float] = None,
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """
@@ -171,8 +170,7 @@ def run_llm_loop(
     escalates reasoning effort for long tasks.
 
     Args:
-        max_rounds: Maximum number of LLM rounds before forcing completion (default: 50)
-        budget_remaining_usd: If set, forces completion when task cost exceeds 40% of this budget
+        budget_remaining_usd: If set, forces completion when task cost exceeds 50% of this budget
 
     Returns: (final_text, accumulated_usage, llm_trace)
     """
@@ -184,7 +182,7 @@ def run_llm_loop(
     llm_trace: Dict[str, Any] = {"assistant_notes": [], "tool_calls": []}
     accumulated_usage: Dict[str, Any] = {}
     max_retries = 3
-    soft_check_interval = 15
+    soft_check_interval = 20
 
     tool_schemas = tools.schemas()
 
@@ -213,15 +211,27 @@ def run_llm_loop(
             except queue.Empty:
                 break
 
-        # Self-check
+        # Self-check: soft cost-awareness, LLM decides whether to continue
         if round_idx > 1 and round_idx % soft_check_interval == 0:
             task_cost = accumulated_usage.get("cost", 0)
             task_tokens = accumulated_usage.get("prompt_tokens", 0)
             cached = accumulated_usage.get("cached_tokens", 0)
-            cache_pct = f" ({cached*100//max(task_tokens,1)}% cached)" if cached > 0 else ""
-            messages.append({"role": "system", "content":
-                f"[Self-check] {round_idx} раундов, ${task_cost:.3f} потрачено, "
-                f"{task_tokens:,} prompt tokens{cache_pct}. Оцени прогресс. Если застрял — смени подход."})
+            cache_pct = int(cached * 100 / max(task_tokens, 1)) if cached > 0 else 0
+            cache_str = f" ({cache_pct}% cached)" if cache_pct > 0 else ""
+            self_check_msg = (
+                f"[Self-check] {round_idx} rounds, ${task_cost:.2f} spent, "
+                f"{task_tokens:,} prompt tokens{cache_str}. Assess progress. "
+                f"If stuck, change approach."
+            )
+            messages.append({"role": "system", "content": self_check_msg})
+            # Log self-check injection to supervisor
+            append_jsonl(drive_logs / "events.jsonl", {
+                "ts": utc_now_iso(), "type": "self_check",
+                "task_id": task_id, "round": round_idx,
+                "message": self_check_msg,
+                "cost_usd": task_cost, "prompt_tokens": task_tokens,
+                "cache_pct": cache_pct,
+            })
 
         # Escalate reasoning effort for long tasks
         if round_idx >= 5:
@@ -361,30 +371,28 @@ def run_llm_loop(
         if error_count >= 4:
             _maybe_raise_effort("xhigh")
 
-        # --- Budget / round guards ---
-        should_finish = False
-        finish_reason = ""
-
-        if round_idx >= max_rounds:
-            should_finish = True
-            finish_reason = f"Достигнут лимит раундов ({max_rounds}). Заверши работу."
-        elif budget_remaining_usd is not None:
+        # --- Budget guard ---
+        # LLM decides when to stop (Bible П0, П3). We only enforce hard budget limit.
+        if budget_remaining_usd is not None:
             task_cost = accumulated_usage.get("cost", 0)
-            if task_cost > budget_remaining_usd * 0.4:
-                should_finish = True
-                finish_reason = f"Задача потратила ${task_cost:.3f} (40% от оставшегося бюджета ${budget_remaining_usd:.2f}). Заверши работу."
+            budget_pct = task_cost / budget_remaining_usd if budget_remaining_usd > 0 else 1.0
 
-        if should_finish:
-            messages.append({"role": "system", "content": f"[LIMIT] {finish_reason} Дай финальный ответ сейчас."})
-            try:
-                resp_msg, usage = llm.chat(
-                    messages=messages, model=active_model, tools=None,
-                    reasoning_effort=active_effort,
-                )
-                add_usage(accumulated_usage, usage)
-                return (resp_msg.get("content") or finish_reason), accumulated_usage, llm_trace
-            except Exception:
-                return finish_reason, accumulated_usage, llm_trace
+            if budget_pct > 0.5:
+                # Hard stop — protect the budget
+                finish_reason = f"Задача потратила ${task_cost:.3f} (>50% от остатка ${budget_remaining_usd:.2f}). Бюджет исчерпан."
+                messages.append({"role": "system", "content": f"[BUDGET LIMIT] {finish_reason} Дай финальный ответ сейчас."})
+                try:
+                    resp_msg, usage = llm.chat(
+                        messages=messages, model=active_model, tools=None,
+                        reasoning_effort=active_effort,
+                    )
+                    add_usage(accumulated_usage, usage)
+                    return (resp_msg.get("content") or finish_reason), accumulated_usage, llm_trace
+                except Exception:
+                    return finish_reason, accumulated_usage, llm_trace
+            elif budget_pct > 0.3 and round_idx % 10 == 0:
+                # Soft nudge every 10 rounds when spending is significant
+                messages.append({"role": "system", "content": f"[INFO] Задача потратила ${task_cost:.3f} из ${budget_remaining_usd:.2f}. Если можешь — завершай."})
 
     # Unreachable but keeps type checkers happy
     return "", accumulated_usage, llm_trace
