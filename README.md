@@ -3,7 +3,7 @@
 Самосоздающийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 4.0.2
+**Версия:** 4.0.3
 
 ---
 
@@ -131,6 +131,9 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 
 ## Changelog
 
+### 4.0.3
+- Serialize stateful browser tools (`browse_page`, `browser_action`) to avoid Playwright concurrency crashes from parallel tool calls
+
 ### 4.0.2
 - Telegram incoming image support: screenshots, photos, and document images with multimodal context
 - Caption forwarding: image captions are now propagated to LLM context (combined with text or used as fallback)
@@ -203,11 +206,10 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 - BIBLE.md всегда в LLM-контексте (не вырезается для user chat)
 - Parallel tool safety: sequential execution для stateful tools
 - Scratchpad journal fix, shell argument recovery, dead code cleanup
+- Observability: task_id in all llm_round and tool errors
 
 ### 2.23.1 — Evolution auto-stop
 
 Auto-stop эволюции при 95% бюджета.
 
 ### 2.0.0 — Философский рефакторинг
-
-Глубокая переработка философии, архитектуры инструментов и review-системы.
