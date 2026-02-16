@@ -158,18 +158,49 @@ def handle_chat_direct(chat_id: int, text: str, image_data: Optional[Tuple[str, 
 
 def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str) -> None:
     import sys as _sys
+    import traceback as _tb
+    import pathlib as _pathlib
     _sys.path.insert(0, repo_dir)
-    from ouroboros.agent import make_agent
-    agent = make_agent(repo_dir=repo_dir, drive_root=drive_root, event_queue=out_q)
+    _drive = _pathlib.Path(drive_root)
+    try:
+        from ouroboros.agent import make_agent
+        agent = make_agent(repo_dir=repo_dir, drive_root=drive_root, event_queue=out_q)
+    except Exception as _e:
+        _log_worker_crash(wid, _drive, "make_agent", _e, _tb.format_exc())
+        return
     while True:
-        task = in_q.get()
-        if task is None or task.get("type") == "shutdown":
-            break
-        events = agent.handle_task(task)
-        for e in events:
-            e2 = dict(e)
-            e2["worker_id"] = wid
-            out_q.put(e2)
+        try:
+            task = in_q.get()
+            if task is None or task.get("type") == "shutdown":
+                break
+            events = agent.handle_task(task)
+            for e in events:
+                e2 = dict(e)
+                e2["worker_id"] = wid
+                out_q.put(e2)
+        except Exception as _e:
+            _log_worker_crash(wid, _drive, "handle_task", _e, _tb.format_exc())
+
+
+def _log_worker_crash(wid: int, drive_root: pathlib.Path, phase: str, exc: Exception, tb: str) -> None:
+    """Best-effort: write crash info to supervisor.jsonl from inside worker process."""
+    import os as _os
+    try:
+        path = drive_root / "logs" / "supervisor.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        entry = json.dumps({
+            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "type": "worker_crash",
+            "worker_id": wid,
+            "pid": _os.getpid(),
+            "phase": phase,
+            "error": repr(exc),
+            "traceback": str(tb)[:3000],
+        }, ensure_ascii=False)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(entry + "\n")
+    except Exception:
+        pass
 
 
 def _first_worker_boot_event_since(offset_bytes: int) -> Optional[Dict[str, Any]]:
@@ -363,48 +394,26 @@ def ensure_workers_healthy() -> None:
     now = time.time()
     CRASH_TS[:] = [t for t in CRASH_TS if (now - t) < 60.0]
     if len(CRASH_TS) >= 3:
+        # Log crash storm but DON'T execv restart — that creates infinite loops.
+        # Instead: kill dead workers, notify owner, continue with direct-chat (threading).
         st = load_state()
-        if st.get("owner_chat_id"):
-            send_with_budget(int(st["owner_chat_id"]),
-                             "⚠️ Частые падения воркеров. Переключаюсь на ouroboros-stable и перезапускаюсь.")
-        ok_reset, msg_reset = git_ops.checkout_and_reset(
-            BRANCH_STABLE, reason="crash_storm_fallback",
-            unsynced_policy="rescue_and_reset",
+        append_jsonl(
+            DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "crash_storm_detected",
+                "crash_count": len(CRASH_TS),
+                "worker_count": len(WORKERS),
+            },
         )
-        if not ok_reset:
-            append_jsonl(
-                DRIVE_ROOT / "logs" / "supervisor.jsonl",
-                {
-                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                    "type": "crash_storm_reset_blocked", "error": msg_reset,
-                },
+        if st.get("owner_chat_id"):
+            send_with_budget(
+                int(st["owner_chat_id"]),
+                "⚠️ Частые падения воркеров. Multiprocessing-воркеры отключены, "
+                "продолжаю работать в direct-chat режиме (threading).",
             )
-            if st.get("owner_chat_id"):
-                send_with_budget(int(st["owner_chat_id"]),
-                                 f"⚠️ Fallback reset в {BRANCH_STABLE} пропущен: {msg_reset}")
-            CRASH_TS.clear()
-            return
-        deps_ok, deps_msg = git_ops.sync_runtime_dependencies(reason="crash_storm_fallback")
-        if not deps_ok:
-            append_jsonl(
-                DRIVE_ROOT / "logs" / "supervisor.jsonl",
-                {
-                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                    "type": "crash_storm_deps_sync_failed", "error": deps_msg,
-                },
-            )
-            if st.get("owner_chat_id"):
-                send_with_budget(int(st["owner_chat_id"]),
-                                 f"⚠️ Fallback в {BRANCH_STABLE} применён, но установка зависимостей упала: {deps_msg}")
-            CRASH_TS.clear()
-            return
+        # Kill all workers — direct chat via handle_chat_direct still works
         kill_workers()
         CRASH_TS.clear()
-        from supervisor import queue
-        queue.persist_queue_snapshot(reason="crash_storm_execv")
-        # Replace entire process to ensure supervisor also picks up stable code
-        import os as _os, sys as _sys
-        launcher = _os.path.join(_os.getcwd(), "colab_launcher.py")
-        _os.execv(_sys.executable, [_sys.executable, launcher])
 
 
