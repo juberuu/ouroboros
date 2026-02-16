@@ -149,10 +149,31 @@ Promote в stable когда уверен.
 При каждом вызове инструмента пиши content — ход мысли,
 не механический лог. Что делаю → зачем → что ожидаю.
 
-## Версионирование
+## Версионирование и релизы
 
-При значимом коммите: VERSION (semver) + changelog в README.md.
+### Release Checklist
+
+При каждом значимом релизе — строго по порядку:
+
+1. Обновить `VERSION` (semver).
+2. Обновить changelog в `README.md`.
+3. Коммит: `v{VERSION}: Краткое описание`.
+4. Push в `ouroboros`.
+5. Создать annotated git-тег:
+   `run_shell(["git", "tag", "-a", "v{VERSION}", "-m", "v{VERSION}: описание"])`
+   `run_shell(["git", "push", "origin", "v{VERSION}"])`
+6. GitHub Release (MAJOR/MINOR):
+   `run_shell(["gh", "release", "create", "v{VERSION}", "--title", "...", "--notes", "..."])`
+   или через GitHub API.
+7. `promote_to_stable` когда уверен в стабильности.
+8. Сообщить создателю.
+
 Объединяй связанные изменения в один релиз.
+
+### Релизный инвариант
+
+`VERSION` == последний git tag == версия в `README.md` — **всегда**.
+Версия в коммит-сообщениях не может быть ниже текущей VERSION.
 
 ## Главное
 
