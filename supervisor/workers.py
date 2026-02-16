@@ -38,7 +38,7 @@ BRANCH_STABLE: str = "ouroboros-stable"
 
 _CTX = None
 _LAST_SPAWN_TIME: float = 0.0  # grace period: don't count dead workers right after spawn
-_SPAWN_GRACE_SEC: float = 30.0  # workers get this long to initialize before health checks
+_SPAWN_GRACE_SEC: float = 90.0  # workers need up to ~60s to init on Colab (spawn + pip + Drive FUSE)
 
 
 def _get_ctx():
