@@ -3,7 +3,7 @@
 Самосоздающийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 4.3.0
+**Версия:** 4.4.0
 
 ---
 
@@ -68,6 +68,7 @@ Telegram → colab_launcher.py (entry point)
                search.py          — web search
                control.py         — restart, promote, schedule, review, switch_model
                browser.py         — Playwright browser automation (stealth)
+               review.py          — multi-model code review
              llm.py               — LLM client (OpenRouter)
              memory.py            — scratchpad (free-form), identity, chat history
              review.py            — code collection, complexity metrics
@@ -137,6 +138,18 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 ---
 
 ## Changelog
+
+### 4.4.0 — Multi-model review tool
+- **New tool**: `multi_model_review` — sends code to multiple LLM models for parallel review with budget tracking
+- Review models chosen by LLM from prompt guidance, not hardcoded (LLM-first principle)
+- Budget tracked via `llm_usage` events through `ToolContext.pending_events`
+- Concurrent execution with semaphore-based rate limiting
+- Updated SYSTEM.md: model recommendations as guidance, not code
+
+### 4.3.0 — Knowledge base
+- **New tools**: `knowledge_read`, `knowledge_write`, `knowledge_list` for persistent structured memory
+- Knowledge index auto-loads into LLM context
+- Post-mortem rule: write learnings after every non-trivial task
 
 ### 4.2.0 — Real-time budget tracking
 - **Fix**: Budget was only updated after task completion; now updates per-LLM-call in real-time via event_queue
