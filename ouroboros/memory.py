@@ -147,8 +147,22 @@ class Memory:
             direction = "→" if dir_raw in ("out", "outgoing") else "←"
             ts_full = e.get("ts", "")
             ts_hhmm = ts_full[11:16] if len(ts_full) >= 16 else ""
-            text = short(str(e.get("text", "")), 160)
+            # Truncate outgoing messages to 500 chars, incoming to 300 chars
+            truncate_len = 500 if dir_raw in ("out", "outgoing") else 300
+            text = short(str(e.get("text", "")), truncate_len)
             lines.append(f"{direction} {ts_hhmm} {text}")
+        return "\n".join(lines)
+
+    def summarize_progress(self, entries: List[Dict[str, Any]], limit: int = 15) -> str:
+        """Summarize progress.jsonl entries (Ouroboros's self-talk / progress messages)."""
+        if not entries:
+            return ""
+        lines = []
+        for e in entries[-limit:]:
+            ts_full = e.get("ts", "")
+            ts_hhmm = ts_full[11:16] if len(ts_full) >= 16 else ""
+            text = short(str(e.get("text", "")), 300)
+            lines.append(f"⚙️ {ts_hhmm} {text}")
         return "\n".join(lines)
 
     def summarize_tools(self, entries: List[Dict[str, Any]]) -> str:

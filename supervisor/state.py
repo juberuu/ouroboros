@@ -132,6 +132,10 @@ def ensure_state_defaults(st: Dict[str, Any]) -> Dict[str, Any]:
     st.setdefault("budget_messages_since_report", 0)
     st.setdefault("evolution_mode_enabled", False)
     st.setdefault("evolution_cycle", 0)
+    st.setdefault("session_daily_snapshot", None)
+    st.setdefault("session_spent_snapshot", None)
+    st.setdefault("budget_drift_pct", None)
+    st.setdefault("budget_drift_alert", False)
     for legacy_key in ("approvals", "idle_cursor", "idle_stats", "last_idle_task_at",
                         "last_auto_review_at", "last_review_task_id"):
         st.pop(legacy_key, None)
@@ -157,6 +161,10 @@ def default_state_dict() -> Dict[str, Any]:
         "budget_messages_since_report": 0,
         "evolution_mode_enabled": False,
         "evolution_cycle": 0,
+        "session_daily_snapshot": None,
+        "session_spent_snapshot": None,
+        "budget_drift_pct": None,
+        "budget_drift_alert": False,
     }
 
 
@@ -203,6 +211,41 @@ def save_state(st: Dict[str, Any]) -> None:
     lock_fd = acquire_file_lock(STATE_LOCK_PATH)
     try:
         _save_state_unlocked(st)
+    finally:
+        release_file_lock(STATE_LOCK_PATH, lock_fd)
+
+
+def init_state() -> Dict[str, Any]:
+    """
+    Initialize state at session start, capturing snapshots for budget drift detection.
+
+    Fetches OpenRouter ground truth and stores session_daily_snapshot and
+    session_spent_snapshot for drift calculation.
+    """
+    lock_fd = acquire_file_lock(STATE_LOCK_PATH)
+    try:
+        st = _load_state_unlocked()
+
+        # Capture session snapshots for drift detection
+        st["session_spent_snapshot"] = float(st.get("spent_usd") or 0.0)
+
+        # Fetch OpenRouter ground truth to capture daily_usd baseline
+        ground_truth = check_openrouter_ground_truth()
+        if ground_truth is not None:
+            st["session_daily_snapshot"] = ground_truth["daily_usd"]
+            st["openrouter_total_usd"] = ground_truth["total_usd"]
+            st["openrouter_daily_usd"] = ground_truth["daily_usd"]
+            st["openrouter_last_check_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        else:
+            # If we can't fetch ground truth, use 0 as baseline
+            st["session_daily_snapshot"] = 0.0
+
+        # Reset drift tracking
+        st["budget_drift_pct"] = None
+        st["budget_drift_alert"] = False
+
+        _save_state_unlocked(st)
+        return st
     finally:
         release_file_lock(STATE_LOCK_PATH, lock_fd)
 
@@ -300,6 +343,50 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> None:
                 st["openrouter_daily_usd"] = ground_truth["daily_usd"]
                 st["openrouter_last_check_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
+                # Calculate budget drift if we have session snapshots
+                session_daily_snap = st.get("session_daily_snapshot")
+                session_spent_snap = st.get("session_spent_snapshot")
+
+                if session_daily_snap is not None and session_spent_snap is not None:
+                    current_daily_usd = ground_truth["daily_usd"]
+                    current_spent_usd = _to_float(st.get("spent_usd") or 0.0)
+
+                    # Delta from OpenRouter (what they see)
+                    or_delta = current_daily_usd - _to_float(session_daily_snap)
+
+                    # Delta from our tracking (what we tracked)
+                    our_delta = current_spent_usd - _to_float(session_spent_snap)
+
+                    # Calculate drift percentage
+                    # Use max(or_delta, 0.01) to avoid division by zero
+                    if or_delta > 0.001:  # Only calculate drift if there's meaningful usage
+                        drift_pct = abs(or_delta - our_delta) / max(abs(or_delta), 0.01) * 100.0
+                        st["budget_drift_pct"] = drift_pct
+
+                        # Set alert if drift is significant
+                        # Threshold: >20% drift AND >$0.50 absolute difference
+                        if drift_pct > 20.0 and or_delta > 0.5:
+                            st["budget_drift_alert"] = True
+                            # Log warning event
+                            from supervisor.state import append_jsonl
+                            append_jsonl(
+                                DRIVE_ROOT / "logs" / "events.jsonl",
+                                {
+                                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                                    "event": "budget_drift_warning",
+                                    "drift_pct": round(drift_pct, 2),
+                                    "our_delta": round(our_delta, 4),
+                                    "or_delta": round(or_delta, 4),
+                                    "spent_calls": st["spent_calls"],
+                                }
+                            )
+                        else:
+                            st["budget_drift_alert"] = False
+                    else:
+                        # Not enough usage to calculate meaningful drift
+                        st["budget_drift_pct"] = 0.0
+                        st["budget_drift_alert"] = False
+
         _save_state_unlocked(st)
     finally:
         release_file_lock(STATE_LOCK_PATH, lock_fd)
@@ -358,6 +445,23 @@ def status_text(workers_dict: Dict[int, Any], pending_list: list, running_dict: 
         lines.append(f"spent_usd: ${spent:.2f}")
     lines.append(f"spent_calls: {st.get('spent_calls')}")
     lines.append(f"prompt_tokens: {st.get('spent_tokens_prompt')}, completion_tokens: {st.get('spent_tokens_completion')}, cached_tokens: {st.get('spent_tokens_cached')}")
+
+    # Display budget drift if available
+    drift_pct = st.get("budget_drift_pct")
+    if drift_pct is not None:
+        session_daily_snap = st.get("session_daily_snapshot")
+        session_spent_snap = st.get("session_spent_snapshot")
+        or_daily = st.get("openrouter_daily_usd")
+
+        if session_daily_snap is not None and session_spent_snap is not None and or_daily is not None:
+            or_delta = or_daily - session_daily_snap
+            our_delta = spent - session_spent_snap
+
+            drift_icon = " ⚠️" if st.get("budget_drift_alert") else ""
+            lines.append(
+                f"budget_drift: {drift_pct:.1f}%{drift_icon} "
+                f"(tracked: ${our_delta:.2f} vs OpenRouter: ${or_delta:.2f})"
+            )
     lines.append(
         "evolution: "
         + f"enabled={int(bool(st.get('evolution_mode_enabled')))}, "

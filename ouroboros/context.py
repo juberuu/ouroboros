@@ -93,6 +93,8 @@ def build_llm_messages(
     # --- Summarize logs ---
     chat_summary = memory.summarize_chat(
         memory.read_jsonl_tail("chat.jsonl", 200))
+    progress_summary = memory.summarize_progress(
+        memory.read_jsonl_tail("progress.jsonl", 200), limit=15)
     tools_summary = memory.summarize_tools(
         memory.read_jsonl_tail("tools.jsonl", 200))
     events_summary = memory.summarize_events(
@@ -161,6 +163,8 @@ def build_llm_messages(
     # Log summaries (optional)
     if chat_summary:
         dynamic_parts.append("## Recent chat\n\n" + chat_summary)
+    if progress_summary:
+        dynamic_parts.append("## Recent progress\n\n" + progress_summary)
     if tools_summary:
         dynamic_parts.append("## Recent tools\n\n" + tools_summary)
     if events_summary:
@@ -237,7 +241,7 @@ def apply_message_token_soft_cap(
         return messages, info
 
     # Prune log summaries from the dynamic text block in multipart system messages
-    prunable = ["## Recent chat", "## Recent tools", "## Recent events", "## Supervisor"]
+    prunable = ["## Recent chat", "## Recent progress", "## Recent tools", "## Recent events", "## Supervisor"]
     pruned = copy.deepcopy(messages)
     for prefix in prunable:
         if estimated <= soft_cap_tokens:

@@ -19,6 +19,38 @@ from ouroboros.tools.registry import ToolRegistry
 from ouroboros.context import compact_tool_history
 from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log, sanitize_tool_result_for_log
 
+# Approximate pricing per 1M tokens (input/cached_input/output)
+MODEL_PRICING = {
+    "anthropic/claude-sonnet-4": (3.0, 0.30, 15.0),
+    "anthropic/claude-opus-4": (15.0, 1.50, 75.0),
+    "openai/o3": (10.0, 2.50, 40.0),
+    "openai/gpt-4.1": (2.0, 0.50, 8.0),
+    "google/gemini-2.5-pro-preview": (1.25, 0.3125, 10.0),
+    "deepseek/deepseek-chat-v3-0324": (0.27, 0.07, 1.10),
+}
+
+def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int,
+                   cached_tokens: int = 0, cache_write_tokens: int = 0) -> float:
+    """Estimate cost from token counts using known pricing. Returns 0 if model unknown."""
+    pricing = MODEL_PRICING.get(model)
+    if not pricing:
+        # Try prefix matching
+        for key, val in MODEL_PRICING.items():
+            if model and model.startswith(key.split("/")[0]):
+                pricing = val
+                break
+    if not pricing:
+        return 0.0
+    input_price, cached_price, output_price = pricing
+    # Non-cached input tokens = prompt_tokens - cached_tokens
+    regular_input = max(0, prompt_tokens - cached_tokens)
+    cost = (
+        regular_input * input_price / 1_000_000
+        + cached_tokens * cached_price / 1_000_000
+        + completion_tokens * output_price / 1_000_000
+    )
+    return round(cost, 6)
+
 READ_ONLY_PARALLEL_TOOLS = frozenset({
     "repo_read", "repo_list",
     "drive_read", "drive_list",
@@ -308,13 +340,29 @@ def run_llm_loop(
                     accumulated_usage["rounds"] = accumulated_usage.get("rounds", 0) + 1
 
                     # Real-time budget update
-                    if event_queue and usage.get("cost"):
+                    cost = float(usage.get("cost") or 0)
+                    if not cost:
+                        cost = _estimate_cost(
+                            active_model,
+                            int(usage.get("prompt_tokens") or 0),
+                            int(usage.get("completion_tokens") or 0),
+                            int(usage.get("cached_tokens") or 0),
+                            int(usage.get("cache_write_tokens") or 0),
+                        )
+                    if event_queue:
                         try:
                             event_queue.put_nowait({
                                 "type": "llm_usage",
                                 "ts": utc_now_iso(),
                                 "task_id": task_id,
-                                "usage": usage,  # single-call usage, not accumulated
+                                "model": active_model,
+                                "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+                                "completion_tokens": int(usage.get("completion_tokens") or 0),
+                                "cached_tokens": int(usage.get("cached_tokens") or 0),
+                                "cache_write_tokens": int(usage.get("cache_write_tokens") or 0),
+                                "cost": cost,
+                                "cost_estimated": not bool(usage.get("cost")),
+                                "usage": usage,
                             })
                         except Exception:
                             pass
@@ -329,7 +377,7 @@ def run_llm_loop(
                         "completion_tokens": int(usage.get("completion_tokens") or 0),
                         "cached_tokens": int(usage.get("cached_tokens") or 0),
                         "cache_write_tokens": int(usage.get("cache_write_tokens") or 0),
-                        "cost_usd": float(usage.get("cost") or 0),
+                        "cost_usd": cost,
                     }
                     append_jsonl(drive_logs / "events.jsonl", _round_event)
                     break
@@ -443,12 +491,28 @@ def run_llm_loop(
                         )
                         add_usage(accumulated_usage, usage)
                         # Real-time budget update
-                        if event_queue and usage.get("cost"):
+                        cost = float(usage.get("cost") or 0)
+                        if not cost:
+                            cost = _estimate_cost(
+                                active_model,
+                                int(usage.get("prompt_tokens") or 0),
+                                int(usage.get("completion_tokens") or 0),
+                                int(usage.get("cached_tokens") or 0),
+                                int(usage.get("cache_write_tokens") or 0),
+                            )
+                        if event_queue:
                             try:
                                 event_queue.put_nowait({
                                     "type": "llm_usage",
                                     "ts": utc_now_iso(),
                                     "task_id": task_id,
+                                    "model": active_model,
+                                    "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+                                    "completion_tokens": int(usage.get("completion_tokens") or 0),
+                                    "cached_tokens": int(usage.get("cached_tokens") or 0),
+                                    "cache_write_tokens": int(usage.get("cache_write_tokens") or 0),
+                                    "cost": cost,
+                                    "cost_estimated": not bool(usage.get("cost")),
                                     "usage": usage,
                                 })
                             except Exception:

@@ -3,7 +3,7 @@
 Самосоздающийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 4.4.0
+**Версия:** 4.5.0
 
 ---
 
@@ -138,6 +138,12 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 ---
 
 ## Changelog
+
+### 4.5.0
+- Context memory overhaul: agent now sees its own recent progress messages (was blind to them before)
+- Chat summary limits increased (500 chars for outgoing, 300 for incoming)
+- Budget drift detection: session-level tracking, alerts when tracked vs ground-truth diverge >$2
+- `init_state()` captures budget snapshot at session start for drift calculation
 
 ### 4.4.0 — Multi-model review tool
 - **New tool**: `multi_model_review` — sends code to multiple LLM models for parallel review with budget tracking

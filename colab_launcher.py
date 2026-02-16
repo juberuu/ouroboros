@@ -165,8 +165,10 @@ REMOTE_URL = f"https://{GITHUB_TOKEN}:x-oauth-basic@github.com/{GITHUB_USER}/{GI
 from supervisor.state import (
     init as state_init, load_state, save_state, append_jsonl,
     update_budget_from_usage, status_text, rotate_chat_log_if_needed,
+    init_state,
 )
 state_init(DRIVE_ROOT, TOTAL_BUDGET_LIMIT)
+init_state()
 
 from supervisor.telegram import (
     init as telegram_init, TelegramClient, send_with_budget, log_chat,
