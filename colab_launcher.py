@@ -242,6 +242,51 @@ append_jsonl(DRIVE_ROOT / "logs" / "supervisor.jsonl", {
 })
 
 # ----------------------------
+# 6.1) Direct-mode watchdog
+# ----------------------------
+def _chat_watchdog_loop():
+    """Monitor direct-mode chat agent for hangs. Runs as daemon thread."""
+    soft_warned = False
+    while True:
+        time.sleep(30)
+        try:
+            agent = _get_chat_agent()
+            if not agent._busy:
+                soft_warned = False
+                continue
+
+            now = time.time()
+            idle_sec = now - agent._last_progress_ts
+            total_sec = now - agent._task_started_ts
+
+            if idle_sec >= HARD_TIMEOUT_SEC:
+                st = load_state()
+                if st.get("owner_chat_id"):
+                    send_with_budget(
+                        int(st["owner_chat_id"]),
+                        f"⚠️ Задача зависла ({int(total_sec)}с без прогресса). "
+                        f"Перезапускаю агента.",
+                    )
+                reset_chat_agent()
+                soft_warned = False
+                continue
+
+            if idle_sec >= SOFT_TIMEOUT_SEC and not soft_warned:
+                soft_warned = True
+                st = load_state()
+                if st.get("owner_chat_id"):
+                    send_with_budget(
+                        int(st["owner_chat_id"]),
+                        f"⏱️ Задача работает {int(total_sec)}с, "
+                        f"последний прогресс {int(idle_sec)}с назад. Продолжаю.",
+                    )
+        except Exception:
+            pass
+
+_watchdog_thread = threading.Thread(target=_chat_watchdog_loop, daemon=True)
+_watchdog_thread.start()
+
+# ----------------------------
 # 7) Main loop
 # ----------------------------
 import types

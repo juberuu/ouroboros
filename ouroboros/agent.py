@@ -72,6 +72,8 @@ class OuroborosAgent:
         # Message injection: owner can send messages while agent is busy
         self._incoming_messages: queue.Queue = queue.Queue()
         self._busy = False
+        self._last_progress_ts: float = 0.0
+        self._task_started_ts: float = 0.0
 
         # SSOT modules
         self.llm = LLMClient()
@@ -134,6 +136,8 @@ class OuroborosAgent:
     def handle_task(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
         self._busy = True
         start_time = time.time()
+        self._task_started_ts = start_time
+        self._last_progress_ts = start_time
         self._pending_events = []
         self._current_chat_id = int(task.get("chat_id") or 0) or None
         self._current_task_type = str(task.get("type") or "")
@@ -219,6 +223,12 @@ class OuroborosAgent:
 
         finally:
             self._busy = False
+            # Clean up browser if it was used during this task
+            try:
+                from ouroboros.tools.browser import cleanup_browser
+                cleanup_browser(self.tools._ctx)
+            except Exception:
+                pass
             while not self._incoming_messages.empty():
                 try:
                     self._incoming_messages.get_nowait()
@@ -338,6 +348,7 @@ class OuroborosAgent:
     # =====================================================================
 
     def _emit_progress(self, text: str) -> None:
+        self._last_progress_ts = time.time()
         if self._event_queue is None or self._current_chat_id is None:
             return
         try:

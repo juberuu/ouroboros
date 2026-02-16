@@ -1,38 +1,26 @@
 """
-Browser automation tools via Playwright.
+Browser automation tools via Playwright (sync API).
 
 Provides browse_page (open URL, get content/screenshot)
 and browser_action (click, fill, evaluate JS on current page).
+
+Browser state lives in ToolContext (per-task lifecycle),
+not module-level globals — safe across threads.
 """
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import logging
+import subprocess
+import sys
 from typing import Any, Dict, List
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
 
 log = logging.getLogger(__name__)
 
-# Module-level state: persistent browser/page within a task
-_browser = None
-_page = None
 _playwright_ready = False
-
-
-def _get_or_create_loop():
-    """Get existing or create new event loop."""
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_closed():
-            raise RuntimeError
-        return loop
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        return loop
 
 
 def _ensure_playwright_installed():
@@ -41,17 +29,12 @@ def _ensure_playwright_installed():
     if _playwright_ready:
         return
 
-    import subprocess
-    import sys
-
-    # Try importing playwright
     try:
-        import playwright
+        import playwright  # noqa: F401
     except ImportError:
         log.info("Playwright not found, installing...")
         subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright"])
 
-    # Check if chromium binary exists
     try:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as pw:
@@ -65,46 +48,79 @@ def _ensure_playwright_installed():
     _playwright_ready = True
 
 
-async def _ensure_browser():
-    """Ensure browser and page are ready."""
-    global _browser, _page
+def _ensure_browser(ctx: ToolContext):
+    """Create or reuse browser for this task. State lives in ctx."""
+    if ctx._browser is not None:
+        try:
+            if ctx._browser.is_connected():
+                return ctx._page
+        except Exception:
+            pass
+        # Browser died — clean up and recreate
+        cleanup_browser(ctx)
+
     _ensure_playwright_installed()
 
-    if _browser and _browser.is_connected():
-        return _page
-
-    from playwright.async_api import async_playwright
-    pw = await async_playwright().start()
-    _browser = await pw.chromium.launch(
+    from playwright.sync_api import sync_playwright
+    ctx._pw_instance = sync_playwright().start()
+    ctx._browser = ctx._pw_instance.chromium.launch(
         headless=True,
         args=["--no-sandbox", "--disable-dev-shm-usage"],
     )
-    _page = await _browser.new_page(
+    ctx._page = ctx._browser.new_page(
         viewport={"width": 1280, "height": 720},
         user_agent=(
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         ),
     )
-    return _page
+    ctx._page.set_default_timeout(30000)
+    return ctx._page
 
 
-async def _browse_page_async(url: str, output: str = "text",
-                              wait_for: str = "", timeout: int = 30000) -> str:
-    page = await _ensure_browser()
-    await page.goto(url, timeout=timeout, wait_until="domcontentloaded")
+def cleanup_browser(ctx: ToolContext) -> None:
+    """Close browser and playwright. Called by agent.py in finally block."""
+    try:
+        if ctx._page is not None:
+            ctx._page.close()
+    except Exception:
+        pass
+    try:
+        if ctx._browser is not None:
+            ctx._browser.close()
+    except Exception:
+        pass
+    try:
+        if ctx._pw_instance is not None:
+            ctx._pw_instance.stop()
+    except Exception:
+        pass
+    ctx._page = None
+    ctx._browser = None
+    ctx._pw_instance = None
+
+
+def _browse_page(ctx: ToolContext, url: str, output: str = "text",
+                 wait_for: str = "", timeout: int = 30000) -> str:
+    page = _ensure_browser(ctx)
+    page.goto(url, timeout=timeout, wait_until="domcontentloaded")
 
     if wait_for:
-        await page.wait_for_selector(wait_for, timeout=timeout)
+        page.wait_for_selector(wait_for, timeout=timeout)
 
     if output == "screenshot":
-        data = await page.screenshot(type="png", full_page=False)
-        return base64.b64encode(data).decode()
+        data = page.screenshot(type="png", full_page=False)
+        b64 = base64.b64encode(data).decode()
+        ctx._last_screenshot_b64 = b64
+        return (
+            f"Screenshot captured ({len(b64)} bytes base64). "
+            f"Call send_photo(image_base64='__last_screenshot__') to deliver it to the owner."
+        )
     elif output == "html":
-        html = await page.content()
+        html = page.content()
         return html[:50000] + ("... [truncated]" if len(html) > 50000 else "")
     elif output == "markdown":
-        text = await page.evaluate("""() => {
+        text = page.evaluate("""() => {
             const walk = (el) => {
                 let out = '';
                 for (const child of el.childNodes) {
@@ -129,68 +145,57 @@ async def _browse_page_async(url: str, output: str = "text",
         }""")
         return text[:30000] + ("... [truncated]" if len(text) > 30000 else "")
     else:  # text
-        text = await page.inner_text("body")
+        text = page.inner_text("body")
         return text[:30000] + ("... [truncated]" if len(text) > 30000 else "")
 
 
-async def _browser_action_async(action: str, selector: str = "",
-                                 value: str = "", timeout: int = 5000) -> str:
-    page = await _ensure_browser()
+def _browser_action(ctx: ToolContext, action: str, selector: str = "",
+                    value: str = "", timeout: int = 5000) -> str:
+    page = _ensure_browser(ctx)
 
     if action == "click":
         if not selector:
             return "Error: selector required for click"
-        await page.click(selector, timeout=timeout)
-        await page.wait_for_timeout(500)
+        page.click(selector, timeout=timeout)
+        page.wait_for_timeout(500)
         return f"Clicked: {selector}"
     elif action == "fill":
         if not selector:
             return "Error: selector required for fill"
-        await page.fill(selector, value, timeout=timeout)
+        page.fill(selector, value, timeout=timeout)
         return f"Filled {selector} with: {value}"
     elif action == "select":
         if not selector:
             return "Error: selector required for select"
-        await page.select_option(selector, value, timeout=timeout)
+        page.select_option(selector, value, timeout=timeout)
         return f"Selected {value} in {selector}"
     elif action == "screenshot":
-        data = await page.screenshot(type="png", full_page=False)
-        return base64.b64encode(data).decode()
+        data = page.screenshot(type="png", full_page=False)
+        b64 = base64.b64encode(data).decode()
+        ctx._last_screenshot_b64 = b64
+        return (
+            f"Screenshot captured ({len(b64)} bytes base64). "
+            f"Call send_photo(image_base64='__last_screenshot__') to deliver it to the owner."
+        )
     elif action == "evaluate":
         if not value:
             return "Error: value (JS code) required for evaluate"
-        result = await page.evaluate(value)
+        result = page.evaluate(value)
         out = str(result)
         return out[:20000] + ("... [truncated]" if len(out) > 20000 else "")
     elif action == "scroll":
         direction = value or "down"
         if direction == "down":
-            await page.evaluate("window.scrollBy(0, 600)")
+            page.evaluate("window.scrollBy(0, 600)")
         elif direction == "up":
-            await page.evaluate("window.scrollBy(0, -600)")
+            page.evaluate("window.scrollBy(0, -600)")
         elif direction == "top":
-            await page.evaluate("window.scrollTo(0, 0)")
+            page.evaluate("window.scrollTo(0, 0)")
         elif direction == "bottom":
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
         return f"Scrolled {direction}"
     else:
         return f"Unknown action: {action}. Use: click, fill, select, screenshot, evaluate, scroll"
-
-
-def _run_async(coro):
-    """Run async coroutine from sync context."""
-    loop = _get_or_create_loop()
-    return loop.run_until_complete(coro)
-
-
-def _browse_page(ctx: ToolContext, url: str, output: str = "text",
-                 wait_for: str = "", timeout: int = 30000) -> str:
-    return _run_async(_browse_page_async(url, output, wait_for, timeout))
-
-
-def _browser_action(ctx: ToolContext, action: str, selector: str = "",
-                    value: str = "", timeout: int = 5000) -> str:
-    return _run_async(_browser_action_async(action, selector, value, timeout))
 
 
 def get_tools() -> List[ToolEntry]:
@@ -202,7 +207,8 @@ def get_tools() -> List[ToolEntry]:
                 "description": (
                     "Open a URL in headless browser. Returns page content as text, "
                     "html, markdown, or screenshot (base64 PNG). "
-                    "Browser persists across calls within a task."
+                    "Browser persists across calls within a task. "
+                    "For screenshots: use send_photo tool to deliver the image to owner."
                 ),
                 "parameters": {
                     "type": "object",
@@ -226,6 +232,7 @@ def get_tools() -> List[ToolEntry]:
                 },
             },
             handler=_browse_page,
+            timeout_sec=60,
         ),
         ToolEntry(
             name="browser_action",
@@ -262,5 +269,6 @@ def get_tools() -> List[ToolEntry]:
                 },
             },
             handler=_browser_action,
+            timeout_sec=60,
         ),
     ]

@@ -28,6 +28,14 @@ class ToolContext:
     last_push_succeeded: bool = False
     emit_progress_fn: Callable[[str], None] = field(default=lambda _: None)
 
+    # Per-task browser lifecycle (created by browser.py, cleaned by agent.py)
+    _pw_instance: Any = None
+    _browser: Any = None
+    _page: Any = None
+
+    # Screenshot stash: browse_page stores base64 here, send_photo reads from here
+    _last_screenshot_b64: Optional[str] = None
+
     def repo_path(self, rel: str) -> pathlib.Path:
         return (self.repo_dir / safe_relpath(rel)).resolve()
 
@@ -46,6 +54,7 @@ class ToolEntry:
     schema: Dict[str, Any]
     handler: Callable  # fn(ctx: ToolContext, **args) -> str
     is_code_tool: bool = False
+    timeout_sec: int = 120
 
 
 class ToolRegistry:
@@ -90,6 +99,11 @@ class ToolRegistry:
 
     def schemas(self) -> List[Dict[str, Any]]:
         return [{"type": "function", "function": e.schema} for e in self._entries.values()]
+
+    def get_timeout(self, name: str) -> int:
+        """Return timeout_sec for the named tool (default 120)."""
+        entry = self._entries.get(name)
+        return entry.timeout_sec if entry is not None else 120
 
     def execute(self, name: str, args: Dict[str, Any]) -> str:
         entry = self._entries.get(name)

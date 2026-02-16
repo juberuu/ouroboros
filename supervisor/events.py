@@ -172,6 +172,36 @@ def _handle_cancel_task(evt: Dict[str, Any], ctx: Any) -> None:
         )
 
 
+def _handle_send_photo(evt: Dict[str, Any], ctx: Any) -> None:
+    """Send a photo (base64 PNG) to a Telegram chat."""
+    import base64 as b64mod
+    try:
+        chat_id = int(evt.get("chat_id") or 0)
+        image_b64 = str(evt.get("image_base64") or "")
+        caption = str(evt.get("caption") or "")
+        if not chat_id or not image_b64:
+            return
+        photo_bytes = b64mod.b64decode(image_b64)
+        ok, err = ctx.TG.send_photo(chat_id, photo_bytes, caption=caption)
+        if not ok:
+            ctx.append_jsonl(
+                ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "type": "send_photo_error",
+                    "chat_id": chat_id, "error": err,
+                },
+            )
+    except Exception as e:
+        ctx.append_jsonl(
+            ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "send_photo_event_error", "error": repr(e),
+            },
+        )
+
+
 # ---------------------------------------------------------------------------
 # Dispatch table
 # ---------------------------------------------------------------------------
@@ -187,6 +217,7 @@ EVENT_HANDLERS = {
     "promote_to_stable": _handle_promote_to_stable,
     "schedule_task": _handle_schedule_task,
     "cancel_task": _handle_cancel_task,
+    "send_photo": _handle_send_photo,
 }
 
 

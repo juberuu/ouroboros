@@ -100,6 +100,58 @@ def _execute_single_tool(
     }
 
 
+def _execute_with_timeout(
+    tools: ToolRegistry,
+    tc: Dict[str, Any],
+    drive_logs: pathlib.Path,
+    timeout_sec: int,
+    task_id: str = "",
+) -> Dict[str, Any]:
+    """
+    Execute a tool call with a hard timeout.
+
+    On timeout: returns TOOL_TIMEOUT error so the LLM regains control.
+    The hung worker thread leaks as daemon — watchdog handles recovery.
+    """
+    fn_name = tc["function"]["name"]
+    tool_call_id = tc["id"]
+    is_code_tool = fn_name in tools.CODE_TOOLS
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_execute_single_tool, tools, tc, drive_logs, task_id)
+        try:
+            return future.result(timeout=timeout_sec)
+        except TimeoutError:
+            args_for_log = {}
+            try:
+                args = json.loads(tc["function"]["arguments"] or "{}")
+                args_for_log = sanitize_tool_args_for_log(fn_name, args if isinstance(args, dict) else {})
+            except Exception:
+                pass
+            result = (
+                f"⚠️ TOOL_TIMEOUT ({fn_name}): exceeded {timeout_sec}s limit. "
+                f"The tool is still running in background but control is returned to you. "
+                f"Try a different approach or inform the owner about the issue."
+            )
+            append_jsonl(drive_logs / "events.jsonl", {
+                "ts": utc_now_iso(), "type": "tool_timeout",
+                "tool": fn_name, "args": args_for_log,
+                "timeout_sec": timeout_sec,
+            })
+            append_jsonl(drive_logs / "tools.jsonl", {
+                "ts": utc_now_iso(), "tool": fn_name,
+                "args": args_for_log, "result_preview": result,
+            })
+            return {
+                "tool_call_id": tool_call_id,
+                "fn_name": fn_name,
+                "result": result,
+                "is_error": True,
+                "args_for_log": args_for_log,
+                "is_code_tool": is_code_tool,
+            }
+
+
 def run_llm_loop(
     messages: List[Dict[str, Any]],
     tools: ToolRegistry,
@@ -243,7 +295,7 @@ def run_llm_loop(
         saw_code_tool = False
         error_count = 0
 
-        # Parallelize only for a strict read-only whitelist.
+        # Parallelize only for a strict read-only whitelist; all calls wrapped with timeout.
         can_parallel = (
             len(tool_calls) > 1 and
             all(
@@ -253,12 +305,19 @@ def run_llm_loop(
         )
 
         if not can_parallel:
-            results = [_execute_single_tool(tools, tc, drive_logs, task_id) for tc in tool_calls]
+            results = [
+                _execute_with_timeout(tools, tc, drive_logs,
+                                      tools.get_timeout(tc["function"]["name"]), task_id)
+                for tc in tool_calls
+            ]
         else:
             max_workers = min(len(tool_calls), 8)
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 future_to_index = {
-                    executor.submit(_execute_single_tool, tools, tc, drive_logs, task_id): idx
+                    executor.submit(
+                        _execute_with_timeout, tools, tc, drive_logs,
+                        tools.get_timeout(tc["function"]["name"]), task_id,
+                    ): idx
                     for idx, tc in enumerate(tool_calls)
                 }
                 results = [None] * len(tool_calls)
