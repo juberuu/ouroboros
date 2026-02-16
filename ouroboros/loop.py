@@ -261,6 +261,10 @@ def run_llm_loop(
 
     tool_schemas = tools.schemas()
 
+    # Set budget tracking on tool context for real-time usage events
+    tools._ctx.event_queue = event_queue
+    tools._ctx.task_id = task_id
+
     # Thread-sticky executor for browser tools (Playwright sync requires greenlet thread-affinity)
     stateful_executor = _StatefulToolExecutor()
 

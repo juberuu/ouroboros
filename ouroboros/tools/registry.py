@@ -45,6 +45,10 @@ class ToolContext:
     # Per-task browser state
     browser_state: BrowserState = field(default_factory=BrowserState)
 
+    # Budget tracking (set by loop.py for real-time usage events)
+    event_queue: Optional[Any] = None
+    task_id: Optional[str] = None
+
     def repo_path(self, rel: str) -> pathlib.Path:
         return (self.repo_dir / safe_relpath(rel)).resolve()
 

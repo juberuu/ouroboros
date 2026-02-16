@@ -9,6 +9,8 @@ import json
 import asyncio
 import httpx
 
+from ouroboros.utils import utc_now_iso
+
 
 # Maximum number of models allowed per review
 MAX_MODELS = 10
@@ -219,18 +221,28 @@ async def _multi_model_review(args, ctx):
             }
 
         # Emit llm_usage event for budget tracking (for ALL cases, including errors)
-        if hasattr(ctx, "pending_events"):
-            ctx.pending_events.append({
-                "type": "llm_usage",
-                "task_id": getattr(ctx, "task_id", None),
-                "usage": {
-                    "cost": review_result["cost_estimate"],
-                    "prompt_tokens": review_result["tokens_in"],
-                    "completion_tokens": review_result["tokens_out"],
-                    "rounds": 1,
-                    "model": model,
-                },
-            })
+        # Use event_queue if available (real-time), fallback to pending_events
+        usage_event = {
+            "type": "llm_usage",
+            "ts": utc_now_iso(),
+            "task_id": ctx.task_id if ctx.task_id else "",
+            "usage": {
+                "prompt_tokens": review_result["tokens_in"],
+                "completion_tokens": review_result["tokens_out"],
+                "cost": review_result["cost_estimate"],
+            },
+        }
+
+        if ctx.event_queue is not None:
+            try:
+                ctx.event_queue.put_nowait(usage_event)
+            except Exception:
+                # Fallback to pending_events if queue fails
+                if hasattr(ctx, "pending_events"):
+                    ctx.pending_events.append(usage_event)
+        elif hasattr(ctx, "pending_events"):
+            # No event_queue — use pending_events
+            ctx.pending_events.append(usage_event)
 
         review_results.append(review_result)
 
