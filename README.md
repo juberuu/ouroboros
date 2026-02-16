@@ -3,7 +3,7 @@
 Самосоздающийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 4.1.0
+**Версия:** 4.1.1
 
 ---
 
@@ -137,6 +137,11 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 ---
 
 ## Changelog
+
+### 4.1.1
+- Fix: add `consciousness` and `sort_pending` to event context — `toggle_evolution` and `toggle_consciousness` tools now work
+- Fix: rename `schedule_self_task` to `schedule_task` in SYSTEM.md prompt
+- Fix: replace unreliable `qsize()` with `get_nowait()` for event queue drain
 
 ### 4.1.0 — Bible v3.1 + Critical Bugfixes + Architecture
 

@@ -4,7 +4,7 @@
 # Thin orchestrator: secrets, bootstrap, main loop.
 # Heavy logic lives in supervisor/ package.
 
-import os, sys, json, time, uuid, pathlib, subprocess, datetime, threading
+import os, sys, json, time, uuid, pathlib, subprocess, datetime, threading, queue as _queue_mod
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 # ----------------------------
@@ -342,6 +342,8 @@ _event_ctx = types.SimpleNamespace(
     safe_restart=safe_restart,
     kill_workers=kill_workers,
     spawn_workers=spawn_workers,
+    sort_pending=sort_pending,
+    consciousness=_consciousness,
 )
 
 
@@ -362,8 +364,11 @@ while True:
 
     # Drain worker events
     event_q = get_event_q()
-    while event_q.qsize() > 0:
-        evt = event_q.get()
+    while True:
+        try:
+            evt = event_q.get_nowait()
+        except _queue_mod.Empty:
+            break
         dispatch_event(evt, _event_ctx)
 
     enforce_task_timeouts()
