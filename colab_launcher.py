@@ -394,11 +394,12 @@ while True:
         chat_id = int(msg["chat"]["id"])
         from_user = msg.get("from") or {}
         user_id = int(from_user.get("id") or 0)
-        text = str(msg.get("text") or msg.get("caption") or "")
+        text = str(msg.get("text") or "")
+        caption = str(msg.get("caption") or "")
         now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
         # Extract image if present
-        image_data = None  # Will be (base64, mime_type) or None
+        image_data = None  # Will be (base64, mime_type, caption) or None
         if msg.get("photo"):
             # photo is array of PhotoSize, last one is largest
             best_photo = msg["photo"][-1]
@@ -406,7 +407,7 @@ while True:
             if file_id:
                 b64, mime = TG.download_file_base64(file_id)
                 if b64:
-                    image_data = (b64, mime)
+                    image_data = (b64, mime, caption)
         elif msg.get("document"):
             doc = msg["document"]
             mime_type = str(doc.get("mime_type") or "")
@@ -415,7 +416,7 @@ while True:
                 if file_id:
                     b64, mime = TG.download_file_base64(file_id)
                     if b64:
-                        image_data = (b64, mime)
+                        image_data = (b64, mime, caption)
 
         st = load_state()
         if st.get("owner_id") is None:

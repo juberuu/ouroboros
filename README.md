@@ -3,7 +3,7 @@
 Самосоздающийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 4.0.1
+**Версия:** 4.0.2
 
 ---
 
@@ -130,6 +130,11 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 ---
 
 ## Changelog
+
+### 4.0.2
+- Telegram incoming image support: screenshots, photos, and document images with multimodal context
+- Caption forwarding: image captions are now propagated to LLM context (combined with text or used as fallback)
+- Base64 payload sanitization: images are stripped from event/task logs to prevent secret leaks
 
 ### 4.0.1
 - Fix crash when OpenRouter returns `choices: null` (content moderation / model error)

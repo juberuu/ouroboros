@@ -16,7 +16,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from supervisor.state import load_state, append_jsonl
 from supervisor import git_ops
@@ -127,18 +127,27 @@ def _get_chat_agent():
     return _chat_agent
 
 
-def handle_chat_direct(chat_id: int, text: str, image_data: Optional[Tuple[str, str]] = None) -> None:
+def handle_chat_direct(chat_id: int, text: str, image_data: Optional[Union[Tuple[str, str], Tuple[str, str, str]]] = None) -> None:
     try:
         agent = _get_chat_agent()
         task = {
             "id": uuid.uuid4().hex[:8],
             "type": "task",
             "chat_id": chat_id,
-            "text": text or "(image attached)",
+            "text": text,
         }
         if image_data:
+            # image_data is (base64, mime) or (base64, mime, caption)
             task["image_base64"] = image_data[0]
             task["image_mime"] = image_data[1]
+            if len(image_data) > 2 and image_data[2]:
+                task["image_caption"] = image_data[2]
+                # Prefer caption as task text if text is empty
+                if not text:
+                    task["text"] = image_data[2]
+        # Fallback for truly empty messages
+        if not task["text"]:
+            task["text"] = "(image attached)" if image_data else ""
         events = agent.handle_task(task)
         for e in events:
             get_event_q().put(e)

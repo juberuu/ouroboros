@@ -204,9 +204,19 @@ def get_git_info(repo_dir: pathlib.Path) -> tuple[str, str]:
 def sanitize_task_for_event(
     task: Dict[str, Any], drive_logs: pathlib.Path, threshold: int = 4000,
 ) -> Dict[str, Any]:
-    """Sanitize task dict for event logging: truncate large text, persist full text."""
+    """Sanitize task dict for event logging: truncate large text, strip base64 images, persist full text."""
     try:
         sanitized = task.copy()
+
+        # Strip all keys ending with _base64 (images, etc.)
+        keys_to_strip = [k for k in sanitized.keys() if k.endswith("_base64")]
+        for key in keys_to_strip:
+            value = sanitized.pop(key)
+            # Record that it was present and its size
+            sanitized[f"{key}_present"] = True
+            if isinstance(value, str):
+                sanitized[f"{key}_len"] = len(value)
+
         text = task.get("text")
         if not isinstance(text, str):
             return sanitized

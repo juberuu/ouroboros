@@ -23,6 +23,7 @@ def _build_user_content(task: Dict[str, Any]) -> Any:
     text = task.get("text", "")
     image_b64 = task.get("image_base64")
     image_mime = task.get("image_mime", "image/jpeg")
+    image_caption = task.get("image_caption", "")
 
     if not image_b64:
         # Return fallback text if both text and image are empty
@@ -32,8 +33,18 @@ def _build_user_content(task: Dict[str, Any]) -> Any:
 
     # Multipart content with text + image
     parts = []
-    if text:
-        parts.append({"type": "text", "text": text})
+    # Combine caption and text for the text part
+    combined_text = ""
+    if image_caption:
+        combined_text = image_caption
+    if text and text != image_caption:
+        combined_text = (combined_text + "\n" + text).strip() if combined_text else text
+
+    # Always include a text part when there's an image
+    if not combined_text:
+        combined_text = "Analyze the screenshot"
+
+    parts.append({"type": "text", "text": combined_text})
     parts.append({
         "type": "image_url",
         "image_url": {"url": f"data:{image_mime};base64,{image_b64}"}
