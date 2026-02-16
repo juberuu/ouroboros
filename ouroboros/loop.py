@@ -25,6 +25,9 @@ READ_ONLY_PARALLEL_TOOLS = frozenset({
     "web_search", "codebase_digest", "chat_history",
 })
 
+# Stateful browser tools require thread-affinity (Playwright sync uses greenlet)
+STATEFUL_BROWSER_TOOLS = frozenset({"browse_page", "browser_action"})
+
 
 def _truncate_tool_result(result: Any) -> str:
     """
@@ -100,28 +103,66 @@ def _execute_single_tool(
     }
 
 
+class _StatefulToolExecutor:
+    """
+    Thread-sticky executor for stateful tools (browser, etc).
+
+    Playwright sync API uses greenlet internally which has strict thread-affinity:
+    once a greenlet starts in a thread, all subsequent calls must happen in the same thread.
+    This executor ensures browse_page/browser_action always run in the same thread.
+
+    On timeout: we shutdown the executor and create a fresh one to reset state.
+    """
+    def __init__(self):
+        self._executor: Optional[ThreadPoolExecutor] = None
+
+    def submit(self, fn, *args, **kwargs):
+        """Submit work to the sticky thread. Creates executor on first call."""
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="stateful_tool")
+        return self._executor.submit(fn, *args, **kwargs)
+
+    def reset(self):
+        """Shutdown current executor and create a fresh one. Used after timeout/error."""
+        if self._executor is not None:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+            self._executor = None
+
+    def shutdown(self):
+        """Final cleanup."""
+        if self._executor is not None:
+            self._executor.shutdown(wait=True)
+            self._executor = None
+
+
 def _execute_with_timeout(
     tools: ToolRegistry,
     tc: Dict[str, Any],
     drive_logs: pathlib.Path,
     timeout_sec: int,
     task_id: str = "",
+    stateful_executor: Optional[_StatefulToolExecutor] = None,
 ) -> Dict[str, Any]:
     """
     Execute a tool call with a hard timeout.
 
     On timeout: returns TOOL_TIMEOUT error so the LLM regains control.
-    The hung worker thread leaks as daemon — watchdog handles recovery.
+    For stateful tools (browser): resets the sticky executor to recover state.
+    For regular tools: the hung worker thread leaks as daemon — watchdog handles recovery.
     """
     fn_name = tc["function"]["name"]
     tool_call_id = tc["id"]
     is_code_tool = fn_name in tools.CODE_TOOLS
+    use_stateful = stateful_executor and fn_name in STATEFUL_BROWSER_TOOLS
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(_execute_single_tool, tools, tc, drive_logs, task_id)
+    if use_stateful:
+        # Use thread-sticky executor for browser tools
+        future = stateful_executor.submit(_execute_single_tool, tools, tc, drive_logs, task_id)
         try:
             return future.result(timeout=timeout_sec)
         except TimeoutError:
+            # Timeout in stateful tool — reset the executor to allow recovery
+            stateful_executor.reset()
             args_for_log = {}
             try:
                 args = json.loads(tc["function"]["arguments"] or "{}")
@@ -131,7 +172,7 @@ def _execute_with_timeout(
             result = (
                 f"⚠️ TOOL_TIMEOUT ({fn_name}): exceeded {timeout_sec}s limit. "
                 f"The tool is still running in background but control is returned to you. "
-                f"Try a different approach or inform the owner about the issue."
+                f"Browser state has been reset. Try a different approach or inform the owner."
             )
             append_jsonl(drive_logs / "events.jsonl", {
                 "ts": utc_now_iso(), "type": "tool_timeout",
@@ -150,6 +191,41 @@ def _execute_with_timeout(
                 "args_for_log": args_for_log,
                 "is_code_tool": is_code_tool,
             }
+    else:
+        # Regular tools: per-call executor (existing behavior)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_execute_single_tool, tools, tc, drive_logs, task_id)
+            try:
+                return future.result(timeout=timeout_sec)
+            except TimeoutError:
+                args_for_log = {}
+                try:
+                    args = json.loads(tc["function"]["arguments"] or "{}")
+                    args_for_log = sanitize_tool_args_for_log(fn_name, args if isinstance(args, dict) else {})
+                except Exception:
+                    pass
+                result = (
+                    f"⚠️ TOOL_TIMEOUT ({fn_name}): exceeded {timeout_sec}s limit. "
+                    f"The tool is still running in background but control is returned to you. "
+                    f"Try a different approach or inform the owner about the issue."
+                )
+                append_jsonl(drive_logs / "events.jsonl", {
+                    "ts": utc_now_iso(), "type": "tool_timeout",
+                    "tool": fn_name, "args": args_for_log,
+                    "timeout_sec": timeout_sec,
+                })
+                append_jsonl(drive_logs / "tools.jsonl", {
+                    "ts": utc_now_iso(), "tool": fn_name,
+                    "args": args_for_log, "result_preview": result,
+                })
+                return {
+                    "tool_call_id": tool_call_id,
+                    "fn_name": fn_name,
+                    "result": result,
+                    "is_error": True,
+                    "args_for_log": args_for_log,
+                    "is_code_tool": is_code_tool,
+                }
 
 
 def run_llm_loop(
@@ -184,173 +260,180 @@ def run_llm_loop(
 
     tool_schemas = tools.schemas()
 
+    # Thread-sticky executor for browser tools (Playwright sync requires greenlet thread-affinity)
+    stateful_executor = _StatefulToolExecutor()
+
     round_idx = 0
-    while True:
-        round_idx += 1
+    try:
+        while True:
+            round_idx += 1
 
-        # Apply LLM-driven model/effort switch (via switch_model tool)
-        ctx = tools._ctx
-        if ctx.active_model_override:
-            active_model = ctx.active_model_override
-            ctx.active_model_override = None
-        if ctx.active_effort_override:
-            active_effort = normalize_reasoning_effort(ctx.active_effort_override, default=active_effort)
-            ctx.active_effort_override = None
+            # Apply LLM-driven model/effort switch (via switch_model tool)
+            ctx = tools._ctx
+            if ctx.active_model_override:
+                active_model = ctx.active_model_override
+                ctx.active_model_override = None
+            if ctx.active_effort_override:
+                active_effort = normalize_reasoning_effort(ctx.active_effort_override, default=active_effort)
+                ctx.active_effort_override = None
 
-        # Inject owner messages received during task execution
-        while not incoming_messages.empty():
-            try:
-                injected = incoming_messages.get_nowait()
-                messages.append({"role": "user", "content": injected})
-            except queue.Empty:
-                break
+            # Inject owner messages received during task execution
+            while not incoming_messages.empty():
+                try:
+                    injected = incoming_messages.get_nowait()
+                    messages.append({"role": "user", "content": injected})
+                except queue.Empty:
+                    break
 
-        # Compact old tool history to save tokens on long conversations
-        if round_idx > 1:
-            messages = compact_tool_history(messages, keep_recent=4)
+            # Compact old tool history to save tokens on long conversations
+            if round_idx > 1:
+                messages = compact_tool_history(messages, keep_recent=4)
 
-        # --- LLM call with retry ---
-        msg = None
-        last_error: Optional[Exception] = None
-        for attempt in range(max_retries):
-            try:
-                resp_msg, usage = llm.chat(
-                    messages=messages, model=active_model, tools=tool_schemas,
-                    reasoning_effort=active_effort,
-                )
-                msg = resp_msg
-                add_usage(accumulated_usage, usage)
-                accumulated_usage["rounds"] = accumulated_usage.get("rounds", 0) + 1
-                # Log per-round metrics
-                _round_event = {
-                    "ts": utc_now_iso(), "type": "llm_round",
-                    "task_id": task_id,
-                    "round": round_idx, "model": active_model,
-                    "reasoning_effort": active_effort,
-                    "prompt_tokens": int(usage.get("prompt_tokens") or 0),
-                    "completion_tokens": int(usage.get("completion_tokens") or 0),
-                    "cached_tokens": int(usage.get("cached_tokens") or 0),
-                    "cache_write_tokens": int(usage.get("cache_write_tokens") or 0),
-                    "cost_usd": float(usage.get("cost") or 0),
-                }
-                append_jsonl(drive_logs / "events.jsonl", _round_event)
-                break
-            except Exception as e:
-                last_error = e
-                append_jsonl(drive_logs / "events.jsonl", {
-                    "ts": utc_now_iso(), "type": "llm_api_error",
-                    "task_id": task_id,
-                    "round": round_idx, "attempt": attempt + 1,
-                    "model": active_model, "error": repr(e),
-                })
-                if attempt < max_retries - 1:
-                    time.sleep(min(2 ** attempt * 2, 30))
-
-        if msg is None:
-            return (
-                f"⚠️ Не удалось получить ответ от модели после {max_retries} попыток.\n"
-                f"Ошибка: {last_error}"
-            ), accumulated_usage, llm_trace
-
-        tool_calls = msg.get("tool_calls") or []
-        content = msg.get("content")
-
-        # No tool calls — final response
-        if not tool_calls:
-            if content and content.strip():
-                llm_trace["assistant_notes"].append(content.strip()[:320])
-            return (content or ""), accumulated_usage, llm_trace
-
-        # Process tool calls
-        messages.append({"role": "assistant", "content": content or "", "tool_calls": tool_calls})
-
-        if content and content.strip():
-            emit_progress(content.strip())
-            llm_trace["assistant_notes"].append(content.strip()[:320])
-
-        error_count = 0
-
-        # Parallelize only for a strict read-only whitelist; all calls wrapped with timeout.
-        can_parallel = (
-            len(tool_calls) > 1 and
-            all(
-                tc.get("function", {}).get("name") in READ_ONLY_PARALLEL_TOOLS
-                for tc in tool_calls
-            )
-        )
-
-        if not can_parallel:
-            results = [
-                _execute_with_timeout(tools, tc, drive_logs,
-                                      tools.get_timeout(tc["function"]["name"]), task_id)
-                for tc in tool_calls
-            ]
-        else:
-            max_workers = min(len(tool_calls), 8)
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_to_index = {
-                    executor.submit(
-                        _execute_with_timeout, tools, tc, drive_logs,
-                        tools.get_timeout(tc["function"]["name"]), task_id,
-                    ): idx
-                    for idx, tc in enumerate(tool_calls)
-                }
-                results = [None] * len(tool_calls)
-                for future in as_completed(future_to_index):
-                    idx = future_to_index[future]
-                    results[idx] = future.result()
-
-        # Process results in original order
-        for exec_result in results:
-            fn_name = exec_result["fn_name"]
-            is_error = exec_result["is_error"]
-
-            if is_error:
-                error_count += 1
-
-            # Truncate tool result before appending to messages
-            truncated_result = _truncate_tool_result(exec_result["result"])
-
-            # Append tool result message
-            messages.append({
-                "role": "tool",
-                "tool_call_id": exec_result["tool_call_id"],
-                "content": truncated_result
-            })
-
-            # Append to LLM trace
-            llm_trace["tool_calls"].append({
-                "tool": fn_name,
-                "args": _safe_args(exec_result["args_for_log"]),
-                "result": truncate_for_log(exec_result["result"], 700),
-                "is_error": is_error,
-            })
-
-        # --- Budget guard ---
-        # LLM decides when to stop (Bible П0, П3). We only enforce hard budget limit.
-        if budget_remaining_usd is not None:
-            task_cost = accumulated_usage.get("cost", 0)
-            budget_pct = task_cost / budget_remaining_usd if budget_remaining_usd > 0 else 1.0
-
-            if budget_pct > 0.5:
-                # Hard stop — protect the budget
-                finish_reason = f"Задача потратила ${task_cost:.3f} (>50% от остатка ${budget_remaining_usd:.2f}). Бюджет исчерпан."
-                messages.append({"role": "system", "content": f"[BUDGET LIMIT] {finish_reason} Дай финальный ответ сейчас."})
+            # --- LLM call with retry ---
+            msg = None
+            last_error: Optional[Exception] = None
+            for attempt in range(max_retries):
                 try:
                     resp_msg, usage = llm.chat(
-                        messages=messages, model=active_model, tools=None,
+                        messages=messages, model=active_model, tools=tool_schemas,
                         reasoning_effort=active_effort,
                     )
+                    msg = resp_msg
                     add_usage(accumulated_usage, usage)
-                    return (resp_msg.get("content") or finish_reason), accumulated_usage, llm_trace
-                except Exception:
-                    return finish_reason, accumulated_usage, llm_trace
-            elif budget_pct > 0.3 and round_idx % 10 == 0:
-                # Soft nudge every 10 rounds when spending is significant
-                messages.append({"role": "system", "content": f"[INFO] Задача потратила ${task_cost:.3f} из ${budget_remaining_usd:.2f}. Если можешь — завершай."})
+                    accumulated_usage["rounds"] = accumulated_usage.get("rounds", 0) + 1
+                    # Log per-round metrics
+                    _round_event = {
+                        "ts": utc_now_iso(), "type": "llm_round",
+                        "task_id": task_id,
+                        "round": round_idx, "model": active_model,
+                        "reasoning_effort": active_effort,
+                        "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+                        "completion_tokens": int(usage.get("completion_tokens") or 0),
+                        "cached_tokens": int(usage.get("cached_tokens") or 0),
+                        "cache_write_tokens": int(usage.get("cache_write_tokens") or 0),
+                        "cost_usd": float(usage.get("cost") or 0),
+                    }
+                    append_jsonl(drive_logs / "events.jsonl", _round_event)
+                    break
+                except Exception as e:
+                    last_error = e
+                    append_jsonl(drive_logs / "events.jsonl", {
+                        "ts": utc_now_iso(), "type": "llm_api_error",
+                        "task_id": task_id,
+                        "round": round_idx, "attempt": attempt + 1,
+                        "model": active_model, "error": repr(e),
+                    })
+                    if attempt < max_retries - 1:
+                        time.sleep(min(2 ** attempt * 2, 30))
 
-    # Unreachable but keeps type checkers happy
-    return "", accumulated_usage, llm_trace
+            if msg is None:
+                return (
+                    f"⚠️ Не удалось получить ответ от модели после {max_retries} попыток.\n"
+                    f"Ошибка: {last_error}"
+                ), accumulated_usage, llm_trace
+
+            tool_calls = msg.get("tool_calls") or []
+            content = msg.get("content")
+
+            # No tool calls — final response
+            if not tool_calls:
+                if content and content.strip():
+                    llm_trace["assistant_notes"].append(content.strip()[:320])
+                return (content or ""), accumulated_usage, llm_trace
+
+            # Process tool calls
+            messages.append({"role": "assistant", "content": content or "", "tool_calls": tool_calls})
+
+            if content and content.strip():
+                emit_progress(content.strip())
+                llm_trace["assistant_notes"].append(content.strip()[:320])
+
+            error_count = 0
+
+            # Parallelize only for a strict read-only whitelist; all calls wrapped with timeout.
+            can_parallel = (
+                len(tool_calls) > 1 and
+                all(
+                    tc.get("function", {}).get("name") in READ_ONLY_PARALLEL_TOOLS
+                    for tc in tool_calls
+                )
+            )
+
+            if not can_parallel:
+                results = [
+                    _execute_with_timeout(tools, tc, drive_logs,
+                                          tools.get_timeout(tc["function"]["name"]), task_id,
+                                          stateful_executor)
+                    for tc in tool_calls
+                ]
+            else:
+                max_workers = min(len(tool_calls), 8)
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    future_to_index = {
+                        executor.submit(
+                            _execute_with_timeout, tools, tc, drive_logs,
+                            tools.get_timeout(tc["function"]["name"]), task_id,
+                            stateful_executor,
+                        ): idx
+                        for idx, tc in enumerate(tool_calls)
+                    }
+                    results = [None] * len(tool_calls)
+                    for future in as_completed(future_to_index):
+                        idx = future_to_index[future]
+                        results[idx] = future.result()
+
+            # Process results in original order
+            for exec_result in results:
+                fn_name = exec_result["fn_name"]
+                is_error = exec_result["is_error"]
+
+                if is_error:
+                    error_count += 1
+
+                # Truncate tool result before appending to messages
+                truncated_result = _truncate_tool_result(exec_result["result"])
+
+                # Append tool result message
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": exec_result["tool_call_id"],
+                    "content": truncated_result
+                })
+
+                # Append to LLM trace
+                llm_trace["tool_calls"].append({
+                    "tool": fn_name,
+                    "args": _safe_args(exec_result["args_for_log"]),
+                    "result": truncate_for_log(exec_result["result"], 700),
+                    "is_error": is_error,
+                })
+
+            # --- Budget guard ---
+            # LLM decides when to stop (Bible П0, П3). We only enforce hard budget limit.
+            if budget_remaining_usd is not None:
+                task_cost = accumulated_usage.get("cost", 0)
+                budget_pct = task_cost / budget_remaining_usd if budget_remaining_usd > 0 else 1.0
+
+                if budget_pct > 0.5:
+                    # Hard stop — protect the budget
+                    finish_reason = f"Задача потратила ${task_cost:.3f} (>50% от остатка ${budget_remaining_usd:.2f}). Бюджет исчерпан."
+                    messages.append({"role": "system", "content": f"[BUDGET LIMIT] {finish_reason} Дай финальный ответ сейчас."})
+                    try:
+                        resp_msg, usage = llm.chat(
+                            messages=messages, model=active_model, tools=None,
+                            reasoning_effort=active_effort,
+                        )
+                        add_usage(accumulated_usage, usage)
+                        return (resp_msg.get("content") or finish_reason), accumulated_usage, llm_trace
+                    except Exception:
+                        return finish_reason, accumulated_usage, llm_trace
+                elif budget_pct > 0.3 and round_idx % 10 == 0:
+                    # Soft nudge every 10 rounds when spending is significant
+                    messages.append({"role": "system", "content": f"[INFO] Задача потратила ${task_cost:.3f} из ${budget_remaining_usd:.2f}. Если можешь — завершай."})
+
+    finally:
+        # Cleanup thread-sticky executor for stateful tools
+        stateful_executor.shutdown()
 
 
 def _safe_args(v: Any) -> Any:
