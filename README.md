@@ -17,7 +17,7 @@
    - `OPENAI_API_KEY` (опционально — для web_search)
    - `ANTHROPIC_API_KEY` (опционально — для claude_code_edit)
 
-2. Опционально добавь config-ячейку (модели, воркеры):
+2. Опционально добавь config-ячейку (модели, воркеры, диагностика):
 ```python
 import os
 CFG = {
@@ -27,11 +27,16 @@ CFG = {
     "OUROBOROS_MODEL_CODE": "anthropic/claude-sonnet-4",
     "OUROBOROS_MODEL_LIGHT": "anthropic/claude-sonnet-4",
     "OUROBOROS_MAX_WORKERS": "5",
+    "OUROBOROS_WORKER_START_METHOD": "fork",   # Colab-safe default
+    "OUROBOROS_DIAG_HEARTBEAT_SEC": "30",      # periodic main_loop_heartbeat in supervisor.jsonl
+    "OUROBOROS_DIAG_SLOW_CYCLE_SEC": "20",     # warns when one loop iteration is too slow
 }
 for k, v in CFG.items():
     os.environ[k] = str(v)
 ```
    Без этой ячейки используются дефолты: `openai/gpt-5.2` / `openai/gpt-5.2-codex`.
+   Для диагностики зависаний смотри `main_loop_heartbeat`, `main_loop_slow_cycle`,
+   `worker_dead_detected`, `worker_crash` в `/content/drive/MyDrive/Ouroboros/logs/supervisor.jsonl`.
 
 3. Запусти boot shim (см. `colab_bootstrap_shim.py`).
 4. Напиши боту в Telegram. Первый написавший — создатель.

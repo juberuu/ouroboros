@@ -78,6 +78,14 @@ def get_cfg(name: str, default: Optional[str] = None, allow_legacy_secret: bool 
             return legacy
     return default
 
+
+def _parse_int_cfg(raw: Optional[str], default: int, minimum: int = 0) -> int:
+    try:
+        val = int(str(raw))
+    except Exception:
+        val = default
+    return max(minimum, val)
+
 OPENROUTER_API_KEY = get_secret("OPENROUTER_API_KEY", required=True)
 TELEGRAM_BOT_TOKEN = get_secret("TELEGRAM_BOT_TOKEN", required=True)
 TOTAL_BUDGET_DEFAULT = get_secret("TOTAL_BUDGET", required=True)
@@ -100,6 +108,16 @@ MODEL_LIGHT = get_cfg("OUROBOROS_MODEL_LIGHT", default=None, allow_legacy_secret
 BUDGET_REPORT_EVERY_MESSAGES = 10
 SOFT_TIMEOUT_SEC = max(60, int(get_cfg("OUROBOROS_SOFT_TIMEOUT_SEC", default="600", allow_legacy_secret=True) or "600"))
 HARD_TIMEOUT_SEC = max(120, int(get_cfg("OUROBOROS_HARD_TIMEOUT_SEC", default="1800", allow_legacy_secret=True) or "1800"))
+DIAG_HEARTBEAT_SEC = _parse_int_cfg(
+    get_cfg("OUROBOROS_DIAG_HEARTBEAT_SEC", default="30", allow_legacy_secret=True),
+    default=30,
+    minimum=0,
+)
+DIAG_SLOW_CYCLE_SEC = _parse_int_cfg(
+    get_cfg("OUROBOROS_DIAG_SLOW_CYCLE_SEC", default="20", allow_legacy_secret=True),
+    default=20,
+    minimum=0,
+)
 
 os.environ["OPENROUTER_API_KEY"] = str(OPENROUTER_API_KEY)
 os.environ["OPENAI_API_KEY"] = str(OPENAI_API_KEY or "")
@@ -110,6 +128,8 @@ os.environ["OUROBOROS_MODEL"] = str(MODEL_MAIN or "openai/gpt-5.2")
 os.environ["OUROBOROS_MODEL_CODE"] = str(MODEL_CODE or "openai/gpt-5.2-codex")
 if MODEL_LIGHT:
     os.environ["OUROBOROS_MODEL_LIGHT"] = str(MODEL_LIGHT)
+os.environ["OUROBOROS_DIAG_HEARTBEAT_SEC"] = str(DIAG_HEARTBEAT_SEC)
+os.environ["OUROBOROS_DIAG_SLOW_CYCLE_SEC"] = str(DIAG_SLOW_CYCLE_SEC)
 os.environ["TELEGRAM_BOT_TOKEN"] = str(TELEGRAM_BOT_TOKEN)
 
 if str(ANTHROPIC_API_KEY or "").strip():
@@ -216,6 +236,9 @@ append_jsonl(DRIVE_ROOT / "logs" / "supervisor.jsonl", {
     "max_workers": MAX_WORKERS,
     "model_default": MODEL_MAIN, "model_code": MODEL_CODE, "model_light": MODEL_LIGHT,
     "soft_timeout_sec": SOFT_TIMEOUT_SEC, "hard_timeout_sec": HARD_TIMEOUT_SEC,
+    "worker_start_method": str(os.environ.get("OUROBOROS_WORKER_START_METHOD") or ""),
+    "diag_heartbeat_sec": DIAG_HEARTBEAT_SEC,
+    "diag_slow_cycle_sec": DIAG_SLOW_CYCLE_SEC,
 })
 
 # ----------------------------
@@ -246,9 +269,19 @@ _event_ctx = types.SimpleNamespace(
     spawn_workers=spawn_workers,
 )
 
+
+def _safe_qsize(q: Any) -> int:
+    try:
+        return int(q.qsize())
+    except Exception:
+        return -1
+
+
 offset = int(load_state().get("tg_offset") or 0)
+_last_diag_heartbeat_ts = 0.0
 
 while True:
+    loop_started_ts = time.time()
     rotate_chat_log_if_needed(DRIVE_ROOT)
     ensure_workers_healthy()
 
@@ -399,5 +432,40 @@ while True:
     st = load_state()
     st["tg_offset"] = offset
     save_state(st)
+
+    now_epoch = time.time()
+    loop_duration_sec = now_epoch - loop_started_ts
+
+    if DIAG_SLOW_CYCLE_SEC > 0 and loop_duration_sec >= float(DIAG_SLOW_CYCLE_SEC):
+        append_jsonl(
+            DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "main_loop_slow_cycle",
+                "duration_sec": round(loop_duration_sec, 3),
+                "pending_count": len(PENDING),
+                "running_count": len(RUNNING),
+            },
+        )
+
+    if DIAG_HEARTBEAT_SEC > 0 and (now_epoch - _last_diag_heartbeat_ts) >= float(DIAG_HEARTBEAT_SEC):
+        workers_total = len(WORKERS)
+        workers_alive = sum(1 for w in WORKERS.values() if w.proc.is_alive())
+        append_jsonl(
+            DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "main_loop_heartbeat",
+                "offset": offset,
+                "workers_total": workers_total,
+                "workers_alive": workers_alive,
+                "pending_count": len(PENDING),
+                "running_count": len(RUNNING),
+                "event_q_size": _safe_qsize(event_q),
+                "running_task_ids": list(RUNNING.keys())[:5],
+                "spent_usd": st.get("spent_usd"),
+            },
+        )
+        _last_diag_heartbeat_ts = now_epoch
 
     time.sleep(0.2)

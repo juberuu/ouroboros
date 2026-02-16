@@ -42,6 +42,12 @@ for _name in ("OPENROUTER_API_KEY", "TELEGRAM_BOT_TOKEN", "TOTAL_BUDGET", "GITHU
 for _name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
     export_secret_to_env(_name, required=False)
 
+# Colab diagnostics defaults (override in config cell if needed).
+os.environ.setdefault("OUROBOROS_WORKER_START_METHOD", "fork")
+os.environ.setdefault("OUROBOROS_DIAG_HEARTBEAT_SEC", "30")
+os.environ.setdefault("OUROBOROS_DIAG_SLOW_CYCLE_SEC", "20")
+os.environ.setdefault("PYTHONUNBUFFERED", "1")
+
 GITHUB_TOKEN = str(os.environ["GITHUB_TOKEN"])
 GITHUB_USER = str(os.environ.get("GITHUB_USER", "razzant"))
 GITHUB_REPO = str(os.environ.get("GITHUB_REPO", "ouroboros"))
@@ -59,6 +65,17 @@ else:
 subprocess.run(["git", "fetch", "origin"], cwd=str(REPO_DIR), check=True)
 subprocess.run(["git", "checkout", BOOT_BRANCH], cwd=str(REPO_DIR), check=True)
 subprocess.run(["git", "reset", "--hard", f"origin/{BOOT_BRANCH}"], cwd=str(REPO_DIR), check=True)
+HEAD_SHA = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=str(REPO_DIR), text=True).strip()
+print(
+    "[boot] branch=%s sha=%s worker_start=%s diag_heartbeat=%ss"
+    % (
+        BOOT_BRANCH,
+        HEAD_SHA[:12],
+        os.environ.get("OUROBOROS_WORKER_START_METHOD", ""),
+        os.environ.get("OUROBOROS_DIAG_HEARTBEAT_SEC", ""),
+    )
+)
+print("[boot] logs: /content/drive/MyDrive/Ouroboros/logs/supervisor.jsonl")
 
 # Mount Drive in notebook process first (interactive auth works here).
 if not pathlib.Path("/content/drive/MyDrive").exists():
