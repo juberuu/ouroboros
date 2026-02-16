@@ -62,7 +62,25 @@ def _ensure_browser(ctx: ToolContext):
     _ensure_playwright_installed()
 
     from playwright.sync_api import sync_playwright
-    ctx._pw_instance = sync_playwright().start()
+
+    try:
+        ctx._pw_instance = sync_playwright().start()
+    except RuntimeError as e:
+        if "cannot switch" in str(e) or "different thread" in str(e):
+            # Kill lingering chromium processes
+            try:
+                subprocess.run(["pkill", "-9", "-f", "chromium"], capture_output=True)
+            except Exception:
+                pass
+            # Force reimport playwright to reset internal state
+            import importlib
+            import playwright.sync_api
+            importlib.reload(playwright.sync_api)
+            from playwright.sync_api import sync_playwright as fresh_sync_playwright
+            ctx._pw_instance = fresh_sync_playwright().start()
+        else:
+            raise
+
     ctx._browser = ctx._pw_instance.chromium.launch(
         headless=True,
         args=["--no-sandbox", "--disable-dev-shm-usage"],
@@ -102,100 +120,165 @@ def cleanup_browser(ctx: ToolContext) -> None:
 
 def _browse_page(ctx: ToolContext, url: str, output: str = "text",
                  wait_for: str = "", timeout: int = 30000) -> str:
-    page = _ensure_browser(ctx)
-    page.goto(url, timeout=timeout, wait_until="domcontentloaded")
+    try:
+        page = _ensure_browser(ctx)
+        page.goto(url, timeout=timeout, wait_until="domcontentloaded")
 
-    if wait_for:
-        page.wait_for_selector(wait_for, timeout=timeout)
+        if wait_for:
+            page.wait_for_selector(wait_for, timeout=timeout)
 
-    if output == "screenshot":
-        data = page.screenshot(type="png", full_page=False)
-        b64 = base64.b64encode(data).decode()
-        ctx._last_screenshot_b64 = b64
-        return (
-            f"Screenshot captured ({len(b64)} bytes base64). "
-            f"Call send_photo(image_base64='__last_screenshot__') to deliver it to the owner."
-        )
-    elif output == "html":
-        html = page.content()
-        return html[:50000] + ("... [truncated]" if len(html) > 50000 else "")
-    elif output == "markdown":
-        text = page.evaluate("""() => {
-            const walk = (el) => {
-                let out = '';
-                for (const child of el.childNodes) {
-                    if (child.nodeType === 3) {
-                        const t = child.textContent.trim();
-                        if (t) out += t + ' ';
-                    } else if (child.nodeType === 1) {
-                        const tag = child.tagName;
-                        if (['SCRIPT','STYLE','NOSCRIPT'].includes(tag)) continue;
-                        if (['H1','H2','H3','H4','H5','H6'].includes(tag))
-                            out += '\\n' + '#'.repeat(parseInt(tag[1])) + ' ';
-                        if (tag === 'P' || tag === 'DIV' || tag === 'BR') out += '\\n';
-                        if (tag === 'LI') out += '\\n- ';
-                        if (tag === 'A') out += '[';
-                        out += walk(child);
-                        if (tag === 'A') out += '](' + (child.href||'') + ')';
+        if output == "screenshot":
+            data = page.screenshot(type="png", full_page=False)
+            b64 = base64.b64encode(data).decode()
+            ctx._last_screenshot_b64 = b64
+            return (
+                f"Screenshot captured ({len(b64)} bytes base64). "
+                f"Call send_photo(image_base64='__last_screenshot__') to deliver it to the owner."
+            )
+        elif output == "html":
+            html = page.content()
+            return html[:50000] + ("... [truncated]" if len(html) > 50000 else "")
+        elif output == "markdown":
+            text = page.evaluate("""() => {
+                const walk = (el) => {
+                    let out = '';
+                    for (const child of el.childNodes) {
+                        if (child.nodeType === 3) {
+                            const t = child.textContent.trim();
+                            if (t) out += t + ' ';
+                        } else if (child.nodeType === 1) {
+                            const tag = child.tagName;
+                            if (['SCRIPT','STYLE','NOSCRIPT'].includes(tag)) continue;
+                            if (['H1','H2','H3','H4','H5','H6'].includes(tag))
+                                out += '\\n' + '#'.repeat(parseInt(tag[1])) + ' ';
+                            if (tag === 'P' || tag === 'DIV' || tag === 'BR') out += '\\n';
+                            if (tag === 'LI') out += '\\n- ';
+                            if (tag === 'A') out += '[';
+                            out += walk(child);
+                            if (tag === 'A') out += '](' + (child.href||'') + ')';
+                        }
                     }
-                }
-                return out;
-            };
-            return walk(document.body);
-        }""")
-        return text[:30000] + ("... [truncated]" if len(text) > 30000 else "")
-    else:  # text
-        text = page.inner_text("body")
-        return text[:30000] + ("... [truncated]" if len(text) > 30000 else "")
+                    return out;
+                };
+                return walk(document.body);
+            }""")
+            return text[:30000] + ("... [truncated]" if len(text) > 30000 else "")
+        else:  # text
+            text = page.inner_text("body")
+            return text[:30000] + ("... [truncated]" if len(text) > 30000 else "")
+    except RuntimeError as e:
+        if "cannot switch" in str(e) or "different thread" in str(e):
+            log.warning("Browser thread error, resetting and retrying once...")
+            cleanup_browser(ctx)
+            # Retry once
+            page = _ensure_browser(ctx)
+            page.goto(url, timeout=timeout, wait_until="domcontentloaded")
+
+            if wait_for:
+                page.wait_for_selector(wait_for, timeout=timeout)
+
+            if output == "screenshot":
+                data = page.screenshot(type="png", full_page=False)
+                b64 = base64.b64encode(data).decode()
+                ctx._last_screenshot_b64 = b64
+                return (
+                    f"Screenshot captured ({len(b64)} bytes base64). "
+                    f"Call send_photo(image_base64='__last_screenshot__') to deliver it to the owner."
+                )
+            elif output == "html":
+                html = page.content()
+                return html[:50000] + ("... [truncated]" if len(html) > 50000 else "")
+            elif output == "markdown":
+                text = page.evaluate("""() => {
+                    const walk = (el) => {
+                        let out = '';
+                        for (const child of el.childNodes) {
+                            if (child.nodeType === 3) {
+                                const t = child.textContent.trim();
+                                if (t) out += t + ' ';
+                            } else if (child.nodeType === 1) {
+                                const tag = child.tagName;
+                                if (['SCRIPT','STYLE','NOSCRIPT'].includes(tag)) continue;
+                                if (['H1','H2','H3','H4','H5','H6'].includes(tag))
+                                    out += '\\n' + '#'.repeat(parseInt(tag[1])) + ' ';
+                                if (tag === 'P' || tag === 'DIV' || tag === 'BR') out += '\\n';
+                                if (tag === 'LI') out += '\\n- ';
+                                if (tag === 'A') out += '[';
+                                out += walk(child);
+                                if (tag === 'A') out += '](' + (child.href||'') + ')';
+                            }
+                        }
+                        return out;
+                    };
+                    return walk(document.body);
+                }""")
+                return text[:30000] + ("... [truncated]" if len(text) > 30000 else "")
+            else:  # text
+                text = page.inner_text("body")
+                return text[:30000] + ("... [truncated]" if len(text) > 30000 else "")
+        else:
+            raise
 
 
 def _browser_action(ctx: ToolContext, action: str, selector: str = "",
                     value: str = "", timeout: int = 5000) -> str:
-    page = _ensure_browser(ctx)
+    def _do_action():
+        page = _ensure_browser(ctx)
 
-    if action == "click":
-        if not selector:
-            return "Error: selector required for click"
-        page.click(selector, timeout=timeout)
-        page.wait_for_timeout(500)
-        return f"Clicked: {selector}"
-    elif action == "fill":
-        if not selector:
-            return "Error: selector required for fill"
-        page.fill(selector, value, timeout=timeout)
-        return f"Filled {selector} with: {value}"
-    elif action == "select":
-        if not selector:
-            return "Error: selector required for select"
-        page.select_option(selector, value, timeout=timeout)
-        return f"Selected {value} in {selector}"
-    elif action == "screenshot":
-        data = page.screenshot(type="png", full_page=False)
-        b64 = base64.b64encode(data).decode()
-        ctx._last_screenshot_b64 = b64
-        return (
-            f"Screenshot captured ({len(b64)} bytes base64). "
-            f"Call send_photo(image_base64='__last_screenshot__') to deliver it to the owner."
-        )
-    elif action == "evaluate":
-        if not value:
-            return "Error: value (JS code) required for evaluate"
-        result = page.evaluate(value)
-        out = str(result)
-        return out[:20000] + ("... [truncated]" if len(out) > 20000 else "")
-    elif action == "scroll":
-        direction = value or "down"
-        if direction == "down":
-            page.evaluate("window.scrollBy(0, 600)")
-        elif direction == "up":
-            page.evaluate("window.scrollBy(0, -600)")
-        elif direction == "top":
-            page.evaluate("window.scrollTo(0, 0)")
-        elif direction == "bottom":
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        return f"Scrolled {direction}"
-    else:
-        return f"Unknown action: {action}. Use: click, fill, select, screenshot, evaluate, scroll"
+        if action == "click":
+            if not selector:
+                return "Error: selector required for click"
+            page.click(selector, timeout=timeout)
+            page.wait_for_timeout(500)
+            return f"Clicked: {selector}"
+        elif action == "fill":
+            if not selector:
+                return "Error: selector required for fill"
+            page.fill(selector, value, timeout=timeout)
+            return f"Filled {selector} with: {value}"
+        elif action == "select":
+            if not selector:
+                return "Error: selector required for select"
+            page.select_option(selector, value, timeout=timeout)
+            return f"Selected {value} in {selector}"
+        elif action == "screenshot":
+            data = page.screenshot(type="png", full_page=False)
+            b64 = base64.b64encode(data).decode()
+            ctx._last_screenshot_b64 = b64
+            return (
+                f"Screenshot captured ({len(b64)} bytes base64). "
+                f"Call send_photo(image_base64='__last_screenshot__') to deliver it to the owner."
+            )
+        elif action == "evaluate":
+            if not value:
+                return "Error: value (JS code) required for evaluate"
+            result = page.evaluate(value)
+            out = str(result)
+            return out[:20000] + ("... [truncated]" if len(out) > 20000 else "")
+        elif action == "scroll":
+            direction = value or "down"
+            if direction == "down":
+                page.evaluate("window.scrollBy(0, 600)")
+            elif direction == "up":
+                page.evaluate("window.scrollBy(0, -600)")
+            elif direction == "top":
+                page.evaluate("window.scrollTo(0, 0)")
+            elif direction == "bottom":
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            return f"Scrolled {direction}"
+        else:
+            return f"Unknown action: {action}. Use: click, fill, select, screenshot, evaluate, scroll"
+
+    try:
+        return _do_action()
+    except RuntimeError as e:
+        if "cannot switch" in str(e) or "different thread" in str(e):
+            log.warning("Browser thread error, resetting and retrying once...")
+            cleanup_browser(ctx)
+            # Retry once
+            return _do_action()
+        else:
+            raise
 
 
 def get_tools() -> List[ToolEntry]:
