@@ -147,8 +147,16 @@ def build_llm_messages(
         "## Drive state\n\n" + clip_text(state_json, 90000),
         "## Scratchpad\n\n" + clip_text(scratchpad_raw, 90000),
         "## Identity\n\n" + clip_text(identity_raw, 80000),
-        "## Runtime context\n\n" + runtime_ctx,
     ]
+
+    # Knowledge base index (if exists)
+    kb_index_path = env.drive_path("memory/knowledge/_index.md")
+    if kb_index_path.exists():
+        kb_index = kb_index_path.read_text(encoding="utf-8")
+        if kb_index.strip():
+            dynamic_parts.append("## Knowledge base\n\n" + clip_text(kb_index, 50000))
+
+    dynamic_parts.append("## Runtime context\n\n" + runtime_ctx)
 
     # Log summaries (optional)
     if chat_summary:
