@@ -332,6 +332,7 @@ def kill_workers() -> None:
 
 
 def respawn_worker(wid: int) -> None:
+    global _LAST_SPAWN_TIME
     ctx = _get_ctx()
     in_q = ctx.Queue()
     proc = ctx.Process(target=worker_main,
@@ -339,6 +340,8 @@ def respawn_worker(wid: int) -> None:
     proc.daemon = True
     proc.start()
     WORKERS[wid] = Worker(wid=wid, proc=proc, in_q=in_q, busy_task_id=None)
+    # Give freshly respawned workers the same init grace as startup workers.
+    _LAST_SPAWN_TIME = time.time()
 
 
 def assign_tasks() -> None:
@@ -380,9 +383,23 @@ def ensure_workers_healthy() -> None:
     # Grace period: skip health check right after spawn — workers need time to initialize
     if (time.time() - _LAST_SPAWN_TIME) < _SPAWN_GRACE_SEC:
         return
+    busy_crashes = 0
+    dead_detections = 0
     for wid, w in list(WORKERS.items()):
         if not w.proc.is_alive():
-            CRASH_TS.append(time.time())
+            dead_detections += 1
+            if w.busy_task_id is not None:
+                busy_crashes += 1
+            append_jsonl(
+                DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "type": "worker_dead_detected",
+                    "worker_id": wid,
+                    "exitcode": w.proc.exitcode,
+                    "busy_task_id": w.busy_task_id,
+                },
+            )
             if w.busy_task_id and w.busy_task_id in RUNNING:
                 meta = RUNNING.pop(w.busy_task_id) or {}
                 task = meta.get("task") if isinstance(meta, dict) else None
@@ -392,6 +409,18 @@ def ensure_workers_healthy() -> None:
             queue.persist_queue_snapshot(reason="worker_respawn_after_crash")
 
     now = time.time()
+    alive_now = sum(1 for w in WORKERS.values() if w.proc.is_alive())
+    if dead_detections:
+        # Count only meaningful failures:
+        # - any crash while a task was running, or
+        # - all workers dead at once.
+        if busy_crashes > 0 or alive_now == 0:
+            CRASH_TS.extend([now] * max(1, dead_detections))
+        else:
+            # Idle worker deaths with at least one healthy worker are degraded mode,
+            # not a crash storm condition.
+            CRASH_TS.clear()
+
     CRASH_TS[:] = [t for t in CRASH_TS if (now - t) < 60.0]
     if len(CRASH_TS) >= 3:
         # Log crash storm but DON'T execv restart — that creates infinite loops.
