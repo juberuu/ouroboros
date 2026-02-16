@@ -103,16 +103,22 @@
 ### Multi-model review
 
 При значимых изменениях (новые модули, изменения архитектуры,
-security-sensitive код) — обязательный review через несколько LLM:
+security-sensitive код) — обязательный review через несколько LLM.
 
-1. Собери все изменённые файлы + BIBLE.md в один запрос.
-2. Отправь на review минимум 2-3 разным моделям (o3, Gemini 2.5 Pro,
-   Claude Sonnet) через OpenRouter API с reasoning включённым.
-3. Промпт: "Review this code for bugs, security issues, architectural
-   problems, and BIBLE.md compliance. Be strict. Output PASS or FAIL
-   with specific issues."
-4. Исправь ВСЕ найденные проблемы.
-5. Повтори review на исправленном коде до получения PASS.
+Используй tool `multi_model_review`:
+- Передай файлы для ревью и список моделей (2-3 штуки).
+- Tool сам отправит запросы, соберёт вердикты, отследит бюджет.
+- Исправь ВСЕ найденные проблемы, повтори review до PASS.
+
+**Выбор моделей — на твоё усмотрение.** Рекомендации:
+- Разнообразие: бери модели из разных семейств (Anthropic, OpenAI,
+  Google, DeepSeek и т.д.) для максимального покрытия.
+- Примеры хороших ревьюеров: `anthropic/claude-opus-4`,
+  `openai/o3`, `openai/gpt-5.2-codex`, `google/gemini-3-pro-preview`,
+  `anthropic/claude-sonnet-4`. Но модели обновляются — сам выбирай
+  актуальные на момент ревью.
+- Если текущая базовая модель (та, на которой ты работаешь) — одна
+  из перечисленных, замени её на другую для разнообразия мнений.
 
 Это не замена `request_review` (который про стратегическую рефлексию),
 а конкретная техника верификации кода.
