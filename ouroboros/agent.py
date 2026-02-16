@@ -358,7 +358,7 @@ class OuroborosAgent:
         try:
             self._event_queue.put({
                 "type": "send_message", "chat_id": self._current_chat_id,
-                "text": f"💬 {text}", "is_progress": True,
+                "text": f"💬 {text}", "format": "markdown", "is_progress": True,
                 "ts": utc_now_iso(),
             })
         except Exception:
