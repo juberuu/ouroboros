@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime
 import json
 import multiprocessing as mp
+import os
 import pathlib
 import sys
 import time
@@ -40,12 +41,20 @@ _CTX = None
 _LAST_SPAWN_TIME: float = 0.0  # grace period: don't count dead workers right after spawn
 _SPAWN_GRACE_SEC: float = 90.0  # workers need up to ~60s to init on Colab (spawn + pip + Drive FUSE)
 
+# On Linux/Colab, "spawn" re-imports __main__ (colab_launcher.py) in child processes.
+# Since launcher has top-level side effects, this causes worker child crashes (exitcode=1).
+# Use "fork" by default on Linux; allow override via env.
+_DEFAULT_WORKER_START_METHOD = "fork" if sys.platform.startswith("linux") else "spawn"
+_WORKER_START_METHOD = str(os.environ.get("OUROBOROS_WORKER_START_METHOD", _DEFAULT_WORKER_START_METHOD) or _DEFAULT_WORKER_START_METHOD).strip().lower()
+if _WORKER_START_METHOD not in {"fork", "spawn", "forkserver"}:
+    _WORKER_START_METHOD = _DEFAULT_WORKER_START_METHOD
+
 
 def _get_ctx():
-    """Return spawn context — recreated fresh in spawn_workers()."""
+    """Return multiprocessing context used for worker processes."""
     global _CTX
     if _CTX is None:
-        _CTX = mp.get_context("spawn")
+        _CTX = mp.get_context(_WORKER_START_METHOD)
     return _CTX
 
 
@@ -287,8 +296,8 @@ def _verify_worker_sha_after_spawn(events_offset: int, timeout_sec: float = 5.0)
 
 def spawn_workers(n: int = 0) -> None:
     global _CTX, _EVENT_Q
-    # Force fresh spawn context to ensure workers use latest code
-    _CTX = mp.get_context("spawn")
+    # Force fresh context to ensure workers use latest code
+    _CTX = mp.get_context(_WORKER_START_METHOD)
     _EVENT_Q = _CTX.Queue()
     events_path = DRIVE_ROOT / "logs" / "events.jsonl"
     try:
@@ -297,6 +306,15 @@ def spawn_workers(n: int = 0) -> None:
         events_offset = 0
 
     count = n or MAX_WORKERS
+    append_jsonl(
+        DRIVE_ROOT / "logs" / "supervisor.jsonl",
+        {
+            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "type": "worker_spawn_start",
+            "start_method": _WORKER_START_METHOD,
+            "count": count,
+        },
+    )
     WORKERS.clear()
     for i in range(count):
         in_q = _CTX.Queue()
