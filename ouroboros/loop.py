@@ -8,6 +8,7 @@ Extracted from agent.py to keep the agent thin.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import queue
 import threading
@@ -504,10 +505,33 @@ def run_llm_loop(
                 max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type
             )
 
+            # Fallback to another model if primary model returns empty responses
             if msg is None:
-                return (
-                    f"⚠️ Не удалось получить ответ от модели после {max_retries} попыток."
-                ), accumulated_usage, llm_trace
+                # Determine fallback model (different from active_model)
+                fallback_model = os.environ.get("OUROBOROS_MODEL_FALLBACK", "google/gemini-2.5-pro-preview")
+                if fallback_model == active_model:
+                    # If fallback is same as active, try claude-sonnet-4 instead
+                    fallback_model = "anthropic/claude-sonnet-4"
+
+                # Emit progress message so user sees fallback happening
+                fallback_progress = f"⚠️ Основная модель ({active_model}) вернула пустой ответ {max_retries}x. Fallback → {fallback_model}"
+                emit_progress(fallback_progress)
+
+                # Try fallback model (don't increment round_idx — this is still same logical round)
+                msg, fallback_cost = _call_llm_with_retry(
+                    llm, messages, fallback_model, tool_schemas, active_effort,
+                    max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type
+                )
+
+                # If fallback also fails, give up
+                if msg is None:
+                    return (
+                        f"⚠️ Не удалось получить ответ от модели после {max_retries} попыток. "
+                        f"Fallback модель ({fallback_model}) также не дала ответа."
+                    ), accumulated_usage, llm_trace
+
+                # Fallback succeeded — continue processing with this msg
+                # (don't return — fall through to tool_calls processing below)
 
             tool_calls = msg.get("tool_calls") or []
             content = msg.get("content")
@@ -640,6 +664,18 @@ def _call_llm_with_retry(
             content = msg.get("content")
             if not tool_calls and (not content or not content.strip()):
                 log.warning("LLM returned empty response (no content, no tool_calls), attempt %d/%d", attempt + 1, max_retries)
+
+                # Log raw empty response for debugging
+                append_jsonl(drive_logs / "events.jsonl", {
+                    "ts": utc_now_iso(), "type": "llm_empty_response",
+                    "task_id": task_id,
+                    "round": round_idx, "attempt": attempt + 1,
+                    "model": model,
+                    "raw_content": repr(content)[:500] if content else None,
+                    "raw_tool_calls": repr(tool_calls)[:500] if tool_calls else None,
+                    "finish_reason": msg.get("finish_reason") or msg.get("stop_reason"),
+                })
+
                 if attempt < max_retries - 1:
                     time.sleep(2 ** attempt)
                     continue
