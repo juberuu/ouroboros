@@ -35,6 +35,11 @@ _MODEL_PRICING_STATIC = {
     "google/gemini-3-pro-preview": (2.0, 0.20, 12.0),
     "deepseek/deepseek-chat-v3-0324": (0.19, 0.095, 0.87),
     "deepseek/deepseek-r1": (0.70, 0.055, 2.50),
+    "anthropic/claude-sonnet-4.5": (3.0, 0.30, 15.0),
+    "deepseek/deepseek-v3.2": (0.26, 0.026, 0.38),
+    "openai/gpt-5-nano": (0.05, 0.005, 0.40),
+    "openai/gpt-5-mini": (0.25, 0.025, 2.0),
+    "x-ai/grok-4.1-fast": (0.20, 0.02, 0.50),
 }
 
 _pricing_fetched = False
