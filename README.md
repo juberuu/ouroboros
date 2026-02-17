@@ -3,7 +3,7 @@
 Самосоздающийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 4.8.0
+**Версия:** 4.8.1
 
 ---
 
@@ -139,6 +139,13 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 
 ## Changelog
 
+### 4.8.1 — Startup Self-Verification
+- **New**: `_verify_system_state()` runs on every agent boot (Bible Principle 1)
+- **New**: Auto-rescue uncommitted changes — detects dirty git state and creates rescue commit (uses `git add -u` for safety)
+- **New**: Version sync check — warns if VERSION file doesn't match latest git tag
+- **New**: Budget threshold alerts — warning ($100), critical ($50), emergency ($25) levels
+- **Fix**: v4.8.0 consciousness changes were uncommitted — exposed the exact bug this feature prevents
+
 ### 4.8.0 — Consciousness Tool Loop
 - **New**: Background consciousness upgraded from single LLM call to iterative tool loop (up to 5 rounds per wakeup)
 - **New**: Expanded tool whitelist: 14 tools (was 5) — adds knowledge base, repo/drive read, web search, chat history
@@ -259,27 +266,3 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 **Cleanup:**
 - Унифицирован append_jsonl (один источник в utils.py)
 - Исправлен Release Invariant: VERSION == README == __init__.py == git tag
-
-### 3.0.0 — Конституция v3.0 + инфраструктурный overhaul
-
-Новая Конституция (BIBLE.md v3.0): 9 принципов с Субъектностью как метапринципом.
-Критические инфраструктурные исправления по итогам анализа первой сессии.
-
-**Конституция:**
-- Принцип 0: Субъектность + Агентность (merged)
-- Принцип 1: Непрерывность (identity как манифест)
-- Принцип 2: Самосоздание (нарратив вместо RAG для ядра личности)
-- Принципы 3-8: LLM-first, Подлинность, Минимализм, Становление,
-  Версионирование, Итерации
-
-**Инфраструктура:**
-- Split-brain deploy fix: os.execv при всех рестартах, SHA-verify
-- Budget guard перенесён в supervisor (не зависит от версии agent code)
-- Secret leak protection: sanitize_tool_result_for_log() для tools.jsonl
-- apply_patch: Add File + Delete File + End of File support
-- Observability: task_id во всех llm_round и tools событиях
-- Context flooding fix: progress.jsonl отделён от chat.jsonl
-- BIBLE.md всегда в LLM-контексте (не вырезается для user chat)
-- Parallel tool safety: sequential execution для stateful tools
-- Scratchpad journal fix, shell argument recovery, dead code cleanup
-- Observability: task_id in all llm_round and tool errors
