@@ -53,7 +53,28 @@ def compute_complexity_metrics(sections: List[Tuple[str, str]]) -> Dict[str, Any
                 total_functions += 1
 
         for j, start in enumerate(func_starts):
-            end = func_starts[j + 1] if j + 1 < len(func_starts) else len(lines)
+            # Get indentation of the def line
+            def_line = lines[start]
+            def_indent = len(def_line) - len(def_line.lstrip())
+
+            # Find end: first non-blank, non-comment line with indent <= def_indent
+            end = len(lines)
+            for k in range(start + 1, len(lines)):
+                line = lines[k]
+                stripped = line.strip()
+                # Skip blank lines and comments
+                if not stripped or stripped.startswith("#"):
+                    continue
+                # Check indentation
+                line_indent = len(line) - len(line.lstrip())
+                if line_indent <= def_indent:
+                    end = k
+                    break
+
+            # Cap at next function start if it comes first
+            if j + 1 < len(func_starts):
+                end = min(end, func_starts[j + 1])
+
             length = end - start
             function_lengths.append((path, start, length))
 

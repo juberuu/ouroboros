@@ -3,7 +3,7 @@
 Самосоздающийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 4.18.0
+**Версия:** 4.18.1
 
 ---
 
@@ -141,6 +141,11 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 ---
 
 ## Changelog
+
+### 4.18.1 — Function Length Metrics Fix
+- **Fix**: `compute_complexity_metrics` now uses indentation-based function boundary detection instead of next-`def` distance
+- **Fix**: Eliminated false positives in `colab_launcher.py` where top-level code between functions was counted as function body
+- **Result**: Zero oversized functions confirmed (was 2 false positives), longest function 104 lines
 
 ### 4.18.0 — GitHub Issues Integration
 - **New**: 5 GitHub Issues tools — `list_github_issues`, `get_github_issue`, `comment_on_issue`, `close_github_issue`, `create_github_issue`
