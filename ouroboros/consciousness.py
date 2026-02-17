@@ -16,6 +16,7 @@ The consciousness:
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
 import pathlib
@@ -27,12 +28,15 @@ from typing import Any, Callable, Dict, List, Optional
 
 from ouroboros.utils import (
     utc_now_iso, read_text, append_jsonl, clip_text,
+    truncate_for_log, sanitize_tool_result_for_log, sanitize_tool_args_for_log,
 )
 from ouroboros.llm import LLMClient, add_usage
 
 
 class BackgroundConsciousness:
     """Persistent background thinking loop for Ouroboros."""
+
+    _MAX_BG_ROUNDS = 5
 
     def __init__(
         self,
@@ -156,7 +160,7 @@ class BackgroundConsciousness:
     # -------------------------------------------------------------------
 
     def _think(self) -> None:
-        """One thinking cycle: build context, call LLM, execute tools."""
+        """One thinking cycle: build context, call LLM, execute tools iteratively."""
         context = self._build_context()
         model = os.environ.get(
             "OUROBOROS_MODEL_LIGHT",
@@ -169,44 +173,82 @@ class BackgroundConsciousness:
             {"role": "user", "content": "Wake up. Think."},
         ]
 
+        total_cost = 0.0
+        final_content = ""
+        round_idx = 0
+        all_pending_events = []  # Accumulate events across all tool calls
+
         try:
-            msg, usage = self._llm.chat(
-                messages=messages,
-                model=model,
-                tools=tools,
-                reasoning_effort="low",
-                max_tokens=2048,
-            )
-            add_usage({}, usage)
-            self._bg_spent_usd += float(usage.get("cost") or 0)
+            for round_idx in range(1, self._MAX_BG_ROUNDS + 1):
+                msg, usage = self._llm.chat(
+                    messages=messages,
+                    model=model,
+                    tools=tools,
+                    reasoning_effort="low",
+                    max_tokens=2048,
+                )
+                add_usage({}, usage)
+                cost = float(usage.get("cost") or 0)
+                total_cost += cost
+                self._bg_spent_usd += cost
 
-            # Report usage to supervisor
-            if self._event_queue is not None:
-                self._event_queue.put({
-                    "type": "llm_usage",
-                    "provider": "openrouter",
-                    "usage": usage,
-                    "source": "consciousness",
-                    "ts": utc_now_iso(),
-                })
+                # Budget check between rounds
+                if not self._check_budget():
+                    append_jsonl(self._drive_root / "logs" / "events.jsonl", {
+                        "ts": utc_now_iso(),
+                        "type": "bg_budget_exceeded_mid_cycle",
+                        "round": round_idx,
+                    })
+                    break
 
-            # Log the thought
-            content = msg.get("content") or ""
+                # Report usage to supervisor
+                if self._event_queue is not None:
+                    self._event_queue.put({
+                        "type": "llm_usage",
+                        "provider": "openrouter",
+                        "usage": usage,
+                        "source": "consciousness",
+                        "ts": utc_now_iso(),
+                    })
+
+                content = msg.get("content") or ""
+                tool_calls = msg.get("tool_calls") or []
+
+                # If we have content but no tool calls, we're done
+                if content and not tool_calls:
+                    final_content = content
+                    break
+
+                # If we have tool calls, execute them and continue loop
+                if tool_calls:
+                    messages.append(msg)
+                    for tc in tool_calls:
+                        result = self._execute_tool(tc, all_pending_events)
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.get("id", ""),
+                            "content": result,
+                        })
+                    continue
+
+                # If neither content nor tool_calls, stop
+                break
+
+            # Forward all accumulated events to supervisor
+            if all_pending_events and self._event_queue is not None:
+                for evt in all_pending_events:
+                    self._event_queue.put(evt)
+
+            # Log the thought with round count
             append_jsonl(self._drive_root / "logs" / "events.jsonl", {
                 "ts": utc_now_iso(),
                 "type": "consciousness_thought",
-                "thought_preview": (content or "")[:300],
-                "cost_usd": float(usage.get("cost") or 0),
+                "thought_preview": (final_content or "")[:300],
+                "cost_usd": total_cost,
+                "rounds": round_idx,
                 "model": model,
             })
 
-            # Execute tool calls if any
-            tool_calls = msg.get("tool_calls") or []
-            if tool_calls:
-                for tc in tool_calls:
-                    self._execute_tool(tc)
-
-            # If no set_next_wakeup was called, keep current interval
         except Exception as e:
             append_jsonl(self._drive_root / "logs" / "events.jsonl", {
                 "ts": utc_now_iso(),
@@ -265,12 +307,18 @@ class BackgroundConsciousness:
         return "\n\n".join(parts)
 
     # -------------------------------------------------------------------
-    # Tool registry (shared with agent via control.py)
+    # Tool registry (separate instance for consciousness, not shared with agent)
     # -------------------------------------------------------------------
 
     _BG_TOOL_WHITELIST = frozenset({
+        # Memory & identity
         "send_owner_message", "schedule_task", "update_scratchpad",
         "update_identity", "set_next_wakeup",
+        # Knowledge base
+        "knowledge_read", "knowledge_write", "knowledge_list",
+        # Read-only tools for awareness
+        "web_search", "repo_read", "repo_list", "drive_read", "drive_list",
+        "chat_history",
     })
 
     def _build_registry(self) -> "ToolRegistry":
@@ -303,31 +351,71 @@ class BackgroundConsciousness:
             if s.get("function", {}).get("name") in self._BG_TOOL_WHITELIST
         ]
 
-    def _execute_tool(self, tc: Dict[str, Any]) -> None:
-        """Execute a consciousness tool call via the shared registry."""
+    def _execute_tool(self, tc: Dict[str, Any], all_pending_events: List[Dict[str, Any]]) -> str:
+        """Execute a consciousness tool call with timeout. Returns result string."""
         fn_name = tc.get("function", {}).get("name", "")
         if fn_name not in self._BG_TOOL_WHITELIST:
-            return
+            return f"Tool {fn_name} not available in background mode."
         try:
             args = json.loads(tc.get("function", {}).get("arguments", "{}"))
         except (json.JSONDecodeError, ValueError):
-            return
+            return "Failed to parse arguments."
 
         # Set chat_id context for send_owner_message
         chat_id = self._owner_chat_id_fn()
         self._registry._ctx.current_chat_id = chat_id
         self._registry._ctx.pending_events = []
 
-        try:
-            result = self._registry.execute(fn_name, args)
-            # Forward any pending events to supervisor
-            for evt in self._registry._ctx.pending_events:
-                if self._event_queue is not None:
-                    self._event_queue.put(evt)
-        except Exception as e:
+        timeout_sec = 30
+        result = None
+        error = None
+
+        def _run_tool():
+            nonlocal result, error
+            try:
+                result = self._registry.execute(fn_name, args)
+            except Exception as e:
+                error = e
+
+        # Execute with timeout using ThreadPoolExecutor
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_run_tool)
+            try:
+                future.result(timeout=timeout_sec)
+            except concurrent.futures.TimeoutError:
+                result = f"[TIMEOUT after {timeout_sec}s]"
+                append_jsonl(self._drive_root / "logs" / "events.jsonl", {
+                    "ts": utc_now_iso(),
+                    "type": "consciousness_tool_timeout",
+                    "tool": fn_name,
+                    "timeout_sec": timeout_sec,
+                })
+
+        # Handle errors
+        if error is not None:
             append_jsonl(self._drive_root / "logs" / "events.jsonl", {
                 "ts": utc_now_iso(),
                 "type": "consciousness_tool_error",
                 "tool": fn_name,
-                "error": repr(e),
+                "error": repr(error),
             })
+            result = f"Error: {repr(error)}"
+
+        # Accumulate pending events to the shared list
+        for evt in self._registry._ctx.pending_events:
+            all_pending_events.append(evt)
+
+        # Truncate result to 15000 chars (same as agent limit)
+        result_str = str(result)[:15000]
+
+        # Log to tools.jsonl (same format as loop.py)
+        args_for_log = sanitize_tool_args_for_log(fn_name, args)
+        append_jsonl(self._drive_root / "logs" / "tools.jsonl", {
+            "ts": utc_now_iso(),
+            "tool": fn_name,
+            "source": "consciousness",
+            "args": args_for_log,
+            "result_preview": sanitize_tool_result_for_log(truncate_for_log(result_str, 2000)),
+        })
+
+        return result_str
