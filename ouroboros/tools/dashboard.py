@@ -15,7 +15,7 @@ from typing import List
 import requests
 
 from ouroboros.tools.registry import ToolEntry, ToolContext
-from ouroboros.utils import read_text, run_cmd, short
+from ouroboros.utils import run_cmd, short
 
 log = logging.getLogger(__name__)
 
@@ -74,15 +74,15 @@ def _collect_data(ctx: ToolContext) -> dict:
     events = _read_jsonl_tail(os.path.join(drive, "logs", "events.jsonl"), 5000)
     breakdown = {}
     for e in events:
-        if e.get("event") == "llm_usage":
+        if e.get("type") == "llm_usage":
             cat = e.get("category", "other")
-            cost = e.get("cost_usd", 0) or 0
+            cost = e.get("cost", 0) or e.get("cost_usd", 0) or 0
             breakdown[cat] = round(breakdown.get(cat, 0) + cost, 4)
 
     # 3. Recent activity
     recent_activity = []
     for e in reversed(events[-50:]):
-        ev = e.get("event", "")
+        ev = e.get("type", "")
         if ev == "llm_usage":
             continue  # too noisy
         icon = "📡"
@@ -126,7 +126,8 @@ def _collect_data(ctx: ToolContext) -> dict:
             if f.endswith(".md"):
                 topic = f.replace(".md", "")
                 try:
-                    content = read_text(os.path.join(kb_dir, f))
+                    with open(os.path.join(kb_dir, f), encoding='utf-8') as file:
+                        content = file.read()
                     # First line as title, rest as preview
                     lines = content.strip().split('\n')
                     title = lines[0].lstrip('#').strip() if lines else topic
@@ -154,7 +155,11 @@ def _collect_data(ctx: ToolContext) -> dict:
 
     # 6. Version
     version_path = os.path.join(str(ctx.repo_dir), "VERSION")
-    version = read_text(version_path).strip() if os.path.exists(version_path) else "unknown"
+    if os.path.exists(version_path):
+        with open(version_path, encoding='utf-8') as f:
+            version = f.read().strip()
+    else:
+        version = "unknown"
 
     # Compile
     spent = round(state.get("spent_usd", 0), 2)
