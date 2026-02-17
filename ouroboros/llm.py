@@ -186,7 +186,7 @@ class LLMClient:
             tools_with_cache = [t for t in tools]  # shallow copy
             if tools_with_cache:
                 last_tool = {**tools_with_cache[-1]}  # copy last tool
-                last_tool["cache_control"] = {"type": "ephemeral"}
+                last_tool["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
                 tools_with_cache[-1] = last_tool
             kwargs["tools"] = tools_with_cache
             kwargs["tool_choice"] = tool_choice
