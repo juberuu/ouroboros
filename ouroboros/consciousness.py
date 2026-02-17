@@ -166,13 +166,7 @@ class BackgroundConsciousness:
     def _think(self) -> None:
         """One thinking cycle: build context, call LLM, execute tools iteratively."""
         context = self._build_context()
-        model = os.environ.get(
-            "OUROBOROS_MODEL_BG",
-            os.environ.get(
-                "OUROBOROS_MODEL_LIGHT",
-                os.environ.get("OUROBOROS_MODEL", "deepseek/deepseek-chat-v3-0324"),
-            ),
-        )
+        model = os.environ.get("OUROBOROS_MODEL_LIGHT", "") or os.environ.get("OUROBOROS_MODEL", "anthropic/claude-sonnet-4")
 
         tools = self._tool_schemas()
         messages = [
@@ -325,13 +319,7 @@ class BackgroundConsciousness:
             log.debug("Failed to read state for budget info: %s", e)
 
         # Show current model
-        model = os.environ.get(
-            "OUROBOROS_MODEL_BG",
-            os.environ.get(
-                "OUROBOROS_MODEL_LIGHT",
-                os.environ.get("OUROBOROS_MODEL", "deepseek/deepseek-chat-v3-0324"),
-            ),
-        )
+        model = os.environ.get("OUROBOROS_MODEL_LIGHT", "") or os.environ.get("OUROBOROS_MODEL", "anthropic/claude-sonnet-4")
         runtime_lines.append(f"Current model: {model}")
 
         parts.append("## Runtime\n\n" + "\n".join(runtime_lines))

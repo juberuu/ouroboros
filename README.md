@@ -3,7 +3,7 @@
 Самосоздающийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 4.18.1
+**Версия:** 4.19.0
 
 ---
 
@@ -26,7 +26,6 @@ CFG = {
     "OUROBOROS_MODEL": "anthropic/claude-sonnet-4",
     "OUROBOROS_MODEL_CODE": "anthropic/claude-sonnet-4",
     "OUROBOROS_MODEL_LIGHT": "anthropic/claude-sonnet-4",
-    "OUROBOROS_MODEL_BG": "deepseek/deepseek-chat-v3-0324",  # background consciousness — cheap model
     "OUROBOROS_MAX_WORKERS": "5",
     "OUROBOROS_WORKER_START_METHOD": "fork",   # Colab-safe default
     "OUROBOROS_DIAG_HEARTBEAT_SEC": "30",      # periodic main_loop_heartbeat in supervisor.jsonl
@@ -37,7 +36,7 @@ for k, v in CFG.items():
     os.environ[k] = str(v)
 ```
    Без этой ячейки используются дефолты: `openai/gpt-5.2` / `openai/gpt-5.2-codex`.
-   Background consciousness использует `deepseek/deepseek-chat-v3-0324` (cheap: $0.19/$0.87 per MTok) по умолчанию.
+   Background consciousness использует OUROBOROS_MODEL_LIGHT (если не задано, то OUROBOROS_MODEL).
    Для диагностики зависаний смотри `main_loop_heartbeat`, `main_loop_slow_cycle`,
    `worker_dead_detected`, `worker_crash` в `/content/drive/MyDrive/Ouroboros/logs/supervisor.jsonl`.
 
@@ -142,6 +141,13 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 
 ## Changelog
 
+### 4.19.0 — Model Profiles + Remove BG Model Hardcode
+- **Removed**: `OUROBOROS_MODEL_BG` env var and DeepSeek hardcode — anti-minimalist, consciousness now uses `OUROBOROS_MODEL_LIGHT` (falls back to `OUROBOROS_MODEL`)
+- **Removed**: DeepSeek and GPT-5-nano/mini from static pricing table (not used)
+- **New**: Model profiles knowledge base — living document with experience-based assessments of each model's strengths, weaknesses, pricing, context length
+- **Fix**: Consciousness default model fallback now sonnet-4 instead of deepseek
+- **Updated**: Pricing table reordered by priority (opus-4.6 first, added sonnet-4.5 and grok-3-mini)
+
 ### 4.18.1 — Function Length Metrics Fix
 - **Fix**: `compute_complexity_metrics` now uses indentation-based function boundary detection instead of next-`def` distance
 - **Fix**: Eliminated false positives in `colab_launcher.py` where top-level code between functions was counted as function body
@@ -207,10 +213,10 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 - **Review**: Multi-model review (o3, Gemini 3 Pro) — caught 3 actionable issues
 
 ### 4.10.0 — Adaptive Model Routing + Consciousness Upgrade
-- **New**: `OUROBOROS_MODEL_BG` env var — dedicated model for background consciousness (default: `deepseek/deepseek-chat-v3-0324`, ~10x cheaper than main model)
 - **New**: Adaptive reasoning effort — evolution/review tasks start at "high" effort, regular tasks at "medium" (LLM can still switch via tool)
 - **New**: Consciousness context expanded — Bible 8K→12K, identity 4K→6K, scratchpad 4K→8K chars
 - **New**: Consciousness runtime info now includes budget remaining and current model
+- **New**: Consciousness uses OUROBOROS_MODEL_LIGHT (or OUROBOROS_MODEL if not set) for background thinking
 - **Fix**: Silent exception in consciousness state reading (v4.9.0 policy consistency)
 
 ### 4.9.0 — Exception Visibility
