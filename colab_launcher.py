@@ -94,9 +94,17 @@ TELEGRAM_BOT_TOKEN = get_secret("TELEGRAM_BOT_TOKEN", required=True)
 TOTAL_BUDGET_DEFAULT = get_secret("TOTAL_BUDGET", required=True)
 GITHUB_TOKEN = get_secret("GITHUB_TOKEN", required=True)
 
+# Robust TOTAL_BUDGET parsing — handles \r\n, spaces, and other junk from Colab Secrets
+# Example: user enters "8 800" → Colab stores as "8\r\n800" → we need 8800
 try:
-    TOTAL_BUDGET_LIMIT = float(TOTAL_BUDGET_DEFAULT)
-except Exception:
+    import re
+    _raw_budget = str(TOTAL_BUDGET_DEFAULT or "")
+    _clean_budget = re.sub(r'[^0-9.\-]', '', _raw_budget)  # keep only digits, dot, minus
+    TOTAL_BUDGET_LIMIT = float(_clean_budget) if _clean_budget else 0.0
+    if _raw_budget.strip() != _clean_budget:
+        log.warning(f"TOTAL_BUDGET cleaned: {_raw_budget!r} → {TOTAL_BUDGET_LIMIT}")
+except Exception as e:
+    log.warning(f"Failed to parse TOTAL_BUDGET ({TOTAL_BUDGET_DEFAULT!r}): {e}")
     TOTAL_BUDGET_LIMIT = 0.0
 
 OPENAI_API_KEY = get_secret("OPENAI_API_KEY", default="")
