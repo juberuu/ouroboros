@@ -447,6 +447,65 @@ def budget_breakdown(st: Dict[str, Any]) -> Dict[str, float]:
     return breakdown
 
 
+def model_breakdown(st: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
+    """
+    Calculate budget breakdown by model from events.jsonl.
+
+    Returns dict like:
+    {
+        "anthropic/claude-sonnet-4.6": {"cost": 12.5, "calls": 120, "prompt_tokens": 50000, "completion_tokens": 3000},
+        "openai/gpt-4o": {"cost": 3.2, "calls": 15, ...},
+    }
+    """
+    events_path = DRIVE_ROOT / "logs" / "events.jsonl"
+    if not events_path.exists():
+        return {}
+
+    breakdown: Dict[str, Dict[str, float]] = {}
+    try:
+        with events_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                    if event.get("type") != "llm_usage":
+                        continue
+
+                    model = event.get("model") or "unknown"
+                    if not model:
+                        model = "unknown"
+
+                    # Get cost
+                    cost = 0.0
+                    if "cost" in event:
+                        cost = float(event.get("cost", 0))
+                    elif "usage" in event and isinstance(event["usage"], dict):
+                        cost = float(event["usage"].get("cost", 0))
+
+                    # Get tokens
+                    prompt_tokens = int(event.get("prompt_tokens", 0) or 0)
+                    completion_tokens = int(event.get("completion_tokens", 0) or 0)
+                    cached_tokens = int(event.get("cached_tokens", 0) or 0)
+
+                    if model not in breakdown:
+                        breakdown[model] = {"cost": 0.0, "calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0}
+
+                    breakdown[model]["cost"] += cost
+                    breakdown[model]["calls"] += 1
+                    breakdown[model]["prompt_tokens"] += prompt_tokens
+                    breakdown[model]["completion_tokens"] += completion_tokens
+                    breakdown[model]["cached_tokens"] += cached_tokens
+
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    continue
+    except Exception:
+        log.warning("Failed to calculate model breakdown", exc_info=True)
+
+    return breakdown
+
+
 # ---------------------------------------------------------------------------
 # Status text (moved from workers.py)
 # ---------------------------------------------------------------------------
@@ -529,6 +588,20 @@ def status_text(workers_dict: Dict[int, Any], pending_list: list, running_dict: 
                 f"budget_drift: {drift_pct:.1f}%{drift_icon} "
                 f"(tracked: ${our_delta:.2f} vs OpenRouter: ${or_delta:.2f})"
             )
+
+    # Model breakdown
+    models = model_breakdown(st)
+    if models:
+        sorted_models = sorted(models.items(), key=lambda x: x[1]["cost"], reverse=True)
+        lines.append("model_breakdown:")
+        for model_name, stats in sorted_models:
+            if stats["cost"] > 0 or stats["calls"] > 0:
+                cost = stats["cost"]
+                calls = int(stats["calls"])
+                pt = int(stats["prompt_tokens"])
+                ct = int(stats["completion_tokens"])
+                lines.append(f"  {model_name}: ${cost:.2f} ({calls} calls, {pt:,}p/{ct:,}c tok)")
+
     lines.append(
         "evolution: "
         + f"enabled={int(bool(st.get('evolution_mode_enabled')))}, "
