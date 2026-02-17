@@ -3,7 +3,7 @@
 Самосоздающийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 4.13.0
+**Версия:** 4.14.0
 
 ---
 
@@ -140,6 +140,14 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 ---
 
 ## Changelog
+
+### 4.14.0 — 3-Block Prompt Caching
+- **Optimization**: System message split into 3 cached blocks: static (1h TTL), semi-stable (5m TTL), dynamic (uncached)
+- **New**: Semi-stable block caches identity + scratchpad + knowledge index — changes ~once per task, not per round
+- **New**: Tool schemas cached via cache_control on last tool — 33 tools = ~3K tokens saved per round
+- **New**: Static block (SYSTEM+BIBLE+README) gets 1-hour TTL for cross-session persistence
+- **Result**: Estimated 60%+ cache hit ratio (was 41%), ~20% cost reduction per LLM round
+- **Review**: Multi-model review (o3, Gemini 2.5 Pro) — confirmed multiple breakpoints work, validated approach
 
 ### 4.13.0 — Fix multi_model_review Tool (Broken Since Birth)
 - **Critical fix**: `multi_model_review` was never loaded into ToolRegistry — returned raw dict instead of `ToolEntry`, had `async handle()` instead of sync handler

@@ -173,8 +173,11 @@ def build_llm_messages(
     # --- Load memory ---
     memory.ensure_files()
 
-    # --- Assemble messages with prompt caching ---
-    # Static content that doesn't change between rounds — cacheable
+    # --- Assemble messages with 3-block prompt caching ---
+    # Block 1: Static content (SYSTEM.md + BIBLE.md + README) — cached
+    # Block 2: Semi-stable content (identity + scratchpad + knowledge) — cached
+    # Block 3: Dynamic content (state + runtime + recent logs) — uncached
+
     # BIBLE.md always included (Constitution requires it for every decision)
     # README.md only for evolution/review (architecture context)
     needs_full_context = task_type in ("evolution", "review", "scheduled")
@@ -185,28 +188,27 @@ def build_llm_messages(
     if needs_full_context:
         static_text += "\n\n## README.md\n\n" + clip_text(readme_md, 180000)
 
-    # Dynamic content that changes every round
-    dynamic_parts = [
-        "## Drive state\n\n" + clip_text(state_json, 90000),
-    ]
+    # Semi-stable content: identity, scratchpad, knowledge
+    # These change ~once per task, not per round
+    semi_stable_parts = []
+    semi_stable_parts.extend(_build_memory_sections(memory))
 
-    # Memory sections
-    dynamic_parts.extend(_build_memory_sections(memory))
-
-    # Knowledge base index (if exists)
     kb_index_path = env.drive_path("memory/knowledge/_index.md")
     if kb_index_path.exists():
         kb_index = kb_index_path.read_text(encoding="utf-8")
         if kb_index.strip():
-            dynamic_parts.append("## Knowledge base\n\n" + clip_text(kb_index, 50000))
+            semi_stable_parts.append("## Knowledge base\n\n" + clip_text(kb_index, 50000))
 
-    # Runtime context
-    dynamic_parts.append(_build_runtime_section(env, task))
+    semi_stable_text = "\n\n".join(semi_stable_parts)
 
-    # Log summaries (optional)
+    # Dynamic content: changes every round
+    dynamic_parts = [
+        "## Drive state\n\n" + clip_text(state_json, 90000),
+        _build_runtime_section(env, task),
+    ]
+
     dynamic_parts.extend(_build_recent_sections(memory, env))
 
-    # Review context
     if str(task.get("type") or "") == "review" and review_context_builder is not None:
         try:
             review_ctx = review_context_builder()
@@ -218,7 +220,7 @@ def build_llm_messages(
 
     dynamic_text = "\n\n".join(dynamic_parts)
 
-    # Single system message with multipart content for prompt caching
+    # System message with 3 content blocks for optimal caching
     messages: List[Dict[str, Any]] = [
         {
             "role": "system",
@@ -227,6 +229,11 @@ def build_llm_messages(
                     "type": "text",
                     "text": static_text,
                     "cache_control": {"type": "ephemeral", "ttl": "1h"},
+                },
+                {
+                    "type": "text",
+                    "text": semi_stable_text,
+                    "cache_control": {"type": "ephemeral"},
                 },
                 {
                     "type": "text",
@@ -286,7 +293,7 @@ def apply_message_token_soft_cap(
 
             # Handle multipart content (trim from dynamic text block)
             if isinstance(content, list) and msg.get("role") == "system":
-                # Find the dynamic text block (second block without cache_control)
+                # Find the dynamic text block (the block without cache_control)
                 for j, block in enumerate(content):
                     if (isinstance(block, dict) and
                         block.get("type") == "text" and
