@@ -466,14 +466,14 @@ def respawn_worker(wid: int) -> None:
 
 def assign_tasks() -> None:
     from supervisor import queue
-    from supervisor.state import budget_pct
+    from supervisor.state import budget_remaining, EVOLUTION_BUDGET_RESERVE
     with _queue_lock:
         for w in WORKERS.values():
             if w.busy_task_id is None and PENDING:
                 # Find first suitable task (skip over-budget evolution tasks)
                 chosen_idx = None
                 for i, candidate in enumerate(PENDING):
-                    if str(candidate.get("type") or "") == "evolution" and budget_pct(load_state()) >= 95.0:
+                    if str(candidate.get("type") or "") == "evolution" and budget_remaining(load_state()) < EVOLUTION_BUDGET_RESERVE:
                         continue
                     chosen_idx = i
                     break

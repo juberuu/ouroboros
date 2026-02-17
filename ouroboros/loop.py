@@ -19,18 +19,20 @@ from ouroboros.tools.registry import ToolRegistry
 from ouroboros.context import compact_tool_history
 from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log, sanitize_tool_result_for_log
 
-# Approximate pricing per 1M tokens (input/cached_input/output)
+# Pricing from OpenRouter API (2026-02-17). Update periodically via /api/v1/models.
 MODEL_PRICING = {
     "anthropic/claude-sonnet-4": (3.0, 0.30, 15.0),
     "anthropic/claude-opus-4": (15.0, 1.50, 75.0),
     "openai/o3": (2.0, 0.50, 8.0),
-    "openai/o3-pro": (20.0, 5.0, 80.0),
+    "openai/o3-pro": (20.0, 0.0, 80.0),  # no cache pricing listed
+    "openai/o4-mini": (1.10, 0.275, 4.40),
     "openai/gpt-4.1": (2.0, 0.50, 8.0),
-    "openai/gpt-5.2-codex": (2.0, 0.50, 8.0),
-    "google/gemini-2.5-pro-preview": (1.25, 0.3125, 10.0),
-    "google/gemini-3-pro-preview": (1.25, 0.3125, 10.0),
-    "deepseek/deepseek-chat-v3-0324": (0.27, 0.07, 1.10),
-    "deepseek/deepseek-r1": (0.55, 0.14, 2.19),
+    "openai/gpt-5.2": (1.75, 0.175, 14.0),
+    "openai/gpt-5.2-codex": (1.75, 0.175, 14.0),
+    "google/gemini-2.5-pro-preview": (1.25, 0.125, 10.0),
+    "google/gemini-3-pro-preview": (2.0, 0.20, 12.0),
+    "deepseek/deepseek-chat-v3-0324": (0.19, 0.095, 0.87),
+    "deepseek/deepseek-r1": (0.70, 0.0, 2.50),
 }
 
 def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int,

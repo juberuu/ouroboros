@@ -31,6 +31,54 @@ def add_usage(total: Dict[str, Any], usage: Dict[str, Any]) -> None:
         total["cost"] = float(total.get("cost") or 0) + float(usage["cost"])
 
 
+def fetch_openrouter_pricing() -> Dict[str, Tuple[float, float, float]]:
+    """
+    Fetch current pricing from OpenRouter API.
+
+    Returns dict of {model_id: (input_per_1m, cached_per_1m, output_per_1m)}.
+    Returns empty dict on failure.
+    """
+    try:
+        import requests
+        url = "https://openrouter.ai/api/v1/models"
+        resp = requests.get(url, timeout=10)
+        if resp.status_code != 200:
+            return {}
+
+        data = resp.json()
+        models = data.get("data", [])
+
+        # Prefixes we care about
+        prefixes = ("anthropic/", "openai/", "google/", "deepseek/", "meta-llama/")
+
+        pricing_dict = {}
+        for model in models:
+            model_id = model.get("id", "")
+            if not model_id.startswith(prefixes):
+                continue
+
+            pricing = model.get("pricing", {})
+            # OpenRouter pricing is in dollars per token, multiply by 1M to get per-million
+            prompt_price = float(pricing.get("prompt", 0)) * 1_000_000
+            completion_price = float(pricing.get("completion", 0)) * 1_000_000
+
+            # Cached pricing: OpenRouter uses "prompt_cached" for cache hits
+            # For cache writes, we approximate as half of prompt price (common pattern)
+            # Some models don't expose cache_write separately, so we use this heuristic
+            cached_price = float(pricing.get("prompt_cached", prompt_price * 0.1)) * 1_000_000
+
+            pricing_dict[model_id] = (
+                round(prompt_price, 2),
+                round(cached_price, 2),
+                round(completion_price, 2),
+            )
+
+        return pricing_dict
+
+    except Exception:
+        return {}
+
+
 class LLMClient:
     """Обёртка над OpenRouter API. Все LLM-вызовы идут через этот класс."""
 

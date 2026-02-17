@@ -254,12 +254,22 @@ def init_state() -> Dict[str, Any]:
 # Budget tracking (moved from workers.py)
 # ---------------------------------------------------------------------------
 TOTAL_BUDGET_LIMIT: float = 0.0
+EVOLUTION_BUDGET_RESERVE: float = 50.0  # Stop evolution when remaining < this
 
 
 def set_budget_limit(limit: float) -> None:
     """Set total budget limit for budget_pct calculation."""
     global TOTAL_BUDGET_LIMIT
     TOTAL_BUDGET_LIMIT = limit
+
+
+def budget_remaining(st: Dict[str, Any]) -> float:
+    """Calculate remaining budget in USD."""
+    spent = float(st.get("spent_usd") or 0.0)
+    total = float(TOTAL_BUDGET_LIMIT or 0.0)
+    if total <= 0:
+        return float('inf')  # No limit set
+    return max(0.0, total - spent)
 
 
 def check_openrouter_ground_truth() -> Optional[Dict[str, float]]:
