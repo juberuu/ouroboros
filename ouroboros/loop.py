@@ -323,6 +323,121 @@ def _execute_with_timeout(
                 )
 
 
+def _handle_tool_calls(
+    tool_calls: List[Dict[str, Any]],
+    tools: ToolRegistry,
+    drive_logs: pathlib.Path,
+    task_id: str,
+    stateful_executor: _StatefulToolExecutor,
+    messages: List[Dict[str, Any]],
+    llm_trace: Dict[str, Any],
+    emit_progress: Callable[[str], None],
+) -> int:
+    """
+    Execute tool calls and append results to messages.
+
+    Returns: Number of errors encountered
+    """
+    # Parallelize only for a strict read-only whitelist; all calls wrapped with timeout.
+    can_parallel = (
+        len(tool_calls) > 1 and
+        all(
+            tc.get("function", {}).get("name") in READ_ONLY_PARALLEL_TOOLS
+            for tc in tool_calls
+        )
+    )
+
+    if not can_parallel:
+        results = [
+            _execute_with_timeout(tools, tc, drive_logs,
+                                  tools.get_timeout(tc["function"]["name"]), task_id,
+                                  stateful_executor)
+            for tc in tool_calls
+        ]
+    else:
+        max_workers = min(len(tool_calls), 8)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_index = {
+                executor.submit(
+                    _execute_with_timeout, tools, tc, drive_logs,
+                    tools.get_timeout(tc["function"]["name"]), task_id,
+                    stateful_executor,
+                ): idx
+                for idx, tc in enumerate(tool_calls)
+            }
+            results = [None] * len(tool_calls)
+            for future in as_completed(future_to_index):
+                idx = future_to_index[future]
+                results[idx] = future.result()
+
+    # Process results in original order
+    return _process_tool_results(results, messages, llm_trace, emit_progress)
+
+
+def _handle_text_response(
+    content: Optional[str],
+    llm_trace: Dict[str, Any],
+    accumulated_usage: Dict[str, Any],
+) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+    """
+    Handle LLM response without tool calls (final response).
+
+    Returns: (final_text, accumulated_usage, llm_trace)
+    """
+    if content and content.strip():
+        llm_trace["assistant_notes"].append(content.strip()[:320])
+    return (content or ""), accumulated_usage, llm_trace
+
+
+def _check_budget_limits(
+    budget_remaining_usd: Optional[float],
+    accumulated_usage: Dict[str, Any],
+    round_idx: int,
+    messages: List[Dict[str, Any]],
+    llm: LLMClient,
+    active_model: str,
+    active_effort: str,
+    max_retries: int,
+    drive_logs: pathlib.Path,
+    task_id: str,
+    event_queue: Optional[queue.Queue],
+    llm_trace: Dict[str, Any],
+) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
+    """
+    Check budget limits and handle budget overrun.
+
+    Returns:
+        None if budget is OK (continue loop)
+        (final_text, accumulated_usage, llm_trace) if budget exceeded (stop loop)
+    """
+    if budget_remaining_usd is None:
+        return None
+
+    task_cost = accumulated_usage.get("cost", 0)
+    budget_pct = task_cost / budget_remaining_usd if budget_remaining_usd > 0 else 1.0
+
+    if budget_pct > 0.5:
+        # Hard stop — protect the budget
+        finish_reason = f"Задача потратила ${task_cost:.3f} (>50% от остатка ${budget_remaining_usd:.2f}). Бюджет исчерпан."
+        messages.append({"role": "system", "content": f"[BUDGET LIMIT] {finish_reason} Дай финальный ответ сейчас."})
+        try:
+            final_msg, final_cost = _call_llm_with_retry(
+                llm, messages, active_model, None, active_effort,
+                max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage
+            )
+            if final_msg:
+                return (final_msg.get("content") or finish_reason), accumulated_usage, llm_trace
+            return finish_reason, accumulated_usage, llm_trace
+        except Exception:
+            log.warning("Failed to get final response after budget limit", exc_info=True)
+            return finish_reason, accumulated_usage, llm_trace
+    elif budget_pct > 0.3 and round_idx % 10 == 0:
+        # Soft nudge every 10 rounds when spending is significant
+        messages.append({"role": "system", "content": f"[INFO] Задача потратила ${task_cost:.3f} из ${budget_remaining_usd:.2f}. Если можешь — завершай."})
+
+    return None
+
+
 def run_llm_loop(
     messages: List[Dict[str, Any]],
     tools: ToolRegistry,
@@ -403,9 +518,7 @@ def run_llm_loop(
             content = msg.get("content")
             # No tool calls — final response
             if not tool_calls:
-                if content and content.strip():
-                    llm_trace["assistant_notes"].append(content.strip()[:320])
-                return (content or ""), accumulated_usage, llm_trace
+                return _handle_text_response(content, llm_trace, accumulated_usage)
 
             # Process tool calls
             messages.append({"role": "assistant", "content": content or "", "tool_calls": tool_calls})
@@ -414,65 +527,20 @@ def run_llm_loop(
                 emit_progress(content.strip())
                 llm_trace["assistant_notes"].append(content.strip()[:320])
 
-            # Parallelize only for a strict read-only whitelist; all calls wrapped with timeout.
-            can_parallel = (
-                len(tool_calls) > 1 and
-                all(
-                    tc.get("function", {}).get("name") in READ_ONLY_PARALLEL_TOOLS
-                    for tc in tool_calls
-                )
+            error_count = _handle_tool_calls(
+                tool_calls, tools, drive_logs, task_id, stateful_executor,
+                messages, llm_trace, emit_progress
             )
-
-            if not can_parallel:
-                results = [
-                    _execute_with_timeout(tools, tc, drive_logs,
-                                          tools.get_timeout(tc["function"]["name"]), task_id,
-                                          stateful_executor)
-                    for tc in tool_calls
-                ]
-            else:
-                max_workers = min(len(tool_calls), 8)
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    future_to_index = {
-                        executor.submit(
-                            _execute_with_timeout, tools, tc, drive_logs,
-                            tools.get_timeout(tc["function"]["name"]), task_id,
-                            stateful_executor,
-                        ): idx
-                        for idx, tc in enumerate(tool_calls)
-                    }
-                    results = [None] * len(tool_calls)
-                    for future in as_completed(future_to_index):
-                        idx = future_to_index[future]
-                        results[idx] = future.result()
-
-            # Process results in original order
-            error_count = _process_tool_results(results, messages, llm_trace, emit_progress)
 
             # --- Budget guard ---
             # LLM decides when to stop (Bible П0, П3). We only enforce hard budget limit.
-            if budget_remaining_usd is not None:
-                task_cost = accumulated_usage.get("cost", 0)
-                budget_pct = task_cost / budget_remaining_usd if budget_remaining_usd > 0 else 1.0
-
-                if budget_pct > 0.5:
-                    # Hard stop — protect the budget
-                    finish_reason = f"Задача потратила ${task_cost:.3f} (>50% от остатка ${budget_remaining_usd:.2f}). Бюджет исчерпан."
-                    messages.append({"role": "system", "content": f"[BUDGET LIMIT] {finish_reason} Дай финальный ответ сейчас."})
-                    try:
-                        final_msg, final_cost = _call_llm_with_retry(
-                            llm, messages, active_model, None, active_effort,
-                            max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage
-                        )
-                        if final_msg:
-                            return (final_msg.get("content") or finish_reason), accumulated_usage, llm_trace
-                        return finish_reason, accumulated_usage, llm_trace
-                    except Exception:
-                        log.warning("Failed to get final response after budget limit", exc_info=True)
-                        return finish_reason, accumulated_usage, llm_trace
-                elif budget_pct > 0.3 and round_idx % 10 == 0:
-                    # Soft nudge every 10 rounds when spending is significant
-                    messages.append({"role": "system", "content": f"[INFO] Задача потратила ${task_cost:.3f} из ${budget_remaining_usd:.2f}. Если можешь — завершай."})
+            budget_result = _check_budget_limits(
+                budget_remaining_usd, accumulated_usage, round_idx, messages,
+                llm, active_model, active_effort, max_retries, drive_logs,
+                task_id, event_queue, llm_trace
+            )
+            if budget_result is not None:
+                return budget_result
 
     finally:
         # Cleanup thread-sticky executor for stateful tools

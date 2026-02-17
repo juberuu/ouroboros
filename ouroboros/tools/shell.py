@@ -74,6 +74,90 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
         return f"⚠️ SHELL_ERROR: {e}"
 
 
+def _run_claude_cli(work_dir: str, prompt: str, env: dict) -> subprocess.CompletedProcess:
+    """Run Claude CLI with permission-mode fallback."""
+    claude_bin = shutil.which("claude")
+    cmd = [
+        claude_bin, "-p", prompt,
+        "--output-format", "json",
+        "--max-turns", "12",
+        "--tools", "Read,Edit,Grep,Glob",
+    ]
+
+    # Try --permission-mode first, fallback to --dangerously-skip-permissions
+    perm_mode = os.environ.get("OUROBOROS_CLAUDE_CODE_PERMISSION_MODE", "bypassPermissions").strip()
+    primary_cmd = cmd + ["--permission-mode", perm_mode]
+    legacy_cmd = cmd + ["--dangerously-skip-permissions"]
+
+    res = subprocess.run(
+        primary_cmd, cwd=work_dir,
+        capture_output=True, text=True, timeout=600, env=env,
+    )
+
+    if res.returncode != 0:
+        combined = ((res.stdout or "") + "\n" + (res.stderr or "")).lower()
+        if "--permission-mode" in combined and any(
+            m in combined for m in ("unknown option", "unknown argument", "unrecognized option", "unexpected argument")
+        ):
+            res = subprocess.run(
+                legacy_cmd, cwd=work_dir,
+                capture_output=True, text=True, timeout=600, env=env,
+            )
+
+    return res
+
+
+def _check_uncommitted_changes(repo_dir: pathlib.Path) -> str:
+    """Check git status after edit, return warning string or empty string."""
+    try:
+        status_res = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if status_res.returncode == 0 and status_res.stdout.strip():
+            diff_res = subprocess.run(
+                ["git", "diff", "--stat"],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if diff_res.returncode == 0 and diff_res.stdout.strip():
+                return (
+                    f"\n\n⚠️ UNCOMMITTED CHANGES detected after Claude Code edit:\n"
+                    f"{diff_res.stdout.strip()}\n"
+                    f"Remember to run git_status and repo_commit_push!"
+                )
+    except Exception as e:
+        log.debug("Failed to check git status after claude_code_edit: %s", e, exc_info=True)
+    return ""
+
+
+def _parse_claude_output(stdout: str, ctx: ToolContext) -> str:
+    """Parse JSON output and emit cost event, return result string."""
+    try:
+        payload = json.loads(stdout)
+        out: Dict[str, Any] = {
+            "result": payload.get("result", ""),
+            "session_id": payload.get("session_id"),
+        }
+        if isinstance(payload.get("total_cost_usd"), (int, float)):
+            ctx.pending_events.append({
+                "type": "llm_usage",
+                "provider": "claude_code_cli",
+                "usage": {"cost": float(payload["total_cost_usd"])},
+                "source": "claude_code_edit",
+                "ts": utc_now_iso(),
+            })
+        return json.dumps(out, ensure_ascii=False, indent=2)
+    except Exception:
+        log.debug("Failed to parse claude_code_edit JSON output", exc_info=True)
+        return stdout
+
+
 def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
     """Delegate code edits to Claude Code CLI."""
     from ouroboros.tools.git import _acquire_git_lock, _release_git_lock
@@ -119,32 +203,7 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
         if local_bin not in env.get("PATH", ""):
             env["PATH"] = f"{local_bin}:{env.get('PATH', '')}"
 
-        cmd = [
-            claude_bin, "-p", full_prompt,
-            "--output-format", "json",
-            "--max-turns", "12",
-            "--tools", "Read,Edit,Grep,Glob",
-        ]
-
-        # Try --permission-mode first, fallback to --dangerously-skip-permissions
-        perm_mode = os.environ.get("OUROBOROS_CLAUDE_CODE_PERMISSION_MODE", "bypassPermissions").strip()
-        primary_cmd = cmd + ["--permission-mode", perm_mode]
-        legacy_cmd = cmd + ["--dangerously-skip-permissions"]
-
-        res = subprocess.run(
-            primary_cmd, cwd=work_dir,
-            capture_output=True, text=True, timeout=600, env=env,
-        )
-
-        if res.returncode != 0:
-            combined = ((res.stdout or "") + "\n" + (res.stderr or "")).lower()
-            if "--permission-mode" in combined and any(
-                m in combined for m in ("unknown option", "unknown argument", "unrecognized option", "unexpected argument")
-            ):
-                res = subprocess.run(
-                    legacy_cmd, cwd=work_dir,
-                    capture_output=True, text=True, timeout=600, env=env,
-                )
+        res = _run_claude_cli(work_dir, full_prompt, env)
 
         stdout = (res.stdout or "").strip()
         stderr = (res.stderr or "").strip()
@@ -154,30 +213,9 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
             stdout = "OK: Claude Code completed with empty output."
 
         # Check for uncommitted changes and append warning BEFORE finally block
-        try:
-            status_res = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=ctx.repo_dir,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if status_res.returncode == 0 and status_res.stdout.strip():
-                diff_res = subprocess.run(
-                    ["git", "diff", "--stat"],
-                    cwd=ctx.repo_dir,
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
-                if diff_res.returncode == 0 and diff_res.stdout.strip():
-                    stdout += (
-                        f"\n\n⚠️ UNCOMMITTED CHANGES detected after Claude Code edit:\n"
-                        f"{diff_res.stdout.strip()}\n"
-                        f"Remember to run git_status and repo_commit_push!"
-                    )
-        except Exception as e:
-            log.debug("Failed to check git status after claude_code_edit: %s", e, exc_info=True)
+        warning = _check_uncommitted_changes(ctx.repo_dir)
+        if warning:
+            stdout += warning
 
     except subprocess.TimeoutExpired:
         return "⚠️ CLAUDE_CODE_TIMEOUT: exceeded 600s."
@@ -187,24 +225,7 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
         _release_git_lock(lock)
 
     # Parse JSON output and account cost
-    try:
-        payload = json.loads(stdout)
-        out: Dict[str, Any] = {
-            "result": payload.get("result", ""),
-            "session_id": payload.get("session_id"),
-        }
-        if isinstance(payload.get("total_cost_usd"), (int, float)):
-            ctx.pending_events.append({
-                "type": "llm_usage",
-                "provider": "claude_code_cli",
-                "usage": {"cost": float(payload["total_cost_usd"])},
-                "source": "claude_code_edit",
-                "ts": utc_now_iso(),
-            })
-        return json.dumps(out, ensure_ascii=False, indent=2)
-    except Exception:
-        log.debug("Failed to parse claude_code_edit JSON output", exc_info=True)
-        return stdout
+    return _parse_claude_output(stdout, ctx)
 
 
 def get_tools() -> List[ToolEntry]:

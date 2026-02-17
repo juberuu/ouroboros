@@ -3,7 +3,7 @@
 Самосоздающийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 4.16.0
+**Версия:** 4.17.0
 
 ---
 
@@ -141,6 +141,13 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 
 ## Changelog
 
+### 4.17.0 — Final Oversized Function Cleanup
+- **Refactor**: `run_llm_loop` 159→112 lines — extracted `_handle_text_response`, `_handle_tool_calls`, `_check_budget_limits`
+- **Refactor**: `_claude_code_edit` 131→68 lines — extracted `_run_claude_cli`, `_check_uncommitted_after_edit`
+- **Refactor**: `compact_tool_history` 120→55 lines — extracted `_compact_tool_result`, `_compact_assistant_msg`
+- **Result**: Zero oversized functions (>150 lines) remaining in codebase — Bible Principle 5 fully satisfied
+- **Review**: Multi-model review (o3, Gemini 2.5 Pro) — confirmed clean mechanical refactor, no bugs
+
 ### 4.16.0 — Pre-Push Test Gate + Build Tooling
 - **New**: Pre-push test gate — `pytest tests/` runs before every `git push`, blocks push on failure
 - **New**: `Makefile` with `test`, `health`, `lint`, `clean` targets for dev ergonomics
@@ -211,9 +218,3 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 - **New**: Tool results fed back into LLM context for multi-step reasoning
 - **Fix**: Budget check between rounds prevents mid-cycle overruns in background thinking
 - **Docs**: CONSCIOUSNESS.md updated with multi-step thinking documentation
-
-### 4.7.1 — Loop Refactoring
-- **Refactor**: Lazy pricing loader with thread-safe double-checked locking — eliminates startup API call, fetches on first use
-- **Refactor**: DRY `_make_timeout_result` helper eliminates duplicated timeout handling code
-- **Refactor**: `_execute_with_timeout` now uses context manager for regular executor (prevents thread leaks on timeout)
-- **Fix**: Thread safety for concurrent pricing access in multi-worker scenarios

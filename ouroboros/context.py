@@ -330,6 +330,73 @@ def apply_message_token_soft_cap(
     return pruned, info
 
 
+def _compact_tool_result(msg: dict, content: str) -> dict:
+    """
+    Compact a single tool result message.
+
+    Args:
+        msg: Original tool result message dict
+        content: Content string to compact
+
+    Returns:
+        Compacted message dict
+    """
+    is_error = content.startswith("⚠️")
+    # Create a short summary
+    if is_error:
+        summary = content[:200]  # Keep error details
+    else:
+        # Keep first line or first 80 chars
+        first_line = content.split('\n')[0][:80]
+        char_count = len(content)
+        summary = f"{first_line}... ({char_count} chars)" if char_count > 80 else content[:200]
+
+    return {**msg, "content": summary}
+
+
+def _compact_assistant_msg(msg: dict) -> dict:
+    """
+    Compact assistant message content and tool_call arguments.
+
+    Args:
+        msg: Original assistant message dict
+
+    Returns:
+        Compacted message dict
+    """
+    compacted_msg = dict(msg)
+
+    # Trim content (progress notes)
+    content = msg.get("content") or ""
+    if len(content) > 200:
+        content = content[:200] + "..."
+    compacted_msg["content"] = content
+
+    # Compact tool_call arguments
+    if msg.get("tool_calls"):
+        compacted_tool_calls = []
+        for tc in msg["tool_calls"]:
+            compacted_tc = dict(tc)
+
+            # Always preserve id and function name
+            if "function" in compacted_tc:
+                func = dict(compacted_tc["function"])
+                args_str = func.get("arguments", "")
+
+                if args_str:
+                    compacted_tc["function"] = _compact_tool_call_arguments(
+                        func["name"], args_str
+                    )
+                else:
+                    compacted_tc["function"] = func
+
+            compacted_tool_calls.append(compacted_tc)
+
+        compacted_msg["tool_calls"] = compacted_tool_calls
+
+    return compacted_msg
+
+
 def compact_tool_history(messages: list, keep_recent: int = 6) -> list:
     """
     Compress old tool call/result message pairs into compact summaries.
@@ -376,53 +443,13 @@ def compact_tool_history(messages: list, keep_recent: int = 6) -> list:
             if parent_round is not None and parent_round in rounds_to_compact:
                 # Compact this tool result
                 content = str(msg.get("content") or "")
-                is_error = content.startswith("⚠️")
-                # Create a short summary
-                if is_error:
-                    summary = content[:200]  # Keep error details
-                else:
-                    # Keep first line or first 80 chars
-                    first_line = content.split('\n')[0][:80]
-                    char_count = len(content)
-                    summary = f"{first_line}... ({char_count} chars)" if char_count > 80 else content[:200]
-
-                result.append({**msg, "content": summary})
+                result.append(_compact_tool_result(msg, content))
                 continue
 
         # For compacted assistant messages, also trim the content (progress notes)
         # AND compact tool_call arguments
         if i in rounds_to_compact and msg.get("role") == "assistant":
-            compacted_msg = dict(msg)
-
-            # Trim content (progress notes)
-            content = msg.get("content") or ""
-            if len(content) > 200:
-                content = content[:200] + "..."
-            compacted_msg["content"] = content
-
-            # Compact tool_call arguments
-            if msg.get("tool_calls"):
-                compacted_tool_calls = []
-                for tc in msg["tool_calls"]:
-                    compacted_tc = dict(tc)
-
-                    # Always preserve id and function name
-                    if "function" in compacted_tc:
-                        func = dict(compacted_tc["function"])
-                        args_str = func.get("arguments", "")
-
-                        if args_str:
-                            compacted_tc["function"] = _compact_tool_call_arguments(
-                                func["name"], args_str
-                            )
-                        else:
-                            compacted_tc["function"] = func
-
-                    compacted_tool_calls.append(compacted_tc)
-
-                compacted_msg["tool_calls"] = compacted_tool_calls
-
-            result.append(compacted_msg)
+            result.append(_compact_assistant_msg(msg))
             continue
 
         result.append(msg)
