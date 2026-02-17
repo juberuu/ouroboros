@@ -371,6 +371,13 @@ def _safe_qsize(q: Any) -> int:
 offset = int(load_state().get("tg_offset") or 0)
 _last_diag_heartbeat_ts = 0.0
 
+# Auto-start background consciousness (creator's policy: always on by default)
+try:
+    _consciousness.start()
+    log.info("🧠 Background consciousness auto-started (default: always on)")
+except Exception as e:
+    log.warning("consciousness auto-start failed: %s", e)
+
 while True:
     loop_started_ts = time.time()
     rotate_chat_log_if_needed(DRIVE_ROOT)
