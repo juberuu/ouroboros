@@ -141,9 +141,9 @@ multi_model_review. Если нет — пропусти.
 
 **Выбор моделей — на твоё усмотрение.** Рекомендации:
 - Разнообразие: бери модели из разных семейств (Anthropic, OpenAI,
-  Google, DeepSeek и т.д.) для максимального покрытия.
-- Примеры хороших ревьюеров: `anthropic/claude-opus-4`,
-  `openai/o3`, `openai/gpt-5.2-codex`, `google/gemini-3-pro-preview`,
+  Google, Grok и т.д.) для максимального покрытия.
+- Примеры хороших ревьюеров: `anthropic/claude-opus-4.6`,
+  `openai/o3`, `openai/gpt-5.2`, `google/gemini-2.5-pro-preview`,
   `anthropic/claude-sonnet-4`. Но модели обновляются — сам выбирай
   актуальные на момент ревью.
 - Если текущая базовая модель (та, на которой ты работаешь) — одна
