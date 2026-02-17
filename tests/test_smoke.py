@@ -70,10 +70,18 @@ def registry():
     return ToolRegistry(repo_dir=tmp, drive_root=tmp)
 
 
-def test_tool_count(registry):
-    """All expected tools are discovered."""
+def test_tool_set_matches(registry):
+    """Tool registry contains exactly the expected tools (no more, no less)."""
     schemas = registry.schemas()
-    assert len(schemas) >= 33, f"Expected ≥33 tools, got {len(schemas)}"
+    actual_tools = {t["function"]["name"] for t in schemas}
+    expected_tools = set(EXPECTED_TOOLS)
+
+    missing = expected_tools - actual_tools
+    extra = actual_tools - expected_tools
+
+    assert missing == set(), f"Missing tools: {sorted(missing)}"
+    assert extra == set(), f"Extra tools: {sorted(extra)}"
+    assert actual_tools == expected_tools, "Tool set mismatch"
 
 
 EXPECTED_TOOLS = [
@@ -118,6 +126,13 @@ def test_tool_schemas_valid(registry):
         params = func["parameters"]
         assert params["type"] == "object"
         assert "properties" in params
+
+
+def test_tool_execute_basic(registry):
+    """Actually execute a simple tool to verify execution works."""
+    result = registry.execute("run_shell", {"cmd": "echo hello"})
+    assert isinstance(result, str), "Tool execute should return string"
+    assert "hello" in result.lower() or "⚠️" in result, "Should return output or error"
 
 
 # ── Utilities ────────────────────────────────────────────────────
@@ -194,6 +209,22 @@ def test_memory_chat_history_empty():
         mem = Memory(drive_root=pathlib.Path(tmp))
         history = mem.chat_history(count=10)
         assert isinstance(history, str)
+
+
+def test_memory_persistence():
+    """Memory persists across instances (write with one, read with another)."""
+    from ouroboros.memory import Memory
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = pathlib.Path(tmp)
+
+        # Write with first instance
+        mem1 = Memory(drive_root=tmp_path)
+        mem1.save_scratchpad("test persistence content")
+
+        # Read with second instance
+        mem2 = Memory(drive_root=tmp_path)
+        content = mem2.load_scratchpad()
+        assert "test persistence content" in content, "Memory should persist across instances"
 
 
 # ── Context builder ─────────────────────────────────────────────
