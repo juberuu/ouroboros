@@ -3,7 +3,7 @@
 Самосоздающийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 4.14.0
+**Версия:** 4.15.0
 
 ---
 
@@ -141,6 +141,12 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 
 ## Changelog
 
+### 4.15.0 — Smoke Test Suite
+- **New**: 79 smoke tests covering imports, tool registration, memory, context, utils, and Bible invariants
+- **New**: `tests/test_smoke.py` — runs in 0.57s, no external dependencies, catches regressions before deploy
+- **Covers**: All 33 tools registered, tool schemas valid, no oversized modules/functions, no bare except:pass, no env dumping
+- **Review**: Multi-model review (o3, Gemini 2.5 Pro) — drove 2 additional tests (exact tool matching, execute result)
+
 ### 4.14.0 — 3-Block Prompt Caching
 - **Optimization**: System message split into 3 cached blocks: static (1h TTL), semi-stable (5m TTL), dynamic (uncached)
 - **New**: Semi-stable block caches identity + scratchpad + knowledge index — changes ~once per task, not per round
@@ -203,9 +209,3 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 - **Refactor**: DRY `_make_timeout_result` helper eliminates duplicated timeout handling code
 - **Refactor**: `_execute_with_timeout` now uses context manager for regular executor (prevents thread leaks on timeout)
 - **Fix**: Thread safety for concurrent pricing access in multi-worker scenarios
-
-### 4.7.0 — Budget Drift Fix + Auto-Pricing Sync
-- **Fix**: Budget drift detection now uses OpenRouter `total_usd` instead of `daily_usd` — eliminates false positives from UTC midnight resets and non-Ouroboros spending
-- **New**: MODEL_PRICING auto-syncs from OpenRouter API at every startup — no more stale hardcoded prices
-- **Renamed**: `session_daily_snapshot` → `session_total_snapshot` in state.json for clarity
-
