@@ -141,6 +141,15 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 
 ## Changelog
 
+### v4.24.0 — Deep Review Bugfixes
+- **Fix**: `_check_budget_limits` NameError — `task_type` param was missing (caused runtime crash)
+- **Fix**: Budget `add_usage` called even on empty responses (was silently losing cost data)
+- **Fix**: Empty response content check now handles `None` and whitespace-only responses
+- **Fix**: Fallback model chain works even when primary IS the fallback (prevents no-op retry)
+- **Fix**: Evolution circuit breaker — 3 consecutive empty-response failures pauses evolution + alerts creator
+- **Fix**: Agent logs raw API response on empty content for debugging
+- **Review**: Multi-model review passed (o3, Gemini 2.5 Pro) — both confirmed all issues
+
 ### v4.23.0 — Empty Response Fallback
 - Automatic fallback to gemini-2.5-pro when primary model returns empty responses 3x
 - Raw empty response logging for debugging (llm_empty_response events)

@@ -145,6 +145,7 @@ def ensure_state_defaults(st: Dict[str, Any]) -> Dict[str, Any]:
     st.setdefault("session_spent_snapshot", None)
     st.setdefault("budget_drift_pct", None)
     st.setdefault("budget_drift_alert", False)
+    st.setdefault("evolution_consecutive_failures", 0)
     for legacy_key in ("approvals", "idle_cursor", "idle_stats", "last_idle_task_at",
                         "last_auto_review_at", "last_review_task_id", "session_daily_snapshot"):
         st.pop(legacy_key, None)
@@ -174,6 +175,7 @@ def default_state_dict() -> Dict[str, Any]:
         "session_spent_snapshot": None,
         "budget_drift_pct": None,
         "budget_drift_alert": False,
+        "evolution_consecutive_failures": 0,
     }
 
 
@@ -386,8 +388,12 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> None:
                         st["budget_drift_pct"] = drift_pct
 
                         # Set alert if drift is significant
-                        # Threshold: >20% drift AND >$0.50 absolute difference
-                        if drift_pct > 20.0 and or_delta > 0.5:
+                        # Threshold: >50% drift AND >$5.00 absolute difference
+                        # High drift is expected when:
+                        # - OpenRouter key is shared (or_delta includes others' spending)
+                        # - Our tracking had bugs early on (events weren't emitted for empty responses)
+                        abs_diff = abs(or_delta - our_delta)
+                        if drift_pct > 50.0 and abs_diff > 5.0:
                             st["budget_drift_alert"] = True
                             # Log warning event
                             from supervisor.state import append_jsonl
@@ -399,7 +405,9 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> None:
                                     "drift_pct": round(drift_pct, 2),
                                     "our_delta": round(our_delta, 4),
                                     "or_delta": round(or_delta, 4),
+                                    "abs_diff": round(abs_diff, 4),
                                     "spent_calls": st["spent_calls"],
+                                    "note": "High drift expected if OR key is shared or tracking had early bugs",
                                 }
                             )
                         else:

@@ -455,10 +455,12 @@ class OuroborosAgent:
         start_time: float, drive_logs: pathlib.Path,
     ) -> None:
         """Emit all end-of-task events to supervisor."""
+        task_type = task.get("type", "task")
+        category = task_type if task_type in ("evolution", "consciousness", "review", "summarize") else "task"
         self._pending_events.append({
             "type": "llm_usage", "task_id": task.get("id"),
             "provider": "openrouter", "usage": usage, "ts": utc_now_iso(),
-            "category": "task",
+            "category": category,
         })
 
         self._pending_events.append({

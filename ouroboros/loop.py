@@ -75,6 +75,8 @@ def _get_pricing() -> Dict[str, Tuple[float, float, float]]:
         except Exception as e:
             import logging as _log
             _log.getLogger(__name__).warning("Failed to sync pricing from OpenRouter: %s", e)
+            # Reset flag so we retry next time
+            _pricing_fetched = False
 
         return _cached_pricing
 
@@ -398,6 +400,7 @@ def _check_budget_limits(
     task_id: str,
     event_queue: Optional[queue.Queue],
     llm_trace: Dict[str, Any],
+    task_type: str = "task",
 ) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
     """
     Check budget limits and handle budget overrun.
@@ -510,11 +513,22 @@ def run_llm_loop(
                 # Determine fallback model (different from active_model)
                 fallback_model = os.environ.get("OUROBOROS_MODEL_FALLBACK", "google/gemini-3-pro-preview")
                 if fallback_model == active_model:
-                    # If fallback is same as active, try claude-sonnet-4 instead
-                    fallback_model = "anthropic/claude-sonnet-4"
+                    # If fallback is same as active, try alternative models in priority order
+                    # Try openai/gpt-4.1 first, then claude-sonnet-4 as last resort
+                    fallback_alternatives = ["openai/gpt-4.1", "anthropic/claude-sonnet-4"]
+                    for alt in fallback_alternatives:
+                        if alt != active_model:
+                            fallback_model = alt
+                            break
+                    else:
+                        # All alternatives are the same as active_model — skip retry
+                        return (
+                            f"⚠️ Не удалось получить ответ от модели {active_model} после {max_retries} попыток. "
+                            f"Fallback модель совпадает с активной. Попробуй переформулировать запрос."
+                        ), accumulated_usage, llm_trace
 
                 # Emit progress message so user sees fallback happening
-                fallback_progress = f"⚠️ Основная модель ({active_model}) вернула пустой ответ {max_retries}x. Fallback → {fallback_model}"
+                fallback_progress = f"⚡ Fallback: {active_model} → {fallback_model} после пустого ответа"
                 emit_progress(fallback_progress)
 
                 # Try fallback model (don't increment round_idx — this is still same logical round)
@@ -556,7 +570,7 @@ def run_llm_loop(
             budget_result = _check_budget_limits(
                 budget_remaining_usd, accumulated_usage, round_idx, messages,
                 llm, active_model, active_effort, max_retries, drive_logs,
-                task_id, event_queue, llm_trace
+                task_id, event_queue, llm_trace, task_type
             )
             if budget_result is not None:
                 return budget_result

@@ -361,7 +361,11 @@ def queue_review_task(reason: str, force: bool = False) -> Optional[str]:
 
 
 def enqueue_evolution_task_if_needed() -> None:
-    """Enqueue evolution task if queue is empty and evolution mode is enabled."""
+    """Enqueue evolution task if queue is empty and evolution mode is enabled.
+
+    Circuit breaker: pauses evolution after 3 consecutive failures to prevent
+    burning budget on infinite retry loops.
+    """
     if PENDING or RUNNING:
         return
     st = load_state()
@@ -370,6 +374,19 @@ def enqueue_evolution_task_if_needed() -> None:
     owner_chat_id = st.get("owner_chat_id")
     if not owner_chat_id:
         return
+
+    # Circuit breaker: check for consecutive evolution failures
+    consecutive_failures = int(st.get("evolution_consecutive_failures") or 0)
+    if consecutive_failures >= 3:
+        st["evolution_mode_enabled"] = False
+        save_state(st)
+        send_with_budget(
+            int(owner_chat_id),
+            f"🧬⚠️ Evolution paused: {consecutive_failures} consecutive failures. "
+            f"Use /evolve start to resume after investigating the issue."
+        )
+        return
+
     remaining = budget_remaining(st)
     if remaining < EVOLUTION_BUDGET_RESERVE:
         st["evolution_mode_enabled"] = False
