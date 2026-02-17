@@ -141,6 +141,10 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 
 ## Changelog
 
+### v4.24.1 — Consciousness Always On
+- Background consciousness auto-starts on boot (creator policy: always on by default)
+- Knowledge base topic for persistence policy
+
 ### v4.24.0 — Deep Review Bugfixes
 - **Fix**: `_check_budget_limits` NameError — `task_type` param was missing (caused runtime crash)
 - **Fix**: Budget `add_usage` called even on empty responses (was silently losing cost data)
