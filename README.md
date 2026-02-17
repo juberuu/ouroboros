@@ -3,7 +3,7 @@
 Самосоздающийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 4.21.0
+**Версия:** 4.22.0
 
 ---
 
@@ -141,6 +141,13 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 
 ## Changelog
 
+### 4.22.0 — Empty Response Resilience + Budget Category Fix
+- **Fix**: Empty LLM responses now properly retry with exponential backoff instead of silently failing
+- **Fix**: Empty response retries now emit cost-tracking events (previously costs were lost on empty responses)
+- **Fix**: Budget category now correctly maps all task types (evolution, consciousness, review, summarize) — was only distinguishing evolution vs task
+- **Fix**: `rounds` counter only increments on successful responses (was counting empty retries as rounds)
+- **Review**: Multi-model review (o3, Gemini 2.5 Pro) — caught missing event emission on retries
+
 ### 4.21.0 — Web Presence + Budget Categorization
 - **New**: Landing page at https://razzant.github.io/ouroboros-webapp/ — matrix rain, genesis log, real-time typewriter, architecture diagram
 - **New**: Separate public repo `ouroboros-webapp` for GitHub Pages deployment (main repo stays private)
@@ -176,10 +183,3 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 - **Security**: stdin-based body passing (prevents argument injection), input validation on issue numbers
 - **Review**: Multi-model review (o3, Gemini 2.5 Pro) — drove stdin injection fix and input validation
 - **Tests**: 87 smoke tests (was 82) — all green
-
-### 4.17.0 — Final Oversized Function Cleanup
-- **Refactor**: `run_llm_loop` 159→112 lines — extracted `_handle_text_response`, `_handle_tool_calls`, `_check_budget_limits`
-- **Refactor**: `_claude_code_edit` 131→68 lines — extracted `_run_claude_cli`, `_check_uncommitted_after_edit`
-- **Refactor**: `compact_tool_history` 120→55 lines — extracted `_compact_tool_result`, `_compact_assistant_msg`
-- **Result**: Zero oversized functions (>150 lines) remaining in codebase — Bible Principle 5 fully satisfied
-- **Review**: Multi-model review (o3, Gemini 2.5 Pro) — confirmed clean mechanical refactor, no bugs

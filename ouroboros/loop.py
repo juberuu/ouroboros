@@ -619,9 +619,8 @@ def _call_llm_with_retry(
             resp_msg, usage = llm.chat(**kwargs)
             msg = resp_msg
             add_usage(accumulated_usage, usage)
-            accumulated_usage["rounds"] = accumulated_usage.get("rounds", 0) + 1
 
-            # Calculate cost
+            # Calculate cost and emit event for EVERY attempt (including retries)
             cost = float(usage.get("cost") or 0)
             if not cost:
                 cost = _estimate_cost(
@@ -633,8 +632,22 @@ def _call_llm_with_retry(
                 )
 
             # Emit real-time usage event with category based on task_type
-            category = "evolution" if task_type == "evolution" else "task"
+            category = task_type if task_type in ("evolution", "consciousness", "review", "summarize") else "task"
             _emit_llm_usage_event(event_queue, task_id, model, usage, cost, category)
+
+            # Empty response = retry-worthy (model sometimes returns empty content with no tool_calls)
+            tool_calls = msg.get("tool_calls") or []
+            content = msg.get("content")
+            if not tool_calls and (not content or not content.strip()):
+                log.warning("LLM returned empty response (no content, no tool_calls), attempt %d/%d", attempt + 1, max_retries)
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
+                    continue
+                # Last attempt — return None to trigger "could not get response"
+                return None, cost
+
+            # Count only successful rounds
+            accumulated_usage["rounds"] = accumulated_usage.get("rounds", 0) + 1
 
             # Log per-round metrics
             _round_event = {
