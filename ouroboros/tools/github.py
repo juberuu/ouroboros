@@ -15,7 +15,7 @@ log = logging.getLogger(__name__)
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _gh_cmd(args: List[str], ctx: ToolContext, timeout: int = 30) -> str:
+def _gh_cmd(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Optional[str] = None) -> str:
     """Run `gh` CLI command and return stdout or error string."""
     cmd = ["gh"] + args
     try:
@@ -25,10 +25,12 @@ def _gh_cmd(args: List[str], ctx: ToolContext, timeout: int = 30) -> str:
             capture_output=True,
             text=True,
             timeout=timeout,
+            input=input_data,
         )
         if res.returncode != 0:
             err = (res.stderr or "").strip()
-            return f"⚠️ GH_ERROR (exit {res.returncode}): {err}"
+            # Only return first line of stderr, truncated to 200 chars for security
+            return f"⚠️ GH_ERROR: {err.split(chr(10))[0][:200]}"
         return res.stdout.strip()
     except FileNotFoundError:
         return "⚠️ GH_ERROR: `gh` CLI not found."
@@ -101,6 +103,9 @@ def _list_issues(ctx: ToolContext, state: str = "open", labels: str = "", limit:
 
 def _get_issue(ctx: ToolContext, number: int) -> str:
     """Get a single issue with full details and comments."""
+    if number <= 0:
+        return "⚠️ issue number must be positive"
+
     args = [
         "issue", "view", str(number),
         "--json", "number,title,body,labels,createdAt,author,assignees,state,comments",
@@ -142,11 +147,15 @@ def _get_issue(ctx: ToolContext, number: int) -> str:
 
 def _comment_on_issue(ctx: ToolContext, number: int, body: str) -> str:
     """Add a comment to an issue."""
+    if number <= 0:
+        return "⚠️ issue number must be positive"
+
     if not body or not body.strip():
         return "⚠️ Comment body cannot be empty."
 
-    args = ["issue", "comment", str(number), "--body", body]
-    raw = _gh_cmd(args, ctx)
+    # Pass body via stdin to prevent argument injection
+    args = ["issue", "comment", str(number), "--body-file", "-"]
+    raw = _gh_cmd(args, ctx, input_data=body)
     if raw.startswith("⚠️"):
         return raw
     return f"✅ Comment added to issue #{number}."
@@ -154,6 +163,9 @@ def _comment_on_issue(ctx: ToolContext, number: int, body: str) -> str:
 
 def _close_issue(ctx: ToolContext, number: int, comment: str = "") -> str:
     """Close an issue with optional closing comment."""
+    if number <= 0:
+        return "⚠️ issue number must be positive"
+
     if comment and comment.strip():
         # Add comment first
         result = _comment_on_issue(ctx, number, comment)
@@ -172,13 +184,26 @@ def _create_issue(ctx: ToolContext, title: str, body: str = "", labels: str = ""
     if not title or not title.strip():
         return "⚠️ Issue title cannot be empty."
 
-    args = ["issue", "create", "--title", title]
+    # Use --flag=value form to prevent argument injection
+    args = ["issue", "create", f"--title={title}"]
     if body:
-        args.extend(["--body", body])
-    if labels:
-        args.extend(["--label", labels])
+        # Pass body via stdin to prevent argument injection
+        args.append("--body-file=-")
+        raw = _gh_cmd(args, ctx, input_data=body)
+    else:
+        raw = _gh_cmd(args, ctx)
 
-    raw = _gh_cmd(args, ctx)
+    if labels:
+        # For existing issue, add labels separately
+        if not raw.startswith("⚠️"):
+            # Extract issue number from URL in raw output
+            import re
+            match = re.search(r'/issues/(\d+)', raw)
+            if match:
+                issue_num = int(match.group(1))
+                label_args = ["issue", "edit", str(issue_num), f"--add-label={labels}"]
+                _gh_cmd(label_args, ctx)
+
     if raw.startswith("⚠️"):
         return raw
     return f"✅ Issue created: {raw}"

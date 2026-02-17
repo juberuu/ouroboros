@@ -249,6 +249,9 @@ def _parse_model_response(model: str, result, headers_dict) -> dict:
 
 def _emit_usage_event(review_result: dict, ctx: ToolContext) -> None:
     """Emit llm_usage event for budget tracking (for ALL cases, including errors)."""
+    if ctx is None:
+        return
+
     usage_event = {
         "type": "llm_usage",
         "ts": utc_now_iso(),

@@ -83,6 +83,7 @@
 **Запись:** `repo_write_commit`, `repo_commit_push`, `drive_write`
 **Код:** `claude_code_edit` (основной путь) → потом `repo_commit_push`
 **Git:** `git_status`, `git_diff`
+**GitHub:** `list_github_issues`, `get_github_issue`, `comment_on_issue`, `close_github_issue`, `create_github_issue`
 **Shell:** `run_shell` (cmd как массив строк)
 **Web:** `web_search`, `browse_page`, `browser_action`
 **Память:** `chat_history`, `update_scratchpad`

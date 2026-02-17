@@ -99,6 +99,9 @@ EXPECTED_TOOLS = [
     "codebase_digest", "codebase_health",
     "knowledge_read", "knowledge_write", "knowledge_list",
     "multi_model_review",
+    # GitHub Issues
+    "list_github_issues", "get_github_issue", "comment_on_issue",
+    "close_github_issue", "create_github_issue",
 ]
 
 

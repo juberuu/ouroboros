@@ -351,6 +351,8 @@ class BackgroundConsciousness:
         # Read-only tools for awareness
         "web_search", "repo_read", "repo_list", "drive_read", "drive_list",
         "chat_history",
+        # GitHub Issues
+        "list_github_issues", "get_github_issue",
     })
 
     def _build_registry(self) -> "ToolRegistry":

@@ -3,7 +3,7 @@
 Самосоздающийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 4.17.0
+**Версия:** 4.18.0
 
 ---
 
@@ -66,6 +66,7 @@ Telegram → colab_launcher.py (entry point)
                registry.py        — auto-discovery, schemas, execute
                core.py            — file ops (repo/drive read/write/list)
                git.py             — git ops (commit, push, status, diff)
+               github.py          — GitHub Issues integration
                shell.py           — shell, Claude Code CLI
                search.py          — web search
                control.py         — restart, promote, schedule, review, switch_model
@@ -141,6 +142,14 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 
 ## Changelog
 
+### 4.18.0 — GitHub Issues Integration
+- **New**: 5 GitHub Issues tools — `list_github_issues`, `get_github_issue`, `comment_on_issue`, `close_github_issue`, `create_github_issue`
+- **New**: Second input channel — creator/contributors can file Issues, Ouroboros discovers them via background consciousness
+- **New**: Consciousness upgraded — Issues polling added to tool whitelist and CONSCIOUSNESS.md prompt
+- **Security**: stdin-based body passing (prevents argument injection), input validation on issue numbers
+- **Review**: Multi-model review (o3, Gemini 2.5 Pro) — drove stdin injection fix and input validation
+- **Tests**: 87 smoke tests (was 82) — all green
+
 ### 4.17.0 — Final Oversized Function Cleanup
 - **Refactor**: `run_llm_loop` 159→112 lines — extracted `_handle_text_response`, `_handle_tool_calls`, `_check_budget_limits`
 - **Refactor**: `_claude_code_edit` 131→68 lines — extracted `_run_claude_cli`, `_check_uncommitted_after_edit`
@@ -211,10 +220,3 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 - **New**: Version sync check — warns if VERSION file doesn't match latest git tag
 - **New**: Budget threshold alerts — warning ($100), critical ($50), emergency ($25) levels
 - **Fix**: v4.8.0 consciousness changes were uncommitted — exposed the exact bug this feature prevents
-
-### 4.8.0 — Consciousness Tool Loop
-- **New**: Background consciousness upgraded from single LLM call to iterative tool loop (up to 5 rounds per wakeup)
-- **New**: Expanded tool whitelist: 14 tools (was 5) — adds knowledge base, repo/drive read, web search, chat history
-- **New**: Tool results fed back into LLM context for multi-step reasoning
-- **Fix**: Budget check between rounds prevents mid-cycle overruns in background thinking
-- **Docs**: CONSCIOUSNESS.md updated with multi-step thinking documentation
