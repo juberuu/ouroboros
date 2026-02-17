@@ -30,13 +30,16 @@ def compute_complexity_metrics(sections: List[Tuple[str, str]]) -> Dict[str, Any
     """Compute codebase complexity metrics from collected sections."""
     total_lines = 0
     total_functions = 0
-    function_lengths: List[int] = []
+    function_lengths: List[Tuple[str, int, int]] = []  # (path, start_line, length)
+    file_sizes: List[Tuple[str, int]] = []  # (path, lines)
     total_files = len(sections)
     py_files = 0
 
     for path, content in sections:
         lines = content.splitlines()
-        total_lines += len(lines)
+        line_count = len(lines)
+        total_lines += line_count
+        file_sizes.append((path, line_count))
 
         if not path.endswith(".py"):
             continue
@@ -51,10 +54,19 @@ def compute_complexity_metrics(sections: List[Tuple[str, str]]) -> Dict[str, Any
 
         for j, start in enumerate(func_starts):
             end = func_starts[j + 1] if j + 1 < len(func_starts) else len(lines)
-            function_lengths.append(end - start)
+            length = end - start
+            function_lengths.append((path, start, length))
 
-    avg_func_len = round(sum(function_lengths) / max(1, len(function_lengths)), 1)
-    max_func_len = max(function_lengths) if function_lengths else 0
+    # Compute aggregates
+    func_lens = [length for _, _, length in function_lengths]
+    avg_func_len = round(sum(func_lens) / max(1, len(func_lens)), 1) if func_lens else 0
+    max_func_len = max(func_lens) if func_lens else 0
+
+    # Sort for reporting
+    largest_files = sorted(file_sizes, key=lambda x: x[1], reverse=True)[:10]
+    longest_functions = sorted(function_lengths, key=lambda x: x[2], reverse=True)[:10]
+    oversized_functions = [(p, start, length) for p, start, length in function_lengths if length > 150]
+    oversized_modules = [(p, lines) for p, lines in file_sizes if p.endswith(".py") and lines > 1000]
 
     return {
         "total_files": total_files,
@@ -63,6 +75,10 @@ def compute_complexity_metrics(sections: List[Tuple[str, str]]) -> Dict[str, Any
         "total_functions": total_functions,
         "avg_function_length": avg_func_len,
         "max_function_length": max_func_len,
+        "largest_files": largest_files,
+        "longest_functions": longest_functions,
+        "oversized_functions": oversized_functions,
+        "oversized_modules": oversized_modules,
     }
 
 
@@ -96,32 +112,39 @@ def collect_sections(
 
     def _walk(root: pathlib.Path, prefix: str, skip_dirs: set) -> None:
         nonlocal total_chars, truncated, dropped
-        for dirpath, dirnames, filenames in os.walk(str(root)):
+        try:
+            root_resolved = root.resolve()
+            if not root_resolved.exists():
+                return
+        except Exception:
+            return
+
+        for dirpath, dirnames, filenames in os.walk(str(root_resolved)):
             dirnames[:] = [d for d in sorted(dirnames) if d not in skip_dirs]
             for fn in sorted(filenames):
-                p = pathlib.Path(dirpath) / fn
-                if not p.is_file() or p.is_symlink():
-                    continue
-                if p.suffix.lower() in _SKIP_EXT:
-                    continue
                 try:
+                    p = pathlib.Path(dirpath) / fn
+                    if not p.is_file() or p.is_symlink():
+                        continue
+                    if p.suffix.lower() in _SKIP_EXT:
+                        continue
                     content = p.read_text(encoding="utf-8", errors="replace")
+                    if not content.strip():
+                        continue
+                    rel = p.relative_to(root_resolved).as_posix()
+                    if len(content) > max_file_chars:
+                        content = clip_text(content, max_file_chars)
+                        truncated += 1
+                    if total_chars >= max_total_chars:
+                        dropped += 1
+                        continue
+                    if (total_chars + len(content)) > max_total_chars:
+                        content = clip_text(content, max(2000, max_total_chars - total_chars))
+                        truncated += 1
+                    sections.append((f"{prefix}/{rel}", content))
+                    total_chars += len(content)
                 except Exception:
                     continue
-                if not content.strip():
-                    continue
-                rel = p.relative_to(root).as_posix()
-                if len(content) > max_file_chars:
-                    content = clip_text(content, max_file_chars)
-                    truncated += 1
-                if total_chars >= max_total_chars:
-                    dropped += 1
-                    continue
-                if (total_chars + len(content)) > max_total_chars:
-                    content = clip_text(content, max(2000, max_total_chars - total_chars))
-                    truncated += 1
-                sections.append((f"{prefix}/{rel}", content))
-                total_chars += len(content)
 
     _walk(repo_dir, "repo",
           {"__pycache__", ".git", ".pytest_cache", ".mypy_cache", "node_modules", ".venv"})

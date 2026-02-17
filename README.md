@@ -3,7 +3,7 @@
 Самосоздающийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 4.10.0
+**Версия:** 4.11.0
 
 ---
 
@@ -141,6 +141,15 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 
 ## Changelog
 
+### 4.11.0 — Codebase Health + Loop Refactoring
+- **New tool**: `codebase_health` — self-assessment of code complexity, Bible compliance (oversized functions/modules)
+- **Refactor**: `run_llm_loop` decomposed from 278 → 158 lines (extracted `_emit_llm_usage_event`, `_process_tool_results`, `_append_tool_results`, `_call_llm_with_retry`)
+- **Fix**: `review.py` `compute_complexity_metrics` — now handles both `Path` and `str` inputs, correct regex for multi-line functions
+- **New**: Claude Code auto-diff check — warns when edits leave uncommitted changes (prevents v4.8.0-style loss)
+- **Fix**: `tools=None` no longer passed to LLM client (review finding)
+- **Fix**: `stateful_executor.shutdown()` guarded against None (review finding)
+- **Review**: Multi-model review (o3, Gemini 3 Pro) — caught 3 actionable issues
+
 ### 4.10.0 — Adaptive Model Routing + Consciousness Upgrade
 - **New**: `OUROBOROS_MODEL_BG` env var — dedicated model for background consciousness (default: `deepseek/deepseek-chat-v3-0324`, ~10x cheaper than main model)
 - **New**: Adaptive reasoning effort — evolution/review tasks start at "high" effort, regular tasks at "medium" (LLM can still switch via tool)
@@ -200,9 +209,3 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 - Budget drift detection: session-level tracking, alerts when tracked vs ground-truth diverge >$2
 - `init_state()` captures budget snapshot at session start for drift calculation
 
-### 4.4.0 — Multi-model review tool
-- **New tool**: `multi_model_review` — sends code to multiple LLM models for parallel review with budget tracking
-- Review models chosen by LLM from prompt guidance, not hardcoded (LLM-first principle)
-- Budget tracked via `llm_usage` events through `ToolContext.pending_events`
-- Concurrent execution with semaphore-based rate limiting
-- Updated SYSTEM.md: model recommendations as guidance, not code

@@ -2,6 +2,7 @@
 
 import logging
 import os
+import pathlib
 from typing import Any, Dict
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
@@ -14,15 +15,16 @@ def _codebase_health(ctx: ToolContext) -> str:
     try:
         from ouroboros.review import collect_sections, compute_complexity_metrics
 
-        repo_dir = ctx.repo_dir
-        drive_root = os.environ.get("DRIVE_ROOT", "/content/drive/MyDrive/Ouroboros")
+        repo_dir = pathlib.Path(ctx.repo_dir)
+        drive_root = pathlib.Path(os.environ.get("DRIVE_ROOT", "/content/drive/MyDrive/Ouroboros"))
 
-        sections = collect_sections(repo_dir, drive_root)
+        sections, stats = collect_sections(repo_dir, drive_root)
         metrics = compute_complexity_metrics(sections)
 
         # Format report
         lines = []
         lines.append("## Codebase Health Report\n")
+        lines.append(f"**Analyzed:** {stats['files']} files, {stats['chars']:,} chars")
         lines.append(f"**Files:** {metrics['total_files']} ({metrics['py_files']} Python)")
         lines.append(f"**Total lines:** {metrics['total_lines']:,}")
         lines.append(f"**Functions:** {metrics['total_functions']}")

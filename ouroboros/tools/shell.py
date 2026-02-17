@@ -151,7 +151,33 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
         if res.returncode != 0:
             return f"⚠️ CLAUDE_CODE_ERROR: exit={res.returncode}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
         if not stdout:
-            return "OK: Claude Code completed with empty output."
+            stdout = "OK: Claude Code completed with empty output."
+
+        # Check for uncommitted changes and append warning BEFORE finally block
+        try:
+            status_res = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=ctx.repo_dir,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if status_res.returncode == 0 and status_res.stdout.strip():
+                diff_res = subprocess.run(
+                    ["git", "diff", "--stat"],
+                    cwd=ctx.repo_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if diff_res.returncode == 0 and diff_res.stdout.strip():
+                    stdout += (
+                        f"\n\n⚠️ UNCOMMITTED CHANGES detected after Claude Code edit:\n"
+                        f"{diff_res.stdout.strip()}\n"
+                        f"Remember to run git_status and repo_commit_push!"
+                    )
+        except Exception as e:
+            log.debug("Failed to check git status after claude_code_edit: %s", e, exc_info=True)
 
     except subprocess.TimeoutExpired:
         return "⚠️ CLAUDE_CODE_TIMEOUT: exceeded 600s."

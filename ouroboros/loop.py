@@ -355,16 +355,13 @@ def run_llm_loop(
     llm_trace: Dict[str, Any] = {"assistant_notes": [], "tool_calls": []}
     accumulated_usage: Dict[str, Any] = {}
     max_retries = 3
-
     tool_schemas = tools.schemas()
 
     # Set budget tracking on tool context for real-time usage events
     tools._ctx.event_queue = event_queue
     tools._ctx.task_id = task_id
-
     # Thread-sticky executor for browser tools (Playwright sync requires greenlet thread-affinity)
     stateful_executor = _StatefulToolExecutor()
-
     round_idx = 0
     try:
         while True:
@@ -392,81 +389,18 @@ def run_llm_loop(
                 messages = compact_tool_history(messages, keep_recent=4)
 
             # --- LLM call with retry ---
-            msg = None
-            last_error: Optional[Exception] = None
-            for attempt in range(max_retries):
-                try:
-                    resp_msg, usage = llm.chat(
-                        messages=messages, model=active_model, tools=tool_schemas,
-                        reasoning_effort=active_effort,
-                    )
-                    msg = resp_msg
-                    add_usage(accumulated_usage, usage)
-                    accumulated_usage["rounds"] = accumulated_usage.get("rounds", 0) + 1
-
-                    # Real-time budget update
-                    cost = float(usage.get("cost") or 0)
-                    if not cost:
-                        cost = _estimate_cost(
-                            active_model,
-                            int(usage.get("prompt_tokens") or 0),
-                            int(usage.get("completion_tokens") or 0),
-                            int(usage.get("cached_tokens") or 0),
-                            int(usage.get("cache_write_tokens") or 0),
-                        )
-                    if event_queue:
-                        try:
-                            event_queue.put_nowait({
-                                "type": "llm_usage",
-                                "ts": utc_now_iso(),
-                                "task_id": task_id,
-                                "model": active_model,
-                                "prompt_tokens": int(usage.get("prompt_tokens") or 0),
-                                "completion_tokens": int(usage.get("completion_tokens") or 0),
-                                "cached_tokens": int(usage.get("cached_tokens") or 0),
-                                "cache_write_tokens": int(usage.get("cache_write_tokens") or 0),
-                                "cost": cost,
-                                "cost_estimated": not bool(usage.get("cost")),
-                                "usage": usage,
-                            })
-                        except Exception:
-                            log.debug("Failed to put llm_usage event to queue", exc_info=True)
-                            pass
-
-                    # Log per-round metrics
-                    _round_event = {
-                        "ts": utc_now_iso(), "type": "llm_round",
-                        "task_id": task_id,
-                        "round": round_idx, "model": active_model,
-                        "reasoning_effort": active_effort,
-                        "prompt_tokens": int(usage.get("prompt_tokens") or 0),
-                        "completion_tokens": int(usage.get("completion_tokens") or 0),
-                        "cached_tokens": int(usage.get("cached_tokens") or 0),
-                        "cache_write_tokens": int(usage.get("cache_write_tokens") or 0),
-                        "cost_usd": cost,
-                    }
-                    append_jsonl(drive_logs / "events.jsonl", _round_event)
-                    break
-                except Exception as e:
-                    last_error = e
-                    append_jsonl(drive_logs / "events.jsonl", {
-                        "ts": utc_now_iso(), "type": "llm_api_error",
-                        "task_id": task_id,
-                        "round": round_idx, "attempt": attempt + 1,
-                        "model": active_model, "error": repr(e),
-                    })
-                    if attempt < max_retries - 1:
-                        time.sleep(min(2 ** attempt * 2, 30))
+            msg, cost = _call_llm_with_retry(
+                llm, messages, active_model, tool_schemas, active_effort,
+                max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage
+            )
 
             if msg is None:
                 return (
-                    f"⚠️ Не удалось получить ответ от модели после {max_retries} попыток.\n"
-                    f"Ошибка: {last_error}"
+                    f"⚠️ Не удалось получить ответ от модели после {max_retries} попыток."
                 ), accumulated_usage, llm_trace
 
             tool_calls = msg.get("tool_calls") or []
             content = msg.get("content")
-
             # No tool calls — final response
             if not tool_calls:
                 if content and content.strip():
@@ -479,8 +413,6 @@ def run_llm_loop(
             if content and content.strip():
                 emit_progress(content.strip())
                 llm_trace["assistant_notes"].append(content.strip()[:320])
-
-            error_count = 0
 
             # Parallelize only for a strict read-only whitelist; all calls wrapped with timeout.
             can_parallel = (
@@ -515,30 +447,7 @@ def run_llm_loop(
                         results[idx] = future.result()
 
             # Process results in original order
-            for exec_result in results:
-                fn_name = exec_result["fn_name"]
-                is_error = exec_result["is_error"]
-
-                if is_error:
-                    error_count += 1
-
-                # Truncate tool result before appending to messages
-                truncated_result = _truncate_tool_result(exec_result["result"])
-
-                # Append tool result message
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": exec_result["tool_call_id"],
-                    "content": truncated_result
-                })
-
-                # Append to LLM trace
-                llm_trace["tool_calls"].append({
-                    "tool": fn_name,
-                    "args": _safe_args(exec_result["args_for_log"]),
-                    "result": truncate_for_log(exec_result["result"], 700),
-                    "is_error": is_error,
-                })
+            error_count = _process_tool_results(results, messages, llm_trace, emit_progress)
 
             # --- Budget guard ---
             # LLM decides when to stop (Bible П0, П3). We only enforce hard budget limit.
@@ -551,40 +460,13 @@ def run_llm_loop(
                     finish_reason = f"Задача потратила ${task_cost:.3f} (>50% от остатка ${budget_remaining_usd:.2f}). Бюджет исчерпан."
                     messages.append({"role": "system", "content": f"[BUDGET LIMIT] {finish_reason} Дай финальный ответ сейчас."})
                     try:
-                        resp_msg, usage = llm.chat(
-                            messages=messages, model=active_model, tools=None,
-                            reasoning_effort=active_effort,
+                        final_msg, final_cost = _call_llm_with_retry(
+                            llm, messages, active_model, None, active_effort,
+                            max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage
                         )
-                        add_usage(accumulated_usage, usage)
-                        # Real-time budget update
-                        cost = float(usage.get("cost") or 0)
-                        if not cost:
-                            cost = _estimate_cost(
-                                active_model,
-                                int(usage.get("prompt_tokens") or 0),
-                                int(usage.get("completion_tokens") or 0),
-                                int(usage.get("cached_tokens") or 0),
-                                int(usage.get("cache_write_tokens") or 0),
-                            )
-                        if event_queue:
-                            try:
-                                event_queue.put_nowait({
-                                    "type": "llm_usage",
-                                    "ts": utc_now_iso(),
-                                    "task_id": task_id,
-                                    "model": active_model,
-                                    "prompt_tokens": int(usage.get("prompt_tokens") or 0),
-                                    "completion_tokens": int(usage.get("completion_tokens") or 0),
-                                    "cached_tokens": int(usage.get("cached_tokens") or 0),
-                                    "cache_write_tokens": int(usage.get("cache_write_tokens") or 0),
-                                    "cost": cost,
-                                    "cost_estimated": not bool(usage.get("cost")),
-                                    "usage": usage,
-                                })
-                            except Exception:
-                                log.debug("Failed to put llm_usage event to queue in budget guard", exc_info=True)
-                                pass
-                        return (resp_msg.get("content") or finish_reason), accumulated_usage, llm_trace
+                        if final_msg:
+                            return (final_msg.get("content") or finish_reason), accumulated_usage, llm_trace
+                        return finish_reason, accumulated_usage, llm_trace
                     except Exception:
                         log.warning("Failed to get final response after budget limit", exc_info=True)
                         return finish_reason, accumulated_usage, llm_trace
@@ -594,11 +476,173 @@ def run_llm_loop(
 
     finally:
         # Cleanup thread-sticky executor for stateful tools
+        if stateful_executor:
+            try:
+                stateful_executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                log.warning("Failed to shutdown stateful executor", exc_info=True)
+                pass
+
+
+def _emit_llm_usage_event(
+    event_queue: Optional[queue.Queue],
+    task_id: str,
+    model: str,
+    usage: Dict[str, Any],
+    cost: float,
+) -> None:
+    """
+    Emit llm_usage event to the event queue.
+
+    Args:
+        event_queue: Queue to emit events to (may be None)
+        task_id: Task ID for the event
+        model: Model name used for the LLM call
+        usage: Usage dict from LLM response
+        cost: Calculated cost for this call
+    """
+    if not event_queue:
+        return
+    try:
+        event_queue.put_nowait({
+            "type": "llm_usage",
+            "ts": utc_now_iso(),
+            "task_id": task_id,
+            "model": model,
+            "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+            "completion_tokens": int(usage.get("completion_tokens") or 0),
+            "cached_tokens": int(usage.get("cached_tokens") or 0),
+            "cache_write_tokens": int(usage.get("cache_write_tokens") or 0),
+            "cost": cost,
+            "cost_estimated": not bool(usage.get("cost")),
+            "usage": usage,
+        })
+    except Exception:
+        log.debug("Failed to put llm_usage event to queue", exc_info=True)
+
+
+def _call_llm_with_retry(
+    llm: LLMClient,
+    messages: List[Dict[str, Any]],
+    model: str,
+    tools: Optional[List[Dict[str, Any]]],
+    effort: str,
+    max_retries: int,
+    drive_logs: pathlib.Path,
+    task_id: str,
+    round_idx: int,
+    event_queue: Optional[queue.Queue],
+    accumulated_usage: Dict[str, Any],
+) -> Tuple[Optional[Dict[str, Any]], float]:
+    """
+    Call LLM with retry logic, usage tracking, and event emission.
+
+    Returns:
+        (response_message, cost) on success
+        (None, 0.0) on failure after max_retries
+    """
+    msg = None
+    last_error: Optional[Exception] = None
+
+    for attempt in range(max_retries):
         try:
-            stateful_executor.shutdown(wait=False, cancel_futures=True)
-        except Exception:
-            log.warning("Failed to shutdown stateful executor", exc_info=True)
-            pass
+            kwargs = {"messages": messages, "model": model, "reasoning_effort": effort}
+            if tools:
+                kwargs["tools"] = tools
+            resp_msg, usage = llm.chat(**kwargs)
+            msg = resp_msg
+            add_usage(accumulated_usage, usage)
+            accumulated_usage["rounds"] = accumulated_usage.get("rounds", 0) + 1
+
+            # Calculate cost
+            cost = float(usage.get("cost") or 0)
+            if not cost:
+                cost = _estimate_cost(
+                    model,
+                    int(usage.get("prompt_tokens") or 0),
+                    int(usage.get("completion_tokens") or 0),
+                    int(usage.get("cached_tokens") or 0),
+                    int(usage.get("cache_write_tokens") or 0),
+                )
+
+            # Emit real-time usage event
+            _emit_llm_usage_event(event_queue, task_id, model, usage, cost)
+
+            # Log per-round metrics
+            _round_event = {
+                "ts": utc_now_iso(), "type": "llm_round",
+                "task_id": task_id,
+                "round": round_idx, "model": model,
+                "reasoning_effort": effort,
+                "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+                "completion_tokens": int(usage.get("completion_tokens") or 0),
+                "cached_tokens": int(usage.get("cached_tokens") or 0),
+                "cache_write_tokens": int(usage.get("cache_write_tokens") or 0),
+                "cost_usd": cost,
+            }
+            append_jsonl(drive_logs / "events.jsonl", _round_event)
+            return msg, cost
+
+        except Exception as e:
+            last_error = e
+            append_jsonl(drive_logs / "events.jsonl", {
+                "ts": utc_now_iso(), "type": "llm_api_error",
+                "task_id": task_id,
+                "round": round_idx, "attempt": attempt + 1,
+                "model": model, "error": repr(e),
+            })
+            if attempt < max_retries - 1:
+                time.sleep(min(2 ** attempt * 2, 30))
+
+    return None, 0.0
+
+
+def _process_tool_results(
+    results: List[Dict[str, Any]],
+    messages: List[Dict[str, Any]],
+    llm_trace: Dict[str, Any],
+    emit_progress: Callable[[str], None],
+) -> int:
+    """
+    Process tool execution results and append to messages/trace.
+
+    Args:
+        results: List of tool execution result dicts
+        messages: Message list to append tool results to
+        llm_trace: Trace dict to append tool call info to
+        emit_progress: Callback for progress updates
+
+    Returns:
+        Number of errors encountered
+    """
+    error_count = 0
+
+    for exec_result in results:
+        fn_name = exec_result["fn_name"]
+        is_error = exec_result["is_error"]
+
+        if is_error:
+            error_count += 1
+
+        # Truncate tool result before appending to messages
+        truncated_result = _truncate_tool_result(exec_result["result"])
+
+        # Append tool result message
+        messages.append({
+            "role": "tool",
+            "tool_call_id": exec_result["tool_call_id"],
+            "content": truncated_result
+        })
+
+        # Append to LLM trace
+        llm_trace["tool_calls"].append({
+            "tool": fn_name,
+            "args": _safe_args(exec_result["args_for_log"]),
+            "result": truncate_for_log(exec_result["result"], 700),
+            "is_error": is_error,
+        })
+
+    return error_count
 
 
 def _safe_args(v: Any) -> Any:
