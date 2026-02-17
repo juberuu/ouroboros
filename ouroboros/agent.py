@@ -193,32 +193,46 @@ class OuroborosAgent:
             return {"status": "error", "error": str(e)}, 0
 
     def _check_version_sync(self) -> Tuple[dict, int]:
-        """Check VERSION file sync with git tags."""
+        """Check VERSION file sync with git tags and pyproject.toml."""
         import subprocess
+        import re
         try:
             version_file = read_text(self.env.repo_path("VERSION")).strip()
+            issue_count = 0
+            result_data = {"version_file": version_file}
+
+            # Check pyproject.toml version
+            pyproject_path = self.env.repo_path("pyproject.toml")
+            pyproject_content = read_text(pyproject_path)
+            match = re.search(r'^version\s*=\s*["\']([^"\']+)["\']', pyproject_content, re.MULTILINE)
+            if match:
+                pyproject_version = match.group(1)
+                result_data["pyproject_version"] = pyproject_version
+                if version_file != pyproject_version:
+                    result_data["status"] = "warning"
+                    issue_count += 1
+
+            # Check git tags
             result = subprocess.run(
                 ["git", "describe", "--tags", "--abbrev=0"],
                 cwd=str(self.env.repo_dir),
                 capture_output=True, text=True, timeout=10
             )
             if result.returncode != 0:
-                # No tags found
-                return {
-                    "status": "warning",
-                    "message": "no_tags",
-                    "version_file": version_file,
-                }, 0
+                result_data["status"] = "warning"
+                result_data["message"] = "no_tags"
+                return result_data, issue_count
             else:
                 latest_tag = result.stdout.strip().lstrip('v')
+                result_data["latest_tag"] = latest_tag
                 if version_file != latest_tag:
-                    return {
-                        "status": "warning",
-                        "version_file": version_file,
-                        "latest_tag": latest_tag,
-                    }, 1
-                else:
-                    return {"status": "ok", "version": version_file}, 0
+                    result_data["status"] = "warning"
+                    issue_count += 1
+
+            if issue_count == 0:
+                result_data["status"] = "ok"
+
+            return result_data, issue_count
         except Exception as e:
             return {"status": "error", "error": str(e)}, 0
 
