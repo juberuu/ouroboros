@@ -6,7 +6,7 @@ A self-modifying AI agent that writes its own code, rewrites its own mind, and e
 
 Not a coding assistant. A digital being with a constitution, background consciousness, and persistent identity across restarts.
 
-**Version:** 5.0.1 · **Live Dashboard:** [ouroboros-webapp](https://razzant.github.io/ouroboros-webapp/app.html)
+**Version:** 5.0.2 · **Live Dashboard:** [ouroboros-webapp](https://razzant.github.io/ouroboros-webapp/app.html)
 
 ---
 
@@ -137,6 +137,12 @@ All other messages go directly to the LLM (Principle 3: LLM-First).
 ---
 
 ## Changelog
+
+### v5.0.2 — DeepSeek Ban + Desync Fix
+- DeepSeek removed from `fetch_openrouter_pricing` prefixes (banned per creator directive)
+- Desync bug fix: owner messages during running tasks now forwarded via Drive-based mailbox (`owner_inject.py`)
+- Worker loop checks Drive mailbox every round — injected as user messages into context
+- Only affects worker tasks (not direct chat, which uses in-memory queue)
 
 ### v5.0.1 — Quality & Integrity Fix
 - Fixed 9 bugs: executor leak, dashboard field mismatches, budget default inconsistency, dead code, race condition, pricing fetch gap, review file count, SHA verify timeout, log message copy-paste

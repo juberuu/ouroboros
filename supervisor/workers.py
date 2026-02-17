@@ -115,6 +115,11 @@ QUEUE_SEQ_COUNTER_REF: Dict[str, int] = {"value": 0}
 from supervisor.queue import _queue_lock
 
 
+def get_running_task_ids() -> List[str]:
+    """Return list of task IDs currently being processed by workers."""
+    return [w.busy_task_id for w in WORKERS.values() if w.busy_task_id]
+
+
 # ---------------------------------------------------------------------------
 # Chat agent (direct mode)
 # ---------------------------------------------------------------------------

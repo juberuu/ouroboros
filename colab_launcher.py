@@ -159,6 +159,15 @@ for sub in ["state", "logs", "memory", "index", "locks", "archive"]:
     (DRIVE_ROOT / sub).mkdir(parents=True, exist_ok=True)
 REPO_DIR.mkdir(parents=True, exist_ok=True)
 
+# Clear stale owner messages from previous session
+try:
+    from ouroboros.owner_inject import get_pending_path
+    _stale_inject = get_pending_path(DRIVE_ROOT)
+    if _stale_inject.exists():
+        _stale_inject.write_text("", encoding="utf-8")
+except Exception:
+    pass
+
 CHAT_LOG_PATH = DRIVE_ROOT / "logs" / "chat.jsonl"
 if not CHAT_LOG_PATH.exists():
     CHAT_LOG_PATH.write_text("", encoding="utf-8")
@@ -546,6 +555,17 @@ while True:
                 send_with_budget(chat_id, "📎 Фото получено, но сейчас идёт задача. Отправь ещё раз когда освобожусь.")
             elif text:
                 agent.inject_message(text)
+
+        # Also write to Drive so any running worker tasks (schedule_task) can see it
+        # Only needed when worker pool has running tasks; direct chat gets inject_message
+        if text:
+            try:
+                from ouroboros.owner_inject import write_owner_message
+                from supervisor.workers import get_running_task_ids
+                if get_running_task_ids():
+                    write_owner_message(DRIVE_ROOT, text)
+            except Exception:
+                pass
         else:
             _consciousness.pause()
             def _run_task_and_resume(cid, txt, img):

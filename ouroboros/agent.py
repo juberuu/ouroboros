@@ -423,6 +423,7 @@ class OuroborosAgent:
                     budget_remaining_usd=budget_remaining,
                     event_queue=self._event_queue,
                     initial_effort=initial_effort,
+                    drive_root=self.env.drive_root,
                 )
             except Exception as e:
                 tb = traceback.format_exc()

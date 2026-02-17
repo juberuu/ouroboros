@@ -449,6 +449,7 @@ def run_llm_loop(
     budget_remaining_usd: Optional[float] = None,
     event_queue: Optional[queue.Queue] = None,
     initial_effort: str = "medium",
+    drive_root: Optional[pathlib.Path] = None,
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """
     Core LLM-with-tools loop.
@@ -518,6 +519,17 @@ def run_llm_loop(
                     messages.append({"role": "user", "content": injected})
                 except queue.Empty:
                     break
+
+            # Also drain any owner messages written via Drive (for worker processes)
+            if drive_root is not None and task_id:
+                from ouroboros.owner_inject import drain_owner_messages
+                drive_msgs = drain_owner_messages(drive_root)
+                for dmsg in drive_msgs:
+                    messages.append({
+                        "role": "user",
+                        "content": f"[Owner message during task]: {dmsg}",
+                    })
+                    emit_progress(f"📨 Новое сообщение от создателя: {dmsg[:100]}")
 
             # Compact old tool history to save tokens on long conversations
             if round_idx > 1:
