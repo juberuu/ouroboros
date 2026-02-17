@@ -151,6 +151,7 @@ def _parse_claude_output(stdout: str, ctx: ToolContext) -> str:
                 "usage": {"cost": float(payload["total_cost_usd"])},
                 "source": "claude_code_edit",
                 "ts": utc_now_iso(),
+                "category": "task",
             })
         return json.dumps(out, ensure_ascii=False, indent=2)
     except Exception:

@@ -458,6 +458,7 @@ class OuroborosAgent:
         self._pending_events.append({
             "type": "llm_usage", "task_id": task.get("id"),
             "provider": "openrouter", "usage": usage, "ts": utc_now_iso(),
+            "category": "task",
         })
 
         self._pending_events.append({
