@@ -3,7 +3,7 @@
 Самосоздающийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 4.12.0
+**Версия:** 4.13.0
 
 ---
 
@@ -141,6 +141,12 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 
 ## Changelog
 
+### 4.13.0 — Fix multi_model_review Tool (Broken Since Birth)
+- **Critical fix**: `multi_model_review` was never loaded into ToolRegistry — returned raw dict instead of `ToolEntry`, had `async handle()` instead of sync handler
+- **Refactor**: `_multi_model_review` decomposed into 3 functions: `_multi_model_review_async` (orchestration), `_parse_model_response` (parsing), `_emit_usage_event` (budget tracking)
+- **Fix**: Async-safe handler — works both in sync context and inside running event loop (ThreadPoolExecutor fallback)
+- **Result**: Tool now correctly registered (33 tools, was 32), callable through standard tool loop
+
 ### 4.12.0 — Agent & Context Decomposition
 - **Refactor**: `_verify_system_state` (142→36 lines) — extracted `_check_uncommitted_changes`, `_check_version_sync`, `_check_budget`
 - **Refactor**: `handle_task` (119→76 lines) — extracted `_prepare_task_context`, `_build_review_context`
@@ -194,19 +200,4 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 - **Fix**: Budget drift detection now uses OpenRouter `total_usd` instead of `daily_usd` — eliminates false positives from UTC midnight resets and non-Ouroboros spending
 - **New**: MODEL_PRICING auto-syncs from OpenRouter API at every startup — no more stale hardcoded prices
 - **Renamed**: `session_daily_snapshot` → `session_total_snapshot` in state.json for clarity
-
-### 4.6.1 — Review fixes for v4.6.0 + Evolution Prompt
-- **Fix**: `fetch_openrouter_pricing()` now correctly reads `input_cache_read` field (was reading non-existent `prompt_cached`, producing absurd cache prices like $300K/MTok)
-- **Fix**: `_estimate_cost()` now uses longest-prefix matching for model names instead of broken provider-prefix matching (e.g. `claude-opus-4.6` was matched to `claude-sonnet-4` pricing)
-- **New model**: Added `anthropic/claude-opus-4.6` to MODEL_PRICING ($5/$0.5/$25 per MTok)
-- **Context expansion**: Tool result truncation increased from 3000 to 15000 chars — agent can now read full source files (was seeing only ~50 lines before)
-- **Budget drift**: These fixes should dramatically reduce budget tracking drift (was 53%, caused by wrong cache pricing)
-
-### 4.6.0 — Tech Radar + Dynamic Pricing
-- **Tech Radar**: background consciousness now periodically scans for new models, pricing changes, and tool updates (web_search)
-- **Dynamic pricing**: `fetch_openrouter_pricing()` in llm.py fetches live model prices from OpenRouter API
-- **MODEL_PRICING updated**: added o4-mini, gpt-5.2, gpt-5.2-codex, gemini-3-pro-preview; fixed stale prices
-- **SYSTEM.md**: new Tech Awareness section — proactive research is now an explicit part of agent behavior
-- **CONSCIOUSNESS.md**: Tech Radar prompt section for periodic environment scanning
-- **Knowledge base**: new `tech-radar` topic with current model landscape
 
