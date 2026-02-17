@@ -38,12 +38,19 @@ def fetch_openrouter_pricing() -> Dict[str, Tuple[float, float, float]]:
     Returns dict of {model_id: (input_per_1m, cached_per_1m, output_per_1m)}.
     Returns empty dict on failure.
     """
+    import logging
+    log = logging.getLogger("ouroboros.llm")
+
     try:
         import requests
+    except ImportError:
+        log.warning("requests not installed, cannot fetch pricing")
+        return {}
+
+    try:
         url = "https://openrouter.ai/api/v1/models"
-        resp = requests.get(url, timeout=10)
-        if resp.status_code != 200:
-            return {}
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
 
         data = resp.json()
         models = data.get("data", [])
@@ -58,24 +65,35 @@ def fetch_openrouter_pricing() -> Dict[str, Tuple[float, float, float]]:
                 continue
 
             pricing = model.get("pricing", {})
-            # OpenRouter pricing is in dollars per token, multiply by 1M to get per-million
-            prompt_price = float(pricing.get("prompt", 0)) * 1_000_000
-            completion_price = float(pricing.get("completion", 0)) * 1_000_000
+            if not pricing or not pricing.get("prompt"):
+                continue
 
-            # Cached pricing: OpenRouter uses "prompt_cached" for cache hits
-            # For cache writes, we approximate as half of prompt price (common pattern)
-            # Some models don't expose cache_write separately, so we use this heuristic
-            cached_price = float(pricing.get("prompt_cached", prompt_price * 0.1)) * 1_000_000
+            # OpenRouter pricing is in dollars per token (raw values)
+            raw_prompt = float(pricing.get("prompt", 0))
+            raw_completion = float(pricing.get("completion", 0))
+            raw_cached_str = pricing.get("input_cache_read")
+            raw_cached = float(raw_cached_str) if raw_cached_str else None
 
-            pricing_dict[model_id] = (
-                round(prompt_price, 2),
-                round(cached_price, 2),
-                round(completion_price, 2),
-            )
+            # Convert to per-million tokens
+            prompt_price = round(raw_prompt * 1_000_000, 4)
+            completion_price = round(raw_completion * 1_000_000, 4)
+            if raw_cached is not None:
+                cached_price = round(raw_cached * 1_000_000, 4)
+            else:
+                cached_price = round(prompt_price * 0.1, 4)  # fallback: 10% of prompt
 
+            # Sanity check: skip obviously wrong prices
+            if prompt_price > 1000 or completion_price > 1000:
+                log.warning(f"Skipping {model_id}: prices seem wrong (prompt={prompt_price}, completion={completion_price})")
+                continue
+
+            pricing_dict[model_id] = (prompt_price, cached_price, completion_price)
+
+        log.info(f"Fetched pricing for {len(pricing_dict)} models from OpenRouter")
         return pricing_dict
 
-    except Exception:
+    except (requests.RequestException, ValueError, KeyError) as e:
+        log.warning(f"Failed to fetch OpenRouter pricing: {e}")
         return {}
 
 

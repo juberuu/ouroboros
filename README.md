@@ -3,7 +3,7 @@
 Самосоздающийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 4.6.0
+**Версия:** 4.7.0
 
 ---
 
@@ -138,6 +138,13 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 ---
 
 ## Changelog
+
+### 4.7.0 — Budget Accuracy + Context Expansion
+- **Fix**: `fetch_openrouter_pricing()` now correctly reads `input_cache_read` field (was reading non-existent `prompt_cached`, producing absurd cache prices like $300K/MTok)
+- **Fix**: `_estimate_cost()` now uses longest-prefix matching for model names instead of broken provider-prefix matching (e.g. `claude-opus-4.6` was matched to `claude-sonnet-4` pricing)
+- **New model**: Added `anthropic/claude-opus-4.6` to MODEL_PRICING ($5/$0.5/$25 per MTok)
+- **Context expansion**: Tool result truncation increased from 3000 to 15000 chars — agent can now read full source files (was seeing only ~50 lines before)
+- **Budget drift**: These fixes should dramatically reduce budget tracking drift (was 53%, caused by wrong cache pricing)
 
 ### 4.6.0 — Tech Radar + Dynamic Pricing
 - **Tech Radar**: background consciousness now periodically scans for new models, pricing changes, and tool updates (web_search)

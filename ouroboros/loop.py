@@ -22,9 +22,10 @@ from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitiz
 # Pricing from OpenRouter API (2026-02-17). Update periodically via /api/v1/models.
 MODEL_PRICING = {
     "anthropic/claude-sonnet-4": (3.0, 0.30, 15.0),
-    "anthropic/claude-opus-4": (15.0, 1.50, 75.0),
+    "anthropic/claude-opus-4": (15.0, 1.5, 75.0),
+    "anthropic/claude-opus-4.6": (5.0, 0.5, 25.0),
     "openai/o3": (2.0, 0.50, 8.0),
-    "openai/o3-pro": (20.0, 0.0, 80.0),  # no cache pricing listed
+    "openai/o3-pro": (20.0, 1.0, 80.0),
     "openai/o4-mini": (1.10, 0.275, 4.40),
     "openai/gpt-4.1": (2.0, 0.50, 8.0),
     "openai/gpt-5.2": (1.75, 0.175, 14.0),
@@ -32,19 +33,24 @@ MODEL_PRICING = {
     "google/gemini-2.5-pro-preview": (1.25, 0.125, 10.0),
     "google/gemini-3-pro-preview": (2.0, 0.20, 12.0),
     "deepseek/deepseek-chat-v3-0324": (0.19, 0.095, 0.87),
-    "deepseek/deepseek-r1": (0.70, 0.0, 2.50),
+    "deepseek/deepseek-r1": (0.70, 0.055, 2.50),
 }
 
 def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int,
                    cached_tokens: int = 0, cache_write_tokens: int = 0) -> float:
     """Estimate cost from token counts using known pricing. Returns 0 if model unknown."""
+    # Try exact match first
     pricing = MODEL_PRICING.get(model)
     if not pricing:
-        # Try prefix matching
+        # Try longest prefix match
+        best_match = None
+        best_length = 0
         for key, val in MODEL_PRICING.items():
-            if model and model.startswith(key.split("/")[0]):
-                pricing = val
-                break
+            if model and model.startswith(key):
+                if len(key) > best_length:
+                    best_match = val
+                    best_length = len(key)
+        pricing = best_match
     if not pricing:
         return 0.0
     input_price, cached_price, output_price = pricing
@@ -69,14 +75,14 @@ STATEFUL_BROWSER_TOOLS = frozenset({"browse_page", "browser_action"})
 
 def _truncate_tool_result(result: Any) -> str:
     """
-    Hard-cap tool result string to 3000 characters.
+    Hard-cap tool result string to 15000 characters.
     If truncated, append a note with the original length.
     """
     result_str = str(result)
-    if len(result_str) <= 3000:
+    if len(result_str) <= 15000:
         return result_str
     original_len = len(result_str)
-    return result_str[:3000] + f"\n... (truncated from {original_len} chars)"
+    return result_str[:15000] + f"\n... (truncated from {original_len} chars)"
 
 
 def _execute_single_tool(
