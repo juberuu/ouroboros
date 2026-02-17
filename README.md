@@ -3,7 +3,7 @@
 Самосоздающийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 4.15.0
+**Версия:** 4.16.0
 
 ---
 
@@ -140,6 +140,14 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 ---
 
 ## Changelog
+
+### 4.16.0 — Pre-Push Test Gate + Build Tooling
+- **New**: Pre-push test gate — `pytest tests/` runs before every `git push`, blocks push on failure
+- **New**: `Makefile` with `test`, `health`, `lint`, `clean` targets for dev ergonomics
+- **New**: `pyproject.toml` with pytest and ruff configuration
+- **New**: `OUROBOROS_PRE_PUSH_TESTS` env var to disable gate (default: enabled)
+- **New**: 82 smoke tests (was 79) — added pre-push gate tests
+- **Note**: GitHub Actions CI ready but blocked by token scope — creator needs `workflow` permission on GITHUB_TOKEN
 
 ### 4.15.0 — Smoke Test Suite
 - **New**: 79 smoke tests covering imports, tool registration, memory, context, utils, and Bible invariants

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import pathlib
+import subprocess
 import time
 from typing import Any, Dict, List, Optional
 
@@ -50,6 +51,74 @@ def _release_git_lock(lock_path: pathlib.Path) -> None:
         pass
 
 
+# --- Pre-push test gate ---
+
+MAX_TEST_OUTPUT = 8000
+
+def _run_pre_push_tests(ctx: ToolContext) -> Optional[str]:
+    """Run pre-push tests if enabled. Returns None if tests pass, error string if they fail."""
+    # Guard against ctx=None
+    if ctx is None:
+        log.warning("_run_pre_push_tests called with ctx=None, skipping tests")
+        return None
+
+    if os.environ.get("OUROBOROS_PRE_PUSH_TESTS", "1") != "1":
+        return None
+
+    tests_dir = pathlib.Path(ctx.repo_dir) / "tests"
+    if not tests_dir.exists():
+        return None
+
+    try:
+        result = subprocess.run(
+            ["pytest", "tests/", "-q", "--tb=line", "--no-header"],
+            cwd=ctx.repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        if result.returncode == 0:
+            return None
+
+        # Truncate output if too long
+        output = result.stdout + result.stderr
+        if len(output) > MAX_TEST_OUTPUT:
+            output = output[:MAX_TEST_OUTPUT] + "\n...(truncated)..."
+        return output
+
+    except subprocess.TimeoutExpired:
+        return "⚠️ PRE_PUSH_TEST_ERROR: pytest timed out after 30 seconds"
+
+    except FileNotFoundError:
+        return "⚠️ PRE_PUSH_TEST_ERROR: pytest not installed or not found in PATH"
+
+    except Exception as e:
+        log.warning(f"Pre-push tests failed with exception: {e}", exc_info=True)
+        return f"⚠️ PRE_PUSH_TEST_ERROR: Unexpected error running tests: {e}"
+
+
+def _git_push_with_tests(ctx: ToolContext) -> Optional[str]:
+    """Run pre-push tests, then pull --rebase and push. Returns None on success, error string on failure."""
+    test_error = _run_pre_push_tests(ctx)
+    if test_error:
+        log.error("Pre-push tests failed, blocking push")
+        ctx.last_push_succeeded = False
+        return f"⚠️ PRE_PUSH_TESTS_FAILED: Tests failed, push blocked.\n{test_error}\nCommitted locally but NOT pushed. Fix tests and push manually."
+
+    try:
+        run_cmd(["git", "pull", "--rebase", "origin", ctx.branch_dev], cwd=ctx.repo_dir)
+    except Exception:
+        log.debug(f"Failed to pull --rebase before push", exc_info=True)
+        pass
+
+    try:
+        run_cmd(["git", "push", "origin", ctx.branch_dev], cwd=ctx.repo_dir)
+    except Exception as e:
+        return f"⚠️ GIT_ERROR (push): {e}\nCommitted locally but NOT pushed."
+
+    return None
+
+
 # --- Tool implementations ---
 
 def _repo_write_commit(ctx: ToolContext, path: str, content: str, commit_message: str) -> str:
@@ -74,15 +143,10 @@ def _repo_write_commit(ctx: ToolContext, path: str, content: str, commit_message
             run_cmd(["git", "commit", "-m", commit_message], cwd=ctx.repo_dir)
         except Exception as e:
             return f"⚠️ GIT_ERROR (commit): {e}"
-        try:
-            run_cmd(["git", "pull", "--rebase", "origin", ctx.branch_dev], cwd=ctx.repo_dir)
-        except Exception:
-            log.debug(f"Failed to pull --rebase before push in repo_write_commit", exc_info=True)
-            pass
-        try:
-            run_cmd(["git", "push", "origin", ctx.branch_dev], cwd=ctx.repo_dir)
-        except Exception as e:
-            return f"⚠️ GIT_ERROR (push): {e}\nCommitted locally but NOT pushed."
+
+        push_error = _git_push_with_tests(ctx)
+        if push_error:
+            return push_error
     finally:
         _release_git_lock(lock)
     ctx.last_push_succeeded = True
@@ -121,15 +185,10 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str, paths: Optional[Lis
             run_cmd(["git", "commit", "-m", commit_message], cwd=ctx.repo_dir)
         except Exception as e:
             return f"⚠️ GIT_ERROR (commit): {e}"
-        try:
-            run_cmd(["git", "pull", "--rebase", "origin", ctx.branch_dev], cwd=ctx.repo_dir)
-        except Exception:
-            log.debug(f"Failed to pull --rebase before push in repo_commit_push", exc_info=True)
-            pass
-        try:
-            run_cmd(["git", "push", "origin", ctx.branch_dev], cwd=ctx.repo_dir)
-        except Exception as e:
-            return f"⚠️ GIT_ERROR (push): {e}\nCommitted locally but NOT pushed."
+
+        push_error = _git_push_with_tests(ctx)
+        if push_error:
+            return push_error
     finally:
         _release_git_lock(lock)
     ctx.last_push_succeeded = True

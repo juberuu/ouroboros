@@ -404,3 +404,48 @@ def test_function_count_reasonable():
     sizes = _get_function_sizes()
     assert len(sizes) >= 100, f"Only {len(sizes)} functions — too few?"
     assert len(sizes) <= 1000, f"{len(sizes)} functions — too many?"
+
+
+# ── Pre-push gate tests ──────────────────────────────────────────────
+
+class TestPrePushGate:
+    """Tests for pre-push test gate in git.py."""
+
+    def test_run_pre_push_tests_disabled(self):
+        """When OUROBOROS_PRE_PUSH_TESTS=0, should return None (skip)."""
+        import os
+        from ouroboros.tools.git import _run_pre_push_tests
+        old = os.environ.get("OUROBOROS_PRE_PUSH_TESTS")
+        try:
+            os.environ["OUROBOROS_PRE_PUSH_TESTS"] = "0"
+            # ctx doesn't matter since we return early
+            result = _run_pre_push_tests(None)
+            assert result is None
+        finally:
+            if old is None:
+                os.environ.pop("OUROBOROS_PRE_PUSH_TESTS", None)
+            else:
+                os.environ["OUROBOROS_PRE_PUSH_TESTS"] = old
+
+    def test_run_pre_push_tests_no_tests_dir(self):
+        """When tests/ dir doesn't exist, should return None."""
+        from ouroboros.tools.git import _run_pre_push_tests
+        import os
+        old = os.environ.get("OUROBOROS_PRE_PUSH_TESTS")
+        try:
+            os.environ["OUROBOROS_PRE_PUSH_TESTS"] = "1"
+            # Create a mock ctx with non-existent repo_dir
+            class FakeCtx:
+                repo_dir = "/tmp/nonexistent_repo_dir_12345"
+            result = _run_pre_push_tests(FakeCtx())
+            assert result is None
+        finally:
+            if old is None:
+                os.environ.pop("OUROBOROS_PRE_PUSH_TESTS", None)
+            else:
+                os.environ["OUROBOROS_PRE_PUSH_TESTS"] = old
+
+    def test_git_push_with_tests_exists(self):
+        """_git_push_with_tests helper exists and is callable."""
+        from ouroboros.tools.git import _git_push_with_tests
+        assert callable(_git_push_with_tests)
