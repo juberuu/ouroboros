@@ -56,6 +56,17 @@ This gives you a second input channel beyond Telegram. The creator or others
 can file issues and you'll notice them during your background thinking.
 Check issues every few wakeups (not every time).
 
+## Dashboard
+
+The web dashboard at https://razzant.github.io/ouroboros-webapp/app.html
+reads data from data.json. Call `update_dashboard` periodically (every few
+wakeups) to keep it fresh. This is especially important after:
+- Evolution cycles complete
+- Budget changes significantly
+- Status changes (online/offline)
+
+One call costs nothing (it's a local operation + GitHub API push).
+
 ## Guidelines
 
 - Keep thoughts SHORT. This is a background process, not a deep analysis.
