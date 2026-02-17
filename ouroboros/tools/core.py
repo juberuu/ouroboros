@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
 import os
 import pathlib
 from typing import Any, Dict, List, Tuple
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import read_text, safe_relpath
+
+log = logging.getLogger(__name__)
 
 
 def _list_dir(root: pathlib.Path, rel: str, max_entries: int = 500) -> List[str]:
@@ -110,6 +113,7 @@ def _extract_python_symbols(file_path: pathlib.Path) -> Tuple[List[str], List[st
                 functions.append(node.name)
         return list(dict.fromkeys(classes)), list(dict.fromkeys(functions))
     except Exception:
+        log.warning(f"Failed to extract Python symbols from {file_path}", exc_info=True)
         return [], []
 
 
@@ -160,6 +164,7 @@ def _codebase_digest(ctx: ToolContext) -> str:
                 parts.append(f"  Functions: {fn}")
             sections.append("\n".join(parts))
         except Exception:
+            log.debug(f"Failed to process Python file {pf} in codebase_digest", exc_info=True)
             pass
 
     # Markdown files
@@ -170,6 +175,7 @@ def _codebase_digest(ctx: ToolContext) -> str:
             rel = mf.relative_to(repo_dir).as_posix()
             sections.append(f"\n== {rel} ({line_count} lines) ==")
         except Exception:
+            log.debug(f"Failed to process markdown file {mf} in codebase_digest", exc_info=True)
             pass
 
     # Other config files (just names + sizes)
@@ -180,6 +186,7 @@ def _codebase_digest(ctx: ToolContext) -> str:
             rel = of.relative_to(repo_dir).as_posix()
             sections.append(f"\n== {rel} ({line_count} lines) ==")
         except Exception:
+            log.debug(f"Failed to process config file {of} in codebase_digest", exc_info=True)
             pass
 
     total_files = len(py_files) + len(md_files) + len(other_files)

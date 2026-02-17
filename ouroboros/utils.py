@@ -80,9 +80,11 @@ def append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> None:
                         lock_path.unlink()
                         continue
                 except Exception:
+                    log.debug("Failed to read lock stat during lock acquisition retry", exc_info=True)
                     pass
                 time.sleep(lock_sleep_sec)
             except Exception:
+                log.debug("Failed to acquire file lock for jsonl append", exc_info=True)
                 break
 
         for attempt in range(write_retries):
@@ -112,11 +114,13 @@ def append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> None:
             try:
                 os.close(lock_fd)
             except Exception:
+                log.debug("Failed to close lock fd after jsonl append", exc_info=True)
                 pass
         if lock_acquired:
             try:
                 lock_path.unlink()
             except Exception:
+                log.debug("Failed to unlink lock file after jsonl append", exc_info=True)
                 pass
 
 
@@ -187,6 +191,7 @@ def get_git_info(repo_dir: pathlib.Path) -> tuple[str, str]:
         if r.returncode == 0:
             branch = r.stdout.strip()
     except Exception:
+        log.debug("Failed to get git branch", exc_info=True)
         pass
     try:
         r = subprocess.run(
@@ -196,6 +201,7 @@ def get_git_info(repo_dir: pathlib.Path) -> tuple[str, str]:
         if r.returncode == 0:
             sha = r.stdout.strip()
     except Exception:
+        log.debug("Failed to get git SHA", exc_info=True)
         pass
     return branch, sha
 
@@ -239,6 +245,7 @@ def sanitize_task_for_event(
                 write_text(full_path, text)
                 sanitized["text_full_path"] = f"tasks/{filename}"
             except Exception:
+                log.debug("Failed to persist full task text to Drive during sanitization", exc_info=True)
                 pass
         else:
             sanitized["text_truncated"] = False
@@ -301,12 +308,15 @@ def sanitize_tool_args_for_log(
             json.dumps(value, ensure_ascii=False)
             return value
         except (TypeError, ValueError):
+            log.debug("Failed to JSON serialize value in sanitize_tool_args", exc_info=True)
             return {"_repr": repr(value)}
 
     try:
         return {k: _sanitize_value(k, v, 0) for k, v in args.items()}
     except Exception:
+        log.debug("Failed to sanitize tool arguments for logging", exc_info=True)
         try:
             return json.loads(json.dumps(args, ensure_ascii=False, default=str))
         except Exception:
+            log.debug("Tool argument sanitization failed completely", exc_info=True)
             return {"_error": "sanitization_failed"}

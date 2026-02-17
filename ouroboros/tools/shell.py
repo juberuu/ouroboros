@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import pathlib
 import shutil
@@ -11,6 +12,8 @@ from typing import Any, Dict, List
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import utc_now_iso, run_cmd, append_jsonl, truncate_for_log
+
+log = logging.getLogger(__name__)
 
 
 def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
@@ -42,6 +45,7 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
                 "cmd_preview": truncate_for_log(raw_cmd, 500),
             })
         except Exception:
+            log.debug("Failed to log run_shell warning to events.jsonl", exc_info=True)
             pass
 
     if not isinstance(cmd, list):
@@ -109,6 +113,7 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
             if hasattr(os, "geteuid") and os.geteuid() == 0:
                 env.setdefault("IS_SANDBOX", "1")
         except Exception:
+            log.debug("Failed to check geteuid for sandbox detection", exc_info=True)
             pass
         local_bin = str(pathlib.Path.home() / ".local" / "bin")
         if local_bin not in env.get("PATH", ""):
@@ -172,6 +177,7 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
             })
         return json.dumps(out, ensure_ascii=False, indent=2)
     except Exception:
+        log.debug("Failed to parse claude_code_edit JSON output", exc_info=True)
         return stdout
 
 

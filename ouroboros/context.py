@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import os
 import pathlib
 from typing import Any, Dict, List, Optional, Tuple
@@ -17,6 +18,8 @@ from ouroboros.utils import (
     utc_now_iso, read_text, clip_text, estimate_tokens, get_git_info,
 )
 from ouroboros.memory import Memory
+
+log = logging.getLogger(__name__)
 
 
 def _build_user_content(task: Dict[str, Any]) -> Any:
@@ -106,6 +109,7 @@ def build_llm_messages(
     try:
         git_branch, git_sha = get_git_info(env.repo_dir)
     except Exception:
+        log.debug("Failed to get git info for context", exc_info=True)
         git_branch, git_sha = "unknown", "unknown"
 
     # --- Budget calculation ---
@@ -117,6 +121,7 @@ def build_llm_messages(
         remaining_usd = total_usd - spent_usd
         budget_info = {"total_usd": total_usd, "spent_usd": spent_usd, "remaining_usd": remaining_usd}
     except Exception:
+        log.debug("Failed to calculate budget info for context", exc_info=True)
         pass
 
     # --- Runtime context JSON ---
@@ -179,6 +184,7 @@ def build_llm_messages(
             if review_ctx:
                 dynamic_parts.append(review_ctx)
         except Exception:
+            log.debug("Failed to build review context", exc_info=True)
             pass
 
     dynamic_text = "\n\n".join(dynamic_parts)
@@ -442,5 +448,6 @@ def _safe_read(path: pathlib.Path, fallback: str = "") -> str:
         if path.exists():
             return read_text(path)
     except Exception:
+        log.debug(f"Failed to read file {path} in _safe_read", exc_info=True)
         pass
     return fallback

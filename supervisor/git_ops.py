@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import logging
 import os
 import pathlib
 import shutil
@@ -19,6 +20,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from supervisor.state import (
     load_state, save_state, append_jsonl, atomic_write_text,
 )
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------

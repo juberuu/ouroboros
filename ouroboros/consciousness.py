@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import logging
 import os
 import pathlib
 import queue
@@ -31,6 +32,8 @@ from ouroboros.utils import (
     truncate_for_log, sanitize_tool_result_for_log, sanitize_tool_args_for_log,
 )
 from ouroboros.llm import LLMClient, add_usage
+
+log = logging.getLogger(__name__)
 
 
 class BackgroundConsciousness:
@@ -153,6 +156,7 @@ class BackgroundConsciousness:
             max_bg = total_budget * (self._bg_budget_pct / 100.0)
             return self._bg_spent_usd < max_bg
         except Exception:
+            log.warning("Failed to check background consciousness budget", exc_info=True)
             return True
 
     # -------------------------------------------------------------------

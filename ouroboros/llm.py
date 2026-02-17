@@ -7,9 +7,12 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
+
+log = logging.getLogger(__name__)
 
 
 def normalize_reasoning_effort(value: str, default: str = "medium") -> str:
@@ -142,6 +145,7 @@ class LLMClient:
                 if cost is not None:
                     return float(cost)
         except Exception:
+            log.debug("Failed to fetch generation cost from OpenRouter", exc_info=True)
             pass
         return None
 

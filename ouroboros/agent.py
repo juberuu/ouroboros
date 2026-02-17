@@ -126,12 +126,15 @@ class OuroborosAgent:
                     'expected_sha': expected_sha, 'observed_sha': git_sha,
                 })
             except Exception:
+                log.debug("Failed to log restart verify event", exc_info=True)
                 pass
             try:
                 claim_path.unlink()
             except Exception:
+                log.debug("Failed to delete restart verify claim file", exc_info=True)
                 pass
         except Exception:
+            log.debug("Restart verification failed", exc_info=True)
             pass
 
     def _verify_system_state(self, git_sha: str) -> None:
@@ -320,10 +323,14 @@ class OuroborosAgent:
             )
 
             if cap_info.get("trimmed_sections"):
-                append_jsonl(drive_logs / "events.jsonl", {
-                    "ts": utc_now_iso(), "type": "context_soft_cap_trim",
-                    "task_id": task.get("id"), **cap_info,
-                })
+                try:
+                    append_jsonl(drive_logs / "events.jsonl", {
+                        "ts": utc_now_iso(), "type": "context_soft_cap_trim",
+                        "task_id": task.get("id"), **cap_info,
+                    })
+                except Exception:
+                    log.warning("Failed to log context soft cap trim event", exc_info=True)
+                    pass
 
             # Read budget remaining for cost guard
             budget_remaining = None
@@ -377,6 +384,7 @@ class OuroborosAgent:
                 from ouroboros.tools.browser import cleanup_browser
                 cleanup_browser(self.tools._ctx)
             except Exception:
+                log.debug("Failed to cleanup browser", exc_info=True)
                 pass
             while not self._incoming_messages.empty():
                 try:
@@ -423,6 +431,7 @@ class OuroborosAgent:
                 "response_len": len(text),
             })
         except Exception:
+            log.warning("Failed to log task eval event", exc_info=True)
             pass
 
         self._pending_events.append({
@@ -507,6 +516,7 @@ class OuroborosAgent:
                 "ts": utc_now_iso(),
             })
         except Exception:
+            log.warning("Failed to emit progress event", exc_info=True)
             pass
 
     def _emit_typing_start(self) -> None:
@@ -518,6 +528,7 @@ class OuroborosAgent:
                 "ts": utc_now_iso(),
             })
         except Exception:
+            log.warning("Failed to emit typing start event", exc_info=True)
             pass
 
     def _emit_task_heartbeat(self, task_id: str, phase: str) -> None:
@@ -529,6 +540,7 @@ class OuroborosAgent:
                 "phase": phase, "ts": utc_now_iso(),
             })
         except Exception:
+            log.warning("Failed to emit task heartbeat event", exc_info=True)
             pass
 
     def _start_task_heartbeat_loop(self, task_id: str) -> Optional[threading.Event]:

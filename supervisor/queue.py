@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import logging
 import pathlib
 import time
 import uuid
@@ -19,6 +20,8 @@ from supervisor.state import (
     budget_remaining, EVOLUTION_BUDGET_RESERVE,
 )
 from supervisor.telegram import send_with_budget
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +150,7 @@ def persist_queue_snapshot(reason: str = "") -> None:
     try:
         atomic_write_text(QUEUE_SNAPSHOT_PATH, json.dumps(payload, ensure_ascii=False, indent=2))
     except Exception:
+        log.warning("Failed to persist queue snapshot (reason=%s)", reason, exc_info=True)
         pass
 
 
@@ -158,6 +162,7 @@ def parse_iso_to_ts(iso_ts: str) -> Optional[float]:
     try:
         return datetime.datetime.fromisoformat(txt.replace("Z", "+00:00")).timestamp()
     except Exception:
+        log.debug("Failed to parse ISO timestamp: %s", txt, exc_info=True)
         return None
 
 
@@ -198,6 +203,7 @@ def restore_pending_from_snapshot(max_age_sec: int = 900) -> int:
             persist_queue_snapshot(reason="queue_restored")
         return restored
     except Exception:
+        log.warning("Failed to restore pending queue from snapshot", exc_info=True)
         return 0
 
 
@@ -278,6 +284,7 @@ def enforce_task_timeouts() -> None:
                     w.proc.terminate()
                 w.proc.join(timeout=5)
             except Exception:
+                log.warning("Failed to terminate worker %d during hard timeout", worker_id, exc_info=True)
                 pass
             workers.respawn_worker(worker_id)
 

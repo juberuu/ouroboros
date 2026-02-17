@@ -4,11 +4,14 @@ Provides read/write/list operations for topic-based knowledge files
 stored in memory/knowledge/ on Drive. Auto-maintains an index file.
 """
 
+import logging
 import re
 from pathlib import Path
 from typing import List
 
 from ouroboros.tools.registry import ToolEntry, ToolContext
+
+log = logging.getLogger(__name__)
 
 KNOWLEDGE_DIR = "memory/knowledge"
 INDEX_FILE = "_index.md"
@@ -100,6 +103,7 @@ def _rebuild_index(ctx: ToolContext):
                     break
             entries.append(f"- **{topic}**: {first_line}")
         except Exception:
+            log.debug(f"Failed to read knowledge file for index rebuild: {topic}", exc_info=True)
             entries.append(f"- **{topic}**: (unreadable)")
 
     index_content = "# Knowledge Base Index\n\n"
@@ -154,6 +158,7 @@ def _update_index_entry(ctx: ToolContext, topic: str):
                     break
             new_entry = f"- **{topic}**: {first_line}"
         except Exception:
+            log.debug(f"Failed to read knowledge file for index update: {topic}", exc_info=True)
             new_entry = f"- **{topic}**: (unreadable)"
 
         # Insert in sorted position

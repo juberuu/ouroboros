@@ -8,6 +8,7 @@ Extracted from colab_launcher.py main loop to keep it under 500 lines.
 from __future__ import annotations
 
 import datetime
+import logging
 import os
 import sys
 import time
@@ -15,6 +16,8 @@ import uuid
 from typing import Any, Dict
 
 # Lazy imports to avoid circular dependencies — everything comes through ctx
+
+log = logging.getLogger(__name__)
 
 
 def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
@@ -33,6 +36,7 @@ def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
             "completion_tokens": usage.get("completion_tokens", 0),
         })
     except Exception:
+        log.warning("Failed to log llm_usage event to events.jsonl", exc_info=True)
         pass
 
 
@@ -53,6 +57,7 @@ def _handle_typing_start(evt: Dict[str, Any], ctx: Any) -> None:
         if chat_id:
             ctx.TG.send_chat_action(chat_id, "typing")
     except Exception:
+        log.debug("Failed to send typing action to chat", exc_info=True)
         pass
 
 

@@ -6,6 +6,8 @@ Queue operations moved to supervisor.queue.
 """
 
 from __future__ import annotations
+import logging
+log = logging.getLogger(__name__)
 
 import datetime
 import json
@@ -172,7 +174,7 @@ def handle_chat_direct(chat_id: int, text: str, image_data: Optional[Union[Tuple
             from supervisor.telegram import get_tg
             get_tg().send_message(chat_id, err_msg)
         except Exception:
-            pass
+            log.debug("Suppressed exception", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +213,7 @@ def auto_resume_after_restart() -> None:
                             recent_restart = True
                             break
                 except Exception:
-                    pass
+                    log.debug("Suppressed exception", exc_info=True)
 
         if not recent_restart:
             return
@@ -310,7 +312,7 @@ def _log_worker_crash(wid: int, drive_root: pathlib.Path, phase: str, exc: Excep
         with path.open("a", encoding="utf-8") as f:
             f.write(entry + "\n")
     except Exception:
-        pass
+        log.debug("Suppressed exception", exc_info=True)
 
 
 def _first_worker_boot_event_since(offset_bytes: int) -> Optional[Dict[str, Any]]:
@@ -326,6 +328,7 @@ def _first_worker_boot_event_since(offset_bytes: int) -> Optional[Dict[str, Any]
             f.seek(safe_offset)
             data = f.read().decode("utf-8", errors="replace")
     except Exception:
+        log.debug("Suppressed exception", exc_info=True)
         return None
 
     for line in data.splitlines():
@@ -335,6 +338,7 @@ def _first_worker_boot_event_since(offset_bytes: int) -> Optional[Dict[str, Any]
         try:
             evt = json.loads(raw)
         except Exception:
+            log.debug("Suppressed exception in loop", exc_info=True)
             continue
         if isinstance(evt, dict) and str(evt.get("type") or "") == "worker_boot":
             return evt

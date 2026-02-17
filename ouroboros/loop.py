@@ -15,10 +15,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+import logging
+
 from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.context import compact_tool_history
 from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log, sanitize_tool_result_for_log
+
+log = logging.getLogger(__name__)
 
 # Pricing from OpenRouter API (2026-02-17). Update periodically via /api/v1/models.
 _MODEL_PRICING_STATIC = {
@@ -424,6 +428,7 @@ def run_llm_loop(
                                 "usage": usage,
                             })
                         except Exception:
+                            log.debug("Failed to put llm_usage event to queue", exc_info=True)
                             pass
 
                     # Log per-round metrics
@@ -575,9 +580,11 @@ def run_llm_loop(
                                     "usage": usage,
                                 })
                             except Exception:
+                                log.debug("Failed to put llm_usage event to queue in budget guard", exc_info=True)
                                 pass
                         return (resp_msg.get("content") or finish_reason), accumulated_usage, llm_trace
                     except Exception:
+                        log.warning("Failed to get final response after budget limit", exc_info=True)
                         return finish_reason, accumulated_usage, llm_trace
                 elif budget_pct > 0.3 and round_idx % 10 == 0:
                     # Soft nudge every 10 rounds when spending is significant
@@ -585,7 +592,11 @@ def run_llm_loop(
 
     finally:
         # Cleanup thread-sticky executor for stateful tools
-        stateful_executor.shutdown()
+        try:
+            stateful_executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            log.warning("Failed to shutdown stateful executor", exc_info=True)
+            pass
 
 
 def _safe_args(v: Any) -> Any:
@@ -593,4 +604,5 @@ def _safe_args(v: Any) -> Any:
     try:
         return json.loads(json.dumps(v, ensure_ascii=False, default=str))
     except Exception:
+        log.debug("Failed to serialize args for trace logging", exc_info=True)
         return {"_repr": repr(v)}

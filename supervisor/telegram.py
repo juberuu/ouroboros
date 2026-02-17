@@ -7,12 +7,15 @@ TelegramClient, message splitting, markdown→HTML conversion, send_with_budget.
 from __future__ import annotations
 
 import datetime
+import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
 from supervisor.state import load_state, save_state, append_jsonl
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +103,7 @@ class TelegramClient:
             )
             return r.status_code == 200
         except Exception:
+            log.debug("Failed to send chat action to chat_id=%d", chat_id, exc_info=True)
             return False
 
     def send_photo(self, chat_id: int, photo_bytes: bytes,
@@ -158,6 +162,7 @@ class TelegramClient:
 
             return b64, mime
         except Exception:
+            log.warning("Failed to download file_id=%s from Telegram", file_id, exc_info=True)
             return None, ""
 
 
@@ -397,6 +402,7 @@ def budget_line(force: bool = False) -> str:
         save_state(st)
         return _format_budget_line(st)
     except Exception:
+        log.debug("Suppressed exception in md_to_tg_html", exc_info=True)
         return ""
 
 

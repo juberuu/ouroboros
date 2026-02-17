@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import pathlib
 import time
@@ -9,6 +10,8 @@ from typing import Any, Dict, List, Optional
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import utc_now_iso, write_text, safe_relpath, run_cmd
+
+log = logging.getLogger(__name__)
 
 
 # --- Git lock ---
@@ -74,6 +77,7 @@ def _repo_write_commit(ctx: ToolContext, path: str, content: str, commit_message
         try:
             run_cmd(["git", "pull", "--rebase", "origin", ctx.branch_dev], cwd=ctx.repo_dir)
         except Exception:
+            log.debug(f"Failed to pull --rebase before push in repo_write_commit", exc_info=True)
             pass
         try:
             run_cmd(["git", "push", "origin", ctx.branch_dev], cwd=ctx.repo_dir)
@@ -120,6 +124,7 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str, paths: Optional[Lis
         try:
             run_cmd(["git", "pull", "--rebase", "origin", ctx.branch_dev], cwd=ctx.repo_dir)
         except Exception:
+            log.debug(f"Failed to pull --rebase before push in repo_commit_push", exc_info=True)
             pass
         try:
             run_cmd(["git", "push", "origin", ctx.branch_dev], cwd=ctx.repo_dir)
@@ -136,6 +141,7 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str, paths: Optional[Lis
                 files = ", ".join(untracked.strip().split("\n"))
                 result += f"\n⚠️ WARNING: untracked files remain: {files} — they are NOT in git. Use repo_commit_push without paths to add everything."
         except Exception:
+            log.debug("Failed to check for untracked files after repo_commit_push", exc_info=True)
             pass
     return result
 

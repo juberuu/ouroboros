@@ -73,6 +73,7 @@ def _reset_playwright_greenlet():
     try:
         subprocess.run(["pkill", "-9", "-f", "chromium"], capture_output=True, timeout=5)
     except Exception:
+        log.debug("Failed to kill chromium processes during reset", exc_info=True)
         pass
 
     # Purge all playwright modules from sys.modules to reset greenlet state
@@ -86,6 +87,7 @@ def _reset_playwright_greenlet():
         try:
             del sys.modules[k]
         except Exception:
+            log.debug(f"Failed to delete greenlet module {k} during reset", exc_info=True)
             pass
 
     # Reset module-level instance and thread ID
@@ -110,6 +112,7 @@ def _ensure_browser(ctx: ToolContext):
             if ctx.browser_state.browser.is_connected():
                 return ctx.browser_state.page
         except Exception:
+            log.debug("Browser connection check failed in _ensure_browser", exc_info=True)
             pass
         # Browser died — clean up and recreate
         cleanup_browser(ctx)
@@ -177,6 +180,7 @@ def cleanup_browser(ctx: ToolContext) -> None:
         if ctx.browser_state.page is not None:
             ctx.browser_state.page.close()
     except Exception:
+        log.debug("Failed to close browser page during cleanup", exc_info=True)
         pass
     try:
         if ctx.browser_state.browser is not None:

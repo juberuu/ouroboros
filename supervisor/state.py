@@ -8,11 +8,14 @@ from __future__ import annotations
 
 import datetime
 import json
+import logging
 import os
 import pathlib
 import time
 import uuid
 from typing import Any, Dict, Optional
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +62,7 @@ def json_load_file(path: pathlib.Path) -> Optional[Dict[str, Any]]:
         obj = json.loads(path.read_text(encoding="utf-8"))
         return obj if isinstance(obj, dict) else None
     except Exception:
+        log.debug(f"Failed to load JSON from {path}", exc_info=True)
         return None
 
 
@@ -76,6 +80,7 @@ def acquire_file_lock(lock_path: pathlib.Path, timeout_sec: float = 4.0,
             try:
                 os.write(fd, f"pid={os.getpid()} ts={datetime.datetime.now(datetime.timezone.utc).isoformat()}\n".encode("utf-8"))
             except Exception:
+                log.debug(f"Failed to write lock metadata to {lock_path}", exc_info=True)
                 pass
             return fd
         except FileExistsError:
@@ -85,9 +90,11 @@ def acquire_file_lock(lock_path: pathlib.Path, timeout_sec: float = 4.0,
                     lock_path.unlink()
                     continue
             except Exception:
+                log.debug(f"Failed to check/remove stale lock at {lock_path}", exc_info=True)
                 pass
             time.sleep(0.05)
         except Exception:
+            log.warning(f"Failed to acquire lock at {lock_path}", exc_info=True)
             break
     return None
 
@@ -98,11 +105,13 @@ def release_file_lock(lock_path: pathlib.Path, lock_fd: Optional[int]) -> None:
     try:
         os.close(lock_fd)
     except Exception:
+        log.debug(f"Failed to close lock fd {lock_fd} for {lock_path}", exc_info=True)
         pass
     try:
         if lock_path.exists():
             lock_path.unlink()
     except Exception:
+        log.debug(f"Failed to unlink lock file {lock_path}", exc_info=True)
         pass
 
 
@@ -297,6 +306,7 @@ def check_openrouter_ground_truth() -> Optional[Dict[str, float]]:
             "daily_usd": float(usage_daily),
         }
     except Exception:
+        log.warning("Failed to fetch OpenRouter ground truth", exc_info=True)
         return None
 
 
@@ -321,12 +331,14 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> None:
         try:
             return float(v)
         except Exception:
+            log.debug(f"Failed to convert value to float: {v!r}", exc_info=True)
             return default
 
     def _to_int(v: Any, default: int = 0) -> int:
         try:
             return int(v)
         except Exception:
+            log.debug(f"Failed to convert value to int: {v!r}", exc_info=True)
             return default
 
     lock_fd = acquire_file_lock(STATE_LOCK_PATH)

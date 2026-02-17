@@ -4,8 +4,11 @@
 # Thin orchestrator: secrets, bootstrap, main loop.
 # Heavy logic lives in supervisor/ package.
 
+import logging
 import os, sys, json, time, uuid, pathlib, subprocess, datetime, threading, queue as _queue_mod
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+log = logging.getLogger(__name__)
 
 # ----------------------------
 # 0) Install launcher deps
@@ -288,6 +291,7 @@ def _chat_watchdog_loop():
                         f"последний прогресс {int(idle_sec)}с назад. Продолжаю.",
                     )
         except Exception:
+            log.debug("Failed to check/notify chat watchdog", exc_info=True)
             pass
 
 _watchdog_thread = threading.Thread(target=_chat_watchdog_loop, daemon=True)

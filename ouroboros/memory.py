@@ -8,11 +8,14 @@ Scratchpad, identity, chat history.
 from __future__ import annotations
 
 import json
+import logging
 import pathlib
 from collections import Counter
 from typing import Any, Dict, List, Optional
 
 from ouroboros.utils import utc_now_iso, read_text, write_text, append_jsonl, short
+
+log = logging.getLogger(__name__)
 
 
 class Memory:
@@ -87,6 +90,7 @@ class Memory:
                 try:
                     entries.append(json.loads(line))
                 except Exception:
+                    log.debug(f"Failed to parse JSON line in chat_history: {line[:100]}")
                     continue
 
             if search:
@@ -131,9 +135,11 @@ class Memory:
                 try:
                     entries.append(json.loads(line))
                 except Exception:
+                    log.debug(f"Failed to parse JSON line in read_jsonl_tail: {line[:100]}", exc_info=True)
                     continue
             return entries
         except Exception:
+            log.warning(f"Failed to read JSONL tail from {log_name}", exc_info=True)
             return []
 
     # --- Log summarization ---

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Any, Dict, List
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import utc_now_iso, write_text, run_cmd
+
+log = logging.getLogger(__name__)
 
 
 def _request_restart(ctx: ToolContext, reason: str) -> str:
@@ -23,6 +26,7 @@ def _request_restart(ctx: ToolContext, reason: str) -> str:
             "expected_branch": branch, "reason": reason,
         }, ensure_ascii=False, indent=2))
     except Exception:
+        log.debug("Failed to read VERSION file or git ref for restart verification", exc_info=True)
         pass
     ctx.pending_events.append({"type": "restart_request", "reason": reason, "ts": utc_now_iso()})
     ctx.last_push_succeeded = False
