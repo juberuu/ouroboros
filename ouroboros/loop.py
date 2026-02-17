@@ -23,10 +23,14 @@ from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitiz
 MODEL_PRICING = {
     "anthropic/claude-sonnet-4": (3.0, 0.30, 15.0),
     "anthropic/claude-opus-4": (15.0, 1.50, 75.0),
-    "openai/o3": (10.0, 2.50, 40.0),
+    "openai/o3": (2.0, 0.50, 8.0),
+    "openai/o3-pro": (20.0, 5.0, 80.0),
     "openai/gpt-4.1": (2.0, 0.50, 8.0),
+    "openai/gpt-5.2-codex": (2.0, 0.50, 8.0),
     "google/gemini-2.5-pro-preview": (1.25, 0.3125, 10.0),
+    "google/gemini-3-pro-preview": (1.25, 0.3125, 10.0),
     "deepseek/deepseek-chat-v3-0324": (0.27, 0.07, 1.10),
+    "deepseek/deepseek-r1": (0.55, 0.14, 2.19),
 }
 
 def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int,

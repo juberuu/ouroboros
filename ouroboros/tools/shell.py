@@ -48,11 +48,6 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
         return "⚠️ SHELL_ARG_ERROR: cmd must be a list of strings."
     cmd = [str(x) for x in cmd]
 
-    # Block git in evolution mode
-    if str(ctx.current_task_type or "") == "evolution":
-        if isinstance(cmd, list) and cmd and str(cmd[0]).lower() == "git":
-            return "⚠️ EVOLUTION_GIT_RESTRICTED: use repo_write_commit/repo_commit_push."
-
     work_dir = ctx.repo_dir
     if cwd and cwd.strip() not in ("", ".", "./"):
         candidate = (ctx.repo_dir / cwd).resolve()
