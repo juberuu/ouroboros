@@ -31,6 +31,8 @@ def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
             "ts": evt.get("ts", utc_now_iso()),
             "type": "llm_usage",
             "task_id": evt.get("task_id", ""),
+            "category": evt.get("category", "other"),
+            "model": evt.get("model", ""),
             "cost": usage.get("cost", 0),
             "prompt_tokens": usage.get("prompt_tokens", 0),
             "completion_tokens": usage.get("completion_tokens", 0),
