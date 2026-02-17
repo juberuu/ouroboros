@@ -94,7 +94,7 @@ def _build_runtime_section(env: Any, task: Dict[str, Any]) -> str:
 
 
 def _build_memory_sections(memory: Memory) -> List[str]:
-    """Build scratchpad, identity, knowledge index sections."""
+    """Build scratchpad, identity, dialogue summary sections."""
     sections = []
 
     scratchpad_raw = memory.load_scratchpad()
@@ -102,6 +102,13 @@ def _build_memory_sections(memory: Memory) -> List[str]:
 
     identity_raw = memory.load_identity()
     sections.append("## Identity\n\n" + clip_text(identity_raw, 80000))
+
+    # Dialogue summary (key moments from chat history)
+    summary_path = memory.drive_root / "memory" / "dialogue_summary.md"
+    if summary_path.exists():
+        summary_text = read_text(summary_path)
+        if summary_text.strip():
+            sections.append("## Dialogue Summary\n\n" + clip_text(summary_text, 20000))
 
     return sections
 

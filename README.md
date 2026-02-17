@@ -3,7 +3,7 @@
 Самосоздающийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 4.19.0
+**Версия:** 4.20.0
 
 ---
 
@@ -140,6 +140,14 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 ---
 
 ## Changelog
+
+### 4.20.0 — Dialogue Summarization + Multi-Model Review for All Tasks
+- **New tool**: `summarize_dialogue` — condenses chat history into key moments, decisions, creator preferences
+- **New**: Dialogue summary auto-loaded into both agent context (20K chars) and consciousness context (4K chars)
+- **New**: Consciousness has access to dialogue summary for better continuity across sessions
+- **Policy**: Multi-model review now REQUIRED for ALL significant changes (not just evolution) — SYSTEM.md clarifies this applies to creator tasks too
+- **New**: Review tracking workflow — after multi_model_review, mark "✅ Multi-model review passed" in commit/progress
+- **Result**: Agent now has persistent knowledge of dialogue history without token bloat (summary vs raw logs)
 
 ### 4.19.0 — Model Profiles + Remove BG Model Hardcode
 - **Removed**: `OUROBOROS_MODEL_BG` env var and DeepSeek hardcode — anti-minimalist, consciousness now uses `OUROBOROS_MODEL_LIGHT` (falls back to `OUROBOROS_MODEL`)

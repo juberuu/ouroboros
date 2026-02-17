@@ -289,6 +289,13 @@ class BackgroundConsciousness:
             parts.append("## Scratchpad\n\n" + clip_text(
                 read_text(scratchpad_path), 8000))
 
+        # Dialogue summary for continuity
+        summary_path = self._drive_root / "memory" / "dialogue_summary.md"
+        if summary_path.exists():
+            summary_text = read_text(summary_path)
+            if summary_text.strip():
+                parts.append("## Dialogue Summary\n\n" + clip_text(summary_text, 4000))
+
         # Recent observations
         observations = []
         while not self._observations.empty():
