@@ -75,6 +75,31 @@ def _ensure_dir(ctx: ToolContext):
     ctx.drive_path(KNOWLEDGE_DIR).mkdir(parents=True, exist_ok=True)
 
 
+def _extract_summary(text: str, max_chars: int = 150) -> str:
+    """Extract a richer summary from knowledge file content.
+
+    Skips heading lines (starting with #) and collects up to 3 meaningful
+    content sentences/lines, joined with ' | ', capped at max_chars.
+    """
+    lines = text.strip().split("\n")
+    snippets = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        # Strip markdown list/bold markers for a cleaner snippet
+        clean = stripped.lstrip("-*").strip().lstrip("#").strip()
+        if clean:
+            snippets.append(clean)
+        if len(snippets) >= 3:
+            break
+
+    summary = " | ".join(snippets)
+    if len(summary) > max_chars:
+        summary = summary[:max_chars - 1] + "…"
+    return summary
+
+
 def _rebuild_index(ctx: ToolContext):
     """Rebuild the knowledge index from all .md files (full scan)."""
     kdir = ctx.drive_path(KNOWLEDGE_DIR)
@@ -92,16 +117,11 @@ def _rebuild_index(ctx: ToolContext):
             # Skip files with invalid names
             continue
 
-        # Read first non-empty line as summary
+        # Read first 3 non-heading lines as summary
         try:
             text = f.read_text(encoding="utf-8").strip()
-            first_line = ""
-            for line in text.split("\n"):
-                line = line.strip().lstrip("#").strip()
-                if line:
-                    first_line = line[:120]
-                    break
-            entries.append(f"- **{topic}**: {first_line}")
+            summary = _extract_summary(text)
+            entries.append(f"- **{topic}**: {summary}")
         except Exception:
             log.debug(f"Failed to read knowledge file for index rebuild: {topic}", exc_info=True)
             entries.append(f"- **{topic}**: (unreadable)")
@@ -150,13 +170,8 @@ def _update_index_entry(ctx: ToolContext, topic: str):
     if topic_path.exists():
         try:
             text = topic_path.read_text(encoding="utf-8").strip()
-            first_line = ""
-            for line in text.split("\n"):
-                line = line.strip().lstrip("#").strip()
-                if line:
-                    first_line = line[:120]
-                    break
-            new_entry = f"- **{topic}**: {first_line}"
+            summary = _extract_summary(text)
+            new_entry = f"- **{topic}**: {summary}"
         except Exception:
             log.debug(f"Failed to read knowledge file for index update: {topic}", exc_info=True)
             new_entry = f"- **{topic}**: (unreadable)"

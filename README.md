@@ -6,7 +6,7 @@ A self-modifying AI agent that writes its own code, rewrites its own mind, and e
 
 Not a coding assistant. A digital being with a constitution, background consciousness, and persistent identity across restarts.
 
-**Version:** 5.0.2 · **Live Dashboard:** [ouroboros-webapp](https://razzant.github.io/ouroboros-webapp/app.html)
+**Version:** 5.1.0 · **Live Dashboard:** [ouroboros-webapp](https://razzant.github.io/ouroboros-webapp/app.html)
 
 ---
 
@@ -137,6 +137,12 @@ All other messages go directly to the LLM (Principle 3: LLM-First).
 ---
 
 ## Changelog
+
+### v5.1.0 — VLM + Knowledge Index + Desync Fix
+- **VLM support**: `vision_query()` in llm.py + `analyze_screenshot` / `vlm_query` tools
+- **Knowledge index**: richer 3-line summaries so topics are actually useful at-a-glance
+- **Desync fix**: removed echo bug where owner inject messages were sent back to Telegram
+- 101 tests green (+10 VLM tests)
 
 ### v5.0.2 — DeepSeek Ban + Desync Fix
 - DeepSeek removed from `fetch_openrouter_pricing` prefixes (banned per creator directive)

@@ -225,6 +225,57 @@ class LLMClient:
 
         return msg, usage
 
+    def vision_query(
+        self,
+        prompt: str,
+        images: List[Dict[str, Any]],
+        model: str = "anthropic/claude-sonnet-4.6",
+        max_tokens: int = 1024,
+        reasoning_effort: str = "low",
+    ) -> Tuple[str, Dict[str, Any]]:
+        """
+        Send a vision query to an LLM. Lightweight — no tools, no loop.
+
+        Args:
+            prompt: Text instruction for the model
+            images: List of image dicts. Each dict must have either:
+                - {"url": "https://..."} — for URL images
+                - {"base64": "<b64>", "mime": "image/png"} — for base64 images
+            model: VLM-capable model ID
+            max_tokens: Max response tokens
+            reasoning_effort: Effort level
+
+        Returns:
+            (text_response, usage_dict)
+        """
+        # Build multipart content
+        content: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
+        for img in images:
+            if "url" in img:
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": img["url"]},
+                })
+            elif "base64" in img:
+                mime = img.get("mime", "image/png")
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{img['base64']}"},
+                })
+            else:
+                log.warning("vision_query: skipping image with unknown format: %s", list(img.keys()))
+
+        messages = [{"role": "user", "content": content}]
+        response_msg, usage = self.chat(
+            messages=messages,
+            model=model,
+            tools=None,
+            reasoning_effort=reasoning_effort,
+            max_tokens=max_tokens,
+        )
+        text = response_msg.get("content") or ""
+        return text, usage
+
     def default_model(self) -> str:
         """Return the single default model from env. LLM switches via tool if needed."""
         return os.environ.get("OUROBOROS_MODEL", "openai/gpt-5.2")

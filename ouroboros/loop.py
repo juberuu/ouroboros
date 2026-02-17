@@ -529,7 +529,6 @@ def run_llm_loop(
                         "role": "user",
                         "content": f"[Owner message during task]: {dmsg}",
                     })
-                    emit_progress(f"📨 Новое сообщение от создателя: {dmsg[:100]}")
 
             # Compact old tool history to save tokens on long conversations
             if round_idx > 1:
