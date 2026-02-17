@@ -3,7 +3,7 @@
 Самосоздающийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 4.7.0
+**Версия:** 4.7.1
 
 ---
 
@@ -138,6 +138,12 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 ---
 
 ## Changelog
+
+### 4.7.1 — Loop Refactoring
+- **Refactor**: Lazy pricing loader with thread-safe double-checked locking — eliminates startup API call, fetches on first use
+- **Refactor**: DRY `_make_timeout_result` helper eliminates duplicated timeout handling code
+- **Refactor**: `_execute_with_timeout` now uses context manager for regular executor (prevents thread leaks on timeout)
+- **Fix**: Thread safety for concurrent pricing access in multi-worker scenarios
 
 ### 4.7.0 — Budget Drift Fix + Auto-Pricing Sync
 - **Fix**: Budget drift detection now uses OpenRouter `total_usd` instead of `daily_usd` — eliminates false positives from UTC midnight resets and non-Ouroboros spending

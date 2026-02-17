@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import pathlib
 import queue
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -20,7 +21,7 @@ from ouroboros.context import compact_tool_history
 from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log, sanitize_tool_result_for_log
 
 # Pricing from OpenRouter API (2026-02-17). Update periodically via /api/v1/models.
-MODEL_PRICING = {
+_MODEL_PRICING_STATIC = {
     "anthropic/claude-sonnet-4": (3.0, 0.30, 15.0),
     "anthropic/claude-opus-4": (15.0, 1.5, 75.0),
     "anthropic/claude-opus-4.6": (5.0, 0.5, 25.0),
@@ -36,26 +37,53 @@ MODEL_PRICING = {
     "deepseek/deepseek-r1": (0.70, 0.055, 2.50),
 }
 
-# Try to auto-update pricing from OpenRouter API at import time
-try:
-    from ouroboros.llm import fetch_openrouter_pricing
-    _live = fetch_openrouter_pricing()
-    if _live and len(_live) > 5:
-        MODEL_PRICING.update(_live)
-except Exception as e:
-    import logging as _log
-    _log.getLogger(__name__).warning("Failed to sync pricing from OpenRouter: %s", e)
+_pricing_fetched = False
+_cached_pricing = None
+_pricing_lock = threading.Lock()
+
+def _get_pricing() -> Dict[str, Tuple[float, float, float]]:
+    """
+    Lazy-load pricing. On first call, attempts to fetch from OpenRouter API.
+    Falls back to static pricing if fetch fails.
+    Thread-safe via module-level lock.
+    """
+    global _pricing_fetched, _cached_pricing
+
+    # Fast path: already fetched (read without lock for performance)
+    if _pricing_fetched:
+        return _cached_pricing or _MODEL_PRICING_STATIC
+
+    # Slow path: fetch pricing (lock required)
+    with _pricing_lock:
+        # Double-check after acquiring lock (another thread may have fetched)
+        if _pricing_fetched:
+            return _cached_pricing or _MODEL_PRICING_STATIC
+
+        _pricing_fetched = True
+        _cached_pricing = dict(_MODEL_PRICING_STATIC)
+
+        try:
+            from ouroboros.llm import fetch_openrouter_pricing
+            _live = fetch_openrouter_pricing()
+            if _live and len(_live) > 5:
+                _cached_pricing.update(_live)
+        except Exception as e:
+            import logging as _log
+            _log.getLogger(__name__).warning("Failed to sync pricing from OpenRouter: %s", e)
+
+        return _cached_pricing
 
 def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int,
                    cached_tokens: int = 0, cache_write_tokens: int = 0) -> float:
     """Estimate cost from token counts using known pricing. Returns 0 if model unknown."""
+    model_pricing = _get_pricing()
     # Try exact match first
-    pricing = MODEL_PRICING.get(model)
+    pricing = model_pricing.get(model)
     if not pricing:
         # Try longest prefix match
         best_match = None
         best_length = 0
-        for key, val in MODEL_PRICING.items():
+        for key, val in model_pricing.items():
             if model and model.startswith(key):
                 if len(key) > best_length:
                     best_match = val
@@ -189,6 +217,57 @@ class _StatefulToolExecutor:
             self._executor = None
 
 
+def _make_timeout_result(
+    fn_name: str,
+    tool_call_id: str,
+    is_code_tool: bool,
+    tc: Dict[str, Any],
+    drive_logs: pathlib.Path,
+    timeout_sec: int,
+    task_id: str = "",
+    reset_msg: str = "",
+) -> Dict[str, Any]:
+    """
+    Create a timeout error result dictionary and log the timeout event.
+
+    Args:
+        reset_msg: Optional additional message (e.g., "Browser state has been reset. ")
+
+    Returns: Dict with tool_call_id, fn_name, result, is_error, args_for_log, is_code_tool
+    """
+    args_for_log = {}
+    try:
+        args = json.loads(tc["function"]["arguments"] or "{}")
+        args_for_log = sanitize_tool_args_for_log(fn_name, args if isinstance(args, dict) else {})
+    except Exception:
+        pass
+
+    result = (
+        f"⚠️ TOOL_TIMEOUT ({fn_name}): exceeded {timeout_sec}s limit. "
+        f"The tool is still running in background but control is returned to you. "
+        f"{reset_msg}Try a different approach or inform the owner{' about the issue' if not reset_msg else ''}."
+    )
+
+    append_jsonl(drive_logs / "events.jsonl", {
+        "ts": utc_now_iso(), "type": "tool_timeout",
+        "tool": fn_name, "args": args_for_log,
+        "timeout_sec": timeout_sec,
+    })
+    append_jsonl(drive_logs / "tools.jsonl", {
+        "ts": utc_now_iso(), "tool": fn_name,
+        "args": args_for_log, "result_preview": result,
+    })
+
+    return {
+        "tool_call_id": tool_call_id,
+        "fn_name": fn_name,
+        "result": result,
+        "is_error": True,
+        "args_for_log": args_for_log,
+        "is_code_tool": is_code_tool,
+    }
+
+
 def _execute_with_timeout(
     tools: ToolRegistry,
     tc: Dict[str, Any],
@@ -209,77 +288,30 @@ def _execute_with_timeout(
     is_code_tool = fn_name in tools.CODE_TOOLS
     use_stateful = stateful_executor and fn_name in STATEFUL_BROWSER_TOOLS
 
+    # Two distinct paths: stateful (thread-sticky) vs regular (per-call)
     if use_stateful:
-        # Use thread-sticky executor for browser tools
+        # Stateful executor: submit + wait, reset on timeout
         future = stateful_executor.submit(_execute_single_tool, tools, tc, drive_logs, task_id)
         try:
             return future.result(timeout=timeout_sec)
         except TimeoutError:
-            # Timeout in stateful tool — reset the executor to allow recovery
             stateful_executor.reset()
-            args_for_log = {}
-            try:
-                args = json.loads(tc["function"]["arguments"] or "{}")
-                args_for_log = sanitize_tool_args_for_log(fn_name, args if isinstance(args, dict) else {})
-            except Exception:
-                pass
-            result = (
-                f"⚠️ TOOL_TIMEOUT ({fn_name}): exceeded {timeout_sec}s limit. "
-                f"The tool is still running in background but control is returned to you. "
-                f"Browser state has been reset. Try a different approach or inform the owner."
+            reset_msg = "Browser state has been reset. "
+            return _make_timeout_result(
+                fn_name, tool_call_id, is_code_tool, tc, drive_logs,
+                timeout_sec, task_id, reset_msg
             )
-            append_jsonl(drive_logs / "events.jsonl", {
-                "ts": utc_now_iso(), "type": "tool_timeout",
-                "tool": fn_name, "args": args_for_log,
-                "timeout_sec": timeout_sec,
-            })
-            append_jsonl(drive_logs / "tools.jsonl", {
-                "ts": utc_now_iso(), "tool": fn_name,
-                "args": args_for_log, "result_preview": result,
-            })
-            return {
-                "tool_call_id": tool_call_id,
-                "fn_name": fn_name,
-                "result": result,
-                "is_error": True,
-                "args_for_log": args_for_log,
-                "is_code_tool": is_code_tool,
-            }
     else:
-        # Regular tools: per-call executor (existing behavior)
+        # Regular executor: context manager wraps BOTH submit AND wait
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(_execute_single_tool, tools, tc, drive_logs, task_id)
             try:
                 return future.result(timeout=timeout_sec)
             except TimeoutError:
-                args_for_log = {}
-                try:
-                    args = json.loads(tc["function"]["arguments"] or "{}")
-                    args_for_log = sanitize_tool_args_for_log(fn_name, args if isinstance(args, dict) else {})
-                except Exception:
-                    pass
-                result = (
-                    f"⚠️ TOOL_TIMEOUT ({fn_name}): exceeded {timeout_sec}s limit. "
-                    f"The tool is still running in background but control is returned to you. "
-                    f"Try a different approach or inform the owner about the issue."
+                return _make_timeout_result(
+                    fn_name, tool_call_id, is_code_tool, tc, drive_logs,
+                    timeout_sec, task_id, reset_msg=""
                 )
-                append_jsonl(drive_logs / "events.jsonl", {
-                    "ts": utc_now_iso(), "type": "tool_timeout",
-                    "tool": fn_name, "args": args_for_log,
-                    "timeout_sec": timeout_sec,
-                })
-                append_jsonl(drive_logs / "tools.jsonl", {
-                    "ts": utc_now_iso(), "tool": fn_name,
-                    "args": args_for_log, "result_preview": result,
-                })
-                return {
-                    "tool_call_id": tool_call_id,
-                    "fn_name": fn_name,
-                    "result": result,
-                    "is_error": True,
-                    "args_for_log": args_for_log,
-                    "is_code_tool": is_code_tool,
-                }
 
 
 def run_llm_loop(
