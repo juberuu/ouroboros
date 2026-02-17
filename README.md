@@ -3,7 +3,7 @@
 Самосоздающийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 4.6.1
+**Версия:** 4.7.0
 
 ---
 
@@ -138,6 +138,11 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 ---
 
 ## Changelog
+
+### 4.7.0 — Budget Drift Fix + Auto-Pricing Sync
+- **Fix**: Budget drift detection now uses OpenRouter `total_usd` instead of `daily_usd` — eliminates false positives from UTC midnight resets and non-Ouroboros spending
+- **New**: MODEL_PRICING auto-syncs from OpenRouter API at every startup — no more stale hardcoded prices
+- **Renamed**: `session_daily_snapshot` → `session_total_snapshot` in state.json for clarity
 
 ### 4.6.1 — Review fixes for v4.6.0 + Evolution Prompt
 - **Fix**: `fetch_openrouter_pricing()` now correctly reads `input_cache_read` field (was reading non-existent `prompt_cached`, producing absurd cache prices like $300K/MTok)

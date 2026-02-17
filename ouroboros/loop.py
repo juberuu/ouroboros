@@ -36,6 +36,16 @@ MODEL_PRICING = {
     "deepseek/deepseek-r1": (0.70, 0.055, 2.50),
 }
 
+# Try to auto-update pricing from OpenRouter API at import time
+try:
+    from ouroboros.llm import fetch_openrouter_pricing
+    _live = fetch_openrouter_pricing()
+    if _live and len(_live) > 5:
+        MODEL_PRICING.update(_live)
+except Exception as e:
+    import logging as _log
+    _log.getLogger(__name__).warning("Failed to sync pricing from OpenRouter: %s", e)
+
 def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int,
                    cached_tokens: int = 0, cache_write_tokens: int = 0) -> float:
     """Estimate cost from token counts using known pricing. Returns 0 if model unknown."""
