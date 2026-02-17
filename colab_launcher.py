@@ -379,7 +379,7 @@ def _safe_qsize(q: Any) -> int:
 
 offset = int(load_state().get("tg_offset") or 0)
 _last_diag_heartbeat_ts = 0.0
-_last_message_ts: float = 0.0
+_last_message_ts: float = time.time()  # Start in active mode after restart
 _ACTIVE_MODE_SEC: int = 300  # 5 min of activity = active polling mode
 
 # Auto-start background consciousness (creator's policy: always on by default)
@@ -573,6 +573,55 @@ while True:
             except Exception:
                 pass
         else:
+            # Batch-collect burst messages: wait briefly for follow-up messages
+            # This prevents "do X" → "cancel" race conditions
+            _BATCH_WINDOW_SEC = 1.5  # collect messages for 1500ms
+            _batch_deadline = time.time() + _BATCH_WINDOW_SEC
+            _batched_texts = [text] if text else []
+            _batched_image = image_data  # keep first image
+
+            while time.time() < _batch_deadline:
+                time.sleep(0.1)
+                try:
+                    _extra_updates = TG.get_updates(offset=offset, timeout=0) or []
+                except Exception:
+                    _extra_updates = []
+                if not _extra_updates and time.time() < _batch_deadline - 1.35:
+                    # No follow-up messages in first ~150ms → single message, dispatch immediately
+                    break
+                for _upd in _extra_updates:
+                    offset = _upd["update_id"] + 1
+                    _msg2 = _upd.get("message") or _upd.get("edited_message") or {}
+                    _uid2 = (_msg2.get("from") or {}).get("id")
+                    _cid2 = (_msg2.get("chat") or {}).get("id")
+                    _txt2 = _msg2.get("text") or _msg2.get("caption") or ""
+                    st_check = load_state()
+                    if _uid2 and st_check.get("owner_id") and _uid2 == int(st_check["owner_id"]):
+                        log_chat("in", _cid2, _uid2, _txt2)
+                        st_check["last_owner_message_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                        save_state(st_check)
+                        if _txt2.strip().lower().startswith("/panic"):
+                            send_with_budget(_cid2, "🛑 PANIC: stopping everything now.")
+                            kill_workers()
+                            raise SystemExit("PANIC")
+                        if _txt2:
+                            _batched_texts.append(_txt2)
+                        if not _batched_image:
+                            _doc2 = _msg2.get("document") or {}
+                            _photo2 = (_msg2.get("photo") or [None])[-1] or {}
+                            _fid2 = _photo2.get("file_id") or _doc2.get("file_id")
+                            if _fid2:
+                                _b642, _mime2 = TG.download_file_base64(_fid2)
+                                if _b642:
+                                    _batched_image = (_b642, _mime2, _txt2)
+
+            # Merge all batched texts into one message
+            if len(_batched_texts) > 1:
+                final_text = "\n\n".join(_batched_texts)
+                log.info("Message batch: %d messages merged into one", len(_batched_texts))
+            else:
+                final_text = _batched_texts[0] if _batched_texts else text
+
             _consciousness.pause()
             def _run_task_and_resume(cid, txt, img):
                 try:
@@ -581,7 +630,7 @@ while True:
                     _consciousness.resume()
             threading.Thread(
                 target=_run_task_and_resume,
-                args=(chat_id, text, image_data),
+                args=(chat_id, final_text, _batched_image),
                 daemon=True,
             ).start()
 
