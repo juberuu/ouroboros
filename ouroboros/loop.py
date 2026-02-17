@@ -508,7 +508,7 @@ def run_llm_loop(
             # Fallback to another model if primary model returns empty responses
             if msg is None:
                 # Determine fallback model (different from active_model)
-                fallback_model = os.environ.get("OUROBOROS_MODEL_FALLBACK", "google/gemini-2.5-pro-preview")
+                fallback_model = os.environ.get("OUROBOROS_MODEL_FALLBACK", "google/gemini-3-pro-preview")
                 if fallback_model == active_model:
                     # If fallback is same as active, try claude-sonnet-4 instead
                     fallback_model = "anthropic/claude-sonnet-4"
