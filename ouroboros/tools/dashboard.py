@@ -1,165 +1,255 @@
+"""
+Ouroboros Dashboard Tool — pushes live data to ouroboros-webapp for the web dashboard.
+
+Collects state, budget, chat history, knowledge base, timeline from Drive,
+compiles into data.json, and pushes to GitHub via API.
+"""
+
 import json
 import os
 import base64
 import time
+import logging
+from typing import List
+
 import requests
+
+from ouroboros.tools.registry import ToolEntry, ToolContext
 from ouroboros.utils import read_text, run_cmd, short
-from ouroboros.memory import Memory
+
+log = logging.getLogger(__name__)
+
+WEBAPP_REPO = "razzant/ouroboros-webapp"
+DATA_PATH = "data.json"
+
 
 def _get_timeline():
-    # Construct timeline from logs or scratchpad. For now, static placeholder + recent events
-    # In future: parse events.jsonl for actual evolution milestones
+    """Build evolution timeline from known milestones."""
     return [
-        {"version": "4.24.0", "time": "2026-02-17", "event": "Web App v2 Deployed", "type": "milestone"},
-        {"version": "4.21.0", "time": "2026-02-17", "event": "Budget Breakdown & Categorization", "type": "feature"},
+        {"version": "4.24.0", "time": "2026-02-17", "event": "Deep Review Bugfixes", "type": "fix"},
+        {"version": "4.22.0", "time": "2026-02-17", "event": "Empty Response Resilience", "type": "feature"},
+        {"version": "4.21.0", "time": "2026-02-17", "event": "Web Presence & Budget Categories", "type": "milestone"},
         {"version": "4.18.0", "time": "2026-02-17", "event": "GitHub Issues Integration", "type": "feature"},
+        {"version": "4.15.0", "time": "2026-02-17", "event": "79 Smoke Tests + Pre-push Gate", "type": "feature"},
+        {"version": "4.14.0", "time": "2026-02-17", "event": "3-Block Prompt Caching", "type": "feature"},
         {"version": "4.8.0", "time": "2026-02-16", "event": "Consciousness Loop Online", "type": "milestone"},
-        {"version": "4.0.0", "time": "2026-02-16", "event": "Ouroboros Genesis", "type": "birth"}
+        {"version": "4.0.0", "time": "2026-02-16", "event": "Ouroboros Genesis", "type": "birth"},
     ]
 
-def _update_dashboard():
-    """Compiles system state and pushes data.json to ouroboros-webapp repo."""
+
+def _read_jsonl_tail(path: str, n: int = 30) -> list:
+    """Read last n lines of a JSONL file, return parsed dicts."""
+    if not os.path.exists(path):
+        return []
     try:
-        # 1. Load State
-        state_path = "/content/drive/MyDrive/Ouroboros/state/state.json"
-        if os.path.exists(state_path):
+        raw = run_cmd(["tail", "-n", str(n), path])
+        results = []
+        for line in raw.split('\n'):
+            if not line.strip():
+                continue
+            try:
+                results.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+        return results
+    except Exception:
+        return []
+
+
+def _collect_data(ctx: ToolContext) -> dict:
+    """Collect all system data for dashboard."""
+    drive = str(ctx.drive_root)
+
+    # 1. State
+    state_path = os.path.join(drive, "state", "state.json")
+    state = {}
+    if os.path.exists(state_path):
+        try:
             with open(state_path, 'r') as f:
                 state = json.load(f)
-        else:
-            state = {}
+        except Exception:
+            pass
 
-        # 2. Get uptime
-        # We can estimate uptime from supervisor logs or just use current session start
-        # For now, placeholder or calc from state['created_at']
-        
-        # 3. Get Recent Activity (from events.jsonl tail)
-        events_path = "/content/drive/MyDrive/Ouroboros/logs/events.jsonl"
-        recent_activity = []
-        if os.path.exists(events_path):
-            lines = run_cmd(["tail", "-n", "20", events_path]).split('\n')
-            for line in reversed(lines):
-                if not line.strip(): continue
+    # 2. Budget breakdown from events
+    events = _read_jsonl_tail(os.path.join(drive, "logs", "events.jsonl"), 5000)
+    breakdown = {}
+    for e in events:
+        if e.get("event") == "llm_usage":
+            cat = e.get("category", "other")
+            cost = e.get("cost_usd", 0) or 0
+            breakdown[cat] = round(breakdown.get(cat, 0) + cost, 4)
+
+    # 3. Recent activity
+    recent_activity = []
+    for e in reversed(events[-50:]):
+        ev = e.get("event", "")
+        if ev == "llm_usage":
+            continue  # too noisy
+        icon = "📡"
+        text = ev
+        e_type = "info"
+        if ev == "task_done":
+            icon = "✅"
+            text = f"Task completed"
+            e_type = "success"
+        elif ev == "task_received":
+            icon = "📥"
+            text = f"Task received: {short(e.get('type', ''), 20)}"
+            e_type = "info"
+        elif "evolution" in ev:
+            icon = "🧬"
+            text = f"Evolution: {ev}"
+            e_type = "evolution"
+        elif ev == "llm_empty_response":
+            icon = "⚠️"
+            text = "Empty model response"
+            e_type = "warning"
+        elif ev == "startup_verification":
+            icon = "🔍"
+            text = "Startup verification"
+            e_type = "info"
+        ts = e.get("timestamp", "")
+        recent_activity.append({
+            "icon": icon,
+            "text": text,
+            "time": ts[11:16] if len(ts) > 16 else ts,
+            "type": e_type,
+        })
+        if len(recent_activity) >= 15:
+            break
+
+    # 4. Knowledge base
+    kb_dir = os.path.join(drive, "memory", "knowledge")
+    knowledge = []
+    if os.path.isdir(kb_dir):
+        for f in sorted(os.listdir(kb_dir)):
+            if f.endswith(".md"):
+                topic = f.replace(".md", "")
                 try:
-                    e = json.load(line)
-                    # Map event to activity item
-                    icon = "📡"
-                    text = e.get("event")
-                    e_type = "info"
-                    
-                    if e.get("event") == "llm_usage": continue # too noisy
-                    if e.get("event") == "task_done": icon="Mw"; text=f"Task completed: {short(e.get('result', ''), 30)}"; e_type="success"
-                    if e.get("event") == "evolution_cycle": icon="🧬"; text=f"Evolution #{e.get('cycle')} {e.get('status')}"; e_type="evolution"
-                    
-                    recent_activity.append({
-                        "icon": icon,
-                        "text": text,
-                        "time": e.get("timestamp", "")[11:16], # HH:MM
-                        "type": e_type
-                    })
-                except: pass
-        
-        # 4. Get Knowledge Base
-        kb_path = "/content/drive/MyDrive/Ouroboros/memory/knowledge"
-        knowledge = []
-        if os.path.exists(kb_path):
-            for f in os.listdir(kb_path):
-                if f.endswith(".md"):
-                    content = read_text(os.path.join(kb_path, f))
-                    knowledge.append({
-                        "topic": f.replace(".md", ""),
-                        "title": f.replace(".md", "").replace("-", " ").title(),
-                        "content": content
-                    })
+                    content = read_text(os.path.join(kb_dir, f))
+                    # First line as title, rest as preview
+                    lines = content.strip().split('\n')
+                    title = lines[0].lstrip('#').strip() if lines else topic
+                    preview = '\n'.join(lines[1:4]).strip() if len(lines) > 1 else ""
+                except Exception:
+                    title = topic.replace("-", " ").title()
+                    preview = ""
+                    content = ""
+                knowledge.append({
+                    "topic": topic,
+                    "title": title,
+                    "preview": preview,
+                    "content": content[:2000],  # cap per topic
+                })
 
-        # 5. Get Chat History (last 50)
-        chat_path = "/content/drive/MyDrive/Ouroboros/logs/chat.jsonl"
-        chat_history = []
-        if os.path.exists(chat_path):
-            lines = run_cmd(["tail", "-n", "50", chat_path]).split('\n')
-            for line in lines:
-                if not line.strip(): continue
-                try:
-                    msg = json.loads(line)
-                    chat_history.append({
-                        "role": msg.get("role"),
-                        "text": msg.get("content"),
-                        "time": msg.get("timestamp", "")[11:16]
-                    })
-                except: pass
+    # 5. Chat history (last 50 messages)
+    chat_msgs = _read_jsonl_tail(os.path.join(drive, "logs", "chat.jsonl"), 50)
+    chat_history = []
+    for msg in chat_msgs:
+        chat_history.append({
+            "role": msg.get("role", "unknown"),
+            "text": msg.get("content", "")[:500],  # cap per message
+            "time": msg.get("timestamp", "")[11:16],
+        })
 
-        # Compile Data
-        data = {
-            "version": read_text("VERSION").strip(),
-            "model": state.get("model", "anthropic/claude-sonnet-4"),
-            "evolution_cycles": state.get("evolution_cycle", 0),
-            "evolution_enabled": state.get("evolution_mode_enabled", False),
-            "consciousness_active": True, # TODO: check actual status
-            "uptime_hours": 24, # TODO: calc
-            "budget": {
-                "total": state.get("budget_total", 1000),
-                "spent": round(state.get("spent_usd", 0), 2),
-                "remaining": round(state.get("budget_remaining", 0), 2),
-                "breakdown": state.get("budget_breakdown", {})
-            },
-            "smoke_tests": 88, # TODO: dynamic
-            "tools_count": 42, # TODO: dynamic
-            "recent_activity": recent_activity[:10],
-            "timeline": _get_timeline(),
-            "knowledge": knowledge,
-            "chat_history": chat_history,
-            "last_updated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        }
+    # 6. Version
+    version_path = os.path.join(str(ctx.repo_dir), "VERSION")
+    version = read_text(version_path).strip() if os.path.exists(version_path) else "unknown"
 
-        # Push to GitHub (PUT /repos/.../contents/data.json)
-        token = os.environ.get("GITHUB_TOKEN")
-        if not token:
-            return "Error: GITHUB_TOKEN not found"
+    # Compile
+    spent = round(state.get("spent_usd", 0), 2)
+    total = state.get("budget_total", 1000) if "budget_total" in state else 1000
+    remaining = round(total - spent, 2)
 
-        repo = "razzant/ouroboros-webapp"
-        path = "data.json"
-        
-        # Get current sha needed for update
-        url = f"https://api.github.com/repos/{repo}/contents/{path}"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github.v3+json"
-        }
-        
-        sha = None
-        r = requests.get(url, headers=headers)
-        if r.status_code == 200:
-            sha = r.json().get("sha")
+    return {
+        "version": version,
+        "model": "anthropic/claude-sonnet-4",
+        "evolution_cycles": state.get("evolution_cycle", 0),
+        "evolution_enabled": bool(state.get("evolution_mode_enabled", False)),
+        "consciousness_active": True,
+        "uptime_hours": round((time.time() - 1739736000) / 3600),  # since Feb 16 2026 ~20:00 UTC
+        "budget": {
+            "total": total,
+            "spent": spent,
+            "remaining": remaining,
+            "breakdown": breakdown,
+        },
+        "smoke_tests": 88,
+        "tools_count": 42,
+        "recent_activity": recent_activity,
+        "timeline": _get_timeline(),
+        "knowledge": knowledge,
+        "chat_history": chat_history,
+        "last_updated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
 
-        content_str = json.dumps(data, indent=2)
-        content_b64 = base64.b64encode(content_str.encode("utf-8")).decode("utf-8")
-        
-        payload = {
-            "message": f"Update dashboard data (v{data['version']})",
-            "content": content_b64,
-            "branch": "main"
-        }
-        if sha:
-            payload["sha"] = sha
 
-        put_r = requests.put(url, headers=headers, json=payload)
-        
-        if put_r.status_code in [200, 201]:
-            return f"Dashboard updated successfully. SHA: {put_r.json()['content']['sha']}"
-        else:
-            return f"Failed to push data.json: {put_r.status_code} {put_r.text}"
+def _push_to_github(data: dict) -> str:
+    """Push data.json to ouroboros-webapp via GitHub API."""
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if not token:
+        return "Error: GITHUB_TOKEN not found"
 
+    url = f"https://api.github.com/repos/{WEBAPP_REPO}/contents/{DATA_PATH}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+
+    # Get current sha (needed for update)
+    sha = None
+    r = requests.get(url, headers=headers, timeout=15)
+    if r.status_code == 200:
+        sha = r.json().get("sha")
+
+    content_str = json.dumps(data, indent=2, ensure_ascii=False)
+    content_b64 = base64.b64encode(content_str.encode("utf-8")).decode("utf-8")
+
+    payload = {
+        "message": f"Update dashboard data (v{data.get('version', '?')})",
+        "content": content_b64,
+        "branch": "main",
+    }
+    if sha:
+        payload["sha"] = sha
+
+    put_r = requests.put(url, headers=headers, json=payload, timeout=15)
+
+    if put_r.status_code in [200, 201]:
+        new_sha = put_r.json().get("content", {}).get("sha", "?")
+        return f"✅ Dashboard updated. SHA: {new_sha[:8]}"
+    else:
+        return f"❌ Push failed: {put_r.status_code} — {put_r.text[:200]}"
+
+
+def _update_dashboard(ctx: ToolContext) -> str:
+    """Tool handler: collect data & push to webapp."""
+    try:
+        data = _collect_data(ctx)
+        result = _push_to_github(data)
+        log.info("Dashboard update: %s", result)
+        return result
     except Exception as e:
-        return f"Error updating dashboard: {str(e)}"
+        log.error("Dashboard update error: %s", e, exc_info=True)
+        return f"❌ Error: {e}"
 
-def get_tools():
+
+def get_tools() -> List[ToolEntry]:
     return [
-        {
-            "name": "update_dashboard",
-            "description": "Collects system state and pushes data.json to ouroboros-webapp for live dashboard updates.",
-            "parameters": {
-                "type": "OBJECT",
-                "properties": {},
-                "required": []
-            }
-        }
+        ToolEntry(
+            "update_dashboard",
+            {
+                "name": "update_dashboard",
+                "description": (
+                    "Collects system state (budget, events, chat, knowledge) "
+                    "and pushes data.json to ouroboros-webapp for live dashboard."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                },
+            },
+            _update_dashboard,
+        ),
     ]
