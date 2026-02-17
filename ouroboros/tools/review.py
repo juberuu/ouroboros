@@ -261,6 +261,7 @@ def _emit_usage_event(review_result: dict, ctx: ToolContext) -> None:
             "completion_tokens": review_result["tokens_out"],
             "cost": review_result["cost_estimate"],
         },
+        "category": "review",
     }
 
     if ctx.event_queue is not None:

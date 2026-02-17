@@ -553,6 +553,7 @@ def _emit_llm_usage_event(
     model: str,
     usage: Dict[str, Any],
     cost: float,
+    category: str = "task",
 ) -> None:
     """
     Emit llm_usage event to the event queue.
@@ -563,6 +564,7 @@ def _emit_llm_usage_event(
         model: Model name used for the LLM call
         usage: Usage dict from LLM response
         cost: Calculated cost for this call
+        category: Budget category (task, evolution, consciousness, review, summarize, other)
     """
     if not event_queue:
         return
@@ -579,6 +581,7 @@ def _emit_llm_usage_event(
             "cost": cost,
             "cost_estimated": not bool(usage.get("cost")),
             "usage": usage,
+            "category": category,
         })
     except Exception:
         log.debug("Failed to put llm_usage event to queue", exc_info=True)
@@ -628,8 +631,9 @@ def _call_llm_with_retry(
                     int(usage.get("cache_write_tokens") or 0),
                 )
 
-            # Emit real-time usage event
-            _emit_llm_usage_event(event_queue, task_id, model, usage, cost)
+            # Emit real-time usage event with category based on task_type
+            category = "evolution" if task_type == "evolution" else "task"
+            _emit_llm_usage_event(event_queue, task_id, model, usage, cost, category)
 
             # Log per-round metrics
             _round_event = {

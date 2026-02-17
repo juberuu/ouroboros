@@ -210,6 +210,7 @@ class BackgroundConsciousness:
                         "usage": usage,
                         "source": "consciousness",
                         "ts": utc_now_iso(),
+                        "category": "consciousness",
                     })
 
                 content = msg.get("content") or ""

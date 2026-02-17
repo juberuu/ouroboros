@@ -280,6 +280,7 @@ Now write a comprehensive summary:"""
                     "completion_tokens": usage.get("completion_tokens", 0),
                     "cost": usage.get("cost", 0),
                 },
+                "category": "summarize",
             }
             if ctx.event_queue is not None:
                 try:

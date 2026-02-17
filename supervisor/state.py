@@ -415,6 +415,54 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Budget breakdown by category
+# ---------------------------------------------------------------------------
+
+def budget_breakdown(st: Dict[str, Any]) -> Dict[str, float]:
+    """
+    Calculate budget breakdown by category from events.jsonl.
+
+    Reads llm_usage events and aggregates cost_usd by category field.
+    Returns dict like {"task": 12.5, "evolution": 45.2, ...}
+    """
+    events_path = DRIVE_ROOT / "logs" / "events.jsonl"
+    if not events_path.exists():
+        return {}
+
+    breakdown: Dict[str, float] = {}
+    try:
+        with events_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                    if event.get("type") != "llm_usage":
+                        continue
+
+                    # Get category (default to "other" if not present)
+                    category = event.get("category", "other")
+
+                    # Get cost from either top-level "cost" or nested "usage.cost"
+                    cost = 0.0
+                    if "cost" in event:
+                        cost = float(event.get("cost", 0))
+                    elif "usage" in event and isinstance(event["usage"], dict):
+                        cost = float(event["usage"].get("cost", 0))
+
+                    if cost > 0:
+                        breakdown[category] = breakdown.get(category, 0.0) + cost
+
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    continue
+    except Exception:
+        log.warning("Failed to calculate budget breakdown", exc_info=True)
+
+    return breakdown
+
+
+# ---------------------------------------------------------------------------
 # Status text (moved from workers.py)
 # ---------------------------------------------------------------------------
 
@@ -470,6 +518,15 @@ def status_text(workers_dict: Dict[int, Any], pending_list: list, running_dict: 
         lines.append(f"spent_usd: ${spent:.2f}")
     lines.append(f"spent_calls: {st.get('spent_calls')}")
     lines.append(f"prompt_tokens: {st.get('spent_tokens_prompt')}, completion_tokens: {st.get('spent_tokens_completion')}, cached_tokens: {st.get('spent_tokens_cached')}")
+
+    # Add budget breakdown by category
+    breakdown = budget_breakdown(st)
+    if breakdown:
+        # Sort by cost descending
+        sorted_categories = sorted(breakdown.items(), key=lambda x: x[1], reverse=True)
+        breakdown_parts = [f"{cat}=${cost:.2f}" for cat, cost in sorted_categories if cost > 0]
+        if breakdown_parts:
+            lines.append(f"budget_breakdown: {', '.join(breakdown_parts)}")
 
     # Display budget drift if available
     drift_pct = st.get("budget_drift_pct")
