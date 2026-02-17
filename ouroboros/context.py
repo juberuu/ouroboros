@@ -113,7 +113,7 @@ def _build_memory_sections(memory: Memory) -> List[str]:
     return sections
 
 
-def _build_recent_sections(memory: Memory, env: Any) -> List[str]:
+def _build_recent_sections(memory: Memory, env: Any, task_id: str = "") -> List[str]:
     """Build recent chat, recent progress, recent tools, recent events sections."""
     sections = []
 
@@ -122,18 +122,24 @@ def _build_recent_sections(memory: Memory, env: Any) -> List[str]:
     if chat_summary:
         sections.append("## Recent chat\n\n" + chat_summary)
 
-    progress_summary = memory.summarize_progress(
-        memory.read_jsonl_tail("progress.jsonl", 200), limit=15)
+    progress_entries = memory.read_jsonl_tail("progress.jsonl", 200)
+    if task_id:
+        progress_entries = [e for e in progress_entries if e.get("task_id") == task_id]
+    progress_summary = memory.summarize_progress(progress_entries, limit=15)
     if progress_summary:
         sections.append("## Recent progress\n\n" + progress_summary)
 
-    tools_summary = memory.summarize_tools(
-        memory.read_jsonl_tail("tools.jsonl", 200))
+    tools_entries = memory.read_jsonl_tail("tools.jsonl", 200)
+    if task_id:
+        tools_entries = [e for e in tools_entries if e.get("task_id") == task_id]
+    tools_summary = memory.summarize_tools(tools_entries)
     if tools_summary:
         sections.append("## Recent tools\n\n" + tools_summary)
 
-    events_summary = memory.summarize_events(
-        memory.read_jsonl_tail("events.jsonl", 200))
+    events_entries = memory.read_jsonl_tail("events.jsonl", 200)
+    if task_id:
+        events_entries = [e for e in events_entries if e.get("task_id") == task_id]
+    events_summary = memory.summarize_events(events_entries)
     if events_summary:
         sections.append("## Recent events\n\n" + events_summary)
 
@@ -214,7 +220,7 @@ def build_llm_messages(
         _build_runtime_section(env, task),
     ]
 
-    dynamic_parts.extend(_build_recent_sections(memory, env))
+    dynamic_parts.extend(_build_recent_sections(memory, env, task_id=task.get("id", "")))
 
     if str(task.get("type") or "") == "review" and review_context_builder is not None:
         try:

@@ -530,9 +530,15 @@ def run_llm_loop(
                         "content": f"[Owner message during task]: {dmsg}",
                     })
 
-            # Compact old tool history to save tokens on long conversations
-            if round_idx > 1:
-                messages = compact_tool_history(messages, keep_recent=4)
+            # Compact old tool history ONLY when needed (not every round)
+            # Aggressive compaction causes "forgot what I did" errors.
+            # Only compact when: long task (round > 8) OR context is getting large.
+            if round_idx > 8:
+                messages = compact_tool_history(messages, keep_recent=6)
+            elif round_idx > 3:
+                # Light compaction: only if messages list is very long (>60 items)
+                if len(messages) > 60:
+                    messages = compact_tool_history(messages, keep_recent=6)
 
             # --- LLM call with retry ---
             msg, cost = _call_llm_with_retry(
