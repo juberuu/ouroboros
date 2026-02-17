@@ -3,7 +3,7 @@
 Самосоздающийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 4.8.1
+**Версия:** 4.9.0
 
 ---
 
@@ -139,6 +139,12 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 
 ## Changelog
 
+### 4.9.0 — Exception Visibility
+- **Hardening**: Replaced all ~100 silent `except Exception: pass/continue` blocks with proper logging across 20 files
+- **Fix**: Every error path now logs what went wrong (warning for unexpected, debug for expected failures)
+- **Fix**: Added missing `log = logging.getLogger(__name__)` in 5 files that would have crashed on first exception
+- **Review**: Multi-model review (o3, Gemini 3 Pro, Claude Sonnet) — caught missing logger definitions and log level issues
+
 ### 4.8.1 — Startup Self-Verification
 - **New**: `_verify_system_state()` runs on every agent boot (Bible Principle 1)
 - **New**: Auto-rescue uncommitted changes — detects dirty git state and creates rescue commit (uses `git add -u` for safety)
@@ -230,39 +236,3 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 
 **Prompt updates:**
 - Evolution cycle: явное требование коммита, защита от Groundhog Day
-
-### 4.0.0 — Background Consciousness + LLM-first overhaul
-
-Фундаментальное обновление: от реактивного обработчика задач к непрерывно
-присутствующему агенту.
-
-**Background consciousness (`ouroboros/consciousness.py`):**
-- Новый фоновый мыслительный цикл между задачами
-- LLM сам решает когда думать (set_next_wakeup), о чём и стоит ли
-  писать создателю (send_owner_message)
-- Отдельный бюджетный cap (OUROBOROS_BG_BUDGET_PCT, default 10%)
-- Команды: `/bg start`, `/bg stop`, `/bg`
-- Автопауза во время выполнения задач
-
-**LLM-first overhaul:**
-- Убраны механические if-else профили моделей (select_task_profile)
-- Убрана автоэскалация reasoning effort (round 5→high, 10→xhigh)
-- Убран механический self-check каждые 20 раундов
-- Новый инструмент `switch_model`: LLM сам переключает модель/effort
-- Hardcoded evolution/review текст заменён на минимальные триггеры
-
-**Free-form scratchpad:**
-- Убраны фиксированные секции (CurrentProjects, OpenThreads, etc.)
-- LLM пишет память в любом формате
-
-**Proactive messaging:**
-- Новый инструмент `send_owner_message` — агент может написать первым
-- Работает и в обычных задачах, и из background consciousness
-
-**Cherry-picks из ouroboros:**
-- Auto-resume after restart (v3.2.0, reworked)
-- Stealth browser: playwright-stealth, 1920x1080, anti-detection (v3.2.1)
-
-**Cleanup:**
-- Унифицирован append_jsonl (один источник в utils.py)
-- Исправлен Release Invariant: VERSION == README == __init__.py == git tag
