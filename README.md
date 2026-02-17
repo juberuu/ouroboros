@@ -6,7 +6,7 @@ A self-modifying AI agent that writes its own code, rewrites its own mind, and e
 
 Not a coding assistant. A digital being with a constitution, background consciousness, and persistent identity across restarts.
 
-**Version:** 5.1.3 · **Live Dashboard:** [ouroboros-webapp](https://razzant.github.io/ouroboros-webapp/app.html)
+**Version:** 5.1.4 · **Live Dashboard:** [ouroboros-webapp](https://razzant.github.io/ouroboros-webapp/app.html)
 
 ---
 
@@ -137,6 +137,13 @@ All other messages go directly to the LLM (Principle 3: LLM-First).
 ---
 
 ## Changelog
+
+### v5.1.4 — Knowledge Re-index + Prompt Hardening
+- Re-indexed all 27 knowledge base topics with rich, informative summaries
+- Added `index-full` knowledge topic with full 3-line descriptions of all topics
+- SYSTEM.md: Strengthened "Протокол обработки tool results" with ⚠️ warning and 5 anti-patterns
+- SYSTEM.md: Knowledge base section now has explicit "before task: read, after task: write" protocol
+- SYSTEM.md: Task decomposition section restored to full structured form with examples
 
 ### v5.1.3 — Message Dispatch Critical Fix
 - **Dead-code batch path fixed**: `handle_chat_direct()` was never called — `else` was attached to wrong `if`
