@@ -3,7 +3,7 @@
 Самосоздающийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 4.7.1
+**Версия:** 4.8.0
 
 ---
 
@@ -139,6 +139,13 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 
 ## Changelog
 
+### 4.8.0 — Consciousness Tool Loop
+- **New**: Background consciousness upgraded from single LLM call to iterative tool loop (up to 5 rounds per wakeup)
+- **New**: Expanded tool whitelist: 14 tools (was 5) — adds knowledge base, repo/drive read, web search, chat history
+- **New**: Tool results fed back into LLM context for multi-step reasoning
+- **Fix**: Budget check between rounds prevents mid-cycle overruns in background thinking
+- **Docs**: CONSCIOUSNESS.md updated with multi-step thinking documentation
+
 ### 4.7.1 — Loop Refactoring
 - **Refactor**: Lazy pricing loader with thread-safe double-checked locking — eliminates startup API call, fetches on first use
 - **Refactor**: DRY `_make_timeout_result` helper eliminates duplicated timeout handling code
@@ -177,24 +184,6 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 - Budget tracked via `llm_usage` events through `ToolContext.pending_events`
 - Concurrent execution with semaphore-based rate limiting
 - Updated SYSTEM.md: model recommendations as guidance, not code
-
-### 4.3.0 — Knowledge base
-- **New tools**: `knowledge_read`, `knowledge_write`, `knowledge_list` for persistent structured memory
-- Knowledge index auto-loads into LLM context
-- Post-mortem rule: write learnings after every non-trivial task
-
-### 4.2.0 — Real-time budget tracking
-- **Fix**: Budget was only updated after task completion; now updates per-LLM-call in real-time via event_queue
-- **Fix**: Added OpenRouter ground truth API check as fallback for budget drift detection
-- **Fix**: llm_usage events now logged to events.jsonl for auditability
-
-### 4.1.2
-- Robust Markdown→HTML conversion for Telegram (handles nested formatting, special characters, proper tag escaping)
-
-### 4.1.1
-- Fix: add `consciousness` and `sort_pending` to event context — `toggle_evolution` and `toggle_consciousness` tools now work
-- Fix: rename `schedule_self_task` to `schedule_task` in SYSTEM.md prompt
-- Fix: replace unreliable `qsize()` with `get_nowait()` for event queue drain
 
 ### 4.1.0 — Bible v3.1 + Critical Bugfixes + Architecture
 
@@ -235,17 +224,6 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 **Prompt updates:**
 - Evolution cycle: явное требование коммита, защита от Groundhog Day
 
-### 4.0.3
-- Serialize stateful browser tools (`browse_page`, `browser_action`) to avoid Playwright concurrency crashes from parallel tool calls
-
-### 4.0.2
-- Telegram incoming image support: screenshots, photos, and document images with multimodal context
-- Caption forwarding: image captions are now propagated to LLM context (combined with text or used as fallback)
-- Base64 payload sanitization: images are stripped from event/task logs to prevent secret leaks
-
-### 4.0.1
-- Fix crash when OpenRouter returns `choices: null` (content moderation / model error)
-
 ### 4.0.0 — Background Consciousness + LLM-first overhaul
 
 Фундаментальное обновление: от реактивного обработчика задач к непрерывно
@@ -282,12 +260,6 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 - Унифицирован append_jsonl (один источник в utils.py)
 - Исправлен Release Invariant: VERSION == README == __init__.py == git tag
 
-### 3.1.0
-- Remove hard round limit (was 50). LLM now decides when to stop, respecting budget constraints only
-- Fix budget tracking: `update_budget_from_usage` now correctly reads `cost_usd` field from usage data
-- Self-check messages now include event logging and are in English for consistency
-- Align architecture with BIBLE.md Principle 0 (Subjectivity) and Principle 3 (LLM-first)
-
 ### 3.0.0 — Конституция v3.0 + инфраструктурный overhaul
 
 Новая Конституция (BIBLE.md v3.0): 9 принципов с Субъектностью как метапринципом.
@@ -311,9 +283,3 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 - Parallel tool safety: sequential execution для stateful tools
 - Scratchpad journal fix, shell argument recovery, dead code cleanup
 - Observability: task_id in all llm_round and tool errors
-
-### 2.23.1 — Evolution auto-stop
-
-Auto-stop эволюции при 95% бюджета.
-
-### 2.0.0 — Философский рефакторинг
