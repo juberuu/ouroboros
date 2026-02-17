@@ -229,9 +229,10 @@ def _summarize_dialogue(ctx: ToolContext, last_n: int = 200) -> str:
         dialogue_text = []
         for entry in entries:
             ts = entry.get("ts", "")
-            role = entry.get("role", "")
-            content = entry.get("content", "")
-            dialogue_text.append(f"[{ts}] {role}: {content}")
+            direction = entry.get("direction", "")
+            role = "Creator" if direction == "in" else "Ouroboros"
+            text = entry.get("text", "")
+            dialogue_text.append(f"[{ts}] {role}: {text}")
 
         formatted_dialogue = "\n".join(dialogue_text)
 
