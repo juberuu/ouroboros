@@ -102,6 +102,7 @@ class OuroborosAgent:
                 'pid': os.getpid(), 'git_branch': git_branch, 'git_sha': git_sha,
             })
             self._verify_restart(git_sha)
+            self._verify_system_state(git_sha)
         except Exception:
             log.warning("Worker boot logging failed", exc_info=True)
             return
@@ -132,6 +133,149 @@ class OuroborosAgent:
                 pass
         except Exception:
             pass
+
+    def _verify_system_state(self, git_sha: str) -> None:
+        """Bible Principle 1: verify system state on every startup.
+
+        Checks:
+        - Uncommitted changes (auto-rescue commit & push)
+        - VERSION file sync with git tags
+        - Budget remaining (warning thresholds)
+        """
+        import re
+        import subprocess
+        checks = {}
+        issues = 0
+        drive_logs = self.env.drive_path("logs")
+
+        # 1. Uncommitted changes
+        try:
+            result = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=str(self.env.repo_dir),
+                capture_output=True, text=True, timeout=10, check=True
+            )
+            dirty_files = [l.strip() for l in result.stdout.strip().split('\n') if l.strip()]
+            if dirty_files:
+                issues += 1
+                # Auto-rescue: commit and push
+                auto_committed = False
+                try:
+                    # Only stage tracked files (not secrets/notebooks)
+                    subprocess.run(["git", "add", "-u"], cwd=str(self.env.repo_dir), timeout=10, check=True)
+                    subprocess.run(
+                        ["git", "commit", "-m", "auto-rescue: uncommitted changes detected on startup"],
+                        cwd=str(self.env.repo_dir), timeout=30, check=True
+                    )
+                    # Validate branch name
+                    if not re.match(r'^[a-zA-Z0-9_/-]+$', self.env.branch_dev):
+                        raise ValueError(f"Invalid branch name: {self.env.branch_dev}")
+                    # Pull with rebase before push
+                    subprocess.run(
+                        ["git", "pull", "--rebase", "origin", self.env.branch_dev],
+                        cwd=str(self.env.repo_dir), timeout=60, check=True
+                    )
+                    # Push
+                    try:
+                        subprocess.run(
+                            ["git", "push", "origin", self.env.branch_dev],
+                            cwd=str(self.env.repo_dir), timeout=60, check=True
+                        )
+                        auto_committed = True
+                        log.warning(f"Auto-rescued {len(dirty_files)} uncommitted files on startup")
+                    except subprocess.CalledProcessError:
+                        # If push fails, undo the commit
+                        subprocess.run(
+                            ["git", "reset", "HEAD~1"],
+                            cwd=str(self.env.repo_dir), timeout=10, check=True
+                        )
+                        raise
+                except Exception as e:
+                    log.warning(f"Failed to auto-rescue uncommitted changes: {e}", exc_info=True)
+                checks["uncommitted_changes"] = {
+                    "status": "warning", "files": dirty_files[:20],
+                    "auto_committed": auto_committed,
+                }
+            else:
+                checks["uncommitted_changes"] = {"status": "ok"}
+        except Exception as e:
+            checks["uncommitted_changes"] = {"status": "error", "error": str(e)}
+
+        # 2. VERSION vs git tag
+        try:
+            version_file = read_text(self.env.repo_path("VERSION")).strip()
+            result = subprocess.run(
+                ["git", "describe", "--tags", "--abbrev=0"],
+                cwd=str(self.env.repo_dir),
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode != 0:
+                # No tags found
+                checks["version_sync"] = {
+                    "status": "warning",
+                    "message": "no_tags",
+                    "version_file": version_file,
+                }
+            else:
+                latest_tag = result.stdout.strip().lstrip('v')
+                if version_file != latest_tag:
+                    issues += 1
+                    checks["version_sync"] = {
+                        "status": "warning",
+                        "version_file": version_file,
+                        "latest_tag": latest_tag,
+                    }
+                else:
+                    checks["version_sync"] = {"status": "ok", "version": version_file}
+        except Exception as e:
+            checks["version_sync"] = {"status": "error", "error": str(e)}
+
+        # 3. Budget check
+        try:
+            state_path = self.env.drive_path("state") / "state.json"
+            state_data = json.loads(read_text(state_path))
+            total_budget_str = os.environ.get("TOTAL_BUDGET", "")
+
+            # Handle unset or zero budget gracefully
+            if not total_budget_str or float(total_budget_str) == 0:
+                checks["budget"] = {"status": "unconfigured"}
+            else:
+                total_budget = float(total_budget_str)
+                spent = float(state_data.get("spent_usd", 0))
+                remaining = max(0, total_budget - spent)
+
+                if remaining < 10:
+                    status = "emergency"
+                    issues += 1
+                elif remaining < 50:
+                    status = "critical"
+                    issues += 1
+                elif remaining < 100:
+                    status = "warning"
+                else:
+                    status = "ok"
+
+                checks["budget"] = {
+                    "status": status,
+                    "remaining_usd": round(remaining, 2),
+                    "total_usd": total_budget,
+                    "spent_usd": round(spent, 2),
+                }
+        except Exception as e:
+            checks["budget"] = {"status": "error", "error": str(e)}
+
+        # Log verification result
+        event = {
+            "ts": utc_now_iso(),
+            "type": "startup_verification",
+            "checks": checks,
+            "issues_count": issues,
+            "git_sha": git_sha,
+        }
+        append_jsonl(drive_logs / "events.jsonl", event)
+
+        if issues > 0:
+            log.warning(f"Startup verification found {issues} issue(s): {checks}")
 
     # =====================================================================
     # Main entry point
