@@ -349,7 +349,7 @@ class OuroborosAgent:
             llm_trace: Dict[str, Any] = {"assistant_notes": [], "tool_calls": []}
 
             # Set initial reasoning effort based on task type
-            task_type_str = str(task.get("type") or "")
+            task_type_str = str(task.get("type") or "").lower()
             if task_type_str in ("evolution", "review"):
                 initial_effort = "high"
             else:
