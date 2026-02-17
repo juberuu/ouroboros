@@ -347,6 +347,14 @@ class OuroborosAgent:
             # --- LLM loop (delegated to loop.py) ---
             usage: Dict[str, Any] = {}
             llm_trace: Dict[str, Any] = {"assistant_notes": [], "tool_calls": []}
+
+            # Set initial reasoning effort based on task type
+            task_type_str = str(task.get("type") or "")
+            if task_type_str in ("evolution", "review"):
+                initial_effort = "high"
+            else:
+                initial_effort = "medium"
+
             try:
                 text, usage, llm_trace = run_llm_loop(
                     messages=messages,
@@ -355,10 +363,11 @@ class OuroborosAgent:
                     drive_logs=drive_logs,
                     emit_progress=self._emit_progress,
                     incoming_messages=self._incoming_messages,
-                    task_type=str(task.get("type") or ""),
+                    task_type=task_type_str,
                     task_id=str(task.get("id") or ""),
                     budget_remaining_usd=budget_remaining,
                     event_queue=self._event_queue,
+                    initial_effort=initial_effort,
                 )
             except Exception as e:
                 tb = traceback.format_exc()

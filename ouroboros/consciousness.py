@@ -167,8 +167,11 @@ class BackgroundConsciousness:
         """One thinking cycle: build context, call LLM, execute tools iteratively."""
         context = self._build_context()
         model = os.environ.get(
-            "OUROBOROS_MODEL_LIGHT",
-            os.environ.get("OUROBOROS_MODEL", "openai/gpt-5.2"),
+            "OUROBOROS_MODEL_BG",
+            os.environ.get(
+                "OUROBOROS_MODEL_LIGHT",
+                os.environ.get("OUROBOROS_MODEL", "deepseek/deepseek-chat-v3-0324"),
+            ),
         )
 
         tools = self._tool_schemas()
@@ -278,19 +281,19 @@ class BackgroundConsciousness:
         bible_path = self._repo_dir / "BIBLE.md"
         if bible_path.exists():
             bible = read_text(bible_path)
-            parts.append("## BIBLE.md\n\n" + clip_text(bible, 8000))
+            parts.append("## BIBLE.md\n\n" + clip_text(bible, 12000))
 
         # Identity
         identity_path = self._drive_root / "memory" / "identity.md"
         if identity_path.exists():
             parts.append("## Identity\n\n" + clip_text(
-                read_text(identity_path), 4000))
+                read_text(identity_path), 6000))
 
         # Scratchpad
         scratchpad_path = self._drive_root / "memory" / "scratchpad.md"
         if scratchpad_path.exists():
             parts.append("## Scratchpad\n\n" + clip_text(
-                read_text(scratchpad_path), 4000))
+                read_text(scratchpad_path), 8000))
 
         # Recent observations
         observations = []
@@ -303,10 +306,35 @@ class BackgroundConsciousness:
             parts.append("## Recent observations\n\n" + "\n".join(
                 f"- {o}" for o in observations[-10:]))
 
-        # Runtime info
-        parts.append(f"## Runtime\n\nUTC: {utc_now_iso()}\n"
-                     f"BG budget spent: ${self._bg_spent_usd:.4f}\n"
-                     f"Current wakeup interval: {self._next_wakeup_sec}s")
+        # Runtime info + state
+        runtime_lines = [f"UTC: {utc_now_iso()}"]
+        runtime_lines.append(f"BG budget spent: ${self._bg_spent_usd:.4f}")
+        runtime_lines.append(f"Current wakeup interval: {self._next_wakeup_sec}s")
+
+        # Read state.json for budget remaining
+        try:
+            state_path = self._drive_root / "state" / "state.json"
+            if state_path.exists():
+                state_data = json.loads(read_text(state_path))
+                total_budget = float(os.environ.get("TOTAL_BUDGET", 0))
+                spent = float(state_data.get("spent_usd", 0))
+                if total_budget > 0:
+                    remaining = max(0, total_budget - spent)
+                    runtime_lines.append(f"Budget remaining: ${remaining:.2f} / ${total_budget:.2f}")
+        except Exception as e:
+            log.debug("Failed to read state for budget info: %s", e)
+
+        # Show current model
+        model = os.environ.get(
+            "OUROBOROS_MODEL_BG",
+            os.environ.get(
+                "OUROBOROS_MODEL_LIGHT",
+                os.environ.get("OUROBOROS_MODEL", "deepseek/deepseek-chat-v3-0324"),
+            ),
+        )
+        runtime_lines.append(f"Current model: {model}")
+
+        parts.append("## Runtime\n\n" + "\n".join(runtime_lines))
 
         return "\n\n".join(parts)
 
