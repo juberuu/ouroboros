@@ -103,6 +103,8 @@ EXPECTED_TOOLS = [
     "list_github_issues", "get_github_issue", "comment_on_issue",
     "close_github_issue", "create_github_issue",
     "summarize_dialogue",
+    # Dashboard
+    "update_dashboard",
 ]
 
 
