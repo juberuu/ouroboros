@@ -3,7 +3,7 @@
 Самосоздающийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 4.5.0
+**Версия:** 4.6.0
 
 ---
 
@@ -138,6 +138,14 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 ---
 
 ## Changelog
+
+### 4.6.0 — Tech Radar + Dynamic Pricing
+- **Tech Radar**: background consciousness now periodically scans for new models, pricing changes, and tool updates (web_search)
+- **Dynamic pricing**: `fetch_openrouter_pricing()` in llm.py fetches live model prices from OpenRouter API
+- **MODEL_PRICING updated**: added o4-mini, gpt-5.2, gpt-5.2-codex, gemini-3-pro-preview; fixed stale prices
+- **SYSTEM.md**: new Tech Awareness section — proactive research is now an explicit part of agent behavior
+- **CONSCIOUSNESS.md**: Tech Radar prompt section for periodic environment scanning
+- **Knowledge base**: new `tech-radar` topic with current model landscape
 
 ### 4.5.0
 - Context memory overhaul: agent now sees its own recent progress messages (was blind to them before)
