@@ -3,7 +3,7 @@
 Самосоздающийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 4.11.0
+**Версия:** 4.12.0
 
 ---
 
@@ -141,6 +141,13 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 
 ## Changelog
 
+### 4.12.0 — Agent & Context Decomposition
+- **Refactor**: `_verify_system_state` (142→36 lines) — extracted `_check_uncommitted_changes`, `_check_version_sync`, `_check_budget`
+- **Refactor**: `handle_task` (119→76 lines) — extracted `_prepare_task_context`, `_build_review_context`
+- **Refactor**: `build_llm_messages` (156→103 lines) — extracted `_build_runtime_section`, `_build_memory_sections`, `_build_recent_sections`
+- **Result**: Oversized functions reduced from 6 to 4 across codebase; agent.py max function 142→76 lines
+- **Review**: Multi-model review (o3, Gemini 3 Pro) — both flagged false positive from truncated diff context
+
 ### 4.11.0 — Codebase Health + Loop Refactoring
 - **New tool**: `codebase_health` — self-assessment of code complexity, Bible compliance (oversized functions/modules)
 - **Refactor**: `run_llm_loop` decomposed from 278 → 158 lines (extracted `_emit_llm_usage_event`, `_process_tool_results`, `_append_tool_results`, `_call_llm_with_retry`)
@@ -202,10 +209,4 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 - **SYSTEM.md**: new Tech Awareness section — proactive research is now an explicit part of agent behavior
 - **CONSCIOUSNESS.md**: Tech Radar prompt section for periodic environment scanning
 - **Knowledge base**: new `tech-radar` topic with current model landscape
-
-### 4.5.0
-- Context memory overhaul: agent now sees its own recent progress messages (was blind to them before)
-- Chat summary limits increased (500 chars for outgoing, 300 for incoming)
-- Budget drift detection: session-level tracking, alerts when tracked vs ground-truth diverge >$2
-- `init_state()` captures budget snapshot at session start for drift calculation
 

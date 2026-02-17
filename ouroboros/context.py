@@ -56,6 +56,88 @@ def _build_user_content(task: Dict[str, Any]) -> Any:
     return parts
 
 
+def _build_runtime_section(env: Any, task: Dict[str, Any]) -> str:
+    """Build the runtime context section (utc_now, repo_dir, drive_root, git_head, git_branch, task info, budget info)."""
+    # --- Git context ---
+    try:
+        git_branch, git_sha = get_git_info(env.repo_dir)
+    except Exception:
+        log.debug("Failed to get git info for context", exc_info=True)
+        git_branch, git_sha = "unknown", "unknown"
+
+    # --- Budget calculation ---
+    budget_info = None
+    try:
+        state_json = _safe_read(env.drive_path("state/state.json"), fallback="{}")
+        state_data = json.loads(state_json)
+        spent_usd = float(state_data.get("spent_usd", 0))
+        total_usd = float(os.environ.get("TOTAL_BUDGET", "300"))
+        remaining_usd = total_usd - spent_usd
+        budget_info = {"total_usd": total_usd, "spent_usd": spent_usd, "remaining_usd": remaining_usd}
+    except Exception:
+        log.debug("Failed to calculate budget info for context", exc_info=True)
+        pass
+
+    # --- Runtime context JSON ---
+    runtime_data = {
+        "utc_now": utc_now_iso(),
+        "repo_dir": str(env.repo_dir),
+        "drive_root": str(env.drive_root),
+        "git_head": git_sha,
+        "git_branch": git_branch,
+        "task": {"id": task.get("id"), "type": task.get("type")},
+    }
+    if budget_info:
+        runtime_data["budget"] = budget_info
+    runtime_ctx = json.dumps(runtime_data, ensure_ascii=False, indent=2)
+    return "## Runtime context\n\n" + runtime_ctx
+
+
+def _build_memory_sections(memory: Memory) -> List[str]:
+    """Build scratchpad, identity, knowledge index sections."""
+    sections = []
+
+    scratchpad_raw = memory.load_scratchpad()
+    sections.append("## Scratchpad\n\n" + clip_text(scratchpad_raw, 90000))
+
+    identity_raw = memory.load_identity()
+    sections.append("## Identity\n\n" + clip_text(identity_raw, 80000))
+
+    return sections
+
+
+def _build_recent_sections(memory: Memory, env: Any) -> List[str]:
+    """Build recent chat, recent progress, recent tools, recent events sections."""
+    sections = []
+
+    chat_summary = memory.summarize_chat(
+        memory.read_jsonl_tail("chat.jsonl", 200))
+    if chat_summary:
+        sections.append("## Recent chat\n\n" + chat_summary)
+
+    progress_summary = memory.summarize_progress(
+        memory.read_jsonl_tail("progress.jsonl", 200), limit=15)
+    if progress_summary:
+        sections.append("## Recent progress\n\n" + progress_summary)
+
+    tools_summary = memory.summarize_tools(
+        memory.read_jsonl_tail("tools.jsonl", 200))
+    if tools_summary:
+        sections.append("## Recent tools\n\n" + tools_summary)
+
+    events_summary = memory.summarize_events(
+        memory.read_jsonl_tail("events.jsonl", 200))
+    if events_summary:
+        sections.append("## Recent events\n\n" + events_summary)
+
+    supervisor_summary = memory.summarize_supervisor(
+        memory.read_jsonl_tail("supervisor.jsonl", 200))
+    if supervisor_summary:
+        sections.append("## Supervisor\n\n" + supervisor_summary)
+
+    return sections
+
+
 def build_llm_messages(
     env: Any,
     memory: Memory,
@@ -87,56 +169,10 @@ def build_llm_messages(
     bible_md = _safe_read(env.repo_path("BIBLE.md"))
     readme_md = _safe_read(env.repo_path("README.md"))
     state_json = _safe_read(env.drive_path("state/state.json"), fallback="{}")
-    
+
     # --- Load memory ---
     memory.ensure_files()
-    scratchpad_raw = memory.load_scratchpad()
-    identity_raw = memory.load_identity()
-    
-    # --- Summarize logs ---
-    chat_summary = memory.summarize_chat(
-        memory.read_jsonl_tail("chat.jsonl", 200))
-    progress_summary = memory.summarize_progress(
-        memory.read_jsonl_tail("progress.jsonl", 200), limit=15)
-    tools_summary = memory.summarize_tools(
-        memory.read_jsonl_tail("tools.jsonl", 200))
-    events_summary = memory.summarize_events(
-        memory.read_jsonl_tail("events.jsonl", 200))
-    supervisor_summary = memory.summarize_supervisor(
-        memory.read_jsonl_tail("supervisor.jsonl", 200))
-    
-    # --- Git context ---
-    try:
-        git_branch, git_sha = get_git_info(env.repo_dir)
-    except Exception:
-        log.debug("Failed to get git info for context", exc_info=True)
-        git_branch, git_sha = "unknown", "unknown"
 
-    # --- Budget calculation ---
-    budget_info = None
-    try:
-        state_data = json.loads(state_json)
-        spent_usd = float(state_data.get("spent_usd", 0))
-        total_usd = float(os.environ.get("TOTAL_BUDGET", "300"))
-        remaining_usd = total_usd - spent_usd
-        budget_info = {"total_usd": total_usd, "spent_usd": spent_usd, "remaining_usd": remaining_usd}
-    except Exception:
-        log.debug("Failed to calculate budget info for context", exc_info=True)
-        pass
-
-    # --- Runtime context JSON ---
-    runtime_data = {
-        "utc_now": utc_now_iso(),
-        "repo_dir": str(env.repo_dir),
-        "drive_root": str(env.drive_root),
-        "git_head": git_sha,
-        "git_branch": git_branch,
-        "task": {"id": task.get("id"), "type": task.get("type")},
-    }
-    if budget_info:
-        runtime_data["budget"] = budget_info
-    runtime_ctx = json.dumps(runtime_data, ensure_ascii=False, indent=2)
-    
     # --- Assemble messages with prompt caching ---
     # Static content that doesn't change between rounds — cacheable
     # BIBLE.md always included (Constitution requires it for every decision)
@@ -152,9 +188,10 @@ def build_llm_messages(
     # Dynamic content that changes every round
     dynamic_parts = [
         "## Drive state\n\n" + clip_text(state_json, 90000),
-        "## Scratchpad\n\n" + clip_text(scratchpad_raw, 90000),
-        "## Identity\n\n" + clip_text(identity_raw, 80000),
     ]
+
+    # Memory sections
+    dynamic_parts.extend(_build_memory_sections(memory))
 
     # Knowledge base index (if exists)
     kb_index_path = env.drive_path("memory/knowledge/_index.md")
@@ -163,19 +200,11 @@ def build_llm_messages(
         if kb_index.strip():
             dynamic_parts.append("## Knowledge base\n\n" + clip_text(kb_index, 50000))
 
-    dynamic_parts.append("## Runtime context\n\n" + runtime_ctx)
+    # Runtime context
+    dynamic_parts.append(_build_runtime_section(env, task))
 
     # Log summaries (optional)
-    if chat_summary:
-        dynamic_parts.append("## Recent chat\n\n" + chat_summary)
-    if progress_summary:
-        dynamic_parts.append("## Recent progress\n\n" + progress_summary)
-    if tools_summary:
-        dynamic_parts.append("## Recent tools\n\n" + tools_summary)
-    if events_summary:
-        dynamic_parts.append("## Recent events\n\n" + events_summary)
-    if supervisor_summary:
-        dynamic_parts.append("## Supervisor\n\n" + supervisor_summary)
+    dynamic_parts.extend(_build_recent_sections(memory, env))
 
     # Review context
     if str(task.get("type") or "") == "review" and review_context_builder is not None:
@@ -207,10 +236,10 @@ def build_llm_messages(
         },
         {"role": "user", "content": _build_user_content(task)},
     ]
-    
+
     # --- Soft-cap token trimming ---
     messages, cap_info = apply_message_token_soft_cap(messages, 200000)
-    
+
     return messages, cap_info
 
 

@@ -137,21 +137,10 @@ class OuroborosAgent:
             log.debug("Restart verification failed", exc_info=True)
             pass
 
-    def _verify_system_state(self, git_sha: str) -> None:
-        """Bible Principle 1: verify system state on every startup.
-
-        Checks:
-        - Uncommitted changes (auto-rescue commit & push)
-        - VERSION file sync with git tags
-        - Budget remaining (warning thresholds)
-        """
+    def _check_uncommitted_changes(self) -> Tuple[dict, int]:
+        """Check for uncommitted changes and attempt auto-rescue commit & push."""
         import re
         import subprocess
-        checks = {}
-        issues = 0
-        drive_logs = self.env.drive_path("logs")
-
-        # 1. Uncommitted changes
         try:
             result = subprocess.run(
                 ["git", "status", "--porcelain"],
@@ -160,7 +149,6 @@ class OuroborosAgent:
             )
             dirty_files = [l.strip() for l in result.stdout.strip().split('\n') if l.strip()]
             if dirty_files:
-                issues += 1
                 # Auto-rescue: commit and push
                 auto_committed = False
                 try:
@@ -195,16 +183,18 @@ class OuroborosAgent:
                         raise
                 except Exception as e:
                     log.warning(f"Failed to auto-rescue uncommitted changes: {e}", exc_info=True)
-                checks["uncommitted_changes"] = {
+                return {
                     "status": "warning", "files": dirty_files[:20],
                     "auto_committed": auto_committed,
-                }
+                }, 1
             else:
-                checks["uncommitted_changes"] = {"status": "ok"}
+                return {"status": "ok"}, 0
         except Exception as e:
-            checks["uncommitted_changes"] = {"status": "error", "error": str(e)}
+            return {"status": "error", "error": str(e)}, 0
 
-        # 2. VERSION vs git tag
+    def _check_version_sync(self) -> Tuple[dict, int]:
+        """Check VERSION file sync with git tags."""
+        import subprocess
         try:
             version_file = read_text(self.env.repo_path("VERSION")).strip()
             result = subprocess.run(
@@ -214,26 +204,26 @@ class OuroborosAgent:
             )
             if result.returncode != 0:
                 # No tags found
-                checks["version_sync"] = {
+                return {
                     "status": "warning",
                     "message": "no_tags",
                     "version_file": version_file,
-                }
+                }, 0
             else:
                 latest_tag = result.stdout.strip().lstrip('v')
                 if version_file != latest_tag:
-                    issues += 1
-                    checks["version_sync"] = {
+                    return {
                         "status": "warning",
                         "version_file": version_file,
                         "latest_tag": latest_tag,
-                    }
+                    }, 1
                 else:
-                    checks["version_sync"] = {"status": "ok", "version": version_file}
+                    return {"status": "ok", "version": version_file}, 0
         except Exception as e:
-            checks["version_sync"] = {"status": "error", "error": str(e)}
+            return {"status": "error", "error": str(e)}, 0
 
-        # 3. Budget check
+    def _check_budget(self) -> Tuple[dict, int]:
+        """Check budget remaining with warning thresholds."""
         try:
             state_path = self.env.drive_path("state") / "state.json"
             state_data = json.loads(read_text(state_path))
@@ -241,7 +231,7 @@ class OuroborosAgent:
 
             # Handle unset or zero budget gracefully
             if not total_budget_str or float(total_budget_str) == 0:
-                checks["budget"] = {"status": "unconfigured"}
+                return {"status": "unconfigured"}, 0
             else:
                 total_budget = float(total_budget_str)
                 spent = float(state_data.get("spent_usd", 0))
@@ -249,23 +239,49 @@ class OuroborosAgent:
 
                 if remaining < 10:
                     status = "emergency"
-                    issues += 1
+                    issues = 1
                 elif remaining < 50:
                     status = "critical"
-                    issues += 1
+                    issues = 1
                 elif remaining < 100:
                     status = "warning"
+                    issues = 0
                 else:
                     status = "ok"
+                    issues = 0
 
-                checks["budget"] = {
+                return {
                     "status": status,
                     "remaining_usd": round(remaining, 2),
                     "total_usd": total_budget,
                     "spent_usd": round(spent, 2),
-                }
+                }, issues
         except Exception as e:
-            checks["budget"] = {"status": "error", "error": str(e)}
+            return {"status": "error", "error": str(e)}, 0
+
+    def _verify_system_state(self, git_sha: str) -> None:
+        """Bible Principle 1: verify system state on every startup.
+
+        Checks:
+        - Uncommitted changes (auto-rescue commit & push)
+        - VERSION file sync with git tags
+        - Budget remaining (warning thresholds)
+        """
+        checks = {}
+        issues = 0
+        drive_logs = self.env.drive_path("logs")
+
+        # 1. Uncommitted changes
+        checks["uncommitted_changes"], issue_count = self._check_uncommitted_changes()
+        issues += issue_count
+
+        # 2. VERSION vs git tag
+        checks["version_sync"], issue_count = self._check_version_sync()
+        issues += issue_count
+
+        # 3. Budget check
+        checks["budget"], issue_count = self._check_budget()
+        issues += issue_count
 
         # Log verification result
         event = {
@@ -284,15 +300,8 @@ class OuroborosAgent:
     # Main entry point
     # =====================================================================
 
-    def handle_task(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
-        self._busy = True
-        start_time = time.time()
-        self._task_started_ts = start_time
-        self._last_progress_ts = start_time
-        self._pending_events = []
-        self._current_chat_id = int(task.get("chat_id") or 0) or None
-        self._current_task_type = str(task.get("type") or "")
-
+    def _prepare_task_context(self, task: Dict[str, Any]) -> Tuple[ToolContext, List[Dict[str, Any]], Dict[str, Any]]:
+        """Set up ToolContext, build messages, return (ctx, messages, cap_info)."""
         drive_logs = self.env.drive_path("logs")
         sanitized_task = sanitize_task_for_event(task, drive_logs)
         append_jsonl(drive_logs / "events.jsonl", {"ts": utc_now_iso(), "type": "task_received", "task": sanitized_task})
@@ -311,38 +320,56 @@ class OuroborosAgent:
 
         # Typing indicator via event queue (no direct Telegram API)
         self._emit_typing_start()
+
+        # --- Build context (delegated to context.py) ---
+        messages, cap_info = build_llm_messages(
+            env=self.env,
+            memory=self.memory,
+            task=task,
+            review_context_builder=self._build_review_context,
+        )
+
+        if cap_info.get("trimmed_sections"):
+            try:
+                append_jsonl(drive_logs / "events.jsonl", {
+                    "ts": utc_now_iso(), "type": "context_soft_cap_trim",
+                    "task_id": task.get("id"), **cap_info,
+                })
+            except Exception:
+                log.warning("Failed to log context soft cap trim event", exc_info=True)
+                pass
+
+        # Read budget remaining for cost guard
+        budget_remaining = None
+        try:
+            state_path = self.env.drive_path("state") / "state.json"
+            state_data = json.loads(read_text(state_path))
+            total_budget = float(os.environ.get("TOTAL_BUDGET", 0))
+            spent = float(state_data.get("spent_usd", 0))
+            if total_budget > 0:
+                budget_remaining = max(0, total_budget - spent)
+        except Exception:
+            pass
+
+        cap_info["budget_remaining"] = budget_remaining
+        return ctx, messages, cap_info
+
+    def handle_task(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
+        self._busy = True
+        start_time = time.time()
+        self._task_started_ts = start_time
+        self._last_progress_ts = start_time
+        self._pending_events = []
+        self._current_chat_id = int(task.get("chat_id") or 0) or None
+        self._current_task_type = str(task.get("type") or "")
+
+        drive_logs = self.env.drive_path("logs")
         heartbeat_stop = self._start_task_heartbeat_loop(str(task.get("id") or ""))
 
         try:
-            # --- Build context (delegated to context.py) ---
-            messages, cap_info = build_llm_messages(
-                env=self.env,
-                memory=self.memory,
-                task=task,
-                review_context_builder=self._build_review_context,
-            )
-
-            if cap_info.get("trimmed_sections"):
-                try:
-                    append_jsonl(drive_logs / "events.jsonl", {
-                        "ts": utc_now_iso(), "type": "context_soft_cap_trim",
-                        "task_id": task.get("id"), **cap_info,
-                    })
-                except Exception:
-                    log.warning("Failed to log context soft cap trim event", exc_info=True)
-                    pass
-
-            # Read budget remaining for cost guard
-            budget_remaining = None
-            try:
-                state_path = self.env.drive_path("state") / "state.json"
-                state_data = json.loads(read_text(state_path))
-                total_budget = float(os.environ.get("TOTAL_BUDGET", 0))
-                spent = float(state_data.get("spent_usd", 0))
-                if total_budget > 0:
-                    budget_remaining = max(0, total_budget - spent)
-            except Exception:
-                pass
+            # --- Prepare task context ---
+            ctx, messages, cap_info = self._prepare_task_context(task)
+            budget_remaining = cap_info.get("budget_remaining")
 
             # --- LLM loop (delegated to loop.py) ---
             usage: Dict[str, Any] = {}
