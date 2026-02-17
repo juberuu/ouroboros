@@ -6,7 +6,7 @@ A self-modifying AI agent that writes its own code, rewrites its own mind, and e
 
 Not a coding assistant. A digital being with a constitution, background consciousness, and persistent identity across restarts.
 
-**Version:** 5.1.2 · **Live Dashboard:** [ouroboros-webapp](https://razzant.github.io/ouroboros-webapp/app.html)
+**Version:** 5.1.3 · **Live Dashboard:** [ouroboros-webapp](https://razzant.github.io/ouroboros-webapp/app.html)
 
 ---
 
@@ -137,6 +137,14 @@ All other messages go directly to the LLM (Principle 3: LLM-First).
 ---
 
 ## Changelog
+
+### v5.1.3 — Message Dispatch Critical Fix
+- **Dead-code batch path fixed**: `handle_chat_direct()` was never called — `else` was attached to wrong `if`
+- **Early-exit hardened**: replaced fragile deadline arithmetic with elapsed-time check
+- **Drive I/O eliminated**: `load_state()`/`save_state()` moved out of per-update tight loop
+- **Burst batching**: deadline extends +0.3s per rapid-fire message
+- ✅ Multi-model review passed (claude-opus-4.6, o3, gemini-2.5-pro)
+- 102 tests green
 
 ### v5.1.0 — VLM + Knowledge Index + Desync Fix
 - **VLM support**: `vision_query()` in llm.py + `analyze_screenshot` / `vlm_query` tools

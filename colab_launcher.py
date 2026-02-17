@@ -552,60 +552,74 @@ while True:
         _consciousness.inject_observation(f"Owner message: {text[:100]}")
 
         agent = _get_chat_agent()
+
         if agent._busy:
-            # Inject into active conversation
+            # BUSY PATH: inject into active conversation
             if image_data:
-                # Can't inject images mid-conversation yet; notify user
                 if text:
                     agent.inject_message(text)
                 send_with_budget(chat_id, "📎 Фото получено, но сейчас идёт задача. Отправь ещё раз когда освобожусь.")
             elif text:
                 agent.inject_message(text)
+            # Also write to Drive for running worker tasks
+            if text:
+                try:
+                    from ouroboros.owner_inject import write_owner_message
+                    from supervisor.workers import get_running_task_ids
+                    if get_running_task_ids():
+                        write_owner_message(DRIVE_ROOT, text)
+                except Exception:
+                    pass
 
-        # Also write to Drive so any running worker tasks (schedule_task) can see it
-        # Only needed when worker pool has running tasks; direct chat gets inject_message
-        if text:
-            try:
-                from ouroboros.owner_inject import write_owner_message
-                from supervisor.workers import get_running_task_ids
-                if get_running_task_ids():
-                    write_owner_message(DRIVE_ROOT, text)
-            except Exception:
-                pass
         else:
+            # FREE PATH: batch-collect burst messages, then dispatch
+            # Write to Drive for worker tasks
+            if text:
+                try:
+                    from ouroboros.owner_inject import write_owner_message
+                    from supervisor.workers import get_running_task_ids
+                    if get_running_task_ids():
+                        write_owner_message(DRIVE_ROOT, text)
+                except Exception:
+                    pass
+
             # Batch-collect burst messages: wait briefly for follow-up messages
             # This prevents "do X" → "cancel" race conditions
             _BATCH_WINDOW_SEC = 1.5  # collect messages for 1500ms
-            _batch_deadline = time.time() + _BATCH_WINDOW_SEC
+            _EARLY_EXIT_SEC = 0.15   # if no burst within 150ms → dispatch immediately
+            _batch_start = time.time()
+            _batch_deadline = _batch_start + _BATCH_WINDOW_SEC
             _batched_texts = [text] if text else []
             _batched_image = image_data  # keep first image
 
+            _batch_state = load_state()
+            _batch_state_dirty = False
             while time.time() < _batch_deadline:
                 time.sleep(0.1)
                 try:
                     _extra_updates = TG.get_updates(offset=offset, timeout=0) or []
                 except Exception:
                     _extra_updates = []
-                if not _extra_updates and time.time() < _batch_deadline - 1.35:
-                    # No follow-up messages in first ~150ms → single message, dispatch immediately
+                if not _extra_updates and (time.time() - _batch_start) < _EARLY_EXIT_SEC:
+                    # No follow-up messages in first 150ms → single message, dispatch immediately
                     break
                 for _upd in _extra_updates:
-                    offset = _upd["update_id"] + 1
+                    offset = max(offset, int(_upd.get("update_id", offset - 1)) + 1)
                     _msg2 = _upd.get("message") or _upd.get("edited_message") or {}
                     _uid2 = (_msg2.get("from") or {}).get("id")
                     _cid2 = (_msg2.get("chat") or {}).get("id")
                     _txt2 = _msg2.get("text") or _msg2.get("caption") or ""
-                    st_check = load_state()
-                    if _uid2 and st_check.get("owner_id") and _uid2 == int(st_check["owner_id"]):
+                    if _uid2 and _batch_state.get("owner_id") and _uid2 == int(_batch_state["owner_id"]):
                         log_chat("in", _cid2, _uid2, _txt2)
-                        st_check["last_owner_message_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-                        save_state(st_check)
+                        _batch_state["last_owner_message_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                        _batch_state_dirty = True
                         if _txt2.strip().lower().startswith("/panic"):
                             send_with_budget(_cid2, "🛑 PANIC: stopping everything now.")
                             kill_workers()
                             raise SystemExit("PANIC")
                         if _txt2:
                             _batched_texts.append(_txt2)
+                            _batch_deadline = max(_batch_deadline, time.time() + 0.3)  # extend for burst
                         if not _batched_image:
                             _doc2 = _msg2.get("document") or {}
                             _photo2 = (_msg2.get("photo") or [None])[-1] or {}
@@ -615,24 +629,43 @@ while True:
                                 if _b642:
                                     _batched_image = (_b642, _mime2, _txt2)
 
+            # Save state once if mutated during batch window
+            if _batch_state_dirty:
+                save_state(_batch_state)
+
             # Merge all batched texts into one message
             if len(_batched_texts) > 1:
                 final_text = "\n\n".join(_batched_texts)
                 log.info("Message batch: %d messages merged into one", len(_batched_texts))
+            elif _batched_texts:
+                final_text = _batched_texts[0]
             else:
-                final_text = _batched_texts[0] if _batched_texts else text
+                final_text = text  # fallback to original
 
-            _consciousness.pause()
-            def _run_task_and_resume(cid, txt, img):
+            # Re-check if agent became busy during batch window (race condition fix)
+            if agent._busy:
+                if final_text:
+                    agent.inject_message(final_text)
+                if _batched_image:
+                    send_with_budget(chat_id, "📎 Фото получено, но сейчас идёт задача. Отправь ещё раз когда освобожусь.")
+            else:
+                # Dispatch to direct chat handler
+                _consciousness.pause()
+                def _run_task_and_resume(cid, txt, img):
+                    try:
+                        handle_chat_direct(cid, txt, img)
+                    finally:
+                        _consciousness.resume()
+                _t = threading.Thread(
+                    target=_run_task_and_resume,
+                    args=(chat_id, final_text, _batched_image),
+                    daemon=True,
+                )
                 try:
-                    handle_chat_direct(cid, txt, img)
-                finally:
-                    _consciousness.resume()
-            threading.Thread(
-                target=_run_task_and_resume,
-                args=(chat_id, final_text, _batched_image),
-                daemon=True,
-            ).start()
+                    _t.start()
+                except Exception as _te:
+                    log.error("Failed to start chat thread: %s", _te)
+                    _consciousness.resume()  # ensure resume if thread fails to start
 
     st = load_state()
     st["tg_offset"] = offset
