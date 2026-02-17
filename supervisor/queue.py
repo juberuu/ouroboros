@@ -10,6 +10,7 @@ import datetime
 import json
 import logging
 import pathlib
+import threading
 import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
@@ -48,6 +49,10 @@ def init(drive_root: pathlib.Path, soft_timeout: int, hard_timeout: int) -> None
 PENDING: List[Dict[str, Any]] = []
 RUNNING: Dict[str, Dict[str, Any]] = {}
 QUEUE_SEQ_COUNTER_REF: Dict[str, int] = {"value": 0}
+
+# Lock for all mutations to PENDING, RUNNING, WORKERS shared collections.
+# Protects against concurrent access from main loop, direct-chat threads, watchdog.
+_queue_lock = threading.Lock()
 
 
 def init_queue_refs(pending: List[Dict[str, Any]], running: Dict[str, Dict[str, Any]],
@@ -211,23 +216,24 @@ def cancel_task_by_id(task_id: str) -> bool:
     """Cancel a task by ID (from PENDING or RUNNING)."""
     # Import here to avoid circular dependency during module load
     from supervisor import workers
-    
-    for i, t in enumerate(list(PENDING)):
-        if t["id"] == task_id:
-            PENDING.pop(i)
-            persist_queue_snapshot(reason="cancel_pending")
-            return True
-    
-    # For RUNNING tasks, need to terminate worker
-    for w in workers.WORKERS.values():
-        if w.busy_task_id == task_id:
-            RUNNING.pop(task_id, None)
-            if w.proc.is_alive():
-                w.proc.terminate()
-            w.proc.join(timeout=5)
-            workers.respawn_worker(w.wid)
-            persist_queue_snapshot(reason="cancel_running")
-            return True
+
+    with _queue_lock:
+        for i, t in enumerate(list(PENDING)):
+            if t["id"] == task_id:
+                PENDING.pop(i)
+                persist_queue_snapshot(reason="cancel_pending")
+                return True
+
+        # For RUNNING tasks, need to terminate worker
+        for w in workers.WORKERS.values():
+            if w.busy_task_id == task_id:
+                RUNNING.pop(task_id, None)
+                if w.proc.is_alive():
+                    w.proc.terminate()
+                w.proc.join(timeout=5)
+                workers.respawn_worker(w.wid)
+                persist_queue_snapshot(reason="cancel_running")
+                return True
     return False
 
 

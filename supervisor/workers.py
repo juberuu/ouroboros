@@ -111,8 +111,8 @@ CRASH_TS: List[float] = []
 QUEUE_SEQ_COUNTER_REF: Dict[str, int] = {"value": 0}
 
 # Lock for all mutations to PENDING, RUNNING, WORKERS shared collections.
-# Protects against concurrent access from main loop, direct-chat threads, watchdog.
-_queue_lock = threading.Lock()
+# Canonical definition lives in queue.py; imported here for use by assign_tasks/kill_workers.
+from supervisor.queue import _queue_lock
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +345,7 @@ def _first_worker_boot_event_since(offset_bytes: int) -> Optional[Dict[str, Any]
     return None
 
 
-def _verify_worker_sha_after_spawn(events_offset: int, timeout_sec: float = 5.0) -> None:
+def _verify_worker_sha_after_spawn(events_offset: int, timeout_sec: float = 90.0) -> None:
     """Verify that newly spawned workers booted with expected current_sha."""
     st = load_state()
     expected_sha = str(st.get("current_sha") or "").strip()

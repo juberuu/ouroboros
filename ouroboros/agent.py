@@ -212,6 +212,19 @@ class OuroborosAgent:
                     result_data["status"] = "warning"
                     issue_count += 1
 
+            # Check README.md version (Bible P7: VERSION == README version)
+            try:
+                readme_content = read_text(self.env.repo_path("README.md"))
+                readme_match = re.search(r'\*\*Version:\*\*\s*(\d+\.\d+\.\d+)', readme_content)
+                if readme_match:
+                    readme_version = readme_match.group(1)
+                    result_data["readme_version"] = readme_version
+                    if version_file != readme_version:
+                        result_data["status"] = "warning"
+                        issue_count += 1
+            except Exception:
+                log.debug("Failed to check README.md version", exc_info=True)
+
             # Check git tags
             result = subprocess.run(
                 ["git", "describe", "--tags", "--abbrev=0"],
@@ -359,7 +372,7 @@ class OuroborosAgent:
         try:
             state_path = self.env.drive_path("state") / "state.json"
             state_data = json.loads(read_text(state_path))
-            total_budget = float(os.environ.get("TOTAL_BUDGET", 0))
+            total_budget = float(os.environ.get("TOTAL_BUDGET", "1"))
             spent = float(state_data.get("spent_usd", 0))
             if total_budget > 0:
                 budget_remaining = max(0, total_budget - spent)
@@ -579,14 +592,16 @@ class OuroborosAgent:
 
             total_chars = 0
             max_chars = 80_000
+            files_added = 0
             for path, content in sections:
                 if total_chars >= max_chars:
-                    parts.append(f"\n... ({len(sections) - len(parts)} more files, use repo_read)")
+                    parts.append(f"\n... ({len(sections) - files_added} more files, use repo_read)")
                     break
                 preview = content[:2000] if len(content) > 2000 else content
                 file_block = f"\n### {path}\n```\n{preview}\n```\n"
                 total_chars += len(file_block)
                 parts.append(file_block)
+                files_added += 1
 
             return "\n".join(parts)
         except Exception as e:

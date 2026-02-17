@@ -217,10 +217,10 @@ class _StatefulToolExecutor:
             self._executor.shutdown(wait=False, cancel_futures=True)
             self._executor = None
 
-    def shutdown(self):
+    def shutdown(self, wait=True, cancel_futures=False):
         """Final cleanup."""
         if self._executor is not None:
-            self._executor.shutdown(wait=True)
+            self._executor.shutdown(wait=wait, cancel_futures=cancel_futures)
             self._executor = None
 
 
@@ -531,22 +531,22 @@ def run_llm_loop(
 
             # Fallback to another model if primary model returns empty responses
             if msg is None:
-                # Determine fallback model (different from active_model)
-                fallback_model = os.environ.get("OUROBOROS_MODEL_FALLBACK", "google/gemini-3-pro-preview")
-                if fallback_model == active_model:
-                    # If fallback is same as active, try alternative models in priority order
-                    # Try openai/gpt-4.1 first, then claude-sonnet-4 as last resort
-                    fallback_alternatives = ["openai/gpt-4.1", "anthropic/claude-sonnet-4"]
-                    for alt in fallback_alternatives:
-                        if alt != active_model:
-                            fallback_model = alt
-                            break
-                    else:
-                        # All alternatives are the same as active_model — skip retry
-                        return (
-                            f"⚠️ Не удалось получить ответ от модели {active_model} после {max_retries} попыток. "
-                            f"Fallback модель совпадает с активной. Попробуй переформулировать запрос."
-                        ), accumulated_usage, llm_trace
+                # Configurable fallback priority list (Bible P3: no hardcoded behavior)
+                fallback_list_raw = os.environ.get(
+                    "OUROBOROS_MODEL_FALLBACK_LIST",
+                    "google/gemini-3-pro-preview,openai/gpt-4.1,anthropic/claude-sonnet-4"
+                )
+                fallback_candidates = [m.strip() for m in fallback_list_raw.split(",") if m.strip()]
+                fallback_model = None
+                for candidate in fallback_candidates:
+                    if candidate != active_model:
+                        fallback_model = candidate
+                        break
+                if fallback_model is None:
+                    return (
+                        f"⚠️ Не удалось получить ответ от модели {active_model} после {max_retries} попыток. "
+                        f"Все fallback-модели совпадают с активной. Попробуй переформулировать запрос."
+                    ), accumulated_usage, llm_trace
 
                 # Emit progress message so user sees fallback happening
                 fallback_progress = f"⚡ Fallback: {active_model} → {fallback_model} после пустого ответа"

@@ -31,7 +31,7 @@ from ouroboros.utils import (
     utc_now_iso, read_text, append_jsonl, clip_text,
     truncate_for_log, sanitize_tool_result_for_log, sanitize_tool_args_for_log,
 )
-from ouroboros.llm import LLMClient, add_usage
+from ouroboros.llm import LLMClient
 
 log = logging.getLogger(__name__)
 
@@ -76,6 +76,10 @@ class BackgroundConsciousness:
     @property
     def is_running(self) -> bool:
         return self._running and self._thread is not None and self._thread.is_alive()
+
+    @property
+    def _model(self) -> str:
+        return os.environ.get("OUROBOROS_MODEL_LIGHT", "") or os.environ.get("OUROBOROS_MODEL", "anthropic/claude-sonnet-4")
 
     def start(self) -> str:
         if self.is_running:
@@ -166,7 +170,7 @@ class BackgroundConsciousness:
     def _think(self) -> None:
         """One thinking cycle: build context, call LLM, execute tools iteratively."""
         context = self._build_context()
-        model = os.environ.get("OUROBOROS_MODEL_LIGHT", "") or os.environ.get("OUROBOROS_MODEL", "anthropic/claude-sonnet-4")
+        model = self._model
 
         tools = self._tool_schemas()
         messages = [
@@ -188,7 +192,6 @@ class BackgroundConsciousness:
                     reasoning_effort="low",
                     max_tokens=2048,
                 )
-                add_usage({}, usage)
                 cost = float(usage.get("cost") or 0)
                 total_cost += cost
                 self._bg_spent_usd += cost
@@ -318,7 +321,7 @@ class BackgroundConsciousness:
             state_path = self._drive_root / "state" / "state.json"
             if state_path.exists():
                 state_data = json.loads(read_text(state_path))
-                total_budget = float(os.environ.get("TOTAL_BUDGET", 0))
+                total_budget = float(os.environ.get("TOTAL_BUDGET", "1"))
                 spent = float(state_data.get("spent_usd", 0))
                 if total_budget > 0:
                     remaining = max(0, total_budget - spent)
@@ -327,8 +330,7 @@ class BackgroundConsciousness:
             log.debug("Failed to read state for budget info: %s", e)
 
         # Show current model
-        model = os.environ.get("OUROBOROS_MODEL_LIGHT", "") or os.environ.get("OUROBOROS_MODEL", "anthropic/claude-sonnet-4")
-        runtime_lines.append(f"Current model: {model}")
+        runtime_lines.append(f"Current model: {self._model}")
 
         parts.append("## Runtime\n\n" + "\n".join(runtime_lines))
 

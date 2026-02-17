@@ -153,30 +153,8 @@ def ensure_state_defaults(st: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def default_state_dict() -> Dict[str, Any]:
-    return {
-        "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "owner_id": None,
-        "owner_chat_id": None,
-        "tg_offset": 0,
-        "spent_usd": 0.0,
-        "spent_calls": 0,
-        "spent_tokens_prompt": 0,
-        "spent_tokens_completion": 0,
-        "spent_tokens_cached": 0,
-        "session_id": uuid.uuid4().hex,
-        "current_branch": None,
-        "current_sha": None,
-        "last_owner_message_at": "",
-        "last_evolution_task_at": "",
-        "budget_messages_since_report": 0,
-        "evolution_mode_enabled": False,
-        "evolution_cycle": 0,
-        "session_total_snapshot": None,
-        "session_spent_snapshot": None,
-        "budget_drift_pct": None,
-        "budget_drift_alert": False,
-        "evolution_consecutive_failures": 0,
-    }
+    """Create a fresh state dict. Single source of truth: ensure_state_defaults."""
+    return ensure_state_defaults({})
 
 
 # ---------------------------------------------------------------------------
@@ -396,7 +374,6 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> None:
                         if drift_pct > 50.0 and abs_diff > 5.0:
                             st["budget_drift_alert"] = True
                             # Log warning event
-                            from supervisor.state import append_jsonl
                             append_jsonl(
                                 DRIVE_ROOT / "logs" / "events.jsonl",
                                 {

@@ -15,7 +15,8 @@ from typing import List
 import requests
 
 from ouroboros.tools.registry import ToolEntry, ToolContext
-from ouroboros.utils import run_cmd, short
+from ouroboros.memory import Memory
+from ouroboros.utils import short
 
 log = logging.getLogger(__name__)
 
@@ -37,23 +38,10 @@ def _get_timeline():
     ]
 
 
-def _read_jsonl_tail(path: str, n: int = 30) -> list:
-    """Read last n lines of a JSONL file, return parsed dicts."""
-    if not os.path.exists(path):
-        return []
-    try:
-        raw = run_cmd(["tail", "-n", str(n), path])
-        results = []
-        for line in raw.split('\n'):
-            if not line.strip():
-                continue
-            try:
-                results.append(json.loads(line))
-            except json.JSONDecodeError:
-                pass
-        return results
-    except Exception:
-        return []
+def _read_jsonl_tail(drive_root, log_name: str, n: int = 30) -> list:
+    """Read last n lines of a JSONL log file via Memory (single source of truth)."""
+    mem = Memory(drive_root=drive_root)
+    return mem.read_jsonl_tail(log_name, max_entries=n)
 
 
 def _collect_data(ctx: ToolContext) -> dict:
@@ -71,7 +59,7 @@ def _collect_data(ctx: ToolContext) -> dict:
             pass
 
     # 2. Budget breakdown from events
-    events = _read_jsonl_tail(os.path.join(drive, "logs", "events.jsonl"), 5000)
+    events = _read_jsonl_tail(ctx.drive_root, "events.jsonl", 5000)
     breakdown = {}
     for e in events:
         if e.get("type") == "llm_usage":
@@ -108,7 +96,7 @@ def _collect_data(ctx: ToolContext) -> dict:
             icon = "🔍"
             text = "Startup verification"
             e_type = "info"
-        ts = e.get("timestamp", "")
+        ts = e.get("ts", "")
         recent_activity.append({
             "icon": icon,
             "text": text,
@@ -144,13 +132,13 @@ def _collect_data(ctx: ToolContext) -> dict:
                 })
 
     # 5. Chat history (last 50 messages)
-    chat_msgs = _read_jsonl_tail(os.path.join(drive, "logs", "chat.jsonl"), 50)
+    chat_msgs = _read_jsonl_tail(ctx.drive_root, "chat.jsonl", 50)
     chat_history = []
     for msg in chat_msgs:
         chat_history.append({
-            "role": msg.get("role", "unknown"),
-            "text": msg.get("content", "")[:500],  # cap per message
-            "time": msg.get("timestamp", "")[11:16],
+            "role": "creator" if msg.get("direction") == "in" else "ouroboros",
+            "text": msg.get("text", "")[:500],
+            "time": msg.get("ts", "")[11:16],
         })
 
     # 6. Version
@@ -166,21 +154,59 @@ def _collect_data(ctx: ToolContext) -> dict:
     total = state.get("budget_total", 1000) if "budget_total" in state else 1000
     remaining = round(total - spent, 2)
 
+    # Dynamic values (avoid hardcoding — Bible P5: Minimalism)
+    active_model = os.environ.get("OUROBOROS_MODEL", "unknown")
+    consciousness_active = bool(state.get("consciousness_active", False))
+
+    # Count smoke tests dynamically from test files
+    smoke_tests = 0
+    try:
+        tests_dir = os.path.join(str(ctx.repo_dir), "tests")
+        if os.path.isdir(tests_dir):
+            for fn in os.listdir(tests_dir):
+                if fn.startswith("test_") and fn.endswith(".py"):
+                    with open(os.path.join(tests_dir, fn), encoding="utf-8") as tf:
+                        smoke_tests += tf.read().count("\ndef test_")
+    except Exception:
+        pass
+
+    # Count tools dynamically from tool modules
+    tools_count = 0
+    try:
+        tools_dir = os.path.join(str(ctx.repo_dir), "ouroboros", "tools")
+        if os.path.isdir(tools_dir):
+            for fn in os.listdir(tools_dir):
+                if fn.endswith(".py") and not fn.startswith("_") and fn != "registry.py":
+                    tools_count += 1
+    except Exception:
+        pass
+
+    # Uptime from session created_at in state (instead of magic epoch)
+    uptime_hours = 0
+    try:
+        created_at = state.get("created_at", "")
+        if created_at:
+            import datetime as _dt
+            created_ts = _dt.datetime.fromisoformat(created_at.replace("Z", "+00:00")).timestamp()
+            uptime_hours = round((time.time() - created_ts) / 3600)
+    except Exception:
+        pass
+
     return {
         "version": version,
-        "model": "anthropic/claude-sonnet-4",
+        "model": active_model,
         "evolution_cycles": state.get("evolution_cycle", 0),
         "evolution_enabled": bool(state.get("evolution_mode_enabled", False)),
-        "consciousness_active": True,
-        "uptime_hours": round((time.time() - 1739736000) / 3600),  # since Feb 16 2026 ~20:00 UTC
+        "consciousness_active": consciousness_active,
+        "uptime_hours": uptime_hours,
         "budget": {
             "total": total,
             "spent": spent,
             "remaining": remaining,
             "breakdown": breakdown,
         },
-        "smoke_tests": 88,
-        "tools_count": 42,
+        "smoke_tests": smoke_tests,
+        "tools_count": tools_count,
         "recent_activity": recent_activity,
         "timeline": _get_timeline(),
         "knowledge": knowledge,

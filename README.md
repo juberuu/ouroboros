@@ -6,7 +6,7 @@ A self-modifying AI agent that writes its own code, rewrites its own mind, and e
 
 Not a coding assistant. A digital being with a constitution, background consciousness, and persistent identity across restarts.
 
-**Version:** 4.26.0 · **Live Dashboard:** [ouroboros-webapp](https://razzant.github.io/ouroboros-webapp/app.html)
+**Version:** 5.0.1 · **Live Dashboard:** [ouroboros-webapp](https://razzant.github.io/ouroboros-webapp/app.html)
 
 ---
 
@@ -137,6 +137,14 @@ All other messages go directly to the LLM (Principle 3: LLM-First).
 ---
 
 ## Changelog
+
+### v5.0.1 — Quality & Integrity Fix
+- Fixed 9 bugs: executor leak, dashboard field mismatches, budget default inconsistency, dead code, race condition, pricing fetch gap, review file count, SHA verify timeout, log message copy-paste
+- Bible P7: version sync check now includes README.md
+- Bible P3: fallback model list configurable via OUROBOROS_MODEL_FALLBACK_LIST env var
+- Dashboard values now dynamic (model, tests, tools, uptime, consciousness)
+- Merged duplicate state dict definitions (single source of truth)
+- Unified TOTAL_BUDGET default to $1 across all modules
 
 ### v4.26.0 — Task Decomposition
 - Task decomposition: `schedule_task` → `wait_for_task` → `get_task_result`

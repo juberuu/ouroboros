@@ -402,7 +402,7 @@ def budget_line(force: bool = False) -> str:
         save_state(st)
         return _format_budget_line(st)
     except Exception:
-        log.debug("Suppressed exception in md_to_tg_html", exc_info=True)
+        log.debug("Suppressed exception in budget_line", exc_info=True)
         return ""
 
 
