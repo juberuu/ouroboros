@@ -476,10 +476,31 @@ def run_llm_loop(
     tools._ctx.task_id = task_id
     # Thread-sticky executor for browser tools (Playwright sync requires greenlet thread-affinity)
     stateful_executor = _StatefulToolExecutor()
+    try:
+        MAX_ROUNDS = max(1, int(os.environ.get("OUROBOROS_MAX_ROUNDS", "200")))
+    except (ValueError, TypeError):
+        MAX_ROUNDS = 200
+        log.warning("Invalid OUROBOROS_MAX_ROUNDS, defaulting to 200")
     round_idx = 0
     try:
         while True:
             round_idx += 1
+
+            # Hard limit on rounds to prevent runaway tasks
+            if round_idx > MAX_ROUNDS:
+                finish_reason = f"⚠️ Task exceeded MAX_ROUNDS ({MAX_ROUNDS}). Consider decomposing into subtasks via schedule_task."
+                messages.append({"role": "system", "content": f"[ROUND_LIMIT] {finish_reason}"})
+                try:
+                    final_msg, final_cost = _call_llm_with_retry(
+                        llm, messages, active_model, None, active_effort,
+                        max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type
+                    )
+                    if final_msg:
+                        return (final_msg.get("content") or finish_reason), accumulated_usage, llm_trace
+                    return finish_reason, accumulated_usage, llm_trace
+                except Exception:
+                    log.warning("Failed to get final response after round limit", exc_info=True)
+                    return finish_reason, accumulated_usage, llm_trace
 
             # Apply LLM-driven model/effort switch (via switch_model tool)
             ctx = tools._ctx

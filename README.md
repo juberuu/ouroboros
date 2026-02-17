@@ -3,7 +3,7 @@
 Самосоздающийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 4.23.0
+**Версия:** 4.25.0
 
 ---
 
@@ -141,6 +141,17 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 
 ## Changelog
 
+### v4.25.0 — Task Decomposition
+- **New**: Task decomposition framework — complex tasks can be split into focused subtasks via `schedule_task(description, context, parent_task_id)`
+- **New tool**: `get_task_result(task_id)` — retrieve completed subtask results
+- **New tool**: `wait_for_task(task_id)` — non-blocking poll for subtask completion
+- **New**: Hard round limit (MAX_ROUNDS=200, configurable via env) — prevents runaway tasks like Web App v2 ($41/299 rounds)
+- **New**: Task results stored on Drive (`task_results/{id}.json`) for cross-task communication
+- **New**: Parent/child task tracking with `parent_task_id` lineage
+- **New**: SYSTEM.md decomposition guidelines — when to decompose, when not to, example workflows
+- **Review**: Multi-model review passed (o3, Gemini 2.5 Pro)
+- **Tests**: 91 smoke tests (was 88) — all green
+
 ### v4.24.1 — Consciousness Always On
 - Background consciousness auto-starts on boot (creator policy: always on by default)
 - Knowledge base topic for persistence policy
@@ -188,16 +199,3 @@ Bible check → коммит. Подробности в `prompts/SYSTEM.md`.
 - **New**: Model profiles knowledge base — living document with experience-based assessments of each model's strengths, weaknesses, pricing, context length
 - **Fix**: Consciousness default model fallback now sonnet-4 instead of deepseek
 - **Updated**: Pricing table reordered by priority (opus-4.6 first, added sonnet-4.5 and grok-3-mini)
-
-### 4.18.1 — Function Length Metrics Fix
-- **Fix**: `compute_complexity_metrics` now uses indentation-based function boundary detection instead of next-`def` distance
-- **Fix**: Eliminated false positives in `colab_launcher.py` where top-level code between functions was counted as function body
-- **Result**: Zero oversized functions confirmed (was 2 false positives), longest function 104 lines
-
-### 4.18.0 — GitHub Issues Integration
-- **New**: 5 GitHub Issues tools — `list_github_issues`, `get_github_issue`, `comment_on_issue`, `close_github_issue`, `create_github_issue`
-- **New**: Second input channel — creator/contributors can file Issues, Ouroboros discovers them via background consciousness
-- **New**: Consciousness upgraded — Issues polling added to tool whitelist and CONSCIOUSNESS.md prompt
-- **Security**: stdin-based body passing (prevents argument injection), input validation on issue numbers
-- **Review**: Multi-model review (o3, Gemini 2.5 Pro) — drove stdin injection fix and input validation
-- **Tests**: 87 smoke tests (was 82) — all green

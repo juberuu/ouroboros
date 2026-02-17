@@ -5,12 +5,16 @@ from __future__ import annotations
 import json
 import logging
 import os
+import uuid
+from pathlib import Path
 from typing import Any, Dict, List
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import utc_now_iso, write_text, run_cmd
 
 log = logging.getLogger(__name__)
+
+MAX_SUBTASK_DEPTH = 3
 
 
 def _request_restart(ctx: ToolContext, reason: str) -> str:
@@ -38,9 +42,21 @@ def _promote_to_stable(ctx: ToolContext, reason: str) -> str:
     return f"Promote to stable requested: {reason}"
 
 
-def _schedule_task(ctx: ToolContext, description: str) -> str:
-    ctx.pending_events.append({"type": "schedule_task", "description": description, "ts": utc_now_iso()})
-    return f"Scheduled: {description}"
+def _schedule_task(ctx: ToolContext, description: str, context: str = "", parent_task_id: str = "") -> str:
+    # Get current task depth from context
+    current_depth = getattr(ctx, 'task_depth', 0)
+    new_depth = current_depth + 1 if parent_task_id else 0
+    if new_depth > MAX_SUBTASK_DEPTH:
+        return f"ERROR: Subtask depth limit ({MAX_SUBTASK_DEPTH}) exceeded. Simplify your approach."
+
+    tid = uuid.uuid4().hex[:8]
+    evt = {"type": "schedule_task", "description": description, "task_id": tid, "depth": new_depth, "ts": utc_now_iso()}
+    if context:
+        evt["context"] = context
+    if parent_task_id:
+        evt["parent_task_id"] = parent_task_id
+    ctx.pending_events.append(evt)
+    return f"Scheduled task {tid}: {description}"
 
 
 def _cancel_task(ctx: ToolContext, task_id: str) -> str:
@@ -157,6 +173,28 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "") -> str:
     return f"OK: switching to {', '.join(changes)} on next round."
 
 
+def _get_task_result(ctx: ToolContext, task_id: str) -> str:
+    """Read the result of a completed subtask."""
+    results_dir = Path(ctx.drive_root) / "task_results"
+    result_file = results_dir / f"{task_id}.json"
+    if not result_file.exists():
+        return f"Task {task_id}: not found or not yet completed"
+    data = json.loads(result_file.read_text())
+    status = data.get("status", "unknown")
+    result = data.get("result", "")
+    cost = data.get("cost_usd", 0)
+    return f"Task {task_id} [{status}]: cost=${cost:.2f}\n\n[BEGIN_SUBTASK_OUTPUT]\n{result}\n[END_SUBTASK_OUTPUT]"
+
+
+def _wait_for_task(ctx: ToolContext, task_id: str) -> str:
+    """Check if a subtask has completed. Call repeatedly to poll."""
+    results_dir = Path(ctx.drive_root) / "task_results"
+    result_file = results_dir / f"{task_id}.json"
+    if result_file.exists():
+        return _get_task_result(ctx, task_id)
+    return f"Task {task_id}: still running. Call again later to check."
+
+
 def get_tools() -> List[ToolEntry]:
     return [
         ToolEntry("request_restart", {
@@ -171,8 +209,12 @@ def get_tools() -> List[ToolEntry]:
         }, _promote_to_stable),
         ToolEntry("schedule_task", {
             "name": "schedule_task",
-            "description": "Schedule a background task.",
-            "parameters": {"type": "object", "properties": {"description": {"type": "string"}}, "required": ["description"]},
+            "description": "Schedule a background task. Returns task_id for later retrieval. For complex tasks, decompose into focused subtasks with clear scope.",
+            "parameters": {"type": "object", "properties": {
+                "description": {"type": "string", "description": "Task description — be specific about scope and expected deliverable"},
+                "context": {"type": "string", "description": "Optional context from parent task: background info, constraints, style guide, etc."},
+                "parent_task_id": {"type": "string", "description": "Optional parent task ID for tracking lineage"},
+            }, "required": ["description"]},
         }, _schedule_task),
         ToolEntry("cancel_task", {
             "name": "cancel_task",
@@ -246,4 +288,18 @@ def get_tools() -> List[ToolEntry]:
                            "description": "Reasoning effort level. Leave empty to keep current."},
             }, "required": []},
         }, _switch_model),
+        ToolEntry("get_task_result", {
+            "name": "get_task_result",
+            "description": "Read the result of a completed subtask. Use after schedule_task to collect results.",
+            "parameters": {"type": "object", "required": ["task_id"], "properties": {
+                "task_id": {"type": "string", "description": "Task ID returned by schedule_task"},
+            }},
+        }, _get_task_result),
+        ToolEntry("wait_for_task", {
+            "name": "wait_for_task",
+            "description": "Check if a subtask has completed. Returns result if done, or 'still running' message. Call repeatedly to poll. Default timeout: 120s.",
+            "parameters": {"type": "object", "required": ["task_id"], "properties": {
+                "task_id": {"type": "string", "description": "Task ID to check"},
+            }},
+        }, _wait_for_task),
     ]

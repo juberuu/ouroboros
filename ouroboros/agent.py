@@ -329,6 +329,7 @@ class OuroborosAgent:
             current_chat_id=self._current_chat_id,
             current_task_type=self._current_task_type,
             emit_progress_fn=self._emit_progress,
+            task_depth=int(task.get("depth", 0)),
         )
         self.tools.set_context(ctx)
 
@@ -519,6 +520,26 @@ class OuroborosAgent:
             "prompt_tokens": int(usage.get("prompt_tokens") or 0),
             "completion_tokens": int(usage.get("completion_tokens") or 0),
         })
+
+        # Store task result for parent task retrieval
+        try:
+            results_dir = pathlib.Path(self.env.drive_root) / "task_results"
+            results_dir.mkdir(parents=True, exist_ok=True)
+            result_data = {
+                "task_id": task.get("id"),
+                "parent_task_id": task.get("parent_task_id"),
+                "status": "completed",
+                "result": text[:4000] if text else "",  # Truncate to avoid huge files
+                "cost_usd": round(float(usage.get("cost") or 0), 6),
+                "total_rounds": int(usage.get("rounds") or 0),
+                "ts": utc_now_iso(),
+            }
+            result_file = results_dir / f"{task.get('id')}.json"
+            tmp_file = results_dir / f"{task.get('id')}.json.tmp"
+            tmp_file.write_text(json.dumps(result_data, ensure_ascii=False, indent=2))
+            os.rename(tmp_file, result_file)
+        except Exception as e:
+            log.warning("Failed to store task result: %s", e)
 
         # Auto-update dashboard data.json after every task completion
         try:

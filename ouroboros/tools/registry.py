@@ -49,6 +49,9 @@ class ToolContext:
     event_queue: Optional[Any] = None
     task_id: Optional[str] = None
 
+    # Task depth for fork bomb protection
+    task_depth: int = 0
+
     def repo_path(self, rel: str) -> pathlib.Path:
         return (self.repo_dir / safe_relpath(rel)).resolve()
 
