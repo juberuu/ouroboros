@@ -177,23 +177,33 @@ def _collect_data(ctx: ToolContext) -> dict:
     # Count smoke tests dynamically from test files
     smoke_tests = 0
     try:
+        import re as _re
         tests_dir = os.path.join(str(ctx.repo_dir), "tests")
         if os.path.isdir(tests_dir):
             for fn in os.listdir(tests_dir):
                 if fn.startswith("test_") and fn.endswith(".py"):
                     with open(os.path.join(tests_dir, fn), encoding="utf-8") as tf:
-                        smoke_tests += tf.read().count("\ndef test_")
+                        smoke_tests += len(_re.findall(r"^def test_", tf.read(), _re.MULTILINE))
     except Exception:
         pass
 
-    # Count tools dynamically from tool modules
+    # Count tools dynamically — import each module and call get_tools()
     tools_count = 0
     try:
-        tools_dir = os.path.join(str(ctx.repo_dir), "ouroboros", "tools")
-        if os.path.isdir(tools_dir):
-            for fn in os.listdir(tools_dir):
+        import importlib.util
+        from pathlib import Path as _Path
+        tools_dir = _Path(str(ctx.repo_dir)) / "ouroboros" / "tools"
+        if tools_dir.is_dir():
+            for fn in sorted(os.listdir(str(tools_dir))):
                 if fn.endswith(".py") and not fn.startswith("_") and fn != "registry.py":
-                    tools_count += 1
+                    spec = importlib.util.spec_from_file_location("_td_" + fn[:-3], tools_dir / fn)
+                    mod = importlib.util.module_from_spec(spec)
+                    try:
+                        spec.loader.exec_module(mod)
+                        if hasattr(mod, "get_tools"):
+                            tools_count += len(mod.get_tools())
+                    except Exception:
+                        pass
     except Exception:
         pass
 
