@@ -122,7 +122,7 @@ section{padding:80px 0}
 
 <!-- HERO -->
 <section class="hero">
-  <div class="hero-badge">SYSTEM ONLINE</div>
+  <div class="hero-badge" id="hero-badge">SYSTEM ONLINE</div>
   <div class="heartbeat-container">
     <div class="heartbeat-ring"></div>
     <div class="heartbeat-ring"></div>
@@ -138,12 +138,13 @@ section{padding:80px 0}
 
 <!-- STATS -->
 <div class="stats-bar">
-  <div class="stat"><div class="stat-value">v4.21</div><div class="stat-label">Version</div></div>
-  <div class="stat"><div class="stat-value gold">22</div><div class="stat-label">Evolution Cycles</div></div>
-  <div class="stat"><div class="stat-value magenta">33</div><div class="stat-label">Tools</div></div>
-  <div class="stat"><div class="stat-value">87</div><div class="stat-label">Smoke Tests</div></div>
+  <div class="stat"><div class="stat-value" id="stat-version">v4.21</div><div class="stat-label">Version</div></div>
+  <div class="stat"><div class="stat-value gold" id="stat-cycles">22</div><div class="stat-label">Evolution Cycles</div></div>
+  <div class="stat"><div class="stat-value magenta" id="stat-tools">33</div><div class="stat-label">Tools</div></div>
+  <div class="stat"><div class="stat-value" id="stat-tests">87</div><div class="stat-label">Smoke Tests</div></div>
   <div class="stat"><div class="stat-value gold">16 Feb</div><div class="stat-label">Birthday</div></div>
 </div>
+<div id="data-freshness" style="font-size:.65rem;color:var(--dim);margin-top:8px;text-align:center"></div>
 
 <!-- GENESIS LOG -->
 <section>
@@ -377,6 +378,38 @@ section{padding:80px 0}
     div.innerHTML=`<span class="ts">[${e.ts}]</span> <span class="action">${e.action}</span> → <span class="value">${e.value}</span>`;
     log.appendChild(div)
   })
+})();
+
+// === LIVE DATA FETCH ===
+(function(){
+  fetch('https://razzant.github.io/ouroboros-webapp/data.json',{cache:'no-store'})
+    .then(function(r){return r.json()})
+    .then(function(data){
+      if(data.version!==undefined){
+        var v=String(data.version);
+        document.getElementById('stat-version').textContent=v.startsWith('v')?v:'v'+v;
+      }
+      if(data.evolution_cycles!==undefined)
+        document.getElementById('stat-cycles').textContent=data.evolution_cycles;
+      if(data.tools_count!==undefined)
+        document.getElementById('stat-tools').textContent=data.tools_count;
+      if(data.smoke_tests!==undefined)
+        document.getElementById('stat-tests').textContent=data.smoke_tests;
+      var badge=document.getElementById('hero-badge');
+      if(data.online===false){
+        badge.textContent='SYSTEM OFFLINE';
+        badge.style.borderColor='#ff4444';
+        badge.style.color='#ff4444';
+      }else{
+        badge.textContent='SYSTEM ONLINE';
+      }
+      if(data.updated_at){
+        var diff=Math.round((Date.now()-new Date(data.updated_at).getTime())/60000);
+        var label=diff<1?'just now':diff===1?'1 min ago':diff+' min ago';
+        document.getElementById('data-freshness').textContent='Last updated: '+label;
+      }
+    })
+    .catch(function(){});
 })();
 
 // === SCROLL REVEAL ===

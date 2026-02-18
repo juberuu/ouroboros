@@ -151,7 +151,15 @@ def _collect_data(ctx: ToolContext) -> dict:
 
     # Compile
     spent = round(state.get("spent_usd", 0), 2)
-    total = state.get("budget_total", 1000) if "budget_total" in state else 1000
+    # Read actual budget total from env (set in Colab) or fall back to 1500
+    budget_total_env = os.environ.get("OUROBOROS_BUDGET_USD", "")
+    if budget_total_env:
+        try:
+            total = float(budget_total_env)
+        except ValueError:
+            total = state.get("budget_total", 1500) or 1500
+    else:
+        total = state.get("budget_total", 1500) or 1500
     remaining = round(total - spent, 2)
 
     # Dynamic values (avoid hardcoding — Bible P5: Minimalism)
