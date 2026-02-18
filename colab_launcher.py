@@ -114,7 +114,7 @@ GITHUB_REPO = get_cfg("GITHUB_REPO", default="ouroboros", allow_legacy_secret=Tr
 MAX_WORKERS = int(get_cfg("OUROBOROS_MAX_WORKERS", default="5", allow_legacy_secret=True) or "5")
 MODEL_MAIN = get_cfg("OUROBOROS_MODEL", default="openai/gpt-5.2", allow_legacy_secret=True)
 MODEL_CODE = get_cfg("OUROBOROS_MODEL_CODE", default="openai/gpt-5.2-codex", allow_legacy_secret=True)
-MODEL_LIGHT = get_cfg("OUROBOROS_MODEL_LIGHT", default=None, allow_legacy_secret=True)
+MODEL_LIGHT = get_cfg("OUROBOROS_MODEL_LIGHT", default="qwen/qwen3.5-plus-02-15", allow_legacy_secret=True)
 
 BUDGET_REPORT_EVERY_MESSAGES = 10
 SOFT_TIMEOUT_SEC = max(60, int(get_cfg("OUROBOROS_SOFT_TIMEOUT_SEC", default="600", allow_legacy_secret=True) or "600"))

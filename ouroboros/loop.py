@@ -30,6 +30,7 @@ _MODEL_PRICING_STATIC = {
     "anthropic/claude-opus-4.6": (5.0, 0.5, 25.0),
     "anthropic/claude-opus-4": (15.0, 1.5, 75.0),
     "anthropic/claude-sonnet-4": (3.0, 0.30, 15.0),
+    "anthropic/claude-sonnet-4.6": (3.0, 0.30, 15.0),
     "anthropic/claude-sonnet-4.5": (3.0, 0.30, 15.0),
     "openai/o3": (2.0, 0.50, 8.0),
     "openai/o3-pro": (20.0, 1.0, 80.0),
@@ -40,6 +41,7 @@ _MODEL_PRICING_STATIC = {
     "google/gemini-2.5-pro-preview": (1.25, 0.125, 10.0),
     "google/gemini-3-pro-preview": (2.0, 0.20, 12.0),
     "x-ai/grok-3-mini": (0.30, 0.03, 0.50),
+    "qwen/qwen3.5-plus-02-15": (0.40, 0.04, 2.40),
 }
 
 _pricing_fetched = False
@@ -551,7 +553,7 @@ def run_llm_loop(
                 # Configurable fallback priority list (Bible P3: no hardcoded behavior)
                 fallback_list_raw = os.environ.get(
                     "OUROBOROS_MODEL_FALLBACK_LIST",
-                    "google/gemini-3-pro-preview,openai/gpt-4.1,anthropic/claude-sonnet-4"
+                    "google/gemini-2.5-pro-preview,openai/o3,anthropic/claude-sonnet-4.6"
                 )
                 fallback_candidates = [m.strip() for m in fallback_list_raw.split(",") if m.strip()]
                 fallback_model = None

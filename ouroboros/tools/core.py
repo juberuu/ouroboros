@@ -257,7 +257,7 @@ Now write a comprehensive summary:"""
 
         # Call LLM
         llm = LLMClient()
-        model = os.environ.get("OUROBOROS_MODEL_LIGHT", "") or os.environ.get("OUROBOROS_MODEL", "anthropic/claude-sonnet-4")
+        model = os.environ.get("OUROBOROS_MODEL_LIGHT", "") or os.environ.get("OUROBOROS_MODEL", "anthropic/claude-sonnet-4.6")
 
         messages = [
             {"role": "user", "content": prompt}

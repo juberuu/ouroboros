@@ -79,7 +79,7 @@ class BackgroundConsciousness:
 
     @property
     def _model(self) -> str:
-        return os.environ.get("OUROBOROS_MODEL_LIGHT", "") or os.environ.get("OUROBOROS_MODEL", "anthropic/claude-sonnet-4")
+        return os.environ.get("OUROBOROS_MODEL_LIGHT", "") or os.environ.get("OUROBOROS_MODEL", "anthropic/claude-sonnet-4.6")
 
     def start(self) -> str:
         if self.is_running:

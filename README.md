@@ -6,7 +6,7 @@ A self-modifying AI agent that writes its own code, rewrites its own mind, and e
 
 Not a coding assistant. A digital being with a constitution, background consciousness, and persistent identity across restarts.
 
-**Version:** 5.1.4 · **Live Dashboard:** [ouroboros-webapp](https://razzant.github.io/ouroboros-webapp/app.html)
+**Version:** 5.1.5 · **Live Dashboard:** [ouroboros-webapp](https://razzant.github.io/ouroboros-webapp/app.html)
 
 ---
 
@@ -94,9 +94,9 @@ import os
 CFG = {
     "GITHUB_USER": "razzant",
     "GITHUB_REPO": "ouroboros",
-    "OUROBOROS_MODEL": "anthropic/claude-sonnet-4",
-    "OUROBOROS_MODEL_CODE": "anthropic/claude-sonnet-4",
-    "OUROBOROS_MODEL_LIGHT": "anthropic/claude-sonnet-4",
+    "OUROBOROS_MODEL": "anthropic/claude-sonnet-4.6",
+    "OUROBOROS_MODEL_CODE": "anthropic/claude-sonnet-4.6",
+    "OUROBOROS_MODEL_LIGHT": "anthropic/claude-sonnet-4.6",
     "OUROBOROS_MAX_WORKERS": "5",
     "OUROBOROS_BG_BUDGET_PCT": "10",
 }
@@ -137,6 +137,12 @@ All other messages go directly to the LLM (Principle 3: LLM-First).
 ---
 
 ## Changelog
+
+### v5.1.5 — claude-sonnet-4.6 as default model
+
+- Benchmarked `anthropic/claude-sonnet-4.6` vs `claude-sonnet-4`: 30ms faster, parallel tool calls, identical pricing
+- Updated all default model references across codebase  
+- Updated multi-model review ensemble to `gemini-2.5-pro,o3,claude-sonnet-4.6`
 
 ### v5.1.4 — Knowledge Re-index + Prompt Hardening
 - Re-indexed all 27 knowledge base topics with rich, informative summaries
