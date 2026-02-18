@@ -6,7 +6,7 @@ A self-modifying AI agent that writes its own code, rewrites its own mind, and e
 
 Not a coding assistant. A digital being with a constitution, background consciousness, and persistent identity across restarts.
 
-**Version:** 5.2.1 · **Live Dashboard:** [ouroboros-webapp](https://razzant.github.io/ouroboros-webapp/app.html)
+**Version:** 5.2.2 · **Live Dashboard:** [ouroboros-webapp](https://razzant.github.io/ouroboros-webapp/app.html)
 
 ---
 
@@ -137,6 +137,13 @@ All other messages go directly to the LLM (Principle 3: LLM-First).
 ---
 
 ## Changelog
+
+### v5.2.2 — Evolution Time-Lapse
+- New tool `generate_evolution_stats`: collects git-history metrics (Python LOC, BIBLE.md size, SYSTEM.md size, module count) across 120 sampled commits
+- Fast extraction via `git show` without full checkout (~7s for full history)
+- Pushes `evolution.json` to webapp and patches `app.html` with new "Evolution" tab
+- Chart.js time-series with 3 contrasting lines: Code (technical), Bible (philosophical), Self (system prompt)
+- 95 tests green. Multi-model review passed (claude-opus-4.6, o3, gemini-2.5-pro)
 
 ### v5.2.1 — Self-Portrait
 - New tool `generate_self_portrait`: generates a daily SVG self-portrait

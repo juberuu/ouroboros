@@ -109,6 +109,7 @@ EXPECTED_TOOLS = [
     "update_dashboard",
     # Self-portrait
     "generate_self_portrait",
+    "generate_evolution_stats",
     # VLM / Vision
     "analyze_screenshot", "vlm_query",
 ]
