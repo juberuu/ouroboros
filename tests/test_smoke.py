@@ -107,6 +107,8 @@ EXPECTED_TOOLS = [
     "get_task_result", "wait_for_task",
     # Dashboard
     "update_dashboard",
+    # Self-portrait
+    "generate_self_portrait",
     # VLM / Vision
     "analyze_screenshot", "vlm_query",
 ]
