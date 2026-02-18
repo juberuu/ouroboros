@@ -78,8 +78,10 @@ def _task_priority(task_type: str) -> int:
 
 
 def _queue_sort_key(task: Dict[str, Any]) -> Tuple[int, int]:
-    pr = int(task.get("priority") or _task_priority(str(task.get("type") or "")))
-    seq = int(task.get("_queue_seq") or 0)
+    _pr = task.get("priority")
+    pr = int(_pr) if _pr is not None else _task_priority(str(task.get("type") or ""))
+    _seq = task.get("_queue_seq")
+    seq = int(_seq) if _seq is not None else 0
     return pr, seq
 
 
@@ -98,7 +100,8 @@ def enqueue_task(task: Dict[str, Any], front: bool = False) -> Dict[str, Any]:
     QUEUE_SEQ_COUNTER_REF["value"] += 1
     seq = QUEUE_SEQ_COUNTER_REF["value"]
     t.setdefault("priority", _task_priority(str(t.get("type") or "")))
-    t.setdefault("_attempt", int(t.get("_attempt") or 1))
+    _att = t.get("_attempt")
+    t.setdefault("_attempt", int(_att) if _att is not None else 1)
     t["_queue_seq"] = -seq if front else seq
     t["queued_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     PENDING.append(t)
@@ -263,9 +266,13 @@ def enforce_task_timeouts() -> None:
         runtime_sec = max(0.0, now - started_at)
         hb_lag_sec = max(0.0, now - last_hb)
         hb_stale = hb_lag_sec >= HEARTBEAT_STALE_SEC
-        worker_id = int(meta.get("worker_id") or -1)
+        _wid = meta.get("worker_id")
+        worker_id = int(_wid) if _wid is not None else -1
         task_type = str(task.get("type") or "")
-        attempt = int(meta.get("attempt") or task.get("_attempt") or 1)
+        _att = meta.get("attempt")
+        if _att is None:
+            _att = task.get("_attempt")
+        attempt = int(_att) if _att is not None else 1
 
         if runtime_sec >= SOFT_TIMEOUT_SEC and not bool(meta.get("soft_sent")):
             meta["soft_sent"] = True
@@ -298,6 +305,8 @@ def enforce_task_timeouts() -> None:
         new_attempt = attempt
         if attempt <= QUEUE_MAX_RETRIES and isinstance(task, dict):
             retried = dict(task)
+            retried["original_task_id"] = task_id
+            retried["id"] = uuid.uuid4().hex[:8]
             retried["_attempt"] = attempt + 1
             retried["timeout_retry_from"] = task_id
             retried["timeout_retry_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()

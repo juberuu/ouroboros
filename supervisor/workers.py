@@ -147,6 +147,7 @@ def handle_chat_direct(chat_id: int, text: str, image_data: Optional[Union[Tuple
             "type": "task",
             "chat_id": chat_id,
             "text": text,
+            "_is_direct_chat": True,
         }
         if image_data:
             # image_data is (base64, mime) or (base64, mime, caption)

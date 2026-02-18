@@ -43,11 +43,22 @@ def _promote_to_stable(ctx: ToolContext, reason: str) -> str:
 
 
 def _schedule_task(ctx: ToolContext, description: str, context: str = "", parent_task_id: str = "") -> str:
-    # Get current task depth from context
     current_depth = getattr(ctx, 'task_depth', 0)
     new_depth = current_depth + 1 if parent_task_id else 0
     if new_depth > MAX_SUBTASK_DEPTH:
         return f"ERROR: Subtask depth limit ({MAX_SUBTASK_DEPTH}) exceeded. Simplify your approach."
+
+    if getattr(ctx, 'is_direct_chat', False):
+        from ouroboros.utils import append_jsonl
+        try:
+            append_jsonl(ctx.drive_logs() / "events.jsonl", {
+                "ts": utc_now_iso(),
+                "type": "schedule_task_from_direct_chat",
+                "description": description[:200],
+                "warning": "schedule_task called from direct chat context — potential duplicate work",
+            })
+        except Exception:
+            pass
 
     tid = uuid.uuid4().hex[:8]
     evt = {"type": "schedule_task", "description": description, "task_id": tid, "depth": new_depth, "ts": utc_now_iso()}

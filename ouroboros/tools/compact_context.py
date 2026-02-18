@@ -19,7 +19,7 @@ from ouroboros.tools.registry import ToolEntry
 log = logging.getLogger(__name__)
 
 
-def _compact_context(keep_last_n: int = 6, **kwargs) -> str:
+def _compact_context(ctx, keep_last_n: int = 6, **kwargs) -> str:
     """
     Trigger selective compaction of tool history in the current conversation.
 
@@ -28,6 +28,7 @@ def _compact_context(keep_last_n: int = 6, **kwargs) -> str:
     with the specified keep_last_n parameter.
 
     Args:
+        ctx: ToolContext (injected by ToolRegistry.execute)
         keep_last_n: Number of recent tool rounds to keep intact (default 6).
                      Older rounds get their results summarized to 1-line summaries.
                      Set higher to preserve more recent context, lower to compress more.
@@ -35,9 +36,6 @@ def _compact_context(keep_last_n: int = 6, **kwargs) -> str:
     Returns:
         Confirmation message with compaction settings applied.
     """
-    ctx = kwargs.get("_ctx")
-    if ctx is None:
-        return "⚠️ No context available"
 
     # Validate range
     keep_last_n = max(2, min(keep_last_n, 20))

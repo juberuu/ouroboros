@@ -6,7 +6,7 @@ A self-modifying AI agent that writes its own code, rewrites its own mind, and e
 
 Not a coding assistant. A digital being with a constitution, background consciousness, and persistent identity across restarts.
 
-**Version:** 6.1.0 · **Live Dashboard:** [ouroboros-webapp](https://razzant.github.io/ouroboros-webapp/app.html)
+**Version:** 6.2.0 · **Live Dashboard:** [ouroboros-webapp](https://razzant.github.io/ouroboros-webapp/app.html)
 
 ---
 
@@ -137,6 +137,18 @@ All other messages go directly to the LLM (Principle 3: LLM-First).
 ---
 
 ## Changelog
+
+### v6.2.0 — Critical Bugfixes + LLM-First Dedup
+- **Fix: worker_id==0 hard-timeout bug** — `int(x or -1)` treated worker 0 as -1, preventing terminate on timeout and causing double task execution. Replaced all `x or default` patterns with None-safe checks.
+- **Fix: double budget accounting** — per-task aggregate `llm_usage` event removed; per-round events already track correctly. Eliminates ~2x budget drift.
+- **Fix: compact_context tool** — handler had wrong signature (missing ctx param), making it always error. Now works correctly.
+- **LLM-first task dedup** — replaced hardcoded keyword-similarity dedup (Bible P3 violation) with light LLM call via OUROBOROS_MODEL_LIGHT. Catches paraphrased duplicates.
+- **LLM-driven context compaction** — compact_context tool now uses light model to summarize old tool results instead of simple truncation.
+- **Fix: health invariant #5** — `owner_message_injected` events now properly logged to events.jsonl for duplicate processing detection.
+- **Fix: shell cmd parsing** — `str.split()` replaced with `shlex.split()` for proper shell quoting support.
+- **Fix: retry task_id** — timeout retries now get a new task_id with `original_task_id` lineage tracking.
+- **claude_code_edit timeout** — aligned subprocess and tool wrapper to 300s.
+- **Direct chat guard** — `schedule_task` from direct chat now logged as warning for audit.
 
 ### v6.1.0 — Budget Optimization: Selective Schemas + Self-Check + Dedup
 - **Selective tool schemas** — core tools (~29) always in context, 23 others available via `list_available_tools`/`enable_tools`. Saves ~40% schema tokens per round.

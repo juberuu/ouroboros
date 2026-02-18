@@ -219,12 +219,14 @@ def _build_health_invariants(env: Any) -> str:
     # 5. Duplicate processing detection: same owner message text appearing in multiple tasks
     try:
         import hashlib
-        events_path = env.drive_path("logs/events.jsonl")
-        if events_path.exists():
-            file_size = events_path.stat().st_size
-            tail_bytes = 256_000
-            msg_hash_to_tasks: Dict[str, set] = {}
-            with events_path.open("r", encoding="utf-8") as f:
+        msg_hash_to_tasks: Dict[str, set] = {}
+        tail_bytes = 256_000
+
+        def _scan_file_for_injected(path, type_field="type", type_value="owner_message_injected"):
+            if not path.exists():
+                return
+            file_size = path.stat().st_size
+            with path.open("r", encoding="utf-8") as f:
                 if file_size > tail_bytes:
                     f.seek(file_size - tail_bytes)
                     f.readline()
@@ -234,23 +236,35 @@ def _build_health_invariants(env: Any) -> str:
                         continue
                     try:
                         ev = json.loads(line)
-                        if ev.get("type") != "owner_message_injected":
+                        if ev.get(type_field) != type_value:
                             continue
-                        text_hash = hashlib.md5(ev.get("text", "").encode()).hexdigest()[:12]
+                        text = ev.get("text", "")
+                        if not text:
+                            continue
+                        text_hash = hashlib.md5(text.encode()).hexdigest()[:12]
                         tid = ev.get("task_id") or "unknown"
                         if text_hash not in msg_hash_to_tasks:
                             msg_hash_to_tasks[text_hash] = set()
                         msg_hash_to_tasks[text_hash].add(tid)
                     except (json.JSONDecodeError, ValueError):
                         continue
-            dupes = {h: tids for h, tids in msg_hash_to_tasks.items() if len(tids) > 1}
-            if dupes:
-                checks.append(
-                    f"CRITICAL: DUPLICATE PROCESSING — {len(dupes)} message(s) "
-                    f"appeared in multiple tasks: {', '.join(str(sorted(tids)) for tids in dupes.values())}"
-                )
-            else:
-                checks.append("OK: no duplicate message processing detected")
+
+        _scan_file_for_injected(env.drive_path("logs/events.jsonl"))
+        # Also check supervisor.jsonl for historically unhandled events
+        _scan_file_for_injected(
+            env.drive_path("logs/supervisor.jsonl"),
+            type_field="event_type",
+            type_value="owner_message_injected",
+        )
+
+        dupes = {h: tids for h, tids in msg_hash_to_tasks.items() if len(tids) > 1}
+        if dupes:
+            checks.append(
+                f"CRITICAL: DUPLICATE PROCESSING — {len(dupes)} message(s) "
+                f"appeared in multiple tasks: {', '.join(str(sorted(tids)) for tids in dupes.values())}"
+            )
+        else:
+            checks.append("OK: no duplicate message processing detected")
     except Exception:
         pass
 
@@ -578,6 +592,116 @@ def compact_tool_history(messages: list, keep_recent: int = 6) -> list:
             result.append(_compact_assistant_msg(msg))
             continue
 
+        result.append(msg)
+
+    return result
+
+
+def compact_tool_history_llm(messages: list, keep_recent: int = 6) -> list:
+    """LLM-driven compaction: summarize old tool results via a light model.
+
+    Falls back to simple truncation (compact_tool_history) on any error.
+    Called when the agent explicitly invokes the compact_context tool.
+    """
+    tool_round_starts = []
+    for i, msg in enumerate(messages):
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            tool_round_starts.append(i)
+
+    if len(tool_round_starts) <= keep_recent:
+        return messages
+
+    rounds_to_compact = set(tool_round_starts[:-keep_recent])
+
+    old_results = []
+    for i, msg in enumerate(messages):
+        if msg.get("role") != "tool" or i == 0:
+            continue
+        parent_round = None
+        for rs in reversed(tool_round_starts):
+            if rs < i:
+                parent_round = rs
+                break
+        if parent_round is not None and parent_round in rounds_to_compact:
+            content = str(msg.get("content") or "")
+            if len(content) > 120:
+                tool_call_id = msg.get("tool_call_id", "")
+                old_results.append({"idx": i, "tool_call_id": tool_call_id, "content": content[:1500]})
+
+    if not old_results:
+        return compact_tool_history(messages, keep_recent=keep_recent)
+
+    batch_text = "\n---\n".join(
+        f"[{r['tool_call_id']}]\n{r['content']}" for r in old_results[:20]
+    )
+    prompt = (
+        "Summarize each tool result below into 1-2 lines of key facts. "
+        "Preserve errors, file paths, and important values. "
+        "Output one summary per [id] block, same order.\n\n" + batch_text
+    )
+
+    try:
+        from ouroboros.llm import LLMClient
+        light_model = os.environ.get("OUROBOROS_MODEL_LIGHT") or "x-ai/grok-3-mini"
+        client = LLMClient()
+        resp_msg, _usage = client.chat(
+            messages=[{"role": "user", "content": prompt}],
+            model=light_model,
+            reasoning_effort="low",
+            max_tokens=1024,
+        )
+        summary_text = resp_msg.get("content") or ""
+        if not summary_text.strip():
+            raise ValueError("empty summary response")
+    except Exception:
+        log.warning("LLM compaction failed, falling back to truncation", exc_info=True)
+        return compact_tool_history(messages, keep_recent=keep_recent)
+
+    summary_lines = summary_text.strip().split("\n")
+    summary_map: Dict[str, str] = {}
+    current_id = None
+    current_lines: list = []
+    for line in summary_lines:
+        stripped = line.strip()
+        if stripped.startswith("[") and "]" in stripped:
+            if current_id is not None:
+                summary_map[current_id] = " ".join(current_lines).strip()
+            bracket_end = stripped.index("]")
+            current_id = stripped[1:bracket_end]
+            rest = stripped[bracket_end + 1:].strip()
+            current_lines = [rest] if rest else []
+        elif current_id is not None:
+            current_lines.append(stripped)
+    if current_id is not None:
+        summary_map[current_id] = " ".join(current_lines).strip()
+
+    idx_to_summary = {}
+    for r in old_results:
+        s = summary_map.get(r["tool_call_id"])
+        if s:
+            idx_to_summary[r["idx"]] = s
+
+    result = []
+    for i, msg in enumerate(messages):
+        if msg.get("role") == "system" and isinstance(msg.get("content"), list):
+            result.append(msg)
+            continue
+        if i in idx_to_summary:
+            result.append({**msg, "content": idx_to_summary[i]})
+            continue
+        if msg.get("role") == "tool" and i > 0:
+            parent_round = None
+            for rs in reversed(tool_round_starts):
+                if rs < i:
+                    parent_round = rs
+                    break
+            if parent_round is not None and parent_round in rounds_to_compact:
+                content = str(msg.get("content") or "")
+                result.append(_compact_tool_result(msg, content))
+                continue
+        if i in rounds_to_compact and msg.get("role") == "assistant":
+            result.append(_compact_assistant_msg(msg))
+            continue
         result.append(msg)
 
     return result

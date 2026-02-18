@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import pathlib
+import shlex
 import shutil
 import subprocess
 from typing import Any, Dict, List
@@ -27,13 +28,13 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
                 cmd = parsed
                 warning = "run_shell_cmd_string_json_list_recovered"
             elif isinstance(parsed, str):
-                cmd = parsed.split()
+                cmd = shlex.split(parsed)
                 warning = "run_shell_cmd_string_json_string_split"
             else:
-                cmd = cmd.split()
+                cmd = shlex.split(cmd)
                 warning = "run_shell_cmd_string_json_non_list_split"
         except Exception:
-            cmd = cmd.split()
+            cmd = shlex.split(cmd)
             warning = "run_shell_cmd_string_split_fallback"
 
         try:
@@ -91,7 +92,7 @@ def _run_claude_cli(work_dir: str, prompt: str, env: dict) -> subprocess.Complet
 
     res = subprocess.run(
         primary_cmd, cwd=work_dir,
-        capture_output=True, text=True, timeout=600, env=env,
+        capture_output=True, text=True, timeout=300, env=env,
     )
 
     if res.returncode != 0:
@@ -101,7 +102,7 @@ def _run_claude_cli(work_dir: str, prompt: str, env: dict) -> subprocess.Complet
         ):
             res = subprocess.run(
                 legacy_cmd, cwd=work_dir,
-                capture_output=True, text=True, timeout=600, env=env,
+                capture_output=True, text=True, timeout=300, env=env,
             )
 
     return res
@@ -219,7 +220,7 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
             stdout += warning
 
     except subprocess.TimeoutExpired:
-        return "⚠️ CLAUDE_CODE_TIMEOUT: exceeded 600s."
+        return "⚠️ CLAUDE_CODE_TIMEOUT: exceeded 300s."
     except Exception as e:
         return f"⚠️ CLAUDE_CODE_FAILED: {type(e).__name__}: {e}"
     finally:
@@ -246,5 +247,5 @@ def get_tools() -> List[ToolEntry]:
                 "prompt": {"type": "string"},
                 "cwd": {"type": "string", "default": ""},
             }, "required": ["prompt"]},
-        }, _claude_code_edit, is_code_tool=True),
+        }, _claude_code_edit, is_code_tool=True, timeout_sec=300),
     ]

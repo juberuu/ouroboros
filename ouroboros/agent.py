@@ -343,6 +343,7 @@ class OuroborosAgent:
             current_task_type=self._current_task_type,
             emit_progress_fn=self._emit_progress,
             task_depth=int(task.get("depth", 0)),
+            is_direct_chat=bool(task.get("_is_direct_chat")),
         )
         self.tools.set_context(ctx)
 
@@ -470,13 +471,10 @@ class OuroborosAgent:
         start_time: float, drive_logs: pathlib.Path,
     ) -> None:
         """Emit all end-of-task events to supervisor."""
-        task_type = task.get("type", "task")
-        category = task_type if task_type in ("evolution", "consciousness", "review", "summarize") else "task"
-        self._pending_events.append({
-            "type": "llm_usage", "task_id": task.get("id"),
-            "provider": "openrouter", "usage": usage, "ts": utc_now_iso(),
-            "category": category,
-        })
+        # NOTE: per-round llm_usage events are already emitted in loop.py
+        # (_emit_llm_usage_event). Do NOT emit an aggregate llm_usage here —
+        # that would double-count in update_budget_from_usage.
+        # Cost/token summaries are carried by task_metrics and task_done events.
 
         self._pending_events.append({
             "type": "send_message", "chat_id": task["chat_id"],

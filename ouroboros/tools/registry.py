@@ -52,6 +52,9 @@ class ToolContext:
     # Task depth for fork bomb protection
     task_depth: int = 0
 
+    # True when running inside handle_chat_direct (not a queued worker task)
+    is_direct_chat: bool = False
+
     def repo_path(self, rel: str) -> pathlib.Path:
         return (self.repo_dir / safe_relpath(rel)).resolve()
 

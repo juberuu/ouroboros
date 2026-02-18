@@ -11,11 +11,9 @@ import datetime
 import json
 import logging
 import os
-import re
 import sys
 import time
 import uuid
-from collections import Counter
 from typing import Any, Dict, Optional
 
 # Lazy imports to avoid circular dependencies — everything comes through ctx
@@ -228,83 +226,59 @@ def _handle_promote_to_stable(evt: Dict[str, Any], ctx: Any) -> None:
             )
 
 
-def _extract_keywords(text: str) -> Counter:
-    """Extract meaningful keywords from task description for dedup comparison."""
-    # Lowercase, strip punctuation, split into words
-    words = re.findall(r'[a-zA-Zа-яА-ЯёЁ0-9_]+', text.lower())
-    # Filter short words and common stop words
-    stop_words = {
-        'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
-        'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
-        'should', 'may', 'might', 'shall', 'can', 'need', 'must',
-        'and', 'or', 'but', 'if', 'then', 'else', 'when', 'where', 'how',
-        'what', 'which', 'who', 'whom', 'this', 'that', 'these', 'those',
-        'for', 'from', 'with', 'into', 'to', 'in', 'on', 'at', 'by', 'of',
-        'not', 'no', 'nor', 'so', 'too', 'very', 'just', 'also',
-        'it', 'its', 'my', 'your', 'our', 'their', 'his', 'her',
-        'all', 'each', 'every', 'both', 'few', 'more', 'most', 'other',
-        'some', 'such', 'only', 'own', 'same', 'than', 'any',
-        'use', 'using', 'used', 'make', 'ensure', 'check', 'task',
-        'begin_parent_context', 'end_parent_context', 'reference', 'material',
-        'instructions', 'context', 'parent',
-    }
-    return Counter(w for w in words if len(w) > 2 and w not in stop_words)
-
-
-def _keyword_similarity(a: Counter, b: Counter) -> float:
-    """Compute Jaccard-like similarity between two keyword sets."""
-    if not a or not b:
-        return 0.0
-    a_set = set(a.keys())
-    b_set = set(b.keys())
-    intersection = a_set & b_set
-    union = a_set | b_set
-    if not union:
-        return 0.0
-    # Weight by frequency: shared keywords that appear often matter more
-    shared_weight = sum(min(a[k], b[k]) for k in intersection)
-    total_weight = sum(a[k] for k in a) + sum(b[k] for k in b)
-    if total_weight == 0:
-        return 0.0
-    # Blend Jaccard (set overlap) and frequency overlap
-    jaccard = len(intersection) / len(union)
-    freq_overlap = (2 * shared_weight) / total_weight
-    return 0.5 * jaccard + 0.5 * freq_overlap
-
-
 def _find_duplicate_task(desc: str, pending: list, running: dict) -> Optional[str]:
-    """Check if a semantically similar task already exists.
+    """Check if a semantically similar task already exists using a light LLM call.
+
+    Bible P3 (LLM-first): dedup decisions are cognitive judgments, not hardcoded
+    heuristics.  A cheap/fast model decides whether the new task is a duplicate.
 
     Returns task_id of the duplicate if found, None otherwise.
-    Uses keyword overlap — cheap, fast, catches the main failure mode
-    (identical or near-identical tasks scheduled multiple times).
+    On any error (API, timeout, import) — returns None (accept the task).
     """
-    SIMILARITY_THRESHOLD = 0.55  # Tuned to catch obvious dupes without false positives
-
-    new_kw = _extract_keywords(desc)
-    if not new_kw:
-        return None
-
-    # Check pending tasks
+    existing = []
     for task in pending:
-        existing_desc = str(task.get("text") or task.get("description") or "")
-        existing_kw = _extract_keywords(existing_desc)
-        sim = _keyword_similarity(new_kw, existing_kw)
-        if sim >= SIMILARITY_THRESHOLD:
-            return task.get("id", "unknown")
-
-    # Check running tasks
+        text = str(task.get("text") or task.get("description") or "")
+        if text.strip():
+            existing.append({"id": task.get("id", "?"), "text": text[:200]})
     for task_id, meta in running.items():
         task_data = meta.get("task") if isinstance(meta, dict) else None
         if not isinstance(task_data, dict):
             continue
-        existing_desc = str(task_data.get("text") or task_data.get("description") or "")
-        existing_kw = _extract_keywords(existing_desc)
-        sim = _keyword_similarity(new_kw, existing_kw)
-        if sim >= SIMILARITY_THRESHOLD:
-            return task_id
+        text = str(task_data.get("text") or task_data.get("description") or "")
+        if text.strip():
+            existing.append({"id": task_id, "text": text[:200]})
 
-    return None
+    if not existing:
+        return None
+
+    existing_lines = "\n".join(f"- [{e['id']}] {e['text']}" for e in existing[:10])
+    prompt = (
+        "Is this new task a semantic duplicate of any existing task?\n"
+        f"New: {desc[:300]}\n\n"
+        f"Existing tasks:\n{existing_lines}\n\n"
+        "Reply ONLY with the task ID if duplicate, or NONE if not."
+    )
+
+    try:
+        from ouroboros.llm import LLMClient
+        light_model = os.environ.get("OUROBOROS_MODEL_LIGHT") or "x-ai/grok-3-mini"
+        client = LLMClient()
+        resp_msg, usage = client.chat(
+            messages=[{"role": "user", "content": prompt}],
+            model=light_model,
+            reasoning_effort="low",
+            max_tokens=50,
+        )
+        answer = (resp_msg.get("content") or "NONE").strip().upper()
+        if answer == "NONE" or not answer:
+            return None
+        for e in existing:
+            if e["id"] in answer:
+                return e["id"]
+        return None
+    except Exception as exc:
+        log.warning("LLM dedup unavailable, accepting task: %s", exc)
+        return None
 
 
 def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
@@ -415,6 +389,20 @@ def _handle_send_photo(evt: Dict[str, Any], ctx: Any) -> None:
         )
 
 
+def _handle_owner_message_injected(evt: Dict[str, Any], ctx: Any) -> None:
+    """Log owner_message_injected to events.jsonl for health invariant #5 (duplicate processing)."""
+    from ouroboros.utils import utc_now_iso
+    try:
+        ctx.append_jsonl(ctx.DRIVE_ROOT / "logs" / "events.jsonl", {
+            "ts": evt.get("ts", utc_now_iso()),
+            "type": "owner_message_injected",
+            "task_id": evt.get("task_id", ""),
+            "text": evt.get("text", "")[:200],
+        })
+    except Exception:
+        log.warning("Failed to log owner_message_injected event", exc_info=True)
+
+
 # ---------------------------------------------------------------------------
 # Dispatch table
 # ---------------------------------------------------------------------------
@@ -433,6 +421,7 @@ EVENT_HANDLERS = {
     "send_photo": _handle_send_photo,
     "toggle_evolution": _handle_toggle_evolution,
     "toggle_consciousness": _handle_toggle_consciousness,
+    "owner_message_injected": _handle_owner_message_injected,
 }
 
 
