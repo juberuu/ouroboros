@@ -156,7 +156,7 @@ def _collect_data(ctx: ToolContext) -> dict:
     # Compile
     spent = round(state.get("spent_usd", 0), 2)
     # Read actual budget total from env (set in Colab) or fall back to 1500
-    budget_total_env = os.environ.get("OUROBOROS_BUDGET_USD", "")
+    budget_total_env = os.environ.get("TOTAL_BUDGET", "")
     if budget_total_env:
         try:
             total = float(budget_total_env)
@@ -218,10 +218,12 @@ def _collect_data(ctx: ToolContext) -> dict:
     except Exception:
         created_at = state.get("created_at", "")
 
+    _now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     return {
         "version": version,
         "model": active_model,
         "status": "online",
+        "online": True,
         "started_at": created_at,
         "evolution_cycles": state.get("evolution_cycle", 0),
         "evolution_enabled": bool(state.get("evolution_mode_enabled", False)),
@@ -239,7 +241,8 @@ def _collect_data(ctx: ToolContext) -> dict:
         "timeline": _get_timeline(),
         "knowledge": knowledge,
         "chat_history": chat_history,
-        "last_updated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "last_updated": _now_iso,
+        "updated_at": _now_iso,
     }
 
 

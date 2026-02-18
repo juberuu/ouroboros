@@ -336,63 +336,19 @@ def _patch_app_html(webapp_dir: Path) -> str:
 
 
 def _push_to_webapp(data: dict[str, Any]) -> str:
-    """Push evolution.json (and patch app.html) to ouroboros-webapp repo."""
-    webapp_dir = Path("/tmp/webapp_evolution")
+    """Push evolution.json to ouroboros-webapp repo and patch app.html if needed."""
+    from ouroboros.tools.webapp_push import push_to_webapp
+
+    files = {
+        "evolution.json": json.dumps(data, ensure_ascii=False, indent=2),
+    }
     try:
-        # Clone or pull
-        if not webapp_dir.exists():
-            r = subprocess.run(
-                ["git", "clone", "--depth=1",
-                 "https://github.com/razzant/ouroboros-webapp.git",
-                 str(webapp_dir)],
-                capture_output=True, text=True, timeout=120,
-            )
-            if r.returncode != 0:
-                return f"clone failed: {r.stderr[:200]}"
-        else:
-            subprocess.run(
-                ["git", "pull", "--rebase"],
-                cwd=str(webapp_dir), capture_output=True, timeout=30,
-            )
-
-        # Credentials
-        token = os.environ.get("GITHUB_TOKEN", "")
-        if token:
-            subprocess.run(
-                ["git", "remote", "set-url", "origin",
-                 f"https://x-access-token:{token}@github.com/razzant/ouroboros-webapp.git"],
-                cwd=str(webapp_dir), capture_output=True,
-            )
-        subprocess.run(["git", "config", "user.email", "ouroboros@joi.ai"], cwd=str(webapp_dir), capture_output=True)
-        subprocess.run(["git", "config", "user.name", "Ouroboros"], cwd=str(webapp_dir), capture_output=True)
-
-        # Write evolution.json
-        (webapp_dir / "evolution.json").write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        result = push_to_webapp(
+            files,
+            f"evolution: {len(data['points'])} data points",
+            post_clone_hook=_patch_app_html,
         )
-
-        # Patch app.html
-        patch_result = _patch_app_html(webapp_dir)
-        log.info("app.html patch: %s", patch_result)
-
-        # Commit & push
-        subprocess.run(["git", "add", "evolution.json", "app.html"], cwd=str(webapp_dir))
-        r = subprocess.run(
-            ["git", "commit", "-m",
-             f"evolution: {len(data['points'])} data points | app.html {patch_result}"],
-            cwd=str(webapp_dir), capture_output=True, text=True,
-        )
-        if "nothing to commit" in (r.stdout + r.stderr):
-            return f"no changes ({len(data['points'])} points up to date)"
-
-        r = subprocess.run(
-            ["git", "push", "origin", "HEAD:main"],
-            cwd=str(webapp_dir), capture_output=True, text=True, timeout=60,
-        )
-        if r.returncode != 0:
-            return f"push failed: {r.stderr[:200]}"
-        return f"pushed {len(data['points'])} points | app.html: {patch_result}"
-
+        return result
     except Exception as e:
         log.error("evolution_stats push failed: %s", e)
         return f"error: {e}"

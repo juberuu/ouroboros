@@ -321,6 +321,7 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> None:
             log.debug(f"Failed to convert value to int: {v!r}", exc_info=True)
             return default
 
+    # Step 1: Update budget counters under lock (fast, no I/O beyond Drive)
     lock_fd = acquire_file_lock(STATE_LOCK_PATH)
     try:
         st = _load_state_unlocked()
@@ -336,44 +337,37 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> None:
             usage.get("completion_tokens") if isinstance(usage, dict) else 0)
         st["spent_tokens_cached"] = _to_int(st.get("spent_tokens_cached") or 0) + _to_int(
             usage.get("cached_tokens") if isinstance(usage, dict) else 0)
+        should_check_ground_truth = (st["spent_calls"] % 50 == 0)
+        _save_state_unlocked(st)
+    finally:
+        release_file_lock(STATE_LOCK_PATH, lock_fd)
 
-        # Periodically check OpenRouter ground truth (every 50 calls)
-        if st["spent_calls"] % 50 == 0:
-            ground_truth = check_openrouter_ground_truth()
-            if ground_truth is not None:
+    # Step 2: HTTP to OpenRouter OUTSIDE the lock (can take up to 10s)
+    if should_check_ground_truth:
+        ground_truth = check_openrouter_ground_truth()
+        if ground_truth is not None:
+            lock_fd = acquire_file_lock(STATE_LOCK_PATH)
+            try:
+                st = _load_state_unlocked()
                 st["openrouter_total_usd"] = ground_truth["total_usd"]
                 st["openrouter_daily_usd"] = ground_truth["daily_usd"]
                 st["openrouter_last_check_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
-                # Calculate budget drift if we have session snapshots
                 session_total_snap = st.get("session_total_snapshot")
                 session_spent_snap = st.get("session_spent_snapshot")
 
                 if session_total_snap is not None and session_spent_snap is not None:
                     current_total_usd = ground_truth["total_usd"]
                     current_spent_usd = _to_float(st.get("spent_usd") or 0.0)
-
-                    # Delta from OpenRouter (what they see)
                     or_delta = current_total_usd - _to_float(session_total_snap)
-
-                    # Delta from our tracking (what we tracked)
                     our_delta = current_spent_usd - _to_float(session_spent_snap)
 
-                    # Calculate drift percentage
-                    # Use max(or_delta, 0.01) to avoid division by zero
-                    if or_delta > 0.001:  # Only calculate drift if there's meaningful usage
+                    if or_delta > 0.001:
                         drift_pct = abs(or_delta - our_delta) / max(abs(or_delta), 0.01) * 100.0
                         st["budget_drift_pct"] = drift_pct
-
-                        # Set alert if drift is significant
-                        # Threshold: >50% drift AND >$5.00 absolute difference
-                        # High drift is expected when:
-                        # - OpenRouter key is shared (or_delta includes others' spending)
-                        # - Our tracking had bugs early on (events weren't emitted for empty responses)
                         abs_diff = abs(or_delta - our_delta)
                         if drift_pct > 50.0 and abs_diff > 5.0:
                             st["budget_drift_alert"] = True
-                            # Log warning event
                             append_jsonl(
                                 DRIVE_ROOT / "logs" / "events.jsonl",
                                 {
@@ -390,13 +384,12 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> None:
                         else:
                             st["budget_drift_alert"] = False
                     else:
-                        # Not enough usage to calculate meaningful drift
                         st["budget_drift_pct"] = 0.0
                         st["budget_drift_alert"] = False
 
-        _save_state_unlocked(st)
-    finally:
-        release_file_lock(STATE_LOCK_PATH, lock_fd)
+                _save_state_unlocked(st)
+            finally:
+                release_file_lock(STATE_LOCK_PATH, lock_fd)
 
 
 # ---------------------------------------------------------------------------
@@ -504,6 +497,49 @@ def model_breakdown(st: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
         log.warning("Failed to calculate model breakdown", exc_info=True)
 
     return breakdown
+
+
+def per_task_cost_summary(max_tasks: int = 10, tail_bytes: int = 512_000) -> List[Dict[str, Any]]:
+    """Return cost summary for recent tasks from events.jsonl.
+
+    Only reads the last `tail_bytes` of the file to avoid scanning
+    megabytes of history on every LLM round.
+
+    Returns list of dicts: [{task_id, cost, rounds, model}, ...]
+    sorted by cost descending, limited to max_tasks.
+    """
+    events_path = DRIVE_ROOT / "logs" / "events.jsonl"
+    if not events_path.exists():
+        return []
+
+    tasks: Dict[str, Dict[str, Any]] = {}
+    try:
+        file_size = events_path.stat().st_size
+        with events_path.open("r", encoding="utf-8") as f:
+            if file_size > tail_bytes:
+                f.seek(file_size - tail_bytes)
+                f.readline()  # skip partial first line
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                    if event.get("type") != "llm_usage":
+                        continue
+                    tid = event.get("task_id") or "unknown"
+                    cost = float(event.get("cost", 0) or 0)
+                    if tid not in tasks:
+                        tasks[tid] = {"task_id": tid, "cost": 0.0, "rounds": 0, "model": event.get("model", "")}
+                    tasks[tid]["cost"] += cost
+                    tasks[tid]["rounds"] += 1
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    continue
+    except Exception:
+        log.warning("Failed to calculate per-task cost summary", exc_info=True)
+
+    sorted_tasks = sorted(tasks.values(), key=lambda x: x["cost"], reverse=True)
+    return sorted_tasks[:max_tasks]
 
 
 # ---------------------------------------------------------------------------

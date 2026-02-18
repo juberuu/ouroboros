@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import pathlib
+import uuid
 from typing import Any, Dict, List, Tuple
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
@@ -309,6 +310,17 @@ Now write a comprehensive summary:"""
 
 
 # ---------------------------------------------------------------------------
+# forward_to_worker — LLM-initiated message routing to worker tasks
+# ---------------------------------------------------------------------------
+
+def _forward_to_worker(ctx: ToolContext, task_id: str, message: str) -> str:
+    """Forward a message to a running worker task's mailbox."""
+    from ouroboros.owner_inject import write_owner_message
+    write_owner_message(ctx.drive_root, message, task_id=task_id, msg_id=uuid.uuid4().hex)
+    return f"Message forwarded to task {task_id}"
+
+
+# ---------------------------------------------------------------------------
 # Tool registration
 # ---------------------------------------------------------------------------
 
@@ -373,4 +385,17 @@ def get_tools() -> List[ToolEntry]:
                 "last_n": {"type": "integer", "description": "Number of recent messages to summarize (default 200)"},
             }, "required": []},
         }, _summarize_dialogue),
+        ToolEntry("forward_to_worker", {
+            "name": "forward_to_worker",
+            "description": (
+                "Forward a message to a running worker task's mailbox. "
+                "Use when the owner sends a message during your active conversation "
+                "that is relevant to a specific running background task. "
+                "The worker will see it as [Owner message during task] on its next LLM round."
+            ),
+            "parameters": {"type": "object", "properties": {
+                "task_id": {"type": "string", "description": "ID of the running task to forward to"},
+                "message": {"type": "string", "description": "Message text to forward"},
+            }, "required": ["task_id", "message"]},
+        }, _forward_to_worker),
     ]

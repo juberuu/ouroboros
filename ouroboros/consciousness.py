@@ -157,7 +157,7 @@ class BackgroundConsciousness:
     def _check_budget(self) -> bool:
         """Check if background consciousness is within its budget allocation."""
         try:
-            total_budget = float(os.environ.get("TOTAL_BUDGET", "0"))
+            total_budget = float(os.environ.get("TOTAL_BUDGET", "1"))
             if total_budget <= 0:
                 return True
             max_bg = total_budget * (self._bg_budget_pct / 100.0)
@@ -198,6 +198,18 @@ class BackgroundConsciousness:
                 cost = float(usage.get("cost") or 0)
                 total_cost += cost
                 self._bg_spent_usd += cost
+
+                # Write BG spending to global state so it's visible in budget tracking
+                try:
+                    from supervisor.state import update_budget_from_usage
+                    update_budget_from_usage({
+                        "cost": cost, "rounds": 1,
+                        "prompt_tokens": usage.get("prompt_tokens", 0),
+                        "completion_tokens": usage.get("completion_tokens", 0),
+                        "cached_tokens": usage.get("cached_tokens", 0),
+                    })
+                except Exception:
+                    log.debug("Failed to update global budget from BG consciousness", exc_info=True)
 
                 # Budget check between rounds
                 if not self._check_budget():

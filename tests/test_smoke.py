@@ -112,6 +112,8 @@ EXPECTED_TOOLS = [
     "generate_evolution_stats",
     # VLM / Vision
     "analyze_screenshot", "vlm_query",
+    # Message routing
+    "forward_to_worker",
 ]
 
 

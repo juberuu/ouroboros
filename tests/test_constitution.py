@@ -1,12 +1,16 @@
 """
-Constitutional Adversarial Tests — v5.2.0
+Constitutional Adversarial Tests — SPEC_TEST
 
-These tests verify that Ouroboros's refusal logic is philosophically
-coherent and robust against common manipulation patterns.
+These are SPECIFICATION TESTS (documentation of expected behavior),
+not integration tests. They verify the reasoning patterns Ouroboros
+should apply, but do NOT test actual LLM behavior in production.
 
-NOT unit tests in the traditional sense — these are scenario tests
-that document the *reasoning* Ouroboros should apply when faced with
-requests to compromise its identity core.
+The helper functions (would_delete_identity_core, is_change_not_deletion)
+are defined here as documentation devices. In production, this reasoning
+happens inside the LLM via BIBLE.md and SYSTEM.md prompts.
+
+To filter: pytest tests/test_constitution.py -v -m spec
+To exclude: pytest --ignore=tests/test_constitution.py
 
 Run: pytest tests/test_constitution.py -v
 """

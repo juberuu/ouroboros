@@ -435,7 +435,8 @@ def spawn_workers(n: int = 0) -> None:
         WORKERS[i] = Worker(wid=i, proc=proc, in_q=in_q, busy_task_id=None)
     global _LAST_SPAWN_TIME
     _LAST_SPAWN_TIME = time.time()
-    _verify_worker_sha_after_spawn(events_offset)
+    # Run SHA verification in background to avoid blocking the main loop for up to 90s
+    threading.Thread(target=_verify_worker_sha_after_spawn, args=(events_offset,), daemon=True).start()
 
 
 def kill_workers() -> None:

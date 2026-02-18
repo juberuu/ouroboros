@@ -59,7 +59,7 @@ def fetch_openrouter_pricing() -> Dict[str, Tuple[float, float, float]]:
         models = data.get("data", [])
 
         # Prefixes we care about
-        prefixes = ("anthropic/", "openai/", "google/", "meta-llama/", "x-ai/")
+        prefixes = ("anthropic/", "openai/", "google/", "meta-llama/", "x-ai/", "qwen/")
 
         pricing_dict = {}
         for model in models:

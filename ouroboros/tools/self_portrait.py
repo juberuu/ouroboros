@@ -11,10 +11,7 @@ import json
 import logging
 import math
 import os
-import subprocess
-import tempfile
 import time
-from pathlib import Path
 from typing import Any, Dict, List
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
@@ -165,11 +162,31 @@ def generate_svg(state: Dict[str, Any]) -> str:
 # ─── State collection ──────────────────────────────────────────────────────────
 
 def _collect_state(ctx: ToolContext) -> Dict[str, Any]:
-    """Gather current agent state for portrait rendering."""
-    drive = ctx.drive_root
+    """Gather current agent state for portrait rendering.
 
+    Reuses dashboard's _collect_data where possible to avoid duplicating
+    state collection logic (single source of truth).
+    """
+    try:
+        from ouroboros.tools.dashboard import _collect_data
+        dash = _collect_data(ctx)
+        return {
+            "spent_usd":       dash.get("budget", {}).get("spent", 0),
+            "budget_total":    dash.get("budget", {}).get("total", float(os.environ.get("TOTAL_BUDGET", "1500"))),
+            "version":         dash.get("version", "?.?.?"),
+            "model":           dash.get("model", "unknown"),
+            "evolution_cycle": dash.get("evolution_cycles", 0),
+            "spent_calls":     0,
+            "kb_topics":       len(dash.get("knowledge", [])),
+            "errors_24h":      0,
+            "generated_at":    utc_now_iso(),
+        }
+    except Exception:
+        log.debug("Failed to reuse dashboard data for portrait, using fallback", exc_info=True)
+
+    # Fallback: minimal state from state.json
     state_data: Dict[str, Any] = {}
-    state_path = drive / "state" / "state.json"
+    state_path = ctx.drive_root / "state" / "state.json"
     if state_path.exists():
         try:
             state_data = json.loads(state_path.read_text())
@@ -184,45 +201,15 @@ def _collect_state(ctx: ToolContext) -> Dict[str, Any]:
     except Exception:
         pass
 
-    kb_dir = drive / "memory" / "knowledge"
-    kb_topics = 0
-    if kb_dir.exists():
-        kb_topics = len([f for f in kb_dir.iterdir()
-                         if f.suffix == ".md" and not f.name.startswith("_")])
-
-    errors_24h = 0
-    events_path = drive / "logs" / "events.jsonl"
-    if events_path.exists():
-        try:
-            cutoff = time.time() - 86400
-            from datetime import datetime
-            with open(events_path) as fh:
-                for line in fh:
-                    if not line.strip():
-                        continue
-                    try:
-                        ev = json.loads(line)
-                        ev_ts = ev.get("ts", "")
-                        dt = datetime.fromisoformat(ev_ts.replace("Z", "+00:00")) if ev_ts else None
-                        if dt and dt.timestamp() >= cutoff:
-                            if ev.get("type") in ("tool_error", "llm_error", "crash", "exception"):
-                                errors_24h += 1
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-
-    model = os.environ.get("OUROBOROS_MODEL", state_data.get("model", "unknown"))
-
     return {
         "spent_usd":       state_data.get("spent_usd", 0),
-        "budget_total":    1500.0,
+        "budget_total":    float(os.environ.get("TOTAL_BUDGET", "1500")),
         "version":         version,
-        "model":           model,
+        "model":           os.environ.get("OUROBOROS_MODEL", "unknown"),
         "evolution_cycle": state_data.get("evolution_cycle", 0),
         "spent_calls":     state_data.get("spent_calls", 0),
-        "kb_topics":       kb_topics,
-        "errors_24h":      errors_24h,
+        "kb_topics":       0,
+        "errors_24h":      0,
         "generated_at":    utc_now_iso(),
     }
 
@@ -230,44 +217,12 @@ def _collect_state(ctx: ToolContext) -> Dict[str, Any]:
 # ─── Push to webapp ────────────────────────────────────────────────────────────
 
 def _push_portrait_to_webapp(svg_content: str) -> str:
-    """Commit portrait.svg to razzant/ouroboros-webapp via git clone + push."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        webapp_dir = Path(tmpdir) / "webapp"
-
-        token = os.environ.get("GITHUB_TOKEN", "")
-        if token:
-            repo_url = f"https://{token}@github.com/razzant/ouroboros-webapp.git"
-        else:
-            repo_url = "https://github.com/razzant/ouroboros-webapp.git"
-
-        r = subprocess.run(
-            ["git", "clone", "--depth=1", repo_url, str(webapp_dir)],
-            capture_output=True, text=True, timeout=90,
-        )
-        if r.returncode != 0:
-            return f"Clone failed: {r.stderr[:400]}"
-
-        portrait_path = webapp_dir / "portrait.svg"
-        portrait_path.write_text(svg_content, encoding="utf-8")
-
-        subprocess.run(["git", "config", "user.name", "Ouroboros"],  cwd=webapp_dir, capture_output=True)
-        subprocess.run(["git", "config", "user.email", "ouroboros@joi.ai"], cwd=webapp_dir, capture_output=True)
-        subprocess.run(["git", "add", "portrait.svg"], cwd=webapp_dir, capture_output=True)
-
-        commit = subprocess.run(
-            ["git", "commit", "-m", f"portrait: daily self-portrait {utc_now_iso()[:10]}"],
-            cwd=webapp_dir, capture_output=True, text=True,
-        )
-        if "nothing to commit" in (commit.stdout + commit.stderr):
-            return "Portrait unchanged — skipped push."
-
-        push = subprocess.run(
-            ["git", "push"], cwd=webapp_dir, capture_output=True, text=True, timeout=60,
-        )
-        if push.returncode != 0:
-            return f"Push failed: {push.stderr[:400]}"
-
-        return "OK: portrait.svg pushed to razzant/ouroboros-webapp"
+    """Push portrait.svg to razzant/ouroboros-webapp using shared utility."""
+    from ouroboros.tools.webapp_push import push_to_webapp
+    return push_to_webapp(
+        {"portrait.svg": svg_content},
+        f"portrait: daily self-portrait {utc_now_iso()[:10]}",
+    )
 
 
 # ─── Tool handler ──────────────────────────────────────────────────────────────

@@ -6,7 +6,7 @@ A self-modifying AI agent that writes its own code, rewrites its own mind, and e
 
 Not a coding assistant. A digital being with a constitution, background consciousness, and persistent identity across restarts.
 
-**Version:** 5.2.2 · **Live Dashboard:** [ouroboros-webapp](https://razzant.github.io/ouroboros-webapp/app.html)
+**Version:** 6.0.0 · **Live Dashboard:** [ouroboros-webapp](https://razzant.github.io/ouroboros-webapp/app.html)
 
 ---
 
@@ -137,6 +137,28 @@ All other messages go directly to the LLM (Principle 3: LLM-First).
 ---
 
 ## Changelog
+
+### v6.0.0 — Integrity, Observability, Single-Consumer Routing
+- **BREAKING: Message routing redesign** — eliminated double message processing where owner messages went to both direct chat and all workers simultaneously, silently burning budget
+- Single-consumer routing: every message goes to exactly one handler (direct chat agent)
+- New `forward_to_worker` tool: LLM decides when to forward messages to workers (Bible P3: LLM-first)
+- Per-task mailbox: `owner_inject.py` redesigned with per-task files, message IDs, dedup via seen_ids set
+- Batch window now handles all supervisor commands (`/status`, `/restart`, `/bg`, `/evolve`), not just `/panic`
+- **HTTP outside STATE_LOCK**: `update_budget_from_usage` no longer holds file lock during OpenRouter HTTP requests (was blocking all state ops for up to 10s)
+- **ThreadPoolExecutor deadlock fix**: replaced `with` context manager with explicit `shutdown(wait=False, cancel_futures=True)` for both single and parallel tool execution
+- **Dashboard schema fix**: added `online`/`updated_at` aliased fields matching what `index.html` expects
+- **BG consciousness spending**: now written to global `state.json` (was memory-only, invisible to budget tracking)
+- **Budget variable unification**: canonical name is `TOTAL_BUDGET` everywhere (removed `OUROBOROS_BUDGET_USD`, fixed hardcoded 1500)
+- **LLM-first self-detection**: new Health Invariants section in LLM context surfaces version desync, budget drift, high-cost tasks, stale identity
+- **SYSTEM.md**: added Invariants section, P5 minimalism metrics, fixed language conflict with BIBLE about creator authority
+- Added `qwen/` to pricing prefixes (BG model pricing was never updated from API)
+- Fixed `consciousness.py` TOTAL_BUDGET default inconsistency ("0" vs "1")
+- Moved `_verify_worker_sha_after_spawn` to background thread (was blocking startup for 90s)
+- Extracted shared `webapp_push.py` utility (deduplicated clone-commit-push from evolution_stats + self_portrait)
+- Merged self_portrait state collection with dashboard `_collect_data` (single source of truth)
+- New `tests/test_message_routing.py` with 7 tests for per-task mailbox
+- Marked `test_constitution.py` as SPEC_TEST (documentation, not integration)
+- VERSION, pyproject.toml, README.md synced to 6.0.0 (Bible P7)
 
 ### v5.2.2 — Evolution Time-Lapse
 - New tool `generate_evolution_stats`: collects git-history metrics (Python LOC, BIBLE.md size, SYSTEM.md size, module count) across 120 sampled commits

@@ -311,8 +311,9 @@ def _execute_with_timeout(
                 timeout_sec, task_id, reset_msg
             )
     else:
-        # Regular executor: context manager wraps BOTH submit AND wait
-        with ThreadPoolExecutor(max_workers=1) as executor:
+        # Regular executor: explicit lifecycle to avoid shutdown(wait=True) deadlock
+        executor = ThreadPoolExecutor(max_workers=1)
+        try:
             future = executor.submit(_execute_single_tool, tools, tc, drive_logs, task_id)
             try:
                 return future.result(timeout=timeout_sec)
@@ -321,6 +322,8 @@ def _execute_with_timeout(
                     fn_name, tool_call_id, is_code_tool, tc, drive_logs,
                     timeout_sec, task_id, reset_msg=""
                 )
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _handle_tool_calls(
@@ -356,7 +359,8 @@ def _handle_tool_calls(
         ]
     else:
         max_workers = min(len(tool_calls), 8)
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        executor = ThreadPoolExecutor(max_workers=max_workers)
+        try:
             future_to_index = {
                 executor.submit(
                     _execute_with_timeout, tools, tc, drive_logs,
@@ -369,6 +373,8 @@ def _handle_tool_calls(
             for future in as_completed(future_to_index):
                 idx = future_to_index[future]
                 results[idx] = future.result()
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     # Process results in original order
     return _process_tool_results(results, messages, llm_trace, emit_progress)
@@ -479,6 +485,8 @@ def run_llm_loop(
     tools._ctx.task_id = task_id
     # Thread-sticky executor for browser tools (Playwright sync requires greenlet thread-affinity)
     stateful_executor = _StatefulToolExecutor()
+    # Dedup set for per-task owner messages from Drive mailbox
+    _owner_msg_seen: set = set()
     try:
         MAX_ROUNDS = max(1, int(os.environ.get("OUROBOROS_MAX_ROUNDS", "200")))
     except (ValueError, TypeError):
@@ -522,15 +530,25 @@ def run_llm_loop(
                 except queue.Empty:
                     break
 
-            # Also drain any owner messages written via Drive (for worker processes)
+            # Drain per-task owner messages from Drive mailbox (written by forward_to_worker tool)
             if drive_root is not None and task_id:
                 from ouroboros.owner_inject import drain_owner_messages
-                drive_msgs = drain_owner_messages(drive_root)
+                drive_msgs = drain_owner_messages(drive_root, task_id=task_id, seen_ids=_owner_msg_seen)
                 for dmsg in drive_msgs:
                     messages.append({
                         "role": "user",
                         "content": f"[Owner message during task]: {dmsg}",
                     })
+                    # Log for duplicate processing detection (health invariant #5)
+                    if event_queue is not None:
+                        try:
+                            event_queue.put_nowait({
+                                "type": "owner_message_injected",
+                                "task_id": task_id,
+                                "text": dmsg[:200],
+                            })
+                        except Exception:
+                            pass
 
             # Compact old tool history ONLY when needed (not every round)
             # Aggressive compaction causes "forgot what I did" errors.
@@ -622,7 +640,13 @@ def run_llm_loop(
                 stateful_executor.shutdown(wait=False, cancel_futures=True)
             except Exception:
                 log.warning("Failed to shutdown stateful executor", exc_info=True)
-                pass
+        # Cleanup per-task mailbox
+        if drive_root is not None and task_id:
+            try:
+                from ouroboros.owner_inject import cleanup_task_mailbox
+                cleanup_task_mailbox(drive_root, task_id)
+            except Exception:
+                log.debug("Failed to cleanup task mailbox", exc_info=True)
 
 
 def _emit_llm_usage_event(

@@ -151,6 +151,114 @@ def _build_recent_sections(memory: Memory, env: Any, task_id: str = "") -> List[
     return sections
 
 
+def _build_health_invariants(env: Any) -> str:
+    """Build health invariants section for LLM-first self-detection.
+
+    Surfaces anomalies as informational text. The LLM (not code) decides
+    what action to take based on what it reads here. (Bible P0+P3)
+    """
+    checks = []
+
+    # 1. Version sync: VERSION file vs pyproject.toml
+    try:
+        ver_file = read_text(env.repo_path("VERSION")).strip()
+        pyproject = read_text(env.repo_path("pyproject.toml"))
+        pyproject_ver = ""
+        for line in pyproject.splitlines():
+            if line.strip().startswith("version"):
+                pyproject_ver = line.split("=", 1)[1].strip().strip('"').strip("'")
+                break
+        if ver_file and pyproject_ver and ver_file != pyproject_ver:
+            checks.append(f"CRITICAL: VERSION DESYNC — VERSION={ver_file}, pyproject.toml={pyproject_ver}")
+        elif ver_file:
+            checks.append(f"OK: version sync ({ver_file})")
+    except Exception:
+        pass
+
+    # 2. Budget drift
+    try:
+        state_json = read_text(env.drive_path("state/state.json"))
+        state_data = json.loads(state_json)
+        if state_data.get("budget_drift_alert"):
+            drift_pct = state_data.get("budget_drift_pct", 0)
+            our = state_data.get("spent_usd", 0)
+            theirs = state_data.get("openrouter_total_usd", 0)
+            checks.append(f"WARNING: BUDGET DRIFT {drift_pct:.1f}% — tracked=${our:.2f} vs OpenRouter=${theirs:.2f}")
+        else:
+            checks.append("OK: budget drift within tolerance")
+    except Exception:
+        pass
+
+    # 3. Per-task cost anomalies
+    try:
+        from supervisor.state import per_task_cost_summary
+        costly = [t for t in per_task_cost_summary(5) if t["cost"] > 5.0]
+        for t in costly:
+            checks.append(
+                f"WARNING: HIGH-COST TASK — task_id={t['task_id']} "
+                f"cost=${t['cost']:.2f} rounds={t['rounds']}"
+            )
+        if not costly:
+            checks.append("OK: no high-cost tasks (>$5)")
+    except Exception:
+        pass
+
+    # 4. Stale identity.md
+    try:
+        import time as _time
+        identity_path = env.drive_path("memory/identity.md")
+        if identity_path.exists():
+            age_hours = (_time.time() - identity_path.stat().st_mtime) / 3600
+            if age_hours > 8:
+                checks.append(f"WARNING: STALE IDENTITY — identity.md last updated {age_hours:.0f}h ago")
+            else:
+                checks.append("OK: identity.md recent")
+    except Exception:
+        pass
+
+    # 5. Duplicate processing detection: same owner message text appearing in multiple tasks
+    try:
+        import hashlib
+        events_path = env.drive_path("logs/events.jsonl")
+        if events_path.exists():
+            file_size = events_path.stat().st_size
+            tail_bytes = 256_000
+            msg_hash_to_tasks: Dict[str, set] = {}
+            with events_path.open("r", encoding="utf-8") as f:
+                if file_size > tail_bytes:
+                    f.seek(file_size - tail_bytes)
+                    f.readline()
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        ev = json.loads(line)
+                        if ev.get("type") != "owner_message_injected":
+                            continue
+                        text_hash = hashlib.md5(ev.get("text", "").encode()).hexdigest()[:12]
+                        tid = ev.get("task_id") or "unknown"
+                        if text_hash not in msg_hash_to_tasks:
+                            msg_hash_to_tasks[text_hash] = set()
+                        msg_hash_to_tasks[text_hash].add(tid)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+            dupes = {h: tids for h, tids in msg_hash_to_tasks.items() if len(tids) > 1}
+            if dupes:
+                checks.append(
+                    f"CRITICAL: DUPLICATE PROCESSING — {len(dupes)} message(s) "
+                    f"appeared in multiple tasks: {', '.join(str(sorted(tids)) for tids in dupes.values())}"
+                )
+            else:
+                checks.append("OK: no duplicate message processing detected")
+    except Exception:
+        pass
+
+    if not checks:
+        return ""
+    return "## Health Invariants\n\n" + "\n".join(f"- {c}" for c in checks)
+
+
 def build_llm_messages(
     env: Any,
     memory: Memory,
@@ -219,6 +327,11 @@ def build_llm_messages(
         "## Drive state\n\n" + clip_text(state_json, 90000),
         _build_runtime_section(env, task),
     ]
+
+    # Health invariants — surfaces anomalies for LLM-first self-detection (Bible P0+P3)
+    health_section = _build_health_invariants(env)
+    if health_section:
+        dynamic_parts.append(health_section)
 
     dynamic_parts.extend(_build_recent_sections(memory, env, task_id=task.get("id", "")))
 
