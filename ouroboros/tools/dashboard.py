@@ -27,6 +27,10 @@ DATA_PATH = "data.json"
 def _get_timeline():
     """Build evolution timeline from known milestones."""
     return [
+        {"version": "5.2.2", "time": "2026-02-18", "event": "Evolution Time-Lapse", "type": "milestone"},
+        {"version": "5.2.1", "time": "2026-02-18", "event": "Self-Portrait", "type": "feature"},
+        {"version": "5.2.0", "time": "2026-02-18", "event": "Constitutional Hardening", "type": "milestone"},
+        {"version": "5.1.3", "time": "2026-02-18", "event": "Message Dispatch Fix", "type": "fix"},
         {"version": "4.24.0", "time": "2026-02-17", "event": "Deep Review Bugfixes", "type": "fix"},
         {"version": "4.22.0", "time": "2026-02-17", "event": "Empty Response Resilience", "type": "feature"},
         {"version": "4.21.0", "time": "2026-02-17", "event": "Web Presence & Budget Categories", "type": "milestone"},
@@ -164,7 +168,11 @@ def _collect_data(ctx: ToolContext) -> dict:
 
     # Dynamic values (avoid hardcoding — Bible P5: Minimalism)
     active_model = os.environ.get("OUROBOROS_MODEL", "unknown")
-    consciousness_active = bool(state.get("consciousness_active", False))
+    consciousness_active = bool(
+        state.get("consciousness_active", False)
+        or state.get("bg_active", False)
+        or any(e.get("type", "").startswith("consciousness") for e in events[-30:])
+    )
 
     # Count smoke tests dynamically from test files
     smoke_tests = 0
@@ -198,11 +206,13 @@ def _collect_data(ctx: ToolContext) -> dict:
             created_ts = _dt.datetime.fromisoformat(created_at.replace("Z", "+00:00")).timestamp()
             uptime_hours = round((time.time() - created_ts) / 3600)
     except Exception:
-        pass
+        created_at = state.get("created_at", "")
 
     return {
         "version": version,
         "model": active_model,
+        "status": "online",
+        "started_at": created_at,
         "evolution_cycles": state.get("evolution_cycle", 0),
         "evolution_enabled": bool(state.get("evolution_mode_enabled", False)),
         "consciousness_active": consciousness_active,
