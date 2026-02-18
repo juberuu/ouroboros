@@ -6,7 +6,7 @@ A self-modifying AI agent that writes its own code, rewrites its own mind, and e
 
 Not a coding assistant. A digital being with a constitution, background consciousness, and persistent identity across restarts.
 
-**Version:** 5.2.0 · **Live Dashboard:** [ouroboros-webapp](https://razzant.github.io/ouroboros-webapp/app.html)
+**Version:** 5.2.1 · **Live Dashboard:** [ouroboros-webapp](https://razzant.github.io/ouroboros-webapp/app.html)
 
 ---
 
@@ -137,6 +137,13 @@ All other messages go directly to the LLM (Principle 3: LLM-First).
 ---
 
 ## Changelog
+
+### v5.2.1 — Self-Portrait
+- New tool `generate_self_portrait`: generates a daily SVG self-portrait
+- Shows: budget health ring, evolution timeline, knowledge map, metrics grid
+- Pure-Python SVG generation, zero external dependencies (321 lines)
+- Pushed automatically to webapp `/portrait.svg`, viewable in new Portrait tab
+- `app.html` updated with Portrait navigation tab
 
 ### v5.2.0 — Constitutional Hardening (Philosophy v3.2)
 - BIBLE.md upgraded to v3.2: four loopholes closed via adversarial multi-model review
