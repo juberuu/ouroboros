@@ -169,7 +169,7 @@ def _collect_data(ctx: ToolContext) -> dict:
     remaining = round(total - spent, 2)
 
     # Dynamic values (avoid hardcoding — Bible P5: Minimalism)
-    active_model = os.environ.get("OUROBOROS_MODEL", "unknown")
+    active_model = os.environ.get("OUROBOROS_MODEL", state.get("model", "unknown"))
     consciousness_active = bool(
         state.get("consciousness_active", False)
         or state.get("bg_active", False)
@@ -185,7 +185,7 @@ def _collect_data(ctx: ToolContext) -> dict:
             for fn in os.listdir(tests_dir):
                 if fn.startswith("test_") and fn.endswith(".py"):
                     with open(os.path.join(tests_dir, fn), encoding="utf-8") as tf:
-                        smoke_tests += len(_re.findall(r"^def test_", tf.read(), _re.MULTILINE))
+                        smoke_tests += len(_re.findall(r"^\s*def test_", tf.read(), _re.MULTILINE))
     except Exception:
         pass
 
