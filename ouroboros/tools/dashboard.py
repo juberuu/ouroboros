@@ -66,7 +66,20 @@ def _count_tests(repo: Path) -> int:
             cwd=str(repo),
         )
         if result.returncode == 0:
-            return len([l for l in result.stdout.strip().split("\n") if "::test_" in l])
+            lines = result.stdout.strip().split("\n")
+            # Primary: sum "filename: N" lines (pytest --co -q format)
+            total = 0
+            for l in lines:
+                m = re.match(r"^.+\.py:\s*(\d+)$", l.strip())
+                if m:
+                    total += int(m.group(1))
+            if total > 0:
+                return total
+            # Cross-check: "N tests collected" on last line
+            last = lines[-1].strip() if lines else ""
+            m2 = re.match(r"^(\d+) tests? collected", last)
+            if m2:
+                return int(m2.group(1))
     except Exception:
         pass
     # Fallback to regex
