@@ -176,16 +176,29 @@ def _collect_data(ctx: ToolContext) -> dict:
         or any(e.get("type", "").startswith("consciousness") for e in events[-30:])
     )
 
-    # Count smoke tests dynamically from test files
+    # Count smoke tests: prefer pytest discovery (catches parametrized), fallback to regex
     smoke_tests = 0
     try:
         import re as _re
-        tests_dir = os.path.join(str(ctx.repo_dir), "tests")
-        if os.path.isdir(tests_dir):
-            for fn in os.listdir(tests_dir):
-                if fn.startswith("test_") and fn.endswith(".py"):
-                    with open(os.path.join(tests_dir, fn), encoding="utf-8") as tf:
-                        smoke_tests += len(_re.findall(r"^\s*def test_", tf.read(), _re.MULTILINE))
+        import subprocess as _subprocess
+        from pathlib import Path as _PPath
+        repo = _PPath(str(ctx.repo_dir))
+        tests_dir = repo / "tests"
+        if tests_dir.is_dir():
+            try:
+                result = _subprocess.run(
+                    ["python", "-m", "pytest", "tests/", "-q", "--co"],
+                    capture_output=True, text=True, timeout=30,
+                    cwd=str(repo),
+                )
+                if result.returncode == 0:
+                    smoke_tests = len([l for l in result.stdout.strip().split("\n") if "::test_" in l])
+                else:
+                    raise RuntimeError("pytest --co failed")
+            except Exception:
+                # Fallback to regex
+                for tf in tests_dir.glob("test_*.py"):
+                    smoke_tests += len(_re.findall(r"^\s*def test_", tf.read_text(), _re.MULTILINE))
     except Exception:
         pass
 
