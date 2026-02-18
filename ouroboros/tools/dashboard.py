@@ -27,6 +27,8 @@ DATA_PATH = "data.json"
 def _get_timeline():
     """Build evolution timeline from known milestones."""
     return [
+        {"version": "6.1.0", "time": "2026-02-18", "event": "Budget Controls: selective tools, soft limits, compact_context", "type": "feature"},
+        {"version": "6.0.0", "time": "2026-02-18", "event": "Major Refactor: single-consumer routing, per-task mailbox", "type": "milestone"},
         {"version": "5.2.2", "time": "2026-02-18", "event": "Evolution Time-Lapse", "type": "milestone"},
         {"version": "5.2.1", "time": "2026-02-18", "event": "Self-Portrait", "type": "feature"},
         {"version": "5.2.0", "time": "2026-02-18", "event": "Constitutional Hardening", "type": "milestone"},
@@ -75,7 +77,7 @@ def _collect_data(ctx: ToolContext) -> dict:
     recent_activity = []
     for e in reversed(events[-50:]):
         ev = e.get("type", "")
-        if ev == "llm_usage":
+        if ev in ("llm_usage", "llm_round", "task_eval"):
             continue  # too noisy
         icon = "📡"
         text = ev
@@ -155,15 +157,15 @@ def _collect_data(ctx: ToolContext) -> dict:
 
     # Compile
     spent = round(state.get("spent_usd", 0), 2)
-    # Read actual budget total from env (set in Colab) or fall back to 1500
+    # Read actual budget total from env (set in Colab) or fall back to 2000
     budget_total_env = os.environ.get("TOTAL_BUDGET", "")
     if budget_total_env:
         try:
             total = float(budget_total_env)
         except ValueError:
-            total = state.get("budget_total", 1500) or 1500
+            total = state.get("budget_total", 2000) or 2000
     else:
-        total = state.get("budget_total", 1500) or 1500
+        total = state.get("budget_total", 2000) or 2000
     remaining = round(total - spent, 2)
 
     # Dynamic values (avoid hardcoding — Bible P5: Minimalism)
