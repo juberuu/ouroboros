@@ -138,6 +138,9 @@ All other messages go directly to the LLM (Principle 3: LLM-First).
 
 ## Changelog
 
+### v5.1.6
+- Background consciousness model default changed to qwen/qwen3.5-plus-02-15 (5x cheaper than Gemini-3-Pro, $0.40 vs $2.0/MTok)
+
 ### v5.1.5 — claude-sonnet-4.6 as default model
 
 - Benchmarked `anthropic/claude-sonnet-4.6` vs `claude-sonnet-4`: 30ms faster, parallel tool calls, identical pricing

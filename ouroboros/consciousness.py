@@ -79,7 +79,10 @@ class BackgroundConsciousness:
 
     @property
     def _model(self) -> str:
-        return os.environ.get("OUROBOROS_MODEL_LIGHT", "") or os.environ.get("OUROBOROS_MODEL", "anthropic/claude-sonnet-4.6")
+        # BG consciousness uses a cheap-but-capable model to minimize cost.
+        # Override via OUROBOROS_MODEL_LIGHT env var (Colab secret).
+        # Qwen3.5-Plus: $0.40/MTok prompt vs Gemini-3-Pro $2.0/MTok → 5x cheaper
+        return os.environ.get("OUROBOROS_MODEL_LIGHT", "") or "qwen/qwen3.5-plus-02-15"
 
     def start(self) -> str:
         if self.is_running:
