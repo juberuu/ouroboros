@@ -189,6 +189,8 @@ export function initSettings({ state }) {
         applyInputValue('s-scope-review-model', s.OUROBOROS_SCOPE_REVIEW_MODEL);
         byId('s-effort-scope-review').value = s.OUROBOROS_EFFORT_SCOPE_REVIEW || 'high';
         byId('s-review-enforcement').value = s.OUROBOROS_REVIEW_ENFORCEMENT || 'advisory';
+        byId('s-runtime-mode').value = s.OUROBOROS_RUNTIME_MODE || 'advanced';
+        applyInputValue('s-skills-repo-path', s.OUROBOROS_SKILLS_REPO_PATH);
         if (s.OUROBOROS_MAX_WORKERS) byId('s-workers').value = s.OUROBOROS_MAX_WORKERS;
         if (s.OUROBOROS_SOFT_TIMEOUT_SEC) byId('s-soft-timeout').value = s.OUROBOROS_SOFT_TIMEOUT_SEC;
         if (s.OUROBOROS_HARD_TIMEOUT_SEC) byId('s-hard-timeout').value = s.OUROBOROS_HARD_TIMEOUT_SEC;
@@ -268,6 +270,8 @@ export function initSettings({ state }) {
             OUROBOROS_SCOPE_REVIEW_MODEL: byId('s-scope-review-model').value.trim(),
             OUROBOROS_EFFORT_SCOPE_REVIEW: byId('s-effort-scope-review').value,
             OUROBOROS_REVIEW_ENFORCEMENT: byId('s-review-enforcement').value,
+            OUROBOROS_RUNTIME_MODE: byId('s-runtime-mode').value,
+            OUROBOROS_SKILLS_REPO_PATH: byId('s-skills-repo-path').value.trim(),
             OUROBOROS_MAX_WORKERS: readInt('s-workers', 5),
             OUROBOROS_SOFT_TIMEOUT_SEC: readInt('s-soft-timeout', 600),
             OUROBOROS_HARD_TIMEOUT_SEC: readInt('s-hard-timeout', 1800),

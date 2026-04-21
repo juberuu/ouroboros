@@ -198,6 +198,11 @@ class StateResponse(TypedDict):
     spent_calls: int
     supervisor_ready: bool
     supervisor_error: Optional[str]
+    # Phase 2 three-layer refactor: runtime-mode axis (``light|advanced|pro``)
+    # and a read-only flag indicating whether the external skills-repo
+    # checkout path is configured. Values live in ``ouroboros.config``.
+    runtime_mode: str
+    skills_repo_configured: bool
 
 
 class SettingsNetworkMeta(TypedDict):

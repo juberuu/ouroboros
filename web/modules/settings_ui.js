@@ -277,6 +277,41 @@ export function renderSettingsPage() {
                             </div>
                         </div>
                     </div>
+
+                    <div class="form-section">
+                        <h3>Runtime Mode</h3>
+                        <div class="settings-section-copy">
+                            Separate axis from Review Enforcement. Controls how far Ouroboros is allowed to self-modify.
+                            <code>Light</code> disables repo self-modification (Phase 3+).
+                            <code>Advanced</code> keeps the current self-modifying evolutionary layer (default).
+                            <code>Pro</code> additionally enables the core-patch lane (Phase 6+).
+                        </div>
+                        <div class="settings-effort-card">
+                            <label>Runtime Mode</label>
+                            <input id="s-runtime-mode" type="hidden" value="advanced">
+                            <div class="settings-effort-group" data-effort-group data-runtime-mode-group data-effort-target="s-runtime-mode">
+                                <button type="button" class="settings-effort-btn" data-effort-value="light">Light</button>
+                                <button type="button" class="settings-effort-btn" data-effort-value="advanced">Advanced</button>
+                                <button type="button" class="settings-effort-btn" data-effort-value="pro">Pro</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="form-section">
+                        <h3>External Skills Repo</h3>
+                        <div class="settings-section-copy">
+                            Local checkout path of the external skills/extensions repository. Phase 2 plumbing only:
+                            the path is stored here; the skill loader + <code>skill_exec</code> arrive in Phase 3.
+                            Leave empty if you have not checked out the skills repo yet.
+                        </div>
+                        <div class="form-row">
+                            <div class="form-field">
+                                <label>Skills Repo Path</label>
+                                <input id="s-skills-repo-path" placeholder="~/Ouroboros/skills or /absolute/path/to/skills">
+                                <div class="settings-inline-note">Absolute or <code>~</code>-prefixed path. Ouroboros never clones/pulls this directory — you manage it yourself.</div>
+                            </div>
+                        </div>
+                    </div>
                 </section>
 
                 <section class="settings-panel" data-settings-panel="integrations">

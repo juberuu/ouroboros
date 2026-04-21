@@ -849,6 +849,7 @@ async def api_state(request: Request) -> JSONResponse:
         from supervisor.state import load_state, budget_remaining, budget_pct, TOTAL_BUDGET_LIMIT
         from supervisor.workers import WORKERS, PENDING, RUNNING
         from supervisor.queue import get_evolution_status_snapshot
+        from ouroboros.config import get_runtime_mode, get_skills_repo_path
         st = load_state()
         alive = 0
         total_w = 0
@@ -881,6 +882,13 @@ async def api_state(request: Request) -> JSONResponse:
             "spent_calls": int(st.get("spent_calls") or 0),
             "supervisor_ready": _supervisor_ready.is_set(),
             "supervisor_error": _supervisor_error,
+            # Phase 2 plumbing: surface the runtime-mode axis to the UI
+            # so Settings and the nav shell can render mode-aware copy
+            # without re-reading settings.json. Skills-repo path is
+            # surfaced as a boolean so the UI can show "configured"
+            # without leaking the absolute path.
+            "runtime_mode": get_runtime_mode(),
+            "skills_repo_configured": bool(get_skills_repo_path()),
         })
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -989,6 +997,20 @@ async def api_settings_post(request: Request) -> JSONResponse:
         body = await request.json()
         old_settings = load_settings()
         current = _merge_settings_payload(old_settings, body)
+        # Phase 2: normalize the new runtime-mode axis on the save path so a
+        # typo like ``{"OUROBOROS_RUNTIME_MODE": "turbo"}`` cannot land in
+        # settings.json. The same normalizer runs on the read side
+        # (``get_runtime_mode``), so /api/settings, /api/state, and the UI
+        # segmented control stay in lockstep.
+        from ouroboros.config import normalize_runtime_mode as _norm_runtime_mode
+        current["OUROBOROS_RUNTIME_MODE"] = _norm_runtime_mode(
+            current.get("OUROBOROS_RUNTIME_MODE")
+        )
+        # Skills-repo path is opaque text; trim incidental whitespace so the
+        # "configured vs empty" boolean in /api/state stays deterministic.
+        current["OUROBOROS_SKILLS_REPO_PATH"] = str(
+            current.get("OUROBOROS_SKILLS_REPO_PATH") or ""
+        ).strip()
         current, provider_defaults_changed, provider_default_keys = apply_runtime_provider_defaults(current)
         if str(current.get("LOCAL_MODEL_SOURCE", "") or "").strip() and not has_supervisor_provider(current):
             return JSONResponse(

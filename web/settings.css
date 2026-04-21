@@ -473,6 +473,13 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+/* Phase 2 runtime-mode toggle (Light/Advanced/Pro): 3 columns. Without
+   this override the 3 buttons would fall through to the default 4-column
+   layout of .settings-effort-group and leave an empty fourth column. */
+[data-runtime-mode-group].settings-effort-group {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 
 [data-enforcement-group] .settings-effort-btn[data-effort-value="advisory"].active,
 [data-enforcement-group] .settings-effort-btn[data-effort-value="advisory"]:hover {

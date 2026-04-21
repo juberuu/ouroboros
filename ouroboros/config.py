@@ -71,6 +71,15 @@ SETTINGS_DEFAULTS = {
     "OUROBOROS_REVIEW_MODELS": "openai/gpt-5.4,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.7",
     # Pre-commit review enforcement: advisory | blocking
     "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
+    # Runtime mode: light | advanced | pro (Phase 2 three-layer refactor).
+    # "advanced" preserves the existing self-modifying evolutionary layer and
+    # is the safe default for current installs. Phases 3+ will start gating
+    # behaviour on this value; Phase 2 only plumbs the setting end-to-end.
+    "OUROBOROS_RUNTIME_MODE": "advanced",
+    # Optional local checkout path for the external skills/extensions repo.
+    # Empty means "no external skills wired yet". Phase 3 will point the
+    # skill loader at this path; no clone/pull management in v1.
+    "OUROBOROS_SKILLS_REPO_PATH": "",
     # Scope review: single-model blocking reviewer (runs after triad review)
     "OUROBOROS_SCOPE_REVIEW_MODEL": "anthropic/claude-opus-4.6",
     # Reasoning effort per task type: none | low | medium | high
@@ -106,6 +115,11 @@ SETTINGS_DEFAULTS = {
 
 _VALID_EFFORTS = ("none", "low", "medium", "high")
 _DIRECT_PROVIDER_REVIEW_RUNS = 3
+
+# Phase 2 three-layer refactor runtime mode. Separate axis from
+# ``OUROBOROS_REVIEW_ENFORCEMENT`` — review strictness and self-modification
+# scope are orthogonal concerns and must not collapse into one flag.
+VALID_RUNTIME_MODES = ("light", "advanced", "pro")
 
 
 def _parse_model_list(value: str) -> list[str]:
@@ -224,6 +238,56 @@ def get_review_enforcement() -> str:
     return raw if raw in {"advisory", "blocking"} else default_val
 
 
+def normalize_runtime_mode(value: Any) -> str:
+    """Clamp an arbitrary caller-supplied runtime mode to a valid value.
+
+    Used on both the write path (``api_settings_post`` / onboarding save)
+    and the read path (``get_runtime_mode``) so the stored value,
+    ``/api/settings`` echo, ``/api/state``, and the UI segmented control
+    can never drift — a typo like ``"turbo"`` is silently pinned to the
+    default (``advanced``) everywhere instead of being accepted by the
+    save path and clamped only at read time.
+
+    Returns the canonical lowercase mode string. Non-string / empty /
+    unknown inputs map to ``SETTINGS_DEFAULTS["OUROBOROS_RUNTIME_MODE"]``.
+    """
+    default_val = str(SETTINGS_DEFAULTS["OUROBOROS_RUNTIME_MODE"])
+    text = str(value or "").strip().lower()
+    return text if text in VALID_RUNTIME_MODES else default_val
+
+
+def get_runtime_mode() -> str:
+    """Return the configured runtime mode (light / advanced / pro).
+
+    Reads ``OUROBOROS_RUNTIME_MODE`` from the environment with
+    ``SETTINGS_DEFAULTS`` as fallback, then delegates to
+    ``normalize_runtime_mode`` so unknown or empty values silently degrade
+    to the default. Phase 2 is plumbing only — callers should still guard
+    behaviour against this value on their own in Phase 3+.
+    """
+    default_val = str(SETTINGS_DEFAULTS["OUROBOROS_RUNTIME_MODE"])
+    return normalize_runtime_mode(
+        os.environ.get("OUROBOROS_RUNTIME_MODE", default_val) or default_val
+    )
+
+
+def get_skills_repo_path() -> str:
+    """Return the configured external skills repo checkout path (or empty).
+
+    Expands a leading ``~`` so settings files written as ``~/Ouroboros/skills``
+    resolve to the user home. Returns an empty string when unset.
+    """
+    raw = (
+        os.environ.get("OUROBOROS_SKILLS_REPO_PATH", "") or ""
+    ).strip()
+    if not raw:
+        return ""
+    try:
+        return str(pathlib.Path(raw).expanduser())
+    except Exception:
+        return raw
+
+
 # ---------------------------------------------------------------------------
 # Version
 # ---------------------------------------------------------------------------
@@ -277,6 +341,18 @@ def _release_settings_lock(fd: Optional[int]) -> None:
 
 def _coerce_setting_value(key: str, value):
     default = SETTINGS_DEFAULTS.get(key)
+    # Phase 2: runtime-mode is a closed enum. Normalize on the read path
+    # (``load_settings``) so every downstream consumer — ``api_settings_get``,
+    # the onboarding bootstrap, ``get_runtime_mode`` — sees the clamped
+    # value. A legacy ``settings.json`` containing e.g. ``"turbo"`` cannot
+    # leak an invalid mode into the UI or the runtime.
+    if key == "OUROBOROS_RUNTIME_MODE":
+        return normalize_runtime_mode(value)
+    # Phase 2: whitespace around the opaque skills-repo path would leave the
+    # ``skills_repo_configured`` boolean in ``/api/state`` non-deterministic.
+    # Trim on load so empty-with-spaces truly reads as empty.
+    if key == "OUROBOROS_SKILLS_REPO_PATH":
+        return str(value or "").strip()
     if isinstance(default, bool):
         if isinstance(value, bool):
             return value
@@ -356,6 +432,8 @@ def apply_settings_to_env(settings: dict) -> None:
         "OUROBOROS_EVO_COST_THRESHOLD", "OUROBOROS_WEBSEARCH_MODEL",
         "OUROBOROS_REVIEW_MODELS", "OUROBOROS_REVIEW_ENFORCEMENT",
         "OUROBOROS_SCOPE_REVIEW_MODEL",
+        # Phase 2 runtime-mode + skills-repo plumbing (no runtime gating yet).
+        "OUROBOROS_RUNTIME_MODE", "OUROBOROS_SKILLS_REPO_PATH",
         "OUROBOROS_EFFORT_TASK", "OUROBOROS_EFFORT_EVOLUTION",
         "OUROBOROS_EFFORT_REVIEW", "OUROBOROS_EFFORT_SCOPE_REVIEW",
         "OUROBOROS_EFFORT_CONSCIOUSNESS",

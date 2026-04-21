@@ -6,7 +6,7 @@ import json
 import pathlib
 from typing import Any, Dict, Tuple
 
-from ouroboros.config import SETTINGS_DEFAULTS
+from ouroboros.config import SETTINGS_DEFAULTS, VALID_RUNTIME_MODES, normalize_runtime_mode
 from ouroboros.provider_models import (
     ANTHROPIC_DIRECT_DEFAULTS,
     CLOUDRU_DIRECT_DEFAULTS,
@@ -193,6 +193,13 @@ def _build_bootstrap(settings: dict, host_mode: str) -> dict:
             "anthropicKey": _string(settings.get("ANTHROPIC_API_KEY")),
             "reviewEnforcement": _string(settings.get("OUROBOROS_REVIEW_ENFORCEMENT"))
             or str(SETTINGS_DEFAULTS["OUROBOROS_REVIEW_ENFORCEMENT"]),
+            # Phase 2 three-layer refactor: runtime mode + skills-repo path.
+            # Onboarding exposes the selector in the ``review_mode`` step
+            # alongside review enforcement; the skill loader does not yet
+            # consume these values.
+            "runtimeMode": _string(settings.get("OUROBOROS_RUNTIME_MODE"))
+            or str(SETTINGS_DEFAULTS["OUROBOROS_RUNTIME_MODE"]),
+            "skillsRepoPath": _string(settings.get("OUROBOROS_SKILLS_REPO_PATH")),
             "totalBudget": _float_setting(
                 settings,
                 "TOTAL_BUDGET",
@@ -243,6 +250,18 @@ def prepare_onboarding_settings(data: dict, current_settings: dict) -> Tuple[dic
     local_chat_format = _string(data.get("LOCAL_MODEL_CHAT_FORMAT"))
     local_routing_mode = _string(data.get("LOCAL_ROUTING_MODE")) or "cloud"
     review_enforcement = _string(data.get("OUROBOROS_REVIEW_ENFORCEMENT")) or "advisory"
+    raw_runtime_mode = _string(data.get("OUROBOROS_RUNTIME_MODE"))
+    # If the caller omitted the key entirely we fall back to the default
+    # (legacy onboarding payloads); otherwise we keep the raw value so the
+    # ``runtime_mode not in VALID_RUNTIME_MODES`` guard below can reject a
+    # typed-in typo with a descriptive error rather than silently coercing
+    # it to "advanced".
+    runtime_mode = (
+        raw_runtime_mode.lower()
+        if raw_runtime_mode
+        else str(SETTINGS_DEFAULTS["OUROBOROS_RUNTIME_MODE"])
+    )
+    skills_repo_path = _string(data.get("OUROBOROS_SKILLS_REPO_PATH"))
 
     if openrouter_key and len(openrouter_key) < 10:
         return {}, "OpenRouter API key looks too short."
@@ -262,6 +281,16 @@ def prepare_onboarding_settings(data: dict, current_settings: dict) -> Tuple[dic
 
     if review_enforcement not in {"advisory", "blocking"}:
         return {}, "Choose advisory or blocking review mode."
+
+    # Use the shared SSOT from ``ouroboros.config`` so the onboarding
+    # validation surface cannot drift from the runtime normalizer the
+    # save path uses (``normalize_runtime_mode`` in ``api_settings_post``
+    # + ``_coerce_setting_value``). DEVELOPMENT.md P5 (DRY).
+    if runtime_mode not in VALID_RUNTIME_MODES:
+        return (
+            {},
+            f"Choose a runtime mode from {sorted(VALID_RUNTIME_MODES)}.",
+        )
 
     models = {
         "OUROBOROS_MODEL": _string(data.get("OUROBOROS_MODEL")),
@@ -323,6 +352,8 @@ def prepare_onboarding_settings(data: dict, current_settings: dict) -> Tuple[dic
             "TOTAL_BUDGET": total_budget,
             "OUROBOROS_PER_TASK_COST_USD": per_task_cost,
             "OUROBOROS_REVIEW_ENFORCEMENT": review_enforcement,
+            "OUROBOROS_RUNTIME_MODE": runtime_mode,
+            "OUROBOROS_SKILLS_REPO_PATH": skills_repo_path,
             "LOCAL_MODEL_SOURCE": local_source if has_local else "",
             "LOCAL_MODEL_FILENAME": local_filename if has_local else "",
             "LOCAL_MODEL_CONTEXT_LENGTH": local_context_length,

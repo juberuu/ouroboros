@@ -679,3 +679,24 @@ def test_schema_version_preserves_key_shape():
 def test_skill_manifest_schema_version_is_stable():
     """Phase 1 pins SkillManifest schema to 1 — bump deliberately."""
     assert SKILL_MANIFEST_SCHEMA_VERSION == 1
+
+
+def test_state_response_declares_phase2_runtime_mode_keys():
+    """Phase 2 extends the frozen ``StateResponse`` surface with
+    ``runtime_mode`` + ``skills_repo_configured``.
+
+    ARCHITECTURE.md §11.3 requires contract extensions under
+    ``ouroboros/contracts/`` to be backed by regression assertions in
+    ``tests/test_contracts.py``. The parity tests above already catch
+    server/contract drift implicitly, but an explicit, named assertion
+    here keeps the frozen-surface table in sync with a dedicated guard
+    that a grep for new key names will find.
+    """
+    from ouroboros.contracts.api_v1 import StateResponse
+
+    keys = set(StateResponse.__annotations__.keys())
+    for required in ("runtime_mode", "skills_repo_configured"):
+        assert required in keys, (
+            f"StateResponse lost the Phase 2 key {required!r}; "
+            "ARCHITECTURE.md §11.3 contract is out of sync."
+        )

@@ -132,6 +132,12 @@
         return mode === 'blocking' ? 'Blocking' : 'Advisory';
     }
 
+    function runtimeModeLabel(mode) {
+        if (mode === 'light') return 'Light';
+        if (mode === 'pro') return 'Pro';
+        return 'Advanced';
+    }
+
     function localRoutingLabel(mode) {
         if (mode === 'all') return 'All models local';
         if (mode === 'fallback') return 'Fallback model local';
@@ -469,6 +475,7 @@
         const rows = [
             ['Detected setup', profileLabel(activeProviderProfile())],
             ['Review mode', reviewLabel(state.reviewEnforcement)],
+            ['Runtime mode', runtimeModeLabel(state.runtimeMode)],
             ['Total budget', formatUsd(state.totalBudget)],
             ['Per-task soft threshold', formatUsd(state.perTaskCostUsd)],
             ['Main', trim(state.mainModel)],
@@ -487,6 +494,9 @@
                 ['Local source', trim(state.localSource) + (trim(state.localFilename) ? ` / ${trim(state.localFilename)}` : '')],
                 ['Local routing', localRoutingLabel(state.localRoutingMode)],
             );
+        }
+        if (trim(state.skillsRepoPath)) {
+            rows.push(['Skills repo', trim(state.skillsRepoPath)]);
         }
         return rows;
     }
@@ -676,6 +686,7 @@
     }
 
     function renderReviewModeStep() {
+        const runtimeMode = trim(state.runtimeMode) || 'advanced';
         return `
             <div class="step-header">
                 <div>
@@ -694,6 +705,35 @@
                     <h3>Blocking</h3>
                     <p>Slower and more expensive, but much safer. Critical review findings stop commits, which dramatically reduces the chance of gradual code degradation.</p>
                 </button>
+            </div>
+            <div class="panel-card runtime-mode-card">
+                <h3>Runtime mode</h3>
+                <p class="field-note">Separate axis from review enforcement. Controls how far Ouroboros is allowed to self-modify. You can change this later in Settings → Behavior.</p>
+                <div class="wizard-choice-grid three">
+                    <button type="button" class="wizard-choice light ${runtimeMode === 'light' ? 'active' : ''}" data-runtime-mode="light">
+                        <span class="tone">Safest</span>
+                        <h3>Light</h3>
+                        <p>Self-modification of the main repo is disabled. Best for trying Ouroboros out or running it as a pure assistant.</p>
+                    </button>
+                    <button type="button" class="wizard-choice advanced ${runtimeMode === 'advanced' ? 'active' : ''}" data-runtime-mode="advanced">
+                        <span class="tone">Default</span>
+                        <h3>Advanced</h3>
+                        <p>Self-modification of the evolutionary layer is allowed (current behaviour). Core/safety-critical files stay protected.</p>
+                    </button>
+                    <button type="button" class="wizard-choice pro ${runtimeMode === 'pro' ? 'active' : ''}" data-runtime-mode="pro">
+                        <span class="tone">Power</span>
+                        <h3>Pro</h3>
+                        <p>Phase 6+: in addition to Advanced, the core-patch auto-PR lane is enabled. Use only when you actively review core-touching changes.</p>
+                    </button>
+                </div>
+                <div class="field">
+                    <div class="field-label-row">
+                        <label for="skills-repo-path">External skills repo (optional)</label>
+                        <button class="field-clear" data-clear="skills-repo-path" type="button">Clear</button>
+                    </div>
+                    <input id="skills-repo-path" type="text" placeholder="~/Ouroboros/skills or /absolute/path/to/skills" value="${escapeHtml(state.skillsRepoPath || '')}">
+                    <div class="field-note">Optional. Local checkout path of the external skills/extensions repository (Phase 2 plumbing; the skill loader + <code>skill_exec</code> land in Phase 3). Leave empty if you have not checked out the skills repo yet — Ouroboros never clones/pulls this directory.</div>
+                </div>
             </div>
         `;
     }
@@ -820,6 +860,7 @@
                 if (target === 'local-source') state.localSource = '';
                 if (target === 'local-filename') state.localFilename = '';
                 if (target === 'local-chat-format') state.localChatFormat = '';
+                if (target === 'skills-repo-path') state.skillsRepoPath = '';
                 state.error = '';
                 render();
             });
@@ -996,6 +1037,20 @@
                 render();
             });
         });
+        root.querySelectorAll('[data-runtime-mode]').forEach((button) => {
+            button.addEventListener('click', () => {
+                state.runtimeMode = button.getAttribute('data-runtime-mode');
+                state.error = '';
+                render();
+            });
+        });
+        const skillsInput = document.getElementById('skills-repo-path');
+        if (skillsInput) {
+            skillsInput.addEventListener('input', () => {
+                state.skillsRepoPath = skillsInput.value;
+                syncCurrentStepActionState();
+            });
+        }
         syncCurrentStepActionState();
     }
 
@@ -1049,6 +1104,8 @@
             TOTAL_BUDGET: Number(state.totalBudget || 0),
             OUROBOROS_PER_TASK_COST_USD: Number(state.perTaskCostUsd || 0),
             OUROBOROS_REVIEW_ENFORCEMENT: trim(state.reviewEnforcement) || 'advisory',
+            OUROBOROS_RUNTIME_MODE: trim(state.runtimeMode) || 'advanced',
+            OUROBOROS_SKILLS_REPO_PATH: trim(state.skillsRepoPath),
             LOCAL_MODEL_SOURCE: trim(state.localSource),
             LOCAL_MODEL_FILENAME: trim(state.localFilename),
             LOCAL_MODEL_CONTEXT_LENGTH: Number(state.localContextLength || 0),

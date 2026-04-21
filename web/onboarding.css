@@ -391,6 +391,13 @@ select:focus {
   gap: 16px;
 }
 
+.wizard-choice-grid.three {
+  /* Phase 2: runtime-mode picker in the review_mode step has three
+     buttons (Light / Advanced / Pro). Without this rule the grid falls
+     back to the default 2-column layout, producing an ugly 2 + 1 split. */
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .wizard-choice {
   cursor: pointer;
   transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;

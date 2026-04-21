@@ -1,4 +1,4 @@
-# Ouroboros v4.45.0 — Architecture & Reference
+# Ouroboros v4.46.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -343,7 +343,7 @@ The Dashboard tab has been removed. Its functionality is now distributed:
   - OpenAI-compatible model values use `openai-compatible::...`.
   - Cloud.ru model values use `cloudru::...`.
   - Anthropic model values use `anthropic::...` (e.g. `anthropic::claude-opus-4-7`).
-- **Behavior tab**: agent-behavior policy settings — Reasoning Effort and Review Enforcement (the two-button advisory/blocking toggle). Review models and Web Search Model live in the Models tab alongside model routing.
+- **Behavior tab**: agent-behavior policy settings — Reasoning Effort, Review Enforcement (the two-button advisory/blocking toggle), **Runtime Mode** (Phase 2, three-button segmented control: `Light` / `Advanced` / `Pro`), and **External Skills Repo** (text field bound to `OUROBOROS_SKILLS_REPO_PATH`). Review models and Web Search Model live in the Models tab alongside model routing.
 - **Reasoning Effort**: Five segmented controls for task/chat, evolution, review, scope review, and consciousness.
   Backed by `OUROBOROS_EFFORT_TASK`, `OUROBOROS_EFFORT_EVOLUTION`, `OUROBOROS_EFFORT_REVIEW`,
   `OUROBOROS_EFFORT_SCOPE_REVIEW`, `OUROBOROS_EFFORT_CONSCIOUSNESS`. Loading falls back to legacy
@@ -356,6 +356,8 @@ The Dashboard tab has been removed. Its functionality is now distributed:
 - **Direct-provider review fallback** (formerly "OpenAI-only review fallback"; updated v4.39.0 for `plan_task` quorum): if exactly one of **official OpenAI** or **Anthropic** is configured (no OpenRouter, no legacy OpenAI base URL, no OpenAI-compatible, no Cloud.ru) and the configured review list is invalid or doesn't match the exclusive provider prefix, review falls back to `[OUROBOROS_MODEL, OUROBOROS_MODEL_LIGHT, OUROBOROS_MODEL_LIGHT]` (3 commit-triad slots, 2 unique models) drawn from `_DIRECT_PROVIDER_AUTO_DEFAULTS` (which pairs e.g. `openai::gpt-5.4` + `openai::gpt-5.4-mini` or `anthropic::claude-opus-4-7` + `anthropic::claude-sonnet-4-6`). This shape preserves the commit triad's "three models review the staged diff" contract (DEVELOPMENT.md) while yielding exactly 2 unique reviewers for `plan_task`'s quorum gate. If `main` and `light` happen to equal (user overrode both lanes to the same model), the fallback degrades to legacy `[main] * _DIRECT_PROVIDER_REVIEW_RUNS` — commit triad still works, `plan_task` then emits its quorum-error recovery hint. This replaces the old `[main] * 3` fallback which broke `plan_task` on first-run single-provider setups. Current scope is OpenAI-only and Anthropic-only — the detector (`ouroboros/config.py::_exclusive_direct_remote_provider_env`) early-returns `""` when OpenAI-compatible or Cloud.ru keys are present, so those provider-only setups do not yet receive the fallback. The fallback additionally requires the main slot `OUROBOROS_MODEL` — after `provider_models.migrate_model_value` — to already start with the exclusive provider prefix (`openai::` / `anthropic::`); if the normalized main model does not match the prefix, `get_review_models` leaves the configured reviewer list untouched and does **not** rewrite it to `[main]*3`. This covers the edge case where the Settings `#s-model` free-text input accepts a non-default cross-provider value. The same SSOT (`ouroboros/config.py::get_review_models`) powers both the commit triad and `plan_task`.
 - **Review Enforcement**: `Advisory` or `Blocking` for pre-commit review behavior. Rendered as a two-button segmented toggle (advisory = amber, blocking = crimson) rather than a dropdown.
   Backed by `OUROBOROS_REVIEW_ENFORCEMENT`. Review always runs in both modes.
+- **Runtime Mode** (Phase 2 three-layer refactor): `Light` / `Advanced` / `Pro` segmented control backed by `OUROBOROS_RUNTIME_MODE` (default `advanced`). Separate axis from Review Enforcement — controls how far Ouroboros is allowed to self-modify. `Light` disables repo self-modification (enforced in Phase 3+); `Advanced` preserves the current self-modifying evolutionary layer with core/safety-critical files still protected by the hardcoded sandbox; `Pro` additionally enables the core-patch auto-PR lane (Phase 6+). `ouroboros/config.py::VALID_RUNTIME_MODES = ("light", "advanced", "pro")` is the SSOT; `normalize_runtime_mode` runs on both the save path (`server.py::api_settings_post`) and the read path (`get_runtime_mode`) so unknown values can never drift between `/api/settings` and `/api/state`.
+- **External Skills Repo**: text input backed by `OUROBOROS_SKILLS_REPO_PATH` (Phase 2 plumbing only; the skill loader and `skill_exec` arrive in Phase 3). Absolute path or `~`-prefixed; empty means "not configured". Ouroboros never clones or pulls this directory — the user manages it out-of-band. `get_skills_repo_path()` expands `~` at read time; `/api/state` surfaces only a `skills_repo_configured` boolean so the absolute path never leaks to the UI.
 - **Advanced tab**: local model runtime, max workers, tool timeout, soft/hard timeout, and reset controls. Total budget and per-task cost cap have moved to the **Costs** page.
 - **Local Model Runtime**: source, GGUF filename, port, GPU layers, context length, chat format, start/stop/test buttons, live local-model status, real download progress bar (updates via `download_progress` from `/api/local-model/status`), and an **Install Local Runtime** button (hidden until runtime is missing). The Start button performs a preflight check via `/api/local-model/start` before downloading; on a `runtime_missing` (HTTP 412) response it surfaces the install button and a human-readable hint instead of a raw traceback. After install completes (`runtime_status == "install_ok"`), the start flow resumes automatically if a source was configured. `LOCAL_MODEL_FILENAME` now accepts subfolder paths (`quant/model.gguf`) and split GGUF patterns (`quant/model-00001-of-00003.gguf`); all shards are downloaded automatically and the server is started with the first shard. If the user omits the subfolder prefix (types just the bare filename), `_resolve_hf_path` auto-resolves the full path by querying `list_repo_files` on the HF repo (fail-open on network errors).
 - **Telegram**: Bot Token and primary chat id. If no primary chat id is pinned, the bridge binds to the first active Telegram chat and keeps replies attached there.
@@ -442,7 +444,7 @@ authentication. If the password is blank, non-loopback access stays open by desi
 |--------|------|-------------|
 | GET | `/` | Serves `web/index.html` |
 | GET | `/api/health` | `{status, version, runtime_version, app_version}` |
-| GET | `/api/state` | Dashboard data: uptime, workers, budget, branch, etc. |
+| GET | `/api/state` | Dashboard data: uptime, workers, budget, branch, etc. Phase 2 adds `runtime_mode` (current `light \| advanced \| pro`) and `skills_repo_configured` (boolean — never the absolute path). Full happy-path shape is pinned by `ouroboros.contracts.api_v1.StateResponse`. |
 | GET | `/api/files/list` | Directory listing for Files tab root/path |
 | GET | `/api/files/read` | File preview payload (text/image metadata/binary placeholder) |
 | GET | `/api/files/content` | Raw file content response for image preview |
@@ -1445,7 +1447,15 @@ Single source of truth for:
 - **Functions**: `load_settings()`, `save_settings()`,
   `apply_settings_to_env()` (copies all hot-reloadable keys — models, API keys,
   Telegram/GitHub integrations, review/effort settings, local-model config,
-  and `A2A_*` keys — from the settings dict into `os.environ`),
+  `A2A_*` keys, and the Phase 2 three-layer-refactor axes
+  `OUROBOROS_RUNTIME_MODE` + `OUROBOROS_SKILLS_REPO_PATH` — from the
+  settings dict into `os.environ`),
+  `normalize_runtime_mode()` (SSOT clamp for `OUROBOROS_RUNTIME_MODE`,
+  shared by the save path in `server.py::api_settings_post`, the read
+  path in `_coerce_setting_value`, and onboarding validation in
+  `ouroboros/onboarding_wizard.py::prepare_onboarding_settings`),
+  `get_runtime_mode()` / `get_skills_repo_path()` (read-side helpers
+  used by `server.py::api_state`),
   `acquire_pid_lock()`, `release_pid_lock()`
 
 Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent access.
@@ -1477,6 +1487,8 @@ Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent acce
 | OUROBOROS_WEBSEARCH_MODEL | gpt-5.2 | Official OpenAI Responses model for `web_search` when `OPENAI_BASE_URL` is empty |
 | OUROBOROS_REVIEW_MODELS | openai/gpt-5.4,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.7 | Comma-separated OpenRouter model IDs for pre-commit review (min 2 for quorum) |
 | OUROBOROS_REVIEW_ENFORCEMENT | advisory | Pre-commit review enforcement: `advisory` or `blocking` |
+| OUROBOROS_RUNTIME_MODE | advanced | Phase 2 three-layer refactor axis: `light`, `advanced`, or `pro`. Orthogonal to `OUROBOROS_REVIEW_ENFORCEMENT`. Clamped via `normalize_runtime_mode` on both save and read paths. No runtime gating yet — enforcement arrives in Phase 3+. |
+| OUROBOROS_SKILLS_REPO_PATH | "" | Optional local checkout path for the external skills/extensions repo (Phase 2 plumbing). Accepts absolute paths or `~`-prefixed paths; `get_skills_repo_path` expands `~` at read time. Ouroboros never clones/pulls this directory. |
 | OUROBOROS_SCOPE_REVIEW_MODEL | anthropic/claude-opus-4.6 | Single model for the blocking scope reviewer |
 | OUROBOROS_EFFORT_TASK | medium | Reasoning effort for task/chat: none, low, medium, high |
 | OUROBOROS_EFFORT_EVOLUTION | high | Reasoning effort for evolution tasks |
@@ -1724,7 +1736,7 @@ via `tests/test_contracts.py`.
 |----------|------|-------------|
 | `ToolContextProtocol` — 6-attribute + 3-method minimum every tool handler relies on (attributes: `repo_dir`, `drive_root`, `pending_events`, `emit_progress_fn`, `current_chat_id`, `task_id`; methods: `repo_path`, `drive_path`, `drive_logs`) | `ouroboros/contracts/tool_context.py` | `ouroboros.tools.registry.ToolContext` must satisfy it (duck-typed check + AST field parity) |
 | `ToolEntryProtocol` + `GetToolsProtocol` — the tool-module ABI | `ouroboros/contracts/tool_abi.py` | Every entry returned by `ToolRegistry._entries` must satisfy `ToolEntryProtocol` |
-| `api_v1` WS/HTTP envelopes — inbound: `ChatInbound`, `CommandInbound`; outbound WS: `ChatOutbound`, `PhotoOutbound`, `TypingOutbound`, `LogOutbound`; HTTP: `HealthResponse`, `StateResponse`, `EvolutionStateSnapshot`, `SettingsNetworkMeta` | `ouroboros/contracts/api_v1.py` | AST scans of `supervisor/message_bus.py` chat envelopes, `server.py::api_state`, `server.py::api_health`, `server.py::_build_network_meta`, and `server.py::ws_endpoint` inbound dispatch assert no un-declared keys leak out |
+| `api_v1` WS/HTTP envelopes — inbound: `ChatInbound`, `CommandInbound`; outbound WS: `ChatOutbound`, `PhotoOutbound`, `TypingOutbound`, `LogOutbound`; HTTP: `HealthResponse`, `StateResponse` (Phase 2 adds `runtime_mode: str` and `skills_repo_configured: bool`), `EvolutionStateSnapshot`, `SettingsNetworkMeta` | `ouroboros/contracts/api_v1.py` | AST scans of `supervisor/message_bus.py` chat envelopes, `server.py::api_state`, `server.py::api_health`, `server.py::_build_network_meta`, and `server.py::ws_endpoint` inbound dispatch assert no un-declared keys leak out; `tests/test_contracts.py::test_state_response_declares_phase2_runtime_mode_keys` explicitly pins the two new Phase 2 fields |
 | `SkillManifest` — unified `SKILL.md` / `skill.json` format (`type: instruction \| script \| extension`) | `ouroboros/contracts/skill_manifest.py` | `parse_skill_manifest_text()` tolerates missing optional fields; `validate()` returns warnings without raising |
 | `schema_versions` — opt-in `_schema_version` key + `with_schema_version`/`read_schema_version` helpers | `ouroboros/contracts/schema_versions.py` | Not yet wired into existing state files; groundwork only |
 
