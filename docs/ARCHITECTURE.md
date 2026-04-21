@@ -1,4 +1,4 @@
-# Ouroboros v4.44.0 — Architecture & Reference
+# Ouroboros v4.45.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -73,6 +73,12 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── tool_policy.py       ← Tool access policy and gating (imports from tool_capabilities)
       ├── utils.py             ← Shared utilities
       ├── world_profiler.py    ← System profile generator (WORLD.md)
+      ├── contracts/           ← Frozen Phase 1 ABI (Protocols + TypedDicts + SkillManifest)
+      │   ├── tool_context.py  ← ToolContextProtocol (minimum tool ABI, duck-typed)
+      │   ├── tool_abi.py      ← ToolEntryProtocol + GetToolsProtocol
+      │   ├── api_v1.py        ← WS/HTTP envelope TypedDicts
+      │   ├── skill_manifest.py ← Unified SKILL.md / skill.json parser (instruction|script|extension)
+      │   └── schema_versions.py ← Opt-in _schema_version helpers
       ├── gateways/            ← External API adapters (thin transport, no business logic)
       │   └── claude_code.py   ← Claude Agent SDK gateway (edit + read-only paths)
       ├── tools/               ← Auto-discovered tool plugins
@@ -1700,3 +1706,47 @@ automatically on completion or via `kill_all_tracked_subprocesses()` on panic.
     `git add`/`git commit`. This keeps pytest subprocesses, A2A card builder, and
     supervisor-side `_get_chat_agent()` from stealing in-progress edits into the
     `ouroboros` branch.
+
+---
+
+## 11. Frozen Contracts v1 (`ouroboros/contracts/`)
+
+Phase 1 of the three-layer refactor introduces a minimal, **frozen** ABI the
+skill/extension layer will rely on. The package lives in
+`ouroboros/contracts/` and is deliberately small — it declares structural
+contracts only, not new runtime behaviour. Existing code is not required to
+import from it; the protocols are verified against the real implementations
+via `tests/test_contracts.py`.
+
+### 11.1 What is frozen
+
+| Contract | File | Anchored by |
+|----------|------|-------------|
+| `ToolContextProtocol` — 6-attribute + 3-method minimum every tool handler relies on (attributes: `repo_dir`, `drive_root`, `pending_events`, `emit_progress_fn`, `current_chat_id`, `task_id`; methods: `repo_path`, `drive_path`, `drive_logs`) | `ouroboros/contracts/tool_context.py` | `ouroboros.tools.registry.ToolContext` must satisfy it (duck-typed check + AST field parity) |
+| `ToolEntryProtocol` + `GetToolsProtocol` — the tool-module ABI | `ouroboros/contracts/tool_abi.py` | Every entry returned by `ToolRegistry._entries` must satisfy `ToolEntryProtocol` |
+| `api_v1` WS/HTTP envelopes — inbound: `ChatInbound`, `CommandInbound`; outbound WS: `ChatOutbound`, `PhotoOutbound`, `TypingOutbound`, `LogOutbound`; HTTP: `HealthResponse`, `StateResponse`, `EvolutionStateSnapshot`, `SettingsNetworkMeta` | `ouroboros/contracts/api_v1.py` | AST scans of `supervisor/message_bus.py` chat envelopes, `server.py::api_state`, `server.py::api_health`, `server.py::_build_network_meta`, and `server.py::ws_endpoint` inbound dispatch assert no un-declared keys leak out |
+| `SkillManifest` — unified `SKILL.md` / `skill.json` format (`type: instruction \| script \| extension`) | `ouroboros/contracts/skill_manifest.py` | `parse_skill_manifest_text()` tolerates missing optional fields; `validate()` returns warnings without raising |
+| `schema_versions` — opt-in `_schema_version` key + `with_schema_version`/`read_schema_version` helpers | `ouroboros/contracts/schema_versions.py` | Not yet wired into existing state files; groundwork only |
+
+### 11.2 What is NOT frozen (intentionally)
+
+- The full `ToolContext` dataclass (browser state, review history, model
+  overrides, …) remains mutable implementation detail.
+- `OUROBOROS_SCHEMA_VERSION` of `state.json` / `queue_snapshot.json` /
+  `task_results/*.json` is treated as `0` (legacy) until Phase 2+ wires the
+  helpers in.
+- The raw WebSocket/HTTP *values* — only the *shape keys* are pinned.
+- The `SKILL.md` body (human-readable markdown) — only the frontmatter
+  schema is pinned.
+
+### 11.3 What to do when extending
+
+Any extension of the ABI MUST:
+
+1. Add the new field/envelope key to the appropriate file under
+   `ouroboros/contracts/`.
+2. Mention the new frozen surface here (Section 11.1 table).
+3. Update `tests/test_contracts.py` so the new surface is enforced.
+
+Removing anything from Section 11.1 is a deliberate ABI break and requires
+a version bump + a migration note in the release row.

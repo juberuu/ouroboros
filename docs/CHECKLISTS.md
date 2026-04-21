@@ -218,6 +218,14 @@ mismatch as **critical**, the mismatch MUST live in one of these categories:
 5. **Safety guarding** — a documented safety / permission / authorization
    contract vs. the actual guard in code (e.g. ARCHITECTURE says "panic
    kills all subprocess trees" but the implementation misses process groups).
+6. **Frozen contracts (v1)** — the ABI under `ouroboros/contracts/`
+   (`ToolContextProtocol`, `ToolEntryProtocol`, `api_v1` envelopes,
+   `SkillManifest`, `schema_versions`). Removing a field, renaming a
+   TypedDict key that the runtime already emits, or breaking the
+   `parse_skill_manifest_text` tolerance contract is critical, because
+   external skills/extensions (Phase 3+) are expected to pin against this
+   surface. Non-breaking *additions* are not critical. The regression
+   suite is `tests/test_contracts.py`.
 
 **All OTHER mismatches are advisory, not critical.** Including:
 

@@ -1,0 +1,681 @@
+"""Contract tests for the frozen v1 ABI in ``ouroboros.contracts``.
+
+These tests protect the minimum guarantees the skill/extension layer will
+rely on once external packages start consuming them:
+
+- The concrete ``ToolContext`` dataclass structurally satisfies
+  ``ToolContextProtocol``; removing a field is a hard regression.
+- Every ``ToolEntry`` produced by the real registry matches
+  ``ToolEntryProtocol``.
+- The WS/HTTP envelopes emitted by ``server.py`` and
+  ``supervisor.message_bus`` still carry the keys declared in ``api_v1``.
+- ``SkillManifest`` parses the unified SKILL.md / skill.json format
+  tolerantly without raising on missing optional fields.
+
+Constitutional-core guards for ``BIBLE.md`` live in
+``tests/test_smoke.py::test_bible_exists_and_has_principles`` (numbering
+spine 0–8) and ``tests/test_constitution.py`` (semantic checks) — this file
+does not duplicate them.
+
+No test in this file requires network access or a running supervisor.
+"""
+from __future__ import annotations
+
+import ast
+import inspect
+import pathlib
+import re
+import tempfile
+
+import pytest
+
+from ouroboros import contracts
+from ouroboros.contracts import (
+    GetToolsProtocol,  # noqa: F401  — imported for ``public API`` assertion
+    SKILL_MANIFEST_SCHEMA_VERSION,
+    SCHEMA_VERSION_KEY,
+    SkillManifest,
+    SkillManifestError,
+    ToolContextProtocol,
+    ToolEntryProtocol,
+    parse_skill_manifest_text,
+    read_schema_version,
+    with_schema_version,
+)
+
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+
+# ---------------------------------------------------------------------------
+# Public surface
+# ---------------------------------------------------------------------------
+
+
+def test_public_api_is_stable():
+    """The frozen ABI must expose at least this set of names."""
+    expected = {
+        "ToolContextProtocol",
+        "ToolEntryProtocol",
+        "GetToolsProtocol",
+        "SkillManifest",
+        "SkillManifestError",
+        "parse_skill_manifest_text",
+        "SKILL_MANIFEST_SCHEMA_VERSION",
+        "VALID_SKILL_TYPES",
+        "VALID_SKILL_RUNTIMES",
+        "VALID_SKILL_PERMISSIONS",
+        "SCHEMA_VERSION_KEY",
+        "with_schema_version",
+        "read_schema_version",
+    }
+    missing = expected - set(dir(contracts))
+    assert missing == set(), f"contracts package missing public names: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# ToolContextProtocol <-> concrete ToolContext
+# ---------------------------------------------------------------------------
+
+
+def test_toolcontext_satisfies_protocol():
+    """The concrete registry ToolContext must satisfy the frozen protocol."""
+    from ouroboros.tools.registry import ToolContext
+
+    tmp = pathlib.Path(tempfile.mkdtemp())
+    ctx = ToolContext(repo_dir=tmp, drive_root=tmp)
+    assert isinstance(ctx, ToolContextProtocol), (
+        "ouroboros.tools.registry.ToolContext no longer matches "
+        "ToolContextProtocol; a required field was removed or renamed."
+    )
+
+
+def test_toolcontext_protocol_fields_match_dataclass():
+    """Every field in ToolContextProtocol must also exist on ToolContext."""
+    from ouroboros.tools.registry import ToolContext
+
+    source = inspect.getsource(ToolContextProtocol)
+    protocol_field_names = set(
+        re.findall(r"^    ([a-zA-Z_][a-zA-Z0-9_]*)\s*:", source, flags=re.MULTILINE)
+    )
+    dataclass_field_names = {field.name for field in ToolContext.__dataclass_fields__.values()}
+    missing = protocol_field_names - dataclass_field_names
+    assert missing == set(), (
+        f"ToolContextProtocol declares fields not present on ToolContext: {missing}"
+    )
+
+
+def test_toolcontext_path_helpers_resolve_inside_root():
+    """repo_path()/drive_path()/drive_logs() must stay inside the declared roots."""
+    from ouroboros.tools.registry import ToolContext
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        ctx = ToolContext(repo_dir=root, drive_root=root)
+        assert ctx.repo_path("a/b.py").is_relative_to(root.resolve())
+        assert ctx.drive_path("memory/x.md").is_relative_to(root.resolve())
+        assert ctx.drive_logs() == (root / "logs").resolve()
+
+
+# ---------------------------------------------------------------------------
+# ToolEntryProtocol <-> real registry
+# ---------------------------------------------------------------------------
+
+
+def test_every_registered_tool_matches_protocol():
+    """Every entry returned by ``ToolRegistry`` must satisfy ToolEntryProtocol."""
+    from ouroboros.tools.registry import ToolRegistry
+
+    tmp = pathlib.Path(tempfile.mkdtemp())
+    registry = ToolRegistry(repo_dir=tmp, drive_root=tmp)
+    # Access the private ``_entries`` map — we are the contract test.
+    entries = list(registry._entries.values())  # type: ignore[attr-defined]
+    assert entries, "Tool registry discovered zero tools"
+    for entry in entries:
+        assert isinstance(entry, ToolEntryProtocol), (
+            f"Tool entry '{getattr(entry, 'name', '?')}' no longer matches "
+            "ToolEntryProtocol"
+        )
+        # Sanity-check required keys in the JSON Schema (OpenAI style).
+        schema = entry.schema
+        assert isinstance(schema, dict)
+        assert schema.get("name") == entry.name
+        assert "description" in schema
+        assert isinstance(schema.get("parameters", {}), dict)
+
+
+# ---------------------------------------------------------------------------
+# api_v1 envelopes <-> real broadcasters
+# ---------------------------------------------------------------------------
+
+
+def test_api_v1_declares_core_ws_message_types():
+    """api_v1 must declare at least chat, photo, typing, log."""
+    from ouroboros.contracts import api_v1
+
+    for name in ("ChatInbound", "ChatOutbound", "PhotoOutbound", "TypingOutbound", "LogOutbound"):
+        assert hasattr(api_v1, name), f"api_v1 missing {name}"
+
+
+def _dict_literal_keys(node: ast.Dict) -> tuple[set[str], list[str]]:
+    """Return (string_keys, non_constant_key_descriptions) for a dict literal.
+
+    ``non_constant_key_descriptions`` surfaces non-string keys (including
+    ``**kwargs`` expansions, which appear as ``None`` keys in
+    ``ast.Dict.keys``) so tests fail loudly instead of silently dropping
+    envelopes assembled via ``{**base, 'type': 'chat'}``.
+    """
+    string_keys: set[str] = set()
+    unknown: list[str] = []
+    for key in node.keys:
+        if key is None:
+            unknown.append("**kwargs-expansion")
+            continue
+        if isinstance(key, ast.Constant) and isinstance(key.value, str):
+            string_keys.add(key.value)
+            continue
+        unknown.append(ast.dump(key))
+    return string_keys, unknown
+
+
+def _dict_type_discriminator(node: ast.Dict) -> str | None:
+    """Return the ``"type"`` discriminator value when the dict has one."""
+    for k, v in zip(node.keys, node.values):
+        if not isinstance(k, ast.Constant) or k.value != "type":
+            continue
+        if isinstance(v, ast.Constant) and isinstance(v.value, str):
+            return v.value
+    return None
+
+
+def _collect_dict_literals_with_type(
+    source_path: pathlib.Path,
+    discriminator: str,
+) -> list[ast.Dict]:
+    """Return every ``ast.Dict`` literal in ``source_path`` whose ``type`` key
+    equals ``discriminator``."""
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    matches = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        if _dict_type_discriminator(node) == discriminator:
+            matches.append(node)
+    return matches
+
+
+_CHAT_OUTBOUND_REQUIRED = frozenset({"type", "role", "content", "ts"})
+_PHOTO_OUTBOUND_REQUIRED = frozenset({"type", "role", "image_base64", "mime", "ts"})
+_TYPING_OUTBOUND_REQUIRED = frozenset({"type", "action"})
+_LOG_OUTBOUND_REQUIRED = frozenset({"type", "data"})
+
+
+def _assert_envelope_parity(
+    source_path: pathlib.Path,
+    discriminator: str,
+    declared_keys: set[str],
+    required_keys: frozenset[str],
+    *,
+    envelope_name: str,
+) -> None:
+    """Shared body for WS-envelope parity assertions.
+
+    Walks every ``ast.Dict`` literal in ``source_path`` whose ``type`` key
+    equals ``discriminator`` and enforces:
+
+    - no ``**kwargs`` expansion (would silently widen the emission surface);
+    - no leaked keys outside ``declared_keys``;
+    - every ``required_keys`` element is present.
+    """
+    literals = _collect_dict_literals_with_type(source_path, discriminator)
+    assert literals, (
+        f"no {envelope_name} envelopes (type={discriminator!r}) found in "
+        f"{source_path.name}"
+    )
+    for literal in literals:
+        keys, unknown = _dict_literal_keys(literal)
+        assert not unknown, (
+            f"{envelope_name} envelope in {source_path.name} uses non-constant "
+            f"keys (e.g. **kwargs expansion): {unknown}"
+        )
+        leaked = keys - declared_keys
+        assert not leaked, (
+            f"{envelope_name} envelope in {source_path.name} uses keys not "
+            f"declared in api_v1: {leaked}"
+        )
+        missing_required = required_keys - keys
+        assert not missing_required, (
+            f"{envelope_name} envelope in {source_path.name} is missing "
+            f"required keys: {missing_required}"
+        )
+
+
+def test_chat_outbound_matches_message_bus_sends():
+    """ChatOutbound TypedDict must cover the keys LocalChatBridge emits.
+
+    Verified by AST scan rather than runtime call so the test stays hermetic.
+    Fails on ``**kwargs`` expansions to keep the contract durable — if a
+    future envelope is built via ``{**base, 'type': 'chat'}`` the test will
+    flag it rather than silently dropping the unknown keys. Also enforces
+    that every discovered envelope contains the contract's required
+    discriminator + core content keys (``type``, ``role``, ``content``,
+    ``ts``); removing one would silently reshape the wire format.
+    """
+    from ouroboros.contracts.api_v1 import ChatOutbound
+
+    declared_keys = set(ChatOutbound.__annotations__.keys())
+    assert _CHAT_OUTBOUND_REQUIRED <= declared_keys, (
+        "ChatOutbound no longer declares one of the core required keys: "
+        f"{_CHAT_OUTBOUND_REQUIRED - declared_keys}"
+    )
+    literals = _collect_dict_literals_with_type(
+        REPO_ROOT / "supervisor" / "message_bus.py",
+        "chat",
+    )
+    assert literals, "no chat envelopes found in message_bus.py"
+
+    for literal in literals:
+        keys, unknown = _dict_literal_keys(literal)
+        assert not unknown, (
+            "message_bus chat envelope uses non-constant keys "
+            f"(e.g. **kwargs expansion) — tighten the envelope: {unknown}"
+        )
+        leaked = keys - declared_keys
+        assert not leaked, (
+            "message_bus chat envelope uses keys not declared in "
+            f"ChatOutbound: {leaked}"
+        )
+        missing_required = _CHAT_OUTBOUND_REQUIRED - keys
+        assert not missing_required, (
+            "message_bus chat envelope is missing required ChatOutbound "
+            f"keys: {missing_required}"
+        )
+
+
+def test_photo_outbound_matches_message_bus_sends():
+    """PhotoOutbound TypedDict must match every photo envelope emitted."""
+    from ouroboros.contracts.api_v1 import PhotoOutbound
+
+    declared = set(PhotoOutbound.__annotations__.keys())
+    assert _PHOTO_OUTBOUND_REQUIRED <= declared, (
+        "PhotoOutbound lost a required key: "
+        f"{_PHOTO_OUTBOUND_REQUIRED - declared}"
+    )
+    _assert_envelope_parity(
+        REPO_ROOT / "supervisor" / "message_bus.py",
+        discriminator="photo",
+        declared_keys=declared,
+        required_keys=_PHOTO_OUTBOUND_REQUIRED,
+        envelope_name="PhotoOutbound",
+    )
+
+
+def test_typing_outbound_matches_message_bus_sends():
+    """TypingOutbound TypedDict must match every typing envelope emitted."""
+    from ouroboros.contracts.api_v1 import TypingOutbound
+
+    declared = set(TypingOutbound.__annotations__.keys())
+    assert _TYPING_OUTBOUND_REQUIRED <= declared, (
+        "TypingOutbound lost a required key: "
+        f"{_TYPING_OUTBOUND_REQUIRED - declared}"
+    )
+    _assert_envelope_parity(
+        REPO_ROOT / "supervisor" / "message_bus.py",
+        discriminator="typing",
+        declared_keys=declared,
+        required_keys=_TYPING_OUTBOUND_REQUIRED,
+        envelope_name="TypingOutbound",
+    )
+
+
+def test_log_outbound_matches_message_bus_sends():
+    """LogOutbound TypedDict must match every log envelope emitted."""
+    from ouroboros.contracts.api_v1 import LogOutbound
+
+    declared = set(LogOutbound.__annotations__.keys())
+    assert _LOG_OUTBOUND_REQUIRED <= declared, (
+        "LogOutbound lost a required key: "
+        f"{_LOG_OUTBOUND_REQUIRED - declared}"
+    )
+    _assert_envelope_parity(
+        REPO_ROOT / "supervisor" / "message_bus.py",
+        discriminator="log",
+        declared_keys=declared,
+        required_keys=_LOG_OUTBOUND_REQUIRED,
+        envelope_name="LogOutbound",
+    )
+
+
+def _api_route_response_dicts(route_fn: ast.AsyncFunctionDef) -> list[ast.Dict]:
+    """Return every ``JSONResponse({...})`` dict literal inside an async route."""
+    out: list[ast.Dict] = []
+    for node in ast.walk(route_fn):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Name) and func.id == "JSONResponse"):
+            continue
+        if not node.args or not isinstance(node.args[0], ast.Dict):
+            continue
+        out.append(node.args[0])
+    return out
+
+
+def _find_async_fn(tree: ast.AST, name: str) -> ast.AsyncFunctionDef | None:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == name:
+            return node
+    return None
+
+
+def test_state_response_matches_server_payload():
+    """StateResponse declared keys must cover every ``/api/state`` success payload.
+
+    The error path returns ``{"error": str}`` with HTTP 500 — that shape is
+    intentionally outside the frozen contract, so the test whitelists
+    ``{"error"}`` only for dicts that contain it (error branch).
+    """
+    from ouroboros.contracts.api_v1 import StateResponse
+
+    tree = ast.parse((REPO_ROOT / "server.py").read_text(encoding="utf-8"))
+    api_state_fn = _find_async_fn(tree, "api_state")
+    assert api_state_fn is not None
+
+    declared = set(StateResponse.__annotations__.keys())
+    response_dicts = _api_route_response_dicts(api_state_fn)
+    assert response_dicts, "api_state exposes no JSONResponse dict literal"
+
+    happy_path_checked = False
+    for literal in response_dicts:
+        keys, unknown = _dict_literal_keys(literal)
+        assert not unknown, (
+            f"api_state response uses non-constant keys: {unknown}"
+        )
+        # The error path has exactly one key ``error``; whitelist it explicitly
+        # rather than blanket-excluding ``error`` from the happy-path contract.
+        if keys == {"error"}:
+            continue
+        leaked = keys - declared
+        assert not leaked, (
+            f"/api/state happy-path emits keys not declared in StateResponse: {leaked}"
+        )
+        # Enforce required-key presence too. ``StateResponse`` is total=True,
+        # so every declared key is required; a missing one means the runtime
+        # silently dropped a declared field and the frozen contract should fail
+        # loudly.
+        missing = declared - keys
+        assert not missing, (
+            f"/api/state happy-path is missing declared StateResponse keys: {missing}"
+        )
+        happy_path_checked = True
+    assert happy_path_checked, "api_state exposes no happy-path response dict"
+
+
+def test_health_response_matches_server_payload():
+    """HealthResponse declared keys must cover ``/api/health`` return payload."""
+    from ouroboros.contracts.api_v1 import HealthResponse
+
+    tree = ast.parse((REPO_ROOT / "server.py").read_text(encoding="utf-8"))
+    api_health_fn = _find_async_fn(tree, "api_health")
+    assert api_health_fn is not None
+
+    declared = set(HealthResponse.__annotations__.keys())
+    response_dicts = _api_route_response_dicts(api_health_fn)
+    assert response_dicts, "api_health exposes no JSONResponse dict literal"
+
+    for literal in response_dicts:
+        keys, unknown = _dict_literal_keys(literal)
+        assert not unknown, (
+            f"api_health response uses non-constant keys: {unknown}"
+        )
+        leaked = keys - declared
+        assert not leaked, (
+            f"/api/health emits keys not declared in HealthResponse: {leaked}"
+        )
+        missing = declared - keys
+        assert not missing, (
+            f"/api/health is missing declared HealthResponse keys: {missing}"
+        )
+
+
+def test_settings_network_meta_matches_build_network_meta():
+    """SettingsNetworkMeta must cover every branch of _build_network_meta."""
+    from ouroboros.contracts.api_v1 import SettingsNetworkMeta
+
+    tree = ast.parse((REPO_ROOT / "server.py").read_text(encoding="utf-8"))
+    build_fn = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_build_network_meta":
+            build_fn = node
+            break
+    assert build_fn is not None
+
+    declared = set(SettingsNetworkMeta.__annotations__.keys())
+    returned_literals: list[ast.Dict] = []
+    for node in ast.walk(build_fn):
+        if isinstance(node, ast.Return) and isinstance(node.value, ast.Dict):
+            returned_literals.append(node.value)
+    assert returned_literals, "_build_network_meta returns no dict literals"
+
+    for literal in returned_literals:
+        keys, unknown = _dict_literal_keys(literal)
+        assert not unknown, (
+            f"_build_network_meta returns non-constant keys: {unknown}"
+        )
+        leaked = keys - declared
+        assert not leaked, (
+            f"_build_network_meta emits keys not declared in SettingsNetworkMeta: {leaked}"
+        )
+        missing = declared - keys
+        assert not missing, (
+            f"_build_network_meta branch missing declared keys: {missing}"
+        )
+
+
+def test_command_inbound_matches_ws_endpoint_dispatch():
+    """CommandInbound must match the keys ``server.ws_endpoint`` reads for commands.
+
+    The inbound side uses ``msg.get("type")``, ``msg.get("cmd")`` and (for
+    chat) ``msg.get("sender_session_id")`` / ``msg.get("client_message_id")``.
+    The frozen CommandInbound contract must therefore include at least
+    ``type`` and ``cmd`` and nothing else unsupported by the dispatcher.
+    """
+    from ouroboros.contracts.api_v1 import ChatInbound, CommandInbound
+
+    src = (REPO_ROOT / "server.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    ws_fn = _find_async_fn(tree, "ws_endpoint")
+    assert ws_fn is not None
+
+    # Collect every string literal passed to ``msg.get("...")`` inside ws_endpoint.
+    read_keys: set[str] = set()
+    for node in ast.walk(ws_fn):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (
+            isinstance(func, ast.Attribute)
+            and func.attr == "get"
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "msg"
+        ):
+            continue
+        if node.args and isinstance(node.args[0], ast.Constant):
+            val = node.args[0].value
+            if isinstance(val, str):
+                read_keys.add(val)
+
+    declared = set(ChatInbound.__annotations__.keys()) | set(
+        CommandInbound.__annotations__.keys()
+    )
+    leaked = read_keys - declared
+    assert not leaked, (
+        "server.ws_endpoint reads inbound keys not declared in "
+        f"ChatInbound/CommandInbound: {leaked}. Update the contract."
+    )
+    # At minimum the dispatcher must read ``type`` and ``cmd`` / ``content``.
+    assert "type" in read_keys, "ws_endpoint no longer reads 'type'"
+    assert "cmd" in read_keys, "ws_endpoint no longer reads 'cmd'"
+    assert "content" in read_keys, "ws_endpoint no longer reads 'content'"
+
+
+# ---------------------------------------------------------------------------
+# SkillManifest parser
+# ---------------------------------------------------------------------------
+
+
+def test_skill_manifest_parses_frontmatter():
+    text = (
+        "---\n"
+        "name: weather\n"
+        "description: Check the weather.\n"
+        "version: 0.1.0\n"
+        "type: script\n"
+        "runtime: python3\n"
+        "timeout_sec: 30\n"
+        "requires: [web_search]\n"
+        "permissions: [net]\n"
+        "scripts:\n"
+        "  - name: fetch.py\n"
+        "    description: Fetch current weather\n"
+        "---\n"
+        "# Weather skill\n\n"
+        "Call fetch.py with a city.\n"
+    )
+    manifest = parse_skill_manifest_text(text)
+    assert isinstance(manifest, SkillManifest)
+    assert manifest.name == "weather"
+    assert manifest.type == "script"
+    assert manifest.runtime == "python3"
+    assert manifest.timeout_sec == 30
+    assert manifest.requires == ["web_search"]
+    assert manifest.permissions == ["net"]
+    assert len(manifest.scripts) == 1 and manifest.scripts[0]["name"] == "fetch.py"
+    assert "Weather skill" in manifest.body
+
+
+def test_skill_manifest_parses_json():
+    raw = (
+        '{"name": "jira", "description": "Jira bridge", '
+        '"version": "0.2.0", "type": "extension", "entry": "plugin.py", '
+        '"permissions": ["net", "widget"]}'
+    )
+    manifest = parse_skill_manifest_text(raw)
+    assert manifest.type == "extension"
+    assert manifest.entry == "plugin.py"
+    assert manifest.permissions == ["net", "widget"]
+
+
+def test_skill_manifest_is_tolerant_of_missing_fields():
+    """Body-only markdown must parse as an instruction skill without raising."""
+    text = "# Hello World Skill\n\nJust a guide.\n"
+    manifest = parse_skill_manifest_text(text)
+    assert manifest.type == "instruction"
+    assert manifest.is_instruction()
+    assert manifest.body.strip().startswith("# Hello World Skill")
+
+
+def test_skill_manifest_rejects_structural_damage():
+    """Malformed JSON should raise SkillManifestError, not silently succeed."""
+    with pytest.raises(SkillManifestError):
+        parse_skill_manifest_text("{\"name\": ")  # truncated JSON
+
+
+def test_skill_manifest_block_sequence_tolerates_blank_lines():
+    """Blank lines inside a block sequence must not break parsing.
+
+    Regression for a bug where ``_collect_block`` preserved interior blank
+    lines and ``_parse_block_sequence`` then either raised on them (when the
+    blank line was first) or silently wrote an empty ``""`` key into the
+    current item.
+    """
+    text = (
+        "---\n"
+        "name: blanks\n"
+        "type: script\n"
+        "scripts:\n"
+        "  - name: a.py\n"
+        "    description: first\n"
+        "\n"
+        "  - name: b.py\n"
+        "    description: second\n"
+        "---\n"
+        "body\n"
+    )
+    manifest = parse_skill_manifest_text(text)
+    assert [s.get("name") for s in manifest.scripts] == ["a.py", "b.py"]
+    # No stray empty-string keys leaked in.
+    for script in manifest.scripts:
+        assert "" not in script
+
+
+def test_skill_manifest_validate_returns_warnings():
+    manifest = SkillManifest(
+        name="broken",
+        description="",
+        version="",
+        type="instruction",
+        runtime="perl",
+        permissions=["bogus"],
+        timeout_sec=-1,
+    )
+    warnings = manifest.validate()
+    text = "\n".join(warnings)
+    assert "unknown runtime" in text
+    assert "unknown permission" in text
+    assert "timeout_sec" in text
+
+
+# ---------------------------------------------------------------------------
+# Schema-version helpers
+# ---------------------------------------------------------------------------
+
+
+def test_schema_version_helpers_round_trip():
+    payload = {"a": 1}
+    stamped = with_schema_version(payload, 2)
+    assert stamped[SCHEMA_VERSION_KEY] == 2
+    # Input must not be mutated.
+    assert SCHEMA_VERSION_KEY not in payload
+    assert read_schema_version(stamped) == 2
+
+
+def test_schema_version_missing_defaults_to_zero():
+    assert read_schema_version({"no": "version"}) == 0
+    assert read_schema_version(None) == 0
+    assert read_schema_version({SCHEMA_VERSION_KEY: "not-an-int"}) == 0
+
+
+def test_schema_version_rejects_non_mapping_input():
+    with pytest.raises(TypeError):
+        with_schema_version([1, 2, 3], 1)  # type: ignore[arg-type]
+
+
+def test_schema_version_preserves_key_shape():
+    """``with_schema_version`` must not silently coerce keys to strings.
+
+    Regression for a bug where the helper used a ``{str(k): v ...}`` dict
+    comprehension — which collapses e.g. ``1`` and ``"1"`` into a single
+    entry even though the caller handed in a mapping that distinguished
+    them. The contract is ``dict(payload) + one added key``, preserving
+    shapes.
+    """
+    payload = {1: "int_one", "1": "str_one"}
+    stamped = with_schema_version(payload, 5)
+    # Both original keys must survive with their original types.
+    assert stamped[1] == "int_one"
+    assert stamped["1"] == "str_one"
+    # The schema-version tag lives alongside them.
+    assert stamped[SCHEMA_VERSION_KEY] == 5
+    # Input is untouched.
+    assert SCHEMA_VERSION_KEY not in payload
+
+
+# ---------------------------------------------------------------------------
+# Constitutional guard (belt-and-braces next to test_constitution.py)
+# ---------------------------------------------------------------------------
+
+
+def test_skill_manifest_schema_version_is_stable():
+    """Phase 1 pins SkillManifest schema to 1 — bump deliberately."""
+    assert SKILL_MANIFEST_SCHEMA_VERSION == 1
