@@ -1,0 +1,128 @@
+"""Tool capability sets — single source of truth.
+
+Every hardcoded set that classifies tool behavior (core visibility,
+parallelism, truncation policy, result size limits) lives HERE and
+only here.  Other modules import from this file.
+
+Why this exists: before the tool-capabilities consolidation, CORE_TOOL_NAMES was duplicated between
+``ouroboros/tools/registry.py`` and ``ouroboros/tool_policy.py``, while
+``READ_ONLY_PARALLEL_TOOLS``, ``_UNTRUNCATED_TOOL_RESULTS``, and
+``_UNTRUNCATED_REPO_READ_PATHS`` were hardcoded in
+``ouroboros/loop_tool_execution.py``.  Drift between the copies was a
+recurring source of subtle bugs.
+
+NOTE: ``ouroboros/tools/registry.py`` is a safety-critical file overwritten
+from the app bundle on every restart.  It contains its own
+``CORE_TOOL_NAMES`` used by the ``schemas(core_only=True)`` fallback path.
+That copy is NOT the runtime authority — ``tool_policy.py`` (which imports
+from here) controls task-start visibility, and ``loop_tool_execution.py``
+(also importing from here) controls parallelism / truncation.
+"""
+
+from __future__ import annotations
+
+# ---------------------------------------------------------------------------
+# Core tools — available from round 1 without enable_tools
+# ---------------------------------------------------------------------------
+
+CORE_TOOL_NAMES: frozenset[str] = frozenset({
+    # File I/O
+    "repo_read", "repo_list", "repo_write", "repo_write_commit", "repo_commit",
+    "str_replace_editor",
+    "data_read", "data_list", "data_write",
+    # Code search
+    "code_search",
+    # Shell / CLI
+    "run_shell", "claude_code_edit",
+    # Git
+    "git_status", "git_diff",
+    "restore_to_head", "revert_commit",
+    "pull_from_remote", "rollback_to_target",
+    # Task decomposition (non-core: use enable_tools("schedule_task") to activate)
+    # schedule_task, wait_for_task, get_task_result are available but not auto-loaded
+    # Memory / identity
+    "update_scratchpad", "update_identity",
+    "chat_history",
+    # Knowledge base
+    "knowledge_read", "knowledge_write", "knowledge_list",
+    # Web
+    "web_search",
+    "browse_page", "browser_action", "analyze_screenshot",
+    # Communication
+    "send_user_message", "send_photo",
+    # Control
+    "switch_model",
+    "request_restart", "promote_to_stable",
+    # Advisory pre-review gate
+    "advisory_pre_review", "review_status",
+})
+
+# Meta-tools: always visible alongside core tools
+META_TOOL_NAMES: frozenset[str] = frozenset({
+    "list_available_tools", "enable_tools",
+})
+
+# ---------------------------------------------------------------------------
+# Read-only parallel-safe tools — can run concurrently in a ThreadPool
+# ---------------------------------------------------------------------------
+
+READ_ONLY_PARALLEL_TOOLS: frozenset[str] = frozenset({
+    "repo_read", "repo_list",
+    "data_read", "data_list",
+    "code_search",
+    "web_search", "codebase_digest", "chat_history",
+})
+
+# ---------------------------------------------------------------------------
+# Stateful browser tools — require thread-sticky executor
+# ---------------------------------------------------------------------------
+
+STATEFUL_BROWSER_TOOLS: frozenset[str] = frozenset({
+    "browse_page", "browser_action",
+})
+
+# ---------------------------------------------------------------------------
+# Tool result truncation policy
+# ---------------------------------------------------------------------------
+
+# Tools whose results must NEVER be truncated (full output is semantically
+# important — commit review verdicts, advisory findings, etc.)
+UNTRUNCATED_TOOL_RESULTS: frozenset[str] = frozenset({
+    "repo_commit",
+    "repo_write_commit",
+    "multi_model_review",
+    "advisory_pre_review",
+    "review_status",
+})
+
+# repo_read paths that must NEVER be truncated (cognitive artifacts)
+UNTRUNCATED_REPO_READ_PATHS: frozenset[str] = frozenset({
+    "BIBLE.md",
+    "README.md",
+    "docs/ARCHITECTURE.md",
+    "docs/CHECKLISTS.md",
+    "docs/DEVELOPMENT.md",
+})
+
+# Per-tool result size caps (chars). Tools not listed use DEFAULT_TOOL_RESULT_LIMIT.
+TOOL_RESULT_LIMITS: dict[str, int] = {
+    "repo_read": 80_000,
+    "data_read": 80_000,
+    "knowledge_read": 80_000,
+    "run_shell": 80_000,
+    "code_search": 80_000,
+}
+
+DEFAULT_TOOL_RESULT_LIMIT: int = 15_000
+
+# ---------------------------------------------------------------------------
+# Reviewed mutative tools — special timeout handling
+# ---------------------------------------------------------------------------
+
+# Tools that perform reviewed mutative operations (commits, etc.)
+# These tools MUST NOT end with an ambiguous timeout — the executor
+# waits synchronously for the final result even if the soft timeout fires.
+REVIEWED_MUTATIVE_TOOLS: frozenset[str] = frozenset({
+    "repo_commit",
+    "repo_write_commit",
+})

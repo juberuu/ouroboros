@@ -1,0 +1,850 @@
+"""
+Supervisor — Git operations.
+
+Clone, checkout, reset, rescue snapshots, dependency sync, import test.
+"""
+
+from __future__ import annotations
+
+import datetime
+import json
+import logging
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+import uuid
+from typing import Any, Dict, List, Optional, Tuple
+
+from supervisor.state import (
+    load_state, save_state, append_jsonl, atomic_write_text,
+)
+
+log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Module-level config (set via init())
+# ---------------------------------------------------------------------------
+REPO_DIR: pathlib.Path = pathlib.Path.home() / "Ouroboros" / "repo"
+DRIVE_ROOT: pathlib.Path = pathlib.Path.home() / "Ouroboros" / "data"
+REMOTE_URL: str = ""
+BRANCH_DEV: str = "ouroboros"
+BRANCH_STABLE: str = "ouroboros-stable"
+
+
+def init(repo_dir: pathlib.Path, drive_root: pathlib.Path, remote_url: str,
+         branch_dev: str = "ouroboros", branch_stable: str = "ouroboros-stable") -> None:
+    global REPO_DIR, DRIVE_ROOT, REMOTE_URL, BRANCH_DEV, BRANCH_STABLE
+    REPO_DIR = repo_dir
+    DRIVE_ROOT = drive_root
+    REMOTE_URL = remote_url
+    BRANCH_DEV = branch_dev
+    BRANCH_STABLE = branch_stable
+
+
+# ---------------------------------------------------------------------------
+# Git helpers
+# ---------------------------------------------------------------------------
+
+def git_capture(cmd: List[str]) -> Tuple[int, str, str]:
+    for _attempt in range(2):
+        r = subprocess.run(cmd, cwd=str(REPO_DIR), capture_output=True, text=True)
+        stderr = (r.stderr or "").strip()
+        if r.returncode == 0:
+            return r.returncode, (r.stdout or "").strip(), stderr
+        if _maybe_repair_git_index(stderr):
+            continue
+        return r.returncode, (r.stdout or "").strip(), stderr
+    return r.returncode, (r.stdout or "").strip(), (r.stderr or "").strip()
+
+
+def _stale_git_lock_paths(max_age_sec: float = 15.0) -> List[pathlib.Path]:
+    git_dir = REPO_DIR / ".git"
+    if not git_dir.exists():
+        return []
+    candidates = [git_dir / "index.lock"]
+    stale_paths: List[pathlib.Path] = []
+    now = datetime.datetime.now(datetime.timezone.utc).timestamp()
+    for path in candidates:
+        try:
+            age = now - path.stat().st_mtime
+        except FileNotFoundError:
+            continue
+        except Exception:
+            continue
+        if age >= max_age_sec:
+            stale_paths.append(path)
+    return stale_paths
+
+
+def _maybe_repair_git_index(stderr: str) -> bool:
+    error_text = str(stderr or "")
+    error_lower = error_text.lower()
+    repaired = False
+
+    if "index.lock" in error_lower:
+        for lock_path in _stale_git_lock_paths():
+            try:
+                lock_path.unlink()
+                repaired = True
+                log.warning("Removed stale git lock: %s", lock_path)
+            except Exception:
+                log.warning("Failed to remove stale git lock: %s", lock_path, exc_info=True)
+
+    corrupt_markers = (
+        "index file smaller than expected",
+        "index file corrupt",
+        "fatal: .git/index:",
+    )
+    if not any(marker in error_lower for marker in corrupt_markers):
+        return repaired
+
+    git_dir = REPO_DIR / ".git"
+    if not git_dir.exists():
+        return repaired
+
+    index_path = git_dir / "index"
+    if index_path.exists():
+        backup_path = git_dir / f"index.corrupt.{uuid.uuid4().hex[:8]}.bak"
+        try:
+            index_path.replace(backup_path)
+            repaired = True
+            log.warning("Backed up corrupt git index to %s", backup_path)
+        except Exception:
+            log.warning("Failed to back up corrupt git index %s", index_path, exc_info=True)
+            return repaired
+
+    rebuild = subprocess.run(
+        ["git", "reset", "--mixed", "HEAD"],
+        cwd=str(REPO_DIR),
+        capture_output=True,
+        text=True,
+    )
+    if rebuild.returncode == 0:
+        log.warning("Rebuilt git index after corruption in %s", REPO_DIR)
+        return True
+
+    log.warning(
+        "Failed to rebuild git index after corruption: %s",
+        (rebuild.stderr or "").strip() or (rebuild.stdout or "").strip(),
+    )
+    return repaired
+
+
+_REPO_GITIGNORE = """\
+# Secrets
+.env
+.env.*
+*.key
+*.pem
+
+# IDE
+.cursor/
+.vscode/
+.idea/
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Build artifacts
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+
+# Native / binary artifacts (PyInstaller, compiled extensions)
+*.so
+*.dylib
+*.dll
+*.dist-info/
+base_library.zip
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Release artifacts
+.create_release.py
+.release_notes.md
+python-standalone/
+"""
+
+
+def _ensure_repo_gitignore(repo_dir: pathlib.Path = None) -> None:
+    """Write .gitignore if missing — MUST run before any git add -A."""
+    target = repo_dir or REPO_DIR
+    gi = target / ".gitignore"
+    if not gi.exists():
+        gi.write_text(_REPO_GITIGNORE, encoding="utf-8")
+
+
+def _ensure_git_identity() -> None:
+    """Ensure repo-local git identity exists for local commits/tags."""
+    git_capture(["git", "config", "user.name", "Ouroboros"])
+    git_capture(["git", "config", "user.email", "ouroboros@local.mac"])
+
+
+def _ensure_local_version_tag() -> None:
+    """Create the current VERSION tag locally when a local-only repo has none."""
+    version_path = REPO_DIR / "VERSION"
+    if not version_path.exists():
+        return
+
+    version = version_path.read_text(encoding="utf-8").strip().lstrip("v")
+    if not re.match(r"^\d+\.\d+\.\d+$", version):
+        return
+
+    tag_name = f"v{version}"
+    rc, tag_match, err = git_capture(["git", "tag", "-l", tag_name])
+    if rc != 0:
+        log.warning("Failed to check local tag %s: %s", tag_name, err)
+        return
+    if tag_match.strip():
+        return
+
+    rc, all_tags, err = git_capture(["git", "tag", "-l"])
+    if rc != 0:
+        log.warning("Failed to list local tags: %s", err)
+        return
+    if any(t.strip() for t in all_tags.splitlines()):
+        return
+
+    rc, head_sha, err = git_capture(["git", "rev-parse", "HEAD"])
+    if rc != 0 or not head_sha:
+        log.warning("Cannot create local version tag %s without HEAD: %s", tag_name, err)
+        return
+
+    _ensure_git_identity()
+    rc, _, err = git_capture(["git", "tag", "-a", tag_name, "-m", f"Release {tag_name}"])
+    if rc != 0:
+        log.warning("Failed to create local version tag %s: %s", tag_name, err)
+        return
+
+    log.info("Created local-only version tag %s at %s", tag_name, head_sha[:8])
+
+
+def ensure_repo_present() -> None:
+    if not (REPO_DIR / ".git").exists():
+        # REPO_DIR is the working code directory - never rm -rf it.
+        # Just initialize git in-place over the existing files.
+        REPO_DIR.mkdir(parents=True, exist_ok=True)
+        _ensure_repo_gitignore()
+        import dulwich.repo
+        dulwich.repo.Repo.init(str(REPO_DIR))
+
+        _ensure_git_identity()
+
+        rc, _, _ = git_capture(["git", "status", "--porcelain"])
+        if rc == 0:
+            subprocess.run(["git", "add", "-A"], cwd=str(REPO_DIR), check=True)
+            subprocess.run(["git", "commit", "-m", "Initial commit from bundle"], cwd=str(REPO_DIR), check=False)
+
+        # Create branches
+        subprocess.run(["git", "branch", "-M", BRANCH_DEV], cwd=str(REPO_DIR), check=False)
+        subprocess.run(["git", "branch", BRANCH_STABLE], cwd=str(REPO_DIR), check=False)
+
+    _ensure_local_version_tag()
+
+
+# ---------------------------------------------------------------------------
+# Repo sync state collection
+# ---------------------------------------------------------------------------
+
+def _collect_repo_sync_state() -> Dict[str, Any]:
+    state: Dict[str, Any] = {
+        "current_branch": "unknown",
+        "dirty_lines": [],
+        "unpushed_lines": [],
+        "warnings": [],
+    }
+
+    rc, branch, err = git_capture(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+    if rc == 0 and branch:
+        state["current_branch"] = branch
+    elif err:
+        state["warnings"].append(f"branch_error:{err}")
+
+    rc, dirty, err = git_capture(["git", "status", "--porcelain"])
+    if rc == 0 and dirty:
+        state["dirty_lines"] = [ln for ln in dirty.splitlines() if ln.strip()]
+    elif rc != 0 and err:
+        state["warnings"].append(f"status_error:{err}")
+
+    upstream = ""
+    if _has_remote():
+        rc, up, err = git_capture(["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+        if rc == 0 and up:
+            upstream = up
+        else:
+            current_branch = str(state.get("current_branch") or "")
+            if current_branch not in ("", "HEAD", "unknown"):
+                upstream = f"origin/{current_branch}"
+            elif err:
+                state["warnings"].append(f"upstream_error:{err}")
+
+        if upstream:
+            rc, unpushed, err = git_capture(["git", "log", "--oneline", f"{upstream}..HEAD"])
+            if rc == 0 and unpushed:
+                state["unpushed_lines"] = [ln for ln in unpushed.splitlines() if ln.strip()]
+            elif rc != 0 and err:
+                state["warnings"].append(f"unpushed_error:{err}")
+
+    return state
+
+
+def _copy_untracked_for_rescue(dst_root: pathlib.Path, max_files: int = 200,
+                                max_total_bytes: int = 12_000_000) -> Dict[str, Any]:
+    out: Dict[str, Any] = {
+        "copied_files": 0, "skipped_files": 0, "copied_bytes": 0, "truncated": False,
+    }
+    rc, txt, err = git_capture(["git", "ls-files", "--others", "--exclude-standard"])
+    if rc != 0:
+        out["error"] = err or "git ls-files failed"
+        return out
+
+    lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
+    if not lines:
+        return out
+
+    dst_root.mkdir(parents=True, exist_ok=True)
+    for rel in lines:
+        if out["copied_files"] >= max_files:
+            out["truncated"] = True
+            break
+        src = (REPO_DIR / rel).resolve()
+        try:
+            src.relative_to(REPO_DIR.resolve())
+        except Exception:
+            out["skipped_files"] += 1
+            continue
+        if not src.exists() or not src.is_file():
+            out["skipped_files"] += 1
+            continue
+        try:
+            size = int(src.stat().st_size)
+        except Exception:
+            out["skipped_files"] += 1
+            continue
+        if (out["copied_bytes"] + size) > max_total_bytes:
+            out["truncated"] = True
+            break
+        dst = dst_root / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(src, dst)
+            out["copied_files"] += 1
+            out["copied_bytes"] += size
+        except Exception:
+            out["skipped_files"] += 1
+    return out
+
+
+def _create_rescue_snapshot(branch: str, reason: str,
+                             repo_state: Dict[str, Any]) -> Dict[str, Any]:
+    now = datetime.datetime.now(datetime.timezone.utc)
+    ts = now.strftime("%Y%m%d_%H%M%S")
+    rescue_dir = DRIVE_ROOT / "archive" / "rescue" / f"{ts}_{uuid.uuid4().hex[:8]}"
+    rescue_dir.mkdir(parents=True, exist_ok=True)
+
+    info: Dict[str, Any] = {
+        "ts": now.isoformat(),
+        "target_branch": branch,
+        "reason": reason,
+        "current_branch": repo_state.get("current_branch"),
+        "dirty_count": len(repo_state.get("dirty_lines") or []),
+        "unpushed_count": len(repo_state.get("unpushed_lines") or []),
+        "warnings": list(repo_state.get("warnings") or []),
+        "path": str(rescue_dir),
+    }
+
+    rc_status, status_txt, _ = git_capture(["git", "status", "--porcelain"])
+    if rc_status == 0:
+        atomic_write_text(rescue_dir / "status.porcelain.txt",
+                          status_txt + ("\n" if status_txt else ""))
+
+    rc_diff, diff_txt, diff_err = git_capture(["git", "diff", "--binary", "HEAD"])
+    if rc_diff == 0:
+        atomic_write_text(rescue_dir / "changes.diff",
+                          diff_txt + ("\n" if diff_txt else ""))
+    else:
+        info["diff_error"] = diff_err or "git diff failed"
+
+    untracked_meta = _copy_untracked_for_rescue(rescue_dir / "untracked")
+    info["untracked"] = untracked_meta
+
+    unpushed_lines = [ln for ln in (repo_state.get("unpushed_lines") or []) if str(ln).strip()]
+    if unpushed_lines:
+        atomic_write_text(rescue_dir / "unpushed_commits.txt",
+                          "\n".join(unpushed_lines) + "\n")
+
+    atomic_write_text(rescue_dir / "rescue_meta.json",
+                      json.dumps(info, ensure_ascii=False, indent=2))
+    return info
+
+
+# ---------------------------------------------------------------------------
+# Checkout + reset
+# ---------------------------------------------------------------------------
+
+def _has_remote() -> bool:
+    """Check if the repo has a remote configured (it shouldn't in local mode)."""
+    rc, remotes, _ = git_capture(["git", "remote"])
+    return rc == 0 and bool(remotes.strip())
+
+
+def checkout_and_reset(branch: str, reason: str = "unspecified",
+                       unsynced_policy: str = "ignore") -> Tuple[bool, str]:
+    if _has_remote():
+        rc, _, err = git_capture(["git", "fetch", "origin"])
+        if rc != 0:
+            msg = f"git fetch failed: {err or 'unknown error'}"
+            append_jsonl(
+                DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "type": "reset_fetch_failed",
+                    "target_branch": branch, "reason": reason, "error": msg,
+                    "continuing_local_reset": True,
+                },
+            )
+            log.warning("%s; continuing with local reset for branch %s", msg, branch)
+
+    policy = str(unsynced_policy or "ignore").strip().lower()
+    if policy not in {"ignore", "block", "rescue_and_block", "rescue_and_reset"}:
+        policy = "ignore"
+
+    if policy != "ignore":
+        repo_state = _collect_repo_sync_state()
+        dirty_lines = list(repo_state.get("dirty_lines") or [])
+        unpushed_lines = list(repo_state.get("unpushed_lines") or [])
+        if dirty_lines or unpushed_lines:
+            rescue_info: Dict[str, Any] = {}
+            if policy in {"rescue_and_block", "rescue_and_reset"}:
+                try:
+                    rescue_info = _create_rescue_snapshot(
+                        branch=branch, reason=reason, repo_state=repo_state)
+                except Exception as e:
+                    rescue_info = {"error": repr(e)}
+            bits: List[str] = []
+            if unpushed_lines:
+                bits.append(f"unpushed={len(unpushed_lines)}")
+            if dirty_lines:
+                bits.append(f"dirty={len(dirty_lines)}")
+            detail = ", ".join(bits) if bits else "unsynced"
+            rescue_suffix = ""
+            rescue_path = str(rescue_info.get("path") or "").strip()
+            if rescue_path:
+                rescue_suffix = f" Rescue saved to {rescue_path}."
+            elif policy in {"rescue_and_block", "rescue_and_reset"} and rescue_info.get("error"):
+                rescue_suffix = f" Rescue failed: {rescue_info.get('error')}."
+
+            if policy in {"block", "rescue_and_block"}:
+                msg = f"Reset blocked ({detail}) to protect local changes.{rescue_suffix}"
+                append_jsonl(
+                    DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                    {
+                        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        "type": "reset_blocked_unsynced_state",
+                        "target_branch": branch, "reason": reason, "policy": policy,
+                        "current_branch": repo_state.get("current_branch"),
+                        "dirty_count": len(dirty_lines),
+                        "unpushed_count": len(unpushed_lines),
+                        "dirty_preview": dirty_lines[:20],
+                        "unpushed_preview": unpushed_lines[:20],
+                        "warnings": list(repo_state.get("warnings") or []),
+                        "rescue": rescue_info,
+                    },
+                )
+                return False, msg
+
+            append_jsonl(
+                DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "type": "reset_unsynced_rescued_then_reset",
+                    "target_branch": branch, "reason": reason, "policy": policy,
+                    "current_branch": repo_state.get("current_branch"),
+                    "dirty_count": len(dirty_lines),
+                    "unpushed_count": len(unpushed_lines),
+                    "dirty_preview": dirty_lines[:20],
+                    "unpushed_preview": unpushed_lines[:20],
+                    "warnings": list(repo_state.get("warnings") or []),
+                    "rescue": rescue_info,
+                },
+            )
+
+    # Always use local HEAD — remote (if configured) is for push/backup only,
+    # never for resetting the local branch. Agent commits must survive restarts.
+    def _run_git_resilient(cmd, **kwargs):
+        import time
+        check = bool(kwargs.pop("check", False))
+        for attempt in range(5):
+            run_kwargs = dict(kwargs)
+            run_kwargs.setdefault("capture_output", True)
+            run_kwargs.setdefault("text", True)
+            result = subprocess.run(cmd, **run_kwargs)
+            if result.returncode == 0:
+                return result
+            if _maybe_repair_git_index(result.stderr):
+                time.sleep(0.2)
+                continue
+            if not check:
+                return result
+            if attempt == 4:
+                raise subprocess.CalledProcessError(
+                    result.returncode,
+                    cmd,
+                    output=result.stdout,
+                    stderr=result.stderr,
+                )
+            time.sleep(1)
+        return subprocess.run(cmd, check=check, **kwargs)
+
+    rc_local = subprocess.run(
+        ["git", "rev-parse", "--verify", branch],
+        cwd=str(REPO_DIR), capture_output=True,
+    ).returncode
+
+    if rc_local != 0:
+        _run_git_resilient(["git", "reset", "--hard", "HEAD"], cwd=str(REPO_DIR), check=True)
+        _run_git_resilient(["git", "clean", "-fd"], cwd=str(REPO_DIR), check=True)
+        _run_git_resilient(["git", "checkout", "-b", branch], cwd=str(REPO_DIR), check=False)
+    else:
+        _run_git_resilient(["git", "checkout", branch], cwd=str(REPO_DIR), check=True)
+        _run_git_resilient(["git", "reset", "--hard", "HEAD"], cwd=str(REPO_DIR), check=True)
+
+    # Clean __pycache__ to prevent stale bytecode (git checkout may not update mtime)
+    for p in REPO_DIR.rglob("__pycache__"):
+        shutil.rmtree(p, ignore_errors=True)
+    st = load_state()
+    st["current_branch"] = branch
+    st["current_sha"] = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(REPO_DIR),
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    save_state(st)
+    return True, "ok"
+
+
+# ---------------------------------------------------------------------------
+# Dependencies + import test
+# ---------------------------------------------------------------------------
+
+def sync_runtime_dependencies(reason: str) -> Tuple[bool, str]:
+    if getattr(sys, 'frozen', False):
+        log.info("Skipping pip install in frozen (PyInstaller) mode — deps are bundled.")
+        return True, "frozen:bundled"
+
+    req_path = REPO_DIR / "requirements.txt"
+    cmd: List[str] = [sys.executable, "-m", "pip", "install", "-q"]
+    source = ""
+    if req_path.exists():
+        cmd += ["-r", str(req_path)]
+        source = f"requirements:{req_path}"
+    else:
+        cmd += ["openai>=1.0.0", "requests"]
+        source = "fallback:minimal"
+    try:
+        subprocess.run(cmd, cwd=str(REPO_DIR), check=True, timeout=120)
+        append_jsonl(
+            DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "deps_sync_ok", "reason": reason, "source": source,
+            },
+        )
+        return True, source
+    except Exception as e:
+        msg = repr(e)
+        append_jsonl(
+            DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "deps_sync_error", "reason": reason, "source": source, "error": msg,
+            },
+        )
+        return False, msg
+
+
+def import_test() -> Dict[str, Any]:
+    if getattr(sys, 'frozen', False):
+        log.info("Skipping import_test in frozen (PyInstaller) mode — modules are bundled.")
+        return {"ok": True, "skipped": "frozen"}
+
+    r = subprocess.run(
+        [sys.executable, "-c", "import ouroboros, ouroboros.agent; print('import_ok')"],
+        cwd=str(REPO_DIR),
+        capture_output=True, text=True,
+    )
+    return {"ok": (r.returncode == 0), "stdout": r.stdout, "stderr": r.stderr,
+            "returncode": r.returncode}
+
+
+# ---------------------------------------------------------------------------
+# Safe restart orchestration
+# ---------------------------------------------------------------------------
+
+def safe_restart(
+    reason: str,
+    unsynced_policy: str = "rescue_and_reset",
+) -> Tuple[bool, str]:
+    """
+    Attempt to checkout dev branch, sync deps, and verify imports.
+    Falls back to stable branch if dev fails.
+
+    Args:
+        reason: Human-readable reason for the restart (logged to supervisor.jsonl)
+        unsynced_policy: Policy for handling unsynced state (default: "rescue_and_reset")
+
+    Returns:
+        Tuple of (ok: bool, message: str)
+        - If successful: (True, "OK: <branch>")
+        - If failed: (False, "<error description>")
+    """
+    # Try dev branch
+    ok, err = checkout_and_reset(BRANCH_DEV, reason=reason, unsynced_policy=unsynced_policy)
+    if not ok:
+        return False, f"Failed checkout {BRANCH_DEV}: {err}"
+
+    deps_ok, deps_msg = sync_runtime_dependencies(reason=reason)
+    if not deps_ok:
+        return False, f"Failed deps for {BRANCH_DEV}: {deps_msg}"
+
+    t = import_test()
+    if t["ok"]:
+        return True, f"OK: {BRANCH_DEV}"
+
+    # Dev branch failed import — log the failure and fall back to stable
+    append_jsonl(
+        DRIVE_ROOT / "logs" / "supervisor.jsonl",
+        {
+            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "type": "safe_restart_dev_import_failed",
+            "reason": reason,
+            "branch": BRANCH_DEV,
+            "stdout": t.get("stdout", ""),
+            "stderr": t.get("stderr", ""),
+            "returncode": t.get("returncode", -1),
+        },
+    )
+
+    # Fallback to stable
+    ok_s, err_s = checkout_and_reset(
+        BRANCH_STABLE,
+        reason=f"{reason}_fallback_stable",
+        unsynced_policy="rescue_and_reset",
+    )
+    if not ok_s:
+        return False, f"Failed checkout {BRANCH_STABLE}: {err_s}"
+
+    deps_ok_s, deps_msg_s = sync_runtime_dependencies(reason=f"{reason}_fallback_stable")
+    if not deps_ok_s:
+        return False, f"Failed deps for {BRANCH_STABLE}: {deps_msg_s}"
+
+    t2 = import_test()
+    if t2["ok"]:
+        return True, f"OK: fell back to {BRANCH_STABLE}"
+
+    # Both branches failed
+    return False, f"Both branches failed import (dev and stable)"
+
+
+# ---------------------------------------------------------------------------
+# Version listing (for UI version panel)
+# ---------------------------------------------------------------------------
+
+def list_versions(max_count: int = 50) -> List[Dict[str, Any]]:
+    """Return list of annotated git tags sorted newest-first."""
+    rc, raw, _ = git_capture([
+        "git", "tag", "-l", "--sort=-creatordate",
+        "--format=%(refname:short)\t%(creatordate:iso-strict)\t%(subject)",
+    ])
+    if rc != 0 or not raw.strip():
+        return []
+    versions: List[Dict[str, Any]] = []
+    for line in raw.splitlines()[:max_count]:
+        parts = line.split("\t", 2)
+        if len(parts) >= 1:
+            versions.append({
+                "tag": parts[0],
+                "date": parts[1] if len(parts) > 1 else "",
+                "message": parts[2] if len(parts) > 2 else "",
+            })
+    return versions
+
+
+def list_commits(max_count: int = 30) -> List[Dict[str, Any]]:
+    """Return recent commits on current branch."""
+    rc, raw, _ = git_capture([
+        "git", "log", f"--max-count={max_count}",
+        "--format=%H\t%h\t%ai\t%s",
+    ])
+    if rc != 0 or not raw.strip():
+        return []
+    commits: List[Dict[str, Any]] = []
+    for line in raw.splitlines():
+        parts = line.split("\t", 3)
+        if len(parts) >= 4:
+            commits.append({
+                "sha": parts[0], "short_sha": parts[1],
+                "date": parts[2], "message": parts[3],
+            })
+    return commits
+
+
+def rollback_to_version(tag_or_sha: str, reason: str = "manual_rollback") -> Tuple[bool, str]:
+    """Rollback to a specific tag or commit SHA with rescue snapshot."""
+    repo_state = _collect_repo_sync_state()
+    try:
+        _create_rescue_snapshot(
+            branch=repo_state.get("current_branch", "unknown"),
+            reason=reason,
+            repo_state=repo_state,
+        )
+    except Exception as e:
+        log.warning("Rescue snapshot failed before rollback: %s", e)
+
+    # Resolve the target to a SHA first
+    rc_rev, target_sha, err_rev = git_capture(["git", "rev-parse", tag_or_sha])
+    if rc_rev != 0:
+        return False, f"Cannot resolve {tag_or_sha}: {err_rev}"
+
+    # Reset current branch to the target (avoids detached HEAD)
+    rc, _, err = git_capture(["git", "reset", "--hard", target_sha])
+    if rc != 0:
+        return False, f"git reset failed: {err}"
+
+    st = load_state()
+    st["current_sha"] = target_sha.strip()
+    save_state(st)
+
+    warning = ""
+    branch = repo_state.get("current_branch") or BRANCH_DEV
+    if _has_remote() and branch and branch not in {"HEAD", "unknown"}:
+        should_sync = True
+        rc_div, div_out, _ = git_capture(["git", "rev-list", "--left-right", "--count", f"HEAD...origin/{branch}"])
+        if rc_div == 0:
+            try:
+                ahead, behind = (int(part) for part in div_out.split())
+                should_sync = (ahead > 0) or (behind > 0)
+            except Exception:
+                should_sync = True
+        if should_sync:
+            rc_push, _, err_push = git_capture([
+                "git", "push", "--force-with-lease", "origin", branch,
+            ])
+            if rc_push != 0:
+                warning = f" ⚠️ Remote not synced: {err_push}"
+                log.warning("Rollback remote sync failed for %s: %s", branch, err_push)
+
+    append_jsonl(
+        DRIVE_ROOT / "logs" / "supervisor.jsonl",
+        {
+            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "type": "manual_rollback",
+            "target": tag_or_sha,
+            "reason": reason,
+            "new_sha": st["current_sha"],
+            "remote_synced": not bool(warning),
+            "branch": branch,
+        },
+    )
+    return True, f"Rolled back to {tag_or_sha} ({st['current_sha'][:8]}){warning}"
+
+
+# ---------------------------------------------------------------------------
+# GitHub remote sync
+# ---------------------------------------------------------------------------
+
+def configure_remote(repo_slug: str, token: str) -> Tuple[bool, str]:
+    """Set up or update the 'origin' remote using credential helper.
+
+    Uses git credential helper to avoid embedding the token in the remote URL
+    (which would expose it in `git remote -v` output and log files).
+    """
+    if not repo_slug or not token:
+        return False, "Missing repo slug or token"
+
+    clean_url = f"https://github.com/{repo_slug}.git"
+
+    if _has_remote():
+        rc, _, err = git_capture(["git", "remote", "set-url", "origin", clean_url])
+    else:
+        rc, _, err = git_capture(["git", "remote", "add", "origin", clean_url])
+    if rc != 0:
+        return False, f"Failed to configure remote: {err}"
+
+    _configure_credential_helper(repo_slug, token)
+    return True, "ok"
+
+
+def _configure_credential_helper(repo_slug: str, token: str) -> None:
+    """Store credentials via repo-local credential helper (not global ~/.git-credentials).
+
+    Each repo gets its own credentials file at .git/credentials, so multiple
+    repos can have different tokens without conflict.
+    """
+    cred_path = REPO_DIR / ".git" / "credentials"
+    git_capture([
+        "git", "config", "--local", "credential.helper",
+        f"store --file={cred_path}",
+    ])
+    cred_line = f"https://x-access-token:{token}@github.com"
+    try:
+        cred_path.write_text(cred_line + "\n", encoding="utf-8")
+        cred_path.chmod(0o600)
+    except Exception as e:
+        log.warning("Failed to write repo credentials file: %s", e)
+
+
+def push_to_remote(branch: Optional[str] = None, push_tags: bool = True) -> Tuple[bool, str]:
+    """Push current branch (and optionally tags) to origin."""
+    if not _has_remote():
+        return False, "No remote configured"
+
+    target = branch or BRANCH_DEV
+    rc, out, err = git_capture(["git", "push", "-u", "origin", target])
+    if rc != 0:
+        return False, f"git push failed: {err}"
+
+    result = f"Pushed {target} to origin"
+    if push_tags:
+        rc_t, _, err_t = git_capture(["git", "push", "origin", "--tags"])
+        if rc_t != 0:
+            result += f" (tags push failed: {err_t})"
+        else:
+            result += " + tags"
+    return True, result
+
+
+def migrate_remote_credentials() -> Tuple[bool, str]:
+    """One-shot: if origin has a token embedded in the URL, migrate to credential helper.
+
+    Safe to call repeatedly — if origin is already clean, this is a no-op.
+    Handles both formats: https://TOKEN@github.com/... and https://user:TOKEN@github.com/...
+    """
+    if not _has_remote():
+        return False, "No remote configured"
+    rc, url, _ = git_capture(["git", "remote", "get-url", "origin"])
+    if rc != 0:
+        return False, "Cannot read origin URL"
+    url = url.strip()
+    m = re.match(r"https://([^@]+)@github\.com/(.+)", url)
+    if not m:
+        return True, "Origin already clean (no embedded token)"
+    userinfo = m.group(1)
+    # Handle user:token format (e.g. x-access-token:ghp_xxx)
+    if ":" in userinfo:
+        token = userinfo.split(":", 1)[1]
+    else:
+        token = userinfo
+    slug = m.group(2).rstrip("/")
+    if slug.endswith(".git"):
+        slug = slug[:-4]
+    return configure_remote(slug, token)

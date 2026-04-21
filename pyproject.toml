@@ -1,0 +1,88 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ouroboros"
+version = "4.44.0"
+description = "Self-creating AI agent with constitution, background consciousness, and persistent identity"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Anton Razzhigaev"},
+]
+keywords = ["ai-agent", "self-modifying", "autonomous", "llm", "openrouter"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "openai>=1.66.0",
+    "requests",
+    "dulwich",
+    "huggingface_hub",
+    "starlette",
+    "python-multipart",
+    "uvicorn[standard]",
+    "websockets",
+    "claude-agent-sdk>=0.1.60",
+]
+
+[project.scripts]
+ouroboros-web = "server:main"
+
+[project.urls]
+Homepage = "https://github.com/joi-lab/ouroboros-desktop"
+Repository = "https://github.com/joi-lab/ouroboros-desktop"
+Issues = "https://github.com/joi-lab/ouroboros-desktop/issues"
+"Previous Version (Colab)" = "https://github.com/joi-lab/ouroboros"
+
+[project.optional-dependencies]
+claude-sdk = ["claude-agent-sdk>=0.1.60"]
+a2a = ["a2a-sdk[http-server]>=0.3.20", "httpx"]
+browser = ["playwright", "playwright-stealth"]
+local-model = ["llama-cpp-python"]
+build = ["pyinstaller>=6.0"]
+all = ["claude-agent-sdk>=0.1.60", "a2a-sdk[http-server]>=0.3.20", "httpx", "playwright", "playwright-stealth", "llama-cpp-python", "huggingface_hub"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-q --tb=short"
+
+[tool.setuptools]
+py-modules = ["server"]
+
+[tool.setuptools.packages.find]
+include = ["ouroboros*", "supervisor*", "web*"]
+
+[tool.setuptools.package-data]
+web = [
+    "*.html",
+    "*.js",
+    "*.css",
+    "*.png",
+    "*.jpg",
+    "modules/*.js",
+    "providers/*.svg",
+    "providers/*.png",
+    "providers/*.ico",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]

@@ -1,0 +1,412 @@
+"""
+Ouroboros — Tool registry (SSOT).
+
+Plugin architecture: each module in tools/ exports get_tools().
+ToolRegistry collects all tools, provides schemas() and execute().
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import pathlib
+import subprocess
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional
+
+from ouroboros.utils import safe_relpath
+
+log = logging.getLogger(__name__)
+
+# --- Safety-critical files: hardcoded protection against any modification ---
+SAFETY_CRITICAL_PATHS = frozenset([
+    "BIBLE.md",
+    "ouroboros/safety.py",
+    "ouroboros/tools/registry.py",
+    "prompts/SAFETY.md",
+])
+_SAFETY_CRITICAL_LOWER = frozenset(p.lower() for p in SAFETY_CRITICAL_PATHS)
+
+_SHELL_WRITE_INDICATORS = (
+    "rm ", "rm\t", ">", "sed -i", "tee ", "truncate",
+    "mv ", "cp ", "chmod ", "chown ", "unlink ", "delete", "trash",
+    "rsync ",
+)
+
+# Git via run_shell: only truly read-only subcommands allowed
+_GIT_READONLY_SUBCOMMANDS = frozenset([
+    "status", "diff", "log", "show", "ls-files",
+    "describe", "rev-parse", "cat-file",
+    "shortlog", "version", "help", "blame",
+    "grep", "reflog", "fetch",
+])
+
+_SHELL_WRAPPERS = frozenset(["bash", "sh", "dash", "zsh", "env"])
+
+
+def _is_safety_critical_path(path: str) -> bool:
+    """Check if a normalized path refers to a safety-critical file."""
+    normalized = os.path.normpath(path.strip().lstrip("./"))
+    return normalized in SAFETY_CRITICAL_PATHS
+
+
+def _revert_safety_critical_files(repo_dir) -> list:
+    """After claude_code_edit, revert any uncommitted changes to safety-critical files."""
+    try:
+        diff = subprocess.run(
+            ["git", "diff", "--name-only"],
+            cwd=str(repo_dir), capture_output=True, text=True, timeout=5,
+        )
+        if diff.returncode != 0:
+            return []
+        modified = set(diff.stdout.strip().splitlines())
+        reverted = []
+        for critical in SAFETY_CRITICAL_PATHS:
+            if critical in modified:
+                subprocess.run(
+                    ["git", "checkout", "--", critical],
+                    cwd=str(repo_dir), capture_output=True, timeout=5,
+                )
+                reverted.append(critical)
+        return reverted
+    except Exception:
+        return []
+
+
+def _extract_git_subcommand(cmd_parts: list) -> str:
+    """Extract the git subcommand from a parsed command list.
+
+    Handles: git status, git -C /path status, git --no-pager log, etc.
+    """
+    if not cmd_parts:
+        return ""
+    parts = [str(p) for p in cmd_parts]
+    if parts[0] != "git":
+        return ""
+    i = 1
+    while i < len(parts):
+        p = parts[i]
+        if p.startswith("-"):
+            if p in ("-C", "--git-dir", "--work-tree"):
+                i += 2
+            else:
+                i += 1
+        else:
+            return p
+    return ""
+
+
+@dataclass
+class BrowserState:
+    """Per-task browser lifecycle state (Playwright). Isolated from generic ToolContext."""
+
+    pw_instance: Any = None
+    browser: Any = None
+    page: Any = None
+    last_screenshot_b64: Optional[str] = None
+
+
+@dataclass
+class ToolContext:
+    """Tool execution context — passed from the agent before each task."""
+
+    repo_dir: pathlib.Path
+    drive_root: pathlib.Path
+    branch_dev: str = "ouroboros"
+    pending_events: List[Dict[str, Any]] = field(default_factory=list)
+    current_chat_id: Optional[int] = None
+    current_task_type: Optional[str] = None
+    pending_restart_reason: Optional[str] = None
+    last_push_succeeded: bool = False
+    emit_progress_fn: Callable[[str], None] = field(default=lambda _: None)
+
+    # LLM-driven model/effort switch (set by switch_model tool, read by loop.py)
+    active_model_override: Optional[str] = None
+    active_effort_override: Optional[str] = None
+    active_use_local_override: Optional[bool] = None
+
+    # Per-task browser state
+    browser_state: BrowserState = field(default_factory=BrowserState)
+
+    # Budget tracking (set by loop.py for real-time usage events)
+    event_queue: Optional[Any] = None
+    task_id: Optional[str] = None
+
+    # Conversation messages (set by loop.py so safety checks have context)
+    messages: Optional[List[Dict[str, Any]]] = None
+
+    # Task depth for fork bomb protection
+    task_depth: int = 0
+
+    # True when running inside handle_chat_direct (not a queued worker task)
+    is_direct_chat: bool = False
+
+    # Pre-commit review state (reset per-commit, carried across review rounds)
+    _review_advisory: List[Any] = field(default_factory=list)
+    _review_iteration_count: int = 0
+    _review_history: list = field(default_factory=list)
+
+    def repo_path(self, rel: str) -> pathlib.Path:
+        resolved = (self.repo_dir / safe_relpath(rel)).resolve()
+        try:
+            resolved.relative_to(self.repo_dir.resolve())
+        except ValueError:
+            raise ValueError(f"Path escapes repo_dir boundary: {rel}")
+        return resolved
+
+    def drive_path(self, rel: str) -> pathlib.Path:
+        resolved = (self.drive_root / safe_relpath(rel)).resolve()
+        try:
+            resolved.relative_to(self.drive_root.resolve())
+        except ValueError:
+            raise ValueError(f"Path escapes drive_root boundary: {rel}")
+        return resolved
+
+    def drive_logs(self) -> pathlib.Path:
+        return (self.drive_root / "logs").resolve()
+
+
+@dataclass
+class ToolEntry:
+    """Single tool descriptor: name, schema, handler, metadata."""
+
+    name: str
+    schema: Dict[str, Any]
+    handler: Callable  # fn(ctx: ToolContext, **args) -> str
+    is_code_tool: bool = False
+    timeout_sec: int = 360
+
+
+CORE_TOOL_NAMES = {
+    "repo_read", "repo_list", "repo_write", "repo_write_commit", "repo_commit",
+    "data_read", "data_list", "data_write",
+    "run_shell", "claude_code_edit",
+    "ensure_claude_cli",
+    "git_status", "git_diff",
+    "pull_from_remote", "restore_to_head", "revert_commit",
+    "schedule_task", "wait_for_task", "get_task_result",
+    "set_tool_timeout",
+    "update_scratchpad", "update_identity",
+    "chat_history", "web_search",
+    "send_user_message", "switch_model",
+    "request_restart", "promote_to_stable",
+    "knowledge_read", "knowledge_write", "knowledge_list",
+    "browse_page", "browser_action", "analyze_screenshot",
+}
+
+
+class ToolRegistry:
+    """Ouroboros tool registry (SSOT).
+
+    To add a tool: create a module in ouroboros/tools/,
+    export get_tools() -> List[ToolEntry].
+    """
+
+    def __init__(self, repo_dir: pathlib.Path, drive_root: pathlib.Path):
+        self._entries: Dict[str, ToolEntry] = {}
+        self._ctx = ToolContext(repo_dir=repo_dir, drive_root=drive_root)
+        self._load_modules()
+
+    _FROZEN_TOOL_MODULES = [
+        "a2a", "browser", "ci", "claude_advisory_review", "compact_context", "control",
+        "core", "evolution_stats", "git", "git_rollback", "github", "health",
+        "knowledge", "memory_tools", "plan_review", "review", "search", "shell",
+        "tool_discovery", "vision",
+    ]
+
+    def _load_modules(self) -> None:
+        """Auto-discover tool modules in ouroboros/tools/ that export get_tools()."""
+        import importlib
+        import logging
+        import sys
+
+        if getattr(sys, 'frozen', False):
+            module_names = self._FROZEN_TOOL_MODULES
+        else:
+            import pkgutil
+            import ouroboros.tools as tools_pkg
+            module_names = [
+                m for _, m, _ in pkgutil.iter_modules(tools_pkg.__path__)
+                if not m.startswith("_") and m != "registry"
+            ]
+
+        for modname in module_names:
+            try:
+                mod = importlib.import_module(f"ouroboros.tools.{modname}")
+                if hasattr(mod, "get_tools"):
+                    for entry in mod.get_tools():
+                        self._entries[entry.name] = entry
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "Failed to load tool module %s", modname, exc_info=True)
+
+    def set_context(self, ctx: ToolContext) -> None:
+        self._ctx = ctx
+
+    def register(self, entry: ToolEntry) -> None:
+        """Register a new tool (for extension by Ouroboros)."""
+        self._entries[entry.name] = entry
+
+    # --- Contract ---
+
+    def available_tools(self) -> List[str]:
+        return [e.name for e in self._entries.values()]
+
+    def schemas(self, core_only: bool = False) -> List[Dict[str, Any]]:
+        if not core_only:
+            return [{"type": "function", "function": e.schema} for e in self._entries.values()]
+        # Core tools + meta-tools for discovering/enabling extended tools
+        result = []
+        for e in self._entries.values():
+            if e.name in CORE_TOOL_NAMES or e.name in ("list_available_tools", "enable_tools"):
+                result.append({"type": "function", "function": e.schema})
+        return result
+
+    def list_non_core_tools(self) -> List[Dict[str, str]]:
+        """Return name+description of all non-core tools."""
+        result = []
+        for e in self._entries.values():
+            if e.name not in CORE_TOOL_NAMES:
+                desc = e.schema.get("description", "No description")
+                result.append({"name": e.name, "description": desc})
+        return result
+
+    def get_schema_by_name(self, name: str) -> Optional[Dict[str, Any]]:
+        """Return the full schema for a specific tool."""
+        entry = self._entries.get(name)
+        if entry:
+            return {"type": "function", "function": entry.schema}
+        return None
+
+    def get_timeout(self, name: str) -> int:
+        """Return timeout_sec for the named tool (default 360)."""
+        entry = self._entries.get(name)
+        return entry.timeout_sec if entry is not None else 360
+
+    def execute(self, name: str, args: Dict[str, Any]) -> str:
+        entry = self._entries.get(name)
+        if entry is None:
+            return f"⚠️ Unknown tool: {name}. Available: {', '.join(sorted(self._entries.keys()))}"
+
+        # --- Hardcoded Sandbox Protections ---
+
+        # Block modification of safety-critical files via repo_write / repo_write_commit
+        if name in ("repo_write_commit", "repo_write"):
+            path = args.get("path", "")
+            if path and _is_safety_critical_path(path):
+                return (
+                    "⚠️ CRITICAL SAFETY_VIOLATION: Hardcoded sandbox prevents "
+                    "modification of safety-critical files: "
+                    + ", ".join(sorted(SAFETY_CRITICAL_PATHS))
+                )
+            files = args.get("files") or []
+            for f_entry in files:
+                if isinstance(f_entry, dict) and _is_safety_critical_path(f_entry.get("path", "")):
+                    return (
+                        "⚠️ CRITICAL SAFETY_VIOLATION: Hardcoded sandbox prevents "
+                        "modification of safety-critical files: "
+                        + ", ".join(sorted(SAFETY_CRITICAL_PATHS))
+                    )
+
+        if name == "run_shell":
+            raw_cmd = args.get("cmd", args.get("command", ""))
+            if isinstance(raw_cmd, list):
+                cmd_lower = " ".join(str(x) for x in raw_cmd).lower()
+            else:
+                cmd_lower = str(raw_cmd).lower()
+
+            # Block shell writes to safety-critical files
+            for cf in _SAFETY_CRITICAL_LOWER:
+                if cf in cmd_lower and any(w in cmd_lower for w in _SHELL_WRITE_INDICATORS):
+                    return (
+                        "⚠️ CRITICAL SAFETY_VIOLATION: Shell command would modify "
+                        "safety-critical file. Protected: "
+                        + ", ".join(sorted(SAFETY_CRITICAL_PATHS))
+                    )
+
+            # Block GitHub repo create/delete/auth
+            if "gh repo create" in cmd_lower or "gh repo delete" in cmd_lower:
+                return "⚠️ SAFETY_VIOLATION: Creating/deleting GitHub repositories requires admin approval."
+            if "gh auth" in cmd_lower:
+                return "⚠️ SAFETY_VIOLATION: Modifying GitHub authentication is not permitted."
+
+            # Git mutative command ban — write ops must go through repo_commit tools
+            if isinstance(raw_cmd, list):
+                cmd_parts_for_git = [str(x) for x in raw_cmd]
+            else:
+                cmd_parts_for_git = cmd_lower.split()
+            first_word = cmd_parts_for_git[0] if cmd_parts_for_git else ""
+            is_direct_git = (first_word == "git")
+            is_wrapped_git = (first_word in _SHELL_WRAPPERS and "git " in cmd_lower)
+
+            if is_direct_git:
+                subcmd = _extract_git_subcommand(cmd_parts_for_git)
+                if subcmd and subcmd.lower() not in _GIT_READONLY_SUBCOMMANDS:
+                    return (
+                        f"⚠️ GIT_VIA_SHELL_BLOCKED: `git {subcmd}` must go through "
+                        "repo_commit / repo_write_commit tools which enforce pre-commit "
+                        "checks. For read-only git: git_status, git_diff tools, or "
+                        "run_shell with git log/show/diff/status."
+                    )
+
+            if is_wrapped_git:
+                _git_banned = (
+                    "git commit", "git push", "git add ", "git add\t",
+                    "git init", "git reset", "git rebase", "git merge",
+                    "git cherry-pick", "git branch", "git tag", "git remote",
+                    "git config", "git stash", "git clean", "git checkout",
+                    "git switch",
+                )
+                for banned in _git_banned:
+                    if banned in cmd_lower:
+                        return (
+                            "⚠️ GIT_VIA_SHELL_BLOCKED: git mutative commands in shell "
+                            "wrappers must go through repo_commit / repo_write_commit tools."
+                        )
+
+        # --- LLM Safety Supervisor ---
+        from ouroboros.safety import check_safety
+        is_safe, safety_msg = check_safety(
+            name,
+            args,
+            messages=getattr(self._ctx, "messages", None),
+            ctx=self._ctx,
+        )
+        if not is_safe:
+            return safety_msg
+
+        try:
+            result = entry.handler(self._ctx, **args)
+        except TypeError as e:
+            return f"⚠️ TOOL_ARG_ERROR ({name}): {e}"
+        except Exception as e:
+            return f"⚠️ TOOL_ERROR ({name}): {e}"
+
+        # Revert safety-critical files after claude_code_edit
+        if name == "claude_code_edit":
+            reverted = _revert_safety_critical_files(self._ctx.repo_dir)
+            if reverted:
+                result += (
+                    "\n\n⚠️ SAFETY: Reverted modifications to safety-critical files: "
+                    + ", ".join(reverted)
+                )
+
+        if safety_msg:
+            return f"{safety_msg}\n\n---\n{result}"
+        return result
+
+    def override_handler(self, name: str, handler) -> None:
+        """Override the handler for a registered tool (used for closure injection)."""
+        entry = self._entries.get(name)
+        if entry:
+            self._entries[name] = ToolEntry(
+                name=entry.name,
+                schema=entry.schema,
+                handler=handler,
+                timeout_sec=entry.timeout_sec,
+            )
+
+    @property
+    def CODE_TOOLS(self) -> frozenset:
+        return frozenset(e.name for e in self._entries.values() if e.is_code_tool)

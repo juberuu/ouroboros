@@ -1,0 +1,819 @@
+"""Regression tests for review-pipeline observability / epistemic-integrity.
+
+Verifies that:
+1. parse_failure is distinguishable from PASS in CommitAttemptRecord
+2. Every triad actor record carries model_id and full raw_text (no provenance loss)
+3. Partial participation (1 of 3 models ERROR) is recorded as DEGRADED, not PASS
+4. scope_raw_result is populated with raw_text and model_id after a scope review
+5. ScopeReviewResult.status = "budget_exceeded" when budget gate fires
+6. ScopeReviewResult.status = "parse_failure" on unparseable scope output
+7. triad_raw_results / scope_raw_result survive save/load roundtrip in review_state.py
+8. _collect_review_findings returns 4-tuple (not 3-tuple)
+9. ctx._last_triad_raw_results is reset at start of each _run_unified_review attempt
+10. parse_failure actors do NOT count toward quorum (same as transport errors)
+11. scope_raw_result includes parsed_items field for shape parity with triad actors
+"""
+from __future__ import annotations
+
+import json
+import types
+import pathlib
+import tempfile
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+def _make_ctx(tmp_path: pathlib.Path) -> MagicMock:
+    ctx = MagicMock()
+    ctx.repo_dir = str(tmp_path)
+    ctx.task_id = "test-task"
+    ctx._review_history = []
+    ctx._review_iteration_count = 0
+    ctx._last_review_block_reason = ""
+    ctx._last_review_critical_findings = []
+    ctx._last_review_advisory_findings = []
+    ctx._last_triad_raw_results = []
+    ctx._last_triad_models = []
+    ctx._review_advisory = []
+    ctx._review_degraded_reasons = []
+    ctx.drive_logs = MagicMock(return_value=tmp_path)
+    return ctx
+
+
+def _model_result(model: str, text: str, verdict: str = "UNKNOWN",
+                  tokens_in: int = 10, tokens_out: int = 5,
+                  cost: float = 0.001) -> dict:
+    return {
+        "model": model,
+        "text": text,
+        "verdict": verdict,
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
+        "cost_estimate": cost,
+    }
+
+
+# ── Test 1: parse_failure ≠ PASS ─────────────────────────────────────────────
+
+def test_parse_failure_distinct_from_pass(tmp_path):
+    """parse_failure must produce status='parse_failure' in actor record, not 'responded'."""
+    from ouroboros.tools.review import _collect_review_findings
+
+    ctx = _make_ctx(tmp_path)
+    bad_json = "This is definitely not JSON at all."
+    results = [_model_result("model-a", bad_json)]
+    critical_fails, advisory_warns, errored_models, triad_raw = _collect_review_findings(ctx, results)
+
+    assert len(triad_raw) == 1
+    assert triad_raw[0]["model_id"] == "model-a"
+    assert triad_raw[0]["status"] == "parse_failure", (
+        f"Expected parse_failure, got {triad_raw[0]['status']!r}"
+    )
+    # raw_text must be preserved in full — not truncated
+    assert triad_raw[0]["raw_text"] == bad_json
+    assert triad_raw[0]["parsed_items"] == []
+
+
+def test_pass_verdict_distinct_from_parse_failure(tmp_path):
+    """A fully PASS review must produce status='responded', not 'parse_failure'."""
+    from ouroboros.tools.review import _collect_review_findings
+
+    ctx = _make_ctx(tmp_path)
+    pass_items = json.dumps([
+        {"item": "bible_compliance", "verdict": "PASS", "severity": "critical", "reason": "OK"}
+    ])
+    results = [_model_result("model-b", pass_items)]
+    critical_fails, advisory_warns, errored_models, triad_raw = _collect_review_findings(ctx, results)
+
+    assert len(triad_raw) == 1
+    assert triad_raw[0]["status"] == "responded"
+    assert triad_raw[0]["parsed_items"] != []
+    assert len(critical_fails) == 0
+
+
+# ── Test 2: provenance — model_id and raw_text always present ────────────────
+
+def test_triad_actor_records_carry_model_id_and_raw_text(tmp_path):
+    """Every actor record must have non-empty model_id and raw_text."""
+    from ouroboros.tools.review import _collect_review_findings
+
+    ctx = _make_ctx(tmp_path)
+    items_json = json.dumps([
+        {"item": "code_quality", "verdict": "FAIL", "severity": "critical", "reason": "bug"}
+    ])
+    results = [
+        _model_result("gpt-5.4", items_json),
+        _model_result("gemini-pro", items_json),
+        _model_result("claude-opus", items_json),
+    ]
+    _, _, _, triad_raw = _collect_review_findings(ctx, results)
+
+    assert len(triad_raw) == 3
+    for record in triad_raw:
+        assert record["model_id"], f"model_id empty in record: {record}"
+        assert record["raw_text"], f"raw_text empty in record: {record}"
+        assert isinstance(record["tokens_in"], int)
+        assert isinstance(record["cost_usd"], float)
+
+
+def test_error_model_provenance_preserved(tmp_path):
+    """ERROR responses must still have model_id and status='error'."""
+    from ouroboros.tools.review import _collect_review_findings
+
+    ctx = _make_ctx(tmp_path)
+    results = [_model_result("bad-model", "Error: API timeout", verdict="ERROR")]
+    _, _, errored, triad_raw = _collect_review_findings(ctx, results)
+
+    assert "bad-model" in errored
+    assert len(triad_raw) == 1
+    assert triad_raw[0]["model_id"] == "bad-model"
+    assert triad_raw[0]["status"] == "error"
+    assert triad_raw[0]["parsed_items"] == []
+
+
+# ── Test 3: degraded participation recorded ───────────────────────────────────
+
+def test_partial_participation_sets_degraded_reasons(tmp_path):
+    """1 of 3 models ERROR while quorum met → ctx._review_degraded_reasons populated."""
+    from ouroboros.tools.review import _collect_review_findings
+
+    ctx = _make_ctx(tmp_path)
+    ok_items = json.dumps([
+        {"item": "bible_compliance", "verdict": "PASS", "severity": "critical", "reason": "OK"}
+    ])
+    results = [
+        _model_result("model-1", ok_items),
+        _model_result("model-2", ok_items),
+        _model_result("model-3", "Error: timeout", verdict="ERROR"),
+    ]
+    _, _, errored, triad_raw = _collect_review_findings(ctx, results)
+
+    statuses = [r["status"] for r in triad_raw]
+    assert "error" in statuses, "Should have an error actor record"
+    assert "responded" in statuses, "Should have responded actor records"
+
+    # Degraded reasons should be populated on ctx
+    degraded = getattr(ctx, "_review_degraded_reasons", [])
+    assert len(degraded) >= 1
+    assert any("DEGRADED" in r for r in degraded)
+
+
+def test_all_three_models_ok_no_degraded(tmp_path):
+    """When all 3 models respond successfully, no degraded reasons."""
+    from ouroboros.tools.review import _collect_review_findings
+
+    ctx = _make_ctx(tmp_path)
+    ok_items = json.dumps([
+        {"item": "bible_compliance", "verdict": "PASS", "severity": "critical", "reason": "OK"}
+    ])
+    results = [_model_result(f"m{i}", ok_items) for i in range(3)]
+    _, _, _, triad_raw = _collect_review_findings(ctx, results)
+
+    degraded = getattr(ctx, "_review_degraded_reasons", [])
+    assert len(degraded) == 0
+    assert all(r["status"] == "responded" for r in triad_raw)
+
+
+# ── Test 4: scope_raw_result populated ────────────────────────────────────────
+
+def test_scope_review_result_has_raw_text_and_model_id():
+    """ScopeReviewResult must carry raw_text, model_id, and status after LLM call."""
+    from ouroboros.tools.scope_review import ScopeReviewResult
+
+    result = ScopeReviewResult(
+        blocked=False,
+        raw_text='[{"item":"intent_alignment","verdict":"PASS","severity":"critical","reason":"OK"}]',
+        model_id="anthropic/claude-opus-4.6",
+        status="responded",
+        prompt_chars=5000,
+        tokens_in=1200,
+        tokens_out=300,
+        cost_usd=0.05,
+    )
+    assert result.raw_text
+    assert result.model_id
+    assert result.status == "responded"
+    assert result.tokens_in == 1200
+    assert result.cost_usd == 0.05
+
+
+# ── Test 5: budget_exceeded status on scope ───────────────────────────────────
+
+def test_scope_budget_exceeded_status():
+    """When scope review is skipped due to budget, status must be 'budget_exceeded'."""
+    from ouroboros.tools.scope_review import _handle_prompt_signals, _TouchedContextStatus
+
+    ctx_status = _TouchedContextStatus(status="budget_exceeded", token_count=800_001)
+    result = _handle_prompt_signals(None, ctx_status)
+
+    assert result is not None
+    assert result.blocked is False
+    assert result.status == "budget_exceeded"
+    assert result.model_id == ""  # populated by run_scope_review after return
+
+
+def test_scope_empty_context_status():
+    """Empty context must set status='empty' and block."""
+    from ouroboros.tools.scope_review import _handle_prompt_signals, _TouchedContextStatus
+
+    ctx_status = _TouchedContextStatus(status="empty")
+    result = _handle_prompt_signals(None, ctx_status)
+
+    assert result is not None
+    assert result.blocked is True
+    assert result.status == "empty"
+
+
+# ── Test 6: parse_failure on scope output ─────────────────────────────────────
+
+def test_scope_parse_failure_status():
+    """Unparseable scope LLM output must produce status='parse_failure' with raw_text preserved."""
+    from ouroboros.tools.scope_review import ScopeReviewResult
+
+    bad_raw = "Sorry, I cannot review this at this time."
+    result = ScopeReviewResult(
+        blocked=True,
+        block_message="⚠️ SCOPE_REVIEW_BLOCKED: Could not parse...",
+        status="parse_failure",
+        raw_text=bad_raw,
+        model_id="some-scope-model",
+        prompt_chars=10000,
+    )
+    assert result.status == "parse_failure"
+    assert result.raw_text == bad_raw
+    assert result.blocked is True
+
+
+# ── Test 7: save/load roundtrip ───────────────────────────────────────────────
+
+def test_commit_attempt_roundtrip_with_actor_records(tmp_path):
+    """triad_raw_results and scope_raw_result survive JSON serialization roundtrip."""
+    from ouroboros.review_state import CommitAttemptRecord, _commit_attempt_from_dict
+    import dataclasses
+
+    triad = [
+        {"model_id": "gpt-5.4", "status": "responded", "raw_text": '["pass"]',
+         "parsed_items": [{"item": "code_quality", "verdict": "PASS"}],
+         "tokens_in": 100, "tokens_out": 50, "cost_usd": 0.01},
+        {"model_id": "gemini-pro", "status": "parse_failure", "raw_text": "not json",
+         "parsed_items": [], "tokens_in": 80, "tokens_out": 20, "cost_usd": 0.005},
+    ]
+    scope = {
+        "model_id": "claude-opus-4.6",
+        "status": "responded",
+        "raw_text": '[{"item":"intent_alignment","verdict":"PASS"}]',
+        "prompt_chars": 3000,
+        "tokens_in": 500,
+        "tokens_out": 200,
+        "cost_usd": 0.03,
+        "critical_findings": [],
+        "advisory_findings": [],
+    }
+
+    record = CommitAttemptRecord(
+        ts="2026-04-16T10:00:00Z",
+        commit_message="test: observability",
+        status="blocked",
+        block_reason="critical_findings",
+        triad_raw_results=triad,
+        scope_raw_result=scope,
+    )
+
+    # Serialize to dict (as done by asdict for JSON persistence)
+    as_dict = dataclasses.asdict(record)
+    # Deserialize
+    restored = _commit_attempt_from_dict(as_dict)
+
+    assert len(restored.triad_raw_results) == 2
+    assert restored.triad_raw_results[0]["model_id"] == "gpt-5.4"
+    assert restored.triad_raw_results[0]["status"] == "responded"
+    assert restored.triad_raw_results[1]["status"] == "parse_failure"
+    assert restored.triad_raw_results[1]["raw_text"] == "not json"
+
+    assert restored.scope_raw_result["model_id"] == "claude-opus-4.6"
+    assert restored.scope_raw_result["status"] == "responded"
+    assert restored.scope_raw_result["tokens_in"] == 500
+
+
+def test_commit_attempt_roundtrip_empty_actor_fields(tmp_path):
+    """CommitAttemptRecord with no actor data roundtrips cleanly (backward compat)."""
+    from ouroboros.review_state import CommitAttemptRecord, _commit_attempt_from_dict
+    import dataclasses
+
+    record = CommitAttemptRecord(
+        ts="2026-04-16T10:00:00Z",
+        commit_message="old format record",
+        status="succeeded",
+    )
+    as_dict = dataclasses.asdict(record)
+    # Simulate old format — remove new keys
+    as_dict.pop("triad_raw_results", None)
+    as_dict.pop("scope_raw_result", None)
+
+    restored = _commit_attempt_from_dict(as_dict)
+    assert restored.triad_raw_results == []
+    assert restored.scope_raw_result == {}
+
+
+# ── Test 8: _collect_review_findings returns 4-tuple ─────────────────────────
+
+def test_collect_review_findings_returns_4_tuple(tmp_path):
+    """_collect_review_findings must return a 4-tuple (not 3)."""
+    from ouroboros.tools.review import _collect_review_findings
+
+    ctx = _make_ctx(tmp_path)
+    result = _collect_review_findings(ctx, [])
+    assert len(result) == 4, f"Expected 4-tuple, got {len(result)}-tuple"
+    critical_fails, advisory_warns, errored_models, triad_raw = result
+    assert isinstance(critical_fails, list)
+    assert isinstance(advisory_warns, list)
+    assert isinstance(errored_models, list)
+    assert isinstance(triad_raw, list)
+
+
+# ── Test 9: ctx._last_triad_raw_results reset per attempt ────────────────────
+
+def test_scope_history_entry_preserves_status_for_parse_failure():
+    """_scope_history_entry must preserve status='parse_failure' so it is
+    not misread as clean PASS on the retry path (empty findings != PASS)."""
+    from ouroboros.tools.parallel_review import _scope_history_entry
+    from ouroboros.tools.scope_review import ScopeReviewResult
+
+    # A parse_failure result has no findings (they couldn't be parsed)
+    # but must NOT be summarised as "(no findings)" — which would look like PASS
+    result = ScopeReviewResult(
+        blocked=True,
+        block_message="SCOPE_REVIEW_BLOCKED: parse failure",
+        critical_findings=[],
+        advisory_findings=[],
+        status="parse_failure",
+    )
+    entry = _scope_history_entry(result)
+    assert entry["status"] == "parse_failure", "status must be preserved in history entry"
+    assert entry["summary"] != "(no findings)", (
+        "parse_failure with no findings must NOT summarise as '(no findings)' — "
+        "that is indistinguishable from a clean PASS"
+    )
+    assert "parse_failure" in entry["summary"], "summary must expose the status signal"
+
+
+def test_scope_history_entry_budget_exceeded_summary():
+    """budget_exceeded status must appear in the summary even with no findings."""
+    from ouroboros.tools.parallel_review import _scope_history_entry
+    from ouroboros.tools.scope_review import ScopeReviewResult
+
+    result = ScopeReviewResult(
+        blocked=False,
+        block_message="",
+        critical_findings=[],
+        advisory_findings=[],
+        status="budget_exceeded",
+    )
+    entry = _scope_history_entry(result)
+    assert entry["status"] == "budget_exceeded"
+    assert "budget_exceeded" in entry["summary"]
+
+
+def test_scope_history_entry_clean_pass_keeps_no_findings_label():
+    """A genuine responded+no-findings result keeps '(no findings)' summary."""
+    from ouroboros.tools.parallel_review import _scope_history_entry
+    from ouroboros.tools.scope_review import ScopeReviewResult
+
+    result = ScopeReviewResult(
+        blocked=False,
+        block_message="",
+        critical_findings=[],
+        advisory_findings=[],
+        status="responded",
+    )
+    entry = _scope_history_entry(result)
+    assert entry["status"] == "responded"
+    assert entry["summary"] == "(no findings)"
+
+
+# ── Scope history round-label rendering (v4.32.0 epistemic-integrity fix) ────
+
+def test_scope_history_section_does_not_label_budget_exceeded_as_passed():
+    """The rendered history section must NOT show ``PASSED`` for a
+    ``status='budget_exceeded'`` entry even though ``blocked=False``.
+
+    Regression guard for obligation b039eaf4402b (v4.32.0): degraded states
+    (budget_exceeded, omitted, parse_failure) were previously rendered as
+    ``PASSED`` because the renderer derived the label purely from
+    ``blocked=False`` — indistinguishable from a genuine clean PASS.
+    """
+    from ouroboros.tools.scope_review import _build_scope_history_section
+
+    history = [{
+        "blocked": False,
+        "status": "budget_exceeded",
+        "summary": "(budget_exceeded)",
+        "critical_findings": [],
+        "advisory_findings": [],
+    }]
+    section = _build_scope_history_section(history)
+    # Extract just the "Round 1:" label line
+    round1_line = next(
+        (ln for ln in section.splitlines() if ln.startswith("Round 1:")),
+        "",
+    )
+    assert round1_line, "expected a 'Round 1:' label line"
+    assert "PASSED" not in round1_line, (
+        f"budget_exceeded must NOT be rendered as PASSED — got: {round1_line!r}"
+    )
+    assert "BUDGET_EXCEEDED" in round1_line, (
+        f"label must surface the status signal — got: {round1_line!r}"
+    )
+
+
+def test_scope_history_section_does_not_label_omitted_as_passed():
+    """The rendered history section must NOT show ``PASSED`` for a
+    ``status='omitted'`` sentinel entry."""
+    from ouroboros.tools.scope_review import _build_scope_history_section
+
+    history = [{
+        "blocked": False,
+        "status": "omitted",
+        "summary": "earlier scope-review round(s) omitted",
+        "critical_findings": [],
+        "advisory_findings": [],
+    }]
+    section = _build_scope_history_section(history)
+    round1_line = next(
+        (ln for ln in section.splitlines() if ln.startswith("Round 1:")),
+        "",
+    )
+    assert round1_line
+    assert "PASSED" not in round1_line, (
+        f"omitted must NOT be rendered as PASSED — got: {round1_line!r}"
+    )
+    assert "OMITTED" in round1_line
+
+
+def test_scope_history_section_does_not_label_parse_failure_as_passed():
+    """The rendered history section must NOT show ``PASSED`` for a
+    ``status='parse_failure'`` entry. Although the entry is marked
+    ``blocked=True`` by _scope_history_entry for parse_failure results,
+    the renderer must also guard against the degenerate case where
+    upstream code produced blocked=False + status=parse_failure."""
+    from ouroboros.tools.scope_review import _build_scope_history_section
+
+    # Degenerate-but-guarded case: blocked=False + status=parse_failure
+    history = [{
+        "blocked": False,
+        "status": "parse_failure",
+        "summary": "(parse_failure)",
+        "critical_findings": [],
+        "advisory_findings": [],
+    }]
+    section = _build_scope_history_section(history)
+    round1_line = next(
+        (ln for ln in section.splitlines() if ln.startswith("Round 1:")),
+        "",
+    )
+    assert round1_line
+    assert "PASSED" not in round1_line, (
+        f"parse_failure must NOT be rendered as PASSED — got: {round1_line!r}"
+    )
+    assert "PARSE_FAILURE" in round1_line
+
+
+def test_scope_history_section_labels_genuine_pass_as_passed():
+    """A genuine ``responded`` + ``blocked=False`` + no findings entry MUST
+    still render as ``PASSED`` so the reviewer can distinguish it from
+    degraded states."""
+    from ouroboros.tools.scope_review import _build_scope_history_section
+
+    history = [{
+        "blocked": False,
+        "status": "responded",
+        "summary": "(no findings)",
+        "critical_findings": [],
+        "advisory_findings": [],
+    }]
+    section = _build_scope_history_section(history)
+    round1_line = next(
+        (ln for ln in section.splitlines() if ln.startswith("Round 1:")),
+        "",
+    )
+    assert round1_line
+    assert "PASSED" in round1_line, (
+        f"genuine clean responded round must still render as PASSED — got: {round1_line!r}"
+    )
+
+
+def test_scope_history_section_labels_blocked_as_blocked():
+    """A ``blocked=True`` entry must render as ``BLOCKED`` regardless of status."""
+    from ouroboros.tools.scope_review import _build_scope_history_section
+
+    history = [{
+        "blocked": True,
+        "status": "responded",
+        "summary": "Critical: some_item",
+        "critical_findings": [{"item": "some_item"}],
+        "advisory_findings": [],
+    }]
+    section = _build_scope_history_section(history)
+    round1_line = next(
+        (ln for ln in section.splitlines() if ln.startswith("Round 1:")),
+        "",
+    )
+    assert round1_line
+    assert "BLOCKED" in round1_line
+    assert "PASSED" not in round1_line
+
+
+def test_scope_round_label_helper_all_paths():
+    """Direct unit coverage of _scope_round_label for all three branches."""
+    from ouroboros.tools.scope_review import _scope_round_label
+
+    # blocked=True wins over any status
+    assert _scope_round_label({"blocked": True, "status": "responded"}) == "BLOCKED"
+    assert _scope_round_label({"blocked": True, "status": "budget_exceeded"}) == "BLOCKED"
+    # non-responded status surfaces as upper-cased label
+    assert _scope_round_label({"blocked": False, "status": "budget_exceeded"}) == "BUDGET_EXCEEDED"
+    assert _scope_round_label({"blocked": False, "status": "omitted"}) == "OMITTED"
+    assert _scope_round_label({"blocked": False, "status": "parse_failure"}) == "PARSE_FAILURE"
+    assert _scope_round_label({"blocked": False, "status": "error"}) == "ERROR"
+    # responded + no block = PASSED
+    assert _scope_round_label({"blocked": False, "status": "responded"}) == "PASSED"
+    # missing status defaults to responded → PASSED
+    assert _scope_round_label({"blocked": False}) == "PASSED"
+    # empty status string defaults to responded → PASSED
+    assert _scope_round_label({"blocked": False, "status": ""}) == "PASSED"
+
+
+def test_last_triad_raw_results_reset_at_start_of_run_unified_review(tmp_path):
+    """ctx._last_triad_raw_results must be reset at start of each _run_unified_review call.
+
+    We verify by pre-seeding stale data then running a review that completes
+    with mocked LLM output (no findings). The stale data from the previous
+    attempt must be gone — replaced by fresh actor records from this run.
+    """
+    from ouroboros.tools import review as review_mod
+
+    ctx = _make_ctx(tmp_path)
+    # Pre-seed stale data simulating a prior attempt
+    ctx._last_triad_raw_results = [
+        {"model_id": "stale-model", "status": "responded", "raw_text": "stale data",
+         "parsed_items": [], "tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0}
+    ]
+
+    # Return a staged diff so function proceeds past the empty-diff guard
+    pass_items = json.dumps([
+        {"item": "bible_compliance", "verdict": "PASS", "severity": "critical", "reason": "OK"}
+    ])
+    mock_review_output = json.dumps({
+        "results": [
+            {"model": "fresh-model", "text": pass_items, "verdict": "PASS",
+             "tokens_in": 10, "tokens_out": 5, "cost_estimate": 0.001}
+        ]
+    })
+
+    with patch.object(review_mod, "run_cmd", return_value="some diff content"), \
+         patch.object(review_mod, "_handle_multi_model_review", return_value=mock_review_output), \
+         patch.object(review_mod, "_load_checklist_section", return_value="## checklist"), \
+         patch.object(review_mod, "_preflight_check", return_value=None), \
+         patch.object(review_mod, "_load_dev_guide_text", return_value=""), \
+         patch.object(review_mod, "_load_architecture_text", return_value=""), \
+         patch("ouroboros.tools.review_helpers.build_touched_file_pack",
+               return_value=("(files)", [])):
+        review_mod._run_unified_review(ctx, "test commit")
+
+    # After the run, stale model_id must not appear
+    model_ids = [r["model_id"] for r in ctx._last_triad_raw_results]
+    assert "stale-model" not in model_ids, (
+        "Stale triad_raw_results from prior attempt must be cleared at function entry"
+    )
+    assert "fresh-model" in model_ids, "Fresh actor record from this run must be present"
+
+
+# ── Test 10: parse_failure actors do NOT count toward quorum ──────────────────
+
+def test_parse_failure_does_not_count_toward_quorum(tmp_path):
+    """1 responded + 1 parse_failure + 1 error = quorum failure (only 1 usable reviewer).
+
+    Before this fix, errored_models only tracked transport errors so parse_failure
+    was counted as a successful quorum participant, silently undermining epistemic
+    integrity.
+    """
+    from ouroboros.tools import review as review_mod
+    from ouroboros.tools.review import _collect_review_findings
+
+    ctx = _make_ctx(tmp_path)
+
+    pass_items = json.dumps([
+        {"item": "bible_compliance", "verdict": "PASS", "severity": "critical", "reason": "OK"}
+    ])
+    results = [
+        _model_result("model-responded", pass_items),        # 1 good reviewer
+        _model_result("model-parse-fail", "not valid json"), # parse_failure — unusable
+        _model_result("model-error", "", verdict="ERROR"),   # transport error — unusable
+    ]
+    critical_fails, advisory_warns, errored_models, triad_raw = _collect_review_findings(ctx, results)
+
+    # Store on ctx as _run_unified_review would
+    ctx._last_triad_raw_results = triad_raw
+
+    # Derive quorum the new way: count only responded actors
+    successful_reviewers = sum(1 for r in triad_raw if r.get("status") == "responded")
+    assert successful_reviewers == 1, (
+        f"Only 1 actor responded; parse_failure and error must not count. "
+        f"Got successful_reviewers={successful_reviewers}"
+    )
+    # Confirm statuses are distinct
+    statuses = {r["model_id"]: r["status"] for r in triad_raw}
+    assert statuses["model-responded"] == "responded"
+    assert statuses["model-parse-fail"] == "parse_failure"
+    assert statuses["model-error"] == "error"
+
+
+def test_two_responded_plus_one_parse_failure_meets_quorum(tmp_path):
+    """2 responded + 1 parse_failure = quorum met (2 usable reviewers, DEGRADED recorded).
+
+    Also verifies that parse_failure does NOT appear in critical_fails — it must only
+    produce an advisory warning so the commit is not blocked when quorum is met.
+    """
+    from ouroboros.tools.review import _collect_review_findings
+
+    ctx = _make_ctx(tmp_path)
+    ctx._review_degraded_reasons = []
+
+    pass_items = json.dumps([
+        {"item": "bible_compliance", "verdict": "PASS", "severity": "critical", "reason": "OK"}
+    ])
+    results = [
+        _model_result("model-a", pass_items),
+        _model_result("model-b", pass_items),
+        _model_result("model-c", "not valid json"),  # parse_failure
+    ]
+    critical_fails, advisory_warns, errored_models, triad_raw = _collect_review_findings(ctx, results)
+
+    successful = sum(1 for r in triad_raw if r.get("status") == "responded")
+    assert successful == 2, "2 responded reviewers should meet the quorum threshold of 2"
+    # DEGRADED must be recorded because 1 actor failed
+    assert ctx._review_degraded_reasons, "parse_failure with quorum met must still record DEGRADED"
+    # parse_failure must NOT be in critical_fails — it should only be an advisory note
+    parse_fail_in_critical = any("parse" in f.lower() or "Could not parse" in f for f in critical_fails)
+    assert not parse_fail_in_critical, (
+        f"parse_failure must not appear in critical_fails when quorum is met. "
+        f"critical_fails={critical_fails}"
+    )
+    # parse_failure must appear as an advisory warning
+    parse_fail_in_advisory = any("parse_failure" in w or "Could not parse" in w for w in advisory_warns)
+    assert parse_fail_in_advisory, (
+        f"parse_failure must produce an advisory warning. advisory_warns={advisory_warns}"
+    )
+
+
+# ── Test 10a: stale forensic fields cleared at commit entrypoint ─────────────
+
+def test_stale_actor_evidence_cleared_at_commit_start(tmp_path):
+    """ctx._last_triad_raw_results, _last_scope_raw_result, _review_degraded_reasons
+    must be reset at the start of _repo_commit_push / _repo_write_commit so that
+    stale data from a prior attempt never bleeds into early-exit paths (e.g.
+    fingerprint failure before run_parallel_review runs).
+    """
+    from ouroboros.tools import git as git_mod
+
+    ctx = _make_ctx(tmp_path)
+    # Pre-seed stale forensic data from a previous attempt
+    ctx._last_triad_raw_results = [
+        {"model_id": "stale-model", "status": "responded", "raw_text": "old text",
+         "parsed_items": [], "tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0}
+    ]
+    ctx._last_scope_raw_result = {"model_id": "stale-scope", "status": "responded", "raw_text": "old"}
+    ctx._review_degraded_reasons = ["stale-degraded"]
+    ctx._last_triad_models = ["stale-triad-model"]
+    ctx._last_scope_model = "stale-scope-model"
+    ctx._review_advisory = []
+    ctx.last_push_succeeded = False
+
+    # Trigger the commit entrypoint and let it fail early (empty commit_message)
+    result = git_mod._repo_commit_push(ctx, commit_message="")
+
+    # Regardless of the outcome, the stale data must have been cleared
+    assert ctx._last_triad_raw_results == [], (
+        f"_last_triad_raw_results must be reset at commit start; got {ctx._last_triad_raw_results}"
+    )
+    assert ctx._last_scope_raw_result == {}, (
+        f"_last_scope_raw_result must be reset at commit start; got {ctx._last_scope_raw_result}"
+    )
+    assert ctx._review_degraded_reasons == [], (
+        f"_review_degraded_reasons must be reset at commit start; got {ctx._review_degraded_reasons}"
+    )
+    assert "ERROR" in result or "error" in result.lower()  # empty message triggers error
+
+
+# ── Test 10b: scope budget_exceeded has non-zero prompt_chars ────────────────
+
+def test_scope_budget_exceeded_has_prompt_chars(tmp_path):
+    """budget_exceeded ScopeReviewResult must carry prompt_chars > 0.
+
+    Before this fix, _handle_prompt_signals set prompt_chars=0 on the budget_exceeded
+    path, losing the only forensic fact about why scope review was skipped.
+    """
+    from ouroboros.tools.scope_review import ScopeReviewResult, _handle_prompt_signals, _TouchedContextStatus
+
+    token_count = 800_000  # exceeds the 750K gate
+    context_status = _TouchedContextStatus(status="budget_exceeded", token_count=token_count)
+    result = _handle_prompt_signals(None, context_status)
+
+    assert result is not None
+    assert result.status == "budget_exceeded"
+    assert result.prompt_chars > 0, (
+        f"prompt_chars must be non-zero on budget_exceeded path; got {result.prompt_chars}"
+    )
+    assert result.prompt_chars == token_count * 4, (
+        f"prompt_chars should be token_count*4={token_count*4}; got {result.prompt_chars}"
+    )
+
+
+def test_scope_empty_response_distinct_from_error(tmp_path):
+    """Empty LLM response must use status='empty_response', not status='error'.
+
+    Before this fix, an empty model response was indistinguishable from a transport
+    failure (both used status='error'), weakening epistemic integrity.
+    """
+    from ouroboros.tools.scope_review import run_scope_review
+    from unittest.mock import patch
+
+    ctx = _make_ctx(tmp_path)
+    ctx._scope_review_history = {}
+    ctx._last_scope_raw_result = {}
+
+    with patch("ouroboros.tools.scope_review._build_scope_prompt",
+               return_value=("some prompt content", None)), \
+         patch("ouroboros.tools.scope_review._call_scope_llm",
+               return_value=("", {"prompt_tokens": 100, "completion_tokens": 0, "cost": 0.001}, None)), \
+         patch("ouroboros.tools.scope_review._get_scope_model", return_value="test-model"):
+        result = run_scope_review(ctx, "test commit")
+
+    assert result.status == "empty_response", (
+        f"Empty LLM response must use status='empty_response', got {result.status!r}. "
+        "This is distinct from transport error (status='error')."
+    )
+    assert result.blocked is True, "Empty response must still block the commit"
+
+
+# ── Test 11: scope_raw_result has parsed_items for shape parity ───────────────
+
+def test_scope_raw_result_has_parsed_items(tmp_path):
+    """scope_raw_result must include parsed_items (critical + advisory findings combined)
+    to match the shape of triad actor records.
+
+    Tests the dict-construction block in parallel_review.py directly — no mocking of
+    internal functions that may not exist as module attributes.
+    """
+    from ouroboros.tools.scope_review import ScopeReviewResult
+
+    critical_item = {"verdict": "FAIL", "severity": "critical", "item": "code_quality",
+                     "reason": "bug found"}
+    advisory_item = {"verdict": "FAIL", "severity": "advisory", "item": "context_building",
+                     "reason": "minor note"}
+
+    scope_result = ScopeReviewResult(
+        blocked=False,
+        block_message="",
+        status="responded",
+        model_id="claude-opus",
+        raw_text="some scope output",
+        prompt_chars=1000,
+        tokens_in=200,
+        tokens_out=50,
+        cost_usd=0.01,
+        critical_findings=[critical_item],
+        advisory_findings=[advisory_item],
+    )
+
+    # Replicate the dict-construction logic from parallel_review.py verbatim
+    scope_raw = {
+        "model_id": getattr(scope_result, "model_id", "") or "claude-opus",
+        "status": getattr(scope_result, "status", "responded"),
+        "raw_text": getattr(scope_result, "raw_text", ""),
+        "prompt_chars": getattr(scope_result, "prompt_chars", 0),
+        "tokens_in": getattr(scope_result, "tokens_in", 0),
+        "tokens_out": getattr(scope_result, "tokens_out", 0),
+        "cost_usd": getattr(scope_result, "cost_usd", 0.0),
+        "parsed_items": list(
+            (scope_result.critical_findings or []) + (scope_result.advisory_findings or [])
+        ),
+        "critical_findings": list(scope_result.critical_findings or []),
+        "advisory_findings": list(scope_result.advisory_findings or []),
+    }
+
+    assert "parsed_items" in scope_raw, "scope_raw_result must have parsed_items for shape parity"
+    assert len(scope_raw["parsed_items"]) == 2, (
+        f"parsed_items should contain critical+advisory findings; got {scope_raw['parsed_items']}"
+    )
+    assert scope_raw["parsed_items"][0]["item"] == "code_quality"
+    assert scope_raw["parsed_items"][1]["item"] == "context_building"
+    # Verify triad-actor shape parity: same keys as triad records
+    triad_shape_keys = {"model_id", "status", "raw_text", "parsed_items",
+                        "tokens_in", "tokens_out", "cost_usd"}
+    assert triad_shape_keys.issubset(scope_raw.keys()), (
+        f"scope_raw_result missing triad-parity keys: {triad_shape_keys - scope_raw.keys()}"
+    )

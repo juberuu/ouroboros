@@ -1,0 +1,209 @@
+"""Test that task_done event is NOT written directly to events.jsonl by emit_task_results.
+
+The audit trail for task_done must go through EVENT_Q → supervisor _handle_task_done,
+ensuring that send_message reaches the UI before task_done (causal ordering).
+"""
+
+import pathlib
+import tempfile
+import json
+
+import pytest
+
+
+def _make_fake_env(drive_root: pathlib.Path):
+    """Create a minimal mock env for emit_task_results."""
+
+    class FakeMemory:
+        def load_identity(self):
+            return "test identity"
+
+    class FakeCtx:
+        pending_restart_reason = None
+
+    class FakeEnv:
+        def __init__(self, root):
+            self.drive_root = root
+
+        def drive_path(self, sub):
+            p = self.drive_root / sub
+            p.mkdir(parents=True, exist_ok=True)
+            return p
+
+    return FakeEnv(drive_root), FakeMemory(), FakeCtx()
+
+
+def _make_fake_llm():
+    class FakeLLM:
+        def chat(self, **kwargs):
+            return {"content": "summary"}, {"cost": 0}
+    return FakeLLM()
+
+
+class TestTaskDoneOrdering:
+    """Verify emit_task_results does not write task_done directly to events.jsonl."""
+
+    def test_emit_task_results_does_not_write_task_done_to_events_jsonl(self, tmp_path):
+        drive_root = tmp_path / "data"
+        drive_root.mkdir()
+        logs = drive_root / "logs"
+        logs.mkdir()
+        events_file = logs / "events.jsonl"
+        (drive_root / "memory").mkdir()
+        (drive_root / "task_results").mkdir()
+
+        env, memory, ctx = _make_fake_env(drive_root)
+        llm = _make_fake_llm()
+        pending_events = []
+
+        task = {"id": "test123", "type": "task", "chat_id": 1, "text": "hello"}
+        usage = {"cost": 0.01, "rounds": 3, "prompt_tokens": 100, "completion_tokens": 50}
+        llm_trace = {"tool_calls": [], "reasoning_notes": []}
+
+        # Monkeypatch consolidation to no-op (avoid LLM calls)
+        import ouroboros.agent_task_pipeline as atp
+        orig_chat_consol = atp._run_chat_consolidation
+        orig_scratchpad_consol = atp._run_scratchpad_consolidation
+        orig_post_task = atp._run_post_task_processing_async
+        atp._run_chat_consolidation = lambda *a, **kw: None
+        atp._run_scratchpad_consolidation = lambda *a, **kw: None
+        atp._run_post_task_processing_async = lambda *a, **kw: None
+
+        try:
+            import time
+            atp.emit_task_results(
+                env=env, memory=memory, llm=llm,
+                pending_events=pending_events,
+                task=task, text="Reply text",
+                usage=usage, llm_trace=llm_trace,
+                start_time=time.time() - 1.0,
+                drive_logs=logs,
+                ctx=ctx,
+            )
+        finally:
+            atp._run_chat_consolidation = orig_chat_consol
+            atp._run_scratchpad_consolidation = orig_scratchpad_consol
+            atp._run_post_task_processing_async = orig_post_task
+
+        # Check events.jsonl: should have task_eval but NOT task_done
+        if events_file.exists():
+            lines = [json.loads(line) for line in events_file.read_text().strip().split("\n") if line.strip()]
+            event_types = [e["type"] for e in lines]
+            assert "task_done" not in event_types, (
+                "task_done should NOT be written to events.jsonl by emit_task_results; "
+                "it must go through EVENT_Q → supervisor _handle_task_done"
+            )
+            # task_eval is still expected to be written directly
+            assert "task_eval" in event_types
+
+    def test_pending_events_ordering(self, tmp_path):
+        """Verify send_message comes before task_done in pending_events."""
+        drive_root = tmp_path / "data"
+        drive_root.mkdir()
+        logs = drive_root / "logs"
+        logs.mkdir()
+        (drive_root / "memory").mkdir()
+        (drive_root / "task_results").mkdir()
+
+        env, memory, ctx = _make_fake_env(drive_root)
+        llm = _make_fake_llm()
+        pending_events = []
+
+        task = {"id": "order_test", "type": "task", "chat_id": 1, "text": "hi"}
+        usage = {"cost": 0.02, "rounds": 1, "prompt_tokens": 50, "completion_tokens": 20}
+        llm_trace = {"tool_calls": [], "reasoning_notes": []}
+
+        import ouroboros.agent_task_pipeline as atp
+        orig_chat_consol = atp._run_chat_consolidation
+        orig_scratchpad_consol = atp._run_scratchpad_consolidation
+        orig_post_task = atp._run_post_task_processing_async
+        atp._run_chat_consolidation = lambda *a, **kw: None
+        atp._run_scratchpad_consolidation = lambda *a, **kw: None
+        atp._run_post_task_processing_async = lambda *a, **kw: None
+
+        try:
+            import time
+            atp.emit_task_results(
+                env=env, memory=memory, llm=llm,
+                pending_events=pending_events,
+                task=task, text="Order test reply",
+                usage=usage, llm_trace=llm_trace,
+                start_time=time.time() - 0.5,
+                drive_logs=logs,
+                ctx=ctx,
+            )
+        finally:
+            atp._run_chat_consolidation = orig_chat_consol
+            atp._run_scratchpad_consolidation = orig_scratchpad_consol
+            atp._run_post_task_processing_async = orig_post_task
+
+        event_types = [e["type"] for e in pending_events]
+        send_idx = event_types.index("send_message")
+        done_idx = event_types.index("task_done")
+        assert send_idx < done_idx, (
+            f"send_message (idx={send_idx}) must come before task_done (idx={done_idx}) "
+            f"in pending_events to ensure causal ordering at the UI"
+        )
+
+
+class TestSupervisorTaskDoneAuditTrail:
+    """Verify _handle_task_done writes to events.jsonl."""
+
+    def test_handle_task_done_writes_events_jsonl(self, tmp_path):
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+        events_file = logs_dir / "events.jsonl"
+
+        # Minimal context mock
+        class MockCtx:
+            DRIVE_ROOT = tmp_path
+            RUNNING = {"test_td": {"task": {"type": "task"}}}
+            WORKERS = {}
+            PENDING = []
+
+            def persist_queue_snapshot(self, reason=""):
+                pass
+
+            class bridge:
+                @staticmethod
+                def push_log(data):
+                    pass
+
+            def sort_pending(self):
+                pass
+
+            def load_state(self):
+                return {}
+
+            def save_state(self, st):
+                pass
+
+            def append_jsonl(self, path, data):
+                from ouroboros.utils import append_jsonl
+                append_jsonl(path, data)
+
+        from supervisor.events import _handle_task_done
+        evt = {
+            "type": "task_done",
+            "task_id": "test_td",
+            "task_type": "task",
+            "cost_usd": 0.05,
+            "total_rounds": 5,
+            "prompt_tokens": 200,
+            "completion_tokens": 80,
+            "ts": "2026-04-02T12:00:00Z",
+        }
+        ctx = MockCtx()
+        # Need task_results dir for the fallback write
+        (tmp_path / "task_results").mkdir()
+
+        _handle_task_done(evt, ctx)
+
+        assert events_file.exists(), "events.jsonl should be created by _handle_task_done"
+        lines = [json.loads(line) for line in events_file.read_text().strip().split("\n") if line.strip()]
+        task_done_entries = [e for e in lines if e["type"] == "task_done"]
+        assert len(task_done_entries) == 1
+        entry = task_done_entries[0]
+        assert entry["task_id"] == "test_td"
+        assert entry["cost_usd"] == 0.05
+        assert entry["total_rounds"] == 5

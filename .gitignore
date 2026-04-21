@@ -1,0 +1,47 @@
+# Secrets
+.env
+.env.*
+*.key
+*.pem
+
+# IDE
+.cursor/
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyinstaller-cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Coverage
+.coverage
+htmlcov/
+
+# Build artifacts
+dist/
+build/
+*.dmg
+python-standalone/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Release helpers (not tracked)
+.create_release.py
+.release_notes.md
+
+# Test artifacts
+<MagicMock*
+.tmp-data-*/
