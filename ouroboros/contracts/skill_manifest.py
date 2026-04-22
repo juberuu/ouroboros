@@ -343,17 +343,63 @@ def _parse_minimal_yaml(text: str) -> Dict[str, Any]:
                 (ln for ln in block_lines if ln.strip()),
                 "",
             )
-            if first_non_empty.lstrip().startswith("- "):
+            first_stripped = first_non_empty.lstrip()
+            if first_stripped.startswith("- "):
                 result[key] = _parse_block_sequence(block_lines)
+            elif first_stripped.startswith("{") or first_stripped.startswith("["):
+                # YAML flow block following a bare key (common in
+                # OpenClaw-format manifests where ``metadata:`` opens a
+                # multi-line JSON object). Try ``json.loads``; fall
+                # back to raw text so the rest of the manifest still
+                # parses.
+                blob = "\n".join(ln for ln in block_lines if ln.strip())
+                try:
+                    result[key] = json.loads(blob)
+                except Exception:
+                    result[key] = blob
             else:
                 result[key] = _parse_block_mapping(block_lines)
             continue
         if rest.startswith("[") and rest.endswith("]"):
             result[key] = _parse_inline_list(rest)
+        elif rest.startswith("{") or rest.startswith("["):
+            # YAML flow syntax (`{...}` / `[...]` possibly spanning
+            # multiple lines, as used by OpenClaw-format ``metadata``).
+            # We greedily consume subsequent lines until the bracket
+            # balance returns to zero and then try ``json.loads`` — if
+            # that fails the value stays as a raw string so the field
+            # still round-trips without breaking the whole manifest.
+            collected = [rest]
+            depth = _bracket_depth(rest)
+            j = i + 1
+            while depth > 0 and j < len(lines):
+                collected.append(lines[j])
+                depth += _bracket_depth(lines[j])
+                j += 1
+            blob = "\n".join(collected)
+            try:
+                result[key] = json.loads(blob)
+            except Exception:
+                result[key] = blob
+            i = j
+            continue
         else:
             result[key] = _coerce_scalar(rest)
         i += 1
     return result
+
+
+def _bracket_depth(text: str) -> int:
+    """Rough bracket/brace depth change — ignoring strings is fine for
+    skill manifests since the YAML flow blocks in OpenClaw format
+    don't contain unescaped quotes that would mess up the count."""
+    depth = 0
+    for ch in text:
+        if ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+    return depth
 
 
 def _collect_block(lines: List[str], start: int) -> Tuple[List[str], int]:

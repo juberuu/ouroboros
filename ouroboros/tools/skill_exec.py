@@ -399,18 +399,26 @@ def _skill_tool_preflight(
 ) -> Optional[str]:
     """Return an error string when the skill surface is unavailable.
 
-    The skill tools are only meaningful when ``OUROBOROS_SKILLS_REPO_PATH``
-    is configured. We surface a gentle message rather than crashing so
-    the agent knows why the surface is empty.
+    The tools work whenever ANY skill is discoverable — that's either
+    the bundled ``repo/skills/`` reference set or the user's configured
+    ``OUROBOROS_SKILLS_REPO_PATH`` checkout. Only when both are empty
+    do we surface the "point at a checkout" hint.
     """
     repo_path = get_skills_repo_path()
-    if not repo_path:
-        return (
-            "⚠️ SKILLS_UNAVAILABLE: OUROBOROS_SKILLS_REPO_PATH is not "
-            "configured. Point it at a local checkout in Settings → "
-            "Behavior → External Skills Repo first."
-        )
-    return None
+    if repo_path:
+        return None
+    # No external path — fall back to checking whether the bundled
+    # reference directory is present and non-empty.
+    from ouroboros.skill_loader import _bundled_skills_dir
+    bundled = _bundled_skills_dir()
+    if bundled is not None and any(bundled.iterdir()):
+        return None
+    return (
+        "⚠️ SKILLS_UNAVAILABLE: No skills are discoverable. Point "
+        "OUROBOROS_SKILLS_REPO_PATH at a local checkout in Settings → "
+        "Behavior → External Skills Repo, or ensure the bundled "
+        "skills directory ships with the build."
+    )
 
 
 def _handle_list_skills(ctx: ToolContext, **_kwargs: Any) -> str:
