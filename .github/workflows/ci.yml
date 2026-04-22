@@ -1,0 +1,170 @@
+# Ouroboros CI — Three-tier cross-platform testing and release pipeline
+#
+# Tier 1: Every push to ouroboros (code paths) → Ubuntu-only tests (~1 min)
+# Tier 2: Push to ouroboros-stable / manual / tag → Full 3-OS matrix (~5 min)
+# Tier 3: Tag v* → Full matrix + build artifacts + GitHub Release (~15 min)
+
+name: CI
+
+# Two separate push triggers: branches have path filters, tags do not.
+# This ensures tag pushes always fire (even if only VERSION/README changed).
+on:
+  push:
+    branches: [ouroboros, ouroboros-stable]
+    paths:
+      - 'ouroboros/**'
+      - 'supervisor/**'
+      - 'server.py'
+      - 'tests/**'
+      - 'web/**'
+      - 'requirements.txt'
+      - 'pyproject.toml'
+      - '.github/workflows/**'
+      - 'build.sh'
+      - 'build_linux.sh'
+      - 'build_windows.ps1'
+      - 'Dockerfile'
+      - 'scripts/**'
+      - 'VERSION'
+      - 'README.md'
+      - 'launcher.py'
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+# Note: GitHub Actions evaluates `branches` + `paths` together but `tags`
+# separately — a tag push matching `v*` will trigger regardless of paths.
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────
+  # Tier 1: Quick tests on Ubuntu (every push to ouroboros)
+  # ──────────────────────────────────────────────────────────────────
+  quick-test:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/ouroboros'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest
+      - name: Run tests
+        run: python -m pytest tests/ -q --tb=short
+
+  # ──────────────────────────────────────────────────────────────────
+  # Tier 2: Full matrix (stable branch, manual, or tag push)
+  # ──────────────────────────────────────────────────────────────────
+  full-test:
+    if: |
+      github.ref == 'refs/heads/ouroboros-stable'
+      || github.event_name == 'workflow_dispatch'
+      || startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest
+      - name: Run tests
+        run: python -m pytest tests/ -q --tb=short
+
+  # ──────────────────────────────────────────────────────────────────
+  # Tier 3: Build & Release (tag push only)
+  # ──────────────────────────────────────────────────────────────────
+  build:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: full-test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            artifact: dmg
+          - os: ubuntu-latest
+            artifact: tar.gz
+          - os: windows-latest
+            artifact: zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      # —— Download embedded Python interpreter ——
+      - name: Download python-standalone (macOS/Linux)
+        if: matrix.os != 'windows-latest'
+        run: bash scripts/download_python_standalone.sh
+
+      - name: Download python-standalone (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: .\scripts\download_python_standalone.ps1
+
+      # —— macOS build ——
+      - name: Build macOS app
+        if: matrix.os == 'macos-latest'
+        run: OUROBOROS_SIGN=0 bash build.sh
+
+      # —— Linux build ——
+      - name: Build Linux binary
+        if: matrix.os == 'ubuntu-latest'
+        run: bash build_linux.sh
+
+      # —— Windows build ——
+      - name: Build Windows executable
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: .\build_windows.ps1
+
+      # —— Upload artifacts ——
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ouroboros-${{ matrix.os }}
+          path: dist/Ouroboros-*
+          retention-days: 30
+
+  # ──────────────────────────────────────────────────────────────────
+  # Release: Create GitHub Release with all artifacts
+  # ──────────────────────────────────────────────────────────────────
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts/
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-artifacts/*
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') }}
