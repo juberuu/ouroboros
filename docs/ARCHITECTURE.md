@@ -1,4 +1,4 @@
-# Ouroboros v4.49.0 — Architecture & Reference
+# Ouroboros v4.50.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -1503,7 +1503,7 @@ Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent acce
 | OUROBOROS_WEBSEARCH_MODEL | gpt-5.2 | Official OpenAI Responses model for `web_search` when `OPENAI_BASE_URL` is empty |
 | OUROBOROS_REVIEW_MODELS | openai/gpt-5.4,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.7 | Comma-separated OpenRouter model IDs for pre-commit review (min 2 for quorum) |
 | OUROBOROS_REVIEW_ENFORCEMENT | advisory | Pre-commit review enforcement: `advisory` or `blocking` |
-| OUROBOROS_RUNTIME_MODE | advanced | Three-layer refactor axis: `light`, `advanced`, or `pro`. Orthogonal to `OUROBOROS_REVIEW_ENFORCEMENT`. Clamped via `normalize_runtime_mode` on both save and read paths. Phase 3 wires `light` to block `skill_exec` entirely; the per-layer self-modification gating arrives in Phase 6. |
+| OUROBOROS_RUNTIME_MODE | advanced | Three-layer refactor axis: `light`, `advanced`, or `pro`. Orthogonal to `OUROBOROS_REVIEW_ENFORCEMENT`. Clamped via `normalize_runtime_mode` on both save and read paths. Phase 3 wires `light` to block `skill_exec` entirely; Phase 6 extends `light` to blanket-block every repo-mutation tool at the `ToolRegistry.execute` gate plus pattern-matched `run_shell` mutation commands. `advanced` keeps the existing hardcoded safety-critical sandbox. `pro` is accepted as a forward-compatible value but currently behaves identically to `advanced` at the enforcement gate — a consistent pro-mode core-patch lane requires plumbing `runtime_mode` through the per-handler checks in `git.py` + the `claude_code_edit` post-execution revert; that work is deferred beyond Phase 6. Core-touching edits today stay on the operator-driven `git_pr.py` workflow. |
 | OUROBOROS_SKILLS_REPO_PATH | "" | Local checkout path for the external skills/extensions repo. Consumed by `ouroboros.skill_loader.discover_skills` (Phase 3); accepts absolute paths or `~`-prefixed paths; `get_skills_repo_path` expands `~` at read time. Ouroboros never clones/pulls this directory. |
 | OUROBOROS_SCOPE_REVIEW_MODEL | anthropic/claude-opus-4.6 | Single model for the blocking scope reviewer |
 | OUROBOROS_EFFORT_TASK | medium | Reasoning effort for task/chat: none, low, medium, high |

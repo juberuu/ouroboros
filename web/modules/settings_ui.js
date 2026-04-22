@@ -282,9 +282,9 @@ export function renderSettingsPage() {
                         <h3>Runtime Mode</h3>
                         <div class="settings-section-copy">
                             Separate axis from Review Enforcement. Controls how far Ouroboros is allowed to self-modify.
-                            <code>Light</code> disables repo self-modification (Phase 3+).
-                            <code>Advanced</code> keeps the current self-modifying evolutionary layer (default).
-                            <code>Pro</code> additionally enables the core-patch lane (Phase 6+).
+                            <code>Light</code> blanket-blocks every repo-mutation tool (<code>repo_write</code>, <code>skill_exec</code>, <code>run_shell</code> mutation patterns, …).
+                            <code>Advanced</code> is the default — self-modify the evolutionary layer; safety-critical files stay protected by the hardcoded sandbox.
+                            <code>Pro</code> is accepted as a forward-compatible value but currently behaves identically to Advanced; the core-patch lane requires plumbing through additional enforcement layers (deferred past Phase 6).
                         </div>
                         <div class="settings-effort-card">
                             <label>Runtime Mode</label>

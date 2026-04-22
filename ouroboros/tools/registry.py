@@ -367,6 +367,50 @@ class ToolRegistry:
 
         # --- Hardcoded Sandbox Protections ---
 
+        # Phase 6 runtime-mode gating.
+        #
+        # Phase 6 ships the ``light`` blanket-block only; the ``pro``
+        # core-patch lane is deliberately DEFERRED. Rationale: the
+        # hardcoded safety-critical sandbox has multiple enforcement
+        # points (here in ``ToolRegistry.execute``, plus the
+        # per-handler checks inside ``ouroboros/tools/git.py`` and the
+        # post-``claude_code_edit`` revert in this same file). Cutting
+        # a consistent ``pro`` escape hatch requires plumbing the
+        # runtime-mode flag through every layer, which in turn would
+        # expand the reviewed patch surface well beyond what Phase 6
+        # can safely land. Until that's done, ``pro`` behaves like
+        # ``advanced`` at the enforcement point — the opt-in still
+        # exists for documentation intent and to let future phases
+        # relax the gate — and the real "land a core patch" path
+        # stays the operator-driven git_pr.py workflow.
+        try:
+            from ouroboros.config import get_runtime_mode as _get_runtime_mode
+            _runtime_mode = _get_runtime_mode()
+        except Exception:
+            _runtime_mode = "advanced"
+        _REPO_MUTATION_TOOLS = frozenset(
+            {
+                "repo_write",
+                "repo_write_commit",
+                "repo_commit",
+                "str_replace_editor",
+                "claude_code_edit",
+                "revert_commit",
+                "pull_from_remote",
+                "restore_to_head",
+                "rollback_to_target",
+                "promote_to_stable",
+            }
+        )
+        if _runtime_mode == "light" and name in _REPO_MUTATION_TOOLS:
+            return (
+                "⚠️ LIGHT_MODE_BLOCKED: runtime_mode=light disables "
+                "repo self-modification. Tool "
+                f"{name!r} would mutate the Ouroboros repository. "
+                "Switch to 'advanced' or 'pro' in Settings → Behavior "
+                "→ Runtime Mode to re-enable self-modification."
+            )
+
         # Block modification of safety-critical files via repo_write / repo_write_commit
         if name in ("repo_write_commit", "repo_write"):
             path = args.get("path", "")
@@ -391,6 +435,32 @@ class ToolRegistry:
                 cmd_lower = " ".join(str(x) for x in raw_cmd).lower()
             else:
                 cmd_lower = str(raw_cmd).lower()
+            # Phase 6 light-mode block for run_shell repo-mutation.
+            # The shell tool is not in ``_REPO_MUTATION_TOOLS`` because
+            # it's used for plenty of read-only invocations (``ls``,
+            # ``git status``, pytest, etc.); we instead pattern-match
+            # the actual command here. Mutation indicators include git
+            # write verbs, file redirection, and python one-liners with
+            # ``open(...,'w')``. This is NECESSARILY a best-effort
+            # filter — the authoritative gate is the review pipeline —
+            # but it blocks the common footguns so a user picking
+            # ``light`` sees consistent behaviour.
+            if _runtime_mode == "light":
+                _LIGHT_MUTATION_INDICATORS = (
+                    "git commit", "git add", "git push", "git rebase", "git reset",
+                    "git checkout", "git merge", "git pull", "git stash drop",
+                    "git revert", "git cherry-pick",
+                    " > ", " >> ", " | tee ",
+                    "rm -", "mkdir ", "mv ", "cp ", "touch ",
+                    "open(", ".write(", ".writelines(",
+                )
+                if any(ind in cmd_lower for ind in _LIGHT_MUTATION_INDICATORS):
+                    return (
+                        "⚠️ LIGHT_MODE_BLOCKED: runtime_mode=light refuses "
+                        "shell commands that look like repo mutations. "
+                        "Switch to 'advanced' or 'pro' in Settings → "
+                        "Behavior → Runtime Mode for write access."
+                    )
 
             # Block shell writes to safety-critical files
             for cf in _SAFETY_CRITICAL_LOWER:
