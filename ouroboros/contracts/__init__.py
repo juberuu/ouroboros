@@ -54,6 +54,12 @@ from ouroboros.contracts.schema_versions import (
     with_schema_version,
     read_schema_version,
 )
+from ouroboros.contracts.plugin_api import (
+    PluginAPI,
+    ExtensionRegistrationError,
+    FORBIDDEN_EXTENSION_SETTINGS,
+    VALID_EXTENSION_PERMISSIONS,
+)
 
 __all__ = [
     "ToolContextProtocol",
@@ -69,4 +75,8 @@ __all__ = [
     "SCHEMA_VERSION_KEY",
     "with_schema_version",
     "read_schema_version",
+    "PluginAPI",
+    "ExtensionRegistrationError",
+    "FORBIDDEN_EXTENSION_SETTINGS",
+    "VALID_EXTENSION_PERMISSIONS",
 ]

@@ -681,6 +681,30 @@ def test_skill_manifest_schema_version_is_stable():
     assert SKILL_MANIFEST_SCHEMA_VERSION == 1
 
 
+def test_plugin_api_surface_is_frozen():
+    """Phase 4 exposes ``PluginAPI`` as a runtime-checkable Protocol
+    with a fixed method set. Adding/removing methods here requires a
+    deliberate ``SKILL_MANIFEST_SCHEMA_VERSION`` bump + release note."""
+    from ouroboros.contracts.plugin_api import PluginAPI
+
+    expected = {
+        "register_tool",
+        "register_route",
+        "register_ws_handler",
+        "register_ui_tab",
+        "log",
+        "get_settings",
+        "get_state_dir",
+    }
+    members = {
+        m for m in dir(PluginAPI)
+        if not m.startswith("_") and callable(getattr(PluginAPI, m, None))
+    }
+    assert expected <= members, (
+        f"PluginAPI lost required method(s): {expected - members}"
+    )
+
+
 def test_state_response_declares_phase2_runtime_mode_keys():
     """Phase 2 extends the frozen ``StateResponse`` surface with
     ``runtime_mode`` + ``skills_repo_configured``.

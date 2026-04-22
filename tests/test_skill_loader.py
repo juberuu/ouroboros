@@ -551,11 +551,11 @@ def test_toplevel_skill_files_are_hashed_and_reviewed(tmp_path):
     )
 
 
-def test_extension_status_overlay_masks_persisted_pass_in_phase3(tmp_path):
-    """Phase 3 round 7 regression: a persisted PASS verdict on a
-    ``type: extension`` skill (e.g. shipped by a Phase 4 pre-release)
-    must still be masked to ``pending_phase4`` in the Phase 3 catalogue,
-    so operators cannot be misled into thinking the extension is runnable."""
+def test_extension_status_reflects_persisted_verdict_in_phase4(tmp_path):
+    """Phase 4 lifted the old Phase 3 ``pending_phase4`` overlay — now
+    that the extension loader exists, a persisted review verdict for a
+    ``type: extension`` skill must surface verbatim so operators and
+    the Skills UI see the real state."""
     drive_root = tmp_path / "drive"
     drive_root.mkdir()
     repo_root = tmp_path / "skills"
@@ -582,7 +582,8 @@ def test_extension_status_overlay_masks_persisted_pass_in_phase3(tmp_path):
 
     reloaded = find_skill(drive_root, "ext2", repo_path=str(repo_root))
     assert reloaded is not None
-    assert reloaded.review.status == "pending_phase4"
+    # Real verdict surfaces — Phase 4 retired the ``pending_phase4`` overlay.
+    assert reloaded.review.status == "pass"
 
     os.environ["OUROBOROS_SKILLS_REPO_PATH"] = str(repo_root)
     try:
@@ -590,8 +591,7 @@ def test_extension_status_overlay_masks_persisted_pass_in_phase3(tmp_path):
     finally:
         os.environ.pop("OUROBOROS_SKILLS_REPO_PATH", None)
     statuses = {s["name"]: s["review_status"] for s in summary["skills"]}
-    assert statuses["ext2"] == "pending_phase4"
-    assert summary["deferred_phase4"] >= 1
+    assert statuses["ext2"] == "pass"
 
 
 # ---------------------------------------------------------------------------

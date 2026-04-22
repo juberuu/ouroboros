@@ -478,9 +478,23 @@ def _handle_skill_exec(
             f"({loaded.load_error}). Fix the skill package and re-review."
         )
     if loaded.manifest.is_extension():
+        # Phase 4 ships the loader + PluginAPI + PluginAPIImpl, so
+        # ``register(api)`` is called on enable and the skill's tools /
+        # routes / WS handlers land in the extension_loader registries.
+        # The runtime dispatch wiring (ToolRegistry fallback for
+        # ``ext.*`` tool names, server.py mount for
+        # ``/api/extensions/<skill>/…`` routes, and message_bus route
+        # for ``ext.<skill>.<msg>`` WS types) arrives in Phase 5
+        # together with the Skills UI.
         return (
-            f"⚠️ SKILL_EXEC_DEFERRED: skill {skill_name!r} is an extension "
-            "(type=extension). Extension execution lands in Phase 4."
+            f"⚠️ SKILL_EXEC_EXTENSION: skill {skill_name!r} is a "
+            "type=extension plugin and does not execute through the "
+            "subprocess substrate. Its ``register(api)`` has already "
+            "been called; the loader registered whatever ``plugin.py`` "
+            "declared (inspect via the snapshot produced by "
+            "``ouroboros.extension_loader.snapshot()``). Phase 5 "
+            "wires the runtime dispatchers so those registrations "
+            "become callable from the normal tool / HTTP / WS surfaces."
         )
     # Phase 3 ``skill_exec`` only executes ``type: script`` skills.
     # ``instruction`` skills are catalogued + reviewable but have no
@@ -742,13 +756,15 @@ def _handle_toggle_skill(
         )
     # Mirror the skill_exec / review_skill guards: a skill flagged with
     # ``load_error`` (broken manifest, sanitised-name collision, etc.)
-    # must not have its state mutated through the tool surface. The
-    # durable state dir would otherwise be shared between two colliding
-    # directories, exactly the bug ``discover_skills`` is trying to
-    # surface.
-    if loaded.load_error:
+    # must not be ENABLED via the tool surface. Disabling a broken
+    # skill IS always allowed — otherwise an operator could never stop
+    # a live extension that degraded after load (e.g. plugin.py became
+    # unreadable post-enable). The durable-state collision concern the
+    # guard was originally about only applies to the write path that
+    # happens AFTER this check.
+    if coerced and loaded.load_error:
         return (
-            f"⚠️ SKILL_TOGGLE_ERROR: skill {skill_name!r} cannot be toggled "
+            f"⚠️ SKILL_TOGGLE_ERROR: skill {skill_name!r} cannot be enabled "
             f"— loader rejected it ({loaded.load_error})."
         )
     save_enabled(drive_root, loaded.name, coerced)
@@ -758,11 +774,49 @@ def _handle_toggle_skill(
             " (skill will remain non-executable until review_skill "
             f"returns 'pass'; current status: {loaded.review.status!r})"
         )
+    # Phase 4: for type=extension skills, toggle_skill is the hook that
+    # actually (un)loads the plugin into the runtime. Without this,
+    # enabling an extension would be a pure filesystem operation and
+    # ``register(api)`` would never run until the next full restart.
+    #
+    # Disable ALWAYS unloads — and consults the extension_loader
+    # registry directly rather than relying on ``loaded.manifest.is_extension()``
+    # so an extension whose manifest became broken post-enable (load_error
+    # fabricates a placeholder instruction manifest) can still be
+    # disabled and torn down.
+    #
+    # Enable only loads when the skill is a PASS-reviewed extension.
+    # Enabling a pending/fail/advisory extension writes enabled=True
+    # for UI intent but refuses to run ``register(api)``.
+    extension_action = None
+    from ouroboros import extension_loader
+    if not coerced:
+        if loaded.name in extension_loader.snapshot()["extensions"]:
+            extension_loader.unload_extension(loaded.name)
+            extension_action = "extension_unloaded"
+    elif loaded.manifest.is_extension():
+        if loaded.review.status == "pass":
+            from ouroboros.skill_loader import find_skill as _find_skill
+            refreshed = _find_skill(drive_root, loaded.name)
+            if refreshed is not None:
+                from ouroboros.config import load_settings as _load_settings
+                extension_loader.unload_extension(loaded.name)
+                err = extension_loader.load_extension(
+                    refreshed, _load_settings, drive_root=drive_root,
+                )
+                extension_action = (
+                    "extension_load_error: " + err if err else "extension_loaded"
+                )
+        else:
+            extension_action = (
+                f"extension_not_loaded (review.status={loaded.review.status!r})"
+            )
     return json.dumps(
         {
             "skill": loaded.name,
             "enabled": coerced,
             "review_status": loaded.review.status,
+            "extension_action": extension_action,
             "message": f"Skill {loaded.name!r} enabled={coerced}{note}",
         },
         ensure_ascii=False,
@@ -810,10 +864,12 @@ _EXEC_SCHEMA = {
     "description": (
         "Execute a script from an external skill package. The skill must be "
         "enabled and carry a fresh PASS review verdict. Only type=script "
-        "skills execute in Phase 3 — type=instruction skills are "
+        "skills execute via this substrate — type=instruction skills are "
         "catalogued + reviewable but have no executable payload by "
-        "design; type=extension execution lands in Phase 4 (returns "
-        "SKILL_EXEC_DEFERRED). The ``script`` argument must match a "
+        "design; type=extension skills run IN-PROCESS via the Phase 4 "
+        "extension_loader (calling skill_exec on an extension returns "
+        "SKILL_EXEC_EXTENSION pointing at that surface). The ``script`` "
+        "argument must match a "
         "``name`` entry in the manifest's ``scripts:`` array (SKILL.md "
         "body and assets/* are reviewed content but not executable). "
         "Runtime allowlist: python/python3/bash/node. The subprocess "

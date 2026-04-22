@@ -1,4 +1,4 @@
-# Ouroboros v4.47.0 — Architecture & Reference
+# Ouroboros v4.48.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -63,6 +63,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── review_evidence.py   ← Structured review findings/obligations snapshot for summaries and reflections
       ├── skill_loader.py      ← External skill discovery + durable skill state (Phase 3; reads OUROBOROS_SKILLS_REPO_PATH, persists to data/state/skills/<name>/)
       ├── skill_review.py      ← Tri-model skill review reusing the repo-review infrastructure against the Skill Review Checklist section of docs/CHECKLISTS.md
+      ├── extension_loader.py  ← Phase 4 in-process loader for type: extension skills; discovers + imports plugin.py via importlib with a narrow PluginAPIImpl, tracks registrations per-skill for atomic unload
       ├── server_auth.py       ← Non-localhost auth gate (OUROBOROS_NETWORK_PASSWORD)
       ├── server_control.py    ← Process-control helpers: restart, panic stop
       ├── server_entrypoint.py ← CLI argument parsing, port-binding helpers
@@ -75,12 +76,13 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── tool_policy.py       ← Tool access policy and gating (imports from tool_capabilities)
       ├── utils.py             ← Shared utilities
       ├── world_profiler.py    ← System profile generator (WORLD.md)
-      ├── contracts/           ← Frozen Phase 1 ABI (Protocols + TypedDicts + SkillManifest)
+      ├── contracts/           ← Frozen ABI (Phase 1 Protocols + TypedDicts + SkillManifest; Phase 4 adds plugin_api.py with PluginAPI + ExtensionRegistrationError + permission/forbidden-settings tuples)
       │   ├── tool_context.py  ← ToolContextProtocol (minimum tool ABI, duck-typed)
       │   ├── tool_abi.py      ← ToolEntryProtocol + GetToolsProtocol
       │   ├── api_v1.py        ← WS/HTTP envelope TypedDicts
       │   ├── skill_manifest.py ← Unified SKILL.md / skill.json parser (instruction|script|extension)
-      │   └── schema_versions.py ← Opt-in _schema_version helpers
+      │   ├── schema_versions.py ← Opt-in _schema_version helpers
+      │   └── plugin_api.py    ← Phase 4: PluginAPI Protocol + ExtensionRegistrationError + FORBIDDEN_EXTENSION_SETTINGS + VALID_EXTENSION_PERMISSIONS
       ├── gateways/            ← External API adapters (thin transport, no business logic)
       │   └── claude_code.py   ← Claude Agent SDK gateway (edit + read-only paths)
       ├── tools/               ← Auto-discovered tool plugins
@@ -153,7 +155,7 @@ Dockerfile                    ← Docker image (web UI runtime)
 │   │   └── skills/              ← Phase 3 external-skill state plane (sibling of advisory_review.json, not shared)
 │   │       └── <skill_name>/
 │   │           ├── enabled.json ← {"enabled": bool, "updated_at": iso_ts}
-│   │           └── review.json  ← {"status": "pass|fail|advisory|pending|pending_phase4", "content_hash": str, "findings": [...], "reviewer_models": [...], "timestamp": iso_ts, ...}
+│   │           └── review.json  ← {"status": "pass|fail|advisory|pending", "content_hash": str, "findings": [...], "reviewer_models": [...], "timestamp": iso_ts, ...}  (Phase 3 ``pending_phase4`` status retired in Phase 4 — legacy files migrate on load)
 │   ├── memory/
 │   │   ├── identity.md     ← Agent's self-description (persistent)
 │   │   ├── scratchpad.md   ← Working memory (auto-generated from scratchpad_blocks.json)
@@ -1765,6 +1767,7 @@ via `tests/test_contracts.py`.
 | `ToolContextProtocol` — 6-attribute + 3-method minimum every tool handler relies on (attributes: `repo_dir`, `drive_root`, `pending_events`, `emit_progress_fn`, `current_chat_id`, `task_id`; methods: `repo_path`, `drive_path`, `drive_logs`) | `ouroboros/contracts/tool_context.py` | `ouroboros.tools.registry.ToolContext` must satisfy it (duck-typed check + AST field parity) |
 | `ToolEntryProtocol` + `GetToolsProtocol` — the tool-module ABI | `ouroboros/contracts/tool_abi.py` | Every entry returned by `ToolRegistry._entries` must satisfy `ToolEntryProtocol` |
 | `api_v1` WS/HTTP envelopes — inbound: `ChatInbound`, `CommandInbound`; outbound WS: `ChatOutbound`, `PhotoOutbound`, `TypingOutbound`, `LogOutbound`; HTTP: `HealthResponse`, `StateResponse` (Phase 2 adds `runtime_mode: str` and `skills_repo_configured: bool`), `EvolutionStateSnapshot`, `SettingsNetworkMeta` | `ouroboros/contracts/api_v1.py` | AST scans of `supervisor/message_bus.py` chat envelopes, `server.py::api_state`, `server.py::api_health`, `server.py::_build_network_meta`, and `server.py::ws_endpoint` inbound dispatch assert no un-declared keys leak out; `tests/test_contracts.py::test_state_response_declares_phase2_runtime_mode_keys` explicitly pins the two new Phase 2 fields |
+| `PluginAPI` (Phase 4) + `ExtensionRegistrationError` + `FORBIDDEN_EXTENSION_SETTINGS` + `VALID_EXTENSION_PERMISSIONS` — the surface every `type: extension` skill's `plugin.py::register(api)` binds against (`register_tool`, `register_route`, `register_ws_handler`, `register_ui_tab`, `log`, `get_settings`, `get_state_dir`) | `ouroboros/contracts/plugin_api.py` | `tests/test_contracts.py::test_plugin_api_surface_is_frozen` pins the frozen method set; `tests/test_extension_loader.py::test_plugin_api_impl_matches_protocol` asserts the concrete `PluginAPIImpl` structurally satisfies the runtime-checkable Protocol |
 | `SkillManifest` — unified `SKILL.md` / `skill.json` format (`type: instruction \| script \| extension`) | `ouroboros/contracts/skill_manifest.py` | `parse_skill_manifest_text()` tolerates missing optional fields; `validate()` returns warnings without raising |
 | `schema_versions` — opt-in `_schema_version` key + `with_schema_version`/`read_schema_version` helpers | `ouroboros/contracts/schema_versions.py` | Not yet wired into existing state files; groundwork only |
 
@@ -1829,12 +1832,12 @@ the skill checkout:
 ### 12.2 Lifecycle
 
 1. **Discover**: ``list_skills`` tool (via ``summarize_skills``) returns
-   the catalogue. Non-extension skills start with ``enabled=False`` and
-   ``review.status="pending"``. ``type: extension`` skills are always
-   surfaced with ``review.status="pending_phase4"`` (even before any
-   review has run) so operators can tell at a glance that their
-   execution is deferred until Phase 4, regardless of what the
-   persisted ``review.json`` says.
+   the catalogue. Skills start with ``enabled=False`` and
+   ``review.status="pending"`` (the Phase 3 ``pending_phase4`` overlay
+   for ``type: extension`` skills was retired in Phase 4 — extensions
+   now surface their real persisted verdict; legacy ``review.json``
+   files still carrying ``pending_phase4`` migrate back to ``pending``
+   on load).
 2. **Review**: ``review_skill(skill=name)`` runs the tri-model pipeline
    (``_handle_multi_model_review``) against the dedicated Skill Review
    Checklist section of ``docs/CHECKLISTS.md``. On a successful
@@ -1875,8 +1878,13 @@ the skill checkout:
   blocks execution entirely).
 - The skill's ``type`` is ``script`` (``skill_exec`` runs scripts —
   ``instruction`` skills are catalogued and reviewable but have no
-  executable payload by design; ``extension`` execution lands in
-  Phase 4 with ``SKILL_EXEC_DEFERRED`` for now).
+  executable payload by design; ``type: extension`` skills do NOT
+  route through ``skill_exec`` — Phase 4's ``ouroboros.extension_loader``
+  imports their ``plugin.py`` IN-PROCESS and exposes their
+  capabilities as ``ext.<skill>.<name>`` tools / ``/api/extensions/<skill>/<path>``
+  HTTP routes / ``ext.<skill>.<message>`` WS handlers; calling
+  ``skill_exec`` on an extension returns ``SKILL_EXEC_EXTENSION``
+  pointing at that in-process surface).
 - The skill's ``enabled.json`` is ``true``.
 - The skill's last review verdict is ``pass``.
 - The stored ``content_hash`` matches the current on-disk hash of the
@@ -1918,3 +1926,55 @@ The two surfaces share the model config (``OUROBOROS_REVIEW_MODELS``)
 and the ``_handle_multi_model_review`` plumbing but are otherwise
 siloed — a blocked skill review cannot create repo-review obligations
 or commit-readiness debt and vice versa.
+
+### 12.5 Extension Loader (Phase 4)
+
+``type: extension`` skills run IN-PROCESS via
+``ouroboros/extension_loader.py``, not via the subprocess substrate.
+
+Lifecycle:
+
+1. ``reload_all(drive_root, settings_reader, repo_path)`` scans the
+   skills checkout, ignores ``type: instruction`` / ``type: script``
+   skills, and for each extension whose review is PASS + enabled +
+   hash-fresh invokes ``load_extension``.
+2. ``load_extension`` resolves the manifest-declared ``entry`` module,
+   loads it via ``importlib.util.spec_from_file_location``, stuffs it
+   in ``sys.modules`` under ``ouroboros._extensions.<skill>``, and
+   calls ``module.register(api)`` with a ``PluginAPIImpl`` bound to
+   the skill's permissions allowlist + env_from_settings allowlist +
+   state directory.
+3. The extension's ``register(api)`` makes one or more of
+   ``api.register_tool``, ``api.register_route``,
+   ``api.register_ws_handler``, ``api.register_ui_tab`` calls. Each
+   call runs the namespace + permission gate:
+   - ``register_tool(name, …)`` exposes ``ext.<skill>.<name>`` via the
+     loader's ``get_tool()`` lookup. ``'tool'`` permission required.
+   - ``register_route(path, …)`` mounts
+     ``/api/extensions/<skill>/<path>`` (absolute paths and ``..``
+     segments are rejected with ``ExtensionRegistrationError``).
+     ``'route'`` permission required.
+   - ``register_ws_handler(message_type, …)`` stores the handler under
+     ``ext.<skill>.<message_type>``. ``'ws_handler'`` permission required.
+   - ``register_ui_tab(tab_id, …)`` is accepted but stored as a
+     ``phase5_pending: True`` declaration. Phase 5 consumes these via
+     the Widget ABI.
+4. ``unload_extension(skill)`` is the inverse: iterates the per-skill
+   registration bundle and pops every attached tool/route/ws_handler/
+   ui_tab, then drops the module from ``sys.modules``.
+   ``toggle_skill(enabled=False)`` and ``reload_all`` both go through
+   this path so disabling an extension is atomic.
+
+Defense in depth against reviewer misses:
+
+- ``PluginAPI.get_settings`` intersects the skill's manifest
+  ``env_from_settings`` with ``FORBIDDEN_EXTENSION_SETTINGS``
+  (``OPENROUTER_API_KEY``, ``OPENAI_API_KEY``,
+  ``OPENAI_COMPATIBLE_API_KEY``, ``CLOUDRU_FOUNDATION_MODELS_API_KEY``,
+  ``ANTHROPIC_API_KEY``, ``TELEGRAM_BOT_TOKEN``, ``GITHUB_TOKEN``,
+  ``OUROBOROS_NETWORK_PASSWORD``) — credential keys can never reach
+  an extension even if the manifest asks and review missed.
+- Each ``register_*`` call raises ``ExtensionRegistrationError`` on
+  namespace collision, missing permission, or malformed path/
+  message-type; errors tear down any partial registrations and
+  surface as a ``load_error`` on the skill.

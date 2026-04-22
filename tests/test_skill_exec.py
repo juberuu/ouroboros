@@ -237,7 +237,11 @@ def test_skill_exec_refuses_extension_skill_in_phase3(tmp_path, monkeypatch):
     result = skill_exec_mod._handle_skill_exec(
         ctx, skill="ext1", script="plugin.py"
     )
-    assert "SKILL_EXEC_DEFERRED" in result
+    # Phase 4: extension skills no longer return SKILL_EXEC_DEFERRED —
+    # they return SKILL_EXEC_EXTENSION pointing the caller at the
+    # in-process PluginAPI surface (Phase 5 wires the dispatchers).
+    assert "SKILL_EXEC_EXTENSION" in result
+    assert "extension_loader" in result
 
 
 # ---------------------------------------------------------------------------
@@ -550,6 +554,71 @@ def test_skill_exec_surfaces_nonzero_exit_as_failure(tmp_path, monkeypatch):
     assert "SKILL_EXEC_FAILED" in result
     assert "exit_code" in result
     assert "7" in result
+
+
+def test_toggle_skill_loads_and_unloads_extension_plugin(tmp_path, monkeypatch):
+    """Phase 4 regression: enabling a type=extension skill via
+    toggle_skill must actually call extension_loader.load_extension,
+    and disabling must call unload_extension — otherwise the extension
+    surface is mystery state relative to what the Skills UI says."""
+    from ouroboros import extension_loader
+    skills_root = tmp_path / "skills"
+    skill_dir = skills_root / "ext_live"
+    skill_dir.mkdir(parents=True)
+    import json as _json
+    (skill_dir / "SKILL.md").write_text(
+        (
+            "---\n"
+            "name: ext_live\n"
+            "description: Runtime ext.\n"
+            "version: 0.1.0\n"
+            "type: extension\n"
+            "entry: plugin.py\n"
+            f"permissions: {_json.dumps(['tool'])}\n"
+            "---\n"
+            "body\n"
+        ),
+        encoding="utf-8",
+    )
+    (skill_dir / "plugin.py").write_text(
+        (
+            "def _t(ctx): return 'ok'\n"
+            "def register(api):\n"
+            "    api.register_tool('t', _t, description='', schema={})\n"
+        ),
+        encoding="utf-8",
+    )
+    ctx = _make_ctx(tmp_path)
+    content_hash = compute_content_hash(
+        skill_dir, manifest_entry="plugin.py", manifest_scripts=None
+    )
+    save_review_state(
+        ctx.drive_root,
+        "ext_live",
+        SkillReviewState(status="pass", content_hash=content_hash),
+    )
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+
+    # Clean slate.
+    extension_loader.unload_extension("ext_live")
+    assert "ext_live" not in extension_loader.snapshot()["extensions"]
+
+    # Enable → plugin gets loaded into the runtime registry.
+    enable_resp = _json.loads(
+        skill_exec_mod._handle_toggle_skill(ctx, skill="ext_live", enabled=True)
+    )
+    assert enable_resp["extension_action"] == "extension_loaded"
+    snap = extension_loader.snapshot()
+    assert "ext_live" in snap["extensions"]
+    assert "ext.ext_live.t" in snap["tools"]
+
+    # Disable → the plugin is torn down.
+    disable_resp = _json.loads(
+        skill_exec_mod._handle_toggle_skill(ctx, skill="ext_live", enabled=False)
+    )
+    assert disable_resp["extension_action"] == "extension_unloaded"
+    snap = extension_loader.snapshot()
+    assert "ext_live" not in snap["extensions"]
 
 
 def test_toggle_skill_refuses_when_load_error_set(tmp_path, monkeypatch):

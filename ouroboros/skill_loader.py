@@ -590,6 +590,14 @@ def load_review_state(drive_root: pathlib.Path, name: str) -> SkillReviewState:
     if not isinstance(data, dict):
         return SkillReviewState()
     raw_status = str(data.get("status") or _REVIEW_STATUS_PENDING).lower()
+    # Phase 4 retires the ``pending_phase4`` overlay. Any lingering
+    # Phase 3 review.json files still carrying that literal status
+    # migrate back to plain ``pending`` on load so the summarizer's
+    # buckets stay consistent (``pending_phase4`` is no longer a
+    # valid persisted status; an extension's real verdict now
+    # surfaces verbatim).
+    if raw_status == _REVIEW_STATUS_DEFERRED_PHASE4:
+        raw_status = _REVIEW_STATUS_PENDING
     status = raw_status if raw_status in VALID_REVIEW_STATUSES else _REVIEW_STATUS_PENDING
     findings = data.get("findings") if isinstance(data.get("findings"), list) else []
     reviewers = (
@@ -715,25 +723,15 @@ def load_skill(
     enabled = load_enabled(drive_root, name)
     review = load_review_state(drive_root, name)
 
-    # Phase 3 ALWAYS surfaces ``type: extension`` skills in the catalogue
-    # with ``pending_phase4`` — regardless of what ``review.json`` on disk
-    # says. Extensions cannot execute via ``skill_exec`` (Phase 3 blocks
-    # them with ``SKILL_EXEC_DEFERRED``) so a persisted PASS verdict from
-    # a Phase 4 pre-release would be misleading in the Phase 3 catalogue.
-    # The raw persisted status is retained in the serialised payload via
-    # ``review.raw_result`` / ``review.findings`` so Phase 4 can lift the
-    # overlay by just removing this branch.
-    if manifest.is_extension():
-        review = SkillReviewState(
-            status=_REVIEW_STATUS_DEFERRED_PHASE4,
-            content_hash=review.content_hash,
-            findings=list(review.findings),
-            reviewer_models=list(review.reviewer_models),
-            timestamp=review.timestamp,
-            prompt_chars=review.prompt_chars,
-            cost_usd=review.cost_usd,
-            raw_result=review.raw_result,
-        )
+    # Phase 4 ships the extension loader (``ouroboros.extension_loader``),
+    # so ``type: extension`` skills now go through the same review +
+    # enable + hash-freshness gate as ``type: script`` skills. The
+    # ``pending_phase4`` overlay is retired; extensions land in whatever
+    # status review actually persisted (``pending`` pre-review, ``pass``
+    # after a clean tri-model verdict, etc.). ``skill_exec`` still
+    # refuses them (extensions don't execute through the subprocess
+    # substrate — they register through ``PluginAPI``), but the catalogue
+    # reflects their true state.
 
     return LoadedSkill(
         name=name,
@@ -868,9 +866,6 @@ def summarize_skills(drive_root: pathlib.Path) -> Dict[str, Any]:
         ),
         "advisory_review": sum(
             1 for s in skills if s.review.status == _REVIEW_STATUS_ADVISORY
-        ),
-        "deferred_phase4": sum(
-            1 for s in skills if s.review.status == _REVIEW_STATUS_DEFERRED_PHASE4
         ),
         "broken": sum(1 for s in skills if s.load_error),
         "skills": [

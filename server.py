@@ -1028,6 +1028,30 @@ async def api_settings_post(request: Request) -> JSONResponse:
         _apply_settings_to_env(current)
         _start_supervisor_if_needed(current)
 
+        # Phase 4: when OUROBOROS_SKILLS_REPO_PATH changed, reconcile the
+        # extension loader against the new path so stale registrations
+        # from the previous path are torn down and any enabled +
+        # PASS-reviewed extensions at the new path come up live. Hot-
+        # reload pattern mirrors the other "next task" plumbing below.
+        try:
+            from ouroboros.extension_loader import reload_all as _reload_extensions
+            new_path = str(current.get("OUROBOROS_SKILLS_REPO_PATH") or "").strip()
+            old_path = str(old_settings.get("OUROBOROS_SKILLS_REPO_PATH") or "").strip()
+            if new_path != old_path:
+                # Use ``load_settings`` rather than ``lambda: current``
+                # so extensions see fresh settings on subsequent reads
+                # (capturing ``current`` would freeze the snapshot at
+                # settings-save time and drift from disk on later
+                # edits).
+                from ouroboros.config import load_settings as _load_settings
+                _reload_extensions(
+                    pathlib.Path(DATA_DIR),
+                    _load_settings,
+                    repo_path=new_path,
+                )
+        except Exception:
+            log.warning("Extension reload after settings change failed", exc_info=True)
+
         # Hot-reload supervisor globals that can change without restart.
         try:
             from supervisor.state import refresh_budget_from_settings
@@ -1281,6 +1305,24 @@ async def lifespan(app):
             target=auto_start_local_model, args=(settings,),
             daemon=True, name="local-model-autostart",
         ).start()
+
+    # Phase 4: reload enabled + reviewed extensions so their
+    # ``register(api)`` runs across process restarts. Without this,
+    # ``toggle_skill(enabled=True)`` would be the only path that loads
+    # plugins, and a simple restart would silently unload every
+    # extension until the operator toggled each one again.
+    try:
+        from ouroboros.config import (
+            get_skills_repo_path,
+            load_settings as _load_settings,
+        )
+        from ouroboros.extension_loader import reload_all as _reload_extensions
+        repo_path = get_skills_repo_path()
+        if repo_path:
+            drive_root = pathlib.Path(DATA_DIR)
+            _reload_extensions(drive_root, _load_settings, repo_path=repo_path)
+    except Exception:
+        log.warning("Extension reload_all at startup failed", exc_info=True)
 
     # A2A server — disabled by default; enable in Settings → Integrations
     a2a_server_task = None
