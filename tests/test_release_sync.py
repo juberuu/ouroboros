@@ -11,6 +11,14 @@ from ouroboros.tools.release_sync import (
     run_release_preflight,
     sync_release_metadata,
 )
+from ouroboros.tools.release_sync import (  # noqa: E402 — private helpers under test
+    _normalize_pep440,
+    _shields_escape,
+    _VERSION_RE,
+    _VERSION_ROW_RE,
+    _README_BADGE_RE,
+    _ARCH_HEADER_RE,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -274,3 +282,235 @@ class TestRunReleasePreflight:
         # Should not raise; README-dependent output will be empty
         assert isinstance(changed, list)
         assert isinstance(warnings, list)
+
+
+# ---------------------------------------------------------------------------
+# PEP 440 pre-release (RC / alpha / beta) support
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizePep440:
+    """``_normalize_pep440`` turns author-facing RC spellings into pip-compatible form."""
+
+    @pytest.mark.parametrize(
+        "src,expected",
+        [
+            ("4.50.0-rc.1", "4.50.0rc1"),
+            ("4.50.0rc1", "4.50.0rc1"),
+            ("4.50.0-rc1", "4.50.0rc1"),
+            ("4.50.0rc.1", "4.50.0rc1"),
+            ("4.50.0-alpha.2", "4.50.0alpha2"),
+            ("4.50.0-beta.3", "4.50.0beta3"),
+            ("4.50.0-a.1", "4.50.0a1"),
+            ("4.50.0-b.1", "4.50.0b1"),
+            ("4.50.0-RC.1", "4.50.0rc1"),  # case-insensitive identifier
+        ],
+    )
+    def test_rc_spellings_normalise(self, src, expected):
+        assert _normalize_pep440(src) == expected
+
+    def test_stable_version_passes_through_unchanged(self):
+        assert _normalize_pep440("4.50.0") == "4.50.0"
+        assert _normalize_pep440("1.2.3") == "1.2.3"
+
+
+class TestShieldsEscape:
+    """shields.io badge URL path-segment escape."""
+
+    def test_hyphen_doubled_for_rc(self):
+        assert _shields_escape("4.50.0-rc.1") == "4.50.0--rc.1"
+
+    def test_plain_version_unchanged(self):
+        assert _shields_escape("4.50.0") == "4.50.0"
+
+    def test_multiple_hyphens_all_doubled(self):
+        assert _shields_escape("1.2.3-rc-1") == "1.2.3--rc--1"
+
+
+class TestVersionRegexAcceptsRc:
+    """The widened ``_VERSION_RE`` accepts both plain and RC spellings."""
+
+    @pytest.mark.parametrize(
+        "ver",
+        [
+            "4.50.0",
+            "4.50.0-rc.1",
+            "4.50.0rc1",
+            "4.50.0-alpha.2",
+            "4.50.0-beta.3",
+            "4.50.0-a.1",
+            "4.50.0-b.1",
+        ],
+    )
+    def test_accepts_valid_versions(self, ver):
+        assert _VERSION_RE.match(ver) is not None, ver
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "",
+            "not-a-version",
+            "4.50",  # too few segments
+            "4.50.0.1",  # too many segments
+            "4.50.0-foo.1",  # unknown identifier
+            "v4.50.0",  # leading 'v' not allowed
+        ],
+    )
+    def test_rejects_invalid_versions(self, bad):
+        assert _VERSION_RE.match(bad) is None, bad
+
+
+def _make_rc_repo(tmp_path: Path, version: str = "4.50.0-rc.1") -> Path:
+    """Like _make_repo but with a realistic pre-existing plain carrier set.
+
+    Mimics the real ``ouroboros`` tree state right before the VERSION
+    bump: VERSION carries the new RC spelling, but badge / pyproject /
+    ARCHITECTURE still reference the previous stable (``4.50.0``) —
+    ``sync_release_metadata`` must migrate them to the RC spelling.
+    """
+    (tmp_path / "VERSION").write_text(version + "\n", encoding="utf-8")
+
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "ouroboros"\nversion = "4.50.0"\n',
+        encoding="utf-8",
+    )
+
+    # Existing plain-version badge that was in-sync for ``4.50.0``.
+    badge_line = (
+        '[![Version 4.50.0]'
+        '(https://img.shields.io/badge/version-4.50.0-green.svg)]'
+        '(VERSION)\n'
+    )
+    readme_content = (
+        "# Ouroboros\n\n"
+        + badge_line
+        + "\n## Version History\n\n"
+        "| Version | Date | Description |\n"
+        "|---------|------|-------------|\n"
+        "| 4.50.0 | 2026-04-21 | Phase 6 landed |\n"
+    )
+    (tmp_path / "README.md").write_text(readme_content, encoding="utf-8")
+
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "ARCHITECTURE.md").write_text(
+        "# Ouroboros v4.50.0 — Architecture\n\nContent here.\n",
+        encoding="utf-8",
+    )
+    return tmp_path
+
+
+class TestSyncReleaseMetadataRc:
+    """``sync_release_metadata`` handles PEP 440 RC versions end-to-end."""
+
+    def test_syncs_pyproject_to_canonical_pep440(self, tmp_path):
+        repo = _make_rc_repo(tmp_path, "4.50.0-rc.1")
+        changed = sync_release_metadata(str(repo))
+        assert "pyproject.toml" in changed
+        text = (repo / "pyproject.toml").read_text()
+        # PEP 440 canonical: no separator between base and ``rc``, no dot.
+        assert 'version = "4.50.0rc1"' in text
+        # And NOT the author-facing spelling.
+        assert 'version = "4.50.0-rc.1"' not in text
+
+    def test_syncs_readme_badge_display_and_url_differ(self, tmp_path):
+        repo = _make_rc_repo(tmp_path, "4.50.0-rc.1")
+        changed = sync_release_metadata(str(repo))
+        assert "README.md" in changed
+        text = (repo / "README.md").read_text()
+        # Display text keeps the author spelling (single hyphen).
+        assert "[![Version 4.50.0-rc.1]" in text
+        # URL path doubles the literal hyphen per shields.io escape.
+        assert "badge/version-4.50.0--rc.1-green" in text
+
+    def test_syncs_architecture_header(self, tmp_path):
+        repo = _make_rc_repo(tmp_path, "4.50.0-rc.1")
+        changed = sync_release_metadata(str(repo))
+        assert "docs/ARCHITECTURE.md" in changed
+        text = (repo / "docs" / "ARCHITECTURE.md").read_text()
+        assert "v4.50.0-rc.1" in text
+        # Must not leave the old stable spelling around.
+        assert "v4.50.0 —" not in text
+
+    def test_idempotent_on_rc_version(self, tmp_path):
+        repo = _make_rc_repo(tmp_path, "4.50.0-rc.1")
+        sync_release_metadata(str(repo))
+        changed2 = sync_release_metadata(str(repo))
+        assert changed2 == []
+
+    def test_accepts_canonical_pep440_input(self, tmp_path):
+        """VERSION=``4.50.0rc1`` (already canonical) works too."""
+        repo = _make_rc_repo(tmp_path, "4.50.0rc1")
+        changed = sync_release_metadata(str(repo))
+        # At least pyproject should update (since its starting value was 4.50.0).
+        assert "pyproject.toml" in changed
+        pyproject_text = (repo / "pyproject.toml").read_text()
+        assert 'version = "4.50.0rc1"' in pyproject_text
+
+    def test_rejects_unparseable_version(self, tmp_path):
+        repo = _make_rc_repo(tmp_path, "4.50.0-rc.1")
+        (repo / "VERSION").write_text("not-a-version\n", encoding="utf-8")
+        assert sync_release_metadata(str(repo)) == []
+
+
+class TestVersionRowRegexBucketingWithRc:
+    """A pre-release row buckets under its base semver slot."""
+
+    def test_rc_row_counted_as_minor(self):
+        readme = (
+            "## Version History\n\n"
+            "| Version | Date | Description |\n"
+            "|---|---|---|\n"
+            "| 4.50.0-rc.1 | 2026-04-21 | RC of phase 6 |\n"
+            "| 4.50.0 | 2026-04-21 | phase 6 |\n"
+        )
+        rows = list(_VERSION_ROW_RE.finditer(readme))
+        assert len(rows) == 2
+        # Both rows parse as X=4, Y=50, Z=0 (RC and its base share the slot).
+        x0, y0, z0 = (int(g) for g in rows[0].groups())
+        x1, y1, z1 = (int(g) for g in rows[1].groups())
+        assert (x0, y0, z0) == (4, 50, 0)
+        assert (x1, y1, z1) == (4, 50, 0)
+
+    def test_rc_rows_do_not_break_history_limit_check(self):
+        # 2 majors + 5 minors + 1 RC (also a minor slot) + 4 patches:
+        # within P7 caps overall.
+        readme = (
+            "## Version History\n\n"
+            "| Version | Date | Description |\n"
+            "|---|---|---|\n"
+            "| 5.0.0 | 2026-01-01 | major |\n"
+            "| 4.0.0 | 2026-01-01 | major |\n"
+            "| 4.5.0 | 2026-01-01 | minor |\n"
+            "| 4.4.0 | 2026-01-01 | minor |\n"
+            "| 4.3.0 | 2026-01-01 | minor |\n"
+            "| 4.2.0 | 2026-01-01 | minor |\n"
+            "| 4.1.0 | 2026-01-01 | minor |\n"
+            "| 4.1.0-rc.1 | 2026-01-01 | minor-rc |\n"
+            "| 4.5.5 | 2026-01-01 | patch |\n"
+            "| 4.5.4 | 2026-01-01 | patch |\n"
+            "| 4.5.3 | 2026-01-01 | patch |\n"
+            "| 4.5.2 | 2026-01-01 | patch |\n"
+        )
+        warnings = check_history_limit(readme)
+        # 6 minor rows (5 + 1 RC sharing minor slot) — should warn.
+        assert any("minor" in w for w in warnings)
+
+
+class TestBadgeAndArchRegexAcceptRc:
+    """Carrier-regex smoke: make sure the RC spellings match existing prose."""
+
+    def test_badge_regex_matches_rc_badge(self):
+        badge = (
+            '[![Version 4.50.0-rc.1]'
+            '(https://img.shields.io/badge/version-4.50.0--rc.1-green.svg)](VERSION)'
+        )
+        assert _README_BADGE_RE.search(badge) is not None
+
+    def test_arch_header_regex_matches_rc_header(self):
+        header = "# Ouroboros v4.50.0-rc.1 — Three-layer refactor\n"
+        assert _ARCH_HEADER_RE.search(header) is not None
+
+    def test_arch_header_regex_still_matches_stable(self):
+        header = "# Ouroboros v4.50.0 — Three-layer refactor\n"
+        assert _ARCH_HEADER_RE.search(header) is not None

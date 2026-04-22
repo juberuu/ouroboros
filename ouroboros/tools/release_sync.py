@@ -13,6 +13,16 @@ surface because each release entry requires a human-written description.
 ``check_history_limit`` and ``detect_numeric_claims`` advise on the quality of
 whatever row the author wrote, without modifying it.
 
+Version format
+--------------
+Stable versions are plain semver (``X.Y.Z``). Pre-release versions use the
+author-facing spellings ``4.50.0-rc.1`` / ``4.50.0rc1`` / ``4.50.0-alpha.2``
+etc.; VERSION / README badge display / ARCHITECTURE header all keep the
+author spelling verbatim, while ``pyproject.toml`` receives the PEP 440-
+canonical form (``4.50.0rc1``) via ``_normalize_pep440`` so pip / build /
+twine accept the project metadata. The README badge URL path additionally
+doubles literal hyphens (``4.50.0--rc.1``) per shields.io's escape rule.
+
 Public API
 ----------
 sync_release_metadata(repo_dir)  -> list[str]   changed carrier file paths
@@ -41,19 +51,95 @@ _NUMERIC_CLAIM_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Version row in README Version History: "| X.Y.Z | date | description |"
-_VERSION_ROW_RE = re.compile(r'^\|\s*(\d+)\.(\d+)\.(\d+)\s*\|', re.MULTILINE)
+# Optional PEP 440 pre-release suffix. Accepts the common author-facing
+# spellings (``-rc.1``, ``-rc1``, ``rc.1``, ``rc1``, ``-alpha.2``,
+# ``-beta.3``, ``-a.1``, ``-b.2``) and their case-insensitive variants.
+# The display spelling is preserved verbatim in VERSION / README /
+# ARCHITECTURE carriers; ``pyproject.toml`` is responsible for holding
+# the PEP 440-canonical form (see sync_release_metadata docstring).
+_PRE_SUFFIX = r'(?:-?(?:rc|alpha|beta|a|b)\.?\d+)?'
 
-# README badge: [![Version X.Y.Z](...)
+# Full semver+optional-pre token used for VERSION file validation.
+_VERSION_RE = re.compile(r'^\d+\.\d+\.\d+' + _PRE_SUFFIX + r'$', re.IGNORECASE)
+
+# Version row in README Version History: "| X.Y.Z[-suffix] | date | description |"
+# Pre-release rows bucket under their base version (a ``4.50.0-rc.1`` row
+# counts as a minor row for the ``4.50.0`` slot, not a separate patch).
+_VERSION_ROW_RE = re.compile(
+    r'^\|\s*(\d+)\.(\d+)\.(\d+)' + _PRE_SUFFIX + r'\s*\|',
+    re.MULTILINE | re.IGNORECASE,
+)
+
+# README badge display text + shields.io URL path. The URL path encodes
+# literal ``-`` as ``--`` (shields.io path-segment escape) so the right-
+# most ``-green`` separator stays unambiguous, hence the two halves of
+# the regex accept slightly different tokens.
+_BADGE_DISPLAY_TOKEN = r'\d+\.\d+\.\d+' + _PRE_SUFFIX
+_BADGE_URL_TOKEN = (
+    r'\d+\.\d+\.\d+'
+    r'(?:(?:-{1,2})?(?:rc|alpha|beta|a|b)\.?\d+)?'
+)
 _README_BADGE_RE = re.compile(
-    r'(\[!\[Version\s+)([\d]+\.[\d]+\.[\d]+)(\]\(https://img\.shields\.io/badge/version-)'
-    r'([\d]+\.[\d]+\.[\d]+)'
+    r'(\[!\[Version\s+)'
+    r'(' + _BADGE_DISPLAY_TOKEN + r')'
+    r'(\]\(https://img\.shields\.io/badge/version-)'
+    r'(' + _BADGE_URL_TOKEN + r')'
     r'(-green\.svg\)\])',
     re.IGNORECASE,
 )
 
-# ARCHITECTURE.md header: "# Ouroboros vX.Y.Z — ..."
-_ARCH_HEADER_RE = re.compile(r'^(#\s+Ouroboros\s+v)([\d]+\.[\d]+\.[\d]+)(\s*)', re.MULTILINE)
+# ARCHITECTURE.md header: "# Ouroboros vX.Y.Z[-suffix] — ..."
+_ARCH_HEADER_RE = re.compile(
+    r'^(#\s+Ouroboros\s+v)'
+    r'(\d+\.\d+\.\d+' + _PRE_SUFFIX + r')'
+    r'(\s*)',
+    re.MULTILINE | re.IGNORECASE,
+)
+
+
+def _shields_escape(version: str) -> str:
+    """Escape a version string for a shields.io badge URL path segment.
+
+    shields.io interprets ``-`` as a URL-path segment separator; literal
+    hyphens inside a value (``4.50.0-rc.1``) must be doubled (``4.50.0--rc.1``)
+    so the final ``-green`` ending stays unambiguous. Returns *version*
+    unchanged when it contains no hyphen.
+    """
+    return version.replace('-', '--')
+
+
+# Matches the pre-release tail (``-rc.1`` / ``rc1`` / ``-alpha.2`` / …)
+# anchored at the right side of the full version string. Used by
+# ``_normalize_pep440`` to split base and suffix without double-counting.
+_PRE_TAIL_RE = re.compile(
+    r'(-?)(rc|alpha|beta|a|b)(\.?)(\d+)$',
+    re.IGNORECASE,
+)
+
+
+def _normalize_pep440(version: str) -> str:
+    """Return the PEP 440-canonical spelling of *version*.
+
+    Author-facing carriers (VERSION / README / ARCHITECTURE) tolerate
+    ``4.50.0-rc.1`` style spellings because they read more naturally in
+    prose and match the ``v{VERSION}`` git-tag convention. ``pyproject.toml``
+    however is consumed by pip / build / twine, which enforce PEP 440:
+    the canonical form for a release-candidate is ``4.50.0rc1`` (no
+    separator between the base version and the pre-release identifier,
+    no dot between ``rc`` and the number). This helper performs that
+    normalisation so the VERSION file can carry the idiomatic spelling
+    while ``pyproject.toml`` stays pip-compatible.
+
+    Stable (non-RC) versions pass through unchanged.
+    """
+    match = _PRE_TAIL_RE.search(version)
+    if not match:
+        return version
+    base = version[: match.start()]
+    # ``rc`` / ``alpha`` / ``beta`` / ``a`` / ``b`` — lowercase normal form.
+    identifier = match.group(2).lower()
+    number = match.group(4)
+    return f"{base}{identifier}{number}"
 
 
 def sync_release_metadata(repo_dir: str) -> List[str]:
@@ -73,8 +159,20 @@ def sync_release_metadata(repo_dir: str) -> List[str]:
         return []
 
     version = version_file.read_text(encoding="utf-8").strip()
-    if not re.match(r'^\d+\.\d+\.\d+$', version):
+    if not _VERSION_RE.match(version):
         return []
+
+    # ``pyproject.toml`` must carry the PEP 440-canonical form so pip
+    # / twine / build do not reject the project metadata. Author-facing
+    # spellings like ``4.50.0-rc.1`` normalise to ``4.50.0rc1`` per
+    # PEP 440 §5 (pre-release separator and identifier rules); we do
+    # the normalisation here rather than requiring the VERSION file to
+    # use the canonical form because the hyphen/dot variant is more
+    # idiomatic in README / ARCHITECTURE prose.
+    pyproject_version = _normalize_pep440(version)
+    # README badge URL path segment doubles literal ``-`` (shields.io
+    # escape) but the badge display text keeps the author spelling.
+    badge_url_version = _shields_escape(version)
 
     changed: List[str] = []
 
@@ -84,7 +182,7 @@ def sync_release_metadata(repo_dir: str) -> List[str]:
         text = pyproject.read_text(encoding="utf-8")
         new_text = re.sub(
             r'^(version\s*=\s*")[^"]*(")',
-            lambda m: f'{m.group(1)}{version}{m.group(2)}',
+            lambda m: f'{m.group(1)}{pyproject_version}{m.group(2)}',
             text,
             flags=re.MULTILINE,
         )
@@ -98,7 +196,7 @@ def sync_release_metadata(repo_dir: str) -> List[str]:
         text = readme.read_text(encoding="utf-8")
         new_text = _README_BADGE_RE.sub(
             lambda m: (
-                m.group(1) + version + m.group(3) + version + m.group(5)
+                m.group(1) + version + m.group(3) + badge_url_version + m.group(5)
             ),
             text,
         )
