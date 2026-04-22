@@ -91,15 +91,21 @@ _ALLOWED_RUNTIMES = {
 # Environment keys that are always passed through to a skill subprocess
 # regardless of ``env_from_settings``. These are OS-level, not application
 # state, and removing them would break basic ``python`` / ``node`` / ``bash``
-# invocations on many systems.
+# invocations on many systems. Keys absent from the parent env are silently
+# skipped in ``_scrub_env`` so mixing Unix + Windows spellings in the same
+# set is safe (on Unix ``USERPROFILE`` / ``APPDATA`` simply don't exist;
+# on Windows ``HOME`` usually doesn't).
 _ALWAYS_FORWARDED_ENV = frozenset(
     {
         "PATH",
-        "HOME",
+        "HOME",            # Unix home dir
+        "USERPROFILE",     # Windows equivalent of HOME
+        "APPDATA",         # Windows roaming app data (e.g. pip cache)
+        "LOCALAPPDATA",    # Windows local app data
         "LANG",
         "LC_ALL",
         "LC_CTYPE",
-        "SYSTEMROOT",  # Windows
+        "SYSTEMROOT",      # Windows
         "TMPDIR",
         "TMP",
         "TEMP",

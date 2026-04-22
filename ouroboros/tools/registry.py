@@ -46,8 +46,18 @@ _SHELL_WRAPPERS = frozenset(["bash", "sh", "dash", "zsh", "env"])
 
 
 def _is_safety_critical_path(path: str) -> bool:
-    """Check if a normalized path refers to a safety-critical file."""
-    normalized = os.path.normpath(path.strip().lstrip("./"))
+    """Check if a normalized path refers to a safety-critical file.
+
+    ``SAFETY_CRITICAL_PATHS`` is declared with forward slashes
+    (``ouroboros/safety.py``). On Windows ``os.path.normpath`` flips
+    ``/`` to ``\\``, which makes the literal-set lookup miss. Normalise
+    to POSIX form BEFORE the set check so the hardcoded sandbox
+    behaves identically on all three supported OSes.
+    """
+    cleaned = path.strip().lstrip("./").replace("\\", "/")
+    # ``PurePosixPath.as_posix()`` collapses redundant ``./`` without
+    # re-introducing backslashes (unlike ``os.path.normpath``).
+    normalized = pathlib.PurePosixPath(cleaned).as_posix()
     return normalized in SAFETY_CRITICAL_PATHS
 
 

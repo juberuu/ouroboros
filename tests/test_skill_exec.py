@@ -356,8 +356,14 @@ def test_skill_exec_runs_reviewed_skill_successfully(tmp_path, monkeypatch):
         "hello",
         script_body=(
             "import json, os, sys\n"
+            # ``has_home`` must be True when either the Unix ``HOME`` or the
+            # Windows ``USERPROFILE`` is forwarded — the scrub layer copies
+            # both (see ``_ALWAYS_FORWARDED_ENV``); checking only ``HOME``
+            # would spuriously fail on Windows CI where the parent process
+            # exports ``USERPROFILE`` instead.
             "print(json.dumps({'cwd': os.getcwd(), 'skill': os.environ.get('OUROBOROS_SKILL_NAME'), "
-            "'argv': sys.argv[1:], 'has_home': 'HOME' in os.environ, "
+            "'argv': sys.argv[1:], "
+            "'has_home': ('HOME' in os.environ) or ('USERPROFILE' in os.environ), "
             "'openrouter_leaked': 'OPENROUTER_API_KEY' in os.environ}))\n"
         ),
     )
