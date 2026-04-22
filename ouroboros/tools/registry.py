@@ -400,6 +400,15 @@ class ToolRegistry:
                 "restore_to_head",
                 "rollback_to_target",
                 "promote_to_stable",
+                # PR integration tools — they check out branches,
+                # cherry-pick, and stage merges. All of them mutate
+                # the local working tree / refs and must not run
+                # when ``runtime_mode=light``.
+                "fetch_pr_ref",
+                "create_integration_branch",
+                "cherry_pick_pr_commits",
+                "stage_adaptations",
+                "stage_pr_merge",
             }
         )
         if _runtime_mode == "light" and name in _REPO_MUTATION_TOOLS:
@@ -452,6 +461,13 @@ class ToolRegistry:
                     "git revert", "git cherry-pick",
                     " > ", " >> ", " | tee ",
                     "rm -", "mkdir ", "mv ", "cp ", "touch ",
+                    # In-place file mutation via common Unix tools.
+                    # ``sed -i`` / ``perl -i`` edit files without any
+                    # redirection so the ``>`` check above misses them.
+                    "sed -i", "perl -i", "ruby -i",
+                    "truncate ", "chmod ", "chown ", "ln -",
+                    "tar -x", "unzip ", "gzip ", "gunzip ",
+                    # Python / JS in-place writers.
                     "open(", ".write(", ".writelines(",
                 )
                 if any(ind in cmd_lower for ind in _LIGHT_MUTATION_INDICATORS):

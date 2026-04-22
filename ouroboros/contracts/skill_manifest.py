@@ -52,6 +52,15 @@ VALID_SKILL_PERMISSIONS = frozenset(
         "subprocess",
         "widget",
         "ws_handler",
+        # Phase 4 ``type: extension`` permissions — kept in sync with
+        # ``ouroboros.contracts.plugin_api.VALID_EXTENSION_PERMISSIONS``
+        # so ``SkillManifest.validate()`` does not warn "unknown
+        # permission" on legitimate extension manifests that declare
+        # these Phase-4 surfaces. The single frozen-set remains the
+        # SSOT for both script-type and extension-type permissions.
+        "route",
+        "tool",
+        "read_settings",
         "iframe_raw",
     }
 )

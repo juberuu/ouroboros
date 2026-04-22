@@ -115,6 +115,46 @@ def test_light_mode_blocks_runshell_mutation(tmp_path, monkeypatch):
     assert "LIGHT_MODE_BLOCKED" in result
 
 
+@pytest.mark.parametrize(
+    "bad_cmd",
+    [
+        "sed -i 's/foo/bar/' docs/README.md",
+        "perl -i -pe 's/foo/bar/' docs/README.md",
+        "truncate -s 0 docs/README.md",
+        "chmod 755 docs/README.md",
+        "chown anton docs/README.md",
+        "ln -s /tmp/x docs/link",
+    ],
+)
+def test_light_mode_blocks_inplace_mutation_tools(bad_cmd, tmp_path, monkeypatch):
+    """Final-review regression: the light-mode shell filter must cover
+    in-place file-mutating Unix tools (``sed -i``, ``chmod``, …)
+    alongside redirections."""
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    reg = _registry(tmp_path)
+    result = reg.execute("run_shell", {"cmd": bad_cmd})
+    assert "LIGHT_MODE_BLOCKED" in result, f"cmd={bad_cmd!r}: {result[:200]}"
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    [
+        "fetch_pr_ref",
+        "create_integration_branch",
+        "cherry_pick_pr_commits",
+        "stage_adaptations",
+        "stage_pr_merge",
+    ],
+)
+def test_light_mode_blocks_pr_integration_tools(tool_name, tmp_path, monkeypatch):
+    """Final-review regression: PR integration tools mutate refs + the
+    working tree and must be covered by the light-mode blanket block."""
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    reg = _registry(tmp_path)
+    result = reg.execute(tool_name, {})
+    assert "LIGHT_MODE_BLOCKED" in result
+
+
 def test_light_mode_allows_readonly_runshell(tmp_path, monkeypatch):
     """Read-only shell invocations (git status, pytest, ls) must
     still work in light mode — the filter only fires on mutation

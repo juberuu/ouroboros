@@ -681,6 +681,22 @@ def test_skill_manifest_schema_version_is_stable():
     assert SKILL_MANIFEST_SCHEMA_VERSION == 1
 
 
+def test_skill_and_extension_permissions_are_kept_in_sync():
+    """Final-review regression: Phase 4 ``VALID_EXTENSION_PERMISSIONS``
+    introduced ``route``, ``tool``, ``read_settings`` but the Phase 1
+    ``VALID_SKILL_PERMISSIONS`` still validated manifests — extension
+    manifests declaring the new perms triggered 'unknown permission'
+    warnings. The Phase 1 frozen set must be a superset of the Phase 4
+    extension-only set."""
+    from ouroboros.contracts.skill_manifest import VALID_SKILL_PERMISSIONS
+    from ouroboros.contracts.plugin_api import VALID_EXTENSION_PERMISSIONS
+
+    assert VALID_EXTENSION_PERMISSIONS <= VALID_SKILL_PERMISSIONS, (
+        f"VALID_EXTENSION_PERMISSIONS has keys not in VALID_SKILL_PERMISSIONS: "
+        f"{sorted(VALID_EXTENSION_PERMISSIONS - VALID_SKILL_PERMISSIONS)}"
+    )
+
+
 def test_plugin_api_surface_is_frozen():
     """Phase 4 exposes ``PluginAPI`` as a runtime-checkable Protocol
     with a fixed method set. Adding/removing methods here requires a
