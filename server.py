@@ -14,6 +14,7 @@ import json
 import logging
 
 import os
+import inspect
 import pathlib
 import socket
 import sys
@@ -492,7 +493,12 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
                 continue
             ctx.kill_workers(force=True)
             _request_restart_exit()
-        elif lowered.startswith("/review"):
+        elif lowered == "/review" or lowered.startswith("/review "):
+            # Only ``/review`` (with no suffix) or ``/review <args>``
+            # maps to deep_self_review. The slash-commands ``/review-skill``
+            # and any future ``/review-*`` flow through the agent's
+            # normal chat pipeline so they can route to their own
+            # tools.
             ctx.queue_deep_self_review_task(reason="owner:/review", force=True)
         elif lowered.startswith("/evolve"):
             parts = lowered.split()
@@ -799,6 +805,45 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                 continue
 
             msg_type = msg.get("type", "")
+            # Phase 5 WS dispatch for extensions: route ``ext.<skill>.<msg>``
+            # message types to handlers registered via
+            # ``PluginAPI.register_ws_handler``. The handler receives the
+            # full payload dict; responses (if any) are sent back to the
+            # originating websocket as a best-effort one-shot reply.
+            if isinstance(msg_type, str) and msg_type.startswith("ext."):
+                try:
+                    from ouroboros.extension_loader import list_ws_handlers as _ws_handlers
+                    handler_spec = _ws_handlers().get(msg_type)
+                except Exception:
+                    handler_spec = None
+                if handler_spec is None:
+                    await websocket.send_text(json.dumps({
+                        "type": "log",
+                        "data": {
+                            "level": "warning",
+                            "message": f"no extension WS handler for {msg_type!r}",
+                        },
+                    }))
+                    continue
+                handler = handler_spec.get("handler")
+                try:
+                    result = handler(msg) if callable(handler) else None
+                    if inspect.iscoroutine(result):
+                        result = await result
+                    if result is not None:
+                        await websocket.send_text(
+                            json.dumps({"type": msg_type + ".reply", "data": result})
+                        )
+                except Exception as exc:
+                    await websocket.send_text(json.dumps({
+                        "type": "log",
+                        "data": {
+                            "level": "error",
+                            "message": f"extension WS handler {msg_type!r} raised: {type(exc).__name__}: {exc}",
+                        },
+                    }))
+                continue
+
             payload = msg.get("content", "") if msg_type == "chat" else msg.get("cmd", "")
             if msg_type in ("chat", "command") and payload:
                 try:
@@ -1245,10 +1290,44 @@ web_dir = resolve_web_dir(REPO_DIR)
 web_dir.mkdir(parents=True, exist_ok=True)
 index_page = make_index_page(web_dir)
 
+from ouroboros.extensions_api import (
+    api_extensions_index,
+    api_extension_manifest,
+    api_extension_dispatch,
+    api_skill_toggle,
+    api_skill_review,
+)
+
 routes = [
     Route("/", endpoint=index_page),
     Route("/api/health", endpoint=api_health),
     Route("/api/state", endpoint=api_state),
+    # Phase 5: extension catalogue + per-skill manifest endpoint + a
+    # catch-all dispatcher that forwards to whatever an extension
+    # registered via ``PluginAPI.register_route``. The catch-all MUST
+    # appear after the more specific routes so ``/manifest`` is
+    # preferred over ``/<rest>``.
+    Route("/api/extensions", endpoint=api_extensions_index, methods=["GET"]),
+    Route(
+        "/api/extensions/{skill}/manifest",
+        endpoint=api_extension_manifest,
+        methods=["GET"],
+    ),
+    Route(
+        "/api/extensions/{skill}/{rest:path}",
+        endpoint=api_extension_dispatch,
+        methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
+    ),
+    Route(
+        "/api/skills/{skill}/toggle",
+        endpoint=api_skill_toggle,
+        methods=["POST"],
+    ),
+    Route(
+        "/api/skills/{skill}/review",
+        endpoint=api_skill_review,
+        methods=["POST"],
+    ),
     *file_browser_routes(),
     Route("/api/onboarding", endpoint=api_onboarding),
     Route("/api/claude-code/status", endpoint=api_claude_code_status),

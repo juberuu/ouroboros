@@ -257,14 +257,41 @@ class ToolRegistry:
         return [e.name for e in self._entries.values()]
 
     def schemas(self, core_only: bool = False) -> List[Dict[str, Any]]:
+        built_in = [{"type": "function", "function": e.schema} for e in self._entries.values()]
+        # Phase 5: include every extension-registered tool's schema so
+        # the agent can actually invoke ``ext.<skill>.<name>`` tools.
+        # The extension tools are namespaced and review-gated (only
+        # loaded when the skill passes tri-model review), so we don't
+        # silo them behind ``list_available_tools``/``enable_tools`` —
+        # an enabled extension's tools are immediately callable.
+        try:
+            from ouroboros.extension_loader import _tools as _ext_tools, _lock as _ext_lock
+            with _ext_lock:
+                extension_schemas = [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": tool["name"],
+                            "description": tool.get("description", ""),
+                            "parameters": tool.get("schema", {"type": "object", "properties": {}}),
+                        },
+                    }
+                    for tool in _ext_tools.values()
+                ]
+        except Exception:
+            extension_schemas = []
+
         if not core_only:
-            return [{"type": "function", "function": e.schema} for e in self._entries.values()]
+            return built_in + extension_schemas
         # Core tools + meta-tools for discovering/enabling extended tools
         result = []
         for e in self._entries.values():
             if e.name in CORE_TOOL_NAMES or e.name in ("list_available_tools", "enable_tools"):
                 result.append({"type": "function", "function": e.schema})
-        return result
+        # Extension tools are always enumerable in core-mode too —
+        # operators expect enabling a skill to make its tools usable
+        # without re-negotiating through ``enable_tools``.
+        return result + extension_schemas
 
     def list_non_core_tools(self) -> List[Dict[str, str]]:
         """Return name+description of all non-core tools."""
@@ -285,11 +312,57 @@ class ToolRegistry:
     def get_timeout(self, name: str) -> int:
         """Return timeout_sec for the named tool (default 360)."""
         entry = self._entries.get(name)
-        return entry.timeout_sec if entry is not None else 360
+        if entry is not None:
+            return entry.timeout_sec
+        # Phase 5: extension-registered tools carry their own timeout_sec
+        # in the loader's tool descriptor.
+        if name.startswith("ext."):
+            try:
+                from ouroboros.extension_loader import get_tool as _ext_get_tool
+                ext_tool = _ext_get_tool(name)
+            except Exception:
+                ext_tool = None
+            if ext_tool:
+                return int(ext_tool.get("timeout_sec") or 60)
+        return 360
 
     def execute(self, name: str, args: Dict[str, Any]) -> str:
         entry = self._entries.get(name)
         if entry is None:
+            # Phase 5 dispatch: fall back to the extension loader for
+            # ``ext.<skill>.<tool>`` names that Phase 4's
+            # ``PluginAPI.register_tool`` attached in-process.
+            # Extension tools intentionally skip the built-in
+            # ``SAFETY_CRITICAL_PATHS`` / ``run_shell`` / safety-policy
+            # gates — they are their own reviewed surface (tri-model
+            # skill review + PluginAPI namespace enforcement) and
+            # cannot call the evolutionary-layer tools directly.
+            if name.startswith("ext."):
+                try:
+                    from ouroboros.extension_loader import get_tool as _ext_get_tool
+                    ext_tool = _ext_get_tool(name)
+                except Exception:
+                    ext_tool = None
+                if ext_tool and callable(ext_tool.get("handler")):
+                    handler = ext_tool["handler"]
+                    try:
+                        # Extension handlers receive ``(ctx, **args)``
+                        # just like built-in tool handlers. The
+                        # ``ctx`` is this registry's own context so
+                        # the extension can reach shared state via
+                        # the ToolContextProtocol — but NOTE: the
+                        # extension author explicitly opted in to
+                        # that surface via the ``tool`` permission.
+                        result = handler(self._ctx, **(args or {}))
+                    except TypeError:
+                        # Handler declared without ``ctx`` — try without.
+                        result = handler(**(args or {}))
+                    except Exception as exc:
+                        return (
+                            f"⚠️ extension tool {name!r} failed: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                    return result if isinstance(result, str) else str(result)
             return f"⚠️ Unknown tool: {name}. Available: {', '.join(sorted(self._entries.keys()))}"
 
         # --- Hardcoded Sandbox Protections ---

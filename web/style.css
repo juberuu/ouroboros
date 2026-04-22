@@ -2346,3 +2346,110 @@ body {
 .evo-empty-error {
     color: var(--red);
 }
+
+/* ------------------------------------------------------------------ */
+/* Phase 5: Skills page                                               */
+/* ------------------------------------------------------------------ */
+#page-skills {
+    padding: 16px 24px;
+    overflow-y: auto;
+}
+
+.skills-header h2 {
+    margin: 0 0 6px 0;
+}
+
+.skills-header .muted {
+    margin: 0 0 12px 0;
+    color: rgba(250, 250, 250, 0.55);
+}
+
+.skills-controls {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    margin-bottom: 14px;
+}
+
+.skills-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.skills-card {
+    border: 1px solid rgba(250, 250, 250, 0.08);
+    border-radius: 8px;
+    padding: 12px 14px;
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.skills-card-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 6px;
+}
+
+.skills-card-title strong {
+    font-size: 15px;
+    margin-right: 8px;
+}
+
+.skills-card-status {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.skills-card-perms {
+    color: rgba(250, 250, 250, 0.55);
+    font-size: 12px;
+    margin-bottom: 8px;
+}
+
+.skills-card-perms code {
+    padding: 1px 6px;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.05);
+    margin-right: 4px;
+}
+
+.skills-card-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.skills-load-error {
+    color: var(--red);
+    font-size: 12px;
+    margin-bottom: 8px;
+}
+
+.skills-badge {
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-family: 'JetBrains Mono', monospace;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.skills-badge-ok { background: rgba(34, 197, 94, 0.15); color: #22c55e; }
+.skills-badge-danger { background: rgba(239, 68, 68, 0.15); color: #ef4444; }
+.skills-badge-warn { background: rgba(245, 158, 11, 0.15); color: #f59e0b; }
+.skills-badge-muted { background: rgba(250, 250, 250, 0.06); color: rgba(250, 250, 250, 0.55); }
+
+.skills-banner {
+    padding: 10px 14px;
+    border-radius: 6px;
+    margin-bottom: 12px;
+    font-size: 13px;
+    border: 1px solid transparent;
+}
+
+.skills-banner-ok { background: rgba(34, 197, 94, 0.08); border-color: rgba(34, 197, 94, 0.3); color: #22c55e; }
+.skills-banner-danger { background: rgba(239, 68, 68, 0.08); border-color: rgba(239, 68, 68, 0.3); color: #ef4444; }
+.skills-banner-warn { background: rgba(245, 158, 11, 0.08); border-color: rgba(245, 158, 11, 0.3); color: #f59e0b; }
+.skills-banner-muted { background: rgba(250, 250, 250, 0.04); border-color: rgba(250, 250, 250, 0.1); color: rgba(250, 250, 250, 0.7); }

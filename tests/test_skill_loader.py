@@ -74,9 +74,52 @@ def _valid_script_manifest(name: str = "weather") -> str:
 def test_discover_skills_returns_empty_when_unconfigured(tmp_path):
     drive_root = tmp_path / "drive"
     drive_root.mkdir()
+    # With ``include_bundled=False`` (forced by the autouse fixture in
+    # conftest.py that stubs out ``_bundled_skills_dir``), an
+    # unconfigured external path yields an empty catalogue.
     assert discover_skills(drive_root, repo_path="") == []
     # A missing path is also silently tolerated — same "no skills" signal.
     assert discover_skills(drive_root, repo_path=str(tmp_path / "does-not-exist")) == []
+
+
+def test_discover_skills_includes_bundled_by_default(tmp_path, monkeypatch):
+    """Phase 5 regression: ``discover_skills`` merges the bundled
+    ``repo/skills/`` reference set with the configured external path
+    by default, so the shipped ``weather`` skill appears in a default
+    install even when ``OUROBOROS_SKILLS_REPO_PATH`` is empty.
+
+    The autouse ``_hide_bundled_skills`` fixture zeroes out the
+    bundled path helper for hermetic tests — we undo it locally to
+    exercise the real production behaviour.
+    """
+    bundled_root = tmp_path / "bundled"
+    bundled_root.mkdir()
+    _write_skill(
+        bundled_root,
+        "weather",
+        manifest=_valid_script_manifest("weather"),
+        scripts={"fetch.py": "print('ok')\n"},
+    )
+    # Override the autouse fixture: re-point the bundled helper at our
+    # tmp ``bundled_root`` so we don't need the real shipped skills.
+    monkeypatch.setattr(
+        "ouroboros.skill_loader._bundled_skills_dir",
+        lambda: bundled_root,
+    )
+
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+
+    # Empty external path — bundled alone must still surface.
+    skills = discover_skills(drive_root, repo_path="")
+    names = {s.name for s in skills}
+    assert "weather" in names
+
+    # include_bundled=False must hide it again.
+    skills_hermetic = discover_skills(
+        drive_root, repo_path="", include_bundled=False
+    )
+    assert skills_hermetic == []
 
 
 def test_load_skill_parses_manifest_and_computes_hash(tmp_path):

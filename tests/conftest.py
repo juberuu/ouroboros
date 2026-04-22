@@ -24,6 +24,24 @@ def pytest_runtest_call(item):  # noqa: ARG001
     asyncio.set_event_loop(None)
 
 
+@pytest.fixture(autouse=True)
+def _hide_bundled_skills(monkeypatch):
+    """Phase 5: skill tests must not see the shipped ``repo/skills/``
+    reference skills. Tests build their own fixtures under ``tmp_path``
+    and rely on ``discover_skills`` returning exactly those — letting
+    the bundled reference skills leak into the view would make every
+    test assertion brittle to changes in the shipped reference set.
+
+    Production keeps the default ``include_bundled=True`` behaviour
+    untouched; this fixture only neutralises the bundled lookup
+    helper inside the pytest process.
+    """
+    monkeypatch.setattr(
+        "ouroboros.skill_loader._bundled_skills_dir",
+        lambda: None,
+    )
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_teardown(item, nextitem):  # noqa: ARG001
     """Keep a valid asyncio event loop available during the teardown phase.

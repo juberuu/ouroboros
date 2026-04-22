@@ -1,4 +1,4 @@
-# Ouroboros v4.48.0 — Architecture & Reference
+# Ouroboros v4.49.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -64,6 +64,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── skill_loader.py      ← External skill discovery + durable skill state (Phase 3; reads OUROBOROS_SKILLS_REPO_PATH, persists to data/state/skills/<name>/)
       ├── skill_review.py      ← Tri-model skill review reusing the repo-review infrastructure against the Skill Review Checklist section of docs/CHECKLISTS.md
       ├── extension_loader.py  ← Phase 4 in-process loader for type: extension skills; discovers + imports plugin.py via importlib with a narrow PluginAPIImpl, tracks registrations per-skill for atomic unload
+      ├── extensions_api.py    ← Phase 5 HTTP surface for extensions (GET /api/extensions, GET /api/extensions/<skill>/manifest, ALL /api/extensions/<skill>/<rest:path> catch-all dispatch, POST /api/skills/<skill>/toggle)
       ├── server_auth.py       ← Non-localhost auth gate (OUROBOROS_NETWORK_PASSWORD)
       ├── server_control.py    ← Process-control helpers: restart, panic stop
       ├── server_entrypoint.py ← CLI argument parsing, port-binding helpers
@@ -281,9 +282,10 @@ The web UI is a single-page app (`web/index.html` + `web/style.css` + ES modules
 - `settings_ui.js` — Settings page HTML layout, tabs, secret input bindings, Network Gate LAN hint container
 - `settings_controls.js` — searchable model pickers + segmented effort controls
 - `costs.js` — cost breakdown tables
+- `skills.js` — Phase 5 Skills page (discover + enable/disable + review trigger + status badges; reads `/api/state` + `/api/extensions`, writes through `/api/skills/<name>/toggle` + `/api/skills/<name>/review`)
 - `about.js` — about page
 
-Navigation is a left sidebar with 7 pages (Chat, Files, Logs, Costs, Evolution, Settings, About).
+Navigation is a left sidebar with 8 pages (Chat, Files, Logs, Costs, Evolution, Skills, Settings, About). The Skills page (Phase 5) manages external + bundled skill packages — enable/disable, review trigger, status badges — and reads from `/api/state` + `/api/extensions`.
 
 ### 3.1 Chat
 
@@ -454,6 +456,11 @@ authentication. If the password is blank, non-loopback access stays open by desi
 | GET | `/` | Serves `web/index.html` |
 | GET | `/api/health` | `{status, version, runtime_version, app_version}` |
 | GET | `/api/state` | Dashboard data: uptime, workers, budget, branch, etc. Phase 2 adds `runtime_mode` (current `light \| advanced \| pro`) and `skills_repo_configured` (boolean — never the absolute path). Full happy-path shape is pinned by `ouroboros.contracts.api_v1.StateResponse`. |
+| GET | `/api/extensions` | Phase 5: catalogue of every discovered skill (bundled + `OUROBOROS_SKILLS_REPO_PATH`) plus `extension_loader.snapshot()` of live registrations. |
+| GET | `/api/extensions/{skill}/manifest` | Phase 5: parsed manifest for one skill (name/type/version/permissions/env_from_settings/ui_tab, plus enabled + review status + content hash). |
+| ALL | `/api/extensions/{skill}/{rest:path}` | Phase 5: catch-all dispatcher that forwards to the handler registered via `PluginAPI.register_route`. Honors the registered methods tuple; `405` on method mismatch, `404` on unknown mount. |
+| POST | `/api/skills/{skill}/toggle` | Phase 5: UI-direct enable/disable. Wraps `save_enabled` plus the `extension_loader.load_extension` / `unload_extension` machinery so the Skills page can flip state without round-tripping through the agent. |
+| POST | `/api/skills/{skill}/review` | Phase 5: UI-direct tri-model review trigger. Offloads the blocking LLM calls to a worker thread via `asyncio.to_thread` so the Starlette event loop keeps serving other requests. |
 | GET | `/api/files/list` | Directory listing for Files tab root/path |
 | GET | `/api/files/read` | File preview payload (text/image metadata/binary placeholder) |
 | GET | `/api/files/content` | Raw file content response for image preview |

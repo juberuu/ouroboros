@@ -744,31 +744,68 @@ def load_skill(
     )
 
 
+def _bundled_skills_dir() -> Optional[pathlib.Path]:
+    """Return the bundled reference-skills directory (``repo/skills/``).
+
+    Discovered by walking up from this module's location to the repo
+    root. Returns ``None`` if the bundled folder is missing (which is
+    fine in a packaged build that strips the reference skills).
+    """
+    here = pathlib.Path(__file__).resolve()
+    for ancestor in (here.parent.parent, *here.parent.parent.parents):
+        candidate = ancestor / "skills"
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
 def discover_skills(
     drive_root: pathlib.Path,
     repo_path: str | None = None,
+    *,
+    include_bundled: bool = True,
 ) -> List[LoadedSkill]:
-    """Scan the external skills checkout for skill packages.
+    """Scan the configured external skills checkout (and optionally the
+    bundled reference-skills directory) for skill packages.
 
     ``repo_path`` defaults to ``ouroboros.config.get_skills_repo_path()``.
-    An empty/missing path returns an empty list without raising — the
-    "no skills repo configured yet" state is normal.
+    When ``include_bundled=True`` (the production default), the bundled
+    ``repo/skills/`` directory is ALSO scanned so the reference
+    ``weather`` skill is available out of the box without user
+    configuration. Tests that want a hermetic view of only their
+    fixture skills can pass ``include_bundled=False``.
+
+    Duplicate basenames between the external repo and the bundled
+    directory surface as sanitised-name collisions via the existing
+    collision detector — the operator can rename the bundled copy or
+    point ``OUROBOROS_SKILLS_REPO_PATH`` at a non-overlapping directory.
     """
     if repo_path is None:
         from ouroboros.config import get_skills_repo_path
         repo_path = get_skills_repo_path()
     repo_path = str(repo_path or "").strip()
-    if not repo_path:
-        return []
-    root = pathlib.Path(repo_path).expanduser().resolve()
-    if not root.is_dir():
+    roots: List[pathlib.Path] = []
+    bundled = _bundled_skills_dir() if include_bundled else None
+    if bundled is not None:
+        roots.append(bundled)
+    if repo_path:
+        external = pathlib.Path(repo_path).expanduser().resolve()
+        if external.is_dir() and (not bundled or external != bundled):
+            roots.append(external)
+    if not roots:
         return []
 
     skills: List[LoadedSkill] = []
-    for entry in _safe_listdir(root):
-        loaded = load_skill(entry, drive_root)
-        if loaded is not None:
-            skills.append(loaded)
+    seen_dirs: set[pathlib.Path] = set()
+    for root in roots:
+        for entry in _safe_listdir(root):
+            resolved = entry.resolve()
+            if resolved in seen_dirs:
+                continue
+            seen_dirs.add(resolved)
+            loaded = load_skill(entry, drive_root)
+            if loaded is not None:
+                skills.append(loaded)
 
     # Detect collisions in the sanitised identity. Two distinct
     # directories ("hello world" and "hello_world") must never share
