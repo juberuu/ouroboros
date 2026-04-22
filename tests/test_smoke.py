@@ -343,12 +343,19 @@ def test_no_hardcoded_replies():
 
 
 def test_version_file_exists():
-    """VERSION file exists and contains valid semver."""
+    """VERSION file exists and contains a valid PEP 440 version.
+
+    Stable releases carry plain ``X.Y.Z``; pre-releases carry
+    ``X.Y.Z[-]?(rc|alpha|beta|a|b)\\.?N`` per the ``release_sync``
+    carrier-format contract. Both are accepted here; stricter
+    spelling rules live in ``tests/test_release_sync.py``.
+    """
+    from ouroboros.tools.release_sync import _VERSION_RE
+
     version = (REPO / "VERSION").read_text(encoding="utf-8").strip()
-    parts = version.split(".")
-    assert len(parts) == 3, f"VERSION '{version}' is not semver"
-    for p in parts:
-        assert p.isdigit(), f"VERSION part '{p}' is not numeric"
+    assert _VERSION_RE.match(version), (
+        f"VERSION '{version}' is not a valid semver / PEP 440 pre-release token"
+    )
 
 
 def test_version_in_readme():
