@@ -212,6 +212,9 @@ class ToolRegistry:
         "a2a", "browser", "ci", "claude_advisory_review", "compact_context", "control",
         "core", "evolution_stats", "git", "git_rollback", "github", "health",
         "knowledge", "memory_tools", "plan_review", "review", "search", "shell",
+        # Phase 3 three-layer refactor: external skill surface
+        # (list_skills / review_skill / skill_exec / toggle_skill).
+        "skill_exec",
         "tool_discovery", "vision",
     ]
 

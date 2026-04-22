@@ -93,7 +93,7 @@ Derived from P5 (Minimalism): entire codebase fits in one context window.
 - Module hard gate: 1600 lines for non-grandfathered modules in `tests/test_smoke.py`. Grandfathered (`GRANDFATHERED_OVERSIZED_MODULES` in `ouroboros/review.py`): `llm.py`, `claude_advisory_review.py`, `review_state.py` — split deferred until each surface stabilises.
 - Method target: <150 lines. Crossing that line is a decomposition signal, not an automatic failure by itself.
 - Method hard gate: 300 lines in `tests/test_smoke.py`.
-- Codebase-wide function-count hard gate: 1250 Python functions/methods in `tests/test_smoke.py`.
+- Codebase-wide function-count hard gate: 1350 Python functions/methods in `tests/test_smoke.py` (source of truth: `ouroboros/review.py::MAX_TOTAL_FUNCTIONS`).
 - Function parameters: <8.
 - Net complexity growth per cycle approaches zero.
 - If a feature is not used in the current cycle — it is premature.
@@ -215,7 +215,7 @@ Before every commit, verify the following:
 #### Module Size & Complexity
 - [ ] Module stays near one context window (~1000 lines target; 1600 hard gate unless explicitly grandfathered debt)
 - [ ] No method exceeds the practical target (150 lines) or the hard gate (300 lines)
-- [ ] Total Python function count stays under the current smoke hard gate (1250)
+- [ ] Total Python function count stays under the current smoke hard gate (1350, source of truth: `ouroboros/review.py::MAX_TOTAL_FUNCTIONS`)
 - [ ] No function has more than 8 parameters
 - [ ] No gratuitous abstract layers (Bible P5)
 

@@ -141,6 +141,9 @@ EXPECTED_TOOLS = [
     "run_ci_tests",
     # A2A (Agent-to-Agent protocol, non-core: require enable_tools)
     "a2a_discover", "a2a_send", "a2a_status",
+    # Phase 3 three-layer refactor: external skill surface
+    # (non-core: require enable_tools)
+    "list_skills", "review_skill", "skill_exec", "toggle_skill",
 ]
 
 

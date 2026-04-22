@@ -125,6 +125,21 @@ TOOL_POLICY: Dict[str, str] = {
     "enable_tools": POLICY_SKIP,
     "advisory_pre_review": POLICY_SKIP,
 
+    # --- Phase 3 three-layer refactor: external skill surface ---
+    # Read-only catalogue view.
+    "list_skills": POLICY_SKIP,
+    # Runs the existing tri-model review against a skill package; no
+    # subprocess execution, only durable skill state updates.
+    "review_skill": POLICY_SKIP,
+    # Flips the ``enabled.json`` bit for a single skill in its private
+    # state directory. Cannot touch the main repo.
+    "toggle_skill": POLICY_SKIP,
+    # Actually spawns a subprocess from the external skill checkout.
+    # The tool itself enforces PASS review + enabled + non-stale hash +
+    # runtime_mode != light, but we still keep a cheap per-call LLM
+    # recheck as defense in depth.
+    "skill_exec": POLICY_CHECK,
+
     # --- Conditional: run_shell (safe-subject whitelist) ---
     "run_shell": POLICY_CHECK_CONDITIONAL,
 

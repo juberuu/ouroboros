@@ -1,4 +1,4 @@
-# Ouroboros v4.46.0 — Architecture & Reference
+# Ouroboros v4.47.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -61,6 +61,8 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── provider_models.py   ← Provider-specific model ID helpers, direct-provider defaults (OpenAI, Anthropic)
       ├── reflection.py        ← Execution reflection and pattern capture
       ├── review_evidence.py   ← Structured review findings/obligations snapshot for summaries and reflections
+      ├── skill_loader.py      ← External skill discovery + durable skill state (Phase 3; reads OUROBOROS_SKILLS_REPO_PATH, persists to data/state/skills/<name>/)
+      ├── skill_review.py      ← Tri-model skill review reusing the repo-review infrastructure against the Skill Review Checklist section of docs/CHECKLISTS.md
       ├── server_auth.py       ← Non-localhost auth gate (OUROBOROS_NETWORK_PASSWORD)
       ├── server_control.py    ← Process-control helpers: restart, panic stop
       ├── server_entrypoint.py ← CLI argument parsing, port-binding helpers
@@ -95,7 +97,8 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── plan_review.py     ← Pre-implementation design review (2–3 distinct parallel full-codebase reviewers, plan_task tool)
       │   ├── review.py          ← Triad diff review (>=2 reviewer models in parallel against CHECKLISTS.md; ships with 3, capped at 10)
       │   ├── review_helpers.py  ← Shared review helpers (section loader, file packs, intent)
-      │   └── scope_review.py   ← Blocking scope reviewer (opus, fail-closed)
+      │   ├── scope_review.py   ← Blocking scope reviewer (opus, fail-closed)
+      │   └── skill_exec.py      ← Phase 3 external-skill surface: list_skills, review_skill, toggle_skill, skill_exec (subprocess runner with cwd confinement, env scrubbing, timeout, runtime allowlist python/bash/node; gated by runtime_mode!=light + enabled + PASS review + fresh content hash)
       └── platform_layer.py    ← Cross-platform process/path/locking helpers
 
 # Build & CI (not part of runtime)
@@ -146,7 +149,11 @@ Dockerfile                    ← Docker image (web UI runtime)
 │   │   ├── state.json  ← Runtime state (spent_usd, session_id, branch, etc.)
 │   │   ├── advisory_review.json ← Durable advisory/review ledger (runs, attempts, obligations, commit-readiness debts)
 │   │   ├── queue_snapshot.json
-│   │   └── review_continuations/ ← Per-task blocked-review continuation payloads (+ quarantined corrupt files under `corrupt/`)
+│   │   ├── review_continuations/ ← Per-task blocked-review continuation payloads (+ quarantined corrupt files under `corrupt/`)
+│   │   └── skills/              ← Phase 3 external-skill state plane (sibling of advisory_review.json, not shared)
+│   │       └── <skill_name>/
+│   │           ├── enabled.json ← {"enabled": bool, "updated_at": iso_ts}
+│   │           └── review.json  ← {"status": "pass|fail|advisory|pending|pending_phase4", "content_hash": str, "findings": [...], "reviewer_models": [...], "timestamp": iso_ts, ...}
 │   ├── memory/
 │   │   ├── identity.md     ← Agent's self-description (persistent)
 │   │   ├── scratchpad.md   ← Working memory (auto-generated from scratchpad_blocks.json)
@@ -357,7 +364,7 @@ The Dashboard tab has been removed. Its functionality is now distributed:
 - **Review Enforcement**: `Advisory` or `Blocking` for pre-commit review behavior. Rendered as a two-button segmented toggle (advisory = amber, blocking = crimson) rather than a dropdown.
   Backed by `OUROBOROS_REVIEW_ENFORCEMENT`. Review always runs in both modes.
 - **Runtime Mode** (Phase 2 three-layer refactor): `Light` / `Advanced` / `Pro` segmented control backed by `OUROBOROS_RUNTIME_MODE` (default `advanced`). Separate axis from Review Enforcement — controls how far Ouroboros is allowed to self-modify. `Light` disables repo self-modification (enforced in Phase 3+); `Advanced` preserves the current self-modifying evolutionary layer with core/safety-critical files still protected by the hardcoded sandbox; `Pro` additionally enables the core-patch auto-PR lane (Phase 6+). `ouroboros/config.py::VALID_RUNTIME_MODES = ("light", "advanced", "pro")` is the SSOT; `normalize_runtime_mode` runs on both the save path (`server.py::api_settings_post`) and the read path (`get_runtime_mode`) so unknown values can never drift between `/api/settings` and `/api/state`.
-- **External Skills Repo**: text input backed by `OUROBOROS_SKILLS_REPO_PATH` (Phase 2 plumbing only; the skill loader and `skill_exec` arrive in Phase 3). Absolute path or `~`-prefixed; empty means "not configured". Ouroboros never clones or pulls this directory — the user manages it out-of-band. `get_skills_repo_path()` expands `~` at read time; `/api/state` surfaces only a `skills_repo_configured` boolean so the absolute path never leaks to the UI.
+- **External Skills Repo**: text input backed by `OUROBOROS_SKILLS_REPO_PATH`. The skill loader (Phase 3) scans this path for `SKILL.md`/`skill.json` packages; `skill_exec` runs reviewed scripts from those packages; `review_skill`/`toggle_skill`/`list_skills` manage lifecycle. Absolute path or `~`-prefixed; empty means "no skills configured" (all four skill tools return a gentle `SKILLS_UNAVAILABLE` warning). Ouroboros never clones or pulls this directory — the user manages it out-of-band. `get_skills_repo_path()` expands `~` at read time; `/api/state` surfaces only a `skills_repo_configured` boolean so the absolute path never leaks to the UI.
 - **Advanced tab**: local model runtime, max workers, tool timeout, soft/hard timeout, and reset controls. Total budget and per-task cost cap have moved to the **Costs** page.
 - **Local Model Runtime**: source, GGUF filename, port, GPU layers, context length, chat format, start/stop/test buttons, live local-model status, real download progress bar (updates via `download_progress` from `/api/local-model/status`), and an **Install Local Runtime** button (hidden until runtime is missing). The Start button performs a preflight check via `/api/local-model/start` before downloading; on a `runtime_missing` (HTTP 412) response it surfaces the install button and a human-readable hint instead of a raw traceback. After install completes (`runtime_status == "install_ok"`), the start flow resumes automatically if a source was configured. `LOCAL_MODEL_FILENAME` now accepts subfolder paths (`quant/model.gguf`) and split GGUF patterns (`quant/model-00001-of-00003.gguf`); all shards are downloaded automatically and the server is started with the first shard. If the user omits the subfolder prefix (types just the bare filename), `_resolve_hf_path` auto-resolves the full path by querying `list_repo_files` on the HF repo (fail-open on network errors).
 - **Telegram**: Bot Token and primary chat id. If no primary chat id is pinned, the bridge binds to the first active Telegram chat and keeps replies attached there.
@@ -1487,8 +1494,8 @@ Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent acce
 | OUROBOROS_WEBSEARCH_MODEL | gpt-5.2 | Official OpenAI Responses model for `web_search` when `OPENAI_BASE_URL` is empty |
 | OUROBOROS_REVIEW_MODELS | openai/gpt-5.4,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.7 | Comma-separated OpenRouter model IDs for pre-commit review (min 2 for quorum) |
 | OUROBOROS_REVIEW_ENFORCEMENT | advisory | Pre-commit review enforcement: `advisory` or `blocking` |
-| OUROBOROS_RUNTIME_MODE | advanced | Phase 2 three-layer refactor axis: `light`, `advanced`, or `pro`. Orthogonal to `OUROBOROS_REVIEW_ENFORCEMENT`. Clamped via `normalize_runtime_mode` on both save and read paths. No runtime gating yet — enforcement arrives in Phase 3+. |
-| OUROBOROS_SKILLS_REPO_PATH | "" | Optional local checkout path for the external skills/extensions repo (Phase 2 plumbing). Accepts absolute paths or `~`-prefixed paths; `get_skills_repo_path` expands `~` at read time. Ouroboros never clones/pulls this directory. |
+| OUROBOROS_RUNTIME_MODE | advanced | Three-layer refactor axis: `light`, `advanced`, or `pro`. Orthogonal to `OUROBOROS_REVIEW_ENFORCEMENT`. Clamped via `normalize_runtime_mode` on both save and read paths. Phase 3 wires `light` to block `skill_exec` entirely; the per-layer self-modification gating arrives in Phase 6. |
+| OUROBOROS_SKILLS_REPO_PATH | "" | Local checkout path for the external skills/extensions repo. Consumed by `ouroboros.skill_loader.discover_skills` (Phase 3); accepts absolute paths or `~`-prefixed paths; `get_skills_repo_path` expands `~` at read time. Ouroboros never clones/pulls this directory. |
 | OUROBOROS_SCOPE_REVIEW_MODEL | anthropic/claude-opus-4.6 | Single model for the blocking scope reviewer |
 | OUROBOROS_EFFORT_TASK | medium | Reasoning effort for task/chat: none, low, medium, high |
 | OUROBOROS_EFFORT_EVOLUTION | high | Reasoning effort for evolution tasks |
@@ -1711,7 +1718,28 @@ automatically on completion or via `kill_all_tracked_subprocesses()` on panic.
     the codebase. Every structural change (new module, new API endpoint, new data file,
     new UI page) must be reflected here. This is the single source of truth for how
     the system works.
-11. **Single-source startup rescue**: a dirty worktree inherited across sessions is
+11. **External skills run only after a tri-model review PASS, and the review
+    is the primary gate**: skills loaded from `OUROBOROS_SKILLS_REPO_PATH`
+    may execute via the dedicated `skill_exec` substrate only when
+    the skill is enabled + the last tri-model review verdict is `pass` +
+    the stored content hash matches the current skill payload hash
+    (including the manifest-declared `entry` file for extensions) +
+    `OUROBOROS_RUNTIME_MODE` is `advanced` or `pro` (not `light`).
+    `skill_exec` additionally provides defense-in-depth via `cwd=skill_dir`,
+    a scrubbed env (only `env_from_settings` allowlisted keys), a runtime
+    allowlist (python/bash/node), a hard 300s timeout ceiling, output
+    caps, and panic-kill tracking via `_tracked_subprocess_run` so
+    `/panic` terminates the whole skill process tree. These runtime
+    guards are NOT a filesystem sandbox: a malicious skill payload that
+    slipped past review could still open absolute paths from inside its
+    interpreter. The Skill Review Checklist items 3 (`no_repo_mutation`),
+    4 (`path_confinement`), and 5 (`env_allowlist`) are therefore the
+    actual authoritative checks, enforced by the multi-model reviewers
+    before any `skill_exec` invocation. Skill review findings live in
+    `data/state/skills/<name>/review.json` and are deliberately siloed
+    from the repo-review ledger (`data/state/advisory_review.json`) — a
+    sticky skill finding cannot block repo commits and vice versa.
+12. **Single-source startup rescue**: a dirty worktree inherited across sessions is
     rescued by exactly one mechanism — `safe_restart(..., "rescue_and_reset")` in
     `_bootstrap_supervisor_repo()`. `OuroborosAgent` construction and worker boot
     (including `_log_worker_boot_once → check_uncommitted_changes`) must never run
@@ -1762,3 +1790,131 @@ Any extension of the ABI MUST:
 
 Removing anything from Section 11.1 is a deliberate ABI break and requires
 a version bump + a migration note in the release row.
+
+---
+
+## 12. External Skills Layer (Phase 3)
+
+Phase 3 of the three-layer refactor introduces a safe, plug-and-play
+external skill surface that lives **outside** the self-modifying
+Ouroboros repository.
+
+### 12.1 Topology
+
+```
+OUROBOROS_SKILLS_REPO_PATH (local checkout, user-managed)
+├── <skill_name>/
+│   ├── SKILL.md         ← manifest frontmatter + body, OR
+│   ├── skill.json       ← manifest as pure JSON
+│   ├── scripts/         ← payload files (python/bash/node)
+│   └── assets/          ← static data the payload reads
+│
+└── …
+```
+
+Ouroboros never clones or pulls this directory — the user manages it
+(git clone, symlink, zip-extract, whatever). Skills are discovered via
+``ouroboros.skill_loader.discover_skills`` which scans immediate
+subdirectories of the configured path.
+
+Per-skill durable state lives on the Ouroboros data plane, not inside
+the skill checkout:
+
+```
+~/Ouroboros/data/state/skills/<name>/
+├── enabled.json        ← {"enabled": bool, "updated_at": iso_ts}
+└── review.json         ← {"status", "content_hash", "findings", …}
+```
+
+### 12.2 Lifecycle
+
+1. **Discover**: ``list_skills`` tool (via ``summarize_skills``) returns
+   the catalogue. Non-extension skills start with ``enabled=False`` and
+   ``review.status="pending"``. ``type: extension`` skills are always
+   surfaced with ``review.status="pending_phase4"`` (even before any
+   review has run) so operators can tell at a glance that their
+   execution is deferred until Phase 4, regardless of what the
+   persisted ``review.json`` says.
+2. **Review**: ``review_skill(skill=name)`` runs the tri-model pipeline
+   (``_handle_multi_model_review``) against the dedicated Skill Review
+   Checklist section of ``docs/CHECKLISTS.md``. On a successful
+   quorum-parseable outcome it persists the verdict + content hash +
+   findings to ``review.json`` via ``save_review_state`` (atomic
+   ``tempfile`` + ``os.replace``). Infrastructure-level failures
+   — missing skill, ``load_error``, unreadable / oversized / binary
+   payload, non-JSON top-level response, transport exception, sub-
+   quorum reviewer count — return a ``SkillReviewOutcome`` with
+   ``status="pending"`` and an actionable ``error`` WITHOUT
+   persisting anything, so a transient failure cannot overwrite a
+   previously-valid verdict.
+3. **Enable**: ``toggle_skill(skill=name, enabled=True)`` flips the
+   ``enabled.json`` bit. Enabling a skill whose review is not PASS is
+   allowed but not functional.
+4. **Execute**: ``skill_exec(skill=name, script=path, args=[...])`` runs
+   the named script via the runtime declared in the manifest
+   (``python``, ``python3``, ``bash``, or ``node``; ``python3`` falls
+   back to ``python`` on Windows-style installs without ``python3.exe``),
+   with cwd confined to the skill
+   directory, env scrubbed to the manifest's ``env_from_settings``
+   allowlist, timeout bounded by the manifest's ``timeout_sec`` (hard
+   cap 300s). stdout/stderr are **streamed with per-byte caps** of
+   64 KB and 32 KB respectively: the moment a skill exceeds either
+   cap the entire process tree is killed and ``_handle_skill_exec``
+   returns ``SKILL_EXEC_OVERFLOW`` with the bounded partial output
+   (the stream reader bounds memory in-flight, so a malicious skill
+   cannot exhaust Ouroboros memory by writing gigabytes to stdout
+   before truncation). A non-zero exit code surfaces as
+   ``SKILL_EXEC_FAILED`` with the structured payload, and a timeout
+   (wall-clock) surfaces as ``SKILL_EXEC_TIMEOUT`` with captured
+   partial output.
+
+### 12.3 Gating invariants (all must hold for ``skill_exec`` to run)
+
+- ``OUROBOROS_SKILLS_REPO_PATH`` is configured.
+- ``OUROBOROS_RUNTIME_MODE`` is ``advanced`` or ``pro`` (``light``
+  blocks execution entirely).
+- The skill's ``type`` is ``script`` (``skill_exec`` runs scripts —
+  ``instruction`` skills are catalogued and reviewable but have no
+  executable payload by design; ``extension`` execution lands in
+  Phase 4 with ``SKILL_EXEC_DEFERRED`` for now).
+- The skill's ``enabled.json`` is ``true``.
+- The skill's last review verdict is ``pass``.
+- The stored ``content_hash`` matches the current on-disk hash of the
+  manifest + runtime-reachable payload files (a user edit invalidates
+  the verdict and blocks execution until a fresh review). The hash is
+  computed by ``ouroboros.skill_loader.compute_content_hash`` and
+  deliberately **excludes** the following file classes so an
+  unrelated byte-flip cannot stale-invalidate a review:
+  (a) VCS / package-manager / editor scratch (``.git``, ``.hg``,
+  ``.svn``, ``.idea``, ``.vscode``, ``.tox``, ``__pycache__``,
+  ``node_modules``, ``.DS_Store``) — silently excluded; (b) symlinks
+  whose targets resolve outside the skill directory (confinement
+  guard) — silently excluded. **Sensitive-shape filenames**
+  (``.env*``, ``.pem``, ``.key``, ``.p12``, ``.pfx``, ``.jks``,
+  ``.keystore``, ``credentials.json``, ``service-account.json``,
+  ``secrets.yaml``, ``secrets.json``, ``.git-credentials``,
+  ``.netrc``, ``.npmrc``, ``.pypirc``, reusing
+  ``review_helpers._SENSITIVE_EXTENSIONS/_SENSITIVE_NAMES``) instead
+  **hard-block the skill** via ``SkillPayloadUnreadable`` — silent
+  exclusion would leave them runtime-reachable via ``open()`` /
+  ``source`` and let a reviewed skill exfiltrate credentials the
+  reviewer never saw. The hash FAILS CLOSED on unreadable files —
+  ``compute_content_hash`` raises ``SkillPayloadUnreadable`` rather
+  than skipping a file it can't see, so a skill with a
+  temporarily-unreadable payload cannot slip a PASS verdict through
+  and then execute once permissions change.
+
+### 12.4 Review surface split (DRY against repo review)
+
+- Repo review (triad + scope + advisory) protects the self-modifying
+  ``~/Ouroboros/repo/``. Its state lives in
+  ``data/state/advisory_review.json`` and is keyed by the staged diff
+  snapshot.
+- Skill review protects the external skills checkout. Its state lives
+  in ``data/state/skills/<name>/review.json`` and is keyed by the
+  manifest + payload content hash.
+
+The two surfaces share the model config (``OUROBOROS_REVIEW_MODELS``)
+and the ``_handle_multi_model_review`` plumbing but are otherwise
+siloed — a blocked skill review cannot create repo-review obligations
+or commit-readiness debt and vice versa.

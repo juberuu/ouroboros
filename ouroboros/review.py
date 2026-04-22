@@ -60,7 +60,13 @@ MAX_FUNCTION_LINES = 300
 # plus the shared _run_reviewed_stage_cycle / _run_non_committing_review_cycle
 # extraction in tools/git.py and _commit_readiness_debts_payload in
 # claude_advisory_review.py) with headroom for incremental growth.
-MAX_TOTAL_FUNCTIONS = 1250
+# Phase 3 three-layer refactor adds the external skill surface
+# (``ouroboros/skill_loader.py``, ``ouroboros/skill_review.py``,
+# ``ouroboros/tools/skill_exec.py``) with exception sentinels,
+# streaming-output runner, capped readers, and scoping helpers.
+# Ceiling raised to 1350 to accommodate that surface + Phase 4–6
+# headroom (extension loader, Widget ABI, pro-mode auto-PR).
+MAX_TOTAL_FUNCTIONS = 1350
 # v4.40.0 adds claude_advisory_review.py to the grandfathered set: the file
 # grew to 1731 lines across v4.37-v4.39 (plan_task quorum + direct-provider
 # fallback + convergence rule + syntax preflight + reflection decoupling).

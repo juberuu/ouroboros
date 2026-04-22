@@ -132,7 +132,7 @@ Ouroboros repository.
 | # | item | what to check | severity when FAIL |
 |---|------|---------------|--------------------|
 | 1 | bible_compliance | Does the diff violate any BIBLE.md principle? | critical |
-| 2 | development_compliance | Does it follow DEVELOPMENT.md patterns? Check explicitly: (a) naming conventions (snake_case modules/vars, PascalCase classes, UPPER_SNAKE_CASE constants); (b) entity type rules — Gateway classes contain ONLY transport, no business logic; Tool functions are thin wrappers; (c) module-size target stays near one context window (~1000 lines) with a hard fail above 1600 lines for non-grandfathered modules, method-size target stays under 150 lines with a hard fail above 300 lines, codebase-wide total Python function/method count stays under the 1250 smoke hard gate, and functions keep `<= 8` params; (d) no gratuitous abstract layers (P5 Minimalism); (e) new LLM calls go through the shared `LLMClient`/`llm.py` layer, not ad-hoc HTTP clients; (f) cognitive artifacts (identity.md, scratchpad, task reflections, review outputs) must NOT use hardcoded `[:N]` truncation — explicit omission notes required; (g) new `get_tools()` exports follow the ToolEntry pattern in registry.py. | critical |
+| 2 | development_compliance | Does it follow DEVELOPMENT.md patterns? Check explicitly: (a) naming conventions (snake_case modules/vars, PascalCase classes, UPPER_SNAKE_CASE constants); (b) entity type rules — Gateway classes contain ONLY transport, no business logic; Tool functions are thin wrappers; (c) module-size target stays near one context window (~1000 lines) with a hard fail above 1600 lines for non-grandfathered modules, method-size target stays under 150 lines with a hard fail above 300 lines, codebase-wide total Python function/method count stays under the 1350 smoke hard gate (source of truth: `ouroboros/review.py::MAX_TOTAL_FUNCTIONS`), and functions keep `<= 8` params; (d) no gratuitous abstract layers (P5 Minimalism); (e) new LLM calls go through the shared `LLMClient`/`llm.py` layer, not ad-hoc HTTP clients; (f) cognitive artifacts (identity.md, scratchpad, task reflections, review outputs) must NOT use hardcoded `[:N]` truncation — explicit omission notes required; (g) new `get_tools()` exports follow the ToolEntry pattern in registry.py. | critical |
 | 3 | secrets_check | Are secrets, API keys, .env files, credentials present in the diff? | critical |
 | 4 | code_quality | Careful code review: bugs, logic errors, crashes, regressions, race conditions, resource leaks? | critical |
 | 5 | security_issues | Security vulnerabilities: injection, path traversal, secret leakage, unsafe operations? | critical |
@@ -253,6 +253,127 @@ At minimum, check for:
 - visible anomaly path when structured output is missing or broken
 
 A state-machine change that only passes the success-path test is incomplete.
+
+---
+
+## Skill Review Checklist
+
+Used by `review_skill` (Phase 3 three-layer refactor) to vet a single
+external skill before it is allowed to execute via `skill_exec`. This
+runs the same tri-model review infrastructure (`_handle_multi_model_review`
+in `ouroboros/tools/review.py`, configured providers from
+`OUROBOROS_REVIEW_MODELS`) but against a skill package in the local
+checkout of `OUROBOROS_SKILLS_REPO_PATH`, not against a staged git diff.
+
+Scope of a skill review pack:
+
+- The skill's `SKILL.md` / `skill.json` manifest (parsed by
+  `ouroboros.contracts.skill_manifest.parse_skill_manifest_text`).
+- The body of the `SKILL.md` (human-readable instructions).
+- **Every regular file under `<skill_dir>/`** that the subprocess could
+  ``import`` / ``source`` / ``read`` at runtime (the skill runs with
+  ``cwd=skill_dir`` so the reviewed/hashed surface must equal the
+  runtime-reachable surface). This includes top-level helpers like
+  `helper.py`, manifest-declared scripts outside `scripts/` (e.g.
+  `bin/run.sh`), and manifest-declared extension entry modules (e.g.
+  `plugin.py`). Hidden files that are NOT VCS/cache metadata (e.g.
+  `.hidden_helper.py`) are hashed + reviewed for the same reason — a
+  skill could still ``import`` them.
+- The manifest's declared `permissions` list, for comparison against
+  what the code actually does.
+
+What is **deliberately excluded** from both the content hash and the
+review pack:
+
+- VCS / package-manager / editor scratch: `.git`, `.hg`, `.svn`,
+  `.idea`, `.vscode`, `.tox`, `__pycache__`, `node_modules`, `.DS_Store`
+  (silently excluded — a byte-flip in a cache file does not
+  invalidate a PASS review).
+- **Sensitive file shapes HARD-BLOCK the skill**: `.env*`, `.pem`,
+  `.key`, `.p12`, `.pfx`, `.jks`, `.keystore`, `credentials.json`,
+  `service-account.json`, `secrets.yaml`, `secrets.json`,
+  `.git-credentials`, `.netrc`, `.npmrc`, `.pypirc`. (Allowlist
+  reused from `ouroboros.tools.review_helpers._SENSITIVE_EXTENSIONS`
+  + `_SENSITIVE_NAMES`.) The loader raises `SkillPayloadUnreadable`
+  on first discovery and the skill shows up in `list_skills` with a
+  non-empty `load_error` — neither reviewable nor executable until
+  the operator renames or relocates the file outside the skill
+  tree. Rationale: silently excluding the file would leave it
+  runtime-reachable via `open('.env').read()`, so a reviewed skill
+  could still exfiltrate credentials the reviewer never saw. If
+  your skill legitimately ships an example config, rename it so it
+  does not match this allowlist (e.g. `env.sample.txt` instead of
+  `.env.example`).
+- Symlinks whose targets resolve outside `skill_dir` (confinement
+  guard — otherwise a symlink to `/etc/passwd` would leak into the
+  review pack sent to external reviewer models).
+
+Phase 3 is **text-only**: any non-UTF-8 file in the runtime-reachable
+skill surface (whether a recognised loadable-binary extension like
+`.so`/`.dylib`/`.pyc`/`.node`/`.wasm` or an extensionless disguised
+blob) is a hard review blocker. ``_read_capped_text`` raises
+``_SkillBinaryPayload`` for any such file and ``review_skill`` converts
+that into ``status="pending"`` with an actionable error — never a
+filename+size note that would let bytes the reviewer could not inspect
+slip past the gate. The subprocess runs with ``cwd=skill_dir`` so it
+could otherwise ``ctypes.CDLL('./payload')`` / ``import`` / ``require``
+opaque bytes, which breaks the "review is the primary gate" invariant.
+Media-carrying skills that need binary assets can stash them outside
+the skill checkout (fetch on demand) or wait for a future phase that
+introduces an explicit manifest-declared binary-asset allowlist.
+
+Skills default to **disabled** and cannot be executed by `skill_exec`
+until review produces a PASS verdict. Skill review output is persisted
+to `~/Ouroboros/data/state/skills/<name>/review.json` with a content
+hash so an edit to the skill invalidates the previous verdict.
+
+### Output contract
+
+Reviewers return a JSON array with one entry per item below (7 entries
+total). Each entry carries `item`, `verdict` (`PASS`/`FAIL`), `severity`
+(`critical`/`advisory`), and `reason`.
+
+### Checklist items
+
+| # | item | what to check | severity when FAIL |
+|---|------|---------------|--------------------|
+| 1 | manifest_schema | Does the manifest parse cleanly? Does `type` match the actual payload (`instruction` = no scripts/entry; `script` = at least one entry in `scripts`; `extension` = non-empty `entry`)? Is `runtime` one of `python`/`python3`/`node`/`bash` for `type: script` (empty `""` is allowed ONLY for `type: instruction` since instruction skills never execute)? Is `timeout_sec` > 0? | critical |
+| 2 | permissions_honesty | Do the declared `permissions` match what the scripts actually do? Missing permission declaration for an effect the code performs is a concrete FAIL. Examples: `net` must be declared if any script uses `httpx`/`requests`/`socket`/`urllib`; `fs` must be declared if a script writes outside the skill state dir; `subprocess` must be declared if a script spawns another process. | critical |
+| 3 | no_repo_mutation | Does any script attempt to write to the self-modifying Ouroboros repo (`~/Ouroboros/repo/`)? Import of `repo_write`/`repo_commit`, `git add`/`git commit`, or any path that starts with `OUROBOROS_REPO_DIR` / `~/Ouroboros/repo` is a concrete FAIL. Skills may only propose patches by returning artifact bundles; commits go through the first-party reviewed path. | critical |
+| 4 | path_confinement | Do scripts stay inside the skill directory and the dedicated state dir (`~/Ouroboros/data/state/skills/<name>/`)? Absolute paths, `..` traversal, and writes to arbitrary user home subdirs are concrete FAIL. Reading from outside the skill dir is OK for read-only lookups (e.g. system info), write-path confinement is the strict rule. | critical |
+| 5 | env_allowlist | Is `env_from_settings` a short, whitelisted list of settings keys (e.g. `TIMEZONE`, `OUROBOROS_MODEL`)? **Note**: keys in the runtime `_FORBIDDEN_ENV_FORWARD_KEYS` denylist (`OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `OPENAI_COMPATIBLE_API_KEY`, `CLOUDRU_FOUNDATION_MODELS_API_KEY`, `ANTHROPIC_API_KEY`, `TELEGRAM_BOT_TOKEN`, `GITHUB_TOKEN`, `OUROBOROS_NETWORK_PASSWORD`) are NEVER forwarded to a skill subprocess even if the manifest explicitly declares them — the runtime refuses and logs a warning. Mark such manifest requests as FAIL: the skill is asking for something it can never receive, which signals intent rather than a legitimate need. Requests for non-forbidden secrets the skill doesn't need for its stated purpose are also FAIL. An empty list is the default and always fine. | critical |
+| 6 | timeout_and_output_discipline | Is `timeout_sec` reasonable for the stated workload (default 60, hard cap 300)? Do scripts print to stdout in chunks that the runtime can cap, rather than streaming unbounded output? Unbounded loops without a `break`/timeout path are a concrete FAIL. | advisory |
+| 7 | extension_namespace_discipline | `type: extension` only: does the extension register its tool/route/ws-handler/ui-tab under the namespace derived from its `name` (e.g. tool `ext.<name>.foo`, route `/api/extensions/<name>/…`, ws type `ext.<name>.…`)? Namespace collisions with built-in surfaces are a concrete FAIL. For Phase 3 the loader skips `type: extension` entirely, so reviewers may verdict PASS with reason "Not applicable — type != extension" for non-extension skills. | critical |
+
+### Severity rules
+
+- Items 1–5 are always critical: a FAIL on any of them aggregates to
+  ``status=fail``, which blocks `skill_exec` (execution requires
+  ``status=pass``).
+- Item 6 is advisory: a FAIL on item 6 alone aggregates to
+  ``status=advisory`` — the verdict is **still not PASS**, so
+  `skill_exec` continues to refuse execution until the author
+  addresses the finding and re-runs review. "Advisory" here means
+  "the finding does NOT escalate to critical"; it does not mean
+  "the skill is still runnable under this verdict". To ship a skill,
+  every item must land PASS.
+- Item 7 is conditionally critical: FAIL only when `type: extension`.
+
+### Skill review vs. repo review
+
+These are **separate surfaces** with separate models, prompts, and state:
+
+- Repo review (triad + scope + advisory) protects the self-modifying
+  `~/Ouroboros/repo/`. Its state lives in `data/state/advisory_review.json`
+  and is keyed by staged diff snapshot.
+- Skill review protects the external skills repo. Its state lives in
+  `data/state/skills/<name>/review.json` and is keyed by a content hash
+  of the skill's manifest + payload files.
+
+A blocked skill review must NOT create obligations, commit-readiness
+debt, or any artefact visible to the repo-review pipeline — the two
+surfaces are deliberately siloed so a sticky skill finding cannot
+block repo commits and vice versa.
 
 ---
 
