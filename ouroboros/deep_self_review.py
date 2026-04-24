@@ -30,11 +30,9 @@ from ouroboros.tools.review_helpers import (  # noqa: E402
 from ouroboros.utils import estimate_tokens  # noqa: E402
 
 # Directory prefixes to skip entirely (relative to repo_dir, using forward slashes).
-# - assets/  : README screenshots and app icons — no agent logic
-# - webview/ : legacy PyWebView JS helpers, not part of the web SPA or agent core
+# - assets/ : README screenshots and app icons — no agent logic
 _SKIP_DIR_PREFIXES = (
-    "assets/", "webview/",
-    "jsonschema/", "jsonschema_specifications/", "Python.framework/", "certifi/",
+    "assets/",
 )
 
 _MEMORY_WHITELIST = [
@@ -108,7 +106,7 @@ def build_review_pack(
         try:
             if not full_path.is_file():
                 continue
-            # Skip excluded directory prefixes (assets, webview, etc.)
+            # Skip excluded directory prefixes (assets/)
             rel_norm = rel_path.replace("\\", "/")
             if rel_norm.startswith(_SKIP_DIR_PREFIXES):
                 skipped.append(f"{rel_path} (excluded dir)")
@@ -180,7 +178,7 @@ def build_review_pack(
             "## OMITTED FILES (not included in review pack)",
             "These files were excluded. Reasons: sensitive=secrets/keys, "
             "vendored/minified=third-party bundled asset, binary/media=images/fonts/compiled blobs, "
-            "excluded_dir=non-agent-logic directory (assets/, webview/), "
+            "excluded_dir=non-agent-logic directory (assets/), "
             "too_large=>1MB, read_error=unreadable.",
             "",
         ]

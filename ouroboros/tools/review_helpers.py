@@ -68,9 +68,8 @@ _FULL_REPO_BINARY_EXTENSIONS = frozenset({
     ".db", ".sqlite", ".sqlite3",
 })
 _FULL_REPO_SKIP_DIR_PREFIXES = (
-    ".cursor/", ".github/", ".vscode/", ".idea/", "assets/", "webview/",
-    "jsonschema/", "jsonschema_specifications/", "Python.framework/", "certifi/",
-    # tests/ excluded from full repo pack — 87 files (~217K tokens, ~31% of budget).
+    ".cursor/", ".github/", ".vscode/", ".idea/", "assets/",
+    # tests/ excluded from full repo pack — ~87 files (~217K tokens, ~31% of budget).
     # Touched test files are still sent via build_touched_file_pack (touched_file_pack
     # section), so scope reviewer always sees the changed tests.
     "tests/",
@@ -692,11 +691,6 @@ def build_full_repo_pack(
         # Skip excluded directory prefixes
         if rel_norm.startswith(_FULL_REPO_SKIP_DIR_PREFIXES):
             omitted.append(f"{rel} (excluded dir)")
-            continue
-
-        # Skip known non-source root files (e.g. bare Python binary from build bootstrap)
-        if rel_norm in ("Python",):
-            omitted.append(f"{rel} (binary root file)")
             continue
 
         fp = repo_dir / rel

@@ -354,18 +354,6 @@ class TestSkipDirPrefixes:
         assert any("assets/logo.jpg" in s for s in stats["skipped"])
         assert "## FILE: main.py" in pack  # non-assets file still present
 
-    def test_webview_dir_excluded(self, tmp_repo, tmp_drive):
-        """Files under webview/ are excluded (legacy PyWebView JS helpers)."""
-        wv = tmp_repo / "webview" / "js"
-        wv.mkdir(parents=True)
-        (wv / "polyfill.js").write_text("/* polyfill */\n")
-        with mock.patch("dulwich.repo.Repo", _make_dulwich_mock(["main.py", "webview/js/polyfill.js"])):
-            pack, stats = build_review_pack(tmp_repo, tmp_drive)
-
-        assert "## FILE: webview/js/polyfill.js" not in pack
-        assert any("webview/js/polyfill.js" in s for s in stats["skipped"])
-        assert "## FILE: main.py" in pack
-
     def test_web_dir_not_excluded(self, tmp_repo, tmp_drive):
         """Files under web/ (SPA modules) are NOT excluded."""
         web = tmp_repo / "web" / "modules"
