@@ -10,7 +10,36 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "build_repo_bundle.py"
 
 
+# Env vars the production ``build_repo_bundle.py`` reads as release-tag
+# candidates (OUROBOROS_RELEASE_TAG + the GitHub Actions GITHUB_REF_* set).
+# These MUST be scrubbed from every subprocess the tests spawn — on a CI
+# run triggered by a tag push, GITHUB_REF_NAME/GITHUB_REF/GITHUB_REF_TYPE
+# are set globally for all jobs, which would bleed into the temp-repo
+# subprocesses and confuse ``_resolve_release_tag`` into reporting two
+# tags on HEAD (the temp-repo's tag + the bleed).
+_BUILD_BUNDLE_ENV_SCRUB_KEYS = (
+    "OUROBOROS_RELEASE_TAG",
+    "GITHUB_REF",
+    "GITHUB_REF_TYPE",
+    "GITHUB_REF_NAME",
+)
+
+
+def _scrubbed_env(extra: "dict[str, str] | None" = None) -> "dict[str, str]":
+    env = dict(os.environ)
+    for key in _BUILD_BUNDLE_ENV_SCRUB_KEYS:
+        env.pop(key, None)
+    if extra:
+        env.update(extra)
+    return env
+
+
 def _run(cmd, *, cwd, check=True, env=None):
+    if env is None:
+        # Caller did not ask for an explicit env -> scrub release-tag
+        # env bleed so temp-repo subprocesses always start from a clean
+        # slate, regardless of what the outer CI sets.
+        env = _scrubbed_env()
     return subprocess.run(
         cmd,
         cwd=str(cwd),
@@ -212,8 +241,7 @@ def test_build_repo_bundle_rejects_release_tag_mismatch(tmp_path):
     repo, _sha = _make_repo(tmp_path)
     bundle = tmp_path / "repo.bundle"
     manifest = tmp_path / "repo_bundle_manifest.json"
-    env = dict(os.environ)
-    env["OUROBOROS_RELEASE_TAG"] = "v4.50.0-rc.3"
+    env = _scrubbed_env({"OUROBOROS_RELEASE_TAG": "v4.50.0-rc.3"})
 
     result = _run(
         [
@@ -243,11 +271,7 @@ def test_build_repo_bundle_requires_release_tag(tmp_path):
     manifest = tmp_path / "repo_bundle_manifest.json"
 
     _run(["git", "tag", "-d", "v4.50.0-rc.2"], cwd=repo)
-    env = dict(os.environ)
-    env.pop("OUROBOROS_RELEASE_TAG", None)
-    env.pop("GITHUB_REF_TYPE", None)
-    env.pop("GITHUB_REF", None)
-    env.pop("GITHUB_REF_NAME", None)
+    env = _scrubbed_env()
 
     result = _run(
         [
@@ -275,8 +299,7 @@ def test_build_repo_bundle_rejects_head_outside_source_branch(tmp_path):
     repo, _sha = _make_repo(tmp_path)
     bundle = tmp_path / "repo.bundle"
     manifest = tmp_path / "repo_bundle_manifest.json"
-    env = dict(os.environ)
-    env["OUROBOROS_RELEASE_TAG"] = "v4.50.0-rc.2"
+    env = _scrubbed_env({"OUROBOROS_RELEASE_TAG": "v4.50.0-rc.2"})
 
     _run(["git", "checkout", "--orphan", "release-detached"], cwd=repo)
     for path in repo.iterdir():
@@ -330,8 +353,7 @@ def test_build_repo_bundle_rejects_lightweight_tag(tmp_path):
     # at the same commit.
     _run(["git", "tag", "-d", "v4.50.0-rc.2"], cwd=repo)
     _run(["git", "tag", "v4.50.0-rc.2"], cwd=repo)
-    env = dict(os.environ)
-    env["OUROBOROS_RELEASE_TAG"] = "v4.50.0-rc.2"
+    env = _scrubbed_env({"OUROBOROS_RELEASE_TAG": "v4.50.0-rc.2"})
 
     result = _run(
         [
@@ -363,8 +385,7 @@ def test_build_repo_bundle_rejects_remote_only_source_branch(tmp_path):
     repo, _sha = _make_repo(tmp_path)
     bundle = tmp_path / "repo.bundle"
     manifest = tmp_path / "repo_bundle_manifest.json"
-    env = dict(os.environ)
-    env["OUROBOROS_RELEASE_TAG"] = "v4.50.0-rc.2"
+    env = _scrubbed_env({"OUROBOROS_RELEASE_TAG": "v4.50.0-rc.2"})
 
     # Request a branch that neither exists locally nor is cached under
     # origin/. The `origin` remote URL is a non-routable dummy set up
@@ -404,8 +425,7 @@ def test_build_repo_bundle_rejects_env_tag_not_on_head(tmp_path):
     (repo / "server.py").write_text("print('post-tag')\n", encoding="utf-8")
     _run(["git", "add", "server.py"], cwd=repo)
     _run(["git", "commit", "-m", "post tag"], cwd=repo)
-    env = dict(os.environ)
-    env["OUROBOROS_RELEASE_TAG"] = "v4.50.0-rc.2"
+    env = _scrubbed_env({"OUROBOROS_RELEASE_TAG": "v4.50.0-rc.2"})
 
     result = _run(
         [
