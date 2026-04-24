@@ -30,6 +30,40 @@ from ouroboros.skill_loader import discover_skills, find_skill
 log = logging.getLogger(__name__)
 
 
+_TRUE_LITERALS = {"true", "yes", "on", "1"}
+_FALSE_LITERALS = {"false", "no", "off", "0"}
+
+
+def _request_drive_root(request: Request) -> pathlib.Path:
+    from ouroboros.config import DATA_DIR
+
+    if hasattr(request.app, "state") and hasattr(request.app.state, "drive_root"):
+        return pathlib.Path(request.app.state.drive_root)  # type: ignore[attr-defined]
+    return pathlib.Path(DATA_DIR)
+
+
+def _request_repo_dir(request: Request) -> pathlib.Path:
+    from ouroboros.config import REPO_DIR
+
+    if hasattr(request.app, "state") and hasattr(request.app.state, "repo_dir"):
+        return pathlib.Path(request.app.state.repo_dir)  # type: ignore[attr-defined]
+    return pathlib.Path(REPO_DIR)
+
+
+def _coerce_bool_arg(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in _TRUE_LITERALS:
+            return True
+        if lowered in _FALSE_LITERALS:
+            return False
+    return None
+
+
 async def api_extensions_index(request: Request) -> JSONResponse:
     """GET /api/extensions — catalogue + live registration snapshot.
 
@@ -43,12 +77,11 @@ async def api_extensions_index(request: Request) -> JSONResponse:
     try:
         from ouroboros.config import get_skills_repo_path
 
-        drive_root = pathlib.Path(
-            request.app.state.drive_root  # type: ignore[attr-defined]
-            if hasattr(request.app, "state") and hasattr(request.app.state, "drive_root")
-            else pathlib.Path.home() / "Ouroboros" / "data"
-        )
+        from ouroboros.extension_loader import runtime_state_for_skill_name
+
+        drive_root = _request_drive_root(request)
         repo_path = get_skills_repo_path()
+        live_snapshot = snapshot()
         # Always scan — ``discover_skills`` still returns the bundled
         # ``repo/skills/`` reference set even when the user has not
         # configured ``OUROBOROS_SKILLS_REPO_PATH``. The earlier "only
@@ -58,6 +91,32 @@ async def api_extensions_index(request: Request) -> JSONResponse:
         # Surface EVERY skill type (instruction / script / extension) so
         # the Skills UI can manage the full lifecycle. The UI filters /
         # badges by ``type`` client-side.
+        runtime_states = {
+            s.name: runtime_state_for_skill_name(s.name, drive_root, repo_path=repo_path)
+            for s in skills
+            if s.manifest.is_extension()
+        }
+
+        def _live_tool_count(skill_name: str) -> int:
+            prefix = f"ext.{skill_name}."
+            return sum(1 for name in live_snapshot.get("tools", []) if str(name).startswith(prefix))
+
+        def _live_route_count(skill_name: str) -> int:
+            prefix = f"/api/extensions/{skill_name}/"
+            return sum(1 for name in live_snapshot.get("routes", []) if str(name).startswith(prefix))
+
+        def _live_ws_count(skill_name: str) -> int:
+            prefix = f"ext.{skill_name}."
+            return sum(1 for name in live_snapshot.get("ws_handlers", []) if str(name).startswith(prefix))
+
+        def _pending_ui_tabs(skill_name: str) -> list[str]:
+            prefix = f"{skill_name}:"
+            return [
+                str(name)
+                for name in live_snapshot.get("ui_tabs_pending", [])
+                if str(name).startswith(prefix)
+            ]
+
         catalog = [
             {
                 "name": s.name,
@@ -68,11 +127,20 @@ async def api_extensions_index(request: Request) -> JSONResponse:
                 "review_status": s.review.status,
                 "review_stale": s.review.is_stale_for(s.content_hash),
                 "permissions": list(s.manifest.permissions or []),
-                "load_error": s.load_error,
+                "load_error": runtime_states.get(s.name, {}).get("load_error", s.load_error),
+                "desired_live": runtime_states.get(s.name, {}).get("desired_live", False),
+                "live_loaded": runtime_states.get(s.name, {}).get("live_loaded", False),
+                "live_reason": runtime_states.get(s.name, {}).get("reason", "not_extension"),
+                "dispatch_live": bool(
+                    _live_tool_count(s.name)
+                    or _live_route_count(s.name)
+                    or _live_ws_count(s.name)
+                ),
+                "ui_tabs_pending": _pending_ui_tabs(s.name),
             }
             for s in skills
         ]
-        return JSONResponse({"skills": catalog, "live": snapshot()})
+        return JSONResponse({"skills": catalog, "live": live_snapshot})
     except Exception as exc:
         log.exception("api_extensions_index failure")
         return JSONResponse({"error": str(exc)}, status_code=500)
@@ -81,18 +149,20 @@ async def api_extensions_index(request: Request) -> JSONResponse:
 async def api_extension_manifest(request: Request) -> JSONResponse:
     """GET /api/extensions/<skill>/manifest — raw manifest metadata."""
     from ouroboros.config import get_skills_repo_path
+    from ouroboros.extension_loader import runtime_state_for_skill_name
 
     skill_name = str(request.path_params.get("skill") or "").strip()
     if not skill_name:
         return JSONResponse({"error": "missing skill name"}, status_code=400)
-    drive_root = pathlib.Path(
-        request.app.state.drive_root  # type: ignore[attr-defined]
-        if hasattr(request.app, "state") and hasattr(request.app.state, "drive_root")
-        else pathlib.Path.home() / "Ouroboros" / "data"
-    )
-    loaded = find_skill(drive_root, skill_name, repo_path=get_skills_repo_path())
+    drive_root = _request_drive_root(request)
+    repo_path = get_skills_repo_path()
+    loaded = find_skill(drive_root, skill_name, repo_path=repo_path)
     if loaded is None:
         return JSONResponse({"error": "skill not found"}, status_code=404)
+    runtime_state = runtime_state_for_skill_name(skill_name, drive_root, repo_path=repo_path)
+    load_error = runtime_state.get("load_error")
+    if not isinstance(load_error, str) or not load_error.strip():
+        load_error = loaded.load_error
     return JSONResponse(
         {
             "name": loaded.name,
@@ -110,7 +180,7 @@ async def api_extension_manifest(request: Request) -> JSONResponse:
             "review_status": loaded.review.status,
             "review_stale": loaded.review.is_stale_for(loaded.content_hash),
             "content_hash": loaded.content_hash,
-            "load_error": loaded.load_error,
+            "load_error": load_error,
         }
     )
 
@@ -123,10 +193,49 @@ async def api_extension_dispatch(request: Request) -> Response:
     via ``PluginAPI.register_route``. Honors the registered methods
     tuple.
     """
+    from ouroboros.config import get_skills_repo_path, load_settings
+    from ouroboros.extension_loader import reconcile_extension, runtime_state_for_skill_name
+
     skill = str(request.path_params.get("skill") or "").strip()
     rest = str(request.path_params.get("rest") or "").strip()
     mount = f"/api/extensions/{skill}/{rest}"
+    drive_root = _request_drive_root(request)
+    repo_path = get_skills_repo_path()
     spec = list_routes().get(mount)
+    if spec is None and skill:
+        state = runtime_state_for_skill_name(skill, drive_root, repo_path=repo_path)
+        if state.get("desired_live"):
+            state = reconcile_extension(skill, drive_root, load_settings, repo_path=repo_path)
+            spec = list_routes().get(mount)
+            if spec is None and state.get("action") == "extension_load_error":
+                return JSONResponse(
+                    {"error": f"extension {skill!r} failed to go live", "state": state},
+                    status_code=409,
+                )
+        elif state.get("reason") != "missing":
+            return JSONResponse(
+                {"error": f"extension {skill!r} not live: {state.get('reason')}", "state": state},
+                status_code=409,
+            )
+    if spec is None:
+        return JSONResponse(
+            {"error": f"no extension route registered for {mount!r}"},
+            status_code=404,
+        )
+    state = runtime_state_for_skill_name(str(spec.get("skill") or skill), drive_root, repo_path=repo_path)
+    if not state.get("desired_live") or not state.get("live_loaded"):
+        state = reconcile_extension(skill, drive_root, load_settings, repo_path=repo_path)
+        spec = list_routes().get(mount)
+        if state.get("action") == "extension_load_error":
+            return JSONResponse(
+                {"error": f"extension {skill!r} failed to go live", "state": state},
+                status_code=409,
+            )
+    if not state.get("desired_live") or not state.get("live_loaded"):
+        return JSONResponse(
+            {"error": f"extension {skill!r} not live: {state.get('reason')}", "state": state},
+            status_code=409,
+        )
     if spec is None:
         return JSONResponse(
             {"error": f"no extension route registered for {mount!r}"},
@@ -134,6 +243,8 @@ async def api_extension_dispatch(request: Request) -> Response:
         )
     method = request.method.upper()
     allowed = {m.upper() for m in spec.get("methods", ("GET",))}
+    if "GET" in allowed:
+        allowed.add("HEAD")
     if method not in allowed:
         return JSONResponse(
             {"error": f"method {method} not allowed; allowed={sorted(allowed)}"},
@@ -177,44 +288,59 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
         body = await request.json()
     except Exception:
         body = {}
-    enabled = bool(body.get("enabled"))
+    enabled = _coerce_bool_arg(body.get("enabled"))
+    if enabled is None:
+        return JSONResponse({"error": "'enabled' must be a boolean"}, status_code=400)
 
-    drive_root = pathlib.Path(
-        request.app.state.drive_root  # type: ignore[attr-defined]
-        if hasattr(request.app, "state") and hasattr(request.app.state, "drive_root")
-        else pathlib.Path.home() / "Ouroboros" / "data"
-    )
-    loaded = find_skill(drive_root, skill_name, repo_path=get_skills_repo_path())
+    drive_root = _request_drive_root(request)
+    repo_path = get_skills_repo_path()
+    loaded = find_skill(drive_root, skill_name, repo_path=repo_path)
     if loaded is None:
         return JSONResponse({"error": "skill not found"}, status_code=404)
+    collision_load_error = loaded.load_error.lower().startswith("skill name collision:")
     if enabled and loaded.load_error:
         return JSONResponse(
             {"error": f"cannot enable: {loaded.load_error}"},
             status_code=400,
         )
-    save_enabled(drive_root, loaded.name, enabled)
-
-    action = None
-    if not enabled:
+    if not enabled and collision_load_error:
+        action = None
         if loaded.name in extension_loader.snapshot()["extensions"]:
             extension_loader.unload_extension(loaded.name)
             action = "extension_unloaded"
-    elif loaded.manifest.is_extension() and loaded.review.status == "pass":
-        refreshed = find_skill(drive_root, loaded.name, repo_path=get_skills_repo_path())
-        if refreshed is not None:
-            extension_loader.unload_extension(loaded.name)
-            err = extension_loader.load_extension(
-                refreshed, load_settings, drive_root=drive_root,
-            )
-            action = (
-                "extension_load_error: " + err if err else "extension_loaded"
-            )
+        return JSONResponse(
+            {
+                "error": (
+                    "cannot persist disable because this skill's sanitized "
+                    "name collides with another skill directory; rename one "
+                    "of the directories first"
+                ),
+                "extension_action": action,
+                "extension_reason": "name_collision",
+            },
+            status_code=400,
+        )
+    save_enabled(drive_root, loaded.name, enabled)
+
+    action = None
+    live_reason = "not_extension"
+    if loaded.manifest.is_extension() or loaded.name in extension_loader.snapshot()["extensions"]:
+        state = extension_loader.reconcile_extension(
+            loaded.name,
+            drive_root,
+            load_settings,
+            repo_path=repo_path,
+            retry_load_error=True,
+        )
+        action = state.get("action")
+        live_reason = str(state.get("reason") or "")
     return JSONResponse(
         {
             "skill": loaded.name,
             "enabled": enabled,
             "review_status": loaded.review.status,
             "extension_action": action,
+            "extension_reason": live_reason,
         }
     )
 
@@ -228,9 +354,9 @@ class _ApiReviewCtx:
     previously crashed the usage-event emission path.
     """
 
-    def __init__(self, drive_root: pathlib.Path) -> None:
+    def __init__(self, drive_root: pathlib.Path, repo_dir: pathlib.Path) -> None:
         self.drive_root = drive_root
-        self.repo_dir = drive_root / ".." / "repo"  # best-effort; only referenced by some helpers
+        self.repo_dir = repo_dir
         self.task_id = "api_skill_review"
         self.current_chat_id = 0
         self.pending_events: list = []
@@ -252,17 +378,25 @@ async def api_skill_review(request: Request) -> JSONResponse:
     import asyncio
     from ouroboros.skill_review import review_skill as _review_skill_impl
 
+    from ouroboros.config import get_skills_repo_path, load_settings
+    from ouroboros.extension_loader import reconcile_extension
+
     skill_name = str(request.path_params.get("skill") or "").strip()
     if not skill_name:
         return JSONResponse({"error": "missing skill name"}, status_code=400)
 
-    drive_root = pathlib.Path(
-        request.app.state.drive_root  # type: ignore[attr-defined]
-        if hasattr(request.app, "state") and hasattr(request.app.state, "drive_root")
-        else pathlib.Path.home() / "Ouroboros" / "data"
-    )
-    ctx = _ApiReviewCtx(drive_root)
+    drive_root = _request_drive_root(request)
+    repo_dir = _request_repo_dir(request)
+    repo_path = get_skills_repo_path()
+    ctx = _ApiReviewCtx(drive_root, repo_dir)
     outcome = await asyncio.to_thread(_review_skill_impl, ctx, skill_name)
+    live_state = reconcile_extension(
+        skill_name,
+        drive_root,
+        load_settings,
+        repo_path=repo_path,
+        retry_load_error=True,
+    )
     return JSONResponse(
         {
             "skill": outcome.skill_name,
@@ -271,6 +405,8 @@ async def api_skill_review(request: Request) -> JSONResponse:
             "error": outcome.error,
             "reviewer_models": outcome.reviewer_models,
             "content_hash": outcome.content_hash,
+            "extension_action": live_state.get("action"),
+            "extension_reason": live_state.get("reason"),
         }
     )
 

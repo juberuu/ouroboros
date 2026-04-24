@@ -598,17 +598,32 @@ def _preflight_check(commit_message: str, staged_files: str,
     # rather than the worktree, so partially staged changes are handled correctly.
     if version_staged:
         try:
+            from ouroboros.tools.release_sync import (
+                _normalize_pep440,
+                _shields_escape,
+                extract_architecture_header_version,
+                extract_readme_badge_version,
+                is_release_version,
+            )
             version_str = _git_show_staged(repo_dir, "VERSION").strip()
-            if version_str and re.match(r'^\d+\.\d+\.\d+$', version_str):
+            if is_release_version(version_str):
                 desync = []
                 pyproject_text = _git_show_staged(repo_dir, "pyproject.toml")
-                if pyproject_text and f'version = "{version_str}"' not in pyproject_text:
-                    desync.append(f"pyproject.toml (expected version = \"{version_str}\")")
+                pyproject_match = re.search(
+                    r'^version\s*=\s*["\']([^"\']+)["\']',
+                    pyproject_text,
+                    re.MULTILINE,
+                )
+                expected_pyproject = _normalize_pep440(version_str)
+                if not pyproject_match or pyproject_match.group(1).strip() != expected_pyproject:
+                    desync.append(f'pyproject.toml (expected version = "{expected_pyproject}")')
                 readme_text = _git_show_staged(repo_dir, "README.md")
-                if readme_text and f"version-{version_str}-" not in readme_text:
-                    desync.append(f"README.md badge (expected version-{version_str}-)")
+                readme_version = extract_readme_badge_version(readme_text)
+                badge_url_token = f"version-{_shields_escape(version_str)}-green"
+                if readme_version != version_str or badge_url_token not in readme_text:
+                    desync.append(f"README.md badge (expected {version_str} / {badge_url_token})")
                 arch_text = _git_show_staged(repo_dir, "docs/ARCHITECTURE.md")
-                if arch_text and f"# Ouroboros v{version_str}" not in arch_text:
+                if extract_architecture_header_version(arch_text) != version_str:
                     desync.append(f"docs/ARCHITECTURE.md header (expected # Ouroboros v{version_str})")
                 if desync:
                     return (
@@ -625,8 +640,9 @@ def _preflight_check(commit_message: str, staged_files: str,
     # contains a row for the new version (structural presence check only).
     if version_staged:
         try:
+            from ouroboros.tools.release_sync import is_release_version
             version_str = _git_show_staged(repo_dir, "VERSION").strip()
-            if version_str and re.match(r'^\d+\.\d+\.\d+$', version_str):
+            if is_release_version(version_str):
                 readme_text = _git_show_staged(repo_dir, "README.md")
                 if readme_text and not re.search(r'\|\s*' + re.escape(version_str) + r'\s*\|', readme_text):
                     return (

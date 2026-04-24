@@ -1,11 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller spec for Ouroboros (macOS, Linux, Windows).
 
-Bundles launcher.py as the entry point. The agent code (server.py, ouroboros/,
-supervisor/, prompts/, web/, docs/, assets/, skills/) is included as data and
-copied to ~/Ouroboros/repo/ on first run. The embedded python-standalone
-interpreter runs the agent as a subprocess. ``skills/`` carries the bundled
-reference skill packages (Phase 3 loader + Phase 5 Skills UI consume it).
+Bundles launcher.py as the entry point. The app ships an embedded managed git
+bootstrap artifact (``repo.bundle`` + ``repo_bundle_manifest.json``) and still
+includes the repo data tree needed by the launcher/runtime itself (web assets,
+docs, tests, bundled skills, etc.). On first run the launcher materializes a
+real git repo under ``~/Ouroboros/repo`` from the embedded bundle; the embedded
+python-standalone interpreter then runs the agent as a subprocess.
 """
 
 import os
@@ -68,6 +69,8 @@ a = Analysis(
     binaries=_extra_binaries,
     datas=[
         ('VERSION', '.'),
+        ('repo.bundle', '.'),
+        ('repo_bundle_manifest.json', '.'),
         ('.gitignore', '.'),
         ('BIBLE.md', '.'),
         ('README.md', '.'),

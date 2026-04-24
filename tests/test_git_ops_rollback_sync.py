@@ -15,7 +15,7 @@ def test_rollback_to_version_force_syncs_remote_when_diverged(monkeypatch, tmp_p
     monkeypatch.setattr(git_ops, "save_state", lambda st: saved.update(st))
     events = []
     monkeypatch.setattr(git_ops, "append_jsonl", lambda path, payload: events.append(payload))
-    monkeypatch.setattr(git_ops, "_has_remote", lambda: True)
+    monkeypatch.setattr(git_ops, "_has_remote", lambda *_args, **_kwargs: True)
 
     calls = []
 
@@ -53,7 +53,7 @@ def test_rollback_to_version_returns_warning_when_remote_sync_fails(monkeypatch,
     monkeypatch.setattr(git_ops, "save_state", lambda st: saved.update(st))
     events = []
     monkeypatch.setattr(git_ops, "append_jsonl", lambda path, payload: events.append(payload))
-    monkeypatch.setattr(git_ops, "_has_remote", lambda: True)
+    monkeypatch.setattr(git_ops, "_has_remote", lambda *_args, **_kwargs: True)
 
     def fake_git_capture(cmd):
         if cmd == ["git", "rev-parse", "targetsha"]:
@@ -85,7 +85,7 @@ def test_rollback_to_version_skips_remote_sync_without_remote(monkeypatch, tmp_p
     saved = {}
     monkeypatch.setattr(git_ops, "save_state", lambda st: saved.update(st))
     monkeypatch.setattr(git_ops, "append_jsonl", lambda path, payload: None)
-    monkeypatch.setattr(git_ops, "_has_remote", lambda: False)
+    monkeypatch.setattr(git_ops, "_has_remote", lambda *_args, **_kwargs: False)
 
     calls = []
 
@@ -114,7 +114,7 @@ def test_rollback_to_version_skips_remote_sync_for_unknown_branch(monkeypatch, t
     monkeypatch.setattr(git_ops, "load_state", _fake_state)
     monkeypatch.setattr(git_ops, "save_state", lambda st: None)
     monkeypatch.setattr(git_ops, "append_jsonl", lambda path, payload: None)
-    monkeypatch.setattr(git_ops, "_has_remote", lambda: True)
+    monkeypatch.setattr(git_ops, "_has_remote", lambda *_args, **_kwargs: True)
 
     calls = []
 

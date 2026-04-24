@@ -33,6 +33,8 @@ DRIVE_ROOT: pathlib.Path = pathlib.Path.home() / "Ouroboros" / "data"
 REMOTE_URL: str = ""
 BRANCH_DEV: str = "ouroboros"
 BRANCH_STABLE: str = "ouroboros-stable"
+MANAGED_REPO_META_NAME = "ouroboros-managed.json"
+BOOTSTRAP_PIN_MARKER_NAME = "ouroboros-bootstrap-pending"
 
 
 def init(repo_dir: pathlib.Path, drive_root: pathlib.Path, remote_url: str,
@@ -43,6 +45,103 @@ def init(repo_dir: pathlib.Path, drive_root: pathlib.Path, remote_url: str,
     REMOTE_URL = remote_url
     BRANCH_DEV = branch_dev
     BRANCH_STABLE = branch_stable
+
+
+def _git_dir() -> pathlib.Path:
+    return REPO_DIR / ".git"
+
+
+def _managed_repo_meta_path() -> pathlib.Path:
+    return _git_dir() / MANAGED_REPO_META_NAME
+
+
+def _bootstrap_pin_marker_path() -> pathlib.Path:
+    return _git_dir() / BOOTSTRAP_PIN_MARKER_NAME
+
+
+def _read_managed_repo_meta() -> Dict[str, Any]:
+    path = _managed_repo_meta_path()
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def managed_branch_defaults(repo_dir: Optional[pathlib.Path] = None) -> Tuple[str, str]:
+    repo = repo_dir or REPO_DIR
+    meta_path = repo / ".git" / MANAGED_REPO_META_NAME
+    if not meta_path.is_file():
+        return BRANCH_DEV, BRANCH_STABLE
+    try:
+        raw = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        return BRANCH_DEV, BRANCH_STABLE
+    if not isinstance(raw, dict):
+        return BRANCH_DEV, BRANCH_STABLE
+    branch_dev = str(raw.get("managed_local_branch") or BRANCH_DEV).strip() or BRANCH_DEV
+    branch_stable = str(raw.get("managed_local_stable_branch") or BRANCH_STABLE).strip() or BRANCH_STABLE
+    return branch_dev, branch_stable
+
+
+def _is_launcher_managed_repo() -> bool:
+    if str(os.environ.get("OUROBOROS_MANAGED_BY_LAUNCHER", "") or "").strip() == "1":
+        return True
+    return bool(_read_managed_repo_meta())
+
+
+def _list_remotes() -> List[str]:
+    rc, remotes, _ = git_capture(["git", "remote"])
+    if rc != 0:
+        return []
+    return [line.strip() for line in remotes.splitlines() if line.strip()]
+
+
+def _has_remote(name: Optional[str] = None) -> bool:
+    remotes = _list_remotes()
+    if name is None:
+        return bool(remotes)
+    return name in remotes
+
+
+def _managed_remote_name(meta: Optional[Dict[str, Any]] = None) -> str:
+    info = meta if meta is not None else _read_managed_repo_meta()
+    return str(info.get("managed_remote_name") or "managed").strip() or "managed"
+
+
+def _managed_remote_branch_for(branch: str, meta: Optional[Dict[str, Any]] = None) -> str:
+    info = meta if meta is not None else _read_managed_repo_meta()
+    if branch == BRANCH_DEV:
+        return str(info.get("managed_remote_branch") or branch).strip()
+    if branch == BRANCH_STABLE:
+        return str(info.get("managed_remote_stable_branch") or branch).strip()
+    return branch
+
+
+def _pin_to_bundle_sha_on_bootstrap(reason: str, managed_meta: Optional[Dict[str, Any]] = None) -> bool:
+    if str(reason or "").strip().lower() != "bootstrap":
+        return False
+    if not _bootstrap_pin_marker_path().exists():
+        return False
+    info = managed_meta if managed_meta is not None else _read_managed_repo_meta()
+    source_sha = str(info.get("source_sha") or "").strip()
+    if not source_sha:
+        return False
+    rc, head_sha, _ = git_capture(["git", "rev-parse", "HEAD"])
+    if rc != 0 or str(head_sha or "").strip() != source_sha:
+        return False
+    return True
+
+
+def _clear_bootstrap_pin_marker() -> None:
+    try:
+        _bootstrap_pin_marker_path().unlink()
+    except FileNotFoundError:
+        return
+    except Exception:
+        log.warning("Failed to clear bootstrap pin marker", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +271,8 @@ Thumbs.db
 # Release artifacts
 .create_release.py
 .release_notes.md
+repo.bundle
+repo_bundle_manifest.json
 python-standalone/
 """
 
@@ -197,7 +298,7 @@ def _ensure_local_version_tag() -> None:
         return
 
     version = version_path.read_text(encoding="utf-8").strip().lstrip("v")
-    if not re.match(r"^\d+\.\d+\.\d+$", version):
+    if not re.match(r"^\d+\.\d+\.\d+(?:-?(?:rc|alpha|beta|a|b)\.?\d+)?$", version, re.IGNORECASE):
         return
 
     tag_name = f"v{version}"
@@ -231,6 +332,11 @@ def _ensure_local_version_tag() -> None:
 
 def ensure_repo_present() -> None:
     if not (REPO_DIR / ".git").exists():
+        if _is_launcher_managed_repo():
+            raise RuntimeError(
+                "Launcher-managed repo is missing .git metadata. "
+                "The launcher bootstrap must recreate REPO_DIR from the embedded repo bundle."
+            )
         # REPO_DIR is the working code directory - never rm -rf it.
         # Just initialize git in-place over the existing files.
         REPO_DIR.mkdir(parents=True, exist_ok=True)
@@ -249,7 +355,8 @@ def ensure_repo_present() -> None:
         subprocess.run(["git", "branch", "-M", BRANCH_DEV], cwd=str(REPO_DIR), check=False)
         subprocess.run(["git", "branch", BRANCH_STABLE], cwd=str(REPO_DIR), check=False)
 
-    _ensure_local_version_tag()
+    if not _is_launcher_managed_repo():
+        _ensure_local_version_tag()
 
 
 # ---------------------------------------------------------------------------
@@ -277,23 +384,30 @@ def _collect_repo_sync_state() -> Dict[str, Any]:
         state["warnings"].append(f"status_error:{err}")
 
     upstream = ""
-    if _has_remote():
+    current_branch = str(state.get("current_branch") or "")
+    managed_meta = _read_managed_repo_meta()
+    if managed_meta and current_branch not in ("", "HEAD", "unknown"):
+        managed_remote = _managed_remote_name(managed_meta)
+        managed_branch = _managed_remote_branch_for(current_branch, managed_meta)
+        if managed_branch and _has_remote(managed_remote):
+            upstream = f"{managed_remote}/{managed_branch}"
+
+    if not upstream and _has_remote("origin"):
         rc, up, err = git_capture(["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
         if rc == 0 and up:
             upstream = up
         else:
-            current_branch = str(state.get("current_branch") or "")
             if current_branch not in ("", "HEAD", "unknown"):
                 upstream = f"origin/{current_branch}"
             elif err:
                 state["warnings"].append(f"upstream_error:{err}")
 
-        if upstream:
-            rc, unpushed, err = git_capture(["git", "log", "--oneline", f"{upstream}..HEAD"])
-            if rc == 0 and unpushed:
-                state["unpushed_lines"] = [ln for ln in unpushed.splitlines() if ln.strip()]
-            elif rc != 0 and err:
-                state["warnings"].append(f"unpushed_error:{err}")
+    if upstream:
+        rc, unpushed, err = git_capture(["git", "log", "--oneline", f"{upstream}..HEAD"])
+        if rc == 0 and unpushed:
+            state["unpushed_lines"] = [ln for ln in unpushed.splitlines() if ln.strip()]
+        elif rc != 0 and err:
+            state["warnings"].append(f"unpushed_error:{err}")
 
     return state
 
@@ -392,24 +506,32 @@ def _create_rescue_snapshot(branch: str, reason: str,
 # Checkout + reset
 # ---------------------------------------------------------------------------
 
-def _has_remote() -> bool:
-    """Check if the repo has a remote configured (it shouldn't in local mode)."""
-    rc, remotes, _ = git_capture(["git", "remote"])
-    return rc == 0 and bool(remotes.strip())
-
-
 def checkout_and_reset(branch: str, reason: str = "unspecified",
                        unsynced_policy: str = "ignore") -> Tuple[bool, str]:
-    if _has_remote():
-        rc, _, err = git_capture(["git", "fetch", "origin"])
+    managed_meta = _read_managed_repo_meta()
+    fetch_remote = ""
+    target_ref = ""
+    pin_bundle_sha = _pin_to_bundle_sha_on_bootstrap(reason, managed_meta)
+    if managed_meta and not pin_bundle_sha:
+        remote_name = _managed_remote_name(managed_meta)
+        remote_branch = _managed_remote_branch_for(branch, managed_meta)
+        if remote_branch and _has_remote(remote_name):
+            fetch_remote = remote_name
+            target_ref = f"{remote_name}/{remote_branch}"
+    elif not pin_bundle_sha and _has_remote("origin"):
+        fetch_remote = "origin"
+
+    if fetch_remote:
+        rc, _, err = git_capture(["git", "fetch", fetch_remote])
         if rc != 0:
-            msg = f"git fetch failed: {err or 'unknown error'}"
+            msg = f"git fetch {fetch_remote} failed: {err or 'unknown error'}"
             append_jsonl(
                 DRIVE_ROOT / "logs" / "supervisor.jsonl",
                 {
                     "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                     "type": "reset_fetch_failed",
                     "target_branch": branch, "reason": reason, "error": msg,
+                    "remote": fetch_remote,
                     "continuing_local_reset": True,
                 },
             )
@@ -479,8 +601,6 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
                 },
             )
 
-    # Always use local HEAD — remote (if configured) is for push/backup only,
-    # never for resetting the local branch. Agent commits must survive restarts.
     def _run_git_resilient(cmd, **kwargs):
         import time
         check = bool(kwargs.pop("check", False))
@@ -506,18 +626,30 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
             time.sleep(1)
         return subprocess.run(cmd, check=check, **kwargs)
 
-    rc_local = subprocess.run(
-        ["git", "rev-parse", "--verify", branch],
-        cwd=str(REPO_DIR), capture_output=True,
-    ).returncode
+    remote_ref_exists = False
+    if target_ref:
+        remote_ref_exists = subprocess.run(
+            ["git", "rev-parse", "--verify", target_ref],
+            cwd=str(REPO_DIR),
+            capture_output=True,
+        ).returncode == 0
 
-    if rc_local != 0:
-        _run_git_resilient(["git", "reset", "--hard", "HEAD"], cwd=str(REPO_DIR), check=True)
+    if remote_ref_exists:
+        _run_git_resilient(["git", "checkout", "-B", branch, target_ref], cwd=str(REPO_DIR), check=True)
         _run_git_resilient(["git", "clean", "-fd"], cwd=str(REPO_DIR), check=True)
-        _run_git_resilient(["git", "checkout", "-b", branch], cwd=str(REPO_DIR), check=False)
     else:
-        _run_git_resilient(["git", "checkout", branch], cwd=str(REPO_DIR), check=True)
-        _run_git_resilient(["git", "reset", "--hard", "HEAD"], cwd=str(REPO_DIR), check=True)
+        rc_local = subprocess.run(
+            ["git", "rev-parse", "--verify", branch],
+            cwd=str(REPO_DIR), capture_output=True,
+        ).returncode
+
+        if rc_local != 0:
+            _run_git_resilient(["git", "reset", "--hard", "HEAD"], cwd=str(REPO_DIR), check=True)
+            _run_git_resilient(["git", "clean", "-fd"], cwd=str(REPO_DIR), check=True)
+            _run_git_resilient(["git", "checkout", "-b", branch], cwd=str(REPO_DIR), check=False)
+        else:
+            _run_git_resilient(["git", "checkout", branch], cwd=str(REPO_DIR), check=True)
+            _run_git_resilient(["git", "reset", "--hard", "HEAD"], cwd=str(REPO_DIR), check=True)
 
     # Clean __pycache__ to prevent stale bytecode (git checkout may not update mtime)
     for p in REPO_DIR.rglob("__pycache__"):
@@ -529,6 +661,8 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
         capture_output=True, text=True, check=True,
     ).stdout.strip()
     save_state(st)
+    if pin_bundle_sha:
+        _clear_bootstrap_pin_marker()
     return True, "ok"
 
 
@@ -726,7 +860,7 @@ def rollback_to_version(tag_or_sha: str, reason: str = "manual_rollback") -> Tup
 
     warning = ""
     branch = repo_state.get("current_branch") or BRANCH_DEV
-    if _has_remote() and branch and branch not in {"HEAD", "unknown"}:
+    if _has_remote("origin") and branch and branch not in {"HEAD", "unknown"}:
         should_sync = True
         rc_div, div_out, _ = git_capture(["git", "rev-list", "--left-right", "--count", f"HEAD...origin/{branch}"])
         if rc_div == 0:
@@ -773,7 +907,7 @@ def configure_remote(repo_slug: str, token: str) -> Tuple[bool, str]:
 
     clean_url = f"https://github.com/{repo_slug}.git"
 
-    if _has_remote():
+    if _has_remote("origin"):
         rc, _, err = git_capture(["git", "remote", "set-url", "origin", clean_url])
     else:
         rc, _, err = git_capture(["git", "remote", "add", "origin", clean_url])
@@ -805,7 +939,7 @@ def _configure_credential_helper(repo_slug: str, token: str) -> None:
 
 def push_to_remote(branch: Optional[str] = None, push_tags: bool = True) -> Tuple[bool, str]:
     """Push current branch (and optionally tags) to origin."""
-    if not _has_remote():
+    if not _has_remote("origin"):
         return False, "No remote configured"
 
     target = branch or BRANCH_DEV
@@ -829,7 +963,7 @@ def migrate_remote_credentials() -> Tuple[bool, str]:
     Safe to call repeatedly — if origin is already clean, this is a no-op.
     Handles both formats: https://TOKEN@github.com/... and https://user:TOKEN@github.com/...
     """
-    if not _has_remote():
+    if not _has_remote("origin"):
         return False, "No remote configured"
     rc, url, _ = git_capture(["git", "remote", "get-url", "origin"])
     if rc != 0:

@@ -33,8 +33,10 @@ import importlib
 import importlib.util
 import logging
 import pathlib
+import shutil
 import sys
 import threading
+import uuid
 from dataclasses import dataclass, field
 from types import ModuleType
 from typing import Any, Callable, Dict, List, Optional, Sequence
@@ -43,12 +45,14 @@ from ouroboros.contracts.plugin_api import (
     ExtensionRegistrationError,
     FORBIDDEN_EXTENSION_SETTINGS,
     VALID_EXTENSION_PERMISSIONS,
+    VALID_EXTENSION_ROUTE_METHODS,
 )
 from ouroboros.skill_loader import (
     LoadedSkill,
     SkillPayloadUnreadable,
     compute_content_hash,
     discover_skills,
+    find_skill,
     skill_state_dir,
 )
 
@@ -68,9 +72,19 @@ class _ExtensionRegistrations:
     routes: List[str] = field(default_factory=list)
     ws_handlers: List[str] = field(default_factory=list)
     ui_tabs: List[str] = field(default_factory=list)
+    content_hash: Optional[str] = None
+    skill_dir: Optional[str] = None
+    import_root: Optional[str] = None
 
     def is_empty(self) -> bool:
         return not (self.tools or self.routes or self.ws_handlers or self.ui_tabs)
+
+
+@dataclass
+class _ExtensionLoadFailure:
+    content_hash: str
+    skill_dir: str
+    error: str
 
 
 # Module-global, lock-guarded registries. Separate dicts make unload
@@ -78,6 +92,7 @@ class _ExtensionRegistrations:
 _lock = threading.RLock()
 _extensions: Dict[str, _ExtensionRegistrations] = {}
 _extension_modules: Dict[str, ModuleType] = {}
+_load_failures: Dict[str, _ExtensionLoadFailure] = {}
 _tools: Dict[str, Any] = {}            # {"ext.<skill>.<name>": ToolEntry-like}
 _routes: Dict[str, Any] = {}           # {"/api/extensions/<skill>/<path>": handler_spec}
 _ws_handlers: Dict[str, Any] = {}      # {"ext.<skill>.<message_type>": handler}
@@ -204,8 +219,23 @@ class PluginAPIImpl:
     ) -> None:
         self._require("route")
         rel = _assert_namespace_path(path)
+        methods_iter = (methods,) if isinstance(methods, str) else (methods or ())
+        norm_methods = tuple(
+            dict.fromkeys(
+                str(m).strip().upper()
+                for m in methods_iter
+                if str(m).strip()
+            )
+        )
+        if not norm_methods:
+            raise ExtensionRegistrationError("route methods must be non-empty")
+        invalid_methods = [m for m in norm_methods if m not in VALID_EXTENSION_ROUTE_METHODS]
+        if invalid_methods:
+            raise ExtensionRegistrationError(
+                f"route methods {invalid_methods!r} are unsupported; "
+                f"expected subset of {sorted(VALID_EXTENSION_ROUTE_METHODS)}"
+            )
         mount = f"/api/extensions/{self._skill}/{rel}"
-        norm_methods = tuple(str(m).upper() for m in methods)
         with _lock:
             if mount in _routes:
                 raise ExtensionRegistrationError(
@@ -261,7 +291,7 @@ class PluginAPIImpl:
                 "title": str(title or clean_tab),
                 "icon": str(icon or "extension"),
                 "render": dict(render or {}),
-                "phase5_pending": True,
+                "ui_host_pending": True,
             }
             _extensions.setdefault(self._skill, _ExtensionRegistrations()).ui_tabs.append(key)
 
@@ -322,6 +352,220 @@ def _module_key(skill_name: str) -> str:
     return f"ouroboros._extensions.{skill_name}"
 
 
+def _purge_extension_bytecode(skill_dir: pathlib.Path) -> None:
+    """Drop cached bytecode so rapid in-place edits reload fresh source."""
+    for pycache in skill_dir.rglob("__pycache__"):
+        if pycache.is_dir():
+            shutil.rmtree(pycache, ignore_errors=True)
+
+
+def _stage_extension_import_tree(
+    skill: LoadedSkill,
+    *,
+    state_dir: pathlib.Path,
+    entry_path: pathlib.Path,
+) -> tuple[pathlib.Path, pathlib.Path]:
+    """Copy one extension tree to a fresh import root for cache-safe reloads.
+
+    Python's import machinery can reuse stale source/bytecode for rapid same-path
+    in-place edits even after ``sys.modules`` and ``__pycache__`` are purged.
+    Loading from a fresh staged directory gives each reload a unique import path,
+    so both the entry module and any relative imports resolve from fresh source.
+    """
+    resolved_root = skill.skill_dir.resolve()
+    relative_entry = entry_path.relative_to(resolved_root)
+    for path in sorted(skill.skill_dir.rglob("*")):
+        if not path.is_symlink():
+            continue
+        try:
+            resolved = path.resolve()
+            resolved.relative_to(resolved_root)
+        except Exception as exc:
+            raise RuntimeError(
+                f"extension {skill.name!r} contains a symlink that resolves outside the skill tree: {path}"
+            ) from exc
+    import_root = state_dir / "__extension_imports" / uuid.uuid4().hex
+    staged_skill_dir = import_root / "skill"
+    import_root.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(skill.skill_dir, staged_skill_dir)
+    _purge_extension_bytecode(staged_skill_dir)
+    staged_entry = (staged_skill_dir / relative_entry).resolve()
+    staged_entry.relative_to(staged_skill_dir.resolve())
+    return import_root, staged_entry
+
+
+def _extension_runtime_state(
+    skill: LoadedSkill,
+    *,
+    current_hash: str | None = None,
+) -> Dict[str, Any]:
+    """Return the single source of truth for whether an extension may be live."""
+    from ouroboros.config import get_runtime_mode
+
+    hash_now = current_hash or skill.content_hash
+    skill_dir_now = str(skill.skill_dir.resolve())
+    review_stale = skill.review.is_stale_for(hash_now)
+    with _lock:
+        live_bundle = _extensions.get(skill.name)
+        live_loaded = bool(
+            live_bundle
+            and live_bundle.content_hash == hash_now
+            and live_bundle.skill_dir == skill_dir_now
+        )
+        loaded_present = live_bundle is not None
+        load_failure = _load_failures.get(skill.name)
+        matched_failure = bool(
+            load_failure
+            and load_failure.content_hash == hash_now
+            and load_failure.skill_dir == skill_dir_now
+        )
+
+    reason = "ready"
+    desired_live = True
+    if not skill.manifest.is_extension():
+        desired_live = False
+        reason = "not_extension"
+    elif skill.load_error:
+        desired_live = False
+        reason = "load_error"
+    elif not skill.enabled:
+        desired_live = False
+        reason = "disabled"
+    elif skill.review.status != "pass":
+        desired_live = False
+        reason = f"review_{skill.review.status or 'pending'}"
+    elif review_stale:
+        desired_live = False
+        reason = "review_stale"
+    elif get_runtime_mode() == "light":
+        desired_live = False
+        reason = "runtime_mode_light"
+    elif matched_failure:
+        reason = "load_error"
+
+    return {
+        "skill": skill.name,
+        "type": skill.manifest.type,
+        "runtime_mode": get_runtime_mode(),
+        "enabled": skill.enabled,
+        "review_status": skill.review.status,
+        "review_stale": review_stale,
+        "load_error": skill.load_error or (load_failure.error if matched_failure and load_failure else None),
+        "desired_live": desired_live,
+        "live_loaded": live_loaded,
+        "loaded_present": loaded_present,
+        "loaded_matches_current": live_loaded,
+        "reason": reason,
+    }
+
+
+def runtime_state_for_skill_name(
+    skill_name: str,
+    drive_root: pathlib.Path,
+    *,
+    repo_path: str | None = None,
+) -> Dict[str, Any]:
+    from ouroboros.config import get_skills_repo_path
+
+    resolved_repo_path = get_skills_repo_path() if repo_path is None else repo_path
+    skill = find_skill(drive_root, skill_name, repo_path=resolved_repo_path)
+    if skill is None:
+        with _lock:
+            live_loaded = skill_name in _extensions
+        return {
+            "skill": skill_name,
+            "type": "extension",
+            "runtime_mode": "",
+            "enabled": False,
+            "review_status": "missing",
+            "review_stale": True,
+            "load_error": "skill not found",
+            "desired_live": False,
+            "live_loaded": live_loaded,
+            "loaded_present": live_loaded,
+            "loaded_matches_current": False,
+            "reason": "missing",
+        }
+    return _extension_runtime_state(skill)
+
+
+def is_extension_live(
+    skill_name: str,
+    drive_root: pathlib.Path,
+    *,
+    repo_path: str | None = None,
+) -> bool:
+    state = runtime_state_for_skill_name(skill_name, drive_root, repo_path=repo_path)
+    return bool(state.get("desired_live")) and bool(state.get("live_loaded"))
+
+
+def reconcile_extension(
+    skill_name: str,
+    drive_root: pathlib.Path,
+    settings_reader: Callable[[], Dict[str, Any]],
+    *,
+    repo_path: str | None = None,
+    retry_load_error: bool = False,
+) -> Dict[str, Any]:
+    """Unload/load one extension so every surface sees the same live state."""
+    with _lock:
+        state = runtime_state_for_skill_name(skill_name, drive_root, repo_path=repo_path)
+        loaded_present = bool(state.get("loaded_present"))
+        was_live = bool(state.get("live_loaded"))
+        if retry_load_error and state.get("reason") == "load_error" and not was_live:
+            _load_failures.pop(skill_name, None)
+            state = runtime_state_for_skill_name(skill_name, drive_root, repo_path=repo_path)
+            loaded_present = bool(state.get("loaded_present"))
+            was_live = bool(state.get("live_loaded"))
+        elif state.get("reason") == "load_error" and not loaded_present:
+            state["action"] = "extension_load_error"
+            return state
+        if state.get("reason") == "missing" or state.get("reason") == "not_extension":
+            if loaded_present:
+                unload_extension(skill_name)
+            state["action"] = "extension_unloaded" if loaded_present else "extension_inactive"
+            state["live_loaded"] = False
+            state["loaded_present"] = False
+            return state
+
+        if not state.get("desired_live"):
+            if loaded_present:
+                unload_extension(skill_name)
+            state["action"] = "extension_unloaded" if loaded_present else "extension_inactive"
+            state["live_loaded"] = False
+            state["loaded_present"] = False
+            return state
+
+        if was_live:
+            state["action"] = "extension_already_live"
+            return state
+
+        from ouroboros.config import get_skills_repo_path
+
+        resolved_repo_path = get_skills_repo_path() if repo_path is None else repo_path
+        loaded = find_skill(drive_root, skill_name, repo_path=resolved_repo_path)
+        if loaded is None:
+            state["reason"] = "missing"
+            state["action"] = "extension_inactive"
+            return state
+        if loaded_present:
+            unload_extension(skill_name)
+        err = load_extension(loaded, settings_reader, drive_root=drive_root)
+        if err:
+            _load_failures[skill_name] = _ExtensionLoadFailure(
+                content_hash=loaded.content_hash,
+                skill_dir=str(loaded.skill_dir.resolve()),
+                error=err,
+            )
+            state["reason"] = "load_error"
+            state["load_error"] = err
+            state["action"] = "extension_load_error"
+            return state
+        refreshed = runtime_state_for_skill_name(skill_name, drive_root, repo_path=resolved_repo_path)
+        refreshed["action"] = "extension_loaded"
+        return refreshed
+
+
 def load_extension(
     skill: LoadedSkill,
     settings_reader: Callable[[], Dict[str, Any]],
@@ -360,12 +604,20 @@ def load_extension(
             f"skill {skill.name!r} payload unreadable at load time: "
             f"{exc}. Fix filesystem state and re-enable."
         )
-    if skill.review.status != "pass" or skill.review.content_hash != current_hash:
+    runtime_state = _extension_runtime_state(skill, current_hash=current_hash)
+    if runtime_state["reason"] == "runtime_mode_light":
+        return (
+            f"skill {skill.name!r} cannot go live while runtime_mode=light "
+            "(in-process extensions are disabled in light mode)"
+        )
+    if runtime_state["reason"] in {"review_stale"} or skill.review.status != "pass" or skill.review.content_hash != current_hash:
         return (
             f"skill {skill.name!r} must carry a fresh PASS review "
             f"(status={skill.review.status!r}, "
             f"stale={skill.review.content_hash != current_hash})"
         )
+    if runtime_state["reason"] == "disabled":
+        return f"skill {skill.name!r} is disabled"
 
     entry_path = _plugin_entry_path(skill)
     if entry_path is None:
@@ -377,17 +629,25 @@ def load_extension(
     if drive_root is None:
         drive_root = pathlib.Path.home() / "Ouroboros" / "data"
     state_dir = skill_state_dir(drive_root, skill.name)
+    staged_import_root: Optional[pathlib.Path] = None
 
     module_key = _module_key(skill.name)
     try:
+        importlib.invalidate_caches()
+        staged_import_root, entry_path = _stage_extension_import_tree(
+            skill,
+            state_dir=state_dir,
+            entry_path=entry_path,
+        )
         # Build a package-style spec so a multi-file extension can use
-        # intra-skill imports (``from .helper import X``) without
-        # manual ``sys.path`` wiring. ``submodule_search_locations``
-        # is the ``__path__`` value the loader installs on the module.
+        # intra-package imports (``from .helper import X``) without
+        # manual ``sys.path`` wiring. The package root must be the
+        # staged entry file's parent so nested ``entry: pkg/plugin.py`` layouts
+        # resolve siblings from ``pkg/`` rather than the skill root.
         spec = importlib.util.spec_from_file_location(
             module_key,
             entry_path,
-            submodule_search_locations=[str(skill.skill_dir)],
+            submodule_search_locations=[str(entry_path.parent)],
         )
         if spec is None or spec.loader is None:
             return f"skill {skill.name!r}: importlib could not build spec"
@@ -413,7 +673,15 @@ def load_extension(
             settings_reader=settings_reader,
         )
         with _lock:
+            bundle = _extensions.get(skill.name)
+            if bundle is None:
+                bundle = _ExtensionRegistrations()
+                _extensions[skill.name] = bundle
+            bundle.content_hash = current_hash
+            bundle.skill_dir = str(skill.skill_dir.resolve())
+            bundle.import_root = str(staged_import_root) if staged_import_root is not None else None
             _extension_modules[skill.name] = module
+            _load_failures.pop(skill.name, None)
         register(api)
     except ExtensionRegistrationError as exc:
         # Tear down any partial registrations the plugin managed before
@@ -424,6 +692,9 @@ def load_extension(
         unload_extension(skill.name)
         log.exception("extension %s failed to load", skill.name)
         return f"skill {skill.name!r} load failure: {type(exc).__name__}: {exc}"
+    finally:
+        if staged_import_root is not None and skill.name not in _extensions:
+            shutil.rmtree(staged_import_root, ignore_errors=True)
     return None
 
 
@@ -441,6 +712,7 @@ def unload_extension(skill_name: str) -> None:
     with _lock:
         bundle = _extensions.pop(skill_name, None)
         _extension_modules.pop(skill_name, None)
+        import_root = pathlib.Path(bundle.import_root) if bundle and bundle.import_root else None
         if bundle:
             for key in bundle.tools:
                 _tools.pop(key, None)
@@ -455,6 +727,8 @@ def unload_extension(skill_name: str) -> None:
     for mod_name in list(sys.modules.keys()):
         if mod_name == prefix or mod_name.startswith(prefix + "."):
             sys.modules.pop(mod_name, None)
+    if import_root is not None:
+        shutil.rmtree(import_root, ignore_errors=True)
 
 
 def reload_all(
@@ -479,9 +753,14 @@ def reload_all(
     for skill in skills:
         if not skill.manifest.is_extension():
             continue
-        unload_extension(skill.name)
-        error = load_extension(skill, settings_reader, drive_root=drive_root)
-        results[skill.name] = error
+        state = reconcile_extension(
+            skill.name,
+            drive_root,
+            settings_reader,
+            repo_path=repo_path,
+            retry_load_error=True,
+        )
+        results[skill.name] = state.get("load_error") or (None if state.get("desired_live") else state.get("reason"))
     return results
 
 
@@ -489,6 +768,8 @@ def snapshot() -> Dict[str, Any]:
     """Return a read-only snapshot of currently-registered surfaces.
 
     Used by ``/api/state`` and the Skills UI to surface what's live.
+    UI tabs are exposed separately as pending declarations because the
+    shipped browser shell does not mount extension tabs yet.
     """
     with _lock:
         return {
@@ -496,7 +777,8 @@ def snapshot() -> Dict[str, Any]:
             "tools": sorted(_tools.keys()),
             "routes": sorted(_routes.keys()),
             "ws_handlers": sorted(_ws_handlers.keys()),
-            "ui_tabs": sorted(_ui_tabs.keys()),
+            "ui_tabs": [],
+            "ui_tabs_pending": sorted(_ui_tabs.keys()),
         }
 
 
@@ -518,9 +800,12 @@ def list_routes() -> Dict[str, Any]:
 
 __all__ = [
     "PluginAPIImpl",
+    "is_extension_live",
     "load_extension",
+    "reconcile_extension",
     "unload_extension",
     "reload_all",
+    "runtime_state_for_skill_name",
     "snapshot",
     "get_tool",
     "list_ws_handlers",

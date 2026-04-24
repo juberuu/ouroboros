@@ -575,10 +575,89 @@ def test_skill_manifest_is_tolerant_of_missing_fields():
     assert manifest.body.strip().startswith("# Hello World Skill")
 
 
+def test_skill_manifest_body_only_markdown_can_start_with_link_syntax():
+    manifest = parse_skill_manifest_text("[Docs](https://example.com)\n\nUse this skill.\n")
+    assert manifest.type == "instruction"
+    assert manifest.body.startswith("[Docs]")
+
+
+def test_skill_manifest_body_only_markdown_can_start_with_thematic_break():
+    """A body-only instruction skill whose first content line is a markdown
+    thematic break (``---`` on its own line, NOT followed by a second
+    closing ``---`` fence) must still parse as ``type: instruction``.
+    Previously this hit an over-eager ``startswith("---")`` reject that
+    treated valid markdown as a broken frontmatter fence."""
+    text = "---\n\n# Intro\n\nUse this skill.\n"
+    manifest = parse_skill_manifest_text(text)
+    assert manifest.type == "instruction"
+    assert manifest.is_instruction()
+    assert "---" in manifest.body
+
+
 def test_skill_manifest_rejects_structural_damage():
     """Malformed JSON should raise SkillManifestError, not silently succeed."""
     with pytest.raises(SkillManifestError):
         parse_skill_manifest_text("{\"name\": ")  # truncated JSON
+
+
+def test_skill_manifest_rejects_unsupported_schema_version():
+    text = (
+        "---\n"
+        "name: future\n"
+        "type: script\n"
+        "schema_version: 2\n"
+        "scripts:\n"
+        "  - name: run.py\n"
+        "---\n"
+        "body\n"
+    )
+    with pytest.raises(SkillManifestError):
+        parse_skill_manifest_text(text)
+
+
+def test_skill_manifest_rejects_malformed_structured_ui_tab():
+    text = (
+        "---\n"
+        "name: widgety\n"
+        "type: extension\n"
+        "entry: plugin.py\n"
+        "ui_tab: [oops\n"
+        "---\n"
+        "body\n"
+    )
+    with pytest.raises(SkillManifestError):
+        parse_skill_manifest_text(text)
+
+
+def test_skill_manifest_rejects_malformed_block_sequence_item():
+    text = (
+        "---\n"
+        "name: broken-seq\n"
+        "type: script\n"
+        "scripts:\n"
+        "  - name: run.py\n"
+        "    description broken\n"
+        "---\n"
+        "body\n"
+    )
+    with pytest.raises(SkillManifestError):
+        parse_skill_manifest_text(text)
+
+
+def test_skill_manifest_rejects_nested_mapping_beyond_supported_depth():
+    text = (
+        "---\n"
+        "name: nested\n"
+        "type: extension\n"
+        "entry: plugin.py\n"
+        "ui_tab:\n"
+        "  render:\n"
+        "    widget: weather\n"
+        "---\n"
+        "body\n"
+    )
+    with pytest.raises(SkillManifestError):
+        parse_skill_manifest_text(text)
 
 
 def test_skill_manifest_block_sequence_tolerates_blank_lines():
@@ -719,6 +798,12 @@ def test_plugin_api_surface_is_frozen():
     assert expected <= members, (
         f"PluginAPI lost required method(s): {expected - members}"
     )
+
+
+def test_extension_route_methods_contract_matches_server_dispatch():
+    from ouroboros.contracts.plugin_api import VALID_EXTENSION_ROUTE_METHODS
+
+    assert VALID_EXTENSION_ROUTE_METHODS == {"GET", "HEAD", "POST", "PUT", "DELETE", "PATCH"}
 
 
 def test_state_response_declares_phase2_runtime_mode_keys():

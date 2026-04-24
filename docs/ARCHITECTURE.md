@@ -1,4 +1,4 @@
-# Ouroboros v4.50.0-rc.2 — Architecture & Reference
+# Ouroboros v4.50.0-rc.3 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -64,7 +64,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── skill_loader.py      ← External skill discovery + durable skill state (Phase 3; reads OUROBOROS_SKILLS_REPO_PATH, persists to data/state/skills/<name>/)
       ├── skill_review.py      ← Tri-model skill review reusing the repo-review infrastructure against the Skill Review Checklist section of docs/CHECKLISTS.md
       ├── extension_loader.py  ← Phase 4 in-process loader for type: extension skills; discovers + imports plugin.py via importlib with a narrow PluginAPIImpl, tracks registrations per-skill for atomic unload
-      ├── extensions_api.py    ← Phase 5 HTTP surface for extensions (GET /api/extensions, GET /api/extensions/<skill>/manifest, ALL /api/extensions/<skill>/<rest:path> catch-all dispatch, POST /api/skills/<skill>/toggle)
+      ├── extensions_api.py    ← Phase 5 HTTP surface for extensions (GET /api/extensions, GET /api/extensions/<skill>/manifest, ALL /api/extensions/<skill>/<rest:path> catch-all dispatch, POST /api/skills/<skill>/toggle, POST /api/skills/<skill>/review)
       ├── server_auth.py       ← Non-localhost auth gate (OUROBOROS_NETWORK_PASSWORD)
       ├── server_control.py    ← Process-control helpers: restart, panic stop
       ├── server_entrypoint.py ← CLI argument parsing, port-binding helpers
@@ -77,13 +77,13 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── tool_policy.py       ← Tool access policy and gating (imports from tool_capabilities)
       ├── utils.py             ← Shared utilities
       ├── world_profiler.py    ← System profile generator (WORLD.md)
-      ├── contracts/           ← Frozen ABI (Phase 1 Protocols + TypedDicts + SkillManifest; Phase 4 adds plugin_api.py with PluginAPI + ExtensionRegistrationError + permission/forbidden-settings tuples)
+      ├── contracts/           ← Frozen ABI (Phase 1 Protocols + TypedDicts + SkillManifest; Phase 4 adds plugin_api.py with PluginAPI + ExtensionRegistrationError + permission/route-method/forbidden-settings tuples)
       │   ├── tool_context.py  ← ToolContextProtocol (minimum tool ABI, duck-typed)
       │   ├── tool_abi.py      ← ToolEntryProtocol + GetToolsProtocol
       │   ├── api_v1.py        ← WS/HTTP envelope TypedDicts
       │   ├── skill_manifest.py ← Unified SKILL.md / skill.json parser (instruction|script|extension)
       │   ├── schema_versions.py ← Opt-in _schema_version helpers
-      │   └── plugin_api.py    ← Phase 4: PluginAPI Protocol + ExtensionRegistrationError + FORBIDDEN_EXTENSION_SETTINGS + VALID_EXTENSION_PERMISSIONS
+      │   └── plugin_api.py    ← Phase 4: PluginAPI Protocol + ExtensionRegistrationError + FORBIDDEN_EXTENSION_SETTINGS + VALID_EXTENSION_PERMISSIONS + VALID_EXTENSION_ROUTE_METHODS
       ├── gateways/            ← External API adapters (thin transport, no business logic)
       │   └── claude_code.py   ← Claude Agent SDK gateway (edit + read-only paths)
       ├── tools/               ← Auto-discovered tool plugins
@@ -109,6 +109,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
 build.sh                      ← macOS build (PyInstaller → .dmg)
 build_linux.sh                ← Linux build (PyInstaller → .tar.gz)
 build_windows.ps1             ← Windows build (PyInstaller → .zip)
+scripts/build_repo_bundle.py  ← Builds `repo.bundle` + `repo_bundle_manifest.json` for packaged releases
 Dockerfile                    ← Docker image (web UI runtime)
 ```
 
@@ -116,8 +117,11 @@ Dockerfile                    ← Docker image (web UI runtime)
 
 1. **launcher.py** — immutable outer shell (tracked in the git repo; bundled as the packaged entry point via PyInstaller). Never self-modifies. Handles:
    - PID lock (single instance)
-   - Bootstrap: copies workspace to `~/Ouroboros/repo/` on first run
-   - Core file sync: overwrites safety-critical files on every launch
+   - Bootstrap: initializes `~/Ouroboros/repo/` from the embedded `repo.bundle` +
+     `repo_bundle_manifest.json` on the first launcher-managed run
+   - Managed repo hand-off: after first bootstrap, keeps using the launcher-managed
+     git checkout and normal managed-remote branch updates instead of per-launch
+     file overwrites
    - Starts `server.py` as a subprocess via embedded Python
    - Shows PyWebView window pointed at `http://127.0.0.1:8765`
    - Monitors subprocess; restarts on exit code 42 (restart signal)
@@ -135,7 +139,7 @@ Dockerfile                    ← Docker image (web UI runtime)
 ```
 ~/Ouroboros/
 ├── repo/              ← Agent's self-modifying git repository
-│   ├── server.py      ← The running server (copied from workspace)
+│   ├── server.py      ← The running server (kept in sync via the launcher-managed git clone, NOT copied from the workspace on each launch; see §2)
 │   ├── ouroboros/      ← Agent core package
 │   │   └── local_model_api.py  ← Local model API endpoints (extracted from server.py)
 │   ├── supervisor/     ← Supervisor package
@@ -156,7 +160,8 @@ Dockerfile                    ← Docker image (web UI runtime)
 │   │   └── skills/              ← Phase 3 external-skill state plane (sibling of advisory_review.json, not shared)
 │   │       └── <skill_name>/
 │   │           ├── enabled.json ← {"enabled": bool, "updated_at": iso_ts}
-│   │           └── review.json  ← {"status": "pass|fail|advisory|pending", "content_hash": str, "findings": [...], "reviewer_models": [...], "timestamp": iso_ts, ...}  (Phase 3 ``pending_phase4`` status retired in Phase 4 — legacy files migrate on load)
+│   │           ├── review.json  ← {"status": "pass|fail|advisory|pending", "content_hash": str, "findings": [...], "reviewer_models": [...], "timestamp": iso_ts, ...}  (Phase 3 ``pending_phase4`` status retired in Phase 4 — legacy files migrate on load)
+│   │           └── __extension_imports/<uuid>/skill/  ← Phase 4 staged import tree for type:extension skills (created on load, removed on unload; see §12.1)
 │   ├── memory/
 │   │   ├── identity.md     ← Agent's self-description (persistent)
 │   │   ├── scratchpad.md   ← Working memory (auto-generated from scratchpad_blocks.json)
@@ -196,8 +201,16 @@ launcher.py main()
   │
   ├── acquire_pid_lock()        → Show "already running" if locked
   ├── check_git()               → Show "install git" wizard if missing
-  ├── bootstrap_repo()          → Copy workspace to ~/Ouroboros/repo/ (first run)
-  │                               OR sync core files (subsequent runs)
+  ├── bootstrap_repo()          → ensure_managed_repo(): first run clones from the embedded
+  │                               repo.bundle + validates repo_bundle_manifest.json;
+  │                               subsequent runs verify the managed clone's bootstrap pin
+  │                               (source_sha + release_tag + bundle_sha256) and ensure the
+  │                               managed remote is configured. The actual
+  │                               fetch + reset to managed/<branch> lives in
+  │                               supervisor/git_ops.checkout_and_reset(), called by
+  │                               server.py::_bootstrap_supervisor_repo() on restart,
+  │                               not in ensure_managed_repo itself — no per-launch
+  │                               file overwrite from the packaged workspace.
   ├── _run_first_run_wizard()   → Show shared setup wizard if no runnable config
   │                               (access entry → models → review mode → budget → summary)
   │                               Saves to ~/Ouroboros/data/settings.json
@@ -222,15 +235,20 @@ Shown when `settings.json` does not contain any supported remote provider key an
 - OpenAI-compatible and Cloud.ru remain explicit model-selection flows from the full Settings page because there is no single safe universal default model ID for those providers.
 - Closing the wizard without saving is non-fatal: the main app still launches and the user can finish configuration in Settings.
 
-### Core file sync (`_sync_core_files`)
+### Launcher-managed bundle bootstrap
 
-On every launch (not just first run), these files are copied from the workspace
-bundle to `~/Ouroboros/repo/`, ensuring safety-critical code cannot be permanently
-corrupted by agent self-modification:
+Packaged releases ship an embedded git bundle (`repo.bundle`) plus
+`repo_bundle_manifest.json`. On the first launcher-managed run the launcher:
 
-- `prompts/SAFETY.md`
-- `ouroboros/safety.py`
-- `ouroboros/tools/registry.py`
+- verifies the manifest against the packaged app version,
+- checks the bundle SHA-256,
+- initializes `~/Ouroboros/repo/` as a managed git checkout,
+- checks out the manifest-pinned `source_sha`,
+- then resumes normal managed-remote branch following on later launches.
+
+Safety-critical protection is no longer implemented as "copy these files from the
+bundle on every launch". The runtime guardrails are the hardcoded sandbox /
+post-edit revert in `registry.py` plus the launcher-managed repo integrity checks.
 
 ### Single-source rescue on startup (v4.36.1+)
 
@@ -282,10 +300,10 @@ The web UI is a single-page app (`web/index.html` + `web/style.css` + ES modules
 - `settings_ui.js` — Settings page HTML layout, tabs, secret input bindings, Network Gate LAN hint container
 - `settings_controls.js` — searchable model pickers + segmented effort controls
 - `costs.js` — cost breakdown tables
-- `skills.js` — Phase 5 Skills page (discover + enable/disable + review trigger + status badges; reads `/api/state` + `/api/extensions`, writes through `/api/skills/<name>/toggle` + `/api/skills/<name>/review`)
+- `skills.js` — Skills page (discover + enable/disable + review trigger + live-vs-catalog extension status; reads `/api/state` + `/api/extensions`, writes through `/api/skills/<name>/toggle` + `/api/skills/<name>/review`)
 - `about.js` — about page
 
-Navigation is a left sidebar with 8 pages (Chat, Files, Logs, Costs, Evolution, Skills, Settings, About). The Skills page (Phase 5) manages external + bundled skill packages — enable/disable, review trigger, status badges — and reads from `/api/state` + `/api/extensions`.
+Navigation is a left sidebar with 8 pages (Chat, Files, Logs, Costs, Evolution, Skills, Settings, About). The Skills page manages external + bundled skill packages — enable/disable, review trigger, status badges, and live-vs-catalog extension state — and reads from `/api/state` + `/api/extensions`.
 
 ### 3.1 Chat
 
@@ -367,8 +385,8 @@ The Dashboard tab has been removed. Its functionality is now distributed:
 - **Direct-provider review fallback** (formerly "OpenAI-only review fallback"; updated v4.39.0 for `plan_task` quorum): if exactly one of **official OpenAI** or **Anthropic** is configured (no OpenRouter, no legacy OpenAI base URL, no OpenAI-compatible, no Cloud.ru) and the configured review list is invalid or doesn't match the exclusive provider prefix, review falls back to `[OUROBOROS_MODEL, OUROBOROS_MODEL_LIGHT, OUROBOROS_MODEL_LIGHT]` (3 commit-triad slots, 2 unique models) drawn from `_DIRECT_PROVIDER_AUTO_DEFAULTS` (which pairs e.g. `openai::gpt-5.4` + `openai::gpt-5.4-mini` or `anthropic::claude-opus-4-7` + `anthropic::claude-sonnet-4-6`). This shape preserves the commit triad's "three models review the staged diff" contract (DEVELOPMENT.md) while yielding exactly 2 unique reviewers for `plan_task`'s quorum gate. If `main` and `light` happen to equal (user overrode both lanes to the same model), the fallback degrades to legacy `[main] * _DIRECT_PROVIDER_REVIEW_RUNS` — commit triad still works, `plan_task` then emits its quorum-error recovery hint. This replaces the old `[main] * 3` fallback which broke `plan_task` on first-run single-provider setups. Current scope is OpenAI-only and Anthropic-only — the detector (`ouroboros/config.py::_exclusive_direct_remote_provider_env`) early-returns `""` when OpenAI-compatible or Cloud.ru keys are present, so those provider-only setups do not yet receive the fallback. The fallback additionally requires the main slot `OUROBOROS_MODEL` — after `provider_models.migrate_model_value` — to already start with the exclusive provider prefix (`openai::` / `anthropic::`); if the normalized main model does not match the prefix, `get_review_models` leaves the configured reviewer list untouched and does **not** rewrite it to `[main]*3`. This covers the edge case where the Settings `#s-model` free-text input accepts a non-default cross-provider value. The same SSOT (`ouroboros/config.py::get_review_models`) powers both the commit triad and `plan_task`.
 - **Review Enforcement**: `Advisory` or `Blocking` for pre-commit review behavior. Rendered as a two-button segmented toggle (advisory = amber, blocking = crimson) rather than a dropdown.
   Backed by `OUROBOROS_REVIEW_ENFORCEMENT`. Review always runs in both modes.
-- **Runtime Mode** (Phase 2 three-layer refactor): `Light` / `Advanced` / `Pro` segmented control backed by `OUROBOROS_RUNTIME_MODE` (default `advanced`). Separate axis from Review Enforcement — controls how far Ouroboros is allowed to self-modify. `Light` disables repo self-modification (enforced in Phase 3+); `Advanced` preserves the current self-modifying evolutionary layer with core/safety-critical files still protected by the hardcoded sandbox; `Pro` additionally enables the core-patch auto-PR lane (Phase 6+). `ouroboros/config.py::VALID_RUNTIME_MODES = ("light", "advanced", "pro")` is the SSOT; `normalize_runtime_mode` runs on both the save path (`server.py::api_settings_post`) and the read path (`get_runtime_mode`) so unknown values can never drift between `/api/settings` and `/api/state`.
-- **External Skills Repo**: text input backed by `OUROBOROS_SKILLS_REPO_PATH`. The skill loader (Phase 3) scans this path for `SKILL.md`/`skill.json` packages; `skill_exec` runs reviewed scripts from those packages; `review_skill`/`toggle_skill`/`list_skills` manage lifecycle. Absolute path or `~`-prefixed; empty means "no skills configured" (all four skill tools return a gentle `SKILLS_UNAVAILABLE` warning). Ouroboros never clones or pulls this directory — the user manages it out-of-band. `get_skills_repo_path()` expands `~` at read time; `/api/state` surfaces only a `skills_repo_configured` boolean so the absolute path never leaks to the UI.
+- **Runtime Mode**: `Light` / `Advanced` / `Pro` segmented control backed by `OUROBOROS_RUNTIME_MODE` (default `advanced`). Separate axis from Review Enforcement — controls how far Ouroboros is allowed to self-modify. `Light` disables repo self-modification; `Advanced` preserves the current self-modifying evolutionary layer with core/safety-critical files still protected by the hardcoded sandbox; `Pro` is accepted as a forward-compatible value but currently behaves the same as `Advanced` while the future core-patch lane remains deferred. `ouroboros/config.py::VALID_RUNTIME_MODES = ("light", "advanced", "pro")` is the SSOT; `normalize_runtime_mode` runs on both the save path (`server.py::api_settings_post`) and the read path (`get_runtime_mode`) so unknown values can never drift between `/api/settings` and `/api/state`.
+- **External Skills Repo**: text input backed by `OUROBOROS_SKILLS_REPO_PATH`. The skill loader scans this path together with bundled `repo/skills/` packages; `skill_exec` runs reviewed scripts from those packages; `review_skill`/`toggle_skill`/`list_skills` manage lifecycle, and the Skills page exposes the same direct review/toggle flow. Absolute path or `~`-prefixed; empty means "bundled skills only". Ouroboros never clones or pulls this directory — the user manages it out-of-band. `get_skills_repo_path()` expands `~` at read time; `/api/state` surfaces only a `skills_repo_configured` boolean so the absolute path never leaks to the UI.
 - **Advanced tab**: local model runtime, max workers, tool timeout, soft/hard timeout, and reset controls. Total budget and per-task cost cap have moved to the **Costs** page.
 - **Local Model Runtime**: source, GGUF filename, port, GPU layers, context length, chat format, start/stop/test buttons, live local-model status, real download progress bar (updates via `download_progress` from `/api/local-model/status`), and an **Install Local Runtime** button (hidden until runtime is missing). The Start button performs a preflight check via `/api/local-model/start` before downloading; on a `runtime_missing` (HTTP 412) response it surfaces the install button and a human-readable hint instead of a raw traceback. After install completes (`runtime_status == "install_ok"`), the start flow resumes automatically if a source was configured. `LOCAL_MODEL_FILENAME` now accepts subfolder paths (`quant/model.gguf`) and split GGUF patterns (`quant/model-00001-of-00003.gguf`); all shards are downloaded automatically and the server is started with the first shard. If the user omits the subfolder prefix (types just the bare filename), `_resolve_hf_path` auto-resolves the full path by querying `list_repo_files` on the HF repo (fail-open on network errors).
 - **Telegram**: Bot Token and primary chat id. If no primary chat id is pinned, the bridge binds to the first active Telegram chat and keeps replies attached there.
@@ -598,8 +616,8 @@ Single source of truth for all tool classification sets:
 - **`TOOL_RESULT_LIMITS`** — per-tool output size caps (chars)
 
 `tool_policy.py` and `loop_tool_execution.py` import from this module. The legacy
-copy in `tools/registry.py` (safety-critical, overwritten on restart) is kept for
-backward compatibility but is not the runtime authority.
+copy in `tools/registry.py` is kept for backward compatibility but is not the
+runtime authority.
 
 ### Tool execution (loop.py)
 
@@ -750,7 +768,7 @@ backward compatibility but is not the runtime authority.
 - `get_github_pr(number)` — full PR detail: author, commits with author names/emails, changed files list, diff/patch, review comments, mergeability
 - `comment_on_pr(number, body)` — add comment to a PR via `gh pr comment` (body via stdin, no injection risk)
 
-**Frozen-bundle limitation (known):** `git_pr.py` is auto-discovered by `pkgutil` at runtime in dev/source mode. It is intentionally NOT in `_FROZEN_TOOL_MODULES` in `registry.py` (that file is safety-critical and overwritten from the bundle on every launch). PR tools are **unavailable in the packaged `.app`/`.tar.gz` bundle** until a new bundle is cut that includes an updated `registry.py`. This is a documented limitation, not an oversight.
+**Frozen-bundle limitation (known):** `git_pr.py` is auto-discovered by `pkgutil` at runtime in dev/source mode. It is intentionally NOT in `_FROZEN_TOOL_MODULES` in `registry.py`, so PR tools are **unavailable in the packaged `.app`/`.tar.gz` bundle** until a new bundle is cut that includes an updated `registry.py`. This is a documented limitation, not an oversight.
 
 ### Git tools (tools/git.py + tools/review.py + supervisor/git_ops.py)
 
@@ -816,7 +834,7 @@ non-fatal on exception (LLM reviewers catch anything that slips through).
 | 2 | `version_in_commit` | Commit message has version pattern but VERSION not staged | Block |
 | 3 | `tests_affected` | `.py` files in `ouroboros/`/`supervisor/` changed without staged tests | Block |
 | 4 | `architecture_doc` | New `.py` in `ouroboros/`/`supervisor/` but `ARCHITECTURE.md` not staged | Block |
-| 5 | `version_values_match` | VERSION staged: pyproject.toml, README badge, ARCHITECTURE.md header in staged index must all match VERSION value | Block on mismatch |
+| 5 | `version_values_match` | VERSION staged: pyproject.toml must match the PEP 440 form of VERSION; README badge + ARCHITECTURE.md header must match the author-facing VERSION spelling | Block on mismatch |
 | 6 | `readme_changelog_row` | VERSION staged: staged README.md changelog must have a table row for the new version | Block if missing |
 | 7 | `p7_history_limits` | VERSION staged: staged README.md Version History must not exceed P7 limits (2 major / 5 minor / 5 patch rows); reads staged content via `git show :README.md`, delegates to `check_history_limit()` from `release_sync.py` | Block on any over-limit category |
 | 8 | `conftest_no_tests` | `conftest.py` staged with `test_*` functions (AST parse of staged content, not regex/worktree read) | Block with move hint |
@@ -863,10 +881,12 @@ Non-blocking warnings are emitted to `events.jsonl` as `advisory_readiness_gate`
 
 `check_worktree_version_sync(repo_dir)` reads VERSION, pyproject.toml, README badge, and
 ARCHITECTURE.md header from the **worktree** (before `git add`) and returns a warning string
-on mismatch. The advisory path (`claude_advisory_review.py`) delegates to this shared helper
-via a backward-compatible `_check_worktree_version_sync` alias. The staged-index equivalent
-in `_preflight_check` (review.py) remains separate — it reads from `git show :PATH` after
-staging and is the authoritative gate.
+on mismatch. For RC/pre-release versions, `pyproject.toml` is compared against the PEP 440
+canonical spelling while README/ARCHITECTURE keep the author-facing spelling from `VERSION`.
+The advisory path (`claude_advisory_review.py`) delegates to this shared helper via a
+backward-compatible `_check_worktree_version_sync` alias. The staged-index equivalent in
+`_preflight_check` (review.py) remains separate — it reads from `git show :PATH` after staging
+and is the authoritative gate.
 
 ### Self-verification template (P2, `ouroboros/tools/review.py::_build_critical_block_message`)
 
@@ -1136,8 +1156,10 @@ errors surface via the same observability path.
 
 - **Worktree version-sync preflight**: `_check_worktree_version_sync` runs before the
   expensive SDK call. Reads VERSION, pyproject.toml, README badge, and ARCHITECTURE.md
-  header from the worktree (not staged index — advisory runs before `git add`). If they
-  disagree, a warning is emitted via `emit_progress_fn` and the advisory continues.
+  header from the worktree (not staged index — advisory runs before `git add`). RC versions
+  compare `pyproject.toml` against the PEP 440-canonical form while README/ARCHITECTURE keep
+  the author-facing `VERSION` spelling. If they disagree, a warning is emitted via
+  `emit_progress_fn` and the advisory continues.
   Non-fatal and non-blocking; the staged-index equivalent in `repo_commit` preflight is
   the authoritative gate.
 - **`advisory_pre_review`** tool: runs a read-only Claude Agent SDK review of the current
@@ -1554,8 +1576,8 @@ Three-tier GitHub Actions workflow:
 | Full | Push to `ouroboros-stable`, manual (`workflow_dispatch`), or tag `v*` | Matrix: Ubuntu + Windows + macOS: `pytest` | ~5 min |
 | Build | Tag `v*` (after full-test passes) | Matrix: PyInstaller build → `.dmg` / `.tar.gz` / `.zip` + GitHub Release | ~15 min |
 
-Path filters for branch pushes: `ouroboros/**`, `supervisor/**`, `server.py`, `tests/**`,
-`web/**`, `requirements.txt`, `pyproject.toml`, `.github/workflows/**`, `build.sh`,
+Path filters for branch pushes: `ouroboros/**`, `supervisor/**`, `server.py`, `launcher.py`,
+`tests/**`, `web/**`, `requirements.txt`, `pyproject.toml`, `.github/workflows/**`, `build.sh`,
 `build_linux.sh`, `build_windows.ps1`, `Dockerfile`, `scripts/**`, `VERSION`, `README.md`.
 Tag pushes (`v*`) always fire regardless of paths.
 
@@ -1567,14 +1589,26 @@ Tag pushes (`v*`) always fire regardless of paths.
 | `build_linux.sh` | Linux | `dist/Ouroboros-<VERSION>-linux-<arch>.tar.gz` |
 | `build_windows.ps1` | Windows | `dist/Ouroboros-<VERSION>-windows-x64.zip` |
 
+**Release tag prerequisite (all scripts).** Before running PyInstaller, every
+build script now verifies both that `refs/tags/v$(cat VERSION)` exists and
+that `git tag --points-at HEAD` reports that same tag. A missing or
+unmatched tag aborts the build with a hard error. This keeps the embedded
+`repo_bundle_manifest.json` honest: the `release_tag` it stores is always
+a real annotated tag that actually points at the packaged commit, so the
+launcher-side bundle verification (see §1 `scripts/build_repo_bundle.py`
+and the bundle-manifest schema) can trust that field. Operators tag the
+release first (`git tag -a v$(cat VERSION) -m …`) and then run the
+platform script.
+
 All three use PyInstaller with `launcher.py` as the packaged entry point (which spawns
 `server.py` as a subprocess). Hidden imports are limited to `webview` and `ouroboros.config`
 (plus Windows-only `pythonnet`/`clr_loader`); the full agent runtime — starlette, uvicorn,
 websockets, dulwich, huggingface_hub, and the rest — ships via the bundled `python-standalone`
 data tree and is resolved at runtime by the embedded interpreter. Data bundles include
 `ouroboros/`, `supervisor/`, `web/`, `prompts/`, `docs/`, `assets/`, `tests/`,
-`server.py`, `BIBLE.md`, `README.md`, `VERSION`, `pyproject.toml`, `Makefile`,
-`requirements.txt`, `requirements-launcher.txt`, `.gitignore`, and `python-standalone/` (the embedded
+`server.py`, `launcher.py`, `BIBLE.md`, `README.md`, `VERSION`, `pyproject.toml`, `Makefile`,
+`requirements.txt`, `requirements-launcher.txt`, `.gitignore`, `repo.bundle`,
+`repo_bundle_manifest.json`, and `python-standalone/` (the embedded
 Python runtime that carries all agent dependencies — and, from v4.40.3, the bundled
 Chromium binary installed via `PLAYWRIGHT_BROWSERS_PATH=0 playwright install chromium`
 before PyInstaller runs; see *Bundled Chromium* paragraph below).
@@ -1713,12 +1747,18 @@ automatically on completion or via `kill_all_tracked_subprocesses()` on panic.
 
 1. **Never delete BIBLE.md. Never physically delete `identity.md` file.**
    (`identity.md` content is intentionally mutable and may be radically rewritten.)
-2. **VERSION == pyproject.toml version == latest git tag == README version == ARCHITECTURE.md header version**
+2. **Release carriers stay in sync**: `VERSION`, the README badge, the ARCHITECTURE header,
+   and the latest release git tag use the same author-facing spelling (for example
+   `4.50.0-rc.2` / `v4.50.0-rc.2`), while `pyproject.toml` stores the PEP 440-canonical form
+   (for example `4.50.0rc2`). For packaged builds, `repo_bundle_manifest.json` pins that same
+   release via `app_version`, `release_tag`, `source_sha`, and the embedded bundle hash for the
+   first launcher-managed bootstrap before normal managed-remote updates resume.
 3. **Config SSOT**: all settings defaults and paths live in `ouroboros/config.py`
 4. **Message bus SSOT**: all messaging goes through `supervisor/message_bus.py`
 5. **State locking**: `state.json` uses file locks for concurrent read-modify-write
 6. **Budget tracking**: per-LLM-call cost events with model/key/category breakdown
-7. **Core file sync**: safety-critical files are overwritten from bundle on every launch
+7. **Launcher-managed repo bootstrap**: packaged builds bootstrap from the manifest-pinned
+   `repo.bundle` once, then continue from the managed git checkout / managed remote flow
 8. **Zero orphans on close**: shutdown MUST kill all child processes (see Section 9)
 9. **Panic MUST kill everything**: all processes (workers, subprocesses, subprocess
    trees, consciousness, evolution) are killed and the application exits completely.
@@ -1774,7 +1814,7 @@ via `tests/test_contracts.py`.
 | `ToolContextProtocol` — 6-attribute + 3-method minimum every tool handler relies on (attributes: `repo_dir`, `drive_root`, `pending_events`, `emit_progress_fn`, `current_chat_id`, `task_id`; methods: `repo_path`, `drive_path`, `drive_logs`) | `ouroboros/contracts/tool_context.py` | `ouroboros.tools.registry.ToolContext` must satisfy it (duck-typed check + AST field parity) |
 | `ToolEntryProtocol` + `GetToolsProtocol` — the tool-module ABI | `ouroboros/contracts/tool_abi.py` | Every entry returned by `ToolRegistry._entries` must satisfy `ToolEntryProtocol` |
 | `api_v1` WS/HTTP envelopes — inbound: `ChatInbound`, `CommandInbound`; outbound WS: `ChatOutbound`, `PhotoOutbound`, `TypingOutbound`, `LogOutbound`; HTTP: `HealthResponse`, `StateResponse` (Phase 2 adds `runtime_mode: str` and `skills_repo_configured: bool`), `EvolutionStateSnapshot`, `SettingsNetworkMeta` | `ouroboros/contracts/api_v1.py` | AST scans of `supervisor/message_bus.py` chat envelopes, `server.py::api_state`, `server.py::api_health`, `server.py::_build_network_meta`, and `server.py::ws_endpoint` inbound dispatch assert no un-declared keys leak out; `tests/test_contracts.py::test_state_response_declares_phase2_runtime_mode_keys` explicitly pins the two new Phase 2 fields |
-| `PluginAPI` (Phase 4) + `ExtensionRegistrationError` + `FORBIDDEN_EXTENSION_SETTINGS` + `VALID_EXTENSION_PERMISSIONS` — the surface every `type: extension` skill's `plugin.py::register(api)` binds against (`register_tool`, `register_route`, `register_ws_handler`, `register_ui_tab`, `log`, `get_settings`, `get_state_dir`) | `ouroboros/contracts/plugin_api.py` | `tests/test_contracts.py::test_plugin_api_surface_is_frozen` pins the frozen method set; `tests/test_extension_loader.py::test_plugin_api_impl_matches_protocol` asserts the concrete `PluginAPIImpl` structurally satisfies the runtime-checkable Protocol |
+| `PluginAPI` (Phase 4) + `ExtensionRegistrationError` + `FORBIDDEN_EXTENSION_SETTINGS` + `VALID_EXTENSION_PERMISSIONS` + `VALID_EXTENSION_ROUTE_METHODS` — the surface every `type: extension` skill's `plugin.py::register(api)` binds against (`register_tool`, `register_route`, `register_ws_handler`, `register_ui_tab`, `log`, `get_settings`, `get_state_dir`). `VALID_EXTENSION_ROUTE_METHODS` is the frozen tuple of HTTP methods accepted by `register_route`; the Phase 5 catch-all dispatcher in `server.py` validates against the same set. | `ouroboros/contracts/plugin_api.py` | `tests/test_contracts.py::test_plugin_api_surface_is_frozen` pins the frozen method set; `tests/test_contracts.py::test_extension_route_methods_contract_matches_server_dispatch` pins the route-methods tuple; `tests/test_extension_loader.py::test_plugin_api_impl_matches_protocol` asserts the concrete `PluginAPIImpl` structurally satisfies the runtime-checkable Protocol |
 | `SkillManifest` — unified `SKILL.md` / `skill.json` format (`type: instruction \| script \| extension`) | `ouroboros/contracts/skill_manifest.py` | `parse_skill_manifest_text()` tolerates missing optional fields; `validate()` returns warnings without raising |
 | `schema_versions` — opt-in `_schema_version` key + `with_schema_version`/`read_schema_version` helpers | `ouroboros/contracts/schema_versions.py` | Not yet wired into existing state files; groundwork only |
 
@@ -1832,9 +1872,26 @@ the skill checkout:
 
 ```
 ~/Ouroboros/data/state/skills/<name>/
-├── enabled.json        ← {"enabled": bool, "updated_at": iso_ts}
-└── review.json         ← {"status", "content_hash", "findings", …}
+├── enabled.json             ← {"enabled": bool, "updated_at": iso_ts}
+├── review.json              ← {"status", "content_hash", "findings", …}
+└── __extension_imports/     ← Phase 4 staged import tree (type: extension skills only)
+    └── <uuid>/skill/        ← Per-load fresh copy used as the importlib spec root
 ```
+
+``__extension_imports/<uuid>/skill/`` is created by
+``ouroboros.extension_loader._stage_extension_import_tree`` on every
+successful ``load_extension`` call for a ``type: extension`` skill. The
+staged copy is bound to that single load: it is removed by the matching
+``unload_extension`` (and by the guard path inside ``load_extension`` if
+load fails after staging), so the tree under a healthy runtime only ever
+contains the currently-loaded extension's staging directory. The copy is
+fail-closed — an extension whose on-disk tree contains a symlink that
+resolves outside the skill checkout is refused at staging time, so the
+confinement the content-hash path already enforces is not bypassed by
+the staging step. This split exists so rapid in-place edits to
+``plugin.py`` or a sibling module no longer race Python's module cache:
+each reload works against a fresh staged copy whose import root cannot
+collide with a previous load's ``sys.modules`` entries.
 
 ### 12.2 Lifecycle
 
@@ -1963,9 +2020,9 @@ Lifecycle:
      ``'route'`` permission required.
    - ``register_ws_handler(message_type, …)`` stores the handler under
      ``ext.<skill>.<message_type>``. ``'ws_handler'`` permission required.
-   - ``register_ui_tab(tab_id, …)`` is accepted but stored as a
-     ``phase5_pending: True`` declaration. Phase 5 consumes these via
-     the Widget ABI.
+  - ``register_ui_tab(tab_id, …)`` is accepted but stored as a future
+    UI-tab declaration (`ui_host_pending: True`). The current shipped
+    UI does not mount extension tabs yet.
 4. ``unload_extension(skill)`` is the inverse: iterates the per-skill
    registration bundle and pops every attached tool/route/ws_handler/
    ui_tab, then drops the module from ``sys.modules``.

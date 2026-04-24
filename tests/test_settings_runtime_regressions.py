@@ -96,6 +96,22 @@ def test_merge_settings_payload_allows_explicit_secret_clear(monkeypatch, tmp_pa
     assert merged["OPENAI_API_KEY"] == ""
 
 
+def test_settings_js_disables_save_until_reload_succeeds():
+    src = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "web"
+        / "modules"
+        / "settings.js"
+    ).read_text(encoding="utf-8")
+
+    assert "let settingsLoaded = false;" in src
+    assert "saveBtn.disabled = !settingsLoaded;" in src
+    assert "btn-reload-settings" in src
+    assert "Save is disabled until reload succeeds" in src
+    assert "Reload current settings successfully before saving." in src
+    assert "loadSettings()\n        .then(() => refreshModelCatalog())\n        .catch(() => {});" not in src
+
+
 def test_restart_current_process_falls_back_to_spawn_on_exec_failure(monkeypatch, tmp_path):
     server_module = _reload_server(monkeypatch, tmp_path)
     called = {}

@@ -107,6 +107,30 @@ def test_prepare_onboarding_settings_sets_all_local_routes():
     assert prepared["USE_LOCAL_FALLBACK"] is True
 
 
+def test_prepare_onboarding_settings_preserves_user_visible_provider_fields():
+    """The wizard only edits fields it actually exposes. Settings fields
+    that live in ``settings_ui.js`` but not in the wizard (``OPENAI_BASE_URL``,
+    ``OPENAI_COMPATIBLE_*``, ``CLOUDRU_FOUNDATION_MODELS_BASE_URL``) must
+    survive re-running onboarding so a user who edited them in Settings
+    does not silently lose the value."""
+    payload = _base_payload()
+    payload["OPENAI_API_KEY"] = "sk-openai-1234567890"
+    current = {
+        "OPENAI_BASE_URL": "https://legacy.example/v1",
+        "OPENAI_COMPATIBLE_API_KEY": "compat-secret",
+        "OPENAI_COMPATIBLE_BASE_URL": "https://compat.example/v1",
+        "CLOUDRU_FOUNDATION_MODELS_BASE_URL": "https://cloud.example/v1",
+    }
+
+    prepared, error = prepare_onboarding_settings(payload, current)
+
+    assert error is None
+    assert prepared["OPENAI_BASE_URL"] == "https://legacy.example/v1"
+    assert prepared["OPENAI_COMPATIBLE_API_KEY"] == "compat-secret"
+    assert prepared["OPENAI_COMPATIBLE_BASE_URL"] == "https://compat.example/v1"
+    assert prepared["CLOUDRU_FOUNDATION_MODELS_BASE_URL"] == "https://cloud.example/v1"
+
+
 def test_build_onboarding_html_contains_multistep_markers():
     html = build_onboarding_html({})
 
@@ -121,6 +145,10 @@ def test_build_onboarding_html_contains_multistep_markers():
     assert "openai::gpt-5.4" in html
     assert "openai::gpt-5.4-mini" in html
     assert "anthropic::claude-sonnet-4-6" in html
+    assert "OPENAI_BASE_URL: ''" not in html
+    assert "OPENAI_COMPATIBLE_API_KEY: ''" not in html
+    assert "OPENAI_COMPATIBLE_BASE_URL: ''" not in html
+    assert "CLOUDRU_FOUNDATION_MODELS_BASE_URL: ''" not in html
 
 
 def test_build_onboarding_html_accepts_web_host_mode():

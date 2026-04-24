@@ -18,6 +18,7 @@ from unittest.mock import patch
 import pytest
 
 from ouroboros.skill_loader import (
+    SkillPayloadUnreadable,
     SkillReviewState,
     compute_content_hash,
     save_enabled,
@@ -25,6 +26,29 @@ from ouroboros.skill_loader import (
 )
 from ouroboros.tools import skill_exec as skill_exec_mod
 from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+
+@pytest.fixture(autouse=True)
+def _clean_extension_runtime():
+    from ouroboros import extension_loader
+
+    with extension_loader._lock:
+        extension_loader._extensions.clear()
+        extension_loader._extension_modules.clear()
+        extension_loader._load_failures.clear()
+        extension_loader._tools.clear()
+        extension_loader._routes.clear()
+        extension_loader._ws_handlers.clear()
+        extension_loader._ui_tabs.clear()
+    yield
+    with extension_loader._lock:
+        extension_loader._extensions.clear()
+        extension_loader._extension_modules.clear()
+        extension_loader._load_failures.clear()
+        extension_loader._tools.clear()
+        extension_loader._routes.clear()
+        extension_loader._ws_handlers.clear()
+        extension_loader._ui_tabs.clear()
 
 
 def _valid_script_manifest(
@@ -446,6 +470,22 @@ def test_toggle_skill_rejects_ambiguous_non_boolean(tmp_path, monkeypatch):
         assert "SKILL_TOGGLE_ERROR" in resp, f"bogus={bogus!r} was accepted: {resp}"
 
 
+def test_toggle_skill_mentions_stale_pass_review(tmp_path, monkeypatch):
+    skills_root = tmp_path / "skills"
+    _build_skill(skills_root, "alpha")
+    ctx = _make_ctx(tmp_path)
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    save_review_state(
+        ctx.drive_root,
+        "alpha",
+        SkillReviewState(status="pass", content_hash="OLD_HASH"),
+    )
+
+    resp = json.loads(skill_exec_mod._handle_toggle_skill(ctx, skill="alpha", enabled=True))
+    assert resp["enabled"] is True
+    assert "stale PASS verdict" in resp["message"]
+
+
 def test_skill_exec_rejects_misserialized_args(tmp_path, monkeypatch):
     """Phase 3 round 16 regression: args as a scalar/string must be
     rejected explicitly, not exploded per-character into argv."""
@@ -627,6 +667,87 @@ def test_toggle_skill_loads_and_unloads_extension_plugin(tmp_path, monkeypatch):
     assert "ext_live" not in snap["extensions"]
 
 
+def test_review_skill_reconciles_live_extension_after_review(tmp_path, monkeypatch):
+    from ouroboros import extension_loader
+    from ouroboros.skill_loader import find_skill
+    from ouroboros.skill_review import SkillReviewOutcome
+
+    skills_root = tmp_path / "skills"
+    skill_dir = skills_root / "ext_reviewed"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        (
+            "---\n"
+            "name: ext_reviewed\n"
+            "description: Runtime ext.\n"
+            "version: 0.1.0\n"
+            "type: extension\n"
+            "entry: plugin.py\n"
+            "permissions: [\"tool\"]\n"
+            "---\n"
+            "body\n"
+        ),
+        encoding="utf-8",
+    )
+    (skill_dir / "plugin.py").write_text(
+        (
+            "def _t(ctx): return 'v1'\n"
+            "def register(api):\n"
+            "    api.register_tool('t', _t, description='', schema={})\n"
+        ),
+        encoding="utf-8",
+    )
+    ctx = _make_ctx(tmp_path)
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    content_hash = compute_content_hash(skill_dir, manifest_entry="plugin.py", manifest_scripts=None)
+    save_enabled(ctx.drive_root, "ext_reviewed", True)
+    save_review_state(
+        ctx.drive_root,
+        "ext_reviewed",
+        SkillReviewState(status="pass", content_hash=content_hash),
+    )
+    loaded = find_skill(ctx.drive_root, "ext_reviewed")
+    assert loaded is not None
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=ctx.drive_root)
+    assert err is None, err
+    tool = extension_loader.get_tool("ext.ext_reviewed.t")
+    assert tool is not None
+    assert tool["handler"](None) == "v1"
+
+    (skill_dir / "plugin.py").write_text(
+        (
+            "def _t(ctx): return 'v2'\n"
+            "def register(api):\n"
+            "    api.register_tool('t', _t, description='', schema={})\n"
+        ),
+        encoding="utf-8",
+    )
+
+    def _fake_review(ctx_arg, skill_name):
+        refreshed = find_skill(pathlib.Path(ctx_arg.drive_root), skill_name)
+        assert refreshed is not None
+        save_review_state(
+            pathlib.Path(ctx_arg.drive_root),
+            skill_name,
+            SkillReviewState(status="pass", content_hash=refreshed.content_hash),
+        )
+        return SkillReviewOutcome(
+            skill_name=skill_name,
+            status="pass",
+            findings=[],
+            reviewer_models=["fake/reviewer"],
+            content_hash=refreshed.content_hash,
+            error="",
+        )
+
+    with patch.object(skill_exec_mod, "_review_skill_impl", side_effect=_fake_review):
+        result = json.loads(skill_exec_mod._handle_review_skill(ctx, skill="ext_reviewed"))
+    assert result["extension_action"] == "extension_loaded"
+    tool = extension_loader.get_tool("ext.ext_reviewed.t")
+    assert tool is not None
+    assert tool["handler"](None) == "v2"
+
+
 def test_toggle_skill_refuses_when_load_error_set(tmp_path, monkeypatch):
     """Phase 3 round 13 regression: a sanitised-name collision marks
     both skills with load_error. ``toggle_skill`` must not mutate state
@@ -644,6 +765,52 @@ def test_toggle_skill_refuses_when_load_error_set(tmp_path, monkeypatch):
     # enabled.json must NOT have been written under the collision key.
     state_file = ctx.drive_root / "state" / "skills" / "hello_world" / "enabled.json"
     assert not state_file.exists()
+
+
+def test_toggle_skill_disable_collision_does_not_write_shared_state(tmp_path, monkeypatch):
+    skills_root = tmp_path / "skills"
+    _build_skill(skills_root, "hello world")
+    _build_skill(skills_root, "hello_world")
+    ctx = _make_ctx(tmp_path)
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+
+    result = json.loads(
+        skill_exec_mod._handle_toggle_skill(ctx, skill="hello_world", enabled=False)
+    )
+    assert result["enabled"] is False
+    assert result["extension_reason"] == "name_collision"
+    assert "not persisted as disabled" in result["message"]
+    state_file = ctx.drive_root / "state" / "skills" / "hello_world" / "enabled.json"
+    assert not state_file.exists()
+
+
+def test_skill_exec_returns_controlled_error_when_payload_becomes_unreadable(
+    tmp_path, monkeypatch
+):
+    skills_root = tmp_path / "skills"
+    skill_dir = _build_skill(skills_root, "alpha")
+    ctx = _make_ctx(tmp_path)
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    save_enabled(ctx.drive_root, "alpha", True)
+    save_review_state(
+        ctx.drive_root,
+        "alpha",
+        SkillReviewState(
+            status="pass",
+            content_hash=compute_content_hash(skill_dir, manifest_entry="", manifest_scripts=[{"name": "run.py"}]),
+        ),
+    )
+    with patch.object(
+        skill_exec_mod,
+        "compute_content_hash",
+        side_effect=SkillPayloadUnreadable(
+            "blocked.txt",
+            PermissionError("permission denied"),
+        ),
+    ):
+        result = skill_exec_mod._handle_skill_exec(ctx, skill="alpha", script="run.py")
+    assert "SKILL_EXEC_ERROR" in result
+    assert "payload became unreadable" in result
 
 
 # ---------------------------------------------------------------------------
@@ -746,3 +913,9 @@ def test_env_denylist_blocks_secret_forwarding(tmp_path, monkeypatch):
     # Non-forbidden manifest-requested keys DO get forwarded so the
     # ``env_from_settings`` surface is not a no-op.
     assert env["SOME_OK_KEY"] == "visible-value"
+
+
+def test_skill_exec_uses_shared_settings_denylist():
+    from ouroboros.contracts.plugin_api import FORBIDDEN_SKILL_SETTINGS
+
+    assert skill_exec_mod._FORBIDDEN_ENV_FORWARD_KEYS == FORBIDDEN_SKILL_SETTINGS

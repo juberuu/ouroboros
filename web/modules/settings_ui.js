@@ -300,9 +300,10 @@ export function renderSettingsPage() {
                     <div class="form-section">
                         <h3>External Skills Repo</h3>
                         <div class="settings-section-copy">
-                            Local checkout path of the external skills/extensions repository. Phase 2 plumbing only:
-                            the path is stored here; the skill loader + <code>skill_exec</code> arrive in Phase 3.
-                            Leave empty if you have not checked out the skills repo yet.
+                            Optional local checkout path of an external skills/extensions repository.
+                            Ouroboros scans this path together with bundled skills under <code>repo/skills/</code>,
+                            and the Skills page already supports review, enable/disable, and live extension status.
+                            Leave empty if you only want the bundled skills.
                         </div>
                         <div class="form-row">
                             <div class="form-field">
@@ -467,6 +468,7 @@ export function renderSettingsPage() {
             </div>
 
             <div class="settings-footer">
+                <button type="button" class="btn btn-secondary" id="btn-reload-settings">Reload Settings</button>
                 <button class="btn btn-save" id="btn-save-settings">Save Settings</button>
                 <div id="settings-status" class="settings-inline-status"></div>
             </div>

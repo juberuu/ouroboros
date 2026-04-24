@@ -122,6 +122,31 @@ def test_discover_skills_includes_bundled_by_default(tmp_path, monkeypatch):
     assert skills_hermetic == []
 
 
+def test_bundled_skills_dir_falls_back_to_module_repo_root(monkeypatch):
+    """Phase 5 regression: source/dev runs should still discover the shipped
+    ``repo/skills/`` bundle even when ``ouroboros.config.REPO_DIR`` points at
+    the launcher-managed default path instead of the active checkout."""
+    import importlib.util
+    import sys
+
+    import ouroboros.config as config_module
+    import ouroboros.skill_loader as live_skill_loader
+
+    module_path = pathlib.Path(live_skill_loader.__file__).resolve()
+    repo_root = module_path.parents[1]
+    assert (repo_root / "skills").is_dir(), "repo/skills/ fixture missing from checkout"
+    spec = importlib.util.spec_from_file_location("skill_loader_test_copy", module_path)
+    assert spec is not None and spec.loader is not None
+    skill_loader_module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = skill_loader_module
+    spec.loader.exec_module(skill_loader_module)
+
+    monkeypatch.setattr(config_module, "REPO_DIR", pathlib.Path("/tmp/nonexistent-ouroboros-repo"))
+
+    bundled = skill_loader_module._bundled_skills_dir()
+    assert bundled == repo_root / "skills"
+
+
 def test_load_skill_parses_manifest_and_computes_hash(tmp_path):
     drive_root = tmp_path / "drive"
     drive_root.mkdir()
@@ -281,6 +306,22 @@ def test_enabled_round_trip(tmp_path):
     assert load_enabled(drive_root, "x") is False
 
 
+def test_load_enabled_fails_closed_on_non_boolean_payload(tmp_path):
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+    raw_path = skill_state_dir(drive_root, "x") / "enabled.json"
+    raw_path.write_text(json.dumps({"enabled": "false"}), encoding="utf-8")
+    assert load_enabled(drive_root, "x") is False
+
+
+def test_load_enabled_fails_closed_on_non_utf8_state_file(tmp_path):
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+    raw_path = skill_state_dir(drive_root, "x") / "enabled.json"
+    raw_path.write_bytes(b"{\"enabled\": \xff}")
+    assert load_enabled(drive_root, "x") is False
+
+
 def test_review_state_round_trip(tmp_path):
     drive_root = tmp_path / "drive"
     drive_root.mkdir()
@@ -301,6 +342,37 @@ def test_review_state_round_trip(tmp_path):
     assert reloaded.content_hash == "abcd"
     assert reloaded.reviewer_models == ["openai/gpt-5.4"]
     assert reloaded.prompt_chars == 1234
+
+
+def test_load_review_state_fails_closed_on_invalid_numeric_fields(tmp_path):
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+    raw_path = skill_state_dir(drive_root, "x") / "review.json"
+    raw_path.write_text(
+        json.dumps(
+            {
+                "status": "pass",
+                "content_hash": "abcd",
+                "prompt_chars": "not-an-int",
+                "cost_usd": "not-a-float",
+            }
+        ),
+        encoding="utf-8",
+    )
+    reloaded = load_review_state(drive_root, "x")
+    assert reloaded.status == "pass"
+    assert reloaded.prompt_chars == 0
+    assert reloaded.cost_usd == 0.0
+
+
+def test_load_review_state_fails_closed_on_non_utf8_state_file(tmp_path):
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+    raw_path = skill_state_dir(drive_root, "x") / "review.json"
+    raw_path.write_bytes(b"{\"status\": \"pass\", \"content_hash\": \xff}")
+    reloaded = load_review_state(drive_root, "x")
+    assert reloaded.status == "pending"
+    assert reloaded.content_hash == ""
 
 
 def test_review_state_unknown_status_clamped_to_pending(tmp_path):
@@ -353,6 +425,29 @@ def test_available_for_execution_requires_pass_review_and_enabled(tmp_path):
     (loaded.skill_dir / "scripts" / "fetch.py").write_text("print('edited')\n", encoding="utf-8")
     available = list_available_for_execution(drive_root, repo_path=str(repo_root))
     assert available == []
+
+
+def test_available_for_execution_rejects_unsupported_runtime(tmp_path):
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+    repo_root = tmp_path / "skills"
+    skill_dir = _write_skill(
+        repo_root,
+        "alpha",
+        manifest=_valid_script_manifest("alpha").replace("runtime: python3", "runtime: perl"),
+        scripts={"fetch.py": "print('x')\n"},
+    )
+    save_enabled(drive_root, "alpha", True)
+    loaded = find_skill(drive_root, "alpha", repo_path=str(repo_root))
+    assert loaded is not None
+    save_review_state(
+        drive_root,
+        "alpha",
+        SkillReviewState(status="pass", content_hash=loaded.content_hash),
+    )
+    refreshed = find_skill(drive_root, "alpha", repo_path=str(repo_root))
+    assert refreshed is not None
+    assert refreshed.available_for_execution is False
 
 
 def test_extension_skill_never_executable_in_phase3(tmp_path):

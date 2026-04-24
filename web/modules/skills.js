@@ -60,6 +60,39 @@ function statusBadge(status) {
 }
 
 
+function extensionLiveBadge(skill) {
+    if (skill.type !== 'extension') return '';
+    const pendingUiTabs = Array.isArray(skill.ui_tabs_pending) ? skill.ui_tabs_pending : [];
+    if (pendingUiTabs.length && !skill.dispatch_live) {
+        return '<span class="skills-badge skills-badge-warn">ui tab pending</span>';
+    }
+    if (skill.live_loaded && skill.dispatch_live) {
+        return '<span class="skills-badge skills-badge-ok">live</span>';
+    }
+    if (skill.live_loaded) {
+        return '<span class="skills-badge skills-badge-muted">loaded</span>';
+    }
+    if (skill.desired_live) {
+        return '<span class="skills-badge skills-badge-warn">catalog only</span>';
+    }
+    return '<span class="skills-badge skills-badge-muted">not live</span>';
+}
+
+
+function extensionLiveNote(skill) {
+    if (skill.type !== 'extension') return '';
+    const pendingUiTabs = Array.isArray(skill.ui_tabs_pending) ? skill.ui_tabs_pending : [];
+    if (pendingUiTabs.length && !skill.dispatch_live) {
+        return '<div class="muted">extension runtime: ui tab declared, but the browser host does not ship extension tabs yet</div>';
+    }
+    const reason = escapeHtml(skill.live_reason || 'catalog_only');
+    const prefix = skill.live_loaded && skill.dispatch_live
+        ? 'extension runtime: live'
+        : (skill.live_loaded ? 'extension runtime: loaded' : 'extension runtime');
+    return `<div class="muted">${prefix}${skill.live_loaded && skill.dispatch_live ? '' : ` (${reason})`}</div>`;
+}
+
+
 function renderSkillCard(skill) {
     const permissions = (skill.permissions || [])
         .map(p => `<code>${escapeHtml(p)}</code>`)
@@ -70,6 +103,7 @@ function renderSkillCard(skill) {
     const reviewStaleNote = skill.review_stale
         ? '<span class="skills-badge skills-badge-warn">stale</span>'
         : '';
+    const liveBadge = extensionLiveBadge(skill);
     const safeName = escapeHtml(skill.name);
     return `
         <div class="skills-card" data-skill="${safeName}">
@@ -81,11 +115,13 @@ function renderSkillCard(skill) {
                 <div class="skills-card-status">
                     ${statusBadge(skill.review_status)}
                     ${reviewStaleNote}
+                    ${liveBadge}
                     ${skill.enabled ? '<span class="skills-badge skills-badge-ok">enabled</span>'
                                     : '<span class="skills-badge skills-badge-muted">disabled</span>'}
                 </div>
             </div>
             <div class="skills-card-perms">permissions: ${permissions || '<i>none</i>'}</div>
+            ${extensionLiveNote(skill)}
             ${loadError}
             <div class="skills-card-actions">
                 <button class="btn btn-default skills-review" data-skill="${safeName}">Review</button>
@@ -112,23 +148,23 @@ async function fetchSkills() {
     return {
         runtimeMode,
         skillsRepoConfigured,
-        extensions: extResp.skills || [],
+        skills: extResp.skills || [],
         live: extResp.live || {},
     };
 }
 
 
 async function renderSkillsList(container, emptyEl, runtimeModeEl) {
-    const { runtimeMode, skillsRepoConfigured, extensions } = await fetchSkills();
+    const { runtimeMode, skillsRepoConfigured, skills } = await fetchSkills();
     runtimeModeEl.textContent = `runtime_mode: ${runtimeMode}`;
-    if (!extensions.length && !skillsRepoConfigured) {
+    if (!skills.length && !skillsRepoConfigured) {
         container.innerHTML = '';
         emptyEl.hidden = false;
         return;
     }
     emptyEl.hidden = true;
-    container.innerHTML = extensions.map(renderSkillCard).join('')
-        || '<div class="muted">No extension skills yet. Bundled <code>type: script</code> skills like <code>weather</code> can also be invoked via <code>skill_exec</code>.</div>';
+    container.innerHTML = skills.map(renderSkillCard).join('')
+        || '<div class="muted">No skills yet. Bundled <code>type: script</code> skills like <code>weather</code> can still be reviewed and invoked via <code>skill_exec</code>.</div>';
 }
 
 
@@ -182,10 +218,11 @@ function attachActionHandlers(container, renderFn) {
                     {}
                 );
                 const findings = result.findings?.length ?? 0;
+                const errorTail = result.error ? ` — ${result.error}` : '';
                 showBanner(
-                    `${name}: review ${result.status}${findings ? ` (${findings} findings)` : ''}`,
+                    `${name}: review ${result.status}${findings ? ` (${findings} findings)` : ''}${errorTail}`,
                     result.status === 'pass' ? 'ok'
-                        : result.status === 'fail' ? 'danger'
+                        : (result.error || result.status === 'fail') ? 'danger'
                         : 'warn'
                 );
             }

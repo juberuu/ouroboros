@@ -22,6 +22,7 @@ def _clean_extensions():
     with extension_loader._lock:
         extension_loader._extensions.clear()
         extension_loader._extension_modules.clear()
+        extension_loader._load_failures.clear()
         extension_loader._tools.clear()
         extension_loader._routes.clear()
         extension_loader._ws_handlers.clear()
@@ -30,6 +31,7 @@ def _clean_extensions():
     with extension_loader._lock:
         extension_loader._extensions.clear()
         extension_loader._extension_modules.clear()
+        extension_loader._load_failures.clear()
         extension_loader._tools.clear()
         extension_loader._routes.clear()
         extension_loader._ws_handlers.clear()
@@ -74,12 +76,14 @@ def _make_client(tmp_path: pathlib.Path, monkeypatch):
 
     import server as srv
 
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     drive_root = tmp_path / "drive"
     drive_root.mkdir()
     # Attach drive_root to the INNER Starlette app's state
     # (``srv.app`` is the NetworkAuthGate wrapper; the inner Starlette
     # is at ``srv.app.app``).
     srv.app.app.state.drive_root = drive_root  # type: ignore[attr-defined]
+    srv.app.app.state.repo_dir = tmp_path / "repo"  # type: ignore[attr-defined]
 
     # Minimal lifecycle patching — reuse the pattern from other tests.
     patches = [
@@ -118,6 +122,8 @@ def test_api_extensions_index_lists_extension_skills(tmp_path, monkeypatch):
         names = {s["name"] for s in data.get("skills", [])}
         assert "ext_a" in names
         assert "live" in data
+        ext_meta = next(s for s in data["skills"] if s["name"] == "ext_a")
+        assert ext_meta["live_reason"] == "disabled"
     finally:
         _stop_patches(patches)
 
@@ -134,6 +140,107 @@ def test_api_extension_manifest_returns_metadata(tmp_path, monkeypatch):
         data = resp.json()
         assert data["name"] == "ext_b"
         assert data["manifest"]["type"] == "extension"
+    finally:
+        _stop_patches(patches)
+
+
+def test_api_extension_manifest_prefers_runtime_load_error(tmp_path, monkeypatch):
+    from ouroboros import extension_loader
+    from ouroboros.skill_loader import (
+        SkillReviewState,
+        compute_content_hash,
+        find_skill,
+        save_enabled,
+        save_review_state,
+    )
+
+    skills_root = tmp_path / "skills"
+    skill_dir = _write_ext(
+        skills_root,
+        "ext_manifest_error",
+        permissions=["route"],
+        plugin=(
+            "def _hello(request):\n"
+            "    return {'hello': 'world'}\n"
+            "def register(api):\n"
+            "    api.register_route('/absolute', _hello, methods=('GET',))\n"
+        ),
+    )
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    client, drive_root, patches = _make_client(tmp_path, monkeypatch)
+    try:
+        content_hash = compute_content_hash(skill_dir, manifest_entry="plugin.py")
+        save_enabled(drive_root, "ext_manifest_error", True)
+        save_review_state(
+            drive_root,
+            "ext_manifest_error",
+            SkillReviewState(status="pass", content_hash=content_hash),
+        )
+        loaded = find_skill(drive_root, "ext_manifest_error", repo_path=str(skills_root))
+        assert loaded is not None
+        state = extension_loader.reconcile_extension(
+            "ext_manifest_error",
+            drive_root,
+            lambda: {},
+            repo_path=str(skills_root),
+            retry_load_error=True,
+        )
+        assert state["action"] == "extension_load_error"
+
+        resp = client.get("/api/extensions/ext_manifest_error/manifest")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert "absolute" in str(data["load_error"])
+    finally:
+        _stop_patches(patches)
+
+
+def test_api_extensions_index_marks_widget_only_extensions_as_ui_pending(
+    tmp_path, monkeypatch
+):
+    from ouroboros import extension_loader
+    from ouroboros.skill_loader import (
+        SkillReviewState,
+        compute_content_hash,
+        find_skill,
+        save_enabled,
+        save_review_state,
+    )
+
+    skills_root = tmp_path / "skills"
+    skill_dir = _write_ext(
+        skills_root,
+        "ext_widget",
+        permissions=["widget"],
+        plugin=(
+            "def register(api):\n"
+            "    api.register_ui_tab('weather', 'Weather', render={'kind': 'card'})\n"
+        ),
+    )
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    client, drive_root, patches = _make_client(tmp_path, monkeypatch)
+    try:
+        content_hash = compute_content_hash(skill_dir, manifest_entry="plugin.py")
+        save_enabled(drive_root, "ext_widget", True)
+        save_review_state(
+            drive_root,
+            "ext_widget",
+            SkillReviewState(status="pass", content_hash=content_hash),
+        )
+        loaded = find_skill(drive_root, "ext_widget", repo_path=str(skills_root))
+        assert loaded is not None
+        err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
+        assert err is None, err
+
+        resp = client.get("/api/extensions")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        entry = next(s for s in data["skills"] if s["name"] == "ext_widget")
+        assert entry["live_loaded"] is True
+        assert entry["dispatch_live"] is False
+        assert entry["ui_tabs_pending"] == ["ext_widget:weather"]
+        assert data["live"]["ui_tabs"] == []
+        assert "ext_widget:weather" in data["live"]["ui_tabs_pending"]
     finally:
         _stop_patches(patches)
 
@@ -183,6 +290,26 @@ def test_api_skill_toggle_enables_and_loads_extension(tmp_path, monkeypatch):
         _stop_patches(patches)
 
 
+def test_api_skill_toggle_collision_disable_does_not_write_shared_state(
+    tmp_path, monkeypatch
+):
+    skills_root = tmp_path / "skills"
+    plugin = "def register(api):\n    return None\n"
+    _write_ext(skills_root, "hello world", permissions=[], plugin=plugin)
+    _write_ext(skills_root, "hello_world", permissions=[], plugin=plugin)
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    client, drive_root, patches = _make_client(tmp_path, monkeypatch)
+    try:
+        resp = client.post("/api/skills/hello_world/toggle", json={"enabled": False})
+        assert resp.status_code == 400, resp.text
+        data = resp.json()
+        assert data["extension_reason"] == "name_collision"
+        state_file = drive_root / "state" / "skills" / "hello_world" / "enabled.json"
+        assert not state_file.exists()
+    finally:
+        _stop_patches(patches)
+
+
 def test_api_extension_dispatcher_routes_to_registered_handler(tmp_path, monkeypatch):
     from ouroboros import extension_loader
     from ouroboros.skill_loader import (
@@ -224,11 +351,216 @@ def test_api_extension_dispatcher_routes_to_registered_handler(tmp_path, monkeyp
         _stop_patches(patches)
 
 
+def test_api_extension_dispatcher_allows_head_for_get_route(tmp_path, monkeypatch):
+    from ouroboros import extension_loader
+    from ouroboros.skill_loader import (
+        SkillReviewState,
+        compute_content_hash,
+        find_skill,
+        save_enabled,
+        save_review_state,
+    )
+
+    skills_root = tmp_path / "skills"
+    skill_dir = _write_ext(
+        skills_root,
+        "ext_head",
+        permissions=["route"],
+        plugin=(
+            "from starlette.responses import JSONResponse\n"
+            "def _hello(request):\n"
+            "    return JSONResponse({'hello': 'world'})\n"
+            "def register(api):\n"
+            "    api.register_route('greet', _hello, methods=('GET',))\n"
+        ),
+    )
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    client, drive_root, patches = _make_client(tmp_path, monkeypatch)
+    try:
+        content_hash = compute_content_hash(skill_dir, manifest_entry="plugin.py")
+        save_enabled(drive_root, "ext_head", True)
+        save_review_state(
+            drive_root,
+            "ext_head",
+            SkillReviewState(status="pass", content_hash=content_hash),
+        )
+        loaded = find_skill(drive_root, "ext_head", repo_path=str(skills_root))
+        assert loaded is not None
+        err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
+        assert err is None, err
+
+        resp = client.head("/api/extensions/ext_head/greet")
+        assert resp.status_code == 200, resp.text
+    finally:
+        _stop_patches(patches)
+
+
 def test_api_extension_dispatcher_404_for_unknown_route(tmp_path, monkeypatch):
     client, _, patches = _make_client(tmp_path, monkeypatch)
     try:
         resp = client.get("/api/extensions/nope/xyz")
         assert resp.status_code == 404
+    finally:
+        _stop_patches(patches)
+
+
+def test_api_extension_dispatcher_surfaces_lazy_load_error(tmp_path, monkeypatch):
+    from ouroboros.skill_loader import (
+        SkillReviewState,
+        compute_content_hash,
+        save_enabled,
+        save_review_state,
+    )
+
+    skills_root = tmp_path / "skills"
+    plugin = (
+        "def _hello(request):\n"
+        "    return {'hello': 'world'}\n"
+        "def register(api):\n"
+        "    api.register_route('/absolute', _hello, methods=('GET',))\n"
+    )
+    skill_dir = _write_ext(skills_root, "ext_broken", permissions=["route"], plugin=plugin)
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    client, drive_root, patches = _make_client(tmp_path, monkeypatch)
+    try:
+        content_hash = compute_content_hash(skill_dir, manifest_entry="plugin.py")
+        save_enabled(drive_root, "ext_broken", True)
+        save_review_state(
+            drive_root,
+            "ext_broken",
+            SkillReviewState(status="pass", content_hash=content_hash),
+        )
+
+        resp = client.get("/api/extensions/ext_broken/greet")
+        assert resp.status_code == 409, resp.text
+        data = resp.json()
+        assert data["state"]["action"] == "extension_load_error"
+        assert data["state"]["reason"] == "load_error"
+    finally:
+        _stop_patches(patches)
+
+
+def test_api_extension_dispatcher_rejects_not_live_route(tmp_path, monkeypatch):
+    from ouroboros import extension_loader
+    from ouroboros.skill_loader import (
+        SkillReviewState,
+        compute_content_hash,
+        save_enabled,
+        save_review_state,
+    )
+
+    skills_root = tmp_path / "skills"
+    plugin = (
+        "from starlette.responses import JSONResponse\n"
+        "def _hello(request):\n"
+        "    return JSONResponse({'hello': 'world'})\n"
+        "def register(api):\n"
+        "    api.register_route('greet', _hello, methods=('GET',))\n"
+    )
+    skill_dir = _write_ext(skills_root, "ext_guarded", permissions=["route"], plugin=plugin)
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    client, drive_root, patches = _make_client(tmp_path, monkeypatch)
+    try:
+        content_hash = compute_content_hash(skill_dir, manifest_entry="plugin.py")
+        save_enabled(drive_root, "ext_guarded", True)
+        save_review_state(
+            drive_root,
+            "ext_guarded",
+            SkillReviewState(status="pass", content_hash=content_hash),
+        )
+        from ouroboros.skill_loader import find_skill
+
+        loaded = find_skill(drive_root, "ext_guarded", repo_path=str(skills_root))
+        assert loaded is not None
+        err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
+        assert err is None, err
+        assert "ext_guarded" in extension_loader.snapshot()["extensions"]
+
+        # Leave stale registrations in memory but mark the skill disabled on disk.
+        save_enabled(drive_root, "ext_guarded", False)
+
+        resp = client.get("/api/extensions/ext_guarded/greet")
+        assert resp.status_code == 409, resp.text
+        data = resp.json()
+        assert data["state"]["reason"] == "disabled"
+        assert "ext_guarded" not in extension_loader.snapshot()["extensions"]
+    finally:
+        _stop_patches(patches)
+
+
+def test_api_extension_dispatcher_reloads_stale_live_route(tmp_path, monkeypatch):
+    from ouroboros import extension_loader
+    from ouroboros.skill_loader import (
+        SkillReviewState,
+        compute_content_hash,
+        find_skill,
+        save_enabled,
+        save_review_state,
+    )
+
+    skills_root = tmp_path / "skills"
+    skill_dir = _write_ext(
+        skills_root,
+        "ext_route_reload",
+        permissions=["route"],
+        plugin=(
+            "from starlette.responses import JSONResponse\n"
+            "def _hello(request):\n"
+            "    return JSONResponse({'hello': 'v1'})\n"
+            "def register(api):\n"
+            "    api.register_route('greet', _hello, methods=('GET',))\n"
+        ),
+    )
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    client, drive_root, patches = _make_client(tmp_path, monkeypatch)
+    try:
+        content_hash = compute_content_hash(skill_dir, manifest_entry="plugin.py")
+        save_enabled(drive_root, "ext_route_reload", True)
+        save_review_state(
+            drive_root,
+            "ext_route_reload",
+            SkillReviewState(status="pass", content_hash=content_hash),
+        )
+        loaded = find_skill(drive_root, "ext_route_reload", repo_path=str(skills_root))
+        assert loaded is not None
+        err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
+        assert err is None, err
+
+        (skill_dir / "plugin.py").write_text(
+            (
+                "from starlette.responses import JSONResponse\n"
+                "def _hello(request):\n"
+                "    return JSONResponse({'hello': 'v2'})\n"
+                "def register(api):\n"
+                "    api.register_route('greet', _hello, methods=('GET',))\n"
+            ),
+            encoding="utf-8",
+        )
+        refreshed = find_skill(drive_root, "ext_route_reload", repo_path=str(skills_root))
+        assert refreshed is not None
+        save_review_state(
+            drive_root,
+            "ext_route_reload",
+            SkillReviewState(status="pass", content_hash=refreshed.content_hash),
+        )
+
+        resp = client.get("/api/extensions/ext_route_reload/greet")
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"hello": "v2"}
+    finally:
+        _stop_patches(patches)
+
+
+def test_api_skill_toggle_rejects_non_boolean_enabled(tmp_path, monkeypatch):
+    skills_root = tmp_path / "skills"
+    plugin = "def register(api):\n    pass\n"
+    _write_ext(skills_root, "ext_toggle_bad", permissions=[], plugin=plugin)
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    client, _, patches = _make_client(tmp_path, monkeypatch)
+    try:
+        resp = client.post("/api/skills/ext_toggle_bad/toggle", json={"enabled": "definitely"})
+        assert resp.status_code == 400
+        assert "boolean" in resp.text
     finally:
         _stop_patches(patches)
 
@@ -292,29 +624,133 @@ def test_ws_endpoint_dispatches_ext_prefixed_messages():
     assert False, "ws_endpoint not found in server.py"
 
 
-def test_tool_registry_execute_dispatches_ext_tool():
+def test_ws_endpoint_reconciles_and_unloads_not_live_extension(tmp_path, monkeypatch):
+    from ouroboros import extension_loader
+    from ouroboros.skill_loader import (
+        SkillReviewState,
+        compute_content_hash,
+        find_skill,
+        save_enabled,
+        save_review_state,
+    )
+
+    skills_root = tmp_path / "skills"
+    plugin = (
+        "async def _handler(payload):\n"
+        "    return {'acked': True}\n"
+        "def register(api):\n"
+        "    api.register_ws_handler('message', _handler)\n"
+    )
+    skill_dir = _write_ext(skills_root, "ext_ws_guarded", permissions=["ws_handler"], plugin=plugin)
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    client, drive_root, patches = _make_client(tmp_path, monkeypatch)
+    try:
+        content_hash = compute_content_hash(skill_dir, manifest_entry="plugin.py")
+        save_enabled(drive_root, "ext_ws_guarded", True)
+        save_review_state(
+            drive_root,
+            "ext_ws_guarded",
+            SkillReviewState(status="pass", content_hash=content_hash),
+        )
+        loaded = find_skill(drive_root, "ext_ws_guarded", repo_path=str(skills_root))
+        assert loaded is not None
+        err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
+        assert err is None, err
+        assert "ext_ws_guarded" in extension_loader.snapshot()["extensions"]
+
+        save_enabled(drive_root, "ext_ws_guarded", False)
+
+        with client.websocket_connect("/ws") as ws:
+            ws.send_text(json.dumps({"type": "ext.ext_ws_guarded.message"}))
+            reply = json.loads(ws.receive_text())
+        assert reply["type"] == "log"
+        assert "not live" in reply["data"]["message"]
+        assert "ext_ws_guarded" not in extension_loader.snapshot()["extensions"]
+    finally:
+        _stop_patches(patches)
+
+
+def test_ws_endpoint_surfaces_extension_load_error(tmp_path, monkeypatch):
+    skills_root = tmp_path / "skills"
+    skill_dir = _write_ext(
+        skills_root,
+        "ext_ws_broken",
+        permissions=["ws_handler"],
+        plugin=(
+            "async def _handler(payload):\n"
+            "    return {'acked': True}\n"
+            "def register(api):\n"
+            "    api.register_ws_handler('bad-type', _handler)\n"
+        ),
+    )
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    client, drive_root, patches = _make_client(tmp_path, monkeypatch)
+    try:
+        from ouroboros.skill_loader import SkillReviewState, compute_content_hash, save_enabled, save_review_state
+
+        content_hash = compute_content_hash(skill_dir, manifest_entry="plugin.py")
+        save_enabled(drive_root, "ext_ws_broken", True)
+        save_review_state(
+            drive_root,
+            "ext_ws_broken",
+            SkillReviewState(status="pass", content_hash=content_hash),
+        )
+
+        with client.websocket_connect("/ws") as ws:
+            ws.send_text(json.dumps({"type": "ext.ext_ws_broken.message"}))
+            reply = json.loads(ws.receive_text())
+        assert reply["type"] == "log"
+        assert "failed to go live" in reply["data"]["message"]
+    finally:
+        _stop_patches(patches)
+
+
+def test_tool_registry_execute_dispatches_ext_tool(tmp_path, monkeypatch):
     """Phase 5 regression: ``ToolRegistry.execute`` falls back to
-    ``extension_loader.get_tool`` for ``ext.*`` names. Hermetic —
-    registers a fake extension tool via the loader's internal dict
-    to avoid booting the full skill machinery."""
+    ``extension_loader.get_tool`` for ``ext.*`` names, but only for
+    reviewed/live extensions that are surfaced through the normal
+    registry schema lookup."""
     from ouroboros.tools import registry as tools_registry
     from ouroboros import extension_loader
+    from ouroboros.skill_loader import (
+        SkillReviewState,
+        compute_content_hash,
+        find_skill,
+        save_enabled,
+        save_review_state,
+    )
 
-    tmp_reg = tools_registry.ToolRegistry(repo_dir=pathlib.Path("/tmp"), drive_root=pathlib.Path("/tmp"))
-    with extension_loader._lock:
-        extension_loader._tools["ext.testskill.echo"] = {
-            "name": "ext.testskill.echo",
-            "handler": lambda ctx, **kwargs: f"hello {kwargs.get('who', 'world')}",
-            "description": "echo",
-            "schema": {},
-            "timeout_sec": 10,
-            "skill": "testskill",
-        }
+    skills_root = tmp_path / "skills"
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+    plugin = (
+        "def _echo(ctx, who='world'):\n"
+        "    return f'hello {who}'\n"
+        "def register(api):\n"
+        "    api.register_tool('echo', _echo, description='echo', schema={}, timeout_sec=10)\n"
+    )
+    skill_dir = _write_ext(skills_root, "testskill", permissions=["tool"], plugin=plugin)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    content_hash = compute_content_hash(skill_dir, manifest_entry="plugin.py")
+    save_enabled(drive_root, "testskill", True)
+    save_review_state(
+        drive_root,
+        "testskill",
+        SkillReviewState(status="pass", content_hash=content_hash),
+    )
+    loaded = find_skill(drive_root, "testskill", repo_path=str(skills_root))
+    assert loaded is not None
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
+    assert err is None, err
     try:
+        tmp_reg = tools_registry.ToolRegistry(repo_dir=tmp_path, drive_root=drive_root)
+        schema = tmp_reg.get_schema_by_name("ext.testskill.echo")
+        assert schema is not None
+        assert schema["function"]["name"] == "ext.testskill.echo"
         result = tmp_reg.execute("ext.testskill.echo", {"who": "phase5"})
         assert result == "hello phase5"
         # get_timeout honours the extension's declared timeout.
         assert tmp_reg.get_timeout("ext.testskill.echo") == 10
     finally:
-        with extension_loader._lock:
-            extension_loader._tools.pop("ext.testskill.echo", None)
+        extension_loader.unload_extension("testskill")

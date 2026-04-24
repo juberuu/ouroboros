@@ -268,14 +268,15 @@ class ToolRegistry:
 
     def schemas(self, core_only: bool = False) -> List[Dict[str, Any]]:
         built_in = [{"type": "function", "function": e.schema} for e in self._entries.values()]
-        # Phase 5: include every extension-registered tool's schema so
-        # the agent can actually invoke ``ext.<skill>.<name>`` tools.
-        # The extension tools are namespaced and review-gated (only
-        # loaded when the skill passes tri-model review), so we don't
-        # silo them behind ``list_available_tools``/``enable_tools`` —
-        # an enabled extension's tools are immediately callable.
+        # Include live extension-registered tool schemas so the normal
+        # tool-policy/enable_tools path can surface ``ext.<skill>.<name>``
+        # entries instead of leaving them manually dispatch-only.
         try:
-            from ouroboros.extension_loader import _tools as _ext_tools, _lock as _ext_lock
+            from ouroboros.extension_loader import (
+                _tools as _ext_tools,
+                _lock as _ext_lock,
+                is_extension_live as _ext_is_live,
+            )
             with _ext_lock:
                 extension_schemas = [
                     {
@@ -287,6 +288,7 @@ class ToolRegistry:
                         },
                     }
                     for tool in _ext_tools.values()
+                    if _ext_is_live(str(tool.get("skill") or ""), pathlib.Path(self._ctx.drive_root))
                 ]
         except Exception:
             extension_schemas = []
@@ -298,9 +300,8 @@ class ToolRegistry:
         for e in self._entries.values():
             if e.name in CORE_TOOL_NAMES or e.name in ("list_available_tools", "enable_tools"):
                 result.append({"type": "function", "function": e.schema})
-        # Extension tools are always enumerable in core-mode too —
-        # operators expect enabling a skill to make its tools usable
-        # without re-negotiating through ``enable_tools``.
+        # Keep live extension tools enumerable in core-mode too so the
+        # loop can discover them through the standard registry surface.
         return result + extension_schemas
 
     def list_non_core_tools(self) -> List[Dict[str, str]]:
@@ -310,6 +311,25 @@ class ToolRegistry:
             if e.name not in CORE_TOOL_NAMES:
                 desc = e.schema.get("description", "No description")
                 result.append({"name": e.name, "description": desc})
+        try:
+            from ouroboros.extension_loader import (
+                _tools as _ext_tools,
+                _lock as _ext_lock,
+                is_extension_live as _ext_is_live,
+            )
+            with _ext_lock:
+                for tool in _ext_tools.values():
+                    skill_name = str(tool.get("skill") or "")
+                    if not skill_name or not _ext_is_live(skill_name, pathlib.Path(self._ctx.drive_root)):
+                        continue
+                    result.append(
+                        {
+                            "name": str(tool.get("name") or ""),
+                            "description": str(tool.get("description") or "No description"),
+                        }
+                    )
+        except Exception:
+            pass
         return result
 
     def get_schema_by_name(self, name: str) -> Optional[Dict[str, Any]]:
@@ -317,6 +337,21 @@ class ToolRegistry:
         entry = self._entries.get(name)
         if entry:
             return {"type": "function", "function": entry.schema}
+        if name.startswith("ext."):
+            try:
+                from ouroboros.extension_loader import get_tool as _ext_get_tool, is_extension_live as _ext_is_live
+                ext_tool = _ext_get_tool(name)
+            except Exception:
+                ext_tool = None
+            if ext_tool and _ext_is_live(str(ext_tool.get("skill") or ""), pathlib.Path(self._ctx.drive_root)):
+                return {
+                    "type": "function",
+                    "function": {
+                        "name": ext_tool["name"],
+                        "description": ext_tool.get("description", ""),
+                        "parameters": ext_tool.get("schema", {"type": "object", "properties": {}}),
+                    },
+                }
         return None
 
     def get_timeout(self, name: str) -> int:
@@ -338,42 +373,13 @@ class ToolRegistry:
 
     def execute(self, name: str, args: Dict[str, Any]) -> str:
         entry = self._entries.get(name)
-        if entry is None:
-            # Phase 5 dispatch: fall back to the extension loader for
-            # ``ext.<skill>.<tool>`` names that Phase 4's
-            # ``PluginAPI.register_tool`` attached in-process.
-            # Extension tools intentionally skip the built-in
-            # ``SAFETY_CRITICAL_PATHS`` / ``run_shell`` / safety-policy
-            # gates — they are their own reviewed surface (tri-model
-            # skill review + PluginAPI namespace enforcement) and
-            # cannot call the evolutionary-layer tools directly.
-            if name.startswith("ext."):
-                try:
-                    from ouroboros.extension_loader import get_tool as _ext_get_tool
-                    ext_tool = _ext_get_tool(name)
-                except Exception:
-                    ext_tool = None
-                if ext_tool and callable(ext_tool.get("handler")):
-                    handler = ext_tool["handler"]
-                    try:
-                        # Extension handlers receive ``(ctx, **args)``
-                        # just like built-in tool handlers. The
-                        # ``ctx`` is this registry's own context so
-                        # the extension can reach shared state via
-                        # the ToolContextProtocol — but NOTE: the
-                        # extension author explicitly opted in to
-                        # that surface via the ``tool`` permission.
-                        result = handler(self._ctx, **(args or {}))
-                    except TypeError:
-                        # Handler declared without ``ctx`` — try without.
-                        result = handler(**(args or {}))
-                    except Exception as exc:
-                        return (
-                            f"⚠️ extension tool {name!r} failed: "
-                            f"{type(exc).__name__}: {exc}"
-                        )
-                    return result if isinstance(result, str) else str(result)
-            return f"⚠️ Unknown tool: {name}. Available: {', '.join(sorted(self._entries.keys()))}"
+        ext_tool = None
+        if entry is None and name.startswith("ext."):
+            try:
+                from ouroboros.extension_loader import get_tool as _ext_get_tool
+                ext_tool = _ext_get_tool(name)
+            except Exception:
+                ext_tool = None
 
         # --- Hardcoded Sandbox Protections ---
 
@@ -398,6 +404,45 @@ class ToolRegistry:
             _runtime_mode = _get_runtime_mode()
         except Exception:
             _runtime_mode = "advanced"
+
+        if entry is None:
+            if ext_tool and callable(ext_tool.get("handler")):
+                try:
+                    from ouroboros.extension_loader import (
+                        is_extension_live as _ext_is_live,
+                        unload_extension as _ext_unload,
+                    )
+                except Exception:
+                    _ext_is_live = None
+                    _ext_unload = None
+                skill_name = str(ext_tool.get("skill") or "")
+                if _runtime_mode == "light":
+                    if skill_name and callable(_ext_unload):
+                        _ext_unload(skill_name)
+                    return (
+                        "⚠️ LIGHT_MODE_BLOCKED: runtime_mode=light disables "
+                        "in-process extension tools. Switch to 'advanced' or "
+                        "'pro' to re-enable extension dispatch."
+                    )
+                if skill_name and callable(_ext_is_live) and not _ext_is_live(skill_name, pathlib.Path(self._ctx.drive_root)):
+                    if callable(_ext_unload):
+                        _ext_unload(skill_name)
+                    return (
+                        f"⚠️ EXTENSION_NOT_LIVE: extension {skill_name!r} is "
+                        "not allowed to dispatch right now."
+                    )
+                handler = ext_tool["handler"]
+                try:
+                    result = handler(self._ctx, **(args or {}))
+                except TypeError:
+                    result = handler(**(args or {}))
+                except Exception as exc:
+                    return (
+                        f"⚠️ extension tool {name!r} failed: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                return result if isinstance(result, str) else str(result)
+            return f"⚠️ Unknown tool: {name}. Available: {', '.join(sorted(self._entries.keys()))}"
         _REPO_MUTATION_TOOLS = frozenset(
             {
                 "repo_write",

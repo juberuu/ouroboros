@@ -88,3 +88,25 @@ def test_list_available_tools_hides_enabled_extra_tools():
     registry.execute("enable_tools", {"tools": "multi_model_review"})
     after = registry.execute("list_available_tools", {})
     assert "multi_model_review" not in after
+
+
+def test_non_core_listing_includes_live_extension_tools(monkeypatch):
+    from ouroboros import extension_loader
+
+    registry = _build_registry()
+    with extension_loader._lock:
+        extension_loader._tools["ext.weather.forecast"] = {
+            "name": "ext.weather.forecast",
+            "handler": lambda ctx: "ok",
+            "description": "Forecast",
+            "schema": {"type": "object", "properties": {}},
+            "timeout_sec": 5,
+            "skill": "weather",
+        }
+    monkeypatch.setattr(extension_loader, "is_extension_live", lambda *_a, **_k: True)
+    try:
+        names = {entry["name"] for entry in list_non_core_tools(registry)}
+        assert "ext.weather.forecast" in names
+    finally:
+        with extension_loader._lock:
+            extension_loader._tools.pop("ext.weather.forecast", None)

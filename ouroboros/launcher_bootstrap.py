@@ -1,84 +1,27 @@
-"""Bundle-to-repo bootstrap and managed sync helpers for the launcher."""
+"""Managed git bootstrap helpers for the desktop launcher."""
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import pathlib
 import shutil
 import time
+import uuid
 from dataclasses import dataclass
-from fnmatch import fnmatch
 from typing import Any, Callable
 
 
-_CORE_SYNC_PATHS = (
-    "ouroboros/safety.py",
-    "prompts/SAFETY.md",
-    "ouroboros/tools/registry.py",
-)
-
-REPO_GITIGNORE = """\
-# Secrets
-.env
-.env.*
-*.key
-*.pem
-
-# IDE
-.cursor/
-.vscode/
-.idea/
-
-# Python bytecode
-__pycache__/
-*.pyc
-*.pyo
-*.egg-info/
-
-# Build artifacts
-dist/
-build/
-.pytest_cache/
-.mypy_cache/
-
-# Native / binary artifacts (PyInstaller, compiled extensions)
-*.so
-*.dylib
-*.dll
-*.dist-info/
-base_library.zip
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Release artifacts
-.create_release.py
-.release_notes.md
-python-standalone/
-"""
-
-MANAGED_BUNDLE_PATHS = (
-    "VERSION",
-    ".gitignore",
-    "BIBLE.md",
-    "README.md",
-    "requirements.txt",
-    "requirements-launcher.txt",
-    "pyproject.toml",
-    "Makefile",
-    "server.py",
-    "ouroboros",
-    "supervisor",
-    "prompts",
-    "web",
-    "webview",
-    "docs",
-    "tests",
-    "assets",
-)
-
-SYNC_IGNORE_PATTERNS = ("__pycache__", "*.pyc", "*.pyo")
+BUNDLE_REPO_NAME = "repo.bundle"
+BUNDLE_MANIFEST_NAME = "repo_bundle_manifest.json"
+MANAGED_REPO_META_NAME = "ouroboros-managed.json"
+BOOTSTRAP_PIN_MARKER_NAME = "ouroboros-bootstrap-pending"
+MANIFEST_SCHEMA_VERSION = 1
+DEFAULT_MANAGED_REMOTE_NAME = "managed"
+DEFAULT_MANAGED_LOCAL_BRANCH = "ouroboros"
+DEFAULT_MANAGED_LOCAL_STABLE_BRANCH = "ouroboros-stable"
+DEFAULT_MANAGED_REMOTE_STABLE_BRANCH = "ouroboros-stable"
 
 
 @dataclass(frozen=True)
@@ -109,182 +52,303 @@ def check_git(is_windows: bool) -> bool:
     return False
 
 
-def _ensure_repo_gitignore(repo_dir: pathlib.Path) -> None:
-    """Write .gitignore if missing before any broad git staging."""
-    gitignore = repo_dir / ".gitignore"
-    if not gitignore.exists():
-        gitignore.write_text(REPO_GITIGNORE, encoding="utf-8")
+def _bundle_repo_path(context: BootstrapContext) -> pathlib.Path:
+    return context.bundle_dir / BUNDLE_REPO_NAME
 
 
-def _is_sync_ignored(name: str) -> bool:
-    return any(fnmatch(name, pattern) for pattern in SYNC_IGNORE_PATTERNS)
+def _bundle_manifest_path(context: BootstrapContext) -> pathlib.Path:
+    return context.bundle_dir / BUNDLE_MANIFEST_NAME
 
 
-def _sync_bundle_tree(src_path: pathlib.Path, dst_path: pathlib.Path, *, overwrite_existing: bool) -> None:
-    if not src_path.exists():
-        return
-    if src_path.is_file():
-        if overwrite_existing or not dst_path.exists():
-            dst_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src_path, dst_path)
-        return
-    if overwrite_existing:
-        shutil.copytree(
-            src_path,
-            dst_path,
-            dirs_exist_ok=True,
-            ignore=shutil.ignore_patterns(*SYNC_IGNORE_PATTERNS),
+def _managed_meta_path(repo_dir: pathlib.Path) -> pathlib.Path:
+    return repo_dir / ".git" / MANAGED_REPO_META_NAME
+
+
+def _bootstrap_pin_marker_path(repo_dir: pathlib.Path) -> pathlib.Path:
+    return repo_dir / ".git" / BOOTSTRAP_PIN_MARKER_NAME
+
+
+def _read_json_file(path: pathlib.Path) -> dict[str, Any]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _normalize_bundle_manifest(raw: dict[str, Any], *, app_version: str) -> dict[str, Any]:
+    manifest = dict(raw)
+    return {
+        "schema_version": int(manifest.get("schema_version") or MANIFEST_SCHEMA_VERSION),
+        "bundle_file": str(manifest.get("bundle_file") or BUNDLE_REPO_NAME),
+        "app_version": str(manifest.get("app_version") or app_version),
+        "source_sha": str(manifest.get("source_sha") or ""),
+        "release_tag": str(manifest.get("release_tag") or ""),
+        "bundle_sha256": str(manifest.get("bundle_sha256") or ""),
+        "source_branch": str(manifest.get("source_branch") or ""),
+        "managed_remote_name": str(manifest.get("managed_remote_name") or DEFAULT_MANAGED_REMOTE_NAME),
+        "managed_remote_url": str(manifest.get("managed_remote_url") or ""),
+        "managed_remote_branch": str(manifest.get("managed_remote_branch") or manifest.get("source_branch") or ""),
+        "managed_local_branch": str(manifest.get("managed_local_branch") or DEFAULT_MANAGED_LOCAL_BRANCH),
+        "managed_local_stable_branch": str(
+            manifest.get("managed_local_stable_branch") or DEFAULT_MANAGED_LOCAL_STABLE_BRANCH
+        ),
+        "managed_remote_stable_branch": str(
+            manifest.get("managed_remote_stable_branch") or DEFAULT_MANAGED_REMOTE_STABLE_BRANCH
+        ),
+    }
+
+
+def load_bundle_manifest(context: BootstrapContext) -> dict[str, Any]:
+    manifest_path = _bundle_manifest_path(context)
+    if not manifest_path.is_file():
+        raise RuntimeError(
+            f"Embedded managed repo manifest is missing: {manifest_path}. "
+            "Rebuild the app bundle with scripts/build_repo_bundle.py."
         )
-        return
+    manifest = _normalize_bundle_manifest(_read_json_file(manifest_path), app_version=context.app_version)
+    if manifest["schema_version"] != MANIFEST_SCHEMA_VERSION:
+        raise RuntimeError(
+            f"Unsupported managed repo manifest schema {manifest['schema_version']} "
+            f"(expected {MANIFEST_SCHEMA_VERSION})."
+        )
+    if not manifest["source_sha"]:
+        raise RuntimeError("Managed repo manifest is missing source_sha.")
+    if not manifest["bundle_sha256"]:
+        raise RuntimeError("Managed repo manifest is missing bundle_sha256.")
+    if not manifest["managed_remote_branch"]:
+        raise RuntimeError("Managed repo manifest is missing managed_remote_branch.")
+    if manifest["app_version"] != context.app_version:
+        raise RuntimeError(
+            f"Managed repo manifest app_version {manifest['app_version']!r} does not "
+            f"match launcher app version {context.app_version!r}."
+        )
+    expected_tag = f"v{manifest['app_version']}"
+    if manifest["release_tag"] and manifest["release_tag"] != expected_tag:
+        raise RuntimeError(
+            f"Managed repo manifest release_tag {manifest['release_tag']!r} does not "
+            f"match app_version {manifest['app_version']!r}."
+        )
+    _assert_bundle_integrity(context, manifest)
+    return manifest
 
-    for root, dirs, files in os.walk(src_path):
-        root_path = pathlib.Path(root)
-        rel_root = root_path.relative_to(src_path)
-        dirs[:] = [name for name in dirs if not _is_sync_ignored(name)]
-        target_root = dst_path / rel_root if str(rel_root) != "." else dst_path
-        target_root.mkdir(parents=True, exist_ok=True)
-        for name in files:
-            if _is_sync_ignored(name):
-                continue
-            dst_file = target_root / name
-            if dst_file.exists():
-                continue
-            shutil.copy2(root_path / name, dst_file)
+
+def load_repo_manifest(repo_dir: pathlib.Path) -> dict[str, Any]:
+    meta_path = _managed_meta_path(repo_dir)
+    if not meta_path.is_file():
+        return {}
+    return _read_json_file(meta_path)
 
 
-def _stage_paths(context: BootstrapContext, rel_paths: tuple[str, ...]) -> None:
-    _ensure_repo_gitignore(context.repo_dir)
-    context.hidden_run(
-        ["git", "add", "--", *rel_paths],
-        cwd=str(context.repo_dir),
-        check=False,
-        capture_output=True,
+def _write_repo_manifest(repo_dir: pathlib.Path, manifest: dict[str, Any]) -> None:
+    meta_path = _managed_meta_path(repo_dir)
+    meta_path.parent.mkdir(parents=True, exist_ok=True)
+    meta_path.write_text(json.dumps(manifest, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
+
+
+def _mark_bootstrap_pin_pending(repo_dir: pathlib.Path) -> None:
+    marker = _bootstrap_pin_marker_path(repo_dir)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("pending\n", encoding="utf-8")
+
+
+def _repo_manifest_matches(repo_dir: pathlib.Path, bundle_manifest: dict[str, Any]) -> bool:
+    installed = load_repo_manifest(repo_dir)
+    if not installed:
+        return False
+    tracked_keys = (
+        "schema_version",
+        "app_version",
+        "source_sha",
+        "release_tag",
+        "bundle_sha256",
+        "managed_remote_name",
+        "managed_remote_url",
+        "managed_remote_branch",
+        "managed_local_branch",
+        "managed_local_stable_branch",
+        "managed_remote_stable_branch",
     )
+    return all(str(installed.get(key) or "") == str(bundle_manifest.get(key) or "") for key in tracked_keys)
 
 
-def _status_for_paths(context: BootstrapContext, rel_paths: tuple[str, ...]) -> str:
-    status = context.hidden_run(
-        ["git", "status", "--porcelain", "--", *rel_paths],
-        cwd=str(context.repo_dir),
-        check=False,
+def _run_git(context: BootstrapContext, args: list[str], *, cwd: pathlib.Path, check: bool = True) -> Any:
+    return context.hidden_run(
+        args,
+        cwd=str(cwd),
+        check=check,
         capture_output=True,
         text=True,
     )
-    return (status.stdout or "").strip()
 
 
-def sync_core_files(context: BootstrapContext) -> None:
-    for rel in _CORE_SYNC_PATHS:
-        src = context.bundle_dir / rel
-        dst = context.repo_dir / rel
-        if src.exists():
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
-    context.log.info("Synced %d core files to %s", len(_CORE_SYNC_PATHS), context.repo_dir)
+def _remote_url(context: BootstrapContext, repo_dir: pathlib.Path, remote_name: str) -> str:
+    result = _run_git(context, ["git", "remote", "get-url", remote_name], cwd=repo_dir, check=False)
+    return str(getattr(result, "stdout", "") or "").strip()
 
 
-def commit_synced_files(context: BootstrapContext) -> None:
-    """Commit protected files so hard resets do not silently drop them."""
-    try:
-        _stage_paths(context, _CORE_SYNC_PATHS)
-        if not _status_for_paths(context, _CORE_SYNC_PATHS):
-            return
-        context.hidden_run(
-            ["git", "commit", "-m", "safety-sync: restore protected files from bundle"],
-            cwd=str(context.repo_dir),
-            check=False,
-            capture_output=True,
+def _sha256_file(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _assert_bundle_integrity(context: BootstrapContext, manifest: dict[str, Any]) -> None:
+    bundle_path = context.bundle_dir / manifest["bundle_file"]
+    if not bundle_path.is_file():
+        raise RuntimeError(
+            f"Embedded managed repo bundle is missing: {bundle_path}. "
+            "Rebuild the app bundle with scripts/build_repo_bundle.py."
         )
-        context.log.info("Committed synced safety files.")
-    except Exception as exc:
-        context.log.warning("Failed to commit synced files: %s", exc)
-
-
-def sync_bundle_managed_paths(context: BootstrapContext, *, overwrite_existing: bool) -> None:
-    for rel in MANAGED_BUNDLE_PATHS:
-        _sync_bundle_tree(context.bundle_dir / rel, context.repo_dir / rel, overwrite_existing=overwrite_existing)
-    context.log.info("Synced managed bundle paths to %s (overwrite=%s)", context.repo_dir, overwrite_existing)
-
-
-def read_version_file(root_dir: pathlib.Path) -> str:
-    try:
-        return (root_dir / "VERSION").read_text(encoding="utf-8").strip()
-    except Exception:
-        return ""
-
-
-def repo_has_pending_changes(context: BootstrapContext) -> bool:
-    try:
-        status = context.hidden_run(
-            ["git", "status", "--porcelain"],
-            cwd=str(context.repo_dir),
-            check=False,
-            capture_output=True,
-            text=True,
+    actual_sha = _sha256_file(bundle_path)
+    expected_sha = str(manifest.get("bundle_sha256") or "").strip()
+    if expected_sha and actual_sha != expected_sha:
+        raise RuntimeError(
+            f"Embedded managed repo bundle hash mismatch for {bundle_path}: "
+            f"expected {expected_sha}, got {actual_sha}."
         )
-        return bool((status.stdout or "").strip())
-    except Exception:
-        return True
 
 
-def create_bundle_backup_branch(context: BootstrapContext, repo_version: str) -> str:
-    branch_name = f"bundle-backup/{repo_version or 'unknown'}-{int(time.time())}"
-    result = context.hidden_run(
-        ["git", "branch", branch_name],
-        cwd=str(context.repo_dir),
+def _archive_existing_repo(context: BootstrapContext, reason: str) -> pathlib.Path | None:
+    if not context.repo_dir.exists():
+        return None
+    archive_root = context.data_dir / "archive" / "managed_repo"
+    archive_root.mkdir(parents=True, exist_ok=True)
+    archive_dir = archive_root / f"{int(time.time())}-{uuid.uuid4().hex[:8]}-{reason}"
+    shutil.move(str(context.repo_dir), str(archive_dir))
+    context.log.info("Archived existing repo to %s (%s)", archive_dir, reason)
+    return archive_dir
+
+
+def _remove_if_exists(path: pathlib.Path) -> None:
+    if not path.exists():
+        return
+    if path.is_dir():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+
+
+def _configure_managed_clone(context: BootstrapContext, repo_dir: pathlib.Path, manifest: dict[str, Any]) -> None:
+    source_sha = str(manifest.get("source_sha") or "").strip()
+    local_branch = manifest["managed_local_branch"]
+    local_stable_branch = manifest["managed_local_stable_branch"]
+    remote_name = manifest["managed_remote_name"]
+    remote_url = manifest["managed_remote_url"]
+
+    source_sha_check = _run_git(
+        context,
+        ["git", "rev-parse", "--verify", source_sha],
+        cwd=repo_dir,
         check=False,
-        capture_output=True,
-        text=True,
     )
-    if result.returncode == 0:
-        context.log.info("Created pre-sync backup branch %s", branch_name)
-        return branch_name
-    context.log.warning(
-        "Failed to create pre-sync backup branch %s: %s",
-        branch_name,
-        (result.stderr or "").strip(),
-    )
-    return ""
-
-
-def commit_bundle_sync(context: BootstrapContext, old_version: str, new_version: str) -> None:
-    try:
-        _stage_paths(context, MANAGED_BUNDLE_PATHS)
-        if not _status_for_paths(context, MANAGED_BUNDLE_PATHS):
-            return
-        commit = context.hidden_run(
-            [
-                "git",
-                "commit",
-                "-m",
-                f"bundle-sync: upgrade repo from {old_version or 'unknown'} to {new_version or context.app_version}",
-            ],
-            cwd=str(context.repo_dir),
-            check=False,
-            capture_output=True,
-            text=True,
+    if getattr(source_sha_check, "returncode", 1) != 0:
+        raise RuntimeError(
+            f"Embedded managed repo bundle does not contain manifest source_sha {source_sha}."
         )
-        if commit.returncode == 0:
-            context.log.info(
-                "Committed managed bundle sync from %s to %s",
-                old_version or "unknown",
-                new_version or context.app_version,
-            )
+    _run_git(context, ["git", "checkout", "-B", local_branch, source_sha], cwd=repo_dir)
+    head = _run_git(context, ["git", "rev-parse", "HEAD"], cwd=repo_dir)
+    head_sha = str(getattr(head, "stdout", "") or "").strip()
+    if head_sha != source_sha:
+        raise RuntimeError(
+            f"Managed repo bootstrap checked out {head_sha or '(unknown)'} but manifest "
+            f"requires {source_sha}."
+        )
+    if local_stable_branch and local_stable_branch != local_branch:
+        if head_sha:
+            _run_git(context, ["git", "branch", "-f", local_stable_branch, head_sha], cwd=repo_dir)
+
+    origin = _run_git(context, ["git", "remote"], cwd=repo_dir, check=False)
+    existing_remotes = {
+        line.strip() for line in str(getattr(origin, "stdout", "") or "").splitlines() if line.strip()
+    }
+    if "origin" in existing_remotes:
+        _run_git(context, ["git", "remote", "remove", "origin"], cwd=repo_dir, check=False)
+    if remote_name in existing_remotes:
+        _run_git(context, ["git", "remote", "remove", remote_name], cwd=repo_dir, check=False)
+    if remote_url:
+        _run_git(context, ["git", "remote", "add", remote_name, remote_url], cwd=repo_dir)
+
+    _run_git(context, ["git", "config", "user.name", "Ouroboros"], cwd=repo_dir, check=False)
+    _run_git(context, ["git", "config", "user.email", "ouroboros@local.mac"], cwd=repo_dir, check=False)
+    _write_repo_manifest(repo_dir, manifest)
+    _mark_bootstrap_pin_pending(repo_dir)
+
+
+def _ensure_managed_remote(context: BootstrapContext, repo_dir: pathlib.Path, manifest: dict[str, Any]) -> None:
+    remote_name = manifest["managed_remote_name"]
+    remote_url = manifest["managed_remote_url"]
+
+    remotes = _run_git(context, ["git", "remote"], cwd=repo_dir, check=False)
+    existing_remotes = {
+        line.strip() for line in str(getattr(remotes, "stdout", "") or "").splitlines() if line.strip()
+    }
+    if remote_url:
+        if remote_name in existing_remotes:
+            _run_git(context, ["git", "remote", "set-url", remote_name, remote_url], cwd=repo_dir)
         else:
-            context.log.warning("Managed bundle sync commit failed: %s", (commit.stderr or "").strip())
-    except Exception as exc:
-        context.log.warning("Failed to commit managed bundle sync: %s", exc)
+            _run_git(context, ["git", "remote", "add", remote_name, remote_url], cwd=repo_dir)
+
+    _run_git(context, ["git", "config", "user.name", "Ouroboros"], cwd=repo_dir, check=False)
+    _run_git(context, ["git", "config", "user.email", "ouroboros@local.mac"], cwd=repo_dir, check=False)
+    _write_repo_manifest(repo_dir, manifest)
+
+
+def _clone_repo_from_bundle(context: BootstrapContext, manifest: dict[str, Any]) -> pathlib.Path:
+    bundle_path = context.bundle_dir / manifest["bundle_file"]
+    if not bundle_path.is_file():
+        raise RuntimeError(
+            f"Embedded managed repo bundle is missing: {bundle_path}. "
+            "Rebuild the app bundle with scripts/build_repo_bundle.py."
+        )
+
+    temp_repo = context.repo_dir.parent / f".repo-bootstrap-{uuid.uuid4().hex[:8]}"
+    _remove_if_exists(temp_repo)
+    try:
+        _run_git(context, ["git", "clone", str(bundle_path), str(temp_repo)], cwd=context.bundle_dir)
+        _configure_managed_clone(context, temp_repo, manifest)
+        return temp_repo
+    except Exception:
+        _remove_if_exists(temp_repo)
+        raise
+
+
+def _install_managed_repo(context: BootstrapContext, manifest: dict[str, Any], *, reason: str) -> str:
+    preserved_origin_url = _remote_url(context, context.repo_dir, "origin") if (context.repo_dir / ".git").exists() else ""
+    archived_repo = _archive_existing_repo(context, reason)
+    temp_repo = _clone_repo_from_bundle(context, manifest)
+    try:
+        shutil.move(str(temp_repo), str(context.repo_dir))
+        if preserved_origin_url:
+            _run_git(context, ["git", "remote", "add", "origin", preserved_origin_url], cwd=context.repo_dir, check=False)
+    except Exception:
+        _remove_if_exists(temp_repo)
+        if archived_repo is not None and not context.repo_dir.exists():
+            shutil.move(str(archived_repo), str(context.repo_dir))
+        raise
+    return "replaced" if archived_repo is not None else "created"
+
+
+def ensure_managed_repo(context: BootstrapContext) -> str:
+    """Ensure REPO_DIR is a managed git clone backed by the embedded bundle."""
+    manifest = load_bundle_manifest(context)
+    if not context.repo_dir.exists():
+        return _install_managed_repo(context, manifest, reason="missing")
+    if not (context.repo_dir / ".git").exists():
+        return _install_managed_repo(context, manifest, reason="legacy-no-git")
+    if not _repo_manifest_matches(context.repo_dir, manifest):
+        return _install_managed_repo(context, manifest, reason="bundle-upgrade")
+
+    _ensure_managed_remote(context, context.repo_dir, manifest)
+    return "unchanged"
 
 
 def sync_existing_repo_from_bundle(context: BootstrapContext) -> None:
-    """Sync safety-critical files from the bundle into an existing repo.
-
-    Only the 3 protected core files (safety.py, SAFETY.md, registry.py) are
-    overwritten — everything else in the repo is left untouched so that the
-    agent's self-modifications are never clobbered by an older bundle.
-    """
-    sync_core_files(context)
-    commit_synced_files(context)
+    """Reconcile the managed repo against the embedded bundle metadata."""
+    outcome = ensure_managed_repo(context)
+    context.log.info("Managed repo sync outcome: %s", outcome)
 
 
 def _migrate_old_settings(context: BootstrapContext) -> None:
@@ -419,30 +483,10 @@ def verify_claude_runtime(context: BootstrapContext) -> bool:
 
 
 def bootstrap_repo(context: BootstrapContext) -> None:
-    """Copy the bundled source tree to REPO_DIR on first run and upgrade safely later."""
+    """Ensure the launcher-managed git repo exists and matches the embedded bundle."""
     context.data_dir.mkdir(parents=True, exist_ok=True)
-    if context.repo_dir.exists() and (context.repo_dir / "server.py").exists():
-        sync_existing_repo_from_bundle(context)
-        verify_claude_runtime(context)
-        return
-
-    needs_full_bootstrap = not context.repo_dir.exists()
-    context.log.info("Bootstrapping repository to %s (full=%s)", context.repo_dir, needs_full_bootstrap)
-    context.repo_dir.mkdir(parents=True, exist_ok=True)
-    sync_bundle_managed_paths(context, overwrite_existing=needs_full_bootstrap)
-
-    if needs_full_bootstrap:
-        _ensure_repo_gitignore(context.repo_dir)
-        try:
-            context.hidden_run(["git", "init"], cwd=str(context.repo_dir), check=True, capture_output=True)
-            context.hidden_run(["git", "config", "user.name", "Ouroboros"], cwd=str(context.repo_dir), check=True, capture_output=True)
-            context.hidden_run(["git", "config", "user.email", "ouroboros@local.mac"], cwd=str(context.repo_dir), check=True, capture_output=True)
-            context.hidden_run(["git", "add", "-A"], cwd=str(context.repo_dir), check=True, capture_output=True)
-            context.hidden_run(["git", "commit", "-m", "Initial commit from app bundle"], cwd=str(context.repo_dir), check=False, capture_output=True)
-            context.hidden_run(["git", "branch", "-M", "ouroboros"], cwd=str(context.repo_dir), check=False, capture_output=True)
-            context.hidden_run(["git", "branch", "ouroboros-stable"], cwd=str(context.repo_dir), check=False, capture_output=True)
-        except Exception as exc:
-            context.log.error("Git init failed: %s", exc)
+    outcome = ensure_managed_repo(context)
+    context.log.info("Bootstrapping managed repository to %s (outcome=%s)", context.repo_dir, outcome)
 
     try:
         memory_dir = context.data_dir / "memory"
@@ -467,6 +511,7 @@ def bootstrap_repo(context: BootstrapContext) -> None:
         context.log.warning("World profile generation failed: %s", exc)
 
     _migrate_old_settings(context)
-    install_deps(context)
+    if outcome != "unchanged":
+        install_deps(context)
     verify_claude_runtime(context)
     context.log.info("Bootstrap complete.")

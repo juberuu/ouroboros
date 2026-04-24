@@ -67,6 +67,18 @@ _MODEL_SUGGESTIONS = [
     "cloudru::zai-org/GLM-4.7",
 ]
 
+# The onboarding wizard intentionally exposes only the first-run provider
+# surface. Hidden compatibility-only provider knobs must not survive
+# invisibly and change the runtime the user thinks they configured.
+#
+# Settings fields that are user-visible in ``web/modules/settings_ui.js``
+# / ``settings.js`` (``OPENAI_BASE_URL``, ``OPENAI_COMPATIBLE_API_KEY``,
+# ``OPENAI_COMPATIBLE_BASE_URL``, ``CLOUDRU_FOUNDATION_MODELS_BASE_URL``)
+# are intentionally NOT listed here — re-running onboarding must not
+# silently erase a legitimate user-edited value for a knob the wizard
+# itself does not expose.
+_WIZARD_HIDDEN_PROVIDER_DEFAULTS: dict = {}
+
 
 def _string(value: Any) -> str:
     return str(value or "").strip()
@@ -193,10 +205,9 @@ def _build_bootstrap(settings: dict, host_mode: str) -> dict:
             "anthropicKey": _string(settings.get("ANTHROPIC_API_KEY")),
             "reviewEnforcement": _string(settings.get("OUROBOROS_REVIEW_ENFORCEMENT"))
             or str(SETTINGS_DEFAULTS["OUROBOROS_REVIEW_ENFORCEMENT"]),
-            # Phase 2 three-layer refactor: runtime mode + skills-repo path.
-            # Onboarding exposes the selector in the ``review_mode`` step
-            # alongside review enforcement; the skill loader does not yet
-            # consume these values.
+            # Runtime mode + skills-repo path are configured during
+            # onboarding so the first real session already matches the
+            # live runtime/skills UX in Settings.
             "runtimeMode": _string(settings.get("OUROBOROS_RUNTIME_MODE"))
             or str(SETTINGS_DEFAULTS["OUROBOROS_RUNTIME_MODE"]),
             "skillsRepoPath": _string(settings.get("OUROBOROS_SKILLS_REPO_PATH")),
@@ -342,6 +353,7 @@ def prepare_onboarding_settings(data: dict, current_settings: dict) -> Tuple[dic
         return {}, "Local-only setups must route at least one model to the local runtime."
 
     prepared = dict(current_settings)
+    prepared.update(_WIZARD_HIDDEN_PROVIDER_DEFAULTS)
     prepared.update(models)
     prepared.update(
         {

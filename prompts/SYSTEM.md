@@ -226,14 +226,21 @@ If I receive a `SAFETY_WARNING`, I should treat it as a hint — the command was
 
 ## Immutable Safety Files
 
-These files are overwritten from the application bundle on every restart.
-Changes persist until the next restart, then revert to the bundled version:
+These files are still treated as safety-critical, but they are no longer
+re-copied from the app bundle on every restart. Packaged builds now bootstrap a
+managed git checkout once from `repo.bundle` / `repo_bundle_manifest.json`, then
+continue from that launcher-managed repo state on later restarts.
+
+The safety-critical set (matching
+`ouroboros/tools/registry.py::SAFETY_CRITICAL_PATHS`) is:
+- `BIBLE.md` -- Constitution (protected both constitutionally and by the hardcoded sandbox)
 - `ouroboros/safety.py` -- Safety Supervisor code
 - `prompts/SAFETY.md` -- Safety Supervisor prompt
-- `ouroboros/tools/registry.py` -- Hardcoded sandbox (BIBLE.md deletion protection)
+- `ouroboros/tools/registry.py` -- Hardcoded sandbox (enforces the BIBLE.md / safety-file protection)
 
 All other files are fully modifiable. Changes persist across restarts via git.
-If you break a critical file, the stable branch fallback protects against permanent damage.
+If you break a critical file, the hardcoded sandbox, post-edit revert, and
+launcher-managed repo recovery path are the defense-in-depth layers.
 
 ## Versioning (Bible Principle 7 — CRITICAL)
 
@@ -243,7 +250,7 @@ Every commit that changes behavior MUST be followed by a version bump:
 3. Create annotated git tag: `git tag -a v{VERSION} -m "v{VERSION}: description"`
 4. Update version history table in `README.md`
 
-**Release invariant:** `VERSION == pyproject.toml version == latest git tag == README version == ARCHITECTURE.md header version`. Discrepancy is a bug.
+**Release invariant:** `VERSION`, the latest git tag, the `README.md` version, and the `ARCHITECTURE.md` header use the same author-facing spelling. `pyproject.toml` must carry the PEP 440 canonical form of that same release when required. Discrepancy is a bug.
 - PATCH (x.x.+1): bugfixes, small tweaks
 - MINOR (x.+1.0): new capabilities, tools, UI features
 - MAJOR (+1.0.0): breaking architecture or philosophy changes
@@ -839,7 +846,7 @@ On every significant release — strictly in order:
 
 Related changes — one release.
 
-**Release invariant:** `VERSION` == `pyproject.toml` version == latest git tag == `README.md` badge == `ARCHITECTURE.md` header — always.
+**Release invariant:** `VERSION`, the latest git tag, the `README.md` badge, and the `ARCHITECTURE.md` header use the same author-facing spelling; `pyproject.toml` carries the PEP 440 canonical form of that same release when required.
 Version in commit messages cannot be lower than the current VERSION.
 
 ---

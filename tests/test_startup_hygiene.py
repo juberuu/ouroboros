@@ -33,6 +33,65 @@ def test_check_version_sync_ignores_non_release_tag(tmp_path, monkeypatch):
     assert result["tag_sync"] == "ignored_non_release_tag"
 
 
+def test_check_version_sync_accepts_rc_release_tag(tmp_path, monkeypatch):
+    (tmp_path / "VERSION").write_text("4.50.0-rc.2\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text('version = "4.50.0rc2"\n', encoding="utf-8")
+    (tmp_path / "README.md").write_text(
+        "[![Version 4.50.0-rc.2](https://img.shields.io/badge/version-4.50.0--rc.2-green.svg)](VERSION)\n",
+        encoding="utf-8",
+    )
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    (docs_dir / "ARCHITECTURE.md").write_text("# Ouroboros v4.50.0-rc.2\n", encoding="utf-8")
+
+    env = types.SimpleNamespace(
+        repo_dir=tmp_path,
+        repo_path=lambda rel: tmp_path / rel,
+    )
+
+    monkeypatch.setattr(
+        startup_mod.subprocess,
+        "run",
+        lambda *args, **kwargs: types.SimpleNamespace(returncode=0, stdout="v4.50.0-rc.2\n"),
+    )
+
+    result, issues = startup_mod.check_version_sync(env)
+
+    assert issues == 0
+    assert result["status"] == "ok"
+    assert result["latest_tag"] == "4.50.0-rc.2"
+    assert result["pyproject_version"] == "4.50.0rc2"
+
+
+def test_check_version_sync_flags_malformed_rc_badge_url(tmp_path, monkeypatch):
+    (tmp_path / "VERSION").write_text("4.50.0-rc.2\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text('version = "4.50.0rc2"\n', encoding="utf-8")
+    (tmp_path / "README.md").write_text(
+        "[![Version 4.50.0-rc.2](https://img.shields.io/badge/version-4.50.0-rc.2-green.svg)](VERSION)\n",
+        encoding="utf-8",
+    )
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    (docs_dir / "ARCHITECTURE.md").write_text("# Ouroboros v4.50.0-rc.2\n", encoding="utf-8")
+
+    env = types.SimpleNamespace(
+        repo_dir=tmp_path,
+        repo_path=lambda rel: tmp_path / rel,
+    )
+
+    monkeypatch.setattr(
+        startup_mod.subprocess,
+        "run",
+        lambda *args, **kwargs: types.SimpleNamespace(returncode=0, stdout="v4.50.0-rc.2\n"),
+    )
+
+    result, issues = startup_mod.check_version_sync(env)
+
+    assert issues == 1
+    assert result["status"] == "warning"
+    assert result["readme_badge_url_valid"] is False
+
+
 def test_memory_ensure_files_generates_world_profile(tmp_path, monkeypatch):
     calls = []
 

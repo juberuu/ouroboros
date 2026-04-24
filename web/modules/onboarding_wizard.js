@@ -26,7 +26,7 @@
             title: 'Choose review mode',
             railCopy: 'Advisory vs blocking',
             copy: 'Decide how strict pre-commit review should be before Ouroboros starts modifying itself.',
-            footer: 'You can change the enforcement mode later in Advanced settings.',
+            footer: 'You can change review enforcement and runtime mode later in Settings → Behavior.',
         },
         budget: {
             title: 'Set your budget',
@@ -37,8 +37,8 @@
         summary: {
             title: 'Review before launch',
             railCopy: 'Final check',
-            copy: 'Check the final provider, model, review, and budget picture. Ouroboros will save exactly this snapshot before starting.',
-            footer: 'The same values remain editable later in Settings.',
+            copy: 'Check the final provider, model, review, and budget picture. Ouroboros will save these onboarding values before starting.',
+            footer: 'The same onboarding values remain editable later in Settings.',
         },
     };
 
@@ -185,6 +185,18 @@
         } else if (state.localRoutingMode === 'cloud') {
             state.localRoutingMode = 'fallback';
         }
+    }
+
+    function detectLocalPresetSelection() {
+        const source = trim(state.localSource);
+        const filename = trim(state.localFilename);
+        if (!source && !filename) return '';
+        for (const [presetId, preset] of Object.entries(LOCAL_PRESETS)) {
+            if (source === trim(preset.source) && filename === trim(preset.filename)) {
+                return presetId;
+            }
+        }
+        return 'custom';
     }
 
     function applyModelDefaults(force) {
@@ -723,7 +735,7 @@
                     <button type="button" class="wizard-choice pro ${runtimeMode === 'pro' ? 'active' : ''}" data-runtime-mode="pro">
                         <span class="tone">Power</span>
                         <h3>Pro</h3>
-                        <p>Phase 6+: in addition to Advanced, the core-patch auto-PR lane is enabled. Use only when you actively review core-touching changes.</p>
+                        <p>Reserved for a future core-patch lane. Today it is accepted as a forward-compatible value but behaves the same as Advanced.</p>
                     </button>
                 </div>
                 <div class="field">
@@ -732,7 +744,7 @@
                         <button class="field-clear" data-clear="skills-repo-path" type="button">Clear</button>
                     </div>
                     <input id="skills-repo-path" type="text" placeholder="~/Ouroboros/skills or /absolute/path/to/skills" value="${escapeHtml(state.skillsRepoPath || '')}">
-                    <div class="field-note">Optional. Local checkout path of the external skills/extensions repository (Phase 2 plumbing; the skill loader + <code>skill_exec</code> land in Phase 3). Leave empty if you have not checked out the skills repo yet — Ouroboros never clones/pulls this directory.</div>
+                    <div class="field-note">Optional. Local checkout path of an external skills/extensions repository. Ouroboros scans it together with bundled skills under <code>repo/skills/</code>. Leave empty if you have not checked out an external skills repo yet — Ouroboros never clones/pulls this directory.</div>
                 </div>
             </div>
         `;
@@ -857,8 +869,14 @@
                     state.localRoutingMode = 'cloud';
                     state.localSourceOpen = false;
                 }
-                if (target === 'local-source') state.localSource = '';
-                if (target === 'local-filename') state.localFilename = '';
+                if (target === 'local-source') {
+                    state.localSource = '';
+                    state.localPreset = detectLocalPresetSelection();
+                }
+                if (target === 'local-filename') {
+                    state.localFilename = '';
+                    state.localPreset = detectLocalPresetSelection();
+                }
                 if (target === 'local-chat-format') state.localChatFormat = '';
                 if (target === 'skills-repo-path') state.skillsRepoPath = '';
                 state.error = '';
@@ -903,7 +921,8 @@
         if (localPreset) localPreset.addEventListener('change', () => { applyPresetSelection(localPreset.value); state.error = ''; render(); });
         if (localSource) localSource.addEventListener('input', () => {
             state.localSource = localSource.value;
-            state.localPreset = state.localPreset || 'custom';
+            state.localPreset = detectLocalPresetSelection();
+            if (localPreset) localPreset.value = state.localPreset || '';
             state.localSourceOpen = true;
             if (trim(state.localSource) && activeProviderProfile() === 'local' && trim(state.localRoutingMode) === 'cloud') {
                 state.localRoutingMode = 'all';
@@ -911,7 +930,13 @@
             state.error = '';
             syncCurrentStepActionState();
         });
-        if (localFilename) localFilename.addEventListener('input', () => { state.localFilename = localFilename.value; state.localPreset = state.localPreset || 'custom'; state.error = ''; syncCurrentStepActionState(); });
+        if (localFilename) localFilename.addEventListener('input', () => {
+            state.localFilename = localFilename.value;
+            state.localPreset = detectLocalPresetSelection();
+            if (localPreset) localPreset.value = state.localPreset || '';
+            state.error = '';
+            syncCurrentStepActionState();
+        });
         if (localContext) localContext.addEventListener('input', () => { state.localContextLength = localContext.value; state.error = ''; syncCurrentStepActionState(); });
         if (localGpuLayers) localGpuLayers.addEventListener('input', () => { state.localGpuLayers = localGpuLayers.value; state.error = ''; syncCurrentStepActionState(); });
         if (localChatFormat) localChatFormat.addEventListener('input', () => { state.localChatFormat = localChatFormat.value; state.error = ''; syncCurrentStepActionState(); });

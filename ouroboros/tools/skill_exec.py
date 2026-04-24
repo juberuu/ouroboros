@@ -40,6 +40,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.config import get_runtime_mode, get_skills_repo_path, load_settings
 from ouroboros.skill_loader import (
+    SkillPayloadUnreadable,
     VALID_REVIEW_STATUSES,
     compute_content_hash,
     discover_skills,
@@ -61,6 +62,7 @@ from ouroboros.tools.shell import (
 )
 from subprocess import Popen
 from ouroboros.platform_layer import merge_hidden_kwargs, subprocess_new_group_kwargs
+from ouroboros.contracts.plugin_api import FORBIDDEN_SKILL_SETTINGS
 
 log = logging.getLogger(__name__)
 
@@ -121,18 +123,7 @@ _ALWAYS_FORWARDED_ENV = frozenset(
 # skill. Skills that genuinely need an API key should talk to the
 # ``main`` Ouroboros process rather than receive it as a subprocess
 # envvar.
-_FORBIDDEN_ENV_FORWARD_KEYS = frozenset(
-    {
-        "OPENROUTER_API_KEY",
-        "OPENAI_API_KEY",
-        "OPENAI_COMPATIBLE_API_KEY",
-        "CLOUDRU_FOUNDATION_MODELS_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "TELEGRAM_BOT_TOKEN",
-        "GITHUB_TOKEN",
-        "OUROBOROS_NETWORK_PASSWORD",
-    }
-)
+_FORBIDDEN_ENV_FORWARD_KEYS = FORBIDDEN_SKILL_SETTINGS
 
 
 def _resolve_runtime_binary(runtime: str) -> Optional[str]:
@@ -452,6 +443,21 @@ def _handle_review_skill(ctx: ToolContext, skill: str = "", **_kwargs: Any) -> s
         "findings": outcome.findings,
         "error": outcome.error,
     }
+    try:
+        from ouroboros import extension_loader
+        from ouroboros.config import load_settings as _load_settings
+
+        live_state = extension_loader.reconcile_extension(
+            skill_name,
+            pathlib.Path(ctx.drive_root),
+            _load_settings,
+            retry_load_error=True,
+        )
+        payload["extension_action"] = live_state.get("action")
+        payload["extension_reason"] = live_state.get("reason")
+    except Exception:
+        payload["extension_action"] = None
+        payload["extension_reason"] = None
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
@@ -528,11 +534,18 @@ def _handle_skill_exec(
             "Enable it after review in the Skills UI (Phase 5) or via "
             "the dedicated enable tool."
         )
-    current_hash = compute_content_hash(
-        loaded.skill_dir,
-        manifest_entry=loaded.manifest.entry,
-        manifest_scripts=loaded.manifest.scripts,
-    )
+    try:
+        current_hash = compute_content_hash(
+            loaded.skill_dir,
+            manifest_entry=loaded.manifest.entry,
+            manifest_scripts=loaded.manifest.scripts,
+        )
+    except SkillPayloadUnreadable as exc:
+        return (
+            f"⚠️ SKILL_EXEC_ERROR: skill {skill_name!r} payload became unreadable "
+            f"({exc}). Fix the skill package and re-run review_skill before "
+            "executing."
+        )
     if loaded.review.is_stale_for(current_hash):
         return (
             f"⚠️ SKILL_EXEC_BLOCKED: skill {skill_name!r} was edited since "
@@ -776,61 +789,70 @@ def _handle_toggle_skill(
     # unreadable post-enable). The durable-state collision concern the
     # guard was originally about only applies to the write path that
     # happens AFTER this check.
+    collision_load_error = loaded.load_error.lower().startswith("skill name collision:")
     if coerced and loaded.load_error:
         return (
             f"⚠️ SKILL_TOGGLE_ERROR: skill {skill_name!r} cannot be enabled "
             f"— loader rejected it ({loaded.load_error})."
         )
-    save_enabled(drive_root, loaded.name, coerced)
-    note = ""
-    if coerced and loaded.review.status != "pass":
-        note = (
-            " (skill will remain non-executable until review_skill "
-            f"returns 'pass'; current status: {loaded.review.status!r})"
-        )
-    # Phase 4: for type=extension skills, toggle_skill is the hook that
-    # actually (un)loads the plugin into the runtime. Without this,
-    # enabling an extension would be a pure filesystem operation and
-    # ``register(api)`` would never run until the next full restart.
-    #
-    # Disable ALWAYS unloads — and consults the extension_loader
-    # registry directly rather than relying on ``loaded.manifest.is_extension()``
-    # so an extension whose manifest became broken post-enable (load_error
-    # fabricates a placeholder instruction manifest) can still be
-    # disabled and torn down.
-    #
-    # Enable only loads when the skill is a PASS-reviewed extension.
-    # Enabling a pending/fail/advisory extension writes enabled=True
-    # for UI intent but refuses to run ``register(api)``.
-    extension_action = None
-    from ouroboros import extension_loader
-    if not coerced:
+    if not coerced and collision_load_error:
+        extension_action = None
+        extension_reason = "name_collision"
+        from ouroboros import extension_loader
+
         if loaded.name in extension_loader.snapshot()["extensions"]:
             extension_loader.unload_extension(loaded.name)
             extension_action = "extension_unloaded"
-    elif loaded.manifest.is_extension():
-        if loaded.review.status == "pass":
-            from ouroboros.skill_loader import find_skill as _find_skill
-            refreshed = _find_skill(drive_root, loaded.name)
-            if refreshed is not None:
-                from ouroboros.config import load_settings as _load_settings
-                extension_loader.unload_extension(loaded.name)
-                err = extension_loader.load_extension(
-                    refreshed, _load_settings, drive_root=drive_root,
-                )
-                extension_action = (
-                    "extension_load_error: " + err if err else "extension_loaded"
-                )
-        else:
-            extension_action = (
-                f"extension_not_loaded (review.status={loaded.review.status!r})"
+        return json.dumps(
+            {
+                "skill": loaded.name,
+                "enabled": False,
+                "review_status": loaded.review.status,
+                "extension_action": extension_action,
+                "extension_reason": extension_reason,
+                "message": (
+                    f"Skill {loaded.name!r} was not persisted as disabled because "
+                    "its sanitized identity collides with another skill directory. "
+                    "Rename one of the directories first."
+                ),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    save_enabled(drive_root, loaded.name, coerced)
+    note = ""
+    if coerced:
+        if loaded.review.status != "pass":
+            note = (
+                " (skill will remain non-executable until review_skill "
+                f"returns 'pass'; current status: {loaded.review.status!r})"
             )
+        elif loaded.review.is_stale_for(loaded.content_hash):
+            note = (
+                " (skill will remain non-executable until review_skill "
+                "refreshes the stale PASS verdict for the current content hash)"
+            )
+    extension_action = None
+    extension_reason = "not_extension"
+    from ouroboros import extension_loader
+    if loaded.manifest.is_extension() or loaded.name in extension_loader.snapshot()["extensions"]:
+        from ouroboros.config import load_settings as _load_settings
+
+        live_state = extension_loader.reconcile_extension(
+            loaded.name,
+            drive_root,
+            _load_settings,
+            retry_load_error=True,
+        )
+        extension_action = live_state.get("action")
+        extension_reason = str(live_state.get("reason") or "")
     return json.dumps(
         {
             "skill": loaded.name,
             "enabled": coerced,
             "review_status": loaded.review.status,
             "extension_action": extension_action,
+            "extension_reason": extension_reason,
             "message": f"Skill {loaded.name!r} enabled={coerced}{note}",
         },
         ensure_ascii=False,

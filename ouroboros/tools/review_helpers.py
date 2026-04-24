@@ -1026,24 +1026,46 @@ def check_worktree_version_sync(repo_dir) -> str:
     """
     import re
     from pathlib import Path as _Path
+    from ouroboros.tools.release_sync import (
+        _normalize_pep440,
+        _shields_escape,
+        extract_architecture_header_version,
+        extract_readme_badge_version,
+        is_release_version,
+    )
     repo_dir = _Path(repo_dir)
     try:
         version_path = repo_dir / "VERSION"
         if not version_path.exists():
             return ""
         version_str = version_path.read_text(encoding="utf-8").strip()
-        if not version_str or not re.match(r"^\d+\.\d+\.\d+$", version_str):
+        if not is_release_version(version_str):
             return ""
         desync = []
         pyproject = repo_dir / "pyproject.toml"
-        if pyproject.exists() and f'version = "{version_str}"' not in pyproject.read_text(encoding="utf-8"):
-            desync.append("pyproject.toml")
+        if pyproject.exists():
+            pyproject_text = pyproject.read_text(encoding="utf-8")
+            pyproject_match = re.search(
+                r'^version\s*=\s*["\']([^"\']+)["\']',
+                pyproject_text,
+                re.MULTILINE,
+            )
+            if not pyproject_match or pyproject_match.group(1).strip() != _normalize_pep440(version_str):
+                desync.append("pyproject.toml")
         readme = repo_dir / "README.md"
-        if readme.exists() and f"version-{version_str}-" not in readme.read_text(encoding="utf-8"):
-            desync.append("README.md badge")
+        if readme.exists():
+            readme_text = readme.read_text(encoding="utf-8")
+            badge_expected = f"version-{_shields_escape(version_str)}-green"
+            if (
+                extract_readme_badge_version(readme_text) != version_str
+                or badge_expected not in readme_text
+            ):
+                desync.append("README.md badge")
         arch = repo_dir / "docs" / "ARCHITECTURE.md"
-        if arch.exists() and f"# Ouroboros v{version_str}" not in arch.read_text(encoding="utf-8"):
-            desync.append("ARCHITECTURE.md header")
+        if arch.exists():
+            arch_text = arch.read_text(encoding="utf-8")
+            if extract_architecture_header_version(arch_text) != version_str:
+                desync.append("ARCHITECTURE.md header")
         if desync:
             return f"VERSION={version_str} but {', '.join(desync)} differ. Sync version carriers before committing."
     except Exception:

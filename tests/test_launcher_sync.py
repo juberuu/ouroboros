@@ -1,11 +1,27 @@
 import importlib
+import json
+import pathlib
+import subprocess
+import sys
 import types
 
 import ouroboros.launcher_bootstrap as bootstrap_module
 
 
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+BUILD_REPO_BUNDLE = REPO_ROOT / "scripts" / "build_repo_bundle.py"
+
+
 def _reload_bootstrap():
     return importlib.reload(bootstrap_module)
+
+
+def _log_stub():
+    return types.SimpleNamespace(
+        info=lambda *args, **kwargs: None,
+        warning=lambda *args, **kwargs: None,
+        error=lambda *args, **kwargs: None,
+    )
 
 
 def _make_context(bundle_dir, repo_dir):
@@ -14,81 +30,213 @@ def _make_context(bundle_dir, repo_dir):
         repo_dir=repo_dir,
         data_dir=repo_dir.parent / "data",
         settings_path=repo_dir.parent / "settings.json",
-        embedded_python="python3",
-        app_version="4.7.0",
-        hidden_run=lambda *args, **kwargs: types.SimpleNamespace(returncode=0, stdout="", stderr=""),
+        embedded_python=sys.executable,
+        app_version="4.50.0-rc.2",
+        hidden_run=subprocess.run,
         save_settings=lambda settings: None,
-        log=types.SimpleNamespace(info=lambda *args, **kwargs: None, warning=lambda *args, **kwargs: None, error=lambda *args, **kwargs: None),
+        log=_log_stub(),
     )
 
 
-def test_sync_bundle_managed_paths_copies_only_whitelisted_entries(monkeypatch, tmp_path):
+def _run(cmd, *, cwd):
+    subprocess.run(cmd, cwd=str(cwd), check=True, capture_output=True, text=True)
+
+
+def _git_output(cwd, *args):
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(cwd),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _make_bundle_source(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    _run(["git", "init"], cwd=src)
+    _run(["git", "config", "user.name", "Test"], cwd=src)
+    _run(["git", "config", "user.email", "test@example.com"], cwd=src)
+    _run(["git", "checkout", "-b", "ouroboros-three-layer"], cwd=src)
+    _run(["git", "remote", "add", "origin", "https://github.com/joi-lab/ouroboros-desktop.git"], cwd=src)
+    (src / "VERSION").write_text("4.50.0-rc.2\n", encoding="utf-8")
+    (src / "server.py").write_text("print('bundle-v1')\n", encoding="utf-8")
+    _run(["git", "add", "VERSION", "server.py"], cwd=src)
+    _run(["git", "commit", "-m", "bundle v1"], cwd=src)
+    _run(["git", "tag", "-a", "v4.50.0-rc.2", "-m", "Release v4.50.0-rc.2"], cwd=src)
+    return src
+
+
+def _write_bundle(repo_src, bundle_dir):
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            sys.executable,
+            str(BUILD_REPO_BUNDLE),
+            "--repo-root",
+            str(repo_src),
+            "--output-bundle",
+            str(bundle_dir / "repo.bundle"),
+            "--output-manifest",
+            str(bundle_dir / "repo_bundle_manifest.json"),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_ensure_managed_repo_clones_from_embedded_bundle(tmp_path):
     bootstrap = _reload_bootstrap()
+    src = _make_bundle_source(tmp_path)
     bundle_dir = tmp_path / "bundle"
     repo_dir = tmp_path / "repo"
-    bundle_dir.mkdir()
-    repo_dir.mkdir()
-
-    (bundle_dir / "server.py").write_text("new-server\n", encoding="utf-8")
-    (bundle_dir / "web").mkdir()
-    (bundle_dir / "web" / "index.html").write_text("web\n", encoding="utf-8")
-    (bundle_dir / "Foundation").mkdir()
-    (bundle_dir / "Foundation" / "ignored.txt").write_text("native\n", encoding="utf-8")
-    (repo_dir / "server.py").write_text("old-server\n", encoding="utf-8")
+    _write_bundle(src, bundle_dir)
 
     ctx = _make_context(bundle_dir, repo_dir)
+    outcome = bootstrap.ensure_managed_repo(ctx)
 
-    bootstrap.sync_bundle_managed_paths(ctx, overwrite_existing=False)
+    assert outcome == "created"
+    assert (repo_dir / ".git").is_dir()
+    assert (repo_dir / "server.py").read_text(encoding="utf-8") == "print('bundle-v1')\n"
+    assert _git_output(repo_dir, "branch", "--show-current") == "ouroboros"
+    meta = bootstrap.load_repo_manifest(repo_dir)
+    assert meta["managed_remote_branch"] == "ouroboros-three-layer"
+    assert meta["managed_local_branch"] == "ouroboros"
+    assert meta["release_tag"] == "v4.50.0-rc.2"
+    assert meta["bundle_sha256"]
+    assert (repo_dir / ".git" / bootstrap.BOOTSTRAP_PIN_MARKER_NAME).exists()
 
-    assert (repo_dir / "server.py").read_text(encoding="utf-8") == "old-server\n"
-    assert (repo_dir / "web" / "index.html").read_text(encoding="utf-8") == "web\n"
-    assert not (repo_dir / "Foundation").exists()
 
-
-def test_sync_bundle_managed_paths_overwrites_existing_managed_files(monkeypatch, tmp_path):
+def test_ensure_managed_repo_preserves_origin_on_unchanged_boot(tmp_path):
     bootstrap = _reload_bootstrap()
+    src = _make_bundle_source(tmp_path)
     bundle_dir = tmp_path / "bundle"
     repo_dir = tmp_path / "repo"
-    bundle_dir.mkdir()
-    repo_dir.mkdir()
-
-    (bundle_dir / "server.py").write_text("new-server\n", encoding="utf-8")
-    (repo_dir / "server.py").write_text("old-server\n", encoding="utf-8")
+    _write_bundle(src, bundle_dir)
 
     ctx = _make_context(bundle_dir, repo_dir)
+    assert bootstrap.ensure_managed_repo(ctx) == "created"
 
-    bootstrap.sync_bundle_managed_paths(ctx, overwrite_existing=True)
+    _run(["git", "remote", "add", "origin", "https://github.com/example/fork.git"], cwd=repo_dir)
 
-    assert (repo_dir / "server.py").read_text(encoding="utf-8") == "new-server\n"
+    outcome = bootstrap.ensure_managed_repo(ctx)
+
+    assert outcome == "unchanged"
+    remotes = set(_git_output(repo_dir, "remote").splitlines())
+    assert remotes == {"managed", "origin"}
 
 
-def test_sync_existing_repo_calls_core_and_commit(monkeypatch, tmp_path):
-    """sync_existing_repo_from_bundle only syncs core files and commits them.
-    Full bundle overwrite paths (managed paths, dirty-check, backup, version sync)
-    must NOT be invoked — agent self-modifications must not be clobbered."""
+def test_sync_existing_repo_from_bundle_replaces_legacy_snapshot(tmp_path):
     bootstrap = _reload_bootstrap()
+    src = _make_bundle_source(tmp_path)
     bundle_dir = tmp_path / "bundle"
     repo_dir = tmp_path / "repo"
-    bundle_dir.mkdir()
+    _write_bundle(src, bundle_dir)
+
     repo_dir.mkdir()
+    (repo_dir / "server.py").write_text("print('legacy-snapshot')\n", encoding="utf-8")
 
-    calls = []
     ctx = _make_context(bundle_dir, repo_dir)
-
-    monkeypatch.setattr(bootstrap, "sync_core_files", lambda context: calls.append("core"))
-    monkeypatch.setattr(bootstrap, "commit_synced_files", lambda context: calls.append("commit-safety"))
-
-    # These must NOT be called — patch them to fail loudly if invoked.
-    def _should_not_be_called(name):
-        def _raise(*args, **kwargs):
-            raise AssertionError(f"{name} must not be called by sync_existing_repo_from_bundle")
-        return _raise
-
-    for fn in ("sync_bundle_managed_paths", "repo_has_pending_changes",
-               "create_bundle_backup_branch", "commit_bundle_sync"):
-        if hasattr(bootstrap, fn):
-            monkeypatch.setattr(bootstrap, fn, _should_not_be_called(fn))
-
     bootstrap.sync_existing_repo_from_bundle(ctx)
 
-    assert calls == ["core", "commit-safety"]
+    assert (repo_dir / ".git").is_dir()
+    assert (repo_dir / "server.py").read_text(encoding="utf-8") == "print('bundle-v1')\n"
+    archived = list((ctx.data_dir / "archive" / "managed_repo").iterdir())
+    assert archived
+    assert (archived[0] / "server.py").read_text(encoding="utf-8") == "print('legacy-snapshot')\n"
+
+
+def test_ensure_managed_repo_replaces_repo_when_embedded_bundle_changes(tmp_path):
+    bootstrap = _reload_bootstrap()
+    src = _make_bundle_source(tmp_path)
+    bundle_dir = tmp_path / "bundle"
+    repo_dir = tmp_path / "repo"
+    _write_bundle(src, bundle_dir)
+
+    ctx = _make_context(bundle_dir, repo_dir)
+    assert bootstrap.ensure_managed_repo(ctx) == "created"
+    _run(["git", "remote", "add", "origin", "https://github.com/example/fork.git"], cwd=repo_dir)
+
+    (src / "server.py").write_text("print('bundle-v2')\n", encoding="utf-8")
+    _run(["git", "add", "server.py"], cwd=src)
+    _run(["git", "commit", "-m", "bundle v2"], cwd=src)
+    # Re-point the annotated release tag onto the new HEAD so the bundle
+    # builder's HEAD-tag check still passes (the test is exercising the
+    # bundle-replacement path, not a VERSION bump).
+    _run(["git", "tag", "-d", "v4.50.0-rc.2"], cwd=src)
+    _run(["git", "tag", "-a", "v4.50.0-rc.2", "-m", "Release v4.50.0-rc.2 (v2)"], cwd=src)
+    _write_bundle(src, bundle_dir)
+
+    outcome = bootstrap.ensure_managed_repo(ctx)
+
+    assert outcome == "replaced"
+    assert (repo_dir / "server.py").read_text(encoding="utf-8") == "print('bundle-v2')\n"
+    assert set(_git_output(repo_dir, "remote").splitlines()) == {"managed", "origin"}
+    archives = list((ctx.data_dir / "archive" / "managed_repo").iterdir())
+    assert archives
+
+
+def test_load_bundle_manifest_rejects_app_version_mismatch(tmp_path):
+    bootstrap = _reload_bootstrap()
+    src = _make_bundle_source(tmp_path)
+    bundle_dir = tmp_path / "bundle"
+    repo_dir = tmp_path / "repo"
+    _write_bundle(src, bundle_dir)
+
+    ctx = bootstrap.BootstrapContext(
+        bundle_dir=bundle_dir,
+        repo_dir=repo_dir,
+        data_dir=repo_dir.parent / "data",
+        settings_path=repo_dir.parent / "settings.json",
+        embedded_python=sys.executable,
+        app_version="4.50.0-rc.3",
+        hidden_run=subprocess.run,
+        save_settings=lambda settings: None,
+        log=_log_stub(),
+    )
+
+    try:
+        bootstrap.load_bundle_manifest(ctx)
+        assert False, "Expected app_version mismatch to raise"
+    except RuntimeError as exc:
+        assert "app_version" in str(exc)
+
+
+def test_load_bundle_manifest_rejects_release_tag_mismatch(tmp_path):
+    bootstrap = _reload_bootstrap()
+    src = _make_bundle_source(tmp_path)
+    bundle_dir = tmp_path / "bundle"
+    repo_dir = tmp_path / "repo"
+    _write_bundle(src, bundle_dir)
+
+    manifest_path = bundle_dir / "repo_bundle_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["release_tag"] = "v4.50.0-rc.3"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+    ctx = _make_context(bundle_dir, repo_dir)
+
+    try:
+        bootstrap.load_bundle_manifest(ctx)
+        assert False, "Expected release_tag mismatch to raise"
+    except RuntimeError as exc:
+        assert "release_tag" in str(exc)
+
+
+def test_ensure_managed_repo_rejects_tampered_bundle(tmp_path):
+    bootstrap = _reload_bootstrap()
+    src = _make_bundle_source(tmp_path)
+    bundle_dir = tmp_path / "bundle"
+    repo_dir = tmp_path / "repo"
+    _write_bundle(src, bundle_dir)
+    (bundle_dir / "repo.bundle").write_bytes(b"tampered-bundle")
+
+    ctx = _make_context(bundle_dir, repo_dir)
+
+    try:
+        bootstrap.ensure_managed_repo(ctx)
+        assert False, "Expected bundle hash mismatch to raise"
+    except RuntimeError as exc:
+        assert "bundle hash mismatch" in str(exc)

@@ -480,6 +480,13 @@ def build_health_invariants(env: Any) -> str:
 
     # --- version sync ---
     try:
+        from ouroboros.tools.release_sync import (
+            _normalize_pep440,
+            _shields_escape,
+            extract_architecture_header_version,
+            extract_readme_badge_version,
+            is_release_version,
+        )
         ver_file = read_text(env.repo_path("VERSION")).strip()
         desync_parts = []
         pyproject = read_text(env.repo_path("pyproject.toml"))
@@ -488,20 +495,29 @@ def build_health_invariants(env: Any) -> str:
             if line.strip().startswith("version"):
                 pyproject_ver = line.split("=", 1)[1].strip().strip('"').strip("'")
                 break
-        if ver_file and pyproject_ver and ver_file != pyproject_ver:
+        if is_release_version(ver_file) and pyproject_ver and _normalize_pep440(ver_file) != pyproject_ver:
             desync_parts.append(f"pyproject.toml={pyproject_ver}")
         try:
             readme = read_text(env.repo_path("README.md"))
-            rm = re.search(r'version-(\d+\.\d+\.\d+)', readme, re.IGNORECASE) or re.search(r'\*\*Version:\*\*\s*(\d+\.\d+\.\d+)', readme)
-            if rm and rm.group(1) != ver_file:
-                desync_parts.append(f"README={rm.group(1)}")
+            badge_ver = extract_readme_badge_version(readme)
+            readme_ver = badge_ver
+            if not readme_ver:
+                rm = re.search(r'\*\*Version:\*\*\s*([^\s]+)', readme)
+                readme_ver = str(rm.group(1) or "").strip() if rm else ""
+            badge_token_ok = True
+            if badge_ver and is_release_version(ver_file):
+                badge_token_ok = f"version-{_shields_escape(ver_file)}-green" in readme
+            if readme_ver and readme_ver != ver_file:
+                desync_parts.append(f"README={readme_ver}")
+            elif readme_ver and not badge_token_ok:
+                desync_parts.append("README badge URL token")
         except Exception:
             pass
         try:
             arch = read_text(env.repo_path("docs/ARCHITECTURE.md"))
-            am = re.search(r'# Ouroboros v(\d+\.\d+\.\d+)', arch)
-            if am and am.group(1) != ver_file:
-                desync_parts.append(f"ARCHITECTURE.md={am.group(1)}")
+            arch_ver = extract_architecture_header_version(arch)
+            if arch_ver and arch_ver != ver_file:
+                desync_parts.append(f"ARCHITECTURE.md={arch_ver}")
         except Exception:
             pass
         if desync_parts:

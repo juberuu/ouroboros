@@ -560,16 +560,32 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
     return offset
 
 
+def _runtime_branch_defaults() -> tuple[str, str]:
+    branch_dev = "ouroboros"
+    branch_stable = "ouroboros-stable"
+    if not _LAUNCHER_MANAGED:
+        return branch_dev, branch_stable
+    try:
+        from supervisor import git_ops as git_ops_module
+        if hasattr(git_ops_module, "managed_branch_defaults"):
+            return git_ops_module.managed_branch_defaults(REPO_DIR)
+    except Exception:
+        pass
+    return branch_dev, branch_stable
+
+
 def _bootstrap_supervisor_repo(settings: dict, git_ops_module=None):
     if git_ops_module is None:
         from supervisor import git_ops as git_ops_module
+
+    branch_dev, branch_stable = _runtime_branch_defaults()
 
     git_ops_module.init(
         repo_dir=REPO_DIR,
         drive_root=DATA_DIR,
         remote_url="",
-        branch_dev="ouroboros",
-        branch_stable="ouroboros-stable",
+        branch_dev=branch_dev,
+        branch_stable=branch_stable,
     )
     git_ops_module.ensure_repo_present()
     setup_remote_if_configured(settings, log)
@@ -636,11 +652,18 @@ def _run_supervisor(settings: dict) -> None:
         soft_timeout = int(settings.get("OUROBOROS_SOFT_TIMEOUT_SEC", 600))
         hard_timeout = int(settings.get("OUROBOROS_HARD_TIMEOUT_SEC", 1800))
 
+        # Branch names come from the managed-repo manifest defaults so a
+        # bundle built with non-default ``--managed-local-branch`` /
+        # ``--managed-local-stable-branch`` drives the worker pool too —
+        # hardcoding ``ouroboros`` / ``ouroboros-stable`` here would bootstrap
+        # one branch set but leave the worker-side commit/restart flows
+        # targeting the old names.
+        _workers_branch_dev, _workers_branch_stable = _runtime_branch_defaults()
         workers_init(
             repo_dir=REPO_DIR, drive_root=DATA_DIR, max_workers=max_workers,
             soft_timeout=soft_timeout, hard_timeout=hard_timeout,
             total_budget_limit=float(settings.get("TOTAL_BUDGET", 10.0)),
-            branch_dev="ouroboros", branch_stable="ouroboros-stable",
+            branch_dev=_workers_branch_dev, branch_stable=_workers_branch_stable,
         )
 
         from supervisor.events import dispatch_event
@@ -680,9 +703,10 @@ def _run_supervisor(settings: dict) -> None:
             _consciousness.start()
             log.info("Background consciousness auto-restored from saved state.")
 
+        branch_dev, branch_stable = _runtime_branch_defaults()
         _event_ctx = types.SimpleNamespace(
             DRIVE_ROOT=DATA_DIR, REPO_DIR=REPO_DIR,
-            BRANCH_DEV="ouroboros", BRANCH_STABLE="ouroboros-stable",
+            BRANCH_DEV=branch_dev, BRANCH_STABLE=branch_stable,
             bridge=bridge, WORKERS=WORKERS, PENDING=PENDING, RUNNING=RUNNING,
             MAX_WORKERS=max_workers,
             send_with_budget=send_with_budget, load_state=load_state, save_state=save_state,
@@ -811,17 +835,57 @@ async def ws_endpoint(websocket: WebSocket) -> None:
             # full payload dict; responses (if any) are sent back to the
             # originating websocket as a best-effort one-shot reply.
             if isinstance(msg_type, str) and msg_type.startswith("ext."):
+                state = None
                 try:
-                    from ouroboros.extension_loader import list_ws_handlers as _ws_handlers
+                    from ouroboros.config import get_skills_repo_path, load_settings
+                    from ouroboros.extension_loader import (
+                        list_ws_handlers as _ws_handlers,
+                        reconcile_extension as _reconcile_extension,
+                    )
+                    skill_name = msg_type.split(".", 2)[1]
+                    drive_root = pathlib.Path(
+                        websocket.app.state.drive_root  # type: ignore[attr-defined]
+                        if hasattr(websocket.app, "state") and hasattr(websocket.app.state, "drive_root")
+                        else DATA_DIR
+                    )
+                    repo_path = get_skills_repo_path()
+                    state = _reconcile_extension(skill_name, drive_root, load_settings, repo_path=repo_path)
+                    if not state.get("desired_live"):
+                        await websocket.send_text(json.dumps({
+                            "type": "log",
+                            "data": {
+                                "level": "warning",
+                                "message": (
+                                    f"extension WS handler {msg_type!r} is not live: "
+                                    f"{state.get('reason')}"
+                                ),
+                            },
+                        }))
+                        continue
+                    if state.get("action") == "extension_load_error" or not state.get("live_loaded"):
+                        await websocket.send_text(json.dumps({
+                            "type": "log",
+                            "data": {
+                                "level": "warning",
+                                "message": (
+                                    f"extension WS handler {msg_type!r} failed to go live: "
+                                    f"{state.get('load_error') or state.get('reason')}"
+                                ),
+                            },
+                        }))
+                        continue
                     handler_spec = _ws_handlers().get(msg_type)
                 except Exception:
                     handler_spec = None
                 if handler_spec is None:
+                    extra = ""
+                    if isinstance(state, dict) and state.get("action") == "extension_load_error":
+                        extra = f" (load_error={state.get('load_error')})"
                     await websocket.send_text(json.dumps({
                         "type": "log",
                         "data": {
                             "level": "warning",
-                            "message": f"no extension WS handler for {msg_type!r}",
+                            "message": f"no extension WS handler for {msg_type!r}{extra}",
                         },
                     }))
                     continue
@@ -1082,7 +1146,9 @@ async def api_settings_post(request: Request) -> JSONResponse:
             from ouroboros.extension_loader import reload_all as _reload_extensions
             new_path = str(current.get("OUROBOROS_SKILLS_REPO_PATH") or "").strip()
             old_path = str(old_settings.get("OUROBOROS_SKILLS_REPO_PATH") or "").strip()
-            if new_path != old_path:
+            new_runtime_mode = str(current.get("OUROBOROS_RUNTIME_MODE") or "").strip()
+            old_runtime_mode = str(old_settings.get("OUROBOROS_RUNTIME_MODE") or "").strip()
+            if new_path != old_path or new_runtime_mode != old_runtime_mode:
                 # Use ``load_settings`` rather than ``lambda: current``
                 # so extensions see fresh settings on subsequent reads
                 # (capturing ``current`` would freeze the snapshot at
@@ -1092,7 +1158,7 @@ async def api_settings_post(request: Request) -> JSONResponse:
                 _reload_extensions(
                     pathlib.Path(DATA_DIR),
                     _load_settings,
-                    repo_path=new_path,
+                    repo_path=new_path or None,
                 )
         except Exception:
             log.warning("Extension reload after settings change failed", exc_info=True)
@@ -1236,12 +1302,13 @@ async def api_git_rollback(request: Request) -> JSONResponse:
 
 
 async def api_git_promote(request: Request) -> JSONResponse:
-    """Promote current ouroboros branch to ouroboros-stable."""
+    """Promote the current dev branch to the runtime's stable branch."""
     try:
         import subprocess as sp
-        sp.run(["git", "branch", "-f", "ouroboros-stable", "ouroboros"],
+        branch_dev, branch_stable = _runtime_branch_defaults()
+        sp.run(["git", "branch", "-f", branch_stable, branch_dev],
                cwd=str(REPO_DIR), check=True, capture_output=True)
-        return JSONResponse({"status": "ok", "message": "ouroboros-stable updated to match ouroboros"})
+        return JSONResponse({"status": "ok", "message": f"{branch_stable} updated to match {branch_dev}"})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -1397,9 +1464,8 @@ async def lifespan(app):
         )
         from ouroboros.extension_loader import reload_all as _reload_extensions
         repo_path = get_skills_repo_path()
-        if repo_path:
-            drive_root = pathlib.Path(DATA_DIR)
-            _reload_extensions(drive_root, _load_settings, repo_path=repo_path)
+        drive_root = pathlib.Path(DATA_DIR)
+        _reload_extensions(drive_root, _load_settings, repo_path=repo_path or None)
     except Exception:
         log.warning("Extension reload_all at startup failed", exc_info=True)
 
@@ -1475,6 +1541,8 @@ async def lifespan(app):
 
 
 app = NetworkAuthGate(Starlette(routes=routes, lifespan=lifespan))
+app.app.state.drive_root = pathlib.Path(DATA_DIR)  # type: ignore[attr-defined]
+app.app.state.repo_dir = pathlib.Path(REPO_DIR)  # type: ignore[attr-defined]
 
 
 def _emergency_process_cleanup() -> None:

@@ -5,6 +5,8 @@ SIGN_IDENTITY="Developer ID Application: Ian Mironov (WHY6PAKA5V)"
 NOTARYTOOL_PROFILE="ouroboros-notarize"
 ENTITLEMENTS="entitlements.plist"
 SIGN_MODE="${OUROBOROS_SIGN:-1}"
+MANAGED_SOURCE_BRANCH="${OUROBOROS_MANAGED_SOURCE_BRANCH:-ouroboros-three-layer}"
+RELEASE_TAG="v$(tr -d '[:space:]' < VERSION)"
 
 APP_PATH="dist/Ouroboros.app"
 DMG_NAME="Ouroboros-$(cat VERSION | tr -d '[:space:]').dmg"
@@ -67,6 +69,22 @@ print(
     f"(skipped {skipped} inside bundled browser bundles)"
 )
 PY
+
+echo "--- Building embedded managed repo bundle ---"
+if ! git rev-parse -q --verify "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+    echo "ERROR: packaging requires git tag $RELEASE_TAG to exist."
+    exit 1
+fi
+TAG_TYPE="$(git cat-file -t "refs/tags/$RELEASE_TAG" 2>/dev/null || true)"
+if [ "$TAG_TYPE" != "tag" ]; then
+    echo "ERROR: packaging requires annotated git tag $RELEASE_TAG (got '$TAG_TYPE'). Recreate with: git tag -a $RELEASE_TAG -m 'Release $RELEASE_TAG'"
+    exit 1
+fi
+if ! git tag --points-at HEAD | grep -Fx "$RELEASE_TAG" >/dev/null 2>&1; then
+    echo "ERROR: packaging requires HEAD to be tagged with $RELEASE_TAG."
+    exit 1
+fi
+python3 scripts/build_repo_bundle.py --source-branch "$MANAGED_SOURCE_BRANCH"
 
 rm -rf build dist
 

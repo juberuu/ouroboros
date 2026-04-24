@@ -155,6 +155,39 @@ class TestAdditionalHealthInvariantCoverage:
         assert "VERSION DESYNC" in result
         assert "pyproject.toml=1.2.4" in result
 
+    def test_rc_pep440_pyproject_does_not_warn(self, tmp_path):
+        env = _make_health_env(tmp_path)
+        (tmp_path / "repo" / "VERSION").write_text("4.50.0-rc.2", encoding="utf-8")
+        (tmp_path / "repo" / "pyproject.toml").write_text('version = "4.50.0rc2"', encoding="utf-8")
+        (tmp_path / "repo" / "README.md").write_text(
+            "[![Version 4.50.0-rc.2](https://img.shields.io/badge/version-4.50.0--rc.2-green.svg)](VERSION)",
+            encoding="utf-8",
+        )
+        (tmp_path / "repo" / "docs" / "ARCHITECTURE.md").write_text(
+            "# Ouroboros v4.50.0-rc.2",
+            encoding="utf-8",
+        )
+
+        result = build_health_invariants(env)
+        assert "VERSION DESYNC" not in result
+
+    def test_rc_badge_url_mismatch_warns(self, tmp_path):
+        env = _make_health_env(tmp_path)
+        (tmp_path / "repo" / "VERSION").write_text("4.50.0-rc.2", encoding="utf-8")
+        (tmp_path / "repo" / "pyproject.toml").write_text('version = "4.50.0rc2"', encoding="utf-8")
+        (tmp_path / "repo" / "README.md").write_text(
+            "[![Version 4.50.0-rc.2](https://img.shields.io/badge/version-4.50.0-rc.2-green.svg)](VERSION)",
+            encoding="utf-8",
+        )
+        (tmp_path / "repo" / "docs" / "ARCHITECTURE.md").write_text(
+            "# Ouroboros v4.50.0-rc.2",
+            encoding="utf-8",
+        )
+
+        result = build_health_invariants(env)
+        assert "VERSION DESYNC" in result
+        assert "README badge URL token" in result
+
     def test_duplicate_processing_warning(self, tmp_path):
         env = _make_health_env(tmp_path)
         (tmp_path / "logs" / "events.jsonl").write_text(

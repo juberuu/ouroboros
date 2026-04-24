@@ -212,7 +212,25 @@ class LoadedSkill:
             return False
         if self.review.is_stale_for(self.content_hash):
             return False
-        return True
+        from ouroboros.tools.skill_exec import _resolve_runtime_binary, _resolve_script_path
+
+        runtime = (self.manifest.runtime or "").strip().lower()
+        if _resolve_runtime_binary(runtime) is None:
+            return False
+        for entry in self.manifest.scripts or []:
+            if not isinstance(entry, dict):
+                continue
+            declared_name = str(entry.get("name") or "").strip()
+            if not declared_name:
+                continue
+            relpath = (
+                declared_name
+                if "/" in declared_name or declared_name.startswith(".")
+                else f"scripts/{declared_name}"
+            )
+            if _resolve_script_path(self.skill_dir, relpath) is not None:
+                return True
+        return False
 
 
 def is_runtime_eligible_for_execution(skill: "LoadedSkill") -> bool:
@@ -564,7 +582,7 @@ def _read_json(path: pathlib.Path) -> Optional[Dict[str, Any]]:
         return None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         log.warning("Failed to parse skill state file %s", path, exc_info=True)
         return None
     return data if isinstance(data, dict) else None
@@ -572,7 +590,10 @@ def _read_json(path: pathlib.Path) -> Optional[Dict[str, Any]]:
 
 def load_enabled(drive_root: pathlib.Path, name: str) -> bool:
     state = _read_json(skill_state_dir(drive_root, name) / "enabled.json")
-    return bool(state.get("enabled")) if isinstance(state, dict) else False
+    if not isinstance(state, dict):
+        return False
+    enabled = state.get("enabled")
+    return enabled if isinstance(enabled, bool) else False
 
 
 def save_enabled(drive_root: pathlib.Path, name: str, enabled: bool) -> None:
@@ -605,14 +626,22 @@ def load_review_state(drive_root: pathlib.Path, name: str) -> SkillReviewState:
         if isinstance(data.get("reviewer_models"), list)
         else []
     )
+    try:
+        prompt_chars = int(data.get("prompt_chars") or 0)
+    except (TypeError, ValueError):
+        prompt_chars = 0
+    try:
+        cost_usd = float(data.get("cost_usd") or 0.0)
+    except (TypeError, ValueError):
+        cost_usd = 0.0
     return SkillReviewState(
         status=status,
         content_hash=str(data.get("content_hash") or ""),
         findings=[f for f in findings if isinstance(f, dict)],
         reviewer_models=[str(m) for m in reviewers if m],
         timestamp=str(data.get("timestamp") or ""),
-        prompt_chars=int(data.get("prompt_chars") or 0),
-        cost_usd=float(data.get("cost_usd") or 0.0),
+        prompt_chars=prompt_chars,
+        cost_usd=cost_usd,
         raw_result=str(data.get("raw_result") or ""),
     )
 
@@ -747,16 +776,18 @@ def load_skill(
 def _bundled_skills_dir() -> Optional[pathlib.Path]:
     """Return the bundled reference-skills directory (``repo/skills/``).
 
-    Discovered by walking up from this module's location to the repo
-    root. Returns ``None`` if the bundled folder is missing (which is
-    fine in a packaged build that strips the reference skills).
+    Bound directly to ``ouroboros.config.REPO_DIR`` so discovery is
+    deterministic in both source checkouts and launcher-managed installs.
+    Returns ``None`` if the bundled folder is missing (which is fine in
+    a packaged build that strips the reference skills).
     """
-    here = pathlib.Path(__file__).resolve()
-    for ancestor in (here.parent.parent, *here.parent.parent.parents):
-        candidate = ancestor / "skills"
-        if candidate.is_dir():
-            return candidate
-    return None
+    from ouroboros.config import REPO_DIR
+
+    candidate = pathlib.Path(REPO_DIR) / "skills"
+    if candidate.is_dir():
+        return candidate
+    fallback = pathlib.Path(__file__).resolve().parents[1] / "skills"
+    return fallback if fallback.is_dir() else None
 
 
 def discover_skills(

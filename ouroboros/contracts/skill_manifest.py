@@ -6,7 +6,8 @@ One manifest format describes all three kinds of external packages:
 - ``type: script``      — markdown guide + one or more scripts invoked
                           through the upcoming ``skill_exec`` tool.
 - ``type: extension``   — markdown guide + ``plugin.py``-style entry plus
-                          optional widgets/routes/ws handlers (Phase 4).
+                          optional routes / ws handlers and future UI-tab
+                          declarations.
 
 The parser intentionally works on either::
 
@@ -20,11 +21,10 @@ The parser intentionally works on either::
 
 (YAML frontmatter in ``SKILL.md``) **or** a standalone ``skill.json`` file.
 
-For Phase 1 the parser is tolerant by design: missing optional fields
-become empty lists/strings, unknown fields are preserved in ``raw_extra``,
-and the parser never raises for "warning-class" issues. Only structural
-damage (not a mapping, not valid JSON/YAML when used) raises
-``SkillManifestError``.
+The parser is intentionally tolerant for missing optional fields and
+unknown extras, but it FAILS CLOSED on structural contract damage:
+invalid JSON/YAML, malformed structured fields (for example ``ui_tab``),
+or an unsupported ``schema_version`` all raise ``SkillManifestError``.
 
 To avoid adding a PyYAML dependency at this stage, the YAML frontmatter
 parser is a *minimal* key: value reader that covers the subset we actually
@@ -191,8 +191,13 @@ def parse_skill_manifest_text(text: str) -> SkillManifest:
         if not isinstance(data, dict):
             raise SkillManifestError("SKILL.md frontmatter must be a mapping")
         return _manifest_from_mapping(data, body=body.strip())
-
     # Fallback: body-only markdown, treat as instruction skill.
+    # ``stripped.startswith("---")`` is NOT treated as a broken frontmatter
+    # fence here — a markdown document that legitimately starts with a
+    # thematic break (``---`` on its own line) is a valid instruction
+    # skill body. Real frontmatter parse failures (malformed YAML, bad
+    # mapping shape) are caught by the branch above which only runs when
+    # the full frontmatter regex actually matches.
     name = _derive_name_from_body(src)
     return SkillManifest(
         name=name,
@@ -237,24 +242,34 @@ def _manifest_from_mapping(data: Dict[str, Any], *, body: str) -> SkillManifest:
     except (TypeError, ValueError):
         timeout_sec = 60
 
-    scripts_raw = data.get("scripts") or []
+    scripts_raw = data.get("scripts", [])
     scripts: List[Dict[str, str]] = []
-    if isinstance(scripts_raw, list):
-        for item in scripts_raw:
-            if isinstance(item, dict):
-                scripts.append({str(k): str(v) for k, v in item.items()})
-            elif isinstance(item, str):
-                scripts.append({"name": item})
+    if scripts_raw in (None, ""):
+        scripts_raw = []
+    if not isinstance(scripts_raw, list):
+        raise SkillManifestError("'scripts' must be a list when provided")
+    for item in scripts_raw:
+        if isinstance(item, dict):
+            scripts.append({str(k): str(v) for k, v in item.items()})
+        elif isinstance(item, str):
+            scripts.append({"name": item})
+        else:
+            raise SkillManifestError("each 'scripts' item must be a mapping or string")
 
     ui_tab = data.get("ui_tab")
     if ui_tab is not None and not isinstance(ui_tab, dict):
-        ui_tab = None
+        raise SkillManifestError("'ui_tab' must be a mapping when provided")
 
     schema_version = data.get("schema_version", SKILL_MANIFEST_SCHEMA_VERSION)
     try:
         schema_version_int = int(schema_version)
     except (TypeError, ValueError):
-        schema_version_int = SKILL_MANIFEST_SCHEMA_VERSION
+        raise SkillManifestError("'schema_version' must be an integer") from None
+    if schema_version_int != SKILL_MANIFEST_SCHEMA_VERSION:
+        raise SkillManifestError(
+            f"unsupported schema_version {schema_version_int}; "
+            f"expected {SKILL_MANIFEST_SCHEMA_VERSION}"
+        )
 
     return SkillManifest(
         name=str(data.get("name") or "").strip(),
@@ -358,14 +373,15 @@ def _parse_minimal_yaml(text: str) -> Dict[str, Any]:
             elif first_stripped.startswith("{") or first_stripped.startswith("["):
                 # YAML flow block following a bare key (common in
                 # OpenClaw-format manifests where ``metadata:`` opens a
-                # multi-line JSON object). Try ``json.loads``; fall
-                # back to raw text so the rest of the manifest still
-                # parses.
+                # multi-line JSON object). The structured block must
+                # parse cleanly — otherwise the manifest is malformed.
                 blob = "\n".join(ln for ln in block_lines if ln.strip())
                 try:
                     result[key] = json.loads(blob)
-                except Exception:
-                    result[key] = blob
+                except Exception as exc:
+                    raise _MiniYamlError(
+                        f"invalid flow block for {key!r}: {exc}"
+                    ) from exc
             else:
                 result[key] = _parse_block_mapping(block_lines)
             continue
@@ -388,8 +404,10 @@ def _parse_minimal_yaml(text: str) -> Dict[str, Any]:
             blob = "\n".join(collected)
             try:
                 result[key] = json.loads(blob)
-            except Exception:
-                result[key] = blob
+            except Exception as exc:
+                raise _MiniYamlError(
+                    f"invalid flow value for {key!r}: {exc}"
+                ) from exc
             i = j
             continue
         else:
@@ -458,8 +476,17 @@ def _parse_block_sequence(block_lines: List[str]) -> List[Any]:
                 raise _MiniYamlError(
                     f"indented line without a current list item: {line!r}"
                 )
+            if ":" not in stripped:
+                raise _MiniYamlError(
+                    f"expected 'key: value' in list item continuation, got: {line!r}"
+                )
             key, _, val = stripped.partition(":")
-            current[key.strip()] = _coerce_scalar(val.strip())
+            val_stripped = val.strip()
+            if val_stripped == "":
+                raise _MiniYamlError(
+                    f"nested mappings deeper than one level are not supported: {line!r}"
+                )
+            current[key.strip()] = _coerce_scalar(val_stripped)
     if current is not None:
         items.append(current)
     return items
@@ -475,6 +502,10 @@ def _parse_block_mapping(block_lines: List[str]) -> Dict[str, Any]:
             raise _MiniYamlError(f"expected 'key: value', got: {stripped!r}")
         key, _, val = stripped.partition(":")
         val_stripped = val.strip()
+        if val_stripped == "":
+            raise _MiniYamlError(
+                f"nested mappings deeper than one level are not supported: {stripped!r}"
+            )
         if val_stripped.startswith("[") and val_stripped.endswith("]"):
             mapping[key.strip()] = _parse_inline_list(val_stripped)
         else:

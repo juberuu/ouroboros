@@ -20,8 +20,10 @@ from ouroboros.utils import utc_now_iso, read_text, append_jsonl
 log = logging.getLogger(__name__)
 
 
-def _is_stable_release_tag(tag: str) -> bool:
-    return bool(re.match(r"^\d+\.\d+\.\d+$", str(tag or "").strip()))
+def _is_release_tag(tag: str) -> bool:
+    from ouroboros.tools.release_sync import normalize_release_tag
+
+    return bool(normalize_release_tag(tag))
 
 
 def check_uncommitted_changes(env: Any) -> Tuple[dict, int]:
@@ -76,6 +78,13 @@ def check_uncommitted_changes(env: Any) -> Tuple[dict, int]:
 def check_version_sync(env: Any) -> Tuple[dict, int]:
     """Check VERSION file sync with git tags and pyproject.toml."""
     try:
+        from ouroboros.tools.release_sync import (
+            _normalize_pep440,
+            _shields_escape,
+            extract_architecture_header_version,
+            extract_readme_badge_version,
+            is_release_version,
+        )
         version_file = read_text(env.repo_path("VERSION")).strip()
         issue_count = 0
         result_data: Dict[str, Any] = {"version_file": version_file}
@@ -86,20 +95,25 @@ def check_version_sync(env: Any) -> Tuple[dict, int]:
         if match:
             pyproject_version = match.group(1)
             result_data["pyproject_version"] = pyproject_version
-            if version_file != pyproject_version:
+            expected_pyproject = _normalize_pep440(version_file) if is_release_version(version_file) else version_file
+            if expected_pyproject != pyproject_version:
                 result_data["status"] = "warning"
                 issue_count += 1
 
         try:
             readme_content = read_text(env.repo_path("README.md"))
-            readme_match = (
-                re.search(r'version-(\d+\.\d+\.\d+)', readme_content, re.IGNORECASE)
-                or re.search(r'\*\*Version:\*\*\s*(\d+\.\d+\.\d+)', readme_content)
-            )
-            if readme_match:
-                readme_version = readme_match.group(1)
+            badge_version = extract_readme_badge_version(readme_content)
+            readme_version = badge_version
+            if not readme_version:
+                readme_match = re.search(r'\*\*Version:\*\*\s*([^\s]+)', readme_content)
+                readme_version = str(readme_match.group(1) or "").strip() if readme_match else ""
+            if readme_version:
                 result_data["readme_version"] = readme_version
-                if version_file != readme_version:
+                badge_token_ok = True
+                if badge_version and is_release_version(version_file):
+                    badge_token_ok = f"version-{_shields_escape(version_file)}-green" in readme_content
+                result_data["readme_badge_url_valid"] = badge_token_ok
+                if version_file != readme_version or not badge_token_ok:
                     result_data["status"] = "warning"
                     issue_count += 1
         except Exception:
@@ -107,9 +121,8 @@ def check_version_sync(env: Any) -> Tuple[dict, int]:
 
         try:
             arch_content = read_text(env.repo_path("docs/ARCHITECTURE.md"))
-            arch_match = re.search(r'# Ouroboros v(\d+\.\d+\.\d+)', arch_content)
-            if arch_match:
-                arch_version = arch_match.group(1)
+            arch_version = extract_architecture_header_version(arch_content)
+            if arch_version:
                 result_data["architecture_version"] = arch_version
                 if version_file != arch_version:
                     result_data["status"] = "warning"
@@ -129,10 +142,10 @@ def check_version_sync(env: Any) -> Tuple[dict, int]:
         else:
             latest_tag = result.stdout.strip().lstrip('v')
             result_data["latest_tag"] = latest_tag
-            if _is_stable_release_tag(latest_tag) and version_file != latest_tag:
+            if _is_release_tag(latest_tag) and version_file != latest_tag:
                 result_data["status"] = "warning"
                 issue_count += 1
-            elif not _is_stable_release_tag(latest_tag):
+            elif not _is_release_tag(latest_tag):
                 result_data["tag_sync"] = "ignored_non_release_tag"
 
         if issue_count == 0:

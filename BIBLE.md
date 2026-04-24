@@ -274,7 +274,8 @@ Every significant change increments the version (semver).
 ### Release Invariant
 
 Release metadata is **always in sync**:
-`VERSION` == `pyproject.toml` version == latest git tag == version in `README.md` == version in `docs/ARCHITECTURE.md`.
+`VERSION`, the latest git tag, the version in `README.md`, and the version in `docs/ARCHITECTURE.md` use the same author-facing spelling.
+`pyproject.toml` uses the PEP 440 canonical form of that same release when required (for example `4.50.0-rc.2` in `VERSION` / `README.md` / tag becomes `4.50.0rc2` in `pyproject.toml`).
 Discrepancy is a bug that must be fixed immediately.
 
 ### Git Tags

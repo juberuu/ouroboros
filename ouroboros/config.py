@@ -71,14 +71,15 @@ SETTINGS_DEFAULTS = {
     "OUROBOROS_REVIEW_MODELS": "openai/gpt-5.4,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.7",
     # Pre-commit review enforcement: advisory | blocking
     "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
-    # Runtime mode: light | advanced | pro (Phase 2 three-layer refactor).
+    # Runtime mode: light | advanced | pro.
     # "advanced" preserves the existing self-modifying evolutionary layer and
-    # is the safe default for current installs. Phases 3+ will start gating
-    # behaviour on this value; Phase 2 only plumbs the setting end-to-end.
+    # is the safe default for current installs. "pro" is reserved for a
+    # future core-patch lane and currently behaves like "advanced".
     "OUROBOROS_RUNTIME_MODE": "advanced",
     # Optional local checkout path for the external skills/extensions repo.
-    # Empty means "no external skills wired yet". Phase 3 will point the
-    # skill loader at this path; no clone/pull management in v1.
+    # Empty means "use only bundled skills". Ouroboros scans this path
+    # together with the bundled repo/skills surface; it never clones or
+    # pulls the external repo for the user.
     "OUROBOROS_SKILLS_REPO_PATH": "",
     # Scope review: single-model blocking reviewer (runs after triad review)
     "OUROBOROS_SCOPE_REVIEW_MODEL": "anthropic/claude-opus-4.6",

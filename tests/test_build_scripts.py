@@ -64,6 +64,26 @@ class TestBuildSh:
             f"(found at char {pw_pos}, PyInstaller cmd at {pi_pos})"
         )
 
+    def test_repo_bundle_generation_before_pyinstaller(self):
+        src = _read("build.sh")
+        bundle_pos = src.find("scripts/build_repo_bundle.py")
+        pi_pos = _find_pyinstaller_cmd_pos(src)
+        assert bundle_pos != -1, "build.sh must generate repo.bundle before packaging"
+        assert "--source-branch" in src, "build.sh must pass an explicit source branch for detached-head builds"
+        assert pi_pos != -1, "PyInstaller command not found in build.sh"
+        assert bundle_pos < pi_pos, "repo bundle generation must happen before PyInstaller in build.sh"
+
+    def test_repo_bundle_requires_real_tag_on_head(self):
+        src = _read("build.sh")
+        assert 'refs/tags/$RELEASE_TAG' in src
+        assert 'git tag --points-at HEAD' in src
+        assert 'OUROBOROS_RELEASE_TAG="$RELEASE_TAG"' not in src
+
+    def test_repo_bundle_requires_annotated_tag(self):
+        src = _read("build.sh")
+        assert 'git cat-file -t "refs/tags/$RELEASE_TAG"' in src
+        assert 'requires annotated git tag' in src
+
     def test_symlink_normalizer_skips_playwright_browser_bundles(self):
         src = _read("build.sh")
         assert "_should_skip_symlink" in src, (
@@ -105,6 +125,26 @@ class TestBuildLinuxSh:
             "playwright install chromium must appear BEFORE PyInstaller in build_linux.sh"
         )
 
+    def test_repo_bundle_generation_before_pyinstaller(self):
+        src = _read("build_linux.sh")
+        bundle_pos = src.find("scripts/build_repo_bundle.py")
+        pi_pos = _find_pyinstaller_cmd_pos(src)
+        assert bundle_pos != -1
+        assert "--source-branch" in src
+        assert pi_pos != -1
+        assert bundle_pos < pi_pos, "repo bundle generation must happen before PyInstaller in build_linux.sh"
+
+    def test_repo_bundle_requires_real_tag_on_head(self):
+        src = _read("build_linux.sh")
+        assert 'refs/tags/$RELEASE_TAG' in src
+        assert 'git tag --points-at HEAD' in src
+        assert 'OUROBOROS_RELEASE_TAG="$RELEASE_TAG"' not in src
+
+    def test_repo_bundle_requires_annotated_tag(self):
+        src = _read("build_linux.sh")
+        assert 'git cat-file -t "refs/tags/$RELEASE_TAG"' in src
+        assert 'requires annotated git tag' in src
+
 
 # ---------------------------------------------------------------------------
 # build_windows.ps1  (Windows / PowerShell)
@@ -133,6 +173,26 @@ class TestBuildWindowsPs1:
         assert pw_pos < pi_pos, (
             "playwright install chromium must appear BEFORE PyInstaller in build_windows.ps1"
         )
+
+    def test_repo_bundle_generation_before_pyinstaller(self):
+        src = _read("build_windows.ps1")
+        bundle_pos = src.find("scripts/build_repo_bundle.py")
+        pi_pos = _find_pyinstaller_cmd_pos(src)
+        assert bundle_pos != -1
+        assert "--source-branch" in src
+        assert pi_pos != -1
+        assert bundle_pos < pi_pos, "repo bundle generation must happen before PyInstaller in build_windows.ps1"
+
+    def test_repo_bundle_requires_real_tag_on_head(self):
+        src = _read("build_windows.ps1")
+        assert 'refs/tags/$ReleaseTag' in src
+        assert 'git tag --points-at HEAD' in src
+        assert '$env:OUROBOROS_RELEASE_TAG' not in src
+
+    def test_repo_bundle_requires_annotated_tag(self):
+        src = _read("build_windows.ps1")
+        assert 'git cat-file -t "refs/tags/$ReleaseTag"' in src
+        assert 'annotated git tag' in src
 
 
 # ---------------------------------------------------------------------------

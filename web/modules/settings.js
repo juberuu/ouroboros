@@ -74,6 +74,7 @@ export function initSettings({ state }) {
     // failure is silently hidden until the user adds a key, which defeats the
     // whole point of prioritizing error over no_api_key in `status_label`.
     let claudeRuntimeHasError = false;
+    let settingsLoaded = false;
 
     function anthropicKeyConfigured() {
         const input = byId('s-anthropic');
@@ -102,6 +103,16 @@ export function initSettings({ state }) {
         if (button && button.dataset.busy !== '1' && button.dataset.ready !== '1') {
             button.disabled = false;
             button.textContent = 'Repair Runtime';
+        }
+    }
+
+    function syncSettingsLoadState() {
+        const saveBtn = byId('btn-save-settings');
+        if (saveBtn) {
+            saveBtn.disabled = !settingsLoaded;
+            saveBtn.title = settingsLoaded
+                ? ''
+                : 'Reload current settings successfully before saving.';
         }
     }
 
@@ -248,11 +259,38 @@ export function initSettings({ state }) {
         applySettings(data);
         _renderNetworkHint(data._meta);
         renderClaudeCodeUi();
+        settingsLoaded = true;
+        syncSettingsLoadState();
         // Always start polling so a below-baseline SDK surfaces even before
         // the user sets ANTHROPIC_API_KEY. `refreshClaudeCodeStatus` is now
         // unconditional, and `shouldShowClaudeRuntimeCard` uses the runtime
         // error signal to decide visibility.
         startClaudeCodePolling();
+    }
+
+    async function reloadSettingsWithFeedback() {
+        setStatus('Loading settings...', 'muted');
+        settingsLoaded = false;
+        syncSettingsLoadState();
+        try {
+            await loadSettings();
+            try {
+                await refreshModelCatalog();
+                setStatus('Settings loaded.', 'ok');
+            } catch (error) {
+                setStatus(
+                    `Settings loaded. Model catalog refresh failed: ${error.message || error}`,
+                    'warn'
+                );
+            }
+        } catch (error) {
+            settingsLoaded = false;
+            syncSettingsLoadState();
+            setStatus(
+                `Failed to load current settings. Save is disabled until reload succeeds: ${error.message || error}`,
+                'warn'
+            );
+        }
     }
 
     function collectBody() {
@@ -314,9 +352,8 @@ export function initSettings({ state }) {
         return body;
     }
 
-    loadSettings()
-        .then(() => refreshModelCatalog())
-        .catch(() => {});
+    syncSettingsLoadState();
+    reloadSettingsWithFeedback();
 
     byId('s-anthropic')?.addEventListener('input', () => {
         renderClaudeCodeUi();
@@ -366,7 +403,15 @@ export function initSettings({ state }) {
         await refreshModelCatalog();
     });
 
+    byId('btn-reload-settings')?.addEventListener('click', async () => {
+        await reloadSettingsWithFeedback();
+    });
+
     byId('btn-save-settings').addEventListener('click', async () => {
+        if (!settingsLoaded) {
+            setStatus('Reload current settings successfully before saving.', 'warn');
+            return;
+        }
         const body = collectBody();
 
         try {
@@ -398,7 +443,7 @@ export function initSettings({ state }) {
             }
             setStatus(statusMsg, statusType);
         } catch (e) {
-            alert('Failed to save: ' + e.message);
+            setStatus('Failed to save: ' + e.message, 'warn');
         }
     });
 

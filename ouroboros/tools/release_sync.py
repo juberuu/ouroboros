@@ -136,10 +136,43 @@ def _normalize_pep440(version: str) -> str:
     if not match:
         return version
     base = version[: match.start()]
-    # ``rc`` / ``alpha`` / ``beta`` / ``a`` / ``b`` — lowercase normal form.
-    identifier = match.group(2).lower()
+    # PEP 440 §Pre-release spelling: ``alpha`` collapses to ``a``,
+    # ``beta`` to ``b``, ``rc`` stays ``rc`` (``c`` is an alias pip also
+    # accepts but the canonical short form is ``rc``). Every identifier
+    # is lowercased on the way out.
+    identifier_raw = match.group(2).lower()
+    _pep440_alias = {"alpha": "a", "beta": "b"}
+    identifier = _pep440_alias.get(identifier_raw, identifier_raw)
     number = match.group(4)
     return f"{base}{identifier}{number}"
+
+
+def is_release_version(version: str) -> bool:
+    """Return True when *version* matches the supported release grammar."""
+    return bool(_VERSION_RE.match(str(version or "").strip()))
+
+
+def normalize_release_tag(tag: str) -> str:
+    """Return canonical ``v{VERSION}`` spelling or ``""`` for non-release tags."""
+    raw = str(tag or "").strip()
+    if not raw:
+        return ""
+    version = raw[1:] if raw.lower().startswith("v") else raw
+    if not is_release_version(version):
+        return ""
+    return f"v{version}"
+
+
+def extract_readme_badge_version(readme_text: str) -> str:
+    """Extract the display version from the README badge, if present."""
+    match = _README_BADGE_RE.search(str(readme_text or ""))
+    return str(match.group(2) or "").strip() if match else ""
+
+
+def extract_architecture_header_version(arch_text: str) -> str:
+    """Extract the version token from the ARCHITECTURE.md header, if present."""
+    match = _ARCH_HEADER_RE.search(str(arch_text or ""))
+    return str(match.group(2) or "").strip() if match else ""
 
 
 def sync_release_metadata(repo_dir: str) -> List[str]:

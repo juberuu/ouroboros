@@ -64,16 +64,35 @@ class TestPreflightVersionValuesMatch:
         result = self._run({
             "VERSION": "4.18.0\n",
             "pyproject.toml": 'version = "4.18.0"\n',
-            "README.md": "version-4.18.0-green\n| 4.18.0 | 2026-04-08 | Change |\n",
+            "README.md": (
+                "[![Version 4.18.0](https://img.shields.io/badge/version-4.18.0-green.svg)](VERSION)\n"
+                "| 4.18.0 | 2026-04-08 | Change |\n"
+            ),
             "docs/ARCHITECTURE.md": "# Ouroboros v4.18.0\n",
         })
+        assert result is None
+
+    def test_rc_all_in_sync_passes(self):
+        result = self._run({
+            "VERSION": "4.50.0-rc.2\n",
+            "pyproject.toml": 'version = "4.50.0rc2"\n',
+            "README.md": (
+                "[![Version 4.50.0-rc.2]"
+                "(https://img.shields.io/badge/version-4.50.0--rc.2-green.svg)](VERSION)\n"
+                "| 4.50.0-rc.2 | 2026-04-21 | Change |\n"
+            ),
+            "docs/ARCHITECTURE.md": "# Ouroboros v4.50.0-rc.2\n",
+        }, staged_files="M  VERSION\nM  README.md\nM  pyproject.toml\nM  docs/ARCHITECTURE.md")
         assert result is None
 
     def test_pyproject_mismatch_blocks(self):
         result = self._run({
             "VERSION": "4.18.0\n",
             "pyproject.toml": 'version = "4.17.9"\n',
-            "README.md": "version-4.18.0-green\n| 4.18.0 |\n",
+            "README.md": (
+                "[![Version 4.18.0](https://img.shields.io/badge/version-4.18.0-green.svg)](VERSION)\n"
+                "| 4.18.0 |\n"
+            ),
             "docs/ARCHITECTURE.md": "# Ouroboros v4.18.0\n",
         })
         assert result is not None
@@ -84,7 +103,10 @@ class TestPreflightVersionValuesMatch:
         result = self._run({
             "VERSION": "4.18.0\n",
             "pyproject.toml": 'version = "4.18.0"\n',
-            "README.md": "version-4.17.9-green\n| 4.18.0 |\n",
+            "README.md": (
+                "[![Version 4.17.9](https://img.shields.io/badge/version-4.17.9-green.svg)](VERSION)\n"
+                "| 4.18.0 |\n"
+            ),
             "docs/ARCHITECTURE.md": "# Ouroboros v4.18.0\n",
         })
         assert result is not None
@@ -95,7 +117,10 @@ class TestPreflightVersionValuesMatch:
         result = self._run({
             "VERSION": "4.18.0\n",
             "pyproject.toml": 'version = "4.18.0"\n',
-            "README.md": "version-4.18.0-green\n| 4.18.0 |\n",
+            "README.md": (
+                "[![Version 4.18.0](https://img.shields.io/badge/version-4.18.0-green.svg)](VERSION)\n"
+                "| 4.18.0 |\n"
+            ),
             "docs/ARCHITECTURE.md": "# Ouroboros v4.17.9\n",
         })
         assert result is not None
@@ -121,7 +146,7 @@ class TestPreflightVersionValuesMatch:
         result = self._run({
             "VERSION": "dev\n",
             "pyproject.toml": 'version = "4.18.0"\n',
-            "README.md": "version-4.18.0-green\n",
+            "README.md": "[![Version 4.18.0](https://img.shields.io/badge/version-4.18.0-green.svg)](VERSION)\n",
             "docs/ARCHITECTURE.md": "# Ouroboros v4.18.0\n",
         })
         assert result is None  # non-semver → skip check
@@ -136,6 +161,7 @@ class TestPreflightReadmeChangelogRow:
 
     def _run(self, version: str, readme_content: str) -> str | None:
         from ouroboros.tools.review import _preflight_check
+        from ouroboros.tools.release_sync import _normalize_pep440
 
         def fake_git_show(repo_dir, path):
             if path == "VERSION":
@@ -143,7 +169,7 @@ class TestPreflightReadmeChangelogRow:
             if path == "README.md":
                 return readme_content
             if path == "pyproject.toml":
-                return f'version = "{version}"\n'
+                return f'version = "{_normalize_pep440(version)}"\n'
             if path == "docs/ARCHITECTURE.md":
                 return f"# Ouroboros v{version}\n"
             return ""
@@ -152,14 +178,40 @@ class TestPreflightReadmeChangelogRow:
             return _preflight_check(f"v{version}", "M  VERSION\nM  README.md", "/repo")
 
     def test_changelog_row_present_passes(self):
-        result = self._run("4.18.0", f"version-4.18.0-green\n| 4.18.0 | 2026-04-08 | A change |\n")
+        result = self._run(
+            "4.18.0",
+            "[![Version 4.18.0](https://img.shields.io/badge/version-4.18.0-green.svg)](VERSION)\n"
+            "| 4.18.0 | 2026-04-08 | A change |\n",
+        )
         assert result is None
 
     def test_changelog_row_missing_blocks(self):
-        result = self._run("4.18.0", "version-4.18.0-green\n| 4.17.5 | 2026-04-08 | Old |\n")
+        result = self._run(
+            "4.18.0",
+            "[![Version 4.18.0](https://img.shields.io/badge/version-4.18.0-green.svg)](VERSION)\n"
+            "| 4.17.5 | 2026-04-08 | Old |\n",
+        )
         assert result is not None
         assert "PREFLIGHT_BLOCKED" in result
         assert "changelog" in result.lower()
+
+    def test_rc_changelog_row_present_passes(self):
+        result = self._run(
+            "4.50.0-rc.2",
+            "[![Version 4.50.0-rc.2](https://img.shields.io/badge/version-4.50.0--rc.2-green.svg)](VERSION)\n"
+            "| 4.50.0-rc.2 | 2026-04-21 | RC |\n",
+        )
+        assert result is None
+
+    def test_rc_changelog_row_missing_blocks(self):
+        result = self._run(
+            "4.50.0-rc.2",
+            "[![Version 4.50.0-rc.2](https://img.shields.io/badge/version-4.50.0--rc.2-green.svg)](VERSION)\n"
+            "| 4.50.0 | 2026-04-21 | Stable |\n",
+        )
+        assert result is not None
+        assert "PREFLIGHT_BLOCKED" in result
+        assert "4.50.0-rc.2" in result
 
 
 # ---------------------------------------------------------------------------
@@ -529,11 +581,16 @@ class TestAdvisoryWorktreeVersionSync:
     """Worktree version-sync preflight in the advisory path."""
 
     def _write_files(self, tmp_path, version, pyproject_ver=None, readme_ver=None, arch_ver=None):
+        from ouroboros.tools.release_sync import _normalize_pep440, _shields_escape
+
         (tmp_path / "VERSION").write_text(version + "\n", encoding="utf-8")
-        pv = pyproject_ver if pyproject_ver is not None else version
+        pv = pyproject_ver if pyproject_ver is not None else _normalize_pep440(version)
         (tmp_path / "pyproject.toml").write_text(f'version = "{pv}"\n', encoding="utf-8")
         rv = readme_ver if readme_ver is not None else version
-        (tmp_path / "README.md").write_text(f"version-{rv}-green\n", encoding="utf-8")
+        (tmp_path / "README.md").write_text(
+            f"[![Version {rv}](https://img.shields.io/badge/version-{_shields_escape(rv)}-green.svg)](VERSION)\n",
+            encoding="utf-8",
+        )
         av = arch_ver if arch_ver is not None else version
         docs = tmp_path / "docs"
         docs.mkdir(exist_ok=True)
@@ -569,5 +626,10 @@ class TestAdvisoryWorktreeVersionSync:
 
     def test_non_semver_version_skips(self, tmp_path):
         (tmp_path / "VERSION").write_text("dev\n", encoding="utf-8")
+        from ouroboros.tools.claude_advisory_review import _check_worktree_version_sync
+        assert _check_worktree_version_sync(tmp_path) == ""
+
+    def test_rc_version_with_pep440_pyproject_returns_empty(self, tmp_path):
+        self._write_files(tmp_path, "4.50.0-rc.2")
         from ouroboros.tools.claude_advisory_review import _check_worktree_version_sync
         assert _check_worktree_version_sync(tmp_path) == ""

@@ -24,7 +24,7 @@ The surface intentionally mirrors what the Phase 3 plan approved:
                            ``/api/extensions/<skill>/<path>``.
 - ``register_ws_handler``— attach a handler for WS message types
                            prefixed ``ext.<skill>.``.
-- ``register_ui_tab``    — (Phase 5) register a Settings/Skills UI tab.
+- ``register_ui_tab``    — declare a future Settings/Skills UI tab.
 - ``log``                — structured logger (the extension does not
                            touch ``logging``/``print`` directly).
 - ``get_settings``       — read-only view of settings keys the skill's
@@ -43,11 +43,11 @@ from __future__ import annotations
 from typing import Any, Awaitable, Callable, Dict, List, Protocol, Sequence, runtime_checkable
 
 
-# Extensions may NOT read these settings keys even if their manifest
-# explicitly requests them (mirrors the ``skill_exec``
-# ``_FORBIDDEN_ENV_FORWARD_KEYS`` denylist — defense in depth against
-# reviewer misses).
-FORBIDDEN_EXTENSION_SETTINGS: frozenset[str] = frozenset(
+# Skills may NOT receive these settings keys even if their manifest
+# explicitly requests them (shared by both ``skill_exec`` env forwarding
+# and ``PluginAPI.get_settings`` — one allow/deny model for script and
+# extension skills).
+FORBIDDEN_SKILL_SETTINGS: frozenset[str] = frozenset(
     {
         "OPENROUTER_API_KEY",
         "OPENAI_API_KEY",
@@ -59,6 +59,8 @@ FORBIDDEN_EXTENSION_SETTINGS: frozenset[str] = frozenset(
         "OUROBOROS_NETWORK_PASSWORD",
     }
 )
+# Backwards-compatible alias for the frozen Phase 4 name.
+FORBIDDEN_EXTENSION_SETTINGS: frozenset[str] = FORBIDDEN_SKILL_SETTINGS
 
 
 # Permission names an extension may declare in its manifest. The values
@@ -75,6 +77,10 @@ VALID_EXTENSION_PERMISSIONS: frozenset[str] = frozenset(
         "tool",
         "read_settings",
     }
+)
+
+VALID_EXTENSION_ROUTE_METHODS: frozenset[str] = frozenset(
+    {"GET", "HEAD", "POST", "PUT", "DELETE", "PATCH"}
 )
 
 
@@ -113,7 +119,8 @@ class PluginAPI(Protocol):
     ) -> None:
         """Register an HTTP route. The final mount point is
         ``/api/extensions/<skill>/<path>``; ``path`` must not start
-        with ``/`` and must not contain ``..`` segments."""
+        with ``/`` and must not contain ``..`` segments. ``methods``
+        must be a non-empty subset of ``VALID_EXTENSION_ROUTE_METHODS``."""
         ...
 
     def register_ws_handler(
@@ -134,11 +141,10 @@ class PluginAPI(Protocol):
         icon: str = "extension",
         render: Dict[str, Any] | None = None,
     ) -> None:
-        """(Phase 5) Register a Skills-UI tab.
+        """Register a Skills-UI tab declaration.
 
-        Phase 4 accepts the call but stores it as a *pending* tab
-        declaration — the actual UI plumbing arrives in Phase 5 via
-        the Widget ABI."""
+        The runtime currently stores the declaration for future host
+        plumbing; today's shipped UI does not mount extension tabs yet."""
         ...
 
     # --- runtime access ---
@@ -155,11 +161,12 @@ class PluginAPI(Protocol):
     def get_settings(self, keys: Sequence[str]) -> Dict[str, Any]:
         """Return a ``{key: value}`` mapping for the requested keys.
 
-        Only keys that are simultaneously in the skill manifest's
+        Requires the manifest ``read_settings`` permission. Only keys
+        that are simultaneously in the skill manifest's
         ``env_from_settings`` allowlist AND NOT in
         ``FORBIDDEN_EXTENSION_SETTINGS`` are returned; forbidden or
-        unallowed keys are silently dropped. Missing keys omit from
-        the result.
+        unallowed keys are silently dropped. Missing keys omit from the
+        result.
         """
         ...
 
@@ -190,6 +197,8 @@ class ExtensionRegistrationError(Exception):
 __all__ = [
     "PluginAPI",
     "ExtensionRegistrationError",
+    "FORBIDDEN_SKILL_SETTINGS",
     "FORBIDDEN_EXTENSION_SETTINGS",
     "VALID_EXTENSION_PERMISSIONS",
+    "VALID_EXTENSION_ROUTE_METHODS",
 ]

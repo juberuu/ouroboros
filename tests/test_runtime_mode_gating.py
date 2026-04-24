@@ -115,6 +115,32 @@ def test_light_mode_blocks_runshell_mutation(tmp_path, monkeypatch):
     assert "LIGHT_MODE_BLOCKED" in result
 
 
+def test_light_mode_blocks_extension_tool_dispatch(tmp_path, monkeypatch):
+    from ouroboros import extension_loader
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    reg = _registry(tmp_path)
+    with extension_loader._lock:
+        extension_loader._tools["ext.testskill.echo"] = {
+            "name": "ext.testskill.echo",
+            "handler": lambda ctx, **kwargs: "should not run",
+            "description": "echo",
+            "schema": {},
+            "timeout_sec": 10,
+            "skill": "testskill",
+        }
+    monkeypatch.setattr(extension_loader, "is_extension_live", lambda *_a, **_k: True)
+    unloaded: list[str] = []
+    monkeypatch.setattr(extension_loader, "unload_extension", unloaded.append)
+    try:
+        result = reg.execute("ext.testskill.echo", {})
+        assert "LIGHT_MODE_BLOCKED" in result
+        assert unloaded == ["testskill"]
+    finally:
+        with extension_loader._lock:
+            extension_loader._tools.pop("ext.testskill.echo", None)
+
+
 @pytest.mark.parametrize(
     "bad_cmd",
     [

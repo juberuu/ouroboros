@@ -50,7 +50,7 @@ def test_checkout_and_reset_removes_stale_index_lock(monkeypatch, tmp_path):
     os.utime(lock_path, (stale_ts, stale_ts))
 
     monkeypatch.setattr(git_ops, "REPO_DIR", tmp_path)
-    monkeypatch.setattr(git_ops, "_has_remote", lambda: False)
+    monkeypatch.setattr(git_ops, "_has_remote", lambda name=None: False)
     monkeypatch.setattr(git_ops, "load_state", lambda: {})
 
     saved_state = {}
@@ -94,7 +94,7 @@ def test_checkout_and_reset_continues_when_fetch_fails(monkeypatch, tmp_path):
     git_dir.mkdir()
 
     monkeypatch.setattr(git_ops, "REPO_DIR", tmp_path)
-    monkeypatch.setattr(git_ops, "_has_remote", lambda: True)
+    monkeypatch.setattr(git_ops, "_has_remote", lambda name=None: name in (None, "origin"))
     monkeypatch.setattr(git_ops, "load_state", lambda: {})
 
     saved_state = {}
@@ -132,3 +132,184 @@ def test_checkout_and_reset_continues_when_fetch_fails(monkeypatch, tmp_path):
     assert events
     assert events[0]["type"] == "reset_fetch_failed"
     assert events[0]["continuing_local_reset"] is True
+
+
+def test_checkout_and_reset_prefers_managed_remote_ref(monkeypatch, tmp_path):
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+
+    monkeypatch.setattr(git_ops, "REPO_DIR", tmp_path)
+    monkeypatch.setattr(git_ops, "_has_remote", lambda name=None: name in (None, "managed"))
+    monkeypatch.setattr(
+        git_ops,
+        "_read_managed_repo_meta",
+        lambda: {
+            "managed_remote_name": "managed",
+            "managed_remote_branch": "ouroboros-three-layer",
+            "managed_remote_stable_branch": "ouroboros-stable",
+        },
+    )
+    monkeypatch.setattr(git_ops, "load_state", lambda: {})
+
+    saved_state = {}
+    monkeypatch.setattr(git_ops, "save_state", lambda state: saved_state.update(state))
+
+    def fake_git_capture(cmd):
+        if cmd == ["git", "fetch", "managed"]:
+            return 0, "", ""
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(git_ops, "git_capture", fake_git_capture)
+
+    calls = []
+
+    def fake_run(cmd, cwd=None, capture_output=False, text=False, check=False):
+        calls.append(cmd)
+        if cmd == ["git", "rev-parse", "--verify", "managed/ouroboros-three-layer"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="remote-sha\n", stderr="")
+        if cmd[:4] == ["git", "checkout", "-B", "ouroboros"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd[:2] == ["git", "clean"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd[:2] == ["git", "rev-parse"] and cmd[-1] == "HEAD":
+            return subprocess.CompletedProcess(cmd, 0, stdout="fedcba\n", stderr="")
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(git_ops.subprocess, "run", fake_run)
+
+    ok, message = git_ops.checkout_and_reset("ouroboros", reason="restart", unsynced_policy="ignore")
+
+    assert ok
+    assert message == "ok"
+    assert ["git", "checkout", "-B", "ouroboros", "managed/ouroboros-three-layer"] in calls
+    assert saved_state["current_branch"] == "ouroboros"
+    assert saved_state["current_sha"] == "fedcba"
+
+
+def test_configure_remote_adds_origin_even_when_managed_remote_exists(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(git_ops, "_has_remote", lambda name=None: name in (None, "managed"))
+    monkeypatch.setattr(
+        git_ops,
+        "git_capture",
+        lambda cmd: calls.append(cmd) or (0, "", ""),
+    )
+    monkeypatch.setattr(
+        git_ops,
+        "_configure_credential_helper",
+        lambda repo_slug, token: calls.append(("helper", repo_slug, token)),
+    )
+
+    ok, message = git_ops.configure_remote("joi-lab/ouroboros-desktop", "ghp_test")
+
+    assert ok
+    assert message == "ok"
+    assert ["git", "remote", "add", "origin", "https://github.com/joi-lab/ouroboros-desktop.git"] in calls
+
+
+def test_collect_repo_sync_state_prefers_managed_remote(monkeypatch):
+    monkeypatch.setattr(
+        git_ops,
+        "_read_managed_repo_meta",
+        lambda: {
+            "managed_remote_name": "managed",
+            "managed_remote_branch": "ouroboros-three-layer",
+        },
+    )
+    monkeypatch.setattr(git_ops, "_has_remote", lambda name=None: name in (None, "managed"))
+
+    def fake_git_capture(cmd):
+        if cmd == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            return 0, "ouroboros", ""
+        if cmd == ["git", "status", "--porcelain"]:
+            return 0, "", ""
+        if cmd == ["git", "log", "--oneline", "managed/ouroboros-three-layer..HEAD"]:
+            return 0, "abc123 local commit\n", ""
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(git_ops, "git_capture", fake_git_capture)
+
+    state = git_ops._collect_repo_sync_state()
+
+    assert state["current_branch"] == "ouroboros"
+    assert state["unpushed_lines"] == ["abc123 local commit"]
+
+
+def test_checkout_and_reset_keeps_bundled_sha_on_first_managed_bootstrap(monkeypatch, tmp_path):
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+    (git_dir / git_ops.BOOTSTRAP_PIN_MARKER_NAME).write_text("pending\n", encoding="utf-8")
+
+    monkeypatch.setattr(git_ops, "REPO_DIR", tmp_path)
+    monkeypatch.setattr(git_ops, "_has_remote", lambda name=None: name in (None, "managed"))
+    monkeypatch.setattr(
+        git_ops,
+        "_read_managed_repo_meta",
+        lambda: {
+            "managed_remote_name": "managed",
+            "managed_remote_branch": "ouroboros-three-layer",
+            "source_sha": "bundle123",
+        },
+    )
+    monkeypatch.setattr(git_ops, "load_state", lambda: {"current_sha": "bundle123"})
+
+    saved_state = {}
+    monkeypatch.setattr(git_ops, "save_state", lambda state: saved_state.update(state))
+
+    def fake_git_capture(cmd):
+        if cmd == ["git", "rev-parse", "HEAD"]:
+            return 0, "bundle123", ""
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(git_ops, "git_capture", fake_git_capture)
+
+    calls = []
+
+    def fake_run(cmd, cwd=None, capture_output=False, text=False, check=False):
+        calls.append(cmd)
+        if cmd == ["git", "rev-parse", "--verify", "ouroboros"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="bundle123\n", stderr="")
+        if cmd[:2] == ["git", "checkout"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd[:2] == ["git", "reset"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd[:2] == ["git", "rev-parse"] and cmd[-1] == "HEAD":
+            return subprocess.CompletedProcess(cmd, 0, stdout="bundle123\n", stderr="")
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(git_ops.subprocess, "run", fake_run)
+
+    ok, message = git_ops.checkout_and_reset("ouroboros", reason="bootstrap", unsynced_policy="ignore")
+
+    assert ok
+    assert message == "ok"
+    assert ["git", "fetch", "managed"] not in calls
+    assert saved_state["current_sha"] == "bundle123"
+    assert not (git_dir / git_ops.BOOTSTRAP_PIN_MARKER_NAME).exists()
+
+
+def test_ensure_local_version_tag_accepts_rc_versions(monkeypatch, tmp_path):
+    (tmp_path / "VERSION").write_text("4.50.0-rc.2\n", encoding="utf-8")
+    monkeypatch.setattr(git_ops, "REPO_DIR", tmp_path)
+    monkeypatch.setattr(git_ops, "_ensure_git_identity", lambda: None)
+
+    calls = []
+
+    def fake_git_capture(cmd):
+        calls.append(cmd)
+        if cmd == ["git", "tag", "-l", "v4.50.0-rc.2"]:
+            return 0, "", ""
+        if cmd == ["git", "tag", "-l"]:
+            return 0, "", ""
+        if cmd == ["git", "rev-parse", "HEAD"]:
+            return 0, "abc123", ""
+        if cmd == ["git", "tag", "-a", "v4.50.0-rc.2", "-m", "Release v4.50.0-rc.2"]:
+            return 0, "", ""
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(git_ops, "git_capture", fake_git_capture)
+
+    git_ops._ensure_local_version_tag()
+
+    assert ["git", "tag", "-a", "v4.50.0-rc.2", "-m", "Release v4.50.0-rc.2"] in calls

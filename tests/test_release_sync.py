@@ -299,8 +299,14 @@ class TestNormalizePep440:
             ("4.50.0rc1", "4.50.0rc1"),
             ("4.50.0-rc1", "4.50.0rc1"),
             ("4.50.0rc.1", "4.50.0rc1"),
-            ("4.50.0-alpha.2", "4.50.0alpha2"),
-            ("4.50.0-beta.3", "4.50.0beta3"),
+            # PEP 440 §Pre-release spelling: ``alpha`` / ``beta`` collapse
+            # to their canonical short forms ``a`` / ``b`` in the output
+            # spelling (pip normalises on read anyway, but the helper's
+            # docstring promises to return the canonical form).
+            ("4.50.0-alpha.2", "4.50.0a2"),
+            ("4.50.0-beta.3", "4.50.0b3"),
+            ("4.50.0-ALPHA.2", "4.50.0a2"),  # case-insensitive alpha alias
+            ("4.50.0-BETA.3", "4.50.0b3"),  # case-insensitive beta alias
             ("4.50.0-a.1", "4.50.0a1"),
             ("4.50.0-b.1", "4.50.0b1"),
             ("4.50.0-RC.1", "4.50.0rc1"),  # case-insensitive identifier

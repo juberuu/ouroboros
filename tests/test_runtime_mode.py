@@ -274,6 +274,27 @@ def test_onboarding_js_has_runtime_mode_selector_and_save_payload():
     assert "OUROBOROS_SKILLS_REPO_PATH" in src
 
 
+def test_phase4_ui_copy_matches_shipped_runtime():
+    settings_ui = (REPO / "web" / "modules" / "settings_ui.js").read_text(encoding="utf-8")
+    onboarding_js = (REPO / "web" / "modules" / "onboarding_wizard.js").read_text(encoding="utf-8")
+
+    assert "Phase 2 plumbing only" not in settings_ui
+    assert "land in Phase 3" not in settings_ui
+    assert "repo/skills/" in settings_ui
+    assert "Settings → Behavior" in onboarding_js
+    assert "behaves the same as Advanced" in onboarding_js
+    assert "Phase 6+:" not in onboarding_js
+
+
+def test_skills_ui_reads_live_extension_state_fields():
+    src = (REPO / "web" / "modules" / "skills.js").read_text(encoding="utf-8")
+    assert "live_loaded" in src
+    assert "live_reason" in src
+    assert "catalog only" in src
+    assert "ui_tabs_pending" in src
+    assert "result.error" in src
+
+
 def test_onboarding_js_exposes_skills_repo_path_input_and_binding():
     """Regression for the Phase 2 round 3 finding: ``state.skillsRepoPath``
     must be configurable through an actual onboarding input, not just

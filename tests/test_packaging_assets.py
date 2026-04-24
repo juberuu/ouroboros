@@ -1,8 +1,4 @@
-"""Regression checks for packaging asset completeness.
-
-These tests read files that exist only in the app bundle (launcher.py,
-Ouroboros.spec) and are skipped when running from a bare repo checkout.
-"""
+"""Regression checks for packaging asset completeness."""
 
 import os
 import pathlib
@@ -23,11 +19,9 @@ def _launcher_has_bootstrap() -> bool:
     bootstrap_src = bootstrap.read_text(encoding="utf-8")
     return (
         "from ouroboros.launcher_bootstrap import" in launcher_src
-        and "MANAGED_BUNDLE_PATHS = (" in bootstrap_src
-        and '"server.py"' in bootstrap_src
-        and '"web"' in bootstrap_src
-        and '"webview"' in bootstrap_src
-        and '"assets"' in bootstrap_src
+        and 'BUNDLE_REPO_NAME = "repo.bundle"' in bootstrap_src
+        and 'BUNDLE_MANIFEST_NAME = "repo_bundle_manifest.json"' in bootstrap_src
+        and "ensure_managed_repo" in bootstrap_src
     )
 
 _LAUNCHER_HAS_BOOTSTRAP = _launcher_has_bootstrap()
@@ -40,6 +34,8 @@ def _read(rel: str) -> str:
 @pytest.mark.skipif(not _BUNDLE_FILES_PRESENT, reason=_SKIP_REASON)
 def test_spec_bundles_assets_and_icon():
     source = _read("Ouroboros.spec")
+    assert "('repo.bundle', '.')" in source
+    assert "('repo_bundle_manifest.json', '.')" in source
     assert "('assets', 'assets')" in source
     assert "icon='assets/icon.icns'" in source
 
@@ -53,11 +49,9 @@ def test_launcher_does_not_exclude_assets_on_bootstrap():
     bootstrap_source = _read("ouroboros/launcher_bootstrap.py")
     assert '"python-standalone", "assets"' not in launcher_source
     assert "from ouroboros.launcher_bootstrap import" in launcher_source
-    assert "MANAGED_BUNDLE_PATHS = (" in bootstrap_source
-    assert '"server.py"' in bootstrap_source
-    assert '"web"' in bootstrap_source
-    assert '"webview"' in bootstrap_source
-    assert '"assets"' in bootstrap_source
+    assert 'BUNDLE_REPO_NAME = "repo.bundle"' in bootstrap_source
+    assert 'BUNDLE_MANIFEST_NAME = "repo_bundle_manifest.json"' in bootstrap_source
+    assert "ensure_managed_repo(" in bootstrap_source
 
 
 @pytest.mark.skipif(not _BUNDLE_FILES_PRESENT, reason=_SKIP_REASON)

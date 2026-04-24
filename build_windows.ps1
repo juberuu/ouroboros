@@ -5,6 +5,8 @@ $ErrorActionPreference = "Stop"
 
 $Version = (Get-Content VERSION).Trim()
 $ArchiveName = "Ouroboros-${Version}-windows-x64.zip"
+$ManagedSourceBranch = if ($env:OUROBOROS_MANAGED_SOURCE_BRANCH) { $env:OUROBOROS_MANAGED_SOURCE_BRANCH } else { "ouroboros-three-layer" }
+$ReleaseTag = "v$Version"
 
 Write-Host "=== Building Ouroboros for Windows (v${Version}) ==="
 
@@ -29,6 +31,21 @@ New-Item -ItemType Directory -Force -Path $env:PYINSTALLER_CONFIG_DIR | Out-Null
 Write-Host "--- Installing Chromium for browser tools (bundled into python-standalone) ---"
 $env:PLAYWRIGHT_BROWSERS_PATH = "0"
 & "python-standalone\python.exe" -m playwright install chromium
+
+Write-Host "--- Building embedded managed repo bundle ---"
+git rev-parse -q --verify "refs/tags/$ReleaseTag" | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    throw "Packaging requires git tag $ReleaseTag to exist."
+}
+$tagType = (git cat-file -t "refs/tags/$ReleaseTag" 2>$null).Trim()
+if ($tagType -ne "tag") {
+    throw "Packaging requires annotated git tag $ReleaseTag (got '$tagType'). Recreate with: git tag -a $ReleaseTag -m 'Release $ReleaseTag'"
+}
+$headTags = git tag --points-at HEAD
+if (-not ($headTags | Where-Object { $_ -eq $ReleaseTag })) {
+    throw "Packaging requires HEAD to be tagged with $ReleaseTag."
+}
+python scripts/build_repo_bundle.py --source-branch $ManagedSourceBranch
 
 Write-Host "--- Running PyInstaller ---"
 python -m PyInstaller Ouroboros.spec --clean --noconfirm
