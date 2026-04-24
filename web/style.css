@@ -1293,7 +1293,11 @@ body {
     flex: 1;
 }
 
-/* Mobile responsive — narrow screens only; desktop layout unchanged */
+/* Mobile responsive — narrow screens only; desktop layout unchanged.
+   NOTE: Rules here apply only to selectors whose base definitions appear
+   BEFORE this block. Overrides for selectors defined later live in the
+   second @media (max-width: 640px) block at the END of this file so they
+   reliably win without !important. */
 @media (max-width: 640px) {
     /* Prevent iOS zoom on input focus */
     textarea, input[type="text"], input[type="password"], input[type="email"], select {
@@ -1312,9 +1316,94 @@ body {
         margin-right: 8%;
     }
 
-    /* Input area safe-area inset for iOS notch */
-    #chat-input-area {
-        padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
+    /* Nav-rail — convert vertical sidebar to horizontal bottom bar. */
+    #nav-rail {
+        flex-direction: row;
+        top: auto;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        width: 100%;
+        height: auto;
+        padding: 6px 6px;
+        padding-bottom: calc(6px + env(safe-area-inset-bottom, 0px));
+        gap: 2px;
+        overflow-x: auto;
+        overflow-y: hidden;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+        background: rgba(13, 11, 15, 0.88);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        border-top: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    #nav-rail::-webkit-scrollbar {
+        display: none;
+    }
+
+    .nav-btn {
+        flex-direction: column;
+        width: auto;
+        min-width: 54px;
+        flex: 0 0 auto;
+        padding: 5px 8px;
+        gap: 2px;
+        font-size: 9px;
+    }
+
+    .nav-btn svg {
+        width: 18px;
+        height: 18px;
+    }
+
+    .unread-badge {
+        top: 2px;
+        right: 4px;
+        min-width: 14px;
+        height: 14px;
+        font-size: 9px;
+    }
+
+    #nav-version,
+    .nav-spacer {
+        display: none;
+    }
+
+    #content {
+        padding-left: 0;
+        padding-bottom: calc(62px + env(safe-area-inset-bottom, 0px));
+    }
+
+    /* Chat header — make non-absolute on mobile so it claims its own vertical
+       space and never hides the first chat message under the gradient when
+       the row of action buttons wraps to 2+ rows. */
+    .chat-page-header {
+        position: static;
+        background: transparent;
+        row-gap: 6px;
+    }
+
+    .chat-header-actions {
+        gap: 4px;
+    }
+
+    .chat-header-btn {
+        padding: 5px 10px;
+        font-size: 11px;
+    }
+
+    .chat-budget-pill {
+        min-width: 0;
+        padding: 3px 10px;
+    }
+
+    .chat-budget-text {
+        font-size: 10px;
+    }
+
+    .page-header {
+        padding: 10px 12px;
     }
 }
 
@@ -1740,6 +1829,7 @@ body {
     font-family: inherit;
     outline: none;
     width: 320px;
+    max-width: 100%;
     transition: border-color 0.2s, box-shadow 0.2s;
 }
 
@@ -2109,7 +2199,7 @@ body {
     flex-direction: column;
     gap: 20px;
     padding: 0 4px;
-    height: calc(100vh - 120px);
+    height: calc(var(--vvh) - 120px);
     overflow-y: auto;
 }
 
@@ -2453,3 +2543,67 @@ body {
 .skills-banner-danger { background: rgba(239, 68, 68, 0.08); border-color: rgba(239, 68, 68, 0.3); color: #ef4444; }
 .skills-banner-warn { background: rgba(245, 158, 11, 0.08); border-color: rgba(245, 158, 11, 0.3); color: #f59e0b; }
 .skills-banner-muted { background: rgba(250, 250, 250, 0.04); border-color: rgba(250, 250, 250, 0.1); color: rgba(250, 250, 250, 0.7); }
+
+/* Mobile overrides — second block, placed AFTER all base rules so media-query
+   rules reliably win without !important. Kept scoped to <= 640px so desktop
+   is never affected. */
+@media (max-width: 640px) {
+    /* Input area safe-area inset for iOS notch */
+    #chat-input-area {
+        padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
+    }
+
+    /* Header is now in normal flow on mobile — remove the desktop 56px top
+       padding that was meant to clear the absolute-positioned header. */
+    #chat-messages {
+        padding-top: 12px;
+    }
+
+    /* Logs page — reduce horizontal padding on filters and entries margin. */
+    .logs-filters {
+        padding: 8px 12px;
+    }
+
+    #log-entries {
+        margin: 0 8px 8px;
+    }
+
+    /* Evolution page — stack version columns and use taller chart area. */
+    .evo-versions-cols {
+        flex-direction: column;
+        gap: 16px;
+        overflow: visible;
+    }
+
+    .evo-versions-content {
+        padding: 12px;
+    }
+
+    .evo-chart-wrap {
+        min-height: 260px;
+        max-height: none;
+        padding: 10px;
+    }
+
+    /* Costs page — collapse multi-column grids to single column. */
+    .costs-budget-fields {
+        grid-template-columns: 1fr;
+    }
+
+    .costs-stats-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .costs-tables-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .costs-scroll {
+        padding: 12px 12px;
+    }
+
+    /* Skills page — reduce padding so cards don't get squeezed. */
+    #page-skills {
+        padding: 12px 12px;
+    }
+}

@@ -553,3 +553,30 @@
         grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 }
+
+@media (max-width: 640px) {
+    .settings-shell {
+        padding: 0 10px 10px;
+    }
+
+    .settings-tabs-bar {
+        padding: 10px 0 8px;
+    }
+
+    .settings-tab {
+        padding: 7px 12px;
+        font-size: 12px;
+    }
+
+    .settings-shell .form-section {
+        padding: 14px;
+    }
+
+    .settings-provider-card summary {
+        padding: 14px 14px;
+    }
+
+    .settings-provider-body {
+        padding: 0 14px 14px;
+    }
+}
