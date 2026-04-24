@@ -138,7 +138,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # Full history + tags so the build scripts' annotated-tag guard
+          # (``git cat-file -t refs/tags/vX.Y.Z`` must return ``tag``) can
+          # see the tag object, not just the tag ref. The default
+          # ``actions/checkout@v4`` shallow clone resolves the tag ref
+          # down to its commit and drops the annotation on the floor,
+          # which makes an annotated tag look like a lightweight one.
+          # ``fetch-depth: 0`` alone is not sufficient on v4 —
+          # ``fetch-tags: true`` is required to pull the tag objects
+          # themselves, not just the refs.
           fetch-depth: 0
+          fetch-tags: true
+
+      # Defense-in-depth: re-fetch tag objects explicitly. On tag-push
+      # runs the action sometimes creates a local lightweight-style ref
+      # from the commit SHA even with fetch-tags: true; an explicit
+      # ``git fetch --tags --force`` guarantees the annotated tag object
+      # is materialized before the build script's ``git cat-file -t``
+      # gate runs.
+      - name: Ensure annotated tag object is fetched
+        shell: bash
+        run: git fetch origin --tags --force
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
