@@ -242,6 +242,96 @@ def test_restart_watchdog_waits_for_uvicorn_exit():
     assert "_uvicorn_exited.set()" in source
 
 
+def test_owner_restart_copy_is_explicit_about_stopped_task():
+    source = _read("server.py")
+    assert 'ctx.send_with_budget(chat_id, "♻️ Restarting.")' in source
+    assert "Stopping active task. New settings apply to the next message." in source
+    assert "owner_restart_no_resume.flag" in source
+    assert "owner_restart_no_resume" in source
+    assert "panic_stop.flag" in source
+    assert "owner_restart_flag.unlink(missing_ok=True)" in source
+    assert "stable_skip_flag.unlink(missing_ok=True)" in source
+    assert source.index("safe_restart(reason=\"owner_restart\"") < source.index("Stopping active task. New settings apply to the next message.")
+    assert source.index("owner_restart_no_resume.flag") < source.index("Stopping active task. New settings apply to the next message.")
+
+
+def test_auto_resume_skips_owner_restart_no_resume_flag(tmp_path, monkeypatch):
+    import supervisor.workers as workers
+
+    original_drive = workers.DRIVE_ROOT
+    workers.DRIVE_ROOT = tmp_path
+    flag = tmp_path / "state" / "owner_restart_no_resume.flag"
+    flag.parent.mkdir(parents=True)
+    flag.write_text("owner_restart", encoding="utf-8")
+    compat_flag = tmp_path / "state" / "panic_stop.flag"
+    compat_flag.write_text("owner_restart_no_resume", encoding="utf-8")
+
+    def fail_load_state():
+        raise AssertionError("owner restart flag should be checked before load_state")
+
+    monkeypatch.setattr(workers, "load_state", fail_load_state)
+    try:
+        workers.auto_resume_after_restart()
+    finally:
+        workers.DRIVE_ROOT = original_drive
+
+    assert not flag.exists()
+    assert not compat_flag.exists()
+
+
+def test_owner_restart_cleans_flags_when_worker_shutdown_fails(tmp_path, monkeypatch):
+    import server
+    import supervisor.message_bus as message_bus
+
+    messages = []
+
+    class Bridge:
+        def get_updates(self, offset=0, timeout=1):
+            return [{
+                "update_id": offset,
+                "message": {
+                    "chat": {"id": 1},
+                    "from": {"id": 1},
+                    "text": "/restart",
+                },
+            }]
+
+    class Ctx:
+        consciousness = None
+
+        def load_state(self):
+            return {}
+
+        def save_state(self, _state):
+            return None
+
+        def send_with_budget(self, _chat_id, text):
+            messages.append(text)
+
+        def safe_restart(self, **_kwargs):
+            return True, "OK"
+
+        def kill_workers(self, force=True, **kwargs):
+            assert kwargs["result_status"] == "cancelled"
+            assert kwargs["result_reason"] == "Owner restart stopped this task before process restart."
+            raise RuntimeError("shutdown failed")
+
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(message_bus, "log_chat", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        server,
+        "_request_restart_exit",
+        lambda: (_ for _ in ()).throw(AssertionError("restart exit should not be requested")),
+    )
+
+    server._process_bridge_updates(Bridge(), 0, Ctx())
+
+    assert not (tmp_path / "state" / "owner_restart_no_resume.flag").exists()
+    assert not (tmp_path / "state" / "panic_stop.flag").exists()
+    assert "Stopping active task. New settings apply to the next message." not in messages
+    assert "⚠️ Restart cancelled: failed to stop workers." in messages
+
+
 def test_ws_reloads_when_sha_unknown_after_reconnect():
     """ws.js must reload the page when _lastSha is null after reconnect (PyWebView loses JS state).
 

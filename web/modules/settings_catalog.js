@@ -1,3 +1,6 @@
+const MODEL_CATALOG_TIMEOUT_MS = 25000;
+let catalogRefreshSeq = 0;
+
 function setCatalogStatus(statusEl, text, tone = 'muted') {
     if (!statusEl) return;
     statusEl.textContent = text;
@@ -25,16 +28,25 @@ function fillCatalogDatalist(items) {
 }
 
 export async function refreshModelCatalog() {
+    const refreshSeq = ++catalogRefreshSeq;
     const statusEl = document.getElementById('settings-model-catalog-status');
     setCatalogStatus(statusEl, 'Refreshing model catalog...', 'muted');
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), MODEL_CATALOG_TIMEOUT_MS);
 
     try {
-        const resp = await fetch('/api/model-catalog', { cache: 'no-store' });
+        const resp = await fetch('/api/model-catalog', {
+            cache: 'no-store',
+            signal: controller.signal,
+        });
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
 
         const items = Array.isArray(data.items) ? data.items : [];
         const errors = Array.isArray(data.errors) ? data.errors : [];
+        if (refreshSeq !== catalogRefreshSeq) {
+            return { items, errors, stale: true };
+        }
         fillCatalogDatalist(items);
 
         if (errors.length && items.length) {
@@ -56,12 +68,20 @@ export async function refreshModelCatalog() {
         }
         return { items, errors };
     } catch (err) {
+        if (refreshSeq !== catalogRefreshSeq) {
+            return { items: [], errors: [{ provider_id: 'catalog', error: 'stale refresh' }], stale: true };
+        }
+        const message = err?.name === 'AbortError'
+            ? `Timed out after ${Math.round(MODEL_CATALOG_TIMEOUT_MS / 1000)}s`
+            : (err.message || err);
         fillCatalogDatalist([]);
         setCatalogStatus(
             statusEl,
-            `Model catalog failed: ${err.message || err}. This is optional.`,
+            `Model catalog failed: ${message}. This is optional.`,
             'warn',
         );
-        return { items: [], errors: [{ provider_id: 'catalog', error: String(err) }] };
+        return { items: [], errors: [{ provider_id: 'catalog', error: String(message) }] };
+    } finally {
+        clearTimeout(timeoutId);
     }
 }

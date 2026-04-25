@@ -269,6 +269,11 @@
     color: var(--red);
 }
 
+.settings-unsaved-indicator {
+    color: var(--amber);
+    font-weight: 600;
+}
+
 .settings-toolbar {
     display: flex;
     flex-wrap: wrap;

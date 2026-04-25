@@ -217,6 +217,20 @@ def auto_resume_after_restart() -> None:
     needed immediately after a restart so the agent doesn't go silent.
     """
     try:
+        owner_restart_flag = DRIVE_ROOT / "state" / "owner_restart_no_resume.flag"
+        if owner_restart_flag.exists():
+            owner_restart_flag.unlink(missing_ok=True)
+            panic_compat_flag = DRIVE_ROOT / "state" / "panic_stop.flag"
+            try:
+                if panic_compat_flag.read_text(encoding="utf-8").strip() == "owner_restart_no_resume":
+                    panic_compat_flag.unlink(missing_ok=True)
+            except FileNotFoundError:
+                pass
+            except Exception:
+                log.debug("Failed to consume owner restart compatibility flag", exc_info=True)
+            log.info("Owner restart flag detected — skipping auto-resume.")
+            return
+
         # Panic flag: skip auto-resume after emergency stop (consumed on check)
         panic_flag = DRIVE_ROOT / "state" / "panic_stop.flag"
         if panic_flag.exists():
@@ -332,7 +346,11 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str)
             _log_worker_crash(wid, _drive, "handle_task", _e, _tb.format_exc())
 
 
-def _write_failure_result(task_id: str, reason: str = "Worker process crashed (crash storm). Task was not completed.") -> None:
+def _write_failure_result(
+    task_id: str,
+    reason: str = "Worker process crashed (crash storm). Task was not completed.",
+    status: str = "",
+) -> None:
     """Write a failure result file for a crashed/orphaned task (zombie prevention)."""
     if not task_id:
         return
@@ -349,7 +367,7 @@ def _write_failure_result(task_id: str, reason: str = "Worker process crashed (c
         write_task_result(
             DRIVE_ROOT,
             task_id,
-            STATUS_FAILED,
+            status or STATUS_FAILED,
             result=reason,
             cost_usd=0,
             total_rounds=0,
@@ -498,7 +516,12 @@ def spawn_workers(n: int = 0) -> None:
     threading.Thread(target=_verify_worker_sha_after_spawn, args=(events_offset,), daemon=True).start()
 
 
-def kill_workers(force: bool = True) -> None:
+def kill_workers(
+    force: bool = True,
+    *,
+    result_reason: str = "Worker process crashed (crash storm). Task was not completed.",
+    result_status: str = "",
+) -> None:
     from supervisor import queue
     with _queue_lock:
         cleared_running = len(RUNNING)
@@ -514,7 +537,7 @@ def kill_workers(force: bool = True) -> None:
             orphaned_ids = []
             for task_id in list(RUNNING):
                 try:
-                    _write_failure_result(task_id)
+                    _write_failure_result(task_id, reason=result_reason, status=result_status)
                     orphaned_ids.append(task_id)
                 except Exception:
                     log.warning("Failed to write failure result for running task %s", task_id, exc_info=True)
@@ -524,7 +547,7 @@ def kill_workers(force: bool = True) -> None:
                 tid = task.get("id")
                 if tid:
                     try:
-                        _write_failure_result(tid)
+                        _write_failure_result(tid, reason=result_reason, status=result_status)
                         drained_ids.append(tid)
                     except Exception:
                         log.warning("Failed to write failure result for pending task %s", tid, exc_info=True)

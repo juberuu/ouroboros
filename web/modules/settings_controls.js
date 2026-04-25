@@ -129,7 +129,6 @@ export function bindModelPickers(root) {
             event.preventDefault();
             input.value = item.dataset.value || '';
             closePicker(picker);
-            input.dispatchEvent(new Event('input', { bubbles: true }));
             input.dispatchEvent(new Event('change', { bubbles: true }));
         });
     });

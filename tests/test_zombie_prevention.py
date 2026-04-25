@@ -152,3 +152,47 @@ def test_kill_workers_writes_failure_for_running_and_pending(tmp_path):
         data = json.loads(path.read_text(encoding="utf-8"))
         assert data["status"] == "failed"
         assert data["task_id"] == tid
+
+
+def test_kill_workers_can_record_owner_restart_cancellation(tmp_path):
+    """Owner restart should not describe intentional aborts as crash storms."""
+    import supervisor.workers as workers
+    import supervisor.queue as queue
+
+    orig_drive = workers.DRIVE_ROOT
+    orig_workers = dict(workers.WORKERS)
+    orig_running = dict(workers.RUNNING)
+    orig_pending = list(workers.PENDING)
+    orig_q_drive = queue.DRIVE_ROOT
+    orig_q_pending = queue.PENDING
+    orig_q_running = queue.RUNNING
+
+    workers.DRIVE_ROOT = tmp_path
+    queue.DRIVE_ROOT = tmp_path
+    workers.WORKERS.clear()
+    workers.RUNNING.clear()
+    workers.RUNNING["run1"] = {"task": {"id": "run1", "type": "task"}, "worker_id": 0}
+    workers.PENDING[:] = [{"id": "pend1", "type": "task"}]
+    queue.PENDING = workers.PENDING
+
+    try:
+        with mock.patch.object(queue, "persist_queue_snapshot"):
+            workers.kill_workers(
+                result_status="cancelled",
+                result_reason="Owner restart stopped this task before process restart.",
+            )
+    finally:
+        workers.DRIVE_ROOT = orig_drive
+        workers.WORKERS.clear()
+        workers.WORKERS.update(orig_workers)
+        workers.RUNNING.clear()
+        workers.RUNNING.update(orig_running)
+        workers.PENDING[:] = orig_pending
+        queue.DRIVE_ROOT = orig_q_drive
+        queue.PENDING = orig_q_pending
+        queue.RUNNING = orig_q_running
+
+    for tid in ("run1", "pend1"):
+        data = json.loads((tmp_path / "task_results" / f"{tid}.json").read_text(encoding="utf-8"))
+        assert data["status"] == "cancelled"
+        assert data["result"] == "Owner restart stopped this task before process restart."

@@ -486,12 +486,46 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
             ctx.send_with_budget(chat_id, "🛑 PANIC: killing everything. App will close.")
             _execute_panic_stop(ctx.consciousness, ctx.kill_workers)
         elif lowered.startswith("/restart"):
-            ctx.send_with_budget(chat_id, "♻️ Restarting (soft).")
+            ctx.send_with_budget(chat_id, "♻️ Restarting.")
             ok, restart_msg = ctx.safe_restart(reason="owner_restart", unsynced_policy="rescue_and_reset")
             if not ok:
                 ctx.send_with_budget(chat_id, f"⚠️ Restart cancelled: {restart_msg}")
                 continue
-            ctx.kill_workers(force=True)
+            state_dir = DATA_DIR / "state"
+            owner_restart_flag = state_dir / "owner_restart_no_resume.flag"
+            stable_skip_flag = state_dir / "panic_stop.flag"
+            try:
+                state_dir.mkdir(parents=True, exist_ok=True)
+                owner_restart_flag.write_text("owner_restart", encoding="utf-8")
+                # Stable fallback builds already skip auto-resume on panic_stop.flag.
+                # Pair it with the owner flag so current builds can distinguish
+                # this from real panic while stable builds still avoid auto-resume.
+                stable_skip_flag.write_text("owner_restart_no_resume", encoding="utf-8")
+            except Exception:
+                owner_restart_flag.unlink(missing_ok=True)
+                stable_skip_flag.unlink(missing_ok=True)
+                log.warning("Failed to write owner restart no-resume flag", exc_info=True)
+                ctx.send_with_budget(chat_id, "⚠️ Restart cancelled: could not write restart state.")
+                continue
+            try:
+                ctx.kill_workers(
+                    force=True,
+                    result_status="cancelled",
+                    result_reason="Owner restart stopped this task before process restart.",
+                )
+            except Exception:
+                owner_restart_flag.unlink(missing_ok=True)
+                stable_skip_flag.unlink(missing_ok=True)
+                log.warning("Restart cancelled because worker shutdown failed", exc_info=True)
+                try:
+                    ctx.send_with_budget(chat_id, "⚠️ Restart cancelled: failed to stop workers.")
+                except Exception:
+                    pass
+                continue
+            try:
+                ctx.send_with_budget(chat_id, "Stopping active task. New settings apply to the next message.")
+            except Exception:
+                log.warning("Failed to send owner restart stop notice; continuing restart", exc_info=True)
             _request_restart_exit()
         elif lowered == "/review" or lowered.startswith("/review "):
             # Only ``/review`` (with no suffix) or ``/review <args>``

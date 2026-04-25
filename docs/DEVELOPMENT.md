@@ -289,6 +289,11 @@ backdrop-filter: blur(8–16px);
 border: 1px solid rgba(255, 255, 255, 0.06–0.12);
 ```
 
+Floating chat chrome that overlaps transcript text (header, status badge, attachment
+preview, input fade) must keep enough opacity or blur in the text-bearing zones that
+underlying message text cannot read through labels. Use the same glass range above
+instead of fully transparent gradients behind visible text.
+
 ### Accent colors
 
 | Role | Value | Usage |

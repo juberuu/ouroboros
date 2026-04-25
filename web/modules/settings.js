@@ -75,6 +75,8 @@ export function initSettings({ state }) {
     // whole point of prioritizing error over no_api_key in `status_label`.
     let claudeRuntimeHasError = false;
     let settingsLoaded = false;
+    let settingsBaseline = '';
+    let settingsDirty = false;
 
     function anthropicKeyConfigured() {
         const input = byId('s-anthropic');
@@ -114,6 +116,26 @@ export function initSettings({ state }) {
                 ? ''
                 : 'Reload current settings successfully before saving.';
         }
+    }
+
+    function snapshotSettingsDraft() {
+        return JSON.stringify(collectBody());
+    }
+
+    function setSettingsCleanBaseline() {
+        settingsBaseline = snapshotSettingsDraft();
+        settingsDirty = false;
+        const indicator = byId('settings-unsaved-indicator');
+        if (indicator) indicator.hidden = true;
+    }
+
+    function updateSettingsDirtyState() {
+        if (!settingsLoaded || !settingsBaseline) return;
+        const nextDirty = snapshotSettingsDraft() !== settingsBaseline;
+        if (nextDirty === settingsDirty) return;
+        settingsDirty = nextDirty;
+        const indicator = byId('settings-unsaved-indicator');
+        if (indicator) indicator.hidden = !settingsDirty;
     }
 
     function applyClaudeCodeStatus(payload = {}) {
@@ -257,6 +279,7 @@ export function initSettings({ state }) {
         if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
         currentSettings = data;
         applySettings(data);
+        setSettingsCleanBaseline();
         _renderNetworkHint(data._meta);
         renderClaudeCodeUi();
         settingsLoaded = true;
@@ -360,6 +383,14 @@ export function initSettings({ state }) {
         if (anthropicKeyConfigured()) {
             startClaudeCodePolling();
             refreshClaudeCodeStatus();
+        }
+    });
+
+    page.addEventListener('input', updateSettingsDirtyState);
+    page.addEventListener('change', updateSettingsDirtyState);
+    page.addEventListener('click', (event) => {
+        if (event.target.closest('[data-effort-value], .secret-clear')) {
+            queueMicrotask(updateSettingsDirtyState);
         }
     });
 

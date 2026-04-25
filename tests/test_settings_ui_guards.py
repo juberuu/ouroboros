@@ -109,3 +109,35 @@ class TestSettingsUiGuards(unittest.TestCase):
         self.assertIn("closeAll();", sources["settings_controls"])
         self.assertIn("closeAll(picker);", sources["settings_controls"])
         self.assertIn("broadcastCatalog(items);", sources["settings_catalog"])
+
+    def test_model_picker_selection_closes_without_reopening_from_synthetic_input(self):
+        source = self._read_settings_sources()["settings_controls"]
+        selection_handler = source.split("panel.addEventListener('mousedown'")[1].split("});", 1)[0]
+        self.assertIn("closePicker(picker);", selection_handler)
+        self.assertIn("new Event('change'", selection_handler)
+        self.assertNotIn("new Event('input'", selection_handler)
+
+    def test_settings_tracks_unsaved_changes_without_navigation_guard(self):
+        sources = self._read_settings_sources()
+        self.assertIn('id="settings-unsaved-indicator"', sources["settings_ui"])
+        self.assertIn(".settings-unsaved-indicator", (REPO / "web/settings.css").read_text(encoding="utf-8"))
+        self.assertIn("let settingsBaseline = '';", sources["settings"])
+        self.assertIn("function updateSettingsDirtyState()", sources["settings"])
+        self.assertIn("indicator.hidden = !settingsDirty;", sources["settings"])
+        self.assertIn("page.addEventListener('input', updateSettingsDirtyState);", sources["settings"])
+        self.assertIn("page.addEventListener('change', updateSettingsDirtyState);", sources["settings"])
+        self.assertIn("[data-effort-value], .secret-clear", sources["settings"])
+
+    def test_model_catalog_refresh_has_browser_timeout(self):
+        source = self._read_settings_sources()["settings_catalog"]
+        self.assertIn("MODEL_CATALOG_TIMEOUT_MS", source)
+        self.assertIn("new AbortController()", source)
+        self.assertIn("signal: controller.signal", source)
+        self.assertIn("AbortError", source)
+
+    def test_model_catalog_refresh_ignores_stale_responses(self):
+        source = self._read_settings_sources()["settings_catalog"]
+        self.assertIn("let catalogRefreshSeq = 0;", source)
+        self.assertIn("const refreshSeq = ++catalogRefreshSeq;", source)
+        self.assertIn("refreshSeq !== catalogRefreshSeq", source)
+        self.assertIn("stale: true", source)

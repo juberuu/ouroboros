@@ -111,6 +111,24 @@ def test_styles_cover_chat_header_controls_and_grouped_cards():
     assert re.search(r"\.chat-live-line-body\s*\{[^}]*font-size:\s*\d+px;", css, re.S)
 
 
+def test_chat_floating_overlays_have_readable_glass_backing():
+    css = _read("web/style.css")
+
+    header = re.search(r"\.chat-page-header\s*\{(?P<body>[^}]+)\}", css, re.S).group("body")
+    status = re.search(r"\.status-badge\s*\{(?P<body>[^}]+)\}", css, re.S).group("body")
+    input_area = re.search(r"#chat-input-area\s*\{(?P<body>[^}]+)\}", css, re.S).group("body")
+    attach = re.search(r"\.attach-badge\s*\{(?P<body>[^}]+)\}", css, re.S).group("body")
+
+    assert "backdrop-filter: blur(10px)" in header
+    assert "transparent 100%" not in header
+    assert "rgba(13, 11, 15, 0.32) 100%" in header
+    assert "backdrop-filter: blur(8px)" in status
+    assert "rgba(26, 21, 32, 0.78)" in status
+    assert "rgba(13, 11, 15, 0.26) 100%" in input_area
+    assert "backdrop-filter: blur(8px)" in attach
+    assert "rgba(26, 21, 32, 0.78)" in attach
+
+
 def test_chat_only_polls_state_when_active():
     chat_source = _read("web/modules/chat.js")
 
