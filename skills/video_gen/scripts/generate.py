@@ -2,8 +2,7 @@
 
 Submits a video generation job to the OpenRouter /api/v1/videos endpoint,
 polls for completion, downloads the result, and saves it as an MP4 file
-in the system temp directory (NOT in the skill directory — writing inside
-the skill directory would mutate the content hash and break the review gate).
+in the skill state directory (OUROBOROS_SKILL_STATE_DIR, injected by skill_exec).
 
 Only the standard library is used (no third-party packages) so every
 byte remains reviewable inside the skill pack.
@@ -18,8 +17,8 @@ Usage:
                [--out FILENAME]
 
 ``--out`` accepts a plain filename (no slashes). The file is written to
-the system temp directory. Absolute paths and directory traversal are
-rejected at argument-parse time.
+OUROBOROS_SKILL_STATE_DIR (the skill state directory injected by skill_exec).
+Absolute paths and directory traversal are rejected at argument-parse time.
 
 Exits 0 on success, 1 on error. Prints one JSON object to stdout.
 """
