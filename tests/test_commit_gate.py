@@ -346,11 +346,11 @@ def test_restore_to_head_blocks_safety_critical_full_restore():
 
 
 def test_also_stage_blocks_safety_critical():
-    """also_stage must not stage safety-critical files."""
+    """also_stage must check protected paths before staging."""
     git_mod = _get_git_module()
     source = inspect.getsource(git_mod._repo_write_commit)
-    assert "SAFETY_CRITICAL_PATHS" in source, (
-        "repo_write_commit must check also_stage paths against SAFETY_CRITICAL_PATHS"
+    assert "protected_paths_in" in source, (
+        "repo_write_commit must check also_stage paths against the shared protected path policy"
     )
 
 

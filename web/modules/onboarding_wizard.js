@@ -667,7 +667,7 @@
                                 ? 'Multiple direct providers are configured. Start here, then split model slots across them if you want.'
                                 : activeProviderProfile() === 'local'
                                     ? 'Local-only setup detected. Review the model values and local routing before launch.'
-                                    : 'OpenRouter-style routing remains active. Unprefixed provider IDs like openai/gpt-5.4 or anthropic/claude-sonnet-4.6 continue to route through OpenRouter.'
+                                    : 'OpenRouter-style routing remains active. Unprefixed provider IDs like openai/gpt-5.5 or anthropic/claude-sonnet-4.6 continue to route through OpenRouter.'
                 )}</p>
             </div>
             <div class="grid two">
@@ -692,7 +692,7 @@
                     <div class="field-note">Fallback and resilience path.</div>
                 </div>
             </div>
-            <div class="wizard-inline-note">Direct providers use <code>openai::gpt-5.4</code>, <code>cloudru::zai-org/GLM-4.7</code>, and <code>anthropic::claude-sonnet-4-6</code>. Plain <code>openai/...</code> or <code>anthropic/...</code> stays router-style by design.</div>
+            <div class="wizard-inline-note">Direct providers use <code>openai::gpt-5.5</code>, <code>cloudru::zai-org/GLM-4.7</code>, and <code>anthropic::claude-sonnet-4-6</code>. Plain <code>openai/...</code> or <code>anthropic/...</code> stays router-style by design.</div>
             <datalist id="model-suggestions">${suggestionOptions}</datalist>
         `;
     }
@@ -730,12 +730,12 @@
                     <button type="button" class="wizard-choice advanced ${runtimeMode === 'advanced' ? 'active' : ''}" data-runtime-mode="advanced">
                         <span class="tone">Default</span>
                         <h3>Advanced</h3>
-                        <p>Self-modification of the evolutionary layer is allowed (current behaviour). Core/safety-critical files stay protected.</p>
+                        <p>Self-modification of the evolutionary layer is allowed (current behaviour). Protected core/contract/release files stay guarded by Advanced mode.</p>
                     </button>
                     <button type="button" class="wizard-choice pro ${runtimeMode === 'pro' ? 'active' : ''}" data-runtime-mode="pro">
                         <span class="tone">Power</span>
                         <h3>Pro</h3>
-                        <p>Reserved for a future core-patch lane. Today it is accepted as a forward-compatible value but behaves the same as Advanced.</p>
+                        <p>Direct core-patch mode. Protected core/contract/release edits require the extra core-patch review gate before commit.</p>
                     </button>
                 </div>
                 <div class="field">

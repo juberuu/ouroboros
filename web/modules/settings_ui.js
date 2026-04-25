@@ -114,7 +114,7 @@ export function renderSettingsPage() {
                                 label: 'OpenAI API Key',
                                 placeholder: 'sk-...',
                             })}</div>
-                            <div class="settings-inline-note">Use model values like <code>openai::gpt-5.4</code> in the Models tab to route models directly here. If OpenRouter is absent and the shipped defaults are still untouched, Ouroboros auto-remaps them to official OpenAI defaults.</div>
+                            <div class="settings-inline-note">Use model values like <code>openai::gpt-5.5</code> in the Models tab to route models directly here. If OpenRouter is absent and the shipped defaults are still untouched, Ouroboros auto-remaps them to official OpenAI defaults.</div>
                         `,
                     })}
                     ${providerCard({
@@ -240,7 +240,7 @@ export function renderSettingsPage() {
                         <div class="form-grid two">
                             <div class="form-field">
                                 <label>Scope Review Model</label>
-                                <input id="s-scope-review-model" placeholder="anthropic/claude-opus-4.6">
+                                <input id="s-scope-review-model" placeholder="openai/gpt-5.5">
                                 <div class="settings-inline-note">Single model for the blocking scope reviewer. Runs in parallel with the triad diff review.</div>
                             </div>
                             <div class="form-field">
@@ -283,8 +283,8 @@ export function renderSettingsPage() {
                         <div class="settings-section-copy">
                             Separate axis from Review Enforcement. Controls how far Ouroboros is allowed to self-modify.
                             <code>Light</code> blanket-blocks every repo-mutation tool (<code>repo_write</code>, <code>skill_exec</code>, <code>run_shell</code> mutation patterns, …).
-                            <code>Advanced</code> is the default — self-modify the evolutionary layer; safety-critical files stay protected by the hardcoded sandbox.
-                            <code>Pro</code> is accepted as a forward-compatible value but currently behaves identically to Advanced; the core-patch lane requires plumbing through additional enforcement layers (deferred past Phase 6).
+                            <code>Advanced</code> is the default — self-modify the evolutionary layer; protected core/contract/release files stay guarded by the shared runtime-mode policy.
+                            <code>Pro</code> can edit protected core/contract/release surfaces only through the extra core-patch review gate; Advanced remains limited to the evolutionary layer.
                         </div>
                         <div class="settings-effort-card">
                             <label>Runtime Mode</label>

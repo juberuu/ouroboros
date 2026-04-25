@@ -166,14 +166,14 @@ def test_extract_actor_findings_reads_flat_text_field():
     not ``choices[0].message.content``."""
     result_json = {
         "results": [
-            _make_actor("openai/gpt-5.4", _pass_array_for_script_skill()),
+            _make_actor("openai/gpt-5.5", _pass_array_for_script_skill()),
             _make_actor("google/gemini-3.1-pro-preview", _pass_array_for_script_skill()),
         ]
     }
     findings, responded = _extract_actor_findings(result_json)
     assert len(findings) == 14
     assert set(responded) == {
-        "openai/gpt-5.4",
+        "openai/gpt-5.5",
         "google/gemini-3.1-pro-preview",
     }
     assert all(f["verdict"] == "PASS" for f in findings)
@@ -183,7 +183,7 @@ def test_extract_actor_findings_skips_error_verdict_actors():
     """Transport errors (verdict=ERROR) must not contribute fake findings."""
     result_json = {
         "results": [
-            _make_actor("openai/gpt-5.4", _pass_array_for_script_skill()),
+            _make_actor("openai/gpt-5.5", _pass_array_for_script_skill()),
             {
                 "model": "google/gemini-3.1-pro-preview",
                 "request_model": "google/gemini-3.1-pro-preview",
@@ -195,8 +195,8 @@ def test_extract_actor_findings_skips_error_verdict_actors():
         ]
     }
     findings, responded = _extract_actor_findings(result_json)
-    assert all(f["model"] == "openai/gpt-5.4" for f in findings)
-    assert responded == ["openai/gpt-5.4"]
+    assert all(f["model"] == "openai/gpt-5.5" for f in findings)
+    assert responded == ["openai/gpt-5.5"]
 
 
 def test_extract_actor_findings_rejects_partial_responses():
@@ -214,16 +214,16 @@ def test_extract_actor_findings_rejects_partial_responses():
     )
     result_json = {
         "results": [
-            _make_actor("openai/gpt-5.4", _pass_array_for_script_skill()),
+            _make_actor("openai/gpt-5.5", _pass_array_for_script_skill()),
             _make_actor("google/gemini-3.1-pro-preview", partial_text),
         ]
     }
     findings, responded = _extract_actor_findings(result_json)
     # Partial reviewer must be excluded from both findings and responded set.
     assert "google/gemini-3.1-pro-preview" not in responded
-    assert set(responded) == {"openai/gpt-5.4"}
+    assert set(responded) == {"openai/gpt-5.5"}
     for f in findings:
-        assert f["model"] == "openai/gpt-5.4"
+        assert f["model"] == "openai/gpt-5.5"
 
 
 # ---------------------------------------------------------------------------
@@ -276,7 +276,7 @@ def test_review_skill_persists_pass_verdict(tmp_path, monkeypatch):
     canned = json.dumps(
         {
             "results": [
-                _make_actor("openai/gpt-5.4", pass_array),
+                _make_actor("openai/gpt-5.5", pass_array),
                 _make_actor("google/gemini-3.1-pro-preview", pass_array),
                 _make_actor("anthropic/claude-opus-4.6", pass_array),
             ]
@@ -289,7 +289,7 @@ def test_review_skill_persists_pass_verdict(tmp_path, monkeypatch):
     assert outcome.status == "pass"
     assert outcome.error == ""
     assert set(outcome.reviewer_models) >= {
-        "openai/gpt-5.4",
+        "openai/gpt-5.5",
         "google/gemini-3.1-pro-preview",
     }
     persisted = load_review_state(ctx.drive_root, "weather")
@@ -308,7 +308,7 @@ def test_review_skill_returns_fail_on_critical_finding(tmp_path, monkeypatch):
     canned = json.dumps(
         {
             "results": [
-                _make_actor("openai/gpt-5.4", _fail_array_on_manifest()),
+                _make_actor("openai/gpt-5.5", _fail_array_on_manifest()),
                 _make_actor("google/gemini-3.1-pro-preview", _fail_array_on_manifest()),
                 _make_actor("anthropic/claude-opus-4.6", _fail_array_on_manifest()),
             ]
@@ -328,7 +328,7 @@ def test_review_skill_returns_advisory_for_soft_only_fail(tmp_path, monkeypatch)
     canned = json.dumps(
         {
             "results": [
-                _make_actor("openai/gpt-5.4", _advisory_only_array()),
+                _make_actor("openai/gpt-5.5", _advisory_only_array()),
                 _make_actor("google/gemini-3.1-pro-preview", _advisory_only_array()),
                 _make_actor("anthropic/claude-opus-4.6", _advisory_only_array()),
             ]
@@ -347,7 +347,7 @@ def test_review_skill_quorum_failure_on_one_responder(tmp_path, monkeypatch):
     canned = json.dumps(
         {
             "results": [
-                _make_actor("openai/gpt-5.4", _pass_array_for_script_skill()),
+                _make_actor("openai/gpt-5.5", _pass_array_for_script_skill()),
                 {
                     "model": "google/gemini-3.1-pro-preview",
                     "request_model": "google/gemini-3.1-pro-preview",
@@ -595,7 +595,7 @@ def test_review_skill_prompt_loads_core_governance_artifacts(tmp_path, monkeypat
         return json.dumps(
             {
                 "results": [
-                    _make_actor("openai/gpt-5.4", _pass_array_for_script_skill()),
+                    _make_actor("openai/gpt-5.5", _pass_array_for_script_skill()),
                     _make_actor("google/gemini-3.1-pro-preview", _pass_array_for_script_skill()),
                 ]
             }
@@ -631,7 +631,7 @@ def test_review_skill_persist_false_does_not_write(tmp_path, monkeypatch):
     canned = json.dumps(
         {
             "results": [
-                _make_actor("openai/gpt-5.4", pass_array),
+                _make_actor("openai/gpt-5.5", pass_array),
                 _make_actor("google/gemini-3.1-pro-preview", pass_array),
             ]
         }

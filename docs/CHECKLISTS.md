@@ -231,7 +231,7 @@ mismatch as **critical**, the mismatch MUST live in one of these categories:
 
 - Wording of explanatory comments that is imprecise but does not misstate
   runtime behaviour of the feature (e.g. comment says "Claude Opus 4.6"
-  when the resolved model is `openai/gpt-5.4-pro`; the comment is stale but
+  when the resolved model is `openai/gpt-5.5-pro`; the comment is stale but
   the runtime is fine — advisory).
 - Stylistic inconsistency between changelog entries, commit-message wording
   that doesn't literally match the code in every respect, descriptive prose

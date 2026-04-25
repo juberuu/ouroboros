@@ -502,6 +502,20 @@ def _create_rescue_snapshot(branch: str, reason: str,
     return info
 
 
+def _rescue_untracked_incomplete(rescue_info: Dict[str, Any]) -> str:
+    """Return a human-readable reason when untracked rescue capture is incomplete."""
+    meta = rescue_info.get("untracked")
+    if not isinstance(meta, dict):
+        return ""
+    if meta.get("error"):
+        return str(meta.get("error"))
+    if meta.get("truncated"):
+        return "untracked rescue copy was truncated"
+    if int(meta.get("skipped_files") or 0) > 0:
+        return f"{int(meta.get('skipped_files') or 0)} untracked file(s) were skipped"
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Checkout + reset
 # ---------------------------------------------------------------------------
@@ -546,6 +560,12 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
         dirty_lines = list(repo_state.get("dirty_lines") or [])
         unpushed_lines = list(repo_state.get("unpushed_lines") or [])
         if dirty_lines or unpushed_lines:
+            bits: List[str] = []
+            if unpushed_lines:
+                bits.append(f"unpushed={len(unpushed_lines)}")
+            if dirty_lines:
+                bits.append(f"dirty={len(dirty_lines)}")
+            detail = ", ".join(bits) if bits else "unsynced"
             rescue_info: Dict[str, Any] = {}
             if policy in {"rescue_and_block", "rescue_and_reset"}:
                 try:
@@ -553,12 +573,70 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
                         branch=branch, reason=reason, repo_state=repo_state)
                 except Exception as e:
                     rescue_info = {"error": repr(e)}
-            bits: List[str] = []
-            if unpushed_lines:
-                bits.append(f"unpushed={len(unpushed_lines)}")
-            if dirty_lines:
-                bits.append(f"dirty={len(dirty_lines)}")
-            detail = ", ".join(bits) if bits else "unsynced"
+                if policy == "rescue_and_reset" and rescue_info.get("error"):
+                    msg = (
+                        f"Reset blocked ({detail}) because rescue snapshot failed: "
+                        f"{rescue_info.get('error')}. Local changes were left untouched."
+                    )
+                    append_jsonl(
+                        DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                        {
+                            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                            "type": "reset_blocked_rescue_failed",
+                            "target_branch": branch, "reason": reason, "policy": policy,
+                            "current_branch": repo_state.get("current_branch"),
+                            "dirty_count": len(dirty_lines),
+                            "unpushed_count": len(unpushed_lines),
+                            "dirty_preview": dirty_lines[:20],
+                            "unpushed_preview": unpushed_lines[:20],
+                            "warnings": list(repo_state.get("warnings") or []),
+                            "rescue": rescue_info,
+                        },
+                    )
+                    return False, msg
+                if policy == "rescue_and_reset" and rescue_info.get("diff_error"):
+                    msg = (
+                        f"Reset blocked ({detail}) because rescue diff capture failed: "
+                        f"{rescue_info.get('diff_error')}. Local changes were left untouched."
+                    )
+                    append_jsonl(
+                        DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                        {
+                            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                            "type": "reset_blocked_rescue_incomplete",
+                            "target_branch": branch, "reason": reason, "policy": policy,
+                            "current_branch": repo_state.get("current_branch"),
+                            "dirty_count": len(dirty_lines),
+                            "unpushed_count": len(unpushed_lines),
+                            "dirty_preview": dirty_lines[:20],
+                            "unpushed_preview": unpushed_lines[:20],
+                            "warnings": list(repo_state.get("warnings") or []),
+                            "rescue": rescue_info,
+                        },
+                    )
+                    return False, msg
+                untracked_rescue_error = _rescue_untracked_incomplete(rescue_info)
+                if policy == "rescue_and_reset" and untracked_rescue_error:
+                    msg = (
+                        f"Reset blocked ({detail}) because untracked-file rescue was incomplete: "
+                        f"{untracked_rescue_error}. Local changes were left untouched."
+                    )
+                    append_jsonl(
+                        DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                        {
+                            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                            "type": "reset_blocked_rescue_incomplete",
+                            "target_branch": branch, "reason": reason, "policy": policy,
+                            "current_branch": repo_state.get("current_branch"),
+                            "dirty_count": len(dirty_lines),
+                            "unpushed_count": len(unpushed_lines),
+                            "dirty_preview": dirty_lines[:20],
+                            "unpushed_preview": unpushed_lines[:20],
+                            "warnings": list(repo_state.get("warnings") or []),
+                            "rescue": rescue_info,
+                        },
+                    )
+                    return False, msg
             rescue_suffix = ""
             rescue_path = str(rescue_info.get("path") or "").strip()
             if rescue_path:

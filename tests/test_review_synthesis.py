@@ -263,13 +263,13 @@ class TestEmitSynthesisUsage:
         """When usage contains resolved_model and provider, those override the configured model."""
         usage = {
             "prompt_tokens": 100, "completion_tokens": 50, "cost": 0.001,
-            "resolved_model": "openai::gpt-5.4-mini",
+            "resolved_model": "openai::gpt-5.5-mini",
             "provider": "openai",
         }
         events = self._emit(usage, model="anthropic/claude-sonnet-4.6")
         assert len(events) == 1
         ev = events[0]
-        assert ev["model"] == "openai::gpt-5.4-mini"
+        assert ev["model"] == "openai::gpt-5.5-mini"
         assert ev["provider"] == "openai"
 
     def test_fallback_to_configured_model_when_no_resolved(self):

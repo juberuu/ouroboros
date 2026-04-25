@@ -363,7 +363,7 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
     """Delegate code edits via the Claude Agent SDK gateway.
 
     Uses the claude-agent-sdk Python package with PreToolUse safety hooks
-    that block writes outside cwd and to safety-critical files.
+    that block writes outside cwd and to protected runtime paths.
     """
     from ouroboros.tools.git import _acquire_git_lock, _release_git_lock
 

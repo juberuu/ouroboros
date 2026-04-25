@@ -331,7 +331,7 @@ def test_review_state_round_trip(tmp_path):
         status="pass",
         content_hash="abcd",
         findings=[{"item": "manifest_schema", "verdict": "PASS", "severity": "critical", "reason": "ok"}],
-        reviewer_models=["openai/gpt-5.4"],
+        reviewer_models=["openai/gpt-5.5"],
         timestamp="2026-04-21T00:00:00+00:00",
         prompt_chars=1234,
         cost_usd=0.5,
@@ -340,7 +340,7 @@ def test_review_state_round_trip(tmp_path):
     reloaded = load_review_state(drive_root, "x")
     assert reloaded.status == "pass"
     assert reloaded.content_hash == "abcd"
-    assert reloaded.reviewer_models == ["openai/gpt-5.4"]
+    assert reloaded.reviewer_models == ["openai/gpt-5.5"]
     assert reloaded.prompt_chars == 1234
 
 

@@ -170,7 +170,7 @@ def test_chat_async_no_proxy_non_anthropic_uses_httpx_async_client():
 
     client = LLMClient(api_key="test-or-key")
     messages = [{"role": "user", "content": "hello"}]
-    model = "openai/gpt-5.4"
+    model = "openai/gpt-5.5"
 
     captured_httpx_kwargs = []
 
@@ -270,7 +270,7 @@ def test_plan_review_query_reviewer_uses_no_proxy():
     result = _asyncio.run(
         plan_review._query_reviewer(
             FakeLLMClient(),
-            "openai/gpt-5.4",
+            "openai/gpt-5.5",
             "system prompt",
             "user content",
             _asyncio.Semaphore(1),
@@ -315,7 +315,7 @@ def test_review_query_model_uses_no_proxy():
     asyncio.run(
         review_mod._query_model(
             FakeLLMClient(),
-            "openai/gpt-5.4",
+            "openai/gpt-5.5",
             messages,
             asyncio.Semaphore(1),
         )

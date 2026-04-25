@@ -116,6 +116,24 @@ class TestFullRepoPack:
         assert any("huge.py" in o for o in omitted)
         assert "small.py" in pack
 
+    def test_full_repo_pack_redacts_inline_secrets(self, tmp_path):
+        import subprocess
+        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
+        (tmp_path / "settings.py").write_text(
+            "OPENAI_API_KEY = 'sk-test-1234567890'\n",
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "add", "settings.py"], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=T", "commit", "-m", "init"],
+            cwd=str(tmp_path), capture_output=True,
+        )
+        mod = _get_module("ouroboros.tools.review_helpers")
+        pack, omitted = mod.build_full_repo_pack(tmp_path)
+        assert "sk-test-1234567890" not in pack
+        assert "***REDACTED***" in pack
+        assert omitted == []
+
 
 class TestIsProbablyBinary:
     """Unit tests for _is_probably_binary heuristic."""

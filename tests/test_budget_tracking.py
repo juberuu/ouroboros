@@ -90,7 +90,7 @@ class TestPlanReviewUsageEmit:
 
     def _make_raw_results(self):
         return [
-            {"model": "openai/gpt-5.4", "tokens_in": 100, "tokens_out": 50, "error": None},
+            {"model": "openai/gpt-5.5", "tokens_in": 100, "tokens_out": 50, "error": None},
             {"model": "google/gemini-3.1-pro", "tokens_in": 120, "tokens_out": 60, "error": None},
             {"model": "anthropic/claude-opus-4.6", "tokens_in": 90, "tokens_out": 40, "error": None},
         ]
@@ -148,7 +148,7 @@ class TestPlanReviewUsageEmit:
         fn = self._get_fn()
         ctx = _FakeCtx()
         results = [
-            {"model": "openai/gpt-5.4", "tokens_in": 1000, "tokens_out": 200,
+            {"model": "openai/gpt-5.5", "tokens_in": 1000, "tokens_out": 200,
              "cost": 6.50, "error": None},
         ]
         fn(ctx, results)
@@ -172,7 +172,7 @@ class TestProviderAttributionHelper:
         assert self._get_fn()("anthropic::claude-opus-4.6") == "anthropic"
 
     def test_openai_prefix(self):
-        assert self._get_fn()("openai::gpt-5.4") == "openai"
+        assert self._get_fn()("openai::gpt-5.5") == "openai"
 
     def test_openai_compatible_prefix(self):
         assert self._get_fn()("openai-compatible::my-model") == "openai-compatible"
@@ -199,7 +199,7 @@ class TestPlanReviewProviderAttribution:
 
     @pytest.mark.parametrize("model,expected_provider", [
         ("anthropic::claude-opus-4.6", "anthropic"),
-        ("openai::gpt-5.4", "openai"),
+        ("openai::gpt-5.5", "openai"),
         ("openai-compatible::my-model", "openai-compatible"),
         ("cloudru::GigaChat-2-Max", "cloudru"),
         ("anthropic/claude-opus-4.6", "openrouter"),  # unprefixed → OpenRouter
@@ -223,7 +223,7 @@ class TestScopeReviewProviderAttribution:
 
     @pytest.mark.parametrize("model,expected_provider", [
         ("anthropic::claude-opus-4.6", "anthropic"),
-        ("openai::gpt-5.4", "openai"),
+        ("openai::gpt-5.5", "openai"),
         ("anthropic/claude-opus-4.6", "openrouter"),
     ])
     def test_provider_per_model_prefix(self, model, expected_provider):
@@ -244,7 +244,7 @@ class TestAdvisoryFallbackProviderAttribution:
 
     @pytest.mark.parametrize("model,expected_provider", [
         ("anthropic::claude-3-5-sonnet", "anthropic"),
-        ("openai::gpt-5.4-mini", "openai"),
+        ("openai::gpt-5.5-mini", "openai"),
         ("anthropic/claude-sonnet-4.6", "openrouter"),  # un-prefixed → openrouter
     ])
     def test_provider_kwarg_propagated(self, model, expected_provider):

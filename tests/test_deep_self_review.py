@@ -99,7 +99,7 @@ class TestIsReviewAvailable:
         with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test"}, clear=False):
             available, model = is_review_available()
         assert available is True
-        assert model == "openai/gpt-5.4-pro"
+        assert model == "openai/gpt-5.5-pro"
 
     def test_openai(self):
         env = {"OPENAI_API_KEY": "sk-test"}
@@ -109,7 +109,7 @@ class TestIsReviewAvailable:
             os.environ.pop("OPENAI_BASE_URL", None)
             available, model = is_review_available()
         assert available is True
-        assert model == "openai::gpt-5.4-pro"
+        assert model == "openai::gpt-5.5-pro"
 
     def test_none(self):
         with mock.patch.dict(os.environ, {}, clear=True):
@@ -129,14 +129,14 @@ class TestRequestToolEmitsEvent:
         ctx = FakeCtx()
         with mock.patch(
             "ouroboros.deep_self_review.is_review_available",
-            return_value=(True, "openai/gpt-5.4-pro"),
+            return_value=(True, "openai/gpt-5.5-pro"),
         ):
             result = _request_deep_self_review(ctx, "test reason")
         assert len(ctx.pending_events) == 1
         evt = ctx.pending_events[0]
         assert evt["type"] == "deep_self_review_request"
         assert evt["reason"] == "test reason"
-        assert evt["model"] == "openai/gpt-5.4-pro"
+        assert evt["model"] == "openai/gpt-5.5-pro"
         assert "Deep self-review" in result
 
     def test_unavailable_returns_error(self):
@@ -399,7 +399,7 @@ class TestNoProxyLlmChat:
                 with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test"}, clear=False):
                     llm.chat(
                         messages=[{"role": "user", "content": "hi"}],
-                        model="openai/gpt-5.4-pro",
+                        model="openai/gpt-5.5-pro",
                         no_proxy=True,
                     )
 
@@ -438,7 +438,7 @@ class TestNoProxyLlmChat:
                 with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test"}, clear=False):
                     llm.chat(
                         messages=[{"role": "user", "content": "hi"}],
-                        model="openai/gpt-5.4-pro",
+                        model="openai/gpt-5.5-pro",
                         no_proxy=True,
                     )
 
@@ -469,7 +469,7 @@ class TestNoProxyLlmChat:
                     with pytest.raises(RuntimeError, match="boom"):
                         llm.chat(
                             messages=[{"role": "user", "content": "hi"}],
-                            model="openai/gpt-5.4-pro",
+                            model="openai/gpt-5.5-pro",
                             no_proxy=True,
                         )
 
@@ -498,7 +498,7 @@ class TestNoProxyLlmChat:
                     with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test"}, clear=False):
                         llm.chat(
                             messages=[{"role": "user", "content": "hi"}],
-                            model="openai/gpt-5.4-pro",
+                            model="openai/gpt-5.5-pro",
                             no_proxy=True,
                         )
                     mock_cost.assert_not_called()
@@ -531,7 +531,7 @@ class TestNoProxyLlmChat:
                     mock_get.return_value = mock_oa
                     llm.chat(
                         messages=[{"role": "user", "content": "hi"}],
-                        model="openai/gpt-5.4-pro",
+                        model="openai/gpt-5.5-pro",
                         no_proxy=False,
                     )
                     mock_get.assert_called_once()
@@ -556,7 +556,7 @@ class TestNoProxyLlmChat:
                 llm=mock_llm,
                 emit_progress=lambda x: None,
                 event_queue=None,
-                model="openai/gpt-5.4-pro",
+                model="openai/gpt-5.5-pro",
             )
 
         assert result == "Review result."

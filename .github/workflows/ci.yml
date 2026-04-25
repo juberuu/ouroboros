@@ -1,6 +1,6 @@
 # Ouroboros CI — Three-tier cross-platform testing and release pipeline
 #
-# Tier 1: Every push to ouroboros (code paths) → Ubuntu-only tests (~1 min)
+# Tier 1: Every push to ouroboros / ouroboros-three-layer (code paths) → Ubuntu-only tests (~1 min)
 # Tier 2: Push to ouroboros-stable / manual / tag → Full 3-OS matrix (~5 min)
 # Tier 3: Tag v* → Full matrix + build artifacts + GitHub Release (~15 min)
 
@@ -10,7 +10,7 @@ name: CI
 # This ensures tag pushes always fire (even if only VERSION/README changed).
 on:
   push:
-    branches: [ouroboros, ouroboros-stable]
+    branches: [ouroboros, ouroboros-three-layer, ouroboros-stable]
     paths:
       - 'ouroboros/**'
       - 'supervisor/**'
@@ -37,10 +37,15 @@ on:
 
 jobs:
   # ──────────────────────────────────────────────────────────────────
-  # Tier 1: Quick tests on Ubuntu (every push to ouroboros)
+  # Tier 1: Quick tests on Ubuntu (every push to ouroboros / ouroboros-three-layer)
   # ──────────────────────────────────────────────────────────────────
   quick-test:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/ouroboros'
+    if: |
+      github.event_name == 'push'
+      && (
+        github.ref == 'refs/heads/ouroboros'
+        || github.ref == 'refs/heads/ouroboros-three-layer'
+      )
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -126,6 +126,26 @@ def _normalize_direct_review_models(settings: dict, provider: str) -> str:
     return _serialize_model_list(migrated_models)
 
 
+def _normalize_direct_scope_review_model(settings: dict, provider: str) -> str:
+    current_raw = _setting_text(settings, "OUROBOROS_SCOPE_REVIEW_MODEL")
+    default_raw = _setting_text(SETTINGS_DEFAULTS, "OUROBOROS_SCOPE_REVIEW_MODEL")
+    current = migrate_model_value(provider, current_raw) if current_raw else ""
+    default = migrate_model_value(provider, default_raw) if default_raw else ""
+    provider_prefix = _provider_prefix(provider)
+    if current.startswith(provider_prefix) and current_raw:
+        return current
+    if provider == "openai":
+        auto_value = migrate_model_value(provider, default_raw or "openai/gpt-5.5")
+    else:
+        auto_value = migrate_model_value(
+            provider,
+            _DIRECT_PROVIDER_AUTO_DEFAULTS.get(provider, {}).get("OUROBOROS_MODEL", ""),
+        )
+    if current_raw in {"", default_raw} or current in {"", default}:
+        return auto_value
+    return current or auto_value
+
+
 def classify_runtime_provider_change(before: dict, after: dict) -> str:
     """Classify what kind of normalization ``apply_runtime_provider_defaults`` did.
 
@@ -214,6 +234,11 @@ def apply_runtime_provider_defaults(settings: dict) -> tuple[dict, bool, list[st
     if review_models != _setting_text(normalized, "OUROBOROS_REVIEW_MODELS"):
         normalized["OUROBOROS_REVIEW_MODELS"] = review_models
         changed_keys.append("OUROBOROS_REVIEW_MODELS")
+
+    scope_review_model = _normalize_direct_scope_review_model(normalized, provider)
+    if scope_review_model != _setting_text(normalized, "OUROBOROS_SCOPE_REVIEW_MODEL"):
+        normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] = scope_review_model
+        changed_keys.append("OUROBOROS_SCOPE_REVIEW_MODEL")
 
     return normalized, bool(changed_keys), changed_keys
 

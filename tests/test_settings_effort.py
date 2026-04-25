@@ -115,7 +115,7 @@ def test_get_review_models_falls_back_to_main_light_light_in_openai_only_mode(mo
     2 unique) instead of the legacy [main]*N so both commit triad and
     plan_task have a quorum-safe reviewer list out of the box. The light slot
     picks up the provider default (OPENAI_DIRECT_DEFAULTS['light'] =
-    openai::gpt-5.4-mini) when OUROBOROS_MODEL_LIGHT is not explicitly set."""
+    openai::gpt-5.5-mini) when OUROBOROS_MODEL_LIGHT is not explicitly set."""
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
@@ -123,18 +123,18 @@ def test_get_review_models_falls_back_to_main_light_light_in_openai_only_mode(mo
     monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
     monkeypatch.delenv("CLOUDRU_FOUNDATION_MODELS_API_KEY", raising=False)
     monkeypatch.delenv("OUROBOROS_MODEL_LIGHT", raising=False)
-    monkeypatch.setenv("OUROBOROS_MODEL", "openai::gpt-5.4")
+    monkeypatch.setenv("OUROBOROS_MODEL", "openai::gpt-5.5")
     monkeypatch.setenv(
         "OUROBOROS_REVIEW_MODELS",
-        "openai/gpt-5.4,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.6",
+        "openai/gpt-5.5,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.6",
     )
 
     models = get_review_models()
 
     assert models == [
-        "openai::gpt-5.4",
-        "openai::gpt-5.4-mini",
-        "openai::gpt-5.4-mini",
+        "openai::gpt-5.5",
+        "openai::gpt-5.5-mini",
+        "openai::gpt-5.5-mini",
     ]
 
 
@@ -145,12 +145,12 @@ def test_get_review_models_preserves_explicit_official_openai_list(monkeypatch):
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
     monkeypatch.delenv("CLOUDRU_FOUNDATION_MODELS_API_KEY", raising=False)
-    monkeypatch.setenv("OUROBOROS_MODEL", "openai::gpt-5.4")
-    monkeypatch.setenv("OUROBOROS_REVIEW_MODELS", "openai/gpt-5.4,openai/gpt-4.1")
+    monkeypatch.setenv("OUROBOROS_MODEL", "openai::gpt-5.5")
+    monkeypatch.setenv("OUROBOROS_REVIEW_MODELS", "openai/gpt-5.5,openai/gpt-4.1")
 
     models = get_review_models()
 
-    assert models == ["openai::gpt-5.4", "openai::gpt-4.1"]
+    assert models == ["openai::gpt-5.5", "openai::gpt-4.1"]
 
 
 def test_get_review_models_falls_back_to_main_light_light_in_anthropic_only_mode(monkeypatch):
@@ -167,7 +167,7 @@ def test_get_review_models_falls_back_to_main_light_light_in_anthropic_only_mode
     monkeypatch.setenv("OUROBOROS_MODEL", "anthropic::claude-opus-4-6")
     monkeypatch.setenv(
         "OUROBOROS_REVIEW_MODELS",
-        "openai/gpt-5.4,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.6",
+        "openai/gpt-5.5,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.6",
     )
 
     models = get_review_models()

@@ -110,7 +110,7 @@ class TestPlanReviewerQuorum(unittest.IsolatedAsyncioTestCase):
     async def test_three_unique_models_proceeds(self):
         """The default shipped config (3 distinct OpenRouter models) must pass."""
         result = await self._run_with_models([
-            "openai/gpt-5.4",
+            "openai/gpt-5.5",
             "google/gemini-3.1-pro-preview",
             "anthropic/claude-opus-4.7",
         ])
@@ -306,7 +306,7 @@ class TestQuorumWithRealEnvVar(unittest.IsolatedAsyncioTestCase):
     async def test_three_unique_env_models_pass_quorum_gate(self):
         """Shipped default: 3 distinct OpenRouter models via env must pass."""
         result = await self._run_with_env(
-            "openai/gpt-5.4,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.7"
+            "openai/gpt-5.5,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.7"
         )
         self.assertNotIn("at least 2 unique reviewer models", result)
         self.assertNotIn("duplicate reviewer models", result)
@@ -351,7 +351,7 @@ class TestDirectProviderFallbackAccepted(unittest.IsolatedAsyncioTestCase):
         # to `[main, light, light]`.
         env = {
             "OUROBOROS_REVIEW_MODELS": (
-                "openai/gpt-5.4,google/gemini-3.1-pro-preview,"
+                "openai/gpt-5.5,google/gemini-3.1-pro-preview,"
                 "anthropic/claude-opus-4.7"
             ),
             "OUROBOROS_MODEL": "anthropic::claude-opus-4-7",
@@ -477,7 +477,7 @@ class TestDirectProviderFallbackAccepted(unittest.IsolatedAsyncioTestCase):
         ctx = _make_ctx()
 
         env = {
-            "OUROBOROS_REVIEW_MODELS": "openai/gpt-5.4,openai/gpt-5.4,anthropic/claude-opus-4.7",
+            "OUROBOROS_REVIEW_MODELS": "openai/gpt-5.5,openai/gpt-5.5,anthropic/claude-opus-4.7",
             "OPENROUTER_API_KEY": "sk-or-test",
             "OPENAI_API_KEY": "",
             "ANTHROPIC_API_KEY": "",
@@ -486,10 +486,10 @@ class TestDirectProviderFallbackAccepted(unittest.IsolatedAsyncioTestCase):
         with (
             patch.dict(_os.environ, env, clear=False),
             patch.object(_cfg, "get_review_models",
-                         return_value=["openai/gpt-5.4", "openai/gpt-5.4",
+                         return_value=["openai/gpt-5.5", "openai/gpt-5.5",
                                        "anthropic/claude-opus-4.7"]),
             patch.object(pr, "_get_review_models",
-                         return_value=["openai/gpt-5.4", "openai/gpt-5.4",
+                         return_value=["openai/gpt-5.5", "openai/gpt-5.5",
                                        "anthropic/claude-opus-4.7"]),
             patch.object(pr, "_load_plan_checklist", return_value="checklist"),
             patch.object(pr, "_load_bible", return_value=""),

@@ -16,9 +16,9 @@ enough not to hurt normal development (single light-model call).
 
 Defense in depth (unchanged, lives elsewhere):
   - Hardcoded sandbox in ouroboros/tools/registry.py runs BEFORE this
-    module and blocks SAFETY_CRITICAL_PATHS writes, mutative git via shell,
-    and GitHub repo/auth manipulation.
-  - claude_code_edit post-execution revert of safety-critical files.
+    module and blocks protected runtime paths (safety-critical, frozen contracts,
+    release invariants), mutative git via shell, and GitHub repo/auth manipulation.
+  - claude_code_edit post-execution revert/non-pro guard for protected paths.
   - Pre-commit triad + scope review (review.py, scope_review.py).
 
 Returns:

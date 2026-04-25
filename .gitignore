@@ -50,6 +50,7 @@ repo_bundle_manifest.json
 .review_phase_1.py
 .final_combined_review.py
 .review_*.py
+/.review-drive/
 
 # Accidentally vendored site-packages fragments — guard against recurrence of the
 # pre-rc.7 "dump site-packages into the source tree" bug (see Version History

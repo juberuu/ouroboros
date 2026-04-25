@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 OPENAI_DIRECT_DEFAULTS = {
-    "main": "openai::gpt-5.4",
-    "code": "openai::gpt-5.4",
-    "light": "openai::gpt-5.4-mini",
-    "fallback": "openai::gpt-5.4-mini",
+    "main": "openai::gpt-5.5",
+    "code": "openai::gpt-5.5",
+    "light": "openai::gpt-5.5-mini",
+    "fallback": "openai::gpt-5.5-mini",
 }
 
 CLOUDRU_DIRECT_DEFAULTS = {

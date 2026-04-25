@@ -82,7 +82,7 @@ def test_architecture_doc_describes_build_script_release_tag_check():
 
 def test_system_prompt_lists_bible_in_safety_critical_set():
     """prompts/SYSTEM.md ``Immutable Safety Files`` section must match
-    ``ouroboros/tools/registry.py::SAFETY_CRITICAL_PATHS`` — including
+    ``ouroboros.runtime_mode_policy.SAFETY_CRITICAL_PATHS`` — including
     ``BIBLE.md``, which is protected by the hardcoded sandbox."""
     system_md = (REPO / "prompts" / "SYSTEM.md").read_text(encoding="utf-8")
 

@@ -134,6 +134,102 @@ def test_checkout_and_reset_continues_when_fetch_fails(monkeypatch, tmp_path):
     assert events[0]["continuing_local_reset"] is True
 
 
+def test_checkout_and_reset_blocks_when_rescue_snapshot_fails(monkeypatch, tmp_path):
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+
+    monkeypatch.setattr(git_ops, "REPO_DIR", tmp_path)
+    monkeypatch.setattr(git_ops, "DRIVE_ROOT", tmp_path / "data")
+    monkeypatch.setattr(git_ops, "_has_remote", lambda name=None: False)
+    monkeypatch.setattr(git_ops, "load_state", lambda: {})
+    monkeypatch.setattr(
+        git_ops,
+        "_collect_repo_sync_state",
+        lambda: {
+            "current_branch": "ouroboros",
+            "dirty_lines": [" M BIBLE.md"],
+            "unpushed_lines": [],
+            "warnings": [],
+        },
+    )
+    monkeypatch.setattr(
+        git_ops,
+        "_create_rescue_snapshot",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("snapshot failed")),
+    )
+    events = []
+    monkeypatch.setattr(git_ops, "append_jsonl", lambda path, payload: events.append(payload))
+
+    reset_calls = []
+
+    def fake_run(cmd, cwd=None, capture_output=False, text=False, check=False):
+        if cmd[:2] == ["git", "reset"]:
+            reset_calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(git_ops.subprocess, "run", fake_run)
+
+    ok, message = git_ops.checkout_and_reset(
+        "ouroboros",
+        reason="restart",
+        unsynced_policy="rescue_and_reset",
+    )
+
+    assert ok is False
+    assert "rescue snapshot failed" in message
+    assert reset_calls == []
+    assert events and events[-1]["type"] == "reset_blocked_rescue_failed"
+
+
+def test_checkout_and_reset_blocks_when_untracked_rescue_is_truncated(monkeypatch, tmp_path):
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+
+    monkeypatch.setattr(git_ops, "REPO_DIR", tmp_path)
+    monkeypatch.setattr(git_ops, "DRIVE_ROOT", tmp_path / "data")
+    monkeypatch.setattr(git_ops, "_has_remote", lambda name=None: False)
+    monkeypatch.setattr(git_ops, "load_state", lambda: {})
+    monkeypatch.setattr(
+        git_ops,
+        "_collect_repo_sync_state",
+        lambda: {
+            "current_branch": "ouroboros",
+            "dirty_lines": ["?? large.bin"],
+            "unpushed_lines": [],
+            "warnings": [],
+        },
+    )
+    monkeypatch.setattr(
+        git_ops,
+        "_create_rescue_snapshot",
+        lambda **_kwargs: {
+            "path": str(tmp_path / "data" / "archive" / "rescue" / "x"),
+            "untracked": {"copied_files": 0, "skipped_files": 0, "truncated": True},
+        },
+    )
+    events = []
+    monkeypatch.setattr(git_ops, "append_jsonl", lambda path, payload: events.append(payload))
+    reset_calls = []
+
+    def fake_run(cmd, cwd=None, capture_output=False, text=False, check=False):
+        if cmd[:2] == ["git", "reset"]:
+            reset_calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(git_ops.subprocess, "run", fake_run)
+
+    ok, message = git_ops.checkout_and_reset(
+        "ouroboros",
+        reason="restart",
+        unsynced_policy="rescue_and_reset",
+    )
+
+    assert ok is False
+    assert "untracked-file rescue was incomplete" in message
+    assert reset_calls == []
+    assert events and events[-1]["type"] == "reset_blocked_rescue_incomplete"
+
+
 def test_checkout_and_reset_prefers_managed_remote_ref(monkeypatch, tmp_path):
     git_dir = tmp_path / ".git"
     git_dir.mkdir()

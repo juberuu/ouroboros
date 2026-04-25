@@ -238,7 +238,7 @@ async def _run_plan_review_async(
             "ERROR: plan_task requires at least 2 unique reviewer models for "
             f"majority-vote coordination. Got {len(unique_resolved)} unique "
             f"model(s) from {resolved_models!r}. Fix OUROBOROS_REVIEW_MODELS "
-            "in settings (example: 'openai/gpt-5.4,"
+            "in settings (example: 'openai/gpt-5.5,"
             "google/gemini-3.1-pro-preview,anthropic/claude-opus-4.7')."
             + single_provider_hint
         )
@@ -259,8 +259,20 @@ async def _run_plan_review_async(
 
     # Full repo pack (same as scope review — reviewers see everything)
     ctx.emit_progress_fn("📐 plan_task: building full repo pack…")
+    canonical_docs = {
+        "BIBLE.md",
+        "docs/DEVELOPMENT.md",
+        "docs/ARCHITECTURE.md",
+        "docs/CHECKLISTS.md",
+    }
     try:
-        repo_pack, omitted = build_full_repo_pack(repo_dir, exclude_paths=set(files_to_touch))
+        # These canonical docs are injected explicitly into the system prompt
+        # below. Excluding them from the wider repo pack prevents duplicate
+        # 100K+ token context while keeping BIBLE/ARCHITECTURE mandatory.
+        repo_pack, omitted = build_full_repo_pack(
+            repo_dir,
+            exclude_paths=set(files_to_touch) | canonical_docs,
+        )
     except Exception as e:
         return f"ERROR: Failed to build repo pack: {e}"
 

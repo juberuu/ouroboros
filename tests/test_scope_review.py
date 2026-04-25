@@ -242,6 +242,41 @@ class TestScopeFailClosed:
         assert omitted is None
         assert "bbb" in prompt
 
+    def test_scope_prompt_deduplicates_touched_tests_and_canonical_docs(self, tmp_path):
+        import subprocess
+        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
+        (tmp_path / "docs").mkdir(exist_ok=True)
+        (tmp_path / "docs" / "CHECKLISTS.md").write_text(
+            "## Intent / Scope Review Checklist\n\nplaceholder\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "docs" / "DEVELOPMENT.md").write_text("dev guide\n", encoding="utf-8")
+        (tmp_path / "docs" / "ARCHITECTURE.md").write_text("architecture v1\n", encoding="utf-8")
+        (tmp_path / "BIBLE.md").write_text("constitution\n", encoding="utf-8")
+        (tmp_path / "tests").mkdir(exist_ok=True)
+        (tmp_path / "tests" / "test_example.py").write_text("def test_old(): pass\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.email=test@ouroboros", "-c", "user.name=TestBot", "commit", "-m", "init"],
+            cwd=str(tmp_path), capture_output=True,
+        )
+
+        (tmp_path / "tests" / "test_example.py").write_text("def test_new(): pass\n", encoding="utf-8")
+        (tmp_path / "docs" / "ARCHITECTURE.md").write_text("architecture v2\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
+
+        mod = _get_module("ouroboros.tools.scope_review")
+        prompt, status = mod._build_scope_prompt(tmp_path, "test msg")
+
+        assert status is None
+        assert prompt is not None
+        assert "## docs/ARCHITECTURE.md" in prompt
+        assert "architecture v2" in prompt
+        assert "CURRENT FILE CONTEXT DEDUPLICATION NOTE" in prompt
+        assert "tests/test_example.py" in prompt
+        assert "docs/ARCHITECTURE.md" in prompt
+        assert "def test_new" in prompt  # visible via staged diff
+
 
 def test_scope_history_keeps_all_rounds_and_structured_ids():
     mod = _get_module("ouroboros.tools.scope_review")
@@ -351,11 +386,11 @@ class TestScopeReviewModule:
 
     def test_scope_review_uses_opus(self):
         mod = _get_module("ouroboros.tools.scope_review")
-        assert "claude-opus-4.6" in mod._SCOPE_MODEL_DEFAULT
+        assert "gpt-5.5" in mod._SCOPE_MODEL_DEFAULT
         # Verify the getter returns opus when no override env var is set
         import os
         if not os.environ.get("OUROBOROS_SCOPE_REVIEW_MODEL"):
-            assert "claude-opus-4.6" in mod._get_scope_model()
+            assert "gpt-5.5" in mod._get_scope_model()
         # else: env override is active — default check not applicable in this env
 
     def test_scope_review_model_configurable_via_env(self):

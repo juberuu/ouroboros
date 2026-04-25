@@ -282,7 +282,7 @@ def test_phase4_ui_copy_matches_shipped_runtime():
     assert "land in Phase 3" not in settings_ui
     assert "repo/skills/" in settings_ui
     assert "Settings → Behavior" in onboarding_js
-    assert "behaves the same as Advanced" in onboarding_js
+    assert "extra core-patch review gate" in onboarding_js
     assert "Phase 6+:" not in onboarding_js
 
 
