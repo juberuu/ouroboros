@@ -40,8 +40,10 @@ Output on success:
 {"status": "completed", "output_path": "/tmp/video_1234567890.mp4", "job_id": "...", "cost_usd": 0.5}
 ```
 
-The output file is written to the **system temp directory** (`/tmp` on macOS/Linux,
-`%TEMP%` on Windows) — never inside the skill directory, to preserve the content hash.
+The output file is written to the **skill state directory**
+(`~/Ouroboros/data/state/skills/video_gen/`) — never inside the skill source
+directory, to preserve the content hash. Falls back to system temp dir if the
+state dir is unavailable.
 
 ## Optional arguments
 

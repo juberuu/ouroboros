@@ -30,7 +30,6 @@ import argparse
 import json
 import os
 import sys
-import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -161,12 +160,22 @@ def _default_filename() -> str:
 
 
 def _output_path(filename: str) -> str:
-    """Resolve the output path in the system temp directory.
+    """Resolve the output path inside the skill state directory.
 
-    Output is placed in tempdir (NOT in the skill directory) to avoid
-    mutating the content hash that gates skill execution after review.
+    skill_exec sets OUROBOROS_SKILL_STATE_DIR to
+    ~/Ouroboros/data/state/skills/<name>/ before launching the subprocess.
+    Output is always confined to that directory — never written into the
+    skill source directory (which would mutate the content hash and
+    invalidate the review verdict).
     """
-    return os.path.join(tempfile.gettempdir(), filename)
+    state_dir = os.environ.get("OUROBOROS_SKILL_STATE_DIR", "").strip()
+    if not state_dir:
+        raise RuntimeError(
+            "OUROBOROS_SKILL_STATE_DIR is not set. "
+            "This script must be run via skill_exec."
+        )
+    os.makedirs(state_dir, exist_ok=True)
+    return os.path.join(state_dir, filename)
 
 
 # ---------------------------------------------------------------------------
