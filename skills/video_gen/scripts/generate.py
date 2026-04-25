@@ -251,7 +251,7 @@ def main(argv: list[str]) -> int:  # noqa: C901
         }))
         return 1
 
-    # Validate filename and resolve to temp dir (outside skill dir).
+    # Validate filename and resolve to the skill state directory.
     try:
         filename = _safe_filename(args.out) if args.out else _default_filename()
     except ValueError as exc:

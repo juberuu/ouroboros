@@ -300,16 +300,45 @@ export function renderSettingsPage() {
                     <div class="form-section">
                         <h3>External Skills Repo</h3>
                         <div class="settings-section-copy">
-                            Optional local checkout path of an external skills/extensions repository.
-                            Ouroboros scans this path together with bundled skills under <code>repo/skills/</code>,
-                            and the Skills page already supports review, enable/disable, and live extension status.
-                            Leave empty if you only want the bundled skills.
+                            Optional EXTRA discovery path on top of the in-data-plane
+                            <code>data/skills/{native,clawhub,external}/</code> tree.
+                            Ouroboros scans this for additional skill packages without
+                            cloning or pulling them. Leave empty to use only the data plane.
                         </div>
                         <div class="form-row">
                             <div class="form-field">
                                 <label>Skills Repo Path</label>
                                 <input id="s-skills-repo-path" placeholder="~/Ouroboros/skills or /absolute/path/to/skills">
                                 <div class="settings-inline-note">Absolute or <code>~</code>-prefixed path. Ouroboros never clones/pulls this directory — you manage it yourself.</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="form-section">
+                        <h3>ClawHub Marketplace</h3>
+                        <div class="settings-section-copy">
+                            Opt-in surface for installing community skills from
+                            <a href="https://clawhub.ai" target="_blank" rel="noopener">clawhub.ai</a>.
+                            When enabled, the Skills page exposes a Marketplace tab; every
+                            install is staged, OpenClaw frontmatter is translated into the
+                            Ouroboros manifest shape, and the standard tri-model review runs
+                            automatically before the skill becomes executable. Plugins (Node)
+                            are filtered out — only skill packages are installable.
+                        </div>
+                        <div class="form-row">
+                            <div class="form-field">
+                                <label>
+                                    <input type="checkbox" id="s-clawhub-enabled">
+                                    Enable ClawHub Marketplace
+                                </label>
+                                <div class="settings-inline-note">Off by default. Disabled = HTTP endpoints respond with 403 and the Marketplace tab shows a hint.</div>
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-field">
+                                <label>Registry URL</label>
+                                <input id="s-clawhub-registry-url" placeholder="https://clawhub.ai/api/v1">
+                                <div class="settings-inline-note">Override only for self-hosted mirrors. Hostname must be <code>clawhub.ai</code> or localhost.</div>
                             </div>
                         </div>
                     </div>

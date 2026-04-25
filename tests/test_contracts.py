@@ -644,7 +644,16 @@ def test_skill_manifest_rejects_malformed_block_sequence_item():
         parse_skill_manifest_text(text)
 
 
-def test_skill_manifest_rejects_nested_mapping_beyond_supported_depth():
+def test_skill_manifest_accepts_nested_mapping_with_pyyaml():
+    """v4.50: the manifest parser now uses ``yaml.safe_load`` when PyYAML
+    is available, which handles the multi-level block mappings that
+    OpenClaw / ClawHub skills routinely use (``metadata.openclaw.requires.env``).
+
+    The minimal in-tree parser is retained as a fallback for environments
+    without the dependency, but the production contract is "nested
+    mappings are valid frontmatter".
+    """
+    pytest.importorskip("yaml")
     text = (
         "---\n"
         "name: nested\n"
@@ -656,8 +665,9 @@ def test_skill_manifest_rejects_nested_mapping_beyond_supported_depth():
         "---\n"
         "body\n"
     )
-    with pytest.raises(SkillManifestError):
-        parse_skill_manifest_text(text)
+    manifest = parse_skill_manifest_text(text)
+    assert manifest.name == "nested"
+    assert manifest.ui_tab == {"render": {"widget": "weather"}}
 
 
 def test_skill_manifest_block_sequence_tolerates_blank_lines():

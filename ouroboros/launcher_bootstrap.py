@@ -482,6 +482,398 @@ def verify_claude_runtime(context: BootstrapContext) -> bool:
         return False
 
 
+_SEED_COMPLETE_MARKER = ".bootstrap-seed-complete"
+
+
+def _read_skill_manifest_version(skill_dir: pathlib.Path) -> str:
+    """Best-effort scan of ``SKILL.md``/``skill.json`` for the version string.
+
+    Used by the per-skill version-aware re-seed pass: when the launcher
+    ships a newer reference version of a native skill (for example
+    weather 0.1.0 ``type: script`` -> 0.2.0 ``type: extension``), the
+    bootstrap detects the version mismatch and replaces the data-plane
+    copy in place. The user's durable enable / review state under
+    ``data/state/skills/<name>/`` survives because we never touch that
+    plane during a re-seed.
+
+    Cycle 1 GPT-critic (Findings 1–3): defers to
+    :func:`ouroboros.contracts.skill_manifest.parse_skill_manifest_text`
+    so the version we see here is exactly the version
+    ``SkillManifest.version`` will report. The hand-rolled line scanner
+    that lived here previously had three concrete edge-case bugs:
+    inline YAML comments leaked into the version string, single-line
+    JSON manifests returned ``""``, and ``version:`` lines that
+    appeared in the body BEFORE the ``---`` frontmatter delimiter
+    were accepted as the version. The shared parser handles all three
+    cases correctly.
+
+    Returns ``""`` if the manifest cannot be parsed (e.g., the file is
+    missing or malformed). The resync pass treats empty-string as "do
+    not upgrade", so a malformed seed manifest just disables the
+    upgrade path for that skill until the operator fixes it.
+    """
+    for candidate in ("SKILL.md", "skill.json"):
+        path = skill_dir / candidate
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        try:
+            from ouroboros.contracts.skill_manifest import parse_skill_manifest_text
+            manifest = parse_skill_manifest_text(text)
+        except Exception:
+            return ""
+        return str(manifest.version or "").strip()
+    return ""
+
+
+def _record_skill_upgrade_migration(
+    drive_root: pathlib.Path,
+    skill_name: str,
+    old_version: str,
+    new_version: str,
+    log_obj: Any,
+) -> None:
+    """Persist a migration record so the Skills UI can surface a banner.
+
+    A native skill being replaced under the operator's feet (because a
+    new launcher version bumped the seed manifest) silently invalidates
+    the review state and any saved patterns / agent prompts that
+    referenced the old type. We write a JSON record at
+    ``data/state/migrations.json`` — the SPA reads it on mount via
+    ``/api/migrations``, displays a one-shot banner on the Skills tab,
+    and persists dismissal via ``/api/migrations/<key>/dismiss``.
+
+    The format is intentionally append-only: ``{key: record}`` where
+    ``key`` is ``"<new_version>_<skill_name>_upgrade"`` so a future
+    upgrade of the same skill at a still-newer version writes a fresh
+    record instead of mutating the old one.
+    """
+    state_dir = drive_root / "state"
+    target = state_dir / "migrations.json"
+    try:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        existing: dict[str, Any] = {}
+        if target.is_file():
+            try:
+                existing = json.loads(target.read_text(encoding="utf-8")) or {}
+                if not isinstance(existing, dict):
+                    existing = {}
+            except Exception:
+                existing = {}
+        # Use the NEW version in the key so each upgrade gets its own
+        # record. Operators can dismiss old upgrades while still seeing
+        # the next one when a future bump fires.
+        key = f"v{new_version}_{skill_name}_upgrade"
+        from datetime import datetime, timezone
+        existing[key] = {
+            "kind": "native_skill_upgrade",
+            "skill": skill_name,
+            "old_version": old_version,
+            "new_version": new_version,
+            "applied_at": datetime.now(timezone.utc).isoformat(),
+            "dismissed": False,
+            "summary": (
+                f"Native skill ``{skill_name}`` was upgraded from "
+                f"{old_version} to {new_version} on launch. Re-review "
+                f"may be required before the new version becomes "
+                f"executable. Old skill_exec / extension call shapes "
+                f"may need to be updated in saved patterns."
+            ),
+        }
+        target.write_text(
+            json.dumps(existing, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        log_obj.warning(
+            "Failed to write migration record for %s: %s", skill_name, exc,
+        )
+
+
+def _reseed_native_skill_in_place(
+    seed_skill: pathlib.Path,
+    target_skill: pathlib.Path,
+    log_obj: Any,
+    *,
+    drive_root: pathlib.Path | None = None,
+    skill_name: str | None = None,
+    old_version: str = "",
+    new_version: str = "",
+) -> bool:
+    """Replace ``target_skill`` with ``seed_skill`` while preserving durable state.
+
+    The durable state plane lives at ``data/state/skills/<name>/``,
+    which is OUTSIDE this skill directory, so a recursive replace
+    here does not touch ``enabled.json`` / ``review.json``. We DO
+    delete the old skill files (including any user mods) — native
+    skills are launcher-owned and the ``.seed-origin`` marker is the
+    explicit signal of that ownership.
+
+    When ``drive_root`` and version metadata are passed, also writes
+    a migration record so the Skills UI can surface a banner about
+    the upgrade. This closes the gap where the operator's
+    `skill_exec(skill="weather", script="fetch.py")` invocations
+    silently broke after the v5 weather skill type-flip; now they
+    see an explicit "weather upgraded — re-review required" notice
+    on the Skills page on first launch after the upgrade.
+    """
+    try:
+        if target_skill.exists():
+            shutil.rmtree(target_skill)
+        shutil.copytree(seed_skill, target_skill)
+        # Preserve the seed-origin contract on the freshly-replaced copy.
+        (target_skill / ".seed-origin").write_text(
+            f"seeded_from={seed_skill.parent.name}\nupgrade=true\n",
+            encoding="utf-8",
+        )
+        if drive_root is not None and skill_name and old_version and new_version:
+            _record_skill_upgrade_migration(
+                drive_root, skill_name, old_version, new_version, log_obj,
+            )
+        return True
+    except OSError as exc:
+        log_obj.warning(
+            "Failed to upgrade native skill in place %s -> %s: %s",
+            seed_skill, target_skill, exc,
+        )
+        return False
+
+
+def _per_skill_version_resync(
+    seed_dir: pathlib.Path,
+    native_root: pathlib.Path,
+    log_obj: Any,
+    *,
+    drive_root: pathlib.Path | None = None,
+) -> int:
+    """Re-seed any native skill whose manifest version drifted from the bundled seed.
+
+    Runs AFTER the first-time bootstrap (so ``.bootstrap-seed-complete``
+    already exists). The pass ONLY upgrades skills that:
+
+    - exist in both the seed and the target native bucket;
+    - carry a ``.seed-origin`` marker (i.e. were originally seeded —
+      not a user-dropped folder);
+    - have a parseable manifest ``version`` on both sides AND the seed
+      version differs from the installed version.
+
+    Skills the user deleted from ``native/`` are left absent — the
+    operator's deletion intent is sticky. Skills the user added by
+    hand (no ``.seed-origin``) are never touched. New seed skills not
+    yet present locally are NOT auto-landed during resync — that
+    upgrade path is reserved for a fresh ``.bootstrap-seed-complete``
+    cycle (delete the marker to receive newly-shipped reference
+    skills). This protects the resurrection invariant
+    (``test_bootstrap_marker_prevents_resurrection_after_user_deletion``).
+
+    Returns the number of skills that were reseeded.
+    """
+    if not seed_dir.is_dir() or not native_root.is_dir():
+        return 0
+    upgraded = 0
+    for entry in sorted(seed_dir.iterdir()):
+        if not entry.is_dir() or entry.name.startswith("."):
+            continue
+        if not any((entry / candidate).is_file() for candidate in ("SKILL.md", "skill.json")):
+            continue
+        target = native_root / entry.name
+        if not target.exists():
+            # User deleted (or never had) this seed skill — respect
+            # their absence intent. The first-time bootstrap is the
+            # only path that auto-lands a seed skill into the data
+            # plane; resync exclusively upgrades.
+            continue
+        if not (target / ".seed-origin").is_file():
+            # User-managed skill in native/ — never touch.
+            continue
+        seed_version = _read_skill_manifest_version(entry)
+        target_version = _read_skill_manifest_version(target)
+        if not seed_version or not target_version:
+            continue
+        if seed_version == target_version:
+            continue
+        log_obj.info(
+            "Native skill %s version drift (seed=%s, installed=%s) — re-seeding",
+            entry.name, seed_version, target_version,
+        )
+        if _reseed_native_skill_in_place(
+            entry, target, log_obj,
+            drive_root=drive_root,
+            skill_name=entry.name,
+            old_version=target_version,
+            new_version=seed_version,
+        ):
+            upgraded += 1
+    return upgraded
+
+
+def _seed_skills_into(seed_dir: pathlib.Path, target_root: pathlib.Path, log_obj: Any) -> int:
+    """Copy seed skills under ``seed_dir`` into ``target_root/native/`` once.
+
+    Pure-fs helper extracted so source-mode startup paths (where there is
+    no full ``BootstrapContext``) can also seed ``data/skills/native/``
+    on first launch. Returns the number of skill packages copied.
+
+    The "exactly once" guarantee is anchored to a ``.bootstrap-seed-complete``
+    marker file written into ``data/skills/native/`` after the first
+    successful seed. If the operator later deletes every native skill the
+    directory becomes empty BUT the marker stays, so a subsequent launch
+    correctly reads "bootstrap already happened" and does NOT resurrect
+    the deleted skills (would otherwise violate the docstring promise +
+    BIBLE.md P0 agency).
+    """
+    if not seed_dir.is_dir():
+        return 0
+    native_root = target_root / "native"
+    try:
+        # Use the canonical layout helper so a future change to bucket
+        # names happens in one place. ``ensure_data_skills_dir`` takes
+        # the parent of ``target_root`` (since ``target_root`` already
+        # ends in ``skills``) — fall back to manual mkdir if the
+        # helper is unavailable for any reason.
+        try:
+            from ouroboros.config import ensure_data_skills_dir
+            ensure_data_skills_dir(target_root.parent)
+        except Exception:
+            target_root.mkdir(parents=True, exist_ok=True)
+            for bucket in ("native", "clawhub", "external"):
+                (target_root / bucket).mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        log_obj.warning("Skills data root setup failed: %s", exc)
+        return 0
+
+    marker_path = native_root / _SEED_COMPLETE_MARKER
+    if marker_path.is_file():
+        # Bootstrap already ran — even if every seeded skill has since
+        # been deleted, the operator's intent stands.
+        return 0
+
+    # Pre-bootstrap legacy state: if there are existing entries but no
+    # marker (e.g. an in-place upgrade from a pre-v4.50 install where
+    # the user already had data/skills/native/ populated), treat that
+    # as "already seeded by a different mechanism" and just write the
+    # marker without re-copying.
+    try:
+        existing = [p for p in native_root.iterdir() if not p.name.startswith(".")]
+    except OSError:
+        existing = []
+    if existing:
+        try:
+            marker_path.write_text(
+                "Bootstrap inferred from pre-existing native/ contents.\n",
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            log_obj.warning("Failed to write %s: %s", marker_path, exc)
+        return 0
+
+    copied = 0
+    for entry in sorted(seed_dir.iterdir()):
+        if not entry.is_dir() or entry.name.startswith("."):
+            continue
+        if not any((entry / candidate).is_file() for candidate in ("SKILL.md", "skill.json")):
+            continue
+        dest = native_root / entry.name
+        if dest.exists():
+            continue
+        try:
+            shutil.copytree(entry, dest)
+            # v4.50 fix (Ouroboros review O3): drop a per-skill seed
+            # marker so ``_classify_skill_source`` can distinguish a
+            # launcher-seeded skill from one a user manually dropped
+            # into ``data/skills/native/``.
+            (dest / ".seed-origin").write_text(
+                f"seeded_from={seed_dir.name}\n", encoding="utf-8",
+            )
+            copied += 1
+        except OSError as exc:
+            log_obj.warning("Failed to copy seed skill %s -> %s: %s", entry, dest, exc)
+
+    # Always write the marker after a bootstrap pass — even when 0
+    # skills landed (seed_dir was empty, or every entry already
+    # existed). The point is: "bootstrap has been attempted; do not
+    # try again on subsequent launches".
+    try:
+        marker_path.write_text(
+            f"Bootstrap-seed completed; copied {copied} skill(s) from {seed_dir}.\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        log_obj.warning("Failed to write %s: %s", marker_path, exc)
+
+    if copied:
+        log_obj.info(
+            "Bootstrapped %d native skill(s) from seed %s into %s",
+            copied, seed_dir, native_root,
+        )
+    return copied
+
+
+def ensure_data_skills_seeded() -> int:
+    """Source-mode entry point: seed ``data/skills/native/`` if empty
+    AND reconcile native skills against the bundled seed when their
+    manifest version changes.
+
+    Two passes:
+
+    1. ``_seed_skills_into`` — first-time copy of ``repo/skills/*`` into
+       ``data/skills/native/*`` plus the durable
+       ``.bootstrap-seed-complete`` marker. Idempotent: returns 0 when
+       the marker already exists.
+    2. ``_per_skill_version_resync`` — runs every launch (cheap text
+       comparison of YAML frontmatter / JSON ``version`` field). When
+       a launcher-shipped seed bumps a native skill's version, we
+       replace the data-plane copy IN PLACE while preserving every
+       file under ``data/state/skills/<name>/`` (enabled / review
+       state). User-managed skills (no ``.seed-origin`` marker) are
+       never touched.
+
+    Returns the total number of native skill packages copied or
+    upgraded across both passes. Best-effort and never raises.
+    """
+    import logging as _logging
+    from ouroboros.config import DATA_DIR, REPO_DIR
+
+    log_obj = _logging.getLogger(__name__)
+    seed_dir = pathlib.Path(REPO_DIR) / "skills"
+    target_root = pathlib.Path(DATA_DIR) / "skills"
+    copied = _seed_skills_into(seed_dir, target_root, log_obj)
+    drive_root = pathlib.Path(DATA_DIR)
+    try:
+        upgraded = _per_skill_version_resync(
+            seed_dir, target_root / "native", log_obj,
+            drive_root=drive_root,
+        )
+    except Exception:  # pragma: no cover - defensive
+        log_obj.warning("Native skill version-resync raised", exc_info=True)
+        upgraded = 0
+    return copied + upgraded
+
+
+def bootstrap_native_skills(context: BootstrapContext) -> None:
+    """One-time copy of ``repo/skills/*`` into ``data/skills/native/*``.
+
+    v4.50 moved skill packages out of the git-tracked ``repo/`` tree into
+    the data plane (``data/skills/native/``) so the runtime location is
+    user-mutable without dirtying the managed repo. ``repo/skills/`` now
+    serves as the launcher-shipped seed; this function copies that seed
+    into the data plane exactly once — when the destination is empty.
+
+    Idempotent and best-effort: any error is logged and swallowed so a
+    transient FS failure does not block startup. Subsequent launches
+    leave the data-plane copy alone, even if the user modified or
+    deleted some seed-derived skills.
+    """
+    _seed_skills_into(
+        context.repo_dir / "skills",
+        context.data_dir / "skills",
+        context.log,
+    )
+
+
 def bootstrap_repo(context: BootstrapContext) -> None:
     """Ensure the launcher-managed git repo exists and matches the embedded bundle."""
     context.data_dir.mkdir(parents=True, exist_ok=True)
@@ -511,6 +903,7 @@ def bootstrap_repo(context: BootstrapContext) -> None:
         context.log.warning("World profile generation failed: %s", exc)
 
     _migrate_old_settings(context)
+    bootstrap_native_skills(context)
     if outcome != "unchanged":
         install_deps(context)
     verify_claude_runtime(context)

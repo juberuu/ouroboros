@@ -744,7 +744,7 @@
                         <button class="field-clear" data-clear="skills-repo-path" type="button">Clear</button>
                     </div>
                     <input id="skills-repo-path" type="text" placeholder="~/Ouroboros/skills or /absolute/path/to/skills" value="${escapeHtml(state.skillsRepoPath || '')}">
-                    <div class="field-note">Optional. Local checkout path of an external skills/extensions repository. Ouroboros scans it together with bundled skills under <code>repo/skills/</code>. Leave empty if you have not checked out an external skills repo yet — Ouroboros never clones/pulls this directory.</div>
+                    <div class="field-note">Optional. Extra discovery root on top of the in-data-plane <code>data/skills/{native,clawhub,external}/</code> tree. Leave empty if you do not maintain your own skills checkout — Ouroboros never clones/pulls this directory.</div>
                 </div>
             </div>
         `;

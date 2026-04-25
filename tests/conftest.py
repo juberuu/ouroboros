@@ -32,14 +32,44 @@ def _hide_bundled_skills(monkeypatch):
     the bundled reference skills leak into the view would make every
     test assertion brittle to changes in the shipped reference set.
 
-    Production keeps the default ``include_bundled=True`` behaviour
-    untouched; this fixture only neutralises the bundled lookup
-    helper inside the pytest process.
+    v4.50: ALSO neutralise the data-plane skills lookup so a developer
+    machine with installed skills under ``~/Ouroboros/data/skills/`` does
+    not poison test results. ``discover_skills`` consults
+    ``_resolve_data_skills_dir`` for its primary scan; pinning that to
+    ``None`` forces tests to either pass an explicit ``drive_root`` (the
+    new contract since v4.50 — the helper now honours that argument)
+    or stick to ``OUROBOROS_SKILLS_REPO_PATH`` fixtures under tmp_path.
+
+    Production keeps the default behaviour untouched; this fixture only
+    neutralises the bundled / data-plane lookups inside the pytest
+    process.
     """
     monkeypatch.setattr(
         "ouroboros.skill_loader._bundled_skills_dir",
         lambda: None,
     )
+    # Patch the data-plane resolver to None unless the caller supplied
+    # an explicit ``drive_root`` (in which case the v4.50 implementation
+    # honours that argument and never touches the global). The signature
+    # check via ``*args`` keeps the fixture compatible with both the
+    # legacy zero-arg call and the new drive_root-aware one.
+    real_resolver = None
+    try:
+        import ouroboros.skill_loader as loader_mod
+        real_resolver = loader_mod._resolve_data_skills_dir
+    except Exception:
+        pass
+
+    def _hermetic_resolver(*args, **kwargs):
+        if args and args[0] is not None:
+            return real_resolver(*args, **kwargs) if real_resolver else None
+        return None
+
+    if real_resolver is not None:
+        monkeypatch.setattr(
+            "ouroboros.skill_loader._resolve_data_skills_dir",
+            _hermetic_resolver,
+        )
 
 
 @pytest.hookimpl(hookwrapper=True)

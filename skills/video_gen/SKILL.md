@@ -10,7 +10,7 @@ permissions: [net, fs]
 env_from_settings: [VIDEO_GEN_KEY]
 scripts:
   - name: generate.py
-    description: Generate a video from a text prompt. Reads VIDEO_GEN_KEY from env. Output written to skill state directory (OUROBOROS_SKILL_STATE_DIR). Usage: generate.py <prompt> [--model MODEL] [--duration SEC] [--aspect RATIO] [--resolution RES] [--out FILENAME]
+    description: "Generate a video from a text prompt. Reads VIDEO_GEN_KEY from env. Output written to skill state directory (OUROBOROS_SKILL_STATE_DIR). Usage: generate.py <prompt> [--model MODEL] [--duration SEC] [--aspect RATIO] [--resolution RES] [--out FILENAME]"
 ---
 
 # Video Generation skill

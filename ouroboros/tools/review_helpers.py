@@ -51,10 +51,24 @@ SKIP_DIRS = frozenset({
 _FILE_SIZE_LIMIT = 1_048_576  # 1 MB
 
 # --- Constants for build_full_repo_pack (mirrors deep_self_review.py, DRY) ---
-_SENSITIVE_EXTENSIONS = frozenset({".env", ".pem", ".key", ".p12", ".pfx", ".jks", ".keystore"})
+_SENSITIVE_EXTENSIONS = frozenset({
+    ".env", ".pem", ".key", ".p12", ".pfx", ".jks", ".keystore",
+    # v4.50: broaden the suffix list covering common credential
+    # vaults / GPG-encrypted blobs / KeePass databases. Reused by
+    # the marketplace fetcher policy gates.
+    ".kdbx", ".gpg", ".asc",
+})
 _SENSITIVE_NAMES = frozenset({
     ".env", ".env.local", ".env.production", ".env.staging",
+    # v4.50: broader env-file coverage for development / test /
+    # example shapes that a publisher could legitimately ship but
+    # which are still credential-shaped.
+    ".env.development", ".env.dev", ".env.test", ".env.example",
     "credentials.json", "service-account.json", "secrets.yaml", "secrets.json",
+    "secrets.toml", "secrets.ini",
+    "aws-credentials.json", "gcp-service-account.json",
+    # SSH private keys
+    "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa",
     ".git-credentials", ".netrc", ".npmrc", ".pypirc",
 })
 _VENDORED_SUFFIXES = frozenset({".min.js", ".min.css", ".min.mjs"})

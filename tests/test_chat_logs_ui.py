@@ -112,6 +112,12 @@ def test_styles_cover_chat_header_controls_and_grouped_cards():
 
 
 def test_chat_floating_overlays_have_readable_glass_backing():
+    """v5: floating overlays at the top and bottom of the chat fade
+    fully to transparent at the inner edge (no visible step). The
+    blur is masked in lockstep so the glass effect does not create
+    its own hard border. Status badge and attachment badge keep
+    their solid backings (those are inline pills, not scrim layers).
+    """
     css = _read("web/style.css")
 
     header = re.search(r"\.chat-page-header\s*\{(?P<body>[^}]+)\}", css, re.S).group("body")
@@ -119,14 +125,43 @@ def test_chat_floating_overlays_have_readable_glass_backing():
     input_area = re.search(r"#chat-input-area\s*\{(?P<body>[^}]+)\}", css, re.S).group("body")
     attach = re.search(r"\.attach-badge\s*\{(?P<body>[^}]+)\}", css, re.S).group("body")
 
+    # Header: glass blur active, gradient ENDS at fully-transparent
+    # (alpha 0.00) so the scroll-under transition has no visible
+    # discontinuity. ``mask-image`` fades the blur in step.
     assert "backdrop-filter: blur(10px)" in header
-    assert "transparent 100%" not in header
-    assert "rgba(13, 11, 15, 0.32) 100%" in header
+    assert "rgba(13, 11, 15, 0.00) 100%" in header
+    assert "mask-image:" in header
+
+    # Bottom input dock: same fade-to-zero contract.
+    assert "rgba(13, 11, 15, 0.00) 100%" in input_area
+    assert "mask-image:" in input_area
+
+    # Inline pills keep their solid backings — the test only enforces
+    # the fade-to-zero invariant on the scrim layers (header / dock).
     assert "backdrop-filter: blur(8px)" in status
     assert "rgba(26, 21, 32, 0.78)" in status
-    assert "rgba(13, 11, 15, 0.26) 100%" in input_area
     assert "backdrop-filter: blur(8px)" in attach
     assert "rgba(26, 21, 32, 0.78)" in attach
+
+
+def test_chat_input_field_has_no_ambient_halo():
+    """v5: the input field's ambient drop-shadow halo was removed.
+    The bottom scrim + the glass background already separate the
+    input from the transcript; the previous 24px ambient ring read
+    as a redundant gradient ring around the textarea.
+    """
+    css = _read("web/style.css")
+    input_block = re.search(r"#chat-input\s*\{(?P<body>[^}]+)\}", css, re.S).group("body")
+    focus_block = re.search(r"#chat-input:focus\s*\{(?P<body>[^}]+)\}", css, re.S).group("body")
+
+    # Ambient halo gone — only the inset top-edge bevel survives in base.
+    assert "0 4px 24px" not in input_block
+    assert "inset 0 1px 0 rgba(255, 255, 255, 0.04)" in input_block
+
+    # Focus state keeps the focus ring (3px solid-tone outline) so
+    # accessibility / keyboard users still see "this is focused".
+    assert "0 0 0 3px rgba(201, 53, 69, 0.10)" in focus_block
+    assert "0 4px 24px" not in focus_block
 
 
 def test_chat_only_polls_state_when_active():

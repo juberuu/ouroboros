@@ -132,7 +132,7 @@ Ouroboros repository.
 | # | item | what to check | severity when FAIL |
 |---|------|---------------|--------------------|
 | 1 | bible_compliance | Does the diff violate any BIBLE.md principle? | critical |
-| 2 | development_compliance | Does it follow DEVELOPMENT.md patterns? Check explicitly: (a) naming conventions (snake_case modules/vars, PascalCase classes, UPPER_SNAKE_CASE constants); (b) entity type rules — Gateway classes contain ONLY transport, no business logic; Tool functions are thin wrappers; (c) module-size target stays near one context window (~1000 lines) with a hard fail above 1600 lines for non-grandfathered modules, method-size target stays under 150 lines with a hard fail above 300 lines, codebase-wide total Python function/method count stays under the 1350 smoke hard gate (source of truth: `ouroboros/review.py::MAX_TOTAL_FUNCTIONS`), and functions keep `<= 8` params; (d) no gratuitous abstract layers (P5 Minimalism); (e) new LLM calls go through the shared `LLMClient`/`llm.py` layer, not ad-hoc HTTP clients; (f) cognitive artifacts (identity.md, scratchpad, task reflections, review outputs) must NOT use hardcoded `[:N]` truncation — explicit omission notes required; (g) new `get_tools()` exports follow the ToolEntry pattern in registry.py. | critical |
+| 2 | development_compliance | Does it follow DEVELOPMENT.md patterns? Check explicitly: (a) naming conventions (snake_case modules/vars, PascalCase classes, UPPER_SNAKE_CASE constants); (b) entity type rules — Gateway classes contain ONLY transport, no business logic; Tool functions are thin wrappers; (c) module-size target stays near one context window (~1000 lines) with a hard fail above 1600 lines for non-grandfathered modules, method-size target stays under 150 lines with a hard fail above 300 lines, codebase-wide total Python function/method count stays under the smoke hard gate defined by `ouroboros/review.py::MAX_TOTAL_FUNCTIONS` (the literal value evolves with the codebase — consult the constant rather than hardcoding the number), and functions keep `<= 8` params; (d) no gratuitous abstract layers (P5 Minimalism); (e) new LLM calls go through the shared `LLMClient`/`llm.py` layer, not ad-hoc HTTP clients; (f) cognitive artifacts (identity.md, scratchpad, task reflections, review outputs) must NOT use hardcoded `[:N]` truncation — explicit omission notes required; (g) new `get_tools()` exports follow the ToolEntry pattern in registry.py. | critical |
 | 3 | secrets_check | Are secrets, API keys, .env files, credentials present in the diff? | critical |
 | 4 | code_quality | Careful code review: bugs, logic errors, crashes, regressions, race conditions, resource leaks? | critical |
 | 5 | security_issues | Security vulnerabilities: injection, path traversal, secret leakage, unsafe operations? | critical |
@@ -358,6 +358,48 @@ total). Each entry carries `item`, `verdict` (`PASS`/`FAIL`), `severity`
   "the skill is still runnable under this verdict". To ship a skill,
   every item must land PASS.
 - Item 7 is conditionally critical: FAIL only when `type: extension`.
+
+### Marketplace-installed skill review (ClawHub provenance)
+
+When a skill's directory carries a `.clawhub.json` provenance sidecar,
+its source is the ClawHub marketplace (v4.50). The review pack will
+also contain a `SKILL.openclaw.md` file — that is the **original**
+publisher-authored manifest, preserved by the marketplace adapter
+(`ouroboros/marketplace/adapter.py`) before it wrote the translated
+`SKILL.md` that the runtime executes. Reviewers MUST cross-check the
+two manifests as part of items 2 (`permissions_honesty`) and 5
+(`env_allowlist`) without inflating the structured 7-item output:
+
+1. **Permissions parity** — confirm the translated `permissions` list
+   captures every effect the original `metadata.openclaw.requires.bins`
+   / `allowed-tools` / scripts imply. A subprocess-spawning publisher
+   that translates to an empty `permissions: []` is a concrete FAIL of
+   item 2 (`permissions_honesty`).
+2. **Env key honesty** — the adapter refuses any env key in the
+   `FORBIDDEN_SKILL_SETTINGS` denylist, so any leak attempt should
+   already have blocked install. If `env_from_settings` is non-empty
+   and any of the listed keys do not appear in the original
+   `metadata.openclaw.requires.env`, that is a concrete FAIL of item 5
+   (`env_allowlist`) — the adapter is fabricating a permission the
+   publisher never asked for.
+3. **Install spec rejection** — the adapter blocks `metadata.openclaw.install`
+   (`brew`/`go`/`uv`/`node`). If the original manifest carries one,
+   the install pipeline should have aborted; the presence of the skill
+   in the runtime is itself a contradiction and FAILs item 1
+   (`manifest_schema`) because the skill should not have landed.
+4. **Plugin packages** — `openclaw.plugin.json` in the file pack means
+   the publisher shipped a Node/TS plugin. The adapter refuses these,
+   so seeing one in a successfully-installed skill is a contradiction
+   and FAILs item 1 (`manifest_schema`).
+
+The marketplace pipeline writes the provenance audit trail to
+`data/state/skills/<name>/clawhub.json` (slug, version, sha256,
+original_manifest_sha256, translated_manifest_sha256, adapter_warnings).
+This file is **not** part of the review pack (it lives outside the
+skill directory) but reviewers may reference its existence as
+context — its absence on a `data/skills/clawhub/...` skill would be a
+concrete FAIL of item 1 (the skill claims marketplace provenance
+without the audit record).
 
 ### Skill review vs. repo review
 

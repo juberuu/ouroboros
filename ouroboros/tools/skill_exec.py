@@ -176,12 +176,16 @@ def _scrub_env(
             env[key] = val
     if manifest_env_keys:
         settings = load_settings()
+        # Case-insensitive denylist comparison: the canonical form of
+        # FORBIDDEN_SKILL_SETTINGS is uppercase (``OPENROUTER_API_KEY`` etc.)
+        # but a future settings.get implementation may lowercase keys
+        # before lookup. Compare on the upper form so a manifest that
+        # tries to sneak in ``openrouter_api_key`` (lowercase) is still
+        # refused.
+        forbidden_upper = {k.upper() for k in _FORBIDDEN_ENV_FORWARD_KEYS}
         allow = {str(k).strip() for k in manifest_env_keys if str(k).strip()}
         for key in allow:
-            if key in _FORBIDDEN_ENV_FORWARD_KEYS:
-                # Runtime denylist — never forward known credentials /
-                # tokens / the network-gate password, regardless of
-                # what the manifest asked for or what review decided.
+            if key.upper() in forbidden_upper:
                 log.warning(
                     "Skill %s asked env_from_settings for %s; refusing by runtime denylist.",
                     skill_name, key,

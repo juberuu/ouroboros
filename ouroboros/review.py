@@ -74,7 +74,7 @@ MAX_FUNCTION_LINES = 300
 # larger than the pre-release scope; the ceiling bump stays consistent
 # with how MAX_TOTAL_FUNCTIONS has grown through v4.40→v4.47 as each
 # phase shipped.
-MAX_TOTAL_FUNCTIONS = 1450
+MAX_TOTAL_FUNCTIONS = 1525  # v4.50: ClawHub marketplace adds ~33 functions (5 marketplace modules + marketplace_api.py + adapter helpers + tests). 1450 -> 1525 leaves ~42 functions of slack for follow-up cycle-2 fixes (additional fetcher tests, hermetic conftest helpers, redirect handler tests, multi-line scalar test, etc.) without requiring a second budget bump.
 # v4.40.0 adds claude_advisory_review.py to the grandfathered set: the file
 # grew to 1731 lines across v4.37-v4.39 (plan_task quorum + direct-provider
 # fallback + convergence rule + syntax preflight + reflection decoupling).

@@ -1,43 +1,62 @@
 ---
 name: weather
-description: Fetch current weather for any city via the public wttr.in service (no API key required).
-version: 0.1.0
-type: script
-runtime: python3
-timeout_sec: 30
-when_to_use: User asks about weather, temperature, forecast, or current conditions in a specific city.
-permissions: [net]
+description: Live weather widget — looks up current conditions for any city via wttr.in (no API key).
+version: 0.2.0
+type: extension
+entry: plugin.py
+permissions: [net, tool, route, widget]
 env_from_settings: []
-scripts:
-  - name: fetch.py
-    description: Fetch a 3-line weather summary for the city supplied via argv.
+when_to_use: User asks about weather, temperature, forecast, or current conditions in a specific city.
+ui_tab:
+  tab_id: widget
+  title: Weather widget
+  icon: cloud
+  render:
+    kind: inline_card
+    api_route: forecast
+    schema_version: 1
 ---
 
-# Weather skill (reference)
+# Weather skill (visual widget reference)
 
-This is the Phase 5 reference skill shipped with Ouroboros. It demonstrates
-the minimum viable ``type: script`` extension:
+This is the v5 reference ``type: extension`` skill shipped with Ouroboros.
+It demonstrates the minimum viable widget extension:
 
-- A manifest declaring ``runtime: python3`` and a single script.
-- One ``net`` permission (the script reaches ``wttr.in``).
-- No ``env_from_settings`` — no secret handling needed, no credential surface.
+- A manifest declaring ``type: extension`` + an ``ui_tab`` block so the
+  Skills UI knows how to render an inline weather card on the Installed
+  tab.
+- An ``entry: plugin.py`` that registers one HTTP route
+  (``GET /api/extensions/weather/forecast?city=…``), one agent-callable
+  tool (``ext.weather.fetch``), and one UI-tab declaration. Every
+  registration goes through the frozen
+  :class:`ouroboros.contracts.plugin_api.PluginAPI` v1 surface — the
+  extension never touches ``logging``, ``starlette``, or the dispatcher
+  directly.
+- Four minimum permissions, one per registered surface:
+  - ``net`` — the route + tool fetch ``wttr.in``.
+  - ``tool`` — required by ``register_tool``.
+  - ``route`` — required by ``register_route``.
+  - ``widget`` — required by ``register_ui_tab``.
 
-## Using it
+## Using the widget
 
-1. Point ``OUROBOROS_SKILLS_REPO_PATH`` at the directory containing this
-   skill (``skills/`` under the Ouroboros checkout works out of the box).
-2. Run ``review_skill(skill="weather")`` — the tri-model review should pass
-   cleanly (public HTTP fetch, no secrets, no repo mutation, tight confinement).
-3. ``toggle_skill(skill="weather", enabled=true)`` flips the durable
-   enabled bit.
-4. Invoke with ``skill_exec(skill="weather", script="fetch.py", args=["Moscow"])``.
+1. **Enable**: open Settings → Skills → Installed, find ``weather``,
+   click ``Enable`` (the extension auto-loads after a fresh review).
+2. **View**: an inline weather card appears under the weather row on
+   the Installed tab. Type a city name and the widget refreshes
+   live — no agent message, no shell command.
+3. **Agent use**: the same skill is callable from the agent surface as
+   ``ext.weather.fetch(city="...")``. The output is identical JSON.
 
-The script prints one JSON object per invocation:
+## Network policy
 
-```
-{"city": "Moscow", "temp_c": 7, "condition": "Partly cloudy", "feels_like_c": 4}
-```
+The widget contacts a single host (``wttr.in``) — the route handler
+explicitly refuses any URL whose hostname is not on the allowlist, and
+the operator's ``permissions: [net]`` declaration scopes that to the
+review-time threat model.
 
-Reviewers should verify that ``fetch.py`` only reaches ``wttr.in`` (the
-declared ``net`` permission is the minimum required) and refuses to
-contact any other host.
+## Data plane
+
+No persistent state is written; the widget fetches on-demand and the
+result is rendered directly. The extension's
+:meth:`PluginAPI.get_state_dir` is unused.

@@ -76,11 +76,17 @@ SETTINGS_DEFAULTS = {
     # is the safe default for current installs. "pro" is reserved for a
     # future core-patch lane and currently behaves like "advanced".
     "OUROBOROS_RUNTIME_MODE": "advanced",
-    # Optional local checkout path for the external skills/extensions repo.
-    # Empty means "use only bundled skills". Ouroboros scans this path
-    # together with the bundled repo/skills surface; it never clones or
-    # pulls the external repo for the user.
+    # Optional EXTRA discovery root for an external skills/extensions
+    # repository (the user's own git checkout). Ouroboros scans this on
+    # top of the in-data-plane ``data/skills/`` tree (which is the
+    # primary location since v4.50). Empty means "use only the data
+    # plane". Ouroboros never clones or pulls this directory itself.
     "OUROBOROS_SKILLS_REPO_PATH": "",
+    # ClawHub marketplace (off by default — opt-in). When enabled,
+    # /api/marketplace/clawhub/* endpoints accept search/install/update
+    # operations against the configured registry URL.
+    "OUROBOROS_CLAWHUB_ENABLED": False,
+    "OUROBOROS_CLAWHUB_REGISTRY_URL": "https://clawhub.ai/api/v1",
     # Scope review: single-model blocking reviewer (runs after triad review)
     "OUROBOROS_SCOPE_REVIEW_MODEL": "anthropic/claude-opus-4.6",
     # Reasoning effort per task type: none | low | medium | high
@@ -290,6 +296,126 @@ def get_skills_repo_path() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Skills data layout
+# ---------------------------------------------------------------------------
+#
+# v4.50 moved skill packages out of the git-tracked ``repo/skills/`` source
+# tree into the data plane (``data/skills/``) so the launcher seed (still
+# shipped under ``repo/skills/``) is a one-time bootstrap copy rather than
+# the live runtime location. Subdirectories carry the discovery source so
+# the Skills/Marketplace UI can group/filter by origin:
+#
+#   data/skills/native/<slug>/    -- bootstrapped from repo/skills/<slug>/
+#   data/skills/clawhub/<slug>/   -- installed by the ClawHub marketplace
+#   data/skills/external/<slug>/  -- user-managed (drop in manually)
+#
+# ``OUROBOROS_SKILLS_REPO_PATH`` continues to work as an OPTIONAL extra
+# discovery root for power users who keep skills in their own checkout.
+
+SKILL_SOURCE_NATIVE = "native"
+SKILL_SOURCE_CLAWHUB = "clawhub"
+SKILL_SOURCE_EXTERNAL = "external"
+SKILL_SOURCE_USER_REPO = "user_repo"
+
+SKILL_SOURCE_SUBDIRS = (
+    SKILL_SOURCE_NATIVE,
+    SKILL_SOURCE_CLAWHUB,
+    SKILL_SOURCE_EXTERNAL,
+)
+
+
+def get_data_skills_dir() -> pathlib.Path:
+    """Return ``<DATA_DIR>/skills/`` (created on demand).
+
+    Single root for all skill packages discovered by the runtime;
+    subdirectories distinguish source (``native`` / ``clawhub`` /
+    ``external``). The directory is created on first read so callers
+    can rely on ``.iterdir()`` working without a separate bootstrap.
+    """
+    return ensure_data_skills_dir(DATA_DIR)
+
+
+def ensure_data_skills_dir(data_dir: pathlib.Path) -> pathlib.Path:
+    """Create + return ``<data_dir>/skills/{native,clawhub,external}/``.
+
+    Split out from :func:`get_data_skills_dir` so callers that want
+    to ENSURE the layout (launcher bootstrap, marketplace install)
+    can opt-in to the side effect, while pure-lookup callers (skill
+    discovery in tests) can use :func:`resolve_data_skills_dir` which
+    is read-only. Cycle 2 critic finding (Opus #3): the previous
+    behaviour of creating directories from inside a function whose
+    name implied "resolve" surprised tests and bled mock state into
+    the developer's real ``~/Ouroboros/data/`` tree.
+    """
+    root = data_dir / "skills"
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        for sub in SKILL_SOURCE_SUBDIRS:
+            (root / sub).mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return root
+
+
+def resolve_data_skills_dir(data_dir: pathlib.Path) -> Optional[pathlib.Path]:
+    """Return ``<data_dir>/skills/`` if it exists on disk, else ``None``.
+
+    Pure read — does NOT create the directory. The marketplace +
+    launcher call :func:`ensure_data_skills_dir` to create the layout
+    explicitly; callers that just want to know "does this exist yet"
+    use this helper.
+    """
+    candidate = data_dir / "skills"
+    return candidate if candidate.is_dir() else None
+
+
+def get_clawhub_skills_dir() -> pathlib.Path:
+    """Return ``<DATA_DIR>/skills/clawhub/`` (created on demand)."""
+    target = get_data_skills_dir() / SKILL_SOURCE_CLAWHUB
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return target
+
+
+def get_clawhub_enabled() -> bool:
+    """Return True when the ClawHub marketplace surface is opt-in enabled."""
+    raw = os.environ.get("OUROBOROS_CLAWHUB_ENABLED", "")
+    if not raw:
+        return False
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def get_clawhub_registry_url() -> str:
+    """Return the configured ClawHub registry base URL (raw value).
+
+    Trailing slashes are stripped + any query string / fragment is
+    dropped so callers can append path segments without double-slash
+    bugs and without accidentally appending after a ``?key=foo``.
+
+    HOST ENFORCEMENT IS NOT PERFORMED HERE — this function only
+    normalises the raw value. The actual allowlist check happens at
+    HTTP-call time inside
+    :func:`ouroboros.marketplace.clawhub._registry_base_url` (also
+    re-applied per redirect hop via
+    :class:`ouroboros.marketplace.clawhub._AllowlistRedirectHandler`).
+    A future caller that uses this URL outside the marketplace client
+    must re-validate the host explicitly.
+    """
+    raw = (os.environ.get("OUROBOROS_CLAWHUB_REGISTRY_URL", "") or "").strip()
+    default_url = "https://clawhub.ai/api/v1"
+    if not raw:
+        return default_url
+    import urllib.parse as _urlparse
+    components = _urlparse.urlparse(raw)
+    cleaned = _urlparse.urlunparse(
+        (components.scheme, components.netloc, components.path.rstrip("/"), "", "", "")
+    )
+    return cleaned
+
+
+# ---------------------------------------------------------------------------
 # Version
 # ---------------------------------------------------------------------------
 def read_version() -> str:
@@ -435,6 +561,8 @@ def apply_settings_to_env(settings: dict) -> None:
         "OUROBOROS_SCOPE_REVIEW_MODEL",
         # Phase 2 runtime-mode + skills-repo plumbing (no runtime gating yet).
         "OUROBOROS_RUNTIME_MODE", "OUROBOROS_SKILLS_REPO_PATH",
+        # v4.50 ClawHub marketplace opt-in.
+        "OUROBOROS_CLAWHUB_ENABLED", "OUROBOROS_CLAWHUB_REGISTRY_URL",
         "OUROBOROS_EFFORT_TASK", "OUROBOROS_EFFORT_EVOLUTION",
         "OUROBOROS_EFFORT_REVIEW", "OUROBOROS_EFFORT_SCOPE_REVIEW",
         "OUROBOROS_EFFORT_CONSCIOUSNESS",

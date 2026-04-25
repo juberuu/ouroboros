@@ -184,9 +184,19 @@ def parse_skill_manifest_text(text: str) -> SkillManifest:
     match = _FRONTMATTER_RE.match(src)
     if match is not None:
         front, body = match.group(1), match.group(2) or ""
+        # Prefer real YAML when PyYAML is available (handles nested
+        # block mappings like ``metadata.openclaw.requires.env`` that
+        # OpenClaw/ClawHub skills use). Fall back to the minimal
+        # in-tree parser for environments without the dependency.
         try:
-            data = _parse_minimal_yaml(front)
-        except _MiniYamlError as exc:
+            import yaml  # type: ignore
+            data: Any = yaml.safe_load(front) or {}
+        except ImportError:
+            try:
+                data = _parse_minimal_yaml(front)
+            except _MiniYamlError as exc:
+                raise SkillManifestError(f"invalid SKILL.md frontmatter: {exc}") from exc
+        except yaml.YAMLError as exc:  # type: ignore[name-defined]
             raise SkillManifestError(f"invalid SKILL.md frontmatter: {exc}") from exc
         if not isinstance(data, dict):
             raise SkillManifestError("SKILL.md frontmatter must be a mapping")

@@ -1398,6 +1398,78 @@ from ouroboros.extensions_api import (
     api_skill_toggle,
     api_skill_review,
 )
+from ouroboros.marketplace_api import (
+    api_marketplace_search,
+    api_marketplace_info,
+    api_marketplace_preview,
+    api_marketplace_install,
+    api_marketplace_update,
+    api_marketplace_uninstall,
+    api_marketplace_installed,
+)
+
+
+# v5.0.0: native-skill version-upgrade migration banner endpoints.
+# When ``ensure_data_skills_seeded`` upgrades a launcher-shipped seed
+# skill in place (e.g. weather 0.1 -> 0.2), it writes a record to
+# ``data/state/migrations.json`` so the Skills UI can render a banner
+# explaining the change. These endpoints expose that record + a
+# dismiss path so the banner doesn't re-fire forever.
+async def api_migrations_list(request: Request) -> JSONResponse:
+    """Return the list of unread upgrade migration records."""
+    import json as _json
+    from starlette.responses import JSONResponse as _JR
+    from ouroboros.config import DATA_DIR
+    target = pathlib.Path(DATA_DIR) / "state" / "migrations.json"
+    if not target.is_file():
+        return _JR({"migrations": []})
+    try:
+        data = _json.loads(target.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return _JR({"migrations": []})
+    except Exception:
+        return _JR({"migrations": []})
+    out = []
+    for key, record in data.items():
+        if not isinstance(record, dict):
+            continue
+        if record.get("dismissed"):
+            continue
+        out.append({"key": str(key), **{k: v for k, v in record.items() if k != "dismissed"}})
+    return _JR({"migrations": out})
+
+
+async def api_migrations_dismiss(request: Request) -> JSONResponse:
+    """Mark a migration record as dismissed so the banner stops firing."""
+    import json as _json
+    from starlette.responses import JSONResponse as _JR
+    from ouroboros.config import DATA_DIR
+    key = (request.path_params.get("key") or "").strip()
+    # Same path-param hygiene as the marketplace surface.
+    if not key or key in {".", ".."} or "/" in key or "\\" in key or "\x00" in key:
+        return _JR({"error": "invalid migration key"}, status_code=400)
+    target = pathlib.Path(DATA_DIR) / "state" / "migrations.json"
+    if not target.is_file():
+        return _JR({"ok": True, "key": key, "note": "no migrations file"})
+    try:
+        data = _json.loads(target.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        data = {}
+    record = data.get(key)
+    if isinstance(record, dict):
+        record["dismissed"] = True
+        data[key] = record
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            _json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        return _JR({"error": str(exc)}, status_code=500)
+    return _JR({"ok": True, "key": key})
 
 routes = [
     Route("/", endpoint=index_page),
@@ -1427,6 +1499,55 @@ routes = [
     Route(
         "/api/skills/{skill}/review",
         endpoint=api_skill_review,
+        methods=["POST"],
+    ),
+    # v4.50: ClawHub marketplace surface (opt-in via OUROBOROS_CLAWHUB_ENABLED).
+    Route(
+        "/api/marketplace/clawhub/search",
+        endpoint=api_marketplace_search,
+        methods=["GET"],
+    ),
+    Route(
+        "/api/marketplace/clawhub/installed",
+        endpoint=api_marketplace_installed,
+        methods=["GET"],
+    ),
+    Route(
+        "/api/marketplace/clawhub/info/{slug:path}",
+        endpoint=api_marketplace_info,
+        methods=["GET"],
+    ),
+    Route(
+        "/api/marketplace/clawhub/preview/{slug:path}",
+        endpoint=api_marketplace_preview,
+        methods=["GET"],
+    ),
+    Route(
+        "/api/marketplace/clawhub/install",
+        endpoint=api_marketplace_install,
+        methods=["POST"],
+    ),
+    Route(
+        "/api/marketplace/clawhub/update/{name}",
+        endpoint=api_marketplace_update,
+        methods=["POST"],
+    ),
+    Route(
+        "/api/marketplace/clawhub/uninstall/{name}",
+        endpoint=api_marketplace_uninstall,
+        methods=["POST"],
+    ),
+    # v5: native-skill upgrade migration banner endpoints (Opus
+    # critic finding O-2 — operator must be told when a launcher
+    # bump silently rewrites an installed skill type).
+    Route(
+        "/api/migrations",
+        endpoint=api_migrations_list,
+        methods=["GET"],
+    ),
+    Route(
+        "/api/migrations/{key}/dismiss",
+        endpoint=api_migrations_dismiss,
         methods=["POST"],
     ),
     *file_browser_routes(),
@@ -1472,6 +1593,16 @@ async def lifespan(app):
         save_settings(settings)
     _apply_settings_to_env(settings)
     has_local = has_local_routing(settings)
+
+    # v4.50: seed ``data/skills/native/`` from ``repo/skills/`` on first
+    # launch. The launcher already does this for packaged builds; calling
+    # it here makes source-mode (``python server.py``) installs land at
+    # the same layout so the Skills/Marketplace UI sees a consistent tree.
+    try:
+        from ouroboros.launcher_bootstrap import ensure_data_skills_seeded
+        ensure_data_skills_seeded()
+    except Exception:
+        log.warning("Native skills bootstrap failed", exc_info=True)
 
     if has_supervisor_provider(settings):
         _start_supervisor_if_needed(settings)

@@ -1,4 +1,4 @@
-# Ouroboros v4.50.0-rc.9 — Architecture & Reference
+# Ouroboros v5.0.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -61,10 +61,12 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── provider_models.py   ← Provider-specific model ID helpers, direct-provider defaults (OpenAI, Anthropic)
       ├── reflection.py        ← Execution reflection and pattern capture
       ├── review_evidence.py   ← Structured review findings/obligations snapshot for summaries and reflections
-      ├── skill_loader.py      ← External skill discovery + durable skill state (Phase 3; reads OUROBOROS_SKILLS_REPO_PATH, persists to data/state/skills/<name>/)
+      ├── skill_loader.py      ← Skill discovery + durable skill state (v4.50: walks data/skills/{native,clawhub,external}/ + optional OUROBOROS_SKILLS_REPO_PATH; persists to data/state/skills/<name>/; tags each LoadedSkill with `source`)
       ├── skill_review.py      ← Tri-model skill review reusing the repo-review infrastructure against the Skill Review Checklist section of docs/CHECKLISTS.md
       ├── extension_loader.py  ← Phase 4 in-process loader for type: extension skills; discovers + imports plugin.py via importlib with a narrow PluginAPIImpl, tracks registrations per-skill for atomic unload
       ├── extensions_api.py    ← Phase 5 HTTP surface for extensions (GET /api/extensions, GET /api/extensions/<skill>/manifest, ALL /api/extensions/<skill>/<rest:path> catch-all dispatch, POST /api/skills/<skill>/toggle, POST /api/skills/<skill>/review)
+      ├── marketplace/         ← v4.50 ClawHub marketplace package (clawhub.py registry client, fetcher.py staging, adapter.py OpenClaw->Ouroboros translation, install.py orchestration, provenance.py durable provenance)
+      ├── marketplace_api.py   ← v4.50 HTTP surface for marketplace (/api/marketplace/clawhub/{search,info,installed,preview,install,update,uninstall}); opt-in via OUROBOROS_CLAWHUB_ENABLED
       ├── server_auth.py       ← Non-localhost auth gate (OUROBOROS_NETWORK_PASSWORD)
       ├── server_control.py    ← Process-control helpers: restart, panic stop
       ├── server_entrypoint.py ← CLI argument parsing, port-binding helpers
@@ -388,7 +390,8 @@ The Dashboard tab has been removed. Its functionality is now distributed:
 - **Review Enforcement**: `Advisory` or `Blocking` for pre-commit review behavior. Rendered as a two-button segmented toggle (advisory = amber, blocking = crimson) rather than a dropdown.
   Backed by `OUROBOROS_REVIEW_ENFORCEMENT`. Review always runs in both modes.
 - **Runtime Mode**: `Light` / `Advanced` / `Pro` segmented control backed by `OUROBOROS_RUNTIME_MODE` (default `advanced`). Separate axis from Review Enforcement — controls how far Ouroboros is allowed to self-modify. `Light` disables repo self-modification; `Advanced` preserves the current self-modifying evolutionary layer with core/safety-critical files still protected by the hardcoded sandbox; `Pro` is accepted as a forward-compatible value but currently behaves the same as `Advanced` while the future core-patch lane remains deferred. `ouroboros/config.py::VALID_RUNTIME_MODES = ("light", "advanced", "pro")` is the SSOT; `normalize_runtime_mode` runs on both the save path (`server.py::api_settings_post`) and the read path (`get_runtime_mode`) so unknown values can never drift between `/api/settings` and `/api/state`.
-- **External Skills Repo**: text input backed by `OUROBOROS_SKILLS_REPO_PATH`. The skill loader scans this path together with bundled `repo/skills/` packages; `skill_exec` runs reviewed scripts from those packages; `review_skill`/`toggle_skill`/`list_skills` manage lifecycle, and the Skills page exposes the same direct review/toggle flow. Absolute path or `~`-prefixed; empty means "bundled skills only". Ouroboros never clones or pulls this directory — the user manages it out-of-band. `get_skills_repo_path()` expands `~` at read time; `/api/state` surfaces only a `skills_repo_configured` boolean so the absolute path never leaks to the UI.
+- **External Skills Repo**: text input backed by `OUROBOROS_SKILLS_REPO_PATH`. v4.50 changed the discovery model: the primary location is now the in-data-plane tree `data/skills/{native,clawhub,external}/`, and `OUROBOROS_SKILLS_REPO_PATH` is an OPTIONAL extra discovery root for users who keep skills in their own checkout. The skill loader walks all three buckets + the optional path, tagging each `LoadedSkill` with `source` (`native`/`clawhub`/`external`/`user_repo`); `skill_exec` runs reviewed scripts from those packages; `review_skill`/`toggle_skill`/`list_skills` manage lifecycle, and the Skills page exposes the same direct review/toggle flow plus a Marketplace sub-tab for ClawHub installs. Absolute path or `~`-prefixed; empty means "use only the data plane". Ouroboros never clones or pulls this directory — the user manages it out-of-band. `get_skills_repo_path()` expands `~` at read time; `/api/state` surfaces only a `skills_repo_configured` boolean so the absolute path never leaks to the UI.
+- **ClawHub Marketplace**: opt-in checkbox + registry URL backed by `OUROBOROS_CLAWHUB_ENABLED` (default `false`) and `OUROBOROS_CLAWHUB_REGISTRY_URL` (default `https://clawhub.ai/api/v1`). When enabled, the Skills page exposes a `Marketplace` sub-tab that talks to the registry via `/api/marketplace/clawhub/*` endpoints. Every install runs through a fixed pipeline — registry resolve -> archive download (50 MB cap, text-only, sensitive-filename + loadable-binary refusal) -> staging extract -> OpenClaw frontmatter translation (writing original `SKILL.md` aside as `SKILL.openclaw.md` for audit) -> atomic land into `data/skills/clawhub/<owner>__<slug>/` -> tri-model `review_skill` auto-trigger -> durable provenance at `data/state/skills/<name>/clawhub.json`. Plugins (Node/TS) are filtered at search time and refused at install time; only skill packages are accepted. The registry-host allowlist (only `clawhub.ai` + localhost — `clawhub.com` was removed in v4.50 because we cannot independently verify shared ownership) prevents a settings override from redirecting HTTP traffic, and a custom redirect handler re-validates the host on every 30x hop. Forbidden settings keys (`OPENROUTER_API_KEY` etc.) cannot be forwarded to a marketplace skill via `env_from_settings` (case-insensitive comparison). Integrity beyond TLS-to-clawhub.ai is best-effort: the registry does not currently advertise a per-version digest, so the locally-computed sha256 acts as a provenance fingerprint rather than an MITM defense.
 - **Advanced tab**: local model runtime, max workers, tool timeout, soft/hard timeout, and reset controls. Total budget and per-task cost cap have moved to the **Costs** page.
 - **Local Model Runtime**: source, GGUF filename, port, GPU layers, context length, chat format, start/stop/test buttons, live local-model status, real download progress bar (updates via `download_progress` from `/api/local-model/status`), and an **Install Local Runtime** button (hidden until runtime is missing). The Start button performs a preflight check via `/api/local-model/start` before downloading; on a `runtime_missing` (HTTP 412) response it surfaces the install button and a human-readable hint instead of a raw traceback. After install completes (`runtime_status == "install_ok"`), the start flow resumes automatically if a source was configured. `LOCAL_MODEL_FILENAME` now accepts subfolder paths (`quant/model.gguf`) and split GGUF patterns (`quant/model-00001-of-00003.gguf`); all shards are downloaded automatically and the server is started with the first shard. If the user omits the subfolder prefix (types just the bare filename), `_resolve_hf_path` auto-resolves the full path by querying `list_repo_files` on the HF repo (fail-open on network errors).
 - **Telegram**: Bot Token and primary chat id. If no primary chat id is pinned, the bridge binds to the first active Telegram chat and keeps replies attached there.
@@ -1844,29 +1847,44 @@ a version bump + a migration note in the release row.
 
 ---
 
-## 12. External Skills Layer (Phase 3)
+## 12. External Skills Layer (Phase 3, refactored in v4.50)
 
-Phase 3 of the three-layer refactor introduces a safe, plug-and-play
+Phase 3 of the three-layer refactor introduced a safe, plug-and-play
 external skill surface that lives **outside** the self-modifying
-Ouroboros repository.
+Ouroboros repository. v4.50 moved the runtime location from the
+git-tracked ``repo/skills/`` seed directory into the data plane and
+added a ClawHub marketplace surface (Section 12.6) on top of that
+foundation.
 
 ### 12.1 Topology
 
 ```
-OUROBOROS_SKILLS_REPO_PATH (local checkout, user-managed)
-├── <skill_name>/
-│   ├── SKILL.md         ← manifest frontmatter + body, OR
-│   ├── skill.json       ← manifest as pure JSON
-│   ├── scripts/         ← payload files (python/bash/node)
-│   └── assets/          ← static data the payload reads
-│
-└── …
+~/Ouroboros/data/skills/                  ← primary discovery root (v4.50)
+├── native/<skill_name>/                  ← bootstrapped from repo/skills/ on first launch
+├── clawhub/<owner>__<slug>/              ← installed by the marketplace pipeline
+└── external/<skill_name>/                ← user-managed (drop in manually)
+
+OUROBOROS_SKILLS_REPO_PATH                ← optional EXTRA discovery root
+└── <skill_name>/                         ← user-managed checkout (git clone, etc.)
+
+Each <skill_name>/ contains:
+├── SKILL.md          ← manifest frontmatter + body, OR
+├── skill.json        ← manifest as pure JSON
+├── SKILL.openclaw.md ← (clawhub source only) preserved original frontmatter
+├── scripts/          ← payload files (python/bash/node)
+├── assets/           ← static data the payload reads
+└── .clawhub.json     ← (clawhub source only) sidecar provenance hint
 ```
 
-Ouroboros never clones or pulls this directory — the user manages it
-(git clone, symlink, zip-extract, whatever). Skills are discovered via
-``ouroboros.skill_loader.discover_skills`` which scans immediate
-subdirectories of the configured path.
+Ouroboros bootstrap-copies its shipped seed (``repo/skills/``) into
+``data/skills/native/`` exactly once on first launch
+(``launcher_bootstrap.ensure_data_skills_seeded``). After that the
+data plane is the source of truth — the user can edit, delete, or add
+skill packages freely without dirtying the managed git repo. Skills
+are discovered via ``ouroboros.skill_loader.discover_skills`` which
+walks the data plane plus the optional external checkout, tagging each
+``LoadedSkill`` with ``source`` (``native`` / ``clawhub`` /
+``external`` / ``user_repo``).
 
 Per-skill durable state lives on the Ouroboros data plane, not inside
 the skill checkout:
@@ -1938,7 +1956,10 @@ collide with a previous load's ``sys.modules`` entries.
 
 ### 12.3 Gating invariants (all must hold for ``skill_exec`` to run)
 
-- ``OUROBOROS_SKILLS_REPO_PATH`` is configured.
+- A skill is discoverable in ``data/skills/{native,clawhub,external}/``
+  OR via ``OUROBOROS_SKILLS_REPO_PATH`` (the legacy "external skills
+  repo" knob). The data plane is the primary location since v4.50;
+  the env-var path remains as an OPTIONAL extra root.
 - ``OUROBOROS_RUNTIME_MODE`` is ``advanced`` or ``pro`` (``light``
   blocks execution entirely).
 - The skill's ``type`` is ``script`` (``skill_exec`` runs scripts —
@@ -2043,3 +2064,76 @@ Defense in depth against reviewer misses:
   namespace collision, missing permission, or malformed path/
   message-type; errors tear down any partial registrations and
   surface as a ``load_error`` on the skill.
+
+### 12.6 ClawHub Marketplace (v4.50)
+
+Opt-in surface for browsing + installing community skills from
+[clawhub.ai](https://clawhub.ai). Disabled by default; the operator
+flips ``OUROBOROS_CLAWHUB_ENABLED=true`` in Settings to expose the
+``Marketplace`` sub-tab on the Skills page and the
+``/api/marketplace/clawhub/*`` HTTP endpoints. Only **skills** are
+installable — Node/TypeScript plugins (``openclaw.plugin.json``) are
+filtered at search time and refused at install time.
+
+#### 12.6.1 Module layout
+
+| Module | Role |
+|---|---|
+| ``ouroboros/marketplace/clawhub.py`` | Read-only registry HTTP client (``search`` / ``info`` / ``list_versions`` / ``download``). Hostname allowlist (``clawhub.ai`` + localhost only — ``clawhub.com`` was removed in v4.50 because we cannot independently verify shared ownership), 4 MB JSON cap, 50 MB archive cap, 15 s default timeout. |
+| ``ouroboros/marketplace/fetcher.py`` | Stages a downloaded archive into a private temp dir. Validates: zip integrity, ≤ 50 MB / ≤ 200 files / ≤ 8 MB per file, text-only extension allowlist, sensitive-filename + loadable-binary refusal, no symlinks, no path traversal. |
+| ``ouroboros/marketplace/adapter.py`` | Translates OpenClaw frontmatter (`metadata.openclaw.requires.{env,bins}`, `os`, `install`, `allowed-tools`, ...) into Ouroboros's manifest shape. Refuses ``install`` specs (brew/go/uv/node), env keys overlapping ``FORBIDDEN_SKILL_SETTINGS``, and plugin packages. Writes the original manifest aside as ``SKILL.openclaw.md`` for audit. |
+| ``ouroboros/marketplace/install.py`` | End-to-end pipeline: ``info`` -> ``download`` -> ``stage`` -> ``adapt`` -> atomically swap the staged tree into ``data/skills/clawhub/<sanitized>/`` -> auto-trigger ``review_skill`` -> persist provenance. Also exposes ``update_skill`` (re-install at newer version) and ``uninstall_skill``. |
+| ``ouroboros/marketplace/provenance.py`` | Atomic JSON read/write helper for ``data/state/skills/<name>/clawhub.json``. Schema: ``{schema_version, source, slug, sanitized_name, version, sha256, original_manifest_sha256, translated_manifest_sha256, registry_url, license, primary_env, adapter_warnings, installed_at, updated_at}``. |
+| ``ouroboros/marketplace_api.py`` | Starlette routes wired in ``server.py`` under ``/api/marketplace/clawhub/{search,info,installed,preview,install,update,uninstall}``. Every endpoint enforces the opt-in flag (HTTP 403 when disabled) and dispatches the heavy work via ``asyncio.to_thread`` to keep the event loop responsive. |
+| ``web/modules/marketplace.js`` | Marketplace UI lazily loaded by the Skills page when the user clicks the ``Marketplace`` tab. Provides search + filters (sort / OS / official) + cards + detail-modal (translated manifest table + adapter warnings/blockers + original ``SKILL.openclaw.md`` preview) + install/update/uninstall flows. |
+
+#### 12.6.2 Frontmatter mapping (OpenClaw -> Ouroboros)
+
+| OpenClaw field | Ouroboros field | Mapping rule |
+|---|---|---|
+| ``name`` (slug) | ``name`` (sanitized) | ``owner/skill`` -> ``owner__skill``; non-alnum chars -> ``_`` ; ``[:64]`` cap. |
+| ``description`` | ``description`` + ``when_to_use`` | Description copied into ``when_to_use`` when the latter is empty so the agent's context-builder uses the same activation trigger surface OpenClaw documents. |
+| ``version`` | ``version`` | Direct passthrough. |
+| ``metadata.openclaw.os`` | ``os`` | ``[darwin, linux]`` -> ``"any"`` if the set is the universe; single platform -> ``"darwin"``/``"linux"``/``"windows"``. ``macos`` aliased to ``darwin``, ``win32`` to ``windows``. |
+| ``metadata.openclaw.requires.env`` | ``env_from_settings`` | Refused (blocker) if any key overlaps ``FORBIDDEN_SKILL_SETTINGS``. |
+| ``metadata.openclaw.requires.bins`` | runtime detection | Only ``python``/``python3``/``node``/``bash`` are honoured; otherwise the skill becomes ``type: instruction`` with a warning. |
+| ``metadata.openclaw.install`` | **REFUSED** | Any non-empty ``install`` array is a hard blocker — Ouroboros does not invoke ``brew``/``go``/``uv``/``node`` installers on the host. |
+| ``metadata.openclaw.always`` | ignored | Marketplace installs always land with ``enabled: false`` regardless of what the publisher wanted. |
+| ``allowed-tools`` | ``permissions`` | ``Bash(...)`` -> ``subprocess``; ``Read``/``Write`` -> ``fs``; ``Fetch``/``HTTP``/``Web`` -> ``net``. Non-empty ``requires.env`` also implies ``net``. |
+| ``metadata.openclaw.primaryEnv`` | provenance JSON | Preserved at ``data/state/skills/<name>/clawhub.json::primary_env``; not folded into the rendered ``SKILL.md``. |
+| ``license`` | provenance JSON | Preserved at ``data/state/skills/<name>/clawhub.json::license``; surfaced in the marketplace UI cards (display-only, never enforced). |
+| ``homepage`` / ``website`` | provenance JSON | Preserved at ``data/state/skills/<name>/clawhub.json::homepage``; surfaced as a marketplace card link with strict scheme validation (``http``/``https`` only). |
+
+#### 12.6.3 Defense in depth
+
+The marketplace inherits every gate that protects the existing skill
+surface (review, runtime mode, sandbox env scrub, byte caps,
+``FORBIDDEN_SKILL_SETTINGS``) and adds:
+
+- **Opt-in flag** ``OUROBOROS_CLAWHUB_ENABLED`` (default ``false``).
+  All marketplace HTTP endpoints respond with HTTP 403 when disabled.
+- **Registry host allowlist** in ``clawhub.py::_registry_base_url``.
+  An override of ``OUROBOROS_CLAWHUB_REGISTRY_URL`` to a non-allowlisted
+  hostname is rejected up-front with ``ClawHubClientHostBlocked``.
+  A custom ``_AllowlistRedirectHandler`` enforces the same allowlist on
+  every 30x redirect hop so a registry response cannot SSRF-pivot to
+  an internal address.
+- **Archive validation** in ``fetcher.py::stage`` rejects oversize
+  bundles, sensitive-shape filenames (``.env``, ``credentials.json``,
+  ``*.pem``, etc.), loadable-binary extensions
+  (``.so``/``.dll``/``.wasm``/``.pyc``/``.exe``/...), zip members with
+  ``..`` traversal, absolute paths, and symlinks. Every check fails
+  closed; nothing is silently skipped.
+- **Adapter blockers** refuse to write the translated manifest if the
+  publisher requested a denylisted env key or any global-mutation
+  ``install`` spec.
+- **Auto-review** runs the existing tri-model ``review_skill``
+  pipeline immediately after install; the new skill is not
+  ``available_for_execution`` until the review verdict is ``pass``.
+  If the review pipeline raises (e.g. transport error), the install
+  still succeeds but ``review_status`` lands as ``pending`` so the
+  operator can re-trigger it from the Skills page.
+- **Provenance audit trail** at ``data/state/skills/<name>/clawhub.json``
+  records the original + translated manifest sha256 pair so a later
+  reviewer (human or LLM) can verify the adapter did not silently
+  drop permissions or env keys.

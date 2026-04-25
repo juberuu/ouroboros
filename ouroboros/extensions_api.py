@@ -117,8 +117,43 @@ async def api_extensions_index(request: Request) -> JSONResponse:
                 if str(name).startswith(prefix)
             ]
 
-        catalog = [
-            {
+        # v5: include marketplace provenance directly on clawhub skills so
+        # the Installed UI can show the registry slug, archive sha256,
+        # homepage / license, adapter warnings, and a "version vs latest"
+        # mismatch hint without making a second round-trip to
+        # ``/api/marketplace/clawhub/installed``. ``read_provenance``
+        # returns ``None`` for any non-clawhub skill (no sidecar present),
+        # so this is a no-op for native / external entries.
+        #
+        # v5 Cycle 1 Gemini Finding 5 + Cycle 2 Opus C2-1 — split the
+        # projection into two slices by *direction of trust*:
+        #
+        # - **Always shown** even when the marketplace surface is
+        #   disabled: ``slug`` (operator-supplied install argument),
+        #   ``version`` (operator-pinned install version),
+        #   ``sha256`` (cryptographic, internally computed),
+        #   ``installed_at`` / ``updated_at`` (internally generated).
+        #   These let the operator inspect what's already on disk
+        #   without re-enabling the marketplace surface.
+        # - **Gated on ``OUROBOROS_CLAWHUB_ENABLED``**: the
+        #   *registry-controlled* fields ``homepage``, ``license``,
+        #   ``primary_env``, ``adapter_warnings``, ``registry_url``.
+        #   These can carry attacker-shaped strings written into
+        #   provenance at install time; they vanish from the wire
+        #   when the operator turns the marketplace off.
+        try:
+            from ouroboros.marketplace.provenance import read_provenance
+        except Exception:  # pragma: no cover — defensive
+            read_provenance = lambda *_a, **_kw: None  # type: ignore[assignment]
+        try:
+            from ouroboros.config import get_clawhub_enabled
+            marketplace_enabled = bool(get_clawhub_enabled())
+        except Exception:  # pragma: no cover — defensive
+            marketplace_enabled = False
+
+        catalog = []
+        for s in skills:
+            entry = {
                 "name": s.name,
                 "type": s.manifest.type,
                 "version": s.manifest.version,
@@ -137,9 +172,39 @@ async def api_extensions_index(request: Request) -> JSONResponse:
                     or _live_ws_count(s.name)
                 ),
                 "ui_tabs_pending": _pending_ui_tabs(s.name),
+                # v4.50: surface the discovery source so the Skills tab
+                # can render a clawhub badge + Update/Uninstall buttons
+                # for marketplace-installed skills. Without this the
+                # /api/extensions catalogue would silently mislabel
+                # clawhub skills as "native" (P5 honesty regression).
+                "source": s.source,
             }
-            for s in skills
-        ]
+            if s.source == "clawhub":
+                try:
+                    prov = read_provenance(drive_root, s.name) or {}
+                except Exception:  # pragma: no cover
+                    prov = {}
+                if prov:
+                    # Always-safe fields (regardless of marketplace flag).
+                    entry["provenance"] = {
+                        "slug": prov.get("slug", ""),
+                        "version": prov.get("version", ""),
+                        "sha256": prov.get("sha256", ""),
+                        "installed_at": prov.get("installed_at", ""),
+                        "updated_at": prov.get("updated_at", ""),
+                    }
+                    # Registry-controlled fields only when the marketplace
+                    # surface is opt-in enabled. These are the strings a
+                    # publisher could shape at install time.
+                    if marketplace_enabled:
+                        entry["provenance"].update({
+                            "homepage": prov.get("homepage", ""),
+                            "license": prov.get("license", ""),
+                            "primary_env": prov.get("primary_env", ""),
+                            "adapter_warnings": list(prov.get("adapter_warnings") or []),
+                            "registry_url": prov.get("registry_url", ""),
+                        })
+            catalog.append(entry)
         return JSONResponse({"skills": catalog, "live": live_snapshot})
     except Exception as exc:
         log.exception("api_extensions_index failure")

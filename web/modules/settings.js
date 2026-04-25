@@ -224,6 +224,8 @@ export function initSettings({ state }) {
         byId('s-review-enforcement').value = s.OUROBOROS_REVIEW_ENFORCEMENT || 'advisory';
         byId('s-runtime-mode').value = s.OUROBOROS_RUNTIME_MODE || 'advanced';
         applyInputValue('s-skills-repo-path', s.OUROBOROS_SKILLS_REPO_PATH);
+        applyCheckboxValue('s-clawhub-enabled', s.OUROBOROS_CLAWHUB_ENABLED);
+        applyInputValue('s-clawhub-registry-url', s.OUROBOROS_CLAWHUB_REGISTRY_URL);
         if (s.OUROBOROS_MAX_WORKERS) byId('s-workers').value = s.OUROBOROS_MAX_WORKERS;
         if (s.OUROBOROS_SOFT_TIMEOUT_SEC) byId('s-soft-timeout').value = s.OUROBOROS_SOFT_TIMEOUT_SEC;
         if (s.OUROBOROS_HARD_TIMEOUT_SEC) byId('s-hard-timeout').value = s.OUROBOROS_HARD_TIMEOUT_SEC;
@@ -333,6 +335,8 @@ export function initSettings({ state }) {
             OUROBOROS_REVIEW_ENFORCEMENT: byId('s-review-enforcement').value,
             OUROBOROS_RUNTIME_MODE: byId('s-runtime-mode').value,
             OUROBOROS_SKILLS_REPO_PATH: byId('s-skills-repo-path').value.trim(),
+            OUROBOROS_CLAWHUB_ENABLED: byId('s-clawhub-enabled')?.checked === true,
+            OUROBOROS_CLAWHUB_REGISTRY_URL: byId('s-clawhub-registry-url')?.value.trim() || '',
             OUROBOROS_MAX_WORKERS: readInt('s-workers', 5),
             OUROBOROS_SOFT_TIMEOUT_SEC: readInt('s-soft-timeout', 600),
             OUROBOROS_HARD_TIMEOUT_SEC: readInt('s-hard-timeout', 1800),

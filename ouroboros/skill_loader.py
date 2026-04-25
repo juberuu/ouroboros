@@ -168,8 +168,11 @@ class LoadedSkill:
     - the last review landed with status ``pass``;
     - the review is not stale against the current content hash.
 
-    Phase 3 ``type: extension`` skills are always ``False`` because the
-    extension loader does not arrive until Phase 4.
+    ``source`` records which discovery root the skill came from
+    (``native`` / ``clawhub`` / ``external`` / ``user_repo``). The Skills /
+    Marketplace UI uses it to group cards and decide which lifecycle
+    actions to expose (e.g. an ``Update`` button is only meaningful for
+    ``clawhub`` skills with provenance metadata).
     """
 
     name: str
@@ -179,6 +182,7 @@ class LoadedSkill:
     enabled: bool = False
     review: SkillReviewState = field(default_factory=SkillReviewState)
     load_error: str = ""
+    source: str = "native"
 
     @property
     def available_for_execution(self) -> bool:
@@ -670,6 +674,23 @@ def _safe_listdir(root: pathlib.Path) -> List[pathlib.Path]:
         return []
 
 
+def _looks_like_skill_dir(path: pathlib.Path) -> bool:
+    """Return True when ``path`` directly contains a SKILL.md / skill.json.
+
+    Used by the recursive ``data/skills/`` walker to decide whether a
+    sub-directory is itself a skill package or a grouping container
+    (``data/skills/native/``, ``data/skills/clawhub/``, ...). Without
+    this gate, the walker would also try to ``load_skill(data/skills/)``
+    and emit a confusing 'no manifest' load_error for the root.
+    """
+    if not path.is_dir():
+        return False
+    for candidate in _MANIFEST_NAMES:
+        if (path / candidate).is_file():
+            return True
+    return False
+
+
 def load_skill(
     skill_dir: pathlib.Path,
     drive_root: pathlib.Path,
@@ -774,10 +795,14 @@ def load_skill(
 
 
 def _bundled_skills_dir() -> Optional[pathlib.Path]:
-    """Return the bundled reference-skills directory (``repo/skills/``).
+    """Return the legacy bundled reference-skills directory (``repo/skills/``).
 
-    Bound directly to ``ouroboros.config.REPO_DIR`` so discovery is
-    deterministic in both source checkouts and launcher-managed installs.
+    Retained for backward compatibility with tests that still ``monkeypatch``
+    this symbol to point at fixture trees. Production discovery no longer
+    consults this path directly: the launcher bootstrap copies the seed
+    one-shot into ``data/skills/native/`` (see ``launcher_bootstrap.bootstrap_native_skills``),
+    and ``discover_skills`` walks the data plane after that.
+
     Returns ``None`` if the bundled folder is missing (which is fine in
     a packaged build that strips the reference skills).
     """
@@ -790,52 +815,278 @@ def _bundled_skills_dir() -> Optional[pathlib.Path]:
     return fallback if fallback.is_dir() else None
 
 
+def _resolve_data_skills_dir(
+    drive_root: Optional[pathlib.Path] = None,
+) -> Optional[pathlib.Path]:
+    """Return the data-plane skills root if it exists on disk.
+
+    Pure READ — does NOT create the directory. The bootstrap path
+    (``launcher_bootstrap.ensure_data_skills_seeded``) and the
+    marketplace install pipeline call ``config.ensure_data_skills_dir``
+    explicitly when they want to materialise the layout.
+
+    When ``drive_root`` is supplied, the skills root is derived from
+    that argument verbatim. Otherwise we read
+    ``ouroboros.config.DATA_DIR`` at call time. Returns ``None`` if
+    the directory does not exist on disk (e.g. a fresh checkout that
+    has not been launched yet).
+    """
+    if drive_root is not None:
+        candidate = pathlib.Path(drive_root) / "skills"
+        return candidate if candidate.is_dir() else None
+    try:
+        from ouroboros.config import resolve_data_skills_dir, DATA_DIR
+        return resolve_data_skills_dir(DATA_DIR)
+    except Exception:
+        return None
+
+
+_ORPHAN_NAME_FRAGMENTS = (".replaced-", ".staging-", ".tmp-")
+
+
+def _is_orphan_marker_name(name: str) -> bool:
+    """Return True for transient backup/staging directory names.
+
+    The marketplace install pipeline (``install.py::_land_staged_into_data_plane``)
+    moves the previous version of a skill aside as
+    ``<slug>.replaced-<sha8>`` before swapping in the fresh tree. On a
+    crash mid-swap (or if ``shutil.rmtree(sibling, ignore_errors=True)``
+    silently fails for filesystem reasons), that sibling can be left
+    behind. Without this filter, ``discover_skills`` would surface
+    those orphans as if they were live skills, attaching Update /
+    Uninstall affordances to a stale snapshot.
+    """
+    cleaned = (name or "").strip()
+    if not cleaned:
+        return False
+    return any(token in cleaned for token in _ORPHAN_NAME_FRAGMENTS)
+
+
+def _walk_skill_packages(
+    root: pathlib.Path,
+) -> List[pathlib.Path]:
+    """Yield every skill package directly under ``root`` or one level deep.
+
+    The data plane uses an intentionally-shallow layout::
+
+        data/skills/native/<slug>/      -- skill package
+        data/skills/clawhub/<slug>/     -- skill package
+        data/skills/external/<slug>/    -- skill package
+
+    so we walk root + each immediate sub-directory and emit any child
+    that owns a ``SKILL.md`` / ``skill.json``. Deeper nesting is
+    deliberately NOT explored — a misclick that drops a SKILL.md
+    five levels down stays invisible rather than silently auto-loading.
+
+    Transient backup directories left behind by interrupted installs
+    (``<slug>.replaced-<sha8>``, ``<slug>.staging-<sha8>``,
+    ``<slug>.tmp-<sha8>``) are filtered out — see
+    :func:`_is_orphan_marker_name`.
+    """
+    out: List[pathlib.Path] = []
+    if not root.is_dir():
+        return out
+    if _looks_like_skill_dir(root):
+        # Edge case: the root itself is a skill (back-compat with
+        # ``OUROBOROS_SKILLS_REPO_PATH`` pointing AT a single-skill folder).
+        out.append(root)
+        return out
+    for child in _safe_listdir(root):
+        if _is_orphan_marker_name(child.name):
+            continue
+        if _looks_like_skill_dir(child):
+            out.append(child)
+            continue
+        # One level deeper for grouping containers (the
+        # ``native`` / ``clawhub`` / ``external`` subdirs of the
+        # data-plane root).
+        for grandchild in _safe_listdir(child):
+            if _is_orphan_marker_name(grandchild.name):
+                continue
+            if _looks_like_skill_dir(grandchild):
+                out.append(grandchild)
+    return out
+
+
+def _classify_skill_source(
+    skill_dir: pathlib.Path,
+    *,
+    data_skills_root: Optional[pathlib.Path],
+    user_repo_root: Optional[pathlib.Path],
+) -> str:
+    """Return the discovery-source tag for a skill directory.
+
+    Order of resolution:
+
+    1. If the path lives under ``data/skills/<bucket>/...`` AND
+       ``<bucket>`` is one of ``native``/``clawhub``/``external``,
+       return that literal bucket. ``native`` carries an extra
+       authenticity gate (BIBLE.md P4 honesty fix from cycle 1
+       Ouroboros review O3): the package must own a sibling
+       ``.seed-origin`` marker file (written by the launcher
+       bootstrap when it copied the seed). A skill that a user
+       manually dropped into ``data/skills/native/`` lacks the
+       marker and is reclassified as ``external`` so the UI badge
+       does not falsely claim launcher-seeded provenance.
+    2. If the path lives under the user-configured
+       ``OUROBOROS_SKILLS_REPO_PATH``, return ``user_repo``.
+    3. Fallback: ``external``.
+    """
+    from ouroboros.config import (
+        SKILL_SOURCE_CLAWHUB,
+        SKILL_SOURCE_EXTERNAL,
+        SKILL_SOURCE_NATIVE,
+        SKILL_SOURCE_USER_REPO,
+        SKILL_SOURCE_SUBDIRS,
+    )
+    try:
+        resolved = skill_dir.resolve()
+    except OSError:
+        return SKILL_SOURCE_EXTERNAL
+    if data_skills_root is not None:
+        try:
+            rel = resolved.relative_to(data_skills_root.resolve())
+            parts = rel.parts
+            if parts:
+                bucket = parts[0]
+                if bucket in SKILL_SOURCE_SUBDIRS:
+                    if bucket == SKILL_SOURCE_NATIVE:
+                        # Honesty gate — only mark as ``native`` when
+                        # the launcher actually seeded this package
+                        # (per-skill ``.seed-origin`` marker present).
+                        # Legacy pre-v4.50 native skills that pre-date
+                        # the marker pattern are reclassified as
+                        # ``external``: there is no way to tell at
+                        # discovery time whether they came from a
+                        # launcher seed or a manual user drop, so the
+                        # safe answer is "user-managed external".
+                        if (resolved / ".seed-origin").is_file():
+                            return SKILL_SOURCE_NATIVE
+                        return SKILL_SOURCE_EXTERNAL
+                    if bucket == SKILL_SOURCE_CLAWHUB:
+                        # Mirror the ``native`` honesty gate for the
+                        # ``clawhub`` bucket. The marketplace install
+                        # pipeline drops ``.clawhub.json`` (provenance
+                        # sidecar) at the skill root; without it,
+                        # treating an arbitrary sub-directory as
+                        # marketplace-installed would attach Update /
+                        # Uninstall affordances to unverified content
+                        # (cycle 2 Ouroboros own-pipeline finding).
+                        if (resolved / ".clawhub.json").is_file():
+                            return SKILL_SOURCE_CLAWHUB
+                        return SKILL_SOURCE_EXTERNAL
+                    return bucket
+            # Unknown bucket (e.g. user dropped a skill directly under
+            # ``data/skills/`` or under a custom subdir). Treat as
+            # ``external`` rather than ``native``.
+            return SKILL_SOURCE_EXTERNAL
+        except ValueError:
+            pass
+    if user_repo_root is not None:
+        try:
+            resolved.relative_to(user_repo_root.resolve())
+            return SKILL_SOURCE_USER_REPO
+        except ValueError:
+            pass
+    return SKILL_SOURCE_EXTERNAL
+
+
 def discover_skills(
     drive_root: pathlib.Path,
     repo_path: str | None = None,
     *,
     include_bundled: bool = True,
 ) -> List[LoadedSkill]:
-    """Scan the configured external skills checkout (and optionally the
-    bundled reference-skills directory) for skill packages.
+    """Scan the data-plane skills tree (and optional external checkouts).
 
-    ``repo_path`` defaults to ``ouroboros.config.get_skills_repo_path()``.
-    When ``include_bundled=True`` (the production default), the bundled
-    ``repo/skills/`` directory is ALSO scanned so the reference
-    ``weather`` skill is available out of the box without user
-    configuration. Tests that want a hermetic view of only their
-    fixture skills can pass ``include_bundled=False``.
+    Discovery walks, in order:
 
-    Duplicate basenames between the external repo and the bundled
-    directory surface as sanitised-name collisions via the existing
-    collision detector — the operator can rename the bundled copy or
-    point ``OUROBOROS_SKILLS_REPO_PATH`` at a non-overlapping directory.
+    1. ``data/skills/native/`` + ``data/skills/clawhub/`` +
+       ``data/skills/external/`` — the in-data-plane runtime location
+       since v4.50. Subdirectory names map directly to the skill's
+       ``source`` tag on the resulting :class:`LoadedSkill`.
+    2. ``OUROBOROS_SKILLS_REPO_PATH`` — optional extra discovery root
+       for users who keep skills in their own git checkout. Skills
+       discovered here are tagged ``user_repo``.
+    3. ``include_bundled`` is retained for back-compat with tests that
+       still monkey-patch ``_bundled_skills_dir``: when the data plane
+       has no skills yet AND a bundled directory exists, we fall through
+       to it (read-only, source=``native``). Production callers should
+       rely on the launcher bootstrap to copy the seed into
+       ``data/skills/native/`` exactly once.
+
+    Duplicate basenames across roots surface as sanitised-name
+    collisions via the existing collision detector — the operator can
+    rename the directories before tools can act on the skill.
     """
     if repo_path is None:
         from ouroboros.config import get_skills_repo_path
         repo_path = get_skills_repo_path()
     repo_path = str(repo_path or "").strip()
-    roots: List[pathlib.Path] = []
-    bundled = _bundled_skills_dir() if include_bundled else None
-    if bundled is not None:
-        roots.append(bundled)
-    if repo_path:
-        external = pathlib.Path(repo_path).expanduser().resolve()
-        if external.is_dir() and (not bundled or external != bundled):
-            roots.append(external)
-    if not roots:
-        return []
 
+    data_skills_root = _resolve_data_skills_dir(drive_root)
+    user_repo_root: Optional[pathlib.Path] = None
+    if repo_path:
+        try:
+            user_repo_candidate = pathlib.Path(repo_path).expanduser().resolve()
+        except OSError:
+            user_repo_candidate = None
+        if user_repo_candidate is not None and user_repo_candidate.is_dir():
+            user_repo_root = user_repo_candidate
+
+    roots: List[pathlib.Path] = []
+    if data_skills_root is not None:
+        roots.append(data_skills_root)
+    if user_repo_root is not None:
+        # Avoid double-scanning if the user pointed OUROBOROS_SKILLS_REPO_PATH
+        # at the data-plane root (unusual but possible during migration).
+        if data_skills_root is None or user_repo_root != data_skills_root.resolve():
+            roots.append(user_repo_root)
+
+    # Back-compat fallback: only fire when the data plane has NEVER
+    # been initialised — i.e. ``data/skills/`` does not exist on disk
+    # at all. Once the bootstrap has run (even to copy zero skills),
+    # the user's explicit emptying of ``data/skills/native/`` must
+    # stick. v4.50 cycle-1 Ouroboros review O2: gating on "no skills
+    # found" instead of "no data plane" silently resurrected deleted
+    # seed skills, violating the "exactly once" docstring promise.
     skills: List[LoadedSkill] = []
     seen_dirs: set[pathlib.Path] = set()
     for root in roots:
-        for entry in _safe_listdir(root):
-            resolved = entry.resolve()
+        for entry in _walk_skill_packages(root):
+            try:
+                resolved = entry.resolve()
+            except OSError:
+                continue
             if resolved in seen_dirs:
                 continue
             seen_dirs.add(resolved)
             loaded = load_skill(entry, drive_root)
-            if loaded is not None:
+            if loaded is None:
+                continue
+            loaded.source = _classify_skill_source(
+                entry,
+                data_skills_root=data_skills_root,
+                user_repo_root=user_repo_root,
+            )
+            skills.append(loaded)
+
+    data_plane_initialised = data_skills_root is not None
+    if not skills and include_bundled and not data_plane_initialised:
+        bundled = _bundled_skills_dir()
+        if bundled is not None and bundled.is_dir():
+            for entry in _walk_skill_packages(bundled):
+                try:
+                    resolved = entry.resolve()
+                except OSError:
+                    continue
+                if resolved in seen_dirs:
+                    continue
+                seen_dirs.add(resolved)
+                loaded = load_skill(entry, drive_root)
+                if loaded is None:
+                    continue
+                loaded.source = "native"
                 skills.append(loaded)
 
     # Detect collisions in the sanitised identity. Two distinct
@@ -950,6 +1201,7 @@ def summarize_skills(drive_root: pathlib.Path) -> Dict[str, Any]:
                     s.available_for_execution and runtime_blocks_execution
                 ),
                 "load_error": s.load_error,
+                "source": s.source,
             }
             for s in skills
         ],

@@ -554,9 +554,23 @@ body {
     flex-wrap: wrap;
     row-gap: 10px;
     pointer-events: none;
-    background: linear-gradient(180deg, rgba(13, 11, 15, 0.88) 0%, rgba(13, 11, 15, 0.72) 70%, rgba(13, 11, 15, 0.32) 100%);
+    /* Fade fully to transparent at the bottom edge so no hard border
+       shows up between the scrim and the transcript. The previous stop
+       at 0.32 alpha left a visible discontinuity; fading to 0 produces
+       a clean scroll-under effect at every scroll position. */
+    background: linear-gradient(
+        180deg,
+        rgba(13, 11, 15, 0.92) 0%,
+        rgba(13, 11, 15, 0.78) 45%,
+        rgba(13, 11, 15, 0.38) 80%,
+        rgba(13, 11, 15, 0.00) 100%
+    );
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
+    /* Soft-mask the blur to fall off in lockstep with the gradient,
+       otherwise the glass effect creates its own visible hard edge. */
+    -webkit-mask-image: linear-gradient(180deg, black 0%, black 70%, transparent 100%);
+            mask-image: linear-gradient(180deg, black 0%, black 70%, transparent 100%);
 }
 
 .chat-page-header > * {
@@ -1422,7 +1436,20 @@ body {
     left: 0;
     right: 0;
     z-index: 5;
-    background: linear-gradient(0deg, rgba(13, 11, 15, 0.84) 30%, rgba(13, 11, 15, 0.26) 100%);
+    /* Bottom scroll-under fade. Reaches a fully-transparent stop at the
+       upper edge so the transcript blends into the input dock without a
+       hard border. Previous gradient bottomed at 0.26 alpha and made a
+       visible step against the page background. */
+    background: linear-gradient(
+        0deg,
+        rgba(13, 11, 15, 0.92) 0%,
+        rgba(13, 11, 15, 0.74) 35%,
+        rgba(13, 11, 15, 0.30) 78%,
+        rgba(13, 11, 15, 0.00) 100%
+    );
+    /* Mask the blur (when used) to fade in step with the gradient. */
+    -webkit-mask-image: linear-gradient(0deg, black 0%, black 60%, transparent 100%);
+            mask-image: linear-gradient(0deg, black 0%, black 60%, transparent 100%);
 }
 
 .chat-input-wrap {
@@ -1529,7 +1556,12 @@ body {
     background: rgba(26, 21, 32, 0.62);
     backdrop-filter: blur(16px);
     -webkit-backdrop-filter: blur(16px);
-    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    /* No drop-shadow halo around the input field — the bottom scroll-under
+       fade + the input's own translucent glass background already separate
+       it from the transcript. The previous 24px ambient shadow read as a
+       redundant gradient ring around the input. Inset highlight kept for
+       the subtle top edge bevel of the glass surface. */
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
     color: var(--text-primary);
     font-size: 15px;
     font-family: inherit;
@@ -1542,7 +1574,8 @@ body {
 #chat-input:focus {
     border-color: rgba(232, 93, 111, 0.4);
     background: rgba(26, 21, 32, 0.72);
-    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 0 0 3px rgba(201, 53, 69, 0.10);
+    /* Focus ring only — no ambient halo. */
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 0 0 3px rgba(201, 53, 69, 0.10);
 }
 #chat-input::placeholder { color: var(--text-muted); }
 
@@ -2550,6 +2583,500 @@ body {
 .skills-banner-warn { background: rgba(245, 158, 11, 0.08); border-color: rgba(245, 158, 11, 0.3); color: #f59e0b; }
 .skills-banner-muted { background: rgba(250, 250, 250, 0.04); border-color: rgba(250, 250, 250, 0.1); color: rgba(250, 250, 250, 0.7); }
 
+/* ----- Skills tab navigation (Installed / Marketplace) ----- */
+
+.skills-tabs {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 14px;
+    border-bottom: 1px solid rgba(250, 250, 250, 0.08);
+}
+
+.skills-tab {
+    appearance: none;
+    background: transparent;
+    border: 1px solid transparent;
+    border-bottom: none;
+    color: rgba(250, 250, 250, 0.55);
+    cursor: pointer;
+    font: inherit;
+    font-size: 13px;
+    padding: 8px 14px;
+    border-radius: 6px 6px 0 0;
+    transition: color 0.15s ease, background 0.15s ease;
+}
+
+.skills-tab:hover {
+    color: rgba(250, 250, 250, 0.85);
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.skills-tab.is-active {
+    color: rgba(250, 250, 250, 0.95);
+    background: rgba(255, 255, 255, 0.05);
+    border-color: rgba(250, 250, 250, 0.08);
+}
+
+.skills-tab-pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-left: 6px;
+    padding: 0 6px;
+    min-width: 18px;
+    height: 18px;
+    border-radius: 9px;
+    background: rgba(245, 158, 11, 0.15);
+    color: #f59e0b;
+    font-size: 11px;
+    font-family: 'JetBrains Mono', monospace;
+}
+
+.skills-tab-panel {
+    margin-top: 4px;
+}
+
+/* ----- ClawHub Marketplace shell ----- */
+
+.marketplace-shell {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.marketplace-controls {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.marketplace-search {
+    flex: 1 1 240px;
+    min-width: 200px;
+    padding: 6px 10px;
+    border: 1px solid rgba(250, 250, 250, 0.1);
+    background: rgba(255, 255, 255, 0.03);
+    color: inherit;
+    border-radius: 6px;
+    font: inherit;
+    font-size: 13px;
+}
+
+.marketplace-search:focus {
+    outline: none;
+    border-color: rgba(250, 250, 250, 0.3);
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.marketplace-select,
+.marketplace-input {
+    padding: 6px 10px;
+    border: 1px solid rgba(250, 250, 250, 0.1);
+    background: rgba(255, 255, 255, 0.03);
+    color: inherit;
+    border-radius: 6px;
+    font: inherit;
+    font-size: 13px;
+}
+
+.marketplace-input {
+    flex: 0 1 220px;
+}
+
+.marketplace-checkbox {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: rgba(250, 250, 250, 0.7);
+    font-size: 13px;
+}
+
+.marketplace-status {
+    min-height: 18px;
+    font-size: 12px;
+}
+
+.marketplace-status[data-tone="ok"] { color: #22c55e; }
+.marketplace-status[data-tone="warn"] { color: #f59e0b; }
+.marketplace-status[data-tone="danger"] { color: #ef4444; }
+
+.marketplace-results {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 12px;
+}
+
+.marketplace-card {
+    border: 1px solid rgba(250, 250, 250, 0.08);
+    border-radius: 8px;
+    padding: 14px;
+    background: rgba(255, 255, 255, 0.02);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.marketplace-card-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 10px;
+}
+
+.marketplace-card-title strong {
+    font-size: 14px;
+    margin-right: 8px;
+    display: block;
+}
+
+.marketplace-card-title .muted {
+    font-size: 12px;
+    color: rgba(250, 250, 250, 0.55);
+    word-break: break-all;
+}
+
+.marketplace-card-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    justify-content: flex-end;
+}
+
+.marketplace-card-body {
+    color: rgba(250, 250, 250, 0.8);
+    font-size: 13px;
+    line-height: 1.45;
+    min-height: 38px;
+}
+
+.marketplace-card-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    font-size: 12px;
+    color: rgba(250, 250, 250, 0.55);
+}
+
+.marketplace-card-meta a {
+    color: rgba(250, 250, 250, 0.75);
+}
+
+.marketplace-card-actions {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: auto;
+}
+
+.marketplace-pagination {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    margin-top: 8px;
+    font-size: 12px;
+}
+
+/* ----- Detail modal ----- */
+
+.marketplace-modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    z-index: 90;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 4vh 16px;
+    overflow-y: auto;
+}
+
+.marketplace-modal {
+    background: var(--bg, #0e0e10);
+    border: 1px solid rgba(250, 250, 250, 0.08);
+    border-radius: 10px;
+    padding: 16px;
+    max-width: 900px;
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+
+.marketplace-modal-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.marketplace-modal-body {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    max-height: 70vh;
+    overflow-y: auto;
+}
+
+.marketplace-modal-body section h3 {
+    margin: 0 0 4px 0;
+    font-size: 16px;
+}
+
+.marketplace-modal-body section h4 {
+    margin: 0 0 4px 0;
+    font-size: 13px;
+    color: rgba(250, 250, 250, 0.75);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.marketplace-modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+.marketplace-manifest-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+
+.marketplace-manifest-table th {
+    text-align: left;
+    width: 30%;
+    padding: 4px 8px;
+    color: rgba(250, 250, 250, 0.55);
+    font-weight: 500;
+    vertical-align: top;
+}
+
+.marketplace-manifest-table td {
+    padding: 4px 8px;
+    border-top: 1px solid rgba(250, 250, 250, 0.05);
+    word-break: break-word;
+}
+
+.marketplace-manifest-table ul {
+    margin: 0;
+    padding-left: 16px;
+}
+
+.marketplace-block-list h4 { color: #ef4444; }
+.marketplace-block-list ul { margin: 4px 0 0 0; padding-left: 18px; color: #ef4444; font-size: 12px; }
+.marketplace-warn-list h4 { color: #f59e0b; }
+.marketplace-warn-list ul { margin: 4px 0 0 0; padding-left: 18px; color: #f59e0b; font-size: 12px; }
+
+.marketplace-file-list {
+    margin: 0;
+    padding-left: 18px;
+    font-size: 12px;
+    color: rgba(250, 250, 250, 0.7);
+    columns: 2;
+}
+
+.marketplace-skillmd {
+    background: rgba(0, 0, 0, 0.4);
+    border: 1px solid rgba(250, 250, 250, 0.05);
+    border-radius: 6px;
+    padding: 10px;
+    font-size: 12px;
+    max-height: 280px;
+    overflow: auto;
+}
+
+/* v5: rendered Markdown body inside the marketplace detail modal.
+   Uses the same surface as the plain ``<pre>`` fallback but applies
+   typography to make the rendered headings/lists/links readable. */
+.marketplace-skillmd-rendered {
+    background: rgba(0, 0, 0, 0.32);
+    border: 1px solid rgba(250, 250, 250, 0.05);
+    border-radius: 6px;
+    padding: 14px 18px;
+    font-size: 13px;
+    line-height: 1.55;
+    max-height: 360px;
+    overflow: auto;
+}
+.marketplace-skillmd-rendered h1,
+.marketplace-skillmd-rendered h2,
+.marketplace-skillmd-rendered h3,
+.marketplace-skillmd-rendered h4 {
+    margin: 14px 0 6px;
+    line-height: 1.25;
+}
+.marketplace-skillmd-rendered h1 { font-size: 18px; }
+.marketplace-skillmd-rendered h2 { font-size: 16px; }
+.marketplace-skillmd-rendered h3 { font-size: 14px; }
+.marketplace-skillmd-rendered h4 { font-size: 13px; color: var(--text-secondary); }
+.marketplace-skillmd-rendered p { margin: 6px 0; }
+.marketplace-skillmd-rendered ul,
+.marketplace-skillmd-rendered ol { padding-left: 22px; margin: 6px 0; }
+.marketplace-skillmd-rendered code {
+    background: rgba(255, 255, 255, 0.07);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 12px;
+}
+.marketplace-skillmd-rendered pre {
+    background: rgba(0, 0, 0, 0.4);
+    padding: 10px;
+    border-radius: 5px;
+    overflow-x: auto;
+}
+.marketplace-skillmd-rendered pre code {
+    background: transparent;
+    padding: 0;
+}
+.marketplace-skillmd-rendered a {
+    color: rgba(232, 93, 111, 0.9);
+    text-decoration: underline;
+}
+.marketplace-skillmd-rendered blockquote {
+    border-left: 3px solid rgba(255, 255, 255, 0.16);
+    margin: 6px 0;
+    padding-left: 12px;
+    color: var(--text-secondary);
+}
+
+/* v5: meta strip inside the marketplace detail modal (version pin
+   select + sha snippet + license + homepage link). Items wrap cleanly
+   on narrow viewports. */
+.marketplace-modal-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+    margin-top: 6px;
+}
+.marketplace-version-pin {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+.marketplace-version-pin select {
+    background: rgba(26, 21, 32, 0.7);
+    color: var(--text-primary);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 4px;
+    padding: 3px 6px;
+    font-size: 12px;
+}
+
+/* v5: provenance + adapter-warning rows inside Installed-tab cards. */
+.skills-card-provenance {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 14px;
+    align-items: center;
+    margin-top: 4px;
+    font-size: 12px;
+}
+.skills-card-warnings {
+    margin-top: 4px;
+    font-size: 12px;
+}
+.skills-card-warnings summary {
+    cursor: pointer;
+    user-select: none;
+}
+.skills-card-warnings ul {
+    margin: 6px 0 4px 16px;
+    padding: 0;
+}
+
+/* v5: native-skill upgrade migration banner — surfaced on the Skills
+   tab when the launcher's per-skill version-aware resync replaces an
+   installed seeded skill. Operators see the change, can dismiss the
+   banner, and can act on stale skill_exec / extension call shapes. */
+.skills-migration-banner {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 6px 0;
+}
+.skills-migration-banner-item {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    justify-content: space-between;
+    padding: 10px 14px;
+    border-radius: 8px;
+    border: 1px solid rgba(232, 165, 53, 0.35);
+    background: linear-gradient(135deg, rgba(232, 165, 53, 0.10), rgba(180, 110, 30, 0.06));
+}
+.skills-migration-banner-text {
+    flex: 1;
+    font-size: 13px;
+    line-height: 1.45;
+}
+.skills-migration-banner-text strong {
+    color: var(--text-primary);
+}
+
+/* v5: in-skill widget mount-point and the bundled weather widget. */
+.skills-widget-mount {
+    margin: 6px 0 10px;
+}
+
+.skill-widget-weather {
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    padding: 10px 12px;
+    background: linear-gradient(135deg, rgba(80, 120, 190, 0.10), rgba(40, 60, 100, 0.06));
+}
+.skill-widget-weather-form {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 8px;
+}
+.skill-widget-weather-city {
+    flex: 1;
+    background: rgba(13, 11, 15, 0.7);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+    padding: 6px 10px;
+    color: var(--text-primary);
+    font-size: 13px;
+    outline: none;
+}
+.skill-widget-weather-city:focus {
+    border-color: rgba(116, 162, 220, 0.55);
+}
+.skill-widget-weather-body[data-state="loading"] {
+    opacity: 0.7;
+}
+.skill-widget-weather-card {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 6px 2px;
+}
+.skill-widget-weather-head {
+    font-size: 14px;
+}
+.skill-widget-weather-temp {
+    font-size: 28px;
+    line-height: 1.0;
+    font-weight: 600;
+    letter-spacing: -0.5px;
+}
+.skill-widget-weather-cond {
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+.skill-widget-weather-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+    font-size: 12px;
+    margin-top: 2px;
+}
+
 /* Mobile overrides — second block, placed AFTER all base rules so media-query
    rules reliably win without !important. Kept scoped to <= 640px so desktop
    is never affected. */
@@ -2611,5 +3138,19 @@ body {
     /* Skills page — reduce padding so cards don't get squeezed. */
     #page-skills {
         padding: 12px 12px;
+    }
+
+    /* Marketplace controls collapse to single column on phone screens. */
+    .marketplace-controls {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .marketplace-results {
+        grid-template-columns: 1fr;
+    }
+
+    .marketplace-file-list {
+        columns: 1;
     }
 }

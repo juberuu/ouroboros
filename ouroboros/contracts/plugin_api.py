@@ -143,8 +143,29 @@ class PluginAPI(Protocol):
     ) -> None:
         """Register a Skills-UI tab declaration.
 
-        The runtime currently stores the declaration for future host
-        plumbing; today's shipped UI does not mount extension tabs yet."""
+        The runtime stores the declaration in
+        ``ouroboros.extension_loader._ui_tabs`` keyed by
+        ``"<skill>:<tab_id>"``. As of v5.0.0 the Skills page
+        (``web/modules/skills.js``) renders inline widgets for
+        ``type: extension`` skills via a *name-keyed dispatch table*
+        (``registerWidgetRenderer``) — the widget code is shipped
+        alongside the launcher, NOT loaded from the extension's own
+        package. This means:
+
+        - Bundled (first-party) extensions like ``weather`` get a
+          visual widget rendered inline on their Installed-tab card
+          via the in-tree ``_renderWeatherWidget`` renderer.
+        - Third-party extensions that call ``register_ui_tab`` are
+          accepted at registration time but their widget surface
+          will display "no widget renderer registered for <name>"
+          until a future Ouroboros release ships a generic
+          declarative renderer (consuming ``render.kind``,
+          ``render.api_route``, ``render.schema_version``).
+
+        v5 deliberately keeps the widget code in-tree so every visible
+        byte stays under the same review gate as the rest of the SPA.
+        A future release may relax this with a per-skill ``widget.js``
+        review track."""
         ...
 
     # --- runtime access ---

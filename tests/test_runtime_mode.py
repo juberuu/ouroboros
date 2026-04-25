@@ -280,7 +280,11 @@ def test_phase4_ui_copy_matches_shipped_runtime():
 
     assert "Phase 2 plumbing only" not in settings_ui
     assert "land in Phase 3" not in settings_ui
-    assert "repo/skills/" in settings_ui
+    # v4.50: skills moved to data/skills/{native,clawhub,external}/ —
+    # the legacy ``repo/skills/`` reference no longer appears in the
+    # settings copy. The onboarding wizard still mentions
+    # "Settings → Behavior" as a guidance breadcrumb.
+    assert "data/skills/" in settings_ui
     assert "Settings → Behavior" in onboarding_js
     assert "behaves the same as Advanced" in onboarding_js
     assert "Phase 6+:" not in onboarding_js
