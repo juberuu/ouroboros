@@ -68,13 +68,13 @@ SETTINGS_DEFAULTS = {
     "OUROBOROS_EVO_COST_THRESHOLD": 0.10,
     "OUROBOROS_WEBSEARCH_MODEL": "gpt-5.2",
     # Pre-commit review: comma-separated provider-tagged model list
-    "OUROBOROS_REVIEW_MODELS": "openai/gpt-5.4,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.7",
+    "OUROBOROS_REVIEW_MODELS": "openai/gpt-5.5,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.7",
     # Pre-commit review enforcement: advisory | blocking
     "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
     # Runtime mode: light | advanced | pro.
     # "advanced" preserves the existing self-modifying evolutionary layer and
     # is the safe default for current installs. "pro" is reserved for a
-    # future core-patch lane and currently behaves like "advanced".
+    # direct protected-surface lane guarded by the normal triad+scope review gate.
     "OUROBOROS_RUNTIME_MODE": "advanced",
     # Optional EXTRA discovery root for an external skills/extensions
     # repository (the user's own git checkout). Ouroboros scans this on
@@ -88,7 +88,7 @@ SETTINGS_DEFAULTS = {
     "OUROBOROS_CLAWHUB_ENABLED": False,
     "OUROBOROS_CLAWHUB_REGISTRY_URL": "https://clawhub.ai/api/v1",
     # Scope review: single-model blocking reviewer (runs after triad review)
-    "OUROBOROS_SCOPE_REVIEW_MODEL": "anthropic/claude-opus-4.6",
+    "OUROBOROS_SCOPE_REVIEW_MODEL": "openai/gpt-5.5",
     # Reasoning effort per task type: none | low | medium | high
     # OUROBOROS_INITIAL_REASONING_EFFORT remains a legacy alias for task/chat.
     "OUROBOROS_EFFORT_TASK": "medium",

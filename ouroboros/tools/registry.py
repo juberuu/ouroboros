@@ -15,23 +15,27 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
+from ouroboros.runtime_mode_policy import (
+    FROZEN_CONTRACT_PATH_PREFIXES,
+    PROTECTED_RUNTIME_PATHS,
+    core_patch_notice,
+    is_protected_runtime_path,
+    mode_allows_protected_write,
+    protected_paths_in,
+    protected_write_block_message,
+)
 from ouroboros.utils import safe_relpath
 
 log = logging.getLogger(__name__)
 
-# --- Safety-critical files: hardcoded protection against any modification ---
-SAFETY_CRITICAL_PATHS = frozenset([
-    "BIBLE.md",
-    "ouroboros/safety.py",
-    "ouroboros/tools/registry.py",
-    "prompts/SAFETY.md",
-])
-_SAFETY_CRITICAL_LOWER = frozenset(p.lower() for p in SAFETY_CRITICAL_PATHS)
+_PROTECTED_RUNTIME_PATHS_LOWER = frozenset(
+    p.lower() for p in PROTECTED_RUNTIME_PATHS
+) | frozenset(prefix.lower() for prefix in FROZEN_CONTRACT_PATH_PREFIXES)
 
 _SHELL_WRITE_INDICATORS = (
     "rm ", "rm\t", ">", "sed -i", "tee ", "truncate",
     "mv ", "cp ", "chmod ", "chown ", "unlink ", "delete", "trash",
-    "rsync ",
+    "rsync ", "write_text", "open(", ".write(", ".writelines(",
 )
 
 # Git via run_shell: only truly read-only subcommands allowed
@@ -44,41 +48,38 @@ _GIT_READONLY_SUBCOMMANDS = frozenset([
 
 _SHELL_WRAPPERS = frozenset(["bash", "sh", "dash", "zsh", "env"])
 
-
-def _is_safety_critical_path(path: str) -> bool:
-    """Check if a normalized path refers to a safety-critical file.
-
-    ``SAFETY_CRITICAL_PATHS`` is declared with forward slashes
-    (``ouroboros/safety.py``). On Windows ``os.path.normpath`` flips
-    ``/`` to ``\\``, which makes the literal-set lookup miss. Normalise
-    to POSIX form BEFORE the set check so the hardcoded sandbox
-    behaves identically on all three supported OSes.
-    """
-    cleaned = path.strip().lstrip("./").replace("\\", "/")
-    # ``PurePosixPath.as_posix()`` collapses redundant ``./`` without
-    # re-introducing backslashes (unlike ``os.path.normpath``).
-    normalized = pathlib.PurePosixPath(cleaned).as_posix()
-    return normalized in SAFETY_CRITICAL_PATHS
-
-
-def _revert_safety_critical_files(repo_dir) -> list:
-    """After claude_code_edit, revert any uncommitted changes to safety-critical files."""
+def _revert_protected_files(repo_dir, *, runtime_mode: str = "advanced") -> list:
+    """After claude_code_edit, revert protected files unless pro mode is active."""
+    if mode_allows_protected_write(runtime_mode):
+        return []
     try:
-        diff = subprocess.run(
+        unstaged_diff = subprocess.run(
             ["git", "diff", "--name-only"],
             cwd=str(repo_dir), capture_output=True, text=True, timeout=5,
         )
-        if diff.returncode != 0:
+        staged_diff = subprocess.run(
+            ["git", "diff", "--cached", "--name-only"],
+            cwd=str(repo_dir), capture_output=True, text=True, timeout=5,
+        )
+        if unstaged_diff.returncode != 0 and staged_diff.returncode != 0:
             return []
-        modified = set(diff.stdout.strip().splitlines())
+        modified = set()
+        if unstaged_diff.returncode == 0:
+            modified.update(unstaged_diff.stdout.strip().splitlines())
+        if staged_diff.returncode == 0:
+            modified.update(staged_diff.stdout.strip().splitlines())
         reverted = []
-        for critical in SAFETY_CRITICAL_PATHS:
-            if critical in modified:
+        for rel in sorted(modified):
+            if is_protected_runtime_path(rel):
                 subprocess.run(
-                    ["git", "checkout", "--", critical],
+                    ["git", "reset", "HEAD", "--", rel],
                     cwd=str(repo_dir), capture_output=True, timeout=5,
                 )
-                reverted.append(critical)
+                subprocess.run(
+                    ["git", "checkout", "--", rel],
+                    cwd=str(repo_dir), capture_output=True, timeout=5,
+                )
+                reverted.append(rel)
         return reverted
     except Exception:
         return []
@@ -383,22 +384,12 @@ class ToolRegistry:
 
         # --- Hardcoded Sandbox Protections ---
 
-        # Phase 6 runtime-mode gating.
-        #
-        # Phase 6 ships the ``light`` blanket-block only; the ``pro``
-        # core-patch lane is deliberately DEFERRED. Rationale: the
-        # hardcoded safety-critical sandbox has multiple enforcement
-        # points (here in ``ToolRegistry.execute``, plus the
-        # per-handler checks inside ``ouroboros/tools/git.py`` and the
-        # post-``claude_code_edit`` revert in this same file). Cutting
-        # a consistent ``pro`` escape hatch requires plumbing the
-        # runtime-mode flag through every layer, which in turn would
-        # expand the reviewed patch surface well beyond what Phase 6
-        # can safely land. Until that's done, ``pro`` behaves like
-        # ``advanced`` at the enforcement point — the opt-in still
-        # exists for documentation intent and to let future phases
-        # relax the gate — and the real "land a core patch" path
-        # stays the operator-driven git_pr.py workflow.
+        # Runtime-mode gating:
+        # - light blocks repo self-modification entirely;
+        # - advanced may evolve the application layer but cannot edit protected
+        #   core/contracts/release surfaces;
+        # - pro may touch those surfaces, but the git commit path must pass the
+        #   normal triad + scope review before the commit lands.
         try:
             from ouroboros.config import get_runtime_mode as _get_runtime_mode
             _runtime_mode = _get_runtime_mode()
@@ -475,23 +466,25 @@ class ToolRegistry:
                 "→ Runtime Mode to re-enable self-modification."
             )
 
-        # Block modification of safety-critical files via repo_write / repo_write_commit
-        if name in ("repo_write_commit", "repo_write"):
-            path = args.get("path", "")
-            if path and _is_safety_critical_path(path):
-                return (
-                    "⚠️ CRITICAL SAFETY_VIOLATION: Hardcoded sandbox prevents "
-                    "modification of safety-critical files: "
-                    + ", ".join(sorted(SAFETY_CRITICAL_PATHS))
+        protected_write_paths = []
+        if name in ("repo_write_commit", "repo_write", "str_replace_editor"):
+            if name in ("repo_write_commit", "repo_write"):
+                maybe_path = str(args.get("path", "") or "")
+                if maybe_path:
+                    protected_write_paths.append(maybe_path)
+                for f_entry in args.get("files") or []:
+                    if isinstance(f_entry, dict):
+                        protected_write_paths.append(str(f_entry.get("path", "") or ""))
+            elif name == "str_replace_editor":
+                protected_write_paths.append(str(args.get("path", "") or ""))
+            protected_matches = protected_paths_in(protected_write_paths)
+            if protected_matches and not mode_allows_protected_write(_runtime_mode):
+                first = protected_matches[0]
+                return protected_write_block_message(
+                    path=first.path,
+                    runtime_mode=_runtime_mode,
+                    action=f"run tool {name!r} against",
                 )
-            files = args.get("files") or []
-            for f_entry in files:
-                if isinstance(f_entry, dict) and _is_safety_critical_path(f_entry.get("path", "")):
-                    return (
-                        "⚠️ CRITICAL SAFETY_VIOLATION: Hardcoded sandbox prevents "
-                        "modification of safety-critical files: "
-                        + ", ".join(sorted(SAFETY_CRITICAL_PATHS))
-                    )
 
         if name == "run_shell":
             raw_cmd = args.get("cmd", args.get("command", ""))
@@ -499,6 +492,9 @@ class ToolRegistry:
                 cmd_lower = " ".join(str(x) for x in raw_cmd).lower()
             else:
                 cmd_lower = str(raw_cmd).lower()
+            cmd_path_lower = cmd_lower.replace("\\", "/")
+            while "//" in cmd_path_lower:
+                cmd_path_lower = cmd_path_lower.replace("//", "/")
             # Phase 6 light-mode block for run_shell repo-mutation.
             # The shell tool is not in ``_REPO_MUTATION_TOOLS`` because
             # it's used for plenty of read-only invocations (``ls``,
@@ -534,12 +530,12 @@ class ToolRegistry:
                     )
 
             # Block shell writes to safety-critical files
-            for cf in _SAFETY_CRITICAL_LOWER:
-                if cf in cmd_lower and any(w in cmd_lower for w in _SHELL_WRITE_INDICATORS):
+            for cf in _PROTECTED_RUNTIME_PATHS_LOWER:
+                if cf in cmd_path_lower and any(w in cmd_lower for w in _SHELL_WRITE_INDICATORS):
                     return (
                         "⚠️ CRITICAL SAFETY_VIOLATION: Shell command would modify "
-                        "safety-critical file. Protected: "
-                        + ", ".join(sorted(SAFETY_CRITICAL_PATHS))
+                        "a protected core/contract/release file. Protected: "
+                        + ", ".join(sorted(PROTECTED_RUNTIME_PATHS))
                     )
 
             # Block GitHub repo create/delete/auth
@@ -600,14 +596,26 @@ class ToolRegistry:
         except Exception as e:
             return f"⚠️ TOOL_ERROR ({name}): {e}"
 
-        # Revert safety-critical files after claude_code_edit
+        # Revert protected files after claude_code_edit unless pro mode is
+        # active; pro-mode commits still require the normal commit review later.
         if name == "claude_code_edit":
-            reverted = _revert_safety_critical_files(self._ctx.repo_dir)
+            reverted = _revert_protected_files(self._ctx.repo_dir, runtime_mode=_runtime_mode)
             if reverted:
                 result += (
-                    "\n\n⚠️ SAFETY: Reverted modifications to safety-critical files: "
+                    "\n\n⚠️ SAFETY: Reverted modifications to protected files: "
                     + ", ".join(reverted)
                 )
+            elif mode_allows_protected_write(_runtime_mode):
+                try:
+                    diff = subprocess.run(
+                        ["git", "diff", "--name-only"],
+                        cwd=str(self._ctx.repo_dir), capture_output=True, text=True, timeout=5,
+                    )
+                    protected_matches = protected_paths_in(diff.stdout.splitlines() if diff.returncode == 0 else [])
+                except Exception:
+                    protected_matches = []
+                if protected_matches:
+                    result += "\n\n" + core_patch_notice(protected_matches)
 
         if safety_msg:
             return f"{safety_msg}\n\n---\n{result}"

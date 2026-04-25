@@ -204,7 +204,7 @@ def test_classify_hot_reloadable_keys_not_in_restart():
     }
     new = {
         "TOTAL_BUDGET": "200",
-        "OUROBOROS_MODEL": "openai/gpt-5.4",
+        "OUROBOROS_MODEL": "openai/gpt-5.5",
         "OPENROUTER_API_KEY": "sk-new",
         "ANTHROPIC_API_KEY": "ant-new",
         "OUROBOROS_REVIEW_MODELS": "x,y",

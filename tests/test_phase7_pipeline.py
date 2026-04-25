@@ -152,7 +152,7 @@ class TestRepoWriteMultiFile:
             {"path": "ok.py", "content": "x"},
             {"path": "BIBLE.md", "content": "hacked"},
         ])
-        assert "SAFETY_VIOLATION" in result
+        assert "CORE_PROTECTION_BLOCKED" in result
 
     def test_files_param_takes_priority(self, tmp_path):
         git_mod = _get_git_module()

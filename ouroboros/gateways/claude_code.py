@@ -38,6 +38,14 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from ouroboros.config import get_runtime_mode
+from ouroboros.runtime_mode_policy import (
+    SAFETY_CRITICAL_PATHS,
+    is_protected_runtime_path,
+    mode_allows_protected_write,
+    protected_write_block_message,
+)
+
 log = logging.getLogger(__name__)
 
 # Import SDK eagerly — ImportError surfaces SDK unavailability so callers return an install hint (no CLI fallback)
@@ -79,13 +87,7 @@ def clear_stderr_buffer() -> None:
     with _stderr_lock:
         _stderr_buffer.clear()
 
-# Safety-critical files (mirrors registry.py SAFETY_CRITICAL_PATHS)
-SAFETY_CRITICAL = frozenset([
-    "BIBLE.md",
-    "ouroboros/safety.py",
-    "ouroboros/tools/registry.py",
-    "prompts/SAFETY.md",
-])
+SAFETY_CRITICAL = SAFETY_CRITICAL_PATHS
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +140,7 @@ class ClaudeCodeResult:
 # ---------------------------------------------------------------------------
 
 def make_path_guard(cwd: str):
-    """Create a PreToolUse hook that blocks writes outside cwd and to safety-critical files."""
+    """Create a PreToolUse hook that blocks writes outside cwd and protected paths."""
     cwd_resolved = pathlib.Path(cwd).resolve()
 
     async def path_guard(input_data: dict, tool_use_id: str, context: Any) -> dict:
@@ -175,17 +177,24 @@ def make_path_guard(cwd: str):
                 }
             }
 
-        # Check: safety-critical file?
+        # Check: protected core/contract/release file?
         # Use pathlib.as_posix() for cross-platform forward-slash comparison
         rel = target.relative_to(cwd_resolved).as_posix()
-        if rel in SAFETY_CRITICAL:
+        try:
+            runtime_mode = get_runtime_mode()
+        except Exception:
+            runtime_mode = "advanced"
+        if is_protected_runtime_path(rel) and not mode_allows_protected_write(runtime_mode):
             return {
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
                     "permissionDecision": "deny",
                     "permissionDecisionReason": (
-                        f"SAFETY: Write blocked — '{rel}' is a safety-critical file. "
-                        "These files cannot be modified by delegated edits."
+                        protected_write_block_message(
+                            path=rel,
+                            runtime_mode=runtime_mode,
+                            action="delegate-edit",
+                        )
                     ),
                 }
             }

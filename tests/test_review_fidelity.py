@@ -997,7 +997,7 @@ class TestGitCommitFailureForensicMetadata:
         ctx.drive_root = str(pathlib.Path(tmp_dir) / "drive")
         ctx.repo_dir = str(pathlib.Path(tmp_dir) / "repo")
         ctx.task_id = "test_task"
-        ctx._last_triad_models = ["openai/gpt-5.4", "google/gemini-pro", "anthropic/claude-opus-4"]
+        ctx._last_triad_models = ["openai/gpt-5.5", "google/gemini-pro", "anthropic/claude-opus-4"]
         ctx._last_scope_model = "anthropic/claude-opus-4"
         # drive_logs must be callable (used by _record_commit_attempt)
         ctx.drive_logs = str(pathlib.Path(tmp_dir) / "drive" / "logs")

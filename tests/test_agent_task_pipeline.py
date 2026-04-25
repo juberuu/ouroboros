@@ -7,10 +7,10 @@ import ouroboros.agent_task_pipeline as pipeline
 def test_task_summary_prefers_direct_model_when_openrouter_missing(tmp_path, monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
-    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "openai::gpt-5.4-mini")
-    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACK", "openai::gpt-5.4-mini")
-    monkeypatch.setenv("OUROBOROS_MODEL", "openai::gpt-5.4")
-    monkeypatch.setenv("OUROBOROS_MODEL_CODE", "openai::gpt-5.4")
+    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "openai::gpt-5.5-mini")
+    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACK", "openai::gpt-5.5-mini")
+    monkeypatch.setenv("OUROBOROS_MODEL", "openai::gpt-5.5")
+    monkeypatch.setenv("OUROBOROS_MODEL_CODE", "openai::gpt-5.5")
 
     captured = {}
 
@@ -35,7 +35,7 @@ def test_task_summary_prefers_direct_model_when_openrouter_missing(tmp_path, mon
         drive_logs=drive_logs,
     )
 
-    assert captured["model"] == "openai::gpt-5.4-mini"
+    assert captured["model"] == "openai::gpt-5.5-mini"
     chat_lines = (drive_logs / "chat.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(chat_lines) == 1
     payload = json.loads(chat_lines[0])
@@ -48,7 +48,7 @@ def test_task_summary_prefers_direct_model_when_openrouter_missing(tmp_path, mon
 
 def test_task_summary_keeps_openrouter_model_when_key_present(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
-    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "openai::gpt-5.4-mini")
+    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "openai::gpt-5.5-mini")
 
     assert (
         pipeline._resolve_task_summary_model("google/gemini-3-flash-preview")
@@ -132,7 +132,7 @@ def test_build_trace_summary_shows_structured_failure_facts():
 
 def test_task_summary_prompt_includes_review_evidence(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
-    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "openai::gpt-5.4-mini")
+    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "openai::gpt-5.5-mini")
 
     captured = {}
 
@@ -200,7 +200,7 @@ def test_trivial_task_summary_bypasses_llm_and_uses_short_format(tmp_path):
 
 def test_multi_round_zero_tool_task_uses_llm_summary_prompt(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
-    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "openai::gpt-5.4-mini")
+    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "openai::gpt-5.5-mini")
 
     captured = {}
 

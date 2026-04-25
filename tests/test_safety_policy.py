@@ -364,6 +364,15 @@ def test_build_check_prompt_tolerates_non_json_argument_values():
     assert "Weird:ok" in prompt or "Weird" in prompt
 
 
+def test_build_check_prompt_includes_runtime_mode(monkeypatch):
+    from ouroboros.safety import _build_check_prompt
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
+    prompt = _build_check_prompt("claude_code_edit", {"prompt": "edit"})
+
+    assert "Runtime mode: pro" in prompt
+
+
 def test_unknown_tool_with_secret_arg_does_not_leak_to_llm(monkeypatch):
     """End-to-end: secrets in an unknown-tool arg never reach the LLM message body."""
     from ouroboros.safety import check_safety

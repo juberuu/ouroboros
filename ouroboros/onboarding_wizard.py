@@ -60,9 +60,9 @@ _MODEL_SUGGESTIONS = [
     "anthropic::claude-sonnet-4-6",
     "google/gemini-3.1-pro-preview",
     "google/gemini-3-flash-preview",
-    "openai/gpt-5.4",
-    "openai::gpt-5.4",
-    "openai::gpt-5.4-mini",
+    "openai/gpt-5.5",
+    "openai::gpt-5.5",
+    "openai::gpt-5.5-mini",
     "openai-compatible::meta-llama/compatible",
     "cloudru::zai-org/GLM-4.7",
 ]

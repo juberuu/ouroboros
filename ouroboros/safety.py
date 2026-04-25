@@ -16,9 +16,9 @@ enough not to hurt normal development (single light-model call).
 
 Defense in depth (unchanged, lives elsewhere):
   - Hardcoded sandbox in ouroboros/tools/registry.py runs BEFORE this
-    module and blocks SAFETY_CRITICAL_PATHS writes, mutative git via shell,
-    and GitHub repo/auth manipulation.
-  - claude_code_edit post-execution revert of safety-critical files.
+    module and blocks protected runtime paths (safety-critical, frozen contracts,
+    release invariants), mutative git via shell, and GitHub repo/auth manipulation.
+  - claude_code_edit post-execution revert/non-pro guard for protected paths; normal commit review remains mandatory.
   - Pre-commit triad + scope review (review.py, scope_review.py).
 
 Returns:
@@ -430,7 +430,13 @@ def _build_check_prompt(
         args_json = json.dumps(safe_args, indent=2, default=repr)
     except Exception:
         args_json = repr(safe_args)
-    prompt = f"Proposed tool call:\nTool: {tool_name}\nArguments:\n```json\n{args_json}\n```\n"
+    runtime_mode = os.environ.get("OUROBOROS_RUNTIME_MODE", "advanced") or "advanced"
+    prompt = (
+        "Proposed tool call:\n"
+        f"Runtime mode: {runtime_mode}\n"
+        f"Tool: {tool_name}\n"
+        f"Arguments:\n```json\n{args_json}\n```\n"
+    )
     if messages:
         context = _format_messages_for_safety(messages)
         if context.strip():

@@ -103,11 +103,11 @@ class TestPlanReviewModels(unittest.TestCase):
 
     def test_returns_configured_models(self):
         from ouroboros.tools.plan_review import _get_review_models
-        configured = "openai/gpt-5.4,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.6"
+        configured = "openai/gpt-5.5,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.6"
         with patch.dict(os.environ, {"OUROBOROS_REVIEW_MODELS": configured}, clear=False):
             models = _get_review_models()
         self.assertEqual(models, [
-            "openai/gpt-5.4",
+            "openai/gpt-5.5",
             "google/gemini-3.1-pro-preview",
             "anthropic/claude-opus-4.6",
         ])
@@ -154,7 +154,7 @@ class TestPlanReviewModels(unittest.TestCase):
         # main is anthropic::..., but the reviewer list is still the default
         # OpenRouter-style set (so none match the anthropic:: prefix).
         env = {
-            "OUROBOROS_REVIEW_MODELS": "openai/gpt-5.4,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.7",
+            "OUROBOROS_REVIEW_MODELS": "openai/gpt-5.5,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.7",
             "OUROBOROS_MODEL": "anthropic::claude-opus-4-7",
             "OUROBOROS_MODEL_LIGHT": "anthropic::claude-sonnet-4-6",
             "OPENROUTER_API_KEY": "",
@@ -521,6 +521,24 @@ class TestPlanReviewToolRegistration(unittest.TestCase):
         self.assertIn("files_to_touch", params)
         self.assertEqual(tool.schema["parameters"]["required"], ["plan", "goal"])
 
+    def test_plan_review_deduplicates_canonical_docs_from_repo_pack(self):
+        import inspect
+        import ouroboros.tools.plan_review as pr
+
+        source = inspect.getsource(pr._run_plan_review_async)
+        assert '"BIBLE.md"' in source
+        assert '"docs/DEVELOPMENT.md"' in source
+        assert '"docs/ARCHITECTURE.md"' in source
+        assert '"docs/CHECKLISTS.md"' in source
+
+    def test_plan_review_prompt_points_to_plan_checklist_section(self):
+        from ouroboros.tools.plan_review import _build_system_prompt
+
+        prompt = _build_system_prompt("", "", "", "", "## Plan Review Checklist\n\n- completeness\n")
+
+        assert "Use the `## Plan Review Checklist` section" in prompt
+        assert "## CHECKLISTS.md" in prompt
+
     def test_plan_task_description_mentions_pre_implementation(self):
         from ouroboros.tools.plan_review import get_tools
         tool = next(t for t in get_tools() if t.name == "plan_task")
@@ -540,10 +558,10 @@ class TestClassifyReviewerError(unittest.TestCase):
         """JSONDecodeError → message explains the likely oversized-prompt root cause."""
         import json
         exc = json.JSONDecodeError("Expecting value", "", 0)
-        msg = self.classify(exc, "openai/gpt-5.4")
+        msg = self.classify(exc, "openai/gpt-5.5")
         self.assertIn("non-JSON response body", msg)
         self.assertIn("oversized prompt", msg)
-        self.assertIn("openai/gpt-5.4", msg)
+        self.assertIn("openai/gpt-5.5", msg)
 
     def test_json_decode_error_does_not_say_json_formatting_problem(self):
         """The user should not think it's a JSON format issue in our code."""
@@ -559,8 +577,8 @@ class TestClassifyReviewerError(unittest.TestCase):
         # Exact args from the production failure:
         # "Expecting value: line 165 column 1 (char 902)"
         exc = json.JSONDecodeError("Expecting value", "line 165 column 1 (char 902)", 0)
-        msg = self.classify(exc, "openai/gpt-5.4")
-        self.assertIn("openai/gpt-5.4", msg)
+        msg = self.classify(exc, "openai/gpt-5.5")
+        self.assertIn("openai/gpt-5.5", msg)
         self.assertIn("non-JSON", msg)
         self.assertIn("oversized", msg)
         # The raw JSONDecodeError text should not be the ONLY content

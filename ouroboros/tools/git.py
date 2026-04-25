@@ -15,14 +15,25 @@ import subprocess
 import time
 from typing import Any, Dict, List, Optional
 
-from ouroboros.tools.registry import ToolContext, ToolEntry, SAFETY_CRITICAL_PATHS
+from ouroboros.config import get_runtime_mode
+from ouroboros.runtime_mode_policy import (
+    core_patch_notice,
+    format_protected_paths,
+    is_protected_runtime_path,
+    mode_allows_protected_write,
+    normalize_repo_path,
+    protected_paths_in,
+    protected_write_block_message,
+)
+from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.tools.commit_gate import (
     _check_advisory_freshness,
     _check_overlapping_review_attempt,
     _invalidate_advisory,
     _record_commit_attempt,
 )
-from ouroboros.utils import append_jsonl, utc_now_iso, write_text, safe_relpath, run_cmd
+from ouroboros.tools.review_revalidation import handle_revalidation_failure
+from ouroboros.utils import utc_now_iso, write_text, safe_relpath, run_cmd
 from ouroboros.tools.parallel_review import run_parallel_review as _run_parallel_review, aggregate_review_verdict as _aggregate_review_verdict
 from ouroboros.tools.review_helpers import _run_review_preflight_tests
 _CONTENT_OMITTED_PREFIX = "<<CONTENT_OMITTED"
@@ -31,9 +42,25 @@ log = logging.getLogger(__name__)
 
 def _normalize_to_posix(path_str: str) -> str:
     """Normalize to forward-slash POSIX form; replaces backslashes first so
-    Windows-style paths match SAFETY_CRITICAL_PATHS on Linux/macOS."""
-    normalized = path_str.strip().lstrip("./").replace("\\", "/")
-    return pathlib.PurePosixPath(normalized).as_posix()
+    Windows-style paths match protected runtime paths on Linux/macOS."""
+    return normalize_repo_path(path_str)
+
+
+def _current_runtime_mode() -> str:
+    try:
+        return get_runtime_mode()
+    except Exception:
+        return "advanced"
+
+
+def _protected_paths_block_message(paths, *, runtime_mode: str, action: str) -> str:
+    rendered = format_protected_paths(paths)
+    return (
+        f"⚠️ CORE_PROTECTION_BLOCKED: runtime_mode={runtime_mode!r} refuses "
+        f"to {action} protected Ouroboros core/contract/release path(s): {rendered}. "
+        "Use runtime_mode='pro' and pass the normal triad + scope review before "
+        "committing protected surfaces."
+    )
 
 
 def _sanitize_git_error(msg: str) -> str:
@@ -65,88 +92,51 @@ def _fingerprint_staged_diff(repo_dir: pathlib.Path) -> Dict[str, Any]:
     }
 
 
-def _emit_review_state_event(ctx: ToolContext, event_type: str, **payload: Any) -> None:
+def _staged_paths_for_protection(repo_dir: pathlib.Path) -> list[str]:
+    """Return staged paths including both sides of renames/copies."""
     try:
-        append_jsonl(ctx.drive_logs() / "events.jsonl", {
-            "ts": utc_now_iso(),
-            "type": event_type,
-            "task_id": str(getattr(ctx, "task_id", "") or ""),
-            **payload,
-        })
+        raw = run_cmd(["git", "diff", "--cached", "--name-status", "-M"], cwd=repo_dir)
     except Exception:
-        log.debug("Failed to append review-state event %s", event_type, exc_info=True)
+        return []
+    paths: list[str] = []
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        status = parts[0]
+        code = status[:1]
+        if code in {"R", "C"} and len(parts) >= 3:
+            paths.extend([parts[1], parts[2]])
+        elif len(parts) >= 2:
+            paths.append(parts[-1])
+    return paths
 
 
-def _build_revalidation_failure(
-    *,
-    kind: str,
-    before: Dict[str, Any],
-    after: Optional[Dict[str, Any]] = None,
-) -> str:
-    if kind == "revalidation_failed":
-        return (
-            "⚠️ REVIEW_REVALIDATION_FAILED: the staged diff changed after review. "
-            f"before={before.get('fingerprint', '')[:12]}, "
-            f"after={str((after or {}).get('fingerprint', ''))[:12]}. "
-            "The reviewed findings were invalidated and were NOT carried forward. "
-            "Re-run advisory_pre_review and repo_commit on the final staged diff."
-        )
-    detail = before.get("reason") or (after or {}).get("reason") or "fingerprint unavailable"
-    return (
-        "⚠️ REVIEW_REVALIDATION_FAILED: could not fingerprint the staged diff "
-        f"for reviewed-commit revalidation ({detail}). "
-        "The attempt was recorded as degraded and reviewed findings were NOT carried forward. "
-        "Fix the git diff issue, then re-run advisory_pre_review and repo_commit."
-    )
+def _paths_from_porcelain_line(line: str) -> list[str]:
+    """Return current and source paths from one porcelain v1 status line.
+
+    Rename/copy entries are rendered as ``R  old -> new``. The restore guard
+    needs both sides so a protected source path cannot disappear behind an
+    unprotected destination name.
+    """
+    if not line or len(line) < 4:
+        return []
+    status = line[:2]
+    entry = line[3:].strip()
+    if not entry:
+        return []
+    if ("R" in status or "C" in status) and " -> " in entry:
+        before, after = entry.rsplit(" -> ", 1)
+        return [before.strip(), after.strip()]
+    return [entry]
 
 
-def _handle_revalidation_failure(
-    ctx: ToolContext,
-    commit_message: str,
-    commit_start: float,
-    *,
-    pre_fingerprint: Dict[str, Any],
-    post_fingerprint: Optional[Dict[str, Any]] = None,
-    kind: str,
-) -> str:
-    msg = _build_revalidation_failure(kind=kind, before=pre_fingerprint, after=post_fingerprint)
-    fingerprint_status = "mismatch" if kind == "revalidation_failed" else "unavailable"
-    degraded_reason = (
-        pre_fingerprint.get("reason")
-        or (post_fingerprint or {}).get("reason")
-        or msg
+def _handle_revalidation_failure(*args, **kwargs):
+    return handle_revalidation_failure(
+        *args,
+        **kwargs,
+        record_commit_attempt=_record_commit_attempt,
     )
-    _emit_review_state_event(
-        ctx,
-        "reviewed_attempt_revalidation_failed",
-        kind=kind,
-        tool=str(getattr(ctx, "_current_review_tool_name", "") or ""),
-        pre_review_fingerprint=pre_fingerprint.get("fingerprint", ""),
-        post_review_fingerprint=(post_fingerprint or {}).get("fingerprint", ""),
-        detail=degraded_reason,
-    )
-    ctx._review_advisory = []
-    _record_commit_attempt(
-        ctx,
-        commit_message,
-        "blocked",
-        block_reason="revalidation_failed" if kind == "revalidation_failed" else "fingerprint_unavailable",
-        block_details=msg,
-        duration_sec=time.time() - commit_start,
-        critical_findings=[],
-        advisory_findings=[],
-        readiness_warnings=["Reviewed findings invalidated; commit must be re-reviewed."],
-        phase="revalidation",
-        pre_review_fingerprint=pre_fingerprint.get("fingerprint", ""),
-        post_review_fingerprint=(post_fingerprint or {}).get("fingerprint", ""),
-        fingerprint_status=fingerprint_status,
-        degraded_reasons=[degraded_reason] + list(getattr(ctx, "_review_degraded_reasons", []) or []),
-        triad_models=getattr(ctx, "_last_triad_models", []),
-        scope_model=getattr(ctx, "_last_scope_model", ""),
-        triad_raw_results=getattr(ctx, "_last_triad_raw_results", []),
-        scope_raw_result=getattr(ctx, "_last_scope_raw_result", {}),
-    )
-    return msg
 
 
 def _finalize_blocked_review(
@@ -250,6 +240,33 @@ def _run_reviewed_stage_cycle(
     advisory_paths = [
         line.strip() for line in staged_names_raw.splitlines() if line.strip()
     ] or None
+    protected_staged_paths = protected_paths_in(_staged_paths_for_protection(pathlib.Path(ctx.repo_dir)))
+    runtime_mode = _current_runtime_mode()
+    if protected_staged_paths and not mode_allows_protected_write(runtime_mode):
+        msg = _protected_paths_block_message(
+            protected_staged_paths,
+            runtime_mode=runtime_mode,
+            action="commit",
+        )
+        try:
+            run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
+        except Exception:
+            pass
+        _record_commit_attempt(
+            ctx,
+            commit_message,
+            "blocked",
+            block_reason="core_protection_blocked",
+            block_details=msg,
+            duration_sec=time.time() - commit_start,
+            critical_findings=[],
+            phase="preflight",
+        )
+        return {
+            "status": "blocked",
+            "message": msg,
+            "block_reason": "core_protection_blocked",
+        }
     advisory_err = _check_advisory_freshness(
         ctx,
         commit_message,
@@ -849,10 +866,11 @@ def _repo_write(ctx: ToolContext, path: str = "", content: str = "",
 
     for e in write_list:
         norm = _normalize_to_posix(e["path"])
-        if norm in SAFETY_CRITICAL_PATHS:
-            return (
-                f"⚠️ SAFETY_VIOLATION: Cannot write safety-critical file: {norm}. "
-                f"Protected: {', '.join(sorted(SAFETY_CRITICAL_PATHS))}"
+        if is_protected_runtime_path(norm) and not mode_allows_protected_write(_current_runtime_mode()):
+            return protected_write_block_message(
+                path=norm,
+                runtime_mode=_current_runtime_mode(),
+                action="write",
             )
         if isinstance(e["content"], str) and e["content"].strip().startswith(_CONTENT_OMITTED_PREFIX):
             return (
@@ -900,11 +918,15 @@ def _repo_write(ctx: ToolContext, path: str = "", content: str = "",
         source_tool="repo_write",
     )
     summary = ", ".join(written)
-    return (
+    result = (
         f"✅ Written {len(written)} file(s): {summary}\n"
         "Files are on disk but NOT committed. Run repo_commit when ready.\n"
         "⚠️ Advisory pre-review is now stale — run advisory_pre_review before repo_commit."
     )
+    protected_written = protected_paths_in(written_paths)
+    if protected_written and mode_allows_protected_write(_current_runtime_mode()):
+        result += "\n\n" + core_patch_notice(protected_written)
+    return result
 
 
 def _str_replace_editor(ctx: ToolContext, path: str, old_str: str, new_str: str) -> str:
@@ -915,10 +937,11 @@ def _str_replace_editor(ctx: ToolContext, path: str, old_str: str, new_str: str)
         return "⚠️ STR_REPLACE_ERROR: old_str is required (cannot be empty)."
 
     norm = _normalize_to_posix(path)
-    if norm in SAFETY_CRITICAL_PATHS:
-        return (
-            f"⚠️ SAFETY_VIOLATION: Cannot edit safety-critical file: {norm}. "
-            f"Protected: {', '.join(sorted(SAFETY_CRITICAL_PATHS))}"
+    if is_protected_runtime_path(norm) and not mode_allows_protected_write(_current_runtime_mode()):
+        return protected_write_block_message(
+            path=norm,
+            runtime_mode=_current_runtime_mode(),
+            action="edit",
         )
 
     try:
@@ -974,12 +997,15 @@ def _str_replace_editor(ctx: ToolContext, path: str, old_str: str, new_str: str)
         mutation_root=pathlib.Path(ctx.repo_dir),
         source_tool="str_replace_editor",
     )
-    return (
+    result = (
         f"✅ Replaced in {path} (line {replacement_line}).\n"
         f"Context:\n{context_preview}\n\n"
         "File is on disk but NOT committed. Run repo_commit when ready.\n"
         "⚠️ Advisory pre-review is now stale — run advisory_pre_review before repo_commit."
     )
+    if is_protected_runtime_path(norm) and mode_allows_protected_write(_current_runtime_mode()):
+        result += "\n\n" + core_patch_notice([norm])
+    return result
 
 
 def _repo_write_commit(ctx: ToolContext, path: str, content: str,
@@ -1003,6 +1029,13 @@ def _repo_write_commit(ctx: ToolContext, path: str, content: str,
         return (
             "⚠️ ERROR: content looks like a compaction marker, not real file content. "
             "Re-read the file and provide the actual content."
+        )
+    target_protected = protected_paths_in([path])
+    if target_protected and not mode_allows_protected_write(_current_runtime_mode()):
+        return _protected_paths_block_message(
+            target_protected,
+            runtime_mode=_current_runtime_mode(),
+            action="write and commit",
         )
     shrink_warning = _check_shrink_guard(ctx, path, content)
     if shrink_warning:
@@ -1055,8 +1088,13 @@ def _repo_write_commit(ctx: ToolContext, path: str, content: str,
                 extra = extra.strip()
                 if not extra:
                     continue
-                if _normalize_to_posix(extra) in SAFETY_CRITICAL_PATHS:
-                    continue
+                protected_extra = protected_paths_in([extra])
+                if protected_extra and not mode_allows_protected_write(_current_runtime_mode()):
+                    return _protected_paths_block_message(
+                        protected_extra,
+                        runtime_mode=_current_runtime_mode(),
+                        action="stage",
+                    )
                 stage_paths.append(extra)
         outcome = _run_reviewed_stage_cycle(
             ctx,
@@ -1308,24 +1346,24 @@ def _restore_to_head(ctx: ToolContext, confirm: bool = False,
         return f"⚠️ RESTORE_ERROR: git status failed: {e}"
     if not status:
         return "Nothing to restore — working directory is already clean."
-    dirty_files = [line[3:].strip().split(" -> ")[-1]
-                   for line in status.splitlines() if line.strip()]
-    affected_critical = [
-        _normalize_to_posix(f) for f in dirty_files
-        if _normalize_to_posix(f) in SAFETY_CRITICAL_PATHS
+    dirty_files = [
+        path
+        for line in status.splitlines()
+        for path in _paths_from_porcelain_line(line)
     ]
+    affected_protected = protected_paths_in(dirty_files)
     if paths:
         for p in paths:
             norm = _normalize_to_posix(p)
-            if norm in SAFETY_CRITICAL_PATHS:
+            if is_protected_runtime_path(norm):
                 return (
-                    f"⚠️ RESTORE_BLOCKED: Cannot restore safety-critical file: {norm}. "
-                    f"Protected: {', '.join(sorted(SAFETY_CRITICAL_PATHS))}"
+                    f"⚠️ RESTORE_BLOCKED: Cannot restore protected file: {norm}. "
+                    "Protected core/contract/release paths must be changed through reviewed commits."
                 )
-    elif affected_critical:
+    elif affected_protected:
         return (
-            f"⚠️ RESTORE_BLOCKED: Uncommitted changes touch safety-critical file(s): "
-            f"{', '.join(affected_critical)}. "
+            f"⚠️ RESTORE_BLOCKED: Uncommitted changes touch protected file(s): "
+            f"{format_protected_paths(affected_protected)}. "
             f"Use paths= to restore specific non-critical files, or resolve manually."
         )
     if not confirm:
@@ -1402,13 +1440,14 @@ def _revert_commit(ctx: ToolContext, sha: str, confirm: bool = False) -> str:
         ).strip().splitlines()
     except Exception:
         changed_files = []
-    for f in changed_files:
-        norm = _normalize_to_posix(f)
-        if norm in SAFETY_CRITICAL_PATHS:
-            return (
-                f"⚠️ REVERT_BLOCKED: Commit {sha[:8]} touches safety-critical file: {norm}. "
-                "Reverting it could modify protected files."
-            )
+    protected_changes = protected_paths_in(changed_files)
+    if protected_changes:
+        return (
+            f"⚠️ REVERT_BLOCKED: Commit {sha[:8]} touches protected file(s): "
+            f"{format_protected_paths(protected_changes)}. "
+            "Direct revert_commit cannot create protected-path commits; stage the intended "
+            "revert manually and use repo_commit so the normal triad + scope review covers it."
+        )
     try:
         commit_msg = run_cmd(
             ["git", "log", "-1", "--format=%s", full_sha], cwd=repo_dir,

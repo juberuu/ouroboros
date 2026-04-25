@@ -238,7 +238,7 @@ async def _run_plan_review_async(
             "ERROR: plan_task requires at least 2 unique reviewer models for "
             f"majority-vote coordination. Got {len(unique_resolved)} unique "
             f"model(s) from {resolved_models!r}. Fix OUROBOROS_REVIEW_MODELS "
-            "in settings (example: 'openai/gpt-5.4,"
+            "in settings (example: 'openai/gpt-5.5,"
             "google/gemini-3.1-pro-preview,anthropic/claude-opus-4.7')."
             + single_provider_hint
         )
@@ -256,11 +256,24 @@ async def _run_plan_review_async(
     bible_text = _load_bible(repo_dir)
     dev_md = _load_doc(repo_dir, "docs/DEVELOPMENT.md")
     arch_md = _load_doc(repo_dir, "docs/ARCHITECTURE.md")
+    checklists_md = _load_doc(repo_dir, "docs/CHECKLISTS.md")
 
     # Full repo pack (same as scope review — reviewers see everything)
     ctx.emit_progress_fn("📐 plan_task: building full repo pack…")
+    canonical_docs = {
+        "BIBLE.md",
+        "docs/DEVELOPMENT.md",
+        "docs/ARCHITECTURE.md",
+        "docs/CHECKLISTS.md",
+    }
     try:
-        repo_pack, omitted = build_full_repo_pack(repo_dir, exclude_paths=set(files_to_touch))
+        # These canonical docs are injected explicitly into the system prompt
+        # below. Excluding them from the wider repo pack prevents duplicate
+        # 100K+ token context while keeping BIBLE/ARCHITECTURE mandatory.
+        repo_pack, omitted = build_full_repo_pack(
+            repo_dir,
+            exclude_paths=set(files_to_touch) | canonical_docs,
+        )
     except Exception as e:
         return f"ERROR: Failed to build repo pack: {e}"
 
@@ -275,7 +288,7 @@ async def _run_plan_review_async(
         head_snapshots = build_head_snapshot_section(repo_dir, files_to_touch)
 
     # Assemble the full prompt
-    system_prompt = _build_system_prompt(checklist, bible_text, dev_md, arch_md)
+    system_prompt = _build_system_prompt(checklist, bible_text, dev_md, arch_md, checklists_md)
     user_content = _build_user_content(plan, goal, files_to_touch, head_snapshots, repo_pack, omitted_note)
 
     # Budget gate
@@ -579,6 +592,7 @@ def _build_system_prompt(
     bible_text: str,
     dev_md: str,
     arch_md: str,
+    checklists_md: str = "",
 ) -> str:
     parts = [
         "You are a senior design reviewer for Ouroboros, a self-creating AI agent.",
@@ -643,7 +657,7 @@ def _build_system_prompt(
         "",
     ]
 
-    if checklist:
+    if checklist and not checklists_md:
         parts += [
             "## Plan Review Checklist",
             "",
@@ -678,6 +692,18 @@ def _build_system_prompt(
             "## ARCHITECTURE.md (Current system structure)",
             "",
             arch_md,
+            "",
+            "---",
+            "",
+        ]
+
+    if checklists_md:
+        parts += [
+            "## CHECKLISTS.md (review contracts and critical thresholds)",
+            "",
+            "Use the `## Plan Review Checklist` section inside this file as the per-item matrix for this plan review.",
+            "",
+            checklists_md,
             "",
             "---",
             "",

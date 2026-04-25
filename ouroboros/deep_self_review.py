@@ -201,9 +201,9 @@ def is_review_available() -> Tuple[bool, Optional[str]]:
     Returns (available, model_id).
     """
     if os.environ.get("OPENROUTER_API_KEY"):
-        return True, "openai/gpt-5.4-pro"
+        return True, "openai/gpt-5.5-pro"
     if os.environ.get("OPENAI_API_KEY") and not os.environ.get("OPENAI_BASE_URL"):
-        return True, "openai::gpt-5.4-pro"
+        return True, "openai::gpt-5.5-pro"
     return False, None
 
 
@@ -259,7 +259,7 @@ def run_deep_self_review(
         # gates its assembled prompt and plan_review gates system+user. Gating
         # only on pack_text would understate the real request size.
         #
-        # Math: the deep-review model (by default `openai/gpt-5.4-pro`, see
+        # Math: the deep-review model (by default `openai/gpt-5.5-pro`, see
         # `is_review_available`) has a 1M context window that is shared between
         # input and output. chars/4 under-counts real tokens by ~15%, so actual
         # input at gate=850K is ≈1M. Output `max_tokens` lives inside the same

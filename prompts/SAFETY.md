@@ -7,7 +7,7 @@ DANGEROUS — block only these:
 - Destructive commands targeting system or home root: rm -rf /, rm -rf ~, disk format/wipe, deleting /System /usr /bin /etc
 - Commands that make the OS unbootable or kill critical system processes irreversibly
 - HTTP requests (curl, wget, python, etc.) that send API keys, tokens, or credentials to non-localhost external URLs
-- Modifying or deleting any safety-critical file: BIBLE.md, ouroboros/safety.py, ouroboros/tools/registry.py, prompts/SAFETY.md
+- Modifying or deleting any protected Ouroboros runtime path outside `runtime_mode=pro` + normal commit review: safety-critical files (`BIBLE.md`, `ouroboros/safety.py`, `ouroboros/runtime_mode_policy.py`, `ouroboros/tools/registry.py`, `prompts/SAFETY.md`), frozen contracts (`ouroboros/contracts/`, `docs/CHECKLISTS.md`), and release/managed invariants (`.github/workflows/ci.yml`, build scripts, `scripts/build_repo_bundle.py`, `ouroboros/launcher_bootstrap.py`, `supervisor/git_ops.py`)
 
 SUSPICIOUS — allow but warn the agent:
 - Commands that delete large amounts of data outside the project directory
@@ -19,7 +19,7 @@ SAFE — verdict SAFE, never flag as DANGEROUS or SUSPICIOUS:
 - Screenshots, screen recording, browser automation
 - Reading files, listing directories, grep, find, cat, head, tail
 - Read-only dev tool invocations: git, docker (ps/logs), compilers, test runners, linters, `pip list` / `pip show` / `pip freeze`
-- Creating, editing, or deleting files inside the project directory
+- Creating, editing, or deleting ordinary files inside the project directory, excluding the protected runtime paths listed above
 - curl/wget for fetching data (without sending credentials)
 - Any standard development workflow command that does not install packages, delete system files, or exfiltrate secrets
 

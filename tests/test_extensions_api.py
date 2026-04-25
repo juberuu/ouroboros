@@ -584,7 +584,7 @@ def test_api_skill_review_offloads_to_thread_and_returns_outcome(tmp_path, monke
             skill_name="ext_r",
             status="pass",
             findings=[{"item": "manifest_schema", "verdict": "PASS"}],
-            reviewer_models=["openai/gpt-5.4"],
+            reviewer_models=["openai/gpt-5.5"],
             content_hash="abcd",
             error="",
         )

@@ -764,9 +764,11 @@ def build_full_repo_pack(
             logger.warning("Could not read repo file: %s", rel, exc_info=True)
             continue
 
+        content, redacted = redact_prompt_secrets(content)
         ext = fp.suffix.lstrip(".")
         lang = ext if ext else ""
-        parts.append(f"### {rel}\n```{lang}\n{content}\n```\n\n")
+        note = "*(secret-like content redacted)*\n" if redacted else ""
+        parts.append(f"### {rel}\n{note}```{lang}\n{content}\n```\n\n")
 
     return "".join(parts), omitted
 

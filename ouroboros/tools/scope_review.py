@@ -47,14 +47,14 @@ from ouroboros.utils import run_cmd, utc_now_iso, append_jsonl, estimate_tokens
 
 log = logging.getLogger(__name__)
 
-_SCOPE_MODEL_DEFAULT = "anthropic/claude-opus-4.6"
+_SCOPE_MODEL_DEFAULT = "openai/gpt-5.5"
 _SCOPE_MAX_TOKENS = 100_000  # 100K output tokens
 
 # Budget gate: if the fully assembled scope-review prompt (input) exceeds this
 # token estimate, scope review is skipped with a non-blocking warning instead of
 # crashing or sending an oversized request.
 #
-# Context math: the default reviewer (anthropic/claude-opus-4.6) has a 1M context
+# Context math: the default reviewer (openai/gpt-5.5) has a 1M context
 # window (GA March 2026) that is SHARED between input and output; other configured
 # reviewers via OUROBOROS_SCOPE_REVIEW_MODEL may have different ceilings.
 # `estimate_tokens` uses chars/4 which under-counts real tokens by ~15%, so at
@@ -133,14 +133,45 @@ _SCOPE_PREAMBLE = (
 )
 
 
-def _load_dev_guide(repo_dir: pathlib.Path) -> str:
+_CANONICAL_CONTEXT_DOCS = (
+    "BIBLE.md",
+    "docs/DEVELOPMENT.md",
+    "docs/ARCHITECTURE.md",
+    "docs/CHECKLISTS.md",
+)
+_CURRENT_TOUCHED_CONTEXT_SKIP_PREFIXES = (
+    "tests/",
+)
+
+
+def _load_doc(repo_dir: pathlib.Path, rel_path: str) -> str:
     try:
-        p = repo_dir / "docs" / "DEVELOPMENT.md"
+        p = repo_dir / rel_path
         if p.is_file():
             return p.read_text(encoding="utf-8")
     except Exception:
         pass
-    return "(DEVELOPMENT.md not found)"
+    return f"({rel_path} not found)"
+
+
+def _load_dev_guide(repo_dir: pathlib.Path) -> str:
+    """Compatibility wrapper for tests and older callers."""
+    return _load_doc(repo_dir, "docs/DEVELOPMENT.md")
+
+
+def _load_canonical_context_docs(repo_dir: pathlib.Path) -> str:
+    parts: list[str] = []
+    for rel_path in _CANONICAL_CONTEXT_DOCS:
+        parts.append(f"## {rel_path}\n\n{_load_doc(repo_dir, rel_path)}")
+    return "\n\n---\n\n".join(parts)
+
+
+def _should_skip_current_touched_context(path: str) -> bool:
+    norm = str(path or "").replace("\\", "/").lstrip("./")
+    return (
+        norm in _CANONICAL_CONTEXT_DOCS
+        or any(norm.startswith(prefix) for prefix in _CURRENT_TOUCHED_CONTEXT_SKIP_PREFIXES)
+    )
 
 
 def _format_history_entry(entry: object, *, default_severity: str = "advisory") -> str:
@@ -371,7 +402,10 @@ def _gather_scope_packs(repo_dir: pathlib.Path, all_touched_paths: list) -> str:
 
     Raises RuntimeError on git failure (fail-closed).
     """
-    exclude_set = set(all_touched_paths)
+    # The canonical docs are injected explicitly into the prompt below. Exclude
+    # them from the wider pack to avoid duplicating BIBLE / ARCHITECTURE /
+    # CHECKLISTS / DEVELOPMENT while still keeping them in every scope review.
+    exclude_set = set(all_touched_paths) | set(_CANONICAL_CONTEXT_DOCS)
     try:
         full_pack, _repo_omitted = build_full_repo_pack(repo_dir, exclude_paths=exclude_set)
         repo_pack_section = full_pack
@@ -469,7 +503,7 @@ def _build_scope_prompt(
 
     goal_section = build_goal_section(goal, scope, commit_message)
     scope_section = build_scope_section(scope)
-    dev_guide = _load_dev_guide(repo_dir)
+    canonical_docs = _load_canonical_context_docs(repo_dir)
     critical_calibration = CRITICAL_FINDING_CALIBRATION  # noqa: F841 — used in f-string below
     rebuttal_section = _shared_build_rebuttal_section(review_rebuttal)
     # Load open obligations for anti-thrashing hint.
@@ -518,12 +552,35 @@ def _build_scope_prompt(
     deleted_paths = [ep[1] for ep in touched_entries if ep[0] == "D"]
     all_touched_paths = [ep[1] for ep in touched_entries]
 
-    current_files_section, omitted = build_touched_file_pack(repo_dir, current_paths)
+    current_context_paths = [
+        path for path in current_paths
+        if not _should_skip_current_touched_context(path)
+    ]
+    current_skipped_by_design = [
+        path for path in current_paths
+        if _should_skip_current_touched_context(path)
+    ]
+
+    current_files_section, omitted = build_touched_file_pack(repo_dir, current_context_paths)
     current_files_section = _inline_deleted_file_pack(
         current_files_section, deleted_paths, repo_dir
     )
+    if current_skipped_by_design:
+        skip_note = (
+            "## CURRENT FILE CONTEXT DEDUPLICATION NOTE\n"
+            "The following touched files are not duplicated as full current-file "
+            "snapshots because they are either canonical docs injected above or "
+            "tests whose exact changes are visible in the staged diff below:\n"
+            + "\n".join(f"- {path}" for path in current_skipped_by_design)
+            + "\n"
+        )
+        current_files_section = (
+            current_files_section + "\n\n" + skip_note
+            if current_files_section.strip()
+            else skip_note
+        )
     touched_status = _compute_touched_status(
-        current_files_section, deleted_paths, omitted, current_paths
+        current_files_section, deleted_paths, omitted, current_context_paths
     )
 
     # Fail-closed check BEFORE the budget gate: touched-file omission always wins.
@@ -637,9 +694,12 @@ Return only one JSON array — not two.
 
 {goal_section}
 
-## DEVELOPMENT.md
+## Canonical Documentation Context
 
-{dev_guide}
+These files are always included explicitly. Do not treat their absence from the
+wider repository pack as omission.
+
+{canonical_docs}
 
 {rebuttal_section}{history_section}{scope_history_section}
 

@@ -216,14 +216,14 @@ class TestAdditionalHealthInvariantCoverage:
         env = _make_health_env(
             tmp_path,
             events_lines=[
-                json.dumps({"type": "llm_api_error", "model": "openai/gpt-5.4"}),
+                json.dumps({"type": "llm_api_error", "model": "openai/gpt-5.5"}),
                 json.dumps({"type": "local_context_overflow", "model": "local/qwen"}),
             ],
         )
 
         result = build_health_invariants(env)
         assert "PROVIDER/ROUTING ERRORS" in result
-        assert "openai/gpt-5.4 x1" in result
+        assert "openai/gpt-5.5 x1" in result
         assert "LOCAL CONTEXT OVERFLOW" in result
         assert "local/qwen x1" in result
 

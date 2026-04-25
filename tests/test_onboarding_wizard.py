@@ -22,10 +22,10 @@ def _base_payload() -> dict:
         "LOCAL_MODEL_N_GPU_LAYERS": -1,
         "LOCAL_MODEL_CHAT_FORMAT": "",
         "LOCAL_ROUTING_MODE": "cloud",
-        "OUROBOROS_MODEL": "openai::gpt-5.4",
-        "OUROBOROS_MODEL_CODE": "openai::gpt-5.4",
-        "OUROBOROS_MODEL_LIGHT": "openai::gpt-5.4-mini",
-        "OUROBOROS_MODEL_FALLBACK": "openai::gpt-5.4-mini",
+        "OUROBOROS_MODEL": "openai::gpt-5.5",
+        "OUROBOROS_MODEL_CODE": "openai::gpt-5.5",
+        "OUROBOROS_MODEL_LIGHT": "openai::gpt-5.5-mini",
+        "OUROBOROS_MODEL_FALLBACK": "openai::gpt-5.5-mini",
     }
 
 
@@ -44,7 +44,7 @@ def test_prepare_onboarding_settings_accepts_openai_only_setup():
 
     assert error is None
     assert prepared["OPENAI_API_KEY"] == "sk-openai-1234567890"
-    assert prepared["OUROBOROS_MODEL"] == "openai::gpt-5.4"
+    assert prepared["OUROBOROS_MODEL"] == "openai::gpt-5.5"
     assert prepared["TOTAL_BUDGET"] == 10.0
     assert prepared["OUROBOROS_PER_TASK_COST_USD"] == 20.0
     assert prepared["OUROBOROS_REVIEW_ENFORCEMENT"] == "advisory"
@@ -142,8 +142,8 @@ def test_build_onboarding_html_contains_multistep_markers():
     assert "Choose review mode" in html
     assert "Set your budget" in html
     assert "Local model settings" in html
-    assert "openai::gpt-5.4" in html
-    assert "openai::gpt-5.4-mini" in html
+    assert "openai::gpt-5.5" in html
+    assert "openai::gpt-5.5-mini" in html
     assert "anthropic::claude-sonnet-4-6" in html
     assert "OPENAI_BASE_URL: ''" not in html
     assert "OPENAI_COMPATIBLE_API_KEY: ''" not in html

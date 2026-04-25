@@ -502,23 +502,19 @@ def _handle_skill_exec(
             f"({loaded.load_error}). Fix the skill package and re-review."
         )
     if loaded.manifest.is_extension():
-        # Phase 4 ships the loader + PluginAPI + PluginAPIImpl, so
-        # ``register(api)`` is called on enable and the skill's tools /
-        # routes / WS handlers land in the extension_loader registries.
-        # The runtime dispatch wiring (ToolRegistry fallback for
-        # ``ext.*`` tool names, server.py mount for
-        # ``/api/extensions/<skill>/…`` routes, and message_bus route
-        # for ``ext.<skill>.<msg>`` WS types) arrives in Phase 5
-        # together with the Skills UI.
+        # Extension plugins execute in-process through PluginAPI, not through
+        # the script subprocess substrate. Their registered tools, routes, and
+        # WS handlers are already dispatched by ToolRegistry / extensions_api /
+        # server.py when the extension is live.
         return (
             f"⚠️ SKILL_EXEC_EXTENSION: skill {skill_name!r} is a "
             "type=extension plugin and does not execute through the "
             "subprocess substrate. Its ``register(api)`` has already "
             "been called; the loader registered whatever ``plugin.py`` "
             "declared (inspect via the snapshot produced by "
-            "``ouroboros.extension_loader.snapshot()``). Phase 5 "
-            "wires the runtime dispatchers so those registrations "
-            "become callable from the normal tool / HTTP / WS surfaces."
+            "``ouroboros.extension_loader.snapshot()``). Use its "
+            "``ext.<skill>.*`` tools, ``/api/extensions/<skill>/...`` "
+            "routes, or ``ext.<skill>.*`` WebSocket handlers instead."
         )
     # Phase 3 ``skill_exec`` only executes ``type: script`` skills.
     # ``instruction`` skills are catalogued + reviewable but have no

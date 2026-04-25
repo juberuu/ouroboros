@@ -7,9 +7,9 @@ const FALLBACK_MODEL_ITEMS = [
     { value: 'anthropic/claude-sonnet-4.6', label: 'Anthropic via OpenRouter' },
     { value: 'google/gemini-3.1-pro-preview', label: 'Google via OpenRouter' },
     { value: 'google/gemini-3-flash-preview', label: 'Google via OpenRouter' },
-    { value: 'openai/gpt-5.4', label: 'OpenAI via OpenRouter' },
-    { value: 'openai::gpt-5.4', label: 'Official OpenAI' },
-    { value: 'openai::gpt-5.4-mini', label: 'Official OpenAI' },
+    { value: 'openai/gpt-5.5', label: 'OpenAI via OpenRouter' },
+    { value: 'openai::gpt-5.5', label: 'Official OpenAI' },
+    { value: 'openai::gpt-5.5-mini', label: 'Official OpenAI' },
 ];
 
 let modelCatalogItems = FALLBACK_MODEL_ITEMS.slice();

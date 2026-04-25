@@ -20,7 +20,7 @@ def test_call_llm_with_retry_records_last_error(tmp_path):
     msg, cost = call_llm_with_retry(
         _FailingLLM(),
         [{"role": "user", "content": "hi"}],
-        "openai::gpt-5.4",
+        "openai::gpt-5.5",
         None,
         "medium",
         1,
@@ -78,7 +78,7 @@ def test_call_llm_with_retry_accumulates_estimated_cost(tmp_path):
                 {"content": "ok"},
                 {
                     "provider": "openai",
-                    "resolved_model": "openai/gpt-5.4",
+                    "resolved_model": "openai/gpt-5.5",
                     "prompt_tokens": 1000,
                     "completion_tokens": 100,
                     "cached_tokens": 0,
@@ -92,7 +92,7 @@ def test_call_llm_with_retry_accumulates_estimated_cost(tmp_path):
         _msg, _cost = call_llm_with_retry(
             _EstimatedCostLLM(),
             [{"role": "user", "content": "hi"}],
-            "openai::gpt-5.4",
+            "openai::gpt-5.5",
             None,
             "medium",
             1,
