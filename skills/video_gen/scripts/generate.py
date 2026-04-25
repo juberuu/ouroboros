@@ -231,7 +231,7 @@ def main(argv: list[str]) -> int:  # noqa: C901
     parser.add_argument("--resolution", default=None, help="Resolution, e.g. 720p")
     parser.add_argument(
         "--out", default=None,
-        help="Output filename (plain name, no slashes). Written to system temp dir."
+        help="Output filename (plain name, no slashes). Written to the skill state directory."
     )
     args = parser.parse_args(argv)
 
