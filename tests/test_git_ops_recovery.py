@@ -179,6 +179,7 @@ def test_checkout_and_reset_blocks_when_rescue_snapshot_fails(monkeypatch, tmp_p
     assert "rescue snapshot failed" in message
     assert reset_calls == []
     assert events and events[-1]["type"] == "reset_blocked_rescue_failed"
+    assert events[-1]["incomplete_reason"] == "snapshot_error"
 
 
 def test_checkout_and_reset_blocks_when_untracked_rescue_is_truncated(monkeypatch, tmp_path):
@@ -228,6 +229,8 @@ def test_checkout_and_reset_blocks_when_untracked_rescue_is_truncated(monkeypatc
     assert "untracked-file rescue was incomplete" in message
     assert reset_calls == []
     assert events and events[-1]["type"] == "reset_blocked_rescue_incomplete"
+    assert events[-1]["incomplete_reason"] == "untracked_rescue"
+    assert events[-1]["incomplete_detail"] == "untracked rescue copy was truncated"
 
 
 def test_checkout_and_reset_prefers_managed_remote_ref(monkeypatch, tmp_path):

@@ -591,7 +591,7 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
                             "unpushed_preview": unpushed_lines[:20],
                             "warnings": list(repo_state.get("warnings") or []),
                             "rescue": rescue_info,
-                            "incomplete_reason": "diff_error",
+                            "incomplete_reason": "snapshot_error",
                         },
                     )
                     return False, msg
@@ -613,7 +613,7 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
                             "unpushed_preview": unpushed_lines[:20],
                             "warnings": list(repo_state.get("warnings") or []),
                             "rescue": rescue_info,
-                            "incomplete_reason": "untracked_rescue",
+                            "incomplete_reason": "diff_error",
                         },
                     )
                     return False, msg
@@ -636,6 +636,8 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
                             "unpushed_preview": unpushed_lines[:20],
                             "warnings": list(repo_state.get("warnings") or []),
                             "rescue": rescue_info,
+                            "incomplete_reason": "untracked_rescue",
+                            "incomplete_detail": untracked_rescue_error,
                         },
                     )
                     return False, msg

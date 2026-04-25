@@ -701,6 +701,8 @@ def _build_system_prompt(
         parts += [
             "## CHECKLISTS.md (review contracts and critical thresholds)",
             "",
+            "Use the `## Plan Review Checklist` section inside this file as the per-item matrix for this plan review.",
+            "",
             checklists_md,
             "",
             "---",

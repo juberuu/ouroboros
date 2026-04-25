@@ -141,8 +141,6 @@ def _normalize_direct_scope_review_model(settings: dict, provider: str) -> str:
     current = migrate_model_value(provider, current_raw) if current_raw else ""
     default = migrate_model_value(provider, default_raw) if default_raw else ""
     provider_prefix = _provider_prefix(provider)
-    if current.startswith(provider_prefix) and current_raw:
-        return current
     if provider == "openai":
         auto_value = migrate_model_value(provider, default_raw or "openai/gpt-5.5")
     else:
@@ -155,6 +153,8 @@ def _normalize_direct_scope_review_model(settings: dict, provider: str) -> str:
     }
     if current_raw in {"", default_raw, *_SCOPE_REVIEW_LEGACY_DEFAULTS} or current in {"", default, *legacy_defaults}:
         return auto_value
+    if current.startswith(provider_prefix) and current_raw:
+        return current
     return current or auto_value
 
 

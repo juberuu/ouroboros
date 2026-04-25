@@ -531,6 +531,14 @@ class TestPlanReviewToolRegistration(unittest.TestCase):
         assert '"docs/ARCHITECTURE.md"' in source
         assert '"docs/CHECKLISTS.md"' in source
 
+    def test_plan_review_prompt_points_to_plan_checklist_section(self):
+        from ouroboros.tools.plan_review import _build_system_prompt
+
+        prompt = _build_system_prompt("", "", "", "", "## Plan Review Checklist\n\n- completeness\n")
+
+        assert "Use the `## Plan Review Checklist` section" in prompt
+        assert "## CHECKLISTS.md" in prompt
+
     def test_plan_task_description_mentions_pre_implementation(self):
         from ouroboros.tools.plan_review import get_tools
         tool = next(t for t in get_tools() if t.name == "plan_task")
