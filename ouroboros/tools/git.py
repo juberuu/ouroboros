@@ -112,6 +112,25 @@ def _staged_paths_for_protection(repo_dir: pathlib.Path) -> list[str]:
     return paths
 
 
+def _paths_from_porcelain_line(line: str) -> list[str]:
+    """Return current and source paths from one porcelain v1 status line.
+
+    Rename/copy entries are rendered as ``R  old -> new``. The restore guard
+    needs both sides so a protected source path cannot disappear behind an
+    unprotected destination name.
+    """
+    if not line or len(line) < 4:
+        return []
+    status = line[:2]
+    entry = line[3:].strip()
+    if not entry:
+        return []
+    if ("R" in status or "C" in status) and " -> " in entry:
+        before, after = entry.rsplit(" -> ", 1)
+        return [before.strip(), after.strip()]
+    return [entry]
+
+
 def _handle_revalidation_failure(*args, **kwargs):
     return handle_revalidation_failure(
         *args,
@@ -1327,8 +1346,11 @@ def _restore_to_head(ctx: ToolContext, confirm: bool = False,
         return f"⚠️ RESTORE_ERROR: git status failed: {e}"
     if not status:
         return "Nothing to restore — working directory is already clean."
-    dirty_files = [line[3:].strip().split(" -> ")[-1]
-                   for line in status.splitlines() if line.strip()]
+    dirty_files = [
+        path
+        for line in status.splitlines()
+        for path in _paths_from_porcelain_line(line)
+    ]
     affected_protected = protected_paths_in(dirty_files)
     if paths:
         for p in paths:

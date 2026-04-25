@@ -296,6 +296,19 @@ def test_restore_to_head_blocks_release_invariant_path(tmp_path, monkeypatch):
     assert ".github/workflows/ci.yml" in result
 
 
+def test_restore_to_head_blocks_protected_rename_source(tmp_path, monkeypatch):
+    from ouroboros.tools import git as git_mod
+
+    repo = _git_repo(tmp_path)
+    subprocess.run(["git", "mv", "BIBLE.md", "BIBLE2.md"], cwd=repo, check=True)
+
+    ctx = _CommitCtx(repo, tmp_path / "drive")
+    result = git_mod._restore_to_head(ctx, confirm=True)
+
+    assert "RESTORE_BLOCKED" in result
+    assert "BIBLE.md" in result
+
+
 def test_revert_commit_blocks_protected_contract_path(tmp_path, monkeypatch):
     from ouroboros.tools import git as git_mod
 
