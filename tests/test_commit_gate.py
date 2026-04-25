@@ -186,19 +186,19 @@ def test_repo_write_commit_uses_shared_reviewed_stage_cycle():
     assert "_run_reviewed_stage_cycle" in source
 
 
-# --- SAFETY_CRITICAL_PATHS checks ---
+# --- Protected-path checks ---
 
-def test_restore_to_head_blocks_safety_critical():
+def test_restore_to_head_blocks_protected_paths():
     git_mod = _get_git_module()
     source = inspect.getsource(git_mod._restore_to_head)
-    assert "SAFETY_CRITICAL_PATHS" in source
+    assert "is_protected_runtime_path" in source or "protected_paths_in" in source
     assert "RESTORE_BLOCKED" in source
 
 
-def test_revert_commit_blocks_safety_critical():
+def test_revert_commit_blocks_protected_paths():
     git_mod = _get_git_module()
     source = inspect.getsource(git_mod._revert_commit)
-    assert "SAFETY_CRITICAL_PATHS" in source
+    assert "protected_paths_in" in source
     assert "REVERT_BLOCKED" in source
 
 
@@ -337,11 +337,11 @@ def test_revert_commit_blocks_merge_commits():
 
 
 def test_restore_to_head_blocks_safety_critical_full_restore():
-    """Full restore (no paths) must check dirty files against SAFETY_CRITICAL_PATHS."""
+    """Full restore (no paths) must check dirty files against protected paths."""
     git_mod = _get_git_module()
     source = inspect.getsource(git_mod._restore_to_head)
     assert "affected_critical" in source or "dirty_files" in source, (
-        "Full restore must parse dirty files and check against SAFETY_CRITICAL_PATHS"
+        "Full restore must parse dirty files and check against protected paths"
     )
 
 

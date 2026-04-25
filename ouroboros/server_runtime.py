@@ -37,6 +37,15 @@ _DIRECT_PROVIDER_LEGACY_DEFAULTS = {
 }
 _ALL_MODEL_SLOT_KEYS = tuple(_DIRECT_PROVIDER_AUTO_DEFAULTS["openai"].keys())
 _DIRECT_PROVIDER_REVIEW_RUNS = 3
+_SCOPE_REVIEW_LEGACY_DEFAULTS = frozenset({
+    "",
+    "anthropic/claude-opus-4.6",
+    "anthropic::claude-opus-4-6",
+    "openai/gpt-5.4",
+    "openai::gpt-5.4",
+    "openai/gpt-5.4-pro",
+    "openai::gpt-5.4-pro",
+})
 
 
 def _truthy_setting(value) -> bool:
@@ -141,7 +150,10 @@ def _normalize_direct_scope_review_model(settings: dict, provider: str) -> str:
             provider,
             _DIRECT_PROVIDER_AUTO_DEFAULTS.get(provider, {}).get("OUROBOROS_MODEL", ""),
         )
-    if current_raw in {"", default_raw} or current in {"", default}:
+    legacy_defaults = {
+        migrate_model_value(provider, item) for item in _SCOPE_REVIEW_LEGACY_DEFAULTS
+    }
+    if current_raw in {"", default_raw, *_SCOPE_REVIEW_LEGACY_DEFAULTS} or current in {"", default, *legacy_defaults}:
         return auto_value
     return current or auto_value
 

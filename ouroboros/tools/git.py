@@ -17,11 +17,11 @@ from typing import Any, Dict, List, Optional
 
 from ouroboros.config import get_runtime_mode
 from ouroboros.runtime_mode_policy import (
-    SAFETY_CRITICAL_PATHS,
     core_patch_notice,
     format_protected_paths,
     is_protected_runtime_path,
     mode_allows_protected_write,
+    normalize_repo_path,
     protected_paths_in,
     protected_write_block_message,
 )
@@ -32,7 +32,6 @@ from ouroboros.tools.commit_gate import (
     _invalidate_advisory,
     _record_commit_attempt,
 )
-from ouroboros.tools.core_patch_gate import run_core_patch_review_gate
 from ouroboros.tools.review_revalidation import handle_revalidation_failure
 from ouroboros.utils import utc_now_iso, write_text, safe_relpath, run_cmd
 from ouroboros.tools.parallel_review import run_parallel_review as _run_parallel_review, aggregate_review_verdict as _aggregate_review_verdict
@@ -43,9 +42,8 @@ log = logging.getLogger(__name__)
 
 def _normalize_to_posix(path_str: str) -> str:
     """Normalize to forward-slash POSIX form; replaces backslashes first so
-    Windows-style paths match SAFETY_CRITICAL_PATHS on Linux/macOS."""
-    normalized = path_str.strip().lstrip("./").replace("\\", "/")
-    return pathlib.PurePosixPath(normalized).as_posix()
+    Windows-style paths match protected runtime paths on Linux/macOS."""
+    return normalize_repo_path(path_str)
 
 
 def _current_runtime_mode() -> str:
@@ -60,7 +58,7 @@ def _protected_paths_block_message(paths, *, runtime_mode: str, action: str) -> 
     return (
         f"⚠️ CORE_PROTECTION_BLOCKED: runtime_mode={runtime_mode!r} refuses "
         f"to {action} protected Ouroboros core/contract/release path(s): {rendered}. "
-        "Use runtime_mode='pro' and pass the extra core-patch review gate before "
+        "Use runtime_mode='pro' and pass the normal triad + scope review before "
         "committing protected surfaces."
     )
 
@@ -338,20 +336,6 @@ def _run_reviewed_stage_cycle(
         pre_review_fingerprint=pre_fingerprint.get("fingerprint", ""),
         fingerprint_status="pending",
     )
-
-    if protected_staged_paths and mode_allows_protected_write(runtime_mode):
-        core_gate = run_core_patch_review_gate(
-            ctx,
-            commit_message,
-            commit_start,
-            protected_paths=protected_staged_paths,
-            pre_fingerprint=pre_fingerprint,
-            goal=goal,
-            scope=scope,
-            review_rebuttal=review_rebuttal,
-        )
-        if core_gate is not None:
-            return core_gate
 
     review_err, scope_result, triad_block_reason, triad_advisory = _run_parallel_review(
         ctx,
@@ -1345,22 +1329,19 @@ def _restore_to_head(ctx: ToolContext, confirm: bool = False,
         return "Nothing to restore — working directory is already clean."
     dirty_files = [line[3:].strip().split(" -> ")[-1]
                    for line in status.splitlines() if line.strip()]
-    affected_critical = [
-        _normalize_to_posix(f) for f in dirty_files
-        if _normalize_to_posix(f) in SAFETY_CRITICAL_PATHS
-    ]
+    affected_protected = protected_paths_in(dirty_files)
     if paths:
         for p in paths:
             norm = _normalize_to_posix(p)
-            if norm in SAFETY_CRITICAL_PATHS:
+            if is_protected_runtime_path(norm):
                 return (
-                    f"⚠️ RESTORE_BLOCKED: Cannot restore safety-critical file: {norm}. "
-                    f"Protected: {', '.join(sorted(SAFETY_CRITICAL_PATHS))}"
+                    f"⚠️ RESTORE_BLOCKED: Cannot restore protected file: {norm}. "
+                    "Protected core/contract/release paths must be changed through reviewed commits."
                 )
-    elif affected_critical:
+    elif affected_protected:
         return (
-            f"⚠️ RESTORE_BLOCKED: Uncommitted changes touch safety-critical file(s): "
-            f"{', '.join(affected_critical)}. "
+            f"⚠️ RESTORE_BLOCKED: Uncommitted changes touch protected file(s): "
+            f"{format_protected_paths(affected_protected)}. "
             f"Use paths= to restore specific non-critical files, or resolve manually."
         )
     if not confirm:
@@ -1437,13 +1418,14 @@ def _revert_commit(ctx: ToolContext, sha: str, confirm: bool = False) -> str:
         ).strip().splitlines()
     except Exception:
         changed_files = []
-    for f in changed_files:
-        norm = _normalize_to_posix(f)
-        if norm in SAFETY_CRITICAL_PATHS:
-            return (
-                f"⚠️ REVERT_BLOCKED: Commit {sha[:8]} touches safety-critical file: {norm}. "
-                "Reverting it could modify protected files."
-            )
+    protected_changes = protected_paths_in(changed_files)
+    if protected_changes:
+        return (
+            f"⚠️ REVERT_BLOCKED: Commit {sha[:8]} touches protected file(s): "
+            f"{format_protected_paths(protected_changes)}. "
+            "Direct revert_commit cannot create protected-path commits; stage the intended "
+            "revert manually and use repo_commit so the normal triad + scope review covers it."
+        )
     try:
         commit_msg = run_cmd(
             ["git", "log", "-1", "--format=%s", full_sha], cwd=repo_dir,

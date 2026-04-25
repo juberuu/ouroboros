@@ -18,7 +18,6 @@ from typing import Any, Callable, Dict, List, Optional
 from ouroboros.runtime_mode_policy import (
     FROZEN_CONTRACT_PATH_PREFIXES,
     PROTECTED_RUNTIME_PATHS,
-    SAFETY_CRITICAL_PATHS,
     core_patch_notice,
     is_protected_runtime_path,
     mode_allows_protected_write,
@@ -48,23 +47,6 @@ _GIT_READONLY_SUBCOMMANDS = frozenset([
 ])
 
 _SHELL_WRAPPERS = frozenset(["bash", "sh", "dash", "zsh", "env"])
-
-
-def _is_safety_critical_path(path: str) -> bool:
-    """Check if a normalized path refers to a safety-critical file.
-
-    ``SAFETY_CRITICAL_PATHS`` is declared with forward slashes
-    (``ouroboros/safety.py``). On Windows ``os.path.normpath`` flips
-    ``/`` to ``\\``, which makes the literal-set lookup miss. Normalise
-    to POSIX form BEFORE the set check so the hardcoded sandbox
-    behaves identically on all three supported OSes.
-    """
-    cleaned = path.strip().lstrip("./").replace("\\", "/")
-    # ``PurePosixPath.as_posix()`` collapses redundant ``./`` without
-    # re-introducing backslashes (unlike ``os.path.normpath``).
-    normalized = pathlib.PurePosixPath(cleaned).as_posix()
-    return normalized in SAFETY_CRITICAL_PATHS
-
 
 def _revert_protected_files(repo_dir, *, runtime_mode: str = "advanced") -> list:
     """After claude_code_edit, revert protected files unless pro mode is active."""
@@ -407,7 +389,7 @@ class ToolRegistry:
         # - advanced may evolve the application layer but cannot edit protected
         #   core/contracts/release surfaces;
         # - pro may touch those surfaces, but the git commit path must pass the
-        #   extra core-patch review gate before the commit lands.
+        #   normal triad + scope review before the commit lands.
         try:
             from ouroboros.config import get_runtime_mode as _get_runtime_mode
             _runtime_mode = _get_runtime_mode()
@@ -503,28 +485,6 @@ class ToolRegistry:
                     runtime_mode=_runtime_mode,
                     action=f"run tool {name!r} against",
                 )
-
-        # Block modification of safety-critical files via repo_write / repo_write_commit
-        if name in ("repo_write_commit", "repo_write"):
-            path = args.get("path", "")
-            if path and _is_safety_critical_path(path) and not mode_allows_protected_write(_runtime_mode):
-                return (
-                    "⚠️ CRITICAL SAFETY_VIOLATION: Hardcoded sandbox prevents "
-                    "modification of safety-critical files: "
-                    + ", ".join(sorted(SAFETY_CRITICAL_PATHS))
-                )
-            files = args.get("files") or []
-            for f_entry in files:
-                if (
-                    isinstance(f_entry, dict)
-                    and _is_safety_critical_path(f_entry.get("path", ""))
-                    and not mode_allows_protected_write(_runtime_mode)
-                ):
-                    return (
-                        "⚠️ CRITICAL SAFETY_VIOLATION: Hardcoded sandbox prevents "
-                        "modification of safety-critical files: "
-                        + ", ".join(sorted(SAFETY_CRITICAL_PATHS))
-                    )
 
         if name == "run_shell":
             raw_cmd = args.get("cmd", args.get("command", ""))
@@ -637,7 +597,7 @@ class ToolRegistry:
             return f"⚠️ TOOL_ERROR ({name}): {e}"
 
         # Revert protected files after claude_code_edit unless pro mode is
-        # active; pro-mode commits still require the core-patch gate later.
+        # active; pro-mode commits still require the normal commit review later.
         if name == "claude_code_edit":
             reverted = _revert_protected_files(self._ctx.repo_dir, runtime_mode=_runtime_mode)
             if reverted:

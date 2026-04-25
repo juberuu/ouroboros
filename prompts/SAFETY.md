@@ -7,7 +7,7 @@ DANGEROUS — block only these:
 - Destructive commands targeting system or home root: rm -rf /, rm -rf ~, disk format/wipe, deleting /System /usr /bin /etc
 - Commands that make the OS unbootable or kill critical system processes irreversibly
 - HTTP requests (curl, wget, python, etc.) that send API keys, tokens, or credentials to non-localhost external URLs
-- Modifying or deleting any protected Ouroboros runtime path outside `runtime_mode=pro` + core-patch gate: safety-critical files (`BIBLE.md`, `ouroboros/safety.py`, `ouroboros/runtime_mode_policy.py`, `ouroboros/tools/core_patch_gate.py`, `ouroboros/tools/registry.py`, `prompts/SAFETY.md`), frozen contracts (`ouroboros/contracts/`, `docs/CHECKLISTS.md`), and release/managed invariants (`.github/workflows/ci.yml`, build scripts, `scripts/build_repo_bundle.py`, `ouroboros/launcher_bootstrap.py`, `supervisor/git_ops.py`)
+- Modifying or deleting any protected Ouroboros runtime path outside `runtime_mode=pro` + normal commit review: safety-critical files (`BIBLE.md`, `ouroboros/safety.py`, `ouroboros/runtime_mode_policy.py`, `ouroboros/tools/registry.py`, `prompts/SAFETY.md`), frozen contracts (`ouroboros/contracts/`, `docs/CHECKLISTS.md`), and release/managed invariants (`.github/workflows/ci.yml`, build scripts, `scripts/build_repo_bundle.py`, `ouroboros/launcher_bootstrap.py`, `supervisor/git_ops.py`)
 
 SUSPICIOUS — allow but warn the agent:
 - Commands that delete large amounts of data outside the project directory

@@ -4,17 +4,14 @@
 - advanced : evolutionary-layer self-modification is allowed, but protected
              core/contract/release paths are blocked.
 - pro      : protected writes are allowed on disk with CORE_PATCH_NOTICE, and
-             repo_commit must pass the extra core-patch review gate.
+             repo_commit must pass the normal triad + scope review gate.
 """
 from __future__ import annotations
 
 import pathlib
 import subprocess
-from types import SimpleNamespace
-
 import pytest
 
-from ouroboros.runtime_mode_policy import ProtectedPath
 from ouroboros.runtime_mode_policy import protected_path_category
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.tools.registry import ToolEntry
@@ -252,7 +249,7 @@ def test_advanced_commit_blocks_rename_from_protected_path(tmp_path, monkeypatch
     assert "BIBLE.md" in result["message"]
 
 
-def test_pro_commit_runs_core_patch_gate_for_protected_paths(tmp_path, monkeypatch):
+def test_pro_commit_uses_normal_review_for_protected_paths(tmp_path, monkeypatch):
     from ouroboros.tools import git as git_mod
 
     repo = _git_repo(tmp_path)
@@ -261,14 +258,13 @@ def test_pro_commit_runs_core_patch_gate_for_protected_paths(tmp_path, monkeypat
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
     monkeypatch.setenv("OUROBOROS_PRE_PUSH_TESTS", "0")
 
-    called: list[list[str]] = []
+    calls = {"review": 0}
 
-    def fake_core_gate(_ctx, _message, _start, *, protected_paths, **_kwargs):
-        called.append([p.path for p in protected_paths])
-        return None
+    def fake_review(*_args, **_kwargs):
+        calls["review"] += 1
+        return None, None, "", []
 
-    monkeypatch.setattr(git_mod, "run_core_patch_review_gate", fake_core_gate)
-    monkeypatch.setattr(git_mod, "_run_parallel_review", lambda *a, **k: (None, None, "", []))
+    monkeypatch.setattr(git_mod, "_run_parallel_review", fake_review)
     monkeypatch.setattr(git_mod, "_aggregate_review_verdict", lambda *a, **k: (False, None, "", [], []))
 
     result = git_mod._run_reviewed_stage_cycle(
@@ -280,94 +276,41 @@ def test_pro_commit_runs_core_patch_gate_for_protected_paths(tmp_path, monkeypat
     )
 
     assert result["status"] == "passed"
-    assert called == [["BIBLE.md"]]
+    assert calls == {"review": 1}
 
 
-def test_core_patch_gate_blocks_when_scope_review_is_budget_skipped(tmp_path, monkeypatch):
-    from ouroboros.tools import core_patch_gate
-
-    repo = _git_repo(tmp_path)
-    ctx = _CommitCtx(repo, tmp_path / "drive")
-    recorded = []
-
-    monkeypatch.setattr(
-        core_patch_gate,
-        "_run_parallel_review",
-        lambda *a, **k: (
-            None,
-            SimpleNamespace(
-                blocked=False,
-                status="budget_exceeded",
-                critical_findings=[],
-                advisory_findings=[],
-                block_message="",
-            ),
-            "",
-            [],
-        ),
-    )
-    monkeypatch.setattr(
-        core_patch_gate,
-        "_aggregate_review_verdict",
-        lambda *a, **k: (False, None, "", [], []),
-    )
-    monkeypatch.setattr(
-        core_patch_gate,
-        "_record_commit_attempt",
-        lambda *args, **kwargs: recorded.append((args, kwargs)),
-    )
-
-    result = core_patch_gate.run_core_patch_review_gate(
-        ctx,
-        "core patch",
-        0.0,
-        protected_paths=[ProtectedPath("BIBLE.md", "safety-critical")],
-        pre_fingerprint={"fingerprint": "abc", "ok": True},
-    )
-
-    assert result is not None
-    assert result["status"] == "blocked"
-    assert result["block_reason"] == "core_patch_review_blocked"
-    assert "did not complete" in result["message"]
-    assert recorded
-
-
-def test_core_patch_gate_allows_responded_pass(tmp_path, monkeypatch):
-    from ouroboros.tools import core_patch_gate
+def test_restore_to_head_blocks_release_invariant_path(tmp_path, monkeypatch):
+    from ouroboros.tools import git as git_mod
 
     repo = _git_repo(tmp_path)
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    (repo / ".github" / "workflows" / "ci.yml").write_text("name: ci\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "ci"], cwd=repo, check=True, capture_output=True)
+    (repo / ".github" / "workflows" / "ci.yml").write_text("name: changed\n", encoding="utf-8")
+
     ctx = _CommitCtx(repo, tmp_path / "drive")
-    monkeypatch.setattr(
-        core_patch_gate,
-        "_run_parallel_review",
-        lambda *a, **k: (
-            None,
-            SimpleNamespace(
-                blocked=False,
-                status="responded",
-                critical_findings=[],
-                advisory_findings=[],
-                block_message="",
-            ),
-            "",
-            [],
-        ),
-    )
-    monkeypatch.setattr(
-        core_patch_gate,
-        "_aggregate_review_verdict",
-        lambda *a, **k: (False, None, "", [], []),
-    )
+    result = git_mod._restore_to_head(ctx, confirm=True, paths=[".github/workflows/ci.yml"])
 
-    result = core_patch_gate.run_core_patch_review_gate(
-        ctx,
-        "core patch",
-        0.0,
-        protected_paths=[ProtectedPath("BIBLE.md", "safety-critical")],
-        pre_fingerprint={"fingerprint": "abc", "ok": True},
-    )
+    assert "RESTORE_BLOCKED" in result
+    assert ".github/workflows/ci.yml" in result
 
-    assert result is None
+
+def test_revert_commit_blocks_protected_contract_path(tmp_path, monkeypatch):
+    from ouroboros.tools import git as git_mod
+
+    repo = _git_repo(tmp_path)
+    (repo / "ouroboros" / "contracts").mkdir(parents=True)
+    (repo / "ouroboros" / "contracts" / "plugin_api.py").write_text("old\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "contract"], cwd=repo, check=True, capture_output=True)
+    target_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+
+    ctx = _CommitCtx(repo, tmp_path / "drive")
+    result = git_mod._revert_commit(ctx, target_sha, confirm=True)
+
+    assert "REVERT_BLOCKED" in result
+    assert "ouroboros/contracts/plugin_api.py" in result
 
 
 def test_light_mode_blocks_runshell_mutation(tmp_path, monkeypatch):

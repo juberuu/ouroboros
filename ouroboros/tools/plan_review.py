@@ -256,6 +256,7 @@ async def _run_plan_review_async(
     bible_text = _load_bible(repo_dir)
     dev_md = _load_doc(repo_dir, "docs/DEVELOPMENT.md")
     arch_md = _load_doc(repo_dir, "docs/ARCHITECTURE.md")
+    checklists_md = _load_doc(repo_dir, "docs/CHECKLISTS.md")
 
     # Full repo pack (same as scope review — reviewers see everything)
     ctx.emit_progress_fn("📐 plan_task: building full repo pack…")
@@ -287,7 +288,7 @@ async def _run_plan_review_async(
         head_snapshots = build_head_snapshot_section(repo_dir, files_to_touch)
 
     # Assemble the full prompt
-    system_prompt = _build_system_prompt(checklist, bible_text, dev_md, arch_md)
+    system_prompt = _build_system_prompt(checklist, bible_text, dev_md, arch_md, checklists_md)
     user_content = _build_user_content(plan, goal, files_to_touch, head_snapshots, repo_pack, omitted_note)
 
     # Budget gate
@@ -591,6 +592,7 @@ def _build_system_prompt(
     bible_text: str,
     dev_md: str,
     arch_md: str,
+    checklists_md: str = "",
 ) -> str:
     parts = [
         "You are a senior design reviewer for Ouroboros, a self-creating AI agent.",
@@ -655,7 +657,7 @@ def _build_system_prompt(
         "",
     ]
 
-    if checklist:
+    if checklist and not checklists_md:
         parts += [
             "## Plan Review Checklist",
             "",
@@ -690,6 +692,16 @@ def _build_system_prompt(
             "## ARCHITECTURE.md (Current system structure)",
             "",
             arch_md,
+            "",
+            "---",
+            "",
+        ]
+
+    if checklists_md:
+        parts += [
+            "## CHECKLISTS.md (review contracts and critical thresholds)",
+            "",
+            checklists_md,
             "",
             "---",
             "",

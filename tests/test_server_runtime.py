@@ -102,6 +102,22 @@ def test_apply_runtime_provider_defaults_keeps_explicit_official_openai_review_m
     assert normalized["OUROBOROS_REVIEW_MODELS"] == "openai::gpt-5.5,openai::gpt-5.5-mini"
 
 
+def test_apply_runtime_provider_defaults_migrates_legacy_scope_model_for_openai_only():
+    normalized, changed, changed_keys = apply_runtime_provider_defaults({
+        "OPENAI_API_KEY": "sk-openai",
+        "OUROBOROS_MODEL": "openai::gpt-5.5",
+        "OUROBOROS_MODEL_CODE": "openai::gpt-5.5",
+        "OUROBOROS_MODEL_LIGHT": "openai::gpt-5.5-mini",
+        "OUROBOROS_MODEL_FALLBACK": "openai::gpt-5.5-mini",
+        "OUROBOROS_REVIEW_MODELS": "openai::gpt-5.5,openai::gpt-5.5-mini",
+        "OUROBOROS_SCOPE_REVIEW_MODEL": "anthropic/claude-opus-4.6",
+    })
+
+    assert changed
+    assert changed_keys == ["OUROBOROS_SCOPE_REVIEW_MODEL"]
+    assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] == "openai::gpt-5.5"
+
+
 def test_apply_runtime_provider_defaults_normalizes_anthropic_only_setup():
     """Legacy path: saved settings.json from older versions had claude-opus-4.6 —
     must still normalize to the Anthropic direct-provider prefix form.

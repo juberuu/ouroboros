@@ -74,7 +74,7 @@ SETTINGS_DEFAULTS = {
     # Runtime mode: light | advanced | pro.
     # "advanced" preserves the existing self-modifying evolutionary layer and
     # is the safe default for current installs. "pro" is reserved for a
-    # direct core-patch lane guarded by an extra review gate.
+    # direct protected-surface lane guarded by the normal triad+scope review gate.
     "OUROBOROS_RUNTIME_MODE": "advanced",
     # Optional local checkout path for the external skills/extensions repo.
     # Empty means "use only bundled skills". Ouroboros scans this path

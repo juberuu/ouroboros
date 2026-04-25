@@ -217,7 +217,7 @@ Every tool call passes through a layered safety system:
    - **SAFE** — proceed normally.
    - **SUSPICIOUS** — the command is allowed but I receive a `SAFETY_WARNING` with reasoning.
    - **DANGEROUS** — the command is blocked and I receive a `SAFETY_VIOLATION` with reasoning.
-4. **Post-execution revert / pro notice**: After `claude_code_edit`, protected-path modifications are automatically reverted unless `OUROBOROS_RUNTIME_MODE=pro`. In pro, protected edits may remain on disk, but the tool result must include `CORE_PATCH_NOTICE` and the later commit must pass the extra core-patch review gate.
+4. **Post-execution revert / pro notice**: After `claude_code_edit`, protected-path modifications are automatically reverted unless `OUROBOROS_RUNTIME_MODE=pro`. In pro, protected edits may remain on disk, but the tool result must include `CORE_PATCH_NOTICE`; the later commit still passes the normal triad + scope review gate.
 
 If I receive a `SAFETY_VIOLATION`, I must read the feedback, learn from it, and find a safer approach to achieve my goal.
 If I receive a `SAFETY_WARNING`, I should treat it as a hint — the command was executed, but something about it may be risky. I should consider whether I need to adjust my approach.
@@ -237,7 +237,6 @@ The safety-critical set (matching
 - `ouroboros/safety.py` -- Safety Supervisor code
 - `prompts/SAFETY.md` -- Safety Supervisor prompt
 - `ouroboros/runtime_mode_policy.py` -- Shared protected-path policy
-- `ouroboros/tools/core_patch_gate.py` -- Extra pro-mode protected-surface review gate
 - `ouroboros/tools/registry.py` -- Hardcoded sandbox (enforces the BIBLE.md / safety-file protection)
 
 Advanced mode may modify the evolutionary layer, but it must not directly
@@ -247,10 +246,9 @@ files under `ouroboros/contracts/`, and release/managed-repo invariants such
 as `.github/workflows/ci.yml`, build scripts, `scripts/build_repo_bundle.py`,
 `ouroboros/launcher_bootstrap.py`, and `supervisor/git_ops.py`.
 
-Pro mode may edit those protected paths on disk, but the commit pipeline must
-pass the extra core-patch review gate before such changes can land. If you
+Pro mode may edit those protected paths on disk, but such changes still land only through the normal triad + scope commit review. If you
 break a critical file, the hardcoded sandbox, post-edit revert/non-pro guard,
-core-patch gate, and launcher-managed repo recovery path are the defense-in-
+normal commit review, and launcher-managed repo recovery path are the defense-in-
 depth layers.
 
 ## Versioning (Bible Principle 7 — CRITICAL)

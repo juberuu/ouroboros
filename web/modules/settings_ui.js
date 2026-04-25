@@ -284,7 +284,7 @@ export function renderSettingsPage() {
                             Separate axis from Review Enforcement. Controls how far Ouroboros is allowed to self-modify.
                             <code>Light</code> blanket-blocks every repo-mutation tool (<code>repo_write</code>, <code>skill_exec</code>, <code>run_shell</code> mutation patterns, …).
                             <code>Advanced</code> is the default — self-modify the evolutionary layer; protected core/contract/release files stay guarded by the shared runtime-mode policy.
-                            <code>Pro</code> can edit protected core/contract/release surfaces only through the extra core-patch review gate; Advanced remains limited to the evolutionary layer.
+                            <code>Pro</code> can edit protected core/contract/release surfaces, but commits still go through the normal triad + scope review gate; Advanced remains limited to the evolutionary layer.
                         </div>
                         <div class="settings-effort-card">
                             <label>Runtime Mode</label>

@@ -2,8 +2,8 @@
 
 ``advanced`` is allowed to evolve the application layer, but must not casually
 rewrite the core contracts, safety files, or release/managed-repo invariants.
-``pro`` may touch those paths only when the commit pipeline runs the extra
-core-patch review gate.
+``pro`` may touch those paths, but commits still flow through the normal
+triad + scope review gate.
 """
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ SAFETY_CRITICAL_PATHS = frozenset({
     "BIBLE.md",
     "ouroboros/safety.py",
     "ouroboros/runtime_mode_policy.py",
-    "ouroboros/tools/core_patch_gate.py",
     "ouroboros/tools/registry.py",
     "prompts/SAFETY.md",
 })
@@ -127,8 +126,8 @@ def protected_write_block_message(
     return (
         f"⚠️ CORE_PROTECTION_BLOCKED: runtime_mode={runtime_mode!r} refuses "
         f"to {action} protected {category or 'core'} path: {norm}. "
-        "Switch to runtime_mode='pro' and let the core-patch review gate pass "
-        "before committing protected core/contract/release surfaces."
+        "Switch to runtime_mode='pro' and let the normal triad + scope review "
+        "cover the protected core/contract/release change before commit."
     )
 
 
@@ -136,7 +135,7 @@ def core_patch_notice(paths: Iterable[ProtectedPath | str]) -> str:
     return (
         "⚠️ CORE_PATCH_NOTICE: runtime_mode='pro' is editing protected "
         "Ouroboros core/contract/release surface(s): "
-        f"{format_protected_paths(paths)}. The commit pipeline must pass the "
-        "extra core-patch review gate before these changes can be committed."
+        f"{format_protected_paths(paths)}. These changes can be committed only "
+        "through the normal triad + scope review pipeline."
     )
 

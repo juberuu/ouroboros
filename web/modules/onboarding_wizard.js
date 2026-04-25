@@ -735,7 +735,7 @@
                     <button type="button" class="wizard-choice pro ${runtimeMode === 'pro' ? 'active' : ''}" data-runtime-mode="pro">
                         <span class="tone">Power</span>
                         <h3>Pro</h3>
-                        <p>Direct core-patch mode. Protected core/contract/release edits require the extra core-patch review gate before commit.</p>
+                        <p>Direct protected-surface mode. Protected core/contract/release edits are allowed on disk, but commits still require the normal triad + scope review gate.</p>
                     </button>
                 </div>
                 <div class="field">
