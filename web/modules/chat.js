@@ -68,6 +68,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
             <span id="chat-status" class="status-badge offline">Connecting...</span>
         </div>
         <div id="chat-messages"></div>
+        <div class="chat-bottom-fade" aria-hidden="true"></div>
         <div id="chat-input-area">
             <div id="chat-attachment-preview" class="chat-attachment-preview"></div>
             <div class="chat-input-wrap">
@@ -75,7 +76,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
                 </button>
                 <input type="file" id="chat-file-input" class="chat-file-input-hidden" accept="*/*">
-                <textarea id="chat-input" placeholder="Message Ouroboros..." rows="1"></textarea>
+                <textarea id="chat-input" placeholder="Message Ouroboros..." rows="1" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
                 <div class="chat-send-group">
                     <button class="chat-send-inline" id="chat-send" title="Send message">Send</button>
                     <button class="chat-send-chevron" id="chat-send-chevron" type="button" title="More send options" aria-label="More send options">
@@ -111,14 +112,10 @@ export function initChat({ ws, state, updateUnreadBadge }) {
     const attachmentPreview = document.getElementById('chat-attachment-preview');
     let pendingAttachment = null;
 
-    attachBtn.addEventListener('click', () => fileInput.click());
-
-    // Stage the selected File object locally — no server upload until sendMessage().
-    // This avoids orphan files, race conditions with fast-send, and network usage for unsent files.
-    fileInput.addEventListener('change', () => {
-        const file = fileInput.files[0];
+    // Shared stager: paperclip change handler AND clipboard paste both go through here
+    // so the attachment badge / removal UI / upload-on-Send semantics are identical.
+    function stagePendingFile(file) {
         if (!file) return;
-        fileInput.value = '';
         pendingAttachment = { file, display_name: file.name };
         attachmentPreview.classList.add('visible');
         attachmentPreview.innerHTML = `
@@ -135,6 +132,43 @@ export function initChat({ ws, state, updateUnreadBadge }) {
             attachmentPreview.innerHTML = '';
             requestAnimationFrame(() => updateMessagesPadding());
         });
+    }
+
+    attachBtn.addEventListener('click', () => fileInput.click());
+
+    // Stage the selected File object locally — no server upload until sendMessage().
+    // This avoids orphan files, race conditions with fast-send, and network usage for unsent files.
+    fileInput.addEventListener('change', () => {
+        const file = fileInput.files[0];
+        if (!file) return;
+        fileInput.value = '';
+        stagePendingFile(file);
+    });
+
+    // Clipboard image paste: scan clipboardData.items for image/*, wrap as File via
+    // getAsFile(), and route through the same stagePendingFile() path the paperclip
+    // uses. preventDefault() runs ONLY when an image is matched so non-image clipboard
+    // payloads (text, formatted text) still paste natively into the textarea. The
+    // generated filename uses a unix timestamp + the MIME-derived extension so each
+    // paste is a distinct attachment if the user pastes several in a row.
+    input.addEventListener('paste', (e) => {
+        const items = e.clipboardData && e.clipboardData.items;
+        if (!items) return;
+        for (let i = 0; i < items.length; i += 1) {
+            const item = items[i];
+            if (item && item.kind === 'file' && typeof item.type === 'string' && item.type.startsWith('image/')) {
+                const blob = item.getAsFile();
+                if (!blob) continue;
+                e.preventDefault();
+                const ext = (item.type.split('/')[1] || 'png').split(';')[0].trim() || 'png';
+                const ts = Date.now();
+                const safeBlob = blob instanceof File
+                    ? new File([blob], `clipboard-${ts}.${ext}`, { type: blob.type })
+                    : new File([blob], `clipboard-${ts}.${ext}`, { type: item.type });
+                stagePendingFile(safeBlob);
+                return;
+            }
+        }
     });
 
     // Set to true during syncHistory pass 1 to suppress premature DOM insertion of

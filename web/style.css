@@ -1425,6 +1425,32 @@ body {
     }
 }
 
+/* Bottom scroll-under fade rendered by a DEDICATED sibling layer so it sits
+   visually BELOW #chat-input-area (which is z-index: 5) and never optically
+   swallows the textarea or the attachment badge. Earlier versions painted
+   this gradient as #chat-input-area's own background, which made the lower
+   edge of the input visually dissolve into the dense end of the gradient
+   (rgba(13, 11, 15, 0.92)). Now the gradient is on its own pointer-events:none
+   layer at z-index: 4. Height is 200px so it always covers the tallest
+   `#chat-input-area` state (attachment badge ~30px + fully-expanded textarea
+   ~120px + padding 24px ≈ 174px) with a buffer. */
+.chat-bottom-fade {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 200px;
+    pointer-events: none;
+    z-index: 4;
+    background: linear-gradient(
+        0deg,
+        rgba(13, 11, 15, 0.92) 0%,
+        rgba(13, 11, 15, 0.74) 35%,
+        rgba(13, 11, 15, 0.30) 78%,
+        rgba(13, 11, 15, 0.00) 100%
+    );
+}
+
 #chat-input-area {
     display: flex;
     flex-direction: column;
@@ -1436,20 +1462,10 @@ body {
     left: 0;
     right: 0;
     z-index: 5;
-    /* Bottom scroll-under fade. Reaches a fully-transparent stop at the
-       upper edge so the transcript blends into the input dock without a
-       hard border. Previous gradient bottomed at 0.26 alpha and made a
-       visible step against the page background. */
-    background: linear-gradient(
-        0deg,
-        rgba(13, 11, 15, 0.92) 0%,
-        rgba(13, 11, 15, 0.74) 35%,
-        rgba(13, 11, 15, 0.30) 78%,
-        rgba(13, 11, 15, 0.00) 100%
-    );
-    /* Mask the blur (when used) to fade in step with the gradient. */
-    -webkit-mask-image: linear-gradient(0deg, black 0%, black 60%, transparent 100%);
-            mask-image: linear-gradient(0deg, black 0%, black 60%, transparent 100%);
+    /* No background here on purpose. The bottom scroll-under fade is rendered
+       by .chat-bottom-fade (z-index: 4) which sits visually below this dock,
+       so the textarea's own frosted-glass background reads cleanly without
+       the gradient bleeding through it. */
 }
 
 .chat-input-wrap {
@@ -3084,6 +3100,13 @@ body {
     /* Input area safe-area inset for iOS notch */
     #chat-input-area {
         padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
+    }
+
+    /* Bottom-fade layer grows by the safe-area inset so the gradient still
+       fully covers the tallest expanded textarea state on iOS where the
+       home-indicator pushes the input area up. */
+    .chat-bottom-fade {
+        height: calc(200px + env(safe-area-inset-bottom, 0px));
     }
 
     /* Header is now in normal flow on mobile — remove the desktop 56px top

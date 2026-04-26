@@ -278,3 +278,270 @@ class TestDockerfile:
             f"Found {len(playwright_invocations)} playwright invocation(s) at positions: "
             f"{playwright_invocations}"
         )
+
+
+# ---------------------------------------------------------------------------
+# .github/workflows/ci.yml + build.sh — macOS code signing & notarization
+# ---------------------------------------------------------------------------
+
+class TestMacOSSigning:
+    """The CI build job and build.sh together implement optional macOS code
+    signing and notarization. Seven contracts are pinned here to prevent
+    regression of the GitHub Actions `secrets.*`-in-step-`if:` pitfall, the
+    build-script env override / optional-notarytool gate, the keychain
+    cleanup guard, and the stapler-failure-as-soft-warning behaviour.
+
+    See docs/DEVELOPMENT.md::"GitHub Actions: secrets in step-level if
+    conditions" for the rationale.
+    """
+
+    _CI_PATH = ".github/workflows/ci.yml"
+    _SIGNING_SECRETS = (
+        "BUILD_CERTIFICATE_BASE64",
+        "P12_PASSWORD",
+        "KEYCHAIN_PASSWORD",
+        "APPLE_TEAM_ID",
+    )
+    _NOTARIZE_SECRETS = (
+        "APPLE_ID",
+        "APPLE_APP_SPECIFIC_PASSWORD",
+    )
+
+    @staticmethod
+    def _build_job_header(src: str) -> str:
+        """Slice the build job header (everything between `  build:` and the
+        first `    steps:` underneath it) so signing-secret env mappings can
+        be located without false positives from later step-level env blocks."""
+        build_idx = src.find("\n  build:\n")
+        assert build_idx != -1, "build job not found in ci.yml"
+        steps_idx = src.find("\n    steps:", build_idx)
+        assert steps_idx != -1, "build.steps: not found in ci.yml"
+        return src[build_idx:steps_idx]
+
+    @staticmethod
+    def _iter_step_if_blocks(src: str):
+        """Yield every `if:` expression in the workflow as a flat string.
+
+        Catches BOTH step-level and job-level `if:` blocks (the
+        `Unrecognized named-value: 'secrets'` rejection applies at every
+        level, so checking job-level too is strictly more conservative).
+
+        Heuristic: collect lines starting from `if:` until the next YAML
+        key starts (a line whose first non-space char is `-` or whose
+        stripped form contains a `:`). Known limitation: a future `if:`
+        whose continuation lines legitimately contain `:` (string literals,
+        nested expressions) would be split prematurely; the current ci.yml
+        has no such case. If that pattern is added, switch to a real YAML
+        parser walking each step's `if` field.
+        """
+        lines = src.splitlines()
+        in_if = False
+        block: list[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("if:"):
+                if in_if and block:
+                    yield " ".join(block)
+                in_if = True
+                block = [stripped]
+                continue
+            if in_if:
+                # Continuation: indented, not a new YAML key, not a step start.
+                if stripped and not stripped.startswith("- ") and ":" not in stripped:
+                    block.append(stripped)
+                else:
+                    yield " ".join(block)
+                    in_if = False
+                    block = []
+        if in_if and block:
+            yield " ".join(block)
+
+    def test_ci_signing_secrets_at_job_level(self):
+        """All four required signing secrets MUST be mapped at the build job's
+        env: block (not at step level), so step-level `if:` conditions can
+        read `env.*`. Step-level env blocks are NOT visible to that step's
+        own `if:` — only job-level env is.
+
+        Each mapping must ALSO be guarded by `matrix.os == 'macos-latest'`
+        so the Apple credentials are scoped to the macOS matrix shard only;
+        Linux and Windows sibling shards receive empty strings. This avoids
+        exposing the signing material to `build_linux.sh` / `build_windows.ps1`
+        subprocesses that have no use for it.
+        """
+        src = _read(self._CI_PATH)
+        header = self._build_job_header(src)
+        # Required form (per secret): `<NAME>: ${{ matrix.os == 'macos-latest' && secrets.<NAME> || '' }}`
+        for secret in self._SIGNING_SECRETS:
+            expected = (
+                f"{secret}: ${{{{ matrix.os == 'macos-latest' "
+                f"&& secrets.{secret} || '' }}}}"
+            )
+            assert expected in header, (
+                f"build job env: must map {secret} at job level with a "
+                f"matrix.os == 'macos-latest' guard so non-macOS shards "
+                f"receive empty strings. Expected line: {expected!r}"
+            )
+        # Optional notarization secrets must also be mapped at job level
+        # (so build.sh inherits them as env vars when it runs), with the
+        # same matrix-shard guard.
+        for secret in self._NOTARIZE_SECRETS:
+            expected = (
+                f"{secret}: ${{{{ matrix.os == 'macos-latest' "
+                f"&& secrets.{secret} || '' }}}}"
+            )
+            assert expected in header, (
+                f"build job env: must also map {secret} (with matrix.os "
+                f"guard) so build.sh can run `xcrun notarytool` when it is "
+                f"configured. Expected line: {expected!r}"
+            )
+
+    def test_ci_uses_env_context_for_condition(self):
+        """No `if:` expression in ci.yml (step-level OR job-level) may
+        reference `secrets.*`.
+
+        GitHub Actions rejects `secrets.*` in `if:` with
+        `Unrecognized named-value: 'secrets'`. Always use `env.*` instead
+        (see the job-level env block test above). The parser used here
+        catches both step-level and job-level `if:` blocks deliberately —
+        the rejection applies at every level, so a job-level violation
+        would also break the workflow.
+        """
+        src = _read(self._CI_PATH)
+        offending = [
+            block for block in self._iter_step_if_blocks(src)
+            if "secrets." in block
+        ]
+        assert not offending, (
+            "secrets.* must not appear in any step-level if-condition "
+            "(promote to job-level env: and reference env.* instead). "
+            f"Offenders: {offending}"
+        )
+
+    def test_ci_import_gates_on_full_secret_set(self):
+        """The Import-Apple-signing-certificate step MUST gate on ALL four
+        required signing secrets via env.*, not just the certificate."""
+        src = _read(self._CI_PATH)
+        import_idx = src.find("Import Apple signing certificate")
+        assert import_idx != -1, (
+            "Apple signing-certificate Import step not found in ci.yml — "
+            "the macOS signing path is missing"
+        )
+        # Take a generous slice around the Import step's `if:` line.
+        region = src[import_idx:import_idx + 800]
+        for env_var in self._SIGNING_SECRETS:
+            assert f"env.{env_var}" in region, (
+                f"Import step if-condition must gate on env.{env_var} to "
+                f"prevent partial-secret runs from importing nothing"
+            )
+
+    def test_ci_cleanup_keychain_step_present(self):
+        """A `Cleanup keychain` step must run with `if: always() &&
+        matrix.os == 'macos-latest' && env.BUILD_CERTIFICATE_BASE64 != ''`
+        so signing material never persists across runs even when the build
+        itself fails, and the bash-only `security` invocation never fires
+        on Linux/Windows shards."""
+        src = _read(self._CI_PATH)
+        # Match the actual STEP definition (`- name: Cleanup keychain`), not
+        # any prose mentioning the step elsewhere in the workflow file (e.g.
+        # an explanatory comment in the Import step that references the later
+        # Cleanup step would match a bare substring search). The `- name:`
+        # anchor pins the assertion to the real step header.
+        cleanup_anchor = "- name: Cleanup keychain"
+        assert cleanup_anchor in src, (
+            "ci.yml must include a `- name: Cleanup keychain` step that "
+            "deletes the temporary signing keychain after every macOS build"
+        )
+        cleanup_idx = src.find(cleanup_anchor)
+        cleanup_region = src[cleanup_idx:cleanup_idx + 500]
+        assert "always()" in cleanup_region, (
+            "Cleanup keychain must run with `if: always()` so it fires on "
+            "build failures too"
+        )
+        assert "matrix.os == 'macos-latest'" in cleanup_region, (
+            "Cleanup keychain must gate on matrix.os == 'macos-latest' so "
+            "the bash-only `security delete-keychain` invocation does not "
+            "fire on Linux/Windows shards (where the secret env var would "
+            "still be set as job-level env)"
+        )
+        assert "env.BUILD_CERTIFICATE_BASE64 != ''" in cleanup_region, (
+            "Cleanup keychain must gate on env.BUILD_CERTIFICATE_BASE64 so "
+            "it does not try to delete a keychain that was never created"
+        )
+
+    def test_build_sh_signing_identity_env_override(self):
+        """build.sh must allow the signing identity to be overridden via env
+        (CI runners import a temporary Developer ID and need to point at
+        whatever identity matches their imported certificate)."""
+        src = _read("build.sh")
+        # Accept either ${SIGN_IDENTITY:-...} or ${SIGN_IDENTITY-...}
+        # (POSIX parameter expansion). We require the explicit `:-` form
+        # so an empty-string env var still falls back to the default.
+        assert re.search(
+            r'SIGN_IDENTITY=\s*"\$\{SIGN_IDENTITY:-[^"]+"',
+            src,
+        ), (
+            "build.sh must set SIGN_IDENTITY=\"${SIGN_IDENTITY:-...}\" "
+            "so the env var wins when present and the default kicks in "
+            "when it is unset or empty"
+        )
+
+    def test_build_sh_notarization_optional(self):
+        """build.sh must include an optional notarization block guarded on
+        APPLE_ID + APPLE_TEAM_ID + APPLE_APP_SPECIFIC_PASSWORD, calling
+        `xcrun notarytool submit` followed by `xcrun stapler staple`."""
+        src = _read("build.sh")
+        assert "xcrun notarytool submit" in src, (
+            "build.sh must call `xcrun notarytool submit` to upload the "
+            "DMG for Apple notarization when credentials are configured"
+        )
+        assert "xcrun stapler staple" in src, (
+            "build.sh must call `xcrun stapler staple` after a successful "
+            "notarytool submission so the ticket is attached to the DMG"
+        )
+        # The notarization block must be guarded on the three notarytool
+        # credential env vars, otherwise builds without an Apple ID hard-fail.
+        for var in ("APPLE_ID", "APPLE_TEAM_ID", "APPLE_APP_SPECIFIC_PASSWORD"):
+            assert var in src, (
+                f"build.sh notarization block must reference {var} so it "
+                f"is gated on the full credential set"
+            )
+
+    def test_build_sh_stapler_failure_is_soft(self):
+        """`xcrun stapler staple` must be wrapped in an `if/then/else`
+        (or paired with `||`) so a transient stapler failure becomes a
+        warning instead of aborting the build under `set -e`.
+
+        Apple's stapler service can fail intermittently after a successful
+        `notarytool submit` (CDN propagation lag, transient 5xx). A
+        signed-and-notarized-but-unstapled DMG is still functional —
+        Gatekeeper fetches the ticket online on first launch — so a
+        stapler hiccup must not delete the macOS artifact from the
+        release.
+        """
+        src = _read("build.sh")
+        # Find the stapler invocation and check it is inside an `if` head
+        # (i.e. `if xcrun stapler staple ...; then`) OR followed by `||`.
+        # The simplest robust check: locate the line, then verify either
+        # (a) it begins with `if ` after stripping leading whitespace, or
+        # (b) it ends with ` || ...` style continuation.
+        # Only inspect actual code lines — strip both whole-line bash comments
+        # (`# …`) and inline trailing comments (`code # …`) before testing.
+        stapler_lines = []
+        for raw in src.splitlines():
+            code = raw.split("#", 1)[0]
+            if "xcrun stapler staple" in code:
+                stapler_lines.append(code)
+        assert stapler_lines, (
+            "build.sh must call `xcrun stapler staple` (notarization step)"
+        )
+        for line in stapler_lines:
+            stripped = line.strip()
+            wrapped_in_if = stripped.startswith("if ") and stripped.endswith("; then")
+            soft_or = "||" in stripped
+            assert wrapped_in_if or soft_or, (
+                "build.sh `xcrun stapler staple` invocation must be guarded "
+                "(`if xcrun stapler staple ...; then ... else WARN ... fi` "
+                "or `xcrun stapler staple ... || echo WARN`) so a transient "
+                "stapler failure does not abort the build under `set -e` and "
+                f"silently drop the macOS DMG. Offending line: {stripped!r}"
+            )

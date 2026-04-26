@@ -56,7 +56,7 @@ def _make_repo(tmp_path):
     _run(["git", "init"], cwd=repo)
     _run(["git", "config", "user.name", "Test"], cwd=repo)
     _run(["git", "config", "user.email", "test@example.com"], cwd=repo)
-    _run(["git", "checkout", "-b", "ouroboros-three-layer"], cwd=repo)
+    _run(["git", "checkout", "-b", "ouroboros"], cwd=repo)
     _run(["git", "remote", "add", "origin", "git@github.com:joi-lab/ouroboros-desktop.git"], cwd=repo)
     (repo / "VERSION").write_text("4.50.0-rc.2\n", encoding="utf-8")
     (repo / "server.py").write_text("print('ok')\n", encoding="utf-8")
@@ -80,7 +80,7 @@ def test_build_repo_bundle_accepts_explicit_source_branch_on_detached_head(tmp_p
             "--repo-root",
             str(repo),
             "--source-branch",
-            "ouroboros-three-layer",
+            "ouroboros",
             "--output-bundle",
             str(bundle),
             "--output-manifest",
@@ -94,7 +94,7 @@ def test_build_repo_bundle_accepts_explicit_source_branch_on_detached_head(tmp_p
     assert payload["source_sha"] == sha
     assert payload["release_tag"] == "v4.50.0-rc.2"
     assert payload["bundle_sha256"]
-    assert payload["managed_remote_branch"] == "ouroboros-three-layer"
+    assert payload["managed_remote_branch"] == "ouroboros"
     assert payload["managed_remote_url"] == "https://github.com/joi-lab/ouroboros-desktop.git"
 
 
@@ -115,7 +115,7 @@ def test_build_repo_bundle_uses_checked_out_head_not_branch_tip(tmp_path):
             "--repo-root",
             str(repo),
             "--source-branch",
-            "ouroboros-three-layer",
+            "ouroboros",
             "--output-bundle",
             str(bundle),
             "--output-manifest",
@@ -142,7 +142,7 @@ def test_build_repo_bundle_refuses_dirty_worktree(tmp_path):
             "--repo-root",
             str(repo),
             "--source-branch",
-            "ouroboros-three-layer",
+            "ouroboros",
             "--output-bundle",
             str(bundle),
             "--output-manifest",
@@ -168,7 +168,7 @@ def test_build_repo_bundle_rejects_reserved_origin_remote_name(tmp_path):
             "--repo-root",
             str(repo),
             "--source-branch",
-            "ouroboros-three-layer",
+            "ouroboros",
             "--managed-remote-name",
             "origin",
             "--output-bundle",
@@ -197,7 +197,7 @@ def test_build_repo_bundle_preserves_https_remote_ports(tmp_path):
             "--repo-root",
             str(repo),
             "--source-branch",
-            "ouroboros-three-layer",
+            "ouroboros",
             "--output-bundle",
             str(bundle),
             "--output-manifest",
@@ -250,7 +250,7 @@ def test_build_repo_bundle_rejects_release_tag_mismatch(tmp_path):
             "--repo-root",
             str(repo),
             "--source-branch",
-            "ouroboros-three-layer",
+            "ouroboros",
             "--output-bundle",
             str(bundle),
             "--output-manifest",
@@ -280,7 +280,7 @@ def test_build_repo_bundle_requires_release_tag(tmp_path):
             "--repo-root",
             str(repo),
             "--source-branch",
-            "ouroboros-three-layer",
+            "ouroboros",
             "--output-bundle",
             str(bundle),
             "--output-manifest",
@@ -326,7 +326,7 @@ def test_build_repo_bundle_rejects_head_outside_source_branch(tmp_path):
             "--repo-root",
             str(repo),
             "--source-branch",
-            "ouroboros-three-layer",
+            "ouroboros",
             "--output-bundle",
             str(bundle),
             "--output-manifest",
@@ -362,7 +362,7 @@ def test_build_repo_bundle_rejects_lightweight_tag(tmp_path):
             "--repo-root",
             str(repo),
             "--source-branch",
-            "ouroboros-three-layer",
+            "ouroboros",
             "--output-bundle",
             str(bundle),
             "--output-manifest",
@@ -434,7 +434,7 @@ def test_build_repo_bundle_rejects_env_tag_not_on_head(tmp_path):
             "--repo-root",
             str(repo),
             "--source-branch",
-            "ouroboros-three-layer",
+            "ouroboros",
             "--output-bundle",
             str(bundle),
             "--output-manifest",

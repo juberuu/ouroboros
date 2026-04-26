@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ouroboros"
-version = "5.0.0"
+version = "5.1.0"
 description = "Self-creating AI agent with constitution, background consciousness, and persistent identity"
 readme = "README.md"
 license = {text = "MIT"}
@@ -64,7 +64,13 @@ all = ["claude-agent-sdk>=0.1.60", "a2a-sdk[http-server]>=0.3.20", "playwright",
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
-addopts = "-q --tb=short"
+# Default local runs exclude the `integration` marker so contributors do not
+# accidentally burn provider tokens on every `pytest`. CI Tier 2.5 opts in
+# explicitly with `pytest -m integration` (the CLI -m overrides addopts -m).
+addopts = "-q --tb=short -m 'not integration'"
+markers = [
+    "integration: requires real provider API keys (OPENROUTER_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY); excluded from default local runs, opt in via `pytest -m integration`",
+]
 
 [tool.setuptools]
 py-modules = ["server"]

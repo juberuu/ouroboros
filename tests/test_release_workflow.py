@@ -30,5 +30,5 @@ def test_ci_build_job_exports_release_tag_and_fetches_full_history():
     workflow = _workflow()
 
     assert "OUROBOROS_RELEASE_TAG: ${{ github.ref_name }}" in workflow
-    assert "OUROBOROS_MANAGED_SOURCE_BRANCH: ouroboros-three-layer" in workflow
+    assert "OUROBOROS_MANAGED_SOURCE_BRANCH: ouroboros" in workflow
     assert "fetch-depth: 0" in workflow

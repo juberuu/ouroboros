@@ -5,7 +5,7 @@ $ErrorActionPreference = "Stop"
 
 $Version = (Get-Content VERSION).Trim()
 $ArchiveName = "Ouroboros-${Version}-windows-x64.zip"
-$ManagedSourceBranch = if ($env:OUROBOROS_MANAGED_SOURCE_BRANCH) { $env:OUROBOROS_MANAGED_SOURCE_BRANCH } else { "ouroboros-three-layer" }
+$ManagedSourceBranch = if ($env:OUROBOROS_MANAGED_SOURCE_BRANCH) { $env:OUROBOROS_MANAGED_SOURCE_BRANCH } else { "ouroboros" }
 $ReleaseTag = "v$Version"
 
 Write-Host "=== Building Ouroboros for Windows (v${Version}) ==="

@@ -78,7 +78,7 @@ def _make_bundle_source(tmp_path):
     _run(["git", "init"], cwd=src)
     _run(["git", "config", "user.name", "Test"], cwd=src)
     _run(["git", "config", "user.email", "test@example.com"], cwd=src)
-    _run(["git", "checkout", "-b", "ouroboros-three-layer"], cwd=src)
+    _run(["git", "checkout", "-b", "ouroboros"], cwd=src)
     _run(["git", "remote", "add", "origin", "https://github.com/joi-lab/ouroboros-desktop.git"], cwd=src)
     (src / "VERSION").write_text("4.50.0-rc.2\n", encoding="utf-8")
     (src / "server.py").write_text("print('bundle-v1')\n", encoding="utf-8")
@@ -123,7 +123,7 @@ def test_ensure_managed_repo_clones_from_embedded_bundle(tmp_path):
     assert (repo_dir / "server.py").read_text(encoding="utf-8") == "print('bundle-v1')\n"
     assert _git_output(repo_dir, "branch", "--show-current") == "ouroboros"
     meta = bootstrap.load_repo_manifest(repo_dir)
-    assert meta["managed_remote_branch"] == "ouroboros-three-layer"
+    assert meta["managed_remote_branch"] == "ouroboros"
     assert meta["managed_local_branch"] == "ouroboros"
     assert meta["release_tag"] == "v4.50.0-rc.2"
     assert meta["bundle_sha256"]

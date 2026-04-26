@@ -3,7 +3,7 @@ set -e
 
 VERSION=$(tr -d '[:space:]' < VERSION)
 ARCHIVE_NAME="Ouroboros-${VERSION}-linux-$(uname -m).tar.gz"
-MANAGED_SOURCE_BRANCH="${OUROBOROS_MANAGED_SOURCE_BRANCH:-ouroboros-three-layer}"
+MANAGED_SOURCE_BRANCH="${OUROBOROS_MANAGED_SOURCE_BRANCH:-ouroboros}"
 RELEASE_TAG="v${VERSION}"
 
 PYTHON_CMD="${PYTHON_CMD:-python3}"

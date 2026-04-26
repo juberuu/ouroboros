@@ -1,8 +1,13 @@
-# Ouroboros CI — Three-tier cross-platform testing and release pipeline
+# Ouroboros CI — Four-tier cross-platform testing and release pipeline
 #
-# Tier 1: Every push to ouroboros / ouroboros-three-layer (code paths) → Ubuntu-only tests (~1 min)
-# Tier 2: Push to ouroboros-stable / manual / tag → Full 3-OS matrix (~5 min)
-# Tier 3: Tag v* → Full matrix + build artifacts + GitHub Release (~15 min)
+# Tier 1 (Quick):       Push to ouroboros (code paths)                                → Ubuntu-only tests (~1 min)
+# Tier 2 (Full):        Push to ouroboros-stable / manual / tag                       → Full 3-OS matrix          (~5 min)
+# Tier 2.5 (Integration): Push to main / ouroboros / ouroboros-stable / manual / tag  → Real-provider tests       (~2 min)
+# Tier 3 (Build+Release): Tag v*                                                       → PyInstaller + GitHub Release (~15 min)
+#
+# Tier 2.5 requires OPENROUTER_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY in
+# repository secrets and runs the `integration` pytest marker; locally these
+# tests are excluded by `addopts = -m 'not integration'` in pyproject.toml.
 
 name: CI
 
@@ -10,7 +15,7 @@ name: CI
 # This ensures tag pushes always fire (even if only VERSION/README changed).
 on:
   push:
-    branches: [ouroboros, ouroboros-three-layer, ouroboros-stable]
+    branches: [main, ouroboros, ouroboros-stable]
     paths:
       - 'ouroboros/**'
       - 'supervisor/**'
@@ -37,15 +42,12 @@ on:
 
 jobs:
   # ──────────────────────────────────────────────────────────────────
-  # Tier 1: Quick tests on Ubuntu (every push to ouroboros / ouroboros-three-layer)
+  # Tier 1: Quick tests on Ubuntu (every push to ouroboros)
   # ──────────────────────────────────────────────────────────────────
   quick-test:
     if: |
       github.event_name == 'push'
-      && (
-        github.ref == 'refs/heads/ouroboros'
-        || github.ref == 'refs/heads/ouroboros-three-layer'
-      )
+      && github.ref == 'refs/heads/ouroboros'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -85,6 +87,42 @@ jobs:
           pip install pytest
       - name: Run tests
         run: python -m pytest tests/ -q --tb=short
+
+  # ──────────────────────────────────────────────────────────────────
+  # Tier 2.5: Integration tests against real provider APIs
+  # Triggered on push to main / ouroboros / ouroboros-stable, manual,
+  # or tag v*. Requires OPENROUTER_API_KEY / OPENAI_API_KEY /
+  # ANTHROPIC_API_KEY in repository secrets. The `integration` pytest
+  # marker (in pyproject.toml) controls inclusion via `-m integration`;
+  # within an included test file, missing-key skipping is done by per-
+  # test `@pytest.mark.skipif(not os.environ.get(KEY))` decorators (see
+  # tests/test_provider_integration.py). NOT a `needs:` of build/
+  # release: a provider outage must not block a tagged release.
+  # ──────────────────────────────────────────────────────────────────
+  integration-test:
+    if: |
+      github.event_name == 'workflow_dispatch'
+      || github.ref == 'refs/heads/main'
+      || github.ref == 'refs/heads/ouroboros'
+      || github.ref == 'refs/heads/ouroboros-stable'
+      || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest
+      - name: Run integration tests
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python -m pytest tests/test_provider_integration.py -m integration -q --tb=short
 
   # ──────────────────────────────────────────────────────────────────
   # Tier 3: Build & Release (tag push only)
@@ -138,8 +176,37 @@ jobs:
             artifact: zip
     runs-on: ${{ matrix.os }}
     env:
-      OUROBOROS_MANAGED_SOURCE_BRANCH: ouroboros-three-layer
+      OUROBOROS_MANAGED_SOURCE_BRANCH: ouroboros
       OUROBOROS_RELEASE_TAG: ${{ github.ref_name }}
+      # Apple signing secrets at JOB LEVEL with a per-matrix-shard guard.
+      #
+      # Step-level `if:` conditions can only read `env.*`, never `secrets.*`
+      # directly (GitHub Actions rejects the workflow with "Unrecognized
+      # named-value: 'secrets'"). See docs/DEVELOPMENT.md::"GitHub Actions:
+      # secrets in step-level if conditions".
+      #
+      # The `matrix.os == 'macos-latest' && ... || ''` GHA expression keeps
+      # the Apple signing/notarization values **scoped to the macOS shard
+      # only** — Linux and Windows shards (which run `build_linux.sh` and
+      # `build_windows.ps1` respectively, neither of which needs Apple
+      # creds) receive empty strings. This avoids exposing the signing
+      # material to non-macOS build subprocesses where it has no business
+      # being. When a secret is not configured even on macOS, the value
+      # is also empty string (not unset), and the gate `env.X != ''`
+      # evaluates false — the signing/notarization steps skip cleanly.
+      BUILD_CERTIFICATE_BASE64: ${{ matrix.os == 'macos-latest' && secrets.BUILD_CERTIFICATE_BASE64 || '' }}
+      P12_PASSWORD: ${{ matrix.os == 'macos-latest' && secrets.P12_PASSWORD || '' }}
+      KEYCHAIN_PASSWORD: ${{ matrix.os == 'macos-latest' && secrets.KEYCHAIN_PASSWORD || '' }}
+      APPLE_TEAM_ID: ${{ matrix.os == 'macos-latest' && secrets.APPLE_TEAM_ID || '' }}
+      APPLE_ID: ${{ matrix.os == 'macos-latest' && secrets.APPLE_ID || '' }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ matrix.os == 'macos-latest' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+      # SIGN_IDENTITY is a forks-friendly override: when a fork configures
+      # a Developer ID secret whose CN differs from the upstream default
+      # (e.g. "Developer ID Application: <Other Name> (<OtherTeamID>)"),
+      # they set `SIGN_IDENTITY` as a repository secret and codesign in
+      # build.sh picks it up via `${SIGN_IDENTITY:-...}`. Same matrix.os
+      # guard so Linux/Windows shards never see it.
+      SIGN_IDENTITY: ${{ matrix.os == 'macos-latest' && secrets.SIGN_IDENTITY || '' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -184,10 +251,49 @@ jobs:
         shell: pwsh
         run: .\scripts\download_python_standalone.ps1
 
-      # —— macOS build ——
+      # —— macOS: import signing certificate (only when ALL four signing
+      #         secrets are present at job level — see env: block above)
+      - name: Import Apple signing certificate
+        if: matrix.os == 'macos-latest' && env.BUILD_CERTIFICATE_BASE64 != '' && env.P12_PASSWORD != '' && env.KEYCHAIN_PASSWORD != '' && env.APPLE_TEAM_ID != ''
+        run: |
+          set -euo pipefail
+          CERTIFICATE_PATH="$RUNNER_TEMP/build_certificate.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          # Always remove the .p12 on EXIT, including failure mid-import:
+          # `set -e` would otherwise abort before the trailing `rm -f` and
+          # leave the certificate blob on the runner until cleanup. The
+          # later `Cleanup keychain` step only handles the keychain itself.
+          trap 'rm -f "$CERTIFICATE_PATH"' EXIT
+          echo "${BUILD_CERTIFICATE_BASE64}" | base64 --decode > "$CERTIFICATE_PATH"
+          security create-keychain -p "${KEYCHAIN_PASSWORD}" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -P "${P12_PASSWORD}" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -k "${KEYCHAIN_PASSWORD}" "$KEYCHAIN_PATH" >/dev/null
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
+      # —— macOS build (signed + optionally notarized when secrets are
+      #         present, otherwise unsigned). build.sh reads the same
+      #         env vars from the job-level env block above.
       - name: Build macOS app
         if: matrix.os == 'macos-latest'
-        run: OUROBOROS_SIGN=0 bash build.sh
+        run: |
+          if [ -n "${BUILD_CERTIFICATE_BASE64:-}" ] && [ -n "${P12_PASSWORD:-}" ] && [ -n "${KEYCHAIN_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
+            echo "Signing certificate detected — building with codesign + (optional) notarization"
+            bash build.sh
+          else
+            echo "No signing secrets — building unsigned (OUROBOROS_SIGN=0)"
+            OUROBOROS_SIGN=0 bash build.sh
+          fi
+
+      # —— macOS: cleanup keychain (always, even on build failure) so the
+      #         temporary signing material never persists across runs.
+      - name: Cleanup keychain
+        if: always() && matrix.os == 'macos-latest' && env.BUILD_CERTIFICATE_BASE64 != ''
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          security delete-keychain "$KEYCHAIN_PATH" || true
 
       # —— Linux build ——
       - name: Build Linux binary

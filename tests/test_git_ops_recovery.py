@@ -244,7 +244,7 @@ def test_checkout_and_reset_prefers_managed_remote_ref(monkeypatch, tmp_path):
         "_read_managed_repo_meta",
         lambda: {
             "managed_remote_name": "managed",
-            "managed_remote_branch": "ouroboros-three-layer",
+            "managed_remote_branch": "ouroboros",
             "managed_remote_stable_branch": "ouroboros-stable",
         },
     )
@@ -264,7 +264,7 @@ def test_checkout_and_reset_prefers_managed_remote_ref(monkeypatch, tmp_path):
 
     def fake_run(cmd, cwd=None, capture_output=False, text=False, check=False):
         calls.append(cmd)
-        if cmd == ["git", "rev-parse", "--verify", "managed/ouroboros-three-layer"]:
+        if cmd == ["git", "rev-parse", "--verify", "managed/ouroboros"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="remote-sha\n", stderr="")
         if cmd[:4] == ["git", "checkout", "-B", "ouroboros"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
@@ -280,7 +280,7 @@ def test_checkout_and_reset_prefers_managed_remote_ref(monkeypatch, tmp_path):
 
     assert ok
     assert message == "ok"
-    assert ["git", "checkout", "-B", "ouroboros", "managed/ouroboros-three-layer"] in calls
+    assert ["git", "checkout", "-B", "ouroboros", "managed/ouroboros"] in calls
     assert saved_state["current_branch"] == "ouroboros"
     assert saved_state["current_sha"] == "fedcba"
 
@@ -313,7 +313,7 @@ def test_collect_repo_sync_state_prefers_managed_remote(monkeypatch):
         "_read_managed_repo_meta",
         lambda: {
             "managed_remote_name": "managed",
-            "managed_remote_branch": "ouroboros-three-layer",
+            "managed_remote_branch": "ouroboros",
         },
     )
     monkeypatch.setattr(git_ops, "_has_remote", lambda name=None: name in (None, "managed"))
@@ -323,7 +323,7 @@ def test_collect_repo_sync_state_prefers_managed_remote(monkeypatch):
             return 0, "ouroboros", ""
         if cmd == ["git", "status", "--porcelain"]:
             return 0, "", ""
-        if cmd == ["git", "log", "--oneline", "managed/ouroboros-three-layer..HEAD"]:
+        if cmd == ["git", "log", "--oneline", "managed/ouroboros..HEAD"]:
             return 0, "abc123 local commit\n", ""
         raise AssertionError(cmd)
 
@@ -347,7 +347,7 @@ def test_checkout_and_reset_keeps_bundled_sha_on_first_managed_bootstrap(monkeyp
         "_read_managed_repo_meta",
         lambda: {
             "managed_remote_name": "managed",
-            "managed_remote_branch": "ouroboros-three-layer",
+            "managed_remote_branch": "ouroboros",
             "source_sha": "bundle123",
         },
     )

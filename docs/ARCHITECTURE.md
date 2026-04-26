@@ -1,4 +1,4 @@
-# Ouroboros v5.0.0 — Architecture & Reference
+# Ouroboros v5.1.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -109,7 +109,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       └── platform_layer.py    ← Cross-platform process/path/locking helpers
 
 # Build & CI (not part of runtime)
-.github/workflows/ci.yml     ← Three-tier CI (quick/full/release)
+.github/workflows/ci.yml     ← Four-tier CI (quick / full / integration / build+release)
 build.sh                      ← macOS build (PyInstaller → .dmg)
 build_linux.sh                ← Linux build (PyInstaller → .tar.gz)
 build_windows.ps1             ← Windows build (PyInstaller → .zip)
@@ -316,7 +316,8 @@ Navigation is a left sidebar with 8 pages (Chat, Files, Logs, Costs, Evolution, 
   Driven by WebSocket connection state, typing events, and live task state.
 - **Header controls**: compact buttons for `/evolve`, `/bg`, `/review`, `/restart`, `/panic` — the canonical location for runtime controls. The chat header is a floating transparent overlay (`position: absolute`, gradient fade with a non-zero opacity floor plus backdrop blur) so messages scroll beneath it on desktop without text reading through the header labels. On narrow viewports (`@media (max-width: 640px)`) `.chat-page-header` switches to `position: static` with a transparent background so it claims its own vertical space — a wrapped row of action buttons never hides the first chat message under the gradient; the `#chat-messages` top padding is correspondingly reduced from `56px` (absolute-header clearance) to `12px`.
 - **Budget pill**: compact amber pill in the header showing `$spent / $limit` with a mini progress bar, updated from `/api/state` polling every 3 seconds.
-- **Message input**: absolute-positioned frosted-glass overlay anchored to the bottom of the chat page (`position: absolute; bottom: 0`). Contains a paperclip attachment button (positioned as an absolute overlay inside the textarea on the left; opens a file picker; selected file is staged locally in JS memory and shown as a removable filename preview badge — the file is uploaded to `data/uploads/` only when Send/Enter is triggered; if the WebSocket is offline at send time, upload is blocked with an error (no upload happens when disconnected, preventing orphan files). If the WebSocket drops after upload completes but before message delivery, the queued message references a durable server-side file that persists until explicitly deleted), a textarea (grows up to 120px; `padding-left: 42px` and `padding-right: 76px` leave space for both overlay controls), and a **send group** (`.chat-send-group`) positioned as an absolute overlay inside the textarea on the right, vertically centered inside the textarea (`top: 50%; transform: translateY(-50%)`). The paperclip attachment button is similarly centered (`top: 50%; transform: translateY(-50%)`), so both controls stay at the visual center of the textarea regardless of whether it is single-line or expanded to its max height. The send group contains a Send/Plan button (`.chat-send-inline`) and a chevron button (`.chat-send-chevron`) with a subtle divider. The send group has a **two-click send model**: the chevron opens a glassmorphism dropdown (`.chat-send-dropdown`) with **Send** and **Plan** items that *switch the active send mode* — they do NOT immediately send. The main button label, colour, and chevron tint reflect the active mode: crimson for Send (default), amber (`var(--amber)`) for Plan. Once the mode is set, clicking the main button or pressing Enter sends in that mode. Mode state is stored as `data-send-mode` on `.chat-send-group` (DOM-backed, CSS-readable single source of truth); `setSendMode(mode)` synchronises button text, title, and `data-mode-active` markers on dropdown items. The chevron is always visible (tappable on touchscreens). The dropdown closes on outside click, item selection, or Escape key. `sendMessage(planMode)` is the shared send function; both the sendBtn click listener and the Enter keydown handler derive `planMode` from `sendGroup.dataset.sendMode === 'plan'` using explicit arrow functions to avoid `MouseEvent` truthy-arg bug. Slash commands bypass the plan prefix regardless of mode. The `#chat-input` textarea has `backdrop-filter: blur(16px)` + semi-transparent background (frosted glass). The `#chat-input-area` wrapper uses a gradient fade overlay with a non-zero top opacity, and the attachment badge has its own blurred glass backing, so message bubbles still scroll underneath without filename/text double exposure. `#chat-messages` `padding-bottom` is set dynamically via `updateMessagesPadding()` in chat.js (real overlay height + 16px buffer), called on page connect, textarea resize, and attachment preview toggle. The CSS default is `84px` (covers min-height state); JS adjusts up to ~160px when the textarea is fully expanded. Shift+Enter for newline, Enter to send.
+- **Message input**: absolute-positioned frosted-glass overlay anchored to the bottom of the chat page (`position: absolute; bottom: 0`). Contains a paperclip attachment button (positioned as an absolute overlay inside the textarea on the left; opens a file picker; selected file is staged locally in JS memory and shown as a removable filename preview badge — the file is uploaded to `data/uploads/` only when Send/Enter is triggered; if the WebSocket is offline at send time, upload is blocked with an error (no upload happens when disconnected, preventing orphan files). If the WebSocket drops after upload completes but before message delivery, the queued message references a durable server-side file that persists until explicitly deleted), a textarea (grows up to 120px; `padding-left: 42px` and `padding-right: 76px` leave space for both overlay controls), and a **send group** (`.chat-send-group`) positioned as an absolute overlay inside the textarea on the right, vertically centered inside the textarea (`top: 50%; transform: translateY(-50%)`). The paperclip attachment button is similarly centered (`top: 50%; transform: translateY(-50%)`), so both controls stay at the visual center of the textarea regardless of whether it is single-line or expanded to its max height. The send group contains a Send/Plan button (`.chat-send-inline`) and a chevron button (`.chat-send-chevron`) with a subtle divider. The send group has a **two-click send model**: the chevron opens a glassmorphism dropdown (`.chat-send-dropdown`) with **Send** and **Plan** items that *switch the active send mode* — they do NOT immediately send. The main button label, colour, and chevron tint reflect the active mode: crimson for Send (default), amber (`var(--amber)`) for Plan. Once the mode is set, clicking the main button or pressing Enter sends in that mode. Mode state is stored as `data-send-mode` on `.chat-send-group` (DOM-backed, CSS-readable single source of truth); `setSendMode(mode)` synchronises button text, title, and `data-mode-active` markers on dropdown items. The chevron is always visible (tappable on touchscreens). The dropdown closes on outside click, item selection, or Escape key. `sendMessage(planMode)` is the shared send function; both the sendBtn click listener and the Enter keydown handler derive `planMode` from `sendGroup.dataset.sendMode === 'plan'` using explicit arrow functions to avoid `MouseEvent` truthy-arg bug. Slash commands bypass the plan prefix regardless of mode. The `#chat-input` textarea has `backdrop-filter: blur(16px)` + semi-transparent background (frosted glass) and explicitly disables browser-level autocorrect / autocapitalize / spellcheck (`autocorrect="off" autocapitalize="off" spellcheck="false"`) so code, identifiers, and slash-commands are not silently mangled. Bottom scroll-under fade is rendered by a **dedicated sibling layer** `<div class="chat-bottom-fade" aria-hidden="true">` (`position: absolute; bottom: 0; pointer-events: none; z-index: 4`) so it always sits **below** `#chat-input-area` (`z-index: 5`) and never optically swallows the textarea or the attachment badge — earlier versions painted the gradient as `#chat-input-area`'s own background, which made the lower part of the textarea visually dissolve into the dense end of the gradient. `#chat-messages` `padding-bottom` is set dynamically via `updateMessagesPadding()` in chat.js (real overlay height + 16px buffer), called on page connect, textarea resize, and attachment preview toggle. The CSS default is `84px` (covers min-height state); JS adjusts up to ~160px when the textarea is fully expanded. Shift+Enter for newline, Enter to send.
+- **Clipboard image paste**: `#chat-input` registers a `paste` listener that scans `e.clipboardData.items` for `image/*` MIME types, calls `getAsFile()` on the first match, wraps the blob as a `File` named `clipboard-<unix-ts>.<ext>` (extension derived from the MIME), and stages it through the **same** `pendingAttachment` slot used by the paperclip button (the badge / removal UI / upload-on-Send path are all reused — no inline upload happens until Send/Enter, mirroring the paperclip semantics including the offline-WS guard). Non-image clipboard payloads fall through to native paste (text / formatted text). When an image is staged this way, `e.preventDefault()` suppresses the browser's default paste so a giant base64 string is not also inserted into the textarea.
 - **Input recall**: ArrowUp / ArrowDown cycles through recent submitted messages without leaving the textarea. On the **first** successful `syncHistory` call of this page lifetime, it seeds `inputHistory` from server-side user messages (including Telegram and other-session messages that never went through the local `rememberInput()` path). Merge strategy: server messages (older) prepend before local session entries (newer); deduped from the end so most-recent entries always win; capped at 50 via `slice(-50)`. `PLAN_PREFIX` preambles are stripped before storage. Seeding is gated on a dedicated one-shot `inputHistorySeededFromServer` flag (not `historyLoaded`) so it fires on the first successful server sync even when the initial fetch failed and `historyLoaded` was already set true by the sessionStorage-fallback bootstrap path. Subsequent WebSocket reconnects deliberately do NOT re-seed (that would reset `inputHistoryIndex` mid-scrub), so Telegram/other-session messages that arrive while this tab stays open only surface in recall after the next full page reload.
 - **Messages**: user bubbles (right, steel-blue-tinted), assistant bubbles (left, crimson), and system-summary bubbles (left, amber). Non-user bubbles render markdown. Live task card uses crimson accent glass matching the assistant palette.
 - **Multi-user visibility**: user messages are now session-aware. The current browser session stays labeled as `You`; other Web UI sessions render as `WebUI (<session>)`; Telegram-origin messages render with their Telegram sender label.
@@ -1586,18 +1587,69 @@ Uncommitted changes are rescued to `~/Ouroboros/data/archive/rescue/` before res
 
 ## 8.1 CI/CD Pipeline (`.github/workflows/ci.yml`)
 
-Three-tier GitHub Actions workflow:
+Four-tier GitHub Actions workflow:
 
 | Tier | Trigger | What runs | Time |
 |------|---------|-----------|------|
-| Quick | Push to `ouroboros` or `ouroboros-three-layer` (code paths only) | Ubuntu-only: `pytest` | ~1 min |
+| Quick | Push to `ouroboros` (code paths only) | Ubuntu-only: `pytest` | ~1 min |
 | Full | Push to `ouroboros-stable`, manual (`workflow_dispatch`), or tag `v*` | Matrix: Ubuntu + Windows + macOS: `pytest` | ~5 min |
-| Build | Tag `v*` (after full-test passes) | Matrix: PyInstaller build → `.dmg` / `.tar.gz` / `.zip` + GitHub Release | ~15 min |
+| Integration | Push to `main`, `ouroboros`, or `ouroboros-stable`, manual (`workflow_dispatch`), or tag `v*` | Ubuntu-only: `pytest tests/test_provider_integration.py -m integration` against real OpenRouter / OpenAI / Anthropic keys (skipped per-provider when its key is unset) | ~2 min |
+| Build + Release | Tag `v*` (after full-test passes) | Matrix: PyInstaller build → `.dmg` / `.tar.gz` / `.zip` (macOS optionally codesigned + notarized when Apple secrets are configured) + GitHub Release | ~15 min |
 
 Path filters for branch pushes: `ouroboros/**`, `supervisor/**`, `server.py`, `launcher.py`,
 `tests/**`, `web/**`, `requirements.txt`, `pyproject.toml`, `.github/workflows/**`, `build.sh`,
 `build_linux.sh`, `build_windows.ps1`, `Dockerfile`, `scripts/**`, `VERSION`, `README.md`.
 Tag pushes (`v*`) always fire regardless of paths.
+
+**macOS code signing & notarization (Build tier).** When the build job has access to
+`BUILD_CERTIFICATE_BASE64`, `P12_PASSWORD`, `KEYCHAIN_PASSWORD`, and `APPLE_TEAM_ID` as
+GitHub Actions repository secrets, the build job creates a temporary keychain, imports
+the Developer ID certificate, and runs `bash build.sh` (which then signs the `.app` and
+the `.dmg`); when `APPLE_ID` and `APPLE_APP_SPECIFIC_PASSWORD` are also present,
+`build.sh` additionally runs `xcrun notarytool submit ... --wait` followed by
+`xcrun stapler staple` to staple the notarization ticket to the DMG. A transient
+stapler failure (Apple CDN propagation lag) after a successful notarytool submission
+is treated as a soft warning — the DMG is genuinely notarized and Gatekeeper validates
+it online; without that guard `set -e` would abort the build and silently drop the
+macOS artifact from the release. A `notarytool submit` failure (Apple-side outage,
+wrong credential) is handled the same way — the DMG ships signed-but-not-notarized
+with a clear `WARNING` log line rather than aborting, so an Apple outage never
+silently removes the macOS artifact from the GitHub Release. The four observable
+notarization outcomes (`success` / `staple_failed` / `submit_failed` / `unconfigured`)
+each render a distinct summary line at the end of the build, plus a defensive
+`Unknown notarization outcome` arm so future enum drift is loud rather than silent. With no Apple secrets configured, the macOS build
+falls back to the unsigned path (`OUROBOROS_SIGN=0 bash build.sh`) — users still need
+right-click → **Open** on first launch. Forks enable signing by configuring all four
+required secrets above; `SIGN_IDENTITY` is an additional optional secret for forks
+whose Developer ID differs from the upstream default. **The signing secrets are mapped
+at the build job's `env:` block, not at step level, because GitHub Actions rejects
+`secrets.*` references inside step-level `if:` expressions ("Unrecognized named-value:
+'secrets'") — step `if:` conditions read `env.*` instead.** Each mapping is additionally
+guarded by `${{ matrix.os == 'macos-latest' && secrets.X || '' }}` so the Apple
+credentials are scoped to the macOS matrix shard only — Linux and Windows sibling
+shards (which run `build_linux.sh` / `build_windows.ps1`, neither of which needs Apple
+creds) receive empty strings, so the signing material is never exposed to non-macOS
+build subprocesses. A `Cleanup keychain` step with
+`if: always() && matrix.os == 'macos-latest' && env.BUILD_CERTIFICATE_BASE64 != ''`
+deletes the temporary keychain regardless of build outcome — the `matrix.os` gate keeps
+the bash-only `security` invocation off Linux/Windows shards, and the env guard skips
+when no keychain was ever created. Signing material never persists on the runner. See
+`docs/DEVELOPMENT.md::GitHub Actions: secrets in step-level if conditions` for the
+rationale.
+
+**Integration tier credentials.** The integration job consumes
+`OPENROUTER_API_KEY`, `OPENAI_API_KEY`, and `ANTHROPIC_API_KEY` from repository secrets
+and exposes them as `env:` to a single `pytest` invocation; tests gated on missing keys
+skip cleanly via per-test `@pytest.mark.skipif(not os.environ.get(KEY))` decorators
+inside the test file. Locally the same tests are excluded by default through the
+`integration` pytest marker plus `addopts = "-m 'not integration'"` in `pyproject.toml`,
+so contributors do not accidentally burn provider tokens on every `pytest` run. Opt in
+with `pytest -m integration` (the whole file) or
+`pytest -m integration tests/test_provider_integration.py::test_openrouter_basic_chat`
+(specific test). A bare `pytest tests/test_provider_integration.py::test_X` without
+`-m integration` is **deselected** by `addopts -m 'not integration'` and exits 5
+("no tests collected"); use the explicit `-m integration` form, or override the
+default with `pytest -o addopts='' tests/test_provider_integration.py::test_X`.
 
 ### Build scripts
 

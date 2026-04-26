@@ -114,15 +114,24 @@ def test_styles_cover_chat_header_controls_and_grouped_cards():
 def test_chat_floating_overlays_have_readable_glass_backing():
     """v5: floating overlays at the top and bottom of the chat fade
     fully to transparent at the inner edge (no visible step). The
-    blur is masked in lockstep so the glass effect does not create
-    its own hard border. Status badge and attachment badge keep
+    top header still paints its own gradient + mask in step with
+    the blur (one layer with blur). The bottom fade-to-zero contract
+    moved out of `#chat-input-area`'s background and onto a dedicated
+    sibling `.chat-bottom-fade` layer (z-index < input dock) so the
+    textarea is no longer optically swallowed by the dense end of the
+    gradient — see test_chat_bottom_fade_is_separate_layer below for
+    the layering invariant. Status badge and attachment badge keep
     their solid backings (those are inline pills, not scrim layers).
     """
     css = _read("web/style.css")
 
     header = re.search(r"\.chat-page-header\s*\{(?P<body>[^}]+)\}", css, re.S).group("body")
     status = re.search(r"\.status-badge\s*\{(?P<body>[^}]+)\}", css, re.S).group("body")
-    input_area = re.search(r"#chat-input-area\s*\{(?P<body>[^}]+)\}", css, re.S).group("body")
+    # There may be multiple `.chat-bottom-fade { … }` rules (base + mobile
+    # @media override). The base rule is the first match and is the one
+    # that owns the gradient; the mobile rule only adjusts height.
+    fade = re.search(r"\.chat-bottom-fade\s*\{(?P<body>[^}]+)\}", css, re.S).group("body")
+    fade_all_bodies = re.findall(r"\.chat-bottom-fade\s*\{([^}]+)\}", css, re.S)
     attach = re.search(r"\.attach-badge\s*\{(?P<body>[^}]+)\}", css, re.S).group("body")
 
     # Header: glass blur active, gradient ENDS at fully-transparent
@@ -132,12 +141,31 @@ def test_chat_floating_overlays_have_readable_glass_backing():
     assert "rgba(13, 11, 15, 0.00) 100%" in header
     assert "mask-image:" in header
 
-    # Bottom input dock: same fade-to-zero contract.
-    assert "rgba(13, 11, 15, 0.00) 100%" in input_area
-    assert "mask-image:" in input_area
+    # Bottom fade layer (base rule): same fade-to-zero contract on a
+    # dedicated layer.
+    assert "rgba(13, 11, 15, 0.00) 100%" in fade
+    assert "linear-gradient" in fade
+
+    # No `mask-image` is needed because this layer is intentionally
+    # blur-less — it is a plain pointer-events:none gradient that sits below
+    # the input dock. The no-blur invariant is asserted on EVERY captured
+    # `.chat-bottom-fade { … }` rule (base + any `@media` overrides) so a
+    # regression that adds `backdrop-filter` only inside the mobile media
+    # block (and would silently slip past a base-only assertion) is caught.
+    # If a future edit needs blur on this layer, also add a coordinating
+    # mask-image so the blur fades in step with the gradient — see the
+    # .chat-page-header pattern for the canonical idiom.
+    assert fade_all_bodies, ".chat-bottom-fade rule must exist"
+    for idx, body in enumerate(fade_all_bodies):
+        assert "backdrop-filter" not in body, (
+            f".chat-bottom-fade rule #{idx} (counting base + @media overrides) "
+            f"must remain blur-less. If a future edit needs blur on this "
+            f"layer, also add a coordinating mask-image (see "
+            f".chat-page-header). Offending rule body: {body.strip()[:200]!r}"
+        )
 
     # Inline pills keep their solid backings — the test only enforces
-    # the fade-to-zero invariant on the scrim layers (header / dock).
+    # the fade-to-zero invariant on the scrim layers (header / fade).
     assert "backdrop-filter: blur(8px)" in status
     assert "rgba(26, 21, 32, 0.78)" in status
     assert "backdrop-filter: blur(8px)" in attach
@@ -1053,4 +1081,116 @@ def test_sync_history_sweep_skips_invisible_completed_cards():
     assert "ts.completed" in source, (
         "The final sweep guard must also check ts.completed so in-progress tasks "
         "without cardVisible are still appended"
+    )
+
+
+# ─── Autocorrect / spellcheck suppression on #chat-input ────────────────
+
+def test_chat_input_disables_autocorrect():
+    """#chat-input textarea must disable browser autocorrect/spellcheck/autocapitalize.
+
+    These attributes prevent the browser from silently rewriting code,
+    identifiers, slash-commands, and other technical input. Test asserts
+    each attribute by literal substring match against the textarea template
+    string in chat.js (no JSDOM — chat.js builds its own template at runtime).
+    """
+    source = _read("web/modules/chat.js")
+    assert 'id="chat-input"' in source, "chat-input textarea must exist"
+    assert 'autocorrect="off"' in source, (
+        "chat-input textarea must set autocorrect='off'"
+    )
+    assert 'autocapitalize="off"' in source, (
+        "chat-input textarea must set autocapitalize='off'"
+    )
+    assert 'spellcheck="false"' in source, (
+        "chat-input textarea must set spellcheck='false'"
+    )
+
+
+# ─── Clipboard image paste handler ──────────────────────────────────────
+
+def test_clipboard_paste_handler_exists():
+    """chat.js must register a `paste` listener that intercepts image/* clipboard
+    items and routes them through the same staging path the paperclip uses.
+
+    Verified by literal substring assertions: the listener registration, the
+    image/* MIME guard, the `pendingAttachment` set, and the `clipboard-`
+    filename prefix. No DOM execution — these strings are stable contract
+    surface for the feature.
+    """
+    source = _read("web/modules/chat.js")
+    assert (
+        "addEventListener('paste'" in source
+        or 'addEventListener("paste"' in source
+    ), (
+        "chat.js must register a paste event listener for clipboard image support"
+    )
+    assert "image/" in source, (
+        "paste handler must guard on image/* MIME type"
+    )
+    assert "pendingAttachment" in source, (
+        "paste handler must set pendingAttachment for the staged image"
+    )
+    assert "clipboard-" in source, (
+        "paste handler must generate a clipboard-prefixed filename"
+    )
+
+
+# ─── Bottom-fade gradient layer is separate from #chat-input-area ───────
+
+def test_chat_bottom_fade_is_separate_layer():
+    """Bottom scroll-under fade must live on a dedicated `.chat-bottom-fade`
+    layer with `pointer-events: none` and a z-index strictly below
+    `#chat-input-area` (which is z-index 5). This ensures the textarea is
+    never optically swallowed by the dense bottom of the gradient.
+
+    Verified at the CSS source level (no rendered-DOM check) so the test is
+    deterministic and robust to layout changes that don't affect z-order.
+    """
+    css = _read("web/style.css")
+
+    # The dedicated layer must be defined.
+    assert ".chat-bottom-fade {" in css, (
+        ".chat-bottom-fade rule must exist as a dedicated layer (not painted "
+        "as a background on #chat-input-area)"
+    )
+
+    # Extract the .chat-bottom-fade rule body and assert pointer-events:none + z-index < 5.
+    fade_match = re.search(
+        r"\.chat-bottom-fade\s*\{([^}]*)\}",
+        css,
+    )
+    assert fade_match, ".chat-bottom-fade rule body must be parseable"
+    fade_body = fade_match.group(1)
+    assert "pointer-events" in fade_body and "none" in fade_body, (
+        ".chat-bottom-fade must set pointer-events: none so it never blocks input"
+    )
+    z_match = re.search(r"z-index\s*:\s*(\d+)", fade_body)
+    assert z_match, ".chat-bottom-fade must declare an explicit z-index"
+    z_index = int(z_match.group(1))
+    assert z_index < 5, (
+        f".chat-bottom-fade z-index must be < 5 (got {z_index}) so it sits below "
+        f"#chat-input-area (z-index 5)"
+    )
+
+    # #chat-input-area must NOT carry the gradient background anymore.
+    input_area_match = re.search(
+        r"#chat-input-area\s*\{([^}]*)\}",
+        css,
+    )
+    assert input_area_match, "#chat-input-area rule must be parseable"
+    input_area_body = input_area_match.group(1)
+    # We tolerate other `background:` properties (none expected today) but
+    # specifically forbid linear-gradient bleeding through the input dock.
+    assert "linear-gradient" not in input_area_body, (
+        "#chat-input-area must not paint the bottom-fade gradient as its own "
+        "background — that is what made the textarea optically sink. Move the "
+        "gradient to the dedicated .chat-bottom-fade layer."
+    )
+
+    # And the DOM template in chat.js must include the dedicated fade element.
+    chat_js = _read("web/modules/chat.js")
+    assert 'class="chat-bottom-fade"' in chat_js, (
+        "chat.js page-chat template must include <div class=\"chat-bottom-fade\"> "
+        "as a sibling of #chat-input-area"
     )
