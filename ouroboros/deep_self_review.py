@@ -16,7 +16,7 @@ log = logging.getLogger(__name__)
 
 _MAX_FILE_BYTES = 1_048_576  # 1 MB
 
-# Filtering constants and binary sniffer — imported from review_helpers (DRY, P5).
+# Filtering constants and binary sniffer — imported from review_helpers (DRY, P7).
 # deep_self_review uses the same exclusion logic as the scope review full-repo pack.
 from ouroboros.tools.review_helpers import (  # noqa: E402
     _SENSITIVE_EXTENSIONS,
@@ -52,7 +52,7 @@ Primary directive: The Constitution (BIBLE.md) is your absolute reference.
 Every finding must be checked against it.
 
 What to look for: bugs, crashes, race conditions,
-BIBLE.md violations (P0–P8), contradictions between code and docs,
+BIBLE.md violations (P0–P12), contradictions between code and docs,
 security gaps, dead code, missing error handling, architectural issues,
 known error patterns from patterns.md that remain unfixed, and ideas how to improve Ouroboros to work better and better comply with the Bible.
 

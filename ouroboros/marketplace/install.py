@@ -435,7 +435,7 @@ def uninstall_skill(
        inside ``<drive_root>/skills/clawhub/``;
     3. require a ``.clawhub.json`` provenance sidecar inside the
        target so we cannot delete a folder that was not actually
-       installed by the marketplace pipeline (P5 honesty — the API
+       installed by the marketplace pipeline (P6 honesty — the API
        contract says "uninstall a marketplace skill", not "rm -rf
        arbitrary directory under data/skills/clawhub/").
     """

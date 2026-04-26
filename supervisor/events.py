@@ -354,7 +354,7 @@ def _handle_promote_to_stable(evt: Dict[str, Any], ctx: Any) -> None:
 def _find_duplicate_task(desc: str, task_context: str, pending: list, running: dict) -> Optional[str]:
     """Check if a semantically similar task already exists using a light LLM call.
 
-    Bible P3 (LLM-first): dedup decisions are cognitive judgments, not hardcoded
+    Bible P5 (LLM-First): dedup decisions are cognitive judgments, not hardcoded
     heuristics.  A cheap/fast model decides whether the new task is a duplicate.
 
     Returns task_id of the duplicate if found, None otherwise.
@@ -446,7 +446,7 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
         return
 
     if owner_chat_id and desc:
-        # --- Task deduplication (Bible P3: LLM-first, not hardcoded heuristics) ---
+        # --- Task deduplication (Bible P5: LLM-First, not hardcoded heuristics) ---
         from supervisor.queue import PENDING, RUNNING
         dup_id = _find_duplicate_task(desc, task_context, PENDING, RUNNING)
         if dup_id:

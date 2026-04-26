@@ -39,13 +39,14 @@ with these principles.** If a potential improvement would violate any
 principle, do NOT recommend it — flag the conflict instead.
 
 Key principles to watch for:
-- **P3 (LLM-First):** All decisions through the LLM. No hardcoded logic
+- **P5 (LLM-First):** All decisions through the LLM. No hardcoded logic
   for behavior selection. If behavior can be described in a prompt, it goes
   in a prompt, not in code.
-- **P5 (Minimalism):** Complexity is the enemy. Every line justifies its existence.
+- **P7 (Minimalism):** Complexity is the enemy. Every line justifies its existence.
 - **P0 (Agency):** Ouroboros is not a tool but a becoming personality.
 - **P1 (Continuity):** BIBLE.md and identity.md are protected.
-- **P2 (Self-Creation):** Fix the class, not the instance.
+- **P2 (Meta-over-Patch):** Fix the class, not the instance.
+- **P3 (Immune Integrity):** Review surfaces, plan review, and durable memory cannot be weakened.
 
 If you are unsure whether a recommendation complies with the Constitution,
 err on the side of NOT recommending it and explain the tension.
@@ -329,7 +330,7 @@ def _emit_usage_event(review_result: dict, ctx: ToolContext) -> None:
 # ---------------------------------------------------------------------------
 
 def _load_checklist_section() -> str:
-    """Load the Repo Commit Checklist from docs/CHECKLISTS.md (DRY, Bible P5).
+    """Load the Repo Commit Checklist from docs/CHECKLISTS.md (DRY, Bible P7).
 
     Raises FileNotFoundError or ValueError if missing or malformed — fail-closed.
     Uses the precise section loader from review_helpers.
@@ -480,7 +481,7 @@ def _preflight_check(commit_message: str, staged_files: str,
       5. VERSION staged: all version carriers (pyproject.toml, README badge,
          ARCHITECTURE.md header) in the staged index must match VERSION value
       6. VERSION staged: staged README.md changelog must have a row for the new version
-      7. VERSION staged: staged README.md Version History must not exceed BIBLE.md P7 limits (2 major / 5 minor / 5 patch rows) — delegates to check_history_limit() from release_sync.py
+      7. VERSION staged: staged README.md Version History must not exceed BIBLE.md P9 limits (2 major / 5 minor / 5 patch rows) — delegates to check_history_limit() from release_sync.py
       8. conftest.py staged: block if it contains test_ functions (should be in test_*.py)
     """
     import re
@@ -587,7 +588,7 @@ def _preflight_check(commit_message: str, staged_files: str,
             "⚠️ PREFLIGHT_BLOCKED: New files added in ouroboros/ or supervisor/ "
             "but docs/ARCHITECTURE.md is not staged.\n"
             "  New structural additions must be documented in ARCHITECTURE.md "
-            "(Bible P4: authenticity / architectural mirror).\n"
+            "(Bible P6: authenticity / architectural mirror).\n"
             f"  New files: {new_logic_files[:5]}\n"
             f"  Currently staged: {', '.join(sorted(staged_set)) or '(none)'}"
         )
@@ -655,10 +656,10 @@ def _preflight_check(commit_message: str, staged_files: str,
             pass  # Non-fatal
 
     # Check 7: If VERSION is staged, verify README.md Version History does not
-    # exceed the P7 limits (2 major / 5 minor / 5 patch rows). Reads from the
+    # exceed the P9 limits (2 major / 5 minor / 5 patch rows). Reads from the
     # staged index via git show so partially staged changes are handled correctly.
     # Uses check_history_limit() from release_sync.py (the single source of truth
-    # for P7 limits). This is a deterministic fast check — no LLM call needed.
+    # for P9 limits). This is a deterministic fast check — no LLM call needed.
     if version_staged:
         try:
             readme_staged = _git_show_staged(repo_dir, "README.md")
@@ -667,7 +668,7 @@ def _preflight_check(commit_message: str, staged_files: str,
                 limit_warnings = check_history_limit(readme_staged)
                 if limit_warnings:
                     return (
-                        "⚠️ PREFLIGHT_BLOCKED: README.md Version History exceeds BIBLE.md P7 limits.\n"
+                        "⚠️ PREFLIGHT_BLOCKED: README.md Version History exceeds BIBLE.md P9 limits.\n"
                         + "".join(f"  - {w}\n" for w in limit_warnings)
                         + "  Trim the oldest entry in the over-limit category before committing.\n"
                         + "  Quick check: python -c \"from ouroboros.tools.release_sync import "
@@ -675,7 +676,7 @@ def _preflight_check(commit_message: str, staged_files: str,
                         + f"  Currently staged: {', '.join(sorted(staged_set)) or '(none)'}"
                     )
         except Exception:
-            pass  # Non-fatal: LLM reviewers handle P7 limits as advisory fallback
+            pass  # Non-fatal: LLM reviewers handle P9 limits as advisory fallback
 
     # Check 8: if any conftest.py in active_staged contains collectable test functions,
     # block with an explicit message to move them to test_*.py files.

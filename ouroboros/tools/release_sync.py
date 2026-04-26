@@ -26,7 +26,7 @@ doubles literal hyphens (``4.50.0--rc.1``) per shields.io's escape rule.
 Public API
 ----------
 sync_release_metadata(repo_dir)  -> list[str]   changed carrier file paths
-check_history_limit(readme_text) -> list[str]   advisory P7 limit warnings
+check_history_limit(readme_text) -> list[str]   advisory P9 limit warnings
 detect_numeric_claims(text)      -> list[str]   matched numeric-claim strings
 run_release_preflight(repo_dir)  -> (list[str], list[str])  (changed, warnings)
 """
@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import List, Tuple
 
 # ---------------------------------------------------------------------------
-# P7 history limits (BIBLE.md)
+# P9 history limits (BIBLE.md)
 # ---------------------------------------------------------------------------
 _MAX_MAJOR = 2
 _MAX_MINOR = 5
@@ -253,7 +253,7 @@ def sync_release_metadata(repo_dir: str) -> List[str]:
 
 
 def check_history_limit(readme_text: str) -> List[str]:
-    """Return advisory warnings when Version History exceeds P7 limits.
+    """Return advisory warnings when Version History exceeds P9 limits.
 
     Limits: 2 major, 5 minor, 5 patch rows visible in the history table.
     Never raises — always returns a (possibly empty) list of warning strings.

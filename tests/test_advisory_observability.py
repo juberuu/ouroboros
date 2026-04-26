@@ -1,6 +1,6 @@
 """Tests for advisory_pre_review observability, model-drift fix, and budget gate.
 
-Split from test_commit_gate.py to keep each test module within the ~1000-line limit (P5).
+Split from test_commit_gate.py to keep each test module within the ~1000-line limit (P7).
 """
 import importlib
 import importlib.util as _ilu

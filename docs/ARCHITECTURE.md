@@ -1,4 +1,4 @@
-# Ouroboros v5.1.2 — Architecture & Reference
+# Ouroboros v5.2.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -90,7 +90,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── gateways/            ← External API adapters (thin transport, no business logic)
       │   └── claude_code.py   ← Claude Agent SDK gateway (edit + read-only paths)
       ├── tools/               ← Auto-discovered tool plugins
-      │   ├── release_sync.py    ← Release-metadata sync library; used by _preflight_check check 7 for P7 history-limit validation (check_history_limit) and by agents for version-carrier sync (sync_release_metadata)
+      │   ├── release_sync.py    ← Release-metadata sync library; used by _preflight_check check 7 for P9 history-limit validation (check_history_limit) and by agents for version-carrier sync (sync_release_metadata)
       │   ├── review_synthesis.py ← LLM-based claim synthesis (Phase 1): deduplicates raw multi-reviewer findings into canonical issues before durable obligations are created; called from commit_gate._record_commit_attempt; fail-open (returns original on any error)
       │   ├── a2a.py             ← A2A client tools: a2a_discover, a2a_send, a2a_status (non-core, require enable_tools)
       │   ├── ci.py              ← CI trigger and monitoring (GitHub Actions API)
@@ -664,7 +664,7 @@ runtime authority.
   queued owner messages are already flushed to the transcript and the checkpoint is what the LLM
   sees last) carrying (a) checkpoint number, round/max, context-token estimate,
   cost so far; (b) a `_build_recent_tool_trace` listing the last 15 tool calls with argument
-  summaries (P3 LLM-First — the trace is factual data, the LLM decides what it means);
+  summaries (P5 LLM-First — the trace is factual data, the LLM decides what it means);
   (c) a short directed self-check prompt asking the model to consider whether it is still
   making progress, whether the current approach is still right or scope should narrow,
   and whether the task is effectively done and should wrap up. Not a special round —
@@ -849,7 +849,7 @@ non-fatal on exception (LLM reviewers catch anything that slips through).
 | 4 | `architecture_doc` | New `.py` in `ouroboros/`/`supervisor/` but `ARCHITECTURE.md` not staged | Block |
 | 5 | `version_values_match` | VERSION staged: pyproject.toml must match the PEP 440 form of VERSION; README badge + ARCHITECTURE.md header must match the author-facing VERSION spelling | Block on mismatch |
 | 6 | `readme_changelog_row` | VERSION staged: staged README.md changelog must have a table row for the new version | Block if missing |
-| 7 | `p7_history_limits` | VERSION staged: staged README.md Version History must not exceed P7 limits (2 major / 5 minor / 5 patch rows); reads staged content via `git show :README.md`, delegates to `check_history_limit()` from `release_sync.py` | Block on any over-limit category |
+| 7 | `version_history_limits` | VERSION staged: staged README.md Version History must not exceed P9 limits (2 major / 5 minor / 5 patch rows); reads staged content via `git show :README.md`, delegates to `check_history_limit()` from `release_sync.py` | Block on any over-limit category |
 | 8 | `conftest_no_tests` | `conftest.py` staged with `test_*` functions (AST parse of staged content, not regex/worktree read) | Block with move hint |
 
 ### Reviewer calibration (`CRITICAL_FINDING_CALIBRATION` in `ouroboros/tools/review_helpers.py`)
@@ -1128,8 +1128,7 @@ the constitutional guard is that the file itself must remain non-deletable.
   REVIEW_REQUIRED=N, GREEN=N, DEGRADED=N`) for auditability. A minority dissenter
   is explicitly noted so the implementer reads the dissent instead of being
   auto-blocked. The prior `any-FAIL-blocks` semantics was intentionally retired in
-  favour of coordinative advisory output consistent with P3 (LLM-first — implementer
-  decides).
+  favour of coordinative advisory output — the implementer decides.
 - **Non-blocking**: results are advisory only — the implementer decides what to do.
   Reviewers are instructed not to penalise missing tests, VERSION bumps, README
   changelog rows, or ARCHITECTURE.md updates (the plan has no code yet) and not to
@@ -1160,7 +1159,7 @@ list — untouched test files are excluded to reduce scope review prompt size; s
 does not duplicate touched tests as full current-file snapshots, but every touched test still
 appears in the staged diff and in the explicit context-deduplication note), HEAD snapshot section builder, goal/scope resolution,
 advisory SDK diagnostic helpers (`get_advisory_runtime_diagnostics`, `format_advisory_sdk_error`)
-shared with `claude_advisory_review.py` to keep that module closer to the one-context-window target (P5).
+shared with `claude_advisory_review.py` to keep that module closer to the one-context-window target (P7).
 `_FILE_SIZE_LIMIT` was raised from 100KB to 1MB in v4.13.0 to stop cutting off normal-sized files.
 
 All LLM calls in the review stack (triad `_query_model`, scope `run_scope_review`) route through
@@ -1382,7 +1381,7 @@ errors surface via the same observability path.
 - **Per-finding commit-disposition discipline (v4.38.0)**: `prompts/SYSTEM.md` "Commit review" section now asks for an explicit verdict (`fix now` / `defer` via `update_scratchpad` / `disagree` via `review_rebuttal` with a one-sentence reason) for EACH critical and advisory finding in the block message, before the next `repo_commit`. This is **prompt-level discipline, not runtime-enforced** — the commit gate does not parse the agent's response for dispositions; a missing disposition does not by itself re-block the commit. The enforcement lives in the next review round: a skipped finding typically remains unaddressed in code, which the next reviewer catches. Paired with a "dependent multi-file changes stay in one commit" rule (coupled signatures, types, imports, version carriers, feature + VERSION + README + ARCHITECTURE) to stop fragmented commits multiplying review-cycle cost and producing transiently broken intermediate states. Existing grouping-by-root-cause and individual-finding-enumeration paragraphs preserved — new rules are additive, not replacements.
 - History snapshot taken before parallel launch so scope sees consistent state regardless of triad execution order.
 - Applies to both `_repo_commit_push` and `_repo_write_commit` (legacy path).
-- Orchestration logic extracted to `ouroboros/tools/parallel_review.py` (P5 Minimalism — relieves git.py size pressure).
+- Orchestration logic extracted to `ouroboros/tools/parallel_review.py` (P7 Minimalism — relieves git.py size pressure).
 
 #### Triad diff review (enriched)
 

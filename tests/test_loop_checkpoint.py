@@ -26,7 +26,7 @@ from ouroboros.loop import (
 
 
 class TestBuildRecentToolTrace:
-    """Tests for _build_recent_tool_trace helper (P3 LLM-First: factual trace)."""
+    """Tests for _build_recent_tool_trace helper (P5 LLM-First: factual trace)."""
 
     def test_empty_messages(self):
         assert _build_recent_tool_trace([]) == ""
@@ -53,7 +53,7 @@ class TestBuildRecentToolTrace:
         messages = [{"role": "assistant", "tool_calls": [tc]}] * 5
         result = _build_recent_tool_trace(messages)
         # All shown, no Python-side classification — the LLM decides what
-        # "repeated calls" means for its current task (P3 LLM-First).
+        # "repeated calls" means for its current task (P5 LLM-First).
         assert result.count("repo_read") == 5
 
     def test_window_limit(self):

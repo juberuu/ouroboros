@@ -142,7 +142,7 @@ def _chat_history(ctx: ToolContext, count: int = 100, offset: int = 0, search: s
 
 
 def _update_scratchpad(ctx: ToolContext, content: str) -> str:
-    """LLM-driven scratchpad update — appends a timestamped block (Constitution P3: LLM-first)."""
+    """LLM-driven scratchpad update — appends a timestamped block (Constitution P5: LLM-first)."""
     if not content or not isinstance(content, str) or len(content.strip()) < 10:
         return (
             "⚠️ REJECTED: content is empty or too short "
@@ -243,7 +243,7 @@ def _toggle_consciousness(ctx: ToolContext, action: str = "status") -> str:
 
 
 def _switch_model(ctx: ToolContext, model: str = "", effort: str = "") -> str:
-    """LLM-driven model/effort switch (Constitution P3: LLM-first).
+    """LLM-driven model/effort switch (Constitution P5: LLM-first).
 
     Stored in ToolContext, applied on the next LLM call in the loop.
     """

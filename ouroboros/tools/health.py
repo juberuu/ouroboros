@@ -88,7 +88,7 @@ def _codebase_health(ctx: ToolContext) -> str:
             or target_drift_mods
             or function_count_violation
         ):
-            lines.append("\n### Complexity Status (Principle 5: Minimalism)")
+            lines.append("\n### Complexity Status (Principle 7: Minimalism)")
             if function_count_violation:
                 lines.append(
                     f"  Hard-limit total functions > {MAX_TOTAL_FUNCTIONS}: {metrics['total_functions']}"
@@ -111,7 +111,7 @@ def _codebase_health(ctx: ToolContext) -> str:
                 lines.append(f"  Target-drift modules > {TARGET_MODULE_LINES} lines: {len(target_drift_mods)}")
         else:
             lines.append(
-                "\n✅ No hard P5 limit violations detected "
+                "\n✅ No hard P7 limit violations detected "
                 f"(all functions <= {MAX_FUNCTION_LINES} lines, total function count <= {MAX_TOTAL_FUNCTIONS}, "
                 f"all non-grandfathered modules <= {MAX_MODULE_LINES} lines)"
             )
@@ -127,7 +127,7 @@ def get_tools():
     return [
         ToolEntry("codebase_health", {
             "name": "codebase_health",
-            "description": "Get codebase complexity metrics: file sizes, longest functions, modules exceeding limits. Useful for self-assessment per Bible Principle 5 (Minimalism).",
+            "description": "Get codebase complexity metrics: file sizes, longest functions, modules exceeding limits. Useful for self-assessment per Bible Principle 7 (Minimalism).",
             "parameters": {"type": "object", "properties": {}, "required": []},
         }, _codebase_health),
     ]

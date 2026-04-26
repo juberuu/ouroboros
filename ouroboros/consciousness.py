@@ -496,7 +496,7 @@ class BackgroundConsciousness:
                     )
                 parts.append("## Knowledge base\n\n" + kb_index)
 
-        # Pattern register (P2 Meta-Reflection Imperative) — full content, no clip_text.
+        # Pattern register (P2 Meta-over-Patch) — full content, no clip_text.
         patterns_path = env.drive_path("memory/knowledge/patterns.md")
         if patterns_path.exists():
             patterns_text = patterns_path.read_text(encoding="utf-8")

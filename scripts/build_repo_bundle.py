@@ -153,7 +153,7 @@ def _verify_release_tag_in_repo(repo_root: pathlib.Path, tag: str) -> None:
     1. ``refs/tags/<tag>`` actually exists in the repo (i.e. the tag was
        created, not just passed via an env var).
     2. The tag object is *annotated* (``git cat-file -t`` returns
-       ``"tag"``, not ``"commit"``) — BIBLE.md P7 requires an annotated
+       ``"tag"``, not ``"commit"``) — BIBLE.md P9 requires an annotated
        tag for every release, so a lightweight tag is not acceptable.
     3. The tag points at ``HEAD``. A tag that exists but points at a
        previous commit would make the packaged manifest lie about which
@@ -186,7 +186,7 @@ def _verify_release_tag_in_repo(repo_root: pathlib.Path, tag: str) -> None:
         raise SystemExit(
             f"Release tag {tag} is not an annotated tag "
             f"(git cat-file -t returned {tag_type!r}). "
-            f"BIBLE.md P7 requires annotated release tags — recreate with "
+            f"BIBLE.md P9 requires annotated release tags — recreate with "
             f"`git tag -a {tag} -m \"Release {tag}\"`."
         )
     head_sha_probe = subprocess.run(

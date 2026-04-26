@@ -480,7 +480,7 @@ class TestVersionRowRegexBucketingWithRc:
 
     def test_rc_rows_do_not_break_history_limit_check(self):
         # 2 majors + 5 minors + 1 RC (also a minor slot) + 4 patches:
-        # within P7 caps overall.
+        # within P9 caps overall.
         readme = (
             "## Version History\n\n"
             "| Version | Date | Description |\n"

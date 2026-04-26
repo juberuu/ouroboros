@@ -342,7 +342,7 @@ def test_build_repo_bundle_rejects_head_outside_source_branch(tmp_path):
 
 
 def test_build_repo_bundle_rejects_lightweight_tag(tmp_path):
-    """BIBLE.md P7 requires annotated release tags. ``_verify_release_tag_in_repo``
+    """BIBLE.md P9 requires annotated release tags. ``_verify_release_tag_in_repo``
     must refuse lightweight tags even when ``OUROBOROS_RELEASE_TAG`` matches
     ``VERSION`` and the tag points at ``HEAD``."""
     repo, _sha = _make_repo(tmp_path)

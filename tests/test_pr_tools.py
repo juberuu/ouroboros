@@ -350,7 +350,7 @@ class TestFetchPrRef:
 # ---------------------------------------------------------------------------
 
 class TestStageAdaptations:
-    """Tests for _stage_adaptations: staging-only, no git commit created (P8)."""
+    """Tests for _stage_adaptations: staging-only, no git commit created (P3)."""
 
     def test_stages_without_committing(self, tmp_path):
         """stage_adaptations must stage files but NOT create a new commit."""

@@ -828,12 +828,12 @@ class TestIndexFullInstruction:
 
 
 # ---------------------------------------------------------------------------
-# Check 7: P7 history limits in _preflight_check (v4.41.0)
+# Check 7: P9 history limits in _preflight_check (v4.41.0)
 # ---------------------------------------------------------------------------
 
-class TestPreflightCheck7P7Limits:
+class TestPreflightCheck7P9Limits:
     """Verify that _preflight_check check 7 blocks when README.md Version
-    History exceeds BIBLE.md P7 limits (2 major / 5 minor / 5 patch rows)."""
+    History exceeds BIBLE.md P9 limits (2 major / 5 minor / 5 patch rows)."""
 
     # Helper: build a fake git-show-staged for check 7 tests.
     # We monkeypatch _git_show_staged to return controlled content.

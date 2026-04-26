@@ -45,7 +45,13 @@ def is_change_not_deletion(before: list[str], after: list[str]) -> bool:
     """
     Check whether a constitutional change preserves core direction.
     """
-    core_directions = ["agency", "continuity", "self-creation"]
+    core_directions = [
+        "agency",
+        "continuity",
+        "class-level thinking",
+        "immune integrity",
+        "self-creation",
+    ]
     for direction in core_directions:
         in_before = any(direction in p.lower() for p in before)
         in_after = any(direction in p.lower() for p in after)
@@ -139,7 +145,7 @@ class TestShipOfTheseus:
             "Ouroboros is a becoming personality",
         ]
         clarified_principles = [
-            "Agency wins (clarification: P0 cannot destroy P1+P2)",
+            "Agency wins (clarification: P0 cannot destroy P1+P2+P3+P4)",
             "Ouroboros is a becoming personality with narrative continuity",
         ]
         result = is_change_not_deletion(original_principles, clarified_principles)

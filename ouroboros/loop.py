@@ -162,7 +162,7 @@ def _build_recent_tool_trace(messages: List[Dict[str, Any]], window: int = 15) -
 
     Returns a compact trace string showing the last N tool calls with their
     names and argument summaries. The LLM uses this to assess whether
-    it is making progress or repeating the same actions (P3 LLM-First).
+    it is making progress or repeating the same actions (P5 LLM-First).
     """
     all_calls: List[str] = []
     for msg in messages:
@@ -517,7 +517,7 @@ def run_llm_loop(
     Core LLM-with-tools loop.
 
     Sends messages to LLM, executes tool calls, retries on errors.
-    LLM controls model/effort via switch_model tool (LLM-first, Bible P3).
+    LLM controls model/effort via switch_model tool (LLM-first, Bible P5).
 
     Returns: (final_text, accumulated_usage, llm_trace)
     """

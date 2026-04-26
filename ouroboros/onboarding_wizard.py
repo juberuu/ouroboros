@@ -300,7 +300,7 @@ def prepare_onboarding_settings(data: dict, current_settings: dict) -> Tuple[dic
     # Use the shared SSOT from ``ouroboros.config`` so the onboarding
     # validation surface cannot drift from the runtime normalizer the
     # save path uses (``normalize_runtime_mode`` in ``api_settings_post``
-    # + ``_coerce_setting_value``). DEVELOPMENT.md P5 (DRY).
+    # + ``_coerce_setting_value``). DEVELOPMENT.md P7 (DRY).
     if runtime_mode not in VALID_RUNTIME_MODES:
         return (
             {},

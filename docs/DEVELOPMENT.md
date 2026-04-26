@@ -44,7 +44,7 @@ Rules in this file must not contradict BIBLE.md.
 
 - **Language:** All code identifiers, comments, docstrings, and commit messages are in English.
 - **Style:** Python PEP 8. Modules and variables — `snake_case`. Classes — `PascalCase`. Constants — `UPPER_SNAKE_CASE`.
-- **Self-explanatory names** over abbreviations. A name should tell you what the thing *does*, not just what it *is*. Derived from P4 (Authenticity).
+- **Self-explanatory names** over abbreviations. A name should tell you what the thing *does*, not just what it *is*. Derived from P6 (Authenticity & Reality Discipline).
 
 ### Entity Types
 
@@ -87,9 +87,9 @@ Not every layer is required for every operation. Simple cases (e.g., `repo_read`
 
 ## Module Size & Complexity
 
-Derived from P5 (Minimalism): entire codebase fits in one context window.
+Derived from P7 (Minimalism): entire codebase fits in one context window.
 
-- Module target: ~1000 lines. Crossing that line is P5 pressure and should trigger extraction or an explicit justification.
+- Module target: ~1000 lines. Crossing that line is P7 pressure and should trigger extraction or an explicit justification.
 - Module hard gate: 1600 lines for non-grandfathered modules in `tests/test_smoke.py`. Grandfathered (`GRANDFATHERED_OVERSIZED_MODULES` in `ouroboros/review.py`): `llm.py`, `claude_advisory_review.py`, `review_state.py` — split deferred until each surface stabilises.
 - Method target: <150 lines. Crossing that line is a decomposition signal, not an automatic failure by itself.
 - Method hard gate: 300 lines in `tests/test_smoke.py`.
@@ -193,7 +193,7 @@ replacement — then `advisory_pre_review`, then `repo_commit` immediately on th
 final diff.
 
 The full pre-commit review checklists live in **`docs/CHECKLISTS.md`** —
-the single source of truth (Bible P5: DRY).
+the single source of truth (Bible P7: DRY).
 
 This section defines what "DEVELOPMENT.md compliance" means in practice — it is the
 detailed expansion of the `development_compliance` item in `docs/CHECKLISTS.md`.
@@ -217,7 +217,7 @@ Before every commit, verify the following:
 - [ ] No method exceeds the practical target (150 lines) or the hard gate (300 lines)
 - [ ] Total Python function count stays under the current smoke hard gate (consult `ouroboros/review.py::MAX_TOTAL_FUNCTIONS` for the active value; bump with a comment if a feature requires more headroom)
 - [ ] No function has more than 8 parameters
-- [ ] No gratuitous abstract layers (Bible P5)
+- [ ] No gratuitous abstract layers (Bible P7)
 
 #### Structural Rules
 - [ ] New Tool? `get_tools()` exports it using the `ToolEntry` pattern from `registry.py`, AND an explicit entry is added to `ouroboros/safety.py::TOOL_POLICY` (`POLICY_SKIP` for trusted built-ins, `POLICY_CHECK` for opaque or outward-facing ones). Without the policy entry the tool falls through to `DEFAULT_POLICY = POLICY_CHECK` and pays a light-model LLM call per invocation, and the `test_tool_policy_covers_all_builtin_tools` invariant will fail.

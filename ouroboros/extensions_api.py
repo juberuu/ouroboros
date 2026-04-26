@@ -176,7 +176,7 @@ async def api_extensions_index(request: Request) -> JSONResponse:
                 # can render a clawhub badge + Update/Uninstall buttons
                 # for marketplace-installed skills. Without this the
                 # /api/extensions catalogue would silently mislabel
-                # clawhub skills as "native" (P5 honesty regression).
+                # clawhub skills as "native" (P6 honesty regression).
                 "source": s.source,
             }
             if s.source == "clawhub":

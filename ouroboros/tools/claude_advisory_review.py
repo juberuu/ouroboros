@@ -416,7 +416,7 @@ def _resolve_fallback_model() -> str:
 
     Uses OUROBOROS_MODEL_LIGHT (user-configured light model) if set, otherwise
     falls back to the system default from config.  Never hardcodes a specific
-    model ID — all model selection is delegated to configuration (P3 LLM-First).
+    model ID — all model selection is delegated to configuration (P5 LLM-First).
     """
     import os as _os
     from ouroboros.config import SETTINGS_DEFAULTS  # type: ignore[attr-defined]

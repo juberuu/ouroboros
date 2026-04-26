@@ -375,7 +375,7 @@ no-silent-truncation rule for cognitive artifacts.
 
 BIBLE.md is Ouroboros' constitutional core. Skills execute inside the
 Ouroboros runtime, so a skill that violates a constitutional principle
-(for example P0 bounded agency, or P7 version-history limits if the
+(for example P0 bounded agency, or P9 version-history limits if the
 skill manipulates release metadata) is grounds for FAIL even when the
 Skill Review Checklist items permit the behaviour in isolation. Treat
 BIBLE.md as the tie-breaker when a skill looks checklist-compliant but

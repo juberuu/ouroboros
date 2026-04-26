@@ -920,7 +920,7 @@ def _classify_skill_source(
     1. If the path lives under ``data/skills/<bucket>/...`` AND
        ``<bucket>`` is one of ``native``/``clawhub``/``external``,
        return that literal bucket. ``native`` carries an extra
-       authenticity gate (BIBLE.md P4 honesty fix from cycle 1
+       authenticity gate (BIBLE.md P6 honesty fix from cycle 1
        Ouroboros review O3): the package must own a sibling
        ``.seed-origin`` marker file (written by the launcher
        bootstrap when it copied the seed). A skill that a user

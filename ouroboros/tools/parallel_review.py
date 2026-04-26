@@ -1,6 +1,6 @@
 """Parallel review orchestration for the pre-commit pipeline.
 
-Extracted from git.py (P5 Minimalism) so both _repo_commit_push and
+Extracted from git.py (P7 Minimalism) so both _repo_commit_push and
 _repo_write_commit can share one implementation without duplication.
 
 Public API:

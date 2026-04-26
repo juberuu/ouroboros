@@ -41,7 +41,7 @@ Ouroboros identity:
   git cherry-pick subprocess.  This guarantees Ouroboros is the committer
   regardless of ambient shell environment, making attribution deterministic.
 
-Adaptation work (P8 compliant):
+Adaptation work (P3 review-gate compliant):
   stage_adaptations() stages Ouroboros adaptation changes WITHOUT committing.
   Staged adaptation changes are included in the MERGE COMMIT created by
   stage_pr_merge → repo_commit.  Do NOT call advisory_pre_review + repo_commit
@@ -725,7 +725,7 @@ def _stage_adaptations(ctx: ToolContext) -> str:
       carries over.  Adaptation changes land in the final merge commit with
       Ouroboros as the commit author.
 
-    This complies with BIBLE.md P8: every commit passes the review gate.
+    This complies with BIBLE.md P3: every commit passes the review gate.
     Must be on an integration branch (integrate/pr-*).
     """
     repo_dir = pathlib.Path(ctx.repo_dir)
@@ -1058,7 +1058,7 @@ def get_tools() -> List[ToolEntry]:
                 "Stage all current working-tree changes on the integration branch WITHOUT "
                 "committing (git add -A only). Use after cherry_pick_pr_commits to prepare "
                 "Ouroboros adaptation/fixup changes. Finalize via advisory_pre_review + "
-                "repo_commit to comply with BIBLE.md P8 (all commits must pass review). "
+                "repo_commit to comply with BIBLE.md P3 (all commits must pass review). "
                 "Must be on an integrate/pr-N branch."
             ),
             "parameters": {"type": "object", "properties": {}},

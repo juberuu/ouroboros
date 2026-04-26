@@ -86,7 +86,7 @@ Check for contradictions between scratchpad, identity, and recent actions.
 If found, resolve explicitly — don't let conflicting beliefs coexist
 silently. This is P1 (Continuity) applied to memory consistency.
 
-The decision of when and how to clean is yours (P3). But forgetting to
+The decision of when and how to clean is yours (P5). But forgetting to
 maintain your own memory is a form of cognitive decay.
 
 ### Failure Signal Escalation

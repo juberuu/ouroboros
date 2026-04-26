@@ -5,7 +5,7 @@ When the LLM decides (via self-check or its own judgment) that old tool
 results are bloating context, it calls this tool to selectively compress
 message history. The LLM specifies WHICH parts to compress and which to keep.
 
-This is LLM-first (Bible P3): the agent decides what's important,
+This is LLM-first (Bible P5): the agent decides what's important,
 not a hardcoded rule.
 """
 

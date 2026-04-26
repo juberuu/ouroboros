@@ -1,6 +1,6 @@
 """commit_gate.py — Advisory freshness gate and commit-attempt recording.
 
-Extracted from git.py to relieve module-size pressure under P5 Minimalism.
+Extracted from git.py to relieve module-size pressure under P7 Minimalism.
 Provides:
   _record_commit_attempt(ctx, commit_message, status, ...)
   _invalidate_advisory(ctx)

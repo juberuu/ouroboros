@@ -315,7 +315,7 @@ def test_context_build_memory_sections():
 # ── Bible invariants ─────────────────────────────────────────────
 
 def test_no_hardcoded_replies():
-    """Principle 3 (LLM-first): no hardcoded reply strings in code.
+    """Principle 5 (LLM-First): no hardcoded reply strings in code.
     
     Checks for suspicious patterns like:
     - reply = "Fixed string"
@@ -366,10 +366,10 @@ def test_version_in_readme():
 
 
 def test_bible_exists_and_has_principles():
-    """BIBLE.md exists and contains the current principle set (0-8)."""
+    """BIBLE.md exists and contains the current principle set (0-12)."""
     bible = (REPO / "BIBLE.md").read_text(encoding="utf-8")
     principles = re.findall(r"^## Principle (\d+):", bible, flags=re.MULTILINE)
-    assert principles == [str(i) for i in range(9)], f"Unexpected BIBLE principles: {principles}"
+    assert principles == [str(i) for i in range(13)], f"Unexpected BIBLE principles: {principles}"
 
 
 # ── Code quality invariants ──────────────────────────────────────
@@ -399,7 +399,7 @@ def test_no_env_dumping():
 
 
 def test_no_oversized_modules():
-    """Principle 5: no non-grandfathered module exceeds the hard gate."""
+    """Principle 7: no non-grandfathered module exceeds the hard gate."""
     from ouroboros.review import GRANDFATHERED_OVERSIZED_MODULES, MAX_MODULE_LINES
 
     max_lines = MAX_MODULE_LINES
