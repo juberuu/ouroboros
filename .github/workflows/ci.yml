@@ -273,6 +273,45 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -k "${KEYCHAIN_PASSWORD}" "$KEYCHAIN_PATH" >/dev/null
           security find-identity -v -p codesigning "$KEYCHAIN_PATH"
 
+      # —— macOS: extract the actual signing identity CN from the imported
+      #          keychain so `codesign -s "$SIGN_IDENTITY"` matches whatever
+      #          certificate the fork/release engineer imported, instead of
+      #          a hardcoded maintainer name. Pushes the value into
+      #          $GITHUB_ENV so the next step (Build macOS app) inherits it
+      #          and build.sh sees a non-empty SIGN_IDENTITY (skipping its
+      #          own auto-detect fallback). When no Developer ID identity
+      #          is present (e.g. only Apple Development certs), this step
+      #          leaves SIGN_IDENTITY empty and build.sh's auto-detect
+      #          will pick up whatever else is in the keychain. The same
+      #          gate as Import — runs only when all 4 signing secrets are
+      #          configured, so non-macOS shards and unconfigured runs are
+      #          unaffected.
+      - name: Extract signing identity from imported keychain
+        if: matrix.os == 'macos-latest' && env.BUILD_CERTIFICATE_BASE64 != '' && env.P12_PASSWORD != '' && env.KEYCHAIN_PASSWORD != '' && env.APPLE_TEAM_ID != ''
+        run: |
+          set -euo pipefail
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          DETECTED="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
+              | grep -E '"Developer ID Application' \
+              | head -1 \
+              | sed -E 's/^.*"([^"]+)".*$/\1/' || true)"
+          if [ -z "${DETECTED:-}" ]; then
+              # Fallback: ANY codesigning identity (not just Developer ID
+              # Application). Forks may use Apple Development certs in
+              # tests; this keeps the build alive long enough to surface
+              # a clearer error from codesign downstream.
+              DETECTED="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
+                  | grep -E '^\s+[0-9]+\)' \
+                  | head -1 \
+                  | sed -E 's/^.*"([^"]+)".*$/\1/' || true)"
+          fi
+          if [ -n "${DETECTED:-}" ]; then
+              echo "Detected signing identity: $DETECTED"
+              echo "SIGN_IDENTITY=$DETECTED" >> "$GITHUB_ENV"
+          else
+              echo "WARNING: no codesigning identity found in temp keychain — build.sh will auto-detect or fail with no identity."
+          fi
+
       # —— macOS build (signed + optionally notarized when secrets are
       #         present, otherwise unsigned). build.sh reads the same
       #         env vars from the job-level env block above.

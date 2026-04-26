@@ -470,19 +470,39 @@ class TestMacOSSigning:
 
     def test_build_sh_signing_identity_env_override(self):
         """build.sh must allow the signing identity to be overridden via env
-        (CI runners import a temporary Developer ID and need to point at
-        whatever identity matches their imported certificate)."""
+        AND auto-detect from the keychain when env is unset/empty.
+
+        The previous hardcoded `Developer ID Application: <Maintainer>
+        (<TeamID>)` default broke any fork whose imported cert had a
+        different CN (`codesign: no identity found`). The current contract:
+        a non-empty `SIGN_IDENTITY` env wins; otherwise auto-detect via
+        `security find-identity -v -p codesigning`.
+        """
         src = _read("build.sh")
-        # Accept either ${SIGN_IDENTITY:-...} or ${SIGN_IDENTITY-...}
-        # (POSIX parameter expansion). We require the explicit `:-` form
-        # so an empty-string env var still falls back to the default.
+        # The empty-env auto-detect block must check `${SIGN_IDENTITY:-}`
+        # explicitly (not `$SIGN_IDENTITY` alone, which would be unbound
+        # under `set -u`).
         assert re.search(
-            r'SIGN_IDENTITY=\s*"\$\{SIGN_IDENTITY:-[^"]+"',
+            r'\[\s*-z\s*"\$\{SIGN_IDENTITY:-\}"\s*\]',
             src,
         ), (
-            "build.sh must set SIGN_IDENTITY=\"${SIGN_IDENTITY:-...}\" "
-            "so the env var wins when present and the default kicks in "
-            "when it is unset or empty"
+            "build.sh must guard the auto-detect block with "
+            "`[ -z \"${SIGN_IDENTITY:-}\" ]` so the env var wins when set "
+            "and auto-detect runs only when env is unset/empty"
+        )
+        assert "security find-identity" in src and "-p codesigning" in src, (
+            "build.sh must call `security find-identity -v -p codesigning` "
+            "to auto-detect the signing identity from the keychain when "
+            "SIGN_IDENTITY is not set externally"
+        )
+        # The hardcoded maintainer-specific default must be GONE (it caused
+        # `codesign: no identity found` on forks; replaced by auto-detect).
+        # We pin a substring that any future re-introduction would trip on.
+        assert 'SIGN_IDENTITY="${SIGN_IDENTITY:-Developer ID Application:' not in src, (
+            "build.sh must NOT carry a hardcoded maintainer-specific "
+            "Developer ID Application default — it breaks forks whose "
+            "imported cert has a different CN. Use auto-detect via "
+            "`security find-identity` instead."
         )
 
     def test_build_sh_notarization_optional(self):

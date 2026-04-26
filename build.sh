@@ -1,11 +1,28 @@
 #!/bin/bash
 set -e
 
-# Signing identity: env override wins so CI runners (which import a temporary
-# Developer ID via `security import` + `security set-key-partition-list`) can
-# point at whatever identity matches their imported certificate without
-# editing this file. Local dev keeps the historical default identity.
-SIGN_IDENTITY="${SIGN_IDENTITY:-Developer ID Application: Ian Mironov (WHY6PAKA5V)}"
+# Signing identity is resolved at runtime in this priority order:
+#   1. The `SIGN_IDENTITY` env var, when set non-empty (CI runners use a
+#      step earlier in the workflow that extracts the actual CN from the
+#      just-imported keychain and writes it into `$GITHUB_ENV`; local
+#      developers can also export it manually).
+#   2. Auto-detection from `security find-identity -v -p codesigning`,
+#      preferring `Developer ID Application` (suitable for distribution).
+#      This works for forks/multi-developer setups without editing this
+#      file — the previous hardcoded "Developer ID Application: <Name>
+#      (<TeamID>)" default broke any fork whose Apple cert had a different
+#      CN with `codesign: no identity found`.
+#   3. Empty (no identity found) — codesign will then fail downstream
+#      with a clear error.
+if [ -z "${SIGN_IDENTITY:-}" ]; then
+    SIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
+        | grep -E '\"Developer ID Application' \
+        | head -1 \
+        | sed -E 's/^.*\"([^\"]+)\".*$/\1/')"
+    if [ -n "${SIGN_IDENTITY:-}" ]; then
+        echo "Auto-detected SIGN_IDENTITY from keychain: $SIGN_IDENTITY"
+    fi
+fi
 ENTITLEMENTS="entitlements.plist"
 SIGN_MODE="${OUROBOROS_SIGN:-1}"
 MANAGED_SOURCE_BRANCH="${OUROBOROS_MANAGED_SOURCE_BRANCH:-ouroboros}"
