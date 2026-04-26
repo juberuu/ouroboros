@@ -165,6 +165,7 @@ class PluginAPIImpl:
         self._skill = skill_name
         self._permissions = frozenset(str(p).strip() for p in (permissions or []))
         self._env_allow = frozenset(str(k).strip() for k in (env_allowlist or []))
+        self._env_allow_upper = frozenset(k.upper() for k in self._env_allow)
         self._state_dir = pathlib.Path(state_dir)
         self._settings_reader = settings_reader
 
@@ -316,14 +317,19 @@ class PluginAPIImpl:
             return {}
         settings = self._settings_reader() or {}
         out: Dict[str, Any] = {}
+        forbidden_upper = {k.upper() for k in FORBIDDEN_EXTENSION_SETTINGS}
         for raw_key in keys or ():
             key = str(raw_key).strip()
-            if not key or key in FORBIDDEN_EXTENSION_SETTINGS:
+            canonical = key.upper()
+            if not key:
                 continue
-            if key not in self._env_allow:
+            if canonical in forbidden_upper:
                 continue
-            if key in settings:
-                out[key] = settings[key]
+            if key not in self._env_allow and canonical not in self._env_allow_upper:
+                continue
+            settings_key = canonical if canonical in forbidden_upper else key
+            if settings_key in settings:
+                out[settings_key] = settings[settings_key]
         return out
 
     def get_state_dir(self) -> str:
@@ -616,7 +622,6 @@ def load_extension(
         )
     if runtime_state["reason"] == "disabled":
         return f"skill {skill.name!r} is disabled"
-
     entry_path = _plugin_entry_path(skill)
     if entry_path is None:
         return (
@@ -627,6 +632,14 @@ def load_extension(
     if drive_root is None:
         drive_root = pathlib.Path.home() / "Ouroboros" / "data"
     state_dir = skill_state_dir(drive_root, skill.name)
+    from ouroboros.skill_loader import requested_core_setting_keys
+
+    requested_core = requested_core_setting_keys(list(skill.manifest.env_from_settings or []))
+    if requested_core:
+        return (
+            f"skill {skill.name!r} requests core settings keys {requested_core}, "
+            "but in-process extensions cannot receive core-key grants safely"
+        )
     staged_import_root: Optional[pathlib.Path] = None
 
     module_key = _module_key(skill.name)
@@ -766,8 +779,7 @@ def snapshot() -> Dict[str, Any]:
     """Return a read-only snapshot of currently-registered surfaces.
 
     Used by ``/api/state`` and the Skills UI to surface what's live.
-    UI tabs are exposed separately as pending declarations because the
-    shipped browser shell does not mount extension tabs yet.
+    UI tabs are hostable by the Widgets page once the extension is live.
     """
     with _lock:
         return {
@@ -775,8 +787,8 @@ def snapshot() -> Dict[str, Any]:
             "tools": sorted(_tools.keys()),
             "routes": sorted(_routes.keys()),
             "ws_handlers": sorted(_ws_handlers.keys()),
-            "ui_tabs": [],
-            "ui_tabs_pending": sorted(_ui_tabs.keys()),
+            "ui_tabs": [dict(value, key=key) for key, value in sorted(_ui_tabs.items())],
+            "ui_tabs_pending": [],
         }
 
 

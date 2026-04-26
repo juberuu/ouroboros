@@ -45,6 +45,7 @@ _DEFAULT_TIMEOUT_SEC = 15
 _MAX_JSON_RESPONSE_BYTES = 4 * 1024 * 1024  # 4 MB JSON cap
 _MAX_ARCHIVE_BYTES = 50 * 1024 * 1024       # mirrors fetcher cap
 _USER_AGENT = "Ouroboros-Marketplace/4.50 (+https://github.com/joi-lab/ouroboros-desktop)"
+_SEARCH_PATH_CANDIDATES = ("skills", "registry/skills", "marketplace/skills", "packages")
 
 # Allowed registry hosts. The canonical registry is ``clawhub.ai`` (per
 # the official docs at github.com/openclaw/clawhub). ``clawhub.com``
@@ -391,10 +392,12 @@ def search(
     *,
     limit: int = 25,
     offset: int = 0,
+    cursor: Optional[str] = None,
     sort: str = "downloads",
     registry_url: Optional[str] = None,
     timeout_sec: int = _DEFAULT_TIMEOUT_SEC,
-) -> List[ClawHubSkillSummary]:
+    include_metadata: bool = False,
+) -> Any:
     """Search the registry for skills matching ``query``.
 
     The registry's search endpoint is documented as
@@ -414,31 +417,102 @@ def search(
         "offset": safe_offset,
         "sort": sort_key,
     }
+    cleaned_cursor = str(cursor or "").strip()
+    if cleaned_cursor:
+        query_params["cursor"] = cleaned_cursor
     cleaned_query = (query or "").strip()
     if cleaned_query:
         query_params["q"] = cleaned_query
-    url = _build_url(base, "skills", query_params)
-    body, _headers = _http_get(url, timeout=timeout_sec)
-    parsed = _decode_json(body, url=url)
-
-    # Registry may return either {"skills": [...]} or a bare array.
-    if isinstance(parsed, dict):
-        items = parsed.get("skills") or parsed.get("results") or parsed.get("items") or []
-    elif isinstance(parsed, list):
-        items = parsed
-    else:
-        raise ClawHubClientError(
-            f"Unexpected response shape from {url}: {type(parsed).__name__}"
-        )
-
-    summaries: List[ClawHubSkillSummary] = []
-    for record in items:
+    last_error: Optional[Exception] = None
+    attempts: List[Dict[str, Any]] = []
+    first_success: Optional[Dict[str, Any]] = None
+    for path in _SEARCH_PATH_CANDIDATES:
+        url = _build_url(base, path, query_params)
         try:
-            summaries.append(_summary_from_record(record))
-        except ClawHubClientError:
-            log.warning("Skipping malformed registry record: %r", record, exc_info=True)
+            path_timeout = timeout_sec if path == "skills" else min(timeout_sec, 3)
+            body, _headers = _http_get(url, timeout=path_timeout)
+            parsed = _decode_json(body, url=url)
+            items: Any
+            next_cursor = ""
+            if isinstance(parsed, dict):
+                nested = parsed.get("data")
+                if isinstance(nested, dict):
+                    items = (
+                        nested.get("skills")
+                        or nested.get("results")
+                        or nested.get("items")
+                        or []
+                    )
+                    next_cursor = str(
+                        nested.get("nextCursor")
+                        or nested.get("next_cursor")
+                        or nested.get("cursor")
+                        or ""
+                    )
+                else:
+                    items = (
+                        parsed.get("skills")
+                        or parsed.get("results")
+                        or parsed.get("items")
+                        or []
+                    )
+                    next_cursor = str(
+                        parsed.get("nextCursor")
+                        or parsed.get("next_cursor")
+                        or parsed.get("cursor")
+                        or ""
+                    )
+            elif isinstance(parsed, list):
+                items = parsed
+            else:
+                raise ClawHubClientError(
+                    f"Unexpected response shape from {url}: {type(parsed).__name__}"
+                )
+            if not isinstance(items, list):
+                raise ClawHubClientError(
+                    f"Unexpected items shape from {url}: {type(items).__name__}"
+                )
+            summaries: List[ClawHubSkillSummary] = []
+            for record in items:
+                try:
+                    summaries.append(_summary_from_record(record))
+                except ClawHubClientError:
+                    log.warning("Skipping malformed registry record: %r", record, exc_info=True)
+                    continue
+            attempts.append({"path": path, "count": len(summaries), "ok": True})
+            if first_success is None:
+                first_success = {
+                    "results": summaries,
+                    "next_cursor": next_cursor,
+                    "path": path,
+                }
+            if summaries or next_cursor or path == _SEARCH_PATH_CANDIDATES[-1]:
+                if include_metadata:
+                    return {
+                        "results": summaries,
+                        "next_cursor": next_cursor,
+                        "path": path,
+                        "attempts": attempts,
+                    }
+                return summaries
+        except ClawHubClientError as exc:
+            last_error = exc
+            attempts.append({"path": path, "ok": False, "error": str(exc)})
             continue
-    return summaries
+    if first_success is not None:
+        if include_metadata:
+            return {
+                "results": first_success["results"],
+                "next_cursor": first_success["next_cursor"],
+                "path": first_success["path"],
+                "attempts": attempts,
+            }
+        return first_success["results"]
+    if last_error:
+        raise last_error
+    if include_metadata:
+        return {"results": [], "next_cursor": "", "path": "skills", "attempts": attempts}
+    return []
 
 
 def _validate_slug(slug: str) -> str:

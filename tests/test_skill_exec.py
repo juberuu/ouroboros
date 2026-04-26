@@ -892,11 +892,7 @@ def test_hard_timeout_ceiling_is_bounded():
 
 
 def test_env_denylist_blocks_secret_forwarding(tmp_path, monkeypatch):
-    """Phase 3 round 20 regression: even if a reviewed manifest
-    declares ``env_from_settings: [OPENROUTER_API_KEY]`` and the review
-    misses it, the runtime denylist must refuse to forward credentials
-    to the skill subprocess. Regression for "defense-in-depth beyond
-    reviewer perfection".
+    """Core settings keys are withheld unless a content-bound grant exists.
 
     Patch target note (round 21 fix): ``skill_exec.py`` imports
     ``load_settings`` from ``ouroboros.config`` as a bound alias via
@@ -930,16 +926,24 @@ def test_env_denylist_blocks_secret_forwarding(tmp_path, monkeypatch):
             skill_state_dir_path=skill_state_dir_path,
             skill_name="ok",
         )
-    # Forbidden keys are dropped even when the manifest explicitly asked for them.
+    # Core keys are dropped when no explicit owner grant exists.
     assert "OPENROUTER_API_KEY" not in env, (
-        "Runtime denylist must refuse to forward the OpenRouter key "
-        "regardless of manifest request."
+        "Runtime must refuse to forward the OpenRouter key without a grant."
     )
     assert "GITHUB_TOKEN" not in env
     assert "OUROBOROS_NETWORK_PASSWORD" not in env
     # Non-forbidden manifest-requested keys DO get forwarded so the
     # ``env_from_settings`` surface is not a no-op.
     assert env["SOME_OK_KEY"] == "visible-value"
+
+    with patch.object(se, "load_settings", return_value={"OPENROUTER_API_KEY": "sk-or-v1-GRANTED"}):
+        granted_env = se._scrub_env(
+            manifest_env_keys=["OPENROUTER_API_KEY"],
+            skill_state_dir_path=skill_state_dir_path,
+            skill_name="ok",
+            granted_keys=["OPENROUTER_API_KEY"],
+        )
+    assert granted_env["OPENROUTER_API_KEY"] == "sk-or-v1-GRANTED"
 
 
 def test_skill_exec_uses_shared_settings_denylist():

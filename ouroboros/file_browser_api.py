@@ -104,13 +104,52 @@ def _is_owner_only_settings_file(target: pathlib.Path) -> bool:
     return False
 
 
+def _is_owner_only_file(target: pathlib.Path) -> bool:
+    if _is_owner_only_settings_file(target):
+        return True
+    from ouroboros import config as _cfg
+    grants_root = pathlib.Path(_cfg.DATA_DIR) / "state" / "skills"
+    if target.exists() and grants_root.is_dir():
+        for grant_file in grants_root.glob("*/grants.json"):
+            try:
+                if grant_file.exists() and target.samefile(grant_file):
+                    return True
+            except OSError:
+                continue
+    try:
+        rel = target.resolve(strict=False).relative_to(pathlib.Path(_cfg.DATA_DIR).resolve(strict=False))
+    except (OSError, ValueError):
+        return False
+    parts = rel.parts
+    return (
+        len(parts) == 4
+        and parts[0].lower() == "state"
+        and parts[1].lower() == "skills"
+        and parts[3].lower() == "grants.json"
+    )
+
+
+def _contains_owner_only_file(target: pathlib.Path) -> bool:
+    if _is_owner_only_file(target):
+        return True
+    if not target.is_dir():
+        return False
+    try:
+        for child in target.rglob("*"):
+            if _is_owner_only_file(child):
+                return True
+    except OSError:
+        return False
+    return False
+
+
 # Standard error response for the Files API guard. Matches the wording
 # of ``tools/core.py::_data_write`` so the operator hears one consistent
 # message regardless of which surface they used.
 _OWNER_ONLY_FILES_API_ERROR = JSONResponse(
     {
         "error": (
-            "settings.json is the canonical owner-edited file and cannot "
+            "settings.json and skill grants are owner-edited state and cannot "
             "be modified through the Files API. Owner-controlled values "
             "(OUROBOROS_RUNTIME_MODE, credentials, A2A bind/expose, review "
             "enforcement) are not agent-mutable. Stop the agent, edit "
@@ -357,7 +396,7 @@ async def api_files_write(request: Request) -> JSONResponse:
         content = str(payload.get("content"))
         create = bool(payload.get("create"))
         root_dir, target, _ = _resolve_target(request, rel_path)
-        if _is_owner_only_settings_file(target):
+        if _contains_owner_only_file(target):
             return _OWNER_ONLY_FILES_API_ERROR
         if not target.exists():
             if not create:
@@ -430,6 +469,8 @@ async def api_files_mkdir(request: Request) -> JSONResponse:
             return JSONResponse({"error": f"Not a directory: {rel_dir}"}, status_code=400)
 
         destination = target_dir / name
+        if _is_owner_only_file(destination):
+            return _OWNER_ONLY_FILES_API_ERROR
         if destination.exists():
             return JSONResponse({"error": f"Path already exists: {name}"}, status_code=409)
         destination.mkdir(parents=False, exist_ok=False)
@@ -462,7 +503,7 @@ async def api_files_delete(request: Request) -> JSONResponse:
         root_dir, target, _ = _resolve_target(request, rel_path)
         if target == root_dir:
             return JSONResponse({"error": "Refusing to delete the configured root directory."}, status_code=400)
-        if _is_owner_only_settings_file(target):
+        if _contains_owner_only_file(target):
             return _OWNER_ONLY_FILES_API_ERROR
         if not target.exists():
             return JSONResponse({"error": f"Path not found: {rel_path}"}, status_code=404)
@@ -510,10 +551,29 @@ async def api_files_transfer(request: Request) -> JSONResponse:
         # resolves to the owner-only settings.json. Source = "move"
         # (deletes settings.json from its expected location), destination
         # = "overwrite settings.json with arbitrary content".
-        if _is_owner_only_settings_file(source):
+        if _contains_owner_only_file(source):
             return _OWNER_ONLY_FILES_API_ERROR
         destination_check = dest_dir / source.name
-        if _is_owner_only_settings_file(destination_check):
+        if _is_owner_only_file(destination_check):
+            return _OWNER_ONLY_FILES_API_ERROR
+        if source.is_dir():
+            try:
+                for child in source.rglob("*"):
+                    projected = destination_check / child.relative_to(source)
+                    if _is_owner_only_file(projected):
+                        return _OWNER_ONLY_FILES_API_ERROR
+                    if child.is_symlink():
+                        try:
+                            resolved = child.resolve(strict=True)
+                        except OSError:
+                            continue
+                        if resolved.is_dir():
+                            for linked_child in resolved.rglob("*"):
+                                if _is_owner_only_file(projected / linked_child.relative_to(resolved)):
+                                    return _OWNER_ONLY_FILES_API_ERROR
+            except OSError:
+                pass
+        elif _is_owner_only_file(destination_check):
             return _OWNER_ONLY_FILES_API_ERROR
         if not source.exists():
             return JSONResponse({"error": f"Path not found: {source_rel}"}, status_code=404)
@@ -577,7 +637,7 @@ async def api_files_upload(request: Request) -> JSONResponse:
         # v5.1.2 iter-2 SR2: an upload's destination would clobber any
         # existing file at that name, including settings.json. Refuse
         # uploads that resolve to the owner-only settings file.
-        if _is_owner_only_settings_file(destination):
+        if _is_owner_only_file(destination):
             return _OWNER_ONLY_FILES_API_ERROR
         if destination.exists():
             return JSONResponse({"error": f"File already exists: {filename}"}, status_code=409)

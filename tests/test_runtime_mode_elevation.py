@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import types
 
 import pytest
 
@@ -178,6 +179,43 @@ def test_data_write_blocks_settings_json(tmp_path, monkeypatch):
     assert not settings_path.exists()
 
 
+def test_data_write_blocks_skill_grants_json(tmp_path, monkeypatch):
+    from ouroboros import config as cfg
+    from ouroboros.tools.core import _data_write
+
+    drive_root = tmp_path / "data"
+    drive_root.mkdir()
+    monkeypatch.setattr(cfg, "DATA_DIR", drive_root, raising=True)
+
+    ctx = _make_drive_ctx(tmp_path)
+    result = _data_write(
+        ctx,
+        "state/skills/weather/grants.json",
+        json.dumps({"granted_keys": ["OPENROUTER_API_KEY"]}),
+    )
+    assert "DATA_WRITE_BLOCKED" in result
+    assert "skill grants" in result
+    assert not (drive_root / "state" / "skills" / "weather" / "grants.json").exists()
+
+
+def test_data_write_blocks_skill_grants_case_variants(tmp_path, monkeypatch):
+    from ouroboros import config as cfg
+    from ouroboros.tools.core import _data_write
+
+    drive_root = tmp_path / "data"
+    drive_root.mkdir()
+    monkeypatch.setattr(cfg, "DATA_DIR", drive_root, raising=True)
+
+    ctx = _make_drive_ctx(tmp_path)
+    result = _data_write(
+        ctx,
+        "State/Skills/weather/grants.json",
+        json.dumps({"granted_keys": ["OPENROUTER_API_KEY"]}),
+    )
+    assert "DATA_WRITE_BLOCKED" in result
+    assert not (drive_root / "State" / "Skills" / "weather" / "grants.json").exists()
+
+
 def test_data_write_allows_other_data_files(tmp_path, monkeypatch):
     """Defense doesn't break legitimate data writes."""
     from ouroboros import config as cfg
@@ -315,6 +353,64 @@ def test_onboarding_can_set_initial_runtime_mode_pro(isolated_settings):
     save_settings({"OUROBOROS_RUNTIME_MODE": "pro"}, allow_elevation=True)
     on_disk = json.loads(isolated_settings.read_text(encoding="utf-8"))
     assert on_disk["OUROBOROS_RUNTIME_MODE"] == "pro"
+
+
+def test_launcher_runtime_mode_bridge_saves_after_confirmation(monkeypatch):
+    import launcher
+
+    saved = {}
+    monkeypatch.setattr(launcher, "_load_settings", lambda: {"OUROBOROS_RUNTIME_MODE": "advanced"})
+    monkeypatch.setattr(launcher, "_save_settings", lambda settings: saved.update(settings))
+
+    result = launcher._request_runtime_mode_change("pro", lambda _title, _message: True)
+
+    assert result["ok"] is True
+    assert result["runtime_mode"] == "pro"
+    assert result["restart_required"] is True
+    assert saved["OUROBOROS_RUNTIME_MODE"] == "pro"
+
+
+def test_launcher_skill_key_grant_validates_review_and_manifest(monkeypatch, tmp_path):
+    import launcher
+
+    class _Manifest:
+        env_from_settings = ["OPENROUTER_API_KEY"]
+        def is_script(self):
+            return True
+
+    class _Review:
+        status = "pass"
+        def is_stale_for(self, _hash):
+            return False
+
+    loaded = types.SimpleNamespace(
+        name="demo",
+        manifest=_Manifest(),
+        review=_Review(),
+        content_hash="hash-a",
+    )
+    captured = {}
+    monkeypatch.setattr(launcher, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(launcher, "_load_settings", lambda: {"OUROBOROS_SKILLS_REPO_PATH": ""})
+    monkeypatch.setattr("ouroboros.skill_loader.find_skill", lambda *_a, **_kw: loaded)
+    monkeypatch.setattr(
+        "ouroboros.skill_loader.save_skill_grants",
+        lambda drive, name, keys, **kw: captured.update(
+            {"drive": drive, "name": name, "keys": keys, **kw}
+        ),
+    )
+
+    result = launcher._request_skill_key_grant(
+        "demo",
+        ["OPENROUTER_API_KEY"],
+        lambda _title, _message: True,
+    )
+
+    assert result["ok"] is True
+    assert captured["name"] == "demo"
+    assert captured["keys"] == ["OPENROUTER_API_KEY"]
+    assert captured["content_hash"] == "hash-a"
+    assert captured["requested_keys"] == ["OPENROUTER_API_KEY"]
 
 
 # ---------------------------------------------------------------------------
@@ -598,15 +694,16 @@ def test_files_api_write_blocks_settings_json(isolated_settings, monkeypatch):
     """Iteration-2 real triad+scope finding SR2: the Files API
     (``/api/files/write``) is a parallel write path that previously
     bypassed both ``_data_write`` and the ``save_settings`` chokepoint.
-    Verify the new ``_is_owner_only_settings_file`` guard rejects
+    Verify the owner-only guard rejects
     writes to the owner-only file. String-level test against the source
     so the assertion is hermetic (full HTTP round-trip belongs in a
     Starlette TestClient suite, but the guard helper is the SSOT)."""
     from ouroboros import file_browser_api as fba_mod
 
     source = pathlib.Path(fba_mod.__file__).read_text(encoding="utf-8")
-    # The shared helper must exist...
+    # The shared helpers must exist...
     assert "_is_owner_only_settings_file" in source
+    assert "_is_owner_only_file" in source
     # ...and must be invoked from each mutating endpoint.
     for endpoint in (
         "api_files_write",
@@ -619,12 +716,23 @@ def test_files_api_write_blocks_settings_json(isolated_settings, monkeypatch):
         # Find the next async def boundary so we scope the guard search.
         next_idx = source.find("\nasync def ", endpoint_idx + 1)
         body = source[endpoint_idx:next_idx if next_idx != -1 else len(source)]
-        assert "_is_owner_only_settings_file" in body, (
-            f"Endpoint {endpoint} must call ``_is_owner_only_settings_file`` "
+        assert "_is_owner_only_file" in body or "_contains_owner_only_file" in body, (
+            f"Endpoint {endpoint} must call ``_is_owner_only_file`` "
             "to refuse writes/deletes/transfers/uploads against the "
-            "owner-only settings.json. Otherwise the Files API is a "
+            "owner-only settings.json and grants.json. Otherwise the Files API is a "
             "parallel privilege-escalation channel."
         )
+
+
+def test_files_api_owner_only_helper_blocks_grants_case_variants(tmp_path, monkeypatch):
+    from ouroboros import config as cfg
+    from ouroboros import file_browser_api as fba_mod
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    monkeypatch.setattr(cfg, "DATA_DIR", data_dir, raising=True)
+    target = data_dir / "State" / "Skills" / "weather" / "grants.json"
+    assert fba_mod._is_owner_only_file(target) is True
 
 
 # ---------------------------------------------------------------------------
@@ -684,6 +792,29 @@ def test_run_shell_in_light_blocks_script_file_with_pathlib_write(tmp_path, monk
         f"Got: {result[:300]}"
     )
     assert "writer.py" in result
+
+
+def test_run_shell_restores_obfuscated_skill_grant_write(tmp_path, monkeypatch):
+    from ouroboros.tools.registry import ToolRegistry
+
+    drive_root = tmp_path / "data"
+    grant_dir = drive_root / "state" / "skills" / "weather"
+    grant_dir.mkdir(parents=True)
+    helper_path = tmp_path / "grant_writer.py"
+    helper_path.write_text(
+        "import json, pathlib, sys\n"
+        "root = pathlib.Path(sys.argv[1])\n"
+        "name = 'grants' + '.json'\n"
+        "target = root / 'state' / 'skills' / 'weather' / name\n"
+        "target.parent.mkdir(parents=True, exist_ok=True)\n"
+        "target.write_text(json.dumps({'granted_keys':['OPENROUTER_API_KEY']}))\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    reg = ToolRegistry(repo_dir=tmp_path, drive_root=drive_root)
+    result = reg.execute("run_shell", {"cmd": ["python3", str(helper_path), str(drive_root)]})
+    assert "OWNER_STATE_RESTORED" in result
+    assert not (grant_dir / "grants.json").exists()
 
 
 def test_run_shell_does_not_scan_files_outside_agent_areas(tmp_path, monkeypatch):

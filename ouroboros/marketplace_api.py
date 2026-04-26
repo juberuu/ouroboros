@@ -1,6 +1,6 @@
 """HTTP surface for the ClawHub marketplace (v4.50).
 
-Endpoints (all opt-in via ``OUROBOROS_CLAWHUB_ENABLED``):
+Endpoints:
 
 - ``GET  /api/marketplace/clawhub/search?q=&sort=&limit=&offset=``
 - ``GET  /api/marketplace/clawhub/info/{slug}``
@@ -64,19 +64,7 @@ def _request_repo_dir(request: Request) -> pathlib.Path:
 
 
 def _enabled_check() -> Optional[JSONResponse]:
-    """Return a 403 response when the marketplace is opt-out."""
-    from ouroboros.config import get_clawhub_enabled
-    if not get_clawhub_enabled():
-        return JSONResponse(
-            {
-                "error": (
-                    "ClawHub marketplace is disabled. Toggle it on in "
-                    "Settings -> Behavior -> ClawHub Marketplace."
-                ),
-                "code": "marketplace_disabled",
-            },
-            status_code=403,
-        )
+    """Compatibility no-op; ClawHub is no longer user-disabled."""
     return None
 
 
@@ -128,16 +116,21 @@ async def api_marketplace_search(request: Request) -> JSONResponse:
     limit = _coerce_int(qp.get("limit"), 25)
     offset = _coerce_int(qp.get("offset"), 0)
     include_plugins = _coerce_bool(qp.get("include_plugins"), False)
+    cursor = qp.get("cursor") or None
     try:
-        results = await asyncio.to_thread(
+        page = await asyncio.to_thread(
             _registry_search,
             query,
             limit=limit,
             offset=offset,
             sort=sort,
+            cursor=cursor,
+            include_metadata=True,
+            timeout_sec=5,
         )
     except Exception as exc:
         return _client_error_response(exc)
+    results = list(page.get("results") or [])
     if not include_plugins:
         results = [r for r in results if not r.is_plugin]
     return JSONResponse(
@@ -146,6 +139,11 @@ async def api_marketplace_search(request: Request) -> JSONResponse:
             "sort": sort,
             "limit": limit,
             "offset": offset,
+            "cursor": cursor,
+            "next_cursor": page.get("next_cursor") or "",
+            "registry_path": page.get("path") or "skills",
+            "registry_attempts": page.get("attempts") or [],
+            "registry_empty": not bool(results),
             "count": len(results),
             "results": [r.to_dict() for r in results],
         }
@@ -428,9 +426,7 @@ async def api_marketplace_installed(request: Request) -> JSONResponse:
     from ouroboros.skill_loader import discover_skills
     from ouroboros.config import get_skills_repo_path
 
-    skills = await asyncio.to_thread(
-        discover_skills, drive_root, repo_path=get_skills_repo_path()
-    )
+    skills = discover_skills(drive_root, repo_path=get_skills_repo_path())
     out = []
     for skill in skills:
         if skill.source != "clawhub":

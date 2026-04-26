@@ -53,6 +53,7 @@ from ouroboros.contracts.skill_manifest import (
     SkillManifestError,
     parse_skill_manifest_text,
 )
+from ouroboros.contracts.plugin_api import FORBIDDEN_SKILL_SETTINGS
 
 log = logging.getLogger(__name__)
 
@@ -112,6 +113,7 @@ VALID_REVIEW_STATUSES = frozenset(
         _REVIEW_STATUS_DEFERRED_PHASE4,
     }
 )
+GRANTS_FILENAME = "grants.json"
 
 
 # ---------------------------------------------------------------------------
@@ -660,6 +662,86 @@ def save_review_state(
     )
 
 
+def requested_core_setting_keys(env_keys: List[str]) -> List[str]:
+    """Return manifest-requested core keys that require explicit grants."""
+    forbidden_upper = {key.upper() for key in FORBIDDEN_SKILL_SETTINGS}
+    out: List[str] = []
+    for raw_key in env_keys or []:
+        key = str(raw_key or "").strip().upper()
+        if key and key in forbidden_upper and key not in out:
+            out.append(key)
+    return out
+
+
+def load_skill_grants(drive_root: pathlib.Path, name: str) -> Dict[str, Any]:
+    data = _read_json(skill_state_dir(drive_root, name) / GRANTS_FILENAME)
+    if not isinstance(data, dict):
+        return {"granted_keys": [], "updated_at": ""}
+    keys = []
+    for raw_key in data.get("granted_keys") or []:
+        key = str(raw_key or "").strip().upper()
+        if key and key not in keys:
+            keys.append(key)
+    requested = []
+    for raw_key in data.get("requested_keys") or []:
+        key = str(raw_key or "").strip().upper()
+        if key and key not in requested:
+            requested.append(key)
+    return {
+        "granted_keys": keys,
+        "requested_keys": requested,
+        "content_hash": str(data.get("content_hash") or ""),
+        "updated_at": str(data.get("updated_at") or ""),
+    }
+
+
+def save_skill_grants(
+    drive_root: pathlib.Path,
+    name: str,
+    granted_keys: List[str],
+    *,
+    content_hash: str,
+    requested_keys: List[str],
+) -> None:
+    allowed = set(requested_core_setting_keys(requested_keys))
+    keys = []
+    for raw_key in granted_keys or []:
+        key = str(raw_key or "").strip().upper()
+        if key and key in allowed and key not in keys:
+            keys.append(key)
+    _atomic_write_json(
+        skill_state_dir(drive_root, name) / GRANTS_FILENAME,
+        {
+            "granted_keys": keys,
+            "requested_keys": sorted(allowed),
+            "content_hash": str(content_hash or ""),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+
+
+def grant_status_for_skill(drive_root: pathlib.Path, skill: LoadedSkill) -> Dict[str, Any]:
+    requested = requested_core_setting_keys(list(skill.manifest.env_from_settings or []))
+    grants = load_skill_grants(drive_root, skill.name)
+    grant_hash_ok = str(grants.get("content_hash") or "") == str(skill.content_hash or "")
+    grant_request_ok = sorted(grants.get("requested_keys") or []) == sorted(requested)
+    persisted_grants = set(grants.get("granted_keys") or []) if grant_hash_ok and grant_request_ok else set()
+    granted = [key for key in requested if key in persisted_grants]
+    missing = [key for key in requested if key not in set(granted)]
+    review_ready = skill.review.status == _REVIEW_STATUS_PASS and not skill.review.is_stale_for(skill.content_hash)
+    unsupported = bool(requested and not skill.manifest.is_script())
+    return {
+        "requested_keys": requested,
+        "granted_keys": granted,
+        "missing_keys": missing,
+        "all_granted": not missing and not unsupported,
+        "usable": review_ready and not missing and not unsupported,
+        "unsupported_for_skill_type": unsupported,
+        "content_hash": grants.get("content_hash", ""),
+        "updated_at": grants.get("updated_at", ""),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Discovery / loading
 # ---------------------------------------------------------------------------
@@ -1134,7 +1216,10 @@ def list_available_for_execution(
     repo_path: str | None = None,
 ) -> List[LoadedSkill]:
     """Return only skills that are enabled + have a fresh PASS review."""
-    return [s for s in discover_skills(drive_root, repo_path=repo_path) if s.available_for_execution]
+    return [
+        s for s in discover_skills(drive_root, repo_path=repo_path)
+        if s.available_for_execution and grant_status_for_skill(drive_root, s).get("usable", True)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1161,7 +1246,14 @@ def summarize_skills(drive_root: pathlib.Path) -> Dict[str, Any]:
         "count": len(skills),
         "runtime_mode": runtime_mode,
         "available": sum(
-            1 for s in skills if is_runtime_eligible_for_execution(s)
+            1 for s in skills
+            if is_runtime_eligible_for_execution(s)
+            and grant_status_for_skill(drive_root, s).get("usable", True)
+        ),
+        "blocked_by_grants": sum(
+            1 for s in skills
+            if is_runtime_eligible_for_execution(s)
+            and not grant_status_for_skill(drive_root, s).get("usable", True)
         ),
         "runtime_blocked": 0,  # v5.1.2: runtime_mode no longer gates skill execution.
         "pending_review": sum(
@@ -1188,8 +1280,12 @@ def summarize_skills(drive_root: pathlib.Path) -> Dict[str, Any]:
                 "enabled": s.enabled,
                 "review_status": s.review.status,
                 "review_stale": s.review.is_stale_for(s.content_hash),
-                "available_for_execution": is_runtime_eligible_for_execution(s),
+                "available_for_execution": (
+                    is_runtime_eligible_for_execution(s)
+                    and grant_status_for_skill(drive_root, s).get("usable", True)
+                ),
                 "static_ready": s.available_for_execution,
+                "blocked_by_grants": not grant_status_for_skill(drive_root, s).get("usable", True),
                 "runtime_blocked_by_mode": False,  # v5.1.2: never blocked by mode.
                 "load_error": s.load_error,
                 "source": s.source,
@@ -1206,13 +1302,17 @@ __all__ = [
     "compute_content_hash",
     "discover_skills",
     "find_skill",
+    "grant_status_for_skill",
     "is_runtime_eligible_for_execution",
     "list_available_for_execution",
     "load_enabled",
     "load_review_state",
+    "load_skill_grants",
     "load_skill",
+    "requested_core_setting_keys",
     "save_enabled",
     "save_review_state",
+    "save_skill_grants",
     "skill_state_dir",
     "summarize_skills",
 ]

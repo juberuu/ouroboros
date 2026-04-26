@@ -231,7 +231,7 @@ def test_adapter_refuses_install_specs(tmp_path):
     assert any("install specs" in b for b in result.blockers)
 
 
-def test_adapter_refuses_forbidden_settings_env_keys(tmp_path):
+def test_adapter_converts_forbidden_settings_env_keys_to_grant_requests(tmp_path):
     staging = tmp_path / "staging"
     _write_staged_skill(
         staging,
@@ -248,8 +248,10 @@ def test_adapter_refuses_forbidden_settings_env_keys(tmp_path):
         ),
     )
     result = adapt_openclaw_skill(staging, slug="x/leaky", version="0.1", sha256="0" * 64)
-    assert not result.ok
-    assert any("forbidden-settings denylist" in b for b in result.blockers)
+    assert result.ok
+    assert "OPENROUTER_API_KEY" in result.manifest.env_from_settings
+    assert result.provenance["requested_key_grants"] == ["OPENROUTER_API_KEY"]
+    assert any("explicit per-skill grants" in w for w in result.warnings)
 
 
 def test_adapter_refuses_plugin_packages(tmp_path):
@@ -369,7 +371,7 @@ def test_adapter_handles_multiline_description(tmp_path):
     assert parsed.description == result.manifest.description
 
 
-def test_adapter_refuses_lowercase_forbidden_settings_env(tmp_path):
+def test_adapter_normalises_lowercase_forbidden_settings_env_to_grant(tmp_path):
     """v4.50 fix: case-insensitive denylist comparison.
 
     A publisher who lowercases the env key (``openrouter_api_key``) used
@@ -395,8 +397,9 @@ def test_adapter_refuses_lowercase_forbidden_settings_env(tmp_path):
     result = adapt_openclaw_skill(
         staging, slug="x/lowercase-leak", version="0.1", sha256="0" * 64
     )
-    assert not result.ok
-    assert any("forbidden-settings denylist" in b for b in result.blockers)
+    assert result.ok
+    assert result.manifest.env_from_settings == ["OPENROUTER_API_KEY"]
+    assert result.provenance["requested_key_grants"] == ["OPENROUTER_API_KEY"]
 
 
 def test_adapter_warns_on_unrecognised_allowed_tools_tokens(tmp_path):

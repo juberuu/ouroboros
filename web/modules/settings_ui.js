@@ -285,16 +285,16 @@ export function renderSettingsPage() {
                             <code>Light</code> blocks repo self-modification but allows reviewed + enabled skills to run.
                             <code>Advanced</code> is the default &mdash; self-modify the evolutionary layer; protected core/contract/release files stay guarded by the shared runtime-mode policy.
                             <code>Pro</code> can edit protected core/contract/release surfaces, but commits still go through the normal triad + scope review gate; Advanced remains limited to the evolutionary layer.
-                            <br><strong>Display only:</strong> runtime mode is owner-controlled. To change it, stop the agent, edit
-                            <code>~/Ouroboros/data/settings.json</code> directly, then restart. The Save button in this page never modifies <code>OUROBOROS_RUNTIME_MODE</code>.
+                            <br><strong>Owner controlled:</strong> desktop builds ask the launcher for native confirmation before saving a mode change.
+                            Web/Docker sessions can view the current mode but cannot elevate it from this page.
                         </div>
                         <div class="settings-effort-card">
                             <label>Runtime Mode</label>
                             <input id="s-runtime-mode" type="hidden" value="advanced">
-                            <div class="settings-effort-group" data-effort-group data-runtime-mode-group data-effort-target="s-runtime-mode" title="Runtime mode is owner-only. Edit settings.json directly while the agent is stopped, then restart.">
-                                <button type="button" class="settings-effort-btn" data-effort-value="light" disabled>Light</button>
-                                <button type="button" class="settings-effort-btn" data-effort-value="advanced" disabled>Advanced</button>
-                                <button type="button" class="settings-effort-btn" data-effort-value="pro" disabled>Pro</button>
+                            <div class="settings-effort-group" data-effort-group data-runtime-mode-group data-effort-target="s-runtime-mode" title="Runtime mode changes require native launcher confirmation and restart.">
+                                <button type="button" class="settings-effort-btn" data-effort-value="light">Light</button>
+                                <button type="button" class="settings-effort-btn" data-effort-value="advanced">Advanced</button>
+                                <button type="button" class="settings-effort-btn" data-effort-value="pro">Pro</button>
                             </div>
                         </div>
                     </div>
@@ -319,22 +319,13 @@ export function renderSettingsPage() {
                     <div class="form-section">
                         <h3>ClawHub Marketplace</h3>
                         <div class="settings-section-copy">
-                            Opt-in surface for installing community skills from
+                            Always-on surface for installing community skills from
                             <a href="https://clawhub.ai" target="_blank" rel="noopener">clawhub.ai</a>.
-                            When enabled, the Skills page exposes a Marketplace tab; every
-                            install is staged, OpenClaw frontmatter is translated into the
+                            The Skills page exposes a Marketplace tab; every install is
+                            staged, OpenClaw frontmatter is translated into the
                             Ouroboros manifest shape, and the standard tri-model review runs
                             automatically before the skill becomes executable. Plugins (Node)
                             are filtered out — only skill packages are installable.
-                        </div>
-                        <div class="form-row">
-                            <div class="form-field">
-                                <label>
-                                    <input type="checkbox" id="s-clawhub-enabled">
-                                    Enable ClawHub Marketplace
-                                </label>
-                                <div class="settings-inline-note">Off by default. Disabled = HTTP endpoints respond with 403 and the Marketplace tab shows a hint.</div>
-                            </div>
                         </div>
                         <div class="form-row">
                             <div class="form-field">

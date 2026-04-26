@@ -70,13 +70,12 @@ class UninstallResult:
 
 
 def _ensure_marketplace_enabled() -> None:
-    """Raise :class:`PermissionError` when the marketplace is opt-out."""
-    from ouroboros.config import get_clawhub_enabled
-    if not get_clawhub_enabled():
-        raise PermissionError(
-            "ClawHub marketplace is disabled. Set OUROBOROS_CLAWHUB_ENABLED=true "
-            "in Settings > Behavior to opt in to the marketplace surface."
-        )
+    """Compatibility no-op: ClawHub is always available.
+
+    Registry host validation and archive/review gates remain the safety
+    boundaries; the old user-facing opt-in switch was removed.
+    """
+    return None
 
 
 def _clawhub_skills_root(drive_root: pathlib.Path) -> pathlib.Path:

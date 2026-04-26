@@ -82,10 +82,6 @@ SETTINGS_DEFAULTS = {
     # primary location since v4.50). Empty means "use only the data
     # plane". Ouroboros never clones or pulls this directory itself.
     "OUROBOROS_SKILLS_REPO_PATH": "",
-    # ClawHub marketplace (off by default — opt-in). When enabled,
-    # /api/marketplace/clawhub/* endpoints accept search/install/update
-    # operations against the configured registry URL.
-    "OUROBOROS_CLAWHUB_ENABLED": False,
     "OUROBOROS_CLAWHUB_REGISTRY_URL": "https://clawhub.ai/api/v1",
     # Scope review: single-model blocking reviewer (runs after triad review)
     "OUROBOROS_SCOPE_REVIEW_MODEL": "openai/gpt-5.5",
@@ -495,11 +491,13 @@ def get_clawhub_skills_dir() -> pathlib.Path:
 
 
 def get_clawhub_enabled() -> bool:
-    """Return True when the ClawHub marketplace surface is opt-in enabled."""
-    raw = os.environ.get("OUROBOROS_CLAWHUB_ENABLED", "")
-    if not raw:
-        return False
-    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+    """Return True; ClawHub is no longer user-disabled by settings.
+
+    Kept as a compatibility helper for older call sites and tests while
+    the public switch is retired. Registry host validation remains the
+    actual safety boundary.
+    """
+    return True
 
 
 def get_clawhub_registry_url() -> str:
@@ -762,8 +760,8 @@ def apply_settings_to_env(settings: dict) -> None:
         "OUROBOROS_SCOPE_REVIEW_MODEL",
         # Phase 2 runtime-mode + skills-repo plumbing (no runtime gating yet).
         "OUROBOROS_RUNTIME_MODE", "OUROBOROS_SKILLS_REPO_PATH",
-        # v4.50 ClawHub marketplace opt-in.
-        "OUROBOROS_CLAWHUB_ENABLED", "OUROBOROS_CLAWHUB_REGISTRY_URL",
+        # v4.50+ ClawHub marketplace registry URL.
+        "OUROBOROS_CLAWHUB_REGISTRY_URL",
         "OUROBOROS_EFFORT_TASK", "OUROBOROS_EFFORT_EVOLUTION",
         "OUROBOROS_EFFORT_REVIEW", "OUROBOROS_EFFORT_SCOPE_REVIEW",
         "OUROBOROS_EFFORT_CONSCIOUSNESS",

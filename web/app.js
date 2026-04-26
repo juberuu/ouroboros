@@ -18,6 +18,7 @@ import { initEvolution } from './modules/evolution.js';
 import { initSettings } from './modules/settings.js';
 import { initCosts } from './modules/costs.js';
 import { initSkills } from './modules/skills.js';
+import { initWidgets } from './modules/widgets.js';
 
 import { initAbout } from './modules/about.js';
 import { initOnboardingOverlay } from './modules/onboarding_overlay.js';
@@ -102,6 +103,7 @@ initEvolution(ctx);
 initSettings(ctx);
 initCosts(ctx);
 initSkills(ctx);
+initWidgets(ctx);
 
 initAbout(ctx);
 initOnboardingOverlay();

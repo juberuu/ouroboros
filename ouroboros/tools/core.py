@@ -80,6 +80,33 @@ def _data_write(ctx: ToolContext, path: str, content: str, mode: str = "overwrit
     from ouroboros import config as _cfg
     target_path = pathlib.Path(p)
     settings_path = pathlib.Path(_cfg.SETTINGS_PATH)
+    grants_path = False
+    try:
+        rel_to_data = target_path.resolve(strict=False).relative_to(pathlib.Path(_cfg.DATA_DIR).resolve(strict=False))
+        parts = rel_to_data.parts
+        grants_path = (
+            len(parts) == 4
+            and parts[0].lower() == "state"
+            and parts[1].lower() == "skills"
+            and parts[3].lower() == "grants.json"
+        )
+    except (OSError, ValueError):
+        grants_path = False
+    if not grants_path:
+        grants_root = pathlib.Path(_cfg.DATA_DIR) / "state" / "skills"
+        if target_path.exists() and grants_root.is_dir():
+            for grant_file in grants_root.glob("*/grants.json"):
+                try:
+                    if grant_file.exists() and target_path.samefile(grant_file):
+                        grants_path = True
+                        break
+                except OSError:
+                    continue
+    if grants_path:
+        return (
+            "⚠️ DATA_WRITE_BLOCKED: skill grants are owner-only state. "
+            "Use the desktop launcher confirmation flow from the Skills UI."
+        )
     matches = False
     try:
         if target_path.exists() and settings_path.exists():

@@ -68,7 +68,6 @@ export function initChat({ ws, state, updateUnreadBadge }) {
             <span id="chat-status" class="status-badge offline">Connecting...</span>
         </div>
         <div id="chat-messages"></div>
-        <div class="chat-bottom-fade" aria-hidden="true"></div>
         <div id="chat-input-area">
             <div id="chat-attachment-preview" class="chat-attachment-preview"></div>
             <div class="chat-input-wrap">
@@ -1224,7 +1223,8 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                 // user was already near the bottom to avoid hijacking scroll
                 // position when they are reading older messages.
                 if (wasFirstLoad || isNearBottom()) {
-                    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                    updateMessagesPadding({ preserveStickiness: false });
+                    scrollToBottomAfterLayout();
                 }
                 return messages.length > 0;
             } catch (err) {
@@ -1424,9 +1424,28 @@ export function initChat({ ws, state, updateUnreadBadge }) {
     // the absolute-positioned #chat-input-area overlay, so the last bubble is always
     // fully visible with a small buffer — no more excessive gap or hidden content.
     const inputArea = document.getElementById('chat-input-area');
-    function updateMessagesPadding() {
+    function scrollToBottom() {
+        messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    }
+
+    function scrollToBottomAfterLayout() {
+        requestAnimationFrame(() => {
+            scrollToBottom();
+            requestAnimationFrame(scrollToBottom);
+        });
+    }
+
+    function updateMessagesPadding(options = {}) {
+        const preserveStickiness = options.preserveStickiness !== false;
+        const shouldStick = preserveStickiness && isNearBottom(160);
         const h = inputArea ? inputArea.offsetHeight : 84;
         messagesDiv.style.paddingBottom = (h + 16) + 'px';
+        if (shouldStick) scrollToBottomAfterLayout();
+    }
+
+    if (window.ResizeObserver && inputArea) {
+        const inputResizeObserver = new ResizeObserver(() => updateMessagesPadding());
+        inputResizeObserver.observe(inputArea);
     }
 
     input.addEventListener('input', () => {

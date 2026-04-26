@@ -224,9 +224,23 @@ function summaryCard(summary, installedMap, isPlugin) {
 }
 
 
-function renderResults(host, summaries, installedMap) {
+function renderResults(host, summaries, installedMap, registryCount, diagnostics) {
     if (!summaries.length) {
-        host.innerHTML = '<div class="muted">No skills match the current filters.</div>';
+        if (registryCount > 0) {
+            host.innerHTML = '<div class="muted">Registry returned skills, but current filters hide them all.</div>';
+        } else {
+            const path = diagnostics?.registryPath || 'skills';
+            const attempts = Array.isArray(diagnostics?.attempts) && diagnostics.attempts.length
+                ? `<details class="marketplace-debug"><summary>Registry diagnostics</summary><pre>${escapeHtml(JSON.stringify(diagnostics.attempts, null, 2))}</pre></details>`
+                : '';
+            host.innerHTML = `
+                <div class="muted">
+                    ClawHub returned zero installable skills from <code>${escapeHtml(path)}</code>.
+                    Ouroboros also probes alternate registry paths when the primary catalogue is empty.
+                </div>
+                ${attempts}
+            `;
+        }
         return;
     }
     host.innerHTML = summaries
@@ -235,17 +249,18 @@ function renderResults(host, summaries, installedMap) {
 }
 
 
-function renderPagination(host, { offset, limit, count }) {
-    if (count < limit && offset === 0) {
+function renderPagination(host, { offset, limit, count, cursor, nextCursor }) {
+    if (!nextCursor && count < limit && offset === 0) {
         host.hidden = true;
         host.innerHTML = '';
         return;
     }
     host.hidden = false;
+    const nextDisabled = nextCursor ? '' : (count < limit ? 'disabled' : '');
     host.innerHTML = `
-        <button class="btn btn-default" data-mp-prev ${offset <= 0 ? 'disabled' : ''}>Prev</button>
-        <span class="muted">offset ${offset} · showing ${count}</span>
-        <button class="btn btn-default" data-mp-next ${count < limit ? 'disabled' : ''}>Next</button>
+        <button class="btn btn-default" data-mp-prev ${offset <= 0 && !cursor ? 'disabled' : ''}>Prev</button>
+        <span class="muted">${cursor ? 'cursor page' : `offset ${offset}`} · showing ${count}</span>
+        <button class="btn btn-default" data-mp-next ${nextDisabled}>Next</button>
     `;
 }
 
@@ -282,8 +297,12 @@ async function fetchJson(url, init) {
 
 
 async function loadInstalled() {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3000);
     try {
-        const data = await fetchJson('/api/marketplace/clawhub/installed');
+        const data = await fetchJson('/api/marketplace/clawhub/installed', {
+            signal: controller.signal,
+        });
         const map = new Map();
         for (const skill of data.skills || []) {
             const provSlug = skill.provenance?.slug;
@@ -291,8 +310,12 @@ async function loadInstalled() {
         }
         return map;
     } catch (err) {
-        console.warn('marketplace: installed lookup failed', err);
+        if (err?.name !== 'AbortError') {
+            console.warn('marketplace: installed lookup failed', err);
+        }
         return new Map();
+    } finally {
+        clearTimeout(timer);
     }
 }
 
@@ -303,6 +326,7 @@ async function runSearch(state) {
     if (state.sort) params.set('sort', state.sort);
     params.set('limit', String(state.limit));
     params.set('offset', String(state.offset));
+    if (state.cursor) params.set('cursor', state.cursor);
     return fetchJson(`/api/marketplace/clawhub/search?${params.toString()}`);
 }
 
@@ -516,6 +540,10 @@ export function initMarketplace(pane) {
         osFilter: '',
         results: [],
         installedMap: new Map(),
+        cursor: '',
+        nextCursor: '',
+        registryPath: 'skills',
+        registryAttempts: [],
     };
 
     const queryInput = pane.querySelector('#mp-query');
@@ -532,9 +560,12 @@ export function initMarketplace(pane) {
     async function refresh() {
         showStatus(pane, 'Loading…', 'muted');
         try {
-            state.installedMap = await loadInstalled();
+            state.installedMap = new Map();
             const data = await runSearch(state);
             state.results = data.results || [];
+            state.nextCursor = data.next_cursor || '';
+            state.registryPath = data.registry_path || 'skills';
+            state.registryAttempts = data.registry_attempts || [];
             const filtered = state.results.filter((s) => {
                 if (state.onlyOfficial && !s.badges?.official) return false;
                 if (state.osFilter) {
@@ -547,28 +578,32 @@ export function initMarketplace(pane) {
                 }
                 return true;
             });
-            renderResults(resultsHost, filtered, state.installedMap);
+            renderResults(resultsHost, filtered, state.installedMap, state.results.length, {
+                registryPath: state.registryPath,
+                attempts: state.registryAttempts,
+            });
             renderPagination(paginationHost, {
                 offset: state.offset,
                 limit: state.limit,
                 count: state.results.length,
+                cursor: state.cursor,
+                nextCursor: state.nextCursor,
             });
             showStatus(pane,
-                `${filtered.length} skill${filtered.length === 1 ? '' : 's'} (showing ${state.results.length} from registry)`,
+                `${filtered.length} skill${filtered.length === 1 ? '' : 's'} (showing ${state.results.length} from ${state.registryPath})`,
                 'muted',
             );
+            loadInstalled().then((installedMap) => {
+                state.installedMap = installedMap;
+                renderResults(resultsHost, filtered, state.installedMap, state.results.length, {
+                    registryPath: state.registryPath,
+                    attempts: state.registryAttempts,
+                });
+            }).catch(() => {});
         } catch (err) {
             const message = err?.body?.error || err?.message || String(err);
             showStatus(pane, `Error: ${message}`, 'danger');
-            if (err?.status === 403) {
-                resultsHost.innerHTML = `
-                    <div class="muted">Marketplace is disabled. Enable it in
-                    Settings &rarr; Behavior &rarr; ClawHub Marketplace
-                    (sets <code>OUROBOROS_CLAWHUB_ENABLED=true</code>).</div>
-                `;
-            } else {
-                resultsHost.innerHTML = `<div class="skills-load-error">${escapeHtml(message)}</div>`;
-            }
+            resultsHost.innerHTML = `<div class="skills-load-error">${escapeHtml(message)}</div>`;
             paginationHost.hidden = true;
         }
     }
@@ -581,11 +616,13 @@ export function initMarketplace(pane) {
     queryInput.addEventListener('input', (event) => {
         state.query = event.target.value || '';
         state.offset = 0;
+        state.cursor = '';
         scheduleRefresh(false);
     });
     sortSelect.addEventListener('change', () => {
         state.sort = sortSelect.value;
         state.offset = 0;
+        state.cursor = '';
         scheduleRefresh(true);
     });
     onlyOfficial.addEventListener('change', () => {
@@ -603,9 +640,14 @@ export function initMarketplace(pane) {
         const next = event.target.closest('[data-mp-next]');
         if (prev) {
             state.offset = Math.max(0, state.offset - state.limit);
+            state.cursor = '';
             scheduleRefresh(true);
         } else if (next) {
-            state.offset = state.offset + state.limit;
+            if (state.nextCursor) {
+                state.cursor = state.nextCursor;
+            } else {
+                state.offset = state.offset + state.limit;
+            }
             scheduleRefresh(true);
         }
     });

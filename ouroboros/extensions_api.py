@@ -25,7 +25,11 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from ouroboros.extension_loader import list_routes, snapshot
-from ouroboros.skill_loader import discover_skills, find_skill
+from ouroboros.skill_loader import (
+    discover_skills,
+    find_skill,
+    grant_status_for_skill,
+)
 
 log = logging.getLogger(__name__)
 
@@ -135,21 +139,16 @@ async def api_extensions_index(request: Request) -> JSONResponse:
         #   ``installed_at`` / ``updated_at`` (internally generated).
         #   These let the operator inspect what's already on disk
         #   without re-enabling the marketplace surface.
-        # - **Gated on ``OUROBOROS_CLAWHUB_ENABLED``**: the
-        #   *registry-controlled* fields ``homepage``, ``license``,
+        # - Registry-controlled fields ``homepage``, ``license``,
         #   ``primary_env``, ``adapter_warnings``, ``registry_url``.
         #   These can carry attacker-shaped strings written into
-        #   provenance at install time; they vanish from the wire
-        #   when the operator turns the marketplace off.
+        #   provenance at install time, so the UI must keep rendering
+        #   them as text/safe links.
         try:
             from ouroboros.marketplace.provenance import read_provenance
         except Exception:  # pragma: no cover — defensive
             read_provenance = lambda *_a, **_kw: None  # type: ignore[assignment]
-        try:
-            from ouroboros.config import get_clawhub_enabled
-            marketplace_enabled = bool(get_clawhub_enabled())
-        except Exception:  # pragma: no cover — defensive
-            marketplace_enabled = False
+        marketplace_enabled = True
 
         catalog = []
         for s in skills:
@@ -172,6 +171,8 @@ async def api_extensions_index(request: Request) -> JSONResponse:
                     or _live_ws_count(s.name)
                 ),
                 "ui_tabs_pending": _pending_ui_tabs(s.name),
+                "review_findings": list(s.review.findings or []),
+                "grants": grant_status_for_skill(drive_root, s),
                 # v4.50: surface the discovery source so the Skills tab
                 # can render a clawhub badge + Update/Uninstall buttons
                 # for marketplace-installed skills. Without this the
@@ -343,7 +344,7 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
     via HTTP.
     """
     from ouroboros.config import get_skills_repo_path, load_settings
-    from ouroboros.skill_loader import find_skill, save_enabled
+    from ouroboros.skill_loader import find_skill, grant_status_for_skill, save_enabled
     from ouroboros import extension_loader
 
     skill_name = str(request.path_params.get("skill") or "").strip()
@@ -368,6 +369,29 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
             {"error": f"cannot enable: {loaded.load_error}"},
             status_code=400,
         )
+    if enabled:
+        stale = loaded.review.is_stale_for(loaded.content_hash)
+        grants = grant_status_for_skill(drive_root, loaded)
+        if loaded.review.status != "pass" or stale:
+            return JSONResponse(
+                {
+                    "error": "cannot enable until review status is fresh PASS",
+                    "review_status": loaded.review.status,
+                    "review_stale": stale,
+                    "grants": grants,
+                },
+                status_code=409,
+            )
+        if not grants.get("all_granted", True):
+            return JSONResponse(
+                {
+                    "error": "cannot enable until requested key grants are approved",
+                    "review_status": loaded.review.status,
+                    "review_stale": stale,
+                    "grants": grants,
+                },
+                status_code=409,
+            )
     if not enabled and collision_load_error:
         action = None
         if loaded.name in extension_loader.snapshot()["extensions"]:
@@ -404,6 +428,8 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
             "skill": loaded.name,
             "enabled": enabled,
             "review_status": loaded.review.status,
+            "review_stale": loaded.review.is_stale_for(loaded.content_hash),
+            "grants": grant_status_for_skill(drive_root, loaded),
             "extension_action": action,
             "extension_reason": live_reason,
         }
@@ -462,6 +488,31 @@ async def api_skill_review(request: Request) -> JSONResponse:
         repo_path=repo_path,
         retry_load_error=True,
     )
+    try:
+        from supervisor.message_bus import send_with_budget
+
+        findings = outcome.findings or []
+        top_findings = []
+        for item in findings[:5]:
+            if isinstance(item, dict):
+                label = item.get("item") or item.get("check") or item.get("title") or "finding"
+                verdict = item.get("verdict") or item.get("severity") or ""
+                reason = item.get("reason") or item.get("message") or ""
+                top_findings.append(f"- {verdict} {label}: {reason}".strip())
+        details = "\n".join(top_findings) if top_findings else "- No reviewer findings."
+        send_with_budget(
+            0,
+            (
+                f"### Skill review: `{outcome.skill_name}`\n"
+                f"Status: `{outcome.status}`\n\n"
+                f"{details}\n\n"
+                "Full findings are available in the Skills page."
+            ),
+            fmt="markdown",
+            task_id="api_skill_review",
+        )
+    except Exception:
+        log.debug("Could not publish skill review summary to chat", exc_info=True)
     return JSONResponse(
         {
             "skill": outcome.skill_name,
@@ -476,10 +527,22 @@ async def api_skill_review(request: Request) -> JSONResponse:
     )
 
 
+async def api_skill_grants(request: Request) -> JSONResponse:
+    """Reject direct grant writes; desktop launcher owns this boundary."""
+    return JSONResponse(
+        {
+            "error": "key grants require desktop launcher confirmation",
+            "code": "owner_confirmation_required",
+        },
+        status_code=403,
+    )
+
+
 __all__ = [
     "api_extensions_index",
     "api_extension_manifest",
     "api_extension_dispatch",
     "api_skill_toggle",
     "api_skill_review",
+    "api_skill_grants",
 ]

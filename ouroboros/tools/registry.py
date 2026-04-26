@@ -599,6 +599,12 @@ class ToolRegistry:
                 "stopping the agent and editing settings.json "
                 "directly, then restart."
             )
+        if "grants.json" in cmd_lower and "state" in cmd_lower and "skills" in cmd_lower:
+            return (
+                "⚠️ GRANT_WRITE_BLOCKED: skill key grants are owner-only "
+                "state and must be created through the desktop launcher "
+                "confirmation flow."
+            )
 
         # 2. Light-mode repo-mutation indicators (argv).
         if runtime_mode == "light":
@@ -733,6 +739,13 @@ class ToolRegistry:
                     "stopping the agent and editing settings.json "
                     "directly, then restart."
                 )
+            if "grants.json" in content_lower and "state" in content_lower and "skills" in content_lower:
+                return (
+                    f"⚠️ GRANT_WRITE_BLOCKED: script file "
+                    f"{script_path_str!r} targets grants.json. Skill key "
+                    "grants are owner-only state and must be created "
+                    "through the desktop launcher confirmation flow."
+                )
             if runtime_mode == "light" and any(
                 ind in content_lower for ind in _LIGHT_MUTATION_INDICATORS
             ):
@@ -746,6 +759,52 @@ class ToolRegistry:
                     "access."
                 )
         return None
+
+    def _snapshot_owner_files(self) -> Dict[pathlib.Path, Optional[str]]:
+        from ouroboros import config as _cfg
+        out: Dict[pathlib.Path, Optional[str]] = {}
+        settings_path = pathlib.Path(_cfg.SETTINGS_PATH)
+        try:
+            out[settings_path] = settings_path.read_text(encoding="utf-8") if settings_path.is_file() else None
+        except OSError:
+            out[settings_path] = None
+        root = pathlib.Path(self._ctx.drive_root) / "state" / "skills"
+        if not root.is_dir():
+            return out
+        for path in root.glob("*/grants.json"):
+            try:
+                out[path] = path.read_text(encoding="utf-8")
+            except OSError:
+                out[path] = None
+        return out
+
+    def _restore_owner_files(self, before: Dict[pathlib.Path, Optional[str]]) -> bool:
+        from ouroboros import config as _cfg
+        root = pathlib.Path(self._ctx.drive_root) / "state" / "skills"
+        current = set(root.glob("*/grants.json")) if root.is_dir() else set()
+        settings_path = pathlib.Path(_cfg.SETTINGS_PATH)
+        current.add(settings_path)
+        changed = False
+        for path in current - set(before):
+            try:
+                path.unlink()
+                changed = True
+            except OSError:
+                pass
+        for path, content in before.items():
+            try:
+                if content is None:
+                    if path.exists():
+                        path.unlink()
+                        changed = True
+                    continue
+                if not path.exists() or path.read_text(encoding="utf-8") != content:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(content, encoding="utf-8")
+                    changed = True
+            except OSError:
+                pass
+        return changed
 
     def execute(self, name: str, args: Dict[str, Any]) -> str:
         entry = self._entries.get(name)
@@ -843,12 +902,21 @@ class ToolRegistry:
         if not is_safe:
             return safety_msg
 
+        owner_snapshot = self._snapshot_owner_files() if name == "run_shell" else {}
         try:
             result = entry.handler(self._ctx, **args)
         except TypeError as e:
             return f"⚠️ TOOL_ARG_ERROR ({name}): {e}"
         except Exception as e:
             return f"⚠️ TOOL_ERROR ({name}): {e}"
+        if name == "run_shell":
+            import time
+            time.sleep(0.5)
+        if name == "run_shell" and self._restore_owner_files(owner_snapshot):
+            result = (
+                f"{result}\n\n⚠️ OWNER_STATE_RESTORED: run_shell attempted to "
+                "change owner-only settings/grant state; protected files were restored."
+            )
 
         # Revert protected files after claude_code_edit unless pro mode is
         # active; pro-mode commits still require the normal commit review later.

@@ -118,6 +118,19 @@ export function initSettings({ state }) {
         }
     }
 
+    function syncRuntimeModeBridgeState() {
+        const hasBridge = Boolean(window.pywebview?.api?.request_runtime_mode_change);
+        const group = document.querySelector('[data-runtime-mode-group]');
+        if (group) {
+            group.title = hasBridge
+                ? 'Runtime mode changes require native launcher confirmation and restart.'
+                : 'Runtime mode is view-only here. Use the desktop app or edit settings.json while Ouroboros is stopped.';
+        }
+        document.querySelectorAll('[data-runtime-mode-group] [data-effort-value]').forEach((button) => {
+            button.disabled = !hasBridge;
+        });
+    }
+
     function snapshotSettingsDraft() {
         return JSON.stringify(collectBody());
     }
@@ -224,7 +237,6 @@ export function initSettings({ state }) {
         byId('s-review-enforcement').value = s.OUROBOROS_REVIEW_ENFORCEMENT || 'advisory';
         byId('s-runtime-mode').value = s.OUROBOROS_RUNTIME_MODE || 'advanced';
         applyInputValue('s-skills-repo-path', s.OUROBOROS_SKILLS_REPO_PATH);
-        applyCheckboxValue('s-clawhub-enabled', s.OUROBOROS_CLAWHUB_ENABLED);
         applyInputValue('s-clawhub-registry-url', s.OUROBOROS_CLAWHUB_REGISTRY_URL);
         if (s.OUROBOROS_MAX_WORKERS) byId('s-workers').value = s.OUROBOROS_MAX_WORKERS;
         if (s.OUROBOROS_SOFT_TIMEOUT_SEC) byId('s-soft-timeout').value = s.OUROBOROS_SOFT_TIMEOUT_SEC;
@@ -253,6 +265,7 @@ export function initSettings({ state }) {
         if (s.A2A_TASK_TTL_HOURS) applyInputValue('s-a2a-ttl-hours', s.A2A_TASK_TTL_HOURS);
         resetSecretClearFlags(page);
         syncEffortSegments(page);
+        syncRuntimeModeBridgeState();
     }
 
     function _renderNetworkHint(meta) {
@@ -333,13 +346,10 @@ export function initSettings({ state }) {
             OUROBOROS_SCOPE_REVIEW_MODEL: byId('s-scope-review-model').value.trim(),
             OUROBOROS_EFFORT_SCOPE_REVIEW: byId('s-effort-scope-review').value,
             OUROBOROS_REVIEW_ENFORCEMENT: byId('s-review-enforcement').value,
-            // OUROBOROS_RUNTIME_MODE is owner-only (v5.1.2 elevation ratchet):
-            // /api/settings POST ignores this key. Mode changes happen only via
-            // direct settings.json edit while the agent is stopped. The
-            // segmented control below remains visible for display + the
-            // tooltip explains the manual procedure.
+            // OUROBOROS_RUNTIME_MODE is owner-only: /api/settings still
+            // ignores it, while desktop mode changes go through the
+            // launcher-native confirmation bridge after normal settings save.
             OUROBOROS_SKILLS_REPO_PATH: byId('s-skills-repo-path').value.trim(),
-            OUROBOROS_CLAWHUB_ENABLED: byId('s-clawhub-enabled')?.checked === true,
             OUROBOROS_CLAWHUB_REGISTRY_URL: byId('s-clawhub-registry-url')?.value.trim() || '',
             OUROBOROS_MAX_WORKERS: readInt('s-workers', 5),
             OUROBOROS_SOFT_TIMEOUT_SEC: readInt('s-soft-timeout', 600),
@@ -383,7 +393,26 @@ export function initSettings({ state }) {
         return body;
     }
 
+    async function saveRuntimeModeViaNativeBridgeIfNeeded() {
+        const nextMode = byId('s-runtime-mode').value || 'advanced';
+        const currentMode = currentSettings?.OUROBOROS_RUNTIME_MODE || 'advanced';
+        if (nextMode === currentMode) return null;
+        const bridge = window.pywebview?.api?.request_runtime_mode_change;
+        if (!bridge) {
+            throw new Error(
+                'Runtime mode changes require the desktop launcher confirmation bridge. '
+                + 'Use the desktop app, or stop Ouroboros and edit settings.json manually.'
+            );
+        }
+        const result = await bridge(nextMode);
+        if (!result || result.ok !== true) {
+            throw new Error(result?.error || 'Runtime mode change was cancelled.');
+        }
+        return result;
+    }
+
     syncSettingsLoadState();
+    syncRuntimeModeBridgeState();
     reloadSettingsWithFeedback();
 
     byId('s-anthropic')?.addEventListener('input', () => {
@@ -461,6 +490,13 @@ export function initSettings({ state }) {
             });
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+            let runtimeModeResult = null;
+            let runtimeModeError = '';
+            try {
+                runtimeModeResult = await saveRuntimeModeViaNativeBridgeIfNeeded();
+            } catch (error) {
+                runtimeModeError = error.message || String(error);
+            }
             await loadSettings();
             let statusMsg;
             let statusType = 'ok';
@@ -478,6 +514,14 @@ export function initSettings({ state }) {
             }
             if (data.warnings && data.warnings.length) {
                 statusMsg += ' ⚠️ ' + data.warnings.join(' | ');
+                statusType = 'warn';
+            }
+            if (runtimeModeResult?.restart_required) {
+                statusMsg = `${statusMsg} Runtime mode saved as ${runtimeModeResult.runtime_mode}; restart required.`;
+                statusType = 'warn';
+            }
+            if (runtimeModeError) {
+                statusMsg = `${statusMsg} Runtime mode was not changed: ${runtimeModeError}`;
                 statusType = 'warn';
             }
             setStatus(statusMsg, statusType);

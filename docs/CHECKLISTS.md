@@ -341,7 +341,7 @@ total). Each entry carries `item`, `verdict` (`PASS`/`FAIL`), `severity`
 | 2 | permissions_honesty | Do the declared `permissions` match what the scripts actually do? Missing permission declaration for an effect the code performs is a concrete FAIL. Examples: `net` must be declared if any script uses `httpx`/`requests`/`socket`/`urllib`; `fs` must be declared if a script writes outside the skill state dir; `subprocess` must be declared if a script spawns another process. | critical |
 | 3 | no_repo_mutation | Does any script attempt to write to the self-modifying Ouroboros repo (`~/Ouroboros/repo/`)? Import of `repo_write`/`repo_commit`, `git add`/`git commit`, or any path that starts with `OUROBOROS_REPO_DIR` / `~/Ouroboros/repo` is a concrete FAIL. Skills may only propose patches by returning artifact bundles; commits go through the first-party reviewed path. | critical |
 | 4 | path_confinement | Do scripts stay inside the skill directory and the dedicated state dir (`~/Ouroboros/data/state/skills/<name>/`)? Absolute paths, `..` traversal, and writes to arbitrary user home subdirs are concrete FAIL. Reading from outside the skill dir is OK for read-only lookups (e.g. system info), write-path confinement is the strict rule. | critical |
-| 5 | env_allowlist | Is `env_from_settings` a short, whitelisted list of settings keys (e.g. `TIMEZONE`, `OUROBOROS_MODEL`)? **Note**: keys in the runtime `_FORBIDDEN_ENV_FORWARD_KEYS` denylist (`OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `OPENAI_COMPATIBLE_API_KEY`, `CLOUDRU_FOUNDATION_MODELS_API_KEY`, `ANTHROPIC_API_KEY`, `TELEGRAM_BOT_TOKEN`, `GITHUB_TOKEN`, `OUROBOROS_NETWORK_PASSWORD`) are NEVER forwarded to a skill subprocess even if the manifest explicitly declares them — the runtime refuses and logs a warning. Mark such manifest requests as FAIL: the skill is asking for something it can never receive, which signals intent rather than a legitimate need. Requests for non-forbidden secrets the skill doesn't need for its stated purpose are also FAIL. An empty list is the default and always fine. | critical |
+| 5 | env_allowlist | Is `env_from_settings` a short, justified list of settings keys? Core keys in `FORBIDDEN_SKILL_SETTINGS` (`OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `OPENAI_COMPATIBLE_API_KEY`, `CLOUDRU_FOUNDATION_MODELS_API_KEY`, `ANTHROPIC_API_KEY`, `TELEGRAM_BOT_TOKEN`, `GITHUB_TOKEN`, `OUROBOROS_NETWORK_PASSWORD`) may be declared only when the script skill genuinely needs that provider/token for its stated purpose; runtime forwards them only after a fresh PASS review and a content-bound desktop-launcher owner grant. Mark unjustified core-key requests or non-forbidden secrets unrelated to the purpose as FAIL. An empty list is the default and always fine. | critical |
 | 6 | timeout_and_output_discipline | Is `timeout_sec` reasonable for the stated workload (default 60, hard cap 300)? Do scripts print to stdout in chunks that the runtime can cap, rather than streaming unbounded output? Unbounded loops without a `break`/timeout path are a concrete FAIL. | advisory |
 | 7 | extension_namespace_discipline | `type: extension` only: does the extension register its tool/route/ws-handler/ui-tab under the namespace derived from its `name` (e.g. tool `ext.<name>.foo`, route `/api/extensions/<name>/…`, ws type `ext.<name>.…`)? Namespace collisions with built-in surfaces are a concrete FAIL. For Phase 3 the loader skips `type: extension` entirely, so reviewers may verdict PASS with reason "Not applicable — type != extension" for non-extension skills. | critical |
 
@@ -375,13 +375,13 @@ two manifests as part of items 2 (`permissions_honesty`) and 5
    / `allowed-tools` / scripts imply. A subprocess-spawning publisher
    that translates to an empty `permissions: []` is a concrete FAIL of
    item 2 (`permissions_honesty`).
-2. **Env key honesty** — the adapter refuses any env key in the
-   `FORBIDDEN_SKILL_SETTINGS` denylist, so any leak attempt should
-   already have blocked install. If `env_from_settings` is non-empty
-   and any of the listed keys do not appear in the original
-   `metadata.openclaw.requires.env`, that is a concrete FAIL of item 5
-   (`env_allowlist`) — the adapter is fabricating a permission the
-   publisher never asked for.
+2. **Env key honesty** — denylisted/core keys from
+   `metadata.openclaw.requires.env` become explicit key-grant
+   requirements, not automatic environment access. If
+   `env_from_settings` is non-empty and any listed key does not appear
+   in the original `metadata.openclaw.requires.env`, that is a concrete
+   FAIL of item 5 (`env_allowlist`) — the adapter is fabricating a
+   permission the publisher never asked for.
 3. **Install spec rejection** — the adapter blocks `metadata.openclaw.install`
    (`brew`/`go`/`uv`/`node`). If the original manifest carries one,
    the install pipeline should have aborted; the presence of the skill

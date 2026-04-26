@@ -119,15 +119,11 @@ _ALWAYS_FORWARDED_ENV = frozenset(
     }
 )
 
-# Hard denylist of settings keys we refuse to forward via
-# ``env_from_settings`` regardless of what the manifest requests. The
-# first layer of defence is the tri-model skill review (``env_allowlist``
-# checklist item), but that depends on reviewer perfection. Keeping a
-# runtime denylist here means a missed review cannot leak production
-# credentials / tokens / the network-gate password to an executing
-# skill. Skills that genuinely need an API key should talk to the
-# ``main`` Ouroboros process rather than receive it as a subprocess
-# envvar.
+# Core settings keys that require explicit, content-bound owner grants
+# before they can be forwarded through ``env_from_settings``. The first
+# layer of defence is the tri-model skill review, but the runtime still
+# refuses to pass these values unless the reviewed script skill carries a
+# matching grant.
 _FORBIDDEN_ENV_FORWARD_KEYS = FORBIDDEN_SKILL_SETTINGS
 
 
@@ -164,6 +160,7 @@ def _scrub_env(
     manifest_env_keys: List[str],
     skill_state_dir_path: pathlib.Path,
     skill_name: str,
+    granted_keys: List[str] | None = None,
 ) -> Dict[str, str]:
     """Build a minimal env for the subprocess.
 
@@ -188,18 +185,20 @@ def _scrub_env(
         # tries to sneak in ``openrouter_api_key`` (lowercase) is still
         # refused.
         forbidden_upper = {k.upper() for k in _FORBIDDEN_ENV_FORWARD_KEYS}
+        granted_upper = {str(k).strip().upper() for k in (granted_keys or []) if str(k).strip()}
         allow = {str(k).strip() for k in manifest_env_keys if str(k).strip()}
         for key in allow:
-            if key.upper() in forbidden_upper:
+            canonical = key.upper()
+            if canonical in forbidden_upper and canonical not in granted_upper:
                 log.warning(
-                    "Skill %s asked env_from_settings for %s; refusing by runtime denylist.",
+                    "Skill %s asked env_from_settings for %s; refusing without explicit grant.",
                     skill_name, key,
                 )
                 continue
-            val = settings.get(key)
+            val = settings.get(canonical) if canonical in forbidden_upper else settings.get(key)
             if val is None or val == "":
                 continue
-            env[key] = str(val)
+            env[canonical if canonical in forbidden_upper else key] = str(val)
     env["OUROBOROS_SKILL_NAME"] = skill_name
     env["OUROBOROS_SKILL_STATE_DIR"] = str(skill_state_dir_path)
     return env
@@ -670,13 +669,22 @@ def _handle_skill_exec(
         cmd.append(str(arg))
 
     timeout = _bound_timeout(loaded.manifest.timeout_sec)
-    from ouroboros.skill_loader import skill_state_dir
+    from ouroboros.skill_loader import grant_status_for_skill, skill_state_dir
 
     state_dir = skill_state_dir(drive_root, loaded.name)
+    grants = grant_status_for_skill(drive_root, loaded)
+    missing_core = list(grants.get("missing_keys") or [])
+    if missing_core:
+        return (
+            "⚠️ SKILL_EXEC_GRANT_REQUIRED: skill "
+            f"{loaded.name!r} requests core settings keys {missing_core}. "
+            "Grant them from the Skills UI after a fresh PASS review before execution."
+        )
     env = _scrub_env(
         manifest_env_keys=list(loaded.manifest.env_from_settings or []),
         skill_state_dir_path=state_dir,
         skill_name=loaded.name,
+        granted_keys=list(grants.get("granted_keys") or []),
     )
 
     try:

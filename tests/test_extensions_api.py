@@ -238,9 +238,9 @@ def test_api_extensions_index_marks_widget_only_extensions_as_ui_pending(
         entry = next(s for s in data["skills"] if s["name"] == "ext_widget")
         assert entry["live_loaded"] is True
         assert entry["dispatch_live"] is False
-        assert entry["ui_tabs_pending"] == ["ext_widget:weather"]
-        assert data["live"]["ui_tabs"] == []
-        assert "ext_widget:weather" in data["live"]["ui_tabs_pending"]
+        assert entry["ui_tabs_pending"] == []
+        assert data["live"]["ui_tabs"][0]["key"] == "ext_widget:weather"
+        assert data["live"]["ui_tabs_pending"] == []
     finally:
         _stop_patches(patches)
 
@@ -561,6 +561,28 @@ def test_api_skill_toggle_rejects_non_boolean_enabled(tmp_path, monkeypatch):
         resp = client.post("/api/skills/ext_toggle_bad/toggle", json={"enabled": "definitely"})
         assert resp.status_code == 400
         assert "boolean" in resp.text
+    finally:
+        _stop_patches(patches)
+
+
+def test_api_skill_grants_requires_owner_bridge(tmp_path, monkeypatch):
+    skills_root = tmp_path / "skills"
+    _write_ext(
+        skills_root,
+        "grant_api",
+        permissions=["tool"],
+        plugin="def register(api):\n    pass\n",
+        env_from_settings=["OPENROUTER_API_KEY"],
+    )
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    client, _drive_root, patches = _make_client(tmp_path, monkeypatch)
+    try:
+        resp = client.post(
+            "/api/skills/grant_api/grants",
+            json={"granted_keys": ["OPENROUTER_API_KEY"]},
+        )
+        assert resp.status_code == 403
+        assert resp.json()["code"] == "owner_confirmation_required"
     finally:
         _stop_patches(patches)
 

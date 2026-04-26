@@ -808,6 +808,56 @@ def test_valid_review_statuses_exported():
     assert "pending_phase4" in VALID_REVIEW_STATUSES
 
 
+def test_skill_grants_are_content_and_request_bound(tmp_path):
+    from ouroboros.contracts.skill_manifest import SkillManifest
+    from ouroboros.skill_loader import (
+        LoadedSkill,
+        SkillReviewState,
+        grant_status_for_skill,
+        save_skill_grants,
+    )
+
+    drive_root = tmp_path / "drive"
+    skill_dir = tmp_path / "skill"
+    drive_root.mkdir()
+    skill_dir.mkdir()
+    manifest = SkillManifest(
+        name="granty",
+        description="grant test",
+        version="0.1",
+        type="script",
+        env_from_settings=["OPENROUTER_API_KEY"],
+    )
+    skill = LoadedSkill(
+        name="granty",
+        skill_dir=skill_dir,
+        manifest=manifest,
+        content_hash="hash-a",
+        review=SkillReviewState(status="pass", content_hash="hash-a"),
+    )
+    save_skill_grants(
+        drive_root,
+        "granty",
+        ["OPENROUTER_API_KEY", "GITHUB_TOKEN"],
+        content_hash="hash-a",
+        requested_keys=["OPENROUTER_API_KEY"],
+    )
+    status = grant_status_for_skill(drive_root, skill)
+    assert status["granted_keys"] == ["OPENROUTER_API_KEY"]
+    assert status["all_granted"] is True
+    skill.content_hash = "hash-b"
+    stale = grant_status_for_skill(drive_root, skill)
+    assert stale["granted_keys"] == []
+    assert stale["missing_keys"] == ["OPENROUTER_API_KEY"]
+
+    skill.content_hash = "hash-a"
+    skill.source = "clawhub"
+    unsupported = grant_status_for_skill(drive_root, skill)
+    assert unsupported["unsupported_for_skill_type"] is False
+    assert unsupported["usable"] is True
+    assert unsupported["granted_keys"] == ["OPENROUTER_API_KEY"]
+
+
 # ---------------------------------------------------------------------------
 # Safety: skill name sanitization
 # ---------------------------------------------------------------------------

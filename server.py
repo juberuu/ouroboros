@@ -289,8 +289,8 @@ def _merge_settings_payload(current: Dict[str, Any], body: Dict[str, Any]) -> Di
         # accepting it from /api/settings POST gives the agent a same-process
         # path to raise its own privilege scope (loopback POST has no auth).
         # Mode changes happen only through direct ``settings.json`` edits while
-        # the agent is stopped, plus restart. UI segmented control becomes
-        # display-only for this key.
+        # the agent is stopped, plus restart. The desktop UI uses a
+        # launcher-native confirmation bridge instead of this HTTP path.
         if key == "OUROBOROS_RUNTIME_MODE":
             continue
         if key not in body:
@@ -1410,6 +1410,7 @@ from ouroboros.extensions_api import (
     api_extension_dispatch,
     api_skill_toggle,
     api_skill_review,
+    api_skill_grants,
 )
 from ouroboros.marketplace_api import (
     api_marketplace_search,
@@ -1514,7 +1515,12 @@ routes = [
         endpoint=api_skill_review,
         methods=["POST"],
     ),
-    # v4.50: ClawHub marketplace surface (opt-in via OUROBOROS_CLAWHUB_ENABLED).
+    Route(
+        "/api/skills/{skill}/grants",
+        endpoint=api_skill_grants,
+        methods=["POST"],
+    ),
+    # v4.50+: ClawHub marketplace surface (always-on, registry-host gated).
     Route(
         "/api/marketplace/clawhub/search",
         endpoint=api_marketplace_search,

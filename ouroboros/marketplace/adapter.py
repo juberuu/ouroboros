@@ -317,6 +317,7 @@ def _translate_permissions(
 def _translate_env_from_settings(
     metadata_block: Dict[str, Any],
     blockers: List[str],
+    warnings: Optional[List[str]] = None,
 ) -> List[str]:
     """Translate the publisher's declared env keys into Ouroboros allowlist.
 
@@ -342,13 +343,17 @@ def _translate_env_from_settings(
             continue
         out.append(canonical)
     if blocked:
-        blockers.append(
-            "OpenClaw manifest requests env keys that overlap with the "
-            f"runtime forbidden-settings denylist: {sorted(set(blocked))}. "
-            "Refusing to install — these keys must never be forwarded to a "
-            "third-party skill subprocess."
-        )
-    return out
+        if warnings is not None:
+            warnings.append(
+                "OpenClaw manifest requests core settings keys that require "
+                f"explicit per-skill grants before execution: {sorted(set(blocked))}."
+            )
+        else:
+            blockers.append(
+                "OpenClaw manifest requests core settings keys that require "
+                f"explicit per-skill grants before execution: {sorted(set(blocked))}."
+            )
+    return out + [key for key in sorted(set(blocked)) if key not in out]
 
 
 # ---------------------------------------------------------------------------
@@ -525,7 +530,7 @@ def adapt_openclaw_skill(
             "tooling manually before installing this skill."
         )
 
-    env_keys = _translate_env_from_settings(metadata_block, blockers)
+    env_keys = _translate_env_from_settings(metadata_block, blockers, warnings)
 
     runtime = _detect_runtime(metadata_block, staging_dir, warnings)
     scripts_entries = _list_scripts_dir(staging_dir)
@@ -579,6 +584,12 @@ def adapt_openclaw_skill(
         provenance_extras["license"] = license_field
     if primary_env:
         provenance_extras["primary_env"] = primary_env
+    requested_grants = [
+        key for key in env_keys
+        if key.upper() in {item.upper() for item in FORBIDDEN_SKILL_SETTINGS}
+    ]
+    if requested_grants:
+        provenance_extras["requested_key_grants"] = requested_grants
 
     raw_timeout = original_front.get("timeout_sec")
     if raw_timeout in (None, ""):

@@ -1,3 +1,5 @@
+import { initMarketplace } from './marketplace.js';
+
 /**
  * Ouroboros Skills UI — Phase 5.
  *
@@ -71,6 +73,54 @@ function statusBadge(status) {
         : status === 'advisory' ? 'warn'
         : 'muted';
     return `<span class="skills-badge skills-badge-${tone}">${escapeHtml(status)}</span>`;
+}
+
+function reviewReady(skill) {
+    return skill.review_status === 'pass' && !skill.review_stale;
+}
+
+function grantReady(skill) {
+    return !skill.grants || skill.grants.all_granted !== false;
+}
+
+function renderReviewFindings(skill) {
+    const findings = Array.isArray(skill.review_findings) ? skill.review_findings : [];
+    if (!findings.length) return '';
+    const rows = findings.map((finding) => {
+        const item = finding.item || finding.check || finding.title || 'finding';
+        const verdict = finding.verdict || finding.severity || '';
+        const reason = finding.reason || finding.message || JSON.stringify(finding);
+        return `<li><strong>${escapeHtml(verdict)}</strong> ${escapeHtml(item)}: ${escapeHtml(reason)}</li>`;
+    }).join('');
+    return `
+        <details class="skills-review-findings">
+            <summary class="muted">${findings.length} review finding${findings.length === 1 ? '' : 's'}</summary>
+            <ul>${rows}</ul>
+        </details>
+    `;
+}
+
+function renderGrantBlock(skill) {
+    const grants = skill.grants || {};
+    const requested = Array.isArray(grants.requested_keys) ? grants.requested_keys : [];
+    if (!requested.length) return '';
+    const missing = Array.isArray(grants.missing_keys) ? grants.missing_keys : [];
+    const granted = Array.isArray(grants.granted_keys) ? grants.granted_keys : [];
+    const unsupported = grants.unsupported_for_skill_type === true;
+    const missingText = unsupported
+        ? 'unsupported for non-script skills'
+        : (missing.length ? `missing: ${missing.join(', ')}` : 'all requested keys granted');
+    const grantButton = !unsupported && reviewReady(skill) && missing.length
+        ? `<button class="btn btn-default skills-grant" data-skill="${escapeHtml(skill.name)}" data-keys="${escapeHtml(requested.join(','))}">Grant requested keys</button>`
+        : '';
+    return `
+        <div class="skills-grants muted">
+            key grants: requested <code>${requested.map(escapeHtml).join('</code>, <code>')}</code>;
+            granted ${granted.length ? `<code>${granted.map(escapeHtml).join('</code>, <code>')}</code>` : '<i>none</i>'};
+            ${escapeHtml(missingText)}
+            ${grantButton}
+        </div>
+    `;
 }
 
 
@@ -163,6 +213,12 @@ function renderSkillCard(skill) {
     const reviewStaleNote = skill.review_stale
         ? '<span class="skills-badge skills-badge-warn">stale</span>'
         : '';
+    const reviewRequiredBadge = reviewReady(skill)
+        ? ''
+        : '<span class="skills-badge skills-badge-warn">review required</span>';
+    const grantMissingBadge = grantReady(skill)
+        ? ''
+        : '<span class="skills-badge skills-badge-warn">grant missing</span>';
     const liveBadge = extensionLiveBadge(skill);
     const safeName = escapeHtml(skill.name);
     const source = (skill.source || 'native').toLowerCase();
@@ -197,14 +253,8 @@ function renderSkillCard(skill) {
         ? `<button class="btn btn-default skills-uninstall" data-skill="${safeName}">Uninstall</button>`
         : '';
     const provenanceBlock = renderProvenanceBlock(provenance);
-    // v5: live extension widget mount-point. The widget host is
-    // populated only for ``type: extension`` skills that registered an
-    // ``ui_tab`` and successfully went live (``dispatch_live``). The
-    // actual widget renderer is registered in
-    // :func:`registerWidgetRenderer` below; we just emit the host
-    // ``<div data-skill-widget>`` here and let the renderer mount in.
-    const widgetMount = (skill.type === 'extension' && skill.live_loaded && skill.dispatch_live)
-        ? `<div class="skills-widget-mount" data-skill-widget="${safeName}"></div>`
+    const widgetNote = (skill.type === 'extension' && skill.live_loaded && skill.dispatch_live)
+        ? '<div class="muted">visual widgets live on the Widgets page</div>'
         : '';
     return `
         <div class="skills-card" data-skill="${safeName}">
@@ -217,6 +267,8 @@ function renderSkillCard(skill) {
                     <span class="skills-badge skills-badge-${sourceTone}">${sourceLabel}</span>
                     ${statusBadge(skill.review_status)}
                     ${reviewStaleNote}
+                    ${reviewRequiredBadge}
+                    ${grantMissingBadge}
                     ${versionDriftBadge}
                     ${liveBadge}
                     ${skill.enabled ? '<span class="skills-badge skills-badge-ok">enabled</span>'
@@ -224,13 +276,15 @@ function renderSkillCard(skill) {
                 </div>
             </div>
             <div class="skills-card-perms">permissions: ${permissions || '<i>none</i>'}</div>
+            ${renderGrantBlock(skill)}
+            ${renderReviewFindings(skill)}
             ${provenanceBlock}
             ${extensionLiveNote(skill)}
-            ${widgetMount}
+            ${widgetNote}
             ${loadError}
             <div class="skills-card-actions">
                 <button class="btn btn-default skills-review" data-skill="${safeName}">Review</button>
-                <button class="btn btn-default skills-toggle" data-skill="${safeName}" data-enabled="${skill.enabled}">
+                <button class="btn btn-default skills-toggle" data-skill="${safeName}" data-enabled="${skill.enabled}" ${(!skill.enabled && (!reviewReady(skill) || !grantReady(skill))) ? 'disabled title="Fresh PASS review and requested key grants are required before enabling."' : ''}>
                     ${skill.enabled ? 'Disable' : 'Enable'}
                 </button>
                 ${updateBtn}
@@ -625,6 +679,29 @@ function attachActionHandlers(container, renderFn) {
                         : (result.error || result.status === 'fail') ? 'danger'
                         : 'warn'
                 );
+            } else if (target.classList.contains('skills-grant')) {
+                const keys = (target.dataset.keys || '').split(',').map((k) => k.trim()).filter(Boolean);
+                if (!keys.length) {
+                    showBanner(`${name}: no requested keys to grant`, 'warn');
+                } else {
+                    const ok = confirm(`Grant ${name} access to these settings keys?\n\n${keys.join('\n')}\n\nOnly do this for reviewed skills you trust.`);
+                    if (!ok) return;
+                    const bridge = window.pywebview?.api?.request_skill_key_grant;
+                    if (!bridge) {
+                        throw new Error('Skill key grants require the desktop launcher confirmation bridge.');
+                    }
+                    const result = await bridge(name, keys);
+                    if (!result?.ok) {
+                        throw new Error(result?.error || 'Skill key grant was cancelled.');
+                    }
+                    const missing = result.grants?.missing_keys || [];
+                    showBanner(
+                        missing.length
+                            ? `${name}: grant saved, still missing ${missing.join(', ')}`
+                            : `${name}: requested key grants saved`,
+                        missing.length ? 'warn' : 'ok'
+                    );
+                }
             } else if (target.classList.contains('skills-update')) {
                 showBanner(`${name}: updating from ClawHub (this may take ~30s)`, 'muted');
                 const result = await postWithFeedback(
@@ -685,9 +762,15 @@ async function renderMarketplacePane() {
         if (refresh) refresh.click();
         return;
     }
-    pane.dataset.bootstrapped = 'true';
-    const mod = await import('./marketplace.js');
-    mod.initMarketplace(pane);
+    pane.innerHTML = '<div class="muted">Loading marketplace…</div>';
+    try {
+        initMarketplace(pane);
+        pane.dataset.bootstrapped = 'true';
+    } catch (err) {
+        pane.dataset.bootstrapped = '';
+        pane.innerHTML = `<div class="skills-load-error">Failed to load marketplace UI: ${escapeHtml(err.message || err)}</div>`;
+        throw err;
+    }
 }
 
 
@@ -701,7 +784,10 @@ export function initSkills(ctx) {
     const runtimeModeEl = document.getElementById('skills-runtime-mode');
     const refreshBtn = document.getElementById('skills-refresh');
 
-    const renderFn = () => renderSkillsList(container, emptyEl, runtimeModeEl);
+    const renderFn = () => renderSkillsList(container, emptyEl, runtimeModeEl).catch((err) => {
+        container.innerHTML = `<div class="skills-load-error">Failed to render skills: ${escapeHtml(err.message || err)}</div>`;
+        console.warn('skills: render failed', err);
+    });
 
     refreshBtn.addEventListener('click', renderFn);
     attachActionHandlers(container, renderFn);
@@ -711,7 +797,9 @@ export function initSkills(ctx) {
             const tabName = btn.dataset.tab;
             activateTab(tabName);
             if (tabName === 'marketplace') {
-                renderMarketplacePane();
+                renderMarketplacePane().catch((err) => {
+                    showBanner(`Marketplace failed: ${err.message || err}`, 'danger');
+                });
             }
         });
     });
@@ -721,4 +809,5 @@ export function initSkills(ctx) {
             renderFn();
         }
     });
+    renderFn();
 }

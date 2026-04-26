@@ -335,7 +335,7 @@ def test_load_extension_registers_ws_handler_with_namespace(tmp_path):
     assert "ext.ws1.message" in handlers
 
 
-def test_register_ui_tab_stays_pending_until_host_exists(tmp_path):
+def test_register_ui_tab_surfaces_hostable_widget(tmp_path):
     loaded, _, _ = _prepare_extension(
         tmp_path,
         "uiwait",
@@ -346,12 +346,13 @@ def test_register_ui_tab_stays_pending_until_host_exists(tmp_path):
     err = extension_loader.load_extension(loaded, lambda: {})
     assert err is None, err
     snap = extension_loader.snapshot()
-    assert snap["ui_tabs"] == []
-    assert snap["ui_tabs_pending"] == ["uiwait:weather"]
+    assert snap["ui_tabs_pending"] == []
+    assert snap["ui_tabs"][0]["key"] == "uiwait:weather"
+    assert snap["ui_tabs"][0]["render"]["kind"] == "card"
 
     extension_loader.unload_extension("uiwait")
     snap = extension_loader.snapshot()
-    assert snap["ui_tabs_pending"] == []
+    assert snap["ui_tabs"] == []
 
 
 def test_load_extension_permission_gate_tool(tmp_path):
@@ -593,14 +594,13 @@ def test_runtime_state_for_skill_name_reports_missing_skill(tmp_path):
     assert state["reason"] == "missing"
 
 
-def test_get_settings_respects_allowlist_and_denylist(tmp_path):
-    """get_settings only returns keys in BOTH the manifest allowlist AND
-    NOT in FORBIDDEN_EXTENSION_SETTINGS."""
+def test_get_settings_respects_allowlist_and_extension_core_denylist(tmp_path):
+    """In-process extensions never receive core settings keys."""
     plugin = (
         "def register(api):\n"
         "    api.register_tool('n', lambda ctx: 'ok', description='n', schema={})\n"
     )
-    loaded, _, _ = _prepare_extension(
+    loaded, _, drive_root = _prepare_extension(
         tmp_path,
         "envtest",
         plugin,
@@ -613,8 +613,8 @@ def test_get_settings_respects_allowlist_and_denylist(tmp_path):
         "MY_OK": "visible",
         "RANDOM_OTHER": "not-allowed",
     }
-    err = extension_loader.load_extension(loaded, lambda: settings_snapshot)
-    assert err is None, err
+    err = extension_loader.load_extension(loaded, lambda: settings_snapshot, drive_root=drive_root)
+    assert "in-process extensions cannot receive core-key grants" in err
 
     impl = extension_loader.PluginAPIImpl(
         skill_name="envtest",
@@ -624,7 +624,6 @@ def test_get_settings_respects_allowlist_and_denylist(tmp_path):
         settings_reader=lambda: settings_snapshot,
     )
     got = impl.get_settings(["OPENROUTER_API_KEY", "TIMEZONE", "MY_OK", "RANDOM_OTHER"])
-    # Forbidden key dropped:
     assert "OPENROUTER_API_KEY" not in got
     # Allowed non-secret key surfaced:
     assert got["TIMEZONE"] == "UTC"

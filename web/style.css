@@ -1425,32 +1425,6 @@ body {
     }
 }
 
-/* Bottom scroll-under fade rendered by a DEDICATED sibling layer so it sits
-   visually BELOW #chat-input-area (which is z-index: 5) and never optically
-   swallows the textarea or the attachment badge. Earlier versions painted
-   this gradient as #chat-input-area's own background, which made the lower
-   edge of the input visually dissolve into the dense end of the gradient
-   (rgba(13, 11, 15, 0.92)). Now the gradient is on its own pointer-events:none
-   layer at z-index: 4. Height is 200px so it always covers the tallest
-   `#chat-input-area` state (attachment badge ~30px + fully-expanded textarea
-   ~120px + padding 24px ≈ 174px) with a buffer. */
-.chat-bottom-fade {
-    position: absolute;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    height: 200px;
-    pointer-events: none;
-    z-index: 4;
-    background: linear-gradient(
-        0deg,
-        rgba(13, 11, 15, 0.92) 0%,
-        rgba(13, 11, 15, 0.74) 35%,
-        rgba(13, 11, 15, 0.30) 78%,
-        rgba(13, 11, 15, 0.00) 100%
-    );
-}
-
 #chat-input-area {
     display: flex;
     flex-direction: column;
@@ -1462,10 +1436,8 @@ body {
     left: 0;
     right: 0;
     z-index: 5;
-    /* No background here on purpose. The bottom scroll-under fade is rendered
-       by .chat-bottom-fade (z-index: 4) which sits visually below this dock,
-       so the textarea's own frosted-glass background reads cleanly without
-       the gradient bleeding through it. */
+    /* No background here on purpose. The input controls carry their own
+       frosted-glass surfaces; transcript text should remain unobscured. */
 }
 
 .chat-input-wrap {
@@ -3093,6 +3065,45 @@ body {
     margin-top: 2px;
 }
 
+/* ------------------------------------------------------------------ */
+/* Widgets page                                                       */
+/* ------------------------------------------------------------------ */
+#page-widgets {
+    padding: 16px 24px;
+    overflow-y: auto;
+}
+
+.widgets-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 14px;
+    margin-top: 16px;
+}
+
+.widgets-card {
+    background: rgba(26, 21, 32, 0.72);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 18px;
+    padding: 14px;
+    backdrop-filter: blur(12px);
+}
+
+.widgets-card-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: baseline;
+    margin-bottom: 12px;
+}
+
+.widgets-frame {
+    width: 100%;
+    min-height: 320px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: var(--radius);
+    background: rgba(13, 11, 15, 0.88);
+}
+
 /* Mobile overrides — second block, placed AFTER all base rules so media-query
    rules reliably win without !important. Kept scoped to <= 640px so desktop
    is never affected. */
@@ -3100,13 +3111,6 @@ body {
     /* Input area safe-area inset for iOS notch */
     #chat-input-area {
         padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
-    }
-
-    /* Bottom-fade layer grows by the safe-area inset so the gradient still
-       fully covers the tallest expanded textarea state on iOS where the
-       home-indicator pushes the input area up. */
-    .chat-bottom-fade {
-        height: calc(200px + env(safe-area-inset-bottom, 0px));
     }
 
     /* Header is now in normal flow on mobile — remove the desktop 56px top

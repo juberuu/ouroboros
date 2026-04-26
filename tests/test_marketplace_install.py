@@ -147,13 +147,19 @@ def _install_with_archive(
             )
 
 
-def test_install_marketplace_disabled_raises(monkeypatch, marketplace_drive):
+def test_install_marketplace_always_on_without_flag(monkeypatch, stub_review, marketplace_drive):
     monkeypatch.delenv("OUROBOROS_CLAWHUB_ENABLED", raising=False)
     data_dir, repo_dir = marketplace_drive
-    from ouroboros.marketplace.install import install_skill
+    archive = _build_archive(slug_dir="always-on", version="1.0.0")
 
-    with pytest.raises(PermissionError):
-        install_skill(data_dir, repo_dir, slug="x/y", version="1.0.0")
+    result = _install_with_archive(
+        data_dir,
+        repo_dir,
+        slug="owner/always-on",
+        archive=archive,
+        version="1.0.0",
+    )
+    assert result.ok, result.error
 
 
 def test_install_lands_skill_and_writes_provenance(

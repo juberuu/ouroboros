@@ -99,6 +99,48 @@ def test_search_handles_bare_array(monkeypatch):
     assert results[0].slug == "a"
 
 
+def test_search_handles_items_and_cursor_metadata(monkeypatch):
+    body = json.dumps(
+        {"items": [{"slug": "owner/cursor", "latestVersion": "1.0.0"}], "nextCursor": "abc"}
+    ).encode("utf-8")
+    with _patch_opener(body):
+        page = search("", cursor="start", include_metadata=True)
+    assert [r.slug for r in page["results"]] == ["owner/cursor"]
+    assert page["next_cursor"] == "abc"
+    assert page["path"] == "skills"
+
+
+def test_search_tries_alternate_paths_when_primary_empty(monkeypatch):
+    empty = json.dumps({"items": [], "nextCursor": None}).encode("utf-8")
+    non_empty = json.dumps({"items": [{"slug": "owner/fallback"}]}).encode("utf-8")
+    responses = [
+        _mock_response(empty),
+        _mock_response(non_empty),
+    ]
+    with mock.patch.object(clawhub_mod._OPENER, "open", side_effect=responses) as opener_mock:
+        page = search("", include_metadata=True)
+    assert opener_mock.call_count == 2
+    assert [r.slug for r in page["results"]] == ["owner/fallback"]
+    assert page["attempts"][0]["path"] == "skills"
+    assert page["attempts"][1]["path"] == "registry/skills"
+
+
+def test_search_primary_empty_alternates_error_returns_empty_metadata(monkeypatch):
+    empty = json.dumps({"items": [], "nextCursor": None}).encode("utf-8")
+    responses = [
+        _mock_response(empty),
+        _mock_response(b"{}", status=404),
+        _mock_response(b"{}", status=404),
+        _mock_response(b"{}", status=404),
+    ]
+    with mock.patch.object(clawhub_mod._OPENER, "open", side_effect=responses):
+        page = search("", include_metadata=True)
+    assert page["results"] == []
+    assert page["path"] == "skills"
+    assert page["attempts"][0]["ok"] is True
+    assert page["attempts"][1]["ok"] is False
+
+
 def test_search_skips_malformed_records(monkeypatch):
     body = json.dumps(
         {
