@@ -49,7 +49,18 @@ def _request_restart(ctx: ToolContext, reason: str) -> str:
 
 
 def _set_tool_timeout(ctx: ToolContext, seconds: int) -> str:
-    """Persist and hot-apply the global tool timeout."""
+    """Persist and hot-apply the global tool timeout.
+
+    v5.1.2 hardening: explicitly anchor ``OUROBOROS_RUNTIME_MODE`` to the
+    live ``os.environ`` value before writing so that an out-of-process
+    disk corruption (e.g. ``run_shell python -c "...write_text..."``)
+    cannot ride into ``apply_settings_to_env`` via this tool's
+    ``load_settings → save_settings → apply_settings_to_env`` round-trip.
+    The chokepoint in ``save_settings`` would already refuse a true
+    elevation, but pinning the value here turns the failure mode into a
+    clean save (the corrupted disk gets restored to the legitimate
+    boot-time mode) instead of a tool-call error.
+    """
     try:
         timeout_sec = int(seconds)
     except (TypeError, ValueError):
@@ -59,6 +70,7 @@ def _set_tool_timeout(ctx: ToolContext, seconds: int) -> str:
 
     settings = load_settings()
     settings["OUROBOROS_TOOL_TIMEOUT_SEC"] = timeout_sec
+    settings["OUROBOROS_RUNTIME_MODE"] = os.environ.get("OUROBOROS_RUNTIME_MODE", "advanced")
     save_settings(settings)
     apply_settings_to_env(settings)
     return f"OK: OUROBOROS_TOOL_TIMEOUT_SEC set to {timeout_sec}s and applied immediately."

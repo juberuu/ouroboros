@@ -128,6 +128,121 @@ _DIRECT_PROVIDER_REVIEW_RUNS = 3
 # scope are orthogonal concerns and must not collapse into one flag.
 VALID_RUNTIME_MODES = ("light", "advanced", "pro")
 
+# Privilege ranking: lower = stricter scope. Used by ``save_settings`` to
+# refuse self-elevation attempts. ``light`` blocks repo self-modification;
+# ``advanced`` opens evolutionary-layer writes; ``pro`` opens protected
+# core/contract/release writes (still gated by triad+scope review at
+# commit). Owner picks scope; agent must not raise it through any
+# tool channel — see ``save_settings`` chokepoint below.
+_RUNTIME_MODE_RANK = {"light": 0, "advanced": 1, "pro": 2}
+
+# Boot-time runtime mode baseline. Captured once by
+# ``initialize_runtime_mode_baseline`` (called from server lifespan and
+# launcher startup AFTER initial settings load + apply_settings_to_env)
+# and used by ``save_settings`` to refuse elevation against THIS value
+# instead of against on-disk old. The on-disk-old baseline is bypassable
+# by an out-of-process write (e.g. subprocess that goes around the
+# chokepoint): if disk gets corrupted to ``pro``, a follow-up
+# ``load_settings → save_settings`` round-trip sees ``incoming==disk_old``
+# and lets the elevation through. Pinning the baseline to the value
+# captured at process boot closes that loophole — the disk corruption
+# can no longer be propagated into ``os.environ`` via any in-process
+# ``save_settings`` caller.
+#
+# v5.1.2 iter-2 fix (multi-critic finding F2-1): the baseline is also
+# exported to ``os.environ[BOOT_RUNTIME_MODE_ENV_KEY]`` whenever
+# ``initialize_runtime_mode_baseline`` runs. ``save_settings`` falls
+# back to that env var when the in-memory ``_BOOT_RUNTIME_MODE`` is
+# still ``None`` — which is the case in fresh subprocesses spawned by
+# ``run_shell`` / ``skill_exec`` / ``multiprocessing`` (spawn). Env
+# vars are inherited across ``subprocess.Popen``, ``mp.spawn``, and
+# ``mp.fork``, so a child of the supervisor sees the same baseline.
+# The agent CAN clobber its own ``os.environ`` from Python, but a
+# subprocess cannot reach back into the parent's ``os.environ``;
+# therefore, even after a clobbered child, the parent supervisor's
+# in-memory ``_BOOT_RUNTIME_MODE`` continues to gate writes via the
+# in-process ``save_settings`` path.
+_BOOT_RUNTIME_MODE: Optional[str] = None
+BOOT_RUNTIME_MODE_ENV_KEY = "OUROBOROS_BOOT_RUNTIME_MODE"
+
+
+def _resolve_baseline_from_env() -> Optional[str]:
+    """Return the pinned-baseline value inherited via env var, or None.
+
+    Used by ``save_settings`` so a fresh subprocess that re-imports
+    this module sees the parent's pin instead of falling back to the
+    permissive ``allow_elevation=True`` branch.
+    """
+    raw = os.environ.get(BOOT_RUNTIME_MODE_ENV_KEY, "")
+    if not raw:
+        return None
+    return normalize_runtime_mode(raw)
+
+
+def initialize_runtime_mode_baseline(mode: Optional[str] = None) -> None:
+    """Pin the boot-time runtime-mode baseline used by ``save_settings``.
+
+    **Order contract (must be respected by every entry point):**
+
+    1. Call AFTER ``load_settings`` + ``apply_settings_to_env`` so the
+       captured value reflects the owner's actual choice for this run
+       (``OUROBOROS_RUNTIME_MODE`` is what the env carries at this
+       point, which equals the on-disk value the launcher / lifespan
+       already validated).
+    2. Call BEFORE any agent code runs (worker spawn, supervisor
+       start, anything that may import + call ``save_settings``). The
+       chokepoint is only meaningful once this is set.
+    3. Subsequent calls are no-ops — the baseline is immutable for the
+       life of the process.
+
+    Production callers MUST also propagate the baseline to subprocess
+    children. This function does so automatically by exporting
+    ``OUROBOROS_BOOT_RUNTIME_MODE`` (a parallel env var, distinct from
+    ``OUROBOROS_RUNTIME_MODE`` so the application code reads the
+    current mode and the chokepoint reads the boot-time baseline).
+    Children that re-import ``ouroboros.config`` see the parent's pin
+    via ``_resolve_baseline_from_env``.
+
+    Tests that monkeypatch settings paths can call this with an
+    explicit ``mode`` to set the baseline for a hermetic test, or pass
+    ``None`` to read the current ``OUROBOROS_RUNTIME_MODE`` env var.
+    """
+    global _BOOT_RUNTIME_MODE
+    if _BOOT_RUNTIME_MODE is not None:
+        return
+    if mode is None:
+        # v5.1.2 iter-2 real triad+scope finding SR1: prefer the
+        # parent-exported ``OUROBOROS_BOOT_RUNTIME_MODE`` over
+        # ``OUROBOROS_RUNTIME_MODE``. A fresh subprocess inherits BOTH
+        # vars, but the parent considers only the BOOT key authoritative
+        # (the agent CAN clobber its own ``OUROBOROS_RUNTIME_MODE`` to
+        # poison the baseline; ``OUROBOROS_BOOT_RUNTIME_MODE`` is only
+        # set by ``initialize_runtime_mode_baseline`` itself and is the
+        # actual owner-pinned value). Only fall back to RUNTIME_MODE on
+        # processes where no baseline was ever pinned (true first
+        # launch / hermetic test).
+        inherited = _resolve_baseline_from_env()
+        if inherited is not None:
+            mode = inherited
+        else:
+            mode = os.environ.get("OUROBOROS_RUNTIME_MODE", "advanced") or "advanced"
+    _BOOT_RUNTIME_MODE = normalize_runtime_mode(mode)
+    # Propagate to env so subprocesses can inherit the pin.
+    os.environ[BOOT_RUNTIME_MODE_ENV_KEY] = _BOOT_RUNTIME_MODE
+
+
+def reset_runtime_mode_baseline_for_tests() -> None:
+    """Test-only helper to clear the pinned baseline AND the env var.
+
+    Production code MUST NOT call this. Tests that need to exercise
+    different baselines call this between cases. Documented under a
+    descriptive name so a casual reader cannot mistake it for a
+    production API.
+    """
+    global _BOOT_RUNTIME_MODE
+    _BOOT_RUNTIME_MODE = None
+    os.environ.pop(BOOT_RUNTIME_MODE_ENV_KEY, None)
+
 
 def _parse_model_list(value: str) -> list[str]:
     return [item.strip() for item in str(value or "").split(",") if item.strip()]
@@ -528,10 +643,96 @@ def load_settings() -> dict:
         _release_settings_lock(fd)
 
 
-def save_settings(settings: dict) -> None:
+def save_settings(settings: dict, *, allow_elevation: bool = False) -> None:
+    """Persist settings to disk.
+
+    Single chokepoint for the runtime_mode self-elevation ratchet
+    (v5.1.2): if the incoming ``OUROBOROS_RUNTIME_MODE`` ranks higher
+    than the boot-time baseline (or on-disk old as fallback) and the
+    caller did not pass ``allow_elevation=True``, the write is refused
+    with ``PermissionError``. Same-mode and downgrade saves are
+    unaffected.
+
+    **Security note (iter-1 real triad+scope finding T1):**
+    ``allow_elevation=True`` is honoured ONLY before the boot-time
+    baseline has been pinned (i.e., during launcher / lifespan
+    pre-agent initialization). Once ``_BOOT_RUNTIME_MODE`` is set, an
+    agent-reachable subprocess that imports this function cannot use
+    the public ``allow_elevation=True`` argument to bypass the rank
+    comparison — the kwarg becomes inert. This makes the consent flag
+    non-forgeable from agent code: the only way to elevate is to stop
+    the agent (which clears ``_BOOT_RUNTIME_MODE``) and then either
+    edit ``settings.json`` directly or restart through the launcher /
+    server lifespan path.
+
+    The baseline is the boot-time ``_BOOT_RUNTIME_MODE`` if pinned, or
+    the on-disk value as a fallback for hermetic tests / pre-baseline
+    saves. The on-disk fallback is bypassable by an out-of-process
+    write (subprocess that goes around the chokepoint), so production
+    code MUST call ``initialize_runtime_mode_baseline`` before any
+    agent code runs.
+    """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     fd = _acquire_settings_lock()
     try:
+        # Baseline preference order:
+        #   1. ``_BOOT_RUNTIME_MODE`` if the launcher/lifespan has
+        #      pinned the boot-time mode in this Python process.
+        #   2. ``_resolve_baseline_from_env()`` — the parent's pinned
+        #      baseline propagated via env var. Closes the
+        #      fresh-subprocess regression where ``_BOOT_RUNTIME_MODE``
+        #      starts as ``None`` because Python re-imports
+        #      ``ouroboros.config`` from scratch.
+        #   3. On-disk old value as a final fallback for hermetic tests
+        #      and pre-launcher scenarios where neither pin nor env
+        #      var exists.
+        #   4. ``"advanced"`` default (matches ``SETTINGS_DEFAULTS``).
+        baseline_pinned_in_process = _BOOT_RUNTIME_MODE is not None
+        baseline_inherited_from_env = (
+            not baseline_pinned_in_process and _resolve_baseline_from_env() is not None
+        )
+        if baseline_pinned_in_process:
+            baseline_mode = _BOOT_RUNTIME_MODE
+        elif baseline_inherited_from_env:
+            baseline_mode = _resolve_baseline_from_env()
+        else:
+            baseline_mode = "advanced"
+            if SETTINGS_PATH.exists():
+                try:
+                    disk_settings = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+                    baseline_mode = normalize_runtime_mode(disk_settings.get("OUROBOROS_RUNTIME_MODE"))
+                except (OSError, json.JSONDecodeError):
+                    pass
+        new_mode = normalize_runtime_mode(settings.get("OUROBOROS_RUNTIME_MODE"))
+        # Once the boot baseline is pinned (in this process OR inherited
+        # from the parent supervisor via env), ``allow_elevation`` becomes
+        # inert. Agent-reachable subprocesses that import ``save_settings``
+        # and try to pass the public ``allow_elevation=True`` cannot bypass
+        # the rank check — the consent flag is only honoured during
+        # pre-agent initialization (launcher / lifespan), when both the
+        # in-process global AND the inherited env var are absent.
+        baseline_pinned = baseline_pinned_in_process or baseline_inherited_from_env
+        consent_honoured = allow_elevation and not baseline_pinned
+        if (_RUNTIME_MODE_RANK[new_mode] > _RUNTIME_MODE_RANK[baseline_mode]
+                and not consent_honoured):
+            if baseline_pinned and allow_elevation:
+                hint = (
+                    " The boot baseline is pinned for this run "
+                    f"(source={'in-process' if baseline_pinned_in_process else 'env-var'}); "
+                    "``allow_elevation=True`` is inert post-init. To "
+                    "change the mode, stop the agent and edit "
+                    "settings.json directly, then restart."
+                )
+            else:
+                hint = (
+                    " Runtime mode is owner-controlled — change it by "
+                    "editing settings.json directly while the agent is "
+                    "stopped, then restart."
+                )
+            raise PermissionError(
+                f"OUROBOROS_RUNTIME_MODE elevation refused: "
+                f"{baseline_mode!r} -> {new_mode!r}.{hint}"
+            )
         try:
             tmp = SETTINGS_PATH.with_suffix(".tmp")
             tmp.write_text(json.dumps(settings, indent=2), encoding="utf-8")

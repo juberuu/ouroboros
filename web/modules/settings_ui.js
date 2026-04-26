@@ -282,17 +282,19 @@ export function renderSettingsPage() {
                         <h3>Runtime Mode</h3>
                         <div class="settings-section-copy">
                             Separate axis from Review Enforcement. Controls how far Ouroboros is allowed to self-modify.
-                            <code>Light</code> blanket-blocks every repo-mutation tool (<code>repo_write</code>, <code>skill_exec</code>, <code>run_shell</code> mutation patterns, …).
-                            <code>Advanced</code> is the default — self-modify the evolutionary layer; protected core/contract/release files stay guarded by the shared runtime-mode policy.
+                            <code>Light</code> blocks repo self-modification but allows reviewed + enabled skills to run.
+                            <code>Advanced</code> is the default &mdash; self-modify the evolutionary layer; protected core/contract/release files stay guarded by the shared runtime-mode policy.
                             <code>Pro</code> can edit protected core/contract/release surfaces, but commits still go through the normal triad + scope review gate; Advanced remains limited to the evolutionary layer.
+                            <br><strong>Display only:</strong> runtime mode is owner-controlled. To change it, stop the agent, edit
+                            <code>~/Ouroboros/data/settings.json</code> directly, then restart. The Save button in this page never modifies <code>OUROBOROS_RUNTIME_MODE</code>.
                         </div>
                         <div class="settings-effort-card">
                             <label>Runtime Mode</label>
                             <input id="s-runtime-mode" type="hidden" value="advanced">
-                            <div class="settings-effort-group" data-effort-group data-runtime-mode-group data-effort-target="s-runtime-mode">
-                                <button type="button" class="settings-effort-btn" data-effort-value="light">Light</button>
-                                <button type="button" class="settings-effort-btn" data-effort-value="advanced">Advanced</button>
-                                <button type="button" class="settings-effort-btn" data-effort-value="pro">Pro</button>
+                            <div class="settings-effort-group" data-effort-group data-runtime-mode-group data-effort-target="s-runtime-mode" title="Runtime mode is owner-only. Edit settings.json directly while the agent is stopped, then restart.">
+                                <button type="button" class="settings-effort-btn" data-effort-value="light" disabled>Light</button>
+                                <button type="button" class="settings-effort-btn" data-effort-value="advanced" disabled>Advanced</button>
+                                <button type="button" class="settings-effort-btn" data-effort-value="pro" disabled>Pro</button>
                             </div>
                         </div>
                     </div>

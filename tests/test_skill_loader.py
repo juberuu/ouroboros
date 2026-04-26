@@ -756,9 +756,11 @@ def test_summarize_skills_shape_contains_counts_and_flat_list(tmp_path):
 
 
 def test_summarize_skills_reflects_runtime_mode_light(tmp_path, monkeypatch):
-    """Phase 3 round 11 regression: a reviewed+enabled skill must NOT
-    be reported as ``available`` when ``OUROBOROS_RUNTIME_MODE=light``,
-    because ``skill_exec`` refuses to run anything in light mode."""
+    """v5.1.2 Frame A: a reviewed + enabled skill stays ``available``
+    in light mode, because ``skill_exec`` no longer refuses light.
+    The static-readiness signal and the available-for-execution flag
+    converge in this release; ``runtime_blocked`` always counts 0 once
+    the runtime-mode gate is gone."""
     drive_root = tmp_path / "drive"
     drive_root.mkdir()
     repo_root = tmp_path / "skills"
@@ -787,15 +789,15 @@ def test_summarize_skills_reflects_runtime_mode_light(tmp_path, monkeypatch):
     assert adv["runtime_blocked"] == 0
     assert adv["skills"][0]["available_for_execution"] is True
 
-    # light → NOT available, but runtime_blocked increments
+    # v5.1.2 Frame A: light is also ``available`` — skills run regardless
+    # of runtime_mode (light still blocks repo self-modification +
+    # elevation ratchet, just not skill execution).
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     light = summarize_skills(drive_root)
-    assert light["available"] == 0
-    assert light["runtime_blocked"] == 1
-    assert light["skills"][0]["available_for_execution"] is False
-    assert light["skills"][0]["runtime_blocked_by_mode"] is True
-    # The static readiness signal is preserved so the UI can still
-    # explain "this would be ready if you were in advanced mode".
+    assert light["available"] == 1
+    assert light["runtime_blocked"] == 0
+    assert light["skills"][0]["available_for_execution"] is True
+    assert light["skills"][0]["runtime_blocked_by_mode"] is False
     assert light["skills"][0]["static_ready"] is True
 
 

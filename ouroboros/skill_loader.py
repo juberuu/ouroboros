@@ -198,11 +198,13 @@ class LoadedSkill:
         ``skill_exec`` will unconditionally reject.
 
         This does NOT consult the ambient ``OUROBOROS_RUNTIME_MODE`` —
-        that's a runtime decision made by the caller (``skill_exec``
-        refuses ``light`` mode; the Skills UI reconciles the flag on
-        its own via ``summarize_skills`` / ``/api/state``).
-        Use :func:`is_runtime_eligible_for_execution` for the full
-        "will this actually run right now" answer.
+        v5.1.2 Frame A: ``skill_exec`` runs reviewed + enabled skills
+        regardless of mode (light/advanced/pro). The runtime_mode axis
+        only gates repo self-modification + the elevation ratchet. Use
+        :func:`is_runtime_eligible_for_execution` for the
+        "will this actually run right now" answer (which now equals
+        ``available_for_execution`` since the runtime-mode gate was
+        removed in v5.1.2).
         """
         if self.load_error:
             return False
@@ -238,19 +240,16 @@ class LoadedSkill:
 
 
 def is_runtime_eligible_for_execution(skill: "LoadedSkill") -> bool:
-    """True when the skill is both statically available AND the current
-    ``OUROBOROS_RUNTIME_MODE`` allows skill execution (``advanced``/``pro``).
+    """True when the skill is statically available for execution.
 
-    Used by ``summarize_skills`` / the Skills UI so the "available"
-    count stays consistent with what ``skill_exec`` will actually let
-    run right now. ``skill_exec`` re-checks the runtime mode itself —
-    this helper just prevents UI drift (e.g. light-mode users seeing
-    a "ready to run" badge on a skill that will always refuse).
+    v5.1.2 Frame A: ``OUROBOROS_RUNTIME_MODE`` no longer gates skill
+    execution — light, advanced, and pro all let reviewed + enabled
+    skills run. The previous helper short-circuited to False on light;
+    that branch is removed so the Skills UI no longer paints a
+    runtime-blocked badge in light mode. The ``runtime_mode`` axis
+    only controls repo self-modification + the elevation ratchet.
     """
-    if not skill.available_for_execution:
-        return False
-    from ouroboros.config import get_runtime_mode
-    return get_runtime_mode() in {"advanced", "pro"}
+    return skill.available_for_execution
 
 
 # ---------------------------------------------------------------------------
@@ -1146,12 +1145,11 @@ def list_available_for_execution(
 def summarize_skills(drive_root: pathlib.Path) -> Dict[str, Any]:
     """Return a compact catalogue summary for the Skills UI / /api/state.
 
-    ``available_for_execution`` and the top-level ``available`` count
-    reflect the CURRENT ``OUROBOROS_RUNTIME_MODE`` — in light mode a
-    reviewed+enabled skill is still counted under ``pending_review``'s
-    sibling ``runtime_blocked`` instead of ``available``, so the UI and
-    ``/api/state`` can never advertise a skill as runnable when
-    ``skill_exec`` would refuse it.
+    v5.1.2 Frame A: ``runtime_mode`` no longer gates skill execution —
+    ``available_for_execution`` and ``static_ready`` converge, and
+    ``runtime_blocked`` is always 0. The fields stay in the schema for
+    backward compatibility (UI, ``/api/state`` consumers) but the
+    ``light`` mode no longer subtracts from ``available``.
 
     Does not include raw manifest bodies or review findings — callers
     that need the detail should call ``discover_skills`` directly.
@@ -1159,18 +1157,13 @@ def summarize_skills(drive_root: pathlib.Path) -> Dict[str, Any]:
     skills = discover_skills(drive_root)
     from ouroboros.config import get_runtime_mode
     runtime_mode = get_runtime_mode()
-    runtime_blocks_execution = runtime_mode not in {"advanced", "pro"}
     return {
         "count": len(skills),
         "runtime_mode": runtime_mode,
         "available": sum(
             1 for s in skills if is_runtime_eligible_for_execution(s)
         ),
-        "runtime_blocked": sum(
-            1
-            for s in skills
-            if s.available_for_execution and runtime_blocks_execution
-        ),
+        "runtime_blocked": 0,  # v5.1.2: runtime_mode no longer gates skill execution.
         "pending_review": sum(
             1
             for s in skills
@@ -1197,9 +1190,7 @@ def summarize_skills(drive_root: pathlib.Path) -> Dict[str, Any]:
                 "review_stale": s.review.is_stale_for(s.content_hash),
                 "available_for_execution": is_runtime_eligible_for_execution(s),
                 "static_ready": s.available_for_execution,
-                "runtime_blocked_by_mode": (
-                    s.available_for_execution and runtime_blocks_execution
-                ),
+                "runtime_blocked_by_mode": False,  # v5.1.2: never blocked by mode.
                 "load_error": s.load_error,
                 "source": s.source,
             }

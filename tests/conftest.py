@@ -25,6 +25,31 @@ def pytest_runtest_call(item):  # noqa: ARG001
 
 
 @pytest.fixture(autouse=True)
+def _reset_runtime_mode_baseline_between_tests():
+    """v5.1.2 iter-2 test isolation fix (Gemini finding F2-7):
+    ``ouroboros.config._BOOT_RUNTIME_MODE`` is a module-level global
+    pinned by ``initialize_runtime_mode_baseline``. Tests that boot a
+    Starlette ``TestClient`` trigger ``server.lifespan`` which pins the
+    baseline; subsequent tests inherit the pin and may see different
+    rank-comparison behaviour depending on test order. Reset to ``None``
+    + remove the env var on every test boundary so each test starts
+    with the documented "no pin" state. Tests that need a pin call
+    ``initialize_runtime_mode_baseline(...)`` explicitly.
+    """
+    try:
+        from ouroboros.config import reset_runtime_mode_baseline_for_tests
+        reset_runtime_mode_baseline_for_tests()
+    except Exception:
+        pass
+    yield
+    try:
+        from ouroboros.config import reset_runtime_mode_baseline_for_tests
+        reset_runtime_mode_baseline_for_tests()
+    except Exception:
+        pass
+
+
+@pytest.fixture(autouse=True)
 def _hide_bundled_skills(monkeypatch):
     """Phase 5: skill tests must not see the shipped ``repo/skills/``
     reference skills. Tests build their own fixtures under ``tmp_path``

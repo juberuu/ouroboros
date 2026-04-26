@@ -248,7 +248,9 @@ def _bootstrap_context() -> BootstrapContext:
         embedded_python=EMBEDDED_PYTHON,
         app_version=APP_VERSION,
         hidden_run=_hidden_run,
-        save_settings=save_settings,
+        # Launcher-driven save: owner-process action, allow_elevation=True
+        # so first-launch env migration can set any runtime_mode.
+        save_settings=lambda settings: save_settings(settings, allow_elevation=True),
         log=log,
     )
 
@@ -527,7 +529,12 @@ def _load_settings() -> dict:
 
 
 def _save_settings(settings: dict) -> None:
-    save_settings(settings)
+    # Launcher is the owner-process boundary: first-run wizard, env-var
+    # migration, and provider-default seeds all flow through here.
+    # ``allow_elevation=True`` lets the owner pick any ``OUROBOROS_RUNTIME_MODE``
+    # at first launch; the agent-callable path (``api_settings_post``,
+    # ``_set_tool_timeout``) keeps the default ``False``.
+    save_settings(settings, allow_elevation=True)
 
 
 def _claude_code_status_payload(settings: dict | None = None) -> dict:

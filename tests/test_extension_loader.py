@@ -406,7 +406,12 @@ def test_load_extension_refuses_disabled(tmp_path):
     assert "disabled" in err
 
 
-def test_reconcile_extension_unloads_when_runtime_mode_light(tmp_path, monkeypatch):
+def test_reconcile_extension_stays_loaded_in_light_mode(tmp_path, monkeypatch):
+    """v5.1.2 Frame A: ``light`` no longer unloads extensions. The
+    ``runtime_mode_light`` reason is gone from
+    ``_extension_runtime_state``. Extensions follow the same
+    enabled / review / content-hash gates regardless of mode.
+    """
     plugin = (
         "def _echo(ctx):\n"
         "    return 'ok'\n"
@@ -430,9 +435,11 @@ def test_reconcile_extension_unloads_when_runtime_mode_light(tmp_path, monkeypat
         lambda: {},
         repo_path=repo_root,
     )
-    assert state["reason"] == "runtime_mode_light"
-    assert state["action"] == "extension_unloaded"
-    assert "lightstop" not in extension_loader.snapshot()["extensions"]
+    # The ``runtime_mode_light`` reason was removed in v5.1.2; the
+    # extension stays live.
+    assert state["reason"] != "runtime_mode_light"
+    assert state["action"] != "extension_unloaded"
+    assert "lightstop" in extension_loader.snapshot()["extensions"]
 
 
 def test_reconcile_extension_keeps_live_extension_loaded(tmp_path, monkeypatch):

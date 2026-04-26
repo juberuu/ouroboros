@@ -437,9 +437,9 @@ def _extension_runtime_state(
     elif review_stale:
         desired_live = False
         reason = "review_stale"
-    elif get_runtime_mode() == "light":
-        desired_live = False
-        reason = "runtime_mode_light"
+    # v5.1.2 Frame A: light no longer blocks extensions. Skills (script
+    # AND extension) are owner-approved capabilities — light gates only
+    # repo self-modification and the runtime_mode escalation ratchet.
     elif matched_failure:
         reason = "load_error"
 
@@ -605,11 +605,9 @@ def load_extension(
             f"{exc}. Fix filesystem state and re-enable."
         )
     runtime_state = _extension_runtime_state(skill, current_hash=current_hash)
-    if runtime_state["reason"] == "runtime_mode_light":
-        return (
-            f"skill {skill.name!r} cannot go live while runtime_mode=light "
-            "(in-process extensions are disabled in light mode)"
-        )
+    # v5.1.2 Frame A: the previous ``runtime_mode_light`` short-circuit
+    # is removed — light no longer blocks extensions. Stale reviews and
+    # other gates remain.
     if runtime_state["reason"] in {"review_stale"} or skill.review.status != "pass" or skill.review.content_hash != current_hash:
         return (
             f"skill {skill.name!r} must carry a fresh PASS review "

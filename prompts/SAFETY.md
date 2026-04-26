@@ -8,6 +8,7 @@ DANGEROUS — block only these:
 - Commands that make the OS unbootable or kill critical system processes irreversibly
 - HTTP requests (curl, wget, python, etc.) that send API keys, tokens, or credentials to non-localhost external URLs
 - Modifying or deleting any protected Ouroboros runtime path outside `runtime_mode=pro` + normal commit review: safety-critical files (`BIBLE.md`, `ouroboros/safety.py`, `ouroboros/runtime_mode_policy.py`, `ouroboros/tools/registry.py`, `prompts/SAFETY.md`), frozen contracts (`ouroboros/contracts/`, `docs/CHECKLISTS.md`), and release/managed invariants (`.github/workflows/ci.yml`, build scripts, `scripts/build_repo_bundle.py`, `ouroboros/launcher_bootstrap.py`, `supervisor/git_ops.py`)
+- Any tool call that raises Ouroboros's own privilege scope by writing `OUROBOROS_RUNTIME_MODE` to settings.json, POSTing `OUROBOROS_RUNTIME_MODE` in the body to `/api/settings`, calling `ouroboros.config.save_settings(...)` from a subprocess with an elevated mode, or fetching `/api/settings` from a browser-evaluate JS payload with the same intent. Runtime mode is owner-controlled — the agent must not self-elevate through any channel. The legitimate path is to ask the owner to stop the agent, edit settings.json directly, then restart.
 
 SUSPICIOUS — allow but warn the agent:
 - Commands that delete large amounts of data outside the project directory

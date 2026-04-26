@@ -21,9 +21,14 @@ Design rules (per the Phase 3 plan):
   stderr so a misbehaving skill cannot flood the runtime logs.
 - The runtime allowlist is ``python``/``python3``/``bash``/``node``;
   anything else is rejected up-front.
-- Runtime-mode gate: ``light`` blocks execution entirely (the whole
-  point of light mode is "no agent-initiated side effects beyond reading");
-  ``advanced`` and ``pro`` both allow reviewed skills to execute.
+- Runtime-mode gate (v5.1.2 Frame A): ``light``/``advanced``/``pro`` ALL
+  allow reviewed + enabled skills to execute. The ``runtime_mode`` axis
+  controls only repo self-modification + the ``OUROBOROS_RUNTIME_MODE``
+  elevation ratchet — owner-approved skills already pass through their
+  own independent stack (tri-model review PASS + ``enabled.json`` toggle
+  + content-hash freshness + sandboxed subprocess + ``FORBIDDEN_SKILL_SETTINGS``
+  denylist), so a runtime_mode gate on top would only deny owner-approved
+  capabilities without adding security.
 """
 
 from __future__ import annotations
@@ -38,7 +43,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from ouroboros.config import get_runtime_mode, get_skills_repo_path, load_settings
+from ouroboros.config import get_skills_repo_path, load_settings
 from ouroboros.skill_loader import (
     SkillPayloadUnreadable,
     VALID_REVIEW_STATUSES,
@@ -476,13 +481,16 @@ def _handle_skill_exec(
     if err:
         return err
 
-    runtime_mode = get_runtime_mode()
-    if runtime_mode == "light":
-        return (
-            "⚠️ SKILL_EXEC_BLOCKED: runtime_mode=light disables skill "
-            "execution. Switch to 'advanced' or 'pro' in Settings → "
-            "Behavior → Runtime Mode to allow reviewed skills to run."
-        )
+    # v5.1.2 light reframed: ``light`` blocks repo self-modification but
+    # ALLOWS reviewed + enabled skills to execute. Skills already have
+    # their own independent safety stack (tri-model review PASS verdict
+    # + ``enabled.json`` toggle + content-hash freshness + sandboxed
+    # subprocess with cwd / scrubbed env / runtime allowlist / 300s
+    # ceiling / byte caps + ``FORBIDDEN_SKILL_SETTINGS`` denylist), so
+    # gating execution by ``runtime_mode`` would only deny owner-
+    # approved capabilities. Repo-mutation tools and the elevation
+    # ratchet (``save_settings`` / ``_data_write`` to settings.json)
+    # remain blocked; that is what ``light`` is for.
 
     skill_name = str(skill or "").strip()
     script_rel = str(script or "").strip()
@@ -911,8 +919,10 @@ _EXEC_SCHEMA = {
         "Runtime allowlist: python/python3/bash/node. The subprocess "
         "runs with cwd=skill_dir, a scrubbed env (env_from_settings "
         "keys only), panic-kill tracking, and a timeout from the "
-        "manifest (capped at 300s). Blocked entirely when "
-        "OUROBOROS_RUNTIME_MODE=light."
+        "manifest (capped at 300s). v5.1.2 Frame A: OUROBOROS_RUNTIME_MODE "
+        "no longer gates execution — light, advanced, and pro all let "
+        "reviewed + enabled skills run. Light still blocks repo "
+        "self-modification and the runtime_mode elevation ratchet."
     ),
     "parameters": {
         "type": "object",

@@ -333,7 +333,11 @@ export function initSettings({ state }) {
             OUROBOROS_SCOPE_REVIEW_MODEL: byId('s-scope-review-model').value.trim(),
             OUROBOROS_EFFORT_SCOPE_REVIEW: byId('s-effort-scope-review').value,
             OUROBOROS_REVIEW_ENFORCEMENT: byId('s-review-enforcement').value,
-            OUROBOROS_RUNTIME_MODE: byId('s-runtime-mode').value,
+            // OUROBOROS_RUNTIME_MODE is owner-only (v5.1.2 elevation ratchet):
+            // /api/settings POST ignores this key. Mode changes happen only via
+            // direct settings.json edit while the agent is stopped. The
+            // segmented control below remains visible for display + the
+            // tooltip explains the manual procedure.
             OUROBOROS_SKILLS_REPO_PATH: byId('s-skills-repo-path').value.trim(),
             OUROBOROS_CLAWHUB_ENABLED: byId('s-clawhub-enabled')?.checked === true,
             OUROBOROS_CLAWHUB_REGISTRY_URL: byId('s-clawhub-registry-url')?.value.trim() || '',

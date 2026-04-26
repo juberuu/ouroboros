@@ -284,6 +284,15 @@ def _classify_settings_changes(
 def _merge_settings_payload(current: Dict[str, Any], body: Dict[str, Any]) -> Dict[str, Any]:
     merged = {k: v for k, v in current.items()}
     for key in _SETTINGS_DEFAULTS:
+        # v5.1.2 elevation ratchet: ``OUROBOROS_RUNTIME_MODE`` is owner-only.
+        # The runtime mode axis controls how far Ouroboros may self-modify;
+        # accepting it from /api/settings POST gives the agent a same-process
+        # path to raise its own privilege scope (loopback POST has no auth).
+        # Mode changes happen only through direct ``settings.json`` edits while
+        # the agent is stopped, plus restart. UI segmented control becomes
+        # display-only for this key.
+        if key == "OUROBOROS_RUNTIME_MODE":
+            continue
         if key not in body:
             continue
         if key in _SECRET_SETTING_KEYS and _looks_masked_secret(body[key]) and merged.get(key):
@@ -1055,7 +1064,7 @@ async def api_settings_get(request: Request) -> JSONResponse:
 async def api_onboarding(request: Request) -> Response:
     settings, provider_defaults_changed, _provider_default_keys = apply_runtime_provider_defaults(load_settings())
     if provider_defaults_changed:
-        save_settings(settings)
+        save_settings(settings, allow_elevation=True)
     if has_startup_ready_provider(settings):
         return Response(status_code=204)
     return HTMLResponse(build_onboarding_html(settings, host_mode="web"))
@@ -1146,8 +1155,12 @@ async def api_settings_post(request: Request) -> JSONResponse:
         # (``get_runtime_mode``), so /api/settings, /api/state, and the UI
         # segmented control stay in lockstep.
         from ouroboros.config import normalize_runtime_mode as _norm_runtime_mode
+        # v5.1.2 elevation ratchet: belt-and-braces. ``_merge_settings_payload``
+        # already skips ``OUROBOROS_RUNTIME_MODE`` so the body cannot influence
+        # it, but if a future contributor adds a side channel we still want
+        # the saved mode to match the on-disk old value, not the request body.
         current["OUROBOROS_RUNTIME_MODE"] = _norm_runtime_mode(
-            current.get("OUROBOROS_RUNTIME_MODE")
+            old_settings.get("OUROBOROS_RUNTIME_MODE")
         )
         # Skills-repo path is opaque text; trim incidental whitespace so the
         # "configured vs empty" boolean in /api/state stays deterministic.
@@ -1590,8 +1603,14 @@ async def lifespan(app):
 
     settings, provider_defaults_changed, _provider_default_keys = apply_runtime_provider_defaults(load_settings())
     if provider_defaults_changed:
-        save_settings(settings)
+        save_settings(settings, allow_elevation=True)
     _apply_settings_to_env(settings)
+    # v5.1.2 elevation ratchet: pin the boot-time runtime-mode baseline AFTER
+    # initial settings load + env apply so the ``save_settings`` chokepoint
+    # compares incoming saves against this owner-fixed value rather than
+    # against on-disk old (which an out-of-process write could corrupt).
+    from ouroboros.config import initialize_runtime_mode_baseline
+    initialize_runtime_mode_baseline()
     has_local = has_local_routing(settings)
 
     # v4.50: seed ``data/skills/native/`` from ``repo/skills/`` on first

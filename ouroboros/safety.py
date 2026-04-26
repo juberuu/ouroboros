@@ -135,9 +135,9 @@ TOOL_POLICY: Dict[str, str] = {
     # state directory. Cannot touch the main repo.
     "toggle_skill": POLICY_SKIP,
     # Actually spawns a subprocess from the external skill checkout.
-    # The tool itself enforces PASS review + enabled + non-stale hash +
-    # runtime_mode != light, but we still keep a cheap per-call LLM
-    # recheck as defense in depth.
+    # The tool itself enforces PASS review + enabled + non-stale hash;
+    # v5.1.2 Frame A: runtime_mode no longer gates execution. We still
+    # keep a cheap per-call LLM recheck as defense in depth.
     "skill_exec": POLICY_CHECK,
 
     # --- Conditional: run_shell (safe-subject whitelist) ---

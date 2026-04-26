@@ -326,6 +326,29 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str)
     if not getattr(_sys, 'frozen', False):
         _sys.path.insert(0, repo_dir)
     _drive = _pathlib.Path(drive_root)
+    # v5.1.2 iter-2 fix: pin the runtime-mode baseline in this worker
+    # process. On ``fork`` start methods the parent's pin is inherited
+    # via copy-on-write memory, so this is a no-op (re-call early-
+    # returns). On ``spawn`` (Windows default + macOS Python 3.8+ when
+    # configured) the worker re-imports ``ouroboros.config`` from
+    # scratch with ``_BOOT_RUNTIME_MODE = None``; the pin reads the
+    # parent-exported ``OUROBOROS_BOOT_RUNTIME_MODE`` env var
+    # (inherited across spawn) and re-establishes the chokepoint
+    # in this worker. Without this, a future tool inside the worker
+    # that calls ``save_settings(..., allow_elevation=True)`` could
+    # bypass the ratchet — the env-var fallback in ``save_settings``
+    # already covers this transparently, but pinning explicitly here
+    # keeps the in-process path identical to the supervisor.
+    try:
+        from ouroboros.config import initialize_runtime_mode_baseline
+        initialize_runtime_mode_baseline()
+    except Exception:
+        # Non-fatal — the ``save_settings`` env-var fallback continues
+        # to gate elevation. Logged so a regression is visible.
+        try:
+            _log_worker_crash(wid, _drive, "init_baseline", None, _tb.format_exc())
+        except Exception:
+            pass
     try:
         from ouroboros.agent import make_agent
         agent = make_agent(repo_dir=repo_dir, drive_root=drive_root, event_queue=out_q)

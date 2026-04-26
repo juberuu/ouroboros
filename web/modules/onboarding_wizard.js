@@ -487,7 +487,11 @@
         const rows = [
             ['Detected setup', profileLabel(activeProviderProfile())],
             ['Review mode', reviewLabel(state.reviewEnforcement)],
-            ['Runtime mode', runtimeModeLabel(state.runtimeMode)],
+            // v5.1.2 iter-2 fix: runtime mode is owner-only and not changed
+            // by onboarding. Show the actual current value (from initial
+            // state load) rather than ``state.runtimeMode`` which the user
+            // may have clicked even though the buttons are now disabled.
+            ['Runtime mode (display only)', `${runtimeModeLabel(state.runtimeMode)} — change via settings.json after install`],
             ['Total budget', formatUsd(state.totalBudget)],
             ['Per-task soft threshold', formatUsd(state.perTaskCostUsd)],
             ['Main', trim(state.mainModel)],
@@ -720,19 +724,19 @@
             </div>
             <div class="panel-card runtime-mode-card">
                 <h3>Runtime mode</h3>
-                <p class="field-note">Separate axis from review enforcement. Controls how far Ouroboros is allowed to self-modify. You can change this later in Settings → Behavior.</p>
-                <div class="wizard-choice-grid three">
-                    <button type="button" class="wizard-choice light ${runtimeMode === 'light' ? 'active' : ''}" data-runtime-mode="light">
+                <p class="field-note">Separate axis from review enforcement. Controls how far Ouroboros is allowed to self-modify. <strong>Display only:</strong> v5.1.2 makes runtime mode owner-only. The current default is <code>Advanced</code>. To pick a different mode, finish onboarding first, then stop the agent, edit <code>~/Ouroboros/data/settings.json</code> directly (set <code>OUROBOROS_RUNTIME_MODE</code>), and restart.</p>
+                <div class="wizard-choice-grid three" data-runtime-mode-disabled>
+                    <button type="button" class="wizard-choice light ${runtimeMode === 'light' ? 'active' : ''}" data-runtime-mode="light" disabled aria-disabled="true">
                         <span class="tone">Safest</span>
                         <h3>Light</h3>
                         <p>Self-modification of the main repo is disabled. Best for trying Ouroboros out or running it as a pure assistant.</p>
                     </button>
-                    <button type="button" class="wizard-choice advanced ${runtimeMode === 'advanced' ? 'active' : ''}" data-runtime-mode="advanced">
+                    <button type="button" class="wizard-choice advanced ${runtimeMode === 'advanced' ? 'active' : ''}" data-runtime-mode="advanced" disabled aria-disabled="true">
                         <span class="tone">Default</span>
                         <h3>Advanced</h3>
                         <p>Self-modification of the evolutionary layer is allowed (current behaviour). Protected core/contract/release files stay guarded by Advanced mode.</p>
                     </button>
-                    <button type="button" class="wizard-choice pro ${runtimeMode === 'pro' ? 'active' : ''}" data-runtime-mode="pro">
+                    <button type="button" class="wizard-choice pro ${runtimeMode === 'pro' ? 'active' : ''}" data-runtime-mode="pro" disabled aria-disabled="true">
                         <span class="tone">Power</span>
                         <h3>Pro</h3>
                         <p>Direct protected-surface mode. Protected core/contract/release edits are allowed on disk, but commits still require the normal triad + scope review gate.</p>
@@ -1129,7 +1133,14 @@
             TOTAL_BUDGET: Number(state.totalBudget || 0),
             OUROBOROS_PER_TASK_COST_USD: Number(state.perTaskCostUsd || 0),
             OUROBOROS_REVIEW_ENFORCEMENT: trim(state.reviewEnforcement) || 'advisory',
-            OUROBOROS_RUNTIME_MODE: trim(state.runtimeMode) || 'advanced',
+            // v5.1.2 elevation ratchet: ``OUROBOROS_RUNTIME_MODE`` is owner-only.
+            // /api/settings drops the key from any POST body, so web/Docker
+            // onboarding does not change the mode (default = ``advanced`` from
+            // SETTINGS_DEFAULTS). To pick a different mode, the operator stops
+            // the agent after the wizard, edits ~/Ouroboros/data/settings.json
+            // directly, and restarts. The mode picker below stays visible so
+            // the operator sees the available scopes; the choice is purely
+            // informational on this onboarding path.
             OUROBOROS_SKILLS_REPO_PATH: trim(state.skillsRepoPath),
             LOCAL_MODEL_SOURCE: trim(state.localSource),
             LOCAL_MODEL_FILENAME: trim(state.localFilename),

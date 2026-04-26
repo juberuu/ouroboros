@@ -485,6 +485,23 @@
     grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+/* v5.1.2 Frame A: runtime-mode segmented control buttons are disabled
+   (display-only — owner edits settings.json directly to change mode).
+   Override the default ``.settings-effort-btn:hover`` highlight so a
+   hovered disabled button does not look interactable. The active value
+   still highlights via ``.active`` (set by ``syncEffortSegments`` on
+   load) so the user can still see which mode is in effect. */
+.settings-effort-btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+}
+.settings-effort-btn:disabled:hover {
+    background: rgba(255, 255, 255, 0.04);
+    border-color: rgba(255, 255, 255, 0.08);
+    color: var(--text-secondary);
+    transform: none;
+}
+
 
 [data-enforcement-group] .settings-effort-btn[data-effort-value="advisory"].active,
 [data-enforcement-group] .settings-effort-btn[data-effort-value="advisory"]:hover {

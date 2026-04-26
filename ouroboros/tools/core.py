@@ -64,6 +64,44 @@ def _data_list(ctx: ToolContext, dir: str = ".", max_entries: int = 500) -> str:
 
 def _data_write(ctx: ToolContext, path: str, content: str, mode: str = "overwrite") -> str:
     p = ctx.drive_path(path)
+    # v5.1.2 elevation ratchet defense-in-depth: settings.json is owner-only.
+    # The chokepoint in ``ouroboros.config.save_settings`` already refuses
+    # disk-level elevation; blocking ``data_write`` here turns the whole
+    # class of attempts into a clear tool-level error.
+    #
+    # The match is inode-aware (``Path.samefile``) so it handles symlinks,
+    # hardlinks, and case-insensitive filesystems (macOS APFS / Windows NTFS
+    # — ``os.path.normcase`` is a no-op on darwin, so a string-equality
+    # compare against the resolved path would let ``data_write("Settings.json",
+    # ...)`` bypass on darwin even though APFS routes both names to the same
+    # inode). For not-yet-existing paths ``samefile`` is unavailable; we
+    # fall back to a parent-resolve + case-insensitive name compare which
+    # covers the same-directory case-variant attack.
+    from ouroboros import config as _cfg
+    target_path = pathlib.Path(p)
+    settings_path = pathlib.Path(_cfg.SETTINGS_PATH)
+    matches = False
+    try:
+        if target_path.exists() and settings_path.exists():
+            matches = target_path.samefile(settings_path)
+    except OSError:
+        matches = False
+    if not matches:
+        try:
+            same_parent = target_path.parent.resolve() == settings_path.parent.resolve()
+        except OSError:
+            same_parent = False
+        if same_parent and target_path.name.lower() == settings_path.name.lower():
+            matches = True
+    if matches:
+        return (
+            "⚠️ DATA_WRITE_BLOCKED: settings.json is the canonical owner-edited "
+            "file. Tool-level writes must route through /api/settings (which "
+            "applies key-by-key policy — OUROBOROS_RUNTIME_MODE is owner-only "
+            "and dropped on POST; other keys flow through normally). To change "
+            "owner-only values, stop the agent, edit ~/Ouroboros/data/settings.json "
+            "directly, then restart."
+        )
     p.parent.mkdir(parents=True, exist_ok=True)
     if mode == "overwrite":
         p.write_text(content, encoding="utf-8")

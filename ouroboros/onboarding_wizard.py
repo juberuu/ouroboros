@@ -262,15 +262,19 @@ def prepare_onboarding_settings(data: dict, current_settings: dict) -> Tuple[dic
     local_routing_mode = _string(data.get("LOCAL_ROUTING_MODE")) or "cloud"
     review_enforcement = _string(data.get("OUROBOROS_REVIEW_ENFORCEMENT")) or "advisory"
     raw_runtime_mode = _string(data.get("OUROBOROS_RUNTIME_MODE"))
-    # If the caller omitted the key entirely we fall back to the default
-    # (legacy onboarding payloads); otherwise we keep the raw value so the
-    # ``runtime_mode not in VALID_RUNTIME_MODES`` guard below can reject a
-    # typed-in typo with a descriptive error rather than silently coercing
-    # it to "advanced".
+    # v5.1.2 iter-2 fix (Opus finding F2-13): if the caller omitted the
+    # key entirely (web onboarding payload no longer sends
+    # OUROBOROS_RUNTIME_MODE; v5.1.2 made the mode owner-only), preserve
+    # the existing on-disk value from ``current_settings`` instead of
+    # silently downgrading a returning user from ``pro``/``light`` to
+    # the SETTINGS_DEFAULTS baseline (``advanced``). Only fall back to
+    # the default when neither the form payload nor the existing
+    # settings carry a value (true first-launch with empty disk).
     runtime_mode = (
         raw_runtime_mode.lower()
         if raw_runtime_mode
-        else str(SETTINGS_DEFAULTS["OUROBOROS_RUNTIME_MODE"])
+        else _string(current_settings.get("OUROBOROS_RUNTIME_MODE"))
+        or str(SETTINGS_DEFAULTS["OUROBOROS_RUNTIME_MODE"])
     )
     skills_repo_path = _string(data.get("OUROBOROS_SKILLS_REPO_PATH"))
 

@@ -749,7 +749,13 @@ def test_tool_registry_execute_dispatches_ext_tool(tmp_path, monkeypatch):
         assert schema is not None
         assert schema["function"]["name"] == "ext.testskill.echo"
         result = tmp_reg.execute("ext.testskill.echo", {"who": "phase5"})
-        assert result == "hello phase5"
+        # v5.1.2 iter-2: extension dispatch now goes through
+        # ``ouroboros.safety.check_safety``. In test envs without a
+        # safety backend, the supervisor returns a visible
+        # ``SAFETY_WARNING`` prefix while still letting the call run
+        # (fail-open). Assert the handler ran and produced its output;
+        # the warning prefix is acceptable.
+        assert "hello phase5" in result, result
         # get_timeout honours the extension's declared timeout.
         assert tmp_reg.get_timeout("ext.testskill.echo") == 10
     finally:

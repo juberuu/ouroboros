@@ -156,22 +156,16 @@ def test_skill_exec_refuses_when_unconfigured(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Runtime-mode gating: light blocks skill_exec
+# Runtime-mode semantics in v5.1.2 (Frame A):
+# ``light`` blocks repo self-modification but ALLOWS reviewed + enabled
+# skills to execute. The previous Frame-B regression (light blocking
+# skill_exec) is replaced by ``test_skill_exec_runs_in_light_mode`` in
+# tests/test_runtime_mode_gating.py — covering the positive path.
+# Light still blocks every escalation channel of the runtime_mode axis
+# itself; that is enforced by the chokepoint in
+# ``ouroboros.config.save_settings`` and ``_data_write`` settings.json
+# block, exercised in tests/test_runtime_mode_elevation.py.
 # ---------------------------------------------------------------------------
-
-
-def test_skill_exec_blocked_in_light_mode(tmp_path, monkeypatch):
-    skills_root = tmp_path / "skills"
-    skill_dir = _build_skill(skills_root, "hello")
-    ctx = _make_ctx(tmp_path)
-    _mark_reviewed_and_enabled(ctx.drive_root, skill_dir, "hello")
-    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
-    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
-    result = skill_exec_mod._handle_skill_exec(
-        ctx, skill="hello", script="scripts/hello.py"
-    )
-    assert "SKILL_EXEC_BLOCKED" in result
-    assert "light" in result.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -415,6 +409,39 @@ def test_skill_exec_runs_reviewed_skill_successfully(tmp_path, monkeypatch):
     assert stdout["has_home"] is True
     # Secret key must not leak into the subprocess environment.
     assert stdout["openrouter_leaked"] is False
+
+
+def test_skill_exec_runs_in_light_mode(tmp_path, monkeypatch):
+    """v5.1.2 Frame A: ``light`` allows reviewed + enabled skills to
+    execute. The privilege scope ``light`` controls is repo
+    self-modification and the runtime_mode elevation ratchet, NOT
+    owner-approved skills (skills already pass tri-model review +
+    enabled.json toggle + content-hash freshness + sandboxed
+    subprocess). This is the positive replacement for the deleted
+    Frame-B regression ``test_skill_exec_blocked_in_light_mode``.
+    """
+    skills_root = tmp_path / "skills"
+    skill_dir = _build_skill(
+        skills_root,
+        "hello",
+        script_body="import json; print(json.dumps({'ok': True}))\n",
+    )
+    ctx = _make_ctx(tmp_path)
+    _mark_reviewed_and_enabled(ctx.drive_root, skill_dir, "hello")
+
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+
+    raw = skill_exec_mod._handle_skill_exec(
+        ctx, skill="hello", script="scripts/hello.py"
+    )
+    # Must NOT be the v5.0.0 Frame-B sentinel.
+    assert "SKILL_EXEC_BLOCKED" not in raw
+    payload = json.loads(raw)
+    assert payload["skill"] == "hello"
+    assert payload["exit_code"] == 0
+    stdout_line = payload["stdout"].strip().splitlines()[-1]
+    assert json.loads(stdout_line) == {"ok": True}
 
 
 # ---------------------------------------------------------------------------

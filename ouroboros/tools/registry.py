@@ -38,6 +38,132 @@ _SHELL_WRITE_INDICATORS = (
     "rsync ", "write_text", "open(", ".write(", ".writelines(",
 )
 
+# v5.1.2 elevation ratchet: indicators reused by the run_shell argv
+# check AND by the run_shell file-content scan (subprocess invocation
+# `python helper.py` where helper.py contains the dangerous code).
+# Splitting these into module-level constants lets ``execute`` apply the
+# same check at both layers without duplicating the tuple.
+#
+# ``_LIGHT_MUTATION_INDICATORS`` fires only when ``runtime_mode == light``
+# and matches obvious repo-mutation patterns. ``_ELEVATION_PROBES``
+# captures the conjunctive elevation pattern (``save_settings`` together
+# with ``OUROBOROS_RUNTIME_MODE``, OR the dotted ``ouroboros.config.save_settings``
+# attribute path) — used in ALL modes because elevation ``advanced→pro``
+# is also out of scope for the agent.
+_LIGHT_MUTATION_INDICATORS = (
+    "git commit", "git add", "git push", "git rebase", "git reset",
+    "git checkout", "git merge", "git pull", "git stash drop",
+    "git revert", "git cherry-pick",
+    " > ", " >> ", " | tee ",
+    "rm -", "mkdir ", "mv ", "cp ", "touch ",
+    # In-place file mutation via common Unix tools.
+    "sed -i", "perl -i", "ruby -i",
+    "truncate ", "chmod ", "chown ", "ln -",
+    "tar -x", "unzip ", "gzip ", "gunzip ",
+    # Python / JS in-place writers.
+    "open(", ".write(", ".writelines(",
+    # ``Path.write_text`` / ``Path.write_bytes`` are not substrings of
+    # ``.write(`` because of the ``_text`` / ``_bytes`` suffix between
+    # ``write`` and ``(``.
+    ".write_text(", ".write_bytes(",
+    # OS-level rename / replace primitives commonly used to atomically
+    # clobber a file.
+    "os.replace(", "os.rename(",
+)
+
+
+def _detect_runtime_mode_elevation(text_lower: str) -> bool:
+    """Return True when ``text_lower`` (a lowercased shell argv string OR
+    a script file's lowercased content) matches the v5.1.2 elevation
+    pattern: BOTH ``save_settings`` AND ``ouroboros_runtime_mode`` are
+    present, OR the dotted attribute path ``ouroboros.config.save_settings``
+    appears verbatim. The conjunctive form keeps the false-positive rate
+    low for legitimate diagnostics (``echo $OUROBOROS_RUNTIME_MODE``,
+    ``grep save_settings ouroboros/config.py``)."""
+    has_save = "save_settings" in text_lower
+    has_mode_key = "ouroboros_runtime_mode" in text_lower
+    has_dotted_path = "ouroboros.config.save_settings" in text_lower
+    return (has_save and has_mode_key) or has_dotted_path
+
+
+_INTERPRETER_BASENAMES = frozenset({
+    "python", "python2", "python3",
+    "bash", "sh", "zsh",
+    "node", "nodejs",
+})
+
+
+def _extract_script_file_args(raw_cmd: Any) -> List[str]:
+    """Return script file paths an interpreter is asked to execute.
+
+    Recognises ``python``/``python3``/``bash``/``sh``/``zsh``/``node``
+    invocations in argv form (list of strings) or shell-string form,
+    and returns the first non-flag positional argument(s) following an
+    interpreter token. Skips ``-c`` (inline code), ``-m`` (module
+    name), ``-`` (stdin) and standard interpreter flags. Returns an
+    empty list when no file argument is found, the cmd is unparseable,
+    or the interpreter has no script file (e.g. ``python -c "..."``).
+
+    Used by ``ToolRegistry.execute`` for ``run_shell`` to detect the
+    file-based subprocess elevation bypass pattern: ``python evil.py``
+    where ``evil.py`` was just written by ``data_write`` and contains
+    code that imports ``save_settings`` or writes ``settings.json``.
+    The argv-level substring check cannot see file content; the caller
+    reads each returned path's content and re-runs the indicator
+    checks against that content.
+    """
+    import shlex
+    if isinstance(raw_cmd, list):
+        argv = [str(x) for x in raw_cmd]
+    else:
+        try:
+            argv = shlex.split(str(raw_cmd or ""))
+        except ValueError:
+            return []
+    if not argv:
+        return []
+
+    files: List[str] = []
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        # Strip leading paths so ``/usr/bin/python3`` and ``python3``
+        # both match. Handle both POSIX and Windows separators because
+        # the agent's argv may originate from either.
+        basename = token.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
+        is_interpreter = (
+            basename in _INTERPRETER_BASENAMES
+            or any(basename.startswith(p + ".") for p in _INTERPRETER_BASENAMES)
+        )
+        if not is_interpreter:
+            i += 1
+            continue
+        # Walk forward to find the script file argument.
+        j = i + 1
+        while j < len(argv):
+            arg = argv[j]
+            if arg in {"-c", "-m"}:
+                # Inline code or module name: nothing to scan as a file.
+                break
+            if arg == "-":
+                # Stdin marker.
+                break
+            if arg.startswith("-"):
+                # Standard interpreter flag (-u, -O, -B, --inspect, etc.).
+                j += 1
+                continue
+            files.append(arg)
+            break
+        i = j + 1 if j < len(argv) else i + 1
+    return files
+
+
+# Bound for file-content scans. 256 KB is enough for any realistic
+# helper script the agent might ask ``run_shell`` to execute; bigger
+# files are skipped (the scan is best-effort defense in depth — the
+# authoritative gate is the ``save_settings`` chokepoint).
+_RUN_SHELL_SCAN_BYTES = 256 * 1024
+
 # Git via run_shell: only truly read-only subcommands allowed
 _GIT_READONLY_SUBCOMMANDS = frozenset([
     "status", "diff", "log", "show", "ls-files",
@@ -372,6 +498,255 @@ class ToolRegistry:
                 return int(ext_tool.get("timeout_sec") or 60)
         return 360
 
+    def _dispatch_extension_tool(self, name: str, ext_tool: Dict[str, Any], args: Optional[Dict[str, Any]]) -> str:
+        """Run an ``ext.<skill>.<tool>`` handler with the same safety gates
+        the built-in tool path uses.
+
+        v5.1.2 Frame A: extension dispatch is allowed in ``light`` (skills
+        carry their own independent review + content-hash + sandbox
+        stack); the ``light`` mode block previously here was removed.
+        v5.1.2 iter-2 real triad finding TR1 (gpt-5.5 critical):
+        extension dispatch previously short-circuited to the handler
+        without reaching ``check_safety``, so removing the light-mode
+        gate left ``ext.*`` tools unsupervised in light. Route through
+        the same supervisor the built-in path uses so the per-call
+        safety check applies uniformly.
+        """
+        try:
+            from ouroboros.extension_loader import (
+                is_extension_live as _ext_is_live,
+                unload_extension as _ext_unload,
+            )
+        except Exception:
+            _ext_is_live = None
+            _ext_unload = None
+        skill_name = str(ext_tool.get("skill") or "")
+        if skill_name and callable(_ext_is_live) and not _ext_is_live(skill_name, pathlib.Path(self._ctx.drive_root)):
+            if callable(_ext_unload):
+                _ext_unload(skill_name)
+            return (
+                f"⚠️ EXTENSION_NOT_LIVE: extension {skill_name!r} is "
+                "not allowed to dispatch right now."
+            )
+        from ouroboros.safety import check_safety as _ext_check_safety
+        _ext_safe, _ext_safety_msg = _ext_check_safety(
+            name,
+            args or {},
+            messages=getattr(self._ctx, "messages", None),
+            ctx=self._ctx,
+        )
+        if not _ext_safe:
+            return _ext_safety_msg
+        handler = ext_tool["handler"]
+        try:
+            result = handler(self._ctx, **(args or {}))
+        except TypeError:
+            result = handler(**(args or {}))
+        except Exception as exc:
+            return (
+                f"⚠️ extension tool {name!r} failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+        result_str = result if isinstance(result, str) else str(result)
+        if _ext_safety_msg:
+            return f"{_ext_safety_msg}\n\n---\n{result_str}"
+        return result_str
+
+    def _run_shell_safety_check(self, args: Dict[str, Any], runtime_mode: str) -> Optional[str]:
+        """Pre-execution safety filter for ``run_shell``.
+
+        Returns a block message string when the command should be
+        refused, or ``None`` to let it proceed to the LLM safety
+        supervisor + handler. Extracted from ``execute`` so the
+        method itself stays under the 300-line hard gate; the checks
+        themselves are unchanged.
+
+        Layered checks (in order):
+          1. Argv-level elevation pattern (``save_settings`` AND
+             ``OUROBOROS_RUNTIME_MODE``, or dotted attribute path) —
+             blocks in ALL modes.
+          2. Light-mode argv repo-mutation indicators (git writes,
+             redirection, ``rm -``, ``sed -i``, ``.write_text(`` …).
+          3. v5.1.2 iter-3 file-content scan: for each interpreter
+             invocation (``python evil.py`` / ``bash evil.sh`` / etc.)
+             where the script file resolves inside the agent-writable
+             area, read the content (bounded) and re-run the same
+             elevation + light-mutation indicators against it.
+          4. Protected runtime path writes (``BIBLE.md`` etc.) outside
+             ``runtime_mode=pro``.
+          5. ``gh repo create/delete/auth`` blanket block.
+          6. Git mutative subcommand ban — write ops must go through
+             ``repo_commit`` tools, never ``run_shell``.
+        """
+        raw_cmd = args.get("cmd", args.get("command", ""))
+        if isinstance(raw_cmd, list):
+            cmd_lower = " ".join(str(x) for x in raw_cmd).lower()
+        else:
+            cmd_lower = str(raw_cmd).lower()
+        cmd_path_lower = cmd_lower.replace("\\", "/")
+        while "//" in cmd_path_lower:
+            cmd_path_lower = cmd_path_lower.replace("//", "/")
+
+        # 1. Elevation pattern (all modes).
+        if _detect_runtime_mode_elevation(cmd_lower):
+            return (
+                "⚠️ ELEVATION_BLOCKED: shell command pattern looks "
+                "like an OUROBOROS_RUNTIME_MODE elevation attempt "
+                "(mentions ``save_settings`` together with "
+                "``OUROBOROS_RUNTIME_MODE``, or invokes "
+                "``ouroboros.config.save_settings`` directly). "
+                "Runtime mode is owner-controlled — change it by "
+                "stopping the agent and editing settings.json "
+                "directly, then restart."
+            )
+
+        # 2. Light-mode repo-mutation indicators (argv).
+        if runtime_mode == "light":
+            if any(ind in cmd_lower for ind in _LIGHT_MUTATION_INDICATORS):
+                return (
+                    "⚠️ LIGHT_MODE_BLOCKED: runtime_mode=light refuses "
+                    "shell commands that look like repo mutations. "
+                    "Switch to 'advanced' or 'pro' in Settings → "
+                    "Behavior → Runtime Mode for write access."
+                )
+
+        # 3. File-content scan (v5.1.2 iter-3 file-based subprocess
+        # bypass fix). The argv-level checks only see the literal
+        # cmd; a ``python evil.py`` call has dangerous code INSIDE
+        # the file, invisible to the substring filter.
+        block_msg = self._scan_script_files(raw_cmd, runtime_mode)
+        if block_msg:
+            return block_msg
+
+        # 4. Protected runtime path writes.
+        for cf in _PROTECTED_RUNTIME_PATHS_LOWER:
+            if cf in cmd_path_lower and any(w in cmd_lower for w in _SHELL_WRITE_INDICATORS):
+                return (
+                    "⚠️ CRITICAL SAFETY_VIOLATION: Shell command would modify "
+                    "a protected core/contract/release file. Protected: "
+                    + ", ".join(sorted(PROTECTED_RUNTIME_PATHS))
+                )
+
+        # 5. GitHub repo create/delete/auth.
+        if "gh repo create" in cmd_lower or "gh repo delete" in cmd_lower:
+            return "⚠️ SAFETY_VIOLATION: Creating/deleting GitHub repositories requires admin approval."
+        if "gh auth" in cmd_lower:
+            return "⚠️ SAFETY_VIOLATION: Modifying GitHub authentication is not permitted."
+
+        # 6. Git mutative ban via shell.
+        if isinstance(raw_cmd, list):
+            cmd_parts_for_git = [str(x) for x in raw_cmd]
+        else:
+            cmd_parts_for_git = cmd_lower.split()
+        first_word = cmd_parts_for_git[0] if cmd_parts_for_git else ""
+        is_direct_git = (first_word == "git")
+        is_wrapped_git = (first_word in _SHELL_WRAPPERS and "git " in cmd_lower)
+        if is_direct_git:
+            subcmd = _extract_git_subcommand(cmd_parts_for_git)
+            if subcmd and subcmd.lower() not in _GIT_READONLY_SUBCOMMANDS:
+                return (
+                    f"⚠️ GIT_VIA_SHELL_BLOCKED: `git {subcmd}` must go through "
+                    "repo_commit / repo_write_commit tools which enforce pre-commit "
+                    "checks. For read-only git: git_status, git_diff tools, or "
+                    "run_shell with git log/show/diff/status."
+                )
+        if is_wrapped_git:
+            _git_banned = (
+                "git commit", "git push", "git add ", "git add\t",
+                "git init", "git reset", "git rebase", "git merge",
+                "git cherry-pick", "git branch", "git tag", "git remote",
+                "git config", "git stash", "git clean", "git checkout",
+                "git switch",
+            )
+            for banned in _git_banned:
+                if banned in cmd_lower:
+                    return (
+                        "⚠️ GIT_VIA_SHELL_BLOCKED: git mutative commands in shell "
+                        "wrappers must go through repo_commit / repo_write_commit tools."
+                    )
+        return None
+
+    def _scan_script_files(self, raw_cmd: Any, runtime_mode: str) -> Optional[str]:
+        """v5.1.2 iter-3 file-content scan for ``run_shell``.
+
+        For each interpreter invocation in ``raw_cmd``, find the script
+        file argument, resolve it, and check if it lives inside the
+        agent-writable area (``repo_dir`` or ``drive_root``). If so,
+        read content (bounded by ``_RUN_SHELL_SCAN_BYTES``) and run
+        the same elevation + light-mutation indicator checks against
+        it. Files outside the agent-writable area are skipped — the
+        agent cannot produce them via ``data_write`` / ``repo_write``,
+        so scanning would only create false positives on system
+        helper scripts.
+        """
+        script_files = _extract_script_file_args(raw_cmd)
+        if not script_files:
+            return None
+        try:
+            repo_root_real = pathlib.Path(self._ctx.repo_dir).resolve()
+        except OSError:
+            repo_root_real = None
+        try:
+            drive_root_real = pathlib.Path(self._ctx.drive_root).resolve()
+        except OSError:
+            drive_root_real = None
+        for script_path_str in script_files:
+            try:
+                script_path = pathlib.Path(script_path_str).resolve()
+            except (OSError, ValueError):
+                continue
+            inside_repo = False
+            inside_drive = False
+            if repo_root_real is not None:
+                try:
+                    script_path.relative_to(repo_root_real)
+                    inside_repo = True
+                except ValueError:
+                    pass
+            if drive_root_real is not None:
+                try:
+                    script_path.relative_to(drive_root_real)
+                    inside_drive = True
+                except ValueError:
+                    pass
+            if not (inside_repo or inside_drive):
+                continue
+            try:
+                if not script_path.is_file():
+                    continue
+                if script_path.stat().st_size > _RUN_SHELL_SCAN_BYTES:
+                    continue
+                content = script_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            content_lower = content.lower()
+            if _detect_runtime_mode_elevation(content_lower):
+                return (
+                    f"⚠️ ELEVATION_BLOCKED: script file "
+                    f"{script_path_str!r} (invoked via run_shell) "
+                    "contains code that looks like an "
+                    "OUROBOROS_RUNTIME_MODE elevation attempt "
+                    "(mentions ``save_settings`` together with "
+                    "``OUROBOROS_RUNTIME_MODE``, or "
+                    "``ouroboros.config.save_settings`` directly). "
+                    "Runtime mode is owner-controlled — change it by "
+                    "stopping the agent and editing settings.json "
+                    "directly, then restart."
+                )
+            if runtime_mode == "light" and any(
+                ind in content_lower for ind in _LIGHT_MUTATION_INDICATORS
+            ):
+                return (
+                    f"⚠️ LIGHT_MODE_BLOCKED: script file "
+                    f"{script_path_str!r} (invoked via run_shell) "
+                    "contains repo-mutation patterns "
+                    "(``.write_text(``/``.write_bytes(``/git writes/"
+                    "``sed -i``/etc.). Switch to 'advanced' or 'pro' "
+                    "in Settings → Behavior → Runtime Mode for write "
+                    "access."
+                )
+        return None
+
     def execute(self, name: str, args: Dict[str, Any]) -> str:
         entry = self._entries.get(name)
         ext_tool = None
@@ -398,41 +773,7 @@ class ToolRegistry:
 
         if entry is None:
             if ext_tool and callable(ext_tool.get("handler")):
-                try:
-                    from ouroboros.extension_loader import (
-                        is_extension_live as _ext_is_live,
-                        unload_extension as _ext_unload,
-                    )
-                except Exception:
-                    _ext_is_live = None
-                    _ext_unload = None
-                skill_name = str(ext_tool.get("skill") or "")
-                if _runtime_mode == "light":
-                    if skill_name and callable(_ext_unload):
-                        _ext_unload(skill_name)
-                    return (
-                        "⚠️ LIGHT_MODE_BLOCKED: runtime_mode=light disables "
-                        "in-process extension tools. Switch to 'advanced' or "
-                        "'pro' to re-enable extension dispatch."
-                    )
-                if skill_name and callable(_ext_is_live) and not _ext_is_live(skill_name, pathlib.Path(self._ctx.drive_root)):
-                    if callable(_ext_unload):
-                        _ext_unload(skill_name)
-                    return (
-                        f"⚠️ EXTENSION_NOT_LIVE: extension {skill_name!r} is "
-                        "not allowed to dispatch right now."
-                    )
-                handler = ext_tool["handler"]
-                try:
-                    result = handler(self._ctx, **(args or {}))
-                except TypeError:
-                    result = handler(**(args or {}))
-                except Exception as exc:
-                    return (
-                        f"⚠️ extension tool {name!r} failed: "
-                        f"{type(exc).__name__}: {exc}"
-                    )
-                return result if isinstance(result, str) else str(result)
+                return self._dispatch_extension_tool(name, ext_tool, args)
             return f"⚠️ Unknown tool: {name}. Available: {', '.join(sorted(self._entries.keys()))}"
         _REPO_MUTATION_TOOLS = frozenset(
             {
@@ -487,96 +828,9 @@ class ToolRegistry:
                 )
 
         if name == "run_shell":
-            raw_cmd = args.get("cmd", args.get("command", ""))
-            if isinstance(raw_cmd, list):
-                cmd_lower = " ".join(str(x) for x in raw_cmd).lower()
-            else:
-                cmd_lower = str(raw_cmd).lower()
-            cmd_path_lower = cmd_lower.replace("\\", "/")
-            while "//" in cmd_path_lower:
-                cmd_path_lower = cmd_path_lower.replace("//", "/")
-            # Phase 6 light-mode block for run_shell repo-mutation.
-            # The shell tool is not in ``_REPO_MUTATION_TOOLS`` because
-            # it's used for plenty of read-only invocations (``ls``,
-            # ``git status``, pytest, etc.); we instead pattern-match
-            # the actual command here. Mutation indicators include git
-            # write verbs, file redirection, and python one-liners with
-            # ``open(...,'w')``. This is NECESSARILY a best-effort
-            # filter — the authoritative gate is the review pipeline —
-            # but it blocks the common footguns so a user picking
-            # ``light`` sees consistent behaviour.
-            if _runtime_mode == "light":
-                _LIGHT_MUTATION_INDICATORS = (
-                    "git commit", "git add", "git push", "git rebase", "git reset",
-                    "git checkout", "git merge", "git pull", "git stash drop",
-                    "git revert", "git cherry-pick",
-                    " > ", " >> ", " | tee ",
-                    "rm -", "mkdir ", "mv ", "cp ", "touch ",
-                    # In-place file mutation via common Unix tools.
-                    # ``sed -i`` / ``perl -i`` edit files without any
-                    # redirection so the ``>`` check above misses them.
-                    "sed -i", "perl -i", "ruby -i",
-                    "truncate ", "chmod ", "chown ", "ln -",
-                    "tar -x", "unzip ", "gzip ", "gunzip ",
-                    # Python / JS in-place writers.
-                    "open(", ".write(", ".writelines(",
-                )
-                if any(ind in cmd_lower for ind in _LIGHT_MUTATION_INDICATORS):
-                    return (
-                        "⚠️ LIGHT_MODE_BLOCKED: runtime_mode=light refuses "
-                        "shell commands that look like repo mutations. "
-                        "Switch to 'advanced' or 'pro' in Settings → "
-                        "Behavior → Runtime Mode for write access."
-                    )
-
-            # Block shell writes to safety-critical files
-            for cf in _PROTECTED_RUNTIME_PATHS_LOWER:
-                if cf in cmd_path_lower and any(w in cmd_lower for w in _SHELL_WRITE_INDICATORS):
-                    return (
-                        "⚠️ CRITICAL SAFETY_VIOLATION: Shell command would modify "
-                        "a protected core/contract/release file. Protected: "
-                        + ", ".join(sorted(PROTECTED_RUNTIME_PATHS))
-                    )
-
-            # Block GitHub repo create/delete/auth
-            if "gh repo create" in cmd_lower or "gh repo delete" in cmd_lower:
-                return "⚠️ SAFETY_VIOLATION: Creating/deleting GitHub repositories requires admin approval."
-            if "gh auth" in cmd_lower:
-                return "⚠️ SAFETY_VIOLATION: Modifying GitHub authentication is not permitted."
-
-            # Git mutative command ban — write ops must go through repo_commit tools
-            if isinstance(raw_cmd, list):
-                cmd_parts_for_git = [str(x) for x in raw_cmd]
-            else:
-                cmd_parts_for_git = cmd_lower.split()
-            first_word = cmd_parts_for_git[0] if cmd_parts_for_git else ""
-            is_direct_git = (first_word == "git")
-            is_wrapped_git = (first_word in _SHELL_WRAPPERS and "git " in cmd_lower)
-
-            if is_direct_git:
-                subcmd = _extract_git_subcommand(cmd_parts_for_git)
-                if subcmd and subcmd.lower() not in _GIT_READONLY_SUBCOMMANDS:
-                    return (
-                        f"⚠️ GIT_VIA_SHELL_BLOCKED: `git {subcmd}` must go through "
-                        "repo_commit / repo_write_commit tools which enforce pre-commit "
-                        "checks. For read-only git: git_status, git_diff tools, or "
-                        "run_shell with git log/show/diff/status."
-                    )
-
-            if is_wrapped_git:
-                _git_banned = (
-                    "git commit", "git push", "git add ", "git add\t",
-                    "git init", "git reset", "git rebase", "git merge",
-                    "git cherry-pick", "git branch", "git tag", "git remote",
-                    "git config", "git stash", "git clean", "git checkout",
-                    "git switch",
-                )
-                for banned in _git_banned:
-                    if banned in cmd_lower:
-                        return (
-                            "⚠️ GIT_VIA_SHELL_BLOCKED: git mutative commands in shell "
-                            "wrappers must go through repo_commit / repo_write_commit tools."
-                        )
+            block_msg = self._run_shell_safety_check(args, _runtime_mode)
+            if block_msg:
+                return block_msg
 
         # --- LLM Safety Supervisor ---
         from ouroboros.safety import check_safety
