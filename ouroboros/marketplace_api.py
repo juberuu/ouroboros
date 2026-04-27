@@ -2,7 +2,7 @@
 
 Endpoints:
 
-- ``GET  /api/marketplace/clawhub/search?q=&official=&limit=&offset=&cursor=``
+- ``GET  /api/marketplace/clawhub/search?q=&official=&limit=&cursor=``
 - ``GET  /api/marketplace/clawhub/info/{slug}``
 - ``GET  /api/marketplace/clawhub/installed`` — local catalog snapshot
 - ``POST /api/marketplace/clawhub/install``     ``{slug, version?, auto_review?, overwrite?}``
@@ -114,21 +114,22 @@ async def api_marketplace_search(request: Request) -> JSONResponse:
     query = qp.get("q") or qp.get("query") or ""
     sort = qp.get("sort") or "registry"
     limit = _coerce_int(qp.get("limit"), 25)
-    offset = _coerce_int(qp.get("offset"), 0)
     include_plugins = _coerce_bool(qp.get("include_plugins"), False)
     official_only = _coerce_bool(qp.get("official") or qp.get("only_official"), False)
     cursor = qp.get("cursor") or None
+    is_text_search = bool(str(query or "").strip())
+    effective_cursor = None if is_text_search else cursor
+    effective_official_only = False if is_text_search else official_only
     try:
         page = await asyncio.to_thread(
             _registry_search,
             query,
             limit=limit,
-            offset=offset,
             sort=sort,
-            cursor=cursor,
-            official_only=official_only,
+            cursor=effective_cursor,
+            official_only=effective_official_only,
             include_metadata=True,
-            timeout_sec=5,
+            timeout_sec=15 if is_text_search else 5,
         )
     except Exception as exc:
         return _client_error_response(exc)
@@ -140,10 +141,10 @@ async def api_marketplace_search(request: Request) -> JSONResponse:
             "query": query,
             "sort": sort,
             "limit": limit,
-            "offset": offset,
-            "cursor": cursor,
+            "offset": 0,
+            "cursor": effective_cursor,
             "next_cursor": page.get("next_cursor") or "",
-            "official": official_only,
+            "official": effective_official_only,
             "registry_path": page.get("path") or "packages",
             "registry_attempts": page.get("attempts") or [],
             "registry_empty": not bool(results),

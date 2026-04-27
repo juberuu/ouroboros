@@ -112,6 +112,9 @@ function formatNumber(value) {
 }
 
 
+const MARKETPLACE_SEARCH_LIMIT = 16;
+
+
 function paneTemplate() {
     return `
         <div class="marketplace-shell">
@@ -224,7 +227,7 @@ function renderResults(host, summaries, installedMap, registryCount, diagnostics
                 <div class="muted">
                     ClawHub returned zero installable skills from <code>${escapeHtml(path)}</code>.
                     Browse uses <code>packages?family=skill</code>; text search uses
-                    <code>packages/search?family=skill</code>.
+                    <code>search?q=...</code>.
                 </div>
                 ${attempts}
             `;
@@ -237,18 +240,18 @@ function renderResults(host, summaries, installedMap, registryCount, diagnostics
 }
 
 
-function renderPagination(host, { offset, limit, count, cursor, nextCursor }) {
-    if (!nextCursor && count < limit && offset === 0) {
+function renderPagination(host, { query, limit, count, cursor, hasPrevious, nextCursor }) {
+    const searchMode = Boolean(String(query || '').trim());
+    if (searchMode || (!nextCursor && !hasPrevious)) {
         host.hidden = true;
         host.innerHTML = '';
         return;
     }
     host.hidden = false;
-    const nextDisabled = nextCursor ? '' : (count < limit ? 'disabled' : '');
     host.innerHTML = `
-        <button class="btn btn-default" data-mp-prev ${offset <= 0 && !cursor ? 'disabled' : ''}>Prev</button>
-        <span class="muted">${cursor ? 'cursor page' : `offset ${offset}`} · ${count} shown</span>
-        <button class="btn btn-default" data-mp-next ${nextDisabled}>Next</button>
+        <button class="btn btn-default" data-mp-prev ${hasPrevious ? '' : 'disabled'}>Prev</button>
+        <span class="muted">${cursor ? 'cursor page' : 'first page'} · ${count} shown</span>
+        <button class="btn btn-default" data-mp-next ${nextCursor ? '' : 'disabled'}>Next</button>
     `;
 }
 
@@ -310,11 +313,13 @@ async function loadInstalled() {
 
 async function runSearch(state) {
     const params = new URLSearchParams();
-    if (state.query) params.set('q', state.query);
-    params.set('limit', String(state.limit));
-    params.set('offset', String(state.offset));
-    if (state.cursor) params.set('cursor', state.cursor);
-    if (state.onlyOfficial) params.set('official', '1');
+    const query = String(state.query || '').trim();
+    if (query) params.set('q', query);
+    params.set('limit', String(query ? MARKETPLACE_SEARCH_LIMIT : state.limit));
+    if (!query) {
+        if (state.cursor) params.set('cursor', state.cursor);
+        if (state.onlyOfficial) params.set('official', '1');
+    }
     return fetchJson(`/api/marketplace/clawhub/search?${params.toString()}`);
 }
 
@@ -522,11 +527,11 @@ export function initMarketplace(pane) {
     const state = {
         query: '',
         limit: 25,
-        offset: 0,
         onlyOfficial: false,
         results: [],
         installedMap: new Map(),
         cursor: '',
+        cursorHistory: [],
         nextCursor: '',
         registryPath: 'packages',
         registryAttempts: [],
@@ -541,9 +546,19 @@ export function initMarketplace(pane) {
 
     let debounceTimer = null;
 
+    function syncControlsForMode() {
+        const searchMode = Boolean(String(state.query || '').trim());
+        onlyOfficial.disabled = searchMode;
+        onlyOfficial.title = searchMode
+            ? 'Official-only filtering is available in browse mode.'
+            : '';
+    }
+
     async function refresh() {
+        syncControlsForMode();
         showStatus(pane, 'Loading…', 'muted');
         try {
+            const query = String(state.query || '').trim();
             state.installedMap = new Map();
             const data = await runSearch(state);
             state.results = data.results || [];
@@ -555,14 +570,15 @@ export function initMarketplace(pane) {
                 attempts: state.registryAttempts,
             });
             renderPagination(paginationHost, {
-                offset: state.offset,
+                query,
                 limit: state.limit,
                 count: state.results.length,
                 cursor: state.cursor,
+                hasPrevious: state.cursorHistory.length > 0,
                 nextCursor: state.nextCursor,
             });
-            const mode = state.query ? 'search' : 'browse';
-            const official = state.onlyOfficial ? ' · official only' : '';
+            const mode = query ? 'search' : 'browse';
+            const official = state.onlyOfficial && mode === 'browse' ? ' · official only' : '';
             showStatus(pane, `${state.results.length} skill${state.results.length === 1 ? '' : 's'} · ${mode}${official} · ${state.registryPath}`, 'muted');
             loadInstalled().then((installedMap) => {
                 state.installedMap = installedMap;
@@ -586,14 +602,14 @@ export function initMarketplace(pane) {
 
     queryInput.addEventListener('input', (event) => {
         state.query = event.target.value || '';
-        state.offset = 0;
         state.cursor = '';
+        state.cursorHistory = [];
         scheduleRefresh(false);
     });
     onlyOfficial.addEventListener('change', () => {
         state.onlyOfficial = onlyOfficial.checked;
-        state.offset = 0;
         state.cursor = '';
+        state.cursorHistory = [];
         scheduleRefresh(true);
     });
     searchBtn.addEventListener('click', () => scheduleRefresh(true));
@@ -602,14 +618,12 @@ export function initMarketplace(pane) {
         const prev = event.target.closest('[data-mp-prev]');
         const next = event.target.closest('[data-mp-next]');
         if (prev) {
-            state.offset = Math.max(0, state.offset - state.limit);
-            state.cursor = '';
+            state.cursor = state.cursorHistory.pop() || '';
             scheduleRefresh(true);
         } else if (next) {
             if (state.nextCursor) {
+                state.cursorHistory.push(state.cursor || '');
                 state.cursor = state.nextCursor;
-            } else {
-                state.offset = state.offset + state.limit;
             }
             scheduleRefresh(true);
         }

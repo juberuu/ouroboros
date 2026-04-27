@@ -35,6 +35,7 @@ import logging
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -46,7 +47,10 @@ _MAX_JSON_RESPONSE_BYTES = 4 * 1024 * 1024  # 4 MB JSON cap
 _MAX_ARCHIVE_BYTES = 50 * 1024 * 1024       # mirrors fetcher cap
 _USER_AGENT = "Ouroboros-Marketplace/4.50 (+https://github.com/joi-lab/ouroboros-desktop)"
 _BROWSE_PATH = "packages"
-_LEXICAL_SEARCH_PATH = "packages/search"
+_LEXICAL_SEARCH_PATH = "search"
+_SEARCH_ENRICH_WORKERS = 8
+_SEARCH_ENRICH_LIMIT = 16
+_SEARCH_ENRICH_TIMEOUT_SEC = 2
 
 # Allowed registry hosts. The canonical registry is ``clawhub.ai`` (per
 # the official docs at github.com/openclaw/clawhub). ``clawhub.com``
@@ -487,11 +491,86 @@ def _summary_from_record(raw: Any) -> ClawHubSkillSummary:
 # ---------------------------------------------------------------------------
 
 
+def _merge_enriched_summary(
+    bare: ClawHubSkillSummary,
+    rich: ClawHubSkillSummary,
+) -> ClawHubSkillSummary:
+    """Merge a thin /search hit with the rich package detail record."""
+    rich_display = rich.display_name
+    if rich_display == rich.slug and bare.display_name:
+        rich_display = ""
+    raw = dict(bare.raw)
+    raw.update(rich.raw)
+    if "score" in bare.raw and "search_score" not in raw:
+        raw["search_score"] = bare.raw.get("score")
+    return ClawHubSkillSummary(
+        slug=bare.slug,
+        display_name=rich_display or bare.display_name,
+        summary=rich.summary or bare.summary,
+        description=rich.description or bare.description,
+        latest_version=rich.latest_version or bare.latest_version,
+        versions=rich.versions or bare.versions,
+        license=rich.license or bare.license,
+        homepage=rich.homepage or bare.homepage,
+        os_list=rich.os_list or bare.os_list,
+        requires_env=rich.requires_env or bare.requires_env,
+        requires_bins=rich.requires_bins or bare.requires_bins,
+        primary_env=rich.primary_env or bare.primary_env,
+        install_specs=rich.install_specs or bare.install_specs,
+        badges={**bare.badges, **rich.badges},
+        stats=rich.stats or bare.stats,
+        is_plugin=rich.is_plugin or bare.is_plugin,
+        raw=raw,
+    )
+
+
+def _enrich_search_summaries(
+    summaries: List[ClawHubSkillSummary],
+    *,
+    registry_url: Optional[str],
+    timeout_sec: int,
+) -> List[ClawHubSkillSummary]:
+    """Recover rich package metadata for thin /search results."""
+    if not summaries:
+        return summaries
+    enriched = list(summaries)
+    enrich_count = min(_SEARCH_ENRICH_LIMIT, len(summaries))
+    workers = max(1, min(_SEARCH_ENRICH_WORKERS, enrich_count))
+    detail_timeout = max(
+        1,
+        min(int(timeout_sec or _DEFAULT_TIMEOUT_SEC), _SEARCH_ENRICH_TIMEOUT_SEC),
+    )
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        future_to_index = {
+            pool.submit(
+                _detail_summary,
+                summary.slug,
+                registry_url=registry_url,
+                timeout_sec=detail_timeout,
+                merge_skill_detail=True,
+            ): idx
+            for idx, summary in enumerate(summaries[:enrich_count])
+        }
+        for future in as_completed(future_to_index):
+            idx = future_to_index[future]
+            try:
+                enriched[idx] = _merge_enriched_summary(
+                    summaries[idx],
+                    future.result(),
+                )
+            except Exception:
+                log.warning(
+                    "Keeping bare ClawHub search result for %s after enrich failure.",
+                    summaries[idx].slug,
+                    exc_info=True,
+                )
+    return enriched
+
+
 def search(
     query: str = "",
     *,
     limit: int = 25,
-    offset: int = 0,
     cursor: Optional[str] = None,
     sort: str = "registry",
     official_only: bool = False,
@@ -501,31 +580,35 @@ def search(
 ) -> Any:
     """Browse or lexical-search the modern ClawHub package catalogue."""
     base = _registry_base_url(registry_url)
-    safe_limit = max(1, min(int(limit or 25), 100))
-    safe_offset = max(0, int(offset or 0))
     sort_key = (sort or "downloads").strip().lower()
     if sort_key not in {"registry", "updated"}:
         sort_key = "registry"
     cleaned_query = (query or "").strip()
+    max_limit = _SEARCH_ENRICH_LIMIT if cleaned_query else 100
+    safe_limit = max(1, min(int(limit or 25), max_limit))
     path = _LEXICAL_SEARCH_PATH if cleaned_query else _BROWSE_PATH
-    query_params: Dict[str, Any] = {
-        "family": "skill",
-        "limit": safe_limit,
-    }
-    if official_only:
-        query_params["isOfficial"] = "true"
-    cleaned_cursor = str(cursor or "").strip()
-    if cleaned_cursor:
-        query_params["cursor"] = cleaned_cursor
-    else:
-        query_params["offset"] = safe_offset
     if cleaned_query:
-        query_params["q"] = cleaned_query
+        query_params: Dict[str, Any] = {
+            "q": cleaned_query,
+            "limit": safe_limit,
+        }
+    else:
+        query_params = {
+            "family": "skill",
+            "limit": safe_limit,
+        }
+        if official_only:
+            query_params["isOfficial"] = "true"
+        cleaned_cursor = str(cursor or "").strip()
+        if cleaned_cursor:
+            query_params["cursor"] = cleaned_cursor
 
     url = _build_url(base, path, query_params)
     body, _headers = _http_get(url, timeout=timeout_sec)
     parsed = _decode_json(body, url=url)
     items, next_cursor = _extract_items_and_cursor(parsed, path=path)
+    if cleaned_query:
+        items = items[:safe_limit]
     summaries: List[ClawHubSkillSummary] = []
     for record in items:
         try:
@@ -533,6 +616,12 @@ def search(
         except ClawHubClientError:
             log.warning("Skipping malformed registry record: %r", record, exc_info=True)
             continue
+    if cleaned_query:
+        summaries = _enrich_search_summaries(
+            summaries,
+            registry_url=registry_url,
+            timeout_sec=timeout_sec,
+        )
     if include_metadata:
         return {
             "results": summaries,
@@ -540,7 +629,10 @@ def search(
             "path": path,
             "attempts": [{"path": path, "count": len(summaries), "ok": True}],
             "sort": sort_key,
-            "filters": {"family": "skill", "official_only": bool(official_only)},
+            "filters": {
+                "family": "skill" if not cleaned_query else "",
+                "official_only": bool(official_only) if not cleaned_query else False,
+            },
         }
     return summaries
 
@@ -569,6 +661,54 @@ def _validate_slug(slug: str) -> str:
     return cleaned
 
 
+def _fetch_summary_path(base: str, path: str, *, timeout_sec: int) -> ClawHubSkillSummary:
+    url = _build_url(base, path)
+    body, _headers = _http_get(url, timeout=timeout_sec)
+    parsed = _decode_json(body, url=url)
+    if isinstance(parsed, dict) and "skill" in parsed:
+        return _summary_from_record(parsed)
+    if isinstance(parsed, dict) and "package" in parsed:
+        return _summary_from_record(parsed)
+    return _summary_from_record(parsed)
+
+
+def _detail_summary(
+    slug: str,
+    *,
+    registry_url: Optional[str] = None,
+    timeout_sec: int = _DEFAULT_TIMEOUT_SEC,
+    merge_skill_detail: bool = False,
+) -> ClawHubSkillSummary:
+    cleaned = _validate_slug(slug)
+    base = _registry_base_url(registry_url)
+    quoted = urllib.parse.quote(cleaned, safe='/-')
+    package_error: Optional[ClawHubClientError] = None
+    package_summary: Optional[ClawHubSkillSummary] = None
+    try:
+        package_summary = _fetch_summary_path(
+            base,
+            f"packages/{quoted}",
+            timeout_sec=timeout_sec,
+        )
+    except ClawHubClientError as exc:
+        package_error = exc
+    if not merge_skill_detail:
+        if package_summary is not None:
+            return package_summary
+        return _fetch_summary_path(base, f"skills/{quoted}", timeout_sec=timeout_sec)
+    try:
+        skill_summary = _fetch_summary_path(base, f"skills/{quoted}", timeout_sec=timeout_sec)
+    except ClawHubClientError:
+        if package_summary is not None:
+            return package_summary
+        if package_error is not None:
+            raise package_error
+        raise
+    if package_summary is None:
+        return skill_summary
+    return _merge_enriched_summary(package_summary, skill_summary)
+
+
 def info(
     slug: str,
     *,
@@ -576,20 +716,11 @@ def info(
     timeout_sec: int = _DEFAULT_TIMEOUT_SEC,
 ) -> ClawHubSkillSummary:
     """Resolve the latest version metadata for ``slug``."""
-    cleaned = _validate_slug(slug)
-    base = _registry_base_url(registry_url)
-    url = _build_url(base, f"packages/{urllib.parse.quote(cleaned, safe='/-')}")
-    try:
-        body, _headers = _http_get(url, timeout=timeout_sec)
-    except ClawHubClientError:
-        url = _build_url(base, f"skills/{urllib.parse.quote(cleaned, safe='/-')}")
-        body, _headers = _http_get(url, timeout=timeout_sec)
-    parsed = _decode_json(body, url=url)
-    if isinstance(parsed, dict) and "skill" in parsed:
-        return _summary_from_record(parsed)
-    if isinstance(parsed, dict) and "package" in parsed:
-        return _summary_from_record(parsed)
-    return _summary_from_record(parsed)
+    return _detail_summary(
+        slug,
+        registry_url=registry_url,
+        timeout_sec=timeout_sec,
+    )
 
 
 def list_versions(
