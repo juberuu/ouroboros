@@ -1159,6 +1159,7 @@ class LLMClient:
     ) -> List[Dict[str, Any]]:
         sanitized_tools: List[Dict[str, Any]] = []
         seen_tool_names: Set[str] = set()
+        provider_name_re = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
         for tool in tools or []:
             if not isinstance(tool, dict):
                 continue
@@ -1168,6 +1169,9 @@ class LLMClient:
                 function_copy = dict(function)
                 name = str(function_copy.get("name") or "").strip()
                 if not name:
+                    continue
+                if not provider_name_re.match(name):
+                    log.warning("Dropping provider-invalid tool schema name: %s", name)
                     continue
                 if name in seen_tool_names:
                     log.warning("Dropping duplicate tool schema: %s", name)

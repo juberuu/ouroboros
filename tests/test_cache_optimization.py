@@ -104,6 +104,30 @@ def test_sanitize_chat_completion_tools_deduplicates_before_sorting():
     assert sanitized[1]["function"]["description"] == "first"
 
 
+def test_sanitize_chat_completion_tools_drops_provider_invalid_names():
+    from ouroboros.llm import LLMClient
+
+    tools = [
+        {"type": "function", "function": {"name": "ext.weather.fetch", "description": "bad", "parameters": {}}},
+        {"type": "function", "function": {"name": "ext_9_r_weather_fetch", "description": "ok", "parameters": {}}},
+    ]
+
+    sanitized = LLMClient._sanitize_chat_completion_tools(tools)
+    assert [tool["function"]["name"] for tool in sanitized] == ["ext_9_r_weather_fetch"]
+
+
+def test_sanitize_chat_completion_tools_drops_overlong_names():
+    from ouroboros.llm import LLMClient
+
+    tools = [
+        {"type": "function", "function": {"name": "a" * 65, "description": "bad", "parameters": {}}},
+        {"type": "function", "function": {"name": "a" * 64, "description": "ok", "parameters": {}}},
+    ]
+
+    sanitized = LLMClient._sanitize_chat_completion_tools(tools)
+    assert [tool["function"]["name"] for tool in sanitized] == ["a" * 64]
+
+
 def test_build_remote_kwargs_marks_last_sorted_tool_for_cache():
     from ouroboros.llm import LLMClient
 

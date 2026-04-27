@@ -61,9 +61,9 @@ def _patch_opener(body, *, status=200, headers=None):
 def test_search_returns_summaries(monkeypatch):
     body = json.dumps(
         {
-            "skills": [
+            "items": [
                 {
-                    "slug": "owner/skill1",
+                    "name": "skill1",
                     "displayName": "Skill 1",
                     "description": "First skill",
                     "latestVersion": "1.0.0",
@@ -72,12 +72,12 @@ def test_search_returns_summaries(monkeypatch):
                     "metadata": {"openclaw": {"os": ["darwin"]}},
                 },
                 {
-                    "slug": "owner/skill2",
+                    "name": "skill2",
                     "displayName": "Skill 2",
                     "description": "Second",
                     "latestVersion": "2.0.0",
                     "stats": {"downloads": 7},
-                    "kind": "plugin",
+                    "family": "code-plugin",
                 },
             ]
         }
@@ -85,7 +85,11 @@ def test_search_returns_summaries(monkeypatch):
     with _patch_opener(body) as opener_mock:
         results = search("foo", limit=5)
     opener_mock.assert_called_once()
-    assert [r.slug for r in results] == ["owner/skill1", "owner/skill2"]
+    request = opener_mock.call_args.args[0]
+    assert "/packages/search?" in request.full_url
+    assert "family=skill" in request.full_url
+    assert "q=foo" in request.full_url
+    assert [r.slug for r in results] == ["skill1", "skill2"]
     assert results[0].license == "MIT"
     assert results[0].os_list == ["darwin"]
     assert results[1].is_plugin is True
@@ -107,38 +111,36 @@ def test_search_handles_items_and_cursor_metadata(monkeypatch):
         page = search("", cursor="start", include_metadata=True)
     assert [r.slug for r in page["results"]] == ["owner/cursor"]
     assert page["next_cursor"] == "abc"
-    assert page["path"] == "skills"
+    assert page["path"] == "packages"
 
 
-def test_search_tries_alternate_paths_when_primary_empty(monkeypatch):
-    empty = json.dumps({"items": [], "nextCursor": None}).encode("utf-8")
-    non_empty = json.dumps({"items": [{"slug": "owner/fallback"}]}).encode("utf-8")
-    responses = [
-        _mock_response(empty),
-        _mock_response(non_empty),
-    ]
-    with mock.patch.object(clawhub_mod._OPENER, "open", side_effect=responses) as opener_mock:
+def test_browse_uses_canonical_packages_endpoint(monkeypatch):
+    body = json.dumps({"items": [{"slug": "owner/pkg"}], "nextCursor": ""}).encode("utf-8")
+    with _patch_opener(body) as opener_mock:
         page = search("", include_metadata=True)
-    assert opener_mock.call_count == 2
-    assert [r.slug for r in page["results"]] == ["owner/fallback"]
-    assert page["attempts"][0]["path"] == "skills"
-    assert page["attempts"][1]["path"] == "registry/skills"
+    request = opener_mock.call_args.args[0]
+    assert "/packages?" in request.full_url
+    assert "/packages/search?" not in request.full_url
+    assert "family=skill" in request.full_url
+    assert [r.slug for r in page["results"]] == ["owner/pkg"]
+    assert page["path"] == "packages"
 
 
-def test_search_primary_empty_alternates_error_returns_empty_metadata(monkeypatch):
+def test_search_empty_returns_empty_metadata(monkeypatch):
     empty = json.dumps({"items": [], "nextCursor": None}).encode("utf-8")
-    responses = [
-        _mock_response(empty),
-        _mock_response(b"{}", status=404),
-        _mock_response(b"{}", status=404),
-        _mock_response(b"{}", status=404),
-    ]
-    with mock.patch.object(clawhub_mod._OPENER, "open", side_effect=responses):
+    with _patch_opener(empty):
         page = search("", include_metadata=True)
     assert page["results"] == []
-    assert page["path"] == "skills"
+    assert page["path"] == "packages"
     assert page["attempts"][0]["ok"] is True
-    assert page["attempts"][1]["ok"] is False
+
+
+def test_search_forwards_official_filter(monkeypatch):
+    body = json.dumps({"items": []}).encode("utf-8")
+    with _patch_opener(body) as opener_mock:
+        search("", official_only=True)
+    request = opener_mock.call_args.args[0]
+    assert "isOfficial=true" in request.full_url
 
 
 def test_search_skips_malformed_records(monkeypatch):
@@ -191,9 +193,16 @@ def test_clawhub_ai_default():
 
 
 def test_info_unwraps_top_level_skill(monkeypatch):
-    body = json.dumps({"skill": {"slug": "owner/x", "latestVersion": "1.2.3"}}).encode("utf-8")
-    with _patch_opener(body):
+    body = json.dumps(
+        {
+            "package": {"name": "owner/x", "tags": {"latest": "1.2.2"}},
+            "latestVersion": {"version": "1.2.3"},
+        }
+    ).encode("utf-8")
+    with _patch_opener(body) as opener_mock:
         summary = info("owner/x")
+    request = opener_mock.call_args.args[0]
+    assert "/packages/owner/x" in request.full_url
     assert summary.latest_version == "1.2.3"
 
 
@@ -211,8 +220,12 @@ def test_info_rejects_traversal_slugs(bad_slug):
 
 def test_download_returns_archive_with_sha(monkeypatch):
     body = b"PKzipfilebytes" + b"\0" * 100
-    with _patch_opener(body, headers={"content-type": "application/zip"}):
+    with _patch_opener(body, headers={"content-type": "application/zip"}) as opener_mock:
         archive = download("owner/x", version="1.0.0")
+    request = opener_mock.call_args.args[0]
+    assert "/download?" in request.full_url
+    assert "slug=owner%2Fx" in request.full_url
+    assert "version=1.0.0" in request.full_url
     assert isinstance(archive, ClawHubArchive)
     assert archive.slug == "owner/x"
     assert archive.version == "1.0.0"

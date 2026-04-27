@@ -4,11 +4,11 @@ Registers the three PluginAPI v1 surfaces a real visual extension uses:
 
 - ``register_route`` — ``GET /api/extensions/weather/forecast?city=...``
   fetches a compact summary from ``wttr.in`` and returns JSON.
-- ``register_tool`` — ``ext.weather.fetch`` exposes the same call to
+- ``register_tool`` — ``ext_9_r_weather_fetch`` exposes the same call to
   the agent dispatcher (so the LLM can ask for weather without going
   through ``skill_exec``).
-- ``register_ui_tab`` — declares a Skills-UI tab so the runtime knows
-  how to render the inline widget on the Installed tab.
+- ``register_ui_tab`` — declares a Widgets-page UI declaration so the runtime knows
+  how to render the widget on the top-level Widgets page.
 
 Every byte that runs on a request is in this file; no third-party
 libraries (the ``net`` permission is bounded to ``wttr.in`` by host

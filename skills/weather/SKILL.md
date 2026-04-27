@@ -1,7 +1,7 @@
 ---
 name: weather
 description: Live weather widget — looks up current conditions for any city via wttr.in (no API key).
-version: 0.2.0
+version: 0.2.1
 type: extension
 entry: plugin.py
 permissions: [net, tool, route, widget]
@@ -23,11 +23,11 @@ This is the v5 reference ``type: extension`` skill shipped with Ouroboros.
 It demonstrates the minimum viable widget extension:
 
 - A manifest declaring ``type: extension`` + an ``ui_tab`` block so the
-  Skills UI knows how to render an inline weather card on the Installed
-  tab.
+  top-level Widgets page knows how to render the weather card separately
+  from the Installed skills catalogue.
 - An ``entry: plugin.py`` that registers one HTTP route
   (``GET /api/extensions/weather/forecast?city=…``), one agent-callable
-  tool (``ext.weather.fetch``), and one UI-tab declaration. Every
+  tool (``ext_9_r_weather_fetch``), and one UI-tab declaration. Every
   registration goes through the frozen
   :class:`ouroboros.contracts.plugin_api.PluginAPI` v1 surface — the
   extension never touches ``logging``, ``starlette``, or the dispatcher
@@ -40,13 +40,12 @@ It demonstrates the minimum viable widget extension:
 
 ## Using the widget
 
-1. **Enable**: open Settings → Skills → Installed, find ``weather``,
+1. **Enable**: open Skills → Installed, find ``weather``,
    click ``Enable`` (the extension auto-loads after a fresh review).
-2. **View**: an inline weather card appears under the weather row on
-   the Installed tab. Type a city name and the widget refreshes
-   live — no agent message, no shell command.
+2. **View**: open the top-level Widgets page. Type a city name and the
+   widget refreshes live — no agent message, no shell command.
 3. **Agent use**: the same skill is callable from the agent surface as
-   ``ext.weather.fetch(city="...")``. The output is identical JSON.
+   ``ext_9_r_weather_fetch(city="...")``. The output is identical JSON.
 
 ## Network policy
 

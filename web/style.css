@@ -164,8 +164,49 @@ body {
     padding-left: 84px;
 }
 
-.page { display: none; flex-direction: column; height: 100%; position: relative; }
+.page {
+    display: none;
+    flex-direction: column;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    position: relative;
+}
 .page.active { display: flex; }
+
+/* Shared containment for narrow screens and unbroken runtime text. */
+#content,
+#content .page,
+#chat-messages,
+#log-entries,
+.log-entry,
+.log-main,
+.log-body,
+.log-headline,
+.log-task-summary,
+.log-task-timeline,
+.chat-bubble,
+.chat-bubble .message,
+.marketplace-shell,
+.marketplace-card,
+.skills-card,
+.widgets-list,
+.widgets-card {
+    min-width: 0;
+}
+
+.log-body,
+.log-headline,
+.log-pill,
+.log-raw,
+.chat-bubble .message,
+.marketplace-card-body,
+.marketplace-card-meta,
+.skills-card,
+.widgets-card {
+    overflow-wrap: anywhere;
+}
 
 .files-layout {
     position: relative;
@@ -790,6 +831,7 @@ body {
 #chat-messages {
     flex: 1;
     overflow-y: auto;
+    overflow-x: hidden;
     padding: 20px;
     padding-top: 56px;
     padding-bottom: 84px; /* JS adjusts this dynamically via updateMessagesPadding() */
@@ -803,6 +845,7 @@ body {
     border-radius: var(--radius-lg);
     max-width: 80%;
     word-wrap: break-word;
+    overflow-wrap: anywhere;
     min-width: 0;
 }
 
@@ -892,6 +935,8 @@ body {
 .chat-bubble.progress {
     border-left: 2px solid rgba(220, 38, 38, 0.2);
     padding-left: 14px;
+    max-width: min(100%, 760px);
+    margin-right: 0;
     opacity: 0.72;
 }
 
@@ -1333,6 +1378,10 @@ body {
     .chat-bubble.system {
         margin-right: 8%;
     }
+    .chat-bubble.progress {
+        max-width: 100%;
+        margin-right: 0;
+    }
 
     /* Nav-rail — convert vertical sidebar to horizontal bottom bar. */
     #nav-rail {
@@ -1452,8 +1501,7 @@ body {
 .chat-attach-btn {
     position: absolute;
     left: 10px;
-    top: 50%;
-    transform: translateY(-50%);
+    bottom: 9px;
     z-index: 2;
     width: 24px;
     height: 24px;
@@ -1571,13 +1619,16 @@ body {
 .chat-send-group {
     position: absolute;
     right: 8px;
-    top: 50%;
-    transform: translateY(-50%);
+    bottom: 7px;
     display: flex;
     align-items: center;
     gap: 0;
     z-index: 1;
     height: 28px;
+}
+
+.chat-send-group[data-busy="1"] {
+    opacity: 0.72;
 }
 
 /* --send-color: resolved per send-mode via dataset attribute below */
@@ -2673,6 +2724,32 @@ body {
     font-size: 11px;
 }
 
+.skills-review-progress {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    align-self: flex-start;
+    padding: 6px 10px;
+    border-radius: 999px;
+    border: 1px solid rgba(201, 53, 69, 0.24);
+    background: rgba(201, 53, 69, 0.08);
+    color: rgba(255, 220, 226, 0.86);
+    font-size: 12px;
+}
+
+.skills-review-spinner {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    border: 2px solid rgba(255, 220, 226, 0.24);
+    border-top-color: rgba(255, 220, 226, 0.9);
+    animation: skills-review-spin 900ms linear infinite;
+}
+
+@keyframes skills-review-spin {
+    to { transform: rotate(360deg); }
+}
+
 /* v5.2.3: friendly "Access" panel for skills that need API key grants.
  * Replaces the previous developer-style line "core key grants:
  * requested OPENROUTER_API_KEY; granted none; missing: ..." */
@@ -2944,6 +3021,8 @@ body {
 .marketplace-search {
     flex: 1 1 240px;
     min-width: 200px;
+    height: 36px;
+    min-height: 36px;
     padding: 6px 10px;
     border: 1px solid rgba(250, 250, 250, 0.1);
     background: rgba(255, 255, 255, 0.03);
@@ -3307,69 +3386,61 @@ body {
     color: var(--text-primary);
 }
 
-/* v5: in-skill widget mount-point and the bundled weather widget. */
-.skills-widget-mount {
-    margin: 6px 0 10px;
-}
-
-.skill-widget-weather {
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 8px;
-    padding: 10px 12px;
-    background: linear-gradient(135deg, rgba(80, 120, 190, 0.10), rgba(40, 60, 100, 0.06));
-}
-.skill-widget-weather-form {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-    margin-bottom: 8px;
-}
-.skill-widget-weather-city {
-    flex: 1;
-    background: rgba(13, 11, 15, 0.7);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 6px;
-    padding: 6px 10px;
-    color: var(--text-primary);
-    font-size: 13px;
-    outline: none;
-}
-.skill-widget-weather-city:focus {
-    border-color: rgba(116, 162, 220, 0.55);
-}
-.skill-widget-weather-body[data-state="loading"] {
-    opacity: 0.7;
-}
-.skill-widget-weather-card {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    padding: 6px 2px;
-}
-.skill-widget-weather-head {
-    font-size: 14px;
-}
-.skill-widget-weather-temp {
-    font-size: 28px;
-    line-height: 1.0;
-    font-weight: 600;
-    letter-spacing: -0.5px;
-}
-.skill-widget-weather-cond {
-    font-size: 13px;
-    color: var(--text-secondary);
-}
-.skill-widget-weather-meta {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px 14px;
-    font-size: 12px;
-    margin-top: 2px;
-}
-
 /* ------------------------------------------------------------------ */
 /* Widgets page                                                       */
 /* ------------------------------------------------------------------ */
+
+.skill-widget-weather-form {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+.skill-widget-weather-city {
+    flex: 1;
+    min-width: 0;
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    border-radius: 9px;
+    background: rgba(13, 11, 15, 0.74);
+    color: var(--text-primary);
+    padding: 8px 10px;
+    font: inherit;
+}
+
+.skill-widget-weather-city:focus {
+    outline: 2px solid rgba(201, 53, 69, 0.25);
+}
+
+.skill-widget-weather-body[data-state="loading"] {
+    opacity: 0.72;
+}
+
+.skill-widget-weather-card {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+}
+
+.skill-widget-weather-head {
+    font-size: 15px;
+}
+
+.skill-widget-weather-temp {
+    font-size: 24px;
+    font-weight: 700;
+    color: rgba(250, 250, 250, 0.95);
+}
+
+.skill-widget-weather-cond {
+    color: rgba(250, 250, 250, 0.8);
+}
+
+.skill-widget-weather-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
 #page-widgets {
     padding: 16px 24px;
     overflow-y: auto;
@@ -3420,10 +3491,16 @@ body {
         padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
     }
 
+    .chat-input-wrap,
+    #chat-input {
+        min-width: 0;
+    }
+
     /* Header is now in normal flow on mobile — remove the desktop 56px top
        padding that was meant to clear the absolute-positioned header. */
     #chat-messages {
         padding-top: 12px;
+        overflow-x: hidden;
     }
 
     /* Logs page — reduce horizontal padding on filters and entries margin. */
@@ -3433,6 +3510,8 @@ body {
 
     #log-entries {
         margin: 0 8px 8px;
+        min-width: 0;
+        overflow-x: hidden;
     }
 
     /* Evolution page — stack version columns and use taller chart area. */
@@ -3478,6 +3557,11 @@ body {
     .marketplace-controls {
         flex-direction: column;
         align-items: stretch;
+    }
+
+    .marketplace-search {
+        flex: 0 0 auto;
+        width: 100%;
     }
 
     .marketplace-results {

@@ -10,7 +10,8 @@ handlers.
 Because extensions share the Ouroboros process address space the
 review gate is stricter than for ``type: script``:
 
-- Every registration is namespaced to ``ext.<skill>.…`` so a plugin
+- Every registration is namespaced to provider-safe ``ext_<len>_<token>_<name>``
+  identifiers so a plugin
   cannot shadow a built-in tool / route / WS message type.
 - The manifest MUST declare a permission for every capability the
   extension actually uses; the runtime enforces the denylist side of
@@ -31,8 +32,10 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import hashlib
 import logging
 import pathlib
+import re
 import shutil
 import sys
 import threading
@@ -95,10 +98,66 @@ _lock = threading.RLock()
 _extensions: Dict[str, _ExtensionRegistrations] = {}
 _extension_modules: Dict[str, ModuleType] = {}
 _load_failures: Dict[str, _ExtensionLoadFailure] = {}
-_tools: Dict[str, Any] = {}            # {"ext.<skill>.<name>": ToolEntry-like}
+_tools: Dict[str, Any] = {}            # {"ext_<len>_<token>_<name>": ToolEntry-like}
 _routes: Dict[str, Any] = {}           # {"/api/extensions/<skill>/<path>": handler_spec}
-_ws_handlers: Dict[str, Any] = {}      # {"ext.<skill>.<message_type>": handler}
+_ws_handlers: Dict[str, Any] = {}      # {"ext_<len>_<token>_<message_type>": handler}
 _ui_tabs: Dict[str, Any] = {}          # {"<skill>:<tab_id>": tab_spec}
+_EXTENSION_NAME_PREFIX = "ext_"
+_EXTENSION_SKILL_TOKEN_MAX = 32
+_EXTENSION_SHORT_MAX = 24
+_EXTENSION_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _extension_skill_token(skill_name: str) -> str:
+    """Return a short ASCII token for a skill without changing its identity."""
+    text = str(skill_name or "").strip()
+    safe = "".join(ch if (ch.isascii() and (ch.isalnum() or ch in "-_")) else "_" for ch in text)
+    safe = re.sub(r"_+", "_", safe).strip("_-")
+    raw_budget = _EXTENSION_SKILL_TOKEN_MAX - 2
+    if safe and safe == text and len(safe) <= raw_budget:
+        return f"r_{safe}"
+    digest = hashlib.sha1(text.encode("utf-8", errors="replace")).hexdigest()[:10]
+    prefix_budget = _EXTENSION_SKILL_TOKEN_MAX - len(digest) - 3
+    prefix = (safe or "skill")[:prefix_budget].strip("_-") or "skill"
+    return f"h_{prefix}_{digest}"
+
+
+def extension_name_prefix(skill_name: str) -> str:
+    """Return the provider-safe prefix for one extension skill."""
+    token = _extension_skill_token(skill_name)
+    return f"{_EXTENSION_NAME_PREFIX}{len(token)}_{token}_"
+
+
+def extension_surface_name(skill_name: str, short_name: str) -> str:
+    """Return a provider-safe canonical tool/ws registration name."""
+    full = f"{extension_name_prefix(skill_name)}{short_name}"
+    if not _EXTENSION_NAME_RE.match(full):
+        raise ExtensionRegistrationError(
+            f"extension surface name {full!r} must match provider tool-name limits"
+        )
+    return full
+
+
+def parse_extension_surface_name(name: str) -> tuple[str, str] | None:
+    """Recognise provider-safe extension names.
+
+    The first tuple element is the encoded skill token, not the persisted
+    skill identity. Runtime dispatch gets the real skill from the loader's
+    handler/tool descriptor.
+    """
+    text = str(name or "").strip()
+    if not _EXTENSION_NAME_RE.match(text) or not text.startswith(_EXTENSION_NAME_PREFIX):
+        return None
+    rest = text[len(_EXTENSION_NAME_PREFIX):]
+    length_text, sep, remainder = rest.partition("_")
+    if sep != "_" or not length_text.isdigit():
+        return None
+    token_len = int(length_text)
+    if token_len < 1 or len(remainder) <= token_len or remainder[token_len] != "_":
+        return None
+    token = remainder[:token_len]
+    short = remainder[token_len + 1:]
+    return token, short
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +185,10 @@ def _assert_tool_name(name: str) -> str:
     candidate = str(name or "").strip()
     if not candidate:
         raise ExtensionRegistrationError("tool name must be non-empty")
+    if len(candidate) > _EXTENSION_SHORT_MAX:
+        raise ExtensionRegistrationError(
+            f"tool name must be <= {_EXTENSION_SHORT_MAX} characters: {candidate!r}"
+        )
     if not candidate.replace("_", "").isalnum():
         raise ExtensionRegistrationError(
             f"tool name must be alnum/underscore only: {candidate!r}"
@@ -137,13 +200,14 @@ def _assert_ws_message_type(message_type: str) -> str:
     candidate = str(message_type or "").strip()
     if not candidate:
         raise ExtensionRegistrationError("ws message_type must be non-empty")
-    # WS message types are dot-separated; extensions may use sub-types
-    # freely under their ``ext.<skill>.`` prefix.
-    for part in candidate.split("."):
-        if not part or not part.replace("_", "").isalnum():
-            raise ExtensionRegistrationError(
-                f"ws message_type must be dot-separated alnum/underscore: {candidate!r}"
-            )
+    if len(candidate) > _EXTENSION_SHORT_MAX:
+        raise ExtensionRegistrationError(
+            f"ws message_type must be <= {_EXTENSION_SHORT_MAX} characters: {candidate!r}"
+        )
+    if not candidate.replace("_", "").isalnum():
+        raise ExtensionRegistrationError(
+            f"ws message_type must be alnum/underscore only: {candidate!r}"
+        )
     return candidate
 
 
@@ -210,7 +274,7 @@ class PluginAPIImpl:
     ) -> None:
         self._require("tool")
         short = _assert_tool_name(name)
-        full = f"ext.{self._skill}.{short}"
+        full = extension_surface_name(self._skill, short)
         with _lock:
             if full in _tools:
                 raise ExtensionRegistrationError(
@@ -272,7 +336,7 @@ class PluginAPIImpl:
     ) -> None:
         self._require("ws_handler")
         short = _assert_ws_message_type(message_type)
-        full = f"ext.{self._skill}.{short}"
+        full = extension_surface_name(self._skill, short)
         with _lock:
             if full in _ws_handlers:
                 raise ExtensionRegistrationError(
@@ -373,7 +437,8 @@ def _plugin_entry_path(skill: LoadedSkill) -> Optional[pathlib.Path]:
 
 
 def _module_key(skill_name: str) -> str:
-    return f"ouroboros._extensions.{skill_name}"
+    digest = hashlib.sha1(str(skill_name or "").encode("utf-8", errors="replace")).hexdigest()[:16]
+    return f"ouroboros._extensions.m_{digest}"
 
 
 def _purge_extension_bytecode(skill_dir: pathlib.Path) -> None:

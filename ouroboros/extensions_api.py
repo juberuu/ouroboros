@@ -81,7 +81,7 @@ async def api_extensions_index(request: Request) -> JSONResponse:
     try:
         from ouroboros.config import get_skills_repo_path
 
-        from ouroboros.extension_loader import runtime_state_for_skill_name
+        from ouroboros.extension_loader import extension_name_prefix, runtime_state_for_skill_name
 
         drive_root = _request_drive_root(request)
         repo_path = get_skills_repo_path()
@@ -102,7 +102,7 @@ async def api_extensions_index(request: Request) -> JSONResponse:
         }
 
         def _live_tool_count(skill_name: str) -> int:
-            prefix = f"ext.{skill_name}."
+            prefix = extension_name_prefix(skill_name)
             return sum(1 for name in live_snapshot.get("tools", []) if str(name).startswith(prefix))
 
         def _live_route_count(skill_name: str) -> int:
@@ -110,7 +110,7 @@ async def api_extensions_index(request: Request) -> JSONResponse:
             return sum(1 for name in live_snapshot.get("routes", []) if str(name).startswith(prefix))
 
         def _live_ws_count(skill_name: str) -> int:
-            prefix = f"ext.{skill_name}."
+            prefix = extension_name_prefix(skill_name)
             return sum(1 for name in live_snapshot.get("ws_handlers", []) if str(name).startswith(prefix))
 
         def _pending_ui_tabs(skill_name: str) -> list[str]:

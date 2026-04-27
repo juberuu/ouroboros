@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 from typing import Any, Dict
 
 import pytest
@@ -168,10 +169,31 @@ def test_load_extension_registers_tool(tmp_path):
     loaded, _, _ = _prepare_extension(tmp_path, "ext1", plugin, permissions=["tool"])
     err = extension_loader.load_extension(loaded, lambda: {})
     assert err is None, err
-    tool = extension_loader.get_tool("ext.ext1.echo")
+    tool_name = extension_loader.extension_surface_name("ext1", "echo")
+    tool = extension_loader.get_tool(tool_name)
     assert tool is not None
-    assert tool["name"] == "ext.ext1.echo"
+    assert tool["name"] == tool_name
     assert callable(tool["handler"])
+
+
+def test_extension_surface_names_are_provider_safe_without_renaming_skill_identity():
+    from ouroboros.skill_loader import _sanitize_skill_name
+
+    dotted = "foo.bar"
+    unicode_name = "погода"
+    dotted_tool = extension_loader.extension_surface_name(dotted, "fetch")
+    unicode_tool = extension_loader.extension_surface_name(unicode_name, "fetch")
+    generated_token_twin = "foo_bar_336d1b3d72"
+
+    assert _sanitize_skill_name(dotted) == dotted
+    assert _sanitize_skill_name("foo_bar") == "foo_bar"
+    assert dotted_tool != extension_loader.extension_surface_name("foo_bar", "fetch")
+    assert dotted_tool != extension_loader.extension_surface_name(generated_token_twin, "fetch")
+    assert extension_loader.extension_surface_name("foo", "bar_baz") != extension_loader.extension_surface_name("foo_bar", "baz")
+    for tool_name in (dotted_tool, unicode_tool):
+        assert re.match(r"^[A-Za-z0-9_-]{1,64}$", tool_name)
+        assert "." not in tool_name
+        assert extension_loader.parse_extension_surface_name(tool_name) is not None
 
 
 def test_load_extension_rejects_outward_symlink_in_skill_tree(tmp_path):
@@ -225,7 +247,7 @@ def test_load_extension_rejects_outward_symlink_in_skill_tree(tmp_path):
     err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
     assert err is not None
     assert "symlink" in err.lower()
-    assert extension_loader.get_tool("ext.symlinked.echo") is None
+    assert extension_loader.get_tool(extension_loader.extension_surface_name("symlinked", "echo")) is None
 
 
 def test_load_extension_registers_route_with_prefix(tmp_path):
@@ -316,9 +338,52 @@ def test_load_extension_supports_nested_entry_relative_imports(tmp_path):
     assert loaded is not None
     err = extension_loader.load_extension(loaded, lambda: {})
     assert err is None, err
-    tool = extension_loader.get_tool("ext.ext_nested.t")
+    tool = extension_loader.get_tool(extension_loader.extension_surface_name("ext_nested", "t"))
     assert tool is not None
     assert tool["handler"](None) == "nested-ok"
+
+
+def test_unload_dotted_prefix_skill_does_not_break_neighbor_imports(tmp_path):
+    repo_root = tmp_path / "skills"
+    foo_dir = _write_ext_skill(
+        repo_root,
+        "foo",
+        permissions=["tool"],
+        plugin_body=(
+            "def register(api):\n"
+            "    api.register_tool('t', lambda ctx: 'foo', description='', schema={})\n"
+        ),
+    )
+    dotted_dir = _write_ext_skill(
+        repo_root,
+        "foo.bar",
+        permissions=["tool"],
+        plugin_body=(
+            "def _lazy(ctx):\n"
+            "    from .helper import VALUE\n"
+            "    return VALUE\n"
+            "def register(api):\n"
+            "    api.register_tool('lazy', _lazy, description='', schema={})\n"
+        ),
+    )
+    (dotted_dir / "helper.py").write_text("VALUE = 'still-live'\n", encoding="utf-8")
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+    for name, skill_dir in (("foo", foo_dir), ("foo.bar", dotted_dir)):
+        save_enabled(drive_root, name, True)
+        save_review_state(
+            drive_root,
+            name,
+            SkillReviewState(status="pass", content_hash=compute_content_hash(skill_dir, manifest_entry="plugin.py")),
+        )
+        loaded = find_skill(drive_root, name, repo_path=str(repo_root))
+        assert loaded is not None
+        assert extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root) is None
+
+    extension_loader.unload_extension("foo")
+    tool = extension_loader.get_tool(extension_loader.extension_surface_name("foo.bar", "lazy"))
+    assert tool is not None
+    assert tool["handler"](None) == "still-live"
 
 
 def test_load_extension_registers_ws_handler_with_namespace(tmp_path):
@@ -332,7 +397,7 @@ def test_load_extension_registers_ws_handler_with_namespace(tmp_path):
     err = extension_loader.load_extension(loaded, lambda: {})
     assert err is None, err
     handlers = extension_loader.list_ws_handlers()
-    assert "ext.ws1.message" in handlers
+    assert extension_loader.extension_surface_name("ws1", "message") in handlers
 
 
 def test_register_ui_tab_surfaces_hostable_widget(tmp_path):
@@ -515,7 +580,7 @@ def test_reconcile_extension_reloads_when_live_code_changes(tmp_path):
     loaded = find_skill(drive_root, "reloadme", repo_path=str(skill_dir.parent))
     err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
     assert err is None, err
-    tool = extension_loader.get_tool("ext.reloadme.echo")
+    tool = extension_loader.get_tool(extension_loader.extension_surface_name("reloadme", "echo"))
     assert tool is not None
     assert tool["handler"](None) == "v1"
 
@@ -545,7 +610,7 @@ def test_reconcile_extension_reloads_when_live_code_changes(tmp_path):
     )
     assert state["action"] == "extension_loaded"
     assert state["live_loaded"] is True
-    tool = extension_loader.get_tool("ext.reloadme.echo")
+    tool = extension_loader.get_tool(extension_loader.extension_surface_name("reloadme", "echo"))
     assert tool is not None
     assert tool["handler"](None) == "v2"
 
@@ -880,8 +945,8 @@ def test_unload_clears_child_module_cache(tmp_path):
     assert err is None, err
     # Both the package module and its helper child module must live in
     # sys.modules after import, and BOTH must be purged on unload.
-    parent_key = "ouroboros._extensions.tree_ext"
-    child_key = "ouroboros._extensions.tree_ext.helper"
+    parent_key = extension_loader._module_key("tree_ext")
+    child_key = f"{parent_key}.helper"
     assert parent_key in _sys.modules
     assert child_key in _sys.modules
     extension_loader.unload_extension("tree_ext")

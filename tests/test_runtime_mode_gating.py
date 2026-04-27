@@ -385,9 +385,10 @@ def test_light_mode_allows_extension_tool_dispatch(tmp_path, monkeypatch):
 
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     reg = _registry(tmp_path)
+    tool_name = extension_loader.extension_surface_name("testskill", "echo")
     with extension_loader._lock:
-        extension_loader._tools["ext.testskill.echo"] = {
-            "name": "ext.testskill.echo",
+        extension_loader._tools[tool_name] = {
+            "name": tool_name,
             "handler": lambda ctx, **kwargs: "extension-tool-ran",
             "description": "echo",
             "schema": {},
@@ -398,14 +399,14 @@ def test_light_mode_allows_extension_tool_dispatch(tmp_path, monkeypatch):
     unloaded: list[str] = []
     monkeypatch.setattr(extension_loader, "unload_extension", unloaded.append)
     try:
-        result = reg.execute("ext.testskill.echo", {})
+        result = reg.execute(tool_name, {})
         assert "LIGHT_MODE_BLOCKED" not in result
         assert "extension-tool-ran" in result
         # Extension stays loaded — no automatic unload triggered by light.
         assert unloaded == []
     finally:
         with extension_loader._lock:
-            extension_loader._tools.pop("ext.testskill.echo", None)
+            extension_loader._tools.pop(tool_name, None)
 
 
 @pytest.mark.parametrize(

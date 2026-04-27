@@ -433,6 +433,21 @@ async def collect_evolution_metrics(repo_dir: str, data_dir: str | None = None) 
         date = parts[1] if len(parts) > 1 else ""
         tags.append((tag, date))
 
+    cache_path: pathlib.Path | None = None
+    cached_by_tag: dict[str, dict[str, Any]] = {}
+    if data_dir:
+        cache_path = pathlib.Path(data_dir) / "state" / "evolution_metrics_cache.json"
+        try:
+            cache_obj = json.loads(cache_path.read_text(encoding="utf-8"))
+            if isinstance(cache_obj, dict) and cache_obj.get("schema") == 1 and isinstance(cache_obj.get("points"), dict):
+                cached_by_tag = {
+                    str(tag): point
+                    for tag, point in cache_obj["points"].items()
+                    if isinstance(point, dict)
+                }
+        except (OSError, json.JSONDecodeError):
+            cached_by_tag = {}
+
     def _metrics_for_tag(tag: str, date: str) -> dict | None:
         ls_result = sp.run(
             ["git", "ls-tree", "-r", "--name-only", tag],
@@ -484,13 +499,44 @@ async def collect_evolution_metrics(repo_dir: str, data_dir: str | None = None) 
             "memory_kb": memory_kb,
         }
 
+    cached_points: list[dict[str, Any]] = []
+    missing_tags: list[tuple[str, str]] = []
+    for tag, date in tags:
+        cached = cached_by_tag.get(tag)
+        if cached and cached.get("date") == date:
+            cached_points.append(dict(cached))
+        else:
+            missing_tags.append((tag, date))
+
     loop = asyncio.get_running_loop()
+    semaphore = asyncio.Semaphore(4)
+
+    async def _bounded_metrics(tag: str, date: str) -> dict | None:
+        async with semaphore:
+            return await loop.run_in_executor(None, _metrics_for_tag, tag, date)
+
     results = await asyncio.gather(*[
-        loop.run_in_executor(None, _metrics_for_tag, tag, date)
-        for tag, date in tags
+        _bounded_metrics(tag, date)
+        for tag, date in missing_tags
     ])
 
-    points = [r for r in results if r is not None]
+    new_points = [r for r in results if r is not None]
+    points_by_tag = {point["tag"]: point for point in cached_points + new_points}
+    points = [points_by_tag[tag] for tag, _date in tags if tag in points_by_tag]
+
+    if cache_path and new_points:
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(
+                json.dumps({
+                    "schema": 1,
+                    "points": points_by_tag,
+                    "updated_at": utc_now_iso(),
+                }, ensure_ascii=False, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        except OSError:
+            log.warning("Failed to write evolution metrics cache: %s", cache_path, exc_info=True)
 
     # Override latest tag's memory with live file sizes (same formula as historical: identity + scratchpad)
     if data_dir and points:

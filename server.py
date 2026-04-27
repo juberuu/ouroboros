@@ -872,26 +872,44 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                 continue
 
             msg_type = msg.get("type", "")
-            # Phase 5 WS dispatch for extensions: route ``ext.<skill>.<msg>``
+            # Phase 5 WS dispatch for extensions: route provider-safe
+            # ``ext_<len>_<token>_<msg>`` message types
             # message types to handlers registered via
             # ``PluginAPI.register_ws_handler``. The handler receives the
             # full payload dict; responses (if any) are sent back to the
             # originating websocket as a best-effort one-shot reply.
-            if isinstance(msg_type, str) and msg_type.startswith("ext."):
+            parsed_ext_type = None
+            if isinstance(msg_type, str):
+                try:
+                    from ouroboros.extension_loader import parse_extension_surface_name as _parse_ext_name
+                    parsed_ext_type = _parse_ext_name(msg_type)
+                except Exception:
+                    parsed_ext_type = None
+            if parsed_ext_type:
                 state = None
                 try:
                     from ouroboros.config import get_skills_repo_path, load_settings
                     from ouroboros.extension_loader import (
+                        extension_name_prefix as _extension_name_prefix,
                         list_ws_handlers as _ws_handlers,
                         reconcile_extension as _reconcile_extension,
                     )
-                    skill_name = msg_type.split(".", 2)[1]
+                    from ouroboros.skill_loader import discover_skills as _discover_skills
                     drive_root = pathlib.Path(
                         websocket.app.state.drive_root  # type: ignore[attr-defined]
                         if hasattr(websocket.app, "state") and hasattr(websocket.app.state, "drive_root")
                         else DATA_DIR
                     )
                     repo_path = get_skills_repo_path()
+                    handler_spec = _ws_handlers().get(msg_type)
+                    skill_name = str((handler_spec or {}).get("skill") or "")
+                    if not skill_name:
+                        for skill in _discover_skills(drive_root, repo_path=repo_path):
+                            if msg_type.startswith(_extension_name_prefix(skill.name)):
+                                skill_name = skill.name
+                                break
+                    if not skill_name:
+                        raise KeyError(msg_type)
                     state = _reconcile_extension(skill_name, drive_root, load_settings, repo_path=repo_path)
                     if not state.get("desired_live"):
                         await websocket.send_text(json.dumps({
@@ -1361,12 +1379,14 @@ async def api_git_promote(request: Request) -> JSONResponse:
 
 
 _evo_cache: Dict[str, Any] = {}
+_evo_task: Optional[asyncio.Task] = None
 
 
 async def api_evolution_data(request: Request) -> JSONResponse:
     """Collect evolution metrics for each git tag."""
     from ouroboros.utils import collect_evolution_metrics
     import time as _t
+    global _evo_task
 
     now = _t.time()
     force_refresh = str(request.query_params.get("force") or "").strip().lower() in {"1", "true", "yes"}
@@ -1378,8 +1398,12 @@ async def api_evolution_data(request: Request) -> JSONResponse:
         })
 
     data_dir = os.environ.get("OUROBOROS_DATA_DIR", os.path.expanduser("~/Ouroboros/data"))
-    data_points = await collect_evolution_metrics(str(REPO_DIR), data_dir=data_dir)
-    _evo_cache["ts"] = now
+    if _evo_task is None or _evo_task.done():
+        _evo_task = asyncio.create_task(
+            collect_evolution_metrics(str(REPO_DIR), data_dir=data_dir)
+        )
+    data_points = await _evo_task
+    _evo_cache["ts"] = _t.time()
     _evo_cache["points"] = data_points
     _evo_cache["generated_at"] = datetime.now(timezone.utc).isoformat()
     return JSONResponse({

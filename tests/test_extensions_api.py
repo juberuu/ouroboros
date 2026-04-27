@@ -724,7 +724,7 @@ def test_api_skill_review_offloads_to_thread_and_returns_outcome(tmp_path, monke
 
 def test_ws_endpoint_dispatches_ext_prefixed_messages():
     """Phase 5 regression: server.py::ws_endpoint must route
-    ``type: "ext.*"`` WS messages through ``extension_loader.list_ws_handlers()``.
+    provider-safe extension WS messages through ``extension_loader.list_ws_handlers()``.
     AST-level check — the full runtime round-trip requires a live
     supervisor which is out of scope for this file."""
     import ast
@@ -733,7 +733,7 @@ def test_ws_endpoint_dispatches_ext_prefixed_messages():
     for node in ast.walk(tree):
         if isinstance(node, ast.AsyncFunctionDef) and node.name == "ws_endpoint":
             body = ast.unparse(node)
-            assert "ext." in body, "ws_endpoint has no ext.* dispatch branch"
+            assert "parse_extension_surface_name" in body, "ws_endpoint has no extension dispatch branch"
             assert "list_ws_handlers" in body, (
                 "ws_endpoint does not look up extension WS handlers via "
                 "``extension_loader.list_ws_handlers``."
@@ -779,11 +779,48 @@ def test_ws_endpoint_reconciles_and_unloads_not_live_extension(tmp_path, monkeyp
         save_enabled(drive_root, "ext_ws_guarded", False)
 
         with client.websocket_connect("/ws") as ws:
-            ws.send_text(json.dumps({"type": "ext.ext_ws_guarded.message"}))
+            ws.send_text(json.dumps({"type": extension_loader.extension_surface_name("ext_ws_guarded", "message")}))
             reply = json.loads(ws.receive_text())
         assert reply["type"] == "log"
         assert "not live" in reply["data"]["message"]
         assert "ext_ws_guarded" not in extension_loader.snapshot()["extensions"]
+    finally:
+        _stop_patches(patches)
+
+
+def test_ws_endpoint_dispatches_first_message_after_lazy_load(tmp_path, monkeypatch):
+    from ouroboros import extension_loader
+    from ouroboros.skill_loader import (
+        SkillReviewState,
+        compute_content_hash,
+        save_enabled,
+        save_review_state,
+    )
+
+    skills_root = tmp_path / "skills"
+    plugin = (
+        "async def _handler(payload):\n"
+        "    return {'acked': payload.get('payload')}\n"
+        "def register(api):\n"
+        "    api.register_ws_handler('message', _handler)\n"
+    )
+    skill_dir = _write_ext(skills_root, "ext_ws_lazy", permissions=["ws_handler"], plugin=plugin)
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    client, drive_root, patches = _make_client(tmp_path, monkeypatch)
+    try:
+        content_hash = compute_content_hash(skill_dir, manifest_entry="plugin.py")
+        save_enabled(drive_root, "ext_ws_lazy", True)
+        save_review_state(
+            drive_root,
+            "ext_ws_lazy",
+            SkillReviewState(status="pass", content_hash=content_hash),
+        )
+        extension_loader.unload_extension("ext_ws_lazy")
+        msg_type = extension_loader.extension_surface_name("ext_ws_lazy", "message")
+        with client.websocket_connect("/ws") as ws:
+            ws.send_text(json.dumps({"type": msg_type, "payload": "first"}))
+            reply = json.loads(ws.receive_text())
+        assert reply == {"type": f"{msg_type}.reply", "data": {"acked": "first"}}
     finally:
         _stop_patches(patches)
 
@@ -804,6 +841,7 @@ def test_ws_endpoint_surfaces_extension_load_error(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
     client, drive_root, patches = _make_client(tmp_path, monkeypatch)
     try:
+        from ouroboros import extension_loader
         from ouroboros.skill_loader import SkillReviewState, compute_content_hash, save_enabled, save_review_state
 
         content_hash = compute_content_hash(skill_dir, manifest_entry="plugin.py")
@@ -815,7 +853,7 @@ def test_ws_endpoint_surfaces_extension_load_error(tmp_path, monkeypatch):
         )
 
         with client.websocket_connect("/ws") as ws:
-            ws.send_text(json.dumps({"type": "ext.ext_ws_broken.message"}))
+            ws.send_text(json.dumps({"type": extension_loader.extension_surface_name("ext_ws_broken", "message")}))
             reply = json.loads(ws.receive_text())
         assert reply["type"] == "log"
         assert "failed to go live" in reply["data"]["message"]
@@ -825,7 +863,7 @@ def test_ws_endpoint_surfaces_extension_load_error(tmp_path, monkeypatch):
 
 def test_tool_registry_execute_dispatches_ext_tool(tmp_path, monkeypatch):
     """Phase 5 regression: ``ToolRegistry.execute`` falls back to
-    ``extension_loader.get_tool`` for ``ext.*`` names, but only for
+    ``extension_loader.get_tool`` for extension names, but only for
     reviewed/live extensions that are surfaced through the normal
     registry schema lookup."""
     from ouroboros.tools import registry as tools_registry
@@ -863,10 +901,11 @@ def test_tool_registry_execute_dispatches_ext_tool(tmp_path, monkeypatch):
     assert err is None, err
     try:
         tmp_reg = tools_registry.ToolRegistry(repo_dir=tmp_path, drive_root=drive_root)
-        schema = tmp_reg.get_schema_by_name("ext.testskill.echo")
+        tool_name = extension_loader.extension_surface_name("testskill", "echo")
+        schema = tmp_reg.get_schema_by_name(tool_name)
         assert schema is not None
-        assert schema["function"]["name"] == "ext.testskill.echo"
-        result = tmp_reg.execute("ext.testskill.echo", {"who": "phase5"})
+        assert schema["function"]["name"] == tool_name
+        result = tmp_reg.execute(tool_name, {"who": "phase5"})
         # v5.1.2 iter-2: extension dispatch now goes through
         # ``ouroboros.safety.check_safety``. In test envs without a
         # safety backend, the supervisor returns a visible
@@ -875,6 +914,6 @@ def test_tool_registry_execute_dispatches_ext_tool(tmp_path, monkeypatch):
         # the warning prefix is acceptable.
         assert "hello phase5" in result, result
         # get_timeout honours the extension's declared timeout.
-        assert tmp_reg.get_timeout("ext.testskill.echo") == 10
+        assert tmp_reg.get_timeout(tool_name) == 10
     finally:
         extension_loader.unload_extension("testskill")

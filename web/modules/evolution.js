@@ -69,7 +69,7 @@ export function initEvolution({ ws, state }) {
         subtabButtons.forEach(btn => btn.classList.toggle('active', btn.dataset.subtab === name));
         chartContent.style.display = name === 'chart' ? '' : 'none';
         versionsContent.style.display = name === 'versions' ? 'flex' : 'none';
-        versionsContent.style.flexDirection = name === 'versions' ? 'column' : '';
+        if (name === 'chart' && state.activePage === 'evolution') ensureEvolutionLoaded(false);
         if (name === 'versions' && !versionsLoaded) loadVersions();
     }
 
@@ -82,6 +82,7 @@ export function initEvolution({ ws, state }) {
     // -----------------------------------------------------------------------
     let evoChart = null;
     let loadSequence = 0;
+    let chartLoaded = false;
     const refreshBtn = document.getElementById('evo-refresh');
     const statusBadge = document.getElementById('evo-status');
     const runtimeDetail = document.getElementById('evo-runtime-detail');
@@ -189,6 +190,7 @@ export function initEvolution({ ws, state }) {
     }
 
     async function loadEvolution(force = false) {
+        chartLoaded = true;
         const requestId = ++loadSequence;
         refreshBtn.disabled = true;
         setBadge('starting', force ? 'Refreshing...' : 'Loading...');
@@ -223,6 +225,15 @@ export function initEvolution({ ws, state }) {
         } finally {
             if (requestId === loadSequence) refreshBtn.disabled = false;
         }
+    }
+
+    function ensureEvolutionLoaded(force = false) {
+        if (activeSubtab !== 'chart') return;
+        if (!force && chartLoaded) {
+            loadEvolution(false);
+            return;
+        }
+        loadEvolution(force);
     }
 
     function renderChart(points) {
@@ -428,23 +439,21 @@ export function initEvolution({ ws, state }) {
 
     ws.on('open', () => {
         if (state.activePage === 'evolution') {
-            loadEvolution(true);
+            ensureEvolutionLoaded(false);
             if (activeSubtab === 'versions') loadVersions();
         }
     });
 
     window.addEventListener('ouro:page-shown', (event) => {
         if (event?.detail?.page === 'evolution') {
-            if (activeSubtab === 'chart') loadEvolution(true);
+            if (activeSubtab === 'chart') ensureEvolutionLoaded(false);
             else loadVersions();
         }
     });
 
     document.addEventListener('visibilitychange', () => {
         if (!document.hidden && state.activePage === 'evolution') {
-            if (activeSubtab === 'chart') loadEvolution(true);
+            if (activeSubtab === 'chart' && chartLoaded) loadEvolution(false);
         }
     });
-
-    loadEvolution(true);
 }

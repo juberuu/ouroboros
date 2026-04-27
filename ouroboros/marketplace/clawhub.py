@@ -45,7 +45,8 @@ _DEFAULT_TIMEOUT_SEC = 15
 _MAX_JSON_RESPONSE_BYTES = 4 * 1024 * 1024  # 4 MB JSON cap
 _MAX_ARCHIVE_BYTES = 50 * 1024 * 1024       # mirrors fetcher cap
 _USER_AGENT = "Ouroboros-Marketplace/4.50 (+https://github.com/joi-lab/ouroboros-desktop)"
-_SEARCH_PATH_CANDIDATES = ("skills", "registry/skills", "marketplace/skills", "packages")
+_BROWSE_PATH = "packages"
+_LEXICAL_SEARCH_PATH = "packages/search"
 
 # Allowed registry hosts. The canonical registry is ``clawhub.ai`` (per
 # the official docs at github.com/openclaw/clawhub). ``clawhub.com``
@@ -262,10 +263,35 @@ def _coerce_str_list(value: Any) -> List[str]:
     if value is None:
         return []
     if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item).strip()]
+        result = []
+        for item in value:
+            if isinstance(item, dict):
+                text = (
+                    item.get("version")
+                    or item.get("name")
+                    or item.get("tag")
+                    or item.get("value")
+                )
+            else:
+                text = item
+            cleaned = str(text or "").strip()
+            if cleaned:
+                result.append(cleaned)
+        return result
     if isinstance(value, str):
         return [part.strip() for part in value.split(",") if part.strip()]
     return []
+
+
+def _coerce_version(value: Any) -> str:
+    if isinstance(value, dict):
+        return str(
+            value.get("version")
+            or value.get("name")
+            or value.get("tag")
+            or ""
+        ).strip()
+    return str(value or "").strip()
 
 
 def _detect_plugin(raw: Dict[str, Any]) -> bool:
@@ -278,8 +304,13 @@ def _detect_plugin(raw: Dict[str, Any]) -> bool:
     ``package_kind == 'plugin'``. We accept any of these as a plugin
     flag; the marketplace UI hides plugins from search results.
     """
-    kind = str(raw.get("kind") or raw.get("package_kind") or "").lower()
-    if kind == "plugin":
+    kind = str(
+        raw.get("kind")
+        or raw.get("package_kind")
+        or raw.get("family")
+        or ""
+    ).lower()
+    if kind in {"plugin", "code-plugin"}:
         return True
     if raw.get("plugin_manifest"):
         return True
@@ -315,12 +346,63 @@ def _extract_metadata_openclaw(raw: Dict[str, Any]) -> Dict[str, Any]:
     return {}
 
 
+def _normalize_record(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Flatten modern package/detail wrappers into one summary record."""
+    if isinstance(raw.get("package"), dict):
+        normalized = dict(raw["package"])
+    elif isinstance(raw.get("skill"), dict):
+        normalized = dict(raw["skill"])
+    else:
+        normalized = dict(raw)
+    for key in ("latestVersion", "latest_version", "versions", "availableVersions"):
+        if key in raw and key not in normalized:
+            normalized[key] = raw[key]
+    owner = raw.get("owner")
+    if isinstance(owner, dict) and "ownerHandle" not in normalized:
+        normalized["ownerHandle"] = owner.get("handle") or owner.get("name")
+    return normalized
+
+
+def _extract_items_and_cursor(parsed: Any, *, path: str) -> Tuple[List[Any], str]:
+    """Return registry items + cursor from browse/search response shapes."""
+    if isinstance(parsed, list):
+        return parsed, ""
+    if not isinstance(parsed, dict):
+        raise ClawHubClientError(
+            f"Unexpected response shape from {path}: {type(parsed).__name__}"
+        )
+    container = parsed.get("data") if isinstance(parsed.get("data"), dict) else parsed
+    if not isinstance(container, dict):
+        raise ClawHubClientError(
+            f"Unexpected data shape from {path}: {type(container).__name__}"
+        )
+    items = (
+        container.get("results")
+        or container.get("items")
+        or container.get("skills")
+        or container.get("packages")
+        or []
+    )
+    if not isinstance(items, list):
+        raise ClawHubClientError(
+            f"Unexpected items shape from {path}: {type(items).__name__}"
+        )
+    next_cursor = str(
+        container.get("nextCursor")
+        or container.get("next_cursor")
+        or container.get("cursor")
+        or ""
+    )
+    return items, next_cursor
+
+
 def _summary_from_record(raw: Any) -> ClawHubSkillSummary:
     """Build a :class:`ClawHubSkillSummary` from one registry record."""
     if not isinstance(raw, dict):
         raise ClawHubClientError(
             f"Registry record must be an object, got {type(raw).__name__}"
         )
+    raw = _normalize_record(raw)
     slug = (
         str(raw.get("slug") or raw.get("name") or "").strip()
     )
@@ -331,7 +413,15 @@ def _summary_from_record(raw: Any) -> ClawHubSkillSummary:
     summary_text = str(raw.get("summary") or raw.get("description") or "").strip()
     description = str(raw.get("description") or summary_text).strip()
 
-    latest_version = str(raw.get("latestVersion") or raw.get("latest_version") or raw.get("version") or "").strip()
+    tags = raw.get("tags") or {}
+    if not isinstance(tags, dict):
+        tags = {}
+    latest_version = _coerce_version(
+        raw.get("latestVersion")
+        or raw.get("latest_version")
+        or raw.get("version")
+        or tags.get("latest")
+    )
     versions = _coerce_str_list(raw.get("versions") or raw.get("availableVersions"))
     if latest_version and latest_version not in versions:
         versions.insert(0, latest_version)
@@ -343,7 +433,15 @@ def _summary_from_record(raw: Any) -> ClawHubSkillSummary:
     requires = metadata_block.get("requires") or {}
     if not isinstance(requires, dict):
         requires = {}
-    os_list = _coerce_str_list(metadata_block.get("os") or raw.get("os"))
+    compatibility = raw.get("compatibility") or {}
+    if not isinstance(compatibility, dict):
+        compatibility = {}
+    os_list = _coerce_str_list(
+        metadata_block.get("os")
+        or raw.get("os")
+        or compatibility.get("os")
+        or compatibility.get("platforms")
+    )
     requires_env = _coerce_str_list(requires.get("env"))
     requires_bins = _coerce_str_list(requires.get("bins") or requires.get("anyBins"))
     primary_env = str(metadata_block.get("primaryEnv") or "").strip()
@@ -357,6 +455,8 @@ def _summary_from_record(raw: Any) -> ClawHubSkillSummary:
     badges = raw.get("badges") or {}
     if not isinstance(badges, dict):
         badges = {}
+    if raw.get("isOfficial") is True or str(raw.get("channel") or "").lower() == "official":
+        badges = {**badges, "official": True}
     stats = raw.get("stats") or {}
     if not isinstance(stats, dict):
         stats = {}
@@ -393,126 +493,56 @@ def search(
     limit: int = 25,
     offset: int = 0,
     cursor: Optional[str] = None,
-    sort: str = "downloads",
+    sort: str = "registry",
+    official_only: bool = False,
     registry_url: Optional[str] = None,
     timeout_sec: int = _DEFAULT_TIMEOUT_SEC,
     include_metadata: bool = False,
 ) -> Any:
-    """Search the registry for skills matching ``query``.
-
-    The registry's search endpoint is documented as
-    ``GET /skills?limit=25`` (per
-    https://github.com/openclaw/clawhub/blob/main/docs/spec.md). When
-    additional filters are exposed by the registry they are forwarded
-    via ``q``, ``sort``, ``offset`` query parameters.
-    """
+    """Browse or lexical-search the modern ClawHub package catalogue."""
     base = _registry_base_url(registry_url)
     safe_limit = max(1, min(int(limit or 25), 100))
     safe_offset = max(0, int(offset or 0))
     sort_key = (sort or "downloads").strip().lower()
-    if sort_key not in {"downloads", "stars", "recent", "name"}:
-        sort_key = "downloads"
+    if sort_key not in {"registry", "updated"}:
+        sort_key = "registry"
+    cleaned_query = (query or "").strip()
+    path = _LEXICAL_SEARCH_PATH if cleaned_query else _BROWSE_PATH
     query_params: Dict[str, Any] = {
+        "family": "skill",
         "limit": safe_limit,
-        "offset": safe_offset,
-        "sort": sort_key,
     }
+    if official_only:
+        query_params["isOfficial"] = "true"
     cleaned_cursor = str(cursor or "").strip()
     if cleaned_cursor:
         query_params["cursor"] = cleaned_cursor
-    cleaned_query = (query or "").strip()
+    else:
+        query_params["offset"] = safe_offset
     if cleaned_query:
         query_params["q"] = cleaned_query
-    last_error: Optional[Exception] = None
-    attempts: List[Dict[str, Any]] = []
-    first_success: Optional[Dict[str, Any]] = None
-    for path in _SEARCH_PATH_CANDIDATES:
-        url = _build_url(base, path, query_params)
+
+    url = _build_url(base, path, query_params)
+    body, _headers = _http_get(url, timeout=timeout_sec)
+    parsed = _decode_json(body, url=url)
+    items, next_cursor = _extract_items_and_cursor(parsed, path=path)
+    summaries: List[ClawHubSkillSummary] = []
+    for record in items:
         try:
-            path_timeout = timeout_sec if path == "skills" else min(timeout_sec, 3)
-            body, _headers = _http_get(url, timeout=path_timeout)
-            parsed = _decode_json(body, url=url)
-            items: Any
-            next_cursor = ""
-            if isinstance(parsed, dict):
-                nested = parsed.get("data")
-                if isinstance(nested, dict):
-                    items = (
-                        nested.get("skills")
-                        or nested.get("results")
-                        or nested.get("items")
-                        or []
-                    )
-                    next_cursor = str(
-                        nested.get("nextCursor")
-                        or nested.get("next_cursor")
-                        or nested.get("cursor")
-                        or ""
-                    )
-                else:
-                    items = (
-                        parsed.get("skills")
-                        or parsed.get("results")
-                        or parsed.get("items")
-                        or []
-                    )
-                    next_cursor = str(
-                        parsed.get("nextCursor")
-                        or parsed.get("next_cursor")
-                        or parsed.get("cursor")
-                        or ""
-                    )
-            elif isinstance(parsed, list):
-                items = parsed
-            else:
-                raise ClawHubClientError(
-                    f"Unexpected response shape from {url}: {type(parsed).__name__}"
-                )
-            if not isinstance(items, list):
-                raise ClawHubClientError(
-                    f"Unexpected items shape from {url}: {type(items).__name__}"
-                )
-            summaries: List[ClawHubSkillSummary] = []
-            for record in items:
-                try:
-                    summaries.append(_summary_from_record(record))
-                except ClawHubClientError:
-                    log.warning("Skipping malformed registry record: %r", record, exc_info=True)
-                    continue
-            attempts.append({"path": path, "count": len(summaries), "ok": True})
-            if first_success is None:
-                first_success = {
-                    "results": summaries,
-                    "next_cursor": next_cursor,
-                    "path": path,
-                }
-            if summaries or next_cursor or path == _SEARCH_PATH_CANDIDATES[-1]:
-                if include_metadata:
-                    return {
-                        "results": summaries,
-                        "next_cursor": next_cursor,
-                        "path": path,
-                        "attempts": attempts,
-                    }
-                return summaries
-        except ClawHubClientError as exc:
-            last_error = exc
-            attempts.append({"path": path, "ok": False, "error": str(exc)})
+            summaries.append(_summary_from_record(record))
+        except ClawHubClientError:
+            log.warning("Skipping malformed registry record: %r", record, exc_info=True)
             continue
-    if first_success is not None:
-        if include_metadata:
-            return {
-                "results": first_success["results"],
-                "next_cursor": first_success["next_cursor"],
-                "path": first_success["path"],
-                "attempts": attempts,
-            }
-        return first_success["results"]
-    if last_error:
-        raise last_error
     if include_metadata:
-        return {"results": [], "next_cursor": "", "path": "skills", "attempts": attempts}
-    return []
+        return {
+            "results": summaries,
+            "next_cursor": next_cursor,
+            "path": path,
+            "attempts": [{"path": path, "count": len(summaries), "ok": True}],
+            "sort": sort_key,
+            "filters": {"family": "skill", "official_only": bool(official_only)},
+        }
+    return summaries
 
 
 def _validate_slug(slug: str) -> str:
@@ -548,11 +578,17 @@ def info(
     """Resolve the latest version metadata for ``slug``."""
     cleaned = _validate_slug(slug)
     base = _registry_base_url(registry_url)
-    url = _build_url(base, f"skills/{urllib.parse.quote(cleaned, safe='/-')}")
-    body, _headers = _http_get(url, timeout=timeout_sec)
+    url = _build_url(base, f"packages/{urllib.parse.quote(cleaned, safe='/-')}")
+    try:
+        body, _headers = _http_get(url, timeout=timeout_sec)
+    except ClawHubClientError:
+        url = _build_url(base, f"skills/{urllib.parse.quote(cleaned, safe='/-')}")
+        body, _headers = _http_get(url, timeout=timeout_sec)
     parsed = _decode_json(body, url=url)
     if isinstance(parsed, dict) and "skill" in parsed:
-        return _summary_from_record(parsed["skill"])
+        return _summary_from_record(parsed)
+    if isinstance(parsed, dict) and "package" in parsed:
+        return _summary_from_record(parsed)
     return _summary_from_record(parsed)
 
 
@@ -593,8 +629,8 @@ def download(
 ) -> ClawHubArchive:
     """Download the binary archive for ``slug`` (specific version or latest).
 
-    The download endpoint is documented as ``GET /download/{skill}``
-    (with optional ``?version=`` query). On success returns the bytes
+    The download endpoint is ``GET /download?slug=<skill>&version=<version>``.
+    On success returns the bytes
     + a sha256 fingerprint computed locally over those bytes.
 
     Important: the returned ``sha256`` is the fingerprint of WHAT WE
@@ -613,11 +649,8 @@ def download(
     cleaned_version = (version or "").strip()
     if cleaned_version:
         query["version"] = cleaned_version
-    url = _build_url(
-        base,
-        f"download/{urllib.parse.quote(cleaned, safe='/-')}",
-        query or None,
-    )
+    query["slug"] = cleaned
+    url = _build_url(base, "download", query)
     body, headers = _http_get(
         url,
         timeout=timeout_sec,

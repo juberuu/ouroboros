@@ -396,7 +396,8 @@ class ToolRegistry:
     def schemas(self, core_only: bool = False) -> List[Dict[str, Any]]:
         built_in = [{"type": "function", "function": e.schema} for e in self._entries.values()]
         # Include live extension-registered tool schemas so the normal
-        # tool-policy/enable_tools path can surface ``ext.<skill>.<name>``
+        # tool-policy/enable_tools path can surface provider-safe extension
+        # tool entries instead of leaving them manually dispatch-only.
         # entries instead of leaving them manually dispatch-only.
         try:
             from ouroboros.extension_loader import (
@@ -464,7 +465,11 @@ class ToolRegistry:
         entry = self._entries.get(name)
         if entry:
             return {"type": "function", "function": entry.schema}
-        if name.startswith("ext."):
+        try:
+            from ouroboros.extension_loader import parse_extension_surface_name as _ext_parse_name
+        except Exception:
+            _ext_parse_name = None
+        if _ext_parse_name and _ext_parse_name(name):
             try:
                 from ouroboros.extension_loader import get_tool as _ext_get_tool, is_extension_live as _ext_is_live
                 ext_tool = _ext_get_tool(name)
@@ -488,7 +493,11 @@ class ToolRegistry:
             return entry.timeout_sec
         # Phase 5: extension-registered tools carry their own timeout_sec
         # in the loader's tool descriptor.
-        if name.startswith("ext."):
+        try:
+            from ouroboros.extension_loader import parse_extension_surface_name as _ext_parse_name
+        except Exception:
+            _ext_parse_name = None
+        if _ext_parse_name and _ext_parse_name(name):
             try:
                 from ouroboros.extension_loader import get_tool as _ext_get_tool
                 ext_tool = _ext_get_tool(name)
@@ -499,7 +508,7 @@ class ToolRegistry:
         return 360
 
     def _dispatch_extension_tool(self, name: str, ext_tool: Dict[str, Any], args: Optional[Dict[str, Any]]) -> str:
-        """Run an ``ext.<skill>.<tool>`` handler with the same safety gates
+        """Run a provider-safe extension handler with the same safety gates
         the built-in tool path uses.
 
         v5.1.2 Frame A: extension dispatch is allowed in ``light`` (skills
@@ -508,7 +517,7 @@ class ToolRegistry:
         v5.1.2 iter-2 real triad finding TR1 (gpt-5.5 critical):
         extension dispatch previously short-circuited to the handler
         without reaching ``check_safety``, so removing the light-mode
-        gate left ``ext.*`` tools unsupervised in light. Route through
+        gate left extension tools unsupervised in light. Route through
         the same supervisor the built-in path uses so the per-call
         safety check applies uniformly.
         """
@@ -809,7 +818,11 @@ class ToolRegistry:
     def execute(self, name: str, args: Dict[str, Any]) -> str:
         entry = self._entries.get(name)
         ext_tool = None
-        if entry is None and name.startswith("ext."):
+        try:
+            from ouroboros.extension_loader import parse_extension_surface_name as _ext_parse_name
+        except Exception:
+            _ext_parse_name = None
+        if entry is None and _ext_parse_name and _ext_parse_name(name):
             try:
                 from ouroboros.extension_loader import get_tool as _ext_get_tool
                 ext_tool = _ext_get_tool(name)

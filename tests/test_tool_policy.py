@@ -94,9 +94,10 @@ def test_non_core_listing_includes_live_extension_tools(monkeypatch):
     from ouroboros import extension_loader
 
     registry = _build_registry()
+    tool_name = extension_loader.extension_surface_name("weather", "forecast")
     with extension_loader._lock:
-        extension_loader._tools["ext.weather.forecast"] = {
-            "name": "ext.weather.forecast",
+        extension_loader._tools[tool_name] = {
+            "name": tool_name,
             "handler": lambda ctx: "ok",
             "description": "Forecast",
             "schema": {"type": "object", "properties": {}},
@@ -106,7 +107,7 @@ def test_non_core_listing_includes_live_extension_tools(monkeypatch):
     monkeypatch.setattr(extension_loader, "is_extension_live", lambda *_a, **_k: True)
     try:
         names = {entry["name"] for entry in list_non_core_tools(registry)}
-        assert "ext.weather.forecast" in names
+        assert tool_name in names
     finally:
         with extension_loader._lock:
-            extension_loader._tools.pop("ext.weather.forecast", None)
+            extension_loader._tools.pop(tool_name, None)

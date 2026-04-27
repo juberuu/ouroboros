@@ -19,11 +19,11 @@ The surface intentionally mirrors what the Phase 3 plan approved:
 
 - ``register_tool``      — add a tool callable via the normal tool
                            dispatch surface, namespaced as
-                           ``ext.<skill>.<name>``.
+                           ``ext_<len>_<token>_<name>``.
 - ``register_route``     — register an HTTP handler mounted under
                            ``/api/extensions/<skill>/<path>``.
 - ``register_ws_handler``— attach a handler for WS message types
-                           prefixed ``ext.<skill>.``.
+                           namespaced the same provider-safe way.
 - ``register_ui_tab``    — declare a reviewed Widgets-page surface.
 - ``log``                — structured logger (the extension does not
                            touch ``logging``/``print`` directly).
@@ -108,9 +108,11 @@ class PluginAPI(Protocol):
         timeout_sec: int = 60,
     ) -> None:
         """Register a tool. The runtime namespaces it to
-        ``ext.<skill>.<name>``; attempting to register a collision with
-        a built-in tool name or another extension's tool raises
-        ``ExtensionRegistrationError``."""
+        ``ext_<len>_<token>_<name>``; attempting to register a collision
+        with a built-in tool name or another extension's tool raises
+        ``ExtensionRegistrationError``. ``name`` must be alphanumeric
+        plus underscores and at most 24 characters so the provider-facing
+        name remains within the strictest tool-name limit."""
         ...
 
     def register_route(
@@ -132,8 +134,10 @@ class PluginAPI(Protocol):
         handler: Callable[..., Awaitable[Any]] | Callable[..., Any],
     ) -> None:
         """Register a WebSocket message handler. ``message_type`` is
-        stored as ``ext.<skill>.<message_type>`` on the dispatcher;
-        handlers receive ``(payload_dict)`` and may be async."""
+        stored under the same provider-safe extension namespace on the
+        dispatcher; handlers receive ``(payload_dict)`` and may be async.
+        ``message_type`` follows the same alphanumeric/underscore and
+        24-character limit as tool names."""
         ...
 
     def register_ui_tab(
@@ -149,11 +153,12 @@ class PluginAPI(Protocol):
         The runtime stores the declaration in
         ``ouroboros.extension_loader._ui_tabs`` keyed by
         ``"<skill>:<tab_id>"``. The browser hosts these declarations
-        on the top-level Widgets page. Supported render shapes are
-        deliberately narrow (for example inline-card routes and
-        sandboxed iframe routes); same-origin dynamic widget modules
-        are not part of this contract because they could call
-        privileged app APIs from the SPA origin."""
+        on the top-level Widgets page. The current ``inline_card``
+        render shape is deliberately narrow and weather-widget-shaped;
+        sandboxed iframe routes remain supported. Broader generic widget
+        schemas are future work. Same-origin dynamic widget modules are
+        not part of this contract because
+        they could call privileged app APIs from the SPA origin."""
         ...
 
     # --- runtime access ---

@@ -2,7 +2,7 @@
 
 Endpoints:
 
-- ``GET  /api/marketplace/clawhub/search?q=&sort=&limit=&offset=``
+- ``GET  /api/marketplace/clawhub/search?q=&official=&limit=&offset=&cursor=``
 - ``GET  /api/marketplace/clawhub/info/{slug}``
 - ``GET  /api/marketplace/clawhub/installed`` — local catalog snapshot
 - ``POST /api/marketplace/clawhub/install``     ``{slug, version?, auto_review?, overwrite?}``
@@ -112,10 +112,11 @@ async def api_marketplace_search(request: Request) -> JSONResponse:
         return blocked
     qp = request.query_params
     query = qp.get("q") or qp.get("query") or ""
-    sort = qp.get("sort") or "downloads"
+    sort = qp.get("sort") or "registry"
     limit = _coerce_int(qp.get("limit"), 25)
     offset = _coerce_int(qp.get("offset"), 0)
     include_plugins = _coerce_bool(qp.get("include_plugins"), False)
+    official_only = _coerce_bool(qp.get("official") or qp.get("only_official"), False)
     cursor = qp.get("cursor") or None
     try:
         page = await asyncio.to_thread(
@@ -125,6 +126,7 @@ async def api_marketplace_search(request: Request) -> JSONResponse:
             offset=offset,
             sort=sort,
             cursor=cursor,
+            official_only=official_only,
             include_metadata=True,
             timeout_sec=5,
         )
@@ -141,7 +143,8 @@ async def api_marketplace_search(request: Request) -> JSONResponse:
             "offset": offset,
             "cursor": cursor,
             "next_cursor": page.get("next_cursor") or "",
-            "registry_path": page.get("path") or "skills",
+            "official": official_only,
+            "registry_path": page.get("path") or "packages",
             "registry_attempts": page.get("attempts") or [],
             "registry_empty": not bool(results),
             "count": len(results),

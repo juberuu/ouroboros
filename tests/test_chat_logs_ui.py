@@ -725,10 +725,12 @@ def test_sync_history_appends_disconnected_unfinished_cards_at_end():
         "liveCardRecords sweep must appear after pass-2 message loop"
 
 
-def test_chat_send_group_vertically_centered():
-    """Send group wrapper must use top:50% + translateY(-50%) so all send controls
-    stay vertically centered inside the textarea, including when it grows to
-    multiple lines (v4.39.1 switched from bottom:8px to true vertical centering)."""
+def test_chat_send_group_bottom_aligned_for_multiline_composer():
+    """Send controls stay anchored near the final textarea line on mobile.
+
+    Centering them in a growing multiline textarea made the send affordance look
+    stuck mid-field, especially after staging a file attachment.
+    """
     css = _read("web/style.css")
 
     # The absolute positioning lives on .chat-send-group, not .chat-send-inline.
@@ -736,10 +738,10 @@ def test_chat_send_group_vertically_centered():
     rule_end = css.index("\n}", rule_start) + 2
     rule_body = css[rule_start:rule_end]
 
-    assert "top: 50%" in rule_body, \
-        ".chat-send-group must use top: 50% for vertical centering (v4.39.1)"
-    assert "translateY(-50%)" in rule_body, \
-        ".chat-send-group must use translateY(-50%) for vertical centering (v4.39.1)"
+    assert "bottom: 7px" in rule_body, \
+        ".chat-send-group must anchor to the bottom edge of the multiline composer"
+    assert "translateY(-50%)" not in rule_body, \
+        ".chat-send-group must not vertically center inside a multiline composer"
     assert "position: absolute" in rule_body, \
         ".chat-send-group must be position: absolute"
     # The Send button itself must NOT re-introduce absolute positioning
@@ -750,19 +752,18 @@ def test_chat_send_group_vertically_centered():
         ".chat-send-inline must not use position: absolute (handled by parent .chat-send-group)"
 
 
-def test_chat_attach_button_vertically_centered():
-    """Paperclip button must use the same top:50% + translateY(-50%) centering as
-    .chat-send-group so both buttons stay aligned inside the textarea (v4.39.1)."""
+def test_chat_attach_button_bottom_aligned_for_multiline_composer():
+    """Paperclip button follows the send control at the textarea baseline."""
     css = _read("web/style.css")
 
     rule_start = css.index(".chat-attach-btn {")
     rule_end = css.index("\n}", rule_start) + 2
     rule_body = css[rule_start:rule_end]
 
-    assert "top: 50%" in rule_body, \
-        ".chat-attach-btn must use top: 50% for vertical centering (v4.39.1)"
-    assert "translateY(-50%)" in rule_body, \
-        ".chat-attach-btn must use translateY(-50%) for vertical centering (v4.39.1)"
+    assert "bottom: 9px" in rule_body, \
+        ".chat-attach-btn must anchor to the bottom edge of the multiline composer"
+    assert "translateY(-50%)" not in rule_body, \
+        ".chat-attach-btn must not vertically center inside a multiline composer"
 
 
 # --- Plan mode send tests ---
@@ -775,6 +776,13 @@ def test_plan_mode_dom_elements_present():
     assert 'id="chat-dropdown-plan"' in source, "chat-dropdown-plan item must be present"
     assert 'id="chat-dropdown-send"' in source, "chat-dropdown-send item must be present"
     assert 'class="chat-send-group"' in source, "chat-send-group wrapper must be present"
+
+
+def test_skill_review_click_guard_prevents_duplicate_posts():
+    source = _read("web/modules/skills.js")
+    assert "if (reviewingSkills.has(name)) return;" in source
+    assert "target.disabled = true;" in source
+    assert "reviewingSkills.add(name);" in source
 
 
 def test_plan_mode_send_message_accepts_plan_flag():

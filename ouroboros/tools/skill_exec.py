@@ -520,8 +520,9 @@ def _handle_skill_exec(
             "been called; the loader registered whatever ``plugin.py`` "
             "declared (inspect via the snapshot produced by "
             "``ouroboros.extension_loader.snapshot()``). Use its "
-            "``ext.<skill>.*`` tools, ``/api/extensions/<skill>/...`` "
-            "routes, or ``ext.<skill>.*`` WebSocket handlers instead."
+            "provider-safe ``ext_<len>_<token>_*`` tools, "
+            "``/api/extensions/<skill>/...`` routes, or provider-safe "
+            "extension WebSocket handlers instead."
         )
     # Phase 3 ``skill_exec`` only executes ``type: script`` skills.
     # ``instruction`` skills are catalogued + reviewable but have no

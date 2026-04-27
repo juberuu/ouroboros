@@ -124,12 +124,12 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                 <button class="attach-remove" type="button" title="Remove">×</button>
             </span>
         `;
-        requestAnimationFrame(() => updateMessagesPadding());
+        requestAnimationFrame(() => updateMessagesPadding({ preserveStickiness: false }));
         attachmentPreview.querySelector('.attach-remove').addEventListener('click', () => {
             pendingAttachment = null;
             attachmentPreview.classList.remove('visible');
             attachmentPreview.innerHTML = '';
-            requestAnimationFrame(() => updateMessagesPadding());
+            requestAnimationFrame(() => updateMessagesPadding({ preserveStickiness: false }));
         });
     }
 
@@ -1275,6 +1275,15 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         inputDraft = '';
     }
 
+    function resizeChatInput({ preserveStickiness = false } = {}) {
+        const caretAtEnd = input.selectionEnd >= input.value.length - 1;
+        const previousScrollTop = input.scrollTop;
+        input.style.height = 'auto';
+        input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+        input.scrollTop = caretAtEnd ? input.scrollHeight : previousScrollTop;
+        updateMessagesPadding({ preserveStickiness });
+    }
+
     function restoreInputHistory(step) {
         if (!inputHistory.length) return;
         if (step < 0) {
@@ -1287,9 +1296,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
             inputHistoryIndex = Math.min(inputHistory.length, inputHistoryIndex + 1);
             input.value = inputHistoryIndex === inputHistory.length ? inputDraft : (inputHistory[inputHistoryIndex] || '');
         }
-        input.style.height = 'auto';
-        input.style.height = Math.min(input.scrollHeight, 120) + 'px';
-        updateMessagesPadding();
+        resizeChatInput({ preserveStickiness: false });
         const cursor = input.value.length;
         input.setSelectionRange(cursor, cursor);
     }
@@ -1307,7 +1314,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                 return;
             }
             const staged = pendingAttachment;
-            sendBtn.disabled = true;
+            setSendBusy(true, 'Uploading');
             try {
                 const formData = new FormData();
                 formData.append('file', staged.file);
@@ -1315,29 +1322,26 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                 const data = await resp.json();
                 if (!resp.ok || !data.ok) {
                     alert('Upload failed: ' + (data.error || resp.statusText));
-                    sendBtn.disabled = false;
                     return;  // pendingAttachment and preview remain — user can retry
                 }
                 // Upload succeeded — clear the staged attachment now that it's on the server
                 pendingAttachment = null;
                 attachmentPreview.classList.remove('visible');
                 attachmentPreview.innerHTML = '';
-                requestAnimationFrame(() => updateMessagesPadding());
+                requestAnimationFrame(() => updateMessagesPadding({ preserveStickiness: false }));
                 text += (text ? '\n\n' : '') + `[Attached file: ${data.display_name || staged.display_name} saved to ${data.path}]`;
             } catch (e) {
                 alert('Upload error: ' + e.message);
-                sendBtn.disabled = false;
                 return;  // pendingAttachment and preview remain — user can retry
             } finally {
-                sendBtn.disabled = false;
+                setSendBusy(false);
             }
         }
         if (!text) return;
         // Recall history always uses the raw user text (no prefix pollution on ArrowUp).
         rememberInput(text);
         input.value = '';
-        input.style.height = 'auto';
-        updateMessagesPadding();
+        resizeChatInput({ preserveStickiness: true });
         // Apply planning prefix to wire content only; display text stays clean.
         // Slash commands are always sent verbatim regardless of planMode.
         const wireText = (planMode && !text.startsWith('/')) ? PLAN_PREFIX + text : text;
@@ -1366,6 +1370,18 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         // Mark the active item in the dropdown for visual feedback.
         dropdownSend.dataset.modeActive = mode === 'send' ? 'true' : 'false';
         dropdownPlan.dataset.modeActive = mode === 'plan' ? 'true' : 'false';
+    }
+
+    function setSendBusy(busy, label = '') {
+        sendGroup.dataset.busy = busy ? '1' : '0';
+        sendBtn.disabled = busy;
+        chevronBtn.disabled = busy;
+        if (busy) {
+            sendBtn.textContent = label || 'Sending';
+            sendBtn.title = label || 'Sending';
+        } else {
+            setSendMode(sendGroup.dataset.sendMode || 'send');
+        }
     }
 
     // Initialise to send mode.
@@ -1444,15 +1460,15 @@ export function initChat({ ws, state, updateUnreadBadge }) {
     }
 
     if (window.ResizeObserver && inputArea) {
-        const inputResizeObserver = new ResizeObserver(() => updateMessagesPadding());
+        // Composer height changes come from typing/attachment staging; avoid
+        // forcing the transcript while the user is editing on a soft keyboard.
+        const inputResizeObserver = new ResizeObserver(() => updateMessagesPadding({ preserveStickiness: false }));
         inputResizeObserver.observe(inputArea);
     }
 
     input.addEventListener('input', () => {
-        input.style.height = 'auto';
-        input.style.height = Math.min(input.scrollHeight, 120) + 'px';
         if (inputHistoryIndex === inputHistory.length) inputDraft = input.value;
-        updateMessagesPadding();
+        resizeChatInput({ preserveStickiness: false });
     });
 
     headerActions?.addEventListener('click', (event) => {

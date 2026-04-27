@@ -683,7 +683,7 @@ def test_toggle_skill_loads_and_unloads_extension_plugin(tmp_path, monkeypatch):
     assert enable_resp["extension_action"] == "extension_loaded"
     snap = extension_loader.snapshot()
     assert "ext_live" in snap["extensions"]
-    assert "ext.ext_live.t" in snap["tools"]
+    assert extension_loader.extension_surface_name("ext_live", "t") in snap["tools"]
 
     # Disable → the plugin is torn down.
     disable_resp = _json.loads(
@@ -737,7 +737,7 @@ def test_review_skill_reconciles_live_extension_after_review(tmp_path, monkeypat
     assert loaded is not None
     err = extension_loader.load_extension(loaded, lambda: {}, drive_root=ctx.drive_root)
     assert err is None, err
-    tool = extension_loader.get_tool("ext.ext_reviewed.t")
+    tool = extension_loader.get_tool(extension_loader.extension_surface_name("ext_reviewed", "t"))
     assert tool is not None
     assert tool["handler"](None) == "v1"
 
@@ -770,7 +770,7 @@ def test_review_skill_reconciles_live_extension_after_review(tmp_path, monkeypat
     with patch.object(skill_exec_mod, "_review_skill_impl", side_effect=_fake_review):
         result = json.loads(skill_exec_mod._handle_review_skill(ctx, skill="ext_reviewed"))
     assert result["extension_action"] == "extension_loaded"
-    tool = extension_loader.get_tool("ext.ext_reviewed.t")
+    tool = extension_loader.get_tool(extension_loader.extension_surface_name("ext_reviewed", "t"))
     assert tool is not None
     assert tool["handler"](None) == "v2"
 
