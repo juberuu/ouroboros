@@ -341,6 +341,27 @@ Add new classes to `web/style.css` when needed.
 Before staging any `web/modules/*.js` file: `grep -n "\.style\." web/modules/*.js`
 and fix any hits.
 
+### Declarative widget UI
+
+Extension widgets must use host-owned declarative render schemas, not
+skill-provided JavaScript. `web/modules/widgets.js` is the single host for
+`register_ui_tab` declarations: legacy `iframe` remains sandboxed with no
+relaxed tokens, legacy `inline_card` remains weather-shaped, and
+`kind: "declarative"` / `schema_version: 1` covers forms, actions, markdown,
+JSON, key/value summaries, tables, progress, files, galleries, and
+image/audio/video media. New widget capabilities should extend that schema and
+its tests rather than adding per-skill renderer modules.
+
+Rules for widget changes:
+
+- Escape every untrusted string with `escapeHtml`; use DOMPurify only for
+  markdown blocks.
+- Media sources must be extension routes under `/api/extensions/<skill>/...`
+  or explicitly safe `data:` URLs for image/audio/video MIME types.
+- Do not load arbitrary JS modules from skill directories into the SPA origin.
+- Add/update `tests/test_widgets_ui_static.py` for every new component kind or
+  media policy.
+
 ---
 
 ## Build & CI

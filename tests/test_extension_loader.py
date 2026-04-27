@@ -405,7 +405,7 @@ def test_register_ui_tab_surfaces_hostable_widget(tmp_path):
         tmp_path,
         "uiwait",
         "def register(api):\n"
-        "    api.register_ui_tab('weather', 'Weather', render={'kind': 'card'})\n",
+        "    api.register_ui_tab('weather', 'Weather', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'markdown', 'text': 'ok'}]})\n",
         permissions=["widget"],
     )
     err = extension_loader.load_extension(loaded, lambda: {})
@@ -413,11 +413,103 @@ def test_register_ui_tab_surfaces_hostable_widget(tmp_path):
     snap = extension_loader.snapshot()
     assert snap["ui_tabs_pending"] == []
     assert snap["ui_tabs"][0]["key"] == "uiwait:weather"
-    assert snap["ui_tabs"][0]["render"]["kind"] == "card"
+    assert snap["ui_tabs"][0]["render"]["kind"] == "declarative"
 
     extension_loader.unload_extension("uiwait")
     snap = extension_loader.snapshot()
     assert snap["ui_tabs"] == []
+
+
+def test_register_ui_tab_rejects_unsupported_render_kind(tmp_path):
+    loaded, _, _ = _prepare_extension(
+        tmp_path,
+        "badui",
+        "def register(api):\n"
+        "    api.register_ui_tab('bad', 'Bad', render={'kind': 'script_module', 'src': 'x.js'})\n",
+        permissions=["widget"],
+    )
+    err = extension_loader.load_extension(loaded, lambda: {})
+    assert err is not None
+    assert "unsupported" in err
+
+
+def test_register_ui_tab_rejects_bad_declarative_component(tmp_path):
+    loaded, _, _ = _prepare_extension(
+        tmp_path,
+        "baddecl",
+        "def register(api):\n"
+        "    api.register_ui_tab('bad', 'Bad', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'script'}]})\n",
+        permissions=["widget"],
+    )
+    err = extension_loader.load_extension(loaded, lambda: {})
+    assert err is not None
+    assert "unsupported type" in err
+
+
+def test_register_ui_tab_rejects_declarative_form_without_route(tmp_path):
+    loaded, _, _ = _prepare_extension(
+        tmp_path,
+        "badform",
+        "def register(api):\n"
+        "    api.register_ui_tab('bad', 'Bad', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'form', 'fields': [{'name': 'q'}]}]})\n",
+        permissions=["widget"],
+    )
+    err = extension_loader.load_extension(loaded, lambda: {})
+    assert err is not None
+    assert "requires route or api_route" in err
+
+
+def test_register_ui_tab_rejects_declarative_table_without_columns(tmp_path):
+    loaded, _, _ = _prepare_extension(
+        tmp_path,
+        "badtable",
+        "def register(api):\n"
+        "    api.register_ui_tab('bad', 'Bad', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'table', 'path': 'rows'}]})\n",
+        permissions=["widget"],
+    )
+    err = extension_loader.load_extension(loaded, lambda: {})
+    assert err is not None
+    assert "columns" in err
+
+
+def test_register_ui_tab_rejects_declarative_media_without_source(tmp_path):
+    loaded, _, _ = _prepare_extension(
+        tmp_path,
+        "badmedia",
+        "def register(api):\n"
+        "    api.register_ui_tab('bad', 'Bad', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'image', 'label': 'Preview'}]})\n",
+        permissions=["widget"],
+    )
+    err = extension_loader.load_extension(loaded, lambda: {})
+    assert err is not None
+    assert "media source" in err
+
+
+def test_register_ui_tab_rejects_bad_gallery_item(tmp_path):
+    loaded, _, _ = _prepare_extension(
+        tmp_path,
+        "badgallery",
+        "def register(api):\n"
+        "    api.register_ui_tab('bad', 'Bad', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'gallery', 'items': [None]}]})\n",
+        permissions=["widget"],
+    )
+    err = extension_loader.load_extension(loaded, lambda: {})
+    assert err is not None
+    assert "item 0 must be an object" in err
+
+
+def test_register_ui_tab_accepts_declarative_poll_component(tmp_path):
+    loaded, _, _ = _prepare_extension(
+        tmp_path,
+        "pollui",
+        "def register(api):\n"
+        "    api.register_ui_tab('poll', 'Poll', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'poll', 'route': 'status'}]})\n",
+        permissions=["widget"],
+    )
+    err = extension_loader.load_extension(loaded, lambda: {})
+    assert err is None, err
+    snap = extension_loader.snapshot()
+    assert snap["ui_tabs"][0]["render"]["components"][0]["type"] == "poll"
 
 
 def test_load_extension_permission_gate_tool(tmp_path):

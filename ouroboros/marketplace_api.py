@@ -119,7 +119,7 @@ async def api_marketplace_search(request: Request) -> JSONResponse:
     cursor = qp.get("cursor") or None
     is_text_search = bool(str(query or "").strip())
     effective_cursor = None if is_text_search else cursor
-    effective_official_only = False if is_text_search else official_only
+    registry_official_only = False if is_text_search else official_only
     try:
         page = await asyncio.to_thread(
             _registry_search,
@@ -127,7 +127,7 @@ async def api_marketplace_search(request: Request) -> JSONResponse:
             limit=limit,
             sort=sort,
             cursor=effective_cursor,
-            official_only=effective_official_only,
+            official_only=registry_official_only,
             include_metadata=True,
             timeout_sec=15 if is_text_search else 5,
         )
@@ -136,6 +136,8 @@ async def api_marketplace_search(request: Request) -> JSONResponse:
     results = list(page.get("results") or [])
     if not include_plugins:
         results = [r for r in results if not r.is_plugin]
+    if is_text_search and official_only:
+        results = [r for r in results if bool((r.badges or {}).get("official"))]
     return JSONResponse(
         {
             "query": query,
@@ -144,7 +146,7 @@ async def api_marketplace_search(request: Request) -> JSONResponse:
             "offset": 0,
             "cursor": effective_cursor,
             "next_cursor": page.get("next_cursor") or "",
-            "official": effective_official_only,
+            "official": official_only,
             "registry_path": page.get("path") or "packages",
             "registry_attempts": page.get("attempts") or [],
             "registry_empty": not bool(results),

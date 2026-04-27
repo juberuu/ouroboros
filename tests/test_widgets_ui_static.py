@@ -1,0 +1,77 @@
+"""Static contract checks for the Widgets page renderer."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _widgets_js() -> str:
+    return (REPO_ROOT / "web" / "modules" / "widgets.js").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_widgets_support_declarative_schema_components():
+    source = _widgets_js()
+    assert "render.kind === 'declarative'" in source
+    for marker in [
+        "type === 'form'",
+        "type === 'action'",
+        "type === 'poll'",
+        "type === 'kv'",
+        "type === 'table'",
+        "type === 'markdown'",
+        "type === 'json'",
+        "['image', 'audio', 'video', 'file'].includes(type)",
+        "type === 'gallery'",
+        "type === 'progress'",
+    ]:
+        assert marker in source
+    assert "rememberFormValues();" in source
+    assert "formValues[idx][field.name] = fieldValue(form, field);" in source
+    assert "String(optValue) === String(saved ?? '')" in source
+
+
+def test_widgets_escape_and_sanitize_untrusted_content():
+    source = _widgets_js()
+    assert "function renderMarkdownSafe" in source
+    assert "DOMPurify.sanitize" in source
+    assert "FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'form', 'input', 'img', 'video', 'audio', 'source']" in source
+    assert "FORBID_ATTR: ['style', 'src', 'srcset', 'srcdoc']" in source
+    assert "escapeHtml(JSON.stringify(value, null, 2))" in source
+    assert "escapeHtml(getPath(row, c.path, ''))" in source
+
+
+def test_widgets_media_sources_are_constrained_to_extension_routes_or_data_urls():
+    source = _widgets_js()
+    assert "function safeMediaSrc" in source
+    assert "const route = spec.route || spec.api_route || '';" in source
+    assert "extensionRouteUrl(tab, route, params)" in source
+    assert "data:(image\\/" in source
+    assert "parsed.pathname.startsWith(expectedPrefix)" in source
+    assert "parsed.origin === window.location.origin" in source
+    assert "javascript:" not in source
+
+
+def test_widgets_treat_head_as_no_body_request():
+    source = _widgets_js()
+    assert "const noBody = method === 'GET' || method === 'HEAD';" in source
+    assert "const init = noBody" in source
+
+
+def test_widgets_keep_iframe_sandbox_locked_down():
+    source = _widgets_js()
+    assert 'sandbox=""' in source
+    assert "allow-scripts" not in source
+
+
+def test_widgets_use_design_radius_tokens():
+    style = (REPO_ROOT / "web" / "style.css").read_text(encoding="utf-8")
+    block_start = style.index(".widget-field input,")
+    block_end = style.index("}", block_start)
+    block = style[block_start:block_end]
+    assert "border-radius: var(--radius-sm);" in block
+    assert "border-radius: 9px;" not in block

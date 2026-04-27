@@ -316,10 +316,8 @@ async function runSearch(state) {
     const query = String(state.query || '').trim();
     if (query) params.set('q', query);
     params.set('limit', String(query ? MARKETPLACE_SEARCH_LIMIT : state.limit));
-    if (!query) {
-        if (state.cursor) params.set('cursor', state.cursor);
-        if (state.onlyOfficial) params.set('official', '1');
-    }
+    if (!query && state.cursor) params.set('cursor', state.cursor);
+    if (state.onlyOfficial) params.set('official', '1');
     return fetchJson(`/api/marketplace/clawhub/search?${params.toString()}`);
 }
 
@@ -548,9 +546,8 @@ export function initMarketplace(pane) {
 
     function syncControlsForMode() {
         const searchMode = Boolean(String(state.query || '').trim());
-        onlyOfficial.disabled = searchMode;
         onlyOfficial.title = searchMode
-            ? 'Official-only filtering is available in browse mode.'
+            ? 'Filters enriched search results to skills marked official.'
             : '';
     }
 
@@ -578,7 +575,7 @@ export function initMarketplace(pane) {
                 nextCursor: state.nextCursor,
             });
             const mode = query ? 'search' : 'browse';
-            const official = state.onlyOfficial && mode === 'browse' ? ' · official only' : '';
+            const official = state.onlyOfficial ? ' · official only' : '';
             showStatus(pane, `${state.results.length} skill${state.results.length === 1 ? '' : 's'} · ${mode}${official} · ${state.registryPath}`, 'muted');
             loadInstalled().then((installedMap) => {
                 state.installedMap = installedMap;

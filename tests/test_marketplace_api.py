@@ -6,6 +6,7 @@ import asyncio
 import json
 
 from ouroboros import marketplace_api
+from ouroboros.marketplace.clawhub import ClawHubSkillSummary
 
 
 class _Request:
@@ -54,10 +55,35 @@ def test_marketplace_api_search_drops_params_with_query(monkeypatch):
     assert captured["kwargs"]["timeout_sec"] == 15
     assert "enrich_search_results" not in captured["kwargs"]
     payload = _json_response_payload(response)
-    assert payload["official"] is False
+    assert payload["official"] is True
     assert payload["offset"] == 0
     assert payload["cursor"] is None
     assert payload["registry_path"] == "search"
+
+
+def test_marketplace_api_search_filters_official_after_enrichment(monkeypatch):
+    def _fake_search(query, **_kwargs):
+        return {
+            "results": [
+                ClawHubSkillSummary(slug="official", badges={"official": True}),
+                ClawHubSkillSummary(slug="community", badges={}),
+            ],
+            "next_cursor": "",
+            "path": "search",
+            "attempts": [],
+        }
+
+    monkeypatch.setattr(marketplace_api, "_registry_search", _fake_search)
+    response = asyncio.run(
+        marketplace_api.api_marketplace_search(
+            _Request({"q": "deep research", "official": "1"})
+        )
+    )
+
+    assert response.status_code == 200
+    payload = _json_response_payload(response)
+    assert payload["official"] is True
+    assert [r["slug"] for r in payload["results"]] == ["official"]
 
 
 def test_marketplace_api_browse_keeps_official_and_cursor(monkeypatch):

@@ -153,12 +153,16 @@ class PluginAPI(Protocol):
         The runtime stores the declaration in
         ``ouroboros.extension_loader._ui_tabs`` keyed by
         ``"<skill>:<tab_id>"``. The browser hosts these declarations
-        on the top-level Widgets page. The current ``inline_card``
-        render shape is deliberately narrow and weather-widget-shaped;
-        sandboxed iframe routes remain supported. Broader generic widget
-        schemas are future work. Same-origin dynamic widget modules are
-        not part of this contract because
-        they could call privileged app APIs from the SPA origin."""
+        on the top-level Widgets page. ``render`` is a declarative
+        browser-hosted schema. Supported host-owned shapes are:
+        ``{"kind": "iframe", "route": "..."}``,
+        ``{"kind": "inline_card", "api_route": "..."}`` for legacy
+        weather widgets, and ``{"kind": "declarative",
+        "schema_version": 1, "components": [...]}`` for generic
+        forms/actions/markdown/json/table/media render blocks.
+        Same-origin dynamic widget modules are not part of this
+        contract because they could call privileged app APIs from the
+        SPA origin."""
         ...
 
     # --- runtime access ---

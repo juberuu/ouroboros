@@ -214,7 +214,7 @@ def test_api_extensions_index_marks_widget_only_extensions_as_ui_pending(
         permissions=["widget"],
         plugin=(
             "def register(api):\n"
-            "    api.register_ui_tab('weather', 'Weather', render={'kind': 'card'})\n"
+            "    api.register_ui_tab('weather', 'Weather', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'markdown', 'text': 'ok'}]})\n"
         ),
     )
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
@@ -240,6 +240,7 @@ def test_api_extensions_index_marks_widget_only_extensions_as_ui_pending(
         assert entry["dispatch_live"] is False
         assert entry["ui_tabs_pending"] == []
         assert data["live"]["ui_tabs"][0]["key"] == "ext_widget:weather"
+        assert data["live"]["ui_tabs"][0]["render"]["kind"] == "declarative"
         assert data["live"]["ui_tabs_pending"] == []
     finally:
         _stop_patches(patches)

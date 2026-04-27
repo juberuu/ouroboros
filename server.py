@@ -1528,7 +1528,7 @@ routes = [
     Route(
         "/api/extensions/{skill}/{rest:path}",
         endpoint=api_extension_dispatch,
-        methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
+        methods=["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH"],
     ),
     Route(
         "/api/skills/{skill}/toggle",

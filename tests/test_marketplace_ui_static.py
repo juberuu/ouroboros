@@ -14,20 +14,19 @@ def _marketplace_js() -> str:
     )
 
 
-def test_marketplace_search_mode_hides_pagination_and_official_filter():
+def test_marketplace_search_mode_hides_pagination_and_keeps_official_clickable():
     source = _marketplace_js()
     assert "const searchMode = Boolean(String(query || '').trim());" in source
     assert "if (searchMode || (!nextCursor && !hasPrevious))" in source
-    assert "onlyOfficial.disabled = searchMode;" in source
-    assert "Official-only filtering is available in browse mode." in source
+    assert "onlyOfficial.disabled = searchMode;" not in source
+    assert "Filters enriched search results to skills marked official." in source
 
 
 def test_marketplace_search_request_drops_browse_only_params():
     source = _marketplace_js()
     assert "const MARKETPLACE_SEARCH_LIMIT = 16;" in source
     assert "String(query ? MARKETPLACE_SEARCH_LIMIT : state.limit)" in source
-    assert "if (!query) {" in source
-    assert "if (state.cursor) params.set('cursor', state.cursor);" in source
+    assert "if (!query && state.cursor) params.set('cursor', state.cursor);" in source
     assert "if (state.onlyOfficial) params.set('official', '1');" in source
     assert "params.set('offset'" not in source
 

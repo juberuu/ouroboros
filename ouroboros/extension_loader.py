@@ -196,6 +196,143 @@ def _assert_tool_name(name: str) -> str:
     return candidate
 
 
+_UI_RENDER_KINDS = {"", "iframe", "inline_card", "declarative"}
+_DECLARATIVE_WIDGET_COMPONENTS = {
+    "action",
+    "audio",
+    "file",
+    "form",
+    "gallery",
+    "image",
+    "json",
+    "kv",
+    "markdown",
+    "poll",
+    "progress",
+    "status",
+    "table",
+    "video",
+}
+
+
+def _validate_ui_render(render: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate the browser-hosted widget declaration surface."""
+    if not isinstance(render, dict):
+        raise ExtensionRegistrationError("ui render must be an object")
+    clean = dict(render)
+    kind = str(clean.get("kind") or "").strip()
+    if kind not in _UI_RENDER_KINDS:
+        raise ExtensionRegistrationError(
+            f"ui render kind {kind!r} is unsupported; "
+            f"expected one of {sorted(_UI_RENDER_KINDS - {''})}"
+        )
+    if kind == "declarative":
+        try:
+            schema_version = int(clean.get("schema_version", 1))
+        except (TypeError, ValueError) as exc:
+            raise ExtensionRegistrationError(
+                "declarative widget schema_version must be 1"
+            ) from exc
+        if schema_version != 1:
+            raise ExtensionRegistrationError(
+                "declarative widget schema_version must be 1"
+            )
+        components = clean.get("components")
+        if not isinstance(components, list):
+            raise ExtensionRegistrationError(
+                "declarative widget render requires components[]"
+            )
+        for idx, component in enumerate(components):
+            if not isinstance(component, dict):
+                raise ExtensionRegistrationError(
+                    f"declarative widget component {idx} must be an object"
+                )
+            component_type = str(component.get("type") or "").strip()
+            if component_type not in _DECLARATIVE_WIDGET_COMPONENTS:
+                raise ExtensionRegistrationError(
+                    "declarative widget component "
+                    f"{idx} has unsupported type {component_type!r}"
+                )
+            if (
+                component_type in {"form", "action", "poll"}
+                and not str(component.get("route") or component.get("api_route") or "").strip()
+            ):
+                raise ExtensionRegistrationError(
+                    f"declarative widget component {idx} requires route or api_route"
+                )
+            method = str(component.get("method") or "GET").upper()
+            if method not in VALID_EXTENSION_ROUTE_METHODS:
+                raise ExtensionRegistrationError(
+                    f"declarative widget component {idx} has unsupported method {method!r}"
+                )
+            if component_type == "form":
+                fields = component.get("fields")
+                if not isinstance(fields, list) or not fields:
+                    raise ExtensionRegistrationError(
+                        f"declarative widget component {idx} requires non-empty fields[]"
+                    )
+                for field_idx, field in enumerate(component.get("fields") or []):
+                    if not isinstance(field, dict) or not str(field.get("name") or "").strip():
+                        raise ExtensionRegistrationError(
+                            f"declarative widget component {idx} field {field_idx} requires name"
+                        )
+            if component_type == "kv":
+                fields = component.get("fields")
+                if not isinstance(fields, list) or not fields:
+                    raise ExtensionRegistrationError(
+                        f"declarative widget component {idx} requires non-empty fields[]"
+                    )
+                for field_idx, field in enumerate(component.get("fields") or []):
+                    if not isinstance(field, dict) or not str(field.get("path") or "").strip():
+                        raise ExtensionRegistrationError(
+                            f"declarative widget component {idx} field {field_idx} requires path"
+                        )
+            if component_type == "table":
+                columns = component.get("columns")
+                if not isinstance(columns, list) or not columns:
+                    raise ExtensionRegistrationError(
+                        f"declarative widget component {idx} requires non-empty columns[]"
+                    )
+                for col_idx, column in enumerate(component.get("columns") or []):
+                    if not isinstance(column, dict) or not str(column.get("path") or "").strip():
+                        raise ExtensionRegistrationError(
+                            f"declarative widget component {idx} column {col_idx} requires path"
+                        )
+            if component_type in {"image", "audio", "video", "file"}:
+                has_media_source = any(
+                    str(component.get(key) or "").strip()
+                    for key in ("route", "api_route", "src", "path")
+                )
+                if not has_media_source:
+                    raise ExtensionRegistrationError(
+                        f"declarative widget component {idx} requires media source"
+                    )
+            if component_type == "gallery" and "items" in component and not isinstance(component.get("items"), list):
+                raise ExtensionRegistrationError(
+                    f"declarative widget component {idx} items must be a list"
+                )
+            if component_type == "gallery":
+                for item_idx, item in enumerate(component.get("items") or []):
+                    if not isinstance(item, dict):
+                        raise ExtensionRegistrationError(
+                            f"declarative widget component {idx} item {item_idx} must be an object"
+                        )
+                    item_type = str(item.get("type") or "image").strip()
+                    if item_type not in {"image", "audio", "video", "file"}:
+                        raise ExtensionRegistrationError(
+                            f"declarative widget component {idx} item {item_idx} has unsupported type {item_type!r}"
+                        )
+                    has_media_source = any(
+                        str(item.get(key) or "").strip()
+                        for key in ("route", "api_route", "src", "path")
+                    )
+                    if not has_media_source:
+                        raise ExtensionRegistrationError(
+                            f"declarative widget component {idx} item {item_idx} requires media source"
+                        )
+    return clean
+
+
 def _assert_ws_message_type(message_type: str) -> str:
     candidate = str(message_type or "").strip()
     if not candidate:
@@ -370,7 +507,7 @@ class PluginAPIImpl:
                 "tab_id": clean_tab,
                 "title": str(title or clean_tab),
                 "icon": str(icon or "extension"),
-                "render": dict(render or {}),
+                "render": _validate_ui_render(dict(render or {})),
                 "ui_host_pending": True,
             }
             _extensions.setdefault(self._skill, _ExtensionRegistrations()).ui_tabs.append(key)
