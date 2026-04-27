@@ -572,8 +572,8 @@ def _request_skill_key_grant(skill: str, keys: list, confirm_fn) -> dict:
     )
     if loaded is None:
         return {"ok": False, "error": f"Skill {skill_name!r} not found"}
-    if not loaded.manifest.is_script():
-        return {"ok": False, "error": "Core-key grants are supported for script skills only."}
+    if not (loaded.manifest.is_script() or loaded.manifest.is_extension()):
+        return {"ok": False, "error": "Core-key grants are supported for script and extension skills."}
     if loaded.review.status != "pass" or loaded.review.is_stale_for(loaded.content_hash):
         return {"ok": False, "error": "Key grants require a fresh PASS review."}
     allowed = requested_core_setting_keys(list(loaded.manifest.env_from_settings or []))
@@ -593,7 +593,58 @@ def _request_skill_key_grant(skill: str, keys: list, confirm_fn) -> dict:
         content_hash=loaded.content_hash,
         requested_keys=allowed,
     )
-    return {"ok": True, "skill": loaded.name, "granted_keys": requested}
+    # v5.2.2 dual-track grants: extensions need a runtime reconcile so
+    # the just-granted core key reaches ``PluginAPIImpl.get_settings``
+    # without forcing the operator to toggle disable/enable. Scripts
+    # pick up the grant on the next ``skill_exec`` call automatically
+    # via ``_scrub_env`` so they do not need this reload.
+    #
+    # Cross-process boundary: launcher.py and server.py are independent
+    # OS processes. The launcher cannot mutate the server's in-process
+    # ``extension_loader._extensions`` / ``_load_failures`` dicts; an
+    # in-launcher ``reconcile_extension`` call would only mutate dead
+    # state and additionally execute the plugin's ``register(api)``
+    # inside the immutable launcher process, which violates the
+    # launcher contract documented at the top of this file. We POST to
+    # the agent server's loopback ``/api/skills/<skill>/reconcile``
+    # endpoint instead, which clears the server's cached load failure
+    # and re-runs ``load_extension`` in the right address space.
+    extension_action = None
+    extension_reason = None
+    extension_load_error = None
+    if loaded.manifest.is_extension():
+        import json as _json
+        import urllib.parse as _urlparse
+        import urllib.request as _urlreq
+
+        try:
+            actual_port = _read_port_file() or AGENT_SERVER_PORT
+            req = _urlreq.Request(
+                f"http://127.0.0.1:{actual_port}/api/skills/"
+                f"{_urlparse.quote(loaded.name)}/reconcile",
+                method="POST",
+                data=b"{}",
+                headers={"Content-Type": "application/json"},
+            )
+            with _urlreq.urlopen(req, timeout=10) as resp:
+                payload = _json.loads(resp.read().decode("utf-8") or "{}")
+            extension_action = payload.get("extension_action")
+            extension_reason = payload.get("extension_reason")
+            extension_load_error = payload.get("load_error")
+        except Exception as exc:
+            log.warning(
+                "Skill grant saved but server-side reconcile failed for %s: %s",
+                loaded.name, exc, exc_info=True,
+            )
+            extension_reason = "reconcile_call_failed"
+    return {
+        "ok": True,
+        "skill": loaded.name,
+        "granted_keys": requested,
+        "extension_action": extension_action,
+        "extension_reason": extension_reason,
+        "load_error": extension_load_error,
+    }
 
 
 def _claude_code_status_payload(settings: dict | None = None) -> dict:

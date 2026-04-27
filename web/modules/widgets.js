@@ -32,15 +32,26 @@ function renderShell(host, tabs) {
         host.innerHTML = '<div class="muted">No live widgets yet. Review and enable an extension that registers a UI tab.</div>';
         return;
     }
-    host.innerHTML = tabs.map((tab) => `
+    host.innerHTML = tabs.map((tab) => {
+        // v5.2.3: the previous "skill:tab_id" muted label leaked
+        // internal registry keys to end users (e.g. "weather:widget").
+        // Show the skill name as a friendly subtitle only when it
+        // differs from the widget title; otherwise omit it entirely
+        // so the card header stays visually clean.
+        const title = tab.title || tab.tab_id || tab.skill;
+        const subtitle = tab.skill && tab.skill !== title
+            ? `<span class="widgets-card-source">from ${escapeHtml(tab.skill)}</span>`
+            : '';
+        return `
         <article class="widgets-card" data-widget-key="${escapeHtml(tab.key || `${tab.skill}:${tab.tab_id}`)}">
             <div class="widgets-card-head">
-                <strong>${escapeHtml(tab.title || tab.tab_id || tab.skill)}</strong>
-                <span class="muted">${escapeHtml(tab.skill)}:${escapeHtml(tab.tab_id || 'widget')}</span>
+                <strong>${escapeHtml(title)}</strong>
+                ${subtitle}
             </div>
             <div class="widgets-card-body" data-widget-mount></div>
         </article>
-    `).join('');
+        `;
+    }).join('');
 }
 
 function cleanWidgetRoute(value) {

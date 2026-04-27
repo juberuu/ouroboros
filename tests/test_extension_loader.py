@@ -594,8 +594,11 @@ def test_runtime_state_for_skill_name_reports_missing_skill(tmp_path):
     assert state["reason"] == "missing"
 
 
-def test_get_settings_respects_allowlist_and_extension_core_denylist(tmp_path):
-    """In-process extensions never receive core settings keys."""
+def test_get_settings_blocks_core_keys_without_grant(tmp_path):
+    """An extension that lists a core key in env_from_settings without
+    an owner grant fails to load and ``PluginAPIImpl.get_settings``
+    silently drops the key — the dual-track grant model deliberately
+    keeps the failure mode the same as the script path."""
     plugin = (
         "def register(api):\n"
         "    api.register_tool('n', lambda ctx: 'ok', description='n', schema={})\n"
@@ -614,7 +617,9 @@ def test_get_settings_respects_allowlist_and_extension_core_denylist(tmp_path):
         "RANDOM_OTHER": "not-allowed",
     }
     err = extension_loader.load_extension(loaded, lambda: settings_snapshot, drive_root=drive_root)
-    assert "in-process extensions cannot receive core-key grants" in err
+    assert err is not None
+    assert "missing owner grants" in err
+    assert "OPENROUTER_API_KEY" in err
 
     impl = extension_loader.PluginAPIImpl(
         skill_name="envtest",
@@ -622,14 +627,106 @@ def test_get_settings_respects_allowlist_and_extension_core_denylist(tmp_path):
         env_allowlist=["OPENROUTER_API_KEY", "TIMEZONE", "MY_OK"],
         state_dir=tmp_path,
         settings_reader=lambda: settings_snapshot,
+        granted_keys=[],
     )
     got = impl.get_settings(["OPENROUTER_API_KEY", "TIMEZONE", "MY_OK", "RANDOM_OTHER"])
     assert "OPENROUTER_API_KEY" not in got
-    # Allowed non-secret key surfaced:
     assert got["TIMEZONE"] == "UTC"
     assert got["MY_OK"] == "visible"
-    # Not in allowlist → not returned:
     assert "RANDOM_OTHER" not in got
+
+
+def test_load_extension_rejects_grant_with_stale_content_hash(tmp_path):
+    """v5.2.2 dual-track grants: the loader binds the persisted grant
+    to the current content hash. A grants.json written for a prior
+    revision must NOT authorise the freshly-edited plugin (defense in
+    depth — even if ``grant_status_for_skill`` is bypassed)."""
+    from ouroboros.skill_loader import save_skill_grants
+
+    plugin = (
+        "def register(api):\n"
+        "    api.register_tool('n', lambda ctx: 'ok', description='n', schema={})\n"
+    )
+    loaded, _, drive_root = _prepare_extension(
+        tmp_path,
+        "stale_grant",
+        plugin,
+        permissions=["tool", "read_settings"],
+        env_from_settings=["OPENROUTER_API_KEY"],
+    )
+    # Persist a grant with the WRONG content hash — simulates a manifest
+    # / plugin edit that the operator has not re-authorised.
+    save_skill_grants(
+        drive_root,
+        "stale_grant",
+        ["OPENROUTER_API_KEY"],
+        content_hash="some-other-hash",
+        requested_keys=["OPENROUTER_API_KEY"],
+    )
+    err = extension_loader.load_extension(
+        loaded,
+        lambda: {"OPENROUTER_API_KEY": "sk-secret"},
+        drive_root=drive_root,
+    )
+    assert err is not None
+    assert "missing owner grants" in err
+
+
+def test_get_settings_returns_core_key_with_grant(tmp_path):
+    """An owner-granted core key is forwarded to the in-process plugin
+    via ``PluginAPIImpl.get_settings``. The grant must be bound to the
+    current content hash + manifest-requested set; ``load_extension``
+    enforces both before constructing the API impl."""
+    from ouroboros.skill_loader import save_skill_grants
+
+    plugin = (
+        "def register(api):\n"
+        "    api.register_tool('n', lambda ctx: 'ok', description='n', schema={})\n"
+    )
+    loaded, _, drive_root = _prepare_extension(
+        tmp_path,
+        "granted_ext",
+        plugin,
+        permissions=["tool", "read_settings"],
+        env_from_settings=["OPENROUTER_API_KEY", "TIMEZONE"],
+    )
+    save_skill_grants(
+        drive_root,
+        "granted_ext",
+        ["OPENROUTER_API_KEY"],
+        content_hash=loaded.content_hash,
+        requested_keys=["OPENROUTER_API_KEY"],
+    )
+    settings_snapshot = {
+        "OPENROUTER_API_KEY": "sk-allowed",
+        "TIMEZONE": "UTC",
+    }
+    err = extension_loader.load_extension(loaded, lambda: settings_snapshot, drive_root=drive_root)
+    assert err is None, err
+
+    impl = extension_loader.PluginAPIImpl(
+        skill_name="granted_ext",
+        permissions=["read_settings"],
+        env_allowlist=["OPENROUTER_API_KEY", "TIMEZONE"],
+        state_dir=tmp_path,
+        settings_reader=lambda: settings_snapshot,
+        granted_keys=["OPENROUTER_API_KEY"],
+    )
+    got = impl.get_settings(["OPENROUTER_API_KEY", "TIMEZONE"])
+    assert got.get("OPENROUTER_API_KEY") == "sk-allowed"
+    assert got.get("TIMEZONE") == "UTC"
+
+    # Grant on the WRONG content hash must not authorise — the loader
+    # builds an empty granted_keys list and drops the value.
+    impl_no_grant = extension_loader.PluginAPIImpl(
+        skill_name="granted_ext",
+        permissions=["read_settings"],
+        env_allowlist=["OPENROUTER_API_KEY", "TIMEZONE"],
+        state_dir=tmp_path,
+        settings_reader=lambda: settings_snapshot,
+        granted_keys=[],
+    )
+    assert "OPENROUTER_API_KEY" not in impl_no_grant.get_settings(["OPENROUTER_API_KEY"])
 
 
 def test_unload_removes_all_registrations(tmp_path):

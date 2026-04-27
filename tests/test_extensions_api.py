@@ -587,6 +587,102 @@ def test_api_skill_grants_requires_owner_bridge(tmp_path, monkeypatch):
         _stop_patches(patches)
 
 
+def test_api_skill_reconcile_clears_cached_load_error(tmp_path, monkeypatch):
+    """v5.2.2 dual-track grants: ``POST /api/skills/<name>/reconcile``
+    is the loopback endpoint the desktop launcher pings after a
+    successful core-key grant. It must clear the server's cached
+    ``_load_failures`` entry and re-run ``load_extension`` so the
+    plugin picks up the freshly-granted key without forcing the user
+    to disable/enable.
+    """
+    from ouroboros import extension_loader
+    from ouroboros.skill_loader import (
+        SkillReviewState,
+        find_skill,
+        save_enabled,
+        save_review_state,
+        save_skill_grants,
+    )
+
+    skills_root = tmp_path / "skills"
+    plugin = (
+        "def register(api):\n"
+        "    api.register_tool('n', lambda ctx: 'ok', description='n', schema={})\n"
+    )
+    _write_ext(
+        skills_root,
+        "reconcile_demo",
+        permissions=["tool", "read_settings"],
+        plugin=plugin,
+        env_from_settings=["OPENROUTER_API_KEY"],
+    )
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    client, drive_root, patches = _make_client(tmp_path, monkeypatch)
+    try:
+        first = find_skill(drive_root, "reconcile_demo", repo_path=str(skills_root))
+        assert first is not None
+        save_enabled(drive_root, "reconcile_demo", True)
+        save_review_state(
+            drive_root,
+            "reconcile_demo",
+            SkillReviewState(status="pass", content_hash=first.content_hash),
+        )
+        loaded = find_skill(drive_root, "reconcile_demo", repo_path=str(skills_root))
+        assert loaded is not None and loaded.enabled
+
+        # First load attempt — no grant on disk → fails with the new
+        # informative error and seeds ``_load_failures``.
+        err = extension_loader.load_extension(
+            loaded, lambda: {"OPENROUTER_API_KEY": "sk-secret"}, drive_root=drive_root,
+        )
+        assert err is not None
+        assert "missing owner grants" in err
+        with extension_loader._lock:
+            extension_loader._load_failures["reconcile_demo"] = (
+                extension_loader._ExtensionLoadFailure(
+                    content_hash=loaded.content_hash,
+                    skill_dir=str(loaded.skill_dir.resolve()),
+                    error=err,
+                )
+            )
+
+        # Owner grants → simulate the launcher writing grants.json.
+        save_skill_grants(
+            drive_root,
+            "reconcile_demo",
+            ["OPENROUTER_API_KEY"],
+            content_hash=loaded.content_hash,
+            requested_keys=["OPENROUTER_API_KEY"],
+        )
+
+        # The endpoint must clear the cached failure and load the plugin.
+        resp = client.post("/api/skills/reconcile_demo/reconcile")
+        assert resp.status_code == 200, resp.text
+        payload = resp.json()
+        assert payload["skill"] == "reconcile_demo"
+        assert payload["live_loaded"] is True
+        assert payload["extension_action"] == "extension_loaded"
+        with extension_loader._lock:
+            assert "reconcile_demo" in extension_loader._extensions
+            assert "reconcile_demo" not in extension_loader._load_failures
+    finally:
+        _stop_patches(patches)
+
+
+def test_api_skill_reconcile_rejects_missing_skill_name(tmp_path, monkeypatch):
+    client, _drive_root, patches = _make_client(tmp_path, monkeypatch)
+    try:
+        # Starlette path params with empty trailing segment → 404 path,
+        # but explicit empty skill via direct call returns 400 from the
+        # endpoint's own validation.
+        resp = client.post("/api/skills/ /reconcile")
+        # Whitespace-only path param hits the endpoint with stripped
+        # empty name → 400.
+        assert resp.status_code == 400
+    finally:
+        _stop_patches(patches)
+
+
 def test_api_skill_review_offloads_to_thread_and_returns_outcome(tmp_path, monkeypatch):
     """Phase 5 regression: ``POST /api/skills/<skill>/review`` must
     trigger the tri-model review and return the outcome. The async

@@ -53,6 +53,8 @@ from ouroboros.skill_loader import (
     compute_content_hash,
     discover_skills,
     find_skill,
+    load_skill_grants,
+    requested_core_setting_keys,
     skill_state_dir,
 )
 
@@ -161,6 +163,7 @@ class PluginAPIImpl:
         env_allowlist: Sequence[str],
         state_dir: pathlib.Path,
         settings_reader: Callable[[], Dict[str, Any]],
+        granted_keys: Sequence[str] | None = None,
     ) -> None:
         self._skill = skill_name
         self._permissions = frozenset(str(p).strip() for p in (permissions or []))
@@ -168,6 +171,18 @@ class PluginAPIImpl:
         self._env_allow_upper = frozenset(k.upper() for k in self._env_allow)
         self._state_dir = pathlib.Path(state_dir)
         self._settings_reader = settings_reader
+        # v5.2.2: extensions may receive forbidden / "core" settings keys
+        # (e.g. ``OPENROUTER_API_KEY``) when an owner grant has been
+        # captured through the desktop launcher native confirmation
+        # bridge. The grant is recorded against the current content
+        # hash + manifest-requested set; the loader passes the granted
+        # subset into ``PluginAPIImpl`` at load time so ``get_settings``
+        # can honour it without re-reading the grants file on every
+        # call. Without a grant, the forbidden denylist still drops the
+        # value silently — same defense-in-depth as the script flow.
+        self._granted_upper = frozenset(
+            str(k).strip().upper() for k in (granted_keys or []) if str(k).strip()
+        )
 
     # --- internal helpers ---
 
@@ -323,7 +338,10 @@ class PluginAPIImpl:
             canonical = key.upper()
             if not key:
                 continue
-            if canonical in forbidden_upper:
+            if canonical in forbidden_upper and canonical not in self._granted_upper:
+                # Forbidden / "core" key without an owner grant — drop
+                # silently so a malicious or buggy plugin cannot probe
+                # for its presence by ``get_settings`` length.
                 continue
             if key not in self._env_allow and canonical not in self._env_allow_upper:
                 continue
@@ -632,14 +650,32 @@ def load_extension(
     if drive_root is None:
         drive_root = pathlib.Path.home() / "Ouroboros" / "data"
     state_dir = skill_state_dir(drive_root, skill.name)
-    from ouroboros.skill_loader import requested_core_setting_keys
 
+    # v5.2.2 dual-track grants: extensions may declare core / forbidden
+    # settings keys in their manifest, but the loader only forwards the
+    # subset the owner has explicitly granted through the desktop
+    # launcher's native confirmation bridge. The grant is bound to the
+    # current content hash + the exact requested set so a tampered
+    # plugin or rotated manifest invalidates the grant automatically.
     requested_core = requested_core_setting_keys(list(skill.manifest.env_from_settings or []))
+    granted_core: List[str] = []
     if requested_core:
-        return (
-            f"skill {skill.name!r} requests core settings keys {requested_core}, "
-            "but in-process extensions cannot receive core-key grants safely"
+        grants_file = load_skill_grants(drive_root, skill.name)
+        grant_hash_ok = str(grants_file.get("content_hash") or "") == str(current_hash or "")
+        grant_request_ok = sorted(grants_file.get("requested_keys") or []) == sorted(requested_core)
+        persisted = (
+            set(grants_file.get("granted_keys") or [])
+            if grant_hash_ok and grant_request_ok
+            else set()
         )
+        granted_core = [key for key in requested_core if key in persisted]
+        missing_grants = [key for key in requested_core if key not in set(granted_core)]
+        if missing_grants:
+            return (
+                f"skill {skill.name!r} requests core settings keys "
+                f"{requested_core}; missing owner grants for "
+                f"{missing_grants}. Grant access from the Skills tab."
+            )
     staged_import_root: Optional[pathlib.Path] = None
 
     module_key = _module_key(skill.name)
@@ -682,6 +718,7 @@ def load_extension(
             env_allowlist=list(skill.manifest.env_from_settings or []),
             state_dir=state_dir,
             settings_reader=settings_reader,
+            granted_keys=granted_core,
         )
         with _lock:
             bundle = _extensions.get(skill.name)

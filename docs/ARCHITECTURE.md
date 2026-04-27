@@ -489,7 +489,7 @@ authentication. If the password is blank, non-loopback access stays open by desi
 | ALL | `/api/extensions/{skill}/{rest:path}` | Phase 5: catch-all dispatcher that forwards to the handler registered via `PluginAPI.register_route`. Honors the registered methods tuple; `405` on method mismatch, `404` on unknown mount. |
 | POST | `/api/skills/{skill}/toggle` | Phase 5: UI-direct enable/disable. Wraps `save_enabled` plus the `extension_loader.load_extension` / `unload_extension` machinery so the Skills page can flip state without round-tripping through the agent. |
 | POST | `/api/skills/{skill}/review` | Phase 5: UI-direct tri-model review trigger. Offloads the blocking LLM calls to a worker thread via `asyncio.to_thread` so the Starlette event loop keeps serving other requests. |
-| POST | `/api/skills/{skill}/grants` | Sentinel endpoint that returns 403; explicit per-skill core-key grants are owner-only and are written by the desktop launcher bridge after native confirmation for reviewed script skills. |
+| POST | `/api/skills/{skill}/grants` | Sentinel endpoint that returns 403; explicit per-skill core-key grants are owner-only and are written by the desktop launcher bridge after native confirmation. v5.2.2 dual-track: ``type: script`` and ``type: extension`` skills are both eligible (instruction skills are not). |
 | GET | `/api/files/list` | Directory listing for Files tab root/path |
 | GET | `/api/files/read` | File preview payload (text/image metadata/binary placeholder) |
 | GET | `/api/files/content` | Raw file content response for image preview |
@@ -2132,9 +2132,17 @@ Defense in depth against reviewer misses:
 
 - ``PluginAPI.get_settings`` intersects the skill's manifest
   ``env_from_settings`` with ``FORBIDDEN_EXTENSION_SETTINGS`` and
-  drops those core credential keys for in-process extensions. Script
-  skills may receive core keys only through explicit, content-bound
-  owner grants because they execute out of process with a scrubbed env.
+  drops those core credential keys unless the owner has explicitly
+  granted them through the desktop launcher's native confirmation
+  bridge. v5.2.2 introduced **dual-track grants**: ``type: script``
+  skills receive granted core keys via ``_scrub_env`` for their
+  out-of-process subprocess, and ``type: extension`` skills receive
+  them via ``PluginAPIImpl.get_settings`` for their in-process plugin
+  code. Both tracks bind the grant to the current content hash + the
+  exact requested set so any edit invalidates the grant. This is a
+  *trust-local* model: extensions still run in-process and can in
+  principle read ``os.environ`` directly, so the grant API is a
+  contract + review check, not an OS-level isolation boundary.
 - Each ``register_*`` call raises ``ExtensionRegistrationError`` on
   namespace collision, missing permission, or malformed path/
   message-type; errors tear down any partial registrations and

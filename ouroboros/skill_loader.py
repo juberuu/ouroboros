@@ -703,16 +703,37 @@ def save_skill_grants(
     content_hash: str,
     requested_keys: List[str],
 ) -> None:
+    """Persist a skill key grant.
+
+    The new ``granted_keys`` are merged with any previously persisted
+    grants for the SAME content hash + manifest-requested set. This
+    matters when a caller approves only a subset of the requested keys
+    in one bridge call: without merging, a later partial call would
+    silently revoke earlier approvals. Any change to the manifest's
+    requested set or the skill's content hash invalidates the prior
+    persisted state and starts fresh — that is the correct behavior
+    because the owner has not yet consented to the new request.
+    """
     allowed = set(requested_core_setting_keys(requested_keys))
-    keys = []
+    existing = load_skill_grants(drive_root, name)
+    persisted_match = (
+        str(existing.get("content_hash") or "") == str(content_hash or "")
+        and sorted(existing.get("requested_keys") or []) == sorted(allowed)
+    )
+    merged: List[str] = []
+    if persisted_match:
+        for raw_key in existing.get("granted_keys") or []:
+            key = str(raw_key or "").strip().upper()
+            if key and key in allowed and key not in merged:
+                merged.append(key)
     for raw_key in granted_keys or []:
         key = str(raw_key or "").strip().upper()
-        if key and key in allowed and key not in keys:
-            keys.append(key)
+        if key and key in allowed and key not in merged:
+            merged.append(key)
     _atomic_write_json(
         skill_state_dir(drive_root, name) / GRANTS_FILENAME,
         {
-            "granted_keys": keys,
+            "granted_keys": merged,
             "requested_keys": sorted(allowed),
             "content_hash": str(content_hash or ""),
             "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -729,7 +750,14 @@ def grant_status_for_skill(drive_root: pathlib.Path, skill: LoadedSkill) -> Dict
     granted = [key for key in requested if key in persisted_grants]
     missing = [key for key in requested if key not in set(granted)]
     review_ready = skill.review.status == _REVIEW_STATUS_PASS and not skill.review.is_stale_for(skill.content_hash)
-    unsupported = bool(requested and not skill.manifest.is_script())
+    # v5.2.2 dual-track grants: both ``script`` and ``extension`` skills
+    # are eligible for owner core-key grants. ``script`` skills get the
+    # grant via ``_scrub_env`` for their subprocess; ``extension``
+    # skills get it via ``PluginAPIImpl.get_settings`` for their
+    # in-process plugin code. Other manifest types (``instruction``)
+    # cannot receive core keys at all.
+    eligible_type = skill.manifest.is_script() or skill.manifest.is_extension()
+    unsupported = bool(requested and not eligible_type)
     return {
         "requested_keys": requested,
         "granted_keys": granted,

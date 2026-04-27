@@ -538,6 +538,50 @@ async def api_skill_grants(request: Request) -> JSONResponse:
     )
 
 
+async def api_skill_reconcile(request: Request) -> JSONResponse:
+    """POST /api/skills/<skill>/reconcile — re-run the extension load gate.
+
+    The desktop launcher owns the grant-write path because it is the only
+    surface that can summon the native confirmation dialog. After the
+    launcher persists ``grants.json`` to disk it cannot reach the
+    server's in-process extension registry directly: launcher.py and
+    server.py run as separate OS processes, each with its own copy of
+    ``extension_loader._extensions`` / ``_load_failures``. The launcher
+    therefore POSTs this loopback endpoint after a successful grant so
+    the agent server clears any cached load failure and re-imports the
+    plugin with the fresh ``granted_keys`` set, lifting the user out of
+    the disable/enable workaround that previous releases required.
+
+    Idempotent: any caller (UI refresh, agent, launcher) may invoke
+    this without side effects beyond reconciling the named skill.
+    """
+    from ouroboros.config import get_skills_repo_path, load_settings
+    from ouroboros import extension_loader
+
+    skill_name = str(request.path_params.get("skill") or "").strip()
+    if not skill_name:
+        return JSONResponse({"error": "missing skill name"}, status_code=400)
+
+    drive_root = _request_drive_root(request)
+    repo_path = get_skills_repo_path()
+    state = extension_loader.reconcile_extension(
+        skill_name,
+        drive_root,
+        load_settings,
+        repo_path=repo_path,
+        retry_load_error=True,
+    )
+    return JSONResponse(
+        {
+            "skill": skill_name,
+            "extension_action": state.get("action"),
+            "extension_reason": state.get("reason"),
+            "live_loaded": bool(state.get("live_loaded")),
+            "load_error": state.get("load_error"),
+        }
+    )
+
+
 __all__ = [
     "api_extensions_index",
     "api_extension_manifest",
@@ -545,4 +589,5 @@ __all__ = [
     "api_skill_toggle",
     "api_skill_review",
     "api_skill_grants",
+    "api_skill_reconcile",
 ]

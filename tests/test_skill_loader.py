@@ -858,6 +858,133 @@ def test_skill_grants_are_content_and_request_bound(tmp_path):
     assert unsupported["granted_keys"] == ["OPENROUTER_API_KEY"]
 
 
+def test_grant_status_supports_extension_skills(tmp_path):
+    """v5.2.2 dual-track grants: ``type: extension`` skills are now
+    eligible for owner core-key grants alongside ``type: script``."""
+    from ouroboros.contracts.skill_manifest import SkillManifest
+    from ouroboros.skill_loader import (
+        LoadedSkill,
+        SkillReviewState,
+        grant_status_for_skill,
+        save_skill_grants,
+    )
+
+    drive_root = tmp_path / "drive"
+    skill_dir = tmp_path / "ext"
+    drive_root.mkdir()
+    skill_dir.mkdir()
+    manifest = SkillManifest(
+        name="ext_grant",
+        description="extension grant test",
+        version="0.1",
+        type="extension",
+        env_from_settings=["OPENROUTER_API_KEY"],
+        permissions=["read_settings"],
+    )
+    skill = LoadedSkill(
+        name="ext_grant",
+        skill_dir=skill_dir,
+        manifest=manifest,
+        content_hash="ext-hash",
+        review=SkillReviewState(status="pass", content_hash="ext-hash"),
+    )
+    no_grant = grant_status_for_skill(drive_root, skill)
+    assert no_grant["unsupported_for_skill_type"] is False
+    assert no_grant["all_granted"] is False
+    assert no_grant["missing_keys"] == ["OPENROUTER_API_KEY"]
+
+    save_skill_grants(
+        drive_root,
+        "ext_grant",
+        ["OPENROUTER_API_KEY"],
+        content_hash="ext-hash",
+        requested_keys=["OPENROUTER_API_KEY"],
+    )
+    granted = grant_status_for_skill(drive_root, skill)
+    assert granted["unsupported_for_skill_type"] is False
+    assert granted["all_granted"] is True
+    assert granted["usable"] is True
+    assert granted["granted_keys"] == ["OPENROUTER_API_KEY"]
+
+
+def test_save_skill_grants_merges_partial_approvals(tmp_path):
+    """A subsequent partial-key grant must not silently revoke
+    previously-approved keys. The merge is bound to the same
+    content_hash + requested_keys; any change to either resets the
+    persisted state because the owner has not consented to the new
+    shape yet."""
+    from ouroboros.skill_loader import (
+        load_skill_grants,
+        save_skill_grants,
+    )
+
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+
+    save_skill_grants(
+        drive_root,
+        "merge_demo",
+        ["OPENROUTER_API_KEY"],
+        content_hash="hash-x",
+        requested_keys=["OPENROUTER_API_KEY", "GITHUB_TOKEN"],
+    )
+    save_skill_grants(
+        drive_root,
+        "merge_demo",
+        ["GITHUB_TOKEN"],
+        content_hash="hash-x",
+        requested_keys=["OPENROUTER_API_KEY", "GITHUB_TOKEN"],
+    )
+    after_merge = load_skill_grants(drive_root, "merge_demo")
+    assert sorted(after_merge["granted_keys"]) == ["GITHUB_TOKEN", "OPENROUTER_API_KEY"]
+
+    # New content hash invalidates the previous persisted state.
+    save_skill_grants(
+        drive_root,
+        "merge_demo",
+        ["OPENROUTER_API_KEY"],
+        content_hash="hash-y",
+        requested_keys=["OPENROUTER_API_KEY", "GITHUB_TOKEN"],
+    )
+    after_rotate = load_skill_grants(drive_root, "merge_demo")
+    assert after_rotate["content_hash"] == "hash-y"
+    assert after_rotate["granted_keys"] == ["OPENROUTER_API_KEY"]
+
+
+def test_grant_status_unsupported_for_instruction_skills(tmp_path):
+    """Instruction-type skills cannot receive core grants — they have
+    no executable surface, so a grant would be meaningless."""
+    from ouroboros.contracts.skill_manifest import SkillManifest
+    from ouroboros.skill_loader import (
+        LoadedSkill,
+        SkillReviewState,
+        grant_status_for_skill,
+    )
+
+    drive_root = tmp_path / "drive"
+    skill_dir = tmp_path / "instr"
+    drive_root.mkdir()
+    skill_dir.mkdir()
+    manifest = SkillManifest(
+        name="instr_grant",
+        description="instruction grant test",
+        version="0.1",
+        type="instruction",
+        env_from_settings=["OPENROUTER_API_KEY"],
+    )
+    skill = LoadedSkill(
+        name="instr_grant",
+        skill_dir=skill_dir,
+        manifest=manifest,
+        content_hash="instr-hash",
+        review=SkillReviewState(status="pass", content_hash="instr-hash"),
+    )
+    status = grant_status_for_skill(drive_root, skill)
+    assert status["unsupported_for_skill_type"] is True
+    assert status["all_granted"] is False
+    assert status["usable"] is False
+
+
 # ---------------------------------------------------------------------------
 # Safety: skill name sanitization
 # ---------------------------------------------------------------------------

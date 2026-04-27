@@ -1,16 +1,16 @@
 ---
 name: video_gen
 description: Generate a short video clip via OpenRouter's video generation API using Seedance 2.0 (bytedance/seedance-2.0). Output is saved to the skill state directory.
-version: 0.6.0
+version: 0.7.0
 type: script
 runtime: python3
 timeout_sec: 300
 when_to_use: User wants to generate a video from a text prompt. Supports optional duration, aspect ratio, and resolution parameters.
 permissions: [net, fs]
-env_from_settings: [VIDEO_GEN_KEY]
+env_from_settings: [OPENROUTER_API_KEY]
 scripts:
   - name: generate.py
-    description: "Generate a video from a text prompt. Reads VIDEO_GEN_KEY from env. Output written to skill state directory (OUROBOROS_SKILL_STATE_DIR). Usage: generate.py <prompt> [--model MODEL] [--duration SEC] [--aspect RATIO] [--resolution RES] [--out FILENAME]"
+    description: "Generate a video from a text prompt. Reads OPENROUTER_API_KEY from env (granted via the Skills tab). Output written to skill state directory (OUROBOROS_SKILL_STATE_DIR). Usage: generate.py <prompt> [--model MODEL] [--duration SEC] [--aspect RATIO] [--resolution RES] [--out FILENAME]"
 ---
 
 # Video Generation skill
@@ -21,9 +21,10 @@ Default model: `bytedance/seedance-2.0`
 
 ## Setup
 
-1. Add `VIDEO_GEN_KEY` in Ouroboros Settings with an [OpenRouter API key](https://openrouter.ai/keys).
-2. Run `review_skill(skill="video_gen")`.
-3. `toggle_skill(skill="video_gen", enabled=true)`
+1. Add your [OpenRouter API key](https://openrouter.ai/keys) under `OPENROUTER_API_KEY` in Ouroboros Settings.
+2. Run `review_skill(skill="video_gen")` and wait for a PASS verdict.
+3. On the Skills tab, click **Grant access** to authorise this skill to read `OPENROUTER_API_KEY` from settings.
+4. `toggle_skill(skill="video_gen", enabled=true)` (or use the Enable button on the Skills tab).
 
 ## Usage
 
@@ -57,7 +58,8 @@ is not set (it must be run via `skill_exec`, not directly).
 
 ## Security model
 
-- `VIDEO_GEN_KEY` is read from env via `env_from_settings`; no secrets appear in argv or stdout.
+- `OPENROUTER_API_KEY` is a forbidden / "core" settings key; it only reaches the script's environment after the owner approves a per-skill grant via the Skills tab. The grant is bound to the current skill content hash, so any edit to this skill invalidates the grant and re-prompts the owner.
+- The grant is forwarded into the subprocess by `_scrub_env`; no secrets appear in argv or stdout.
 - Output is confined to the skill state directory (`OUROBOROS_SKILL_STATE_DIR`).
 - Cross-host HTTP redirects are blocked by a custom `urllib` redirect handler.
 - Only reaches `openrouter.ai` — no other network contact.

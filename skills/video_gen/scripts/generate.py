@@ -7,8 +7,10 @@ in the skill state directory (OUROBOROS_SKILL_STATE_DIR, injected by skill_exec)
 Only the standard library is used (no third-party packages) so every
 byte remains reviewable inside the skill pack.
 
-The OpenRouter API key is read from the environment variable VIDEO_GEN_KEY
-(injected via env_from_settings in the manifest). No secrets appear in argv.
+The OpenRouter API key is read from the environment variable
+OPENROUTER_API_KEY (injected via env_from_settings in the manifest after
+the owner approves a key-grant on the Skills tab). No secrets appear in
+argv.
 
 Usage:
     generate.py <prompt...>
@@ -240,13 +242,16 @@ def main(argv: list[str]) -> int:  # noqa: C901
         print(json.dumps({"error": "prompt is empty"}))
         return 2
 
-    # Read API key from environment (injected via env_from_settings: [VIDEO_GEN_KEY]).
-    api_key = os.environ.get("VIDEO_GEN_KEY", "").strip()
+    # Injected via env_from_settings: [OPENROUTER_API_KEY] after the
+    # owner approves a key-grant on the Skills tab. ``_scrub_env``
+    # forwards the value out-of-process for this script.
+    api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
     if not api_key:
         print(json.dumps({
             "error": (
-                "VIDEO_GEN_KEY is not set. "
-                "Add it in Ouroboros Settings with your OpenRouter API key value."
+                "OPENROUTER_API_KEY is not set. Configure it in Ouroboros "
+                "Settings and approve a key-grant for video_gen on the "
+                "Skills tab before running this script."
             )
         }))
         return 1

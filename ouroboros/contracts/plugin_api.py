@@ -43,9 +43,13 @@ from __future__ import annotations
 from typing import Any, Awaitable, Callable, Dict, List, Protocol, Sequence, runtime_checkable
 
 
-# In-process extensions may NOT receive these settings keys via
-# ``PluginAPI.get_settings``. Out-of-process script skills may receive
-# them only through explicit, content-bound owner grants.
+# Forbidden / "core" settings keys. Both in-process extensions
+# (``PluginAPI.get_settings``) and out-of-process script skills
+# (``_scrub_env``) drop these keys from their normal allowlist flow;
+# the runtime forwards them only through explicit, content-hash-bound
+# owner grants captured by the desktop launcher's native confirmation
+# bridge (v5.2.2 dual-track grants — see ``docs/ARCHITECTURE.md``
+# §12.5). Type ``instruction`` skills never receive them.
 FORBIDDEN_SKILL_SETTINGS: frozenset[str] = frozenset(
     {
         "OPENROUTER_API_KEY",
@@ -166,12 +170,16 @@ class PluginAPI(Protocol):
     def get_settings(self, keys: Sequence[str]) -> Dict[str, Any]:
         """Return a ``{key: value}`` mapping for the requested keys.
 
-        Requires the manifest ``read_settings`` permission. Only keys
-        that are simultaneously in the skill manifest's
-        ``env_from_settings`` allowlist AND NOT in
-        ``FORBIDDEN_EXTENSION_SETTINGS`` are returned; forbidden/core
-        keys are silently dropped for in-process extensions. Missing
-        keys omit from the result.
+        Requires the manifest ``read_settings`` permission. Returned
+        keys must be in the skill manifest's ``env_from_settings``
+        allowlist. Forbidden / "core" keys (``FORBIDDEN_EXTENSION_SETTINGS``)
+        are dropped silently UNLESS the owner has captured an explicit,
+        content-hash-bound grant via the desktop launcher's native
+        confirmation bridge (v5.2.2 dual-track grants). When such a
+        grant is in place the loader passes the granted subset into
+        ``PluginAPIImpl`` at construction time and ``get_settings``
+        forwards those values to the in-process plugin. Missing keys
+        omit from the result.
         """
         ...
 

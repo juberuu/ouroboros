@@ -1411,6 +1411,7 @@ from ouroboros.extensions_api import (
     api_skill_toggle,
     api_skill_review,
     api_skill_grants,
+    api_skill_reconcile,
 )
 from ouroboros.marketplace_api import (
     api_marketplace_search,
@@ -1518,6 +1519,11 @@ routes = [
     Route(
         "/api/skills/{skill}/grants",
         endpoint=api_skill_grants,
+        methods=["POST"],
+    ),
+    Route(
+        "/api/skills/{skill}/reconcile",
+        endpoint=api_skill_reconcile,
         methods=["POST"],
     ),
     # v4.50+: ClawHub marketplace surface (always-on, registry-host gated).
