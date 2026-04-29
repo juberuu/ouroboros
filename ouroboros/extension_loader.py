@@ -240,6 +240,8 @@ _UI_RENDER_KINDS = {"", "iframe", "inline_card", "declarative"}
 _DECLARATIVE_WIDGET_COMPONENTS = {
     "action",
     "audio",
+    "chart",
+    "code",
     "file",
     "form",
     "gallery",
@@ -250,7 +252,9 @@ _DECLARATIVE_WIDGET_COMPONENTS = {
     "poll",
     "progress",
     "status",
+    "stream",
     "subscription",
+    "tabs",
     "table",
     "video",
 }
@@ -308,10 +312,46 @@ def _validate_ui_render(render: Dict[str, Any]) -> Dict[str, Any]:
                         f"declarative widget component {idx} requires event or message_type"
                     )
                 _assert_ws_message_type(event_name)
+            if component_type == "stream" and not str(component.get("route") or component.get("api_route") or "").strip():
+                raise ExtensionRegistrationError(
+                    f"declarative widget component {idx} requires route or api_route"
+                )
+            if component_type == "tabs":
+                tabs = component.get("tabs")
+                if not isinstance(tabs, list) or not tabs:
+                    raise ExtensionRegistrationError(
+                        f"declarative widget component {idx} requires non-empty tabs[]"
+                    )
+                for tab_idx, tab in enumerate(tabs):
+                    if not isinstance(tab, dict) or not str(tab.get("label") or "").strip():
+                        raise ExtensionRegistrationError(
+                            f"declarative widget component {idx} tab {tab_idx} requires label"
+                        )
+                    tab_components = tab.get("components", [])
+                    if not isinstance(tab_components, list):
+                        raise ExtensionRegistrationError(
+                            f"declarative widget component {idx} tab {tab_idx} components must be a list"
+                        )
+                    for child_idx, child in enumerate(tab_components):
+                        child_type = str((child or {}).get("type") or "") if isinstance(child, dict) else ""
+                        if child_type in {"form", "action", "poll", "subscription", "stream", "tabs"}:
+                            raise ExtensionRegistrationError(
+                                f"declarative widget component {idx} tab {tab_idx} child {child_idx} "
+                                f"cannot use interactive type {child_type!r}"
+                            )
+                    _validate_ui_render({
+                        "kind": "declarative",
+                        "schema_version": schema_version,
+                        "components": tab_components,
+                    })
             method = str(component.get("method") or "GET").upper()
             if method not in VALID_EXTENSION_ROUTE_METHODS:
                 raise ExtensionRegistrationError(
                     f"declarative widget component {idx} has unsupported method {method!r}"
+                )
+            if component_type == "stream" and method != "GET":
+                raise ExtensionRegistrationError(
+                    f"declarative widget component {idx} stream method must be GET"
                 )
             if component_type == "form":
                 fields = component.get("fields")

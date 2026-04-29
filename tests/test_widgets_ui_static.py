@@ -26,6 +26,10 @@ def test_widgets_support_declarative_schema_components():
         "type === 'table'",
         "type === 'markdown'",
         "type === 'json'",
+        "type === 'code'",
+        "type === 'chart'",
+        "type === 'tabs'",
+        "type === 'stream'",
         "['image', 'audio', 'video', 'file'].includes(type)",
         "type === 'gallery'",
         "type === 'progress'",
@@ -44,6 +48,11 @@ def test_widgets_support_declarative_schema_components():
     assert "widgetMessageHandlers.add(handler);" in source
     assert "ctx.ws.on('message'" in source
     assert "msg?.type !== expectedType" in source
+    assert "new EventSource(url)" in source
+    assert "eventSources.forEach((source) => source.close());" in source
+    assert "new Chart(canvas, config)" in source
+    assert "chartInstances.forEach((chart) => chart.destroy());" in source
+    assert "data-widget-tab-key" in source
     assert "event.detail?.page === 'widgets'" in source
     assert "disposeMountedWidgets();" in source.split("window.addEventListener('ouro:page-shown'")[1]
     assert "let renderGeneration = 0;" in source

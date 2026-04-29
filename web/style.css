@@ -3500,6 +3500,10 @@ body {
 .widget-kv,
 .widget-markdown,
 .widget-json,
+.widget-code,
+.widget-chart,
+.widget-tabs,
+.widget-stream,
 .widget-media,
 .widget-gallery,
 .widget-progress {
@@ -3582,6 +3586,46 @@ body {
     display: flex;
     align-items: center;
     gap: 10px;
+}
+
+.widget-code pre {
+    margin: 0;
+    padding: 10px;
+    border-radius: var(--radius-sm);
+    background: rgba(0, 0, 0, 0.24);
+    overflow-x: auto;
+}
+
+.widget-code-label {
+    color: rgba(250, 250, 250, 0.65);
+    font-size: 12px;
+    margin-bottom: 6px;
+}
+
+.widget-chart {
+    min-height: 240px;
+}
+
+.widget-tab-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 10px;
+}
+
+.widget-tab-btn {
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.03);
+    color: var(--text-secondary);
+    cursor: pointer;
+    padding: 5px 10px;
+}
+
+.widget-tab-btn.active {
+    border-color: rgba(232, 93, 111, 0.4);
+    background: rgba(232, 93, 111, 0.12);
+    color: var(--text-primary);
 }
 
 /* Mobile overrides — second block, placed AFTER all base rules so media-query

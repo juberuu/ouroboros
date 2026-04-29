@@ -162,7 +162,28 @@ function renderField(field, savedValues) {
     return `<label class="widget-field"><span>${label}</span><input type="${type}" name="${name}" value="${value}" ${required}></label>`;
 }
 
-function renderDataComponent(tab, component, state, status) {
+function chartConfig(component, data) {
+    const type = ['line', 'bar'].includes(component.chart_type) ? component.chart_type : 'line';
+    const labels = component.labels || getPath(data, component.labels_path || 'labels', []);
+    const datasets = component.datasets || getPath(data, component.datasets_path || 'datasets', []);
+    return {
+        type,
+        data: {
+            labels: Array.isArray(labels) ? labels.map((item) => String(item ?? '')) : [],
+            datasets: Array.isArray(datasets) ? datasets.map((dataset) => ({
+                label: String(dataset?.label ?? 'Series'),
+                data: Array.isArray(dataset?.data) ? dataset.data.map((value) => Number(value) || 0) : [],
+            })) : [],
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: true } },
+        },
+    };
+}
+
+function renderDataComponent(tab, component, state, status, componentState = {}, componentKey = '') {
     const type = String(component.type || '');
     const target = component.target || 'result';
     const data = state[target] || {};
@@ -193,6 +214,32 @@ function renderDataComponent(tab, component, state, status) {
         const value = component.path ? getPath(data, component.path, {}) : data;
         return `<details class="widget-json"><summary>${escapeHtml(component.label || 'JSON')}</summary><pre>${escapeHtml(JSON.stringify(value, null, 2))}</pre></details>`;
     }
+    if (type === 'code') {
+        const value = component.text ?? getPath(data, component.path || '', '');
+        const label = component.label ? `<div class="widget-code-label">${escapeHtml(component.label)}</div>` : '';
+        return `<div class="widget-code">${label}<pre><code>${escapeHtml(value)}</code></pre></div>`;
+    }
+    if (type === 'chart') {
+        const config = chartConfig(component, component.path ? getPath(data, component.path, {}) : data);
+        return `<div class="widget-chart"><canvas data-widget-chart-config="${escapeHtml(JSON.stringify(config))}"></canvas></div>`;
+    }
+    if (type === 'tabs') {
+        const tabs = Array.isArray(component.tabs) ? component.tabs : [];
+        const stateKey = `tab:${componentKey}`;
+        const active = Math.max(0, Math.min(Number(componentState[stateKey] || 0), Math.max(tabs.length - 1, 0)));
+        const buttons = tabs.map((item, idx) => (
+            `<button type="button" class="widget-tab-btn ${idx === active ? 'active' : ''}" data-widget-tab-key="${escapeHtml(stateKey)}" data-widget-tab-idx="${idx}">${escapeHtml(item.label || `Tab ${idx + 1}`)}</button>`
+        )).join('');
+        const activeTab = tabs[active] || {};
+        const body = (activeTab.components || [])
+            .map((child, idx) => renderDataComponent(tab, child, state, status, componentState, `${componentKey}:${active}:${idx}`))
+            .join('');
+        return `<div class="widget-tabs"><div class="widget-tab-list">${buttons}</div><div class="widget-tab-body">${body || '<div class="muted">No content.</div>'}</div></div>`;
+    }
+    if (type === 'stream') {
+        const current = status[target] || 'idle';
+        return `<div class="widget-stream" data-state="${escapeHtml(current)}">${escapeHtml(component[current] || component.label || current)}</div>`;
+    }
     if (['image', 'audio', 'video', 'file'].includes(type)) {
         const src = safeMediaSrc(tab, component, state);
         const label = escapeHtml(component.label || component.alt || type);
@@ -205,7 +252,7 @@ function renderDataComponent(tab, component, state, status) {
     if (type === 'gallery') {
         const items = component.items || getPath(data, component.path || '', []);
         if (!Array.isArray(items)) return '<div class="muted">No media items.</div>';
-        return `<div class="widget-gallery">${items.map((item) => renderDataComponent(tab, { ...item, type: item.type || 'image' }, state, status)).join('')}</div>`;
+        return `<div class="widget-gallery">${items.map((item, idx) => renderDataComponent(tab, { ...item, type: item.type || 'image' }, state, status, componentState, `${componentKey}:gallery:${idx}`)).join('')}</div>`;
     }
     if (type === 'progress') {
         const value = Number(getPath(data, component.path || 'progress', 0));
@@ -256,8 +303,11 @@ async function mountDeclarativeWidget(mount, tab, render) {
     const state = {};
     const status = {};
     const formValues = {};
+    const componentState = {};
     const timers = new Set();
     const controllers = new Set();
+    const chartInstances = new Set();
+    const eventSources = new Map();
     const activePolls = new Set();
     const autoStarted = new Set();
     const messageHandlers = new Set();
@@ -277,6 +327,10 @@ async function mountDeclarativeWidget(mount, tab, render) {
         disposed = true;
         controllers.forEach((controller) => controller.abort());
         controllers.clear();
+        chartInstances.forEach((chart) => chart.destroy());
+        chartInstances.clear();
+        eventSources.forEach((source) => source.close());
+        eventSources.clear();
         timers.forEach((timer) => clearTimeout(timer));
         timers.clear();
         activePolls.clear();
@@ -338,6 +392,8 @@ async function mountDeclarativeWidget(mount, tab, render) {
     const renderAll = () => {
         if (disposed) return;
         rememberFormValues();
+        chartInstances.forEach((chart) => chart.destroy());
+        chartInstances.clear();
         mount.innerHTML = components.map((component, idx) => {
             const type = String(component.type || '');
             if (type === 'form') {
@@ -355,7 +411,7 @@ async function mountDeclarativeWidget(mount, tab, render) {
             if (type === 'subscription') {
                 return '';
             }
-            return renderDataComponent(tab, component, state, status);
+            return renderDataComponent(tab, component, state, status, componentState, String(idx));
         }).join('');
         mount.querySelectorAll('[data-widget-form]').forEach((form) => {
             form.addEventListener('submit', async (event) => {
@@ -399,11 +455,50 @@ async function mountDeclarativeWidget(mount, tab, render) {
                 startPoll(Number(button.dataset.widgetPoll));
             });
         });
+        mount.querySelectorAll('[data-widget-tab-key]').forEach((button) => {
+            button.addEventListener('click', () => {
+                componentState[button.dataset.widgetTabKey] = Number(button.dataset.widgetTabIdx || 0);
+                renderAll();
+            });
+        });
+        mount.querySelectorAll('[data-widget-chart-config]').forEach((canvas) => {
+            if (typeof Chart === 'undefined') return;
+            try {
+                const config = JSON.parse(canvas.dataset.widgetChartConfig || '{}');
+                chartInstances.add(new Chart(canvas, config));
+            } catch (err) {
+                console.warn('widgets: chart render failed', err);
+            }
+        });
         components.forEach((component, idx) => {
             if (String(component.type || '') === 'poll' && component.auto_start === true && !autoStarted.has(idx)) {
                 autoStarted.add(idx);
                 queueMicrotask(() => startPoll(idx));
             }
+        });
+        components.forEach((component, idx) => {
+            if (String(component.type || '') !== 'stream' || eventSources.has(idx)) return;
+            const url = extensionRouteUrl(tab, component.route || component.api_route, new URLSearchParams());
+            if (!url || typeof EventSource === 'undefined') return;
+            const target = component.target || 'result';
+            const source = new EventSource(url);
+            eventSources.set(idx, source);
+            status[target] = 'loading';
+            source.onmessage = (event) => {
+                if (disposed) return;
+                try {
+                    state[target] = JSON.parse(event.data);
+                } catch {
+                    state[target] = { text: event.data || '' };
+                }
+                status[target] = 'success';
+                renderAll();
+            };
+            source.onerror = () => {
+                if (disposed) return;
+                status[target] = 'error';
+                renderAll();
+            };
         });
         components.forEach((component, idx) => {
             if (String(component.type || '') !== 'subscription' || subscribed.has(idx)) return;

@@ -1,4 +1,4 @@
-# Ouroboros v5.3.3 — Architecture & Reference
+# Ouroboros v5.3.4 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -308,7 +308,7 @@ The web UI is a single-page app (`web/index.html` + `web/style.css` + ES modules
 - `settings_catalog.js` — optional model-catalog refresh helper; handles `/api/model-catalog`, browser timeout, stale-response suppression, and model-picker catalog broadcasts
 - `costs.js` — cost breakdown tables
 - `skills.js` — Skills page (discover + enable/disable + review trigger + key-grant state + live-vs-catalog extension status; reads `/api/state` + `/api/extensions`, writes through `/api/skills/<name>/toggle` + `/api/skills/<name>/review`, and requests key grants through the desktop launcher bridge)
-- `widgets.js` — Widgets page for reviewed extension UI surfaces declared through `register_ui_tab`; hosts legacy `inline_card`/`iframe` plus declarative v1 widgets (forms/actions, markdown, JSON, key/value, tables, progress, `subscription` WS updates, poll with `auto_start`, files, galleries, image/audio/video media) and tears down widget timers/listeners on remount.
+- `widgets.js` — Widgets page for reviewed extension UI surfaces declared through `register_ui_tab`; hosts legacy `inline_card`/`iframe` plus declarative v1 widgets (forms/actions, markdown, code, JSON, key/value, tables, tabs, charts, stream, progress, `subscription` WS updates, poll with `auto_start`, files, galleries, image/audio/video media) and tears down widget timers/listeners/streams on remount.
 - `about.js` — about page
 
 Navigation is a left sidebar with 9 pages (Chat, Files, Logs, Costs, Evolution, Skills, Widgets, Settings, About). On narrow viewports (`@media (max-width: 640px)`) `#nav-rail` collapses to a horizontal bottom bar — `position: fixed; bottom: 0; flex-direction: row` with `padding-bottom: calc(6px + env(safe-area-inset-bottom, 0px))` for the iOS home-indicator, `overflow-x: auto` horizontal scroll if many items, and `#content { padding-left: 0; padding-bottom: calc(62px + env(safe-area-inset-bottom, 0px)) }` to clear the bar. The Skills page manages external + bundled skill packages — review trigger, key grants, enable/disable, status badges, and live-vs-catalog extension state — and reads from `/api/state` + `/api/extensions`. The Widgets page hosts reviewed extension UI declarations separately so useful widgets do not get buried in long skill lists.
@@ -2147,8 +2147,9 @@ Lifecycle:
     "components": [...]}``. The browser-owned renderer supports
     forms/actions, status/progress/polling (including `auto_start` polls
     whose timers are cleaned up when the widget remounts), `subscription`
-    components for extension WS push events, markdown, JSON, key/value
-    summaries, tables, file links, galleries, and image/audio/video
+    components for extension WS push events, `stream` components for
+    extension-owned SSE routes, markdown, read-only code blocks, JSON, key/value
+    summaries, tabs, Chart.js-backed charts, tables, file links, galleries, and image/audio/video
     media sourced from extension routes or safe data URLs. Same-origin
     dynamic JS modules are intentionally not supported because they
     could call privileged app APIs from the SPA origin; iframe widgets

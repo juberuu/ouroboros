@@ -590,6 +590,103 @@ def test_register_ui_tab_accepts_subscription_component(tmp_path):
     assert snap["ui_tabs"][0]["render"]["components"][0]["type"] == "subscription"
 
 
+def test_register_ui_tab_accepts_widget_v2_components(tmp_path):
+    loaded, _, _ = _prepare_extension(
+        tmp_path,
+        "v2ui",
+        "def register(api):\n"
+        "    api.register_ui_tab('v2', 'V2', render={'kind': 'declarative', 'schema_version': 1, 'components': [\n"
+        "        {'type': 'code', 'text': 'print(1)'},\n"
+        "        {'type': 'chart', 'path': 'chart'},\n"
+        "        {'type': 'tabs', 'tabs': [{'label': 'A', 'components': [{'type': 'markdown', 'text': 'ok'}]}]},\n"
+        "        {'type': 'stream', 'route': 'events'}\n"
+        "    ]})\n",
+        permissions=["widget"],
+    )
+    err = extension_loader.load_extension(loaded, lambda: {})
+    assert err is None, err
+    types = [item["type"] for item in extension_loader.snapshot()["ui_tabs"][0]["render"]["components"]]
+    assert types == ["code", "chart", "tabs", "stream"]
+
+
+def test_register_ui_tab_rejects_bad_tabs_component(tmp_path):
+    loaded, _, _ = _prepare_extension(
+        tmp_path,
+        "badtabs",
+        "def register(api):\n"
+        "    api.register_ui_tab('tabs', 'Tabs', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'tabs', 'tabs': []}]})\n",
+        permissions=["widget"],
+    )
+    err = extension_loader.load_extension(loaded, lambda: {})
+    assert err is not None
+    assert "tabs" in err
+
+
+def test_register_ui_tab_rejects_invalid_nested_tab_component(tmp_path):
+    loaded, _, _ = _prepare_extension(
+        tmp_path,
+        "badnestedtabs",
+        "def register(api):\n"
+        "    api.register_ui_tab('tabs', 'Tabs', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'tabs', 'tabs': [{'label': 'A', 'components': [{'type': 'image'}]}]}]})\n",
+        permissions=["widget"],
+    )
+    err = extension_loader.load_extension(loaded, lambda: {})
+    assert err is not None
+    assert "media source" in err
+
+
+def test_register_ui_tab_rejects_interactive_nested_tab_component(tmp_path):
+    loaded, _, _ = _prepare_extension(
+        tmp_path,
+        "badinteractivetabs",
+        "def register(api):\n"
+        "    api.register_ui_tab('tabs', 'Tabs', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'tabs', 'tabs': [{'label': 'A', 'components': [{'type': 'form', 'route': 'submit', 'fields': [{'name': 'q'}]}]}]}]})\n",
+        permissions=["widget"],
+    )
+    err = extension_loader.load_extension(loaded, lambda: {})
+    assert err is not None
+    assert "interactive type" in err
+
+
+def test_register_ui_tab_rejects_nested_tabs_component(tmp_path):
+    loaded, _, _ = _prepare_extension(
+        tmp_path,
+        "badnestednestedtabs",
+        "def register(api):\n"
+        "    api.register_ui_tab('tabs', 'Tabs', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'tabs', 'tabs': [{'label': 'A', 'components': [{'type': 'tabs', 'tabs': [{'label': 'B', 'components': []}]}]}]}]})\n",
+        permissions=["widget"],
+    )
+    err = extension_loader.load_extension(loaded, lambda: {})
+    assert err is not None
+    assert "interactive type" in err
+
+
+def test_register_ui_tab_rejects_stream_without_route(tmp_path):
+    loaded, _, _ = _prepare_extension(
+        tmp_path,
+        "badstream",
+        "def register(api):\n"
+        "    api.register_ui_tab('stream', 'Stream', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'stream'}]})\n",
+        permissions=["widget"],
+    )
+    err = extension_loader.load_extension(loaded, lambda: {})
+    assert err is not None
+    assert "requires route" in err
+
+
+def test_register_ui_tab_rejects_stream_with_non_get_method(tmp_path):
+    loaded, _, _ = _prepare_extension(
+        tmp_path,
+        "badstreammethod",
+        "def register(api):\n"
+        "    api.register_ui_tab('stream', 'Stream', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'stream', 'route': 'events', 'method': 'POST'}]})\n",
+        permissions=["widget"],
+    )
+    err = extension_loader.load_extension(loaded, lambda: {})
+    assert err is not None
+    assert "stream method" in err
+
+
 def test_register_ui_tab_rejects_subscription_component_without_event(tmp_path):
     loaded, _, _ = _prepare_extension(
         tmp_path,
