@@ -43,6 +43,7 @@ def _clear_loader_state(monkeypatch):
         extension_loader._routes.clear()
         extension_loader._ws_handlers.clear()
         extension_loader._ui_tabs.clear()
+        extension_loader.set_ws_broadcaster(None)
     yield
     with extension_loader._lock:
         extension_loader._extensions.clear()
@@ -54,6 +55,7 @@ def _clear_loader_state(monkeypatch):
         extension_loader._routes.clear()
         extension_loader._ws_handlers.clear()
         extension_loader._ui_tabs.clear()
+        extension_loader.set_ws_broadcaster(None)
 
 
 def _write_ext_skill(
@@ -404,6 +406,62 @@ def test_load_extension_registers_ws_handler_with_namespace(tmp_path):
     assert extension_loader.extension_surface_name("ws1", "message") in handlers
 
 
+def test_send_ws_message_broadcasts_namespaced_event(tmp_path):
+    sent: list[dict] = []
+    loaded, _, _ = _prepare_extension(
+        tmp_path,
+        "push_ext",
+        "def register(api):\n"
+        "    api.send_ws_message('progress', {'pct': 40})\n",
+        permissions=["ws_handler"],
+    )
+    extension_loader.set_ws_broadcaster(sent.append)
+
+    err = extension_loader.load_extension(loaded, lambda: {})
+
+    assert err is None, err
+    assert sent == [
+        {
+            "type": extension_loader.extension_surface_name("push_ext", "progress"),
+            "data": {"pct": 40},
+            "skill": "push_ext",
+        }
+    ]
+
+
+def test_send_ws_message_still_works_after_registration_phase(tmp_path):
+    sent: list[dict] = []
+    impl = extension_loader.PluginAPIImpl(
+        skill_name="push_runtime",
+        permissions=["ws_handler"],
+        env_allowlist=[],
+        state_dir=tmp_path,
+        settings_reader=lambda: {},
+    )
+    extension_loader.set_ws_broadcaster(sent.append)
+
+    impl._close_registration()
+    impl.send_ws_message("progress", {"pct": 90})
+
+    assert sent[0]["type"] == extension_loader.extension_surface_name("push_runtime", "progress")
+    assert sent[0]["data"] == {"pct": 90}
+
+
+def test_send_ws_message_requires_ws_permission(tmp_path):
+    loaded, _, _ = _prepare_extension(
+        tmp_path,
+        "no_push_ext",
+        "def register(api):\n"
+        "    api.send_ws_message('progress', {'pct': 40})\n",
+        permissions=[],
+    )
+
+    err = extension_loader.load_extension(loaded, lambda: {})
+
+    assert err is not None
+    assert "ws_handler" in err
+
+
 def test_register_ui_tab_surfaces_hostable_widget(tmp_path):
     loaded, _, _ = _prepare_extension(
         tmp_path,
@@ -417,6 +475,7 @@ def test_register_ui_tab_surfaces_hostable_widget(tmp_path):
     snap = extension_loader.snapshot()
     assert snap["ui_tabs_pending"] == []
     assert snap["ui_tabs"][0]["key"] == "uiwait:weather"
+    assert snap["ui_tabs"][0]["ws_prefix"] == extension_loader.extension_name_prefix("uiwait")
     assert snap["ui_tabs"][0]["render"]["kind"] == "declarative"
 
     extension_loader.unload_extension("uiwait")
@@ -515,6 +574,33 @@ def test_register_ui_tab_accepts_declarative_poll_component(tmp_path):
     snap = extension_loader.snapshot()
     assert snap["ui_tabs"][0]["render"]["components"][0]["type"] == "poll"
     assert snap["ui_tabs"][0]["render"]["components"][0]["auto_start"] is True
+
+
+def test_register_ui_tab_accepts_subscription_component(tmp_path):
+    loaded, _, _ = _prepare_extension(
+        tmp_path,
+        "subui",
+        "def register(api):\n"
+        "    api.register_ui_tab('sub', 'Sub', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'subscription', 'event': 'progress', 'target': 'result'}, {'type': 'progress', 'path': 'pct'}]})\n",
+        permissions=["widget"],
+    )
+    err = extension_loader.load_extension(loaded, lambda: {})
+    assert err is None, err
+    snap = extension_loader.snapshot()
+    assert snap["ui_tabs"][0]["render"]["components"][0]["type"] == "subscription"
+
+
+def test_register_ui_tab_rejects_subscription_component_without_event(tmp_path):
+    loaded, _, _ = _prepare_extension(
+        tmp_path,
+        "badsubui",
+        "def register(api):\n"
+        "    api.register_ui_tab('sub', 'Sub', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'subscription'}]})\n",
+        permissions=["widget"],
+    )
+    err = extension_loader.load_extension(loaded, lambda: {})
+    assert err is not None
+    assert "requires event" in err
 
 
 def test_on_unload_callback_runs_during_unload(tmp_path):

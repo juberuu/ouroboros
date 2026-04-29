@@ -788,8 +788,8 @@ def test_skill_and_extension_permissions_are_kept_in_sync():
 
 def test_plugin_api_surface_is_frozen():
     """Phase 4 exposes ``PluginAPI`` as a runtime-checkable Protocol
-    with a fixed method set. Adding/removing methods here requires a
-    deliberate ``SKILL_MANIFEST_SCHEMA_VERSION`` bump + release note."""
+    with a fixed method set. Additive optional methods must update this
+    expected set + release docs; breaking changes require a schema bump."""
     from ouroboros.contracts.plugin_api import PluginAPI
 
     expected = {
@@ -797,6 +797,7 @@ def test_plugin_api_surface_is_frozen():
         "register_route",
         "register_ws_handler",
         "register_ui_tab",
+        "send_ws_message",
         "on_unload",
         "log",
         "get_settings",

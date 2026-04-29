@@ -11,9 +11,10 @@ entry point::
 ``PluginAPI`` is the ONLY surface an extension may call. The ABI
 declared here is frozen between releases in the same sense as
 ``ouroboros/contracts/tool_abi.py`` — breaking any method signature or
-tightening a permission allowlist requires a deliberate bump in
-``SKILL_MANIFEST_SCHEMA_VERSION`` and a release note in
-``docs/ARCHITECTURE.md`` §12.
+tightening a permission allowlist requires a deliberate schema/version
+bump and a release note in ``docs/ARCHITECTURE.md`` §12. Additive
+methods are allowed within schema v1 when they are optional for older
+skills, documented here, and pinned by contract tests.
 
 The surface intentionally mirrors what the Phase 3 plan approved:
 
@@ -25,6 +26,8 @@ The surface intentionally mirrors what the Phase 3 plan approved:
 - ``register_ws_handler``— attach a handler for WS message types
                            namespaced the same provider-safe way.
 - ``register_ui_tab``    — declare a reviewed Widgets-page surface.
+- ``send_ws_message``    — broadcast a namespaced extension event to
+                           connected browser clients.
 - ``on_unload``          — register cleanup for background resources.
 - ``log``                — structured logger (the extension does not
                            touch ``logging``/``print`` directly).
@@ -164,6 +167,19 @@ class PluginAPI(Protocol):
         Same-origin dynamic widget modules are not part of this
         contract because they could call privileged app APIs from the
         SPA origin."""
+        ...
+
+    def send_ws_message(self, message_type: str, data: Dict[str, Any]) -> None:
+        """Broadcast a namespaced extension event to connected browsers.
+
+        ``message_type`` follows the same short-name rules as
+        ``register_ws_handler`` and is emitted as
+        ``ext_<len>_<token>_<message_type>``. Requires the manifest
+        ``ws_handler`` permission because it uses the same WebSocket
+        extension namespace as inbound handlers. The broadcast is
+        best-effort; when no WebSocket loop is available the message is
+        dropped.
+        """
         ...
 
     def on_unload(self, callback: Callable[[], Any]) -> None:

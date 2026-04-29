@@ -1683,6 +1683,8 @@ async def lifespan(app):
             load_settings as _load_settings,
         )
         from ouroboros.extension_loader import reload_all as _reload_extensions
+        from ouroboros.extension_loader import set_ws_broadcaster as _set_extension_ws_broadcaster
+        _set_extension_ws_broadcaster(broadcast_ws_sync)
         repo_path = get_skills_repo_path()
         drive_root = pathlib.Path(DATA_DIR)
         _reload_extensions(drive_root, _load_settings, repo_path=repo_path or None)

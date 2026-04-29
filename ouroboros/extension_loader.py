@@ -112,6 +112,7 @@ _tools: Dict[str, Any] = {}            # {"ext_<len>_<token>_<name>": ToolEntry-
 _routes: Dict[str, Any] = {}           # {"/api/extensions/<skill>/<path>": handler_spec}
 _ws_handlers: Dict[str, Any] = {}      # {"ext_<len>_<token>_<message_type>": handler}
 _ui_tabs: Dict[str, Any] = {}          # {"<skill>:<tab_id>": tab_spec}
+_ws_broadcaster: Optional[Callable[[dict], None]] = None
 _EXTENSION_NAME_PREFIX = "ext_"
 _EXTENSION_SKILL_TOKEN_MAX = 32
 _EXTENSION_SHORT_MAX = 24
@@ -249,6 +250,7 @@ _DECLARATIVE_WIDGET_COMPONENTS = {
     "poll",
     "progress",
     "status",
+    "subscription",
     "table",
     "video",
 }
@@ -299,6 +301,13 @@ def _validate_ui_render(render: Dict[str, Any]) -> Dict[str, Any]:
                 raise ExtensionRegistrationError(
                     f"declarative widget component {idx} requires route or api_route"
                 )
+            if component_type == "subscription":
+                event_name = str(component.get("event") or component.get("message_type") or "").strip()
+                if not event_name:
+                    raise ExtensionRegistrationError(
+                        f"declarative widget component {idx} requires event or message_type"
+                    )
+                _assert_ws_message_type(event_name)
             method = str(component.get("method") or "GET").upper()
             if method not in VALID_EXTENSION_ROUTE_METHODS:
                 raise ExtensionRegistrationError(
@@ -385,6 +394,13 @@ def _assert_ws_message_type(message_type: str) -> str:
             f"ws message_type must be alnum/underscore only: {candidate!r}"
         )
     return candidate
+
+
+def set_ws_broadcaster(broadcaster: Callable[[dict], None] | None) -> None:
+    """Install the host WebSocket broadcaster used by PluginAPI.send_ws_message."""
+    global _ws_broadcaster
+    with _lock:
+        _ws_broadcaster = broadcaster
 
 
 class PluginAPIImpl:
@@ -562,10 +578,33 @@ class PluginAPIImpl:
                 "tab_id": clean_tab,
                 "title": str(title or clean_tab),
                 "icon": str(icon or "extension"),
+                "ws_prefix": extension_name_prefix(self._skill),
                 "render": _validate_ui_render(dict(render or {})),
                 "ui_host_pending": True,
             }
             _extensions.setdefault(self._skill, _ExtensionRegistrations()).ui_tabs.append(key)
+
+    def send_ws_message(self, message_type: str, data: Dict[str, Any]) -> None:
+        if "ws_handler" not in self._permissions:
+            raise ExtensionRegistrationError(
+                f"skill {self._skill!r} cannot 'ws_handler' "
+                f"— manifest permissions={sorted(self._permissions)}"
+            )
+        short = _assert_ws_message_type(message_type)
+        full = extension_surface_name(self._skill, short)
+        payload = {"type": full, "data": dict(data or {}), "skill": self._skill}
+        with self._api_lock:
+            with _lock:
+                if self._runtime_closing or self._runtime_closed or self._skill in _unloading:
+                    return
+            broadcaster = _ws_broadcaster
+            if broadcaster is None:
+                log.debug("extension %s dropped WS message %s: no broadcaster", self._skill, full)
+                return
+            try:
+                broadcaster(payload)
+            except Exception:
+                log.warning("extension %s WS broadcast failed for %s", self._skill, full, exc_info=True)
 
     def on_unload(self, callback: Callable[[], Any]) -> None:
         if not callable(callback):

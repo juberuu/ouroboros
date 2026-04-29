@@ -21,6 +21,7 @@ def test_widgets_support_declarative_schema_components():
         "type === 'form'",
         "type === 'action'",
         "type === 'poll'",
+        "type === 'subscription'",
         "type === 'kv'",
         "type === 'table'",
         "type === 'markdown'",
@@ -40,6 +41,9 @@ def test_widgets_support_declarative_schema_components():
     assert "timers.forEach((timer) => clearTimeout(timer));" in source
     assert "const controller = new AbortController();" in source
     assert "controllers.forEach((controller) => controller.abort());" in source
+    assert "widgetMessageHandlers.add(handler);" in source
+    assert "ctx.ws.on('message'" in source
+    assert "msg?.type !== expectedType" in source
     assert "event.detail?.page === 'widgets'" in source
     assert "disposeMountedWidgets();" in source.split("window.addEventListener('ouro:page-shown'")[1]
     assert "let renderGeneration = 0;" in source

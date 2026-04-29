@@ -216,6 +216,8 @@ function renderDataComponent(tab, component, state, status) {
 }
 
 const widgetDisposers = new Map();
+const widgetMessageHandlers = new Set();
+let widgetsWsBridgeBound = false;
 
 function boundedNumber(value, fallback, min, max) {
     const parsed = Number(value);
@@ -258,6 +260,8 @@ async function mountDeclarativeWidget(mount, tab, render) {
     const controllers = new Set();
     const activePolls = new Set();
     const autoStarted = new Set();
+    const messageHandlers = new Set();
+    const subscribed = new Set();
     let disposed = false;
 
     const schedule = (fn, delay) => {
@@ -276,6 +280,9 @@ async function mountDeclarativeWidget(mount, tab, render) {
         timers.forEach((timer) => clearTimeout(timer));
         timers.clear();
         activePolls.clear();
+        messageHandlers.forEach((handler) => widgetMessageHandlers.delete(handler));
+        messageHandlers.clear();
+        subscribed.clear();
     };
     const callRoute = async (spec, values) => {
         if (disposed) throw new Error('widget disposed');
@@ -345,6 +352,9 @@ async function mountDeclarativeWidget(mount, tab, render) {
             if (type === 'poll') {
                 return `<button class="btn btn-default" data-widget-poll="${idx}">${escapeHtml(component.label || 'Start polling')}</button>`;
             }
+            if (type === 'subscription') {
+                return '';
+            }
             return renderDataComponent(tab, component, state, status);
         }).join('');
         mount.querySelectorAll('[data-widget-form]').forEach((form) => {
@@ -394,6 +404,23 @@ async function mountDeclarativeWidget(mount, tab, render) {
                 autoStarted.add(idx);
                 queueMicrotask(() => startPoll(idx));
             }
+        });
+        components.forEach((component, idx) => {
+            if (String(component.type || '') !== 'subscription' || subscribed.has(idx)) return;
+            const event = String(component.event || component.message_type || '').trim();
+            const prefix = String(tab.ws_prefix || '').trim();
+            if (!event || !prefix) return;
+            const expectedType = `${prefix}${event}`;
+            const target = component.target || 'result';
+            const handler = (msg) => {
+                if (disposed || msg?.type !== expectedType) return;
+                state[target] = msg.data || {};
+                status[target] = 'success';
+                renderAll();
+            };
+            subscribed.add(idx);
+            messageHandlers.add(handler);
+            widgetMessageHandlers.add(handler);
         });
     };
     renderAll();
@@ -475,7 +502,7 @@ async function mountTrackedTab(card, tab) {
     }
 }
 
-export function initWidgets() {
+export function initWidgets(ctx = {}) {
     const page = document.createElement('div');
     page.innerHTML = pageTemplate();
     document.getElementById('content').appendChild(page.firstElementChild);
@@ -483,6 +510,12 @@ export function initWidgets() {
     const refreshBtn = document.getElementById('widgets-refresh');
     let renderGeneration = 0;
     let widgetsVisible = false;
+    if (ctx.ws && !widgetsWsBridgeBound) {
+        widgetsWsBridgeBound = true;
+        ctx.ws.on('message', (msg) => {
+            widgetMessageHandlers.forEach((handler) => handler(msg));
+        });
+    }
 
     async function render() {
         const generation = ++renderGeneration;
