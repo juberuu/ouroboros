@@ -318,7 +318,10 @@ jobs:
       - name: Build macOS app
         if: matrix.os == 'macos-latest'
         run: |
-          if [ -n "${BUILD_CERTIFICATE_BASE64:-}" ] && [ -n "${P12_PASSWORD:-}" ] && [ -n "${KEYCHAIN_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
+          if [ "${{ needs.release-preflight.outputs.is_prerelease }}" = "true" ]; then
+            echo "Pre-release tag detected — building unsigned DMG for artifact validation"
+            OUROBOROS_SIGN=0 bash build.sh
+          elif [ -n "${BUILD_CERTIFICATE_BASE64:-}" ] && [ -n "${P12_PASSWORD:-}" ] && [ -n "${KEYCHAIN_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
             echo "Signing certificate detected — building with codesign + (optional) notarization"
             bash build.sh
           else
