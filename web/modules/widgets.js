@@ -215,7 +215,15 @@ function renderDataComponent(tab, component, state, status) {
     return '';
 }
 
-async function callWidgetRoute(tab, spec, values) {
+const widgetDisposers = new Map();
+
+function boundedNumber(value, fallback, min, max) {
+    const parsed = Number(value);
+    const safe = Number.isFinite(parsed) ? parsed : fallback;
+    return Math.max(min, Math.min(safe, max));
+}
+
+async function callWidgetRoute(tab, spec, values, signal) {
     const method = String(spec.method || 'GET').toUpperCase();
     const params = new URLSearchParams();
     for (const [key, value] of Object.entries(values || {})) {
@@ -225,11 +233,12 @@ async function callWidgetRoute(tab, spec, values) {
     const url = extensionRouteUrl(tab, spec.route || spec.api_route, noBody ? params : null);
     if (!url) throw new Error('invalid widget route');
     const init = noBody
-        ? { method }
+        ? { method, signal }
         : {
             method,
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(values || {}),
+            signal,
         };
     const resp = await fetch(url, init);
     const contentType = resp.headers.get('content-type') || '';
@@ -245,6 +254,39 @@ async function mountDeclarativeWidget(mount, tab, render) {
     const state = {};
     const status = {};
     const formValues = {};
+    const timers = new Set();
+    const controllers = new Set();
+    const activePolls = new Set();
+    const autoStarted = new Set();
+    let disposed = false;
+
+    const schedule = (fn, delay) => {
+        if (disposed) return null;
+        const timer = setTimeout(() => {
+            timers.delete(timer);
+            fn();
+        }, delay);
+        timers.add(timer);
+        return timer;
+    };
+    const dispose = () => {
+        disposed = true;
+        controllers.forEach((controller) => controller.abort());
+        controllers.clear();
+        timers.forEach((timer) => clearTimeout(timer));
+        timers.clear();
+        activePolls.clear();
+    };
+    const callRoute = async (spec, values) => {
+        if (disposed) throw new Error('widget disposed');
+        const controller = new AbortController();
+        controllers.add(controller);
+        try {
+            return await callWidgetRoute(tab, spec, values, controller.signal);
+        } finally {
+            controllers.delete(controller);
+        }
+    };
     const rememberFormValues = () => {
         mount.querySelectorAll('[data-widget-form]').forEach((form) => {
             const idx = form.dataset.widgetForm;
@@ -255,7 +297,39 @@ async function mountDeclarativeWidget(mount, tab, render) {
             }
         });
     };
+    const startPoll = (idx) => {
+        if (disposed || activePolls.has(idx)) return;
+        const spec = components[Number(idx)] || {};
+        const target = spec.target || 'result';
+        const maxTicks = boundedNumber(spec.max_ticks, 20, 1, 100);
+        const intervalMs = boundedNumber(spec.interval_ms, 2000, 1000, 30000);
+        let ticks = 0;
+        activePolls.add(idx);
+        const poll = async () => {
+            if (disposed) return;
+            ticks += 1;
+            status[target] = 'loading';
+            renderAll();
+            try {
+                state[target] = await callRoute(spec, {});
+                if (disposed) return;
+                status[target] = 'success';
+            } catch (err) {
+                state[target] = { error: err.message || String(err) };
+                status[target] = 'error';
+            }
+            const stopValue = getPath(state[target], spec.stop_path || '', undefined);
+            if (ticks < maxTicks && String(stopValue) !== String(spec.stop_value ?? 'done')) {
+                schedule(poll, intervalMs);
+            } else {
+                activePolls.delete(idx);
+            }
+            renderAll();
+        };
+        poll();
+    };
     const renderAll = () => {
+        if (disposed) return;
         rememberFormValues();
         mount.innerHTML = components.map((component, idx) => {
             const type = String(component.type || '');
@@ -283,7 +357,8 @@ async function mountDeclarativeWidget(mount, tab, render) {
                 status[target] = 'loading';
                 renderAll();
                 try {
-                    state[target] = await callWidgetRoute(tab, spec, values);
+                    state[target] = await callRoute(spec, values);
+                    if (disposed) return;
                     status[target] = 'success';
                 } catch (err) {
                     state[target] = { error: err.message || String(err) };
@@ -299,7 +374,8 @@ async function mountDeclarativeWidget(mount, tab, render) {
                 status[target] = 'loading';
                 renderAll();
                 try {
-                    state[target] = await callWidgetRoute(tab, spec, spec.body || {});
+                    state[target] = await callRoute(spec, spec.body || {});
+                    if (disposed) return;
                     status[target] = 'success';
                 } catch (err) {
                     state[target] = { error: err.message || String(err) };
@@ -310,33 +386,18 @@ async function mountDeclarativeWidget(mount, tab, render) {
         });
         mount.querySelectorAll('[data-widget-poll]').forEach((button) => {
             button.addEventListener('click', () => {
-                const spec = components[Number(button.dataset.widgetPoll)] || {};
-                const target = spec.target || 'result';
-                const maxTicks = Math.max(1, Math.min(Number(spec.max_ticks || 20), 100));
-                const intervalMs = Math.max(1000, Math.min(Number(spec.interval_ms || 2000), 30000));
-                let ticks = 0;
-                const poll = async () => {
-                    ticks += 1;
-                    status[target] = 'loading';
-                    renderAll();
-                    try {
-                        state[target] = await callWidgetRoute(tab, spec, {});
-                        status[target] = 'success';
-                    } catch (err) {
-                        state[target] = { error: err.message || String(err) };
-                        status[target] = 'error';
-                    }
-                    const stopValue = getPath(state[target], spec.stop_path || '', undefined);
-                    if (ticks < maxTicks && String(stopValue) !== String(spec.stop_value ?? 'done')) {
-                        setTimeout(poll, intervalMs);
-                    }
-                    renderAll();
-                };
-                poll();
+                startPoll(Number(button.dataset.widgetPoll));
             });
+        });
+        components.forEach((component, idx) => {
+            if (String(component.type || '') === 'poll' && component.auto_start === true && !autoStarted.has(idx)) {
+                autoStarted.add(idx);
+                queueMicrotask(() => startPoll(idx));
+            }
         });
     };
     renderAll();
+    return dispose;
 }
 
 async function mountTab(card, tab) {
@@ -383,10 +444,35 @@ async function mountTab(card, tab) {
         return;
     }
     if (render.kind === 'declarative') {
-        await mountDeclarativeWidget(mount, tab, render);
-        return;
+        return mountDeclarativeWidget(mount, tab, render);
     }
     mount.innerHTML = `<div class="muted">Widget render kind <code>${escapeHtml(render.kind || 'unknown')}</code> is not supported yet.</div>`;
+    return null;
+}
+
+function disposeMountedWidgets() {
+    widgetDisposers.forEach((dispose) => {
+        try {
+            dispose();
+        } catch (err) {
+            console.warn('widgets: dispose failed', err);
+        }
+    });
+    widgetDisposers.clear();
+}
+
+async function mountTrackedTab(card, tab) {
+    const key = tab.key || `${tab.skill}:${tab.tab_id}`;
+    const existing = widgetDisposers.get(key);
+    if (existing) {
+        existing();
+        widgetDisposers.delete(key);
+    }
+    const dispose = await mountTab(card, tab);
+    if (typeof dispose === 'function') {
+        widgetDisposers.set(key, dispose);
+        return;
+    }
 }
 
 export function initWidgets() {
@@ -395,31 +481,45 @@ export function initWidgets() {
     document.getElementById('content').appendChild(page.firstElementChild);
     const list = document.getElementById('widgets-list');
     const refreshBtn = document.getElementById('widgets-refresh');
+    let renderGeneration = 0;
+    let widgetsVisible = false;
 
     async function render() {
+        const generation = ++renderGeneration;
+        widgetsVisible = true;
+        disposeMountedWidgets();
         list.innerHTML = '<div class="muted">Loading widgets…</div>';
         try {
             const data = await fetchExtensions();
+            if (!widgetsVisible || generation !== renderGeneration) return;
             const tabs = Array.isArray(data.live?.ui_tabs) ? data.live.ui_tabs : [];
             renderShell(list, tabs);
             for (const tab of tabs) {
+                if (!widgetsVisible || generation !== renderGeneration) return;
                 const key = tab.key || `${tab.skill}:${tab.tab_id}`;
                 const card = list.querySelector(`[data-widget-key="${CSS.escape(key)}"]`);
                 if (!card) continue;
                 try {
-                    await mountTab(card, tab);
+                    await mountTrackedTab(card, tab);
                 } catch (err) {
                     const mount = card.querySelector('[data-widget-mount]');
                     if (mount) mount.innerHTML = `<div class="skills-load-error">widget failed: ${escapeHtml(err.message || err)}</div>`;
                 }
             }
         } catch (err) {
+            if (!widgetsVisible || generation !== renderGeneration) return;
             list.innerHTML = `<div class="skills-load-error">Failed to load widgets: ${escapeHtml(err.message || err)}</div>`;
         }
     }
 
     refreshBtn.addEventListener('click', render);
     window.addEventListener('ouro:page-shown', (event) => {
-        if (event.detail?.page === 'widgets') render();
+        if (event.detail?.page === 'widgets') {
+            render();
+        } else {
+            widgetsVisible = false;
+            renderGeneration += 1;
+            disposeMountedWidgets();
+        }
     });
 }

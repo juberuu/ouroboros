@@ -77,12 +77,20 @@ class _ExtensionRegistrations:
     routes: List[str] = field(default_factory=list)
     ws_handlers: List[str] = field(default_factory=list)
     ui_tabs: List[str] = field(default_factory=list)
+    unload_callbacks: List[Callable[[], Any]] = field(default_factory=list)
+    api_instances: List[Any] = field(default_factory=list)
     content_hash: Optional[str] = None
     skill_dir: Optional[str] = None
     import_root: Optional[str] = None
 
     def is_empty(self) -> bool:
-        return not (self.tools or self.routes or self.ws_handlers or self.ui_tabs)
+        return not (
+            self.tools
+            or self.routes
+            or self.ws_handlers
+            or self.ui_tabs
+            or self.unload_callbacks
+        )
 
 
 @dataclass
@@ -98,6 +106,8 @@ _lock = threading.RLock()
 _extensions: Dict[str, _ExtensionRegistrations] = {}
 _extension_modules: Dict[str, ModuleType] = {}
 _load_failures: Dict[str, _ExtensionLoadFailure] = {}
+_unloading: set[str] = set()
+_lifecycle_locks: Dict[str, threading.RLock] = {}
 _tools: Dict[str, Any] = {}            # {"ext_<len>_<token>_<name>": ToolEntry-like}
 _routes: Dict[str, Any] = {}           # {"/api/extensions/<skill>/<path>": handler_spec}
 _ws_handlers: Dict[str, Any] = {}      # {"ext_<len>_<token>_<message_type>": handler}
@@ -158,6 +168,35 @@ def parse_extension_surface_name(name: str) -> tuple[str, str] | None:
     token = remainder[:token_len]
     short = remainder[token_len + 1:]
     return token, short
+
+
+def _lifecycle_lock_for(skill_name: str) -> threading.RLock:
+    with _lock:
+        lock = _lifecycle_locks.get(skill_name)
+        if lock is None:
+            lock = threading.RLock()
+            _lifecycle_locks[skill_name] = lock
+        return lock
+
+
+def _run_unload_callback(skill_name: str, callback: Callable[[], Any], timeout_sec: float = 2.0) -> None:
+    errors: list[BaseException] = []
+
+    def runner() -> None:
+        try:
+            callback()
+        except BaseException as exc:  # pragma: no cover - surfaced via log
+            errors.append(exc)
+
+    thread = threading.Thread(target=runner, name=f"ouroboros-ext-unload-{skill_name}", daemon=True)
+    thread.start()
+    thread.join(timeout=timeout_sec)
+    if thread.is_alive():
+        log.warning("extension %s unload callback timed out after %.1fs", skill_name, timeout_sec)
+        return
+    if errors:
+        exc = errors[0]
+        log.warning("extension %s unload callback failed", skill_name, exc_info=(type(exc), exc, exc.__traceback__))
 
 
 # ---------------------------------------------------------------------------
@@ -372,6 +411,10 @@ class PluginAPIImpl:
         self._env_allow_upper = frozenset(k.upper() for k in self._env_allow)
         self._state_dir = pathlib.Path(state_dir)
         self._settings_reader = settings_reader
+        self._registration_closed = False
+        self._runtime_closing = False
+        self._runtime_closed = False
+        self._api_lock = threading.RLock()
         # v5.2.2: extensions may receive forbidden / "core" settings keys
         # (e.g. ``OPENROUTER_API_KEY``) when an owner grant has been
         # captured through the desktop launcher native confirmation
@@ -388,6 +431,8 @@ class PluginAPIImpl:
     # --- internal helpers ---
 
     def _require(self, perm: str) -> None:
+        with _lock:
+            self._require_open_locked()
         if perm not in VALID_EXTENSION_PERMISSIONS:
             raise ExtensionRegistrationError(
                 f"unknown extension permission {perm!r}"
@@ -396,6 +441,12 @@ class PluginAPIImpl:
             raise ExtensionRegistrationError(
                 f"skill {self._skill!r} cannot {perm!r} "
                 f"— manifest permissions={sorted(self._permissions)}"
+            )
+
+    def _require_open_locked(self) -> None:
+        if self._registration_closed or self._runtime_closing or self._runtime_closed or self._skill in _unloading:
+            raise ExtensionRegistrationError(
+                f"skill {self._skill!r} cannot register after unload has started"
             )
 
     # --- registration ---
@@ -413,6 +464,7 @@ class PluginAPIImpl:
         short = _assert_tool_name(name)
         full = extension_surface_name(self._skill, short)
         with _lock:
+            self._require_open_locked()
             if full in _tools:
                 raise ExtensionRegistrationError(
                     f"tool {full!r} already registered"
@@ -454,6 +506,7 @@ class PluginAPIImpl:
             )
         mount = f"/api/extensions/{self._skill}/{rel}"
         with _lock:
+            self._require_open_locked()
             if mount in _routes:
                 raise ExtensionRegistrationError(
                     f"route {mount!r} already registered"
@@ -475,6 +528,7 @@ class PluginAPIImpl:
         short = _assert_ws_message_type(message_type)
         full = extension_surface_name(self._skill, short)
         with _lock:
+            self._require_open_locked()
             if full in _ws_handlers:
                 raise ExtensionRegistrationError(
                     f"ws handler {full!r} already registered"
@@ -498,6 +552,7 @@ class PluginAPIImpl:
         clean_tab = _assert_tool_name(tab_id)  # same syntax rules
         key = f"{self._skill}:{clean_tab}"
         with _lock:
+            self._require_open_locked()
             if key in _ui_tabs:
                 raise ExtensionRegistrationError(
                     f"ui tab {key!r} already registered"
@@ -511,6 +566,28 @@ class PluginAPIImpl:
                 "ui_host_pending": True,
             }
             _extensions.setdefault(self._skill, _ExtensionRegistrations()).ui_tabs.append(key)
+
+    def on_unload(self, callback: Callable[[], Any]) -> None:
+        if not callable(callback):
+            raise ExtensionRegistrationError("on_unload callback must be callable")
+        with _lock:
+            if self._registration_closed or self._runtime_closing or self._runtime_closed or self._skill in _unloading:
+                raise ExtensionRegistrationError(
+                    f"skill {self._skill!r} cannot register unload callbacks after unload has started"
+                )
+            _extensions.setdefault(self._skill, _ExtensionRegistrations()).unload_callbacks.append(callback)
+
+    def _close_registration(self) -> None:
+        with _lock:
+            self._registration_closed = True
+
+    def _close_runtime_access(self) -> None:
+        with _lock:
+            self._registration_closed = True
+            self._runtime_closing = True
+        with self._api_lock:
+            with _lock:
+                self._runtime_closed = True
 
     # --- runtime access ---
 
@@ -526,30 +603,37 @@ class PluginAPIImpl:
         )
 
     def get_settings(self, keys: Sequence[str]) -> Dict[str, Any]:
-        if "read_settings" not in self._permissions:
-            # Read without the permission → empty dict (fail silent for
-            # forward-compat, but never leak). Reviewer catches the
-            # missing permission.
-            return {}
-        settings = self._settings_reader() or {}
-        out: Dict[str, Any] = {}
-        forbidden_upper = {k.upper() for k in FORBIDDEN_EXTENSION_SETTINGS}
-        for raw_key in keys or ():
-            key = str(raw_key).strip()
-            canonical = key.upper()
-            if not key:
-                continue
-            if canonical in forbidden_upper and canonical not in self._granted_upper:
-                # Forbidden / "core" key without an owner grant — drop
-                # silently so a malicious or buggy plugin cannot probe
-                # for its presence by ``get_settings`` length.
-                continue
-            if key not in self._env_allow and canonical not in self._env_allow_upper:
-                continue
-            settings_key = canonical if canonical in forbidden_upper else key
-            if settings_key in settings:
-                out[settings_key] = settings[settings_key]
-        return out
+        with self._api_lock:
+            with _lock:
+                if self._runtime_closing or self._runtime_closed or self._skill in _unloading:
+                    return {}
+            if "read_settings" not in self._permissions:
+                # Read without the permission → empty dict (fail silent for
+                # forward-compat, but never leak). Reviewer catches the
+                # missing permission.
+                return {}
+            settings = self._settings_reader() or {}
+            with _lock:
+                if self._runtime_closing or self._runtime_closed or self._skill in _unloading:
+                    return {}
+            out: Dict[str, Any] = {}
+            forbidden_upper = {k.upper() for k in FORBIDDEN_EXTENSION_SETTINGS}
+            for raw_key in keys or ():
+                key = str(raw_key).strip()
+                canonical = key.upper()
+                if not key:
+                    continue
+                if canonical in forbidden_upper and canonical not in self._granted_upper:
+                    # Forbidden / "core" key without an owner grant — drop
+                    # silently so a malicious or buggy plugin cannot probe
+                    # for its presence by ``get_settings`` length.
+                    continue
+                if key not in self._env_allow and canonical not in self._env_allow_upper:
+                    continue
+                settings_key = canonical if canonical in forbidden_upper else key
+                if settings_key in settings:
+                    out[settings_key] = settings[settings_key]
+            return out
 
     def get_state_dir(self) -> str:
         return str(self._state_dir)
@@ -734,12 +818,14 @@ def reconcile_extension(
     retry_load_error: bool = False,
 ) -> Dict[str, Any]:
     """Unload/load one extension so every surface sees the same live state."""
-    with _lock:
+    lifecycle_lock = _lifecycle_lock_for(skill_name)
+    with lifecycle_lock:
         state = runtime_state_for_skill_name(skill_name, drive_root, repo_path=repo_path)
         loaded_present = bool(state.get("loaded_present"))
         was_live = bool(state.get("live_loaded"))
         if retry_load_error and state.get("reason") == "load_error" and not was_live:
-            _load_failures.pop(skill_name, None)
+            with _lock:
+                _load_failures.pop(skill_name, None)
             state = runtime_state_for_skill_name(skill_name, drive_root, repo_path=repo_path)
             loaded_present = bool(state.get("loaded_present"))
             was_live = bool(state.get("live_loaded"))
@@ -778,11 +864,12 @@ def reconcile_extension(
             unload_extension(skill_name)
         err = load_extension(loaded, settings_reader, drive_root=drive_root)
         if err:
-            _load_failures[skill_name] = _ExtensionLoadFailure(
-                content_hash=loaded.content_hash,
-                skill_dir=str(loaded.skill_dir.resolve()),
-                error=err,
-            )
+            with _lock:
+                _load_failures[skill_name] = _ExtensionLoadFailure(
+                    content_hash=loaded.content_hash,
+                    skill_dir=str(loaded.skill_dir.resolve()),
+                    error=err,
+                )
             state["reason"] = "load_error"
             state["load_error"] = err
             state["action"] = "extension_load_error"
@@ -930,9 +1017,11 @@ def load_extension(
             bundle.content_hash = current_hash
             bundle.skill_dir = str(skill.skill_dir.resolve())
             bundle.import_root = str(staged_import_root) if staged_import_root is not None else None
+            bundle.api_instances.append(api)
             _extension_modules[skill.name] = module
             _load_failures.pop(skill.name, None)
         register(api)
+        api._close_registration()
     except ExtensionRegistrationError as exc:
         # Tear down any partial registrations the plugin managed before
         # the error.
@@ -949,6 +1038,12 @@ def load_extension(
 
 
 def unload_extension(skill_name: str) -> None:
+    lifecycle_lock = _lifecycle_lock_for(skill_name)
+    with lifecycle_lock:
+        _unload_extension_locked(skill_name)
+
+
+def _unload_extension_locked(skill_name: str) -> None:
     """Remove every registration attached by ``skill_name`` + drop the
     module (and every submodule) from ``sys.modules`` so a subsequent
     load re-imports cleanly.
@@ -963,6 +1058,10 @@ def unload_extension(skill_name: str) -> None:
         bundle = _extensions.pop(skill_name, None)
         _extension_modules.pop(skill_name, None)
         import_root = pathlib.Path(bundle.import_root) if bundle and bundle.import_root else None
+        callbacks = list(bundle.unload_callbacks) if bundle else []
+        api_instances = list(bundle.api_instances) if bundle else []
+        if bundle:
+            _unloading.add(skill_name)
         if bundle:
             for key in bundle.tools:
                 _tools.pop(key, None)
@@ -972,13 +1071,23 @@ def unload_extension(skill_name: str) -> None:
                 _ws_handlers.pop(key, None)
             for key in bundle.ui_tabs:
                 _ui_tabs.pop(key, None)
-    prefix = _module_key(skill_name)
-    # Iterate over a copy so we can mutate ``sys.modules`` safely.
-    for mod_name in list(sys.modules.keys()):
-        if mod_name == prefix or mod_name.startswith(prefix + "."):
-            sys.modules.pop(mod_name, None)
-    if import_root is not None:
-        shutil.rmtree(import_root, ignore_errors=True)
+    for api in api_instances:
+        close = getattr(api, "_close_runtime_access", None)
+        if callable(close):
+            close()
+    try:
+        for callback in callbacks:
+            _run_unload_callback(skill_name, callback)
+        prefix = _module_key(skill_name)
+        # Iterate over a copy so we can mutate ``sys.modules`` safely.
+        for mod_name in list(sys.modules.keys()):
+            if mod_name == prefix or mod_name.startswith(prefix + "."):
+                sys.modules.pop(mod_name, None)
+        if import_root is not None:
+            shutil.rmtree(import_root, ignore_errors=True)
+    finally:
+        with _lock:
+            _unloading.discard(skill_name)
 
 
 def reload_all(

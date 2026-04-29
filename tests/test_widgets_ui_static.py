@@ -33,6 +33,19 @@ def test_widgets_support_declarative_schema_components():
     assert "rememberFormValues();" in source
     assert "formValues[idx][field.name] = fieldValue(form, field);" in source
     assert "String(optValue) === String(saved ?? '')" in source
+    assert "component.auto_start === true" in source
+    assert "queueMicrotask(() => startPoll(idx));" in source
+    assert "boundedNumber(spec.interval_ms, 2000, 1000, 30000)" in source
+    assert "disposeMountedWidgets();" in source
+    assert "timers.forEach((timer) => clearTimeout(timer));" in source
+    assert "const controller = new AbortController();" in source
+    assert "controllers.forEach((controller) => controller.abort());" in source
+    assert "event.detail?.page === 'widgets'" in source
+    assert "disposeMountedWidgets();" in source.split("window.addEventListener('ouro:page-shown'")[1]
+    assert "let renderGeneration = 0;" in source
+    assert "generation !== renderGeneration" in source
+    assert "widgetsVisible = false;" in source
+    assert "if (!widgetsVisible || generation !== renderGeneration) return;" in source
 
 
 def test_widgets_escape_and_sanitize_untrusted_content():

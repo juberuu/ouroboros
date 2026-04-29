@@ -797,6 +797,7 @@ def test_plugin_api_surface_is_frozen():
         "register_route",
         "register_ws_handler",
         "register_ui_tab",
+        "on_unload",
         "log",
         "get_settings",
         "get_state_dir",
@@ -805,8 +806,8 @@ def test_plugin_api_surface_is_frozen():
         m for m in dir(PluginAPI)
         if not m.startswith("_") and callable(getattr(PluginAPI, m, None))
     }
-    assert expected <= members, (
-        f"PluginAPI lost required method(s): {expected - members}"
+    assert members == expected, (
+        f"PluginAPI method set changed. Missing={expected - members}; extra={members - expected}"
     )
 
 

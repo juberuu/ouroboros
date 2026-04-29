@@ -1,4 +1,4 @@
-# Ouroboros v5.3.1 — Architecture & Reference
+# Ouroboros v5.3.2 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -308,7 +308,7 @@ The web UI is a single-page app (`web/index.html` + `web/style.css` + ES modules
 - `settings_catalog.js` — optional model-catalog refresh helper; handles `/api/model-catalog`, browser timeout, stale-response suppression, and model-picker catalog broadcasts
 - `costs.js` — cost breakdown tables
 - `skills.js` — Skills page (discover + enable/disable + review trigger + key-grant state + live-vs-catalog extension status; reads `/api/state` + `/api/extensions`, writes through `/api/skills/<name>/toggle` + `/api/skills/<name>/review`, and requests key grants through the desktop launcher bridge)
-- `widgets.js` — Widgets page for reviewed extension UI surfaces declared through `register_ui_tab`; hosts legacy `inline_card`/`iframe` plus declarative v1 widgets (forms/actions, markdown, JSON, key/value, tables, progress, files, galleries, image/audio/video media)
+- `widgets.js` — Widgets page for reviewed extension UI surfaces declared through `register_ui_tab`; hosts legacy `inline_card`/`iframe` plus declarative v1 widgets (forms/actions, markdown, JSON, key/value, tables, progress, poll with `auto_start`, files, galleries, image/audio/video media) and tears down widget timers on remount.
 - `about.js` — about page
 
 Navigation is a left sidebar with 9 pages (Chat, Files, Logs, Costs, Evolution, Skills, Widgets, Settings, About). On narrow viewports (`@media (max-width: 640px)`) `#nav-rail` collapses to a horizontal bottom bar — `position: fixed; bottom: 0; flex-direction: row` with `padding-bottom: calc(6px + env(safe-area-inset-bottom, 0px))` for the iOS home-indicator, `overflow-x: auto` horizontal scroll if many items, and `#content { padding-left: 0; padding-bottom: calc(62px + env(safe-area-inset-bottom, 0px)) }` to clear the bar. The Skills page manages external + bundled skill packages — review trigger, key grants, enable/disable, status badges, and live-vs-catalog extension state — and reads from `/api/state` + `/api/extensions`. The Widgets page hosts reviewed extension UI declarations separately so useful widgets do not get buried in long skill lists.
@@ -1891,7 +1891,7 @@ via `tests/test_contracts.py`.
 | `ToolContextProtocol` — 6-attribute + 3-method minimum every tool handler relies on (attributes: `repo_dir`, `drive_root`, `pending_events`, `emit_progress_fn`, `current_chat_id`, `task_id`; methods: `repo_path`, `drive_path`, `drive_logs`) | `ouroboros/contracts/tool_context.py` | `ouroboros.tools.registry.ToolContext` must satisfy it (duck-typed check + AST field parity) |
 | `ToolEntryProtocol` + `GetToolsProtocol` — the tool-module ABI | `ouroboros/contracts/tool_abi.py` | Every entry returned by `ToolRegistry._entries` must satisfy `ToolEntryProtocol` |
 | `api_v1` WS/HTTP envelopes — inbound: `ChatInbound`, `CommandInbound`; outbound WS: `ChatOutbound`, `PhotoOutbound`, `TypingOutbound`, `LogOutbound`; HTTP: `HealthResponse`, `StateResponse` (Phase 2 adds `runtime_mode: str` and `skills_repo_configured: bool`), `EvolutionStateSnapshot`, `SettingsNetworkMeta` | `ouroboros/contracts/api_v1.py` | AST scans of `supervisor/message_bus.py` chat envelopes, `server.py::api_state`, `server.py::api_health`, `server.py::_build_network_meta`, and `server.py::ws_endpoint` inbound dispatch assert no un-declared keys leak out; `tests/test_contracts.py::test_state_response_declares_phase2_runtime_mode_keys` explicitly pins the two new Phase 2 fields |
-| `PluginAPI` (Phase 4) + `ExtensionRegistrationError` + `FORBIDDEN_EXTENSION_SETTINGS` + `VALID_EXTENSION_PERMISSIONS` + `VALID_EXTENSION_ROUTE_METHODS` — the surface every `type: extension` skill's `plugin.py::register(api)` binds against (`register_tool`, `register_route`, `register_ws_handler`, `register_ui_tab`, `log`, `get_settings`, `get_state_dir`). `VALID_EXTENSION_ROUTE_METHODS` is the frozen tuple of HTTP methods accepted by `register_route`; the Phase 5 catch-all dispatcher in `server.py` validates against the same set. | `ouroboros/contracts/plugin_api.py` | `tests/test_contracts.py::test_plugin_api_surface_is_frozen` pins the frozen method set; `tests/test_contracts.py::test_extension_route_methods_contract_matches_server_dispatch` pins the route-methods tuple; `tests/test_extension_loader.py::test_plugin_api_impl_matches_protocol` asserts the concrete `PluginAPIImpl` structurally satisfies the runtime-checkable Protocol |
+| `PluginAPI` (Phase 4) + `ExtensionRegistrationError` + `FORBIDDEN_EXTENSION_SETTINGS` + `VALID_EXTENSION_PERMISSIONS` + `VALID_EXTENSION_ROUTE_METHODS` — the surface every `type: extension` skill's `plugin.py::register(api)` binds against (`register_tool`, `register_route`, `register_ws_handler`, `register_ui_tab`, `on_unload`, `log`, `get_settings`, `get_state_dir`). `VALID_EXTENSION_ROUTE_METHODS` is the frozen tuple of HTTP methods accepted by `register_route`; the Phase 5 catch-all dispatcher in `server.py` validates against the same set. | `ouroboros/contracts/plugin_api.py` | `tests/test_contracts.py::test_plugin_api_surface_is_frozen` pins the frozen method set; `tests/test_contracts.py::test_extension_route_methods_contract_matches_server_dispatch` pins the route-methods tuple; `tests/test_extension_loader.py::test_plugin_api_impl_matches_protocol` asserts the concrete `PluginAPIImpl` structurally satisfies the runtime-checkable Protocol |
 | `SkillManifest` — unified `SKILL.md` / `skill.json` format (`type: instruction \| script \| extension`) | `ouroboros/contracts/skill_manifest.py` | `parse_skill_manifest_text()` tolerates missing optional fields; `validate()` returns warnings without raising |
 | `schema_versions` — opt-in `_schema_version` key + `with_schema_version`/`read_schema_version` helpers | `ouroboros/contracts/schema_versions.py` | Not yet wired into existing state files; groundwork only |
 
@@ -2140,15 +2140,19 @@ Lifecycle:
     weather-shaped ``inline_card`` hosts and adds declarative render
     schema v1: ``{"kind": "declarative", "schema_version": 1,
     "components": [...]}``. The browser-owned renderer supports
-    forms/actions, status/progress/polling, markdown, JSON, key/value
+    forms/actions, status/progress/polling (including `auto_start` polls
+    whose timers are cleaned up when the widget remounts), markdown, JSON, key/value
     summaries, tables, file links, galleries, and image/audio/video
     media sourced from extension routes or safe data URLs. Same-origin
     dynamic JS modules are intentionally not supported because they
     could call privileged app APIs from the SPA origin; iframe widgets
     remain sandboxed with no relaxed sandbox tokens.
+  - ``on_unload(callback)`` registers best-effort cleanup for extension-owned
+    resources (threads, sockets, EventSource clients, temporary workers). It
+    does not require a manifest permission because it only narrows lifetime.
 4. ``unload_extension(skill)`` is the inverse: iterates the per-skill
    registration bundle and pops every attached tool/route/ws_handler/
-   ui_tab, then drops the module from ``sys.modules``.
+   ui_tab, invokes registered unload callbacks, then drops the module from ``sys.modules``.
    ``toggle_skill(enabled=False)`` and ``reload_all`` both go through
    this path so disabling an extension is atomic.
 

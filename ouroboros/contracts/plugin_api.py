@@ -25,6 +25,7 @@ The surface intentionally mirrors what the Phase 3 plan approved:
 - ``register_ws_handler``— attach a handler for WS message types
                            namespaced the same provider-safe way.
 - ``register_ui_tab``    — declare a reviewed Widgets-page surface.
+- ``on_unload``          — register cleanup for background resources.
 - ``log``                — structured logger (the extension does not
                            touch ``logging``/``print`` directly).
 - ``get_settings``       — read-only view of settings keys the skill's
@@ -163,6 +164,18 @@ class PluginAPI(Protocol):
         Same-origin dynamic widget modules are not part of this
         contract because they could call privileged app APIs from the
         SPA origin."""
+        ...
+
+    def on_unload(self, callback: Callable[[], Any]) -> None:
+        """Register a best-effort cleanup callback.
+
+        The extension loader invokes callbacks when the owning skill is
+        disabled, reloaded, made stale, or otherwise unloaded. Callbacks
+        should be fast and idempotent: close sockets, stop EventSource
+        clients, signal worker threads, or terminate child processes
+        owned by the extension. Exceptions are logged and do not prevent
+        registry teardown.
+        """
         ...
 
     # --- runtime access ---

@@ -37,6 +37,8 @@ def _clear_loader_state(monkeypatch):
         extension_loader._extensions.clear()
         extension_loader._extension_modules.clear()
         extension_loader._load_failures.clear()
+        extension_loader._unloading.clear()
+        extension_loader._lifecycle_locks.clear()
         extension_loader._tools.clear()
         extension_loader._routes.clear()
         extension_loader._ws_handlers.clear()
@@ -46,6 +48,8 @@ def _clear_loader_state(monkeypatch):
         extension_loader._extensions.clear()
         extension_loader._extension_modules.clear()
         extension_loader._load_failures.clear()
+        extension_loader._unloading.clear()
+        extension_loader._lifecycle_locks.clear()
         extension_loader._tools.clear()
         extension_loader._routes.clear()
         extension_loader._ws_handlers.clear()
@@ -503,13 +507,198 @@ def test_register_ui_tab_accepts_declarative_poll_component(tmp_path):
         tmp_path,
         "pollui",
         "def register(api):\n"
-        "    api.register_ui_tab('poll', 'Poll', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'poll', 'route': 'status'}]})\n",
+        "    api.register_ui_tab('poll', 'Poll', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'poll', 'route': 'status', 'auto_start': True}]})\n",
         permissions=["widget"],
     )
     err = extension_loader.load_extension(loaded, lambda: {})
     assert err is None, err
     snap = extension_loader.snapshot()
     assert snap["ui_tabs"][0]["render"]["components"][0]["type"] == "poll"
+    assert snap["ui_tabs"][0]["render"]["components"][0]["auto_start"] is True
+
+
+def test_on_unload_callback_runs_during_unload(tmp_path):
+    loaded, _, drive_root = _prepare_extension(
+        tmp_path,
+        "cleanup_ext",
+        "import pathlib\n"
+        "def register(api):\n"
+        "    state_dir = pathlib.Path(api.get_state_dir())\n"
+        "    api.on_unload(lambda: (state_dir / 'cleanup.txt').write_text('done', encoding='utf-8'))\n"
+        "    api.register_tool('ping', lambda **kw: 'pong', description='ping', schema={})\n",
+        permissions=["tool"],
+    )
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
+    assert err is None, err
+
+    extension_loader.unload_extension("cleanup_ext")
+
+    cleanup_file = drive_root / "state" / "skills" / "cleanup_ext" / "cleanup.txt"
+    assert cleanup_file.read_text(encoding="utf-8") == "done"
+    assert extension_loader.snapshot()["tools"] == []
+
+
+def test_on_unload_callback_error_does_not_block_teardown(tmp_path):
+    loaded, _, drive_root = _prepare_extension(
+        tmp_path,
+        "bad_cleanup_ext",
+        "def register(api):\n"
+        "    api.on_unload(lambda: (_ for _ in ()).throw(RuntimeError('boom')))\n"
+        "    api.register_tool('ping', lambda **kw: 'pong', description='ping', schema={})\n",
+        permissions=["tool"],
+    )
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
+    assert err is None, err
+
+    extension_loader.unload_extension("bad_cleanup_ext")
+
+    assert extension_loader.snapshot()["tools"] == []
+
+
+def test_on_unload_callback_cannot_reregister_surfaces(tmp_path):
+    loaded, _, drive_root = _prepare_extension(
+        tmp_path,
+        "ghost_ext",
+        "def register(api):\n"
+        "    api.on_unload(lambda: api.register_tool('ghost', lambda **kw: 'boo', description='ghost', schema={}))\n"
+        "    api.register_tool('ping', lambda **kw: 'pong', description='ping', schema={})\n",
+        permissions=["tool"],
+    )
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
+    assert err is None, err
+
+    extension_loader.unload_extension("ghost_ext")
+
+    snap = extension_loader.snapshot()
+    assert snap["extensions"] == []
+    assert snap["tools"] == []
+
+
+def test_on_unload_delayed_callback_cannot_reregister_surfaces(tmp_path):
+    import time
+
+    loaded, _, drive_root = _prepare_extension(
+        tmp_path,
+        "delayed_ghost_ext",
+        "import threading, time\n"
+        "def register(api):\n"
+        "    def cleanup():\n"
+        "        def later():\n"
+        "            time.sleep(0.1)\n"
+        "            try:\n"
+        "                api.register_tool('ghost', lambda **kw: 'boo', description='ghost', schema={})\n"
+        "            except Exception:\n"
+        "                pass\n"
+        "        threading.Thread(target=later).start()\n"
+        "    api.on_unload(cleanup)\n"
+        "    api.register_tool('ping', lambda **kw: 'pong', description='ping', schema={})\n",
+        permissions=["tool"],
+    )
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
+    assert err is None, err
+
+    extension_loader.unload_extension("delayed_ghost_ext")
+    time.sleep(0.3)
+
+    snap = extension_loader.snapshot()
+    assert snap["extensions"] == []
+    assert snap["tools"] == []
+
+
+def test_delayed_post_load_registration_is_rejected(tmp_path):
+    import time
+
+    loaded, _, drive_root = _prepare_extension(
+        tmp_path,
+        "late_register_ext",
+        "import threading, time\n"
+        "def register(api):\n"
+        "    api.register_tool('ping', lambda **kw: 'pong', description='ping', schema={})\n"
+        "    def later():\n"
+        "        time.sleep(0.1)\n"
+        "        try:\n"
+        "            api.register_tool('ghost', lambda **kw: 'boo', description='ghost', schema={})\n"
+        "        except Exception:\n"
+        "            pass\n"
+        "    threading.Thread(target=later).start()\n",
+        permissions=["tool"],
+    )
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
+    assert err is None, err
+    time.sleep(0.3)
+
+    snap = extension_loader.snapshot()
+    assert snap["tools"] == [extension_loader.extension_surface_name("late_register_ext", "ping")]
+
+
+def test_reconcile_unload_callbacks_do_not_hold_loader_lock(tmp_path):
+    loaded, _, drive_root = _prepare_extension(
+        tmp_path,
+        "lock_probe",
+        "import pathlib, threading\n"
+        "def register(api):\n"
+        "    state_dir = pathlib.Path(api.get_state_dir())\n"
+        "    def cleanup():\n"
+        "        done = state_dir / 'snapshot_done.txt'\n"
+        "        def worker():\n"
+        "            from ouroboros import extension_loader\n"
+        "            extension_loader.snapshot()\n"
+        "            done.write_text('done', encoding='utf-8')\n"
+        "        thread = threading.Thread(target=worker)\n"
+        "        thread.start()\n"
+        "        thread.join(timeout=1.0)\n"
+        "        if not done.exists():\n"
+        "            raise RuntimeError('snapshot blocked by loader lock')\n"
+        "    api.on_unload(cleanup)\n"
+        "    api.register_tool('ping', lambda **kw: 'pong', description='ping', schema={})\n",
+        permissions=["tool"],
+    )
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
+    assert err is None, err
+
+    # Make the extension undesired so reconcile unloads it through the normal path.
+    save_enabled(drive_root, "lock_probe", False)
+    state = extension_loader.reconcile_extension("lock_probe", drive_root, lambda: {})
+
+    done_file = drive_root / "state" / "skills" / "lock_probe" / "snapshot_done.txt"
+    assert done_file.read_text(encoding="utf-8") == "done"
+    assert state["action"] == "extension_unloaded"
+
+
+def test_concurrent_reconcile_converges_to_one_live_extension(tmp_path):
+    import threading
+
+    loaded, _, drive_root = _prepare_extension(
+        tmp_path,
+        "race_ext",
+        "import time\n"
+        "def register(api):\n"
+        "    time.sleep(0.05)\n"
+        "    api.register_tool('ping', lambda **kw: 'pong', description='ping', schema={})\n",
+        permissions=["tool"],
+    )
+
+    results = []
+    repo_path = str(tmp_path / "skills")
+    threads = [
+        threading.Thread(
+            target=lambda: results.append(
+                extension_loader.reconcile_extension("race_ext", drive_root, lambda: {}, repo_path=repo_path)
+            )
+        )
+        for _ in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2.0)
+
+    assert len(results) == 2
+    assert {r["action"] for r in results} <= {"extension_loaded", "extension_already_live"}
+    snap = extension_loader.snapshot()
+    assert snap["extensions"] == ["race_ext"]
+    assert snap["tools"] == [extension_loader.extension_surface_name("race_ext", "ping")]
+    assert extension_loader.runtime_state_for_skill_name("race_ext", drive_root, repo_path=repo_path)["reason"] == "ready"
 
 
 def test_load_extension_permission_gate_tool(tmp_path):
@@ -791,6 +980,80 @@ def test_get_settings_blocks_core_keys_without_grant(tmp_path):
     assert got["TIMEZONE"] == "UTC"
     assert got["MY_OK"] == "visible"
     assert "RANDOM_OTHER" not in got
+    impl._close_runtime_access()
+    assert impl.get_settings(["TIMEZONE", "MY_OK"]) == {}
+
+
+def test_get_settings_rechecks_runtime_close_after_reader_returns(tmp_path):
+    import threading
+
+    reader_started = threading.Event()
+    release_reader = threading.Event()
+
+    def settings_reader():
+        reader_started.set()
+        assert release_reader.wait(1.0)
+        return {"MY_OK": "visible"}
+
+    impl = extension_loader.PluginAPIImpl(
+        skill_name="settings_race",
+        permissions=["read_settings"],
+        env_allowlist=["MY_OK"],
+        state_dir=tmp_path,
+        settings_reader=settings_reader,
+    )
+    result = []
+    thread = threading.Thread(target=lambda: result.append(impl.get_settings(["MY_OK"])))
+    thread.start()
+    assert reader_started.wait(1.0)
+    close_done = threading.Event()
+    close_thread = threading.Thread(target=lambda: (impl._close_runtime_access(), close_done.set()))
+    close_thread.start()
+    assert not close_done.wait(0.1)
+    release_reader.set()
+    thread.join(timeout=1.0)
+    close_thread.join(timeout=1.0)
+
+    assert close_done.is_set()
+    assert result == [{}]
+    assert impl.get_settings(["MY_OK"]) == {}
+
+
+def test_unload_does_not_deadlock_with_inflight_get_settings(tmp_path):
+    import threading
+    import time
+
+    reader_started = threading.Event()
+    release_reader = threading.Event()
+
+    def settings_reader():
+        reader_started.set()
+        release_reader.wait()
+        return {"MY_OK": "visible"}
+
+    loaded, _, drive_root = _prepare_extension(
+        tmp_path,
+        "settings_unload_race",
+        "import threading\n"
+        "def register(api):\n"
+        "    threading.Thread(target=lambda: api.get_settings(['MY_OK'])).start()\n"
+        "    api.register_tool('ping', lambda **kw: 'pong', description='ping', schema={})\n",
+        permissions=["tool", "read_settings"],
+        env_from_settings=["MY_OK"],
+    )
+    err = extension_loader.load_extension(loaded, settings_reader, drive_root=drive_root)
+    assert err is None, err
+    assert reader_started.wait(1.0)
+
+    unload_done = threading.Event()
+    unload_thread = threading.Thread(target=lambda: (extension_loader.unload_extension("settings_unload_race"), unload_done.set()))
+    unload_thread.start()
+    time.sleep(0.1)
+    release_reader.set()
+    unload_thread.join(timeout=1.0)
+
+    assert unload_done.is_set()
+    assert extension_loader.snapshot()["extensions"] == []
 
 
 def test_load_extension_rejects_grant_with_stale_content_hash(tmp_path):
