@@ -331,6 +331,17 @@ skill trust/control-plane state: they are mutated only through the review,
 toggle, launcher-grant, and marketplace paths, not through generic
 agent/browser file writes.
 
+The Skills UI Heal affordance is only a task starter: it asks Ouroboros
+to edit payload files and rerun `review_skill`. It must not write
+trust/control-plane state directly, auto-enable a repaired skill, or
+grant keys. Heal tasks carry a `HEAL_MODE_NO_ENABLE` marker so deterministic
+tool guards allow only `list_skills`, payload-oriented read/write tools,
+and `review_skill`, and block `toggle_skill`, `skill_exec`, shell/browser
+indirection, extension tools, repo mutation, and subtask delegation while
+the repair task is active.
+Payload data access is scoped to the selected non-native skill under
+`data/skills/external/<skill>/` or `data/skills/clawhub/<skill>/`.
+
 ### Output contract
 
 Reviewers return a JSON array with one entry per item below (7 entries

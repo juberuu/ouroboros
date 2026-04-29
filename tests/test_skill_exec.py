@@ -108,6 +108,14 @@ def _mark_reviewed_and_enabled(drive_root: pathlib.Path, skill_dir: pathlib.Path
     )
 
 
+def _mark_reviewed(drive_root: pathlib.Path, skill_dir: pathlib.Path, name: str):
+    save_review_state(
+        drive_root,
+        name,
+        SkillReviewState(status="pass", content_hash=compute_content_hash(skill_dir)),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tool registration
 # ---------------------------------------------------------------------------
@@ -451,9 +459,10 @@ def test_skill_exec_runs_in_light_mode(tmp_path, monkeypatch):
 
 def test_toggle_skill_persists_enable_state(tmp_path, monkeypatch):
     skills_root = tmp_path / "skills"
-    _build_skill(skills_root, "alpha")
+    skill_dir = _build_skill(skills_root, "alpha")
     ctx = _make_ctx(tmp_path)
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    _mark_reviewed(ctx.drive_root, skill_dir, "alpha")
 
     # Enable, then disable.
     enabled_resp = json.loads(skill_exec_mod._handle_toggle_skill(ctx, skill="alpha", enabled=True))
@@ -462,6 +471,167 @@ def test_toggle_skill_persists_enable_state(tmp_path, monkeypatch):
 
     disabled_resp = json.loads(skill_exec_mod._handle_toggle_skill(ctx, skill="alpha", enabled=False))
     assert disabled_resp["enabled"] is False
+
+
+def test_toggle_skill_blocked_in_heal_context(tmp_path, monkeypatch):
+    skills_root = tmp_path / "skills"
+    skill_dir = _build_skill(skills_root, "alpha")
+    ctx = _make_ctx(tmp_path)
+    ctx.messages = [{"role": "user", "content": 'HEAL_MODE_NO_ENABLE\nHEAL_SKILL_NAME_JSON="alpha"\nHEAL_SKILL_PAYLOAD_ROOT_JSON="skills/external/alpha"\nrepair alpha'}]
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    _mark_reviewed(ctx.drive_root, skill_dir, "alpha")
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+    registry._ctx = ctx
+
+    result = registry.execute("toggle_skill", {"skill": "alpha", "enabled": True})
+
+    assert "HEAL_MODE_BLOCKED" in result
+
+
+@pytest.mark.parametrize("tool_name,args", [
+    ("run_shell", {"cmd": ["python", "-c", "print('x')"]}),
+    ("browse_page", {"url": "http://127.0.0.1"}),
+    ("browser_action", {"action": "evaluate", "value": "fetch('/api/skills/x/toggle')"}),
+    ("schedule_task", {"text": "enable skill"}),
+    ("skill_exec", {"skill": "alpha", "script": "hello.py"}),
+    ("repo_write", {"path": "x.txt", "content": "x"}),
+    ("str_replace_editor", {"path": "x.txt", "old": "a", "new": "b"}),
+    ("claude_code_edit", {"prompt": "edit repo"}),
+])
+def test_heal_context_blocks_indirect_enable_paths(tool_name, args, tmp_path):
+    ctx = _make_ctx(tmp_path)
+    ctx.messages = [{"role": "user", "content": 'HEAL_MODE_NO_ENABLE\nHEAL_SKILL_NAME_JSON="alpha"\nHEAL_SKILL_PAYLOAD_ROOT_JSON="skills/external/alpha"\nrepair alpha'}]
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+    registry._ctx = ctx
+
+    result = registry.execute(tool_name, args)
+
+    assert "HEAL_MODE_BLOCKED" in result
+
+
+def test_heal_context_allows_payload_tools_and_review(tmp_path):
+    ctx = _make_ctx(tmp_path)
+    ctx.messages = [{"role": "user", "content": 'HEAL_MODE_NO_ENABLE\nHEAL_SKILL_NAME_JSON="alpha"\nHEAL_SKILL_PAYLOAD_ROOT_JSON="skills/external/alpha"\nrepair alpha'}]
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+    registry._ctx = ctx
+
+    result = registry.execute("data_write", {"path": "skills/external/alpha/notes.txt", "content": "x"})
+
+    assert "HEAL_MODE_BLOCKED" not in result
+    assert "OK" in result
+
+
+@pytest.mark.parametrize("tool_name,args", [
+    ("data_write", {"path": "memory/identity.md", "content": "x"}),
+    ("data_read", {"path": "settings.json"}),
+    ("data_list", {"dir": "memory"}),
+    ("review_skill", {"skill": "beta"}),
+])
+def test_heal_context_blocks_out_of_scope_data_access(tool_name, args, tmp_path):
+    ctx = _make_ctx(tmp_path)
+    ctx.messages = [{"role": "user", "content": 'HEAL_MODE_NO_ENABLE\nHEAL_SKILL_NAME_JSON="alpha"\nHEAL_SKILL_PAYLOAD_ROOT_JSON="skills/external/alpha"\nrepair alpha'}]
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+    registry._ctx = ctx
+
+    result = registry.execute(tool_name, args)
+
+    assert "HEAL_MODE_BLOCKED" in result
+
+
+def test_heal_context_blocks_symlink_escape_from_selected_skill(tmp_path):
+    ctx = _make_ctx(tmp_path)
+    ctx.messages = [{"role": "user", "content": 'HEAL_MODE_NO_ENABLE\nHEAL_SKILL_NAME_JSON="alpha"\nHEAL_SKILL_PAYLOAD_ROOT_JSON="skills/external/alpha"\nrepair alpha'}]
+    skill_root = pathlib.Path(ctx.drive_root) / "skills" / "external" / "alpha"
+    memory_root = pathlib.Path(ctx.drive_root) / "memory"
+    skill_root.mkdir(parents=True)
+    memory_root.mkdir()
+    (memory_root / "identity.md").write_text("secret-ish", encoding="utf-8")
+    try:
+        (skill_root / "escape").symlink_to(memory_root / "identity.md")
+    except (OSError, NotImplementedError):
+        pytest.skip("Symlinks unavailable on this filesystem")
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+    registry._ctx = ctx
+
+    result = registry.execute("data_read", {"path": "skills/external/alpha/escape"})
+
+    assert "HEAL_MODE_BLOCKED" in result
+
+
+def test_heal_context_blocks_wrong_source_root(tmp_path):
+    ctx = _make_ctx(tmp_path)
+    ctx.messages = [{"role": "user", "content": 'HEAL_MODE_NO_ENABLE\nHEAL_SKILL_NAME_JSON="alpha"\nHEAL_SKILL_PAYLOAD_ROOT_JSON="skills/clawhub/alpha"\nrepair alpha'}]
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+    registry._ctx = ctx
+
+    result = registry.execute("data_write", {"path": "skills/external/alpha/notes.txt", "content": "x"})
+
+    assert "HEAL_MODE_BLOCKED" in result
+
+
+def test_heal_context_blocks_native_payload_root_marker(tmp_path):
+    ctx = _make_ctx(tmp_path)
+    ctx.messages = [{"role": "user", "content": 'HEAL_MODE_NO_ENABLE\nHEAL_SKILL_NAME_JSON="alpha"\nHEAL_SKILL_PAYLOAD_ROOT_JSON="skills/native/alpha"\nrepair alpha'}]
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+    registry._ctx = ctx
+
+    result = registry.execute("data_read", {"path": "skills/native/alpha/SKILL.md"})
+
+    assert "HEAL_MODE_BLOCKED" in result
+
+
+def test_heal_context_rejects_traversal_skill_marker(tmp_path):
+    ctx = _make_ctx(tmp_path)
+    ctx.messages = [{"role": "user", "content": 'HEAL_MODE_NO_ENABLE\nHEAL_SKILL_NAME_JSON="../.."\nHEAL_SKILL_PAYLOAD_ROOT_JSON="../../"\nrepair'}]
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+    registry._ctx = ctx
+
+    result = registry.execute("data_read", {"path": "settings.json"})
+
+    assert "HEAL_MODE_BLOCKED" in result
+
+
+def test_heal_context_rejects_traversal_payload_root_marker(tmp_path):
+    ctx = _make_ctx(tmp_path)
+    ctx.messages = [{"role": "user", "content": 'HEAL_MODE_NO_ENABLE\nHEAL_SKILL_NAME_JSON="alpha"\nHEAL_SKILL_PAYLOAD_ROOT_JSON="skills/external/alpha/../../memory"\nrepair'}]
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+    registry._ctx = ctx
+
+    result = registry.execute("data_read", {"path": "memory/identity.md"})
+
+    assert "HEAL_MODE_BLOCKED" in result
+
+
+def test_heal_review_does_not_reconcile_live_extension(tmp_path, monkeypatch):
+    import types
+
+    ctx = _make_ctx(tmp_path)
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir()
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    ctx.messages = [{"role": "user", "content": 'HEAL_MODE_NO_ENABLE\nHEAL_SKILL_NAME_JSON="alpha"\nHEAL_SKILL_PAYLOAD_ROOT_JSON="skills/external/alpha"\nrepair alpha'}]
+    calls = []
+
+    monkeypatch.setattr(
+        skill_exec_mod,
+        "_review_skill_impl",
+        lambda _ctx, skill_name: types.SimpleNamespace(
+            skill_name=skill_name,
+            status="pass",
+            content_hash="hash",
+            reviewer_models=[],
+            findings=[],
+            error="",
+        ),
+    )
+
+    from ouroboros import extension_loader
+    monkeypatch.setattr(extension_loader, "reconcile_extension", lambda *a, **kw: calls.append(a) or {"action": "extension_loaded"})
+
+    result = json.loads(skill_exec_mod._handle_review_skill(ctx, skill="alpha"))
+
+    assert calls == []
+    assert result["extension_reason"] == "heal_review_only"
 
 
 def test_toggle_skill_requires_both_args(tmp_path, monkeypatch):
@@ -478,9 +648,10 @@ def test_toggle_skill_rejects_ambiguous_non_boolean(tmp_path, monkeypatch):
     rather than silently enabling when the caller meant to disable."""
     import json as _json
     skills_root = tmp_path / "skills"
-    _build_skill(skills_root, "alpha")
+    skill_dir = _build_skill(skills_root, "alpha")
     ctx = _make_ctx(tmp_path)
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    _mark_reviewed(ctx.drive_root, skill_dir, "alpha")
 
     # These look booleans-ish but could flip enabled incorrectly under
     # naive ``bool()`` coercion. The handler must accept them ONLY
@@ -497,7 +668,7 @@ def test_toggle_skill_rejects_ambiguous_non_boolean(tmp_path, monkeypatch):
         assert "SKILL_TOGGLE_ERROR" in resp, f"bogus={bogus!r} was accepted: {resp}"
 
 
-def test_toggle_skill_mentions_stale_pass_review(tmp_path, monkeypatch):
+def test_toggle_skill_rejects_stale_pass_review(tmp_path, monkeypatch):
     skills_root = tmp_path / "skills"
     _build_skill(skills_root, "alpha")
     ctx = _make_ctx(tmp_path)
@@ -508,9 +679,9 @@ def test_toggle_skill_mentions_stale_pass_review(tmp_path, monkeypatch):
         SkillReviewState(status="pass", content_hash="OLD_HASH"),
     )
 
-    resp = json.loads(skill_exec_mod._handle_toggle_skill(ctx, skill="alpha", enabled=True))
-    assert resp["enabled"] is True
-    assert "stale PASS verdict" in resp["message"]
+    resp = skill_exec_mod._handle_toggle_skill(ctx, skill="alpha", enabled=True)
+    assert "SKILL_TOGGLE_ERROR" in resp
+    assert "fresh PASS" in resp
 
 
 def test_skill_exec_rejects_misserialized_args(tmp_path, monkeypatch):

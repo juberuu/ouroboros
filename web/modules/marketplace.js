@@ -660,8 +660,8 @@ export function initMarketplace(pane) {
                 } else if (result.review_error) {
                     showStatus(
                         pane,
-                        `Installed ${slug} — AUTO-REVIEW FAILED (${result.review_error}). Skill is non-executable; rerun review from the Skills tab.`,
-                        'danger',
+                        `Installed ${slug} — auto-review failed (${result.review_error}). Open the Installed tab and use Heal to let Ouroboros repair the skill, then rerun review.`,
+                        'warn',
                     );
                 } else {
                     showStatus(pane, `Installed ${slug} — review ${result.review_status}`, result.review_status === 'pass' ? 'ok' : 'warn');
@@ -763,7 +763,7 @@ export function initMarketplace(pane) {
             } else if (result.review_error) {
                 showStatus(
                     pane,
-                    `Installed ${slug} — AUTO-REVIEW FAILED (${result.review_error}). Skill is non-executable; rerun review from the Skills tab.`,
+                    `Installed ${slug} — auto-review failed (${result.review_error}). Open the Installed tab and use Heal to let Ouroboros repair the skill, then rerun review.`,
                     'danger',
                 );
                 const backdrop = modalHost.querySelector('[data-mp-modal]');

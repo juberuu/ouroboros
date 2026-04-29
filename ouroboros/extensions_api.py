@@ -152,6 +152,13 @@ async def api_extensions_index(request: Request) -> JSONResponse:
 
         catalog = []
         for s in skills:
+            payload_root = ""
+            try:
+                rel_skill_dir = s.skill_dir.resolve().relative_to(drive_root.resolve())
+                if rel_skill_dir.parts[:1] == ("skills",):
+                    payload_root = rel_skill_dir.as_posix()
+            except Exception:
+                payload_root = ""
             entry = {
                 "name": s.name,
                 "type": s.manifest.type,
@@ -179,6 +186,7 @@ async def api_extensions_index(request: Request) -> JSONResponse:
                 # /api/extensions catalogue would silently mislabel
                 # clawhub skills as "native" (P6 honesty regression).
                 "source": s.source,
+                "payload_root": payload_root,
             }
             if s.source == "clawhub":
                 try:

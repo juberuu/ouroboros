@@ -1,4 +1,4 @@
-# Ouroboros v5.3.4 — Architecture & Reference
+# Ouroboros v5.3.5 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -307,7 +307,7 @@ The web UI is a single-page app (`web/index.html` + `web/style.css` + ES modules
 - `settings_controls.js` — segmented effort controls
 - `settings_catalog.js` — optional model-catalog refresh helper; handles `/api/model-catalog`, browser timeout, stale-response suppression, and model-picker catalog broadcasts
 - `costs.js` — cost breakdown tables
-- `skills.js` — Skills page (discover + enable/disable + review trigger + key-grant state + live-vs-catalog extension status; reads `/api/state` + `/api/extensions`, writes through `/api/skills/<name>/toggle` + `/api/skills/<name>/review`, and requests key grants through the desktop launcher bridge)
+- `skills.js` — Skills page (discover + enable/disable + review trigger + Heal task affordance for non-native failing skills + key-grant state + live-vs-catalog extension status; reads `/api/state` + `/api/extensions`, writes through `/api/skills/<name>/toggle` + `/api/skills/<name>/review`, sends Heal prompts through `/api/command`, and requests key grants through the desktop launcher bridge)
 - `widgets.js` — Widgets page for reviewed extension UI surfaces declared through `register_ui_tab`; hosts legacy `inline_card`/`iframe` plus declarative v1 widgets (forms/actions, markdown, code, JSON, key/value, tables, tabs, charts, stream, progress, `subscription` WS updates, poll with `auto_start`, files, galleries, image/audio/video media) and tears down widget timers/listeners/streams on remount.
 - `about.js` — about page
 
@@ -488,7 +488,7 @@ authentication. If the password is blank, non-loopback access stays open by desi
 | GET | `/api/extensions` | Phase 5: catalogue of every discovered skill (bundled + `OUROBOROS_SKILLS_REPO_PATH`) plus `extension_loader.snapshot()` of live registrations. |
 | GET | `/api/extensions/{skill}/manifest` | Phase 5: parsed manifest for one skill (name/type/version/permissions/env_from_settings/ui_tab, plus enabled + review status + content hash). |
 | ALL | `/api/extensions/{skill}/{rest:path}` | Phase 5: catch-all dispatcher that forwards to the handler registered via `PluginAPI.register_route`. Honors the registered methods tuple; `405` on method mismatch, `404` on unknown mount. |
-| POST | `/api/skills/{skill}/toggle` | Phase 5: UI-direct enable/disable. Wraps `save_enabled` plus the `extension_loader.load_extension` / `unload_extension` machinery so the Skills page can flip state without round-tripping through the agent. |
+| POST | `/api/skills/{skill}/toggle` | Phase 5: UI-direct enable/disable. Enabling requires a fresh PASS review plus approved grants; disabling remains available to take skills offline. Wraps `save_enabled` plus the `extension_loader.load_extension` / `unload_extension` machinery so the Skills page can flip state without round-tripping through the agent. |
 | POST | `/api/skills/{skill}/review` | Phase 5: UI-direct tri-model review trigger. Offloads the blocking LLM calls to a worker thread via `asyncio.to_thread` so the Starlette event loop keeps serving other requests. |
 | POST | `/api/skills/{skill}/grants` | Sentinel endpoint that returns 403; explicit per-skill core-key grants are owner-only and are written by the desktop launcher bridge after native confirmation. v5.2.2 dual-track: ``type: script`` and ``type: extension`` skills are both eligible (instruction skills are not). |
 | POST | `/api/skills/{skill}/reconcile` | Reload/unload the live extension state after owner key grants or catalogue changes; used by launcher/UI flows to make persisted skill state match runtime registrations. |
@@ -2016,8 +2016,9 @@ collide with a previous load's ``sys.modules`` entries.
    persisting anything, so a transient failure cannot overwrite a
    previously-valid verdict.
 3. **Enable**: ``toggle_skill(skill=name, enabled=True)`` flips the
-   ``enabled.json`` bit. Enabling a skill whose review is not PASS is
-   allowed but not functional.
+   ``enabled.json`` bit only when the skill has a fresh PASS review and
+   any requested core-key grants are already approved. Disable remains
+   allowed so an owner can always take a live skill offline.
 4. **Execute**: ``skill_exec(skill=name, script=path, args=[...])`` runs
    the named script via the runtime declared in the manifest
    (``python``, ``python3``, ``bash``, or ``node``; ``python3`` falls
@@ -2202,7 +2203,7 @@ filtered at search time and refused at install time.
 | ``ouroboros/marketplace/install.py`` | End-to-end pipeline: ``info`` -> ``download`` -> ``stage`` -> ``adapt`` -> atomically swap the staged tree into ``data/skills/clawhub/<sanitized>/`` -> auto-trigger ``review_skill`` -> persist provenance. Also exposes ``update_skill`` (re-install at newer version) and ``uninstall_skill``. |
 | ``ouroboros/marketplace/provenance.py`` | Atomic JSON read/write helper for ``data/state/skills/<name>/clawhub.json``. Schema: ``{schema_version, source, slug, sanitized_name, version, sha256, original_manifest_sha256, translated_manifest_sha256, registry_url, license, primary_env, adapter_warnings, installed_at, updated_at}``. |
 | ``ouroboros/marketplace_api.py`` | Starlette routes wired in ``server.py`` under ``/api/marketplace/clawhub/{search,info,installed,preview,install,update,uninstall}``. Registry and install work dispatch through ``asyncio.to_thread`` to keep the event loop responsive; the old user-facing disabled gate is retired. |
-| ``web/modules/marketplace.js`` | Marketplace UI lazily loaded by the Skills page when the user clicks the ``Marketplace`` tab. Provides lexical search, official-only filtering (server-backed browse, post-enrichment text search), cards, detail-modal (translated manifest table + adapter warnings/blockers + original ``SKILL.openclaw.md`` preview), and install/update/uninstall flows. |
+| ``web/modules/marketplace.js`` | Marketplace UI lazily loaded by the Skills page when the user clicks the ``Marketplace`` tab. Provides lexical search, official-only filtering (server-backed browse, post-enrichment text search), cards, detail-modal (translated manifest table + adapter warnings/blockers + original ``SKILL.openclaw.md`` preview), install/update/uninstall flows, and points auto-review failures to the Installed-tab Heal flow. |
 | ``web/modules/widgets.js`` | Widgets page host for reviewed ``register_ui_tab`` declarations. Supports legacy ``iframe`` / ``inline_card`` and declarative v1 components without loading arbitrary skill JavaScript. |
 
 #### 12.6.2 Frontmatter mapping (OpenClaw -> Ouroboros)

@@ -44,3 +44,11 @@ def test_marketplace_empty_and_timeout_copy_is_human_readable():
     assert "No installable${officialText} skills found ${mode}." in source
     assert "ClawHub did not respond in time. Try again" in source
     assert "packages/search?family=skill" not in source
+
+
+def test_marketplace_review_failure_points_to_heal_flow():
+    source = _marketplace_js()
+    assert "auto-review failed" in source
+    assert "use Heal to let Ouroboros repair the skill" in source
+    assert "AUTO-REVIEW FAILED" not in source
+    assert "rerun review from the Skills tab" not in source

@@ -50,6 +50,7 @@ from ouroboros.skill_loader import (
     compute_content_hash,
     discover_skills,
     find_skill,
+    grant_status_for_skill,
     save_enabled,
     summarize_skills,
 )
@@ -451,6 +452,25 @@ def _handle_review_skill(ctx: ToolContext, skill: str = "", **_kwargs: Any) -> s
         "findings": outcome.findings,
         "error": outcome.error,
     }
+    heal_mode = any(
+        isinstance(message.get("content"), str) and "HEAL_MODE_NO_ENABLE" in message.get("content", "")
+        for message in (getattr(ctx, "messages", None) or [])
+    )
+    if heal_mode:
+        try:
+            from ouroboros import extension_loader
+
+            if skill_name in extension_loader.snapshot()["extensions"]:
+                extension_loader.unload_extension(skill_name)
+                payload["extension_action"] = "extension_unloaded"
+                payload["extension_reason"] = "heal_review_only"
+            else:
+                payload["extension_action"] = "extension_heal_review_only"
+                payload["extension_reason"] = "heal_review_only"
+        except Exception:
+            payload["extension_action"] = "extension_heal_review_only"
+            payload["extension_reason"] = "heal_review_only"
+        return json.dumps(payload, ensure_ascii=False, indent=2)
     try:
         from ouroboros import extension_loader
         from ouroboros.config import load_settings as _load_settings
@@ -812,6 +832,21 @@ def _handle_toggle_skill(
             f"⚠️ SKILL_TOGGLE_ERROR: skill {skill_name!r} cannot be enabled "
             f"— loader rejected it ({loaded.load_error})."
         )
+    if coerced:
+        stale = loaded.review.is_stale_for(loaded.content_hash)
+        grants = grant_status_for_skill(drive_root, loaded)
+        if loaded.review.status != "pass" or stale:
+            return (
+                "⚠️ SKILL_TOGGLE_ERROR: cannot enable until review status is "
+                f"fresh PASS (status={loaded.review.status!r}, stale={stale}). "
+                "Run review_skill first."
+            )
+        if not grants.get("all_granted", True):
+            missing = ", ".join(grants.get("missing_keys") or [])
+            return (
+                "⚠️ SKILL_TOGGLE_ERROR: cannot enable until requested key grants "
+                f"are approved{f' ({missing})' if missing else ''}."
+            )
     if not coerced and collision_load_error:
         extension_action = None
         extension_reason = "name_collision"
@@ -838,17 +873,6 @@ def _handle_toggle_skill(
         )
     save_enabled(drive_root, loaded.name, coerced)
     note = ""
-    if coerced:
-        if loaded.review.status != "pass":
-            note = (
-                " (skill will remain non-executable until review_skill "
-                f"returns 'pass'; current status: {loaded.review.status!r})"
-            )
-        elif loaded.review.is_stale_for(loaded.content_hash):
-            note = (
-                " (skill will remain non-executable until review_skill "
-                "refreshes the stale PASS verdict for the current content hash)"
-            )
     extension_action = None
     extension_reason = "not_extension"
     from ouroboros import extension_loader
@@ -962,8 +986,8 @@ _TOGGLE_SCHEMA = {
     "name": "toggle_skill",
     "description": (
         "Enable or disable a skill. Disabled skills are excluded from "
-        "skill_exec regardless of review status. Enabling a skill with a "
-        "non-PASS review is allowed but does not make it executable."
+        "skill_exec regardless of review status. Enabling requires a fresh "
+        "PASS review and any requested core-key grants."
     ),
     "parameters": {
         "type": "object",

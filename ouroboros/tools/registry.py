@@ -86,6 +86,90 @@ def _detect_runtime_mode_elevation(text_lower: str) -> bool:
     return (has_save and has_mode_key) or has_dotted_path
 
 
+def _is_heal_no_enable_context(messages: Optional[List[Dict[str, Any]]]) -> bool:
+    for message in messages or []:
+        content = message.get("content")
+        if isinstance(content, str) and "HEAL_MODE_NO_ENABLE" in content:
+            return True
+    return False
+
+
+def _heal_skill_name(messages: Optional[List[Dict[str, Any]]]) -> str:
+    return _heal_marker_value(messages, "HEAL_SKILL_NAME_JSON=")
+
+
+def _heal_payload_root(messages: Optional[List[Dict[str, Any]]]) -> str:
+    raw = _raw_heal_marker_value(messages, "HEAL_SKILL_PAYLOAD_ROOT_JSON=")
+    path = raw.replace("\\", "/").strip("/")
+    if ".." in path:
+        return ""
+    parts = pathlib.PurePosixPath(path).parts
+    if len(parts) < 3 or parts[0] != "skills" or parts[1] not in {"external", "clawhub"}:
+        return ""
+    if any(part in {"", ".", ".."} for part in parts):
+        return ""
+    return "/".join(parts)
+
+
+def _raw_heal_marker_value(messages: Optional[List[Dict[str, Any]]], marker: str) -> str:
+    for message in messages or []:
+        content = message.get("content")
+        if not isinstance(content, str) or marker not in content:
+            continue
+        raw = content.split(marker, 1)[1].splitlines()[0].strip()
+        try:
+            value = json.loads(raw)
+        except Exception:
+            value = raw.strip('"')
+        return str(value or "").strip()
+    return ""
+
+
+def _heal_marker_value(messages: Optional[List[Dict[str, Any]]], marker: str) -> str:
+    for message in messages or []:
+        content = message.get("content")
+        if not isinstance(content, str) or marker not in content:
+            continue
+        raw = content.split(marker, 1)[1].splitlines()[0].strip()
+        try:
+            value = json.loads(raw)
+        except Exception:
+            value = raw.strip('"')
+        text = str(value or "").strip()
+        if (
+            not text
+            or "/" in text
+            or "\\" in text
+            or text in {".", ".."}
+            or any(part in {".", ".."} for part in pathlib.PurePosixPath(text).parts)
+        ):
+            return ""
+        return text
+    return ""
+
+
+def _heal_data_path_allowed(path_text: str, payload_root: str, drive_root: pathlib.Path) -> bool:
+    if not payload_root:
+        return False
+    try:
+        drive = pathlib.Path(drive_root).resolve(strict=False)
+        allowed_root = pathlib.Path(os.path.realpath(drive / safe_relpath(payload_root)))
+        target = pathlib.Path(os.path.realpath(drive / safe_relpath(path_text or "")))
+        target.relative_to(allowed_root)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+_HEAL_MODE_ALLOWED_TOOLS = frozenset({
+    "data_read",
+    "data_list",
+    "data_write",
+    "list_skills",
+    "review_skill",
+})
+
+
 _SKILL_OWNER_STATE_STEMS = ("grants", "review", "enabled", "clawhub")
 _DETACHED_PROCESS_MARKERS = (
     "start_new_session",
@@ -898,6 +982,36 @@ class ToolRegistry:
         except Exception:
             _runtime_mode = "advanced"
 
+        heal_no_enable = _is_heal_no_enable_context(getattr(self._ctx, "messages", None))
+        if heal_no_enable:
+            heal_skill = _heal_skill_name(getattr(self._ctx, "messages", None))
+            heal_payload_root = _heal_payload_root(getattr(self._ctx, "messages", None))
+            if name in {"data_read", "data_write"}:
+                data_path = str(args.get("path", "") or "")
+                if not _heal_data_path_allowed(data_path, heal_payload_root, pathlib.Path(self._ctx.drive_root)):
+                    return (
+                        "⚠️ HEAL_MODE_BLOCKED: Heal/Fix data access is limited "
+                        "to the selected skill payload under data/skills/external "
+                        "or data/skills/clawhub."
+                    )
+            if name == "data_list":
+                data_dir = str(args.get("dir", args.get("path", "")) or "")
+                if not _heal_data_path_allowed(data_dir, heal_payload_root, pathlib.Path(self._ctx.drive_root)):
+                    return (
+                        "⚠️ HEAL_MODE_BLOCKED: Heal/Fix data listing is limited "
+                        "to the selected skill payload under data/skills/external "
+                        "or data/skills/clawhub."
+                    )
+            if name == "review_skill" and str(args.get("skill", "") or "").strip() != heal_skill:
+                return "⚠️ HEAL_MODE_BLOCKED: Heal/Fix may only review the selected skill."
+            if ext_tool or name not in _HEAL_MODE_ALLOWED_TOOLS:
+                return (
+                    "⚠️ HEAL_MODE_BLOCKED: Heal/Fix tasks may inspect/edit skill "
+                    "payloads and run review_skill only. Shell, browser automation, "
+                    "repo mutation, skill execution, extension tools, delegation, "
+                    "and enable/disable flows are unavailable. Use the Skills UI "
+                    "after a fresh PASS review."
+                )
         if entry is None:
             if ext_tool and callable(ext_tool.get("handler")):
                 return self._dispatch_extension_tool(name, ext_tool, args)
