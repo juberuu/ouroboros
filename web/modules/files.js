@@ -468,7 +468,13 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
     function downloadFile(path) {
         if (!path) return;
         const params = new URLSearchParams({ path });
-        window.open(`/api/files/download?${params.toString()}`, '_blank', 'noopener');
+        const link = document.createElement('a');
+        link.href = `/api/files/download?${params.toString()}`;
+        link.download = '';
+        link.rel = 'noopener';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
     }
 
     async function createDirectory() {
@@ -514,9 +520,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
         if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
 
         const pastedMode = state.clipboard.mode;
-        if (pastedMode === 'move') {
-            state.clipboard = null;
-        }
+        state.clipboard = null;
         updateClipboardActions();
         state.selectedPath = data.path || '';
         state.selectedType = data.type || '';
@@ -545,9 +549,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
         if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
 
         const pastedMode = state.clipboard.mode;
-        if (pastedMode === 'move') {
-            state.clipboard = null;
-        }
+        state.clipboard = null;
         updateClipboardActions();
         const refreshPath = destinationPath || state.path || '.';
         state.selectedPath = data.path || '';

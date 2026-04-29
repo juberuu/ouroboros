@@ -39,8 +39,8 @@ def test_marketplace_browse_tracks_cursor_history_for_prev():
     assert "hasPrevious: state.cursorHistory.length > 0" in source
 
 
-def test_marketplace_copy_names_current_clawhub_endpoints():
+def test_marketplace_empty_and_timeout_copy_is_human_readable():
     source = _marketplace_js()
-    assert "Browse uses <code>packages?family=skill</code>" in source
-    assert "<code>search?q=...</code>" in source
+    assert "No installable${officialText} skills found ${mode}." in source
+    assert "ClawHub did not respond in time. Try again" in source
     assert "packages/search?family=skill" not in source

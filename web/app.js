@@ -40,14 +40,15 @@ const state = {
 // WebSocket (created but not yet connected — deferred until after init)
 // ---------------------------------------------------------------------------
 const ws = createWS();
+const beforePageLeaveHandlers = [];
 
 // ---------------------------------------------------------------------------
 // Navigation
 // ---------------------------------------------------------------------------
 async function showPage(name) {
     if (state.activePage === name) return;
-    if (typeof state.beforePageLeave === 'function') {
-        const canLeave = await state.beforePageLeave({ from: state.activePage, to: name });
+    for (const handler of beforePageLeaveHandlers) {
+        const canLeave = await handler({ from: state.activePage, to: name });
         if (canLeave === false) return;
     }
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
@@ -91,7 +92,12 @@ const ctx = {
     state,
     updateUnreadBadge,
     setBeforePageLeave: (handler) => {
-        state.beforePageLeave = typeof handler === 'function' ? handler : null;
+        if (typeof handler !== 'function') return () => {};
+        beforePageLeaveHandlers.push(handler);
+        return () => {
+            const idx = beforePageLeaveHandlers.indexOf(handler);
+            if (idx >= 0) beforePageLeaveHandlers.splice(idx, 1);
+        };
     },
 };
 

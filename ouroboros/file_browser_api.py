@@ -29,6 +29,55 @@ _TEXT_PREVIEW_EXTENSIONS = {
     ".js", ".css", ".html", ".ts", ".tsx", ".jsx", ".ini", ".cfg",
     ".sh", ".zsh", ".bash", ".ps1", ".env", ".xml", ".csv",
 }
+_SKILL_OWNER_STATE_FILENAMES = frozenset({
+    "enabled.json",
+    "grants.json",
+    "review.json",
+    "clawhub.json",
+})
+
+
+def _is_skill_owner_state_target(target: pathlib.Path) -> bool:
+    if target.name.lower() not in _SKILL_OWNER_STATE_FILENAMES:
+        return False
+    from ouroboros import config as _cfg
+    data_root = pathlib.Path(_cfg.DATA_DIR).resolve(strict=False)
+    try:
+        rel = target.relative_to(data_root)
+        parts = rel.parts
+        if (
+            len(parts) == 4
+            and parts[0].lower() == "state"
+            and parts[1].lower() == "skills"
+        ):
+            return True
+    except (OSError, ValueError):
+        pass
+    try:
+        rel = target.resolve(strict=False).relative_to(data_root)
+        parts = rel.parts
+        if (
+            len(parts) == 4
+            and parts[0].lower() == "state"
+            and parts[1].lower() == "skills"
+        ):
+            return True
+    except (OSError, ValueError):
+        pass
+    skills_state_root = data_root / "state" / "skills"
+    if not skills_state_root.is_dir():
+        return False
+    try:
+        target_parent = target.parent.resolve(strict=False)
+    except OSError:
+        return False
+    for skill_state_dir in skills_state_root.iterdir():
+        try:
+            if skill_state_dir.resolve(strict=False) == target_parent:
+                return True
+        except OSError:
+            continue
+    return False
 
 
 class FileBrowserPayloadTooLarge(ValueError):
@@ -107,17 +156,22 @@ def _is_owner_only_settings_file(target: pathlib.Path) -> bool:
 def _is_owner_only_file(target: pathlib.Path) -> bool:
     if _is_owner_only_settings_file(target):
         return True
+    if _is_skill_owner_state_target(target):
+        return True
     from ouroboros import config as _cfg
-    grants_root = pathlib.Path(_cfg.DATA_DIR) / "state" / "skills"
-    if target.exists() and grants_root.is_dir():
-        for grant_file in grants_root.glob("*/grants.json"):
+    data_root = pathlib.Path(_cfg.DATA_DIR).resolve(strict=False)
+    skills_state_root = pathlib.Path(_cfg.DATA_DIR) / "state" / "skills"
+    if target.exists() and skills_state_root.is_dir():
+        for owner_state_file in skills_state_root.glob("*/*"):
+            if owner_state_file.name.lower() not in _SKILL_OWNER_STATE_FILENAMES:
+                continue
             try:
-                if grant_file.exists() and target.samefile(grant_file):
+                if owner_state_file.exists() and target.samefile(owner_state_file):
                     return True
             except OSError:
                 continue
     try:
-        rel = target.resolve(strict=False).relative_to(pathlib.Path(_cfg.DATA_DIR).resolve(strict=False))
+        rel = target.resolve(strict=False).relative_to(data_root)
     except (OSError, ValueError):
         return False
     parts = rel.parts
@@ -125,7 +179,7 @@ def _is_owner_only_file(target: pathlib.Path) -> bool:
         len(parts) == 4
         and parts[0].lower() == "state"
         and parts[1].lower() == "skills"
-        and parts[3].lower() == "grants.json"
+        and parts[3].lower() in _SKILL_OWNER_STATE_FILENAMES
     )
 
 
@@ -149,8 +203,8 @@ def _contains_owner_only_file(target: pathlib.Path) -> bool:
 _OWNER_ONLY_FILES_API_ERROR = JSONResponse(
     {
         "error": (
-            "settings.json and skill grants are owner-edited state and cannot "
-            "be modified through the Files API. Owner-controlled values "
+            "settings.json and skill review/enablement/grant/provenance state "
+            "cannot be modified through the Files API. Owner-controlled values "
             "(OUROBOROS_RUNTIME_MODE, credentials, A2A bind/expose, review "
             "enforcement) are not agent-mutable. Stop the agent, edit "
             "~/Ouroboros/data/settings.json directly, then restart."

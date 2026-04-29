@@ -1,4 +1,4 @@
-# Ouroboros v5.3.0 — Architecture & Reference
+# Ouroboros v5.3.1 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -302,9 +302,9 @@ The web UI is a single-page app (`web/index.html` + `web/style.css` + ES modules
 - `log_events.js` — shared event summarization/grouping helpers used by Chat and Logs
 - `files.js` — file browser, preview, uploads, and editor
 - `evolution.js` — evolution chart (Chart.js) + versions sub-tab (git commits, tags, rollback, promote)
-- `settings.js` — settings form with local model management
+- `settings.js` — settings form with local model management and catalog-backed Settings model pickers
 - `settings_ui.js` — Settings page HTML layout, tabs, secret input bindings, Network Gate LAN hint container
-- `settings_controls.js` — searchable model pickers + segmented effort controls
+- `settings_controls.js` — segmented effort controls
 - `settings_catalog.js` — optional model-catalog refresh helper; handles `/api/model-catalog`, browser timeout, stale-response suppression, and model-picker catalog broadcasts
 - `costs.js` — cost breakdown tables
 - `skills.js` — Skills page (discover + enable/disable + review trigger + key-grant state + live-vs-catalog extension status; reads `/api/state` + `/api/extensions`, writes through `/api/skills/<name>/toggle` + `/api/skills/<name>/review`, and requests key grants through the desktop launcher bridge)
@@ -1966,9 +1966,18 @@ the skill checkout:
 ~/Ouroboros/data/state/skills/<name>/
 ├── enabled.json             ← {"enabled": bool, "updated_at": iso_ts}
 ├── review.json              ← {"status", "content_hash", "findings", …}
+├── grants.json              ← content-hash-bound owner grants for core settings keys
+├── clawhub.json             ← marketplace provenance for ClawHub-installed skills
 └── __extension_imports/     ← Phase 4 staged import tree (type: extension skills only)
     └── <uuid>/skill/        ← Per-load fresh copy used as the importlib spec root
 ```
+
+The files above are the skill trust/control plane, not normal agent
+scratch data. Agent-write surfaces (`data_write`, Files API mutations,
+and `run_shell` post-execution owner-state restore) protect
+`enabled.json`, `review.json`, `grants.json`, and `clawhub.json`; payload
+repair happens under `data/skills/...` and must flow back through
+`review_skill`, Skills UI enablement, and the launcher grant bridge.
 
 ``__extension_imports/<uuid>/skill/`` is created by
 ``ouroboros.extension_loader._stage_extension_import_tree`` on every

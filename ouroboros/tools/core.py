@@ -17,6 +17,54 @@ from ouroboros.utils import read_text, safe_relpath, utc_now_iso
 
 log = logging.getLogger(__name__)
 
+_SKILL_OWNER_STATE_FILENAMES = frozenset({
+    "enabled.json",
+    "grants.json",
+    "review.json",
+    "clawhub.json",
+})
+
+
+def _is_skill_owner_state_target(target: pathlib.Path, data_root: pathlib.Path) -> bool:
+    if target.name.lower() not in _SKILL_OWNER_STATE_FILENAMES:
+        return False
+    try:
+        rel_to_data = target.relative_to(data_root)
+        parts = rel_to_data.parts
+        if (
+            len(parts) == 4
+            and parts[0].lower() == "state"
+            and parts[1].lower() == "skills"
+        ):
+            return True
+    except (OSError, ValueError):
+        pass
+    try:
+        rel_to_data = target.resolve(strict=False).relative_to(data_root)
+        parts = rel_to_data.parts
+        if (
+            len(parts) == 4
+            and parts[0].lower() == "state"
+            and parts[1].lower() == "skills"
+        ):
+            return True
+    except (OSError, ValueError):
+        pass
+    skills_state_root = data_root / "state" / "skills"
+    if not skills_state_root.is_dir():
+        return False
+    try:
+        target_parent = target.parent.resolve(strict=False)
+    except OSError:
+        return False
+    for skill_state_dir in skills_state_root.iterdir():
+        try:
+            if skill_state_dir.resolve(strict=False) == target_parent:
+                return True
+        except OSError:
+            continue
+    return False
+
 
 def _list_dir(root: pathlib.Path, rel: str, max_entries: int = 500) -> List[str]:
     target = (root / safe_relpath(rel)).resolve()
@@ -80,32 +128,30 @@ def _data_write(ctx: ToolContext, path: str, content: str, mode: str = "overwrit
     from ouroboros import config as _cfg
     target_path = pathlib.Path(p)
     settings_path = pathlib.Path(_cfg.SETTINGS_PATH)
-    grants_path = False
-    try:
-        rel_to_data = target_path.resolve(strict=False).relative_to(pathlib.Path(_cfg.DATA_DIR).resolve(strict=False))
-        parts = rel_to_data.parts
-        grants_path = (
-            len(parts) == 4
-            and parts[0].lower() == "state"
-            and parts[1].lower() == "skills"
-            and parts[3].lower() == "grants.json"
-        )
-    except (OSError, ValueError):
-        grants_path = False
-    if not grants_path:
-        grants_root = pathlib.Path(_cfg.DATA_DIR) / "state" / "skills"
-        if target_path.exists() and grants_root.is_dir():
-            for grant_file in grants_root.glob("*/grants.json"):
+    data_root = pathlib.Path(_cfg.DATA_DIR).resolve(strict=False)
+    lexical_target = pathlib.Path(ctx.drive_root).resolve(strict=False) / safe_relpath(path)
+    skill_owner_state_path = (
+        _is_skill_owner_state_target(lexical_target, data_root)
+        or _is_skill_owner_state_target(target_path, data_root)
+    )
+    if not skill_owner_state_path:
+        skills_state_root = pathlib.Path(_cfg.DATA_DIR) / "state" / "skills"
+        if target_path.exists() and skills_state_root.is_dir():
+            for owner_state_file in skills_state_root.glob("*/*"):
+                if owner_state_file.name.lower() not in _SKILL_OWNER_STATE_FILENAMES:
+                    continue
                 try:
-                    if grant_file.exists() and target_path.samefile(grant_file):
-                        grants_path = True
+                    if owner_state_file.exists() and target_path.samefile(owner_state_file):
+                        skill_owner_state_path = True
                         break
                 except OSError:
                     continue
-    if grants_path:
+    if skill_owner_state_path:
         return (
-            "⚠️ DATA_WRITE_BLOCKED: skill grants are owner-only state. "
-            "Use the desktop launcher confirmation flow from the Skills UI."
+            "⚠️ DATA_WRITE_BLOCKED: skill review, enablement, grants, and "
+            "marketplace provenance are owner/review controlled state. Edit "
+            "the skill payload under data/skills/ and use review_skill, the "
+            "Skills UI toggle, or the desktop launcher grant flow."
         )
     matches = False
     try:

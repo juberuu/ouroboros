@@ -74,7 +74,7 @@ MAX_FUNCTION_LINES = 300
 # larger than the pre-release scope; the ceiling bump stays consistent
 # with how MAX_TOTAL_FUNCTIONS has grown through v4.40→v4.47 as each
 # phase shipped.
-MAX_TOTAL_FUNCTIONS = 1560  # v5.2.2: dual-track grants for in-process extensions adds api_skill_reconcile in ouroboros/extensions_api.py (one new HTTP endpoint), test_launcher_skill_key_grant_supports_extensions / test_launcher_skill_key_grant_handles_reconcile_http_error / test_launcher_skill_key_grant_rejects_instruction_skill in tests/test_runtime_mode_elevation.py, test_get_settings_returns_core_key_with_grant / test_load_extension_rejects_grant_with_stale_content_hash in tests/test_extension_loader.py, test_grant_status_supports_extension_skills / test_grant_status_unsupported_for_instruction_skills / test_save_skill_grants_merges_partial_approvals in tests/test_skill_loader.py, test_api_skill_reconcile_clears_cached_load_error / test_api_skill_reconcile_rejects_missing_skill_name in tests/test_extensions_api.py, plus toggleLockReason helper. Bumped to 1560 to leave slack for follow-up review-cycle additions.
+MAX_TOTAL_FUNCTIONS = 1565  # v5.3.0: skill trust-state hardening adds owner-state target helpers plus adversarial regressions for review/enabled/grant/provenance forge paths (symlink backing dirs, cwd-relative run_shell scans, detached writers). Bumped from 1560 because these guards protect the skill execution trust root rather than adding optional feature surface.
 # v4.40.0 adds claude_advisory_review.py to the grandfathered set: the file
 # grew to 1731 lines across v4.37-v4.39 (plan_task quorum + direct-provider
 # fallback + convergence rule + syntax preflight + reflection decoupling).

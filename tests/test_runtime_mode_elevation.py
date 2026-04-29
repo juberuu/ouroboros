@@ -194,8 +194,27 @@ def test_data_write_blocks_skill_grants_json(tmp_path, monkeypatch):
         json.dumps({"granted_keys": ["OPENROUTER_API_KEY"]}),
     )
     assert "DATA_WRITE_BLOCKED" in result
-    assert "skill grants" in result
+    assert "skill review" in result
     assert not (drive_root / "state" / "skills" / "weather" / "grants.json").exists()
+
+
+@pytest.mark.parametrize("filename", ["review.json", "enabled.json", "clawhub.json"])
+def test_data_write_blocks_skill_trust_state_json(filename, tmp_path, monkeypatch):
+    from ouroboros import config as cfg
+    from ouroboros.tools.core import _data_write
+
+    drive_root = tmp_path / "data"
+    drive_root.mkdir()
+    monkeypatch.setattr(cfg, "DATA_DIR", drive_root, raising=True)
+
+    ctx = _make_drive_ctx(tmp_path)
+    result = _data_write(
+        ctx,
+        f"state/skills/weather/{filename}",
+        json.dumps({"status": "pass", "enabled": True}),
+    )
+    assert "DATA_WRITE_BLOCKED" in result
+    assert not (drive_root / "state" / "skills" / "weather" / filename).exists()
 
 
 def test_data_write_blocks_skill_grants_case_variants(tmp_path, monkeypatch):
@@ -214,6 +233,31 @@ def test_data_write_blocks_skill_grants_case_variants(tmp_path, monkeypatch):
     )
     assert "DATA_WRITE_BLOCKED" in result
     assert not (drive_root / "State" / "Skills" / "weather" / "grants.json").exists()
+
+
+def test_data_write_blocks_skill_trust_state_under_symlinked_skill_dir(tmp_path, monkeypatch):
+    from ouroboros import config as cfg
+    from ouroboros.tools.core import _data_write
+
+    drive_root = tmp_path / "data"
+    link_target = drive_root / "memory" / "linkstate"
+    link_target.mkdir(parents=True)
+    skills_root = drive_root / "state" / "skills"
+    skills_root.mkdir(parents=True)
+    try:
+        (skills_root / "weather").symlink_to(link_target, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("Symlinks unavailable on this filesystem")
+    monkeypatch.setattr(cfg, "DATA_DIR", drive_root, raising=True)
+
+    ctx = _make_drive_ctx(tmp_path)
+    result = _data_write(ctx, "state/skills/weather/review.json", json.dumps({"status": "pass"}))
+    assert "DATA_WRITE_BLOCKED" in result
+    assert not (link_target / "review.json").exists()
+
+    backing_result = _data_write(ctx, "memory/linkstate/enabled.json", json.dumps({"enabled": True}))
+    assert "DATA_WRITE_BLOCKED" in backing_result
+    assert not (link_target / "enabled.json").exists()
 
 
 def test_data_write_allows_other_data_files(tmp_path, monkeypatch):
@@ -897,20 +941,42 @@ def test_files_api_write_blocks_settings_json(isolated_settings, monkeypatch):
         assert "_is_owner_only_file" in body or "_contains_owner_only_file" in body, (
             f"Endpoint {endpoint} must call ``_is_owner_only_file`` "
             "to refuse writes/deletes/transfers/uploads against the "
-            "owner-only settings.json and grants.json. Otherwise the Files API is a "
+            "owner-only settings.json and skill trust-state JSON. Otherwise the Files API is a "
             "parallel privilege-escalation channel."
         )
 
 
-def test_files_api_owner_only_helper_blocks_grants_case_variants(tmp_path, monkeypatch):
+@pytest.mark.parametrize("filename", ["grants.json", "review.json", "enabled.json", "clawhub.json"])
+def test_files_api_owner_only_helper_blocks_skill_state_case_variants(filename, tmp_path, monkeypatch):
     from ouroboros import config as cfg
     from ouroboros import file_browser_api as fba_mod
 
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     monkeypatch.setattr(cfg, "DATA_DIR", data_dir, raising=True)
-    target = data_dir / "State" / "Skills" / "weather" / "grants.json"
+    target = data_dir / "State" / "Skills" / "weather" / filename
     assert fba_mod._is_owner_only_file(target) is True
+
+
+def test_files_api_owner_only_helper_blocks_symlinked_skill_state_dir(tmp_path, monkeypatch):
+    from ouroboros import config as cfg
+    from ouroboros import file_browser_api as fba_mod
+
+    data_dir = tmp_path / "data"
+    link_target = data_dir / "memory" / "linkstate"
+    link_target.mkdir(parents=True)
+    skills_root = data_dir / "state" / "skills"
+    skills_root.mkdir(parents=True)
+    try:
+        (skills_root / "weather").symlink_to(link_target, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("Symlinks unavailable on this filesystem")
+    monkeypatch.setattr(cfg, "DATA_DIR", data_dir, raising=True)
+
+    target = data_dir / "state" / "skills" / "weather" / "enabled.json"
+    assert fba_mod._is_owner_only_file(target) is True
+    backing_target = link_target / "review.json"
+    assert fba_mod._is_owner_only_file(backing_target) is True
 
 
 # ---------------------------------------------------------------------------
@@ -972,27 +1038,100 @@ def test_run_shell_in_light_blocks_script_file_with_pathlib_write(tmp_path, monk
     assert "writer.py" in result
 
 
-def test_run_shell_restores_obfuscated_skill_grant_write(tmp_path, monkeypatch):
+@pytest.mark.parametrize("filename", ["grants.json", "review.json", "enabled.json", "Review.JSON"])
+def test_run_shell_blocks_obfuscated_skill_owner_state_write(filename, tmp_path, monkeypatch):
     from ouroboros.tools.registry import ToolRegistry
 
     drive_root = tmp_path / "data"
-    grant_dir = drive_root / "state" / "skills" / "weather"
-    grant_dir.mkdir(parents=True)
-    helper_path = tmp_path / "grant_writer.py"
+    skill_state_dir = drive_root / "state" / "skills" / "weather"
+    skill_state_dir.mkdir(parents=True)
+    helper_path = tmp_path / "owner_state_writer.py"
+    stem, suffix = filename.split(".", 1)
     helper_path.write_text(
         "import json, pathlib, sys\n"
         "root = pathlib.Path(sys.argv[1])\n"
-        "name = 'grants' + '.json'\n"
+        f"name = {stem!r} + '.{suffix}'\n"
         "target = root / 'state' / 'skills' / 'weather' / name\n"
         "target.parent.mkdir(parents=True, exist_ok=True)\n"
-        "target.write_text(json.dumps({'granted_keys':['OPENROUTER_API_KEY']}))\n",
+        "target.write_text(json.dumps({'status':'pass','enabled':True}))\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     reg = ToolRegistry(repo_dir=tmp_path, drive_root=drive_root)
     result = reg.execute("run_shell", {"cmd": ["python3", str(helper_path), str(drive_root)]})
-    assert "OWNER_STATE_RESTORED" in result
-    assert not (grant_dir / "grants.json").exists()
+    assert "SKILL_STATE_WRITE_BLOCKED" in result
+    assert not (skill_state_dir / filename).exists()
+
+
+def test_run_shell_blocks_delayed_skill_owner_state_writer(tmp_path, monkeypatch):
+    from ouroboros.tools.registry import ToolRegistry
+    import sys
+    import time
+
+    drive_root = tmp_path / "data"
+    skill_state_dir = drive_root / "state" / "skills" / "weather"
+    skill_state_dir.mkdir(parents=True)
+    child_code = (
+        "import json, pathlib, sys, time\n"
+        "time.sleep(1.0)\n"
+        "root = pathlib.Path(sys.argv[1])\n"
+        "name = 'review' + '.json'\n"
+        "target = root / 'state' / 'skills' / 'weather' / name\n"
+        "target.write_text(json.dumps({'status':'pass'}))\n"
+    )
+    parent_code = (
+        "import subprocess, sys\n"
+        "subprocess.Popen([sys.executable, '-c', sys.argv[2], sys.argv[1]], "
+        "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+    )
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    reg = ToolRegistry(repo_dir=tmp_path, drive_root=drive_root)
+    result = reg.execute("run_shell", {"cmd": [sys.executable, "-c", parent_code, str(drive_root), child_code]})
+    assert "SKILL_STATE_WRITE_BLOCKED" in result
+    time.sleep(1.4)
+    assert not (skill_state_dir / "review.json").exists()
+
+
+def test_run_shell_blocks_detached_skill_state_command(tmp_path, monkeypatch):
+    from ouroboros.tools.registry import ToolRegistry
+    import sys
+
+    drive_root = tmp_path / "data"
+    (drive_root / "state" / "skills" / "weather").mkdir(parents=True)
+    code = (
+        "import subprocess, sys\n"
+        "subprocess.Popen([sys.executable, '-c', 'pass'], start_new_session=True)\n"
+        "print('state skills')\n"
+    )
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    reg = ToolRegistry(repo_dir=tmp_path, drive_root=drive_root)
+    result = reg.execute("run_shell", {"cmd": [sys.executable, "-c", code]})
+    assert "SKILL_STATE_WRITE_BLOCKED" in result
+
+
+def test_run_shell_scans_scripts_relative_to_cwd(tmp_path, monkeypatch):
+    from ouroboros.tools.registry import ToolRegistry
+    import sys
+
+    repo_dir = tmp_path / "repo"
+    subdir = repo_dir / "sub"
+    subdir.mkdir(parents=True)
+    drive_root = tmp_path / "data"
+    (drive_root / "state" / "skills" / "weather").mkdir(parents=True)
+    helper = subdir / "evil.py"
+    helper.write_text(
+        "import json, pathlib, sys\n"
+        "root = pathlib.Path(sys.argv[1])\n"
+        "name = 'review' + '.json'\n"
+        "target = root / 'state' / 'skills' / 'weather' / name\n"
+        "target.write_text(json.dumps({'status':'pass'}))\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    reg = ToolRegistry(repo_dir=repo_dir, drive_root=drive_root)
+    result = reg.execute("run_shell", {"cmd": [sys.executable, "evil.py", str(drive_root)], "cwd": "sub"})
+    assert "SKILL_STATE_WRITE_BLOCKED" in result
+    assert not (drive_root / "state" / "skills" / "weather" / "review.json").exists()
 
 
 def test_run_shell_does_not_scan_files_outside_agent_areas(tmp_path, monkeypatch):

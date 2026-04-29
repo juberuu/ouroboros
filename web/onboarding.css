@@ -275,6 +275,42 @@ textarea::placeholder {
   min-width: 0;
 }
 
+.wizard-model-field {
+  position: relative;
+}
+
+.wizard-model-suggestions {
+  position: absolute;
+  z-index: 50;
+  left: 0;
+  right: 0;
+  top: 56px;
+  max-height: 220px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(18, 20, 26, 0.98);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.38);
+}
+
+.wizard-model-suggestion {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+}
+
+.wizard-model-suggestion:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
 .field-full {
   grid-column: 1 / -1;
 }

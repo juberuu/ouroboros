@@ -86,6 +86,31 @@ def _detect_runtime_mode_elevation(text_lower: str) -> bool:
     return (has_save and has_mode_key) or has_dotted_path
 
 
+_SKILL_OWNER_STATE_STEMS = ("grants", "review", "enabled", "clawhub")
+_DETACHED_PROCESS_MARKERS = (
+    "start_new_session",
+    "new_session",
+    "setsid",
+    "preexec_fn",
+    "nohup",
+)
+
+
+def _mentions_skill_owner_state(text_lower: str) -> bool:
+    if "state" not in text_lower or "skills" not in text_lower:
+        return False
+    for stem in _SKILL_OWNER_STATE_STEMS:
+        if f"{stem}.json" in text_lower:
+            return True
+        if stem in text_lower and ".json" in text_lower:
+            return True
+    return False
+
+
+def _mentions_detached_process(text_lower: str) -> bool:
+    return any(marker in text_lower for marker in _DETACHED_PROCESS_MARKERS)
+
+
 _INTERPRETER_BASENAMES = frozenset({
     "python", "python2", "python3",
     "bash", "sh", "zsh",
@@ -608,11 +633,18 @@ class ToolRegistry:
                 "stopping the agent and editing settings.json "
                 "directly, then restart."
             )
-        if "grants.json" in cmd_lower and "state" in cmd_lower and "skills" in cmd_lower:
+        if _mentions_skill_owner_state(cmd_lower):
             return (
-                "⚠️ GRANT_WRITE_BLOCKED: skill key grants are owner-only "
-                "state and must be created through the desktop launcher "
-                "confirmation flow."
+                "⚠️ SKILL_STATE_WRITE_BLOCKED: skill review, enablement, "
+                "grants, and marketplace provenance are owner/review "
+                "controlled state. Use review_skill, toggle_skill/the Skills "
+                "UI, or the desktop launcher confirmation flow."
+            )
+        if "state" in cmd_lower and "skills" in cmd_lower and _mentions_detached_process(cmd_lower):
+            return (
+                "⚠️ SKILL_STATE_WRITE_BLOCKED: detached shell processes must "
+                "not target skill state directories. Use the reviewed skill "
+                "lifecycle tools instead."
             )
 
         # 2. Light-mode repo-mutation indicators (argv).
@@ -629,7 +661,7 @@ class ToolRegistry:
         # bypass fix). The argv-level checks only see the literal
         # cmd; a ``python evil.py`` call has dangerous code INSIDE
         # the file, invisible to the substring filter.
-        block_msg = self._scan_script_files(raw_cmd, runtime_mode)
+        block_msg = self._scan_script_files(raw_cmd, runtime_mode, cwd=str(args.get("cwd") or ""))
         if block_msg:
             return block_msg
 
@@ -681,7 +713,7 @@ class ToolRegistry:
                     )
         return None
 
-    def _scan_script_files(self, raw_cmd: Any, runtime_mode: str) -> Optional[str]:
+    def _scan_script_files(self, raw_cmd: Any, runtime_mode: str, cwd: str = "") -> Optional[str]:
         """v5.1.2 iter-3 file-content scan for ``run_shell``.
 
         For each interpreter invocation in ``raw_cmd``, find the script
@@ -705,9 +737,17 @@ class ToolRegistry:
             drive_root_real = pathlib.Path(self._ctx.drive_root).resolve()
         except OSError:
             drive_root_real = None
+        work_dir = pathlib.Path(self._ctx.repo_dir)
+        if cwd and str(cwd).strip() not in ("", ".", "./"):
+            candidate = (pathlib.Path(self._ctx.repo_dir) / str(cwd)).resolve()
+            if candidate.exists() and candidate.is_dir():
+                work_dir = candidate
         for script_path_str in script_files:
             try:
-                script_path = pathlib.Path(script_path_str).resolve()
+                raw_script_path = pathlib.Path(script_path_str)
+                if not raw_script_path.is_absolute():
+                    raw_script_path = work_dir / raw_script_path
+                script_path = raw_script_path.resolve()
             except (OSError, ValueError):
                 continue
             inside_repo = False
@@ -748,12 +788,18 @@ class ToolRegistry:
                     "stopping the agent and editing settings.json "
                     "directly, then restart."
                 )
-            if "grants.json" in content_lower and "state" in content_lower and "skills" in content_lower:
+            if _mentions_skill_owner_state(content_lower):
                 return (
-                    f"⚠️ GRANT_WRITE_BLOCKED: script file "
-                    f"{script_path_str!r} targets grants.json. Skill key "
-                    "grants are owner-only state and must be created "
-                    "through the desktop launcher confirmation flow."
+                    f"⚠️ SKILL_STATE_WRITE_BLOCKED: script file "
+                    f"{script_path_str!r} targets skill owner/review state. "
+                    "Use review_skill, toggle_skill/the Skills UI, or the "
+                    "desktop launcher confirmation flow."
+                )
+            if "state" in content_lower and "skills" in content_lower and _mentions_detached_process(content_lower):
+                return (
+                    f"⚠️ SKILL_STATE_WRITE_BLOCKED: script file "
+                    f"{script_path_str!r} starts detached processes that target "
+                    "skill state directories."
                 )
             if runtime_mode == "light" and any(
                 ind in content_lower for ind in _LIGHT_MUTATION_INDICATORS
@@ -780,7 +826,10 @@ class ToolRegistry:
         root = pathlib.Path(self._ctx.drive_root) / "state" / "skills"
         if not root.is_dir():
             return out
-        for path in root.glob("*/grants.json"):
+        protected_skill_state = {"grants.json", "review.json", "enabled.json", "clawhub.json"}
+        for path in root.glob("*/*"):
+            if path.name.lower() not in protected_skill_state:
+                continue
             try:
                 out[path] = path.read_text(encoding="utf-8")
             except OSError:
@@ -790,7 +839,13 @@ class ToolRegistry:
     def _restore_owner_files(self, before: Dict[pathlib.Path, Optional[str]]) -> bool:
         from ouroboros import config as _cfg
         root = pathlib.Path(self._ctx.drive_root) / "state" / "skills"
-        current = set(root.glob("*/grants.json")) if root.is_dir() else set()
+        current = set()
+        if root.is_dir():
+            protected_skill_state = {"grants.json", "review.json", "enabled.json", "clawhub.json"}
+            current.update(
+                path for path in root.glob("*/*")
+                if path.name.lower() in protected_skill_state
+            )
         settings_path = pathlib.Path(_cfg.SETTINGS_PATH)
         current.add(settings_path)
         changed = False
@@ -924,12 +979,15 @@ class ToolRegistry:
             return f"⚠️ TOOL_ERROR ({name}): {e}"
         if name == "run_shell":
             import time
-            time.sleep(0.5)
-        if name == "run_shell" and self._restore_owner_files(owner_snapshot):
-            result = (
-                f"{result}\n\n⚠️ OWNER_STATE_RESTORED: run_shell attempted to "
-                "change owner-only settings/grant state; protected files were restored."
-            )
+            restored_owner_state = False
+            for _ in range(4):
+                time.sleep(0.3)
+                restored_owner_state = self._restore_owner_files(owner_snapshot) or restored_owner_state
+            if restored_owner_state:
+                result = (
+                    f"{result}\n\n⚠️ OWNER_STATE_RESTORED: run_shell attempted to "
+                    "change owner-only settings or skill trust state; protected files were restored."
+                )
 
         # Revert protected files after claude_code_edit unless pro mode is
         # active; pro-mode commits still require the normal commit review later.

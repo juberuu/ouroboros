@@ -216,18 +216,19 @@ function summaryCard(summary, installedMap, isPlugin) {
 
 function renderResults(host, summaries, installedMap, registryCount, diagnostics) {
     if (!summaries.length) {
+        const query = String(diagnostics?.query || '').trim();
+        const official = Boolean(diagnostics?.official);
+        const mode = query ? 'matching your search' : 'in the marketplace browse list';
+        const officialText = official ? ' official' : '';
         if (registryCount > 0) {
-            host.innerHTML = '<div class="muted">Registry returned skills, but none are installable in this view.</div>';
+            host.innerHTML = `<div class="muted">No installable${officialText} skills found ${mode}.</div>`;
         } else {
-            const path = diagnostics?.registryPath || 'skills';
             const attempts = Array.isArray(diagnostics?.attempts) && diagnostics.attempts.length
                 ? `<details class="marketplace-debug"><summary>Registry diagnostics</summary><pre>${escapeHtml(JSON.stringify(diagnostics.attempts, null, 2))}</pre></details>`
                 : '';
             host.innerHTML = `
                 <div class="muted">
-                    ClawHub returned zero installable skills from <code>${escapeHtml(path)}</code>.
-                    Browse uses <code>packages?family=skill</code>; text search uses
-                    <code>search?q=...</code>.
+                    No installable${officialText} skills found ${mode}.
                 </div>
                 ${attempts}
             `;
@@ -563,6 +564,8 @@ export function initMarketplace(pane) {
             state.registryPath = data.registry_path || 'packages';
             state.registryAttempts = data.registry_attempts || [];
             renderResults(resultsHost, state.results, state.installedMap, state.results.length, {
+                query,
+                official: state.onlyOfficial,
                 registryPath: state.registryPath,
                 attempts: state.registryAttempts,
             });
@@ -580,13 +583,20 @@ export function initMarketplace(pane) {
             loadInstalled().then((installedMap) => {
                 state.installedMap = installedMap;
                 renderResults(resultsHost, state.results, state.installedMap, state.results.length, {
+                    query,
+                    official: state.onlyOfficial,
                     registryPath: state.registryPath,
                     attempts: state.registryAttempts,
                 });
             }).catch(() => {});
         } catch (err) {
-            const message = err?.body?.error || err?.message || String(err);
-            showStatus(pane, `Error: ${message}`, 'danger');
+            const rawMessage = String(err?.body?.error || err?.message || err || '');
+            const firstLine = rawMessage.split('\n').map((line) => line.trim()).filter(Boolean)[0] || 'Marketplace request failed';
+            const timeout = /timed out|timeout/i.test(rawMessage);
+            const message = timeout
+                ? 'ClawHub did not respond in time. Try again, or search by name to narrow the request.'
+                : firstLine.replace(/^Error:\s*/i, '');
+            showStatus(pane, message, 'danger');
             resultsHost.innerHTML = `<div class="skills-load-error">${escapeHtml(message)}</div>`;
             paginationHost.hidden = true;
         }

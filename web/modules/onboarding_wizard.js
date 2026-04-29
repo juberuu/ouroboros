@@ -643,10 +643,18 @@
         `;
     }
 
+    function modelSuggestionField({ id, label, value, note }) {
+        return `
+            <div class="field wizard-model-field" data-wizard-model-field>
+                <label for="${id}">${label}</label>
+                <input id="${id}" value="${escapeHtml(value)}" autocomplete="off" spellcheck="false" data-wizard-model-input>
+                <div class="wizard-model-suggestions" hidden></div>
+                <div class="field-note">${note}</div>
+            </div>
+        `;
+    }
+
     function renderModelsStep() {
-        const suggestionOptions = MODEL_SUGGESTIONS
-            .map((model) => `<option value="${escapeHtml(model)}"></option>`)
-            .join('');
         return `
             <div class="step-header">
                 <div>
@@ -671,29 +679,12 @@
                 )}</p>
             </div>
             <div class="grid two">
-                <div class="field">
-                    <label for="main-model">Main Model</label>
-                    <input list="model-suggestions" id="main-model" value="${escapeHtml(state.mainModel)}">
-                    <div class="field-note">Primary reasoning and long-form work.</div>
-                </div>
-                <div class="field">
-                    <label for="code-model">Code Model</label>
-                    <input list="model-suggestions" id="code-model" value="${escapeHtml(state.codeModel)}">
-                    <div class="field-note">Tool-heavy coding and edits.</div>
-                </div>
-                <div class="field">
-                    <label for="light-model">Light Model</label>
-                    <input list="model-suggestions" id="light-model" value="${escapeHtml(state.lightModel)}">
-                    <div class="field-note">Fast summaries and lightweight tasks.</div>
-                </div>
-                <div class="field">
-                    <label for="fallback-model">Fallback Model</label>
-                    <input list="model-suggestions" id="fallback-model" value="${escapeHtml(state.fallbackModel)}">
-                    <div class="field-note">Fallback and resilience path.</div>
-                </div>
+                ${modelSuggestionField({ id: 'main-model', label: 'Main Model', value: state.mainModel, note: 'Primary reasoning and long-form work.' })}
+                ${modelSuggestionField({ id: 'code-model', label: 'Code Model', value: state.codeModel, note: 'Tool-heavy coding and edits.' })}
+                ${modelSuggestionField({ id: 'light-model', label: 'Light Model', value: state.lightModel, note: 'Fast summaries and lightweight tasks.' })}
+                ${modelSuggestionField({ id: 'fallback-model', label: 'Fallback Model', value: state.fallbackModel, note: 'Fallback and resilience path.' })}
             </div>
             <div class="wizard-inline-note">Direct providers use <code>openai::gpt-5.5</code>, <code>cloudru::zai-org/GLM-4.7</code>, and <code>anthropic::claude-sonnet-4-6</code>. Plain <code>openai/...</code> or <code>anthropic/...</code> stays router-style by design.</div>
-            <datalist id="model-suggestions">${suggestionOptions}</datalist>
         `;
     }
 
@@ -1046,16 +1037,79 @@
             'light-model': 'lightModel',
             'fallback-model': 'fallbackModel',
         };
+        function suggestionMatches(query) {
+            const needle = trim(query).toLowerCase();
+            const source = MODEL_SUGGESTIONS.length ? MODEL_SUGGESTIONS : [
+                'openai::gpt-5.5',
+                'openai::gpt-5.5-mini',
+                'anthropic::claude-opus-4-7',
+                'anthropic::claude-sonnet-4-6',
+                'openai/gpt-5.5',
+            ];
+            return source
+                .filter((model) => !needle || String(model).toLowerCase().includes(needle))
+                .slice(0, 8);
+        }
+        function closeSuggestions(exceptInput = null) {
+            root.querySelectorAll('.wizard-model-suggestions').forEach((panel) => {
+                if (exceptInput && panel.parentElement?.querySelector('input') === exceptInput) return;
+                panel.hidden = true;
+                panel.innerHTML = '';
+            });
+        }
+        function renderSuggestions(input) {
+            const panel = input.closest('[data-wizard-model-field]')?.querySelector('.wizard-model-suggestions');
+            if (!panel) return;
+            const matches = suggestionMatches(input.value);
+            if (!matches.length) {
+                panel.hidden = true;
+                panel.innerHTML = '';
+                return;
+            }
+            panel.innerHTML = matches.map((model) => (
+                `<button type="button" class="wizard-model-suggestion" data-value="${escapeHtml(model)}">${escapeHtml(model)}</button>`
+            )).join('');
+            panel.hidden = false;
+        }
         Object.entries(map).forEach(([id, key]) => {
             const input = document.getElementById(id);
             if (!input) return;
+            input.addEventListener('focus', () => {
+                closeSuggestions(input);
+                renderSuggestions(input);
+            });
             input.addEventListener('input', () => {
                 state[key] = input.value;
                 state.modelsDirty = true;
                 state.error = '';
+                closeSuggestions(input);
+                renderSuggestions(input);
                 syncCurrentStepActionState();
             });
         });
+        root.querySelectorAll('.wizard-model-suggestions').forEach((panel) => {
+            panel.addEventListener('mousedown', (event) => {
+                const button = event.target.closest('.wizard-model-suggestion');
+                if (!button) return;
+                event.preventDefault();
+                const input = panel.parentElement?.querySelector('input');
+                if (!input) return;
+                input.value = button.dataset.value || '';
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+                closeSuggestions();
+            });
+        });
+        if (root.dataset.modelSuggestionOutsideListener !== '1') {
+            root.dataset.modelSuggestionOutsideListener = '1';
+            document.addEventListener('mousedown', (event) => {
+                if (!root.contains(event.target) || !event.target.closest('[data-wizard-model-field]')) {
+                    root.querySelectorAll('.wizard-model-suggestions').forEach((panel) => {
+                        panel.hidden = true;
+                        panel.innerHTML = '';
+                    });
+                }
+            });
+        }
         syncCurrentStepActionState();
     }
 

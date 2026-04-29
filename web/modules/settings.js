@@ -1,5 +1,5 @@
 import { refreshModelCatalog } from './settings_catalog.js';
-import { bindEffortSegments, bindModelPickers, syncEffortSegments } from './settings_controls.js';
+import { bindEffortSegments, syncEffortSegments } from './settings_controls.js';
 import { bindLocalModelControls } from './settings_local_model.js';
 import { bindSecretInputs, bindSettingsTabs, renderSettingsPage } from './settings_ui.js';
 
@@ -54,7 +54,28 @@ function collectSecretValue(id, body) {
     if (value && !value.includes('...')) body[settingKey] = value;
 }
 
-export function initSettings({ state }) {
+const SETTINGS_FALLBACK_MODELS = [
+    'anthropic::claude-opus-4-7',
+    'anthropic::claude-sonnet-4-6',
+    'openai::gpt-5.5',
+    'openai::gpt-5.5-mini',
+    'openai/gpt-5.5',
+    'anthropic/claude-opus-4.7',
+    'google/gemini-3.1-pro-preview',
+];
+
+let settingsModelCatalogItems = SETTINGS_FALLBACK_MODELS.map((value) => ({ value, label: 'Suggested model' }));
+
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+export function initSettings({ state, setBeforePageLeave } = {}) {
     const page = document.createElement('div');
     page.id = 'page-settings';
     page.className = 'page';
@@ -64,7 +85,6 @@ export function initSettings({ state }) {
     bindSettingsTabs(page);
     bindSecretInputs(page);
     bindEffortSegments(page);
-    bindModelPickers(page);
     bindLocalModelControls({ state });
     let currentSettings = {};
     let claudeCodePollStarted = false;
@@ -132,7 +152,10 @@ export function initSettings({ state }) {
     }
 
     function snapshotSettingsDraft() {
-        return JSON.stringify(collectBody());
+        return JSON.stringify({
+            ...collectBody(),
+            OUROBOROS_RUNTIME_MODE_DRAFT: byId('s-runtime-mode')?.value || 'advanced',
+        });
     }
 
     function setSettingsCleanBaseline() {
@@ -149,6 +172,12 @@ export function initSettings({ state }) {
         settingsDirty = nextDirty;
         const indicator = byId('settings-unsaved-indicator');
         if (indicator) indicator.hidden = !settingsDirty;
+    }
+
+    function discardUnsavedSettingsDraft() {
+        applySettings(currentSettings || {});
+        setSettingsCleanBaseline();
+        setStatus('', 'ok');
     }
 
     function applyClaudeCodeStatus(payload = {}) {
@@ -314,7 +343,7 @@ export function initSettings({ state }) {
             await loadSettings();
             try {
                 await refreshModelCatalog();
-                setStatus('Settings loaded.', 'ok');
+                setStatus('Settings loaded', 'ok');
             } catch (error) {
                 setStatus(
                     `Settings loaded. Model catalog refresh failed: ${error.message || error}`,
@@ -415,6 +444,15 @@ export function initSettings({ state }) {
     syncRuntimeModeBridgeState();
     reloadSettingsWithFeedback();
 
+    if (typeof setBeforePageLeave === 'function') {
+        setBeforePageLeave(({ from }) => {
+            if (from !== 'settings' || !settingsDirty) return true;
+            const leave = confirm('You have unsaved settings changes. Discard them and leave Settings?');
+            if (leave) discardUnsavedSettingsDraft();
+            return leave;
+        });
+    }
+
     byId('s-anthropic')?.addEventListener('input', () => {
         renderClaudeCodeUi();
         if (anthropicKeyConfigured()) {
@@ -429,6 +467,103 @@ export function initSettings({ state }) {
         if (event.target.closest('[data-effort-value], .secret-clear')) {
             queueMicrotask(updateSettingsDirtyState);
         }
+    });
+
+    function closeSettingsModelPickers(exceptPicker = null) {
+        page.querySelectorAll('[data-model-picker]').forEach((picker) => {
+            if (picker === exceptPicker) return;
+            const panel = picker.querySelector('.model-picker-results');
+            if (!panel) return;
+            panel.hidden = true;
+            panel.innerHTML = '';
+        });
+    }
+
+    function renderSettingsModelPicker(input) {
+        const picker = input.closest('[data-model-picker]');
+        const panel = picker?.querySelector('.model-picker-results');
+        if (!picker || !panel) return;
+        const needle = String(input.value || '').trim().toLowerCase();
+        let items = settingsModelCatalogItems
+            .filter((item) => {
+                const haystack = `${item.value} ${item.label || ''} ${item.provider || ''}`.toLowerCase();
+                return !needle || haystack.includes(needle);
+            })
+            .slice(0, 8);
+        if (!items.length && needle) {
+            items = settingsModelCatalogItems.slice(0, 8);
+        }
+        if (!items.length) {
+            panel.hidden = true;
+            panel.innerHTML = '';
+            return;
+        }
+        panel.innerHTML = items.map((item) => `
+            <button type="button" class="model-picker-item" data-value="${escapeHtml(item.value)}">
+                <span class="model-picker-item-value">${escapeHtml(item.value)}</span>
+                <span class="model-picker-item-label">${escapeHtml(item.label || item.provider || 'Catalog model')}</span>
+            </button>
+        `).join('');
+        panel.hidden = false;
+    }
+
+    page.addEventListener('focusin', (event) => {
+        const input = event.target instanceof Element
+            ? event.target.closest('[data-model-picker] input')
+            : null;
+        if (!input) return;
+        const picker = input.closest('[data-model-picker]');
+        closeSettingsModelPickers(picker);
+        renderSettingsModelPicker(input);
+    });
+    page.dataset.modelPickerBound = '1';
+
+    page.addEventListener('input', (event) => {
+        const input = event.target instanceof Element
+            ? event.target.closest('[data-model-picker] input')
+            : null;
+        if (!input) return;
+        const picker = input.closest('[data-model-picker]');
+        closeSettingsModelPickers(picker);
+        renderSettingsModelPicker(input);
+    });
+
+    page.addEventListener('mousedown', (event) => {
+        const item = event.target instanceof Element
+            ? event.target.closest('.model-picker-item')
+            : null;
+        if (item) {
+            const picker = item.closest('[data-model-picker]');
+            const input = picker?.querySelector('input');
+            if (input) {
+                event.preventDefault();
+                input.value = item.dataset.value || '';
+                closeSettingsModelPickers();
+                input.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            return;
+        }
+        if (!(event.target instanceof Element) || !event.target.closest('[data-model-picker]')) {
+            closeSettingsModelPickers();
+        }
+    });
+
+    document.addEventListener('settings-model-catalog:updated', (event) => {
+        const items = Array.isArray(event.detail?.items) ? event.detail.items : [];
+        settingsModelCatalogItems = items.length
+            ? items.map((item) => ({
+                value: item.value || item.id || '',
+                label: item.label || item.provider || 'Catalog model',
+                provider: item.provider || '',
+            })).filter((item) => item.value)
+            : SETTINGS_FALLBACK_MODELS.map((value) => ({ value, label: 'Suggested model' }));
+        page.querySelectorAll('[data-model-picker]').forEach((picker) => {
+            const panel = picker.querySelector('.model-picker-results');
+            if (panel && !panel.hidden) {
+                const input = picker.querySelector('input');
+                renderSettingsModelPicker(input);
+            }
+        });
     });
 
     page.addEventListener('click', (event) => {
@@ -453,7 +588,7 @@ export function initSettings({ state }) {
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
             applyClaudeCodeStatus(data);
-            setStatus(data.repaired ? 'Claude runtime repaired.' : 'Claude runtime up to date.', 'ok');
+            setStatus(data.repaired ? 'Claude runtime repaired' : 'Claude runtime up to date', 'ok');
         } catch (error) {
             const message = String(error?.message || error || '');
             applyClaudeCodeStatus({
@@ -463,7 +598,7 @@ export function initSettings({ state }) {
                 error: message,
                 message: `Claude runtime repair failed: ${message}`,
             });
-            setStatus('Claude runtime repair failed.', 'warn');
+            setStatus('Claude runtime repair failed', 'warn');
         }
     });
 
@@ -501,16 +636,16 @@ export function initSettings({ state }) {
             let statusMsg;
             let statusType = 'ok';
             if (data.no_changes) {
-                statusMsg = 'No changes detected.';
+                statusMsg = 'No changes detected';
             } else if (data.restart_required) {
-                statusMsg = 'Settings saved. Some changes require a restart to take effect.';
+                statusMsg = 'Settings saved. Some changes require a restart to take effect';
                 statusType = 'warn';
             } else if (data.immediate_changed && data.next_task_changed) {
-                statusMsg = 'Settings saved. Some changes took effect immediately; others apply on the next task.';
+                statusMsg = 'Settings saved. Some changes took effect immediately; others apply on the next task';
             } else if (data.immediate_changed) {
-                statusMsg = 'Settings saved. Changes took effect immediately.';
+                statusMsg = 'Settings saved. Changes took effect immediately';
             } else {
-                statusMsg = 'Settings saved. Changes take effect on the next task.';
+                statusMsg = 'Settings saved. Changes take effect on the next task';
             }
             if (data.warnings && data.warnings.length) {
                 statusMsg += ' ⚠️ ' + data.warnings.join(' | ');

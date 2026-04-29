@@ -492,7 +492,7 @@ export function renderSettingsPage() {
             <div class="settings-footer">
                 <button type="button" class="btn btn-secondary" id="btn-reload-settings">Reload Settings</button>
                 <button class="btn btn-save" id="btn-save-settings">Save Settings</button>
-                <span id="settings-unsaved-indicator" class="settings-inline-status settings-unsaved-indicator" hidden>Unsaved changes.</span>
+                <span id="settings-unsaved-indicator" class="settings-inline-status settings-unsaved-indicator" hidden>Unsaved changes</span>
                 <div id="settings-status" class="settings-inline-status"></div>
             </div>
         </div>
@@ -521,9 +521,6 @@ export function bindSettingsTabs(root) {
 
 export function bindSecretInputs(root) {
     root.querySelectorAll('.secret-input').forEach((input) => {
-        input.addEventListener('focus', () => {
-            if (input.value.includes('...')) input.value = '';
-        });
         input.addEventListener('input', () => {
             if (input.value.trim()) delete input.dataset.forceClear;
         });

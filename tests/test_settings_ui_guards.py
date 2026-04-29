@@ -28,9 +28,9 @@ class TestSettingsUiGuards(unittest.TestCase):
         self.assertIn("if (input.dataset.forceClear === '1') {", source)
         self.assertIn("if (value && !value.includes('...')) body[settingKey] = value;", source)
 
-    def test_masked_secret_inputs_clear_on_focus(self):
+    def test_masked_secret_inputs_do_not_clear_on_focus(self):
         source = self._read_settings_sources()["settings_ui"]
-        self.assertIn("if (input.value.includes('...')) input.value = '';", source)
+        self.assertNotIn("input.value.includes('...')) input.value = ''", source)
         self.assertIn("target.dataset.forceClear = '1';", source)
 
     def test_models_section_explains_local_switching(self):
@@ -106,23 +106,26 @@ class TestSettingsUiGuards(unittest.TestCase):
         self.assertNotIn('<datalist id="settings-model-catalog">', sources["settings_ui"])
         self.assertIn('autocomplete="off"', sources["settings_ui"])
         self.assertIn('spellcheck="false"', sources["settings_ui"])
-        self.assertIn("closeAll();", sources["settings_controls"])
-        self.assertIn("closeAll(picker);", sources["settings_controls"])
+        self.assertIn("function renderSettingsModelPicker(input)", sources["settings"])
+        self.assertIn("closeSettingsModelPickers(picker);", sources["settings"])
+        self.assertNotIn("function bindModelPickers", sources["settings_controls"])
         self.assertIn("broadcastCatalog(items);", sources["settings_catalog"])
 
     def test_model_picker_selection_closes_without_reopening_from_synthetic_input(self):
-        source = self._read_settings_sources()["settings_controls"]
-        selection_handler = source.split("panel.addEventListener('mousedown'")[1].split("});", 1)[0]
-        self.assertIn("closePicker(picker);", selection_handler)
+        source = self._read_settings_sources()["settings"]
+        selection_handler = source.split("page.addEventListener('mousedown'")[1].split("});", 1)[0]
+        self.assertIn("closeSettingsModelPickers();", selection_handler)
         self.assertIn("new Event('change'", selection_handler)
         self.assertNotIn("new Event('input'", selection_handler)
 
-    def test_settings_tracks_unsaved_changes_without_navigation_guard(self):
+    def test_settings_tracks_unsaved_changes_with_navigation_guard(self):
         sources = self._read_settings_sources()
         self.assertIn('id="settings-unsaved-indicator"', sources["settings_ui"])
         self.assertIn(".settings-unsaved-indicator", (REPO / "web/settings.css").read_text(encoding="utf-8"))
         self.assertIn("let settingsBaseline = '';", sources["settings"])
         self.assertIn("function updateSettingsDirtyState()", sources["settings"])
+        self.assertIn("OUROBOROS_RUNTIME_MODE_DRAFT", sources["settings"])
+        self.assertIn("setBeforePageLeave", sources["settings"])
         self.assertIn("indicator.hidden = !settingsDirty;", sources["settings"])
         self.assertIn("page.addEventListener('input', updateSettingsDirtyState);", sources["settings"])
         self.assertIn("page.addEventListener('change', updateSettingsDirtyState);", sources["settings"])
@@ -141,3 +144,16 @@ class TestSettingsUiGuards(unittest.TestCase):
         self.assertIn("const refreshSeq = ++catalogRefreshSeq;", source)
         self.assertIn("refreshSeq !== catalogRefreshSeq", source)
         self.assertIn("stale: true", source)
+
+    def test_settings_model_picker_consumes_catalog_updates(self):
+        source = self._read_settings_sources()["settings"]
+        self.assertIn("settings-model-catalog:updated", source)
+        self.assertIn("settingsModelCatalogItems", source)
+        self.assertIn("item.value || item.id", source)
+
+    def test_onboarding_model_suggestions_are_styled_in_onboarding_css(self):
+        wizard = (REPO / "web/modules/onboarding_wizard.js").read_text(encoding="utf-8")
+        css = (REPO / "web/onboarding.css").read_text(encoding="utf-8")
+        self.assertIn("wizard-model-suggestions", wizard)
+        self.assertIn(".wizard-model-suggestions", css)
+        self.assertIn("overscroll-behavior: contain;", css)

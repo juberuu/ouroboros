@@ -326,6 +326,10 @@ Skills default to **disabled** and cannot be executed by `skill_exec`
 until review produces a PASS verdict. Skill review output is persisted
 to `~/Ouroboros/data/state/skills/<name>/review.json` with a content
 hash so an edit to the skill invalidates the previous verdict.
+`review.json`, `enabled.json`, `grants.json`, and ClawHub provenance are
+skill trust/control-plane state: they are mutated only through the review,
+toggle, launcher-grant, and marketplace paths, not through generic
+agent/browser file writes.
 
 ### Output contract
 

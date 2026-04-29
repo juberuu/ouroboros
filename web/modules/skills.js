@@ -801,10 +801,25 @@ export function initSkills(ctx) {
     const refreshBtn = document.getElementById('skills-refresh');
     const reviewingSkills = new Set();
 
-    const renderFn = () => renderSkillsList(container, emptyEl, runtimeModeEl, reviewingSkills).catch((err) => {
-        container.innerHTML = `<div class="skills-load-error">Failed to render skills: ${escapeHtml(err.message || err)}</div>`;
-        console.warn('skills: render failed', err);
-    });
+    const renderFn = async () => {
+        refreshBtn.disabled = true;
+        refreshBtn.classList.add('is-loading');
+        const originalText = refreshBtn.textContent || 'Refresh';
+        refreshBtn.textContent = 'Refreshing';
+        try {
+            await Promise.all([
+                renderSkillsList(container, emptyEl, runtimeModeEl, reviewingSkills),
+                new Promise((resolve) => setTimeout(resolve, 250)),
+            ]);
+        } catch (err) {
+            container.innerHTML = `<div class="skills-load-error">Failed to render skills: ${escapeHtml(err.message || err)}</div>`;
+            console.warn('skills: render failed', err);
+        } finally {
+            refreshBtn.disabled = false;
+            refreshBtn.classList.remove('is-loading');
+            refreshBtn.textContent = originalText === 'Refreshing' ? 'Refresh' : originalText;
+        }
+    };
 
     refreshBtn.addEventListener('click', renderFn);
     attachActionHandlers(container, renderFn, reviewingSkills);
