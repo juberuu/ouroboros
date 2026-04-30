@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Protocol
 
+from ouroboros.tool_aliases import canonical_tool_name
 from ouroboros.tool_capabilities import CORE_TOOL_NAMES, META_TOOL_NAMES
 
 
@@ -24,7 +25,8 @@ class ToolSchemaProvider(Protocol):
 def is_initial_task_tool(name: str) -> bool:
     """Return True if the tool should be loaded before any enable_tools call."""
 
-    return name in CORE_TOOL_NAMES or name in META_TOOL_NAMES
+    canonical = canonical_tool_name(name)
+    return canonical in CORE_TOOL_NAMES or canonical in META_TOOL_NAMES
 
 
 def initial_tool_schemas(registry: ToolSchemaProvider) -> List[Dict[str, Any]]:

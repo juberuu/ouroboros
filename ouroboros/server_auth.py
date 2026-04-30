@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import html
 import ipaddress
 import os
 from http.cookies import SimpleCookie
@@ -142,11 +143,13 @@ def _sanitize_next_url(value: str) -> str:
         return "/"
     if text.startswith("//"):
         return "/"
+    if any(ch in text for ch in ('"', "'", "<", ">", "\r", "\n", "\x00")):
+        return "/"
     return text
 
 
 def _login_page(next_url: str, error: str = "") -> str:
-    safe_next = _sanitize_next_url(next_url)
+    safe_next = html.escape(_sanitize_next_url(next_url), quote=True)
     error_html = (
         f'<div style="margin-top:12px;color:#ef4444;font-size:14px">{error}</div>'
         if error

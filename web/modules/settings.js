@@ -162,7 +162,7 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
         settingsBaseline = snapshotSettingsDraft();
         settingsDirty = false;
         const indicator = byId('settings-unsaved-indicator');
-        if (indicator) indicator.hidden = true;
+        if (indicator) indicator.classList.remove('is-visible');
     }
 
     function updateSettingsDirtyState() {
@@ -171,10 +171,11 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
         if (nextDirty === settingsDirty) return;
         settingsDirty = nextDirty;
         const indicator = byId('settings-unsaved-indicator');
-        if (indicator) indicator.hidden = !settingsDirty;
+        if (indicator) indicator.classList.toggle('is-visible', settingsDirty);
     }
 
     function discardUnsavedSettingsDraft() {
+        closeSettingsModelPickers();
         applySettings(currentSettings || {});
         setSettingsCleanBaseline();
         setStatus('', 'ok');
@@ -248,6 +249,7 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
         applyInputValue('s-cloudru-base-url', s.CLOUDRU_FOUNDATION_MODELS_BASE_URL);
         applyInputValue('s-anthropic', s.ANTHROPIC_API_KEY);
         applyInputValue('s-network-password', s.OUROBOROS_NETWORK_PASSWORD);
+        applyInputValue('s-server-host', s.OUROBOROS_SERVER_HOST || '127.0.0.1');
         applyInputValue('s-telegram-token', s.TELEGRAM_BOT_TOKEN);
         applyInputValue('s-telegram-chat-id', s.TELEGRAM_CHAT_ID);
 
@@ -301,15 +303,19 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
         const hint = document.getElementById('settings-lan-hint');
         if (!hint || !meta) return;
         if (meta.reachability === 'loopback_only') {
-            hint.innerHTML = '🔒 Bound to <code>localhost</code> — only accessible from this machine. To allow LAN access, restart with <code>OUROBOROS_SERVER_HOST=0.0.0.0</code>.';
+            hint.innerHTML = 'Bound to <code>localhost</code>: only accessible from this machine. Set Server Bind Host to <code>0.0.0.0</code>, save, and restart for LAN access.';
             hint.dataset.tone = 'info';
             hint.hidden = false;
         } else if (meta.reachability === 'lan_reachable') {
-            hint.innerHTML = `🌐 Accessible on your local network at <a href="${meta.recommended_url}" target="_blank" rel="noopener">${meta.recommended_url}</a>${meta.warning ? ' — <em>' + meta.warning + '</em>' : ''}`;
-            hint.dataset.tone = 'ok';
+            const url = escapeHtml(meta.recommended_url || '');
+            const warning = escapeHtml(meta.warning || '');
+            hint.innerHTML = `LAN URL: <a href="${url}" target="_blank" rel="noopener">${url}</a>${warning ? ' — <strong>' + warning + '</strong>' : ''}`;
+            hint.dataset.tone = meta.warning ? 'warn' : 'ok';
             hint.hidden = false;
         } else if (meta.reachability === 'host_ip_unknown') {
-            hint.innerHTML = `⚠️ Server is listening on non-localhost but LAN IP could not be detected automatically. Try <code>${meta.recommended_url}</code>.${meta.warning ? ' ' + meta.warning : ''}`;
+            const url = escapeHtml(meta.recommended_url || '');
+            const warning = escapeHtml(meta.warning || '');
+            hint.innerHTML = `Server is listening on non-localhost but LAN IP could not be detected automatically. Try <code>${url}</code>.${warning ? ' <strong>' + warning + '</strong>' : ''}`;
             hint.dataset.tone = 'warn';
             hint.hidden = false;
         } else {
@@ -324,6 +330,7 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
         currentSettings = data;
         applySettings(data);
         setSettingsCleanBaseline();
+        closeSettingsModelPickers();
         _renderNetworkHint(data._meta);
         renderClaudeCodeUi();
         settingsLoaded = true;
@@ -367,6 +374,7 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
             OUROBOROS_MODEL_LIGHT: byId('s-model-light').value,
             OUROBOROS_MODEL_FALLBACK: byId('s-model-fallback').value,
             CLAUDE_CODE_MODEL: byId('s-claude-code-model').value || 'claude-opus-4-7[1m]',
+            OUROBOROS_SERVER_HOST: (byId('s-server-host')?.value || '127.0.0.1').trim() || '127.0.0.1',
             OUROBOROS_EFFORT_TASK: byId('s-effort-task').value,
             OUROBOROS_EFFORT_EVOLUTION: byId('s-effort-evolution').value,
             OUROBOROS_EFFORT_REVIEW: byId('s-effort-review').value,

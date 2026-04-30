@@ -95,6 +95,7 @@ class TestSettingsUiGuards(unittest.TestCase):
         advanced_section = source.split('data-settings-panel="advanced"')[1].split('data-settings-panel=')[0]
         self.assertIn('id="s-openai-base-url"', providers_section)
         self.assertNotIn('id="s-openai-base-url"', advanced_section)
+        self.assertIn('id="s-server-host"', providers_section)
 
     def test_save_reloads_settings_after_success(self):
         source = self._read_settings_sources()["settings"]
@@ -126,7 +127,8 @@ class TestSettingsUiGuards(unittest.TestCase):
         self.assertIn("function updateSettingsDirtyState()", sources["settings"])
         self.assertIn("OUROBOROS_RUNTIME_MODE_DRAFT", sources["settings"])
         self.assertIn("setBeforePageLeave", sources["settings"])
-        self.assertIn("indicator.hidden = !settingsDirty;", sources["settings"])
+        self.assertIn("indicator.classList.toggle('is-visible', settingsDirty);", sources["settings"])
+        self.assertIn("closeSettingsModelPickers();", sources["settings"])
         self.assertIn("page.addEventListener('input', updateSettingsDirtyState);", sources["settings"])
         self.assertIn("page.addEventListener('change', updateSettingsDirtyState);", sources["settings"])
         self.assertIn("[data-effort-value], .secret-clear", sources["settings"])

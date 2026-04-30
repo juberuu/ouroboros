@@ -74,7 +74,7 @@ MAX_FUNCTION_LINES = 300
 # larger than the pre-release scope; the ceiling bump stays consistent
 # with how MAX_TOTAL_FUNCTIONS has grown through v4.40→v4.47 as each
 # phase shipped.
-MAX_TOTAL_FUNCTIONS = 1585  # v5.3.6-rc.2: extensions/skills platform hardening adds reviewed lifecycle, widget-v2, Heal-mode guard, and adversarial regression helpers. Bumped from 1565 because these functions close trust/lifecycle boundaries for shipped extension capabilities; follow-up connector/runtime work should pay down function count through extraction rather than repeatedly raising this gate.
+MAX_TOTAL_FUNCTIONS = 1590  # v5.4.0: OpenClaw compatibility + Marketplace lifecycle UX adds a small alias boundary and lifecycle-state helpers. Bumped from 1585; follow-up UI consolidation should pay this down rather than growing another parallel helper set.
 # v4.40.0 adds claude_advisory_review.py to the grandfathered set: the file
 # grew to 1731 lines across v4.37-v4.39 (plan_task quorum + direct-provider
 # fallback + convergence rule + syntax preflight + reflection decoupling).

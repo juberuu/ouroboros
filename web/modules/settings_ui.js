@@ -196,7 +196,14 @@ export function renderSettingsPage() {
                             label: 'Network Password (optional)',
                             placeholder: 'Leave blank to keep the network surface open',
                         })}</div>
-                        <div class="settings-inline-note">Adds a password wall only for non-localhost app and API access. Leave it blank if you use Ouroboros only on this machine or inside a trusted private network. External binds still start without it, but startup logs a warning.</div>
+                        <div class="form-row">
+                            <div class="form-field">
+                                <label>Server Bind Host</label>
+                                <input id="s-server-host" placeholder="127.0.0.1 or 0.0.0.0">
+                                <div class="settings-inline-note">Use <code>127.0.0.1</code> for this machine only. Use <code>0.0.0.0</code> for LAN/Docker access with a Network Password in the same save. Specific LAN IP binds are manual/env-only.</div>
+                            </div>
+                        </div>
+                        <div class="settings-inline-note">Adds a password wall only for non-localhost app and API access. If you expose Ouroboros on LAN or Docker, set a password before sharing the URL.</div>
                         <div id="settings-lan-hint" class="settings-lan-hint" hidden></div>
                     </div>
                 </section>
@@ -490,10 +497,14 @@ export function renderSettingsPage() {
             </div>
 
             <div class="settings-footer">
-                <button type="button" class="btn btn-secondary" id="btn-reload-settings">Reload Settings</button>
-                <button class="btn btn-save" id="btn-save-settings">Save Settings</button>
-                <span id="settings-unsaved-indicator" class="settings-inline-status settings-unsaved-indicator" hidden>Unsaved changes</span>
-                <div id="settings-status" class="settings-inline-status"></div>
+                <div class="settings-footer-actions">
+                    <button type="button" class="btn btn-secondary" id="btn-reload-settings">Reload Settings</button>
+                    <button class="btn btn-save" id="btn-save-settings">Save Settings</button>
+                </div>
+                <div class="settings-footer-status">
+                    <span id="settings-unsaved-indicator" class="settings-inline-status settings-unsaved-indicator" aria-hidden="true">Unsaved changes</span>
+                    <div id="settings-status" class="settings-inline-status"></div>
+                </div>
             </div>
         </div>
     `;

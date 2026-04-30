@@ -429,7 +429,7 @@ async def api_marketplace_installed(request: Request) -> JSONResponse:
     if blocked:
         return blocked
     drive_root = _request_drive_root(request)
-    from ouroboros.skill_loader import discover_skills
+    from ouroboros.skill_loader import discover_skills, grant_status_for_skill
     from ouroboros.config import get_skills_repo_path
 
     skills = discover_skills(drive_root, repo_path=get_skills_repo_path())
@@ -438,6 +438,13 @@ async def api_marketplace_installed(request: Request) -> JSONResponse:
         if skill.source != "clawhub":
             continue
         prov = read_provenance(drive_root, skill.name) or {}
+        payload_root = ""
+        try:
+            rel_skill_dir = skill.skill_dir.resolve().relative_to(drive_root.resolve())
+            if rel_skill_dir.parts[:1] == ("skills",):
+                payload_root = rel_skill_dir.as_posix()
+        except Exception:
+            payload_root = ""
         out.append(
             {
                 "name": skill.name,
@@ -445,8 +452,11 @@ async def api_marketplace_installed(request: Request) -> JSONResponse:
                 "version": skill.manifest.version,
                 "review_status": skill.review.status,
                 "review_stale": skill.review.is_stale_for(skill.content_hash),
+                "review_findings": list(skill.review.findings or []),
                 "enabled": skill.enabled,
                 "load_error": skill.load_error,
+                "grants": grant_status_for_skill(drive_root, skill),
+                "payload_root": payload_root,
                 "provenance": prov,
             }
         )

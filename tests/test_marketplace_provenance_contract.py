@@ -38,6 +38,11 @@ _CANONICAL_PROVENANCE = {
     "primary_env": "DEMO_API_KEY",
     "original_manifest_sha256": "b" * 64,
     "translated_manifest_sha256": "c" * 64,
+    "adapter_version": "5.4.0",
+    "openclaw_compat": {
+        "adapter_version": "5.4.0",
+        "requires": {"bins": [], "anyBins": [], "env": [], "config": ["browser.enabled"]},
+    },
     "adapter_warnings": ["adapter could not derive permissions"],
     "registry_url": "https://clawhub.ai/api/v1",
 }
@@ -55,6 +60,8 @@ _REQUIRED_PROJECTION_FIELDS = frozenset(
         "homepage",
         "license",
         "adapter_warnings",
+        "adapter_version",
+        "openclaw_compat",
     }
 )
 

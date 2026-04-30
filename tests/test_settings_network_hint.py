@@ -58,7 +58,7 @@ class TestBuildNetworkMeta:
         assert meta["reachability"] == "lan_reachable"
         assert meta["recommended_url"] == "http://192.168.1.42:8765"
         assert meta["lan_ip"] == "192.168.1.42"
-        assert meta["warning"] == ""
+        assert "without OUROBOROS_NETWORK_PASSWORD" in meta["warning"]
 
     def test_nonloopback_without_detected_ip(self):
         from server import _build_network_meta

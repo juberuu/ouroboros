@@ -20,6 +20,7 @@ from typing import Any, Callable, Dict, List, Optional
 import logging
 
 from ouroboros.config import load_settings
+from ouroboros.tool_aliases import adapt_tool_args, canonical_tool_name
 from ouroboros.tool_capabilities import (
     READ_ONLY_PARALLEL_TOOLS,
     REVIEWED_MUTATIVE_TOOLS,
@@ -189,14 +190,15 @@ def _execute_single_tool(
 
     Returns dict with: tool_call_id, fn_name, result, is_error, args_for_log, is_code_tool
     """
-    fn_name = tc["function"]["name"]
+    requested_fn_name = tc["function"]["name"]
+    fn_name = canonical_tool_name(requested_fn_name)
     tool_call_id = tc["id"]
     is_code_tool = fn_name in tools.CODE_TOOLS
 
     try:
         args = json.loads(tc["function"]["arguments"] or "{}")
     except (json.JSONDecodeError, ValueError) as e:
-        result = f"⚠️ TOOL_ARG_ERROR: Could not parse arguments for '{fn_name}': {e}"
+        result = f"⚠️ TOOL_ARG_ERROR: Could not parse arguments for '{requested_fn_name}': {e}"
         return {
             "tool_call_id": tool_call_id,
             "fn_name": fn_name,
@@ -208,6 +210,8 @@ def _execute_single_tool(
             "result_meta": _extract_result_metadata(fn_name, result, True),
         }
 
+    if isinstance(args, dict):
+        args = adapt_tool_args(requested_fn_name, args)
     args_for_log = sanitize_tool_args_for_log(fn_name, args if isinstance(args, dict) else {})
 
     tool_ok = True
@@ -327,7 +331,8 @@ def _execute_with_timeout(
     stateful_executor: Optional[StatefulToolExecutor] = None,
 ) -> Dict[str, Any]:
     """Execute a tool call with a hard timeout."""
-    fn_name = tc["function"]["name"]
+    requested_fn_name = tc["function"]["name"]
+    fn_name = canonical_tool_name(requested_fn_name)
     tool_call_id = tc["id"]
     is_code_tool = fn_name in tools.CODE_TOOLS
     use_stateful = stateful_executor and fn_name in STATEFUL_BROWSER_TOOLS
@@ -335,6 +340,8 @@ def _execute_with_timeout(
     args_for_log = {}
     try:
         args = json.loads(tc["function"]["arguments"] or "{}")
+        if isinstance(args, dict):
+            args = adapt_tool_args(requested_fn_name, args)
         if isinstance(args, dict):
             args_for_log = sanitize_tool_args_for_log(fn_name, args)
     except Exception:
@@ -537,7 +544,7 @@ def handle_tool_calls(
     can_parallel = (
         len(tool_calls) > 1 and
         all(
-            tc.get("function", {}).get("name") in READ_ONLY_PARALLEL_TOOLS
+            canonical_tool_name(tc.get("function", {}).get("name")) in READ_ONLY_PARALLEL_TOOLS
             for tc in tool_calls
         )
     )
@@ -545,7 +552,7 @@ def handle_tool_calls(
     if not can_parallel:
         results = [
             _execute_with_timeout(tools, tc, drive_logs,
-                                  _get_tool_timeout(tools, tc["function"]["name"]), task_id,
+                                  _get_tool_timeout(tools, canonical_tool_name(tc["function"]["name"])), task_id,
                                   stateful_executor)
             for tc in tool_calls
         ]
@@ -556,7 +563,7 @@ def handle_tool_calls(
             future_to_index = {
                 executor.submit(
                     _execute_with_timeout, tools, tc, drive_logs,
-                    _get_tool_timeout(tools, tc["function"]["name"]), task_id,
+                    _get_tool_timeout(tools, canonical_tool_name(tc["function"]["name"])), task_id,
                     stateful_executor,
                 ): idx
                 for idx, tc in enumerate(tool_calls)
@@ -568,7 +575,8 @@ def handle_tool_calls(
                     results[idx] = future.result()
                 except Exception as exc:
                     tc = tool_calls[idx]
-                    fn_name = tc.get("function", {}).get("name", "unknown")
+                    requested_fn_name = tc.get("function", {}).get("name", "unknown")
+                    fn_name = canonical_tool_name(requested_fn_name)
                     results[idx] = {
                         "tool_call_id": tc.get("id", ""),
                         "fn_name": fn_name,

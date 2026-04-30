@@ -2888,6 +2888,10 @@ body {
     flex-wrap: wrap;
 }
 
+.skills-next-action {
+    min-width: 130px;
+}
+
 .skills-card-actions .skills-details {
     margin-top: 0;
     border: none;
@@ -3092,12 +3096,17 @@ body {
 
 .marketplace-card {
     border: 1px solid rgba(250, 250, 250, 0.08);
-    border-radius: 8px;
+    border-radius: var(--radius-lg);
     padding: 14px;
     background: rgba(255, 255, 255, 0.02);
     display: flex;
     flex-direction: column;
     gap: 10px;
+}
+
+.marketplace-card.is-working {
+    border-color: rgba(245, 158, 11, 0.35);
+    background: rgba(245, 158, 11, 0.035);
 }
 
 .marketplace-card-head {
@@ -3133,6 +3142,36 @@ body {
     min-height: 38px;
 }
 
+.marketplace-card-state {
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: var(--radius);
+    padding: 10px 12px;
+    font-size: 12px;
+    background: rgba(255, 255, 255, 0.035);
+}
+
+.marketplace-card-state strong {
+    display: block;
+    margin-bottom: 4px;
+}
+
+.marketplace-card-state-hint {
+    color: rgba(250, 250, 250, 0.68);
+    line-height: 1.45;
+}
+
+.marketplace-state-ok {
+    border-color: rgba(34, 197, 94, 0.25);
+}
+
+.marketplace-state-warn {
+    border-color: rgba(245, 158, 11, 0.30);
+}
+
+.marketplace-state-danger {
+    border-color: rgba(239, 68, 68, 0.30);
+}
+
 .marketplace-card-meta {
     display: flex;
     flex-wrap: wrap;
@@ -3147,9 +3186,19 @@ body {
 
 .marketplace-card-actions {
     display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: auto;
+}
+
+.marketplace-primary-action .btn {
+    width: 100%;
+}
+
+.marketplace-secondary-actions {
+    display: flex;
     gap: 6px;
     flex-wrap: wrap;
-    margin-top: auto;
 }
 
 .marketplace-pagination {

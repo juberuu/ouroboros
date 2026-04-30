@@ -97,6 +97,8 @@ def test_adapter_translates_basic_metadata(tmp_path):
     sidecar = json.loads((staging / ".clawhub.json").read_text(encoding="utf-8"))
     assert sidecar["source"] == "clawhub"
     assert sidecar["slug"] == "anthropics/nano-banana"
+    assert sidecar["adapter_version"] == adapter_mod.ADAPTER_VERSION
+    assert sidecar["openclaw_compat"]["metadata_openclaw"]["primaryEnv"] == "GEMINI_API_KEY"
 
 
 def test_adapter_description_mirrors_into_when_to_use(tmp_path):
@@ -178,6 +180,41 @@ def test_adapter_full_os_set_resolves_to_any(tmp_path):
     assert result.manifest.os == "any"
 
 
+def test_adapter_preserves_openclaw_command_and_gating_metadata(tmp_path):
+    staging = tmp_path / "staging"
+    _write_staged_skill(
+        staging,
+        textwrap.dedent(
+            """
+            name: commandish
+            description: Tool command.
+            version: 0.1
+            user-invocable: true
+            command-dispatch: tool
+            command-tool: web_search
+            command-arg-mode: raw
+            metadata:
+              openclaw:
+                always: true
+                skillKey: commandish-key
+                emoji: ":search:"
+                homepage: https://example.com/commandish
+                requires:
+                  config: [browser.enabled]
+            """
+        ),
+    )
+    result = adapt_openclaw_skill(staging, slug="x/commandish", version="0.1", sha256="0" * 64)
+    assert result.ok
+    compat = result.provenance["openclaw_compat"]
+    assert compat["always"] is True
+    assert compat["skill_key"] == "commandish-key"
+    assert compat["requires"]["config"] == ["browser.enabled"]
+    assert compat["command_fields"]["command-tool"] == "web_search"
+    assert any("requires.config" in warning for warning in result.warnings)
+    assert any("always=true" in warning for warning in result.warnings)
+
+
 def test_adapter_scripts_listed_when_runtime_python(tmp_path):
     staging = tmp_path / "staging"
     _write_staged_skill(
@@ -227,6 +264,27 @@ def test_adapter_refuses_install_specs(tmp_path):
         ),
     )
     result = adapt_openclaw_skill(staging, slug="x/brew-skill", version="0.1", sha256="0" * 64)
+    assert not result.ok
+    assert any("install specs" in b for b in result.blockers)
+
+
+@pytest.mark.parametrize("install_value", ["brew jq", "{kind: brew, formula: jq}"])
+def test_adapter_refuses_malformed_non_empty_install_specs(tmp_path, install_value):
+    staging = tmp_path / "staging"
+    _write_staged_skill(
+        staging,
+        textwrap.dedent(
+            f"""
+            name: malformed-install
+            description: bad install shape
+            version: 0.1
+            metadata:
+              openclaw:
+                install: {install_value}
+            """
+        ),
+    )
+    result = adapt_openclaw_skill(staging, slug="x/malformed-install", version="0.1", sha256="0" * 64)
     assert not result.ok
     assert any("install specs" in b for b in result.blockers)
 

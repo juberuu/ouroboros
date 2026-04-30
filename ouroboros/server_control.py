@@ -11,11 +11,21 @@ from typing import Any
 
 def restart_current_process(host: str, port: int, *, repo_dir: pathlib.Path, log: Any) -> None:
     env = os.environ.copy()
-    env["OUROBOROS_SERVER_HOST"] = str(host)
+    desired_host = str(host)
+    try:
+        from ouroboros.config import load_settings
+        desired_host = (
+            str(os.environ.get("OUROBOROS_SERVER_HOST") or "").strip()
+            or str(load_settings().get("OUROBOROS_SERVER_HOST") or "").strip()
+            or desired_host
+        )
+    except Exception:
+        desired_host = str(host)
+    env["OUROBOROS_SERVER_HOST"] = desired_host
     env["OUROBOROS_SERVER_PORT"] = str(port)
     env.pop("OUROBOROS_MANAGED_BY_LAUNCHER", None)
     argv = [sys.executable, *sys.argv]
-    log.info("Re-executing direct server mode on %s:%d", host, port)
+    log.info("Re-executing direct server mode on %s:%d", desired_host, port)
     try:
         os.execvpe(sys.executable, argv, env)
     except Exception:

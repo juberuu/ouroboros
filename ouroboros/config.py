@@ -51,6 +51,7 @@ SETTINGS_DEFAULTS = {
     "TELEGRAM_CHAT_ID": "",
 
     "OUROBOROS_NETWORK_PASSWORD": "",
+    "OUROBOROS_SERVER_HOST": "127.0.0.1",
     "OUROBOROS_MODEL": "anthropic/claude-opus-4.7",
     "OUROBOROS_MODEL_CODE": "anthropic/claude-opus-4.7",
     "OUROBOROS_MODEL_LIGHT": "anthropic/claude-sonnet-4.6",

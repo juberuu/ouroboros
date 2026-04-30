@@ -76,3 +76,11 @@ def test_network_auth_gate_accepts_header_and_login_cookie(monkeypatch):
         cookie_resp = client.get("/")
         assert cookie_resp.status_code == 200
         assert cookie_resp.json() == {"ok": True}
+
+
+def test_login_next_url_is_escaped(monkeypatch):
+    with _make_client(monkeypatch) as client:
+        resp = client.get('/auth/login?next=/"><script>alert(1)</script>', follow_redirects=False)
+        assert resp.status_code == 200
+        assert "<script>" not in resp.text
+        assert 'value="/"' in resp.text

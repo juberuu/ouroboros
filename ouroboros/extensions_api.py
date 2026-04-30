@@ -199,6 +199,8 @@ async def api_extensions_index(request: Request) -> JSONResponse:
                         "slug": prov.get("slug", ""),
                         "version": prov.get("version", ""),
                         "sha256": prov.get("sha256", ""),
+                        "adapter_version": prov.get("adapter_version", ""),
+                        "openclaw_compat": dict(prov.get("openclaw_compat") or {}),
                         "installed_at": prov.get("installed_at", ""),
                         "updated_at": prov.get("updated_at", ""),
                     }
@@ -211,6 +213,8 @@ async def api_extensions_index(request: Request) -> JSONResponse:
                             "license": prov.get("license", ""),
                             "primary_env": prov.get("primary_env", ""),
                             "adapter_warnings": list(prov.get("adapter_warnings") or []),
+                            "original_manifest_sha256": prov.get("original_manifest_sha256", ""),
+                            "translated_manifest_sha256": prov.get("translated_manifest_sha256", ""),
                             "registry_url": prov.get("registry_url", ""),
                         })
             catalog.append(entry)

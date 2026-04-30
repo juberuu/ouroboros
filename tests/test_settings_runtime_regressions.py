@@ -114,6 +114,10 @@ def test_settings_js_disables_save_until_reload_succeeds():
 
 def test_restart_current_process_falls_back_to_spawn_on_exec_failure(monkeypatch, tmp_path):
     server_module = _reload_server(monkeypatch, tmp_path)
+    (tmp_path / "settings.json").write_text(
+        json.dumps({"OUROBOROS_SERVER_HOST": "0.0.0.0"}),
+        encoding="utf-8",
+    )
     called = {}
     spawned = {}
     import ouroboros.server_control as server_control_module
@@ -137,12 +141,43 @@ def test_restart_current_process_falls_back_to_spawn_on_exec_failure(monkeypatch
 
     assert called["executable"] == sys.executable
     assert called["argv"][0] == sys.executable
-    assert called["env"]["OUROBOROS_SERVER_HOST"] == "127.0.0.1"
+    assert called["env"]["OUROBOROS_SERVER_HOST"] == "0.0.0.0"
     assert called["env"]["OUROBOROS_SERVER_PORT"] == "9032"
     assert "OUROBOROS_MANAGED_BY_LAUNCHER" not in called["env"]
     assert spawned["argv"] == called["argv"]
     assert spawned["env"]["OUROBOROS_SERVER_PORT"] == "9032"
     assert spawned["cwd"] == str(server_module.REPO_DIR)
+
+
+def test_restart_current_process_preserves_env_host_precedence(monkeypatch, tmp_path):
+    server_module = _reload_server(monkeypatch, tmp_path)
+    (tmp_path / "settings.json").write_text(
+        json.dumps({"OUROBOROS_SERVER_HOST": "127.0.0.1"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OUROBOROS_SERVER_HOST", "0.0.0.0")
+    called = {}
+    import ouroboros.server_control as server_control_module
+
+    def _fake_execvpe(executable, argv, env):
+        called["env"] = env
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(server_control_module.os, "execvpe", _fake_execvpe)
+    monkeypatch.setattr(server_control_module.subprocess, "Popen", lambda *_a, **_kw: object())
+
+    server_module._restart_current_process("127.0.0.1", 9033)
+
+    assert called["env"]["OUROBOROS_SERVER_HOST"] == "0.0.0.0"
+
+
+def test_apply_settings_to_env_does_not_overwrite_launch_server_host(monkeypatch, tmp_path):
+    config_module, _settings_path = _reload_config(monkeypatch, tmp_path)
+    monkeypatch.setenv("OUROBOROS_SERVER_HOST", "0.0.0.0")
+
+    config_module.apply_settings_to_env({"OUROBOROS_SERVER_HOST": "127.0.0.1"})
+
+    assert os.environ["OUROBOROS_SERVER_HOST"] == "0.0.0.0"
 
 
 def test_api_settings_post_rejects_local_only_unrouted_runtime(monkeypatch, tmp_path):
@@ -172,6 +207,91 @@ def test_api_settings_post_rejects_local_only_unrouted_runtime(monkeypatch, tmp_
 
     assert response.status_code == 400
     assert payload["error"] == "Local-only setups must route at least one model to the local runtime."
+
+
+def test_api_settings_post_requires_password_for_nonloopback_bind(monkeypatch, tmp_path):
+    server_module = _reload_server(monkeypatch, tmp_path)
+
+    class _Request:
+        async def json(self):
+            return {
+                "OUROBOROS_SERVER_HOST": "0.0.0.0",
+                "OUROBOROS_NETWORK_PASSWORD": "",
+            }
+
+    response = asyncio.run(server_module.api_settings_post(_Request()))
+    payload = json.loads(response.body.decode("utf-8"))
+
+    assert response.status_code == 400
+    assert "requires a Network Password" in payload["error"]
+
+
+def test_api_settings_post_rejects_specific_lan_host(monkeypatch, tmp_path):
+    server_module = _reload_server(monkeypatch, tmp_path)
+
+    class _Request:
+        async def json(self):
+            return {
+                "OUROBOROS_SERVER_HOST": "192.168.1.50",
+                "OUROBOROS_NETWORK_PASSWORD": "secret",
+            }
+
+    response = asyncio.run(server_module.api_settings_post(_Request()))
+    payload = json.loads(response.body.decode("utf-8"))
+
+    assert response.status_code == 400
+    assert "Specific LAN IP binds" in payload["error"]
+
+
+def test_api_settings_post_refuses_password_clear_while_nonloopback_bound(monkeypatch, tmp_path):
+    server_module = _reload_server(monkeypatch, tmp_path)
+    (tmp_path / "settings.json").write_text(
+        json.dumps({
+            "OUROBOROS_SERVER_HOST": "0.0.0.0",
+            "OUROBOROS_NETWORK_PASSWORD": "secret",
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(server_module, "_BIND_HOST", "0.0.0.0")
+
+    class _Request:
+        async def json(self):
+            return {
+                "OUROBOROS_SERVER_HOST": "127.0.0.1",
+                "OUROBOROS_NETWORK_PASSWORD": "",
+            }
+
+    response = asyncio.run(server_module.api_settings_post(_Request()))
+    payload = json.loads(response.body.decode("utf-8"))
+
+    assert response.status_code == 400
+    assert "Cannot clear Network Password" in payload["error"]
+
+
+def test_password_clear_guard_uses_actual_bound_host_before_env(monkeypatch, tmp_path):
+    server_module = _reload_server(monkeypatch, tmp_path)
+    (tmp_path / "settings.json").write_text(
+        json.dumps({
+            "OUROBOROS_SERVER_HOST": "127.0.0.1",
+            "OUROBOROS_NETWORK_PASSWORD": "secret",
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OUROBOROS_SERVER_HOST", "127.0.0.1")
+    monkeypatch.setattr(server_module, "_BIND_HOST", "0.0.0.0")
+
+    class _Request:
+        async def json(self):
+            return {
+                "OUROBOROS_SERVER_HOST": "127.0.0.1",
+                "OUROBOROS_NETWORK_PASSWORD": "",
+            }
+
+    response = asyncio.run(server_module.api_settings_post(_Request()))
+    payload = json.loads(response.body.decode("utf-8"))
+
+    assert response.status_code == 400
+    assert "Cannot clear Network Password" in payload["error"]
 
 
 def test_api_command_uses_local_enqueue_semantics(monkeypatch, tmp_path):

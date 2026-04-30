@@ -272,6 +272,15 @@
 .settings-unsaved-indicator {
     color: var(--amber);
     font-weight: 600;
+    min-width: 126px;
+    opacity: 0;
+    visibility: hidden;
+    text-align: right;
+}
+
+.settings-unsaved-indicator.is-visible {
+    opacity: 1;
+    visibility: visible;
 }
 
 .settings-toolbar {
@@ -290,6 +299,29 @@
     padding: 14px 2px 0;
     border-top: 1px solid rgba(255, 255, 255, 0.06);
     background: linear-gradient(180deg, rgba(13, 11, 15, 0), rgba(13, 11, 15, 0.92) 55%);
+}
+
+.settings-footer-actions,
+.settings-footer-status {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.settings-footer-actions {
+    flex: 0 0 auto;
+}
+
+.settings-footer-status {
+    flex: 1 1 auto;
+    justify-content: flex-end;
+    min-width: 0;
+}
+
+.settings-footer-status #settings-status {
+    min-width: 220px;
+    max-width: 52ch;
+    text-align: right;
 }
 
 .secret-input-row {
@@ -558,6 +590,17 @@
     .settings-footer {
         align-items: stretch;
         flex-direction: column;
+    }
+
+    .settings-footer-actions,
+    .settings-footer-status {
+        justify-content: flex-start;
+        align-items: stretch;
+    }
+
+    .settings-footer-status #settings-status,
+    .settings-unsaved-indicator {
+        text-align: left;
     }
 
     .settings-provider-hint {

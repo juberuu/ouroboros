@@ -8,8 +8,11 @@ auditability + later review.
 
 The adapter NEVER:
 
-- Forwards a setting key that overlaps with
+- Auto-forwards a setting key that overlaps with
   :data:`ouroboros.contracts.plugin_api.FORBIDDEN_SKILL_SETTINGS`.
+  Core keys may be preserved in ``env_from_settings`` only as explicit
+  per-skill grant requirements; runtime access still requires fresh PASS
+  review plus owner approval bound to the current content hash.
 - Accepts a ``metadata.openclaw.install`` spec (brew/go/uv/node) — those
   require global state mutations Ouroboros refuses to delegate to a
   third-party package.
@@ -48,6 +51,7 @@ log = logging.getLogger(__name__)
 _ALLOWED_RUNTIME_BINS = frozenset({"python", "python3", "bash", "node"})
 _NAME_SAFE_RE = re.compile(r"[^a-zA-Z0-9._-]+")
 _MAX_SLUG_LEN = 64
+ADAPTER_VERSION = "5.4.0"
 
 
 @dataclass
@@ -152,6 +156,89 @@ def _extract_metadata_block(front: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(block, dict) and block:
             return block
     return {}
+
+
+def _json_safe(value: Any) -> Any:
+    """Return a JSON-serializable copy for provenance snapshots."""
+
+    try:
+        return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _openclaw_compat_snapshot(
+    front: Dict[str, Any],
+    metadata_block: Dict[str, Any],
+    warnings: List[str],
+) -> Dict[str, Any]:
+    """Preserve OpenClaw authoring metadata not native to Ouroboros."""
+
+    requires = metadata_block.get("requires") if isinstance(metadata_block, dict) else {}
+    if not isinstance(requires, dict):
+        requires = {}
+    unsupported_top_level = sorted(
+        key
+        for key in front.keys()
+        if key
+        not in {
+            "name",
+            "description",
+            "version",
+            "metadata",
+            "homepage",
+            "website",
+            "license",
+            "timeout_sec",
+            "when_to_use",
+        }
+    )
+    command_fields = {
+        key: front.get(key)
+        for key in (
+            "user-invocable",
+            "disable-model-invocation",
+            "command-dispatch",
+            "command-tool",
+            "command-arg-mode",
+            "argument-hint",
+            "arguments",
+        )
+        if key in front
+    }
+    if requires.get("config"):
+        warnings.append(
+            "OpenClaw metadata declares requires.config gates. Ouroboros "
+            "preserves them in provenance but does not treat them as runtime "
+            "permissions or auto-enable conditions."
+        )
+    if metadata_block.get("always") is True:
+        warnings.append(
+            "OpenClaw metadata declares always=true. Ouroboros ignores it: "
+            "marketplace installs still require review and explicit enablement."
+        )
+    return {
+        "adapter_version": ADAPTER_VERSION,
+        "metadata_openclaw": _json_safe(metadata_block),
+        "requires": {
+            "bins": _coerce_str_list(requires.get("bins")),
+            "anyBins": _coerce_str_list(requires.get("anyBins")),
+            "env": _coerce_str_list(requires.get("env")),
+            "config": _coerce_str_list(requires.get("config")),
+        },
+        "skill_key": str(metadata_block.get("skillKey") or "").strip(),
+        "emoji": str(metadata_block.get("emoji") or "").strip(),
+        "homepage": str(metadata_block.get("homepage") or front.get("homepage") or front.get("website") or "").strip(),
+        "primary_env": str(metadata_block.get("primaryEnv") or "").strip(),
+        "always": metadata_block.get("always") is True,
+        "command_fields": _json_safe(command_fields),
+        "unsupported_top_level_fields": unsupported_top_level,
+        "lossy_mappings": [
+            "metadata.openclaw.requires.* is load-time gating in OpenClaw; Ouroboros preserves it and only maps selected fields into permissions/env allowlists.",
+            "allowed-tools is advisory compatibility metadata; Ouroboros maps a conservative subset into permissions and keeps the original manifest in SKILL.openclaw.md.",
+            "metadata.openclaw.install is display-only here and blocks install rather than mutating the host.",
+        ],
+    }
 
 
 def _coerce_str_list(value: Any) -> List[str]:
@@ -475,12 +562,14 @@ def adapt_openclaw_skill(
     warnings: List[str] = []
     blockers: List[str] = []
     provenance: Dict[str, Any] = {
+        "schema_version": 1,
         "source": "clawhub",
         "slug": slug,
         "sanitized_name": sanitized,
         "version": (version or "").strip(),
         "sha256": (sha256 or "").strip(),
         "is_plugin": bool(is_plugin),
+        "adapter_version": ADAPTER_VERSION,
         "installed_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -514,14 +603,18 @@ def adapt_openclaw_skill(
         )
 
     metadata_block = _extract_metadata_block(original_front)
+    openclaw_compat = _openclaw_compat_snapshot(original_front, metadata_block, warnings)
 
-    install_specs = metadata_block.get("install") or []
-    if isinstance(install_specs, list) and install_specs:
+    install_specs = metadata_block.get("install")
+    if install_specs not in (None, "", [], {}):
+        specs_list = install_specs if isinstance(install_specs, list) else [install_specs]
         kinds = sorted({
             str(spec.get("kind") or "").strip()
-            for spec in install_specs
+            for spec in specs_list
             if isinstance(spec, dict) and spec.get("kind")
         })
+        if not kinds:
+            kinds = [type(install_specs).__name__]
         blockers.append(
             "OpenClaw manifest declares install specs that require global "
             "package-manager mutations (kinds=" + str(kinds) + "). Ouroboros "
@@ -652,6 +745,8 @@ def adapt_openclaw_skill(
     provenance["original_manifest_sha256"] = _sha256_of_text(original_text)
     provenance["translated_manifest_sha256"] = _sha256_of_text(rendered_skill_md)
     provenance["adapter_warnings"] = list(warnings)
+    provenance["openclaw_compat"] = openclaw_compat
+    provenance["original_frontmatter"] = _json_safe(original_front)
     provenance.update(provenance_extras)
 
     if blockers:
@@ -724,6 +819,7 @@ def _sha256_of_text(text: str) -> str:
 
 
 __all__ = [
+    "ADAPTER_VERSION",
     "AdapterResult",
     "adapt_openclaw_skill",
     "sanitize_clawhub_slug",

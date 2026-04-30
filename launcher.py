@@ -290,6 +290,9 @@ def start_agent(port: int = AGENT_SERVER_PORT) -> subprocess.Popen:
     _apply_settings_to_env(settings)
     env = os.environ.copy()
     env["PYTHONPATH"] = str(REPO_DIR)
+    saved_host = str(settings.get("OUROBOROS_SERVER_HOST") or "").strip()
+    if saved_host:
+        env["OUROBOROS_SERVER_HOST"] = saved_host
     env["OUROBOROS_SERVER_PORT"] = str(port)
     env["OUROBOROS_DATA_DIR"] = str(DATA_DIR)
     env["OUROBOROS_REPO_DIR"] = str(REPO_DIR)

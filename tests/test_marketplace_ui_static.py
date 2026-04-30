@@ -14,6 +14,12 @@ def _marketplace_js() -> str:
     )
 
 
+def _skills_js() -> str:
+    return (REPO_ROOT / "web" / "modules" / "skills.js").read_text(
+        encoding="utf-8"
+    )
+
+
 def test_marketplace_search_mode_hides_pagination_and_keeps_official_clickable():
     source = _marketplace_js()
     assert "const searchMode = Boolean(String(query || '').trim());" in source
@@ -48,7 +54,45 @@ def test_marketplace_empty_and_timeout_copy_is_human_readable():
 
 def test_marketplace_review_failure_points_to_heal_flow():
     source = _marketplace_js()
-    assert "auto-review failed" in source
-    assert "use Heal to let Ouroboros repair the skill" in source
+    assert "Fix" in source
+    assert "Ask Ouroboros in chat to repair" in source
     assert "AUTO-REVIEW FAILED" not in source
     assert "rerun review from the Skills tab" not in source
+
+
+def test_marketplace_cards_have_lifecycle_next_action():
+    source = _marketplace_js()
+    assert "function lifecycleFor" in source
+    assert "marketplace-next-action" in source
+    assert "data-mp-action" in source
+    assert "state.pendingBySlug" in source
+
+
+def test_marketplace_fix_prompt_has_heal_payload_root_marker():
+    source = _marketplace_js()
+    assert "HEAL_SKILL_PAYLOAD_ROOT_JSON" in source
+    assert "diagnostics.payload_root" in source
+    assert "Final non-negotiable rules:" in source
+    assert ".replace(/`/g, \"'\")" in source
+
+
+def test_marketplace_install_does_not_silently_enable():
+    source = _marketplace_js()
+    assert "review passed. Enable it from the card when ready." in source
+    assert "Installed and enabled" not in source
+    assert "toggleInstalledSkill(installedNow, true)" not in source
+
+
+def test_installed_skills_keep_review_before_fix_for_pending_or_stale():
+    source = _skills_js()
+    next_action = source.split("function skillNextAction", 1)[1].split("function renderSkillCard", 1)[0]
+    assert "if (!reviewReady(skill))" in next_action
+    assert "skill.review_status === 'fail'" in next_action
+
+
+def test_marketplace_pending_or_stale_lifecycle_uses_review_not_fix():
+    source = _marketplace_js()
+    lifecycle = source.split("function lifecycleFor", 1)[1].split("function buildHealPrompt", 1)[0]
+    assert "installed.review_status === 'fail'" in lifecycle
+    assert "action: 'review'" in lifecycle
+    assert "button: installed.review_stale ? 'Re-review' : 'Review'" in lifecycle

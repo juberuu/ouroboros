@@ -122,7 +122,7 @@ from ouroboros.platform_layer import is_container_env
 
 def _build_network_meta(bind_host: str, bind_port: int) -> dict:
     """Build the _meta dict for /api/settings response."""
-    from ouroboros.server_auth import is_loopback_host
+    from ouroboros.server_auth import get_network_auth_startup_warning, is_loopback_host
     # Strip surrounding brackets from IPv6 literals (e.g. "[::1]" → "::1") so
     # is_loopback_host can correctly classify bracketed IPv6 loopback addresses.
     unbracketed = bind_host[1:-1] if bind_host.startswith("[") and bind_host.endswith("]") else bind_host
@@ -153,16 +153,23 @@ def _build_network_meta(bind_host: str, bind_port: int) -> dict:
         # Use unbracketed form so URL construction can uniformly re-bracket IPv6.
         lan_ip = unbracketed
 
+    auth_warning = get_network_auth_startup_warning(bind_host) or ""
     if lan_ip:
         # Handle IPv6 addresses (bracket them for URL)
         host_in_url = f"[{lan_ip}]" if ":" in lan_ip else lan_ip
         reachability = "lan_reachable"
         recommended_url = f"http://{host_in_url}:{bind_port}"
-        warning = ""
+        warning = auth_warning
     else:
         reachability = "host_ip_unknown"
         recommended_url = f"http://your-host-ip:{bind_port}"
-        warning = "Could not detect LAN IP automatically." if wildcard else ""
+        warning = " ".join(
+            part for part in [
+                "Could not detect LAN IP automatically." if wildcard else "",
+                auth_warning,
+            ]
+            if part
+        )
     return {
         "bind_host": bind_host,
         "bind_port": bind_port,
@@ -246,6 +253,7 @@ _IMMEDIATE_KEYS = frozenset({
 # Everything else is hot-reloadable (takes effect on the next task).
 _RESTART_REQUIRED_KEYS = frozenset({
     "OUROBOROS_MAX_WORKERS",
+    "OUROBOROS_SERVER_HOST",
     "LOCAL_MODEL_SOURCE",
     "LOCAL_MODEL_FILENAME",
     "LOCAL_MODEL_PORT",
@@ -1185,6 +1193,58 @@ async def api_settings_post(request: Request) -> JSONResponse:
         current["OUROBOROS_SKILLS_REPO_PATH"] = str(
             current.get("OUROBOROS_SKILLS_REPO_PATH") or ""
         ).strip()
+        try:
+            from ouroboros.server_auth import is_loopback_host
+            desired_host = str(current.get("OUROBOROS_SERVER_HOST") or "").strip()
+            desired_password = str(current.get("OUROBOROS_NETWORK_PASSWORD") or "").strip()
+            allowed_saved_hosts = {"", "127.0.0.1", "localhost", "::1", "[::1]", "0.0.0.0", "::", "[::]"}
+            if desired_host and desired_host not in allowed_saved_hosts:
+                return JSONResponse(
+                    {
+                        "error": (
+                            "Server Bind Host in Settings supports localhost or wildcard "
+                            "binds only (127.0.0.1 or 0.0.0.0). Specific LAN IP binds "
+                            "are manual/env-only so the desktop launcher can keep using "
+                            "a reliable loopback health check."
+                        )
+                    },
+                    status_code=400,
+                )
+            if desired_host and not is_loopback_host(desired_host) and not desired_password:
+                return JSONResponse(
+                    {
+                        "error": (
+                            "Setting a non-localhost Server Bind Host through the web UI "
+                            "requires a Network Password in the same save. For manual "
+                            "trusted-lab/Docker setups, stop Ouroboros and edit "
+                            "settings.json or environment variables directly."
+                        )
+                    },
+                    status_code=400,
+                )
+            current_effective_host = (
+                str(_BIND_HOST or "").strip()
+                or str(os.environ.get("OUROBOROS_SERVER_HOST") or "").strip()
+            )
+            old_password = str(old_settings.get("OUROBOROS_NETWORK_PASSWORD") or "").strip()
+            if (
+                current_effective_host
+                and not is_loopback_host(current_effective_host)
+                and old_password
+                and not desired_password
+            ):
+                return JSONResponse(
+                    {
+                        "error": (
+                            "Cannot clear Network Password while the running server is "
+                            "still bound to a non-localhost interface. First save a "
+                            "loopback Server Bind Host and restart, then clear the password."
+                        )
+                    },
+                    status_code=400,
+                )
+        except Exception:
+            log.warning("Could not validate network bind settings", exc_info=True)
         current, provider_defaults_changed, provider_default_keys = apply_runtime_provider_defaults(current)
         if str(current.get("LOCAL_MODEL_SOURCE", "") or "").strip() and not has_supervisor_provider(current):
             return JSONResponse(
@@ -1259,6 +1319,17 @@ async def api_settings_post(request: Request) -> JSONResponse:
         try:
             from supervisor.message_bus import get_bridge
             get_bridge().configure_from_settings(current)
+        except Exception:
+            pass
+        try:
+            from ouroboros.server_auth import is_loopback_host
+            desired_host = str(current.get("OUROBOROS_SERVER_HOST") or "").strip()
+            desired_password = str(current.get("OUROBOROS_NETWORK_PASSWORD") or "").strip()
+            if desired_host and not is_loopback_host(desired_host) and not desired_password:
+                warnings.append(
+                    "Server Bind Host is non-localhost and Network Password is empty; "
+                    "after restart the app will be reachable on the network without a password."
+                )
         except Exception:
             pass
         _repo_slug = current.get("GITHUB_REPO", "")
@@ -1794,7 +1865,12 @@ def _emergency_process_cleanup() -> None:
 # Main
 # ---------------------------------------------------------------------------
 def main() -> int:
-    args = parse_server_args(DEFAULT_HOST, DEFAULT_PORT)
+    try:
+        saved_host = str(load_settings().get("OUROBOROS_SERVER_HOST") or "").strip()
+    except Exception:
+        saved_host = ""
+    default_host = os.environ.get("OUROBOROS_SERVER_HOST", "").strip() or saved_host or DEFAULT_HOST
+    args = parse_server_args(default_host, DEFAULT_PORT)
     global _BIND_HOST
     _BIND_HOST = args.host
     auth_warning = get_network_auth_startup_warning(args.host)

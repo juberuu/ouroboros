@@ -184,15 +184,6 @@ function renderGrantBlock(skill) {
         statusTone = 'warn';
     }
 
-    let grantButton = '';
-    if (!unsupported && missing.length) {
-        if (reviewBlocked) {
-            grantButton = `<button class="btn btn-default skills-grant" disabled title="Run a fresh PASS review before granting access.">Grant access</button>`;
-        } else {
-            grantButton = `<button class="btn btn-primary skills-grant" data-skill="${escapeHtml(skill.name)}" data-keys="${escapeHtml(requested.join(','))}">Grant access</button>`;
-        }
-    }
-
     const grantedRow = granted.length
         ? `<div class="skills-access-row"><span class="skills-access-label">Granted</span> ${granted.map((k) => `<code>${escapeHtml(k)}</code>`).join(' ')}</div>`
         : '';
@@ -205,7 +196,6 @@ function renderGrantBlock(skill) {
             </div>
             ${grantedRow}
             <div class="skills-access-status">${escapeHtml(statusLine)}</div>
-            ${grantButton ? `<div class="skills-access-actions">${grantButton}</div>` : ''}
         </div>
     `;
 }
@@ -314,6 +304,43 @@ function toggleLockReason(skill) {
     return '';
 }
 
+function skillNextAction(skill, reviewInProgress = false) {
+    if (reviewInProgress) {
+        return { label: 'Reviewing...', className: '', disabled: true };
+    }
+    if (skill.load_error || skill.review_status === 'fail') {
+        if (healReady(skill)) {
+            return { label: 'Fix', className: 'skills-heal', disabled: false };
+        }
+        return { label: 'Review', className: 'skills-review', disabled: false };
+    }
+    if (!reviewReady(skill)) {
+        return { label: skill.review_stale ? 'Re-review' : 'Review', className: 'skills-review', disabled: false };
+    }
+    if (healReady(skill)) {
+        return { label: 'Fix', className: 'skills-heal', disabled: false };
+    }
+    if (!grantReady(skill)) {
+        const requested = skill.grants?.requested_keys || [];
+        const missing = skill.grants?.missing_keys || requested;
+        return {
+            label: 'Grant access',
+            className: 'skills-grant',
+            disabled: !missing.length,
+            keys: missing.join(','),
+        };
+    }
+    if (skill.enabled && skill.type === 'extension' && skill.live_loaded && skill.dispatch_live) {
+        return { label: 'Open widgets', className: 'skills-open-widgets', disabled: false };
+    }
+    return {
+        label: skill.enabled ? 'Turn off' : 'Turn on',
+        className: 'skills-next-toggle',
+        disabled: false,
+        enabled: (!skill.enabled).toString(),
+    };
+}
+
 function renderSkillCard(skill, reviewingSkills = new Set()) {
     const safeName = escapeHtml(skill.name);
     const description = escapeHtml(skill.description || '');
@@ -386,6 +413,18 @@ function renderSkillCard(skill, reviewingSkills = new Set()) {
     const healBtn = healReady(skill)
         ? `<button class="btn btn-primary skills-heal" data-skill="${safeName}">Heal</button>`
         : '';
+    const next = skillNextAction(skill, reviewInProgress);
+    const nextAttrs = [
+        `data-skill="${safeName}"`,
+        next.keys ? `data-keys="${escapeHtml(next.keys)}"` : '',
+        next.enabled ? `data-enabled="${escapeHtml(next.enabled)}"` : '',
+        next.disabled ? 'disabled' : '',
+    ].filter(Boolean).join(' ');
+    const nextButton = `
+        <button class="btn btn-primary skills-next-action ${escapeHtml(next.className)}" ${nextAttrs}>
+            ${escapeHtml(next.label)}
+        </button>
+    `;
 
     // v5.2.3 review-cycle fix: review findings are a primary safety
     // signal (P3). Promote the disclosure out of "Show details" so a
@@ -447,8 +486,7 @@ function renderSkillCard(skill, reviewingSkills = new Set()) {
             ${reviewFindings}
             ${loadError}
             <footer class="skills-card-actions">
-                <button class="btn btn-default skills-review" data-skill="${safeName}" ${reviewInProgress ? 'disabled' : ''}>Review</button>
-                ${healBtn}
+                ${nextButton}
                 ${updateBtn}
                 ${uninstallBtn}
                 ${details}
@@ -739,7 +777,25 @@ function attachActionHandlers(container, renderFn, reviewingSkills) {
         }
         target.disabled = true;
         try {
-            if (target.classList.contains('skills-grant')) {
+            if (target.classList.contains('skills-next-toggle')) {
+                const wantsEnabled = target.dataset.enabled === 'true';
+                const result = await postWithFeedback(
+                    `/api/skills/${encodeURIComponent(name)}/toggle`,
+                    { enabled: wantsEnabled }
+                );
+                const actionLabels = {
+                    extension_loaded: 'live',
+                    extension_unloaded: 'stopped',
+                    extension_already_live: '',
+                    extension_inactive: '',
+                    extension_load_error: 'load failed',
+                };
+                const friendlyAction = actionLabels[result.extension_action];
+                const tail = friendlyAction ? ` — ${friendlyAction}` : '';
+                showBanner(`${name} ${wantsEnabled ? 'turned on' : 'turned off'}${tail}`, 'ok');
+            } else if (target.classList.contains('skills-open-widgets')) {
+                document.querySelector('.nav-btn[data-page="widgets"]')?.click();
+            } else if (target.classList.contains('skills-grant')) {
                 const keys = (target.dataset.keys || '').split(',').map((k) => k.trim()).filter(Boolean);
                 if (!keys.length) {
                     showBanner(`${name}: no requested keys to grant`, 'warn');
@@ -843,10 +899,12 @@ async function renderMarketplacePane() {
     const pane = document.getElementById('skills-pane-marketplace');
     if (!pane) return;
     if (pane.dataset.bootstrapped === 'true') {
-        // Trigger a refresh so installed-state updates persist when the
-        // operator switches between tabs.
-        const refresh = pane.querySelector('[data-mp-search]');
-        if (refresh) refresh.click();
+        // Refresh installed-state on tab entry without simulating a
+        // search-button click. The button remains as a manual fallback,
+        // but normal tab navigation should keep cards current by itself.
+        if (typeof pane._marketplaceRefresh === 'function') {
+            pane._marketplaceRefresh();
+        }
         return;
     }
     pane.innerHTML = '<div class="muted">Loading marketplace…</div>';
