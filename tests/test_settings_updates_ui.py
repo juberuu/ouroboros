@@ -1,0 +1,93 @@
+"""Static checks for Settings-hosted observability and update panels."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+
+REPO = Path(__file__).resolve().parents[1]
+
+
+def _read(rel: str) -> str:
+    return (REPO / rel).read_text(encoding="utf-8")
+
+
+def test_nav_moves_observability_pages_into_settings():
+    html = _read("web/index.html")
+    settings_ui = _read("web/modules/settings_ui.js")
+    app = _read("web/app.js")
+
+    assert 'data-page="logs"' not in html
+    assert 'data-page="costs"' not in html
+    assert 'data-page="evolution"' not in html
+    for tab in ("logs", "evolution", "updates", "costs"):
+        assert f'data-settings-tab="{tab}"' in settings_ui
+        assert f'data-settings-panel="{tab}"' in settings_ui
+    assert "openSettingsTab" in app
+    assert "settingsActiveSubtab" in app
+
+
+def test_settings_mobile_stack_contract_exists():
+    settings_ui = _read("web/modules/settings_ui.js")
+    settings_css = _read("web/settings.css")
+
+    assert "settings-mobile-back" in settings_ui
+    assert "settings-subtab-open" in settings_ui
+    assert "#page-settings:not(.settings-subtab-open) .settings-scroll" in settings_css
+    assert "#page-settings.settings-subtab-open .settings-tabs" in settings_css
+
+
+def test_update_panel_contract_exists():
+    updates = _read("web/modules/updates.js")
+    server = _read("server.py")
+    git_ops = _read("supervisor/git_ops.py")
+
+    assert "export function initUpdates" in updates
+    assert "/api/update/status" in updates
+    assert "/api/update/check" in updates
+    assert "/api/update/apply" in updates
+    assert "api_update_status" in server
+    assert "api_update_check" in server
+    assert "api_update_apply" in server
+    assert "compute_managed_update_status" in git_ops
+    assert "prepare_managed_update" in git_ops
+    assert "UPDATE_INTENT_MARKER_NAME" in git_ops
+    assert "_write_update_intent" in git_ops
+    assert "_read_update_intent" in git_ops
+    assert "if int(status.get(\"ahead\") or 0) > 0:" in git_ops
+    assert "[\"git\", \"reset\", \"--hard\", \"HEAD\"]" in git_ops
+    assert "[\"git\", \"reset\", \"--hard\", target_ref]" in git_ops
+    assert "expected {update_intent_target}" in git_ops
+    assert 'str(reason or "") != "ui_update_apply"' in git_ops
+
+
+def test_update_panel_surfaces_unmanaged_checkouts_as_unavailable():
+    updates = _read("web/modules/updates.js")
+
+    assert "Managed updates are unavailable for this checkout." in updates
+    assert "managed_updates_unavailable" in updates
+    assert "applyBtn.textContent = 'Unavailable'" in updates
+
+
+def test_update_apply_consumes_intent_before_restart():
+    server = _read("server.py")
+    git_ops = _read("supervisor/git_ops.py")
+
+    assert "checkout_and_reset(" in server
+    assert 'reason="ui_update_apply"' in server
+    assert 'str(reason or "") != "ui_update_apply"' in git_ops
+    assert "_request_restart_exit()" in server
+
+
+def test_button_design_system_contract_exists():
+    css = _read("web/style.css")
+    dev = _read("docs/DEVELOPMENT.md")
+    marketplace = _read("web/modules/marketplace.js")
+
+    btn_block = css[css.index(".btn {"):css.index(".btn-primary {")]
+    assert "justify-content: center" in btn_block
+    assert ".btn-secondary" in css
+    assert ".btn-ghost" in css
+    assert ".btn-lg" in css
+    assert ".btn-default.btn-primary" not in marketplace
+    assert "### Button conventions" in dev

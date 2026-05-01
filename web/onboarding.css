@@ -568,12 +568,12 @@ select:focus {
   transform: translateY(-1px);
 }
 
-.btn.secondary {
+.btn-secondary {
   background: rgba(255, 255, 255, 0.03);
   color: var(--text);
 }
 
-.btn.primary {
+.btn-primary {
   min-width: 170px;
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
   border-color: rgba(251, 113, 133, 0.55);
@@ -581,7 +581,7 @@ select:focus {
   font-weight: 700;
 }
 
-.btn.ghost {
+.btn-ghost {
   background: rgba(255, 255, 255, 0.03);
   color: var(--text);
 }

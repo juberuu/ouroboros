@@ -683,7 +683,7 @@ async function openDetailModal(host, slug, options) {
 
         const installable = preview.adapter?.ok && !preview.staging?.is_plugin;
         actions.innerHTML = installable
-            ? `<button class="btn btn-default btn-primary"
+            ? `<button class="btn btn-primary"
                        data-mp-modal-install="${escapeHtml(slug)}"
                        data-version="${escapeHtml(previewedVersion)}">
                  Install v${escapeHtml(previewedVersion)} + auto-review

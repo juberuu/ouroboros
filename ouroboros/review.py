@@ -74,7 +74,7 @@ MAX_FUNCTION_LINES = 300
 # larger than the pre-release scope; the ceiling bump stays consistent
 # with how MAX_TOTAL_FUNCTIONS has grown through v4.40→v4.47 as each
 # phase shipped.
-MAX_TOTAL_FUNCTIONS = 1660  # v5.5.0: official hub, lifecycle queue, isolated dependency installers, desktop download bridge, widget persistence, and review-requested safety tests add real capability surfaces. Keep follow-up pressure on UI/helper consolidation.
+MAX_TOTAL_FUNCTIONS = 1665  # v5.6.0: managed-update helpers add exact-SHA intent and preservation surfaces; keep follow-up pressure on UI/helper consolidation.
 # v4.40.0 adds claude_advisory_review.py to the grandfathered set: the file
 # grew to 1731 lines across v4.37-v4.39 (plan_task quorum + direct-provider
 # fallback + convergence rule + syntax preflight + reflection decoupling).

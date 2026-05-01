@@ -1111,7 +1111,7 @@ def test_clipboard_paste_handler_exists():
 # ─── Bottom-fade gradient layer is separate from #chat-input-area ───────
 
 def test_chat_bottom_fade_is_removed_and_padding_is_dynamic():
-    """Bottom fade is removed; input overlap is handled by JS padding."""
+    """Bottom fade is removed; flex layout reserves space for the composer."""
     css = _read("web/style.css")
     input_area_match = re.search(
         r"#chat-input-area\s*\{([^}]*)\}",
@@ -1126,5 +1126,27 @@ def test_chat_bottom_fade_is_removed_and_padding_is_dynamic():
     )
     chat_js = _read("web/modules/chat.js")
     assert 'class="chat-bottom-fade"' not in chat_js
-    assert "ResizeObserver" in chat_js
     assert "scrollToBottomAfterLayout" in chat_js
+    assert "messagesDiv.style.paddingBottom" not in chat_js
+
+
+def test_mobile_chat_uses_flex_composer_layout_and_no_interactive_widget():
+    css = _read("web/style.css")
+    html = _read("web/index.html")
+
+    assert "interactive-widget" not in html
+    input_area = re.search(r"#chat-input-area\s*\{(?P<body>[^}]+)\}", css, re.S).group("body")
+    chat_messages = re.search(r"#chat-messages\s*\{(?P<body>[^}]+)\}", css, re.S).group("body")
+    assert "position: absolute" not in input_area
+    assert "flex-shrink: 0" in input_area
+    assert "min-height: 0" in chat_messages
+
+
+def test_budget_pill_navigates_to_settings_costs():
+    source = _read("web/modules/chat.js")
+    css = _read("web/style.css")
+
+    assert 'id="chat-budget-pill" type="button"' in source
+    assert "openSettingsTab('costs')" in source
+    budget_block = re.search(r"\.chat-budget-pill\s*\{(?P<body>[^}]+)\}", css, re.S).group("body")
+    assert "cursor: pointer" in budget_block

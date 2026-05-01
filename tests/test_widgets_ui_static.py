@@ -54,11 +54,15 @@ def test_widgets_support_declarative_schema_components():
     assert "chartInstances.forEach((chart) => chart.destroy());" in source
     assert "data-widget-tab-key" in source
     assert "event.detail?.page === 'widgets'" in source
-    assert "disposeMountedWidgets();" in source.split("window.addEventListener('ouro:page-shown'")[1]
+    page_shown_branch = source.split("window.addEventListener('ouro:page-shown'")[1]
+    assert "disposeMountedWidgets();" in page_shown_branch
     assert "let renderGeneration = 0;" in source
     assert "generation !== renderGeneration" in source
     assert "widgetsVisible = false;" in source
     assert "if (!widgetsVisible || generation !== renderGeneration) return;" in source
+    assert "let widgetsMounted = false;" in source
+    assert "if (widgetsMounted && !force) return;" in source
+    assert "widgetsMounted = false;" in page_shown_branch
 
 
 def test_widgets_escape_and_sanitize_untrusted_content():
@@ -101,3 +105,12 @@ def test_widgets_use_design_radius_tokens():
     block = style[block_start:block_end]
     assert "border-radius: var(--radius-sm);" in block
     assert "border-radius: 9px;" not in block
+
+
+def test_widgets_inline_card_preserves_session_state():
+    source = _widgets_js()
+    assert "const saved = widgetSessionState.get(persistenceKey) || {};" in source
+    assert "const savedCity = escapeHtml(saved.city || 'Moscow');" in source
+    assert "const savedResult = saved.resultHtml" in source
+    assert "widgetSessionState.set(persistenceKey, { city: query, resultHtml: result.innerHTML });" in source
+    assert "return () => {" in source

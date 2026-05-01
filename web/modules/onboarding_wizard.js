@@ -458,9 +458,9 @@
         if (!LOCAL_RUNTIME_CONTROLS) return '';
         return `
             <div class="wizard-runtime-strip">
-                <button type="button" class="btn ghost" id="wizard-local-start">Start local runtime</button>
-                <button type="button" class="btn ghost" id="wizard-local-stop" disabled>Stop</button>
-                <button type="button" class="btn ghost" id="wizard-local-test" disabled>Test tool calling</button>
+                <button type="button" class="btn btn-ghost" id="wizard-local-start">Start local runtime</button>
+                <button type="button" class="btn btn-ghost" id="wizard-local-stop" disabled>Stop</button>
+                <button type="button" class="btn btn-ghost" id="wizard-local-test" disabled>Test tool calling</button>
                 <span id="wizard-local-status" class="wizard-runtime-status">Status: Offline</span>
             </div>
             <div id="wizard-local-test-result" class="wizard-test-result"></div>
@@ -473,10 +473,10 @@
                 <h3>Claude Runtime</h3>
                 <p>Claude runtime powers delegated code editing and advisory review. It is managed automatically by the app.</p>
                 <div class="wizard-runtime-strip">
-                    <button type="button" class="btn ghost" id="wizard-claude-install" ${state.claudeCliBusy || state.claudeCliInstalled ? 'disabled' : ''}>
+                    <button type="button" class="btn btn-ghost" id="wizard-claude-install" ${state.claudeCliBusy || state.claudeCliInstalled ? 'disabled' : ''}>
                         ${escapeHtml(state.claudeCliBusy ? 'Repairing...' : (state.claudeCliInstalled ? 'Runtime OK' : 'Repair Runtime'))}
                     </button>
-                    <button type="button" class="btn secondary" id="wizard-claude-skip" ${state.claudeCliBusy || state.claudeCliInstalled ? 'hidden' : ''}>Skip for now</button>
+                    <button type="button" class="btn btn-secondary" id="wizard-claude-skip" ${state.claudeCliBusy || state.claudeCliInstalled ? 'hidden' : ''}>Skip for now</button>
                     <span id="wizard-claude-status" class="wizard-runtime-status" data-tone="${escapeHtml(state.claudeCliTone || 'muted')}">${escapeHtml(state.claudeCliStatusText || 'Checking Claude runtime...')}</span>
                 </div>
             </div>
@@ -837,8 +837,8 @@
                     <div class="wizard-footer">
                         <div class="footer-copy">${escapeHtml(meta.footer)}</div>
                         <div class="footer-actions">
-                            <button class="btn secondary" id="back-btn" type="button" ${index === 0 || state.saving ? 'disabled' : ''}>Back</button>
-                            <button class="btn primary" id="next-btn" type="button" ${nextButtonShouldBeDisabled() ? 'disabled' : ''}>${escapeHtml(nextLabel)}</button>
+                            <button class="btn btn-secondary" id="back-btn" type="button" ${index === 0 || state.saving ? 'disabled' : ''}>Back</button>
+                            <button class="btn btn-primary" id="next-btn" type="button" ${nextButtonShouldBeDisabled() ? 'disabled' : ''}>${escapeHtml(nextLabel)}</button>
                         </div>
                     </div>
                     <div class="wizard-error">${escapeHtml(state.error)}</div>

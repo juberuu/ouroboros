@@ -326,6 +326,30 @@ active: background rgba(201,53,69, 0.12) + crimson glow
 focus:  border-color rgba(232,93,111,0.4) + box-shadow 0 0 0 3px rgba(201,53,69,0.10)
 ```
 
+### Button conventions
+
+All normal application buttons use the shared `.btn` base class plus exactly
+one semantic variant:
+
+| Variant | Purpose |
+|---------|---------|
+| `.btn-primary` | Primary action in the current surface: enable, install, update, start |
+| `.btn-secondary` | Neutral secondary action next to a primary action: reload, cancel, install runtime |
+| `.btn-default` | Low-emphasis utility action: refresh, details, open related view |
+| `.btn-ghost` | Very quiet action on an already-strong surface |
+| `.btn-save` | Persist settings or budget changes |
+| `.btn-danger` | Destructive or emergency action |
+
+Size modifiers are `.btn-xs`, `.btn-sm`, `.btn-md`, and `.btn-lg`. Omit a size
+modifier for the default medium size. Do not combine semantic variants (for
+example, `.btn-default.btn-primary` is invalid), and do not invent one-off
+button schemes in feature modules. Onboarding and modal buttons use the same
+`.btn` variants as the main SPA.
+
+Buttons are horizontally centered by default. If a control intentionally uses a
+menu-row layout, use a named menu-item class (for example `.skills-menu-item`)
+rather than overloading `.btn`.
+
 ### "Working" phase color
 
 Use **crimson** (`rgba(248, 130, 140, ...)`) for active/working states everywhere — not blue.

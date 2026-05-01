@@ -1,7 +1,7 @@
-export function initCosts({ ws, state }) {
+export function initCosts({ ws, state, mount = null, embedded = false }) {
     const page = document.createElement('div');
     page.id = 'page-costs';
-    page.className = 'page';
+    page.className = embedded ? 'settings-embedded-content settings-costs-panel' : 'page';
     page.innerHTML = `
         <div class="page-header">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
@@ -51,7 +51,7 @@ export function initCosts({ ws, state }) {
             </div>
         </div>
     `;
-    document.getElementById('content').appendChild(page);
+    (mount || document.getElementById('content')).appendChild(page);
 
     function renderBreakdownTable(tableId, data, totalCost) {
         const tbody = document.querySelector('#' + tableId + ' tbody');
@@ -153,8 +153,19 @@ export function initCosts({ ws, state }) {
         setTimeout(() => { statusEl.textContent = ''; }, 4000);
     });
 
-    const obs = new MutationObserver(() => {
-        if (page.classList.contains('active')) { loadCosts(); loadBudget(); }
-    });
-    obs.observe(page, { attributes: true, attributeFilter: ['class'] });
+    function refreshCostsPanel() {
+        loadCosts();
+        loadBudget();
+    }
+
+    if (embedded) {
+        window.addEventListener('ouro:settings-subtab-shown', (event) => {
+            if (event.detail?.tab === 'costs') refreshCostsPanel();
+        });
+    } else {
+        const obs = new MutationObserver(() => {
+            if (page.classList.contains('active')) refreshCostsPanel();
+        });
+        obs.observe(page, { attributes: true, attributeFilter: ['class'] });
+    }
 }

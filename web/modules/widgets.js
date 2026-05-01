@@ -31,7 +31,7 @@ function pageTemplate() {
         <section class="page" id="page-widgets">
             <div class="page-header">
                 <h2>Widgets</h2>
-                <button id="widgets-refresh" class="btn btn-default">Refresh</button>
+                <button id="widgets-refresh" class="btn btn-default btn-sm">Refresh</button>
             </div>
             <p class="muted">Reviewed extension UI surfaces live here, separate from the skill catalogue.</p>
             <div id="widgets-list" class="widgets-list"></div>
@@ -550,12 +550,16 @@ async function mountTab(card, tab) {
     if (render.kind === 'inline_card' && render.api_route) {
         const apiRoute = cleanWidgetRoute(render.api_route);
         if (!apiRoute) throw new Error('invalid widget api_route');
+        const persistenceKey = tab.key || `${tab.skill}:${tab.tab_id}`;
+        const saved = widgetSessionState.get(persistenceKey) || {};
+        const savedCity = escapeHtml(saved.city || 'Moscow');
+        const savedResult = saved.resultHtml || '<div class="muted">Press Refresh.</div>';
         mount.innerHTML = `
             <form class="skill-widget-weather-form" data-widget-form>
-                <input class="skill-widget-weather-city" value="Moscow" autocomplete="off" maxlength="80" aria-label="Widget query">
-                <button type="submit" class="btn btn-default">Refresh</button>
+                <input class="skill-widget-weather-city" value="${savedCity}" autocomplete="off" maxlength="80" aria-label="Widget query">
+                <button type="submit" class="btn btn-default btn-sm">Refresh</button>
             </form>
-            <div class="skill-widget-weather-body" data-widget-result><div class="muted">Press Refresh.</div></div>
+            <div class="skill-widget-weather-body" data-widget-result>${savedResult}</div>
         `;
         const form = mount.querySelector('[data-widget-form]');
         const input = mount.querySelector('input');
@@ -563,11 +567,12 @@ async function mountTab(card, tab) {
         form.addEventListener('submit', async (event) => {
             event.preventDefault();
             const query = (input.value || '').trim();
-            result.innerHTML = '<div class="muted">Loading…</div>';
+            result.innerHTML = '<div class="muted">Loading...</div>';
             const resp = await fetch(`/api/extensions/${encodeURIComponent(tab.skill)}/${apiRoute}?city=${encodeURIComponent(query)}`);
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok || data.error) {
                 result.innerHTML = `<div class="skills-load-error">${escapeHtml(data.error || `HTTP ${resp.status}`)}</div>`;
+                widgetSessionState.set(persistenceKey, { city: query, resultHtml: result.innerHTML });
                 return;
             }
             result.innerHTML = `
@@ -577,8 +582,14 @@ async function mountTab(card, tab) {
                     <div>${escapeHtml(data.condition || 'Unknown')}</div>
                 </div>
             `;
+            widgetSessionState.set(persistenceKey, { city: query, resultHtml: result.innerHTML });
         });
-        return;
+        return () => {
+            widgetSessionState.set(persistenceKey, {
+                city: input.value || 'Moscow',
+                resultHtml: result.innerHTML || '<div class="muted">Press Refresh.</div>',
+            });
+        };
     }
     if (render.kind === 'declarative') {
         return mountDeclarativeWidget(mount, tab, render);
@@ -620,6 +631,7 @@ export function initWidgets(ctx = {}) {
     const refreshBtn = document.getElementById('widgets-refresh');
     let renderGeneration = 0;
     let widgetsVisible = false;
+    let widgetsMounted = false;
     if (ctx.ws && !widgetsWsBridgeBound) {
         widgetsWsBridgeBound = true;
         ctx.ws.on('message', (msg) => {
@@ -627,9 +639,10 @@ export function initWidgets(ctx = {}) {
         });
     }
 
-    async function render() {
+    async function render(force = false) {
         const generation = ++renderGeneration;
         widgetsVisible = true;
+        if (widgetsMounted && !force) return;
         disposeMountedWidgets();
         list.innerHTML = '<div class="muted">Loading widgets…</div>';
         try {
@@ -637,6 +650,7 @@ export function initWidgets(ctx = {}) {
             if (!widgetsVisible || generation !== renderGeneration) return;
             const tabs = Array.isArray(data.live?.ui_tabs) ? data.live.ui_tabs : [];
             renderShell(list, tabs);
+            widgetsMounted = true;
             for (const tab of tabs) {
                 if (!widgetsVisible || generation !== renderGeneration) return;
                 const key = tab.key || `${tab.skill}:${tab.tab_id}`;
@@ -652,17 +666,19 @@ export function initWidgets(ctx = {}) {
         } catch (err) {
             if (!widgetsVisible || generation !== renderGeneration) return;
             list.innerHTML = `<div class="skills-load-error">Failed to load widgets: ${escapeHtml(err.message || err)}</div>`;
+            widgetsMounted = false;
         }
     }
 
-    refreshBtn.addEventListener('click', render);
+    refreshBtn.addEventListener('click', () => render(true));
     window.addEventListener('ouro:page-shown', (event) => {
         if (event.detail?.page === 'widgets') {
             render();
         } else {
             widgetsVisible = false;
-            renderGeneration += 1;
+            widgetsMounted = false;
             disposeMountedWidgets();
+            list.innerHTML = '';
         }
     });
 }

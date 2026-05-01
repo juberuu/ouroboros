@@ -1,19 +1,19 @@
 import { escapeHtml } from './utils.js';
 
-export function initEvolution({ ws, state }) {
+export function initEvolution({ ws, state, mount = null, embedded = false, chartOnly = false }) {
     const page = document.createElement('div');
     page.id = 'page-evolution';
-    page.className = 'page';
+    page.className = embedded ? 'settings-embedded-content settings-evolution-panel' : 'page';
     page.innerHTML = `
         <div class="page-header">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
             <h2>Evolution</h2>
             <div class="spacer"></div>
-            <div class="evo-subtabs">
+            <div class="evo-subtabs" ${chartOnly ? 'hidden' : ''}>
                 <button class="evo-subtab active" data-subtab="chart">Chart</button>
                 <button class="evo-subtab" data-subtab="versions">Versions</button>
             </div>
-            <button id="evo-refresh" class="btn btn-default evo-refresh-btn" type="button">Refresh</button>
+            <button id="evo-refresh" class="btn btn-default btn-sm evo-refresh-btn" type="button">Refresh</button>
             <span id="evo-status" class="status-badge">Loading...</span>
         </div>
         <!-- Chart sub-tab -->
@@ -54,7 +54,7 @@ export function initEvolution({ ws, state }) {
             </div>
         </div>
     `;
-    document.getElementById('content').appendChild(page);
+    (mount || document.getElementById('content')).appendChild(page);
 
     // -----------------------------------------------------------------------
     // Sub-tab switching
@@ -63,13 +63,20 @@ export function initEvolution({ ws, state }) {
     const subtabButtons = page.querySelectorAll('.evo-subtab');
     const chartContent = document.getElementById('evo-chart-content');
     const versionsContent = document.getElementById('evo-versions-content');
+    if (chartOnly && versionsContent) versionsContent.hidden = true;
+
+    function isEvolutionVisible() {
+        return embedded
+            ? state.activePage === 'settings' && state.settingsActiveSubtab === 'evolution'
+            : state.activePage === 'evolution';
+    }
 
     function showSubtab(name) {
         activeSubtab = name;
         subtabButtons.forEach(btn => btn.classList.toggle('active', btn.dataset.subtab === name));
         chartContent.style.display = name === 'chart' ? '' : 'none';
         versionsContent.style.display = name === 'versions' ? 'flex' : 'none';
-        if (name === 'chart' && state.activePage === 'evolution') ensureEvolutionLoaded(false);
+        if (name === 'chart' && isEvolutionVisible()) ensureEvolutionLoaded(false);
         if (name === 'versions' && !versionsLoaded) loadVersions();
     }
 
@@ -433,26 +440,29 @@ export function initEvolution({ ws, state }) {
     // Refresh button + event listeners
     // -----------------------------------------------------------------------
     refreshBtn.addEventListener('click', () => {
-        if (activeSubtab === 'chart') loadEvolution(true);
+        if (chartOnly || activeSubtab === 'chart') loadEvolution(true);
         else loadVersions();
     });
 
     ws.on('open', () => {
-        if (state.activePage === 'evolution') {
+        if (isEvolutionVisible()) {
             ensureEvolutionLoaded(false);
             if (activeSubtab === 'versions') loadVersions();
         }
     });
 
     window.addEventListener('ouro:page-shown', (event) => {
-        if (event?.detail?.page === 'evolution') {
+        if (!embedded && event?.detail?.page === 'evolution') {
             if (activeSubtab === 'chart') ensureEvolutionLoaded(false);
             else loadVersions();
         }
     });
+    window.addEventListener('ouro:settings-subtab-shown', (event) => {
+        if (embedded && event?.detail?.tab === 'evolution') ensureEvolutionLoaded(false);
+    });
 
     document.addEventListener('visibilitychange', () => {
-        if (!document.hidden && state.activePage === 'evolution') {
+        if (!document.hidden && isEvolutionVisible()) {
             if (activeSubtab === 'chart' && chartLoaded) loadEvolution(false);
         }
     });

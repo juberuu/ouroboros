@@ -19,6 +19,7 @@ import { initSettings } from './modules/settings.js';
 import { initCosts } from './modules/costs.js';
 import { initSkills } from './modules/skills.js';
 import { initWidgets } from './modules/widgets.js';
+import { initUpdates } from './modules/updates.js';
 
 import { initAbout } from './modules/about.js';
 import { initOnboardingOverlay } from './modules/onboarding_overlay.js';
@@ -33,6 +34,7 @@ const state = {
     activeFilters: { tools: true, llm: true, errors: true, tasks: true, system: true, consciousness: true },
     unreadCount: 0,
     activePage: 'chat',
+    settingsActiveSubtab: 'providers',
     beforePageLeave: null,
 };
 
@@ -41,6 +43,7 @@ const state = {
 // ---------------------------------------------------------------------------
 const ws = createWS();
 const beforePageLeaveHandlers = [];
+let settingsControls = null;
 
 // ---------------------------------------------------------------------------
 // Navigation
@@ -60,6 +63,13 @@ async function showPage(name) {
     if (name === 'chat') {
         state.unreadCount = 0;
         updateUnreadBadge();
+    }
+}
+
+async function openSettingsTab(tabName) {
+    await showPage('settings');
+    if (settingsControls && typeof settingsControls.activateTab === 'function') {
+        settingsControls.activateTab(tabName);
     }
 }
 
@@ -91,6 +101,8 @@ const ctx = {
     ws,
     state,
     updateUnreadBadge,
+    showPage,
+    openSettingsTab,
     setBeforePageLeave: (handler) => {
         if (typeof handler !== 'function') return () => {};
         beforePageLeaveHandlers.push(handler);
@@ -103,11 +115,11 @@ const ctx = {
 
 initChat(ctx);
 initFiles(ctx);
-
-initLogs(ctx);
-initEvolution(ctx);
-initSettings(ctx);
-initCosts(ctx);
+settingsControls = initSettings(ctx);
+initLogs({ ...ctx, mount: document.getElementById('settings-panel-logs'), embedded: true });
+initEvolution({ ...ctx, mount: document.getElementById('settings-panel-evolution'), embedded: true, chartOnly: true });
+initUpdates({ ...ctx, mount: document.getElementById('settings-panel-updates') });
+initCosts({ ...ctx, mount: document.getElementById('settings-panel-costs'), embedded: true });
 initSkills(ctx);
 initWidgets(ctx);
 

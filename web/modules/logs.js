@@ -10,7 +10,7 @@ import {
     summarizeLogEvent,
 } from './log_events.js';
 
-export function initLogs({ ws, state }) {
+export function initLogs({ ws, state, mount = null, embedded = false }) {
     const MAX_LOGS = 500;
     const MAX_TASK_EVENTS = 30;
     const duplicateWindowMs = 5000;
@@ -23,7 +23,7 @@ export function initLogs({ ws, state }) {
 
     const page = document.createElement('div');
     page.id = 'page-logs';
-    page.className = 'page';
+    page.className = embedded ? 'settings-embedded-content settings-logs-panel' : 'page';
     page.innerHTML = `
         <div class="page-header">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
@@ -34,14 +34,18 @@ export function initLogs({ ws, state }) {
         <div class="logs-filters" id="log-filters"></div>
         <div id="log-entries"></div>
     `;
-    document.getElementById('content').appendChild(page);
+    (mount || document.getElementById('content')).appendChild(page);
 
     const filtersDiv = page.querySelector('#log-filters');
     const logEntries = page.querySelector('#log-entries');
-    const logsNavBtn = document.querySelector('.nav-btn[data-page="logs"]');
+    function isLogsVisible() {
+        return embedded
+            ? state.activePage === 'settings' && state.settingsActiveSubtab === 'logs'
+            : state.activePage === 'logs';
+    }
 
     function scrollToLatest() {
-        if (state.activePage !== 'logs') return;
+        if (!isLogsVisible()) return;
         requestAnimationFrame(() => {
             logEntries.scrollTop = logEntries.scrollHeight;
         });
@@ -304,7 +308,7 @@ export function initLogs({ ws, state }) {
         logEntries.innerHTML = '';
     });
 
-    logsNavBtn?.addEventListener('click', () => {
-        scrollToLatest();
+    window.addEventListener('ouro:settings-subtab-shown', (event) => {
+        if (event.detail?.tab === 'logs') scrollToLatest();
     });
 }

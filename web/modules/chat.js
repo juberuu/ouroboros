@@ -40,7 +40,7 @@ function saveInputHistory(entries) {
     } catch {}
 }
 
-export function initChat({ ws, state, updateUnreadBadge }) {
+export function initChat({ ws, state, updateUnreadBadge, openSettingsTab }) {
     const container = document.getElementById('content');
     const chatSessionId = getOrCreateChatSessionId();
 
@@ -59,12 +59,12 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                 <button class="chat-header-btn" type="button" data-chat-command="restart" title="Restart agent">Restart</button>
                 <button class="chat-header-btn danger" type="button" data-chat-command="panic" title="Stop all workers">Panic</button>
             </div>
-            <div class="chat-budget-pill" id="chat-budget-pill" title="Budget">
+            <button class="chat-budget-pill" id="chat-budget-pill" type="button" title="Open budget controls" aria-label="Open budget controls">
                 <span class="chat-budget-text" id="chat-budget-text">$0 / $0</span>
                 <div class="chat-budget-bar">
                     <div class="chat-budget-bar-fill" id="chat-budget-bar-fill"></div>
                 </div>
-            </div>
+            </button>
             <span id="chat-status" class="status-badge offline">Connecting...</span>
         </div>
         <div id="chat-messages"></div>
@@ -106,6 +106,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
     const dropdownPlan = document.getElementById('chat-dropdown-plan');
     const statusBadge = document.getElementById('chat-status');
     const headerActions = document.getElementById('chat-header-actions');
+    const budgetPill = document.getElementById('chat-budget-pill');
     const attachBtn = document.getElementById('chat-attach');
     const fileInput = document.getElementById('chat-file-input');
     const attachmentPreview = document.getElementById('chat-attachment-preview');
@@ -1439,7 +1440,6 @@ export function initChat({ ws, state, updateUnreadBadge }) {
     // Dynamically adjust #chat-messages padding-bottom to match the real height of
     // the absolute-positioned #chat-input-area overlay, so the last bubble is always
     // fully visible with a small buffer — no more excessive gap or hidden content.
-    const inputArea = document.getElementById('chat-input-area');
     function scrollToBottom() {
         messagesDiv.scrollTop = messagesDiv.scrollHeight;
     }
@@ -1454,16 +1454,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
     function updateMessagesPadding(options = {}) {
         const preserveStickiness = options.preserveStickiness !== false;
         const shouldStick = preserveStickiness && isNearBottom(160);
-        const h = inputArea ? inputArea.offsetHeight : 84;
-        messagesDiv.style.paddingBottom = (h + 16) + 'px';
         if (shouldStick) scrollToBottomAfterLayout();
-    }
-
-    if (window.ResizeObserver && inputArea) {
-        // Composer height changes come from typing/attachment staging; avoid
-        // forcing the transcript while the user is editing on a soft keyboard.
-        const inputResizeObserver = new ResizeObserver(() => updateMessagesPadding({ preserveStickiness: false }));
-        inputResizeObserver.observe(inputArea);
     }
 
     input.addEventListener('input', () => {
@@ -1498,6 +1489,10 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         if (command === 'panic' && confirm('Kill all workers immediately?')) {
             ws.send({ type: 'command', cmd: '/panic' });
         }
+    });
+
+    budgetPill?.addEventListener('click', () => {
+        if (typeof openSettingsTab === 'function') openSettingsTab('costs');
     });
 
     refreshHeaderControlState(true);

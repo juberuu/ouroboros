@@ -1449,6 +1449,74 @@ async def api_git_promote(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+async def api_update_status(request: Request) -> JSONResponse:
+    """Return passive managed-update status without fetching."""
+    try:
+        from supervisor.git_ops import compute_managed_update_status, git_capture
+        status = compute_managed_update_status(fetch=False)
+        latest_version = ""
+        target_ref = status.get("target_ref") or ""
+        if target_ref and status.get("latest_sha"):
+            rc, version_text, _ = git_capture(["git", "show", f"{target_ref}:VERSION"])
+            if rc == 0:
+                latest_version = version_text.strip()
+        return JSONResponse({
+            "current_version": get_version(),
+            "latest_version": latest_version,
+            **status,
+        })
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+async def api_update_check(request: Request) -> JSONResponse:
+    """Fetch the managed remote and return fresh update status."""
+    try:
+        from supervisor.git_ops import compute_managed_update_status, git_capture
+        status = compute_managed_update_status(fetch=True)
+        latest_version = ""
+        target_ref = status.get("target_ref") or ""
+        if target_ref and status.get("latest_sha"):
+            rc, version_text, _ = git_capture(["git", "show", f"{target_ref}:VERSION"])
+            if rc == 0:
+                latest_version = version_text.strip()
+        return JSONResponse({
+            "current_version": get_version(),
+            "latest_version": latest_version,
+            **status,
+        })
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+async def api_update_apply(request: Request) -> JSONResponse:
+    """Prepare a managed update and restart so safe_restart applies it."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        strategy = str(body.get("strategy") or "replace")
+        from supervisor.git_ops import BRANCH_DEV, checkout_and_reset, prepare_managed_update
+        ok, payload = prepare_managed_update(strategy)
+        if not ok:
+            return JSONResponse(payload, status_code=409)
+        checkout_ok, checkout_msg = checkout_and_reset(
+            BRANCH_DEV,
+            reason="ui_update_apply",
+            unsynced_policy="ignore",
+        )
+        if not checkout_ok:
+            return JSONResponse(
+                {"error": f"Prepared update but checkout failed: {checkout_msg}", **payload},
+                status_code=409,
+            )
+        _request_restart_exit()
+        return JSONResponse({"status": "ok", "restarting": True, **payload})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 _evo_cache: Dict[str, Any] = {}
 _evo_task: Optional[asyncio.Task] = None
 
@@ -1724,6 +1792,9 @@ routes = [
     Route("/api/git/log", endpoint=api_git_log),
     Route("/api/git/rollback", endpoint=api_git_rollback, methods=["POST"]),
     Route("/api/git/promote", endpoint=api_git_promote, methods=["POST"]),
+    Route("/api/update/status", endpoint=api_update_status),
+    Route("/api/update/check", endpoint=api_update_check, methods=["POST"]),
+    Route("/api/update/apply", endpoint=api_update_apply, methods=["POST"]),
     Route("/api/cost-breakdown", endpoint=api_cost_breakdown),
     Route("/api/evolution-data", endpoint=api_evolution_data),
     Route("/api/chat/history", endpoint=api_chat_history),

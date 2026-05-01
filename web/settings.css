@@ -17,6 +17,10 @@
     backdrop-filter: blur(10px);
 }
 
+.settings-mobile-back {
+    display: none;
+}
+
 .settings-tabs {
     display: flex;
     flex-wrap: nowrap;
@@ -69,6 +73,25 @@
 
 .settings-panel.active {
     display: flex;
+}
+
+.settings-embedded-panel {
+    min-height: 0;
+}
+
+.settings-embedded-content {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+#page-settings[data-active-settings-tab="logs"] .settings-footer,
+#page-settings[data-active-settings-tab="evolution"] .settings-footer,
+#page-settings[data-active-settings-tab="updates"] .settings-footer,
+#page-settings[data-active-settings-tab="costs"] .settings-footer {
+    display: none;
 }
 
 .settings-section-copy {
@@ -625,9 +648,53 @@
         padding: 10px 0 8px;
     }
 
+    .settings-tabs {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 8px;
+        overflow: visible;
+    }
+
     .settings-tab {
-        padding: 7px 12px;
-        font-size: 12px;
+        display: flex;
+        align-items: center;
+        width: 100%;
+        min-height: 46px;
+        padding: 12px 14px;
+        font-size: 14px;
+        text-align: left;
+        border-radius: 16px;
+        justify-content: flex-start;
+    }
+
+    #page-settings:not(.settings-subtab-open) .settings-scroll,
+    #page-settings:not(.settings-subtab-open) .settings-footer {
+        display: none;
+    }
+
+    #page-settings.settings-subtab-open .settings-tabs {
+        display: none;
+    }
+
+    #page-settings.settings-subtab-open .settings-mobile-back {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 44px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        background: rgba(255, 255, 255, 0.04);
+        color: var(--text-primary);
+        border-radius: 14px;
+        padding: 0 14px;
+        font: inherit;
+        font-size: 14px;
+        cursor: pointer;
+    }
+
+    #page-settings.settings-subtab-open .settings-mobile-back::before {
+        content: '<';
+        color: var(--accent-light);
+        font-weight: 700;
     }
 
     .settings-shell .form-section {

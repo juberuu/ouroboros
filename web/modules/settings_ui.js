@@ -74,12 +74,17 @@ export function renderSettingsPage() {
         </div>
         <div class="settings-shell">
             <div class="settings-tabs-bar">
+                <button type="button" class="settings-mobile-back" data-settings-back hidden>Settings</button>
                 <div class="settings-tabs">
                     <button class="settings-tab active" data-settings-tab="providers">Providers</button>
                     <button class="settings-tab" data-settings-tab="models">Models</button>
                     <button class="settings-tab" data-settings-tab="behavior">Behavior</button>
                     <button class="settings-tab" data-settings-tab="integrations">Integrations</button>
                     <button class="settings-tab" data-settings-tab="advanced">Advanced</button>
+                    <button class="settings-tab" data-settings-tab="logs">Logs</button>
+                    <button class="settings-tab" data-settings-tab="evolution">Evolution</button>
+                    <button class="settings-tab" data-settings-tab="updates">Updates</button>
+                    <button class="settings-tab" data-settings-tab="costs">Costs</button>
                 </div>
             </div>
 
@@ -494,6 +499,10 @@ export function renderSettingsPage() {
                         <button class="btn btn-danger" id="btn-reset">Reset All Data</button>
                     </div>
                 </section>
+                <section class="settings-panel settings-embedded-panel" data-settings-panel="logs" id="settings-panel-logs"></section>
+                <section class="settings-panel settings-embedded-panel" data-settings-panel="evolution" id="settings-panel-evolution"></section>
+                <section class="settings-panel settings-embedded-panel" data-settings-panel="updates" id="settings-panel-updates"></section>
+                <section class="settings-panel settings-embedded-panel" data-settings-panel="costs" id="settings-panel-costs"></section>
             </div>
 
             <div class="settings-footer">
@@ -510,12 +519,16 @@ export function renderSettingsPage() {
     `;
 }
 
-export function bindSettingsTabs(root) {
+export function bindSettingsTabs(root, options = {}) {
     const tabs = Array.from(root.querySelectorAll('.settings-tab'));
     const panels = Array.from(root.querySelectorAll('.settings-panel'));
     const scrollRoot = root.querySelector('.settings-scroll');
+    const backButton = root.querySelector('[data-settings-back]');
+    const state = options.state || null;
+    const onActivate = typeof options.onActivate === 'function' ? options.onActivate : null;
 
     function activate(tabName) {
+        root.dataset.activeSettingsTab = tabName;
         tabs.forEach((button) => {
             button.classList.toggle('active', button.dataset.settingsTab === tabName);
         });
@@ -523,11 +536,27 @@ export function bindSettingsTabs(root) {
             panel.classList.toggle('active', panel.dataset.settingsPanel === tabName);
         });
         if (scrollRoot) scrollRoot.scrollTop = 0;
+        if (state) state.settingsActiveSubtab = tabName;
+        root.classList.add('settings-subtab-open');
+        if (backButton) {
+            backButton.hidden = false;
+            backButton.textContent = 'Settings';
+        }
+        if (onActivate) onActivate(tabName);
+        window.dispatchEvent(new CustomEvent('ouro:settings-subtab-shown', { detail: { tab: tabName } }));
     }
 
     tabs.forEach((button) => {
         button.addEventListener('click', () => activate(button.dataset.settingsTab));
     });
+    backButton?.addEventListener('click', () => {
+        root.classList.remove('settings-subtab-open');
+        if (backButton) backButton.hidden = true;
+        if (scrollRoot) scrollRoot.scrollTop = 0;
+    });
+    root.activateSettingsTab = activate;
+    if (state && !state.settingsActiveSubtab) state.settingsActiveSubtab = 'providers';
+    root.dataset.activeSettingsTab = state?.settingsActiveSubtab || 'providers';
 }
 
 export function bindSecretInputs(root) {

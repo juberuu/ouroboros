@@ -82,7 +82,12 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
     page.innerHTML = renderSettingsPage();
     document.getElementById('content').appendChild(page);
 
-    bindSettingsTabs(page);
+    const activateSettingsTab = (tabName) => {
+        if (typeof page.activateSettingsTab === 'function') {
+            page.activateSettingsTab(tabName);
+        }
+    };
+    bindSettingsTabs(page, { state });
     bindSecretInputs(page);
     bindEffortSegments(page);
     bindLocalModelControls({ state });
@@ -684,4 +689,9 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
             alert('Reset failed: ' + e.message);
         }
     });
+
+    return {
+        activateTab: activateSettingsTab,
+        page,
+    };
 }
