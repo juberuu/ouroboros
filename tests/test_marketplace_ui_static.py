@@ -49,13 +49,15 @@ def test_marketplace_empty_and_timeout_copy_is_human_readable():
     source = _marketplace_js()
     assert "No installable${officialText} skills found ${mode}." in source
     assert "ClawHub did not respond in time. Try again" in source
+    assert "registry_warnings" in source
     assert "packages/search?family=skill" not in source
 
 
 def test_marketplace_review_failure_points_to_heal_flow():
     source = _marketplace_js()
     assert "Fix" in source
-    assert "Ask Ouroboros in chat to repair" in source
+    assert "Start a repair task" in source
+    assert "visible_text:" in source
     assert "AUTO-REVIEW FAILED" not in source
     assert "rerun review from the Skills tab" not in source
 
@@ -74,6 +76,9 @@ def test_marketplace_fix_prompt_has_heal_payload_root_marker():
     assert "diagnostics.payload_root" in source
     assert "Final non-negotiable rules:" in source
     assert ".replace(/`/g, \"'\")" in source
+    assert "Start a repair task" in source
+    assert "visible_text:" in source
+    assert "data-page=\"chat\"" in source
 
 
 def test_marketplace_install_does_not_silently_enable():

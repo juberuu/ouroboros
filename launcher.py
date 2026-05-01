@@ -947,8 +947,8 @@ def main():
                     return {"ok": False, "error": "desktop downloads are limited to the local Ouroboros server"}
                 if parsed.port != actual_port:
                     return {"ok": False, "error": "download URL port must match the local Ouroboros server"}
-                if parsed.path != "/api/files/download":
-                    return {"ok": False, "error": "download URL path must be /api/files/download"}
+                if parsed.path != "/api/files/download" and not parsed.path.startswith("/api/extensions/"):
+                    return {"ok": False, "error": "download URL path must be /api/files/download or /api/extensions/<skill>/..."}
                 safe_name = pathlib.Path(str(filename or "download")).name or "download"
                 downloads = pathlib.Path.home() / "Downloads"
                 downloads.mkdir(parents=True, exist_ok=True)

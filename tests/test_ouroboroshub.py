@@ -45,7 +45,17 @@ def test_ouroboroshub_atomic_land_restores_old_on_move_failure(monkeypatch, tmp_
 
 
 def test_ouroboroshub_rejects_windows_and_review_opaque_paths():
-    for value in ("..\\evil", "..\\..\\evil", "C:\\evil", "node_modules/dep/index.js", ".ouroboros_env/bin/tool"):
+    for value in (
+        "..\\evil",
+        "..\\..\\evil",
+        "C:\\evil",
+        "node_modules/dep/index.js",
+        ".ouroboros_env/bin/tool",
+        "__pycache__/plugin.cpython-39.pyc",
+        "plugin.pyc",
+        "native.so",
+        "module.wasm",
+    ):
         try:
             ouroboroshub._safe_rel(value)
         except Exception:

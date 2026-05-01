@@ -30,8 +30,10 @@ def test_skill_cards_keep_toggle_but_move_secondary_actions_to_menu():
 
     assert "class=\"skills-switch" in source
     assert "skills-card-menu" in source
+    assert "data-skill-menu-trigger" in source
     assert "skills-menu-item skills-update" in source
     assert "skills-menu-item skills-uninstall" in source
     assert ".skills-card-menu-popover" in css
+    assert "position: static" in css
     assert ".skills-menu-item" in css
     assert ">Heal<" not in source

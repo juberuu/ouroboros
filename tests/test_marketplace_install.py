@@ -224,6 +224,31 @@ def test_install_refuses_when_summary_marks_plugin(
     assert "plugin" in result.error.lower()
 
 
+def test_install_rate_limit_error_is_actionable(enable_marketplace, stub_review, marketplace_drive):
+    data_dir, repo_dir = marketplace_drive
+    from ouroboros.marketplace import install as install_mod
+    from ouroboros.marketplace.clawhub import ClawHubRateLimitError, ClawHubSkillSummary
+
+    summary = ClawHubSkillSummary(slug="owner/limited", latest_version="1.0.0")
+    with mock.patch.object(install_mod, "_registry_info", return_value=summary):
+        with mock.patch.object(
+            install_mod,
+            "_registry_download",
+            side_effect=ClawHubRateLimitError("https://clawhub.ai/api/v1/download", 90),
+        ):
+            result = install_mod.install_skill(
+                data_dir,
+                repo_dir,
+                slug="owner/limited",
+                version="1.0.0",
+                auto_review=True,
+                overwrite=True,
+            )
+    assert not result.ok
+    assert "ClawHub rate limit reached" in result.error
+    assert "HTTP 429" not in result.error
+
+
 def test_uninstall_removes_dir_and_provenance(
     enable_marketplace, stub_review, marketplace_drive
 ):

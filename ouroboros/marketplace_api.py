@@ -152,6 +152,7 @@ async def api_marketplace_search(request: Request) -> JSONResponse:
             "official": official_only,
             "registry_path": page.get("path") or "packages",
             "registry_attempts": page.get("attempts") or [],
+            "registry_warnings": page.get("warnings") or [],
             "registry_empty": not bool(results),
             "count": len(results),
             "results": [r.to_dict() for r in results],

@@ -466,6 +466,7 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
         image_base64 = str(msg.get("image_base64") or "")
         image_mime = str(msg.get("image_mime") or "image/jpeg")
         image_caption = str(msg.get("image_caption") or "")
+        suppress_chat_log = bool(msg.get("suppress_chat_log"))
         image_data = (
             (image_base64, image_mime, image_caption)
             if image_base64
@@ -481,17 +482,18 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
 
         from supervisor.message_bus import log_chat
 
-        log_chat(
-            "in",
-            chat_id,
-            user_id,
-            log_text,
-            source=source,
-            sender_label=sender_label,
-            sender_session_id=sender_session_id,
-            client_message_id=client_message_id,
-            telegram_chat_id=telegram_chat_id,
-        )
+        if not suppress_chat_log:
+            log_chat(
+                "in",
+                chat_id,
+                user_id,
+                log_text,
+                source=source,
+                sender_label=sender_label,
+                sender_session_id=sender_session_id,
+                client_message_id=client_message_id,
+                telegram_chat_id=telegram_chat_id,
+            )
         st["last_owner_message_at"] = now_iso
         ctx.save_state(st)
 
@@ -1394,9 +1396,32 @@ async def api_command(request: Request) -> JSONResponse:
         body = await request.json()
         cmd = body.get("cmd", "")
         if cmd:
-            from supervisor.message_bus import get_bridge
+            from supervisor.message_bus import get_bridge, log_chat
             bridge = get_bridge()
-            bridge.ui_send(cmd, broadcast=False)
+            visible_text = str(body.get("visible_text") or "").strip()
+            bridge.ui_send(cmd, broadcast=False, suppress_chat_log=bool(visible_text))
+            if visible_text:
+                task_id = str(body.get("visible_task_id") or "skill_repair")
+                ts = datetime.now(timezone.utc).isoformat()
+                payload = {
+                    "type": "chat",
+                    "role": "system",
+                    "content": visible_text,
+                    "ts": ts,
+                    "source": "skill_repair",
+                    "system_type": "skill_repair",
+                    "task_id": task_id,
+                }
+                broadcast_ws_sync(payload)
+                log_chat(
+                    "system",
+                    0,
+                    0,
+                    visible_text,
+                    ts=ts,
+                    source="skill_repair",
+                    task_id=task_id,
+                )
         return JSONResponse({"status": "ok"})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=400)

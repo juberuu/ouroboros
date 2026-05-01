@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -51,6 +52,8 @@ _LEXICAL_SEARCH_PATH = "search"
 _SEARCH_ENRICH_WORKERS = 8
 _SEARCH_ENRICH_LIMIT = 16
 _SEARCH_ENRICH_TIMEOUT_SEC = 2
+_MAX_RATE_LIMIT_RETRIES = 2
+_MAX_RATE_LIMIT_SLEEP_SEC = 3.0
 
 # Allowed registry hosts. The canonical registry is ``clawhub.ai`` (per
 # the official docs at github.com/openclaw/clawhub). ``clawhub.com``
@@ -71,6 +74,17 @@ _ALLOWED_REGISTRY_HOSTS = frozenset(
 
 class ClawHubClientError(RuntimeError):
     """Raised on any registry-side failure (HTTP, JSON, host policy)."""
+
+
+class ClawHubRateLimitError(ClawHubClientError):
+    """Raised when ClawHub keeps rate-limiting after bounded retries."""
+
+    def __init__(self, url: str, retry_after: Optional[float] = None) -> None:
+        self.url = url
+        self.retry_after = retry_after
+        wait = _format_retry_after(retry_after)
+        suffix = f" Try again in {wait}." if wait else " Try again in a few minutes."
+        super().__init__(f"ClawHub rate limit reached.{suffix}")
 
 
 class ClawHubClientHostBlocked(ClawHubClientError):
@@ -197,6 +211,33 @@ class _AllowlistRedirectHandler(urllib.request.HTTPRedirectHandler):
 _OPENER = urllib.request.build_opener(_AllowlistRedirectHandler())
 
 
+def _parse_retry_after(value: Any) -> Optional[float]:
+    """Return Retry-After seconds for numeric values; ignore HTTP-date forms."""
+    try:
+        seconds = float(str(value or "").strip())
+    except (TypeError, ValueError):
+        return None
+    if seconds < 0:
+        return None
+    return seconds
+
+
+def _format_retry_after(seconds: Optional[float]) -> str:
+    if seconds is None:
+        return ""
+    rounded = max(1, int(seconds))
+    if rounded >= 60:
+        minutes = max(1, round(rounded / 60))
+        return f"{minutes} minute{'s' if minutes != 1 else ''}"
+    return f"{rounded} second{'s' if rounded != 1 else ''}"
+
+
+def _sleep_for_rate_limit(retry_after: Optional[float], attempt: int) -> None:
+    fallback = min(_MAX_RATE_LIMIT_SLEEP_SEC, 0.5 * (2 ** attempt))
+    delay = retry_after if retry_after is not None else fallback
+    time.sleep(min(_MAX_RATE_LIMIT_SLEEP_SEC, max(0.1, float(delay))))
+
+
 def _http_get(
     url: str,
     *,
@@ -212,40 +253,57 @@ def _http_get(
     or :class:`ClawHubClientHostBlocked` on a redirect target outside
     :data:`_ALLOWED_REGISTRY_HOSTS`.
     """
-    request = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": _USER_AGENT,
-            "Accept": accept,
-        },
-        method="GET",
-    )
-    try:
-        with _OPENER.open(request, timeout=timeout) as response:
-            status = int(getattr(response, "status", 0) or response.getcode() or 0)
-            if status >= 400:
-                raise ClawHubClientError(
-                    f"GET {url} returned HTTP {status}"
-                )
-            buf = bytearray()
-            while True:
-                chunk = response.read(64 * 1024)
-                if not chunk:
-                    break
-                if len(buf) + len(chunk) > max_bytes:
+    last_retry_after: Optional[float] = None
+    for attempt in range(_MAX_RATE_LIMIT_RETRIES + 1):
+        request = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": _USER_AGENT,
+                "Accept": accept,
+            },
+            method="GET",
+        )
+        try:
+            with _OPENER.open(request, timeout=timeout) as response:
+                status = int(getattr(response, "status", 0) or response.getcode() or 0)
+                if status == 429:
+                    retry_after = _parse_retry_after(response.headers.get("Retry-After"))
+                    last_retry_after = retry_after
+                    if attempt < _MAX_RATE_LIMIT_RETRIES:
+                        _sleep_for_rate_limit(retry_after, attempt)
+                        continue
+                    raise ClawHubRateLimitError(url, retry_after)
+                if status >= 400:
                     raise ClawHubClientError(
-                        f"GET {url} response exceeds {max_bytes} byte cap "
-                        "(possible registry abuse)."
+                        f"GET {url} returned HTTP {status}"
                     )
-                buf.extend(chunk)
-            headers = {k.lower(): v for k, v in response.headers.items()}
-            return bytes(buf), headers
-    except urllib.error.HTTPError as exc:
-        raise ClawHubClientError(f"GET {url}: HTTP {exc.code}: {exc.reason}") from exc
-    except urllib.error.URLError as exc:
-        raise ClawHubClientError(f"GET {url}: transport error: {exc.reason}") from exc
-    except TimeoutError as exc:
-        raise ClawHubClientError(f"GET {url}: timed out after {timeout}s") from exc
+                buf = bytearray()
+                while True:
+                    chunk = response.read(64 * 1024)
+                    if not chunk:
+                        break
+                    if len(buf) + len(chunk) > max_bytes:
+                        raise ClawHubClientError(
+                            f"GET {url} response exceeds {max_bytes} byte cap "
+                            "(possible registry abuse)."
+                        )
+                    buf.extend(chunk)
+                headers = {k.lower(): v for k, v in response.headers.items()}
+                return bytes(buf), headers
+        except urllib.error.HTTPError as exc:
+            if int(exc.code or 0) == 429:
+                retry_after = _parse_retry_after(exc.headers.get("Retry-After") if exc.headers else None)
+                last_retry_after = retry_after
+                if attempt < _MAX_RATE_LIMIT_RETRIES:
+                    _sleep_for_rate_limit(retry_after, attempt)
+                    continue
+                raise ClawHubRateLimitError(url, retry_after) from exc
+            raise ClawHubClientError(f"GET {url}: HTTP {exc.code}: {exc.reason}") from exc
+        except urllib.error.URLError as exc:
+            raise ClawHubClientError(f"GET {url}: transport error: {exc.reason}") from exc
+        except TimeoutError as exc:
+            raise ClawHubClientError(f"GET {url}: timed out after {timeout}s") from exc
+    raise ClawHubRateLimitError(url, last_retry_after)
 
 
 def _decode_json(body: bytes, *, url: str) -> Any:
@@ -529,11 +587,12 @@ def _enrich_search_summaries(
     *,
     registry_url: Optional[str],
     timeout_sec: int,
-) -> List[ClawHubSkillSummary]:
+) -> Tuple[List[ClawHubSkillSummary], List[str]]:
     """Recover rich package metadata for thin /search results."""
     if not summaries:
-        return summaries
+        return summaries, []
     enriched = list(summaries)
+    warnings: List[str] = []
     enrich_count = min(_SEARCH_ENRICH_LIMIT, len(summaries))
     workers = max(1, min(_SEARCH_ENRICH_WORKERS, enrich_count))
     detail_timeout = max(
@@ -558,13 +617,20 @@ def _enrich_search_summaries(
                     summaries[idx],
                     future.result(),
                 )
+            except ClawHubRateLimitError as exc:
+                warnings.append(str(exc))
+                log.warning(
+                    "Keeping bare ClawHub search result for %s after rate-limit during enrich.",
+                    summaries[idx].slug,
+                    exc_info=True,
+                )
             except Exception:
                 log.warning(
                     "Keeping bare ClawHub search result for %s after enrich failure.",
                     summaries[idx].slug,
                     exc_info=True,
                 )
-    return enriched
+    return enriched, warnings
 
 
 def search(
@@ -616,18 +682,24 @@ def search(
         except ClawHubClientError:
             log.warning("Skipping malformed registry record: %r", record, exc_info=True)
             continue
+    enrich_warnings: List[str] = []
     if cleaned_query:
-        summaries = _enrich_search_summaries(
+        enriched_result = _enrich_search_summaries(
             summaries,
             registry_url=registry_url,
             timeout_sec=timeout_sec,
         )
+        if isinstance(enriched_result, tuple):
+            summaries, enrich_warnings = enriched_result
+        else:  # Backward-compatible for tests/patches that stub the old shape.
+            summaries = enriched_result
     if include_metadata:
         return {
             "results": summaries,
             "next_cursor": next_cursor,
             "path": path,
             "attempts": [{"path": path, "count": len(summaries), "ok": True}],
+            "warnings": enrich_warnings,
             "sort": sort_key,
             "filters": {
                 "family": "skill" if not cleaned_query else "",
@@ -803,6 +875,7 @@ __all__ = [
     "ClawHubArchive",
     "ClawHubClientError",
     "ClawHubClientHostBlocked",
+    "ClawHubRateLimitError",
     "ClawHubSkillSummary",
     "download",
     "info",

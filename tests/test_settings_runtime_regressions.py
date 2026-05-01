@@ -315,7 +315,44 @@ def test_api_command_uses_local_enqueue_semantics(monkeypatch, tmp_path):
 
     assert response.status_code == 200
     assert payload == {"status": "ok"}
-    assert captured == {"text": "status", "kwargs": {"broadcast": False}}
+    assert captured == {"text": "status", "kwargs": {"broadcast": False, "suppress_chat_log": False}}
+
+
+def test_api_command_can_broadcast_short_visible_status(monkeypatch, tmp_path):
+    server_module = _reload_server(monkeypatch, tmp_path)
+    captured = {}
+    broadcasts = []
+    chat_logs = []
+    import supervisor.message_bus as message_bus
+
+    class _Bridge:
+        def ui_send(self, text, **kwargs):
+            captured["text"] = text
+            captured["kwargs"] = kwargs
+
+    class _Request:
+        async def json(self):
+            return {
+                "cmd": "FULL_HEAL_PROMPT",
+                "visible_text": "Repair task queued for nanobanana.",
+                "visible_task_id": "skill_repair_nanobanana",
+            }
+
+    monkeypatch.setattr(message_bus, "get_bridge", lambda: _Bridge())
+    monkeypatch.setattr(message_bus, "log_chat", lambda *args, **kwargs: chat_logs.append((args, kwargs)))
+    monkeypatch.setattr(server_module, "broadcast_ws_sync", lambda payload: broadcasts.append(payload))
+
+    response = asyncio.run(server_module.api_command(_Request()))
+    payload = json.loads(response.body.decode("utf-8"))
+
+    assert response.status_code == 200
+    assert payload == {"status": "ok"}
+    assert captured == {"text": "FULL_HEAL_PROMPT", "kwargs": {"broadcast": False, "suppress_chat_log": True}}
+    assert broadcasts[0]["role"] == "system"
+    assert broadcasts[0]["content"] == "Repair task queued for nanobanana."
+    assert broadcasts[0]["task_id"] == "skill_repair_nanobanana"
+    assert chat_logs
+    assert chat_logs[0][0][0] == "system"
 
 
 @pytest.mark.skipif(

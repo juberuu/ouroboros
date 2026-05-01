@@ -382,6 +382,15 @@ Rules for widget changes:
   markdown blocks.
 - Media sources must be extension routes under `/api/extensions/<skill>/...`
   or explicitly safe `data:` URLs for image/audio/video MIME types.
+- Long-running user actions (image/music/research generation) must use the
+  declarative async job contract: start route returns `job_id`, status route
+  returns `queued|running|done|error`, and the widget host resumes polling by
+  `job_id` after tab switches. Do not implement long generation as a single
+  foreground HTTP request that can be lost when the widget remounts.
+- Download controls must use the host download helper (`data-widget-download-url`
+  / desktop bridge / fetch-blob fallback). Raw in-app navigation links are not
+  acceptable for downloads because desktop WebView may replace the Ouroboros UI
+  with the media file.
 - Do not load arbitrary JS modules from skill directories into the SPA origin.
 - Add/update `tests/test_widgets_ui_static.py` for every new component kind or
   media policy.

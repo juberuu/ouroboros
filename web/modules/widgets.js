@@ -128,6 +128,20 @@ function safeMediaSrc(tab, spec, state) {
     return '';
 }
 
+function filenameFromWidgetUrl(url, fallback = 'download') {
+    try {
+        const parsed = new URL(url, window.location.origin);
+        for (const key of ['filename', 'image_id', 'clip_id']) {
+            const value = parsed.searchParams.get(key);
+            if (value) return value.split('/').pop() || fallback;
+        }
+        const base = parsed.pathname.split('/').filter(Boolean).pop();
+        return base || fallback;
+    } catch {
+        return fallback;
+    }
+}
+
 function fieldValue(form, field) {
     const name = String(field.name || '');
     const input = form.elements[name];
@@ -247,7 +261,8 @@ function renderDataComponent(tab, component, state, status, componentState = {},
         if (type === 'image') return `<figure class="widget-media"><img src="${escapeHtml(src)}" alt="${escapeHtml(component.alt || label)}"><figcaption>${label}</figcaption></figure>`;
         if (type === 'audio') return `<div class="widget-media"><div>${label}</div><audio controls src="${escapeHtml(src)}"></audio></div>`;
         if (type === 'video') return `<div class="widget-media"><div>${label}</div><video controls src="${escapeHtml(src)}"></video></div>`;
-        return `<a class="btn btn-default" href="${escapeHtml(src)}" download>${label}</a>`;
+        const filename = escapeHtml(component.filename || filenameFromWidgetUrl(src, label || 'download'));
+        return `<button class="btn btn-default widget-download" type="button" data-widget-download-url="${escapeHtml(src)}" data-widget-download-filename="${filename}">${label}</button>`;
     }
     if (type === 'gallery') {
         const items = component.items || getPath(data, component.path || '', []);
@@ -312,10 +327,38 @@ async function mountDeclarativeWidget(mount, tab, render) {
     const chartInstances = new Set();
     const eventSources = new Map();
     const activePolls = new Set();
+    const activeJobs = new Set();
     const autoStarted = new Set();
     const messageHandlers = new Set();
     const subscribed = new Set();
     let disposed = false;
+
+    const downloadWidgetFile = async (url, filename) => {
+        const resolvedUrl = new URL(url, window.location.origin);
+        const expectedPrefix = `/api/extensions/${encodeURIComponent(tab.skill)}/`;
+        if (resolvedUrl.origin !== window.location.origin || !resolvedUrl.pathname.startsWith(expectedPrefix)) {
+            throw new Error('download URL is outside this widget extension');
+        }
+        const safeName = filenameFromWidgetUrl(resolvedUrl.toString(), filename || 'download');
+        const bridge = window.pywebview?.api?.download_file_to_downloads;
+        if (bridge) {
+            const result = await bridge(resolvedUrl.pathname + resolvedUrl.search, safeName, false);
+            if (!result?.ok) throw new Error(result?.error || 'desktop download failed');
+            return;
+        }
+        const resp = await fetch(resolvedUrl.pathname + resolvedUrl.search, { credentials: 'include' });
+        if (!resp.ok) throw new Error(`download failed: HTTP ${resp.status}`);
+        const blob = await resp.blob();
+        const blobUrl = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = blobUrl;
+        link.download = safeName;
+        link.rel = 'noopener';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+    };
 
     const schedule = (fn, delay) => {
         if (disposed) return null;
@@ -343,6 +386,7 @@ async function mountDeclarativeWidget(mount, tab, render) {
         timers.forEach((timer) => clearTimeout(timer));
         timers.clear();
         activePolls.clear();
+        activeJobs.clear();
         messageHandlers.forEach((handler) => widgetMessageHandlers.delete(handler));
         messageHandlers.clear();
         subscribed.clear();
@@ -398,6 +442,66 @@ async function mountDeclarativeWidget(mount, tab, render) {
         };
         poll();
     };
+    const startJobPoll = (idx, jobId) => {
+        if (disposed || !jobId || activeJobs.has(idx)) return;
+        const spec = components[Number(idx)] || {};
+        const target = spec.target || 'result';
+        const statusRoute = spec.status_route || spec.job_status_route || 'status';
+        const intervalMs = boundedNumber(spec.interval_ms, 2000, 1000, 30000);
+        const maxTicks = boundedNumber(spec.max_ticks, 240, 1, 1000);
+        let ticks = 0;
+        activeJobs.add(idx);
+        componentState[`job:${idx}`] = { job_id: jobId, status_route: statusRoute };
+        const pollJob = async () => {
+            if (disposed) return;
+            ticks += 1;
+            try {
+                const data = await callRoute({ route: statusRoute, method: 'GET' }, { job_id: jobId });
+                if (disposed) return;
+                const currentStatus = String(data.status || data.state || '').toLowerCase();
+                if (currentStatus === 'done' || currentStatus === 'succeeded' || currentStatus === 'success') {
+                    state[target] = data.result && typeof data.result === 'object' ? data.result : data;
+                    status[target] = 'success';
+                    delete componentState[`job:${idx}`];
+                    activeJobs.delete(idx);
+                    renderAll();
+                    return;
+                }
+                if (currentStatus === 'error' || currentStatus === 'failed') {
+                    state[target] = { error: data.error || 'job failed' };
+                    status[target] = 'error';
+                    delete componentState[`job:${idx}`];
+                    activeJobs.delete(idx);
+                    renderAll();
+                    return;
+                }
+                state[target] = {
+                    ...(state[target] || {}),
+                    job_id: jobId,
+                    progress: data.progress,
+                    message: data.message,
+                };
+                status[target] = 'loading';
+                renderAll();
+                if (ticks < maxTicks) {
+                    schedule(pollJob, intervalMs);
+                } else {
+                    state[target] = { error: 'job timed out waiting for result' };
+                    status[target] = 'error';
+                    delete componentState[`job:${idx}`];
+                    activeJobs.delete(idx);
+                    renderAll();
+                }
+            } catch (err) {
+                state[target] = { error: err.message || String(err) };
+                status[target] = 'error';
+                delete componentState[`job:${idx}`];
+                activeJobs.delete(idx);
+                renderAll();
+            }
+        };
+        pollJob();
+    };
     const renderAll = () => {
         if (disposed) return;
         rememberFormValues();
@@ -438,9 +542,18 @@ async function mountDeclarativeWidget(mount, tab, render) {
                 status[target] = 'loading';
                 renderAll();
                 try {
-                    state[target] = await callRoute(spec, values);
+                    const data = await callRoute(spec, values);
                     if (disposed) return;
-                    status[target] = 'success';
+                    if (spec.job === true || spec.mode === 'job') {
+                        const jobId = data.job_id || data.id;
+                        if (!jobId) throw new Error('job response missing job_id');
+                        state[target] = { job_id: jobId, message: data.message || 'Job started.' };
+                        status[target] = 'loading';
+                        startJobPoll(Number(form.dataset.widgetForm), jobId);
+                    } else {
+                        state[target] = data;
+                        status[target] = 'success';
+                    }
                 } catch (err) {
                     state[target] = { error: err.message || String(err) };
                     status[target] = 'error';
@@ -455,9 +568,18 @@ async function mountDeclarativeWidget(mount, tab, render) {
                 status[target] = 'loading';
                 renderAll();
                 try {
-                    state[target] = await callRoute(spec, spec.body || {});
+                    const data = await callRoute(spec, spec.body || {});
                     if (disposed) return;
-                    status[target] = 'success';
+                    if (spec.job === true || spec.mode === 'job') {
+                        const jobId = data.job_id || data.id;
+                        if (!jobId) throw new Error('job response missing job_id');
+                        state[target] = { job_id: jobId, message: data.message || 'Job started.' };
+                        status[target] = 'loading';
+                        startJobPoll(Number(button.dataset.widgetAction), jobId);
+                    } else {
+                        state[target] = data;
+                        status[target] = 'success';
+                    }
                 } catch (err) {
                     state[target] = { error: err.message || String(err) };
                     status[target] = 'error';
@@ -476,6 +598,20 @@ async function mountDeclarativeWidget(mount, tab, render) {
                 renderAll();
             });
         });
+        mount.querySelectorAll('[data-widget-download-url]').forEach((button) => {
+            button.addEventListener('click', async (event) => {
+                event.preventDefault();
+                button.disabled = true;
+                try {
+                    await downloadWidgetFile(button.dataset.widgetDownloadUrl || '', button.dataset.widgetDownloadFilename || 'download');
+                } catch (err) {
+                    state.download = { error: err.message || String(err) };
+                    status.download = 'error';
+                } finally {
+                    button.disabled = false;
+                }
+            });
+        });
         mount.querySelectorAll('[data-widget-chart-config]').forEach((canvas) => {
             if (typeof Chart === 'undefined') return;
             try {
@@ -489,6 +625,14 @@ async function mountDeclarativeWidget(mount, tab, render) {
             if (String(component.type || '') === 'poll' && component.auto_start === true && !autoStarted.has(idx)) {
                 autoStarted.add(idx);
                 queueMicrotask(() => startPoll(idx));
+            }
+        });
+        components.forEach((component, idx) => {
+            if (!(component.job === true || component.mode === 'job')) return;
+            const savedJob = componentState[`job:${idx}`];
+            const jobId = savedJob && savedJob.job_id;
+            if (jobId && status[component.target || 'result'] === 'loading') {
+                queueMicrotask(() => startJobPoll(idx, jobId));
             }
         });
         components.forEach((component, idx) => {

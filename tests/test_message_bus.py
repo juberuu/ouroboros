@@ -53,6 +53,16 @@ def test_ui_send_enqueues_structured_message_and_broadcasts(monkeypatch):
     assert updates[0]["message"]["client_message_id"] == "c-1"
 
 
+def test_ui_send_preserves_suppress_chat_log_flag(monkeypatch):
+    bridge = _make_bridge(monkeypatch)
+
+    bridge.ui_send("FULL_PROMPT", broadcast=False, suppress_chat_log=True)
+    updates = bridge.get_updates(offset=0, timeout=1)
+
+    assert updates[0]["message"]["text"] == "FULL_PROMPT"
+    assert updates[0]["message"]["suppress_chat_log"] is True
+
+
 def test_telegram_poll_loop_enqueues_inbound_messages(monkeypatch):
     bridge = _make_bridge(monkeypatch, {"TELEGRAM_BOT_TOKEN": "token"})
     broadcasts = []

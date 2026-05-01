@@ -53,6 +53,9 @@ def test_widgets_support_declarative_schema_components():
     assert "new Chart(canvas, config)" in source
     assert "chartInstances.forEach((chart) => chart.destroy());" in source
     assert "data-widget-tab-key" in source
+    assert "component.job === true || component.mode === 'job'" in source
+    assert "startJobPoll" in source
+    assert "status_route" in source
     assert "event.detail?.page === 'widgets'" in source
     page_shown_branch = source.split("window.addEventListener('ouro:page-shown'")[1]
     assert "disposeMountedWidgets();" in page_shown_branch
@@ -84,6 +87,17 @@ def test_widgets_media_sources_are_constrained_to_extension_routes_or_data_urls(
     assert "parsed.pathname.startsWith(expectedPrefix)" in source
     assert "parsed.origin === window.location.origin" in source
     assert "javascript:" not in source
+
+
+def test_widgets_downloads_use_host_handler_not_navigation():
+    source = _widgets_js()
+    assert "data-widget-download-url" in source
+    assert "event.preventDefault();" in source
+    assert "download_file_to_downloads" in source
+    assert "URL.createObjectURL(blob)" in source
+    assert "window.location.href" not in source
+    assert "window.location.assign" not in source
+    assert '<a class="btn btn-default" href' not in source
 
 
 def test_widgets_treat_head_as_no_body_request():

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import urllib.error
 import urllib.parse
 from unittest import mock
 
@@ -18,6 +19,7 @@ from ouroboros.marketplace import clawhub as clawhub_mod
 from ouroboros.marketplace.clawhub import (
     ClawHubArchive,
     ClawHubClientError,
+    ClawHubRateLimitError,
     ClawHubClientHostBlocked,
     download,
     info,
@@ -56,6 +58,16 @@ def _patch_opener(body, *, status=200, headers=None):
     """
     return mock.patch.object(
         clawhub_mod._OPENER, "open", return_value=_mock_response(body, status=status, headers=headers)
+    )
+
+
+def _http_429(url: str = "https://clawhub.ai/api/v1/download"):
+    return urllib.error.HTTPError(
+        url,
+        429,
+        "Too Many Requests",
+        {"Retry-After": "2"},
+        io.BytesIO(b""),
     )
 
 
@@ -102,6 +114,34 @@ def test_search_uses_search_endpoint(monkeypatch):
     assert params == {"q": ["foo"], "limit": ["5"]}
     assert [r.slug for r in results] == ["skill1", "skill2"]
     assert results[0].latest_version == "1.0.0"
+
+
+def test_http_get_retries_rate_limit_then_succeeds(monkeypatch):
+    body = json.dumps({"items": []}).encode("utf-8")
+    monkeypatch.setattr(clawhub_mod, "_sleep_for_rate_limit", lambda *_args: None)
+    with mock.patch.object(
+        clawhub_mod._OPENER,
+        "open",
+        side_effect=[_http_429(), _mock_response(body)],
+    ) as opener_mock:
+        page = search("", include_metadata=True)
+    assert page["results"] == []
+    assert opener_mock.call_count == 2
+
+
+def test_http_get_rate_limit_error_is_human_readable(monkeypatch):
+    monkeypatch.setattr(clawhub_mod, "_sleep_for_rate_limit", lambda *_args: None)
+    with mock.patch.object(
+        clawhub_mod._OPENER,
+        "open",
+        side_effect=[_http_429(), _http_429(), _http_429()],
+    ):
+        with pytest.raises(ClawHubRateLimitError) as excinfo:
+            search("", include_metadata=True)
+    message = str(excinfo.value)
+    assert "ClawHub rate limit reached" in message
+    assert "Try again in 2 seconds" in message
+    assert "HTTP 429" not in message
 
 
 def test_search_handles_bare_array(monkeypatch):
@@ -192,6 +232,22 @@ def test_search_enriches_records(monkeypatch):
     assert results[0].badges["official"] is True
     assert results[0].stats["downloads"] == 321
     assert results[0].latest_version == "2.0.0"
+
+
+def test_search_metadata_surfaces_rate_limited_enrichment(monkeypatch):
+    body = json.dumps(
+        {"results": [{"slug": "owner/limited", "displayName": "Limited"}]}
+    ).encode("utf-8")
+
+    def _rate_limited(_slug, **_kwargs):
+        raise ClawHubRateLimitError("https://clawhub.ai/api/v1/packages/owner/limited", 30)
+
+    monkeypatch.setattr(clawhub_mod, "_detail_summary", _rate_limited)
+    with _patch_opener(body):
+        page = search("limited", include_metadata=True)
+    assert [r.slug for r in page["results"]] == ["owner/limited"]
+    assert page["warnings"]
+    assert "rate limit" in page["warnings"][0].lower()
 
 
 def test_search_enrich_merges_skill_detail_stats(monkeypatch):

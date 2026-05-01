@@ -59,4 +59,5 @@ def test_files_pdf_preview_and_download_bridge_are_safe():
     assert "download_file_to_downloads" in source
     assert "URL.createObjectURL(blob)" in source
     assert 'parsed.path != "/api/files/download"' in launcher
+    assert 'parsed.path.startswith("/api/extensions/")' in launcher
     assert "parsed.port != actual_port" in launcher

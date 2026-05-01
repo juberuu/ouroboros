@@ -138,6 +138,7 @@ class LocalChatBridge:
                 "image_base64",
                 "image_mime",
                 "image_caption",
+                "suppress_chat_log",
             ):
                 value = msg.get(key)
                 if value not in (None, "", 0):
@@ -465,6 +466,7 @@ class LocalChatBridge:
         image_base64: str = "",
         image_mime: str = "",
         image_caption: str = "",
+        suppress_chat_log: bool = False,
     ) -> None:
         clean_text = str(text or "").strip()
         caption_text = str(image_caption or "").strip()
@@ -485,6 +487,7 @@ class LocalChatBridge:
             "image_base64": image_b64,
             "image_mime": str(image_mime or ""),
             "image_caption": caption_text,
+            "suppress_chat_log": bool(suppress_chat_log),
         })
 
     def send_message(
@@ -609,6 +612,7 @@ class LocalChatBridge:
         broadcast: bool = True,
         sender_session_id: str = "",
         client_message_id: str = "",
+        suppress_chat_log: bool = False,
     ):
         """Called by the web UI to send a message to the agent."""
         if broadcast:
@@ -618,7 +622,7 @@ class LocalChatBridge:
                 client_message_id=client_message_id,
             )
             return
-        self.enqueue_local_message(text)
+        self.enqueue_local_message(text, suppress_chat_log=suppress_chat_log)
 
     def ui_receive(self, timeout: float = 0.1) -> Optional[Dict[str, Any]]:
         """Called by the web UI to check for new messages from the agent."""

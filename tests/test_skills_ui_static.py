@@ -19,7 +19,9 @@ def test_skills_heal_button_is_review_preserving_agent_task():
     assert "skills-heal" in source
     assert "return { label: 'Fix', className: 'skills-heal'" in source
     assert "buildHealPrompt(skill)" in source
-    assert "await postWithFeedback('/api/command', { cmd: prompt });" in source
+    assert "visible_text:" in source
+    assert "Repair task queued for" in source
+    assert "ctx.showPage('chat')" in source
     assert "HEAL_MODE_NO_ENABLE" in source
     assert "HEAL_SKILL_NAME_JSON" in source
     assert "HEAL_SKILL_PAYLOAD_ROOT_JSON" in source

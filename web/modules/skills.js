@@ -98,6 +98,11 @@ function isMissingGrantLoadError(skill) {
     return !grantReady(skill) && String(skill.load_error || '').includes('missing owner grants');
 }
 
+function isRateLimitError(message) {
+    const text = String(message || '').toLowerCase();
+    return text.includes('rate limit') || text.includes('too many requests') || text.includes('http 429');
+}
+
 // v5.2.3: collapse the previous wall of competing badges
 // (NATIVE / PASS / LIVE / ENABLED / GRANT MISSING / etc.) into a single
 // human-readable status chip per card. The detailed flags stay
@@ -105,6 +110,9 @@ function isMissingGrantLoadError(skill) {
 function skillStatusChip(skill) {
     if (!grantReady(skill)) {
         return { tone: 'warn', label: 'Needs access grant' };
+    }
+    if (skill.lifecycle_virtual && isRateLimitError(skill.load_error)) {
+        return { tone: 'warn', label: 'Rate limited' };
     }
     if (skill.load_error) {
         return { tone: 'danger', label: 'Failed to load' };
@@ -310,6 +318,9 @@ function skillNextAction(skill, reviewInProgress = false) {
     if (reviewInProgress) {
         return { label: 'Reviewing...', className: '', disabled: true };
     }
+    if (skill.lifecycle_virtual && skill.source === 'clawhub' && isRateLimitError(skill.load_error)) {
+        return { label: 'Retry install', className: 'skills-retry-install', disabled: false };
+    }
     if ((skill.load_error && !isMissingGrantLoadError(skill)) || skill.review_status === 'fail') {
         if (healReady(skill)) {
             return { label: 'Fix', className: 'skills-heal', disabled: false };
@@ -476,14 +487,14 @@ function renderSkillCard(skill, reviewingSkills = new Set()) {
             <footer class="skills-card-actions">
                 ${healBtn}
                 ${(updateBtn || uninstallBtn || reviewMenuBtn) ? `
-                    <details class="skills-card-menu">
-                        <summary aria-label="More actions">...</summary>
-                        <div class="skills-card-menu-popover">
+                    <div class="skills-card-menu">
+                        <button type="button" class="skills-card-menu-trigger" aria-label="More actions" aria-haspopup="menu" aria-expanded="false" data-skill-menu-trigger>...</button>
+                        <div class="skills-card-menu-popover" role="menu" hidden>
                             ${reviewMenuBtn}
                             ${updateBtn}
                             ${uninstallBtn}
                         </div>
-                    </details>
+                    </div>
                 ` : ''}
                 ${details}
             </footer>
@@ -533,6 +544,7 @@ function mergeLifecycleEvents(skills, events) {
             permissions: [],
             load_error: event.status === 'failed' ? event.error : '',
             source: event.source || 'external',
+            lifecycle_kind: event.kind || '',
             lifecycle_virtual: true,
             grants: { all_granted: true },
         });
@@ -746,7 +758,17 @@ function buildHealPrompt(skill) {
 }
 
 
-function attachActionHandlers(container, renderFn, reviewingSkills) {
+function attachActionHandlers(container, renderFn, reviewingSkills, ctx = {}) {
+    function closeSkillMenus(exceptMenu = null) {
+        container.querySelectorAll('.skills-card-menu').forEach((menu) => {
+            if (menu === exceptMenu) return;
+            const popover = menu.querySelector('.skills-card-menu-popover');
+            const trigger = menu.querySelector('[data-skill-menu-trigger]');
+            if (popover) popover.hidden = true;
+            if (trigger) trigger.setAttribute('aria-expanded', 'false');
+        });
+    }
+
     async function requestMissingKeyGrants(name, keys) {
         const cleanKeys = (keys || []).map((k) => String(k || '').trim()).filter(Boolean);
         if (!cleanKeys.length) return;
@@ -857,6 +879,18 @@ function attachActionHandlers(container, renderFn, reviewingSkills) {
         }
     });
     container.addEventListener('click', async (event) => {
+        const menuTrigger = event.target.closest('[data-skill-menu-trigger]');
+        if (menuTrigger) {
+            const menu = menuTrigger.closest('.skills-card-menu');
+            const popover = menu?.querySelector('.skills-card-menu-popover');
+            const opening = Boolean(popover?.hidden);
+            closeSkillMenus(opening ? menu : null);
+            if (popover && menu) {
+                popover.hidden = !opening;
+                menuTrigger.setAttribute('aria-expanded', opening ? 'true' : 'false');
+            }
+            return;
+        }
         const target = event.target.closest('button[data-skill]');
         if (!target) return;
         if (target.classList.contains('skills-toggle')) {
@@ -885,6 +919,16 @@ function attachActionHandlers(container, renderFn, reviewingSkills) {
                 await toggleSkillEnabled(name, wantsEnabled);
             } else if (target.classList.contains('skills-open-widgets')) {
                 document.querySelector('.nav-btn[data-page="widgets"]')?.click();
+            } else if (target.classList.contains('skills-retry-install')) {
+                showBanner(`${name}: retrying install from ClawHub`, 'muted');
+                const result = await postWithFeedback('/api/marketplace/clawhub/install', {
+                    slug: name,
+                    auto_review: true,
+                });
+                if (!result.ok) {
+                    throw new Error(result.error || 'install failed');
+                }
+                showBanner(`${name}: install queued/retried`, 'ok');
             } else if (target.classList.contains('skills-grant')) {
                 const keys = (target.dataset.keys || '').split(',').map((k) => k.trim()).filter(Boolean);
                 if (!keys.length) {
@@ -939,8 +983,17 @@ function attachActionHandlers(container, renderFn, reviewingSkills) {
                     throw new Error('Skill not found in current catalogue.');
                 }
                 const prompt = buildHealPrompt(skill);
-                await postWithFeedback('/api/command', { cmd: prompt });
+                await postWithFeedback('/api/command', {
+                    cmd: prompt,
+                    visible_text: `Repair task queued for ${name}. Ouroboros will inspect the skill payload and re-run review.`,
+                    visible_task_id: `skill_repair_${name}`,
+                });
                 showBanner(`${name}: fix task sent to Ouroboros`, 'ok');
+                if (typeof ctx.showPage === 'function') {
+                    ctx.showPage('chat');
+                } else {
+                    document.querySelector('.nav-btn[data-page="chat"]')?.click();
+                }
             } else if (target.classList.contains('skills-uninstall')) {
                 const source = target.dataset.source === 'ouroboroshub' ? 'ouroboroshub' : 'clawhub';
                 if (!confirm(`Uninstall ${name}? This deletes data/skills/${source}/${name}/.`)) {
@@ -959,9 +1012,19 @@ function attachActionHandlers(container, renderFn, reviewingSkills) {
             showBanner(`${name}: ${err.message || err}`, 'danger');
         } finally {
             target.disabled = false;
+            closeSkillMenus();
             renderFn();
         }
     });
+
+    document.addEventListener('click', (event) => {
+        if (container.contains(event.target)) return;
+        closeSkillMenus();
+    });
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') closeSkillMenus();
+    });
+    window.addEventListener('scroll', () => closeSkillMenus(), true);
 }
 
 
@@ -1056,7 +1119,7 @@ export function initSkills(ctx) {
     };
 
     refreshBtn.addEventListener('click', renderFn);
-    attachActionHandlers(container, renderFn, reviewingSkills);
+    attachActionHandlers(container, renderFn, reviewingSkills, ctx);
 
     document.querySelectorAll('.skills-tab').forEach((btn) => {
         btn.addEventListener('click', () => {

@@ -18,6 +18,17 @@ function escapeHtml(value) {
         .replace(/'/g, '&#39;');
 }
 
+function isRateLimitError(message) {
+    const text = String(message || '').toLowerCase();
+    return text.includes('rate limit') || text.includes('too many requests') || text.includes('http 429');
+}
+
+function installErrorCopy(message) {
+    return isRateLimitError(message)
+        ? `${message} Click Install again later to retry.`
+        : message;
+}
+
 
 /**
  * Render an untrusted Markdown string from the registry as sanitised HTML.
@@ -750,6 +761,7 @@ export function initMarketplace(pane) {
             state.nextCursor = data.next_cursor || '';
             state.registryPath = data.registry_path || 'packages';
             state.registryAttempts = data.registry_attempts || [];
+            const registryWarnings = Array.isArray(data.registry_warnings) ? data.registry_warnings : [];
             renderResults(resultsHost, state.results, state.installedMap, state.results.length, {
                 query,
                 official: state.onlyOfficial,
@@ -766,7 +778,11 @@ export function initMarketplace(pane) {
             });
             const mode = query ? 'search' : 'browse';
             const official = state.onlyOfficial ? ' · official only' : '';
-            showStatus(pane, `${state.results.length} skill${state.results.length === 1 ? '' : 's'} · ${mode}${official} · ${state.registryPath}`, 'muted');
+            if (registryWarnings.length) {
+                showStatus(pane, `${state.results.length} skill${state.results.length === 1 ? '' : 's'} · ${mode}${official} · ${state.registryPath} · ${registryWarnings[0]}`, 'warn');
+            } else {
+                showStatus(pane, `${state.results.length} skill${state.results.length === 1 ? '' : 's'} · ${mode}${official} · ${state.registryPath}`, 'muted');
+            }
         } catch (err) {
             const rawMessage = String(err?.body?.error || err?.message || err || '');
             const firstLine = rawMessage.split('\n').map((line) => line.trim()).filter(Boolean)[0] || 'Marketplace request failed';
@@ -842,15 +858,20 @@ export function initMarketplace(pane) {
             return;
         }
         if (action === 'fix' && installed) {
-            const ok = confirm(`Ask Ouroboros in chat to repair ${installed.name || slug}? It will edit only the skill payload and re-run review.`);
+            const ok = confirm(`Start a repair task for ${installed.name || slug}? Ouroboros will edit only the skill payload and re-run review.`);
             if (!ok) return;
-            setPending(slug, { label: 'Fix requested', tone: 'warn', message: 'Sending repair prompt to chat…' });
+            setPending(slug, { label: 'Fix requested', tone: 'warn', message: 'Queueing repair task…' });
             await fetchJson('/api/command', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ cmd: buildHealPrompt(installed, summary) }),
+                body: JSON.stringify({
+                    cmd: buildHealPrompt(installed, summary),
+                    visible_text: `Repair task queued for ${installed.name || slug}. Ouroboros will inspect the skill payload and re-run review.`,
+                    visible_task_id: `skill_repair_${installed.name || slug}`,
+                }),
             });
-            showStatus(pane, `${slug}: fix request sent to chat`, 'ok');
+            showStatus(pane, `${slug}: repair task queued`, 'ok');
+            document.querySelector('.nav-btn[data-page="chat"]')?.click();
             return;
         }
         if (action === 'review' && installed) {
@@ -958,7 +979,7 @@ export function initMarketplace(pane) {
                     body: JSON.stringify({ slug, auto_review: true }),
                 });
                 if (!result.ok) {
-                    showStatus(pane, `Install failed: ${result.error}`, 'danger');
+                    showStatus(pane, `Install failed: ${installErrorCopy(result.error)}`, isRateLimitError(result.error) ? 'warn' : 'danger');
                 } else if (result.review_error) {
                     showStatus(
                         pane,
@@ -969,7 +990,7 @@ export function initMarketplace(pane) {
                     showStatus(pane, `Installed ${slug} — review ${result.review_status}`, result.review_status === 'pass' ? 'ok' : 'warn');
                 }
             } catch (err) {
-                showStatus(pane, `Install error: ${err.message}`, 'danger');
+                showStatus(pane, `Install error: ${installErrorCopy(err.message)}`, isRateLimitError(err.message) ? 'warn' : 'danger');
             } finally {
                 installBtn.disabled = false;
                 refresh();

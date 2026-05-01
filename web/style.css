@@ -3038,10 +3038,10 @@ body {
 
 .skills-card-menu {
     position: relative;
+    display: inline-flex;
 }
 
-.skills-card-menu > summary {
-    list-style: none;
+.skills-card-menu-trigger {
     width: 34px;
     min-height: 34px;
     border-radius: var(--radius-sm);
@@ -3053,22 +3053,17 @@ body {
     justify-content: center;
     cursor: pointer;
     font-weight: 700;
+    font-family: inherit;
 }
 
-.skills-card-menu > summary::-webkit-details-marker {
-    display: none;
-}
-
-.skills-card-menu > summary:hover {
+.skills-card-menu-trigger:hover {
     border-color: rgba(232, 93, 111, 0.30);
     color: var(--text-primary);
 }
 
 .skills-card-menu-popover {
-    position: absolute;
-    right: 0;
-    top: calc(100% + 6px);
-    z-index: 5;
+    position: static;
+    margin-top: 6px;
     min-width: 150px;
     padding: 6px;
     border-radius: 12px;
