@@ -10,7 +10,7 @@ huggingface_hub
 PyYAML>=6.0
 claude-agent-sdk>=0.1.60
 # A2A (Agent-to-Agent) protocol is part of the packaged/base runtime.
-a2a-sdk[http-server]>=0.3.20
+a2a-sdk[http-server]>=0.3.20,<1.0.0
 # optional: browser automation tools (for browse_page/browser_action)
 playwright
 playwright-stealth
