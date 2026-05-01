@@ -264,6 +264,7 @@ function renderDataComponent(tab, component, state, status, componentState = {},
 
 const widgetDisposers = new Map();
 const widgetMessageHandlers = new Set();
+const widgetSessionState = new Map();
 let widgetsWsBridgeBound = false;
 
 function boundedNumber(value, fallback, min, max) {
@@ -300,10 +301,12 @@ async function callWidgetRoute(tab, spec, values, signal) {
 
 async function mountDeclarativeWidget(mount, tab, render) {
     const components = Array.isArray(render.components) ? render.components : [];
-    const state = {};
-    const status = {};
-    const formValues = {};
-    const componentState = {};
+    const persistenceKey = tab.key || `${tab.skill}:${tab.tab_id}`;
+    const saved = widgetSessionState.get(persistenceKey) || {};
+    const state = { ...(saved.state || {}) };
+    const status = { ...(saved.status || {}) };
+    const formValues = { ...(saved.formValues || {}) };
+    const componentState = { ...(saved.componentState || {}) };
     const timers = new Set();
     const controllers = new Set();
     const chartInstances = new Set();
@@ -324,6 +327,12 @@ async function mountDeclarativeWidget(mount, tab, render) {
         return timer;
     };
     const dispose = () => {
+        widgetSessionState.set(persistenceKey, {
+            state: { ...state },
+            status: { ...status },
+            formValues: { ...formValues },
+            componentState: { ...componentState },
+        });
         disposed = true;
         controllers.forEach((controller) => controller.abort());
         controllers.clear();
@@ -392,6 +401,12 @@ async function mountDeclarativeWidget(mount, tab, render) {
     const renderAll = () => {
         if (disposed) return;
         rememberFormValues();
+        widgetSessionState.set(persistenceKey, {
+            state: { ...state },
+            status: { ...status },
+            formValues: { ...formValues },
+            componentState: { ...componentState },
+        });
         chartInstances.forEach((chart) => chart.destroy());
         chartInstances.clear();
         mount.innerHTML = components.map((component, idx) => {

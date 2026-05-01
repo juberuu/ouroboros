@@ -1,4 +1,4 @@
-# Ouroboros v5.4.0 — Architecture & Reference
+# Ouroboros v5.5.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -62,12 +62,14 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── runtime_mode_policy.py ← Runtime-mode protected-path policy (safety-critical files, frozen contracts, release/managed invariants) shared by registry, git tools, and Claude gateway guards
       ├── reflection.py        ← Execution reflection and pattern capture
       ├── review_evidence.py   ← Structured review findings/obligations snapshot for summaries and reflections
-      ├── skill_loader.py      ← Skill discovery + durable skill state (v4.50: walks data/skills/{native,clawhub,external}/ + optional OUROBOROS_SKILLS_REPO_PATH; persists to data/state/skills/<name>/; tags each LoadedSkill with `source`)
+      ├── skill_loader.py      ← Skill discovery + durable skill state (v5.5: walks data/skills/{native,clawhub,ouroboroshub,external}/ + optional OUROBOROS_SKILLS_REPO_PATH; persists to data/state/skills/<name>/; tags each LoadedSkill with `source`)
       ├── skill_review.py      ← Tri-model skill review reusing the repo-review infrastructure against the Skill Review Checklist section of docs/CHECKLISTS.md
       ├── extension_loader.py  ← Phase 4 in-process loader for type: extension skills; discovers + imports plugin.py via importlib with a narrow PluginAPIImpl, tracks registrations per-skill for atomic unload
       ├── extensions_api.py    ← Phase 5 HTTP surface for extensions (GET /api/extensions, GET /api/extensions/<skill>/manifest, ALL /api/extensions/<skill>/<rest:path> catch-all dispatch, POST /api/skills/<skill>/toggle, POST /api/skills/<skill>/review, POST /api/skills/<skill>/grants)
-      ├── marketplace/         ← v4.50 ClawHub marketplace package (clawhub.py registry client, fetcher.py staging, adapter.py OpenClaw->Ouroboros translation, install.py orchestration, provenance.py durable provenance)
-      ├── marketplace_api.py   ← v4.50 HTTP surface for marketplace (/api/marketplace/clawhub/{search,info,installed,preview,install,update,uninstall}); always-on with registry host allowlist
+      ├── marketplace/         ← ClawHub + OuroborosHub marketplace package (clawhub.py registry client, ouroboroshub.py static GitHub catalog client, fetcher.py staging, adapter.py OpenClaw->Ouroboros translation, install.py orchestration, isolated_deps.py per-skill dependency prefix, provenance.py durable provenance)
+      ├── marketplace_api.py   ← HTTP surface for marketplaces (/api/marketplace/clawhub/* and /api/marketplace/ouroboroshub/*); always-on with registry host allowlists and hash checks
+      ├── skill_lifecycle_queue.py ← single FIFO lane for mutating skill lifecycle actions (install/update/review/deps/enable/disable/uninstall) with recent event snapshot for Skills UI
+      ├── skill_migrations.py  ← one-shot data-plane migrations for renamed official generation skills (image_gen→nanobanana, audio_gen→music_gen)
       ├── server_auth.py       ← Non-localhost auth gate (OUROBOROS_NETWORK_PASSWORD)
       ├── server_control.py    ← Process-control helpers: restart, panic stop
       ├── server_entrypoint.py ← CLI argument parsing, port-binding helpers
@@ -168,6 +170,7 @@ Dockerfile                    ← Docker image (web UI runtime)
 │   │       └── <skill_name>/
 │   │           ├── enabled.json ← {"enabled": bool, "updated_at": iso_ts}
 │   │           ├── review.json  ← {"status": "pass|fail|advisory|pending", "content_hash": str, "findings": [...], "reviewer_models": [...], "timestamp": iso_ts, ...}  (Phase 3 ``pending_phase4`` status retired in Phase 4 — legacy files migrate on load)
+│   │           ├── deps.json    ← isolated dependency install fingerprint for skills with reviewed install specs
 │   │           └── __extension_imports/<uuid>/skill/  ← Phase 4 staged import tree for type:extension skills (created on load, removed on unload; see §12.1)
 │   ├── memory/
 │   │   ├── identity.md     ← Agent's self-description (persistent)
@@ -346,7 +349,8 @@ Navigation is a left sidebar with 9 pages (Chat, Files, Logs, Costs, Evolution, 
 
 - **Browser pane**: directory tree for the configured root, breadcrumb navigation, inline filter, refresh button,
   create-file/create-directory actions, clipboard-style copy/move/paste, and delete/download context menu.
-- **Preview pane**: text preview/editor, image preview, binary-file placeholder, and drag-drop upload target.
+- **Preview pane**: text preview/editor, image preview, PDF preview in a sandboxed iframe, binary-file placeholder, and drag-drop upload target.
+- **Download/Open externally**: the web fallback downloads via Blob URLs; the desktop launcher bridge (`MainApi.download_file_to_downloads`) accepts only local `/api/files/download` URLs on the active server port, writes to the OS Downloads folder, and can then open the saved file through `platform_layer.open_path_external`.
 - **Write safety**: unsaved text edits are guarded on folder switches, file switches, page navigation, and browser refresh.
 - **Root policy**: localhost requests fall back to the current user's home directory when no root is configured.
   Network/Docker access requires an explicit `OUROBOROS_FILE_BROWSER_DEFAULT` directory.
@@ -378,11 +382,11 @@ The Dashboard tab has been removed. Its functionality is now distributed:
 - **Model pickers**: searchable provider-aware pickers replace legacy raw dropdowns for remote models. Selecting a model writes it into the field and closes the results panel; typing/focus reopens the filtered list.
 - **Unsaved draft indicator**: Settings does not block SPA navigation and does not show a modal. Edits persist in the DOM while navigating between pages, and a small `Unsaved changes.` footer indicator remains visible until Save or Reload resets the loaded baseline. Masked secrets keep the existing save semantics: untouched masked values are omitted, typed values overwrite, and explicit Clear persists an empty value.
 - **Provider prefixes**:
-  - OpenRouter model values stay unprefixed (`anthropic/claude-opus-4.7`).
+  - OpenRouter model values stay unprefixed (`anthropic/claude-opus-4.6`).
   - OpenAI model values use `openai::...`.
   - OpenAI-compatible model values use `openai-compatible::...`.
   - Cloud.ru model values use `cloudru::...`.
-  - Anthropic model values use `anthropic::...` (e.g. `anthropic::claude-opus-4-7`).
+  - Anthropic model values use `anthropic::...` (e.g. `anthropic::claude-opus-4-6`).
 - **Behavior tab**: agent-behavior policy settings — Reasoning Effort, Review Enforcement (the two-button advisory/blocking toggle), **Runtime Mode** (Phase 2, three-button segmented control: `Light` / `Advanced` / `Pro`), and **External Skills Repo** (text field bound to `OUROBOROS_SKILLS_REPO_PATH`). Review models and Web Search Model live in the Models tab alongside model routing.
 - **Reasoning Effort**: Five segmented controls for task/chat, evolution, review, scope review, and consciousness.
   Backed by `OUROBOROS_EFFORT_TASK`, `OUROBOROS_EFFORT_EVOLUTION`, `OUROBOROS_EFFORT_REVIEW`,
@@ -393,7 +397,7 @@ The Dashboard tab has been removed. Its functionality is now distributed:
 - **Scope Review Model**: Single model for the blocking scope reviewer.
   Backed by `OUROBOROS_SCOPE_REVIEW_MODEL` (default `openai/gpt-5.5`).
 - **Provider change classification** (`server_runtime.classify_runtime_provider_change`, v4.40.6): classifies provider state after a settings save. Returns `"direct_normalize"` (an exclusive-direct provider is active → direct-provider autofill ran, warning appropriate), `"reverse_migrate"` (OpenRouter is present, no exclusive-direct provider active → `apply_runtime_provider_defaults` returned without changes, pure housekeeping, no warning), or `"none"` (neither condition). Used by `server.py::api_settings_post` to suppress the misleading "Normalized direct-provider routing" warning when the user adds OpenRouter back. `_MODEL_LANE_KEYS` renamed to `_ALL_MODEL_SLOT_KEYS` for consistency.
-- **Direct-provider review fallback** (formerly "OpenAI-only review fallback"; updated v4.39.0 for `plan_task` quorum): if exactly one of **official OpenAI** or **Anthropic** is configured (no OpenRouter, no legacy OpenAI base URL, no OpenAI-compatible, no Cloud.ru) and the configured review list is invalid or doesn't match the exclusive provider prefix, review falls back to `[OUROBOROS_MODEL, OUROBOROS_MODEL_LIGHT, OUROBOROS_MODEL_LIGHT]` (3 commit-triad slots, 2 unique models) drawn from `_DIRECT_PROVIDER_AUTO_DEFAULTS` (which pairs e.g. `openai::gpt-5.5` + `openai::gpt-5.5-mini` or `anthropic::claude-opus-4-7` + `anthropic::claude-sonnet-4-6`). This shape preserves the commit triad's "three models review the staged diff" contract (DEVELOPMENT.md) while yielding exactly 2 unique reviewers for `plan_task`'s quorum gate. If `main` and `light` happen to equal (user overrode both lanes to the same model), the fallback degrades to legacy `[main] * _DIRECT_PROVIDER_REVIEW_RUNS` — commit triad still works, `plan_task` then emits its quorum-error recovery hint. This replaces the old `[main] * 3` fallback which broke `plan_task` on first-run single-provider setups. Current scope is OpenAI-only and Anthropic-only — the detector (`ouroboros/config.py::_exclusive_direct_remote_provider_env`) early-returns `""` when OpenAI-compatible or Cloud.ru keys are present, so those provider-only setups do not yet receive the fallback. The fallback additionally requires the main slot `OUROBOROS_MODEL` — after `provider_models.migrate_model_value` — to already start with the exclusive provider prefix (`openai::` / `anthropic::`); if the normalized main model does not match the prefix, `get_review_models` leaves the configured reviewer list untouched and does **not** rewrite it to `[main]*3`. This covers the edge case where the Settings `#s-model` free-text input accepts a non-default cross-provider value. The same SSOT (`ouroboros/config.py::get_review_models`) powers both the commit triad and `plan_task`.
+- **Direct-provider review fallback** (formerly "OpenAI-only review fallback"; updated v4.39.0 for `plan_task` quorum): if exactly one of **official OpenAI** or **Anthropic** is configured (no OpenRouter, no legacy OpenAI base URL, no OpenAI-compatible, no Cloud.ru) and the configured review list is invalid or doesn't match the exclusive provider prefix, review falls back to `[OUROBOROS_MODEL, OUROBOROS_MODEL_LIGHT, OUROBOROS_MODEL_LIGHT]` (3 commit-triad slots, 2 unique models) drawn from `_DIRECT_PROVIDER_AUTO_DEFAULTS` (which pairs e.g. `openai::gpt-5.5` + `openai::gpt-5.5-mini` or `anthropic::claude-opus-4-6` + `anthropic::claude-sonnet-4-6`). This shape preserves the commit triad's "three models review the staged diff" contract (DEVELOPMENT.md) while yielding exactly 2 unique reviewers for `plan_task`'s quorum gate. If `main` and `light` happen to equal (user overrode both lanes to the same model), the fallback degrades to legacy `[main] * _DIRECT_PROVIDER_REVIEW_RUNS` — commit triad still works, `plan_task` then emits its quorum-error recovery hint. This replaces the old `[main] * 3` fallback which broke `plan_task` on first-run single-provider setups. Current scope is OpenAI-only and Anthropic-only — the detector (`ouroboros/config.py::_exclusive_direct_remote_provider_env`) early-returns `""` when OpenAI-compatible or Cloud.ru keys are present, so those provider-only setups do not yet receive the fallback. The fallback additionally requires the main slot `OUROBOROS_MODEL` — after `provider_models.migrate_model_value` — to already start with the exclusive provider prefix (`openai::` / `anthropic::`); if the normalized main model does not match the prefix, `get_review_models` leaves the configured reviewer list untouched and does **not** rewrite it to `[main]*3`. This covers the edge case where the Settings `#s-model` free-text input accepts a non-default cross-provider value. The same SSOT (`ouroboros/config.py::get_review_models`) powers both the commit triad and `plan_task`.
 - **Review Enforcement**: `Advisory` or `Blocking` for pre-commit review behavior. Rendered as a two-button segmented toggle (advisory = amber, blocking = crimson) rather than a dropdown.
   Backed by `OUROBOROS_REVIEW_ENFORCEMENT`. Review always runs in both modes.
 - **Runtime Mode**: `Light` / `Advanced` / `Pro` segmented control backed by `OUROBOROS_RUNTIME_MODE` (default `advanced`). Onboarding can choose the initial boot baseline before the agent starts. After launch, the Settings control is interactive only in desktop builds: `web/modules/settings.js` calls the pywebview launcher bridge `request_runtime_mode_change`, the launcher shows a native confirmation dialog, and the launcher saves the new mode with `allow_elevation=True`; the change is reported as restart-required. Web/Docker sessions can view the current mode but cannot elevate it through `/api/settings`. The normal HTTP save path still omits/drops `OUROBOROS_RUNTIME_MODE`, and `ouroboros/config.py::save_settings` plus the boot-baseline pin, `_data_write` settings.json block, shell filters, and Files API guard remain the self-elevation defenses. `ouroboros/config.py::VALID_RUNTIME_MODES = ("light", "advanced", "pro")` is the SSOT; `normalize_runtime_mode` runs on the read path (`get_runtime_mode`) so unknown values can never drift into `/api/state`.
@@ -490,6 +494,7 @@ authentication. If the password is blank, non-loopback access stays open by desi
 | GET | `/api/extensions/{skill}/manifest` | Phase 5: parsed manifest for one skill (name/type/version/permissions/env_from_settings/ui_tab, plus enabled + review status + content hash). |
 | ALL | `/api/extensions/{skill}/{rest:path}` | Phase 5: catch-all dispatcher that forwards to the handler registered via `PluginAPI.register_route`. Honors the registered methods tuple; `405` on method mismatch, `404` on unknown mount. |
 | POST | `/api/skills/{skill}/toggle` | Phase 5: UI-direct enable/disable. Enabling requires a fresh PASS review plus approved grants; disabling remains available to take skills offline. Wraps `save_enabled` plus the `extension_loader.load_extension` / `unload_extension` machinery so the Skills page can flip state without round-tripping through the agent. |
+| GET | `/api/skills/lifecycle-queue` | v5.5: recent global FIFO skill lifecycle jobs (install/update/review/deps/enable/disable/uninstall) for My skills virtual rows, tab badges, and operator feedback. |
 | POST | `/api/skills/{skill}/review` | Phase 5: UI-direct tri-model review trigger. Offloads the blocking LLM calls to a worker thread via `asyncio.to_thread` so the Starlette event loop keeps serving other requests. |
 | POST | `/api/skills/{skill}/grants` | Sentinel endpoint that returns 403; explicit per-skill core-key grants are owner-only and are written by the desktop launcher bridge after native confirmation. v5.2.2 dual-track: ``type: script`` and ``type: extension`` skills are both eligible (instruction skills are not). |
 | POST | `/api/skills/{skill}/reconcile` | Reload/unload the live extension state after owner key grants or catalogue changes; used by launcher/UI flows to make persisted skill state match runtime registrations. |
@@ -509,6 +514,19 @@ authentication. If the password is blank, non-loopback access stays open by desi
 | GET | `/api/claude-code/status` | App-managed Claude runtime status (SDK version, CLI path/version, legacy detection, API key readiness) |
 | POST | `/api/claude-code/install` | Repair/update the app-managed Claude runtime |
 | GET | `/api/model-catalog` | Optional provider model catalog (OpenRouter/OpenAI/compatible/Cloud.ru) |
+| GET | `/api/marketplace/clawhub/search` | ClawHub search/browse catalogue. |
+| GET | `/api/marketplace/clawhub/info/{slug}` | ClawHub package detail. |
+| GET | `/api/marketplace/clawhub/installed` | ClawHub-installed local skills with provenance/review/grant state. |
+| GET | `/api/marketplace/clawhub/preview/{slug}` | Staged ClawHub preview with translated manifest and adapter warnings. |
+| POST | `/api/marketplace/clawhub/install` | Queue ClawHub install, review, and isolated dependency handling. |
+| POST | `/api/marketplace/clawhub/update/{name}` | Queue ClawHub update. |
+| POST | `/api/marketplace/clawhub/uninstall/{name}` | Queue ClawHub uninstall. |
+| GET | `/api/marketplace/ouroboroshub/catalog` | Official static GitHub catalog listing from `OUROBOROS_HUB_CATALOG_URL`. |
+| GET | `/api/marketplace/ouroboroshub/installed` | OuroborosHub-installed local skills with review/grant state. |
+| GET | `/api/marketplace/ouroboroshub/preview/{slug}` | Official skill metadata/file preview from the catalog. |
+| POST | `/api/marketplace/ouroboroshub/install` | Queue official skill install from pinned raw GitHub files and auto-review. |
+| POST | `/api/marketplace/ouroboroshub/update/{name}` | Queue official skill update (install with overwrite). |
+| POST | `/api/marketplace/ouroboroshub/uninstall/{name}` | Queue official skill uninstall. |
 | POST | `/api/command` | Send a slash command `{cmd: "/status"}` |
 | POST | `/api/reset` | Delete all runtime data, restart for fresh onboarding |
 | GET | `/api/git/log` | Recent commits + tags + current branch/sha |
@@ -956,7 +974,7 @@ the constitutional guard is that the file itself must remain non-deletable.
 - **Logging**: structured logs written to `data/logs/a2a.log` (RotatingFileHandler, 2 MB × 3 backups).
 - **Client tools** (non-core, require `enable_tools("a2a_discover,a2a_send,a2a_status")`): `a2a_discover` fetches remote Agent Cards, `a2a_send` sends tasks and waits for results, `a2a_status` polls task status.
 - **Settings**: `A2A_ENABLED` (bool), `A2A_HOST` (default `127.0.0.1`), `A2A_PORT` (default `18800`), `A2A_MAX_CONCURRENT` (default `3`), `A2A_AGENT_NAME`, `A2A_AGENT_DESCRIPTION`, `A2A_TASK_TTL_HOURS` (default `24`). All changes require restart (all seven keys are in `server.py::_RESTART_REQUIRED_KEYS`; all included in `apply_settings_to_env` for consistency).
-- **Optional dependency**: `a2a-sdk[http-server]>=0.3.20` is in the `a2a` extra (`pip install 'ouroboros[a2a]'`). `httpx` is now a core dependency because `/api/model-catalog` uses native async HTTP. All four A2A modules (`a2a_server.py`, `a2a_executor.py`, `a2a_task_store.py`, `tools/a2a.py`) guard their top-level `from a2a.*` imports with `try/except ImportError` so the rest of Ouroboros starts cleanly when the extra is absent. `start_a2a_server` returns early with a warning if the SDK is missing. The test module (`tests/test_a2a_protocol.py`) uses `pytest.importorskip('a2a.types')` at the top so it skips cleanly when the extra is absent.
+- **Base dependency**: `a2a-sdk[http-server]>=0.3.20` is part of the base runtime in `requirements.txt` and `pyproject.toml`. The `a2a` extra remains as compatibility metadata for package installers that still request it explicitly. All four A2A modules (`a2a_server.py`, `a2a_executor.py`, `a2a_task_store.py`, `tools/a2a.py`) still guard their top-level `from a2a.*` imports with `try/except ImportError` so source checkouts with incomplete dependency installs fail gracefully. `start_a2a_server` returns early with a warning if the SDK is missing.
 - **Concurrency safety**: `supervisor/workers.py` exposes a module-level `_chat_agent_lock` (`threading.Lock`) that `handle_chat_direct` acquires before touching the shared `_chat_agent` singleton. This serializes all callers — A2A tasks (via `asyncio.to_thread`) and Web UI direct-chat — against the agent's mutable per-call state (`_busy`, `_current_chat_id`, `_current_task_id`). A2A tasks are accepted up to `A2A_MAX_CONCURRENT` (semaphore) but their supervisor dispatches are serialized through this shared lock.
 - **Client auth**: `A2A_CLIENT_PASSWORD` env var (not a settings key — read at call time). When set, `a2a_discover`, `a2a_send`, and `a2a_status` pass it as HTTP Basic auth (`ouroboros:<password>`) so they can reach remote A2A servers protected by `NetworkAuthGate` / `OUROBOROS_NETWORK_PASSWORD`.
 - **Memory isolation**: A2A traffic uses negative `chat_id` values (base `-1001`, decremented per task) to distinguish it from human dialogue. `supervisor/message_bus.py::broadcast` and `send_message` check `chat_id >= 0` before WebSocket broadcast; `ouroboros/server_history_api.py` filters negative `chat_id` from `/api/chat/history` replay; `ouroboros/consolidator.py::_read_chat_entries` skips `chat_id < 0` entries to prevent A2A traffic from contaminating `dialogue_blocks.json`; `ouroboros/memory.py::chat_history` (exposed as the `chat_history` tool) filters `chat_id < 0` entries so A2A traffic never appears in the agent's dialogue tool results. Raw A2A entries may still be present in `data/logs/chat.jsonl` (written by `log_chat`); all consumer paths above guard against them. Structured A2A audit logs also go to `data/logs/a2a.log`.
@@ -1196,8 +1214,8 @@ errors surface via the same observability path.
   This converts `parse_failure` → `fresh` run on the vast majority of real advisory outputs,
   saving $32–64 per bypass cycle.
   Model resolved via `resolve_claude_code_model()` — respects `CLAUDE_CODE_MODEL` setting,
-  defaults to `claude-opus-4-7[1m]` (same helper used by `claude_code_edit`; the `[1m]` suffix
-  is a Claude Code selector requesting the 1M-context extended mode on Opus 4.7). Shared
+  defaults to `claude-opus-4-6[1m]` (same helper used by `claude_code_edit`; the `[1m]` suffix
+  is a Claude Code selector requesting the 1M-context extended mode on Opus 4.6). Shared
   Claude Code turn budget: 50 turns for both advisory and edit paths. Per-tool timeout
   floor: 1200s (20 min).
   Prompt includes the "Repo Commit Checklist" section from
@@ -1541,20 +1559,21 @@ Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent acce
 | TELEGRAM_CHAT_ID | "" | Optional. Pin replies to a specific Telegram chat |
 | OUROBOROS_NETWORK_PASSWORD | "" | Optional. Enables the non-loopback auth gate when set; empty still allows open bind, but startup logs a warning |
 | OUROBOROS_SERVER_HOST | 127.0.0.1 | Server bind host. Use `0.0.0.0` for LAN/Docker access; restart required. |
-| OUROBOROS_MODEL | anthropic/claude-opus-4.7 | Main reasoning model |
-| OUROBOROS_MODEL_CODE | anthropic/claude-opus-4.7 | Code editing model |
+| OUROBOROS_MODEL | anthropic/claude-opus-4.6 | Main reasoning model |
+| OUROBOROS_MODEL_CODE | anthropic/claude-opus-4.6 | Code editing model |
 | OUROBOROS_MODEL_LIGHT | anthropic/claude-sonnet-4.6 | Fast/cheap model (safety, consciousness) |
 | OUROBOROS_MODEL_FALLBACK | anthropic/claude-sonnet-4.6 | Fallback when primary fails |
-| CLAUDE_CODE_MODEL | claude-opus-4-7[1m] | Anthropic model for Claude Agent SDK tools (`claude_code_edit`, `advisory_pre_review`; values: sonnet, opus, `claude-opus-4-7[1m]`, or full model name; the `[1m]` suffix is a Claude Code selector that requests the 1M-context extended mode) |
+| CLAUDE_CODE_MODEL | claude-opus-4-6[1m] | Anthropic model for Claude Agent SDK tools (`claude_code_edit`, `advisory_pre_review`; values: sonnet, opus, `claude-opus-4-6[1m]`, or full model name; the `[1m]` suffix is a Claude Code selector that requests the 1M-context extended mode) |
 | OUROBOROS_MAX_WORKERS | 5 | Worker process pool size |
 | TOTAL_BUDGET | 10.0 | Total budget in USD |
 | OUROBOROS_PER_TASK_COST_USD | 20.0 | Per-task soft threshold in USD |
 | OUROBOROS_TOOL_TIMEOUT_SEC | 600 | Global tool timeout override (read live from settings.json on each tool call) |
 | OUROBOROS_WEBSEARCH_MODEL | gpt-5.2 | Official OpenAI Responses model for `web_search` when `OPENAI_BASE_URL` is empty |
-| OUROBOROS_REVIEW_MODELS | openai/gpt-5.5,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.7 | Comma-separated OpenRouter model IDs for pre-commit review (min 2 for quorum) |
+| OUROBOROS_REVIEW_MODELS | openai/gpt-5.5,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.6 | Comma-separated OpenRouter model IDs for pre-commit review (min 2 for quorum) |
 | OUROBOROS_REVIEW_ENFORCEMENT | advisory | Pre-commit review enforcement: `advisory` or `blocking` |
 | OUROBOROS_RUNTIME_MODE | advanced | Three-layer refactor axis: `light`, `advanced`, or `pro`. Orthogonal to `OUROBOROS_REVIEW_ENFORCEMENT`. Clamped via `normalize_runtime_mode` on both save and read paths. v5.1.2 Frame A: `light` blanket-blocks every repo-mutation tool at the `ToolRegistry.execute` gate plus pattern-matched `run_shell` mutation commands AND refuses runtime_mode self-elevation through every channel (`save_settings` chokepoint, `_data_write` settings.json block, `/api/settings` POST drop), but reviewed + enabled skills (script + extension) execute in light. `advanced` can evolve the application layer but blocks protected core/contract/release paths. `pro` may edit those protected surfaces directly, but committing them still requires the normal triad + scope review to pass. The runtime_mode value itself is owner-only — change it by editing `settings.json` directly while the agent is stopped, then restart. |
 | OUROBOROS_SKILLS_REPO_PATH | "" | Local checkout path for the external skills/extensions repo. Consumed by `ouroboros.skill_loader.discover_skills` (Phase 3); accepts absolute paths or `~`-prefixed paths; `get_skills_repo_path` expands `~` at read time. Ouroboros never clones/pulls this directory. |
+| OUROBOROS_HUB_CATALOG_URL | `https://raw.githubusercontent.com/joi-lab/OuroborosHub/main/catalog.json` | Official static skill catalog. The client fetches only this JSON automatically; selected skill installs download the catalog-listed files and verify sha256. |
 | OUROBOROS_SCOPE_REVIEW_MODEL | openai/gpt-5.5 | Single model for the blocking scope reviewer |
 | OUROBOROS_EFFORT_TASK | medium | Reasoning effort for task/chat: none, low, medium, high |
 | OUROBOROS_EFFORT_EVOLUTION | high | Reasoning effort for evolution tasks |
@@ -1937,7 +1956,8 @@ foundation.
 ```
 ~/Ouroboros/data/skills/                  ← primary discovery root (v4.50)
 ├── native/<skill_name>/                  ← bootstrapped from repo/skills/ on first launch
-├── clawhub/<owner>__<slug>/              ← installed by the marketplace pipeline
+├── clawhub/<owner>__<slug>/              ← installed by the ClawHub marketplace pipeline
+├── ouroboroshub/<slug>/                  ← installed from official static GitHub catalog
 └── external/<skill_name>/                ← user-managed (drop in manually)
 
 OUROBOROS_SKILLS_REPO_PATH                ← optional EXTRA discovery root
@@ -1949,7 +1969,8 @@ Each <skill_name>/ contains:
 ├── SKILL.openclaw.md ← (clawhub source only) preserved original frontmatter
 ├── scripts/          ← payload files (python/bash/node)
 ├── assets/           ← static data the payload reads
-└── .clawhub.json     ← (clawhub source only) sidecar provenance hint
+├── .clawhub.json     ← (clawhub source only) sidecar provenance hint
+└── .ouroboroshub.json ← (ouroboroshub source only) official catalog provenance hint
 ```
 
 Ouroboros bootstrap-copies its shipped seed (``repo/skills/``) into
@@ -1960,7 +1981,7 @@ skill packages freely without dirtying the managed git repo. Skills
 are discovered via ``ouroboros.skill_loader.discover_skills`` which
 walks the data plane plus the optional external checkout, tagging each
 ``LoadedSkill`` with ``source`` (``native`` / ``clawhub`` /
-``external`` / ``user_repo``).
+``ouroboroshub`` / ``external`` / ``user_repo``).
 
 Per-skill durable state lives on the Ouroboros data plane, not inside
 the skill checkout:
@@ -2187,14 +2208,15 @@ Defense in depth against reviewer misses:
   message-type; errors tear down any partial registrations and
   surface as a ``load_error`` on the skill.
 
-### 12.6 ClawHub Marketplace (v4.50)
+### 12.6 Skills Marketplace: My skills, ClawHub, and OuroborosHub (v5.5)
 
-Always-on surface for browsing + installing community skills from
-[clawhub.ai](https://clawhub.ai). The Skills page exposes the
-``Marketplace`` sub-tab and the
-``/api/marketplace/clawhub/*`` HTTP endpoints. Only **skills** are
-installable — Node/TypeScript plugins (``openclaw.plugin.json``) are
-filtered at search time and refused at install time.
+Always-on surface for browsing, installing, reviewing, and enabling
+skills. The Skills page exposes three operator-facing tabs:
+``My skills`` (local lifecycle), ``ClawHub`` (community OpenClaw
+registry), and ``OuroborosHub`` (official static GitHub catalog at
+``joi-lab/OuroborosHub``). Only **skills** are installable —
+Node/TypeScript plugins (``openclaw.plugin.json``) are filtered at
+search time and refused at install time.
 
 #### 12.6.1 Module layout
 
@@ -2202,12 +2224,17 @@ filtered at search time and refused at install time.
 |---|---|
 | ``ouroboros/marketplace/clawhub.py`` | Read-only registry HTTP client (``search`` / ``info`` / ``list_versions`` / ``download``). Browse calls the rich cursor-paginated ``/packages?family=skill`` catalogue; text search calls the single-page ``/search?q=&limit=16`` relevance endpoint and bounded-parallel enriches hits via a merged ``/packages/<slug>`` + ``/skills/<slug>`` detail lookup. Hostname allowlist (``clawhub.ai`` + localhost only — ``clawhub.com`` was removed in v4.50 because we cannot independently verify shared ownership), 4 MB JSON cap, 50 MB archive cap, 15 s default timeout. |
 | ``ouroboros/marketplace/fetcher.py`` | Stages a downloaded archive into a private temp dir. Validates: zip integrity, ≤ 50 MB / ≤ 200 files / ≤ 8 MB per file, text-only extension allowlist, sensitive-filename + loadable-binary refusal, no symlinks, no path traversal. |
-| ``ouroboros/marketplace/adapter.py`` | Translates OpenClaw frontmatter (`metadata.openclaw.requires.{env,bins}`, `os`, `install`, `allowed-tools`, ...) into Ouroboros's manifest shape. Refuses ``install`` specs (brew/go/uv/node) and plugin packages; core env keys become explicit grant requirements rather than automatic access. Writes the original manifest aside as ``SKILL.openclaw.md`` for audit. |
-| ``ouroboros/marketplace/install.py`` | End-to-end pipeline: ``info`` -> ``download`` -> ``stage`` -> ``adapt`` -> atomically swap the staged tree into ``data/skills/clawhub/<sanitized>/`` -> auto-trigger ``review_skill`` -> persist provenance. Also exposes ``update_skill`` (re-install at newer version) and ``uninstall_skill``. |
+| ``ouroboros/marketplace/adapter.py`` | Translates OpenClaw frontmatter (`metadata.openclaw.requires.{env,bins}`, `os`, `install`, `allowed-tools`, ...) into Ouroboros's manifest shape. Normalizes ``install`` specs into auto-isolated vs manual-guidance classes; plugin packages remain refused. Core env keys become explicit grant requirements rather than automatic access. Writes the original manifest aside as ``SKILL.openclaw.md`` for audit. |
+| ``ouroboros/marketplace/install_specs.py`` | Small SSOT for install-spec normalization. Auto kinds are limited to Python wheel-only and npm no-script shapes that can map to a bounded per-skill prefix. Cargo/brew/apt/global Go/download/arbitrary shell stay manual. |
+| ``ouroboros/marketplace/isolated_deps.py`` | Installs reviewed dependency specs under ``<skill>/.ouroboros_env/`` only, records ``fingerprint.json`` in the env and ``deps.json`` in the durable state plane, and exposes PATH augmentation helpers for ``skill_exec``. |
+| ``ouroboros/marketplace/install.py`` | End-to-end ClawHub pipeline: ``info`` -> ``download`` -> ``stage`` -> ``adapt`` -> atomically swap the staged tree into ``data/skills/clawhub/<sanitized>/`` -> auto-trigger ``review_skill`` -> only after fresh PASS install auto-isolated dependencies -> persist provenance. Also exposes ``update_skill`` (re-install at newer version) and ``uninstall_skill``. |
+| ``ouroboros/marketplace/ouroboroshub.py`` | Read-only static GitHub catalog client. Loads ``catalog.json`` from ``OUROBOROS_HUB_CATALOG_URL``, downloads only the selected skill files from raw GitHub URLs pinned by catalog metadata, verifies every file sha256, and lands into ``data/skills/ouroboroshub/<slug>/`` with ``.ouroboroshub.json`` provenance. |
 | ``ouroboros/marketplace/provenance.py`` | Atomic JSON read/write helper for ``data/state/skills/<name>/clawhub.json``. Schema: ``{schema_version, source, slug, sanitized_name, version, sha256, original_manifest_sha256, translated_manifest_sha256, registry_url, license, primary_env, adapter_warnings, installed_at, updated_at}``. |
-| ``ouroboros/marketplace_api.py`` | Starlette routes wired in ``server.py`` under ``/api/marketplace/clawhub/{search,info,installed,preview,install,update,uninstall}``. Registry and install work dispatch through ``asyncio.to_thread`` to keep the event loop responsive; the old user-facing disabled gate is retired. |
-| ``web/modules/marketplace.js`` | Marketplace UI lazily loaded by the Skills page when the user clicks the ``Marketplace`` tab. Provides lexical search, official-only filtering (server-backed browse, post-enrichment text search), cards, detail-modal (translated manifest table + adapter warnings/blockers + original ``SKILL.openclaw.md`` preview), install/update/uninstall flows, and points auto-review failures to the Installed-tab Heal flow. |
-| ``web/modules/widgets.js`` | Widgets page host for reviewed ``register_ui_tab`` declarations. Supports legacy ``iframe`` / ``inline_card`` and declarative v1 components without loading arbitrary skill JavaScript. |
+| ``ouroboros/marketplace_api.py`` | Starlette routes wired in ``server.py`` under ``/api/marketplace/clawhub/*`` and ``/api/marketplace/ouroboroshub/*``. Registry and install work dispatch through ``asyncio.to_thread`` to keep the event loop responsive; mutating routes pass through ``skill_lifecycle_queue``. |
+| ``ouroboros/skill_lifecycle_queue.py`` | Process-local global FIFO for mutating skill lifecycle operations. Recent job state feeds My skills virtual rows, tab badges, and chat/system summaries. |
+| ``web/modules/marketplace.js`` | ClawHub UI lazily loaded by the Skills page. Provides lexical search, official-only filtering, cards, detail modal, and queued lifecycle actions. Failed installs remain visible instead of being immediately erased by refresh. |
+| ``web/modules/ouroboroshub.js`` | Official hub UI backed by the static GitHub catalog. Lists 10-50 official skills without a server-side search service; install pulls only the selected skill files. |
+| ``web/modules/widgets.js`` | Widgets page host for reviewed ``register_ui_tab`` declarations. Supports legacy ``iframe`` / ``inline_card`` and declarative v1 components without loading arbitrary skill JavaScript. Declarative widget state persists across tab switches for the current browser session. |
 
 #### 12.6.2 Frontmatter mapping (OpenClaw -> Ouroboros)
 
@@ -2219,7 +2246,7 @@ filtered at search time and refused at install time.
 | ``metadata.openclaw.os`` | ``os`` | ``[darwin, linux]`` -> ``"any"`` if the set is the universe; single platform -> ``"darwin"``/``"linux"``/``"windows"``. ``macos`` aliased to ``darwin``, ``win32`` to ``windows``. |
 | ``metadata.openclaw.requires.env`` | ``env_from_settings`` + provenance grant request | Core keys in ``FORBIDDEN_SKILL_SETTINGS`` become explicit per-skill grant requirements; non-core keys pass through normally. |
 | ``metadata.openclaw.requires.bins`` | runtime detection | Only ``python``/``python3``/``node``/``bash`` are honoured; otherwise the skill becomes ``type: instruction`` with a warning. |
-| ``metadata.openclaw.install`` | **REFUSED** | Any non-empty ``install`` array is a hard blocker — Ouroboros does not invoke ``brew``/``go``/``uv``/``node`` installers on the host. |
+| ``metadata.openclaw.install`` | isolated deps or manual guidance | Python wheel-only and npm no-script shapes are normalized and stored in provenance; Cargo/global shapes become manual guidance, but are executed only after the translated skill receives a fresh PASS review and only under ``.ouroboros_env``. Global host-mutating installers become manual setup guidance in the translated ``SKILL.md``. |
 | ``metadata.openclaw.always`` | ignored | Marketplace installs always land with ``enabled: false`` regardless of what the publisher wanted. |
 | ``metadata.openclaw.skillKey`` / ``emoji`` / ``requires.config`` / command fields | provenance JSON | Preserved under ``openclaw_compat`` for audit and UI/debugging. ``requires.config`` remains OpenClaw load-time gating metadata, not an Ouroboros permission. |
 | ``allowed-tools`` | ``permissions`` | ``Bash(...)`` -> ``subprocess``; ``Read``/``Write`` -> ``fs``; ``Fetch``/``HTTP``/``Web`` -> ``net``. Non-empty ``requires.env`` also implies ``net``. |
@@ -2248,9 +2275,13 @@ surface (review, runtime mode, sandbox env scrub, byte caps,
   (``.so``/``.dll``/``.wasm``/``.pyc``/``.exe``/...), zip members with
   ``..`` traversal, absolute paths, and symlinks. Every check fails
   closed; nothing is silently skipped.
-- **Adapter blockers** refuse to write the translated manifest if the
-  publisher requested a denylisted env key or any global-mutation
-  ``install`` spec.
+- **Review-before-deps invariant.** Publisher-declared dependencies are
+  not installed until the skill payload and normalized install specs
+  have a fresh PASS verdict. Auto-installable specs run only inside
+  ``.ouroboros_env``; unpinned package names are allowed but their
+  resolved fingerprint is recorded in ``deps.json`` and provenance.
+  Global-mutation specs become manual setup guidance instead of host
+  package-manager calls.
 - **Auto-review** runs the existing tri-model ``review_skill``
   pipeline immediately after install; the new skill is not
   ``available_for_execution`` until the review verdict is ``pass``.

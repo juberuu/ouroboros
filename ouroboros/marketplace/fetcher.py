@@ -142,6 +142,10 @@ def _is_loadable_binary(path: pathlib.PurePosixPath) -> bool:
     return any(name_lower.endswith(ext) for ext in _LOADABLE_BINARY_EXTENSIONS)
 
 
+def _has_review_opaque_dir(path: pathlib.PurePosixPath) -> bool:
+    return any(part in {"node_modules", ".ouroboros_env"} for part in path.parts)
+
+
 def _validate_member_path(name: str) -> pathlib.PurePosixPath:
     """Normalise + reject path-traversal / absolute zip members.
 
@@ -285,6 +289,10 @@ def stage(
                     if _is_sensitive(rel_path):
                         raise FetchError(
                             f"Archive contains sensitive-shape filename {rel_path}"
+                        )
+                    if _has_review_opaque_dir(rel_path):
+                        raise FetchError(
+                            f"Archive contains review-opaque dependency directory {rel_path}"
                         )
                     if _is_loadable_binary(rel_path):
                         raise FetchError(

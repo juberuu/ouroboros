@@ -18,7 +18,7 @@ DEFAULT_REASONING_EFFORT = "high"
 
 _OPENAI_PRICING = {
     "gpt-5.2": (1.75, 14.0),
-    "gpt-5.4-mini": (0.75, 4.5),
+    "gpt-5.5-mini": (0.75, 4.5),
     "gpt-4.1": (2.0, 8.0),
     "o3": (2.0, 8.0),
     "o4-mini": (1.10, 4.40),

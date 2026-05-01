@@ -26,8 +26,8 @@ def test_has_supervisor_provider_requires_remote_credentials_or_local_routing():
 def test_apply_runtime_provider_defaults_autofills_official_openai_models():
     normalized, changed, changed_keys = apply_runtime_provider_defaults({
         "OPENAI_API_KEY": "sk-openai",
-        "OUROBOROS_MODEL": "anthropic/claude-opus-4.7",
-        "OUROBOROS_MODEL_CODE": "anthropic/claude-opus-4.7",
+        "OUROBOROS_MODEL": "anthropic/claude-opus-4.6",
+        "OUROBOROS_MODEL_CODE": "anthropic/claude-opus-4.6",
         "OUROBOROS_MODEL_LIGHT": "anthropic/claude-sonnet-4.6",
         "OUROBOROS_MODEL_FALLBACK": "anthropic/claude-sonnet-4.6",
     })
@@ -102,11 +102,46 @@ def test_apply_runtime_provider_defaults_keeps_explicit_official_openai_review_m
     assert normalized["OUROBOROS_REVIEW_MODELS"] == "openai::gpt-5.5,openai::gpt-5.5-mini"
 
 
+def test_apply_runtime_provider_defaults_refreshes_retired_opus_defaults_with_openrouter():
+    old_openrouter = "anthropic/claude-opus-" + "4.7"
+    old_claude_code = "claude-opus-" + "4-7[1m]"
+    normalized, changed, changed_keys = apply_runtime_provider_defaults({
+        "OPENROUTER_API_KEY": "sk-or",
+        "OUROBOROS_MODEL": old_openrouter,
+        "OUROBOROS_MODEL_CODE": old_openrouter,
+        "OUROBOROS_REVIEW_MODELS": f"openai/gpt-5.5,{old_openrouter}",
+        "CLAUDE_CODE_MODEL": old_claude_code,
+    })
+
+    assert changed
+    assert "OUROBOROS_MODEL" in changed_keys
+    assert normalized["OUROBOROS_MODEL"] == "anthropic/claude-opus-4.6"
+    assert normalized["OUROBOROS_MODEL_CODE"] == "anthropic/claude-opus-4.6"
+    assert normalized["OUROBOROS_REVIEW_MODELS"] == "openai/gpt-5.5,anthropic/claude-opus-4.6"
+    assert normalized["CLAUDE_CODE_MODEL"] == "claude-opus-4-6[1m]"
+
+
+def test_apply_runtime_provider_defaults_refreshes_retired_gpt54_defaults():
+    old_main = "openai/gpt-" + "5.4"
+    old_pro = "openai/gpt-" + "5.4-pro"
+    old_mini = "openai/gpt-" + "5.4-mini"
+    normalized, changed, changed_keys = apply_runtime_provider_defaults({
+        "OPENROUTER_API_KEY": "sk-or",
+        "OUROBOROS_REVIEW_MODELS": f"{old_main},{old_mini}",
+        "OUROBOROS_SCOPE_REVIEW_MODEL": old_pro,
+    })
+
+    assert changed
+    assert "OUROBOROS_REVIEW_MODELS" in changed_keys
+    assert normalized["OUROBOROS_REVIEW_MODELS"] == "openai/gpt-5.5,openai/gpt-5.5-mini"
+    assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] == "openai/gpt-5.5-pro"
+
+
 def test_apply_runtime_provider_defaults_migrates_legacy_scope_model_for_openai_only():
-    for legacy_scope_model in (
-        "anthropic/claude-opus-4.6",
-        "openai/gpt-5.4",
-        "openai::gpt-5.4",
+    for legacy_scope_model, should_change in (
+        ("anthropic/claude-opus-4.6", True),
+        ("openai/gpt-5.5", True),
+        ("openai::gpt-5.5", False),
     ):
         normalized, changed, changed_keys = apply_runtime_provider_defaults({
             "OPENAI_API_KEY": "sk-openai",
@@ -118,8 +153,8 @@ def test_apply_runtime_provider_defaults_migrates_legacy_scope_model_for_openai_
             "OUROBOROS_SCOPE_REVIEW_MODEL": legacy_scope_model,
         })
 
-        assert changed
-        assert changed_keys == ["OUROBOROS_SCOPE_REVIEW_MODEL"]
+        assert changed is should_change
+        assert changed_keys == (["OUROBOROS_SCOPE_REVIEW_MODEL"] if should_change else [])
         assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] == "openai::gpt-5.5"
 
 
@@ -154,18 +189,18 @@ def test_apply_runtime_provider_defaults_normalizes_anthropic_only_setup():
         "anthropic::claude-sonnet-4-6,"
         "anthropic::claude-sonnet-4-6"
     )
-    assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] == "anthropic::claude-opus-4-7"
+    assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] == "anthropic::claude-opus-4-6"
 
 
 def test_apply_runtime_provider_defaults_normalizes_anthropic_only_setup_with_shipped_defaults():
-    """Fresh-install path: user starts with shipped SETTINGS_DEFAULTS (claude-opus-4.7)
-    and adds only an Anthropic key. Main/code must normalize to anthropic::claude-opus-4-7
+    """Fresh-install path: user starts with shipped SETTINGS_DEFAULTS (claude-opus-4.6)
+    and adds only an Anthropic key. Main/code must normalize to anthropic::claude-opus-4-6
     (the dash form), and REVIEW_MODELS must fall back to main × 3 for the missing triad.
     This regression-pins the post-v4.33.1 default migration path."""
     normalized, changed, changed_keys = apply_runtime_provider_defaults({
         "ANTHROPIC_API_KEY": "sk-ant",
-        "OUROBOROS_MODEL": "anthropic/claude-opus-4.7",
-        "OUROBOROS_MODEL_CODE": "anthropic/claude-opus-4.7",
+        "OUROBOROS_MODEL": "anthropic/claude-opus-4.6",
+        "OUROBOROS_MODEL_CODE": "anthropic/claude-opus-4.6",
         "OUROBOROS_MODEL_LIGHT": "anthropic/claude-sonnet-4.6",
         "OUROBOROS_MODEL_FALLBACK": "anthropic/claude-sonnet-4.6",
     })
@@ -179,17 +214,17 @@ def test_apply_runtime_provider_defaults_normalizes_anthropic_only_setup_with_sh
         "OUROBOROS_REVIEW_MODELS",
         "OUROBOROS_SCOPE_REVIEW_MODEL",
     }
-    assert normalized["OUROBOROS_MODEL"] == "anthropic::claude-opus-4-7"
-    assert normalized["OUROBOROS_MODEL_CODE"] == "anthropic::claude-opus-4-7"
+    assert normalized["OUROBOROS_MODEL"] == "anthropic::claude-opus-4-6"
+    assert normalized["OUROBOROS_MODEL_CODE"] == "anthropic::claude-opus-4-6"
     assert normalized["OUROBOROS_MODEL_LIGHT"] == "anthropic::claude-sonnet-4-6"
     assert normalized["OUROBOROS_MODEL_FALLBACK"] == "anthropic::claude-sonnet-4-6"
     # v4.39.0: `[main, light, light]` — 3 commit-triad slots, 2 unique.
     assert normalized["OUROBOROS_REVIEW_MODELS"] == (
-        "anthropic::claude-opus-4-7,"
+        "anthropic::claude-opus-4-6,"
         "anthropic::claude-sonnet-4-6,"
         "anthropic::claude-sonnet-4-6"
     )
-    assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] == "anthropic::claude-opus-4-7"
+    assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] == "anthropic::claude-opus-4-6"
 
 
 def test_apply_runtime_provider_defaults_skips_non_official_or_custom_configs():
@@ -231,7 +266,7 @@ class TestClassifyRuntimeProviderChange:
 
     def test_direct_normalize_for_anthropic_only(self):
         before = {"ANTHROPIC_API_KEY": "sk-ant"}
-        after = {"ANTHROPIC_API_KEY": "sk-ant", "OUROBOROS_MODEL": "anthropic::claude-opus-4-7"}
+        after = {"ANTHROPIC_API_KEY": "sk-ant", "OUROBOROS_MODEL": "anthropic::claude-opus-4-6"}
         assert classify_runtime_provider_change(before, after) == "direct_normalize"
 
     def test_reverse_migrate_for_anthropic_plus_openrouter(self):
@@ -239,7 +274,7 @@ class TestClassifyRuntimeProviderChange:
         after = {
             "ANTHROPIC_API_KEY": "sk-ant",
             "OPENROUTER_API_KEY": "sk-or-v1-new",
-            "OUROBOROS_MODEL": "anthropic::claude-opus-4-7",
+            "OUROBOROS_MODEL": "anthropic::claude-opus-4-6",
         }
         assert classify_runtime_provider_change(before, after) == "reverse_migrate"
 

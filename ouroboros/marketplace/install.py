@@ -35,6 +35,7 @@ from ouroboros.marketplace.clawhub import (
     info as _registry_info,
 )
 from ouroboros.marketplace.fetcher import FetchError, StagedSkill, stage as _stage_archive
+from ouroboros.marketplace.isolated_deps import install_isolated_dependencies
 from ouroboros.marketplace.provenance import (
     delete_provenance,
     read_provenance,
@@ -58,6 +59,9 @@ class InstallResult:
     review_status: str = ""
     review_findings: List[Dict[str, Any]] = field(default_factory=list)
     review_error: str = ""
+    deps_status: str = ""
+    deps_error: str = ""
+    deps_fingerprint: Dict[str, Any] = field(default_factory=dict)
     error: str = ""
     provenance: Dict[str, Any] = field(default_factory=dict)
 
@@ -390,13 +394,34 @@ def install_skill(
     review_status = "pending"
     review_findings: List[Dict[str, Any]] = []
     review_error = ""
+    deps_status = "not_required"
+    deps_error = ""
+    deps_fingerprint: Dict[str, Any] = {}
     if auto_review:
         review_status, review_findings, review_error = _run_skill_review(
             drive_root, repo_dir, adapter_result.sanitized_name
         )
+    auto_specs = list((provenance.get("install_specs") or {}).get("auto") or [])
+    if auto_specs:
+        deps_status = "pending_review"
+        if review_status == "pass" and not review_error:
+            try:
+                deps_fingerprint = install_isolated_dependencies(
+                    drive_root,
+                    adapter_result.sanitized_name,
+                    target_dir,
+                    auto_specs,
+                )
+                deps_status = "installed"
+                provenance["dependency_fingerprint"] = deps_fingerprint
+                write_provenance(drive_root, adapter_result.sanitized_name, provenance)
+            except Exception as exc:
+                log.exception("isolated dependency install failed for %s", adapter_result.sanitized_name)
+                deps_status = "failed"
+                deps_error = f"{type(exc).__name__}: {exc}"
 
     return InstallResult(
-        ok=True,
+        ok=deps_status != "failed",
         sanitized_name=adapter_result.sanitized_name,
         target_dir=target_dir,
         summary=summary,
@@ -406,6 +431,10 @@ def install_skill(
         review_status=review_status,
         review_findings=review_findings,
         review_error=review_error,
+        deps_status=deps_status,
+        deps_error=deps_error,
+        deps_fingerprint=deps_fingerprint,
+        error=deps_error if deps_status == "failed" else "",
         provenance=provenance,
     )
 

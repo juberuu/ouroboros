@@ -50,3 +50,13 @@ def test_files_layout_uses_internal_scroll_contract():
     assert "overscroll-behavior: contain;" in css
     assert "grid-template-rows: minmax(220px, 320px) minmax(0, 1fr);" in css
     assert 'max-height: none;' in css
+
+
+def test_files_pdf_preview_and_download_bridge_are_safe():
+    source = _read("web/modules/files.js")
+    launcher = _read("launcher.py")
+    assert 'class="files-preview-frame" sandbox="allow-same-origin"' in source
+    assert "download_file_to_downloads" in source
+    assert "URL.createObjectURL(blob)" in source
+    assert 'parsed.path != "/api/files/download"' in launcher
+    assert "parsed.port != actual_port" in launcher

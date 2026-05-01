@@ -112,7 +112,7 @@ class TestPlanReviewerQuorum(unittest.IsolatedAsyncioTestCase):
         result = await self._run_with_models([
             "openai/gpt-5.5",
             "google/gemini-3.1-pro-preview",
-            "anthropic/claude-opus-4.7",
+            "anthropic/claude-opus-4.6",
         ])
         self.assertNotIn("at least 2 unique", result)
         self.assertNotIn("duplicate reviewer models", result)
@@ -306,7 +306,7 @@ class TestQuorumWithRealEnvVar(unittest.IsolatedAsyncioTestCase):
     async def test_three_unique_env_models_pass_quorum_gate(self):
         """Shipped default: 3 distinct OpenRouter models via env must pass."""
         result = await self._run_with_env(
-            "openai/gpt-5.5,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.7"
+            "openai/gpt-5.5,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.6"
         )
         self.assertNotIn("at least 2 unique reviewer models", result)
         self.assertNotIn("duplicate reviewer models", result)
@@ -352,9 +352,9 @@ class TestDirectProviderFallbackAccepted(unittest.IsolatedAsyncioTestCase):
         env = {
             "OUROBOROS_REVIEW_MODELS": (
                 "openai/gpt-5.5,google/gemini-3.1-pro-preview,"
-                "anthropic/claude-opus-4.7"
+                "anthropic/claude-opus-4.6"
             ),
-            "OUROBOROS_MODEL": "anthropic::claude-opus-4-7",
+            "OUROBOROS_MODEL": "anthropic::claude-opus-4-6",
             "OUROBOROS_MODEL_LIGHT": "anthropic::claude-sonnet-4-6",
             "OPENROUTER_API_KEY": "",
             "OPENAI_API_KEY": "",
@@ -365,7 +365,7 @@ class TestDirectProviderFallbackAccepted(unittest.IsolatedAsyncioTestCase):
         }
 
         fallback_shape = [
-            "anthropic::claude-opus-4-7",
+            "anthropic::claude-opus-4-6",
             "anthropic::claude-sonnet-4-6",
             "anthropic::claude-sonnet-4-6",
         ]
@@ -415,19 +415,19 @@ class TestDirectProviderFallbackAccepted(unittest.IsolatedAsyncioTestCase):
         # Exact shape `_normalize_direct_review_models` writes into settings
         # for an anthropic-only setup with the shipped defaults.
         fallback_env = (
-            "anthropic::claude-opus-4-7,"
+            "anthropic::claude-opus-4-6,"
             "anthropic::claude-sonnet-4-6,"
             "anthropic::claude-sonnet-4-6"
         )
         fallback_shape = [
-            "anthropic::claude-opus-4-7",
+            "anthropic::claude-opus-4-6",
             "anthropic::claude-sonnet-4-6",
             "anthropic::claude-sonnet-4-6",
         ]
 
         env = {
             "OUROBOROS_REVIEW_MODELS": fallback_env,
-            "OUROBOROS_MODEL": "anthropic::claude-opus-4-7",
+            "OUROBOROS_MODEL": "anthropic::claude-opus-4-6",
             "OUROBOROS_MODEL_LIGHT": "anthropic::claude-sonnet-4-6",
             "OPENROUTER_API_KEY": "",
             "OPENAI_API_KEY": "",
@@ -477,7 +477,7 @@ class TestDirectProviderFallbackAccepted(unittest.IsolatedAsyncioTestCase):
         ctx = _make_ctx()
 
         env = {
-            "OUROBOROS_REVIEW_MODELS": "openai/gpt-5.5,openai/gpt-5.5,anthropic/claude-opus-4.7",
+            "OUROBOROS_REVIEW_MODELS": "openai/gpt-5.5,openai/gpt-5.5,anthropic/claude-opus-4.6",
             "OPENROUTER_API_KEY": "sk-or-test",
             "OPENAI_API_KEY": "",
             "ANTHROPIC_API_KEY": "",
@@ -487,10 +487,10 @@ class TestDirectProviderFallbackAccepted(unittest.IsolatedAsyncioTestCase):
             patch.dict(_os.environ, env, clear=False),
             patch.object(_cfg, "get_review_models",
                          return_value=["openai/gpt-5.5", "openai/gpt-5.5",
-                                       "anthropic/claude-opus-4.7"]),
+                                       "anthropic/claude-opus-4.6"]),
             patch.object(pr, "_get_review_models",
                          return_value=["openai/gpt-5.5", "openai/gpt-5.5",
-                                       "anthropic/claude-opus-4.7"]),
+                                       "anthropic/claude-opus-4.6"]),
             patch.object(pr, "_load_plan_checklist", return_value="checklist"),
             patch.object(pr, "_load_bible", return_value=""),
             patch.object(pr, "_load_doc", return_value=""),
@@ -516,7 +516,7 @@ class TestDirectProviderFallbackAccepted(unittest.IsolatedAsyncioTestCase):
 
         # User-authored duplicate list under an Anthropic-only setup.
         # The duplicate `anthropic::a` does NOT match the fallback shape
-        # `[anthropic::claude-opus-4-7, anthropic::claude-sonnet-4-6,
+        # `[anthropic::claude-opus-4-6, anthropic::claude-sonnet-4-6,
         #  anthropic::claude-sonnet-4-6]` that
         # `direct_provider_review_models_fallback` would emit, so the gate
         # must still fire.
@@ -527,7 +527,7 @@ class TestDirectProviderFallbackAccepted(unittest.IsolatedAsyncioTestCase):
         )
         env = {
             "OUROBOROS_REVIEW_MODELS": user_duplicates,
-            "OUROBOROS_MODEL": "anthropic::claude-opus-4-7",
+            "OUROBOROS_MODEL": "anthropic::claude-opus-4-6",
             "OUROBOROS_MODEL_LIGHT": "anthropic::claude-sonnet-4-6",
             "OPENROUTER_API_KEY": "",
             "OPENAI_API_KEY": "",

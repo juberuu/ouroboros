@@ -443,7 +443,10 @@ def _handle_review_skill(ctx: ToolContext, skill: str = "", **_kwargs: Any) -> s
     skill_name = str(skill or "").strip()
     if not skill_name:
         return "⚠️ SKILL_REVIEW_ERROR: 'skill' argument is required."
-    outcome = _review_skill_impl(ctx, skill_name)
+    from ouroboros.skill_lifecycle_queue import skill_lifecycle_file_lock
+
+    with skill_lifecycle_file_lock(pathlib.Path(ctx.drive_root)):
+        outcome = _review_skill_impl(ctx, skill_name)
     payload = {
         "skill": outcome.skill_name,
         "status": outcome.status,
@@ -589,6 +592,15 @@ def _handle_skill_exec(
 
     runtime = (loaded.manifest.runtime or "").strip().lower()
     runtime_binary = _resolve_runtime_binary(runtime)
+    try:
+        from ouroboros.marketplace.isolated_deps import python_runtime_binary
+
+        if runtime in {"python", "python3"}:
+            isolated_python = python_runtime_binary(loaded.skill_dir)
+            if isolated_python is not None:
+                runtime_binary = str(isolated_python)
+    except Exception:
+        log.debug("Could not resolve isolated Python runtime", exc_info=True)
     if runtime_binary is None:
         return (
             f"⚠️ SKILL_EXEC_ERROR: skill {skill_name!r} declared runtime "
@@ -707,6 +719,12 @@ def _handle_skill_exec(
         skill_name=loaded.name,
         granted_keys=list(grants.get("granted_keys") or []),
     )
+    try:
+        from ouroboros.marketplace.isolated_deps import augment_env_for_skill_deps
+
+        env = augment_env_for_skill_deps(env, loaded.skill_dir)
+    except Exception:
+        log.debug("Could not augment skill env with isolated dependencies", exc_info=True)
 
     try:
         returncode, stdout_bytes, stderr_bytes, overflowed = _run_skill_subprocess(
@@ -795,7 +813,7 @@ def _handle_toggle_skill(
     skill: str = "",
     enabled: Any = None,
     **_kwargs: Any,
-) -> str:
+    ) -> str:
     err = _skill_tool_preflight(ctx)
     if err:
         return err
@@ -811,97 +829,59 @@ def _handle_toggle_skill(
             f"{sorted(_TRUE_LITERALS | _FALSE_LITERALS)}. "
             f"Got {enabled!r} ({type(enabled).__name__})."
         )
+
     drive_root = pathlib.Path(ctx.drive_root)
-    loaded = find_skill(drive_root, skill_name)
-    if loaded is None:
-        return (
-            f"⚠️ SKILL_TOGGLE_ERROR: skill {skill_name!r} not found in "
-            "OUROBOROS_SKILLS_REPO_PATH."
-        )
-    # Mirror the skill_exec / review_skill guards: a skill flagged with
-    # ``load_error`` (broken manifest, sanitised-name collision, etc.)
-    # must not be ENABLED via the tool surface. Disabling a broken
-    # skill IS always allowed — otherwise an operator could never stop
-    # a live extension that degraded after load (e.g. plugin.py became
-    # unreadable post-enable). The durable-state collision concern the
-    # guard was originally about only applies to the write path that
-    # happens AFTER this check.
-    collision_load_error = loaded.load_error.lower().startswith("skill name collision:")
-    if coerced and loaded.load_error:
-        return (
-            f"⚠️ SKILL_TOGGLE_ERROR: skill {skill_name!r} cannot be enabled "
-            f"— loader rejected it ({loaded.load_error})."
-        )
-    if coerced:
-        stale = loaded.review.is_stale_for(loaded.content_hash)
-        grants = grant_status_for_skill(drive_root, loaded)
-        if loaded.review.status != "pass" or stale:
+    from ouroboros.skill_lifecycle_queue import skill_lifecycle_file_lock
+
+    with skill_lifecycle_file_lock(drive_root):
+        loaded = find_skill(drive_root, skill_name)
+        if loaded is None:
             return (
-                "⚠️ SKILL_TOGGLE_ERROR: cannot enable until review status is "
-                f"fresh PASS (status={loaded.review.status!r}, stale={stale}). "
-                "Run review_skill first."
+                f"⚠️ SKILL_TOGGLE_ERROR: skill {skill_name!r} not found in "
+                "OUROBOROS_SKILLS_REPO_PATH."
             )
-        if not grants.get("all_granted", True):
-            missing = ", ".join(grants.get("missing_keys") or [])
+        collision_load_error = loaded.load_error.lower().startswith("skill name collision:")
+        if coerced and loaded.load_error:
             return (
-                "⚠️ SKILL_TOGGLE_ERROR: cannot enable until requested key grants "
-                f"are approved{f' ({missing})' if missing else ''}."
+                f"⚠️ SKILL_TOGGLE_ERROR: skill {skill_name!r} cannot be enabled "
+                f"— loader rejected it ({loaded.load_error})."
             )
-    if not coerced and collision_load_error:
+        if coerced:
+            stale = loaded.review.is_stale_for(loaded.content_hash)
+            grants = grant_status_for_skill(drive_root, loaded)
+            if loaded.review.status != "pass" or stale:
+                return (
+                    "⚠️ SKILL_TOGGLE_ERROR: cannot enable until review status is "
+                    f"fresh PASS (status={loaded.review.status!r}, stale={stale}). "
+                    "Run review_skill first."
+                )
+            if not grants.get("all_granted", True):
+                missing = ", ".join(grants.get("missing_keys") or [])
+                return (
+                    "⚠️ SKILL_TOGGLE_ERROR: cannot enable until requested key grants "
+                    f"are approved{f' ({missing})' if missing else ''}."
+                )
+        if not coerced and collision_load_error:
+            extension_action = None
+            extension_reason = "name_collision"
+            from ouroboros import extension_loader
+            if loaded.name in extension_loader.snapshot()["extensions"]:
+                extension_loader.unload_extension(loaded.name)
+                extension_action = "extension_unloaded"
+            return json.dumps({"skill": loaded.name, "enabled": False, "review_status": loaded.review.status, "extension_action": extension_action, "extension_reason": extension_reason, "message": f"Skill {loaded.name!r} was not persisted as disabled because its sanitized identity collides with another skill directory. Rename one of the directories first."}, ensure_ascii=False, indent=2)
+        save_enabled(drive_root, loaded.name, coerced)
         extension_action = None
-        extension_reason = "name_collision"
+        extension_reason = "not_extension"
         from ouroboros import extension_loader
-
-        if loaded.name in extension_loader.snapshot()["extensions"]:
-            extension_loader.unload_extension(loaded.name)
-            extension_action = "extension_unloaded"
-        return json.dumps(
-            {
-                "skill": loaded.name,
-                "enabled": False,
-                "review_status": loaded.review.status,
-                "extension_action": extension_action,
-                "extension_reason": extension_reason,
-                "message": (
-                    f"Skill {loaded.name!r} was not persisted as disabled because "
-                    "its sanitized identity collides with another skill directory. "
-                    "Rename one of the directories first."
-                ),
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-    save_enabled(drive_root, loaded.name, coerced)
-    note = ""
-    extension_action = None
-    extension_reason = "not_extension"
-    from ouroboros import extension_loader
-    if loaded.manifest.is_extension() or loaded.name in extension_loader.snapshot()["extensions"]:
-        from ouroboros.config import load_settings as _load_settings
-
-        live_state = extension_loader.reconcile_extension(
-            loaded.name,
-            drive_root,
-            _load_settings,
-            retry_load_error=True,
-        )
-        extension_action = live_state.get("action")
-        extension_reason = str(live_state.get("reason") or "")
-    return json.dumps(
-        {
-            "skill": loaded.name,
-            "enabled": coerced,
-            "review_status": loaded.review.status,
-            "extension_action": extension_action,
-            "extension_reason": extension_reason,
-            "message": f"Skill {loaded.name!r} enabled={coerced}{note}",
-        },
-        ensure_ascii=False,
-        indent=2,
-    )
+        if loaded.manifest.is_extension() or loaded.name in extension_loader.snapshot()["extensions"]:
+            from ouroboros.config import load_settings as _load_settings
+            live_state = extension_loader.reconcile_extension(loaded.name, drive_root, _load_settings, retry_load_error=True)
+            extension_action = live_state.get("action")
+            extension_reason = str(live_state.get("reason") or "")
+        return json.dumps({"skill": loaded.name, "enabled": coerced, "review_status": loaded.review.status, "extension_action": extension_action, "extension_reason": extension_reason, "message": f"Skill {loaded.name!r} enabled={coerced}"}, ensure_ascii=False, indent=2)
 
 
-# ---------------------------------------------------------------------------
+
 # Tool registrations
 # ---------------------------------------------------------------------------
 
@@ -1039,8 +1019,8 @@ def get_tools() -> List[ToolEntry]:
     ]
 
 
-__all__ = [
+    __all__ = [
     "get_tools",
     "_ALLOWED_RUNTIMES",
     "_HARD_TIMEOUT_CEILING_SEC",
-]
+    ]

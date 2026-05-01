@@ -245,7 +245,7 @@ def test_adapter_scripts_listed_when_runtime_python(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_adapter_refuses_install_specs(tmp_path):
+def test_adapter_converts_global_install_specs_to_manual_guidance(tmp_path):
     staging = tmp_path / "staging"
     _write_staged_skill(
         staging,
@@ -264,12 +264,15 @@ def test_adapter_refuses_install_specs(tmp_path):
         ),
     )
     result = adapt_openclaw_skill(staging, slug="x/brew-skill", version="0.1", sha256="0" * 64)
-    assert not result.ok
-    assert any("install specs" in b for b in result.blockers)
+    assert result.ok
+    specs = result.provenance["install_specs"]
+    assert specs["auto"] == []
+    assert specs["manual"][0]["kind"] == "brew"
+    assert "Manual setup required" in (staging / "SKILL.md").read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("install_value", ["brew jq", "{kind: brew, formula: jq}"])
-def test_adapter_refuses_malformed_non_empty_install_specs(tmp_path, install_value):
+def test_adapter_preserves_malformed_non_empty_install_specs_as_manual(tmp_path, install_value):
     staging = tmp_path / "staging"
     _write_staged_skill(
         staging,
@@ -285,8 +288,8 @@ def test_adapter_refuses_malformed_non_empty_install_specs(tmp_path, install_val
         ),
     )
     result = adapt_openclaw_skill(staging, slug="x/malformed-install", version="0.1", sha256="0" * 64)
-    assert not result.ok
-    assert any("install specs" in b for b in result.blockers)
+    assert result.ok
+    assert result.provenance["install_specs"]["manual"]
 
 
 def test_adapter_converts_forbidden_settings_env_keys_to_grant_requests(tmp_path):

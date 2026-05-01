@@ -45,9 +45,9 @@ def test_query_model_preserves_full_error_body_under_4000_chars():
     # 500-char error body — well above the old 200 cap, well under the 4K limit
     body = "Error code: 404 - " + "X" * 500
     client = _ExplodingClient(body)
-    model, result, _headers = _run_query_model(client, "anthropic/claude-opus-4.7", [])
+    model, result, _headers = _run_query_model(client, "anthropic/claude-opus-4.6", [])
 
-    assert model == "anthropic/claude-opus-4.7"
+    assert model == "anthropic/claude-opus-4.6"
     assert isinstance(result, str)
     # Full body must survive
     assert "X" * 500 in result
@@ -59,7 +59,7 @@ def test_query_model_over_limit_appends_omission_note():
     # 5000-char body — over the 4K limit
     body = "A" * 5000
     client = _ExplodingClient(body)
-    _, result, _ = _run_query_model(client, "anthropic/claude-opus-4.7", [])
+    _, result, _ = _run_query_model(client, "anthropic/claude-opus-4.6", [])
 
     assert isinstance(result, str)
     # Omission note is explicit (no silent clipping)
@@ -78,7 +78,7 @@ def test_parse_model_response_unparseable_preserves_full_body():
         "some_field": "Y" * 400,
         "another": "Z" * 400,
     }
-    parsed = _parse_model_response("anthropic/claude-opus-4.7", payload, None)
+    parsed = _parse_model_response("anthropic/claude-opus-4.6", payload, None)
 
     assert parsed["verdict"] == "ERROR"
     # Full serialised body preserved (no silent clipping)
@@ -94,7 +94,7 @@ def test_parse_model_response_malformed_choices_preserves_body():
 
     # An unexpected shape that will trigger the except clause
     bad = {"choices": [{"message": None}], "big_field": "Q" * 300}
-    parsed = _parse_model_response("anthropic/claude-opus-4.7", bad, None)
+    parsed = _parse_model_response("anthropic/claude-opus-4.6", bad, None)
 
     assert parsed["verdict"] == "ERROR"
     # Ensure error text preserves context (it will include `choices` and nested None)

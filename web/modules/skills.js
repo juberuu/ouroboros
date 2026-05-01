@@ -1,4 +1,5 @@
 import { initMarketplace } from './marketplace.js';
+import { initOuroborosHub } from './ouroboroshub.js';
 
 /**
  * Ouroboros Skills UI — Phase 5.
@@ -21,11 +22,16 @@ function skillsPageTemplate() {
                 </p>
                 <div class="skills-tabs" role="tablist" aria-label="Skills views">
                     <button class="skills-tab is-active" data-tab="installed" role="tab" aria-selected="true">
-                        Installed
+                        My skills
+                        <span class="skills-tab-pill" id="skills-tab-pill-installed" hidden></span>
                     </button>
                     <button class="skills-tab" data-tab="marketplace" role="tab" aria-selected="false">
-                        Marketplace
+                        ClawHub
                         <span class="skills-tab-pill" id="skills-tab-pill-marketplace" hidden></span>
+                    </button>
+                    <button class="skills-tab" data-tab="ouroboroshub" role="tab" aria-selected="false">
+                        OuroborosHub
+                        <span class="skills-tab-pill" id="skills-tab-pill-ouroboroshub" hidden></span>
                     </button>
                 </div>
             </div>
@@ -36,12 +42,13 @@ function skillsPageTemplate() {
                 </div>
                 <div id="skills-list" class="skills-list"></div>
                 <div id="skills-empty" class="muted" hidden>
-                    No skills installed yet. Browse the
-                    <b>Marketplace</b> tab to add one, or import a custom
+                    No skills yet. Browse <b>ClawHub</b> or
+                    <b>OuroborosHub</b> to add one, or import a custom
                     package from the Files tab.
                 </div>
             </div>
             <div class="skills-tab-panel" id="skills-pane-marketplace" data-pane="marketplace" hidden></div>
+            <div class="skills-tab-panel" id="skills-pane-ouroboroshub" data-pane="ouroboroshub" hidden></div>
         </section>
     `;
 }
@@ -79,7 +86,7 @@ function grantReady(skill) {
 
 function healReady(skill) {
     const source = (skill.source || 'native').toLowerCase();
-    if (!['clawhub', 'external', 'user_repo'].includes(source)) return false;
+    if (!['clawhub', 'ouroboroshub', 'external', 'user_repo'].includes(source)) return false;
     const payloadRoot = String(skill.payload_root || '');
     return source !== 'user_repo' && payloadRoot.startsWith('skills/') && (Boolean(skill.load_error) || !reviewReady(skill));
 }
@@ -125,6 +132,7 @@ function skillSourceChip(skill) {
     }
     const labelMap = {
         clawhub: { label: 'ClawHub', tone: 'warn' },
+        ouroboroshub: { label: 'OuroborosHub', tone: 'ok' },
         external: { label: 'External', tone: 'muted' },
         user_repo: { label: 'User repo', tone: 'muted' },
     };
@@ -333,12 +341,7 @@ function skillNextAction(skill, reviewInProgress = false) {
     if (skill.enabled && skill.type === 'extension' && skill.live_loaded && skill.dispatch_live) {
         return { label: 'Open widgets', className: 'skills-open-widgets', disabled: false };
     }
-    return {
-        label: skill.enabled ? 'Turn off' : 'Turn on',
-        className: 'skills-next-toggle',
-        disabled: false,
-        enabled: (!skill.enabled).toString(),
-    };
+    return { label: '', className: '', disabled: true };
 }
 
 function renderSkillCard(skill, reviewingSkills = new Set()) {
@@ -363,7 +366,7 @@ function renderSkillCard(skill, reviewingSkills = new Set()) {
     const statusChip = `<span class="skills-status-chip skills-status-${status.tone}">${escapeHtml(status.label)}</span>`;
     const sourceChip = skillSourceChip(skill);
 
-    const toggleSwitch = `
+    const toggleSwitch = skill.lifecycle_virtual ? '' : `
         <label class="skills-switch ${toggleLocked ? 'is-locked' : ''}" title="${escapeHtml(toggleLocked ? `Locked: ${lockReason}` : (skill.enabled ? 'Turn skill off' : 'Turn skill on'))}">
             <input type="checkbox"
                    class="skills-toggle"
@@ -397,18 +400,19 @@ function renderSkillCard(skill, reviewingSkills = new Set()) {
 
     const source = (skill.source || 'native').toLowerCase();
     const sourceLabel = source === 'clawhub' ? 'ClawHub'
+        : source === 'ouroboroshub' ? 'OuroborosHub'
         : source === 'native' ? 'Built-in'
         : source === 'external' ? 'External'
         : source === 'user_repo' ? 'User repo'
         : source;
 
-    const isClawhub = source === 'clawhub';
-    const provenance = isClawhub ? skill.provenance : null;
-    const updateBtn = isClawhub
-        ? `<button class="btn btn-default skills-update" data-skill="${safeName}">Update</button>`
+    const isMarketplaceManaged = source === 'clawhub' || source === 'ouroboroshub';
+    const provenance = isMarketplaceManaged ? skill.provenance : null;
+    const updateBtn = isMarketplaceManaged
+        ? `<button class="btn btn-default skills-update" data-skill="${safeName}" data-source="${escapeHtml(source)}">Update</button>`
         : '';
-    const uninstallBtn = isClawhub
-        ? `<button class="btn btn-default skills-uninstall" data-skill="${safeName}">Uninstall</button>`
+    const uninstallBtn = isMarketplaceManaged
+        ? `<button class="btn btn-default skills-uninstall" data-skill="${safeName}" data-source="${escapeHtml(source)}">Uninstall</button>`
         : '';
     const healBtn = healReady(skill)
         ? `<button class="btn btn-primary skills-heal" data-skill="${safeName}">Heal</button>`
@@ -420,11 +424,11 @@ function renderSkillCard(skill, reviewingSkills = new Set()) {
         next.enabled ? `data-enabled="${escapeHtml(next.enabled)}"` : '',
         next.disabled ? 'disabled' : '',
     ].filter(Boolean).join(' ');
-    const nextButton = `
+    const nextButton = next.label ? `
         <button class="btn btn-primary skills-next-action ${escapeHtml(next.className)}" ${nextAttrs}>
             ${escapeHtml(next.label)}
         </button>
-    `;
+    ` : '';
 
     // v5.2.3 review-cycle fix: review findings are a primary safety
     // signal (P3). Promote the disclosure out of "Show details" so a
@@ -477,6 +481,7 @@ function renderSkillCard(skill, reviewingSkills = new Set()) {
                 </div>
                 <div class="skills-card-toggle">
                     ${statusChip}
+                    ${nextButton}
                     ${toggleSwitch}
                 </div>
             </header>
@@ -486,7 +491,6 @@ function renderSkillCard(skill, reviewingSkills = new Set()) {
             ${reviewFindings}
             ${loadError}
             <footer class="skills-card-actions">
-                ${nextButton}
                 ${updateBtn}
                 ${uninstallBtn}
                 ${details}
@@ -497,9 +501,10 @@ function renderSkillCard(skill, reviewingSkills = new Set()) {
 
 
 async function fetchSkills() {
-    const [stateResp, extResp] = await Promise.all([
+    const [stateResp, extResp, queueResp] = await Promise.all([
         fetch('/api/state').then(r => r.ok ? r.json() : {}),
         fetch('/api/extensions').then(r => r.ok ? r.json() : { skills: [], live: {} }),
+        fetch('/api/skills/lifecycle-queue').then(r => r.ok ? r.json() : { events: [] }).catch(() => ({ events: [] })),
     ]);
     // ``/api/state`` does not yet expose a ``summarize_skills`` payload
     // directly (that land in a later round if needed). For now we
@@ -510,9 +515,63 @@ async function fetchSkills() {
     return {
         runtimeMode,
         skillsRepoConfigured,
-        skills: extResp.skills || [],
+        skills: mergeLifecycleEvents(extResp.skills || [], queueResp.events || []),
         live: extResp.live || {},
+        queue: queueResp,
     };
+}
+
+
+function mergeLifecycleEvents(skills, events) {
+    const out = [...skills];
+    const names = new Set(out.map((skill) => skill.name));
+    for (const event of [...events].reverse()) {
+        if (!['queued', 'running', 'failed'].includes(event.status)) continue;
+        const name = event.target;
+        if (!name || names.has(name)) continue;
+        names.add(name);
+        out.unshift({
+            name,
+            description: event.message || event.error || 'Skill lifecycle operation',
+            version: '—',
+            type: 'skill',
+            enabled: false,
+            review_status: 'pending',
+            review_stale: true,
+            permissions: [],
+            load_error: event.status === 'failed' ? event.error : '',
+            source: event.source || 'external',
+            lifecycle_virtual: true,
+            grants: { all_granted: true },
+        });
+    }
+    updateQueueBadges(events);
+    return out;
+}
+
+
+function updateQueueBadges(events) {
+    const actionable = events.filter((event) => ['queued', 'running', 'failed'].includes(event.status));
+    const bySource = new Map();
+    for (const event of actionable) {
+        const source = event.source === 'ouroboroshub' ? 'ouroboroshub'
+            : event.source === 'clawhub' ? 'marketplace'
+            : 'installed';
+        bySource.set(source, (bySource.get(source) || 0) + 1);
+    }
+    for (const [id, count] of bySource.entries()) {
+        const el = document.getElementById(`skills-tab-pill-${id}`);
+        if (!el) continue;
+        el.hidden = !count;
+        el.textContent = count ? String(count) : '';
+    }
+    for (const id of ['installed', 'marketplace', 'ouroboroshub']) {
+        if (bySource.has(id)) continue;
+        const el = document.getElementById(`skills-tab-pill-${id}`);
+        if (!el) continue;
+        el.hidden = true;
+        el.textContent = '';
+    }
 }
 
 
@@ -536,7 +595,7 @@ async function renderSkillsList(container, emptyEl, runtimeModeEl, reviewingSkil
     }
     if (emptyEl) emptyEl.hidden = true;
     container.innerHTML = skills.map((skill) => renderSkillCard(skill, reviewingSkills)).join('')
-        || '<div class="muted">No skills yet. Add one from the <b>Marketplace</b> tab.</div>';
+        || '<div class="muted">No skills yet. Add one from <b>ClawHub</b> or <b>OuroborosHub</b>.</div>';
     // v5: surface unread native-skill upgrade migrations so the
     // operator is told when the launcher silently rewrote an
     // installed skill (e.g. weather 0.1 script -> 0.2 extension).
@@ -837,11 +896,13 @@ function attachActionHandlers(container, renderFn, reviewingSkills) {
                     }
                 }
             } else if (target.classList.contains('skills-update')) {
-                showBanner(`${name}: updating from ClawHub (this may take ~30s)`, 'muted');
-                const result = await postWithFeedback(
-                    `/api/marketplace/clawhub/update/${encodeURIComponent(name)}`,
-                    {}
-                );
+                const source = target.dataset.source === 'ouroboroshub' ? 'ouroboroshub' : 'clawhub';
+                showBanner(`${name}: updating from ${source === 'ouroboroshub' ? 'OuroborosHub' : 'ClawHub'} (this may take ~30s)`, 'muted');
+                const url = source === 'ouroboroshub'
+                    ? `/api/marketplace/ouroboroshub/install`
+                    : `/api/marketplace/clawhub/update/${encodeURIComponent(name)}`;
+                const body = source === 'ouroboroshub' ? { slug: name, overwrite: true, auto_review: true } : {};
+                const result = await postWithFeedback(url, body);
                 const tail = result.review_status ? ` — review ${result.review_status}` : '';
                 showBanner(
                     result.ok
@@ -859,13 +920,14 @@ function attachActionHandlers(container, renderFn, reviewingSkills) {
                 await postWithFeedback('/api/command', { cmd: prompt });
                 showBanner(`${name}: heal task sent to Ouroboros`, 'ok');
             } else if (target.classList.contains('skills-uninstall')) {
-                if (!confirm(`Uninstall ${name}? This deletes data/skills/clawhub/${name}/.`)) {
+                const source = target.dataset.source === 'ouroboroshub' ? 'ouroboroshub' : 'clawhub';
+                if (!confirm(`Uninstall ${name}? This deletes data/skills/${source}/${name}/.`)) {
                     return;
                 }
-                const result = await postWithFeedback(
-                    `/api/marketplace/clawhub/uninstall/${encodeURIComponent(name)}`,
-                    {}
-                );
+                const url = source === 'ouroboroshub'
+                    ? `/api/marketplace/ouroboroshub/uninstall/${encodeURIComponent(name)}`
+                    : `/api/marketplace/clawhub/uninstall/${encodeURIComponent(name)}`;
+                const result = await postWithFeedback(url, {});
                 showBanner(
                     result.ok ? `${name}: uninstalled` : `${name}: uninstall failed — ${result.error}`,
                     result.ok ? 'ok' : 'danger',
@@ -919,6 +981,27 @@ async function renderMarketplacePane() {
 }
 
 
+async function renderOuroborosHubPane() {
+    const pane = document.getElementById('skills-pane-ouroboroshub');
+    if (!pane) return;
+    if (pane.dataset.bootstrapped === 'true') {
+        if (typeof pane._ouroboroshubRefresh === 'function') {
+            pane._ouroboroshubRefresh();
+        }
+        return;
+    }
+    pane.innerHTML = '<div class="muted">Loading OuroborosHub…</div>';
+    try {
+        initOuroborosHub(pane);
+        pane.dataset.bootstrapped = 'true';
+    } catch (err) {
+        pane.dataset.bootstrapped = '';
+        pane.innerHTML = `<div class="skills-load-error">Failed to load OuroborosHub UI: ${escapeHtml(err.message || err)}</div>`;
+        throw err;
+    }
+}
+
+
 export function initSkills(ctx) {
     const page = document.createElement('div');
     page.innerHTML = skillsPageTemplate();
@@ -959,7 +1042,11 @@ export function initSkills(ctx) {
             activateTab(tabName);
             if (tabName === 'marketplace') {
                 renderMarketplacePane().catch((err) => {
-                    showBanner(`Marketplace failed: ${err.message || err}`, 'danger');
+                    showBanner(`ClawHub failed: ${err.message || err}`, 'danger');
+                });
+            } else if (tabName === 'ouroboroshub') {
+                renderOuroborosHubPane().catch((err) => {
+                    showBanner(`OuroborosHub failed: ${err.message || err}`, 'danger');
                 });
             }
         });

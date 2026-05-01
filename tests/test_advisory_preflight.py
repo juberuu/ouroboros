@@ -150,7 +150,7 @@ class TestPreflightGatesBeforeSDK:
             raise AssertionError("SDK should NOT be called when preflight blocks")
 
         def _fake_resolve_model():
-            return "claude-opus-4-7[1m]"
+            return "claude-opus-4-6[1m]"
 
         monkeypatch.setattr(
             "ouroboros.gateways.claude_code.run_readonly",
@@ -227,7 +227,7 @@ class TestPreflightGatesBeforeSDK:
             return _Result()
 
         def _fake_resolve_model():
-            return "claude-opus-4-7[1m]"
+            return "claude-opus-4-6[1m]"
 
         # run_readonly is imported INSIDE _run_claude_advisory, not at module top,
         # so patch the source symbol.

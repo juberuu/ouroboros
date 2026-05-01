@@ -57,6 +57,8 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
                         <div id="files-preview-meta" class="files-preview-meta">${defaultDirectoryMeta()}</div>
                     </div>
                     <div class="files-preview-actions">
+                        <button class="btn btn-default" id="files-download" hidden>Download</button>
+                        <button class="btn btn-default" id="files-open-external" hidden>Open externally</button>
                         <button class="btn btn-primary" id="files-save" hidden disabled>Save</button>
                     </div>
                 </div>
@@ -102,6 +104,8 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
     const modalCancelBtn = page.querySelector('#files-modal-cancel');
     const modalConfirmBtn = page.querySelector('#files-modal-confirm');
     const saveBtn = page.querySelector('#files-save');
+    const downloadBtn = page.querySelector('#files-download');
+    const openExternalBtn = page.querySelector('#files-open-external');
     const pasteBtn = page.querySelector('#files-paste');
     const newFileBtn = page.querySelector('#files-new-file');
     const newDirBtn = page.querySelector('#files-new-dir');
@@ -141,6 +145,9 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
         ) && (state.editorDirty || state.editorIsNew);
         saveBtn.hidden = !visible;
         saveBtn.disabled = !canSave;
+        const fileSelected = state.selectedType === 'file' && Boolean(state.selectedPath);
+        downloadBtn.hidden = !fileSelected;
+        openExternalBtn.hidden = !fileSelected;
     }
 
     function resetEditorState() {
@@ -436,6 +443,17 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
             return;
         }
 
+        if (data.is_pdf && data.content_url) {
+            resetEditorState();
+            const safeUrl = encodeURI(data.content_url);
+            setPreview({
+                path: data.display_path || state.rootPath || 'Files',
+                meta: `${formatFileSize(data.size)} • PDF preview`,
+                html: `<iframe class="files-preview-frame" sandbox="allow-same-origin" src="${safeUrl}" title="${escapeHtml(data.name || 'PDF preview')}"></iframe>`,
+            });
+            return;
+        }
+
         if (!data.is_text) {
             resetEditorState();
             setPreview({
@@ -465,16 +483,38 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
         });
     }
 
-    function downloadFile(path) {
+    function filenameFromPath(path) {
+        return String(path || '').split('/').filter(Boolean).pop() || 'download';
+    }
+
+    async function downloadFile(path, { openExternal = false } = {}) {
         if (!path) return;
         const params = new URLSearchParams({ path });
+        const url = `/api/files/download?${params.toString()}`;
+        const filename = filenameFromPath(path);
+        const bridge = window.pywebview?.api?.download_file_to_downloads;
+        if (bridge) {
+            const result = await bridge(url, filename, Boolean(openExternal));
+            if (!result?.ok) throw new Error(result?.error || 'native download failed');
+            setPreview({
+                path,
+                meta: openExternal ? 'Opened externally' : 'Downloaded',
+                content: `${filename} saved to ${result.path || 'Downloads'}.`,
+            });
+            return;
+        }
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`download failed: HTTP ${resp.status}`);
+        const blob = await resp.blob();
+        const blobUrl = URL.createObjectURL(blob);
         const link = document.createElement('a');
-        link.href = `/api/files/download?${params.toString()}`;
-        link.download = '';
+        link.href = blobUrl;
+        link.download = filename;
         link.rel = 'noopener';
         document.body.appendChild(link);
         link.click();
         link.remove();
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
     }
 
     async function createDirectory() {
@@ -715,6 +755,12 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
     saveBtn.addEventListener('click', () => {
         saveCurrentFile().catch(showError);
     });
+    downloadBtn.addEventListener('click', () => {
+        downloadFile(state.selectedPath).catch(showError);
+    });
+    openExternalBtn.addEventListener('click', () => {
+        downloadFile(state.selectedPath, { openExternal: true }).catch(showError);
+    });
 
     layoutEl.addEventListener('dragenter', (event) => {
         event.preventDefault();
@@ -752,7 +798,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
     contextMenuEl.addEventListener('click', (event) => {
         const action = event.target instanceof HTMLElement ? event.target.dataset.action : '';
         if (action === 'download') {
-            downloadFile(state.contextPath);
+            downloadFile(state.contextPath).catch(showError);
         } else if (action === 'copy' || action === 'move') {
             const entry = state.entries.find((item) => item.path === state.contextPath);
             if (entry) {

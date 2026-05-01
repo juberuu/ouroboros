@@ -1507,6 +1507,7 @@ from ouroboros.extensions_api import (
     api_skill_review,
     api_skill_grants,
     api_skill_reconcile,
+    api_skill_lifecycle_queue,
 )
 from ouroboros.marketplace_api import (
     api_marketplace_search,
@@ -1516,6 +1517,12 @@ from ouroboros.marketplace_api import (
     api_marketplace_update,
     api_marketplace_uninstall,
     api_marketplace_installed,
+    api_ouroboroshub_catalog,
+    api_ouroboroshub_preview,
+    api_ouroboroshub_install,
+    api_ouroboroshub_update,
+    api_ouroboroshub_installed,
+    api_ouroboroshub_uninstall,
 )
 
 
@@ -1607,6 +1614,11 @@ routes = [
         methods=["POST"],
     ),
     Route(
+        "/api/skills/lifecycle-queue",
+        endpoint=api_skill_lifecycle_queue,
+        methods=["GET"],
+    ),
+    Route(
         "/api/skills/{skill}/review",
         endpoint=api_skill_review,
         methods=["POST"],
@@ -1655,6 +1667,36 @@ routes = [
     Route(
         "/api/marketplace/clawhub/uninstall/{name}",
         endpoint=api_marketplace_uninstall,
+        methods=["POST"],
+    ),
+    Route(
+        "/api/marketplace/ouroboroshub/catalog",
+        endpoint=api_ouroboroshub_catalog,
+        methods=["GET"],
+    ),
+    Route(
+        "/api/marketplace/ouroboroshub/installed",
+        endpoint=api_ouroboroshub_installed,
+        methods=["GET"],
+    ),
+    Route(
+        "/api/marketplace/ouroboroshub/preview/{slug:path}",
+        endpoint=api_ouroboroshub_preview,
+        methods=["GET"],
+    ),
+    Route(
+        "/api/marketplace/ouroboroshub/install",
+        endpoint=api_ouroboroshub_install,
+        methods=["POST"],
+    ),
+    Route(
+        "/api/marketplace/ouroboroshub/update/{name}",
+        endpoint=api_ouroboroshub_update,
+        methods=["POST"],
+    ),
+    Route(
+        "/api/marketplace/ouroboroshub/uninstall/{name}",
+        endpoint=api_ouroboroshub_uninstall,
         methods=["POST"],
     ),
     # v5: native-skill upgrade migration banner endpoints (Opus
@@ -1727,6 +1769,8 @@ async def lifespan(app):
     try:
         from ouroboros.launcher_bootstrap import ensure_data_skills_seeded
         ensure_data_skills_seeded()
+        from ouroboros.skill_migrations import migrate_generation_skill_names
+        migrate_generation_skill_names()
     except Exception:
         log.warning("Native skills bootstrap failed", exc_info=True)
 

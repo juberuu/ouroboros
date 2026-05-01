@@ -454,6 +454,14 @@ body {
     box-shadow: 0 18px 50px rgba(0, 0, 0, 0.28);
 }
 
+.files-preview-frame {
+    width: 100%;
+    min-height: 70vh;
+    border: 1px solid var(--divider);
+    border-radius: 12px;
+    background: #111827;
+}
+
 .files-drop-overlay {
     position: absolute;
     inset: 0;
@@ -2593,6 +2601,9 @@ body {
     align-items: center;
     gap: 10px;
     flex-shrink: 0;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    min-width: 0;
 }
 
 /* v5.2.3: single status chip — the "summary verdict" of the skill.
@@ -3133,6 +3144,9 @@ body {
     flex-wrap: wrap;
     gap: 4px;
     justify-content: flex-end;
+    align-items: flex-start;
+    min-width: 0;
+    max-width: 100%;
 }
 
 .marketplace-card-body {

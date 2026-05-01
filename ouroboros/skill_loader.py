@@ -86,6 +86,7 @@ _SKILL_DIR_CACHE_NAMES = frozenset(
         ".idea",
         ".vscode",
         ".tox",
+        ".ouroboros_env",
         ".DS_Store",
     }
 )
@@ -1045,6 +1046,7 @@ def _classify_skill_source(
         SKILL_SOURCE_CLAWHUB,
         SKILL_SOURCE_EXTERNAL,
         SKILL_SOURCE_NATIVE,
+        SKILL_SOURCE_OUROBOROSHUB,
         SKILL_SOURCE_USER_REPO,
         SKILL_SOURCE_SUBDIRS,
     )
@@ -1083,6 +1085,10 @@ def _classify_skill_source(
                         # (cycle 2 Ouroboros own-pipeline finding).
                         if (resolved / ".clawhub.json").is_file():
                             return SKILL_SOURCE_CLAWHUB
+                        return SKILL_SOURCE_EXTERNAL
+                    if bucket == SKILL_SOURCE_OUROBOROSHUB:
+                        if (resolved / ".ouroboroshub.json").is_file():
+                            return SKILL_SOURCE_OUROBOROSHUB
                         return SKILL_SOURCE_EXTERNAL
                     return bucket
             # Unknown bucket (e.g. user dropped a skill directly under

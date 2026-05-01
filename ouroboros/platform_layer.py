@@ -46,6 +46,18 @@ def is_container_env() -> bool:
     return False
 
 
+def open_path_external(path: pathlib.Path) -> None:
+    """Open a local path with the platform default application."""
+
+    target = pathlib.Path(path)
+    if IS_MACOS:
+        subprocess.Popen(["open", str(target)])
+    elif IS_WINDOWS:
+        os.startfile(str(target))  # type: ignore[attr-defined]
+    else:
+        subprocess.Popen(["xdg-open", str(target)])
+
+
 def _hidden_run(command: list[str], **kwargs):
     if _SUBPROCESS_NO_WINDOW:
         kwargs = dict(kwargs)

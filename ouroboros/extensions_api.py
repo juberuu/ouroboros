@@ -25,6 +25,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from ouroboros.extension_loader import list_routes, snapshot
+from ouroboros.skill_lifecycle_queue import queue_snapshot, run_lifecycle_job
 from ouroboros.skill_loader import (
     discover_skills,
     find_skill,
@@ -372,78 +373,97 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
 
     drive_root = _request_drive_root(request)
     repo_path = get_skills_repo_path()
-    loaded = find_skill(drive_root, skill_name, repo_path=repo_path)
-    if loaded is None:
+
+    initial = find_skill(drive_root, skill_name, repo_path=repo_path)
+    if initial is None:
         return JSONResponse({"error": "skill not found"}, status_code=404)
-    collision_load_error = loaded.load_error.lower().startswith("skill name collision:")
-    if enabled and loaded.load_error:
-        return JSONResponse(
-            {"error": f"cannot enable: {loaded.load_error}"},
-            status_code=400,
-        )
-    if enabled:
-        stale = loaded.review.is_stale_for(loaded.content_hash)
-        grants = grant_status_for_skill(drive_root, loaded)
-        if loaded.review.status != "pass" or stale:
-            return JSONResponse(
-                {
+    async def _run_toggle() -> dict[str, Any]:
+        loaded = find_skill(drive_root, skill_name, repo_path=repo_path)
+        if loaded is None:
+            return {"error": "skill not found", "status_code": 404}
+        collision_load_error = loaded.load_error.lower().startswith("skill name collision:")
+        if enabled and loaded.load_error:
+            return {"error": f"cannot enable: {loaded.load_error}", "status_code": 400}
+        if enabled:
+            stale = loaded.review.is_stale_for(loaded.content_hash)
+            grants = grant_status_for_skill(drive_root, loaded)
+            if loaded.review.status != "pass" or stale:
+                return {
                     "error": "cannot enable until review status is fresh PASS",
+                    "status_code": 409,
                     "review_status": loaded.review.status,
                     "review_stale": stale,
                     "grants": grants,
-                },
-                status_code=409,
-            )
-        if not grants.get("all_granted", True):
-            return JSONResponse(
-                {
+                }
+            if not grants.get("all_granted", True):
+                return {
                     "error": "cannot enable until requested key grants are approved",
+                    "status_code": 409,
                     "review_status": loaded.review.status,
                     "review_stale": stale,
                     "grants": grants,
-                },
-                status_code=409,
-            )
-    if not enabled and collision_load_error:
-        action = None
-        if loaded.name in extension_loader.snapshot()["extensions"]:
-            extension_loader.unload_extension(loaded.name)
-            action = "extension_unloaded"
-        return JSONResponse(
-            {
+                }
+        if not enabled and collision_load_error:
+            action = None
+            if loaded.name in extension_loader.snapshot()["extensions"]:
+                extension_loader.unload_extension(loaded.name)
+                action = "extension_unloaded"
+            return {
                 "error": (
                     "cannot persist disable because this skill's sanitized "
                     "name collides with another skill directory; rename one "
                     "of the directories first"
                 ),
+                "status_code": 400,
                 "extension_action": action,
                 "extension_reason": "name_collision",
-            },
-            status_code=400,
-        )
-    save_enabled(drive_root, loaded.name, enabled)
-
-    action = None
-    live_reason = "not_extension"
-    if loaded.manifest.is_extension() or loaded.name in extension_loader.snapshot()["extensions"]:
-        state = extension_loader.reconcile_extension(
-            loaded.name,
-            drive_root,
-            load_settings,
-            repo_path=repo_path,
-            retry_load_error=True,
-        )
-        action = state.get("action")
-        live_reason = str(state.get("reason") or "")
-    return JSONResponse(
-        {
+            }
+        save_enabled(drive_root, loaded.name, enabled)
+        action = None
+        live_reason = "not_extension"
+        if loaded.manifest.is_extension() or loaded.name in extension_loader.snapshot()["extensions"]:
+            state = extension_loader.reconcile_extension(
+                loaded.name,
+                drive_root,
+                load_settings,
+                repo_path=repo_path,
+                retry_load_error=True,
+            )
+            action = state.get("action")
+            live_reason = str(state.get("reason") or "")
+        return {
             "skill": loaded.name,
-            "enabled": enabled,
+            "source": loaded.source,
             "review_status": loaded.review.status,
             "review_stale": loaded.review.is_stale_for(loaded.content_hash),
             "grants": grant_status_for_skill(drive_root, loaded),
-            "extension_action": action,
-            "extension_reason": live_reason,
+            "action": action,
+            "live_reason": live_reason,
+        }
+
+    queued = await run_lifecycle_job(
+        kind="enable" if enabled else "disable",
+        target=initial.name,
+        source=initial.source,
+        message=("Enabling" if enabled else "Disabling") + f" {initial.name}",
+        runner=_run_toggle,
+        result_message=lambda item: (
+            item.get("error", "")
+            or (("Enabled" if enabled else "Disabled") + f" {item.get('skill', initial.name)}")
+        ),
+        result_error=lambda item: item.get("error", ""),
+    )
+    if queued.get("error"):
+        return JSONResponse(queued, status_code=int(queued.get("status_code") or 400))
+    return JSONResponse(
+        {
+            "skill": queued.get("skill", initial.name),
+            "enabled": enabled,
+            "review_status": queued.get("review_status"),
+            "review_stale": queued.get("review_stale"),
+            "grants": queued.get("grants", {}),
+            "extension_action": queued.get("action"),
+            "extension_reason": queued.get("live_reason"),
         }
     )
 
@@ -492,7 +512,18 @@ async def api_skill_review(request: Request) -> JSONResponse:
     repo_dir = _request_repo_dir(request)
     repo_path = get_skills_repo_path()
     ctx = _ApiReviewCtx(drive_root, repo_dir)
-    outcome = await asyncio.to_thread(_review_skill_impl, ctx, skill_name)
+    async def _run_review() -> Any:
+        return await asyncio.to_thread(_review_skill_impl, ctx, skill_name)
+
+    outcome = await run_lifecycle_job(
+        kind="review",
+        target=skill_name,
+        source="skills",
+        message=f"Reviewing {skill_name}",
+        runner=_run_review,
+        result_message=lambda item: f"Review {getattr(item, 'status', 'pending')}",
+        result_error=lambda item: getattr(item, "error", "") or "",
+    )
     live_state = reconcile_extension(
         skill_name,
         drive_root,
@@ -537,6 +568,12 @@ async def api_skill_review(request: Request) -> JSONResponse:
             "extension_reason": live_state.get("reason"),
         }
     )
+
+
+async def api_skill_lifecycle_queue(request: Request) -> JSONResponse:
+    """GET /api/skills/lifecycle-queue — recent mutating skill operations."""
+
+    return JSONResponse(queue_snapshot())
 
 
 async def api_skill_grants(request: Request) -> JSONResponse:

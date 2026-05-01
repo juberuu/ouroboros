@@ -166,9 +166,12 @@ def _ensure_playwright_installed():
                 "Playwright chromium binary not found. "
                 "Install manually: python3 -m playwright install chromium"
             )
-        log.info("Installing Playwright chromium binary...")
+        log.info("Installing Playwright chromium dependencies and binary...")
+        try:
+            subprocess.check_call([sys.executable, "-m", "playwright", "install-deps", "chromium"])
+        except Exception as exc:
+            log.warning("Playwright system dependency repair failed; continuing with browser download: %s", exc)
         subprocess.check_call([sys.executable, "-m", "playwright", "install", "chromium"])
-        subprocess.check_call([sys.executable, "-m", "playwright", "install-deps", "chromium"])
 
     _playwright_ready = True
 

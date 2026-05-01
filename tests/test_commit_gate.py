@@ -832,8 +832,8 @@ def test_advisory_prompt_contains_blocking_history_when_blocked(tmp_path):
         block_reason="critical_findings",
         block_details=(
             "⚠️ REVIEW_BLOCKED: Critical issues found.\n"
-            "  CRITICAL: [gpt-5.4] bible_compliance: Missing BIBLE.md update\n"
-            "  CRITICAL: [gpt-5.4] tests_affected: No tests for new function\n"
+            "  CRITICAL: [gpt-5.5] bible_compliance: Missing BIBLE.md update\n"
+            "  CRITICAL: [gpt-5.5] tests_affected: No tests for new function\n"
             "  WARN: [opus] self_consistency: Minor doc drift"
         ),
         critical_findings=[

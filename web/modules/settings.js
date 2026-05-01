@@ -55,12 +55,12 @@ function collectSecretValue(id, body) {
 }
 
 const SETTINGS_FALLBACK_MODELS = [
-    'anthropic::claude-opus-4-7',
+    'anthropic::claude-opus-4-6',
     'anthropic::claude-sonnet-4-6',
     'openai::gpt-5.5',
     'openai::gpt-5.5-mini',
     'openai/gpt-5.5',
-    'anthropic/claude-opus-4.7',
+    'anthropic/claude-opus-4.6',
     'google/gemini-3.1-pro-preview',
 ];
 
@@ -373,7 +373,7 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
             OUROBOROS_MODEL_CODE: byId('s-model-code').value,
             OUROBOROS_MODEL_LIGHT: byId('s-model-light').value,
             OUROBOROS_MODEL_FALLBACK: byId('s-model-fallback').value,
-            CLAUDE_CODE_MODEL: byId('s-claude-code-model').value || 'claude-opus-4-7[1m]',
+            CLAUDE_CODE_MODEL: byId('s-claude-code-model').value || 'claude-opus-4-6[1m]',
             OUROBOROS_SERVER_HOST: (byId('s-server-host')?.value || '127.0.0.1').trim() || '127.0.0.1',
             OUROBOROS_EFFORT_TASK: byId('s-effort-task').value,
             OUROBOROS_EFFORT_EVOLUTION: byId('s-effort-evolution').value,

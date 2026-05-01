@@ -5,7 +5,7 @@ strip sampling parameters (`temperature`, `top_p`, `top_k`) the resolved
 model doesn't list in `supported_parameters`. Combined with
 `provider.require_parameters: true` on Anthropic-prefixed models, unknown
 params used to cause 404 "No endpoints found" from OpenRouter (this is why
-`anthropic/claude-opus-4.7` was silently dropped from every triad review
+`anthropic/claude-opus-4.6` was silently dropped from every triad review
 for the whole v4.32.x line — it simply doesn't support `temperature`).
 
 These tests cover:
@@ -60,7 +60,7 @@ class TestSupportedParametersFilter:
 
         _install_fake_response(monkeypatch, {
             "data": [{
-                "id": "anthropic/claude-opus-4.7",
+                "id": "anthropic/claude-opus-4.6",
                 "supported_parameters": [
                     "include_reasoning", "max_tokens", "reasoning",
                     "response_format", "stop", "structured_outputs",
@@ -70,7 +70,7 @@ class TestSupportedParametersFilter:
         })
 
         client = LLMClient(api_key="test")
-        target = client._resolve_remote_target("anthropic/claude-opus-4.7")
+        target = client._resolve_remote_target("anthropic/claude-opus-4.6")
         kwargs = client._build_remote_kwargs(
             target=target,
             messages=[{"role": "user", "content": "hi"}],
@@ -123,7 +123,7 @@ class TestSupportedParametersFilter:
         monkeypatch.setattr(requests, "get", exploding_get)
 
         client = LLMClient(api_key="test")
-        target = client._resolve_remote_target("anthropic/claude-opus-4.7")
+        target = client._resolve_remote_target("anthropic/claude-opus-4.6")
         kwargs = client._build_remote_kwargs(
             target=target,
             messages=[{"role": "user", "content": "hi"}],
@@ -142,13 +142,13 @@ class TestSupportedParametersFilter:
 
         call_count = _install_fake_response(monkeypatch, {
             "data": [{
-                "id": "anthropic/claude-opus-4.7",
+                "id": "anthropic/claude-opus-4.6",
                 "supported_parameters": ["max_tokens"],
             }]
         })
 
         client = LLMClient(api_key="test")
-        target = client._resolve_remote_target("anthropic/claude-opus-4.7")
+        target = client._resolve_remote_target("anthropic/claude-opus-4.6")
         # Two back-to-back calls: the second must hit the cache, not the network.
         for _ in range(2):
             client._build_remote_kwargs(

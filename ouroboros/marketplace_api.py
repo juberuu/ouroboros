@@ -38,11 +38,14 @@ from ouroboros.marketplace.clawhub import (
 )
 from ouroboros.marketplace.fetcher import FetchError, stage as _stage_archive
 from ouroboros.marketplace.install import (
+    _run_skill_review,
     install_skill,
     uninstall_skill,
     update_skill,
 )
 from ouroboros.marketplace.provenance import read_provenance
+from ouroboros.marketplace import ouroboroshub
+from ouroboros.skill_lifecycle_queue import run_lifecycle_job
 
 log = logging.getLogger(__name__)
 
@@ -301,6 +304,9 @@ def _serialize_install_result(result: Any) -> Dict[str, Any]:
     payload["review_status"] = result.review_status
     payload["review_findings"] = result.review_findings
     payload["review_error"] = result.review_error
+    payload["deps_status"] = getattr(result, "deps_status", "")
+    payload["deps_error"] = getattr(result, "deps_error", "")
+    payload["deps_fingerprint"] = getattr(result, "deps_fingerprint", {})
     payload["provenance"] = result.provenance
     return payload
 
@@ -324,8 +330,8 @@ async def api_marketplace_install(request: Request) -> JSONResponse:
 
     drive_root = _request_drive_root(request)
     repo_dir = _request_repo_dir(request)
-    try:
-        result = await asyncio.to_thread(
+    async def _run_install() -> Any:
+        return await asyncio.to_thread(
             install_skill,
             drive_root,
             repo_dir,
@@ -333,6 +339,25 @@ async def api_marketplace_install(request: Request) -> JSONResponse:
             version=version,
             auto_review=auto_review,
             overwrite=overwrite,
+        )
+
+    try:
+        result = await run_lifecycle_job(
+            kind="install",
+            target=slug,
+            source="clawhub",
+            message=f"Installing {slug}",
+            runner=_run_install,
+            result_message=lambda item: (
+                f"Installed as {item.sanitized_name}"
+                if getattr(item, "ok", False)
+                else getattr(item, "error", "install failed")
+            ),
+            result_error=lambda item: (
+                getattr(item, "error", "install failed")
+                if not getattr(item, "ok", False)
+                else (getattr(item, "deps_error", "") if getattr(item, "deps_status", "") == "failed" else "")
+            ),
         )
     except PermissionError as exc:
         return JSONResponse({"error": str(exc), "code": "marketplace_disabled"}, status_code=403)
@@ -360,13 +385,32 @@ async def api_marketplace_update(request: Request) -> JSONResponse:
     version = str(body.get("version") or "").strip() or None
     drive_root = _request_drive_root(request)
     repo_dir = _request_repo_dir(request)
-    try:
-        result = await asyncio.to_thread(
+    async def _run_update() -> Any:
+        return await asyncio.to_thread(
             update_skill,
             drive_root,
             repo_dir,
             sanitized_name=sanitized,
             version=version,
+        )
+
+    try:
+        result = await run_lifecycle_job(
+            kind="update",
+            target=sanitized,
+            source="clawhub",
+            message=f"Updating {sanitized}",
+            runner=_run_update,
+            result_message=lambda item: (
+                f"Updated {item.sanitized_name}"
+                if getattr(item, "ok", False)
+                else getattr(item, "error", "update failed")
+            ),
+            result_error=lambda item: (
+                getattr(item, "error", "update failed")
+                if not getattr(item, "ok", False)
+                else (getattr(item, "deps_error", "") if getattr(item, "deps_status", "") == "failed" else "")
+            ),
         )
     except PermissionError as exc:
         return JSONResponse({"error": str(exc), "code": "marketplace_disabled"}, status_code=403)
@@ -405,11 +449,26 @@ async def api_marketplace_uninstall(request: Request) -> JSONResponse:
     if err:
         return JSONResponse({"error": err}, status_code=400)
     drive_root = _request_drive_root(request)
-    try:
-        result = await asyncio.to_thread(
+    async def _run_uninstall() -> Any:
+        return await asyncio.to_thread(
             uninstall_skill,
             drive_root,
             sanitized_name=sanitized,
+        )
+
+    try:
+        result = await run_lifecycle_job(
+            kind="uninstall",
+            target=sanitized,
+            source="clawhub",
+            message=f"Uninstalling {sanitized}",
+            runner=_run_uninstall,
+            result_message=lambda item: (
+                f"Uninstalled {item.sanitized_name}"
+                if getattr(item, "ok", False)
+                else getattr(item, "error", "uninstall failed")
+            ),
+            result_error=lambda item: "" if getattr(item, "ok", False) else getattr(item, "error", "uninstall failed"),
         )
     except PermissionError as exc:
         return JSONResponse({"error": str(exc), "code": "marketplace_disabled"}, status_code=403)
@@ -463,6 +522,186 @@ async def api_marketplace_installed(request: Request) -> JSONResponse:
     return JSONResponse({"count": len(out), "skills": out})
 
 
+# ---------------------------------------------------------------------------
+# OuroborosHub static official-skill catalog
+# ---------------------------------------------------------------------------
+
+
+async def api_ouroboroshub_catalog(request: Request) -> JSONResponse:
+    query = str(request.query_params.get("q") or request.query_params.get("query") or "").strip()
+    try:
+        results = await asyncio.to_thread(ouroboroshub.search, query)
+    except Exception as exc:
+        log.warning("OuroborosHub catalog failed: %s", exc, exc_info=True)
+        return JSONResponse({"error": str(exc)}, status_code=502)
+    return JSONResponse({"query": query, "count": len(results), "results": [item.to_dict() for item in results]})
+
+
+async def api_ouroboroshub_preview(request: Request) -> JSONResponse:
+    slug = str(request.path_params.get("slug") or "").strip()
+    if not slug:
+        return JSONResponse({"error": "missing slug"}, status_code=400)
+    try:
+        summary = await asyncio.to_thread(ouroboroshub.info, slug)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    return JSONResponse({"summary": summary.to_dict(), "files": summary.files})
+
+
+async def api_ouroboroshub_install(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    slug = str(body.get("slug") or "").strip()
+    if not slug:
+        return JSONResponse({"error": "missing slug"}, status_code=400)
+    overwrite = _coerce_bool(body.get("overwrite"), False)
+    auto_review = _coerce_bool(body.get("auto_review"), True)
+    drive_root = _request_drive_root(request)
+    repo_dir = _request_repo_dir(request)
+
+    async def _run_install() -> Dict[str, Any]:
+        result = await asyncio.to_thread(ouroboroshub.install, slug, overwrite=overwrite)
+        payload: Dict[str, Any] = {
+            "ok": result.ok,
+            "sanitized_name": result.sanitized_name,
+            "error": result.error,
+            "provenance": result.provenance,
+            "summary": result.summary.to_dict() if result.summary else None,
+        }
+        if result.target_dir is not None:
+            payload["target_dir"] = str(result.target_dir)
+        if result.ok and auto_review:
+            status, findings, error = await asyncio.to_thread(
+                _run_skill_review,
+                drive_root,
+                repo_dir,
+                result.sanitized_name,
+            )
+            payload.update({"review_status": status, "review_findings": findings, "review_error": error})
+        return payload
+
+    payload = await run_lifecycle_job(
+        kind="install",
+        target=slug,
+        source="ouroboroshub",
+        message=f"Installing {slug}",
+        runner=_run_install,
+        result_message=lambda item: (
+            f"Installed as {item.get('sanitized_name')}"
+            if item.get("ok")
+            else item.get("error", "install failed")
+        ),
+        result_error=lambda item: "" if item.get("ok") else item.get("error", "install failed"),
+    )
+    return JSONResponse(payload, status_code=200 if payload.get("ok") else 400)
+
+
+async def api_ouroboroshub_update(request: Request) -> JSONResponse:
+    name = str(request.path_params.get("name") or "").strip()
+    err = _validate_path_param_name(name)
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    drive_root = _request_drive_root(request)
+    repo_dir = _request_repo_dir(request)
+
+    async def _run_update() -> Dict[str, Any]:
+        result = await asyncio.to_thread(ouroboroshub.install, name, overwrite=True)
+        payload: Dict[str, Any] = {
+            "ok": result.ok,
+            "sanitized_name": result.sanitized_name,
+            "error": result.error,
+            "provenance": result.provenance,
+            "summary": result.summary.to_dict() if result.summary else None,
+        }
+        if result.target_dir is not None:
+            payload["target_dir"] = str(result.target_dir)
+        if result.ok:
+            status, findings, error = await asyncio.to_thread(
+                _run_skill_review,
+                drive_root,
+                repo_dir,
+                result.sanitized_name,
+            )
+            payload.update({"review_status": status, "review_findings": findings, "review_error": error})
+        return payload
+
+    payload = await run_lifecycle_job(
+        kind="update",
+        target=name,
+        source="ouroboroshub",
+        message=f"Updating {name}",
+        runner=_run_update,
+        result_message=lambda item: (
+            f"Updated {item.get('sanitized_name')}"
+            if item.get("ok")
+            else item.get("error", "update failed")
+        ),
+        result_error=lambda item: "" if item.get("ok") else item.get("error", "update failed"),
+    )
+    return JSONResponse(payload, status_code=200 if payload.get("ok") else 400)
+
+async def api_ouroboroshub_installed(request: Request) -> JSONResponse:
+    drive_root = _request_drive_root(request)
+    from ouroboros.config import get_skills_repo_path
+    from ouroboros.skill_loader import discover_skills, grant_status_for_skill
+
+    skills = discover_skills(drive_root, repo_path=get_skills_repo_path())
+    out = []
+    for skill in skills:
+        if skill.source != "ouroboroshub":
+            continue
+        payload_root = ""
+        try:
+            rel_skill_dir = skill.skill_dir.resolve().relative_to(drive_root.resolve())
+            if rel_skill_dir.parts[:1] == ("skills",):
+                payload_root = rel_skill_dir.as_posix()
+        except Exception:
+            payload_root = ""
+        out.append({
+            "name": skill.name,
+            "type": skill.manifest.type,
+            "version": skill.manifest.version,
+            "review_status": skill.review.status,
+            "review_stale": skill.review.is_stale_for(skill.content_hash),
+            "review_findings": list(skill.review.findings or []),
+            "enabled": skill.enabled,
+            "load_error": skill.load_error,
+            "grants": grant_status_for_skill(drive_root, skill),
+            "payload_root": payload_root,
+        })
+    return JSONResponse({"count": len(out), "skills": out})
+
+
+async def api_ouroboroshub_uninstall(request: Request) -> JSONResponse:
+    sanitized = str(request.path_params.get("name") or "").strip()
+    err = _validate_path_param_name(sanitized)
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+
+    async def _run_uninstall() -> Dict[str, Any]:
+        result = await asyncio.to_thread(ouroboroshub.uninstall, sanitized)
+        return {"ok": result.ok, "sanitized_name": result.sanitized_name, "error": result.error}
+
+    payload = await run_lifecycle_job(
+        kind="uninstall",
+        target=sanitized,
+        source="ouroboroshub",
+        message=f"Uninstalling {sanitized}",
+        runner=_run_uninstall,
+        result_message=lambda item: (
+            f"Uninstalled {item.get('sanitized_name')}"
+            if item.get("ok")
+            else item.get("error", "uninstall failed")
+        ),
+        result_error=lambda item: "" if item.get("ok") else item.get("error", "uninstall failed"),
+    )
+    return JSONResponse(payload, status_code=200 if payload.get("ok") else 400)
+
+
 __all__ = [
     "api_marketplace_search",
     "api_marketplace_info",
@@ -471,4 +710,10 @@ __all__ = [
     "api_marketplace_update",
     "api_marketplace_uninstall",
     "api_marketplace_installed",
+    "api_ouroboroshub_catalog",
+    "api_ouroboroshub_preview",
+    "api_ouroboroshub_install",
+    "api_ouroboroshub_update",
+    "api_ouroboroshub_installed",
+    "api_ouroboroshub_uninstall",
 ]

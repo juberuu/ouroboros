@@ -52,11 +52,11 @@ SETTINGS_DEFAULTS = {
 
     "OUROBOROS_NETWORK_PASSWORD": "",
     "OUROBOROS_SERVER_HOST": "127.0.0.1",
-    "OUROBOROS_MODEL": "anthropic/claude-opus-4.7",
-    "OUROBOROS_MODEL_CODE": "anthropic/claude-opus-4.7",
+    "OUROBOROS_MODEL": "anthropic/claude-opus-4.6",
+    "OUROBOROS_MODEL_CODE": "anthropic/claude-opus-4.6",
     "OUROBOROS_MODEL_LIGHT": "anthropic/claude-sonnet-4.6",
     "OUROBOROS_MODEL_FALLBACK": "anthropic/claude-sonnet-4.6",
-    "CLAUDE_CODE_MODEL": "claude-opus-4-7[1m]",
+    "CLAUDE_CODE_MODEL": "claude-opus-4-6[1m]",
     "OUROBOROS_MAX_WORKERS": 5,
     "TOTAL_BUDGET": 10.0,
     "OUROBOROS_PER_TASK_COST_USD": 20.0,
@@ -69,7 +69,7 @@ SETTINGS_DEFAULTS = {
     "OUROBOROS_EVO_COST_THRESHOLD": 0.10,
     "OUROBOROS_WEBSEARCH_MODEL": "gpt-5.2",
     # Pre-commit review: comma-separated provider-tagged model list
-    "OUROBOROS_REVIEW_MODELS": "openai/gpt-5.5,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.7",
+    "OUROBOROS_REVIEW_MODELS": "openai/gpt-5.5,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.6",
     # Pre-commit review enforcement: advisory | blocking
     "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
     # Runtime mode: light | advanced | pro.
@@ -84,6 +84,7 @@ SETTINGS_DEFAULTS = {
     # plane". Ouroboros never clones or pulls this directory itself.
     "OUROBOROS_SKILLS_REPO_PATH": "",
     "OUROBOROS_CLAWHUB_REGISTRY_URL": "https://clawhub.ai/api/v1",
+    "OUROBOROS_HUB_CATALOG_URL": "https://raw.githubusercontent.com/joi-lab/OuroborosHub/main/catalog.json",
     # Scope review: single-model blocking reviewer (runs after triad review)
     "OUROBOROS_SCOPE_REVIEW_MODEL": "openai/gpt-5.5",
     # Reasoning effort per task type: none | low | medium | high
@@ -420,6 +421,7 @@ def get_skills_repo_path() -> str:
 #   data/skills/native/<slug>/    -- bootstrapped from repo/skills/<slug>/
 #   data/skills/clawhub/<slug>/   -- installed by the ClawHub marketplace
 #   data/skills/external/<slug>/  -- user-managed (drop in manually)
+#   data/skills/ouroboroshub/<slug>/ -- installed from the official static GitHub catalog
 #
 # ``OUROBOROS_SKILLS_REPO_PATH`` continues to work as an OPTIONAL extra
 # discovery root for power users who keep skills in their own checkout.
@@ -427,12 +429,14 @@ def get_skills_repo_path() -> str:
 SKILL_SOURCE_NATIVE = "native"
 SKILL_SOURCE_CLAWHUB = "clawhub"
 SKILL_SOURCE_EXTERNAL = "external"
+SKILL_SOURCE_OUROBOROSHUB = "ouroboroshub"
 SKILL_SOURCE_USER_REPO = "user_repo"
 
 SKILL_SOURCE_SUBDIRS = (
     SKILL_SOURCE_NATIVE,
     SKILL_SOURCE_CLAWHUB,
     SKILL_SOURCE_EXTERNAL,
+    SKILL_SOURCE_OUROBOROSHUB,
 )
 
 
@@ -484,6 +488,23 @@ def resolve_data_skills_dir(data_dir: pathlib.Path) -> Optional[pathlib.Path]:
 def get_clawhub_skills_dir() -> pathlib.Path:
     """Return ``<DATA_DIR>/skills/clawhub/`` (created on demand)."""
     target = get_data_skills_dir() / SKILL_SOURCE_CLAWHUB
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return target
+
+
+def get_ouroboroshub_catalog_url() -> str:
+    """Return the official OuroborosHub static catalog URL."""
+
+    return str(load_settings().get("OUROBOROS_HUB_CATALOG_URL") or SETTINGS_DEFAULTS["OUROBOROS_HUB_CATALOG_URL"]).strip()
+
+
+def get_ouroboroshub_skills_dir() -> pathlib.Path:
+    """Return ``<DATA_DIR>/skills/ouroboroshub/`` (created on demand)."""
+
+    target = get_data_skills_dir() / SKILL_SOURCE_OUROBOROSHUB
     try:
         target.mkdir(parents=True, exist_ok=True)
     except OSError:

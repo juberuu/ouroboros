@@ -239,7 +239,7 @@ async def _run_plan_review_async(
             f"majority-vote coordination. Got {len(unique_resolved)} unique "
             f"model(s) from {resolved_models!r}. Fix OUROBOROS_REVIEW_MODELS "
             "in settings (example: 'openai/gpt-5.5,"
-            "google/gemini-3.1-pro-preview,anthropic/claude-opus-4.7')."
+            "google/gemini-3.1-pro-preview,anthropic/claude-opus-4.6')."
             + single_provider_hint
         )
 
@@ -859,7 +859,7 @@ def _get_review_models() -> list[str]:
 
     models = list(_cfg.get_review_models() or [])
     if not models:
-        main = os.environ.get("OUROBOROS_MODEL", "anthropic/claude-opus-4.7")
+        main = os.environ.get("OUROBOROS_MODEL", "anthropic/claude-opus-4.6")
         models = [main]
 
     # Pad to exactly 3 by repeating the last model if needed

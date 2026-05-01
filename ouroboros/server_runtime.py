@@ -41,11 +41,28 @@ _SCOPE_REVIEW_LEGACY_DEFAULTS = frozenset({
     "",
     "anthropic/claude-opus-4.6",
     "anthropic::claude-opus-4-6",
-    "openai/gpt-5.4",
-    "openai::gpt-5.4",
-    "openai/gpt-5.4-pro",
-    "openai::gpt-5.4-pro",
+    "openai/gpt-5.5",
+    "openai::gpt-5.5",
+    "openai/gpt-5.5-pro",
+    "openai::gpt-5.5-pro",
+    "openai/gpt-" + "5.4",
+    "openai::gpt-" + "5.4",
+    "openai/gpt-" + "5.4-pro",
+    "openai::gpt-" + "5.4-pro",
+    "openai/gpt-" + "5.4-mini",
+    "openai::gpt-" + "5.4-mini",
 })
+_RETIRED_MODEL_DEFAULT_REPLACEMENTS = {
+    "anthropic/claude-opus-" + "4.7": "anthropic/claude-opus-4.6",
+    "anthropic::claude-opus-" + "4-7": "anthropic::claude-opus-4-6",
+    "claude-opus-" + "4-7[1m]": "claude-opus-4-6[1m]",
+    "openai/gpt-" + "5.4": "openai/gpt-5.5",
+    "openai::gpt-" + "5.4": "openai::gpt-5.5",
+    "openai/gpt-" + "5.4-pro": "openai/gpt-5.5-pro",
+    "openai::gpt-" + "5.4-pro": "openai::gpt-5.5-pro",
+    "openai/gpt-" + "5.4-mini": "openai/gpt-5.5-mini",
+    "openai::gpt-" + "5.4-mini": "openai::gpt-5.5-mini",
+}
 
 
 def _truthy_setting(value) -> bool:
@@ -62,6 +79,36 @@ def _parse_model_list(value: str) -> list[str]:
 
 def _serialize_model_list(models: list[str]) -> str:
     return ",".join(model.strip() for model in models if str(model or "").strip())
+
+
+def _refresh_retired_model_defaults(settings: dict) -> tuple[dict, list[str]]:
+    normalized = dict(settings)
+    changed: list[str] = []
+    keys = [
+        "OUROBOROS_MODEL",
+        "OUROBOROS_MODEL_CODE",
+        "OUROBOROS_MODEL_LIGHT",
+        "OUROBOROS_MODEL_FALLBACK",
+        "CLAUDE_CODE_MODEL",
+        "OUROBOROS_SCOPE_REVIEW_MODEL",
+    ]
+    for key in keys:
+        value = _setting_text(normalized, key)
+        replacement = _RETIRED_MODEL_DEFAULT_REPLACEMENTS.get(value)
+        if replacement:
+            normalized[key] = replacement
+            changed.append(key)
+    review_value = _setting_text(normalized, "OUROBOROS_REVIEW_MODELS")
+    if review_value:
+        models = [
+            _RETIRED_MODEL_DEFAULT_REPLACEMENTS.get(item, item)
+            for item in _parse_model_list(review_value)
+        ]
+        serialized = _serialize_model_list(models)
+        if serialized != review_value:
+            normalized["OUROBOROS_REVIEW_MODELS"] = serialized
+            changed.append("OUROBOROS_REVIEW_MODELS")
+    return normalized, changed
 
 
 def _provider_prefix(provider: str) -> str:
@@ -223,13 +270,13 @@ def has_supervisor_provider(settings: dict) -> bool:
 
 def apply_runtime_provider_defaults(settings: dict) -> tuple[dict, bool, list[str]]:
     """Auto-fill safe runtime defaults for the agreed provider cases."""
-    normalized = dict(settings)
+    normalized, retired_changed = _refresh_retired_model_defaults(settings)
     provider = _exclusive_direct_remote_provider(normalized)
 
     if not provider:
-        return normalized, False, []
+        return normalized, bool(retired_changed), retired_changed
 
-    changed_keys: list[str] = []
+    changed_keys: list[str] = list(retired_changed)
     provider_defaults = _DIRECT_PROVIDER_AUTO_DEFAULTS[provider]
     for key in _ALL_MODEL_SLOT_KEYS:
         raw_current = _setting_text(normalized, key)

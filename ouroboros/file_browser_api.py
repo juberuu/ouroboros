@@ -24,6 +24,7 @@ _FILE_BROWSER_MAX_PREVIEW_CHARS = 120_000
 _FILE_BROWSER_UPLOAD_CHUNK_SIZE = 1024 * 1024
 _FILE_BROWSER_MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 _IMAGE_PREVIEW_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
+_PDF_PREVIEW_EXTENSIONS = {".pdf"}
 _TEXT_PREVIEW_EXTENSIONS = {
     ".py", ".md", ".txt", ".json", ".jsonl", ".toml", ".yml", ".yaml",
     ".js", ".css", ".html", ".ts", ".tsx", ".jsx", ".ini", ".cfg",
@@ -358,7 +359,24 @@ async def api_files_read(request: Request) -> JSONResponse:
                 "size": size,
                 "is_text": False,
                 "is_image": True,
+                "is_pdf": False,
                 "media_type": _guess_media_type(target),
+                "content_url": f"/api/files/content?path={encoded_rel}",
+                "content": "",
+                "truncated": False,
+            })
+        if target.suffix.lower() in _PDF_PREVIEW_EXTENSIONS:
+            encoded_rel = quote(rel, safe="/")
+            return JSONResponse({
+                "root_path": str(root_dir),
+                "path": rel,
+                "display_path": _format_path(root_dir, rel),
+                "name": target.name,
+                "size": size,
+                "is_text": False,
+                "is_image": False,
+                "is_pdf": True,
+                "media_type": "application/pdf",
                 "content_url": f"/api/files/content?path={encoded_rel}",
                 "content": "",
                 "truncated": False,
@@ -372,6 +390,7 @@ async def api_files_read(request: Request) -> JSONResponse:
                 "size": size,
                 "is_text": False,
                 "is_image": False,
+                "is_pdf": False,
                 "content": "",
                 "truncated": False,
             })
@@ -391,6 +410,7 @@ async def api_files_read(request: Request) -> JSONResponse:
             "size": size,
             "is_text": True,
             "is_image": False,
+            "is_pdf": False,
             "content": text,
             "truncated": truncated,
         })

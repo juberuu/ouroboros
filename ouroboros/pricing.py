@@ -21,8 +21,6 @@ log = logging.getLogger(__name__)
 
 # Pricing from OpenRouter API (2026-02-17). Update periodically via /api/v1/models.
 MODEL_PRICING_STATIC = {
-    "anthropic/claude-opus-4.7": (5.0, 0.5, 25.0),
-    "anthropic/claude-opus-4-7": (5.0, 0.5, 25.0),
     "anthropic/claude-opus-4.6": (5.0, 0.5, 25.0),
     "anthropic/claude-opus-4-6": (5.0, 0.5, 25.0),
     "anthropic/claude-opus-4": (15.0, 1.5, 75.0),
@@ -40,7 +38,6 @@ MODEL_PRICING_STATIC = {
     "openai/gpt-5.5-pro": (1.75, 0.175, 14.0),
     # Mirrors the previous static mini lane until live OpenRouter pricing is fetched.
     "openai/gpt-5.5-mini": (0.75, 0.075, 4.50),
-    "openai/gpt-5.4-mini": (0.75, 0.075, 4.50),
     "openai/gpt-5.2": (1.75, 0.175, 14.0),
     "openai/gpt-5.2-codex": (1.75, 0.175, 14.0),
     "openai/gpt-5.3-codex": (1.75, 0.175, 14.0),

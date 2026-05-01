@@ -209,6 +209,16 @@ def test_stage_rejects_disallowed_extension():
         stage(archive, slug="x", version="1.0.0")
 
 
+@pytest.mark.parametrize("name", ["node_modules/dep/index.js", ".ouroboros_env/bin/tool.js"])
+def test_stage_rejects_review_opaque_dependency_dirs(name):
+    archive = _zip_with([
+        ("SKILL.md", SKILL_MD_BYTES),
+        (name, b"console.log('hidden')\n"),
+    ])
+    with pytest.raises(FetchError, match="review-opaque"):
+        stage(archive, slug="x", version="1.0.0")
+
+
 def test_stage_rejects_per_file_oversize():
     big = b"x" * (8 * 1024 * 1024 + 1)  # > 8 MB cap
     archive = _zip_with([

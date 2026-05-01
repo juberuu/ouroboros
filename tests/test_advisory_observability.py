@@ -62,7 +62,7 @@ def test_resolve_claude_code_model_falls_back_to_shipped_default(monkeypatch):
     sys.path.insert(0, REPO)
     gw = importlib.import_module("ouroboros.gateways.claude_code")
     monkeypatch.delenv("CLAUDE_CODE_MODEL", raising=False)
-    assert gw.resolve_claude_code_model() == "claude-opus-4-7[1m]"
+    assert gw.resolve_claude_code_model() == "claude-opus-4-6[1m]"
 
 
 def test_resolve_claude_code_model_strips_whitespace(monkeypatch):

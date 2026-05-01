@@ -154,8 +154,8 @@ class TestPlanReviewModels(unittest.TestCase):
         # main is anthropic::..., but the reviewer list is still the default
         # OpenRouter-style set (so none match the anthropic:: prefix).
         env = {
-            "OUROBOROS_REVIEW_MODELS": "openai/gpt-5.5,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.7",
-            "OUROBOROS_MODEL": "anthropic::claude-opus-4-7",
+            "OUROBOROS_REVIEW_MODELS": "openai/gpt-5.5,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.6",
+            "OUROBOROS_MODEL": "anthropic::claude-opus-4-6",
             "OUROBOROS_MODEL_LIGHT": "anthropic::claude-sonnet-4-6",
             "OPENROUTER_API_KEY": "",
             "OPENAI_API_KEY": "",
@@ -172,7 +172,7 @@ class TestPlanReviewModels(unittest.TestCase):
         self.assertEqual(
             models,
             [
-                "anthropic::claude-opus-4-7",
+                "anthropic::claude-opus-4-6",
                 "anthropic::claude-sonnet-4-6",
                 "anthropic::claude-sonnet-4-6",
             ],

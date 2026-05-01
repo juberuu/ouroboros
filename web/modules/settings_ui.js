@@ -220,15 +220,15 @@ export function renderSettingsPage() {
                             <span id="settings-model-catalog-status" class="settings-inline-status">Model catalog is optional and failure-tolerant.</span>
                         </div>
                         <div class="settings-model-grid">
-                            ${modelCard({ title: 'Main', copy: 'Primary reasoning model.', inputId: 's-model', toggleId: 's-local-main', defaultValue: 'anthropic/claude-opus-4.7' })}
-                            ${modelCard({ title: 'Code', copy: 'Tool-heavy coding model.', inputId: 's-model-code', toggleId: 's-local-code', defaultValue: 'anthropic/claude-opus-4.7' })}
+                            ${modelCard({ title: 'Main', copy: 'Primary reasoning model.', inputId: 's-model', toggleId: 's-local-main', defaultValue: 'anthropic/claude-opus-4.6' })}
+                            ${modelCard({ title: 'Code', copy: 'Tool-heavy coding model.', inputId: 's-model-code', toggleId: 's-local-code', defaultValue: 'anthropic/claude-opus-4.6' })}
                             ${modelCard({ title: 'Light', copy: 'Fast summaries and lightweight tasks.', inputId: 's-model-light', toggleId: 's-local-light', defaultValue: 'anthropic/claude-sonnet-4.6' })}
                             ${modelCard({ title: 'Fallback', copy: 'Resilience and degraded path.', inputId: 's-model-fallback', toggleId: 's-local-fallback', defaultValue: 'anthropic/claude-sonnet-4.6' })}
                         </div>
                         <div class="form-row">
                             <div class="form-field">
                                 <label>Claude Code Model</label>
-                                <input id="s-claude-code-model" value="claude-opus-4-7[1m]" placeholder="sonnet, opus, claude-opus-4-7[1m], or full name">
+                                <input id="s-claude-code-model" value="claude-opus-4-6[1m]" placeholder="sonnet, opus, claude-opus-4-6[1m], or full name">
                                 <div class="settings-inline-note">Anthropic model for <code>claude_code_edit</code> and <code>advisory_pre_review</code> tools. Requires Anthropic key in Providers.</div>
                             </div>
                         </div>

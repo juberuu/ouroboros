@@ -9,8 +9,8 @@ websockets
 huggingface_hub
 PyYAML>=6.0
 claude-agent-sdk>=0.1.60
-# optional: A2A (Agent-to-Agent) protocol — pip install 'ouroboros[a2a]'
-# a2a-sdk[http-server]>=0.3.20
+# A2A (Agent-to-Agent) protocol is part of the packaged/base runtime.
+a2a-sdk[http-server]>=0.3.20
 # optional: browser automation tools (for browse_page/browser_action)
 playwright
 playwright-stealth

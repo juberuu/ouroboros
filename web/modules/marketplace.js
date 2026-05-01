@@ -318,7 +318,7 @@ function summaryCard(summary, installedMap, isPlugin) {
         : '';
     const reviewBadge = isInstalled ? statusBadgeForReview(installed.review_status) : '';
     const lifecycle = lifecycleFor(summary, installed, pending);
-    const lifecycleChip = `<span class="skills-status-chip skills-status-${lifecycle.tone}">${escapeHtml(lifecycle.label)}</span>`;
+    const lifecycleChip = '';
     const lifecycleHint = lifecycle.hint
         ? `<div class="marketplace-card-state-hint">${escapeHtml(lifecycle.hint)}</div>`
         : '';
@@ -933,14 +933,17 @@ export function initMarketplace(pane) {
             const action = actionBtn.dataset.mpAction;
             if (!slug || !action) return;
             actionBtn.disabled = true;
+            let failedMessage = '';
             try {
                 await runLifecycleAction(slug, action);
             } catch (err) {
-                showStatus(pane, `${slug}: ${err.message || err}`, 'danger');
+                failedMessage = err.message || String(err);
+                showStatus(pane, `${slug}: ${failedMessage}`, 'danger');
+                setPending(slug, { label: `${action} failed`, tone: 'danger', message: failedMessage });
             } finally {
-                setPending(slug, null);
+                if (!failedMessage) setPending(slug, null);
                 actionBtn.disabled = false;
-                refresh();
+                if (!failedMessage) refresh();
             }
             return;
         }

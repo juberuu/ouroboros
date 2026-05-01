@@ -105,7 +105,7 @@ def test_triad_actor_records_carry_model_id_and_raw_text(tmp_path):
         {"item": "code_quality", "verdict": "FAIL", "severity": "critical", "reason": "bug"}
     ])
     results = [
-        _model_result("gpt-5.4", items_json),
+        _model_result("gpt-5.5", items_json),
         _model_result("gemini-pro", items_json),
         _model_result("claude-opus", items_json),
     ]
@@ -255,7 +255,7 @@ def test_commit_attempt_roundtrip_with_actor_records(tmp_path):
     import dataclasses
 
     triad = [
-        {"model_id": "gpt-5.4", "status": "responded", "raw_text": '["pass"]',
+        {"model_id": "gpt-5.5", "status": "responded", "raw_text": '["pass"]',
          "parsed_items": [{"item": "code_quality", "verdict": "PASS"}],
          "tokens_in": 100, "tokens_out": 50, "cost_usd": 0.01},
         {"model_id": "gemini-pro", "status": "parse_failure", "raw_text": "not json",
@@ -288,7 +288,7 @@ def test_commit_attempt_roundtrip_with_actor_records(tmp_path):
     restored = _commit_attempt_from_dict(as_dict)
 
     assert len(restored.triad_raw_results) == 2
-    assert restored.triad_raw_results[0]["model_id"] == "gpt-5.4"
+    assert restored.triad_raw_results[0]["model_id"] == "gpt-5.5"
     assert restored.triad_raw_results[0]["status"] == "responded"
     assert restored.triad_raw_results[1]["status"] == "parse_failure"
     assert restored.triad_raw_results[1]["raw_text"] == "not json"

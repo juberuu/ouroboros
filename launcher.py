@@ -62,6 +62,7 @@ from ouroboros.platform_layer import (
     git_install_hint,
     kill_process_on_port,
     merge_hidden_kwargs,
+    open_path_external,
     resume_process,
     terminate_job,
 )
@@ -931,6 +932,42 @@ def main():
             except Exception as exc:
                 log.warning("Skill grant native confirmation failed: %s", exc, exc_info=True)
                 return {"ok": False, "error": f"Native confirmation failed: {exc}"}
+
+        def download_file_to_downloads(self, url: str, filename: str, open_external: bool = False) -> dict:
+            try:
+                import urllib.parse
+                import urllib.request
+
+                raw_url = str(url or "")
+                full_url = urllib.parse.urljoin(f"http://127.0.0.1:{actual_port}", raw_url)
+                parsed = urllib.parse.urlparse(full_url)
+                if parsed.scheme != "http":
+                    return {"ok": False, "error": "download URL must be http://"}
+                if parsed.hostname not in {"127.0.0.1", "localhost"}:
+                    return {"ok": False, "error": "desktop downloads are limited to the local Ouroboros server"}
+                if parsed.port != actual_port:
+                    return {"ok": False, "error": "download URL port must match the local Ouroboros server"}
+                if parsed.path != "/api/files/download":
+                    return {"ok": False, "error": "download URL path must be /api/files/download"}
+                safe_name = pathlib.Path(str(filename or "download")).name or "download"
+                downloads = pathlib.Path.home() / "Downloads"
+                downloads.mkdir(parents=True, exist_ok=True)
+                target = downloads / safe_name
+                stem = target.stem
+                suffix = target.suffix
+                counter = 1
+                while target.exists():
+                    target = downloads / f"{stem}-{counter}{suffix}"
+                    counter += 1
+                with urllib.request.urlopen(full_url, timeout=60) as resp:  # noqa: S310 - localhost validated above
+                    with target.open("wb") as fh:
+                        shutil.copyfileobj(resp, fh)
+                if open_external:
+                    open_path_external(target)
+                return {"ok": True, "path": str(target)}
+            except Exception as exc:
+                log.warning("Desktop file download failed: %s", exc, exc_info=True)
+                return {"ok": False, "error": str(exc)}
 
     url = f"http://127.0.0.1:{actual_port}"
     window = webview.create_window(
