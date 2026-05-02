@@ -1,4 +1,4 @@
-export function initCosts({ ws, state, mount = null, embedded = false }) {
+export function initCosts({ ws, state, mount = null, embedded = false, hostPage = 'settings', hostSubtab = 'costs' }) {
     const page = document.createElement('div');
     page.id = 'page-costs';
     page.className = embedded ? 'settings-embedded-content settings-costs-panel' : 'page';
@@ -161,6 +161,9 @@ export function initCosts({ ws, state, mount = null, embedded = false }) {
     if (embedded) {
         window.addEventListener('ouro:settings-subtab-shown', (event) => {
             if (event.detail?.tab === 'costs') refreshCostsPanel();
+        });
+        window.addEventListener('ouro:dashboard-subtab-shown', (event) => {
+            if (event.detail?.tab === hostSubtab && state.activePage === hostPage) refreshCostsPanel();
         });
     } else {
         const obs = new MutationObserver(() => {

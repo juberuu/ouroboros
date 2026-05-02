@@ -340,7 +340,10 @@ and `review_skill`, and block `toggle_skill`, `skill_exec`, shell/browser
 indirection, extension tools, repo mutation, and subtask delegation while
 the repair task is active.
 Payload data access is scoped to the selected non-native skill under
-`data/skills/external/<skill>/` or `data/skills/clawhub/<skill>/`.
+`data/skills/external/<skill>/`, `data/skills/clawhub/<skill>/`, or
+`data/skills/ouroboroshub/<skill>/`. Marketplace/official provenance
+sidecars inside those payload roots (`.clawhub.json`, `.ouroboroshub.json`)
+remain control-plane state and are not writable from Heal mode.
 
 ### Output contract
 

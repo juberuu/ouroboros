@@ -438,14 +438,14 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
             setPreview({
                 path: data.display_path || state.rootPath || 'Files',
                 meta: `${formatFileSize(data.size)} • ${data.media_type || 'image'}`,
-                html: `<img class="files-preview-image" src="${encodeURI(data.content_url)}" alt="${escapeHtml(data.name || data.path || 'image')}">`,
+                html: `<img class="files-preview-image" src="${escapeHtml(data.content_url)}" alt="${escapeHtml(data.name || data.path || 'image')}">`,
             });
             return;
         }
 
         if (data.is_pdf && data.content_url) {
             resetEditorState();
-            const safeUrl = encodeURI(data.content_url);
+            const safeUrl = escapeHtml(data.content_url);
             setPreview({
                 path: data.display_path || state.rootPath || 'Files',
                 meta: `${formatFileSize(data.size)} • PDF preview`,

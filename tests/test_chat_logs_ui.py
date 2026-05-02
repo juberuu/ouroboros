@@ -1110,8 +1110,8 @@ def test_clipboard_paste_handler_exists():
 
 # ─── Bottom-fade gradient layer is separate from #chat-input-area ───────
 
-def test_chat_bottom_fade_is_removed_and_padding_is_dynamic():
-    """Bottom fade is removed; flex layout reserves space for the composer."""
+def test_chat_input_dock_has_glass_gradient_without_absolute_positioning():
+    """Flex composer reserves layout space while the dock keeps a readable glass fade."""
     css = _read("web/style.css")
     input_area_match = re.search(
         r"#chat-input-area\s*\{([^}]*)\}",
@@ -1119,11 +1119,9 @@ def test_chat_bottom_fade_is_removed_and_padding_is_dynamic():
     )
     assert input_area_match, "#chat-input-area rule must be parseable"
     input_area_body = input_area_match.group(1)
-    # We tolerate other `background:` properties (none expected today) but
-    # specifically forbid linear-gradient bleeding through the input dock.
-    assert "linear-gradient" not in input_area_body, (
-        "#chat-input-area must not paint a bottom-fade gradient."
-    )
+    assert "linear-gradient" in input_area_body
+    assert "backdrop-filter: blur(8px)" in input_area_body
+    assert "position: absolute" not in input_area_body
     chat_js = _read("web/modules/chat.js")
     assert 'class="chat-bottom-fade"' not in chat_js
     assert "scrollToBottomAfterLayout" in chat_js
@@ -1147,6 +1145,6 @@ def test_budget_pill_navigates_to_settings_costs():
     css = _read("web/style.css")
 
     assert 'id="chat-budget-pill" type="button"' in source
-    assert "openSettingsTab('costs')" in source
+    assert "openDashboardTab('costs')" in source
     budget_block = re.search(r"\.chat-budget-pill\s*\{(?P<body>[^}]+)\}", css, re.S).group("body")
     assert "cursor: pointer" in budget_block

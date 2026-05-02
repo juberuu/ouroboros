@@ -1,4 +1,4 @@
-"""Static checks for Settings-hosted observability and update panels."""
+"""Static checks for Dashboard-hosted observability and update panels."""
 
 from __future__ import annotations
 
@@ -12,19 +12,22 @@ def _read(rel: str) -> str:
     return (REPO / rel).read_text(encoding="utf-8")
 
 
-def test_nav_moves_observability_pages_into_settings():
+def test_nav_moves_observability_pages_into_dashboard():
     html = _read("web/index.html")
     settings_ui = _read("web/modules/settings_ui.js")
+    dashboard = _read("web/modules/dashboard.js")
     app = _read("web/app.js")
 
     assert 'data-page="logs"' not in html
     assert 'data-page="costs"' not in html
     assert 'data-page="evolution"' not in html
+    assert 'data-page="dashboard"' in html
     for tab in ("logs", "evolution", "updates", "costs"):
-        assert f'data-settings-tab="{tab}"' in settings_ui
-        assert f'data-settings-panel="{tab}"' in settings_ui
-    assert "openSettingsTab" in app
-    assert "settingsActiveSubtab" in app
+        assert f'data-settings-tab="{tab}"' not in settings_ui
+        assert f'data-dashboard-tab="{tab}"' in dashboard
+        assert f'data-dashboard-panel="{tab}"' in dashboard
+    assert "openDashboardTab" in app
+    assert "dashboardActiveSubtab" in app
 
 
 def test_settings_mobile_stack_contract_exists():
@@ -51,6 +54,14 @@ def test_update_panel_contract_exists():
     assert "api_update_apply" in server
     assert "compute_managed_update_status" in git_ops
     assert "prepare_managed_update" in git_ops
+    assert 'OFFICIAL_UPDATE_REMOTE_URL = "https://github.com/joi-lab/ouroboros-desktop"' in git_ops
+    assert "ensure_official_update_remote" in git_ops
+    assert "list_official_update_tags" in git_ops
+    assert "state[\"managed\"] = False" in git_ops
+    assert "remote_config_error" in git_ops
+    assert "official_tags" in server
+    assert "Official Releases" in updates
+    assert "Local Recovery" in updates
     assert "UPDATE_INTENT_MARKER_NAME" in git_ops
     assert "_write_update_intent" in git_ops
     assert "_read_update_intent" in git_ops

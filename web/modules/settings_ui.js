@@ -81,10 +81,6 @@ export function renderSettingsPage() {
                     <button class="settings-tab" data-settings-tab="behavior">Behavior</button>
                     <button class="settings-tab" data-settings-tab="integrations">Integrations</button>
                     <button class="settings-tab" data-settings-tab="advanced">Advanced</button>
-                    <button class="settings-tab" data-settings-tab="logs">Logs</button>
-                    <button class="settings-tab" data-settings-tab="evolution">Evolution</button>
-                    <button class="settings-tab" data-settings-tab="updates">Updates</button>
-                    <button class="settings-tab" data-settings-tab="costs">Costs</button>
                 </div>
             </div>
 
@@ -499,10 +495,6 @@ export function renderSettingsPage() {
                         <button class="btn btn-danger" id="btn-reset">Reset All Data</button>
                     </div>
                 </section>
-                <section class="settings-panel settings-embedded-panel" data-settings-panel="logs" id="settings-panel-logs"></section>
-                <section class="settings-panel settings-embedded-panel" data-settings-panel="evolution" id="settings-panel-evolution"></section>
-                <section class="settings-panel settings-embedded-panel" data-settings-panel="updates" id="settings-panel-updates"></section>
-                <section class="settings-panel settings-embedded-panel" data-settings-panel="costs" id="settings-panel-costs"></section>
             </div>
 
             <div class="settings-footer">

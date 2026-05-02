@@ -1,4 +1,4 @@
-# Ouroboros v5.6.3 — Architecture & Reference
+# Ouroboros v5.6.4 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -305,8 +305,9 @@ The web UI is a single-page app (`web/index.html` + `web/style.css` + ES modules
 - `logs.js` — log viewer with category filters and grouped task cards
 - `log_events.js` — shared event summarization/grouping helpers used by Chat and Logs
 - `files.js` — file browser, preview, uploads, and editor
-- `evolution.js` — evolution chart (Chart.js), now mounted as the Settings → Evolution panel
-- `updates.js` — Settings → Updates panel for managed-repo update status/check/apply plus git commits/tags rollback/promote controls
+- `evolution.js` — evolution chart (Chart.js), now mounted as the Dashboard → Evolution panel
+- `dashboard.js` — top-level Dashboard page hosting Logs, Evolution, Costs, and Updates as full-height operational panels
+- `updates.js` — Dashboard → Updates panel for official update status/check/apply plus local recovery commits/tags rollback/promote controls
 - `settings.js` — settings form with local model management and catalog-backed Settings model pickers
 - `settings_ui.js` — Settings page HTML layout, tabs, secret input bindings, Network Gate LAN hint container
 - `settings_controls.js` — segmented effort controls
@@ -316,7 +317,7 @@ The web UI is a single-page app (`web/index.html` + `web/style.css` + ES modules
 - `widgets.js` — Widgets page for reviewed extension UI surfaces declared through `register_ui_tab`; hosts legacy `inline_card`/`iframe` plus declarative v1 widgets (forms/actions, async job forms/actions, markdown, code, JSON, key/value, tables, tabs, charts, stream, progress, `subscription` WS updates, poll with `auto_start`, files, galleries, image/audio/video media) and tears down widget timers/listeners/streams on remount while resuming async jobs by `job_id`.
 - `about.js` — about page
 
-Navigation is a left sidebar with 6 pages (Chat, Files, Skills, Widgets, Settings, About). Logs, Evolution, Updates, and Costs live as Settings sub-tabs rather than top-level nav pages; this keeps the mobile bottom bar compact while making Settings the operational hub. On narrow viewports (`@media (max-width: 640px)`) `#nav-rail` collapses to a horizontal bottom bar — `position: fixed; bottom: 0; flex-direction: row` with `padding-bottom: calc(6px + env(safe-area-inset-bottom, 0px))` for the iOS home-indicator and `#content { padding-left: 0; padding-bottom: calc(62px + env(safe-area-inset-bottom, 0px)) }` to clear the bar. Settings itself switches to a mobile stack list: tapping a section opens that panel and shows a Back-to-Settings control. The Skills page manages external + bundled skill packages — review trigger, key grants, enable/disable, status badges, and live-vs-catalog extension state — and reads from `/api/state` + `/api/extensions`. The Widgets page hosts reviewed extension UI declarations separately so useful widgets do not get buried in long skill lists; inline-card widgets now preserve their current state across SPA tab switches.
+Navigation is a left sidebar with 7 pages (Chat, Files, Skills, Widgets, Dashboard, Settings, About). Dashboard is the operational hub for Logs, Evolution, Costs, and Updates; Settings returns to configuration-only tabs. On narrow viewports (`@media (max-width: 640px)`) `#nav-rail` collapses to a horizontal bottom bar — `position: fixed; bottom: 0; flex-direction: row` with `padding-bottom: calc(6px + env(safe-area-inset-bottom, 0px))` for the iOS home-indicator and `#content { padding-left: 0; padding-bottom: calc(62px + env(safe-area-inset-bottom, 0px)) }` to clear the bar. Settings itself switches to a mobile stack list: tapping a section opens that panel and shows a Back-to-Settings control. The Skills page manages external + bundled skill packages — review trigger, key grants, enable/disable, status badges, and live-vs-catalog extension state — and reads from `/api/state` + `/api/extensions`. The Widgets page hosts reviewed extension UI declarations separately so useful widgets do not get buried in long skill lists; inline-card widgets now preserve their current state across SPA tab switches.
 
 ### 3.1 Chat
 
@@ -362,17 +363,18 @@ Navigation is a left sidebar with 6 pages (Chat, Files, Skills, Widgets, Setting
 - **Transfer semantics**: copy/move of symlink entries preserves the link object; writing through a symlink-backed file edits the target content.
 - **Bounds**: directory listings are capped, previews are bounded to a text/byte limit, and uploads reject oversized payloads.
 
-### 3.3 Dashboard (removed in v4.10.0)
+### 3.3 Dashboard
 
-The Dashboard tab has been removed. Its functionality is now distributed:
-- **Budget**: shown as a compact pill in the Chat header (polls `/api/state` every 3s).
-- **Evolve/BG toggles**: Chat header buttons (glow when active).
-- **Review/Restart/Panic**: Chat header buttons.
-- **Runtime status (evolution/consciousness detail)**: Evolution page runtime card.
+The Dashboard tab is the operational hub. It hosts four full-height sub-tabs:
+
+- **Logs** — live log timeline and filters.
+- **Evolution** — runtime/evolution status chart.
+- **Costs** — budget controls and spend breakdown. The Chat budget pill opens this sub-tab directly.
+- **Updates** — official update status plus a separate local recovery area.
 
 ### 3.4 Settings
 
-- **Tabbed layout**: `Providers`, `Models`, `Behavior`, `Integrations`, `Advanced`, `Logs`, `Evolution`, `Updates`, `Costs`. On mobile, the tab row becomes a native-feeling section list; selecting a section opens a sub-screen with a Back-to-Settings button.
+- **Tabbed layout**: `Providers`, `Models`, `Behavior`, `Integrations`, `Advanced`. On mobile, the tab row becomes a native-feeling section list; selecting a section opens a sub-screen with a Back-to-Settings button.
 - **Provider cards**: OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, Anthropic, plus optional Network Password. Cards are collapsible and use masked-secret inputs with show/hide toggles.
 - **API Keys**: OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, Anthropic, Telegram Bot Token, GitHub Token, and Network Password.
   Keys are displayed as masked values (e.g., `sk-or-v1...`), can be explicitly cleared, and are only overwritten on save if the user enters a new value (not containing `...`).
@@ -404,7 +406,7 @@ The Dashboard tab has been removed. Its functionality is now distributed:
 - **Runtime Mode**: `Light` / `Advanced` / `Pro` segmented control backed by `OUROBOROS_RUNTIME_MODE` (default `advanced`). Onboarding can choose the initial boot baseline before the agent starts. After launch, the Settings control is interactive only in desktop builds: `web/modules/settings.js` calls the pywebview launcher bridge `request_runtime_mode_change`, the launcher shows a native confirmation dialog, and the launcher saves the new mode with `allow_elevation=True`; the change is reported as restart-required. Web/Docker sessions can view the current mode but cannot elevate it through `/api/settings`. The normal HTTP save path still omits/drops `OUROBOROS_RUNTIME_MODE`, and `ouroboros/config.py::save_settings` plus the boot-baseline pin, `_data_write` settings.json block, shell filters, and Files API guard remain the self-elevation defenses. `ouroboros/config.py::VALID_RUNTIME_MODES = ("light", "advanced", "pro")` is the SSOT; `normalize_runtime_mode` runs on the read path (`get_runtime_mode`) so unknown values can never drift into `/api/state`.
 - **External Skills Repo**: text input backed by `OUROBOROS_SKILLS_REPO_PATH`. v5 changed the discovery model: the primary location is now the in-data-plane tree `data/skills/{native,clawhub,external}/`, and `OUROBOROS_SKILLS_REPO_PATH` is an OPTIONAL extra discovery root for users who keep skills in their own checkout. The skill loader walks all three buckets + the optional path, tagging each `LoadedSkill` with `source` (`native`/`clawhub`/`external`/`user_repo`); `skill_exec` runs reviewed scripts from those packages; `review_skill`/`toggle_skill`/`list_skills` manage lifecycle, and the Skills page exposes the same direct review/toggle flow plus a Marketplace sub-tab for ClawHub installs. Absolute path or `~`-prefixed; empty means "use only the data plane". Ouroboros never clones or pulls this directory — the user manages it out-of-band. `get_skills_repo_path()` expands `~` at read time; `/api/state` surfaces only a `skills_repo_configured` boolean so the absolute path never leaks to the UI.
 - **ClawHub Marketplace**: always-on Marketplace sub-tab backed by `OUROBOROS_CLAWHUB_REGISTRY_URL` (default `https://clawhub.ai/api/v1`). The old `OUROBOROS_CLAWHUB_ENABLED` key is ignored when present in legacy settings and is no longer part of defaults or env propagation. Browse uses `/packages?family=skill`; text search uses `/search?q=&limit=16` (full-index relevance ranking, single-page) and enriches thin hits through a merged `/packages/<slug>` + `/skills/<slug>` detail lookup to recover stats, official badges, license, and homepage metadata. The Official-only checkbox is clickable in both modes: browse forwards `isOfficial=true` to the catalogue, while text search applies it after enrichment because `/search` has no official filter parameter. Registry reads and downloads retry bounded 429 responses with `Retry-After` when present; persistent rate limits surface as a human-readable "try again later" state with a retry affordance instead of a raw HTTP 429. Every install runs through a fixed pipeline — registry resolve -> archive download (50 MB cap, text-only, sensitive-filename + loadable-binary refusal) -> staging extract -> OpenClaw frontmatter translation (writing original `SKILL.md` aside as `SKILL.openclaw.md` for audit) -> atomic land into `data/skills/clawhub/<owner>__<slug>/` -> tri-model `review_skill` auto-trigger -> durable provenance at `data/state/skills/<name>/clawhub.json`. v5.4.0 adds a card-level lifecycle CTA: install auto-runs review, then the card offers Enable only after a fresh PASS review and any required grants; otherwise the same card becomes Fix / Grant / Enable / Open widgets / Disable / Uninstall. Plugins (Node/TS) are filtered at search time and refused at install time; only skill packages are accepted. The registry-host allowlist prevents a settings override from redirecting HTTP traffic, and a custom redirect handler re-validates the host on every 30x hop. Core settings keys (`OPENROUTER_API_KEY` etc.) requested by OpenClaw `requires.env` become per-skill grant requirements and are forwarded only after fresh PASS review plus desktop-launcher owner grant; this is a trust-local model with `_data_write`, Files API, and `run_shell` owner-state defenses rather than an OS-level same-user sandbox.
-- **Advanced tab**: local model runtime, max workers, tool timeout, soft/hard timeout, and reset controls. Total budget and per-task cost cap live in the **Costs** Settings sub-tab.
+- **Advanced tab**: local model runtime, max workers, tool timeout, soft/hard timeout, and reset controls. Total budget and per-task cost cap live in **Dashboard → Costs**.
 - **Local Model Runtime**: source, GGUF filename, port, GPU layers, context length, chat format, start/stop/test buttons, live local-model status, real download progress bar (updates via `download_progress` from `/api/local-model/status`), and an **Install Local Runtime** button (hidden until runtime is missing). The Start button performs a preflight check via `/api/local-model/start` before downloading; on a `runtime_missing` (HTTP 412) response it surfaces the install button and a human-readable hint instead of a raw traceback. After install completes (`runtime_status == "install_ok"`), the start flow resumes automatically if a source was configured. `LOCAL_MODEL_FILENAME` now accepts subfolder paths (`quant/model.gguf`) and split GGUF patterns (`quant/model-00001-of-00003.gguf`); all shards are downloaded automatically and the server is started with the first shard. If the user omits the subfolder prefix (types just the bare filename), `_resolve_hf_path` auto-resolves the full path by querying `list_repo_files` on the HF repo (fail-open on network errors).
 - **Telegram**: Bot Token and primary chat id. If no primary chat id is pinned, the bridge binds to the first active Telegram chat and keeps replies attached there.
 - **GitHub**: Token + Repo (for remote sync).
@@ -437,16 +439,16 @@ The Dashboard tab has been removed. Its functionality is now distributed:
 The standalone Versions tab has been merged into the Evolution page as a sub-tab.
 See section 3.8 (Evolution) for the combined page.
 
-### 3.7 Settings → Costs
+### 3.7 Dashboard → Costs
 
-- **Budget card** at top of the Settings sub-tab: Total Budget (`s-budget`) and Per-task Cost Cap (`s-per-task-cost`) inputs with a **Save Budget** button that POSTs directly to `/api/settings`. The chat budget pill opens this tab directly.
+- **Budget card** at top of the Dashboard Costs sub-tab: Total Budget (`s-budget`) and Per-task Cost Cap (`s-per-task-cost`) inputs with a **Save Budget** button that POSTs directly to `/api/settings`. The chat budget pill opens this tab directly.
 - **Total Spent / Total Calls / Top Model** stat cards below the budget card.
 - **Breakdown tables**: By Model, By API Key, By Model Category, By Task Category.
   Each row shows name, call count, cost, and a proportional bar.
 - **Refresh** button reloads data from `/api/cost-breakdown`.
-- Data auto-loads when the Settings `Costs` sub-tab is shown.
+- Data auto-loads when the Dashboard `Costs` sub-tab is shown.
 
-### 3.8 Settings → Evolution
+### 3.8 Dashboard → Evolution
 
 - **Runtime status card**: evolution mode / consciousness pills, cycle count, queue, budget remaining, last evolution timestamp, next wakeup.
 - **Chart**: interactive Chart.js line graph showing code LOC, prompt sizes (BIBLE, SYSTEM),
@@ -456,9 +458,10 @@ See section 3.8 (Evolution) for the combined page.
 - Data fetched from `/api/evolution-data` (cached 60s server-side).
 - Chart.js bundled locally (`web/chart.umd.min.js`) — no CDN dependency.
 
-### 3.9 Settings → Updates
+### 3.9 Dashboard → Updates
 
-- **Managed update card**: shows current version/SHA, latest managed remote SHA/message, dirty/ahead/behind state, and an explicit **Check for updates** action. Passive status reads do not fetch; manual Check fetches the launcher-managed `managed` remote. Source-mode checkouts without launcher-managed metadata report managed updates as unavailable rather than pretending an `origin` pull can be applied by the launcher restart path.
+- **Official update card**: shows current version/SHA, latest official remote SHA/message, dirty/ahead/behind state, and an explicit **Check for updates** action. Passive status reads do not fetch; manual Check fetches the launcher-managed `managed` remote, which is normalized to the hardcoded official repo `https://github.com/joi-lab/ouroboros-desktop`. Source-mode checkouts without launcher-managed metadata report managed updates as unavailable rather than pretending an `origin` pull can be applied by the launcher restart path.
+- **Official releases vs local recovery**: official tags come from the official managed remote. Local commits/tags remain visible only in the Local Recovery area and are labelled as recovery/developer refs, not official releases.
 - **Update Now / Update with Options** → POST `/api/update/apply`. Safe clean updates are one-click. Divergent/dirty worktrees show an explicit options prompt; the backend always writes a rescue snapshot first, always preserves ahead commits on a `local-keep-*` branch, and writes a one-shot update-intent marker pinned to the exact target SHA before restart. The current process may pre-checkout that SHA before exiting so the launcher starts the updated `server.py`, but the marker is intentionally kept until post-restart bootstrap; `checkout_and_reset` consumes and clears it only there so the restarted process applies the commit the user approved, not a later moving branch tip.
 - **Current branch + SHA** displayed at top.
 - **Recent Commits** list with SHA, date, message, and "Restore" button.

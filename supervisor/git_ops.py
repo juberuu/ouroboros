@@ -36,6 +36,7 @@ BRANCH_STABLE: str = "ouroboros-stable"
 MANAGED_REPO_META_NAME = "ouroboros-managed.json"
 BOOTSTRAP_PIN_MARKER_NAME = "ouroboros-bootstrap-pending"
 UPDATE_INTENT_MARKER_NAME = "ouroboros-update-intent.json"
+OFFICIAL_UPDATE_REMOTE_URL = "https://github.com/joi-lab/ouroboros-desktop"
 
 
 def init(repo_dir: pathlib.Path, drive_root: pathlib.Path, remote_url: str,
@@ -972,16 +973,55 @@ def _managed_update_target(branch: Optional[str] = None) -> Tuple[str, str, str]
     managed_meta = _read_managed_repo_meta()
     if not managed_meta:
         return "", "", ""
-    remote_name = _managed_remote_name(managed_meta)
+    remote_name = "managed"
     remote_branch = _managed_remote_branch_for(target_branch, managed_meta)
     target_ref = f"{remote_name}/{remote_branch}" if remote_name and remote_branch else ""
     return remote_name, remote_branch, target_ref
+
+
+def ensure_official_update_remote() -> Tuple[bool, str]:
+    """Ensure the managed update remote points at the official Ouroboros repository."""
+    remotes = _list_remotes()
+    if "managed" in remotes:
+        rc, _out, err = git_capture(["git", "remote", "set-url", "managed", OFFICIAL_UPDATE_REMOTE_URL])
+    else:
+        rc, _out, err = git_capture(["git", "remote", "add", "managed", OFFICIAL_UPDATE_REMOTE_URL])
+    return rc == 0, err
+
+
+def list_official_update_tags(max_count: int = 30) -> List[Dict[str, Any]]:
+    """Return official tags from the official managed remote, separate from local/user tags."""
+    if not _has_remote("managed"):
+        return []
+    rc, raw, _err = git_capture([
+        "git", "ls-remote", "--tags", "--refs", "--sort=-version:refname",
+        "managed", "refs/tags/v*",
+    ])
+    if rc != 0:
+        return []
+    tags: List[Dict[str, Any]] = []
+    for line in raw.splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        tags.append({
+            "tag": parts[1].rsplit("/", 1)[-1],
+            "sha": parts[0],
+            "source": "official",
+        })
+        if len(tags) >= max_count:
+            break
+    return tags
 
 
 def compute_managed_update_status(fetch: bool = False) -> Dict[str, Any]:
     """Return current managed-remote divergence for the UI Update panel."""
     branch_dev, _branch_stable = managed_branch_defaults()
     remote_name, remote_branch, target_ref = _managed_update_target(branch_dev)
+    official_remote_ok = True
+    official_remote_err = ""
+    if remote_name:
+        official_remote_ok, official_remote_err = ensure_official_update_remote()
     state: Dict[str, Any] = {
         "managed": bool(_read_managed_repo_meta()),
         "remote": remote_name,
@@ -1002,6 +1042,12 @@ def compute_managed_update_status(fetch: bool = False) -> Dict[str, Any]:
         "available": False,
         "safe_to_apply": False,
     }
+    if not official_remote_ok:
+        state["warnings"].append(f"remote_config_error:{official_remote_err or 'unknown error'}")
+        state["managed"] = False
+        state["available"] = False
+        state["safe_to_apply"] = False
+        return state
 
     rc, branch, err = git_capture(["git", "rev-parse", "--abbrev-ref", "HEAD"])
     if rc == 0:
@@ -1025,13 +1071,16 @@ def compute_managed_update_status(fetch: bool = False) -> Dict[str, Any]:
     elif err:
         state["warnings"].append(f"status_error:{err}")
 
-    if fetch and remote_name and _has_remote(remote_name):
+    if fetch and remote_name:
         rc, _out, err = git_capture(["git", "fetch", remote_name])
         if rc != 0:
             state["warnings"].append(f"fetch_error:{err or 'unknown error'}")
 
     if not target_ref:
         state["warnings"].append("managed_updates_unavailable")
+        return state
+    if not fetch:
+        state["warnings"].append("official_status_requires_check")
         return state
     if not _has_remote(remote_name):
         state["warnings"].append(f"missing_remote:{remote_name}")

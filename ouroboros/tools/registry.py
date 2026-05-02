@@ -110,7 +110,7 @@ def _heal_payload_root(messages: Optional[List[Dict[str, Any]]]) -> str:
     if ".." in path:
         return ""
     parts = pathlib.PurePosixPath(path).parts
-    if len(parts) < 3 or parts[0] != "skills" or parts[1] not in {"external", "clawhub"}:
+    if len(parts) < 3 or parts[0] != "skills" or parts[1] not in {"external", "clawhub", "ouroboroshub"}:
         return ""
     if any(part in {"", ".", ".."} for part in parts):
         return ""
@@ -175,6 +175,8 @@ _HEAL_MODE_ALLOWED_TOOLS = frozenset({
     "review_skill",
 })
 
+_HEAL_PROTECTED_PAYLOAD_FILENAMES = frozenset({".clawhub.json", ".ouroboroshub.json"})
+
 
 _SKILL_OWNER_STATE_STEMS = ("grants", "review", "enabled", "clawhub")
 _DETACHED_PROCESS_MARKERS = (
@@ -199,6 +201,11 @@ def _mentions_skill_owner_state(text_lower: str) -> bool:
 
 def _mentions_detached_process(text_lower: str) -> bool:
     return any(marker in text_lower for marker in _DETACHED_PROCESS_MARKERS)
+
+
+def _heal_protected_payload_sidecar(path_text: str) -> bool:
+    name = pathlib.PurePosixPath(str(path_text or "").replace("\\", "/")).name
+    return name in _HEAL_PROTECTED_PAYLOAD_FILENAMES
 
 
 _INTERPRETER_BASENAMES = frozenset({
@@ -1020,7 +1027,13 @@ class ToolRegistry:
                     return (
                         "⚠️ HEAL_MODE_BLOCKED: Heal/Fix data access is limited "
                         "to the selected skill payload under data/skills/external "
-                        "or data/skills/clawhub."
+                        "data/skills/clawhub, or data/skills/ouroboroshub."
+                    )
+                if name == "data_write" and _heal_protected_payload_sidecar(data_path):
+                    return (
+                        "⚠️ HEAL_MODE_BLOCKED: Heal/Fix may not edit marketplace "
+                        "or official provenance sidecars such as .clawhub.json "
+                        "or .ouroboroshub.json."
                     )
             if name == "data_list":
                 data_dir = str(args.get("dir", args.get("path", "")) or "")
@@ -1028,7 +1041,7 @@ class ToolRegistry:
                     return (
                         "⚠️ HEAL_MODE_BLOCKED: Heal/Fix data listing is limited "
                         "to the selected skill payload under data/skills/external "
-                        "or data/skills/clawhub."
+                        "data/skills/clawhub, or data/skills/ouroboroshub."
                     )
             if name == "review_skill" and str(args.get("skill", "") or "").strip() != heal_skill:
                 return "⚠️ HEAL_MODE_BLOCKED: Heal/Fix may only review the selected skill."

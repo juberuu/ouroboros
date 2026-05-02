@@ -333,6 +333,9 @@ function summaryCard(summary, installedMap, isPlugin) {
     const lifecycleHint = lifecycle.hint
         ? `<div class="marketplace-card-state-hint">${escapeHtml(lifecycle.hint)}</div>`
         : '';
+    const workingIndicator = pending
+        ? '<span class="marketplace-working-spinner" aria-hidden="true"></span>'
+        : '';
     const primaryButton = isPlugin
         ? `<button class="btn btn-default" disabled title="OpenClaw Node/TypeScript plugins are not installable in Ouroboros. Use a Python port or MCP bridge.">Plugin</button>`
         : `<button class="btn btn-primary marketplace-next-action"
@@ -385,7 +388,7 @@ function summaryCard(summary, installedMap, isPlugin) {
             </div>
             <div class="marketplace-card-body">${escapeHtml(description)}</div>
             <div class="marketplace-card-state marketplace-state-${lifecycle.tone}">
-                <strong>${escapeHtml(lifecycle.label)}</strong>
+                <strong>${workingIndicator}${escapeHtml(lifecycle.label)}</strong>
                 ${lifecycleHint}
             </div>
             <div class="marketplace-card-meta muted">
@@ -590,18 +593,52 @@ async function openDetailModal(host, slug, options) {
     });
     backdrop.querySelector('[data-mp-modal-close]').addEventListener('click', () => backdrop.remove());
 
-    // Initial preview always uses the registry's latest version. The
-    // user can pick a different version from the Version dropdown
-    // (rendered below) which re-fetches and re-renders this modal in
-    // place. We keep this preview-orchestrator separate from
-    // ``runPreview`` so the version-change handler can call it without
-    // mutating the modal scaffolding.
-    //
-    // ``previewToken`` is incremented on every preview request so a
-    // late v2 response cannot overwrite a newer v3 render — Cycle 1
-    // GPT critic Finding 6.
     const initialVersion = options?.preselectVersion || null;
     let previewToken = 0;
+
+    async function runInfo() {
+        body.innerHTML = '<div class="muted">Loading details…</div>';
+        actions.innerHTML = '';
+        try {
+            const summary = await fetchJson(`/api/marketplace/clawhub/info/${encodeURIComponent(slug)}`);
+            const versions = Array.from(new Set([...(summary.versions || []), summary.latest_version].filter(Boolean)));
+            const versionOptions = versions
+                .map((v) => `<option value="${escapeHtml(v)}"${v === summary.latest_version ? ' selected' : ''}>${escapeHtml(v)}</option>`)
+                .join('');
+            const homepageHref = safeExternalUrl(summary.homepage);
+            body.innerHTML = `
+                <section>
+                    <h3>${escapeHtml(summary.display_name || summary.name || slug)}</h3>
+                    <div class="muted">${escapeHtml(summary.summary || summary.description || '')}</div>
+                    <div class="marketplace-modal-meta muted">
+                        <label class="marketplace-version-pin">
+                            Version:
+                            <select data-mp-modal-version-select>
+                                ${versionOptions || `<option value="${escapeHtml(summary.latest_version || '')}">${escapeHtml(summary.latest_version || '—')}</option>`}
+                            </select>
+                        </label>
+                        ${summary.license ? `<span>license: ${escapeHtml(summary.license)}</span>` : ''}
+                        ${homepageHref ? `<a href="${homepageHref}" target="_blank" rel="noopener noreferrer">homepage</a>` : ''}
+                    </div>
+                    <p class="muted">Use Inspect package to download and adapt the archive before installing.</p>
+                </section>
+            `;
+            const versionSelect = body.querySelector('[data-mp-modal-version-select]');
+            actions.innerHTML = `
+                <button class="btn btn-default" data-mp-inspect-package>Inspect package</button>
+                <button class="btn btn-primary" data-mp-modal-install="${escapeHtml(slug)}" data-version="${escapeHtml(versionSelect?.value || summary.latest_version || '')}">Install + auto-review</button>
+            `;
+            versionSelect?.addEventListener('change', () => {
+                const install = actions.querySelector('[data-mp-modal-install]');
+                if (install) install.dataset.version = versionSelect.value || '';
+            });
+            actions.querySelector('[data-mp-inspect-package]')?.addEventListener('click', () => {
+                runPreview(versionSelect?.value || initialVersion).catch((err) => console.warn('marketplace: preview failed', err));
+            });
+        } catch (err) {
+            body.innerHTML = `<div class="skills-load-error">Failed to load details: ${escapeHtml(err.message)}</div>`;
+        }
+    }
 
     async function runPreview(version) {
         const myToken = ++previewToken;
@@ -615,7 +652,11 @@ async function openDetailModal(host, slug, options) {
             preview = await fetchJson(url);
         } catch (err) {
             if (myToken !== previewToken) return;
-            body.innerHTML = `<div class="skills-load-error">Failed to load preview: ${escapeHtml(err.message)}</div>`;
+            body.innerHTML = `
+                <div class="skills-load-error">Failed to load deep preview: ${escapeHtml(err.message)}</div>
+                <button class="btn btn-default" data-mp-retry-preview>Retry preview</button>
+            `;
+            body.querySelector('[data-mp-retry-preview]')?.addEventListener('click', () => runPreview(version));
             return;
         }
         if (myToken !== previewToken) {
@@ -704,7 +745,7 @@ async function openDetailModal(host, slug, options) {
                 : 'Install blocked by adapter — see Blockers above.'}</div>`;
     }
 
-    await runPreview(initialVersion);
+    await runInfo();
 }
 
 
@@ -958,9 +999,12 @@ export function initMarketplace(pane) {
             try {
                 await runLifecycleAction(slug, action);
             } catch (err) {
-                failedMessage = err.message || String(err);
-                showStatus(pane, `${slug}: ${failedMessage}`, 'danger');
-                setPending(slug, { label: `${action} failed`, tone: 'danger', message: failedMessage });
+                failedMessage = action === 'install'
+                    ? installErrorCopy(err.message || String(err))
+                    : (err.message || String(err));
+                const tone = action === 'install' && isRateLimitError(failedMessage) ? 'warn' : 'danger';
+                showStatus(pane, `${slug}: ${failedMessage}`, tone);
+                setPending(slug, { label: `${action} failed`, tone, message: failedMessage });
             } finally {
                 if (!failedMessage) setPending(slug, null);
                 actionBtn.disabled = false;
@@ -1082,7 +1126,7 @@ export function initMarketplace(pane) {
                 body: JSON.stringify(body),
             });
             if (!result.ok) {
-                showStatus(pane, `Install failed: ${result.error}`, 'danger');
+                showStatus(pane, `Install failed: ${installErrorCopy(result.error)}`, isRateLimitError(result.error) ? 'warn' : 'danger');
             } else if (result.review_error) {
                 showStatus(
                     pane,

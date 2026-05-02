@@ -1488,6 +1488,7 @@ async def api_update_status(request: Request) -> JSONResponse:
         return JSONResponse({
             "current_version": get_version(),
             "latest_version": latest_version,
+            "official_tags": [],
             **status,
         })
     except Exception as e:
@@ -1497,7 +1498,7 @@ async def api_update_status(request: Request) -> JSONResponse:
 async def api_update_check(request: Request) -> JSONResponse:
     """Fetch the managed remote and return fresh update status."""
     try:
-        from supervisor.git_ops import compute_managed_update_status, git_capture
+        from supervisor.git_ops import compute_managed_update_status, git_capture, list_official_update_tags
         status = compute_managed_update_status(fetch=True)
         latest_version = ""
         target_ref = status.get("target_ref") or ""
@@ -1508,6 +1509,7 @@ async def api_update_check(request: Request) -> JSONResponse:
         return JSONResponse({
             "current_version": get_version(),
             "latest_version": latest_version,
+            "official_tags": list_official_update_tags(),
             **status,
         })
     except Exception as e:

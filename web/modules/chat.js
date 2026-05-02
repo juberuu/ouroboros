@@ -40,7 +40,7 @@ function saveInputHistory(entries) {
     } catch {}
 }
 
-export function initChat({ ws, state, updateUnreadBadge, openSettingsTab }) {
+export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDashboardTab }) {
     const container = document.getElementById('content');
     const chatSessionId = getOrCreateChatSessionId();
 
@@ -1492,7 +1492,8 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab }) {
     });
 
     budgetPill?.addEventListener('click', () => {
-        if (typeof openSettingsTab === 'function') openSettingsTab('costs');
+        if (typeof openDashboardTab === 'function') openDashboardTab('costs');
+        else if (typeof openSettingsTab === 'function') openSettingsTab('costs');
     });
 
     refreshHeaderControlState(true);

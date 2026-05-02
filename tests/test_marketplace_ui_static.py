@@ -14,6 +14,10 @@ def _marketplace_js() -> str:
     )
 
 
+def _read(rel: str) -> str:
+    return (REPO_ROOT / rel).read_text(encoding="utf-8")
+
+
 def _skills_js() -> str:
     return (REPO_ROOT / "web" / "modules" / "skills.js").read_text(
         encoding="utf-8"
@@ -64,8 +68,11 @@ def test_marketplace_review_failure_points_to_heal_flow():
 
 def test_marketplace_cards_have_lifecycle_next_action():
     source = _marketplace_js()
+    css = _read("web/style.css")
     assert "function lifecycleFor" in source
     assert "marketplace-next-action" in source
+    assert "marketplace-working-spinner" in source
+    assert ".marketplace-working-spinner" in css
     assert "data-mp-action" in source
     assert "state.pendingBySlug" in source
 

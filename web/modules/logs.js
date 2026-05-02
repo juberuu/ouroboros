@@ -10,7 +10,7 @@ import {
     summarizeLogEvent,
 } from './log_events.js';
 
-export function initLogs({ ws, state, mount = null, embedded = false }) {
+export function initLogs({ ws, state, mount = null, embedded = false, hostPage = 'settings', hostSubtab = 'logs' }) {
     const MAX_LOGS = 500;
     const MAX_TASK_EVENTS = 30;
     const duplicateWindowMs = 5000;
@@ -40,7 +40,7 @@ export function initLogs({ ws, state, mount = null, embedded = false }) {
     const logEntries = page.querySelector('#log-entries');
     function isLogsVisible() {
         return embedded
-            ? state.activePage === 'settings' && state.settingsActiveSubtab === 'logs'
+            ? state.activePage === hostPage && (hostPage === 'dashboard' ? state.dashboardActiveSubtab : state.settingsActiveSubtab) === hostSubtab
             : state.activePage === 'logs';
     }
 
@@ -309,6 +309,9 @@ export function initLogs({ ws, state, mount = null, embedded = false }) {
     });
 
     window.addEventListener('ouro:settings-subtab-shown', (event) => {
+        if (event.detail?.tab === 'logs') scrollToLatest();
+    });
+    window.addEventListener('ouro:dashboard-subtab-shown', (event) => {
         if (event.detail?.tab === 'logs') scrollToLatest();
     });
 }

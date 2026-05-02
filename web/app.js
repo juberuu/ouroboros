@@ -20,6 +20,7 @@ import { initCosts } from './modules/costs.js';
 import { initSkills } from './modules/skills.js';
 import { initWidgets } from './modules/widgets.js';
 import { initUpdates } from './modules/updates.js';
+import { initDashboard } from './modules/dashboard.js';
 
 import { initAbout } from './modules/about.js';
 import { initOnboardingOverlay } from './modules/onboarding_overlay.js';
@@ -35,6 +36,7 @@ const state = {
     unreadCount: 0,
     activePage: 'chat',
     settingsActiveSubtab: 'providers',
+    dashboardActiveSubtab: 'logs',
     beforePageLeave: null,
 };
 
@@ -44,6 +46,7 @@ const state = {
 const ws = createWS();
 const beforePageLeaveHandlers = [];
 let settingsControls = null;
+let dashboardControls = null;
 
 // ---------------------------------------------------------------------------
 // Navigation
@@ -70,6 +73,13 @@ async function openSettingsTab(tabName) {
     await showPage('settings');
     if (settingsControls && typeof settingsControls.activateTab === 'function') {
         settingsControls.activateTab(tabName);
+    }
+}
+
+async function openDashboardTab(tabName) {
+    await showPage('dashboard');
+    if (dashboardControls && typeof dashboardControls.activateTab === 'function') {
+        dashboardControls.activateTab(tabName);
     }
 }
 
@@ -103,6 +113,7 @@ const ctx = {
     updateUnreadBadge,
     showPage,
     openSettingsTab,
+    openDashboardTab,
     setBeforePageLeave: (handler) => {
         if (typeof handler !== 'function') return () => {};
         beforePageLeaveHandlers.push(handler);
@@ -116,10 +127,11 @@ const ctx = {
 initChat(ctx);
 initFiles(ctx);
 settingsControls = initSettings(ctx);
-initLogs({ ...ctx, mount: document.getElementById('settings-panel-logs'), embedded: true });
-initEvolution({ ...ctx, mount: document.getElementById('settings-panel-evolution'), embedded: true, chartOnly: true });
-initUpdates({ ...ctx, mount: document.getElementById('settings-panel-updates') });
-initCosts({ ...ctx, mount: document.getElementById('settings-panel-costs'), embedded: true });
+dashboardControls = initDashboard(ctx);
+initLogs({ ...ctx, mount: document.getElementById('dashboard-panel-logs'), embedded: true, hostPage: 'dashboard', hostSubtab: 'logs' });
+initEvolution({ ...ctx, mount: document.getElementById('dashboard-panel-evolution'), embedded: true, hostPage: 'dashboard', hostSubtab: 'evolution', chartOnly: true });
+initUpdates({ ...ctx, mount: document.getElementById('dashboard-panel-updates'), hostPage: 'dashboard', hostSubtab: 'updates' });
+initCosts({ ...ctx, mount: document.getElementById('dashboard-panel-costs'), embedded: true, hostPage: 'dashboard', hostSubtab: 'costs' });
 initSkills(ctx);
 initWidgets(ctx);
 

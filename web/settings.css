@@ -75,25 +75,6 @@
     display: flex;
 }
 
-.settings-embedded-panel {
-    min-height: 0;
-}
-
-.settings-embedded-content {
-    display: flex;
-    flex: 1;
-    min-height: 0;
-    flex-direction: column;
-    overflow: hidden;
-}
-
-#page-settings[data-active-settings-tab="logs"] .settings-footer,
-#page-settings[data-active-settings-tab="evolution"] .settings-footer,
-#page-settings[data-active-settings-tab="updates"] .settings-footer,
-#page-settings[data-active-settings-tab="costs"] .settings-footer {
-    display: none;
-}
-
 .settings-section-copy {
     color: var(--text-secondary);
     font-size: 13px;

@@ -1,6 +1,6 @@
 import { escapeHtml } from './utils.js';
 
-export function initEvolution({ ws, state, mount = null, embedded = false, chartOnly = false }) {
+export function initEvolution({ ws, state, mount = null, embedded = false, chartOnly = false, hostPage = 'settings', hostSubtab = 'evolution' }) {
     const page = document.createElement('div');
     page.id = 'page-evolution';
     page.className = embedded ? 'settings-embedded-content settings-evolution-panel' : 'page';
@@ -67,7 +67,7 @@ export function initEvolution({ ws, state, mount = null, embedded = false, chart
 
     function isEvolutionVisible() {
         return embedded
-            ? state.activePage === 'settings' && state.settingsActiveSubtab === 'evolution'
+            ? state.activePage === hostPage && (hostPage === 'dashboard' ? state.dashboardActiveSubtab : state.settingsActiveSubtab) === hostSubtab
             : state.activePage === 'evolution';
     }
 
@@ -458,6 +458,9 @@ export function initEvolution({ ws, state, mount = null, embedded = false, chart
         }
     });
     window.addEventListener('ouro:settings-subtab-shown', (event) => {
+        if (embedded && event?.detail?.tab === 'evolution') ensureEvolutionLoaded(false);
+    });
+    window.addEventListener('ouro:dashboard-subtab-shown', (event) => {
         if (embedded && event?.detail?.tab === 'evolution') ensureEvolutionLoaded(false);
     });
 

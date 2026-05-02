@@ -15,7 +15,7 @@ def _skills_js() -> str:
 def test_skills_heal_button_is_review_preserving_agent_task():
     source = _skills_js()
     assert "function healReady(skill)" in source
-    assert "source !== 'user_repo'" in source
+    assert "['clawhub', 'ouroboroshub', 'external'].includes(source)" in source
     assert "skills-heal" in source
     assert "return { label: 'Fix', className: 'skills-heal'" in source
     assert "buildHealPrompt(skill)" in source

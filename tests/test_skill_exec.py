@@ -521,6 +521,31 @@ def test_heal_context_allows_payload_tools_and_review(tmp_path):
     assert "OK" in result
 
 
+def test_heal_context_allows_ouroboroshub_payload_tools(tmp_path):
+    ctx = _make_ctx(tmp_path)
+    ctx.messages = [{"role": "user", "content": 'HEAL_MODE_NO_ENABLE\nHEAL_SKILL_NAME_JSON="nanobanana"\nHEAL_SKILL_PAYLOAD_ROOT_JSON="skills/ouroboroshub/nanobanana"\nrepair nanobanana'}]
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+    registry._ctx = ctx
+
+    result = registry.execute("data_write", {"path": "skills/ouroboroshub/nanobanana/plugin.py", "content": "# fixed"})
+
+    assert "HEAL_MODE_BLOCKED" not in result
+    assert "OK" in result
+
+
+@pytest.mark.parametrize("sidecar", [".ouroboroshub.json", ".clawhub.json"])
+def test_heal_context_blocks_marketplace_sidecar_writes(sidecar, tmp_path):
+    ctx = _make_ctx(tmp_path)
+    ctx.messages = [{"role": "user", "content": 'HEAL_MODE_NO_ENABLE\nHEAL_SKILL_NAME_JSON="nanobanana"\nHEAL_SKILL_PAYLOAD_ROOT_JSON="skills/ouroboroshub/nanobanana"\nrepair nanobanana'}]
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+    registry._ctx = ctx
+
+    result = registry.execute("data_write", {"path": f"skills/ouroboroshub/nanobanana/{sidecar}", "content": "{}"})
+
+    assert "HEAL_MODE_BLOCKED" in result
+    assert "provenance sidecars" in result
+
+
 @pytest.mark.parametrize("tool_name,args", [
     ("data_write", {"path": "memory/identity.md", "content": "x"}),
     ("data_read", {"path": "settings.json"}),

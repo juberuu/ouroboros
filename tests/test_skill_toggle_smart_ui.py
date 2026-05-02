@@ -33,7 +33,10 @@ def test_skill_cards_keep_toggle_but_move_secondary_actions_to_menu():
     assert "data-skill-menu-trigger" in source
     assert "skills-menu-item skills-update" in source
     assert "skills-menu-item skills-uninstall" in source
-    assert ".skills-card-menu-popover" in css
-    assert "position: static" in css
+    assert "skills-card-menu-dialog" in source
+    assert "showModal()" in source
+    assert "event.target.classList?.contains('skills-card-menu-dialog')" in source
+    assert ".skills-card-menu-dialog" in css
+    assert "::backdrop" in css
     assert ".skills-menu-item" in css
     assert ">Heal<" not in source

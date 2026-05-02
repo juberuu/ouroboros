@@ -1,6 +1,6 @@
 import { escapeHtml } from './utils.js';
 
-export function initUpdates({ mount }) {
+export function initUpdates({ mount, hostPage = 'settings', hostSubtab = 'updates', state = {} }) {
     const host = mount || document.getElementById('content');
     const page = document.createElement('div');
     page.id = 'page-updates';
@@ -16,7 +16,7 @@ export function initUpdates({ mount }) {
             <section class="updates-card" id="updates-status-card">
                 <div class="updates-card-head">
                     <div>
-                        <div class="section-title">Managed Repository</div>
+                        <div class="section-title">Official Updates</div>
                         <div class="updates-summary" id="updates-summary">Loading update status...</div>
                     </div>
                     <span class="status-badge offline" id="updates-badge">Idle</span>
@@ -33,11 +33,15 @@ export function initUpdates({ mount }) {
                 </div>
                 <div class="evo-versions-cols">
                     <div class="evo-versions-col">
-                        <h3 class="section-title">Recent Commits</h3>
+                        <h3 class="section-title">Local Recovery: Recent Commits</h3>
                         <div id="updates-commits" class="log-scroll evo-versions-list"></div>
                     </div>
                     <div class="evo-versions-col">
-                        <h3 class="section-title">Tags</h3>
+                        <h3 class="section-title">Official Releases</h3>
+                        <div id="updates-official-tags" class="log-scroll evo-versions-list"></div>
+                    </div>
+                    <div class="evo-versions-col">
+                        <h3 class="section-title">Local Recovery: Local Tags</h3>
                         <div id="updates-tags" class="log-scroll evo-versions-list"></div>
                     </div>
                 </div>
@@ -53,6 +57,7 @@ export function initUpdates({ mount }) {
     const meta = page.querySelector('#updates-meta');
     const current = page.querySelector('#updates-current');
     const commitsDiv = page.querySelector('#updates-commits');
+    const officialTagsDiv = page.querySelector('#updates-official-tags');
     const tagsDiv = page.querySelector('#updates-tags');
     let latestStatus = null;
 
@@ -85,6 +90,15 @@ export function initUpdates({ mount }) {
             setBadge('offline', 'Unavailable');
             return;
         }
+        if (Array.isArray(data.warnings) && data.warnings.includes('official_status_requires_check')) {
+            summary.textContent = 'Click Check for updates to refresh official update status.';
+            meta.innerHTML = '<span class="evo-runtime-chip"><strong>Official repo:</strong> joi-lab/ouroboros-desktop</span>';
+            applyBtn.disabled = true;
+            applyBtn.dataset.safe = '0';
+            applyBtn.textContent = 'Check Required';
+            setBadge('offline', 'Not checked');
+            return;
+        }
         const currentVersion = data.current_version || 'unknown';
         const latestVersion = data.latest_version || 'unknown';
         const currentSha = data.current_short_sha || '?';
@@ -96,7 +110,8 @@ export function initUpdates({ mount }) {
             ? `Update available: ${currentVersion} (${currentSha}) -> ${latestVersion} (${latestSha})`
             : `Ouroboros is up to date at ${currentVersion} (${currentSha}).`;
         meta.innerHTML = [
-            `<span class="evo-runtime-chip"><strong>Remote:</strong> ${escapeHtml(data.remote || 'managed')}/${escapeHtml(data.remote_branch || '')}</span>`,
+            `<span class="evo-runtime-chip"><strong>Official repo:</strong> joi-lab/ouroboros-desktop</span>`,
+            `<span class="evo-runtime-chip"><strong>Remote ref:</strong> ${escapeHtml(data.remote || 'managed')}/${escapeHtml(data.remote_branch || '')}</span>`,
             `<span class="evo-runtime-chip"><strong>Divergence:</strong> ${escapeHtml(divergenceText(data))}</span>`,
             `<span class="evo-runtime-chip"><strong>Latest:</strong> ${escapeHtml(latestMsg)}</span>`,
         ].join('');
@@ -117,6 +132,7 @@ export function initUpdates({ mount }) {
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
             renderStatus(data);
+            renderOfficialTags(data.official_tags || []);
         } catch (err) {
             summary.textContent = `Failed to load update status: ${err.message || err}`;
             meta.innerHTML = '';
@@ -140,6 +156,20 @@ export function initUpdates({ mount }) {
         `;
         row.querySelector('button').addEventListener('click', () => rollback(targetId));
         return row;
+    }
+
+    function renderOfficialTags(tags) {
+        officialTagsDiv.innerHTML = '';
+        (tags || []).forEach((tag) => {
+            const row = document.createElement('div');
+            row.className = 'log-entry evo-versions-row';
+            row.innerHTML = `
+                <span class="log-type tools evo-versions-row-label">${escapeHtml(tag.tag || '')}</span>
+                <span class="log-msg evo-versions-row-msg">${escapeHtml((tag.sha || '').slice(0, 12))}</span>
+            `;
+            officialTagsDiv.appendChild(row);
+        });
+        if (!tags?.length) officialTagsDiv.innerHTML = '<div class="evo-empty">Check for updates to load official releases.</div>';
     }
 
     async function loadVersions() {
@@ -238,6 +268,11 @@ export function initUpdates({ mount }) {
 
     window.addEventListener('ouro:settings-subtab-shown', (event) => {
         if (event.detail?.tab !== 'updates') return;
+        loadStatus({ fetchRemote: false });
+        loadVersions();
+    });
+    window.addEventListener('ouro:dashboard-subtab-shown', (event) => {
+        if (event.detail?.tab !== hostSubtab || state.activePage !== hostPage) return;
         loadStatus({ fetchRemote: false });
         loadVersions();
     });

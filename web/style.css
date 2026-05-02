@@ -1512,8 +1512,14 @@ body {
     align-items: stretch;
     z-index: 5;
     flex-shrink: 0;
-    /* No background here on purpose. The input controls carry their own
-       frosted-glass surfaces; transcript text should remain unobscured. */
+    background: linear-gradient(
+        180deg,
+        rgba(13, 11, 15, 0.00) 0%,
+        rgba(13, 11, 15, 0.58) 28%,
+        rgba(13, 11, 15, 0.90) 100%
+    );
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
 }
 
 .chat-input-wrap {
@@ -2577,6 +2583,76 @@ body {
     margin-top: 12px;
 }
 
+/* Dashboard */
+#page-dashboard {
+    min-height: 0;
+}
+
+.dashboard-shell {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    padding: 0 20px 18px;
+    overflow: hidden;
+}
+
+.dashboard-tabs {
+    display: flex;
+    gap: 10px;
+    padding: 8px 0 12px;
+    overflow-x: auto;
+    scrollbar-width: none;
+}
+
+.dashboard-tabs::-webkit-scrollbar {
+    display: none;
+}
+
+.dashboard-tab {
+    flex: 0 0 auto;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.03);
+    color: var(--text-secondary);
+    border-radius: 999px;
+    padding: 9px 16px;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.dashboard-tab:hover,
+.dashboard-tab.active {
+    color: var(--text-primary);
+    border-color: rgba(232, 93, 111, 0.4);
+    background: rgba(232, 93, 111, 0.12);
+}
+
+.dashboard-panels,
+.dashboard-panel {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.dashboard-panel {
+    display: none;
+}
+
+.dashboard-panel.active {
+    display: flex;
+    flex-direction: column;
+}
+
+.settings-embedded-content {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    flex-direction: column;
+    overflow: hidden;
+}
+
 /* Evolution Versions sub-tab layout */
 .evo-versions-content {
     display: none;
@@ -3061,15 +3137,39 @@ body {
     color: var(--text-primary);
 }
 
-.skills-card-menu-popover {
-    position: static;
-    margin-top: 6px;
+.skills-card-menu-dialog {
     min-width: 150px;
     padding: 6px;
     border-radius: 12px;
     border: 1px solid rgba(255, 255, 255, 0.08);
     background: rgba(18, 20, 26, 0.96);
+    color: var(--text-primary);
     box-shadow: 0 18px 44px rgba(0, 0, 0, 0.32);
+    margin: auto;
+}
+
+.skills-card-menu-dialog::backdrop {
+    background: rgba(0, 0, 0, 0.28);
+    backdrop-filter: blur(2px);
+}
+
+.skills-card-menu-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 4px 6px 8px;
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+.skills-card-menu-close {
+    border: 0;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font: inherit;
+    font-size: 18px;
 }
 
 .skills-menu-item {
@@ -3291,7 +3391,7 @@ body {
 
 .marketplace-card.is-working {
     border-color: rgba(245, 158, 11, 0.35);
-    background: rgba(245, 158, 11, 0.035);
+    background: linear-gradient(135deg, rgba(245, 158, 11, 0.08), rgba(255, 255, 255, 0.02));
 }
 
 .marketplace-card-head {
@@ -3339,8 +3439,19 @@ body {
 }
 
 .marketplace-card-state strong {
-    display: block;
+    display: flex;
+    align-items: center;
+    gap: 8px;
     margin-bottom: 4px;
+}
+
+.marketplace-working-spinner {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    border: 2px solid rgba(245, 158, 11, 0.22);
+    border-top-color: rgba(245, 158, 11, 0.95);
+    animation: skills-review-spin 900ms linear infinite;
 }
 
 .marketplace-card-state-hint {
@@ -3934,6 +4045,31 @@ body {
     /* Skills page — reduce padding so cards don't get squeezed. */
     #page-skills {
         padding: 12px 12px;
+    }
+
+    .skills-card-head {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .skills-card-title {
+        width: 100%;
+    }
+
+    .skills-card-title h3,
+    .skills-card-desc {
+        overflow-wrap: anywhere;
+        word-break: normal;
+    }
+
+    .skills-card-toggle {
+        justify-content: flex-start;
+        width: 100%;
+    }
+
+    .skills-next-action {
+        min-width: 0;
+        flex: 1 1 150px;
     }
 
     /* Marketplace controls collapse to single column on phone screens. */
