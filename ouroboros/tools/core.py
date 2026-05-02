@@ -197,8 +197,34 @@ def _list_dir(root: pathlib.Path, rel: str, max_entries: int = 500) -> List[str]
     return items
 
 
+_MEMORY_AT_DRIVE_MEMORY = frozenset({
+    "identity.md", "scratchpad.md", "dialogue_summary.md",
+    "dialogue_blocks.json", "registry.md", "deep_review.md",
+    "WORLD.md",
+})
+
+
 def _repo_read(ctx: ToolContext, path: str, max_lines: int = 2000, start_line: int = 1) -> str:
-    """Read a file from the repo, optionally slicing to a line range."""
+    """Read a file from the repo, optionally slicing to a line range.
+
+    When the requested path is a known memory artifact (identity.md,
+    scratchpad.md, etc.) at the repo root level, return a hint rather than
+    letting an opaque ENOENT scroll past. These files live at
+    ``data_root/memory/`` AND are already injected into the system prompt —
+    re-reading wastes rounds.
+    """
+    norm = path.strip().lstrip("./").replace("\\", "/")
+    base = norm.rsplit("/", 1)[-1]
+    if "/" not in norm and base in _MEMORY_AT_DRIVE_MEMORY:
+        title = base.split('.')[0].title()
+        return (
+            f"⚠️ NOT_FOUND: '{path}' is not at the repo root.\n\n"
+            f"This file lives at `data_root/memory/{base}` AND is already "
+            f"injected into your system prompt above as `## {title}`. "
+            f"You don't need to read it — the content is already in your "
+            f"context. If you genuinely need the raw file, call "
+            f"`data_read(path='memory/{base}')`."
+        )
     content = read_text(ctx.repo_path(path))
     lines = content.splitlines(keepends=True)
     total = len(lines)
@@ -215,7 +241,33 @@ def _repo_list(ctx: ToolContext, dir: str = ".", max_entries: int = 500) -> str:
 
 
 def _data_read(ctx: ToolContext, path: str) -> str:
-    return read_text(ctx.drive_path(path))
+    """Read a UTF-8 text file from the drive (relative to drive_root).
+
+    Paths that include the drive_root prefix (e.g.
+    ``.tmp-data-qwen-coder-next/data/memory/identity.md`` or the absolute
+    ``/Users/.../data/memory/...``) used to silently fail with ENOENT
+    because ``drive_path()`` prepends drive_root again, producing a doubled
+    path. Strip the duplicate prefix when we recognize one so the call works
+    rather than burning a round on a confusing path-doubling error.
+    """
+    norm = str(path).strip().replace("\\", "/")
+    if norm.startswith("./"):
+        norm = norm[2:]
+    drive_str = str(ctx.drive_root).rstrip("/")
+    drive_no_lead = drive_str.lstrip("/")
+    if drive_no_lead and norm.lstrip("/").startswith(drive_no_lead):
+        stripped = norm.lstrip("/")
+        norm = stripped[len(drive_no_lead):].lstrip("/")
+    elif norm.startswith(".tmp-data-") or norm.lstrip("/").startswith(".tmp-data-"):
+        candidate = norm.lstrip("/")
+        first_slash = candidate.find("/")
+        if first_slash > 0:
+            after = candidate[first_slash + 1:]
+            if after.startswith("data/"):
+                norm = after[len("data/"):]
+            else:
+                norm = after
+    return read_text(ctx.drive_path(norm))
 
 
 def _data_list(ctx: ToolContext, dir: str = ".", max_entries: int = 500) -> str:
