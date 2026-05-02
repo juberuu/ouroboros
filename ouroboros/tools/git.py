@@ -177,6 +177,33 @@ def _finalize_blocked_review(
     return combined_msg
 
 
+_DOC_ONLY_EXTENSIONS = (".md", ".txt", ".rst", ".json")
+
+
+def _diff_is_doc_only(staged_paths: List[str]) -> bool:
+    """Return True iff every staged path is a documentation file outside ``tests/``.
+
+    Docs/.md/.txt/.rst/.json changes can't break test behaviour, so the
+    preflight test gate is wasteful for them. The maintainer hit a 6-retry
+    loop on a doc-only commit (39 rounds, 3 hours) before this check existed.
+    Defensive: any staged file under ``tests/`` triggers the full preflight,
+    even if the extension is .md, since test fixtures can be markdown.
+    """
+    if not staged_paths:
+        return False
+    saw_any = False
+    for raw in staged_paths:
+        p = str(raw).strip()
+        if not p:
+            continue
+        saw_any = True
+        if p.startswith("tests/") or "/tests/" in p:
+            return False
+        if not p.lower().endswith(_DOC_ONLY_EXTENSIONS):
+            return False
+    return saw_any
+
+
 def _run_reviewed_stage_cycle(
     ctx: ToolContext,
     commit_message: str,
@@ -184,6 +211,7 @@ def _run_reviewed_stage_cycle(
     *,
     paths: Optional[List[str]] = None,
     skip_advisory_pre_review: bool = False,
+    skip_tests: bool = False,
     goal: str = "",
     scope: str = "",
     review_rebuttal: str = "",
@@ -295,8 +323,20 @@ def _run_reviewed_stage_cycle(
     # this gate, broken code could reach the expensive triad + scope review.
     # Mirror the same pytest preflight here so both bypass paths provide
     # equivalent coverage.
+    #
+    # Two skip paths layered on top:
+    #   1. ``skip_tests=True`` — explicit caller opt-out. Previously this flag
+    #      was silently ignored when advisory was bypassed (the agent surfaced
+    #      this bug at 16:25:32 after a 39-round commit-loop task).
+    #   2. Doc-only diffs — `.md`/`.txt`/`.rst`/`.json` changes outside
+    #      ``tests/`` can't affect test behaviour, so running the full
+    #      pytest suite is pure overhead. Disable via
+    #      ``OUROBOROS_PREFLIGHT_DIFF_AWARE=false`` if the heuristic ever
+    #      misfires.
     _advisory_bypassed = skip_advisory_pre_review or not os.environ.get("ANTHROPIC_API_KEY", "")
-    if _advisory_bypassed:
+    _diff_aware = (os.environ.get("OUROBOROS_PREFLIGHT_DIFF_AWARE", "true") or "true").strip().lower() in ("true", "1", "yes")
+    _doc_only = _diff_aware and _diff_is_doc_only(advisory_paths or [])
+    if _advisory_bypassed and not skip_tests and not _doc_only:
         try:
             ctx.emit_progress_fn(
                 "Advisory bypassed — running test preflight before triad + scope review..."
@@ -330,6 +370,22 @@ def _run_reviewed_stage_cycle(
                 "message": msg,
                 "block_reason": "tests_preflight_blocked",
             }
+    elif _advisory_bypassed:
+        # Skip path: emit a visible progress note so the operator (and the
+        # events log) records why preflight didn't run. ``reason`` is the most
+        # specific applicable cause.
+        if skip_tests and _doc_only:
+            _skip_reason = "skip_tests + doc_only"
+        elif skip_tests:
+            _skip_reason = "skip_tests"
+        else:
+            _skip_reason = "doc_only"
+        try:
+            ctx.emit_progress_fn(
+                f"Advisory bypassed — preflight tests skipped ({_skip_reason})."
+            )
+        except Exception:
+            pass
 
     pre_fingerprint = _fingerprint_staged_diff(pathlib.Path(ctx.repo_dir))
     if not pre_fingerprint.get("ok"):
@@ -1101,6 +1157,7 @@ def _repo_write_commit(ctx: ToolContext, path: str, content: str,
             commit_message,
             _commit_start,
             paths=stage_paths,
+            skip_tests=skip_tests,
         )
         if outcome.get("status") != "passed":
             message = str(outcome.get("message", "") or "")
@@ -1209,6 +1266,7 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
             _commit_start,
             paths=paths,
             skip_advisory_pre_review=skip_advisory_pre_review,
+            skip_tests=skip_tests,
             goal=goal,
             scope=scope,
             review_rebuttal=review_rebuttal,
