@@ -264,7 +264,18 @@ class OuroborosAgent:
         self._task_started_ts = start_time
         self._last_progress_ts = start_time
         self._pending_events = []
-        self._current_chat_id = int(task.get("chat_id") or 0) or None
+        # Preserve chat_id=0 verbatim — `int(x or 0) or None` collapsed
+        # legitimate chat_id=0 sessions to None, mixing tasks across sessions
+        # in logs and breaking UI updates. Branch explicitly on the missing
+        # case (None / empty) and pass any int value (including 0) through.
+        _raw_chat = task.get("chat_id")
+        if _raw_chat is None or _raw_chat == "":
+            self._current_chat_id = None
+        else:
+            try:
+                self._current_chat_id = int(_raw_chat)
+            except (TypeError, ValueError):
+                self._current_chat_id = None
         self._current_task_type = str(task.get("type") or "")
         self._current_task_id = str(task.get("id") or "") or None
         self._emit_live_log(

@@ -59,8 +59,15 @@ def write_text(path: pathlib.Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
-def append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> None:
-    """Append a JSON object as a line to a JSONL file (concurrent-safe)."""
+def append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> bool:
+    """Append a JSON object as a line to a JSONL file (concurrent-safe).
+
+    Returns ``True`` on successful write, ``False`` when all retries
+    failed (which is also logged at WARNING). Important events
+    (``task_done``, ``llm_round``, escalation messages) need that signal
+    so the caller can fall back to an in-memory queue or stderr instead
+    of pretending the write succeeded.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(obj, ensure_ascii=False)
     data = (line + "\n").encode("utf-8")
@@ -106,7 +113,7 @@ def append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> None:
                 finally:
                     os.close(fd)
                 _written = True
-                return
+                return True
             except Exception:
                 if attempt < write_retries - 1:
                     time.sleep(retry_sleep_base_sec * (2 ** attempt))
@@ -116,7 +123,7 @@ def append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> None:
                 with path.open("a", encoding="utf-8") as f:
                     f.write(line + "\n")
                 _written = True
-                return
+                return True
             except Exception:
                 if attempt < write_retries - 1:
                     time.sleep(retry_sleep_base_sec * (2 ** attempt))
@@ -140,6 +147,7 @@ def append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> None:
                 _log_sink(obj)
             except Exception:
                 pass
+    return _written
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +155,23 @@ def append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 def safe_relpath(p: str) -> str:
+    """Normalize a relative path and reject path-traversal / control-char
+    payloads. The previous form accepted strings containing NUL bytes and
+    other ASCII control characters. Most Python file ops truncate at NUL —
+    a path like ``"BIBLE.md\\x00.pdf"`` then writes to ``BIBLE.md`` on disk
+    while the safety-critical check (which compares the raw string) sees a
+    different name. Reject any control character below 0x20 except
+    tab/newline/CR.
+    """
+    if not isinstance(p, str):
+        raise ValueError("Path must be a string.")
+    for ch in p:
+        if ch == "\x00":
+            raise ValueError("Path contains NUL byte.")
+        if ord(ch) < 0x20 and ch not in ("\t", "\n", "\r"):
+            raise ValueError(
+                f"Path contains control character U+{ord(ch):04X}."
+            )
     p = p.replace("\\", "/").lstrip("/")
     if ".." in pathlib.PurePosixPath(p).parts:
         raise ValueError("Path traversal is not allowed.")

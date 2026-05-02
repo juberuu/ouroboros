@@ -900,11 +900,17 @@ def build_head_snapshot_section(
         try:
             # Fetch HEAD content as raw bytes only — single subprocess call.
             # Binary detection and size check run on raw bytes before any decode.
+            # Force LC_ALL=C so git error messages are English regardless of the
+            # operator's locale — the new-file detection below depends on
+            # stable English substrings, and a German/French/etc. locale
+            # otherwise misclassifies new files as "git error".
+            _git_env = {**os.environ, "LC_ALL": "C", "LANG": "C", "LANGUAGE": "C"}
             result = subprocess.run(
                 ["git", "show", f"HEAD:{rel}"],
                 cwd=repo_dir,
                 capture_output=True,
                 timeout=10,
+                env=_git_env,
             )
             if result.returncode == 0 and result.stdout:
                 raw_bytes = result.stdout
