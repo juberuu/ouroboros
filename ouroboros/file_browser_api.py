@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import mimetypes
 import os
 import pathlib
@@ -9,6 +10,8 @@ import shutil
 from contextlib import suppress
 from typing import Any
 from urllib.parse import quote
+
+log = logging.getLogger(__name__)
 
 from starlette.datastructures import UploadFile
 from starlette.requests import Request
@@ -35,6 +38,7 @@ _SKILL_OWNER_STATE_FILENAMES = frozenset({
     "grants.json",
     "review.json",
     "clawhub.json",
+    "deps.json",
 })
 
 
@@ -196,6 +200,58 @@ def _contains_owner_only_file(target: pathlib.Path) -> bool:
     except OSError:
         return False
     return False
+
+
+def _is_skill_control_plane_api_target(target: pathlib.Path) -> bool:
+    """Return True for skill payload provenance / launcher sidecars.
+
+    File Browser endpoints bypass ``tools/core._data_write`` and touch the
+    filesystem directly, so every mutating route must re-apply the same
+    control-plane guard. This wrapper keeps import/config errors best-effort:
+    unrelated file-browser paths should not brick if config is unavailable
+    during early startup.
+    """
+    try:
+        from ouroboros.config import DATA_DIR
+        from ouroboros.tools.core import is_skill_control_plane_path
+
+        data_root = pathlib.Path(DATA_DIR).resolve(strict=False)
+        return is_skill_control_plane_path(pathlib.Path(target), data_root)
+    except Exception:
+        log.debug("control-plane guard probe failed in file_browser_api", exc_info=True)
+        return False
+
+
+def _contains_skill_control_plane_file(target: pathlib.Path) -> bool:
+    """Recursive version of ``_is_skill_control_plane_api_target``.
+
+    Used for directory delete/transfer so a whole payload directory cannot be
+    removed or copied/moved through the generic file browser while it contains
+    provenance/seed/deps control-plane files.
+    """
+    if _is_skill_control_plane_api_target(target):
+        return True
+    if not target.is_dir():
+        return False
+    try:
+        for child in target.rglob("*"):
+            if _is_skill_control_plane_api_target(child):
+                return True
+    except OSError:
+        return False
+    return False
+
+
+_CONTROL_PLANE_FILES_API_ERROR = JSONResponse(
+    {
+        "error": (
+            "Refusing to modify skill provenance / launcher seed marker "
+            "(.clawhub.json, .ouroboroshub.json, SKILL.openclaw.md, .seed-origin). "
+            "Use marketplace Uninstall/Update flows or edit user-authored payload files instead."
+        ),
+    },
+    status_code=400,
+)
 
 
 # Standard error response for the Files API guard. Matches the wording
@@ -472,6 +528,8 @@ async def api_files_write(request: Request) -> JSONResponse:
         root_dir, target, _ = _resolve_target(request, rel_path)
         if _contains_owner_only_file(target):
             return _OWNER_ONLY_FILES_API_ERROR
+        if _contains_skill_control_plane_file(target):
+            return _CONTROL_PLANE_FILES_API_ERROR
         if not target.exists():
             if not create:
                 return JSONResponse({"error": f"Path not found: {rel_path}"}, status_code=404)
@@ -545,6 +603,8 @@ async def api_files_mkdir(request: Request) -> JSONResponse:
         destination = target_dir / name
         if _is_owner_only_file(destination):
             return _OWNER_ONLY_FILES_API_ERROR
+        if _is_skill_control_plane_api_target(destination):
+            return _CONTROL_PLANE_FILES_API_ERROR
         if destination.exists():
             return JSONResponse({"error": f"Path already exists: {name}"}, status_code=409)
         destination.mkdir(parents=False, exist_ok=False)
@@ -579,6 +639,8 @@ async def api_files_delete(request: Request) -> JSONResponse:
             return JSONResponse({"error": "Refusing to delete the configured root directory."}, status_code=400)
         if _contains_owner_only_file(target):
             return _OWNER_ONLY_FILES_API_ERROR
+        if _contains_skill_control_plane_file(target):
+            return _CONTROL_PLANE_FILES_API_ERROR
         if not target.exists():
             return JSONResponse({"error": f"Path not found: {rel_path}"}, status_code=404)
 
@@ -627,15 +689,21 @@ async def api_files_transfer(request: Request) -> JSONResponse:
         # = "overwrite settings.json with arbitrary content".
         if _contains_owner_only_file(source):
             return _OWNER_ONLY_FILES_API_ERROR
+        if _contains_skill_control_plane_file(source):
+            return _CONTROL_PLANE_FILES_API_ERROR
         destination_check = dest_dir / source.name
         if _is_owner_only_file(destination_check):
             return _OWNER_ONLY_FILES_API_ERROR
+        if _is_skill_control_plane_api_target(destination_check):
+            return _CONTROL_PLANE_FILES_API_ERROR
         if source.is_dir():
             try:
                 for child in source.rglob("*"):
                     projected = destination_check / child.relative_to(source)
                     if _is_owner_only_file(projected):
                         return _OWNER_ONLY_FILES_API_ERROR
+                    if _is_skill_control_plane_api_target(projected):
+                        return _CONTROL_PLANE_FILES_API_ERROR
                     if child.is_symlink():
                         try:
                             resolved = child.resolve(strict=True)
@@ -645,10 +713,14 @@ async def api_files_transfer(request: Request) -> JSONResponse:
                             for linked_child in resolved.rglob("*"):
                                 if _is_owner_only_file(projected / linked_child.relative_to(resolved)):
                                     return _OWNER_ONLY_FILES_API_ERROR
+                                if _is_skill_control_plane_api_target(projected / linked_child.relative_to(resolved)):
+                                    return _CONTROL_PLANE_FILES_API_ERROR
             except OSError:
                 pass
         elif _is_owner_only_file(destination_check):
             return _OWNER_ONLY_FILES_API_ERROR
+        elif _is_skill_control_plane_api_target(destination_check):
+            return _CONTROL_PLANE_FILES_API_ERROR
         if not source.exists():
             return JSONResponse({"error": f"Path not found: {source_rel}"}, status_code=404)
         if not dest_dir.exists():
@@ -713,6 +785,8 @@ async def api_files_upload(request: Request) -> JSONResponse:
         # uploads that resolve to the owner-only settings file.
         if _is_owner_only_file(destination):
             return _OWNER_ONLY_FILES_API_ERROR
+        if _is_skill_control_plane_api_target(destination):
+            return _CONTROL_PLANE_FILES_API_ERROR
         if destination.exists():
             return JSONResponse({"error": f"File already exists: {filename}"}, status_code=409)
 

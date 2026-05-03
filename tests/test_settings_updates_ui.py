@@ -30,14 +30,27 @@ def test_nav_moves_observability_pages_into_dashboard():
     assert "dashboardActiveSubtab" in app
 
 
-def test_settings_mobile_stack_contract_exists():
+def test_settings_mobile_horizontal_pills_contract_exists():
+    """v5.7.0: the v5.6.0 drill-down/back-button accordion was reverted in
+    favour of horizontal-scroll pills on every viewport. The active pill
+    auto-scrolls into view via scrollIntoView({inline:'center'}) so users
+    on narrow phones can still reach every sub-tab in one tap. The legacy
+    .settings-mobile-back element is kept in the DOM hidden for back-compat
+    but is no longer functionally wired."""
     settings_ui = _read("web/modules/settings_ui.js")
     settings_css = _read("web/settings.css")
 
-    assert "settings-mobile-back" in settings_ui
-    assert "settings-subtab-open" in settings_ui
-    assert "#page-settings:not(.settings-subtab-open) .settings-scroll" in settings_css
-    assert "#page-settings.settings-subtab-open .settings-tabs" in settings_css
+    # v5.7.0 behaviour: scrollable pills + scrollIntoView for active.
+    assert "scrollIntoView" in settings_ui
+    assert "inline: 'center'" in settings_ui
+    # Mobile media query keeps pills horizontal (overflow-x: auto on mobile).
+    assert "overflow-x: auto" in settings_css
+    # The legacy back-button element is hidden on every viewport now.
+    assert ".settings-mobile-back" in settings_css
+    # The drill-down toggle class may still appear in comments documenting
+    # the v5.6.0 rollback, but no runtime class mutation may remain.
+    assert "root.classList.add('settings-subtab-open')" not in settings_ui
+    assert "root.classList.remove('settings-subtab-open')" not in settings_ui
 
 
 def test_update_panel_contract_exists():

@@ -1,4 +1,4 @@
-# Ouroboros v5.6.4 — Architecture & Reference
+# Ouroboros v5.7.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -108,7 +108,8 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── review_helpers.py  ← Shared review helpers (section loader, file packs, intent)
       │   ├── review_revalidation.py ← Reviewed-commit fingerprint revalidation helpers (blocks when staged diff changes after review)
       │   ├── scope_review.py   ← Blocking scope reviewer (configurable, fail-closed)
-      │   └── skill_exec.py      ← Phase 3 external-skill surface: list_skills, review_skill, toggle_skill, skill_exec (subprocess runner with cwd confinement, env scrubbing, timeout, runtime allowlist python/bash/node; gated by enabled + PASS review + fresh content hash — v5.1.2 Frame A: runtime_mode no longer blocks execution)
+      │   ├── skill_exec.py      ← Phase 3 external-skill surface: list_skills, review_skill, toggle_skill, skill_exec (subprocess runner with cwd confinement, env scrubbing, timeout, runtime allowlist python/python3/bash/node/deno/ruby/go; gated by enabled + PASS review + fresh content hash — v5.1.2 Frame A: runtime_mode no longer blocks execution)
+      │   └── skill_preflight.py ← v5.7.0 heal-safe, read-only skill payload preflight validator (manifest parse + Python compile() / node --check / bash -n; no review-state mutation)
       └── platform_layer.py    ← Cross-platform process/path/locking helpers
 
 # Build & CI (not part of runtime)
@@ -156,7 +157,8 @@ Dockerfile                    ← Docker image (web UI runtime)
 │   ├── docs/           ← Project documentation
 │   │   ├── ARCHITECTURE.md ← This document
 │   │   ├── DEVELOPMENT.md  ← Engineering handbook (naming, entity types, review protocol)
-│   │   └── CHECKLISTS.md   ← Pre-commit review checklists (single source of truth)
+│   │   ├── CHECKLISTS.md   ← Pre-commit review checklists (single source of truth)
+│   │   └── CREATING_SKILLS.md ← Skill author guide (manifest schema, PluginAPI, widgets, publishing)
 │   └── prompts/        ← System prompts (SYSTEM.md, SAFETY.md, CONSCIOUSNESS.md)
 ├── data/
 │   ├── settings.json   ← User settings (API keys, models, budget)
@@ -314,18 +316,19 @@ The web UI is a single-page app (`web/index.html` + `web/style.css` + ES modules
 - `settings_catalog.js` — optional model-catalog refresh helper; handles `/api/model-catalog`, browser timeout, stale-response suppression, and model-picker catalog broadcasts
 - `costs.js` — cost breakdown tables
 - `skills.js` — Skills page (discover + enable/disable + review trigger + Heal task affordance for non-native failing skills + key-grant state + live-vs-catalog extension status; reads `/api/state` + `/api/extensions`, writes through `/api/skills/<name>/toggle` + `/api/skills/<name>/review`, sends Heal prompts through `/api/command`, and requests key grants through the desktop launcher bridge)
-- `widgets.js` — Widgets page for reviewed extension UI surfaces declared through `register_ui_tab`; hosts legacy `inline_card`/`iframe` plus declarative v1 widgets (forms/actions, async job forms/actions, markdown, code, JSON, key/value, tables, tabs, charts, stream, progress, `subscription` WS updates, poll with `auto_start`, files, galleries, image/audio/video media) and tears down widget timers/listeners/streams on remount while resuming async jobs by `job_id`.
-- `about.js` — about page
+- `widgets.js` — Widgets page for reviewed extension UI surfaces declared through `register_ui_tab`; hosts legacy `inline_card`/`iframe` plus declarative v1 widgets (forms/actions, async job forms/actions, markdown, code, JSON, key/value, tables, tabs, charts, stream, progress, `subscription` WS updates, poll with `auto_start`, files, galleries, image/audio/video media, **map/calendar/kanban (v5.7.0)**) and tears down widget timers/listeners/streams on remount while resuming async jobs by `job_id`. **v5.7.0** also adds `kind: "module"` widgets: the host fetches reviewed `widget.js` through `/api/extensions/<skill>/module/<entry>`, embeds it into a sandboxed `<iframe srcdoc sandbox="allow-scripts">` with no `allow-same-origin`, and injects a parent-mediated `fetch` bridge restricted to `/api/extensions/<skill>/...`.
 
-Navigation is a left sidebar with 7 pages (Chat, Files, Skills, Widgets, Dashboard, Settings, About). Dashboard is the operational hub for Logs, Evolution, Costs, and Updates; Settings returns to configuration-only tabs. On narrow viewports (`@media (max-width: 640px)`) `#nav-rail` collapses to a horizontal bottom bar — `position: fixed; bottom: 0; flex-direction: row` with `padding-bottom: calc(6px + env(safe-area-inset-bottom, 0px))` for the iOS home-indicator and `#content { padding-left: 0; padding-bottom: calc(62px + env(safe-area-inset-bottom, 0px)) }` to clear the bar. Settings itself switches to a mobile stack list: tapping a section opens that panel and shows a Back-to-Settings control. The Skills page manages external + bundled skill packages — review trigger, key grants, enable/disable, status badges, and live-vs-catalog extension state — and reads from `/api/state` + `/api/extensions`. The Widgets page hosts reviewed extension UI declarations separately so useful widgets do not get buried in long skill lists; inline-card widgets now preserve their current state across SPA tab switches.
+(`about.js` was removed in v5.7.0 when About moved into Settings as a sub-tab.)
+
+Navigation is a left sidebar with 6 pages (Chat, Files, Skills, Widgets, Dashboard, Settings). About lives as a sub-tab inside Settings (v5.7.0+) — there is no top-level About page; the desktop launcher's `#nav-version` span keeps a compact version label visible above the rail's footer. Dashboard is the operational hub for Logs, Evolution, Costs, and Updates; Settings holds Providers / Models / Behavior / Integrations / Advanced / About sub-tabs. The Dashboard nav button uses the Lucide `gauge` icon (a half-circle speedometer with needle) — the previous `layout-dashboard` glyph was visually indistinguishable from the `layout-grid` Widgets glyph at 20×20 px. On narrow viewports (`@media (max-width: 640px)`) `#nav-rail` collapses to a horizontal bottom bar — `position: fixed; bottom: 0; flex-direction: row; justify-content: safe center` with `padding-bottom: calc(6px + env(safe-area-inset-bottom, 0px))` for the iOS home-indicator and `#content { padding-left: 0; padding-bottom: calc(62px + env(safe-area-inset-bottom, 0px)) }` to clear the bar. Mobile Settings keeps the horizontal pill strip (no drill-down accordion) — the active pill auto-scrolls into view via `scrollIntoView({ inline: 'center' })`. The Skills page manages external + bundled skill packages — review trigger, key grants, enable/disable, status badges, and live-vs-catalog extension state — and reads from `/api/state` + `/api/extensions`. Each skill card carries a kebab (⋮) menu in its header (right of the toggle) that opens as an anchored non-modal popover via `dialog.show()`; the menu hosts Re-review / Update / Uninstall actions. The Widgets page hosts reviewed extension UI declarations separately so useful widgets do not get buried in long skill lists; inline-card widgets now preserve their current state across SPA tab switches.
 
 ### 3.1 Chat
 
 - **Status badge** (top-right): "Online" (green) / "Thinking..." / "Working..." (amber pulse) / "Reconnecting..." (muted offline).
   Driven by WebSocket connection state, typing events, and live task state.
-- **Header controls**: compact buttons for `/evolve`, `/bg`, `/review`, `/restart`, `/panic` — the canonical location for runtime controls. The chat header is a floating transparent overlay (`position: absolute`, gradient fade with a non-zero opacity floor plus backdrop blur) so messages scroll beneath it on desktop without text reading through the header labels. On narrow viewports (`@media (max-width: 640px)`) `.chat-page-header` switches to `position: static` with a transparent background so it claims its own vertical space — a wrapped row of action buttons never hides the first chat message under the gradient; the `#chat-messages` top padding is correspondingly reduced from `56px` (absolute-header clearance) to `12px`.
+- **Header controls**: compact buttons for `/evolve`, `/bg`, `/review`, `/restart`, `/panic` — the canonical location for runtime controls. The chat header is a floating transparent overlay (`position: absolute`, gradient fade with a non-zero opacity floor plus backdrop blur) so messages scroll beneath it without text reading through the header labels. On narrow viewports (`@media (max-width: 640px)`) the header remains an overlay, but row gaps and button spacing are tightened; `#chat-messages` reserves `80px` of top padding to clear the wrapped mobile action row while preserving the same scroll-under gradient behaviour.
 - **Budget pill**: compact amber pill in the header showing `$spent / $limit` with a mini progress bar, updated from `/api/state` polling every 3 seconds.
-- **Message input**: absolute-positioned frosted-glass overlay anchored to the bottom of the chat page (`position: absolute; bottom: 0`). It contains the paperclip attachment button, multiline textarea, and send group. The send group (`bottom: 7px`) and paperclip (`bottom: 9px`) anchor near the textarea baseline so multiline/mobile composition keeps controls beside the final line. There is no separate bottom fade layer and `#chat-input-area` stays background-free; the input controls carry their own frosted-glass surfaces. `#chat-messages` bottom padding is set dynamically by `updateMessagesPadding()` from the real composer height plus a small buffer. Files are staged locally and uploaded to `data/uploads/` only when Send/Enter is triggered; offline WebSocket state blocks upload to avoid orphan files. Shift+Enter inserts a newline; Enter sends.
+- **Message input**: absolute-positioned overlay anchored to the bottom of the chat page (`position: absolute; bottom: 0`). It contains the paperclip attachment button, multiline textarea, and send group. The send group (`bottom: 7px`) and paperclip (`bottom: 9px`) anchor near the textarea baseline so multiline/mobile composition keeps controls beside the final line. There is no separate bottom fade layer: `#chat-input-area` carries only a compact darkening gradient (no wrapper blur), while `#chat-input` itself carries the frosted-glass blur (`backdrop-filter: blur(20px)`) and semi-transparent fill. `#chat-messages` reserves bottom padding via `--chat-input-reserve`, set from the actual `#chat-input-area.offsetHeight + 16px` (fallback `108px`; mobile adds safe-area). This avoids the huge blank gap of a worst-case static reserve while still keeping the last message reachable when the textarea grows or an attachment preview is visible. `updateMessagesPadding()` owns only this CSS variable plus scroll-stickiness; it never writes `paddingBottom` directly. Files are staged locally and uploaded to `data/uploads/` only when Send/Enter is triggered; offline WebSocket state blocks upload to avoid orphan files. Shift+Enter inserts a newline; Enter sends.
 - **Clipboard image paste**: `#chat-input` registers a `paste` listener that scans `e.clipboardData.items` for `image/*` MIME types, calls `getAsFile()` on the first match, wraps the blob as a `File` named `clipboard-<unix-ts>.<ext>` (extension derived from the MIME), and stages it through the **same** `pendingAttachment` slot used by the paperclip button (the badge / removal UI / upload-on-Send path are all reused — no inline upload happens until Send/Enter, mirroring the paperclip semantics including the offline-WS guard). Non-image clipboard payloads fall through to native paste (text / formatted text). When an image is staged this way, `e.preventDefault()` suppresses the browser's default paste so a giant base64 string is not also inserted into the textarea.
 - **Input recall**: ArrowUp / ArrowDown cycles through recent submitted messages without leaving the textarea. On the **first** successful `syncHistory` call of this page lifetime, it seeds `inputHistory` from server-side user messages (including Telegram and other-session messages that never went through the local `rememberInput()` path). Merge strategy: server messages (older) prepend before local session entries (newer); deduped from the end so most-recent entries always win; capped at 50 via `slice(-50)`. `PLAN_PREFIX` preambles are stripped before storage. Seeding is gated on a dedicated one-shot `inputHistorySeededFromServer` flag (not `historyLoaded`) so it fires on the first successful server sync even when the initial fetch failed and `historyLoaded` was already set true by the sessionStorage-fallback bootstrap path. Subsequent WebSocket reconnects deliberately do NOT re-seed (that would reset `inputHistoryIndex` mid-scrub), so Telegram/other-session messages that arrive while this tab stays open only surface in recall after the next full page reload.
 - **Messages**: user bubbles (right, steel-blue-tinted), assistant bubbles (left, crimson), and system-summary bubbles (left, amber). Non-user bubbles render markdown. Live task card uses crimson accent glass matching the assistant palette.
@@ -374,7 +377,7 @@ The Dashboard tab is the operational hub. It hosts four full-height sub-tabs:
 
 ### 3.4 Settings
 
-- **Tabbed layout**: `Providers`, `Models`, `Behavior`, `Integrations`, `Advanced`. On mobile, the tab row becomes a native-feeling section list; selecting a section opens a sub-screen with a Back-to-Settings button.
+- **Tabbed layout (v5.7.0+)**: `Providers`, `Models`, `Behavior`, `Integrations`, `Advanced`, `About`. On every viewport (including mobile) the tab row stays a horizontal-scroll pill strip; the active pill auto-scrolls into view. The v5.6.0 mobile drill-down with Back-to-Settings button has been retired — `bindSettingsTabs` no longer toggles `settings-subtab-open` and the `.settings-mobile-back` element is hidden via CSS for back-compat with anyone querying it from outside.
 - **Provider cards**: OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, Anthropic, plus optional Network Password. Cards are collapsible and use masked-secret inputs with show/hide toggles.
 - **API Keys**: OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, Anthropic, Telegram Bot Token, GitHub Token, and Network Password.
   Keys are displayed as masked values (e.g., `sk-or-v1...`), can be explicitly cleared, and are only overwritten on save if the user enters a new value (not containing `...`).
@@ -472,13 +475,25 @@ See section 3.8 (Evolution) for the combined page.
   Updates `ouroboros-stable` branch to match `ouroboros`.
 - Data loaded on first visit to the Updates sub-tab and refreshed by Check for updates.
 
-### 3.10 About
+### 3.10 About (Settings sub-tab, v5.7.0+)
 
-- Logo (large, centered — the only location for the logo image; sidebar shows only a compact version label above the About button)
+About is a Settings sub-tab — there is no top-level About page in the
+nav rail. The compact version label (`#nav-version` span) stays in
+the sidebar between the last nav button and the rail footer, and a
+detailed version string is rendered inside the About panel.
+
+The About panel content:
+
+- Logo (large, centered — the only location for the logo image)
 - "A self-creating AI agent" description
 - Created by Anton Razzhigaev & Andrew Kaznacheev
 - Links: @abstractDL (Telegram), GitHub repo
 - "Joi Lab" footer
+
+Static checks: `tests/test_chat_logs_ui.py::test_about_uses_css_classes_not_inline`
+asserts the About markup lives in `web/modules/settings_ui.js` (under
+`data-settings-panel="about"`) and continues to use the `.about-*` CSS
+classes rather than inline `style=""` attributes.
 
 ---
 
@@ -495,6 +510,8 @@ authentication. If the password is blank, non-loopback access stays open by desi
 | GET | `/api/state` | Dashboard data: uptime, workers, budget, branch, etc. Phase 2 adds `runtime_mode` (current `light \| advanced \| pro`) and `skills_repo_configured` (boolean — never the absolute path). Full happy-path shape is pinned by `ouroboros.contracts.api_v1.StateResponse`. |
 | GET | `/api/extensions` | Phase 5: catalogue of every discovered skill (bundled + `OUROBOROS_SKILLS_REPO_PATH`) plus `extension_loader.snapshot()` of live registrations. |
 | GET | `/api/extensions/{skill}/manifest` | Phase 5: parsed manifest for one skill (name/type/version/permissions/env_from_settings/ui_tab, plus enabled + review status + content hash). |
+| GET | `/api/extensions/{skill}/module/{entry}` | Phase 5.7: reviewed static widget module source for `kind: "module"` tabs. Only serves a live extension's declared module entry, confines the path to `skill_dir`, returns JavaScript text with `Cache-Control: no-store`. |
+| GET | `/api/extensions/{skill}/settings_section` | Phase 5.7: declarative Settings sections registered via `PluginAPI.register_settings_section`. Returns `{skill, sections[]}` filtered to the skill. |
 | ALL | `/api/extensions/{skill}/{rest:path}` | Phase 5: catch-all dispatcher that forwards to the handler registered via `PluginAPI.register_route`. Honors the registered methods tuple; `405` on method mismatch, `404` on unknown mount. |
 | POST | `/api/skills/{skill}/toggle` | Phase 5: UI-direct enable/disable. Enabling requires a fresh PASS review plus approved grants; disabling remains available to take skills offline. Wraps `save_enabled` plus the `extension_loader.load_extension` / `unload_extension` machinery so the Skills page can flip state without round-tripping through the agent. |
 | GET | `/api/skills/lifecycle-queue` | v5.5: recent global FIFO skill lifecycle jobs (install/update/review/deps/enable/disable/uninstall) for My skills virtual rows, tab badges, and operator feedback. |
@@ -1881,7 +1898,7 @@ automatically on completion or via `kill_all_tracked_subprocesses()` on panic.
     — `light`/`advanced`/`pro` all let reviewed + enabled skills run.
     `skill_exec` additionally provides defense-in-depth via `cwd=skill_dir`,
     a scrubbed env (only `env_from_settings` allowlisted keys), a runtime
-    allowlist (python/bash/node), a hard 300s timeout ceiling, output
+    allowlist (python/python3/bash/node/deno/ruby/go), a hard 300s timeout ceiling, output
     caps, and panic-kill tracking via `_tracked_subprocess_run` so
     `/panic` terminates the whole skill process tree. These runtime
     guards are NOT a filesystem sandbox: a malicious skill payload that
@@ -1919,7 +1936,7 @@ via `tests/test_contracts.py`.
 | `ToolContextProtocol` — 6-attribute + 3-method minimum every tool handler relies on (attributes: `repo_dir`, `drive_root`, `pending_events`, `emit_progress_fn`, `current_chat_id`, `task_id`; methods: `repo_path`, `drive_path`, `drive_logs`) | `ouroboros/contracts/tool_context.py` | `ouroboros.tools.registry.ToolContext` must satisfy it (duck-typed check + AST field parity) |
 | `ToolEntryProtocol` + `GetToolsProtocol` — the tool-module ABI | `ouroboros/contracts/tool_abi.py` | Every entry returned by `ToolRegistry._entries` must satisfy `ToolEntryProtocol` |
 | `api_v1` WS/HTTP envelopes — inbound: `ChatInbound`, `CommandInbound`; outbound WS: `ChatOutbound`, `PhotoOutbound`, `TypingOutbound`, `LogOutbound`; HTTP: `HealthResponse`, `StateResponse` (Phase 2 adds `runtime_mode: str` and `skills_repo_configured: bool`), `EvolutionStateSnapshot`, `SettingsNetworkMeta` | `ouroboros/contracts/api_v1.py` | AST scans of `supervisor/message_bus.py` chat envelopes, `server.py::api_state`, `server.py::api_health`, `server.py::_build_network_meta`, and `server.py::ws_endpoint` inbound dispatch assert no un-declared keys leak out; `tests/test_contracts.py::test_state_response_declares_phase2_runtime_mode_keys` explicitly pins the two new Phase 2 fields |
-| `PluginAPI` (Phase 4) + `ExtensionRegistrationError` + `FORBIDDEN_EXTENSION_SETTINGS` + `VALID_EXTENSION_PERMISSIONS` + `VALID_EXTENSION_ROUTE_METHODS` — the surface every `type: extension` skill's `plugin.py::register(api)` binds against (`register_tool`, `register_route`, `register_ws_handler`, `register_ui_tab`, `send_ws_message`, `on_unload`, `log`, `get_settings`, `get_state_dir`). `VALID_EXTENSION_ROUTE_METHODS` is the frozen tuple of HTTP methods accepted by `register_route`; the Phase 5 catch-all dispatcher in `server.py` validates against the same set. | `ouroboros/contracts/plugin_api.py` | `tests/test_contracts.py::test_plugin_api_surface_is_frozen` pins the frozen method set; `tests/test_contracts.py::test_extension_route_methods_contract_matches_server_dispatch` pins the route-methods tuple; `tests/test_extension_loader.py::test_plugin_api_impl_matches_protocol` asserts the concrete `PluginAPIImpl` structurally satisfies the runtime-checkable Protocol |
+| `PluginAPI` (Phase 4) + `ExtensionRegistrationError` + `FORBIDDEN_EXTENSION_SETTINGS` + `VALID_EXTENSION_PERMISSIONS` + `VALID_EXTENSION_ROUTE_METHODS` — the surface every `type: extension` skill's `plugin.py::register(api)` binds against (`register_tool`, `register_route`, `register_ws_handler`, `register_ui_tab`, `register_settings_section`, `send_ws_message`, `on_unload`, `log`, `get_settings`, `get_state_dir`, `get_runtime_info`). `VALID_EXTENSION_ROUTE_METHODS` is the frozen tuple of HTTP methods accepted by `register_route`; the Phase 5 catch-all dispatcher in `server.py` validates against the same set. | `ouroboros/contracts/plugin_api.py` | `tests/test_contracts.py::test_plugin_api_surface_is_frozen` pins the frozen method set; `tests/test_contracts.py::test_extension_route_methods_contract_matches_server_dispatch` pins the route-methods tuple; `tests/test_extension_loader.py::test_plugin_api_impl_matches_protocol` asserts the concrete `PluginAPIImpl` structurally satisfies the runtime-checkable Protocol |
 | `SkillManifest` — unified `SKILL.md` / `skill.json` format (`type: instruction \| script \| extension`) | `ouroboros/contracts/skill_manifest.py` | `parse_skill_manifest_text()` tolerates missing optional fields; `validate()` returns warnings without raising |
 | `schema_versions` — opt-in `_schema_version` key + `with_schema_version`/`read_schema_version` helpers | `ouroboros/contracts/schema_versions.py` | Not yet wired into existing state files; groundwork only |
 
@@ -1973,7 +1990,7 @@ Each <skill_name>/ contains:
 ├── SKILL.md          ← manifest frontmatter + body, OR
 ├── skill.json        ← manifest as pure JSON
 ├── SKILL.openclaw.md ← (clawhub source only) preserved original frontmatter
-├── scripts/          ← payload files (python/bash/node)
+├── scripts/          ← payload files (python/python3/bash/node/deno/ruby/go)
 ├── assets/           ← static data the payload reads
 ├── .clawhub.json     ← (clawhub source only) sidecar provenance hint
 └── .ouroboroshub.json ← (ouroboroshub source only) official catalog provenance hint
@@ -2051,13 +2068,14 @@ collide with a previous load's ``sys.modules`` entries.
    allowed so an owner can always take a live skill offline.
 4. **Execute**: ``skill_exec(skill=name, script=path, args=[...])`` runs
    the named script via the runtime declared in the manifest
-   (``python``, ``python3``, ``bash``, or ``node``; ``python3`` falls
-   back to ``python`` on Windows-style installs without ``python3.exe``),
+   (``python``, ``python3``, ``bash``, ``node``, ``deno``, ``ruby``,
+   or ``go``; ``python3`` falls back to ``python`` on Windows-style
+   installs without ``python3.exe``),
    with cwd confined to the skill
    directory, env scrubbed to the manifest's ``env_from_settings``
    allowlist, timeout bounded by the manifest's ``timeout_sec`` (hard
    cap 300s). stdout/stderr are **streamed with per-byte caps** of
-   64 KB and 32 KB respectively: the moment a skill exceeds either
+   256 KB and 128 KB respectively: the moment a skill exceeds either
    cap the entire process tree is killed and ``_handle_skill_exec``
    returns ``SKILL_EXEC_OVERFLOW`` with the bounded partial output
    (the stream reader bounds memory in-flight, so a malicious skill
@@ -2180,11 +2198,17 @@ Lifecycle:
     whose timers are cleaned up when the widget remounts), `subscription`
     components for extension WS push events, `stream` components for
     extension-owned SSE routes, markdown, read-only code blocks, JSON, key/value
-    summaries, tabs, Chart.js-backed charts, tables, file links, galleries, and image/audio/video
-    media sourced from extension routes or safe data URLs. Same-origin
-    dynamic JS modules are intentionally not supported because they
-    could call privileged app APIs from the SPA origin; iframe widgets
-    remain sandboxed with no relaxed sandbox tokens.
+    summaries, tabs, Chart.js-backed charts, tables, file links, galleries,
+    map/calendar/kanban host components, and image/audio/video media sourced
+    from extension routes or safe data URLs. Same-origin dynamic JS modules
+    in the SPA origin remain intentionally unsupported because they could call
+    privileged app APIs. v5.7.0 adds the safer exception:
+    ``{"kind": "module", "entry": "widget.js"}`` serves reviewed static JS
+    through ``/api/extensions/<skill>/module/<entry>`` and mounts it inside a
+    sandboxed ``<iframe srcdoc sandbox="allow-scripts">`` with no
+    ``allow-same-origin``. The parent injects a small fetch bridge restricted
+    to ``/api/extensions/<skill>/...`` so module widgets can use their own
+    extension routes without gaining SPA cookie/storage access.
   - ``on_unload(callback)`` registers best-effort cleanup for extension-owned
     resources (threads, sockets, EventSource clients, temporary workers). It
     does not require a manifest permission because it only narrows lifetime.

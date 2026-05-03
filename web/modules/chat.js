@@ -99,6 +99,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
 
     const messagesDiv = document.getElementById('chat-messages');
     const input = document.getElementById('chat-input');
+    const inputArea = document.getElementById('chat-input-area');
     const sendBtn = document.getElementById('chat-send');
     const chevronBtn = document.getElementById('chat-send-chevron');
     const sendDropdown = document.getElementById('chat-send-dropdown');
@@ -1437,9 +1438,13 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
             restoreInputHistory(1);
         }
     });
-    // Dynamically adjust #chat-messages padding-bottom to match the real height of
-    // the absolute-positioned #chat-input-area overlay, so the last bubble is always
-    // fully visible with a small buffer — no more excessive gap or hidden content.
+    // v5.7.0+: #chat-input-area is an absolute-positioned translucent overlay.
+    // The bottom reserve is dynamic via --chat-input-reserve so normal
+    // one-line composition does not leave a huge blank gap, while multiline
+    // textareas / attachment preview still reserve enough scroll space.
+    // We set a CSS variable (not paddingBottom directly) so the design-system
+    // "no separate fade layer" rule remains intact and CSS owns the actual
+    // padding expression, including mobile safe-area.
     function scrollToBottom() {
         messagesDiv.scrollTop = messagesDiv.scrollHeight;
     }
@@ -1454,6 +1459,10 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
     function updateMessagesPadding(options = {}) {
         const preserveStickiness = options.preserveStickiness !== false;
         const shouldStick = preserveStickiness && isNearBottom(160);
+        if (inputArea && messagesDiv) {
+            const reserve = Math.max(92, Math.ceil(inputArea.offsetHeight || 0) + 16);
+            messagesDiv.style.setProperty('--chat-input-reserve', `${reserve}px`);
+        }
         if (shouldStick) scrollToBottomAfterLayout();
     }
 

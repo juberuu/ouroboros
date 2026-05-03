@@ -45,7 +45,7 @@ from ouroboros.marketplace.install import (
 )
 from ouroboros.marketplace.provenance import read_provenance
 from ouroboros.marketplace import ouroboroshub
-from ouroboros.skill_lifecycle_queue import run_lifecycle_job
+from ouroboros.skill_lifecycle_queue import JobProgressTarget, run_lifecycle_job
 
 log = logging.getLogger(__name__)
 
@@ -331,6 +331,7 @@ async def api_marketplace_install(request: Request) -> JSONResponse:
 
     drive_root = _request_drive_root(request)
     repo_dir = _request_repo_dir(request)
+    install_progress = JobProgressTarget()
     async def _run_install() -> Any:
         return await asyncio.to_thread(
             install_skill,
@@ -340,6 +341,7 @@ async def api_marketplace_install(request: Request) -> JSONResponse:
             version=version,
             auto_review=auto_review,
             overwrite=overwrite,
+            progress_callback=install_progress.set,
         )
 
     try:
@@ -349,6 +351,7 @@ async def api_marketplace_install(request: Request) -> JSONResponse:
             source="clawhub",
             message=f"Installing {slug}",
             runner=_run_install,
+            progress_target=install_progress,
             result_message=lambda item: (
                 f"Installed as {item.sanitized_name}"
                 if getattr(item, "ok", False)
@@ -610,6 +613,14 @@ async def api_ouroboroshub_update(request: Request) -> JSONResponse:
     repo_dir = _request_repo_dir(request)
 
     async def _run_update() -> Dict[str, Any]:
+        was_live = False
+        try:
+            from ouroboros.extension_loader import is_extension_live, unload_extension
+
+            was_live = bool(is_extension_live(name, drive_root))
+            unload_extension(name)
+        except Exception:
+            log.debug("OuroborosHub pre-update extension unload failed for %s", name, exc_info=True)
         result = await asyncio.to_thread(ouroboroshub.install, name, overwrite=True)
         payload: Dict[str, Any] = {
             "ok": result.ok,
@@ -628,6 +639,30 @@ async def api_ouroboroshub_update(request: Request) -> JSONResponse:
                 result.sanitized_name,
             )
             payload.update({"review_status": status, "review_findings": findings, "review_error": error})
+            if was_live and status == "pass" and not error:
+                try:
+                    from ouroboros.config import load_settings
+                    from ouroboros.extension_loader import reconcile_extension
+
+                    live_state = await asyncio.to_thread(
+                        reconcile_extension,
+                        result.sanitized_name,
+                        drive_root,
+                        load_settings,
+                    )
+                    payload.update({
+                        "extension_action": live_state.get("action"),
+                        "extension_reason": live_state.get("reason"),
+                    })
+                except Exception:
+                    log.debug("OuroborosHub post-update reconcile failed for %s", name, exc_info=True)
+        elif was_live:
+            try:
+                from ouroboros.config import load_settings
+                from ouroboros.extension_loader import reconcile_extension
+                await asyncio.to_thread(reconcile_extension, name, drive_root, load_settings)
+            except Exception:
+                log.debug("OuroborosHub failed-update re-reconcile failed for %s", name, exc_info=True)
         return payload
 
     payload = await run_lifecycle_job(

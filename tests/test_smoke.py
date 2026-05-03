@@ -143,8 +143,13 @@ EXPECTED_TOOLS = [
     # A2A (Agent-to-Agent protocol, non-core: require enable_tools)
     "a2a_discover", "a2a_send", "a2a_status",
     # Phase 3 three-layer refactor: external skill surface
-    # (non-core: require enable_tools)
+    # (non-core: require enable_tools, except review_skill which is core
+    # in v5.7.0+ so heal mode can satisfy its own prompt without a
+    # forbidden enable_tools round-trip)
     "list_skills", "review_skill", "skill_exec", "toggle_skill",
+    # v5.7.0: skill_preflight — heal-allowed validator that runs
+    # Python compile() / node --check / bash -n on a skill's payload.
+    "skill_preflight",
 ]
 
 

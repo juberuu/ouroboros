@@ -308,19 +308,22 @@ review pack:
   guard — otherwise a symlink to `/etc/passwd` would leak into the
   review pack sent to external reviewer models).
 
-Phase 3 is **text-only**: any non-UTF-8 file in the runtime-reachable
-skill surface (whether a recognised loadable-binary extension like
-`.so`/`.dylib`/`.pyc`/`.node`/`.wasm` or an extensionless disguised
-blob) is a hard review blocker. ``_read_capped_text`` raises
+Skill review is **text-only**: any non-UTF-8 file in the runtime-
+reachable skill surface (whether a recognised loadable-binary extension
+like `.so`/`.dylib`/`.pyc`/`.node`/`.wasm` or an extensionless
+disguised blob) is a hard review blocker. ``_read_capped_text`` raises
 ``_SkillBinaryPayload`` for any such file and ``review_skill`` converts
 that into ``status="pending"`` with an actionable error — never a
 filename+size note that would let bytes the reviewer could not inspect
 slip past the gate. The subprocess runs with ``cwd=skill_dir`` so it
 could otherwise ``ctypes.CDLL('./payload')`` / ``import`` / ``require``
 opaque bytes, which breaks the "review is the primary gate" invariant.
-Media-carrying skills that need binary assets can stash them outside
-the skill checkout (fetch on demand) or wait for a future phase that
-introduces an explicit manifest-declared binary-asset allowlist.
+Media-carrying skills that need binary assets must fetch them on
+demand from a reviewable HTTPS source rather than vendoring opaque
+bytes inside the skill checkout. The text-only invariant is permanent
+in v5.7.0 — there is no follow-up "binary-asset allowlist" phase
+planned; a future sandbox project (out-of-process / WASM) is the
+prerequisite for trusting any opaque bytes inside the skill tree.
 
 Skills default to **disabled** and cannot be executed by `skill_exec`
 until review produces a PASS verdict. Skill review output is persisted
@@ -336,8 +339,10 @@ to edit payload files and rerun `review_skill`. It must not write
 trust/control-plane state directly, auto-enable a repaired skill, or
 grant keys. Heal tasks carry a `HEAL_MODE_NO_ENABLE` marker so deterministic
 tool guards allow only `list_skills`, payload-oriented read/write tools,
-and `review_skill`, and block `toggle_skill`, `skill_exec`, shell/browser
-indirection, extension tools, repo mutation, and subtask delegation while
+`review_skill`, and (v5.7.0+) `skill_preflight` for cheap offline
+syntax/manifest validation, and block `toggle_skill`, `skill_exec`,
+shell/browser indirection, extension tools, repo mutation, and subtask
+delegation while
 the repair task is active.
 Payload data access is scoped to the selected non-native skill under
 `data/skills/external/<skill>/`, `data/skills/clawhub/<skill>/`, or
@@ -347,7 +352,7 @@ remain control-plane state and are not writable from Heal mode.
 
 ### Output contract
 
-Reviewers return a JSON array with one entry per item below (7 entries
+Reviewers return a JSON array with one entry per item below (8 entries
 total). Each entry carries `item`, `verdict` (`PASS`/`FAIL`), `severity`
 (`critical`/`advisory`), and `reason`.
 
@@ -355,13 +360,14 @@ total). Each entry carries `item`, `verdict` (`PASS`/`FAIL`), `severity`
 
 | # | item | what to check | severity when FAIL |
 |---|------|---------------|--------------------|
-| 1 | manifest_schema | Does the manifest parse cleanly? Does `type` match the actual payload (`instruction` = no scripts/entry; `script` = at least one entry in `scripts`; `extension` = non-empty `entry`)? Is `runtime` one of `python`/`python3`/`node`/`bash` for `type: script` (empty `""` is allowed ONLY for `type: instruction` since instruction skills never execute)? Is `timeout_sec` > 0? | critical |
+| 1 | manifest_schema | Does the manifest parse cleanly? Does `type` match the actual payload (`instruction` = no scripts/entry; `script` = at least one entry in `scripts`; `extension` = non-empty `entry`)? Is `runtime` one of `python`/`python3`/`node`/`bash`/`deno`/`ruby`/`go` for `type: script` (empty `""` is allowed ONLY for `type: instruction` since instruction skills never execute; extension entries are Python `plugin.py` modules)? Is `timeout_sec` > 0? | critical |
 | 2 | permissions_honesty | Do the declared `permissions` match what the scripts actually do? Missing permission declaration for an effect the code performs is a concrete FAIL. Examples: `net` must be declared if any script uses `httpx`/`requests`/`socket`/`urllib`; `fs` must be declared if a script writes outside the skill state dir; `subprocess` must be declared if a script spawns another process. | critical |
 | 3 | no_repo_mutation | Does any script attempt to write to the self-modifying Ouroboros repo (`~/Ouroboros/repo/`)? Import of `repo_write`/`repo_commit`, `git add`/`git commit`, or any path that starts with `OUROBOROS_REPO_DIR` / `~/Ouroboros/repo` is a concrete FAIL. Skills may only propose patches by returning artifact bundles; commits go through the first-party reviewed path. | critical |
 | 4 | path_confinement | Do scripts stay inside the skill directory and the dedicated state dir (`~/Ouroboros/data/state/skills/<name>/`)? Absolute paths, `..` traversal, and writes to arbitrary user home subdirs are concrete FAIL. Reading from outside the skill dir is OK for read-only lookups (e.g. system info), write-path confinement is the strict rule. | critical |
 | 5 | env_allowlist | Is `env_from_settings` a short, justified list of settings keys? Core keys in `FORBIDDEN_SKILL_SETTINGS` (`OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `OPENAI_COMPATIBLE_API_KEY`, `CLOUDRU_FOUNDATION_MODELS_API_KEY`, `ANTHROPIC_API_KEY`, `TELEGRAM_BOT_TOKEN`, `GITHUB_TOKEN`, `OUROBOROS_NETWORK_PASSWORD`) may be declared only when the skill genuinely needs that provider/token for its stated purpose; runtime forwards them only after a fresh PASS review and a content-bound desktop-launcher owner grant. v5.2.2 dual-track grants: both `type: script` skills (forwarded by `_scrub_env`) and `type: extension` skills (forwarded by `PluginAPIImpl.get_settings`) are eligible; `type: instruction` skills cannot receive core keys. Mark unjustified core-key requests or non-forbidden secrets unrelated to the purpose as FAIL. An empty list is the default and always fine. | critical |
 | 6 | timeout_and_output_discipline | Is `timeout_sec` reasonable for the stated workload (default 60, hard cap 300)? Do scripts print to stdout in chunks that the runtime can cap, rather than streaming unbounded output? Unbounded loops without a `break`/timeout path are a concrete FAIL. | advisory |
-| 7 | extension_namespace_discipline | `type: extension` only: does the extension register its tool/route/ws-handler/ui-tab under the namespace derived from its `name` (e.g. provider-safe tool/ws names like `ext_<len>_<token>_<surface>`, route `/api/extensions/<name>/…`)? Tool and WS short names must be alphanumeric/underscore and at most 24 characters. Namespace collisions with built-in surfaces are a concrete FAIL. If the extension uses `api.send_ws_message`, are emitted event names short/provider-safe and paired with reviewed host-owned widget `subscription` components rather than arbitrary same-origin JavaScript? If the extension declares streaming UI, is it a reviewed extension route consumed by a host-owned `stream` component? If the extension owns background resources (threads, sockets, EventSource clients, subprocesses), does it register cleanup with `api.on_unload(callback)`? If the extension declares a widget render block, is it one of the host-owned schemas (`iframe`, `inline_card`, or declarative v1: forms/actions, markdown/code, JSON/kv/table, tabs/chart, stream/subscription, progress/poll, file/gallery/media), with media sourced from extension routes or safe data URLs and no arbitrary same-origin JavaScript? For non-extension skills, verdict PASS with reason "Not applicable — type != extension." | critical |
+| 7 | extension_namespace_discipline | `type: extension` only: does the extension register its tool/route/ws-handler/ui-tab under the namespace derived from its `name` (e.g. provider-safe tool/ws names like `ext_<len>_<token>_<surface>`, route `/api/extensions/<name>/…`)? Tool and WS short names must be alphanumeric/underscore and at most 24 characters. Namespace collisions with built-in surfaces are a concrete FAIL. If the extension uses `api.send_ws_message`, are emitted event names short/provider-safe and paired with reviewed host-owned widget `subscription` components rather than arbitrary same-origin JavaScript? If the extension declares streaming UI, is it a reviewed extension route consumed by a host-owned `stream` component? If the extension owns background resources (threads, sockets, EventSource clients, subprocesses), does it register cleanup with `api.on_unload(callback)`? If the extension declares a widget render block, is it one of the host-owned schemas (`iframe`, `inline_card`, or declarative v1: forms/actions, markdown/code, JSON/kv/table, tabs/chart, stream/subscription, progress/poll, file/gallery/media, **map/calendar/kanban (v5.7.0)**), with media sourced from extension routes or safe data URLs and no arbitrary same-origin JavaScript? For non-extension skills, verdict PASS with reason "Not applicable — type != extension." | critical |
+| 8 | widget_module_safety | **v5.7.0+. ``kind: "module"`` widgets only.** Does the extension-supplied ``widget.js`` avoid touching ``document.cookie``, ``localStorage``, ``sessionStorage``, ``window.parent`` data, or ``fetch``/``XMLHttpRequest`` URLs OUTSIDE ``/api/extensions/<skill>/``? The host fetches reviewed ``widget.js`` through ``GET /api/extensions/<skill>/module/<entry>``, embeds the source into a sandboxed ``<iframe srcdoc sandbox="allow-scripts">`` with no ``allow-same-origin``, and injects a parent-mediated ``fetch`` bridge that rejects paths outside the owning skill route prefix. Reviewers must still confirm at the source level that the script is NOT trying to escape the sandbox via arbitrary ``postMessage`` protocols, opaque-origin storage probes, or unauthorised cross-origin fetches. Acceptable interactions: ``fetch('/api/extensions/<skill>/...')`` (through the host bridge), ``window.OuroborosWidget.fetch('/api/extensions/<skill>/...')``, and host-supplied data attributes. Mark non-module widgets and non-extension skills PASS with reason "Not applicable". | critical (when kind=module) |
 
 ### Severity rules
 
@@ -376,6 +382,12 @@ total). Each entry carries `item`, `verdict` (`PASS`/`FAIL`), `severity`
   "the skill is still runnable under this verdict". To ship a skill,
   every item must land PASS.
 - Item 7 is conditionally critical: FAIL only when `type: extension`.
+- Item 8 (`widget_module_safety`) is critical for any `type: extension`
+  if the reviewer returns FAIL. Reviewers MUST mark it PASS with reason
+  "Not applicable" when the extension does not use a module widget. This
+  runtime rule deliberately does not rely only on manifest `ui_tab`
+  detection because extensions can register module widgets dynamically from
+  `plugin.py` via `PluginAPI.register_ui_tab`.
 
 ### Marketplace-installed skill review (ClawHub provenance)
 
@@ -386,7 +398,7 @@ publisher-authored manifest, preserved by the marketplace adapter
 (`ouroboros/marketplace/adapter.py`) before it wrote the translated
 `SKILL.md` that the runtime executes. Reviewers MUST cross-check the
 two manifests as part of items 2 (`permissions_honesty`) and 5
-(`env_allowlist`) without inflating the structured 7-item output:
+(`env_allowlist`) without inflating the structured 8-item output:
 
 1. **Permissions parity** — confirm the translated `permissions` list
    captures every effect the original `metadata.openclaw.requires.bins`
@@ -400,10 +412,20 @@ two manifests as part of items 2 (`permissions_honesty`) and 5
    in the original `metadata.openclaw.requires.env`, that is a concrete
    FAIL of item 5 (`env_allowlist`) — the adapter is fabricating a
    permission the publisher never asked for.
-3. **Install spec rejection** — the adapter blocks `metadata.openclaw.install`
-   (`brew`/`go`/`uv`/`node`). If the original manifest carries one,
-   the install pipeline should have aborted; the presence of the skill
-   in the runtime is itself a contradiction and FAILs item 1
+3. **Install spec policy (v5.7.0+)** — the adapter NORMALISES
+   `metadata.openclaw.install` specs into Ouroboros's isolated
+   per-skill dependency lane. ``pip``/``pipx``/``uv``/``npm``/``node``
+   specs land in `data/skills/<bucket>/<skill>/.ouroboros_env/` and
+   are invoked with `--ignore-scripts` for npm + `--only-binary=:all:`
+   for pip. Specs with global side effects (``brew``, ``apt``,
+   ``cargo``, ``go``, ``download``) are translated into manual setup
+   warnings instead. Reviewers should confirm the auto-installed
+   packages match the skill's stated purpose; an unjustified `pip
+   install <package>` for a skill that doesn't import it is a FAIL of
+   item 2 (`permissions_honesty`). The adapter still rejects Node/TS
+   plugin packages outright at the staging step; seeing
+   ``openclaw.plugin.json`` in the file pack means the install
+   pipeline should have aborted, which FAILs item 1
    (`manifest_schema`) because the skill should not have landed.
 4. **Plugin packages** — `openclaw.plugin.json` in the file pack means
    the publisher shipped a Node/TS plugin. The adapter refuses these,

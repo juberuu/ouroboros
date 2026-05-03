@@ -105,7 +105,7 @@ class PluginAPI(Protocol):
     def register_tool(
         self,
         name: str,
-        handler: Callable[..., str],
+        handler: Callable[..., str] | Callable[..., Awaitable[str]],
         *,
         description: str,
         schema: Dict[str, Any],
@@ -116,7 +116,13 @@ class PluginAPI(Protocol):
         with a built-in tool name or another extension's tool raises
         ``ExtensionRegistrationError``. ``name`` must be alphanumeric
         plus underscores and at most 24 characters so the provider-facing
-        name remains within the strictest tool-name limit."""
+        name remains within the strictest tool-name limit.
+
+        v5.7.0+: handlers may be synchronous or ``async def``. Async
+        handlers are executed by the registry on a helper thread with a
+        fresh event loop and ``asyncio.wait_for(timeout_sec)``. They are
+        not run on the main server event loop, so authors should not rely
+        on loop-local state captured at register time."""
         ...
 
     def register_route(
@@ -164,9 +170,15 @@ class PluginAPI(Protocol):
         weather widgets, and ``{"kind": "declarative",
         "schema_version": 1, "components": [...]}`` for generic
         forms/actions/markdown/json/table/media render blocks.
-        Same-origin dynamic widget modules are not part of this
-        contract because they could call privileged app APIs from the
-        SPA origin."""
+        v5.7.0 adds a reviewed sandboxed module exception:
+        ``{"kind": "module", "entry": "widget.js"}``. The host serves
+        the declared file via ``GET /api/extensions/<skill>/module/<entry>``
+        only when a live widget tab declared that exact entry, then
+        mounts the JS inside an opaque ``<iframe srcdoc sandbox="allow-scripts">``
+        with a parent-mediated fetch bridge restricted to the owning
+        ``/api/extensions/<skill>/...`` route prefix. Same-origin dynamic
+        modules in the SPA origin remain outside this contract because
+        they could call privileged app APIs."""
         ...
 
     def send_ws_message(self, message_type: str, data: Dict[str, Any]) -> None:
@@ -179,6 +191,35 @@ class PluginAPI(Protocol):
         extension namespace as inbound handlers. The broadcast is
         best-effort; when no WebSocket loop is available the message is
         dropped.
+        """
+        ...
+
+    def register_settings_section(
+        self,
+        section_id: str,
+        title: str,
+        *,
+        schema: Dict[str, Any],
+    ) -> None:
+        """Register a host-rendered Settings sub-panel for this extension
+        (v5.7.0+).
+
+        The runtime stores the declaration keyed by
+        ``"<skill>:<section_id>"``; the browser fetches the catalogue
+        via ``GET /api/extensions/<skill>/settings_section`` and mounts
+        it in the Settings UI under an "Extension Settings" group.
+        ``schema`` uses a deliberately narrow declarative subset:
+        ``form`` / ``action`` (configuration writes through reviewed
+        extension routes) plus ``markdown`` / ``json`` (explanatory or
+        diagnostic content). Rich widget-only components such as media,
+        stream, kanban, map, or arbitrary JS are not part of Settings.
+        Arbitrary extension-supplied JS is NEVER rendered into the SPA
+        origin via this API.
+
+        ``section_id`` follows the same alphanumeric/underscore + 24
+        character rules as tool names. ``title`` is a human-readable
+        section name displayed verbatim (escaped). Calling this twice
+        for the same ``section_id`` raises ``ExtensionRegistrationError``.
         """
         ...
 
@@ -235,6 +276,30 @@ class PluginAPI(Protocol):
         their durable state so operators can find it in the expected
         place and ``toggle_skill`` / clean-uninstall paths know where
         to look."""
+        ...
+
+    def get_runtime_info(self) -> Dict[str, Any]:
+        """Return a read-only snapshot of runtime context the extension
+        may need (v5.7.0+).
+
+        Shape (subject to additive evolution within schema v1)::
+
+            {
+                "runtime_mode": "light"|"advanced"|"pro",
+                "app_version": "5.7.0",     # ouroboros/VERSION
+                "data_dir": "/.../Ouroboros/data",
+                "skill_dir": "/.../data/skills/<bucket>/<skill>",
+                "state_dir": "/.../data/state/skills/<skill>",
+                "server_port": 8765,        # 0 if launcher not in HTTP mode
+            }
+
+        All values are computed on demand from the loader / config /
+        skill loader; calling this method does not mutate state.
+        Extensions can use the snapshot to e.g. adapt UX to the runtime
+        mode (light vs pro), embed the app version in chat messages,
+        find their state dir without re-reading their manifest, or
+        construct relative routes to other in-process /api/extensions
+        surfaces."""
         ...
 
 

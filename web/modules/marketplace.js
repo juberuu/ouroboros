@@ -132,10 +132,14 @@ function paneTemplate() {
             <div class="marketplace-controls">
                 <input type="search" id="mp-query" class="marketplace-search"
                        placeholder="Search ClawHub skills by name or summary…" autocomplete="off">
-                <label class="marketplace-checkbox">
-                    <input type="checkbox" id="mp-only-official"> Official only
-                </label>
                 <button class="btn btn-primary" data-mp-search>Search</button>
+            </div>
+            <div class="marketplace-filters">
+                <label class="marketplace-filter-toggle">
+                    <input type="checkbox" id="mp-only-official">
+                    <span class="marketplace-filter-track" aria-hidden="true"></span>
+                    <span>Official only</span>
+                </label>
             </div>
             <div id="mp-status" class="muted marketplace-status"></div>
             <div id="mp-results" class="marketplace-results"></div>
@@ -179,6 +183,16 @@ function boundedText(value, maxLen = 1200) {
 
 function lifecycleFor(summary, installed, pending) {
     if (pending) {
+        if (pending.failed === true) {
+            return {
+                tone: pending.tone || 'danger',
+                label: pending.label || 'Failed',
+                hint: pending.message || '',
+                action: pending.retry_action || 'install',
+                button: pending.retry_label || 'Retry',
+                disabled: false,
+            };
+        }
         return {
             tone: pending.tone || 'warn',
             label: pending.label || 'Working',
@@ -478,9 +492,16 @@ async function fetchJson(url, init) {
 }
 
 
-async function loadInstalled() {
+async function loadInstalled({ signal: externalSignal } = {}) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 3000);
+    // v5.7.0: link an external (caller-owned) signal so refresh() can cancel
+    // a stale loadInstalled() when a newer refresh starts in parallel.
+    const onExternalAbort = () => controller.abort();
+    if (externalSignal) {
+        if (externalSignal.aborted) controller.abort();
+        else externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+    }
     try {
         const [data, catalog] = await Promise.all([
             fetchJson('/api/marketplace/clawhub/installed', { signal: controller.signal }),
@@ -504,18 +525,19 @@ async function loadInstalled() {
         return new Map();
     } finally {
         clearTimeout(timer);
+        if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
     }
 }
 
 
-async function runSearch(state) {
+async function runSearch(state, { signal } = {}) {
     const params = new URLSearchParams();
     const query = String(state.query || '').trim();
     if (query) params.set('q', query);
     params.set('limit', String(query ? MARKETPLACE_SEARCH_LIMIT : state.limit));
     if (!query && state.cursor) params.set('cursor', state.cursor);
     if (state.onlyOfficial) params.set('official', '1');
-    return fetchJson(`/api/marketplace/clawhub/search?${params.toString()}`);
+    return fetchJson(`/api/marketplace/clawhub/search?${params.toString()}`, { signal });
 }
 
 
@@ -779,6 +801,13 @@ export function initMarketplace(pane) {
     const modalHost = pane.querySelector('#mp-modal-host');
 
     let debounceTimer = null;
+    // v5.7.0: search race control. ``activeController`` is the AbortController
+    // for the in-flight request; the next refresh() aborts it before kicking
+    // off a new fetch. ``refreshToken`` is bumped on each refresh; after the
+    // awaits a stale request bails out before touching state/DOM, so a slow
+    // older response cannot overwrite a fresh newer render.
+    let activeController = null;
+    let refreshToken = 0;
 
     function syncControlsForMode() {
         const searchMode = Boolean(String(state.query || '').trim());
@@ -791,11 +820,21 @@ export function initMarketplace(pane) {
         syncControlsForMode();
         const query = String(state.query || '').trim();
         showStatus(pane, query ? `Searching for "${query}"…` : 'Browsing ClawHub…', 'muted');
+        // Cancel any prior in-flight refresh and stake a new token.
+        if (activeController) {
+            try { activeController.abort(); } catch (_) { /* ignore */ }
+        }
+        const myController = new AbortController();
+        activeController = myController;
+        const myToken = ++refreshToken;
         try {
             const [data, installedMap] = await Promise.all([
-                runSearch(state),
-                loadInstalled(),
+                runSearch(state, { signal: myController.signal }),
+                loadInstalled({ signal: myController.signal }),
             ]);
+            // Stale response — a newer refresh started; drop the result so
+            // we never overwrite the fresher state with stale data.
+            if (myToken !== refreshToken) return;
             state.results = data.results || [];
             state.installedMap = installedMap;
             state.installedMap.pendingBySlug = state.pendingBySlug;
@@ -825,6 +864,9 @@ export function initMarketplace(pane) {
                 showStatus(pane, `${state.results.length} skill${state.results.length === 1 ? '' : 's'} · ${mode}${official} · ${state.registryPath}`, 'muted');
             }
         } catch (err) {
+            // Stale-response abort: silent — a newer refresh is already in
+            // flight (or just rendered) and owns the UI.
+            if (err?.name === 'AbortError' || myToken !== refreshToken) return;
             const rawMessage = String(err?.body?.error || err?.message || err || '');
             const firstLine = rawMessage.split('\n').map((line) => line.trim()).filter(Boolean)[0] || 'Marketplace request failed';
             const timeout = /timed out|timeout/i.test(rawMessage);
@@ -834,6 +876,8 @@ export function initMarketplace(pane) {
             showStatus(pane, message, 'danger');
             resultsHost.innerHTML = `<div class="skills-load-error">${escapeHtml(message)}</div>`;
             paginationHost.hidden = true;
+        } finally {
+            if (activeController === myController) activeController = null;
         }
     }
 
@@ -844,10 +888,75 @@ export function initMarketplace(pane) {
 
     pane._marketplaceRefresh = () => scheduleRefresh(true);
 
+    // v5.7.0 lifecycle polling: while any slug is pending (e.g. mid-install)
+    // we poll /api/skills/lifecycle-queue every 1s and surface the active
+    // job's `message` (e.g. "Downloading…" → "Adapting…" → "Running review…"
+    // → "Installing dependencies…") in the per-card pending hint so the user
+    // sees real progress instead of a frozen spinner. The poller stops as
+    // soon as state.pendingBySlug empties to avoid background load.
+    let lifecyclePollTimer = null;
+    async function tickLifecyclePoll() {
+        if (state.pendingBySlug.size === 0) {
+            lifecyclePollTimer = null;
+            return;
+        }
+        try {
+            const data = await fetch('/api/skills/lifecycle-queue', { cache: 'no-store' })
+                .then((r) => (r.ok ? r.json() : { active: null, events: [] }))
+                .catch(() => ({ active: null, events: [] }));
+            const active = data?.active;
+            const events = Array.isArray(data?.events) ? data.events : [];
+            // Update per-pending-slug hint text from queue messages. We
+            // match by event.target — for ClawHub install jobs that target
+            // is the slug; for already-sanitized targets we fall back to
+            // any name match to keep messaging useful regardless.
+            let hasQueuedOrRunningJob = false;
+            for (const slug of Array.from(state.pendingBySlug.keys())) {
+                let job = events.find((e) => e?.target === slug && (e?.status === 'running' || e?.status === 'queued'));
+                if (!job && active?.target === slug) job = active;
+                if (!job) continue;
+                if (job.status === 'running' || job.status === 'queued') {
+                    hasQueuedOrRunningJob = true;
+                }
+                const prev = state.pendingBySlug.get(slug) || {};
+                const nextMsg = String(job.message || prev.message || '').trim();
+                if (nextMsg && nextMsg !== prev.message) {
+                    state.pendingBySlug.set(slug, { ...prev, message: nextMsg });
+                    state.installedMap.pendingBySlug = state.pendingBySlug;
+                    renderResults(resultsHost, state.results, state.installedMap, state.results.length, {
+                        query: state.query,
+                        official: state.onlyOfficial,
+                        registryPath: state.registryPath,
+                        attempts: state.registryAttempts,
+                    });
+                }
+            }
+            if (!hasQueuedOrRunningJob) {
+                // Keep terminal failed cards visible (they intentionally stay
+                // in pendingBySlug for display), but stop the background poller
+                // once no queued/running lifecycle job remains.
+                lifecyclePollTimer = null;
+                return;
+            }
+        } catch (_) {
+            /* polling is best-effort */
+        }
+        if (state.pendingBySlug.size > 0) {
+            lifecyclePollTimer = setTimeout(tickLifecyclePoll, 1000);
+        } else {
+            lifecyclePollTimer = null;
+        }
+    }
+    function ensureLifecyclePoll() {
+        if (lifecyclePollTimer || state.pendingBySlug.size === 0) return;
+        lifecyclePollTimer = setTimeout(tickLifecyclePoll, 1000);
+    }
+
     function setPending(slug, pending) {
         if (pending) state.pendingBySlug.set(slug, pending);
         else state.pendingBySlug.delete(slug);
         state.installedMap.pendingBySlug = state.pendingBySlug;
+        ensureLifecyclePoll();
         renderResults(resultsHost, state.results, state.installedMap, state.results.length, {
             query: state.query,
             official: state.onlyOfficial,
@@ -957,13 +1066,29 @@ export function initMarketplace(pane) {
         state.cursorHistory = [];
         scheduleRefresh(false);
     });
+    queryInput.addEventListener('keydown', (event) => {
+        // v5.7.0: Enter triggers a search; without this, users instinctively
+        // pressed Enter (no-op) and then clicked Search, which used to
+        // create the typing-debounce + click race the user complained about.
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            scheduleRefresh(true);
+        }
+    });
     onlyOfficial.addEventListener('change', () => {
         state.onlyOfficial = onlyOfficial.checked;
         state.cursor = '';
         state.cursorHistory = [];
         scheduleRefresh(true);
     });
-    searchBtn.addEventListener('click', () => scheduleRefresh(true));
+    searchBtn.addEventListener('click', () => {
+        // v5.7.0: clear cursor history on explicit Search so a user that
+        // paginated through browse mode and then types a query gets a
+        // fresh cursorless first page (matching the input/checkbox flows).
+        state.cursor = '';
+        state.cursorHistory = [];
+        scheduleRefresh(true);
+    });
 
     paginationHost.addEventListener('click', (event) => {
         const prev = event.target.closest('[data-mp-prev]');
@@ -1004,11 +1129,21 @@ export function initMarketplace(pane) {
                     : (err.message || String(err));
                 const tone = action === 'install' && isRateLimitError(failedMessage) ? 'warn' : 'danger';
                 showStatus(pane, `${slug}: ${failedMessage}`, tone);
-                setPending(slug, { label: `${action} failed`, tone, message: failedMessage });
+                setPending(slug, {
+                    label: `${action} failed`,
+                    tone,
+                    message: failedMessage,
+                    failed: true,
+                    retry_action: action,
+                    retry_label: action === 'install' ? 'Retry install' : `Retry ${action}`,
+                });
             } finally {
                 if (!failedMessage) setPending(slug, null);
                 actionBtn.disabled = false;
-                if (!failedMessage) refresh();
+                // v5.7.0: funnel through scheduleRefresh so back-to-back
+                // action completions coalesce into one refresh, sharing
+                // the abort/token guards in refresh().
+                if (!failedMessage) scheduleRefresh(true);
             }
             return;
         }
@@ -1037,7 +1172,7 @@ export function initMarketplace(pane) {
                 showStatus(pane, `Install error: ${installErrorCopy(err.message)}`, isRateLimitError(err.message) ? 'warn' : 'danger');
             } finally {
                 installBtn.disabled = false;
-                refresh();
+                scheduleRefresh(true);
             }
             return;
         }
@@ -1085,7 +1220,7 @@ export function initMarketplace(pane) {
                 showStatus(pane, `Update error: ${err.message}`, 'danger');
             } finally {
                 updateBtn.disabled = false;
-                refresh();
+                scheduleRefresh(true);
             }
             return;
         }
@@ -1105,7 +1240,7 @@ export function initMarketplace(pane) {
                 showStatus(pane, `Uninstall error: ${err.message}`, 'danger');
             } finally {
                 uninstallBtn.disabled = false;
-                refresh();
+                scheduleRefresh(true);
             }
         }
     });
@@ -1144,7 +1279,7 @@ export function initMarketplace(pane) {
             showStatus(pane, `Install error: ${err.message}`, 'danger');
         } finally {
             installBtn.disabled = false;
-            refresh();
+            scheduleRefresh(true);
         }
     });
 

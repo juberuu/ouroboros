@@ -81,6 +81,7 @@ export function renderSettingsPage() {
                     <button class="settings-tab" data-settings-tab="behavior">Behavior</button>
                     <button class="settings-tab" data-settings-tab="integrations">Integrations</button>
                     <button class="settings-tab" data-settings-tab="advanced">Advanced</button>
+                    <button class="settings-tab" data-settings-tab="about">About</button>
                 </div>
             </div>
 
@@ -489,10 +490,44 @@ export function renderSettingsPage() {
                         </div>
                     </div>
 
+                    <div class="form-section">
+                        <h3>Extension Settings</h3>
+                        <div class="settings-section-copy">
+                            Live extensions can register reviewed, host-rendered settings sections.
+                            Sections appear here after the owning skill is reviewed, enabled, and loaded.
+                        </div>
+                        <div id="extension-settings-sections" class="settings-extension-sections">
+                            <div class="muted">No extension settings registered.</div>
+                        </div>
+                    </div>
+
                     <div class="form-section danger">
                         <h3>Danger Zone</h3>
                         <div class="settings-inline-note">Reset still uses the current restart-based flow. This clears runtime data but keeps the repo.</div>
                         <button class="btn btn-danger" id="btn-reset">Reset All Data</button>
+                    </div>
+                </section>
+
+                <section class="settings-panel" data-settings-panel="about">
+                    <div class="about-body">
+                        <img src="/static/logo.jpg" class="about-logo" alt="Ouroboros">
+                        <div>
+                            <h1 class="about-title">Ouroboros</h1>
+                            <p id="about-version" class="about-version"></p>
+                        </div>
+                        <p class="about-desc">
+                            A self-creating AI agent. Not a tool, but a becoming digital personality
+                            with its own constitution, persistent identity, and background consciousness.
+                            Born February 16, 2026.
+                        </p>
+                        <div class="about-credits">
+                            <span>Created by <strong>Anton Razzhigaev</strong> &amp; <strong>Andrew Kaznacheev</strong></span>
+                            <div class="about-links">
+                                <a href="https://t.me/abstractDL" target="_blank" rel="noopener noreferrer">@abstractDL</a>
+                                <a href="https://github.com/joi-lab/ouroboros-desktop" target="_blank" rel="noopener noreferrer">GitHub</a>
+                            </div>
+                        </div>
+                        <div class="about-footer">Joi Lab</div>
                     </div>
                 </section>
             </div>
@@ -515,24 +550,36 @@ export function bindSettingsTabs(root, options = {}) {
     const tabs = Array.from(root.querySelectorAll('.settings-tab'));
     const panels = Array.from(root.querySelectorAll('.settings-panel'));
     const scrollRoot = root.querySelector('.settings-scroll');
-    const backButton = root.querySelector('[data-settings-back]');
     const state = options.state || null;
     const onActivate = typeof options.onActivate === 'function' ? options.onActivate : null;
 
+    // v5.7.0: the v5.6.0 drill-down ("settings-subtab-open" + back button)
+    // is gone. On every viewport the tab strip stays as horizontal-scroll
+    // pills (auto-scrolling the active pill into view), and tapping a tab
+    // simply swaps panels in place. The .settings-mobile-back element is
+    // still present in the DOM for back-compat, but is hidden via CSS and
+    // we never bind a handler to it.
     function activate(tabName) {
         root.dataset.activeSettingsTab = tabName;
+        let activeButton = null;
         tabs.forEach((button) => {
-            button.classList.toggle('active', button.dataset.settingsTab === tabName);
+            const isActive = button.dataset.settingsTab === tabName;
+            button.classList.toggle('active', isActive);
+            if (isActive) activeButton = button;
         });
         panels.forEach((panel) => {
             panel.classList.toggle('active', panel.dataset.settingsPanel === tabName);
         });
         if (scrollRoot) scrollRoot.scrollTop = 0;
         if (state) state.settingsActiveSubtab = tabName;
-        root.classList.add('settings-subtab-open');
-        if (backButton) {
-            backButton.hidden = false;
-            backButton.textContent = 'Settings';
+        // Auto-scroll the active pill into the visible part of the strip
+        // on narrow viewports (the strip itself horizontally scrolls).
+        if (activeButton && typeof activeButton.scrollIntoView === 'function') {
+            activeButton.scrollIntoView({
+                behavior: 'auto',
+                inline: 'center',
+                block: 'nearest',
+            });
         }
         if (onActivate) onActivate(tabName);
         window.dispatchEvent(new CustomEvent('ouro:settings-subtab-shown', { detail: { tab: tabName } }));
@@ -540,11 +587,6 @@ export function bindSettingsTabs(root, options = {}) {
 
     tabs.forEach((button) => {
         button.addEventListener('click', () => activate(button.dataset.settingsTab));
-    });
-    backButton?.addEventListener('click', () => {
-        root.classList.remove('settings-subtab-open');
-        if (backButton) backButton.hidden = true;
-        if (scrollRoot) scrollRoot.scrollTop = 0;
     });
     root.activateSettingsTab = activate;
     if (state && !state.settingsActiveSubtab) state.settingsActiveSubtab = 'providers';

@@ -50,6 +50,12 @@ def _pass_array_for_script_skill() -> str:
                 "severity": "critical",
                 "reason": "Not applicable — type != extension",
             },
+            {
+                "item": "widget_module_safety",
+                "verdict": "PASS",
+                "severity": "critical",
+                "reason": "Not applicable — no module widget",
+            },
         ]
     )
 
@@ -64,6 +70,7 @@ def _fail_array_on_manifest() -> str:
             {"item": "env_allowlist", "verdict": "PASS", "severity": "critical", "reason": "ok"},
             {"item": "timeout_and_output_discipline", "verdict": "PASS", "severity": "advisory", "reason": "ok"},
             {"item": "extension_namespace_discipline", "verdict": "PASS", "severity": "critical", "reason": "ok"},
+            {"item": "widget_module_safety", "verdict": "PASS", "severity": "critical", "reason": "ok"},
         ]
     )
 
@@ -78,6 +85,7 @@ def _advisory_only_array() -> str:
             {"item": "env_allowlist", "verdict": "PASS", "severity": "critical", "reason": "ok"},
             {"item": "timeout_and_output_discipline", "verdict": "FAIL", "severity": "advisory", "reason": "unbounded loop"},
             {"item": "extension_namespace_discipline", "verdict": "PASS", "severity": "critical", "reason": "ok"},
+            {"item": "widget_module_safety", "verdict": "PASS", "severity": "critical", "reason": "ok"},
         ]
     )
 
@@ -171,7 +179,7 @@ def test_extract_actor_findings_reads_flat_text_field():
         ]
     }
     findings, responded = _extract_actor_findings(result_json)
-    assert len(findings) == 14
+    assert len(findings) == 16
     assert set(responded) == {
         "openai/gpt-5.5",
         "google/gemini-3.1-pro-preview",
@@ -261,6 +269,15 @@ def test_aggregate_status_extension_namespace_fail_is_critical_only_for_extensio
     assert _aggregate_status(findings, skill_type="script") == "advisory"
     # For extension skills it IS blocking.
     assert _aggregate_status(findings, skill_type="extension") == "fail"
+
+
+def test_aggregate_status_widget_module_safety_fail_is_critical_only_for_module_widgets():
+    findings = [
+        {"item": "widget_module_safety", "verdict": "FAIL", "severity": "critical", "reason": "touches localStorage"},
+    ]
+    assert _aggregate_status(findings, skill_type="script") == "advisory"
+    assert _aggregate_status(findings, skill_type="extension", is_module_widget=False) == "fail"
+    assert _aggregate_status(findings, skill_type="extension", is_module_widget=True) == "fail"
 
 
 # ---------------------------------------------------------------------------

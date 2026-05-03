@@ -82,8 +82,14 @@ log = logging.getLogger(__name__)
 # long-running worker tasks.
 _HARD_TIMEOUT_CEILING_SEC = 300
 _DEFAULT_TIMEOUT_SEC = 60
-_MAX_STDOUT_BYTES = 64 * 1024
-_MAX_STDERR_BYTES = 32 * 1024
+# v5.7.0: bumped from 64KB / 32KB. Real script skills (image-gen prompt
+# trace, deep-research dump, batch summarisation) routinely produced
+# 80–200KB of stdout, which used to trip ``SKILL_EXEC_OVERFLOW`` and
+# kill the process mid-run. ``tool_capabilities.TOOL_RESULT_LIMITS``
+# pairs this with a 300_000-char per-tool cap so the wrapped JSON does
+# not get re-truncated to 15KB by the loop's default limit.
+_MAX_STDOUT_BYTES = 256 * 1024
+_MAX_STDERR_BYTES = 128 * 1024
 
 _ALLOWED_RUNTIMES = {
     # Cross-platform compatibility: ``python3`` is the canonical declared
@@ -94,6 +100,16 @@ _ALLOWED_RUNTIMES = {
     "python3": ("python3", "python"),
     "bash": ("bash",),
     "node": ("node",),
+    # v5.7.0: declared additional runtimes. Resolution still happens via
+    # ``shutil.which`` so the skill subprocess fails closed with a clear
+    # ``SKILL_EXEC_ERROR: runtime <foo> is not in the allowlist or the
+    # matching binary is not on PATH`` if the operator has not installed
+    # the runtime locally. The runtime allowlist + subprocess sandbox
+    # invariants (cwd=skill_dir, scrubbed env, byte caps, panic-tracked
+    # process group) apply identically.
+    "deno": ("deno",),
+    "ruby": ("ruby",),
+    "go": ("go",),
 }
 
 # Environment keys that are always passed through to a skill subprocess
@@ -447,6 +463,10 @@ def _handle_review_skill(ctx: ToolContext, skill: str = "", **_kwargs: Any) -> s
 
     with skill_lifecycle_file_lock(pathlib.Path(ctx.drive_root)):
         outcome = _review_skill_impl(ctx, skill_name)
+        deps_status, deps_error = _reconcile_deps_after_pass_review(
+            pathlib.Path(ctx.drive_root),
+            skill_name,
+        ) if outcome.status == "pass" else ("not_required", "")
     payload = {
         "skill": outcome.skill_name,
         "status": outcome.status,
@@ -454,6 +474,8 @@ def _handle_review_skill(ctx: ToolContext, skill: str = "", **_kwargs: Any) -> s
         "reviewer_models": outcome.reviewer_models,
         "findings": outcome.findings,
         "error": outcome.error,
+        "deps_status": deps_status,
+        "deps_error": deps_error,
     }
     heal_mode = any(
         isinstance(message.get("content"), str) and "HEAL_MODE_NO_ENABLE" in message.get("content", "")
@@ -490,6 +512,73 @@ def _handle_review_skill(ctx: ToolContext, skill: str = "", **_kwargs: Any) -> s
         payload["extension_action"] = None
         payload["extension_reason"] = None
     return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def _reconcile_deps_after_pass_review(drive_root: pathlib.Path, skill_name: str) -> tuple[str, str]:
+    """Install/reinstall isolated deps after a PASS review for the tool path.
+
+    Mirrors ``extensions_api.api_skill_review`` so both review entrypoints
+    clear the dependency gate. Must be called while the caller holds the skill
+    lifecycle file lock (the tool path does; the HTTP path wraps this inside
+    ``run_lifecycle_job``).
+    """
+    try:
+        from ouroboros.marketplace.provenance import read_provenance
+        from ouroboros.marketplace.install_specs import install_specs_hash
+        from ouroboros.marketplace.isolated_deps import (
+            install_isolated_dependencies,
+            read_deps_state,
+        )
+
+        prov = read_provenance(drive_root, skill_name) or {}
+        auto_specs = list((prov.get("install_specs") or {}).get("auto") or [])
+        if not auto_specs:
+            return "not_required", ""
+        deps_state = read_deps_state(drive_root, skill_name)
+        expected_hash = install_specs_hash(auto_specs)
+        if (
+            str(deps_state.get("status") or "") == "installed"
+            and deps_state.get("specs_hash") == expected_hash
+        ):
+            return "installed", ""
+        loaded = find_skill(drive_root, skill_name)
+        if loaded is None:
+            return "failed", "skill not found during dependency reconciliation"
+        install_isolated_dependencies(drive_root, skill_name, loaded.skill_dir, auto_specs)
+        return "installed", ""
+    except Exception as exc:
+        log.debug("tool review dependency reconciliation failed", exc_info=True)
+        return "failed", f"{type(exc).__name__}: {exc}"
+
+
+def _skill_deps_exec_block(drive_root: pathlib.Path, loaded: Any) -> str:
+    """Return a SKILL_EXEC_BLOCKED string when isolated deps are not ready.
+
+    Toggle guards prevent future enables, but already-enabled script skills
+    still need an execution-time check because deps.json can become stale,
+    corrupted, or failed after enablement.
+    """
+    try:
+        from ouroboros.marketplace.provenance import read_provenance
+        from ouroboros.marketplace.install_specs import install_specs_hash as _specs_hash
+        from ouroboros.marketplace.isolated_deps import read_deps_state
+
+        prov = read_provenance(drive_root, loaded.name) or {}
+        auto_specs = list((prov.get("install_specs") or {}).get("auto") or [])
+        if not auto_specs:
+            return ""
+        deps_state = read_deps_state(drive_root, loaded.name)
+        deps_status = str(deps_state.get("status") or "pending")
+        if deps_status == "installed" and deps_state.get("specs_hash") == _specs_hash(auto_specs):
+            return ""
+        return (
+            f"⚠️ SKILL_EXEC_BLOCKED: skill {loaded.name!r} isolated "
+            f"dependencies are not ready (status={deps_status!r}). "
+            "Re-run review_skill so PASS review can reinstall dependencies."
+        )
+    except Exception:
+        log.debug("skill_exec deps readiness probe failed", exc_info=True)
+        return ""
 
 
 def _handle_skill_exec(
@@ -589,6 +678,9 @@ def _handle_skill_exec(
             f"'{loaded.review.status}', not 'pass'. Run review_skill and "
             "resolve findings before executing."
         )
+    deps_block = _skill_deps_exec_block(drive_root, loaded)
+    if deps_block:
+        return deps_block
 
     runtime = (loaded.manifest.runtime or "").strip().lower()
     runtime_binary = _resolve_runtime_binary(runtime)
@@ -861,6 +953,41 @@ def _handle_toggle_skill(
                     "⚠️ SKILL_TOGGLE_ERROR: cannot enable until requested key grants "
                     f"are approved{f' ({missing})' if missing else ''}."
                 )
+            # v5.7.0: refuse enable when the skill declared isolated
+            # ``install_specs`` but the deps are not actually installed
+            # (status != "installed") OR are stale relative to the
+            # current provenance specs_hash. Without this guard a user
+            # could toggle an extension whose ``import requests`` would
+            # ImportError mid-dispatch.
+            try:
+                from ouroboros.marketplace.provenance import read_provenance
+                from ouroboros.marketplace.install_specs import install_specs_hash as _specs_hash
+                from ouroboros.marketplace.isolated_deps import read_deps_state
+                prov = read_provenance(drive_root, loaded.name) or {}
+                auto_specs = list((prov.get("install_specs") or {}).get("auto") or [])
+                if auto_specs:
+                    deps_state = read_deps_state(drive_root, loaded.name)
+                    deps_status = str(deps_state.get("status") or "pending")
+                    expected_hash = _specs_hash(auto_specs)
+                    actual_hash = str(deps_state.get("specs_hash") or "")
+                    if deps_status != "installed":
+                        return (
+                            f"⚠️ SKILL_TOGGLE_ERROR: skill {loaded.name!r} declares "
+                            f"isolated dependencies (status={deps_status!r}). "
+                            "Re-run review_skill (PASS triggers a deps re-install) "
+                            "before enabling."
+                        )
+                    if actual_hash != expected_hash:
+                        return (
+                            f"⚠️ SKILL_TOGGLE_ERROR: skill {loaded.name!r} dependency "
+                            "fingerprint is stale (provenance changed since last "
+                            "install). Re-run review_skill before enabling."
+                        )
+            except Exception:
+                # Defense-in-depth: never block enable on a probe error;
+                # log and continue. The other guards above + skill_exec's
+                # own freshness checks still apply.
+                log.debug("toggle_skill deps probe failed", exc_info=True)
         if not coerced and collision_load_error:
             extension_action = None
             extension_reason = "name_collision"
@@ -929,7 +1056,7 @@ _EXEC_SCHEMA = {
         "argument must match a "
         "``name`` entry in the manifest's ``scripts:`` array (SKILL.md "
         "body and assets/* are reviewed content but not executable). "
-        "Runtime allowlist: python/python3/bash/node. The subprocess "
+        "Runtime allowlist: python/python3/bash/node/deno/ruby/go. The subprocess "
         "runs with cwd=skill_dir, a scrubbed env (env_from_settings "
         "keys only), panic-kill tracking, and a timeout from the "
         "manifest (capped at 300s). v5.1.2 Frame A: OUROBOROS_RUNTIME_MODE "

@@ -151,6 +151,42 @@
     padding: 0 18px 18px;
 }
 
+.settings-extension-sections {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.settings-extension-section {
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 14px;
+    padding: 12px 14px;
+}
+
+.settings-extension-section-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 6px;
+}
+
+.settings-extension-components,
+.settings-extension-form {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.settings-extension-checkbox {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-secondary);
+    font-size: 13px;
+}
+
 .settings-shell .form-row {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
@@ -621,6 +657,12 @@
 }
 
 @media (max-width: 640px) {
+    /* v5.7.0: revert the v5.6.0 drill-down/back-button accordion. On
+       phones the tab strip stays horizontal-scroll pills (the pre-rc.8
+       shape) so all sub-tabs are reachable in one tap, no back-out
+       round-trip. The .settings-mobile-back element stays in the DOM
+       hidden so the JS in bindSettingsTabs (still present for back-
+       compat) does not error if it queries it. */
     .settings-shell {
         padding: 0 10px 10px;
     }
@@ -630,52 +672,23 @@
     }
 
     .settings-tabs {
-        display: grid;
-        grid-template-columns: 1fr;
+        flex-wrap: nowrap;
         gap: 8px;
-        overflow: visible;
+        padding: 0 2px 6px;
+        overflow-x: auto;
     }
 
     .settings-tab {
-        display: flex;
-        align-items: center;
-        width: 100%;
-        min-height: 46px;
-        padding: 12px 14px;
-        font-size: 14px;
-        text-align: left;
-        border-radius: 16px;
-        justify-content: flex-start;
+        flex: 0 0 auto;
+        min-height: 38px;
+        padding: 8px 14px;
+        font-size: 13px;
+        white-space: nowrap;
+        border-radius: 999px;
     }
 
-    #page-settings:not(.settings-subtab-open) .settings-scroll,
-    #page-settings:not(.settings-subtab-open) .settings-footer {
-        display: none;
-    }
-
-    #page-settings.settings-subtab-open .settings-tabs {
-        display: none;
-    }
-
-    #page-settings.settings-subtab-open .settings-mobile-back {
-        display: inline-flex;
-        align-items: center;
-        gap: 8px;
-        min-height: 44px;
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        background: rgba(255, 255, 255, 0.04);
-        color: var(--text-primary);
-        border-radius: 14px;
-        padding: 0 14px;
-        font: inherit;
-        font-size: 14px;
-        cursor: pointer;
-    }
-
-    #page-settings.settings-subtab-open .settings-mobile-back::before {
-        content: '<';
-        color: var(--accent-light);
-        font-weight: 700;
+    .settings-mobile-back {
+        display: none !important;
     }
 
     .settings-shell .form-section {

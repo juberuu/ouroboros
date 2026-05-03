@@ -107,9 +107,36 @@ def test_widgets_treat_head_as_no_body_request():
 
 
 def test_widgets_keep_iframe_sandbox_locked_down():
+    """The legacy ``kind: "iframe"`` widget surface mounts an extension
+    route inside a <iframe> with the *empty* sandbox attribute (no
+    permissions at all). v5.7.0 added ``kind: "module"``, which mounts
+    extension-supplied JS inside a separate <iframe srcdoc> with
+    ``sandbox="allow-scripts"`` BUT no ``allow-same-origin`` token —
+    so the iframe is still an opaque origin (no SPA cookie / storage
+    access) and is further constrained by a strict CSP. We check both
+    invariants here:
+
+    1. The legacy iframe path still uses the empty sandbox.
+    2. The module iframe path adds ``allow-scripts`` but never adds
+       ``allow-same-origin`` (the only token that would re-expose
+       parent storage).
+    """
     source = _widgets_js()
     assert 'sandbox=""' in source
-    assert "allow-scripts" not in source
+    # ``allow-scripts`` is now legitimately present, but only inside the
+    # ``kind === 'module'`` branch. The dangerous combined sandbox token
+    # must never appear in an actual iframe attribute.
+    assert 'sandbox="allow-scripts"' in source
+    assert 'sandbox="allow-scripts allow-same-origin"' not in source
+    assert 'sandbox="allow-scripts allow-forms allow-same-origin"' not in source
+    assert "render.kind === 'module'" in source
+    # Verify the module iframe carries a CSP that does NOT grant network
+    # access directly. The parent injects a postMessage fetch bridge instead,
+    # restricted to /api/extensions/<skill>/... from the parent side.
+    assert "default-src 'none'" in source
+    assert "script-src 'unsafe-inline'" in source
+    assert "OuroborosWidget = { fetch: window.fetch }" in source
+    assert "module widget fetch outside extension route prefix" in source
 
 
 def test_widgets_use_design_radius_tokens():
@@ -128,3 +155,21 @@ def test_widgets_inline_card_preserves_session_state():
     assert "const savedResult = saved.resultHtml" in source
     assert "widgetSessionState.set(persistenceKey, { city: query, resultHtml: result.innerHTML });" in source
     assert "return () => {" in source
+
+
+def test_widgets_v5_7_0_new_components_render():
+    """v5.7.0 host-owned declarative components: ``map`` (Leaflet-ready
+    fallback list), ``calendar`` (host SVG-style row list), ``kanban``
+    (HTML5 drag with on_move POST). All three must be present in the
+    declarative renderer so authors can reference them in widgets, and
+    none of them may bring skill-supplied JS into the SPA origin."""
+    source = _widgets_js()
+    assert "type === 'map'" in source
+    assert "type === 'calendar'" in source
+    assert "type === 'kanban'" in source
+    # Module / arbitrary <script> from the skill must NEVER be inserted
+    # into the host origin. ``data-widget-map-config`` carries the spec
+    # as JSON in a data attribute (host renders); no runtime eval of
+    # extension JS is acceptable in any of the new component renderers.
+    assert "data-widget-map-config" in source
+    assert "widget-kanban-card" in source

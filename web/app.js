@@ -22,7 +22,6 @@ import { initWidgets } from './modules/widgets.js';
 import { initUpdates } from './modules/updates.js';
 import { initDashboard } from './modules/dashboard.js';
 
-import { initAbout } from './modules/about.js';
 import { initOnboardingOverlay } from './modules/onboarding_overlay.js';
 
 // ---------------------------------------------------------------------------
@@ -135,7 +134,6 @@ initCosts({ ...ctx, mount: document.getElementById('dashboard-panel-costs'), emb
 initSkills(ctx);
 initWidgets(ctx);
 
-initAbout(ctx);
 initOnboardingOverlay();
 
 // ---------------------------------------------------------------------------

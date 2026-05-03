@@ -22,6 +22,41 @@ _SKILL_OWNER_STATE_FILENAMES = frozenset({
     "grants.json",
     "review.json",
     "clawhub.json",
+    # v5.7.0: isolated dependency install state/fingerprint. If agents can
+    # forge ``deps.json`` to {"status":"installed"} they can bypass the
+    # new dependency enable gate. Treat it as owner/lifecycle state.
+    "deps.json",
+})
+
+# v5.7.0: provenance / control-plane sidecars that live INSIDE a payload
+# directory (``data/skills/<bucket>/<skill>/``) but are owned by the
+# launcher/marketplace pipeline, not by the skill author. Any tool that
+# accepts arbitrary user-supplied paths (data_write, run_shell file scan,
+# file_browser_api delete/upload, heal-mode write check) consults
+# ``is_skill_control_plane_path`` to refuse writes to these markers.
+# Pre-v5.7.0 these names were only protected in heal mode, leaving normal
+# tool flows free to overwrite provenance.
+_SKILL_PAYLOAD_CONTROL_PLANE_FILENAMES = frozenset({
+    ".clawhub.json",
+    ".ouroboroshub.json",
+    "skill.openclaw.md",
+    ".seed-origin",
+})
+
+_SKILL_PAYLOAD_CONTROL_PLANE_DIRNAMES = frozenset({
+    ".ouroboros_env",
+    "node_modules",
+})
+
+# Buckets in ``data/skills/<bucket>/<skill>/`` where the payload
+# control-plane filenames are protected. We deliberately list every
+# bucket the launcher / marketplace pipelines own (native is launcher-
+# seeded, the others are user/marketplace-installed).
+_SKILL_PAYLOAD_BUCKETS = frozenset({
+    "native",
+    "external",
+    "clawhub",
+    "ouroboroshub",
 })
 
 
@@ -63,6 +98,83 @@ def _is_skill_owner_state_target(target: pathlib.Path, data_root: pathlib.Path) 
                 return True
         except OSError:
             continue
+    return False
+
+
+def is_skill_control_plane_path(target: pathlib.Path, data_root: pathlib.Path) -> bool:
+    """Return True if ``target`` is a skill provenance / control-plane
+    file that must NEVER be edited via generic file-write tooling.
+
+    Two surfaces qualify:
+
+    1. ``data/state/skills/<skill>/{enabled,grants,review,clawhub}.json``
+       (launcher-owned trust state — already covered by
+       ``_is_skill_owner_state_target`` for back-compat callers).
+    2. ``data/skills/<bucket>/<skill>/`` payload sidecars that the
+       launcher / marketplace pipelines own:
+       ``.clawhub.json``, ``.ouroboroshub.json``, ``SKILL.openclaw.md``,
+       ``.seed-origin`` (case-insensitive on the filename).
+
+    Symlinks are resolved so a payload-local symlink like
+    ``notes.txt -> .clawhub.json`` still trips the guard.
+    """
+    if _is_skill_owner_state_target(target, data_root):
+        return True
+
+    def _matches_payload(candidate: pathlib.Path) -> bool:
+        try:
+            rel = candidate.relative_to(data_root)
+        except (OSError, ValueError):
+            return False
+        parts = rel.parts
+        # ``skills/<bucket>/<skill>/<filename>`` = 4 parts.
+        if len(parts) < 4:
+            return False
+        if parts[0].lower() != "skills":
+            return False
+        if parts[1].lower() not in _SKILL_PAYLOAD_BUCKETS:
+            return False
+        rel_tail = [part.lower() for part in parts[3:]]
+        if any(part in _SKILL_PAYLOAD_CONTROL_PLANE_DIRNAMES for part in rel_tail):
+            return True
+        return candidate.name.lower() in _SKILL_PAYLOAD_CONTROL_PLANE_FILENAMES
+
+    if _matches_payload(target):
+        return True
+
+    # Resolve symlinks so a payload-local symlink or benign-looking path
+    # like ``notes.txt -> .clawhub.json`` still trips the guard. Pre-v5.7.0
+    # review found our first implementation checked basename before
+    # resolving, which missed this exact shape.
+    try:
+        resolved = pathlib.Path(target).resolve(strict=False)
+    except OSError:
+        resolved = pathlib.Path(target)
+    if _matches_payload(resolved):
+        return True
+
+    # Hardlink/inode defense: if ``target`` exists and points to the same
+    # inode as a protected sidecar in the same payload directory, a benign
+    # basename would otherwise bypass the name-based guard. Samefile is
+    # the portable API here (works on APFS/NTFS case-insensitive FS too).
+    try:
+        if not pathlib.Path(target).exists():
+            return False
+        rel = pathlib.Path(target).resolve(strict=False).relative_to(data_root)
+        parts = rel.parts
+        if len(parts) < 4 or parts[0].lower() != "skills" or parts[1].lower() not in _SKILL_PAYLOAD_BUCKETS:
+            return False
+        payload_root = data_root / parts[0] / parts[1] / parts[2]
+        for protected in payload_root.iterdir():
+            if protected.name.lower() not in _SKILL_PAYLOAD_CONTROL_PLANE_FILENAMES:
+                continue
+            try:
+                if protected.exists() and pathlib.Path(target).samefile(protected):
+                    return True
+            except OSError:
+                continue
+    except (OSError, ValueError):
+        return False
     return False
 
 
@@ -152,6 +264,19 @@ def _data_write(ctx: ToolContext, path: str, content: str, mode: str = "overwrit
             "marketplace provenance are owner/review controlled state. Edit "
             "the skill payload under data/skills/ and use review_skill, the "
             "Skills UI toggle, or the desktop launcher grant flow."
+        )
+    # v5.7.0: extend the control-plane block to payload-side provenance
+    # sidecars (.clawhub.json / .ouroboroshub.json / SKILL.openclaw.md
+    # / .seed-origin) for ALL data_write calls, not just heal mode. The
+    # marketplace adapter and launcher own these markers; rewriting them
+    # via generic tools could launder provenance or detach a launcher-
+    # seeded skill from its update lane.
+    if is_skill_control_plane_path(lexical_target, data_root) or is_skill_control_plane_path(target_path, data_root):
+        return (
+            "⚠️ DATA_WRITE_BLOCKED: marketplace provenance and launcher "
+            "seed markers (.clawhub.json, .ouroboroshub.json, "
+            "SKILL.openclaw.md, .seed-origin) are owner/review controlled. "
+            "Edit the payload's user-authored files instead and rerun review_skill."
         )
     matches = False
     try:

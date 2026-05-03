@@ -715,6 +715,23 @@ def test_skill_manifest_validate_returns_warnings():
     assert "timeout_sec" in text
 
 
+def test_skill_manifest_allows_v5_7_runtimes():
+    from ouroboros.contracts.skill_manifest import VALID_SKILL_RUNTIMES
+
+    for runtime in ("deno", "ruby", "go"):
+        assert runtime in VALID_SKILL_RUNTIMES
+        manifest = SkillManifest(
+            name=f"skill-{runtime}",
+            description="ok",
+            version="0.1.0",
+            type="script",
+            runtime=runtime,
+            scripts=[{"name": "run"}],
+            timeout_sec=30,
+        )
+        assert not any("unknown runtime" in item for item in manifest.validate())
+
+
 # ---------------------------------------------------------------------------
 # Schema-version helpers
 # ---------------------------------------------------------------------------
@@ -797,11 +814,13 @@ def test_plugin_api_surface_is_frozen():
         "register_route",
         "register_ws_handler",
         "register_ui_tab",
+        "register_settings_section",
         "send_ws_message",
         "on_unload",
         "log",
         "get_settings",
         "get_state_dir",
+        "get_runtime_info",
     }
     members = {
         m for m in dir(PluginAPI)

@@ -4,7 +4,12 @@ export function initEvolution({ ws, state, mount = null, embedded = false, chart
     const page = document.createElement('div');
     page.id = 'page-evolution';
     page.className = embedded ? 'settings-embedded-content settings-evolution-panel' : 'page';
-    page.innerHTML = `
+    // v5.7.0: drop the duplicate inner page-header when embedded (Dashboard
+    // pill strip already labels the panel). Move Refresh + status badge
+    // into the runtime card head row alongside the existing pills.
+    const headerBlock = embedded
+        ? ''
+        : `
         <div class="page-header">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
             <h2>Evolution</h2>
@@ -15,7 +20,16 @@ export function initEvolution({ ws, state, mount = null, embedded = false, chart
             </div>
             <button id="evo-refresh" class="btn btn-default btn-sm evo-refresh-btn" type="button">Refresh</button>
             <span id="evo-status" class="status-badge">Loading...</span>
-        </div>
+        </div>`;
+    const inlineEvoControls = embedded
+        ? `
+                    <div class="evo-runtime-pills evo-runtime-controls">
+                        <button id="evo-refresh" class="btn btn-default btn-sm evo-refresh-btn" type="button">Refresh</button>
+                        <span id="evo-status" class="status-badge">Loading...</span>
+                    </div>`
+        : '';
+    page.innerHTML = `
+        ${headerBlock}
         <!-- Chart sub-tab -->
         <div id="evo-chart-content" class="evolution-container">
             <div class="evo-runtime-card">
@@ -28,6 +42,7 @@ export function initEvolution({ ws, state, mount = null, embedded = false, chart
                         <span id="evo-mode-pill" class="evo-runtime-pill">Evolution</span>
                         <span id="evo-bg-pill" class="evo-runtime-pill">Consciousness</span>
                     </div>
+                    ${inlineEvoControls}
                 </div>
                 <div id="evo-runtime-meta" class="evo-runtime-meta"></div>
             </div>

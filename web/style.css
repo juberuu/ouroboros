@@ -60,7 +60,11 @@ body {
     z-index: 0;
 }
 
-/* Navigation Rail — floating overlay */
+/* Navigation Rail — floating overlay.
+   v5.7.0 spacing pass: top padding 12 -> 28 and inter-item gap 4 -> 10 so
+   the rail is no longer "stuck" to the viewport top edge and tiles breathe.
+   These values track the Material 3 / Apple HIG navigation rail norms and
+   are documented in docs/DEVELOPMENT.md "Navigation rail spacing". */
 #nav-rail {
     position: fixed;
     left: 0;
@@ -70,8 +74,8 @@ body {
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding: 12px 0;
-    gap: 4px;
+    padding: 28px 0 16px;
+    gap: 10px;
     background: transparent;
     backdrop-filter: none;
     border-right: none;
@@ -864,7 +868,7 @@ body {
     overflow-x: hidden;
     padding: 20px;
     padding-top: 56px;
-    padding-bottom: 16px;
+    padding-bottom: var(--chat-input-reserve, 108px);
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -1413,7 +1417,12 @@ body {
         margin-right: 0;
     }
 
-    /* Nav-rail — convert vertical sidebar to horizontal bottom bar. */
+    /* Nav-rail — convert vertical sidebar to horizontal bottom bar.
+       v5.7.0: ``justify-content: safe center`` centers the row when all
+       buttons fit (~6 buttons × 60px ≈ 360-410px), and falls back to
+       ``flex-start`` when content overflows so leftmost items remain
+       reachable on narrow phones. ``min-width: 60px`` on .nav-btn keeps
+       labels like "Dashboard" from truncating in space-evenly mode. */
     #nav-rail {
         flex-direction: row;
         top: auto;
@@ -1425,6 +1434,7 @@ body {
         padding: 6px 6px;
         padding-bottom: calc(6px + env(safe-area-inset-bottom, 0px));
         gap: 2px;
+        justify-content: safe center;
         overflow-x: auto;
         overflow-y: hidden;
         -webkit-overflow-scrolling: touch;
@@ -1442,7 +1452,7 @@ body {
     .nav-btn {
         flex-direction: column;
         width: auto;
-        min-width: 54px;
+        min-width: 60px;
         flex: 0 0 auto;
         padding: 5px 8px;
         gap: 2px;
@@ -1472,12 +1482,16 @@ body {
         padding-bottom: calc(62px + env(safe-area-inset-bottom, 0px));
     }
 
-    /* Chat header — make non-absolute on mobile so it claims its own vertical
-       space and never hides the first chat message under the gradient when
-       the row of action buttons wraps to 2+ rows. */
+    /* Chat header — keep the floating-overlay glass treatment on mobile too
+       so the same soft-gradient + masked-blur scroll-under effect holds
+       across viewports. v5.6.x had switched it to ``position: static`` to
+       avoid hiding the first chat message under wrapped action rows, but
+       that introduced a hard "black bar" edge above the transcript. We
+       restore the overlay and instead reduce the row gap so the header
+       stays compact on phones; #chat-messages already reserves
+       ``padding-top: 12px`` and the absolute composer compensates for any
+       wrapping via its own padding. */
     .chat-page-header {
-        position: static;
-        background: transparent;
         row-gap: 6px;
     }
 
@@ -1505,21 +1519,35 @@ body {
 }
 
 #chat-input-area {
+    /* Hybrid translucent overlay (v5.7.0). Mirrors the ``.chat-page-header``
+       pattern at the bottom of the chat page: a compact absolute-positioned
+       wrapper with a soft 4-stop gradient that only darkens transcript
+       text as it approaches the composer. The actual frosted blur lives on
+       the input field itself, not this wrapper, so the fade never becomes a
+       tall smeared glass band. ``#chat-messages`` reserves enough bottom
+       padding so the last bubble is reachable above the composer surface. */
     display: flex;
     flex-direction: column;
     gap: 4px;
-    padding: 8px 16px 16px;
+    padding: 32px 16px 16px;
     align-items: stretch;
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
     z-index: 5;
-    flex-shrink: 0;
+    pointer-events: none;
     background: linear-gradient(
-        180deg,
-        rgba(13, 11, 15, 0.00) 0%,
-        rgba(13, 11, 15, 0.58) 28%,
-        rgba(13, 11, 15, 0.90) 100%
+        0deg,
+        rgba(13, 11, 15, 0.82) 0%,
+        rgba(13, 11, 15, 0.58) 48%,
+        rgba(13, 11, 15, 0.22) 78%,
+        rgba(13, 11, 15, 0.00) 100%
     );
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
+}
+
+#chat-input-area > * {
+    pointer-events: auto;
 }
 
 .chat-input-wrap {
@@ -1621,15 +1649,16 @@ body {
     flex: 1;
     padding: 10px 76px 10px 42px;
     border-radius: 24px;
-    border: 1px solid rgba(255, 255, 255, 0.09);
-    background: rgba(26, 21, 32, 0.62);
-    backdrop-filter: blur(16px);
-    -webkit-backdrop-filter: blur(16px);
-    /* No drop-shadow halo around the input field — the bottom scroll-under
-       fade + the input's own translucent glass background already separate
-       it from the transcript. The previous 24px ambient shadow read as a
-       redundant gradient ring around the input. Inset highlight kept for
-       the subtle top edge bevel of the glass surface. */
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    background: rgba(26, 21, 32, 0.55);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    /* The textarea is the focal "glass" element. Its own dense blur
+       (20px) together with a moderately translucent fill (0.55) is what
+       makes message bubbles read THROUGH the input field as a frosted
+       surface. The wrapper's mask-faded blur handles the scroll-under
+       gradient zone above the textarea, so the textarea itself does not
+       need to carry the wrapper's gradient. */
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
     color: var(--text-primary);
     font-size: 15px;
@@ -1642,7 +1671,7 @@ body {
 }
 #chat-input:focus {
     border-color: rgba(232, 93, 111, 0.4);
-    background: rgba(26, 21, 32, 0.72);
+    background: rgba(26, 21, 32, 0.85);
     /* Focus ring only — no ambient halo. */
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 0 0 3px rgba(201, 53, 69, 0.10);
 }
@@ -2039,6 +2068,13 @@ body {
     flex-wrap: wrap;
     gap: 6px;
     padding: 8px 20px;
+    align-items: center;
+}
+
+/* v5.7.0: the embedded-Logs Clear button lives inside the filters row
+   (right-aligned) instead of in a duplicate inner page header. */
+.logs-inline-clear {
+    margin-left: auto;
 }
 
 .filter-chip {
@@ -2415,6 +2451,14 @@ body {
     gap: 8px;
 }
 
+/* v5.7.0: when Evolution is embedded in the Dashboard tab strip, the
+   "Refresh" button + status badge that used to live in a duplicate
+   inner ".page-header" relocate into the runtime card head, sitting
+   alongside the existing pills cluster. */
+.evo-runtime-controls {
+    align-items: center;
+}
+
 .evo-runtime-pill,
 .evo-runtime-chip {
     display: inline-flex;
@@ -2522,8 +2566,14 @@ body {
     padding: 20px 24px;
     margin-bottom: 20px;
 }
-.costs-budget-title { font-size: 15px; font-weight: 600; margin: 0 0 16px; color: var(--text-primary); }
-.costs-budget-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 20px; margin-bottom: 16px; }
+.costs-budget-title { font-size: 15px; font-weight: 600; margin: 0; color: var(--text-primary); }
+/* v5.7.0: budget card head row hosts the title plus (when costs is
+   embedded in the Dashboard tab strip) the relocated Refresh button. */
+.costs-budget-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+.costs-budget-refresh { flex: 0 0 auto; }
+.costs-budget-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px 20px; margin-bottom: 16px; }
+.costs-budget-fields .form-field { min-width: 0; }
+.costs-budget-fields input { width: 100%; min-width: 0; }
 .costs-budget-save { margin-top: 4px; }
 .costs-stats-grid {
     display: grid;
@@ -2568,6 +2618,16 @@ body {
     align-items: flex-start;
     justify-content: space-between;
     gap: 14px;
+}
+
+/* v5.7.0: actions cluster (status badge + relocated Check-for-updates
+   button) sits to the right of the head row, replacing the duplicate
+   inner page-header that used to host the button. */
+.updates-head-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
 }
 
 .updates-summary {
@@ -2634,6 +2694,19 @@ body {
     flex: 1;
     min-height: 0;
     overflow: hidden;
+}
+
+/* v5.7.0 scroll-chain fix: ``.dashboard-panels`` is the parent of every
+   embedded sub-panel. Without ``display: flex; flex-direction: column;``
+   the active panel's ``flex: 1; min-height: 0`` collapses to content
+   height, which kills overflow scrolling for Logs / Updates / Costs
+   (and the 3-column Updates Tags view). Evolution previously bypassed
+   the broken chain via an explicit ``height: calc(var(--vvh) - 120px)``
+   on ``.evolution-container`` — that rule stays as a belt-and-braces.
+   With this single rule the sub-panel's flex chain is intact end-to-end. */
+.dashboard-panels {
+    display: flex;
+    flex-direction: column;
 }
 
 .dashboard-panel {
@@ -3112,14 +3185,19 @@ body {
     padding: 6px 4px;
 }
 
+/* v5.7.0 kebab menu: anchored popover under the trigger (not a centered
+   modal). The wrapper is position:relative so the dialog can position:
+   absolute inside it under the button. The dialog opens via .show()
+   (non-modal) so the rest of the page stays interactive and there is no
+   ::backdrop dim. */
 .skills-card-menu {
     position: relative;
     display: inline-flex;
 }
 
 .skills-card-menu-trigger {
-    width: 34px;
-    min-height: 34px;
+    width: 32px;
+    min-height: 32px;
     border-radius: var(--radius-sm);
     border: 1px solid rgba(255, 255, 255, 0.08);
     background: rgba(255, 255, 255, 0.04);
@@ -3129,7 +3207,10 @@ body {
     justify-content: center;
     cursor: pointer;
     font-weight: 700;
+    font-size: 18px;
+    line-height: 1;
     font-family: inherit;
+    padding: 0;
 }
 
 .skills-card-menu-trigger:hover {
@@ -3138,38 +3219,23 @@ body {
 }
 
 .skills-card-menu-dialog {
-    min-width: 150px;
+    /* Anchored popover (non-modal). position: absolute relative to the
+       wrapper so the menu sits right under the kebab; right: 0 keeps the
+       menu's right edge aligned with the trigger's right edge so it
+       never overflows the card on the right. */
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    left: auto;
+    margin: 0;
+    min-width: 160px;
     padding: 6px;
     border-radius: 12px;
     border: 1px solid rgba(255, 255, 255, 0.08);
     background: rgba(18, 20, 26, 0.96);
     color: var(--text-primary);
     box-shadow: 0 18px 44px rgba(0, 0, 0, 0.32);
-    margin: auto;
-}
-
-.skills-card-menu-dialog::backdrop {
-    background: rgba(0, 0, 0, 0.28);
-    backdrop-filter: blur(2px);
-}
-
-.skills-card-menu-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 4px 6px 8px;
-    color: var(--text-secondary);
-    font-size: 12px;
-}
-
-.skills-card-menu-close {
-    border: 0;
-    background: transparent;
-    color: var(--text-secondary);
-    cursor: pointer;
-    font: inherit;
-    font-size: 18px;
+    z-index: 50;
 }
 
 .skills-menu-item {
@@ -3392,6 +3458,89 @@ body {
 .marketplace-card.is-working {
     border-color: rgba(245, 158, 11, 0.35);
     background: linear-gradient(135deg, rgba(245, 158, 11, 0.08), rgba(255, 255, 255, 0.02));
+    /* v5.7.0: gentle pulsing background so a long install (download +
+       adapt + review + deps) reads as actively in progress rather than
+       a frozen card. Animation runs only while the card carries the
+       is-working class. */
+    animation: marketplace-card-pulse 2.4s ease-in-out infinite;
+}
+
+@keyframes marketplace-card-pulse {
+    0%   { background: linear-gradient(135deg, rgba(245, 158, 11, 0.06), rgba(255, 255, 255, 0.02)); }
+    50%  { background: linear-gradient(135deg, rgba(245, 158, 11, 0.14), rgba(255, 255, 255, 0.04)); }
+    100% { background: linear-gradient(135deg, rgba(245, 158, 11, 0.06), rgba(255, 255, 255, 0.02)); }
+}
+
+/* v5.7.0: marketplace filter row + Official-only toggle (replaces the
+   awkward inline native <input type="checkbox"> wedged between the search
+   field and the Search button). The toggle visually mirrors the design
+   system's switch surface (track + thumb) but uses a real <input> for
+   keyboard / a11y. */
+.marketplace-filters {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 0 8px;
+}
+
+.marketplace-filter-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    color: var(--text-secondary);
+    font-size: 13px;
+    user-select: none;
+}
+
+.marketplace-filter-toggle input[type="checkbox"] {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    border: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+}
+
+.marketplace-filter-track {
+    width: 36px;
+    height: 20px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.12);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    position: relative;
+    flex-shrink: 0;
+    transition: background 0.18s ease;
+}
+
+.marketplace-filter-track::after {
+    content: '';
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.85);
+    transition: transform 0.18s ease;
+}
+
+.marketplace-filter-toggle input[type="checkbox"]:checked + .marketplace-filter-track {
+    background: rgba(232, 93, 111, 0.55);
+    border-color: rgba(232, 93, 111, 0.65);
+}
+
+.marketplace-filter-toggle input[type="checkbox"]:checked + .marketplace-filter-track::after {
+    transform: translateX(16px);
+    background: #fff;
+}
+
+.marketplace-filter-toggle input[type="checkbox"]:focus-visible + .marketplace-filter-track {
+    outline: 2px solid rgba(232, 93, 111, 0.45);
+    outline-offset: 2px;
 }
 
 .marketplace-card-head {
@@ -3930,6 +4079,53 @@ body {
     gap: 10px;
 }
 
+/* v5.7.0: host-owned map / calendar / kanban renderers. Lightweight
+   declarative layouts; Leaflet upgrade for ``.widget-map`` is kept as
+   a follow-up integration so the widget surface ships without a new
+   third-party dependency in this update. */
+.widget-map {
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 8px;
+    padding: 10px;
+    background: rgba(255, 255, 255, 0.02);
+}
+.widget-map-list { margin: 0; padding-left: 18px; font-size: 13px; }
+.widget-map-list li { padding: 2px 0; }
+
+.widget-calendar { font-size: 13px; }
+.widget-calendar-list { list-style: none; margin: 0; padding: 0; }
+.widget-calendar-row {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    padding: 6px 8px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.widget-kanban {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 10px;
+    margin-top: 8px;
+}
+.widget-kanban-col {
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 8px;
+    padding: 10px;
+    min-height: 120px;
+}
+.widget-kanban-col-head { margin-bottom: 8px; font-size: 12px; color: var(--text-secondary); }
+.widget-kanban-card {
+    background: rgba(232, 93, 111, 0.12);
+    border: 1px solid rgba(232, 93, 111, 0.25);
+    border-radius: 6px;
+    padding: 6px 8px;
+    margin: 4px 0;
+    cursor: grab;
+    font-size: 12px;
+}
+.widget-kanban-card:active { cursor: grabbing; }
+
 .widget-progress {
     display: flex;
     align-items: center;
@@ -3990,10 +4186,13 @@ body {
         min-width: 0;
     }
 
-    /* Header is now in normal flow on mobile — remove the desktop 56px top
-       padding that was meant to clear the absolute-positioned header. */
+    /* Header is back to being a floating overlay on mobile (v5.7.0). The
+       transcript needs to clear the absolute header (taller on phones
+       because action buttons wrap to ~2 rows). Bottom padding clears
+       the absolute composer + safe-area. */
     #chat-messages {
-        padding-top: 12px;
+        padding-top: 80px;
+        padding-bottom: calc(var(--chat-input-reserve, 108px) + env(safe-area-inset-bottom, 0px));
         overflow-x: hidden;
     }
 

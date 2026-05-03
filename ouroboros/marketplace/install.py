@@ -24,7 +24,7 @@ import logging
 import pathlib
 import shutil
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ouroboros.marketplace.adapter import AdapterResult, adapt_openclaw_skill
 from ouroboros.marketplace.clawhub import (
@@ -223,6 +223,7 @@ def install_skill(
     version: Optional[str] = None,
     auto_review: bool = True,
     overwrite: bool = False,
+    progress_callback: Optional[Callable[[str], None]] = None,
 ) -> InstallResult:
     """End-to-end install of one ClawHub skill into the data plane.
 
@@ -230,8 +231,27 @@ def install_skill(
     is ``False`` and ``error`` carries an operator-facing summary.
     Idempotent for re-installs at the same version: ``overwrite=True``
     is required to replace an existing copy.
+
+    v5.7.0: ``progress_callback`` (optional) receives short human-readable
+    stage labels ("Resolving registry…", "Downloading…", "Adapting
+    manifest…", "Landing into data plane…", "Running security review…",
+    "Installing dependencies…", "Done"). The marketplace HTTP layer
+    bridges these to the active :class:`LifecycleJob`'s ``message`` so
+    the Skills UI surfaces real per-stage progress instead of a static
+    spinner. The callback runs on the worker thread; it must be cheap,
+    must not raise, and must not block on the event loop.
     """
+
+    def _progress(stage: str) -> None:
+        if progress_callback is None:
+            return
+        try:
+            progress_callback(stage)
+        except Exception:
+            log.debug("install_skill progress callback raised", exc_info=True)
+
     _ensure_marketplace_enabled()
+    _progress("Resolving registry…")
 
     cleaned_slug = (slug or "").strip()
     if not cleaned_slug:
@@ -272,6 +292,7 @@ def install_skill(
             error="Registry returned no version metadata; cannot resolve install target.",
         )
 
+    _progress(f"Downloading v{target_version}…")
     try:
         archive = _registry_download(cleaned_slug, version=target_version)
     except ClawHubClientError as exc:
@@ -314,6 +335,7 @@ def install_skill(
             error=f"Archive validation failed: {exc}",
         )
 
+    _progress("Adapting manifest…")
     try:
         adapter_result = adapt_openclaw_skill(
             staged.staging_dir,
@@ -346,6 +368,7 @@ def install_skill(
             error="Adapter rejected the package: " + "; ".join(adapter_result.blockers),
         )
 
+    _progress("Landing into data plane…")
     target_root = _clawhub_skills_root(drive_root)
     target_dir = target_root / adapter_result.target_dirname
     try:
@@ -391,6 +414,38 @@ def install_skill(
     except Exception:
         log.warning("Failed to persist provenance for %s", adapter_result.sanitized_name, exc_info=True)
 
+    # v5.7.0: write an explicit ``grants.json`` with ``requested_keys`` and
+    # empty ``granted_keys`` when the freshly-installed skill requests core
+    # keys via ``env_from_settings`` (e.g. ``OPENROUTER_API_KEY``). The
+    # Skills UI already computes the requested set from the manifest
+    # on-the-fly via ``grant_status_for_skill``; persisting this file
+    # at install time means the desktop launcher's owner-grant bridge
+    # has a single canonical state file to update once the operator
+    # approves keys, regardless of whether the skill carries
+    # ``provenance.requires.config``, ``provenance.requested_key_grants``,
+    # or only the manifest's ``env_from_settings`` allowlist.
+    try:
+        from ouroboros.skill_loader import (
+            find_skill,
+            requested_core_setting_keys,
+            save_skill_grants,
+        )
+        installed_skill = find_skill(drive_root, adapter_result.sanitized_name)
+        if installed_skill is not None:
+            requested = requested_core_setting_keys(
+                list(installed_skill.manifest.env_from_settings or [])
+            )
+            if requested:
+                save_skill_grants(
+                    drive_root,
+                    installed_skill.name,
+                    granted_keys=[],
+                    content_hash=installed_skill.content_hash,
+                    requested_keys=requested,
+                )
+    except Exception:
+        log.debug("requires.config -> grants.json bootstrap failed", exc_info=True)
+
     review_status = "pending"
     review_findings: List[Dict[str, Any]] = []
     review_error = ""
@@ -398,6 +453,7 @@ def install_skill(
     deps_error = ""
     deps_fingerprint: Dict[str, Any] = {}
     if auto_review:
+        _progress("Running security review…")
         review_status, review_findings, review_error = _run_skill_review(
             drive_root, repo_dir, adapter_result.sanitized_name
         )
@@ -405,6 +461,7 @@ def install_skill(
     if auto_specs:
         deps_status = "pending_review"
         if review_status == "pass" and not review_error:
+            _progress("Installing dependencies…")
             try:
                 deps_fingerprint = install_isolated_dependencies(
                     drive_root,
@@ -419,6 +476,7 @@ def install_skill(
                 log.exception("isolated dependency install failed for %s", adapter_result.sanitized_name)
                 deps_status = "failed"
                 deps_error = f"{type(exc).__name__}: {exc}"
+    _progress("Done")
 
     return InstallResult(
         ok=deps_status != "failed",
@@ -528,6 +586,18 @@ def uninstall_skill(
             ),
         )
 
+    # v5.7.0: unload any in-process extension instance BEFORE removing the
+    # payload directory. Otherwise the loader's tools/routes/ws_handlers/
+    # ui_tabs registries keep pointing at modules whose source has just
+    # been deleted, and any background threads/timers/EventSource clients
+    # the extension started keep running until the next dispatch tries to
+    # use them and fails. Calling ``unload_extension`` runs registered
+    # ``on_unload`` callbacks first, then drops the registrations.
+    try:
+        from ouroboros.extension_loader import unload_extension
+        unload_extension(cleaned)
+    except Exception:  # pragma: no cover — defensive
+        log.debug("extension unload pre-uninstall failed for %s", cleaned, exc_info=True)
     try:
         shutil.rmtree(target)
     except OSError as exc:
@@ -570,7 +640,18 @@ def update_skill(
             sanitized_name=sanitized_name,
             error="provenance is missing slug",
         )
-    return install_skill(
+    # v5.7.0: capture the current live state BEFORE the unload+swap.
+    # If the extension was live and enabled, we will reconcile it after
+    # install_skill lands the new payload so the user does not have to
+    # toggle the skill off/on by hand.
+    was_live = False
+    try:
+        from ouroboros.extension_loader import is_extension_live, unload_extension
+        was_live = bool(is_extension_live(sanitized_name, drive_root))
+        unload_extension(sanitized_name)
+    except Exception:  # pragma: no cover — defensive
+        log.debug("pre-update unload failed for %s", sanitized_name, exc_info=True)
+    result = install_skill(
         drive_root,
         repo_dir,
         slug=slug,
@@ -578,6 +659,14 @@ def update_skill(
         auto_review=True,
         overwrite=True,
     )
+    if was_live and (not getattr(result, "ok", False) or getattr(result, "review_status", "") == "pass"):
+        try:
+            from ouroboros.extension_loader import reconcile_extension
+            from ouroboros.config import load_settings
+            reconcile_extension(sanitized_name, drive_root, load_settings)
+        except Exception:  # pragma: no cover — defensive
+            log.debug("post-update reconcile failed for %s", sanitized_name, exc_info=True)
+    return result
 
 
 __all__ = [

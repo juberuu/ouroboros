@@ -140,6 +140,60 @@ def test_plugin_api_impl_matches_protocol():
         settings_reader=lambda: {},
     )
     assert isinstance(impl, PluginAPI)
+    info = impl.get_runtime_info()
+    assert info["app_version"]
+    assert sorted(info) == [
+        "app_version",
+        "data_dir",
+        "runtime_mode",
+        "server_port",
+        "skill_dir",
+        "state_dir",
+    ]
+
+
+def test_plugin_api_runtime_info_uses_port_file(tmp_path, monkeypatch):
+    """server_port must reflect the actual bound server port written by
+    server.py/launcher, not the static AGENT_SERVER_PORT fallback."""
+    from ouroboros import config as cfg
+
+    port_file = tmp_path / "state" / "server_port"
+    port_file.parent.mkdir()
+    port_file.write_text("9012\n", encoding="utf-8")
+    monkeypatch.setattr(cfg, "PORT_FILE", port_file)
+    impl = extension_loader.PluginAPIImpl(
+        skill_name="x",
+        permissions=(),
+        env_allowlist=(),
+        state_dir=tmp_path / "state",
+        settings_reader=lambda: {},
+    )
+
+    assert impl.get_runtime_info()["server_port"] == 9012
+
+
+def test_register_settings_section_lifecycle(tmp_path):
+    loaded, _repo_root, drive_root = _prepare_extension(
+        tmp_path,
+        "settings_ext",
+        plugin_body=(
+            "def register(api):\n"
+            "    api.register_settings_section('config', 'Config', schema={'components': [\n"
+            "        {'type': 'markdown', 'text': 'hello'}\n"
+            "    ]})\n"
+        ),
+        permissions=["widget"],
+    )
+
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
+    assert err is None, err
+    sections = extension_loader.snapshot()["settings_sections"]
+    assert len(sections) == 1
+    assert sections[0]["skill"] == "settings_ext"
+    assert sections[0]["section_id"] == "config"
+
+    extension_loader.unload_extension("settings_ext")
+    assert extension_loader.snapshot()["settings_sections"] == []
 
 
 def test_forbidden_extension_settings_carries_repo_secrets():

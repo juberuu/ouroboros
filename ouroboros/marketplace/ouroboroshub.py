@@ -278,5 +278,15 @@ def uninstall(sanitized_name: str) -> HubInstallResult:
         return HubInstallResult(ok=False, sanitized_name=name, error=f"{name} is not installed")
     if not marker.is_file():
         return HubInstallResult(ok=False, sanitized_name=name, error="missing OuroborosHub provenance marker")
+    # v5.7.0: unload any in-process extension instance BEFORE removing the
+    # payload directory (mirrors the ClawHub uninstall path). The loader's
+    # registries are otherwise left pointing at deleted modules and any
+    # background work the extension started keeps running until the next
+    # failed dispatch.
+    try:
+        from ouroboros.extension_loader import unload_extension
+        unload_extension(name)
+    except Exception:  # pragma: no cover — defensive
+        pass
     shutil.rmtree(target)
     return HubInstallResult(ok=True, sanitized_name=name, target_dir=target)

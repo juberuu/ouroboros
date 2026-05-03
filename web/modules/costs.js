@@ -2,16 +2,29 @@ export function initCosts({ ws, state, mount = null, embedded = false, hostPage 
     const page = document.createElement('div');
     page.id = 'page-costs';
     page.className = embedded ? 'settings-embedded-content settings-costs-panel' : 'page';
-    page.innerHTML = `
+    // v5.7.0: when embedded, drop the inner ".page-header" duplicate label
+    // (the outer Dashboard pill strip already names the panel) and move the
+    // Refresh button into the budget card head row.
+    const headerBlock = embedded
+        ? ''
+        : `
         <div class="page-header">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
             <h2>Costs</h2>
             <div class="spacer"></div>
             <button class="btn btn-default btn-sm" id="btn-refresh-costs">Refresh</button>
-        </div>
+        </div>`;
+    const inlineRefresh = embedded
+        ? `<button class="btn btn-default btn-sm costs-budget-refresh" id="btn-refresh-costs">Refresh</button>`
+        : '';
+    page.innerHTML = `
+        ${headerBlock}
         <div class="costs-scroll">
             <div class="costs-budget-card">
-                <h3 class="costs-budget-title">Budget</h3>
+                <div class="costs-budget-head">
+                    <h3 class="costs-budget-title">Budget</h3>
+                    ${inlineRefresh}
+                </div>
                 <div class="costs-budget-fields">
                     <div class="form-field">
                         <label>Total Budget ($)</label>

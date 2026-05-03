@@ -122,10 +122,91 @@ def _mark_reviewed(drive_root: pathlib.Path, skill_dir: pathlib.Path, name: str)
 
 
 def test_skill_exec_tools_register_in_registry(tmp_path):
-    """ToolRegistry must expose all four Phase 3 skill tools."""
+    """ToolRegistry must expose the skill lifecycle tools."""
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
     names = {t["function"]["name"] for t in registry.schemas()}
-    assert {"list_skills", "review_skill", "skill_exec", "toggle_skill"} <= names
+    assert {"list_skills", "review_skill", "skill_exec", "toggle_skill", "skill_preflight"} <= names
+
+
+def test_skill_preflight_success_and_no_pycache(tmp_path, monkeypatch):
+    ctx = _make_ctx(tmp_path)
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir()
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    skill_dir = _build_skill(skills_root, "alpha", script_body="print('ok')\n")
+
+    from ouroboros.tools.skill_preflight import _handle_skill_preflight
+
+    result = json.loads(_handle_skill_preflight(ctx, skill="alpha"))
+
+    assert result["ok"] is True
+    assert result["files_checked"] >= 1
+    assert result["files_failed"] == 0
+    assert not (skill_dir / "scripts" / "__pycache__").exists()
+
+
+def test_skill_preflight_reports_python_syntax_error(tmp_path, monkeypatch):
+    ctx = _make_ctx(tmp_path)
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir()
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    _build_skill(skills_root, "alpha", script_body="def broken(:\n")
+
+    from ouroboros.tools.skill_preflight import _handle_skill_preflight
+
+    result = json.loads(_handle_skill_preflight(ctx, skill="alpha"))
+
+    assert result["ok"] is False
+    assert result["files_failed"] == 1
+    assert "SyntaxError" in result["files"][0]["stderr"]
+
+
+def test_skill_preflight_fails_closed_when_file_limit_omits_payload(tmp_path, monkeypatch):
+    ctx = _make_ctx(tmp_path)
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir()
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    skill_dir = _build_skill(skills_root, "alpha")
+    scripts = skill_dir / "scripts"
+    from ouroboros.tools import skill_preflight as sp
+
+    for idx in range(sp._PREFLIGHT_HARD_FILE_LIMIT + 2):
+        (scripts / f"extra_{idx}.py").write_text("print('ok')\n", encoding="utf-8")
+
+    result = json.loads(sp._handle_skill_preflight(ctx, skill="alpha"))
+
+    assert result["ok"] is False
+    assert result["omitted_count"] > 0
+
+
+def test_skill_preflight_missing_validator_runtime_is_not_ok(tmp_path, monkeypatch):
+    ctx = _make_ctx(tmp_path)
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir()
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    skill_dir = _build_skill(skills_root, "alpha")
+    (skill_dir / "scripts" / "check.js").write_text("console.log('ok')\n", encoding="utf-8")
+
+    from ouroboros.tools import skill_preflight as sp
+    monkeypatch.setattr(sp, "_resolve_runtime", lambda runtime: None if runtime == "node" else "/bin/echo")
+
+    result = json.loads(sp._handle_skill_preflight(ctx, skill="alpha", paths=["scripts/check.js"]))
+
+    assert result["ok"] is False
+    assert result["files"][0]["skipped"] is True
+
+
+def test_run_shell_script_scan_handles_interpreter_option_values(tmp_path):
+    """Regression for v5.7.0 A2 review: python/node options that consume a
+    following value must not hide the actual script file from run_shell's
+    content scanner."""
+    from ouroboros.tools.registry import _extract_script_file_args
+
+    assert _extract_script_file_args(["python3", "-W", "ignore", "evil.py"]) == ["evil.py"]
+    assert _extract_script_file_args(["python3", "-X", "utf8", "evil.py"]) == ["evil.py"]
+    assert _extract_script_file_args(["node", "--require", "preload.js", "evil.js"]) == ["preload.js", "evil.js"]
+    assert _extract_script_file_args(["node", "--require=preload.js", "-e", "console.log(1)"]) == ["preload.js"]
+    assert _extract_script_file_args(["node", "--import=preload.mjs", "evil.js"]) == ["preload.mjs", "evil.js"]
 
 
 def test_skill_exec_tools_have_policy_entries():
@@ -135,6 +216,7 @@ def test_skill_exec_tools_have_policy_entries():
     assert TOOL_POLICY["list_skills"] == POLICY_SKIP
     assert TOOL_POLICY["review_skill"] == POLICY_SKIP
     assert TOOL_POLICY["toggle_skill"] == POLICY_SKIP
+    assert TOOL_POLICY["skill_preflight"] == POLICY_SKIP
     assert TOOL_POLICY["skill_exec"] == POLICY_CHECK
 
 
@@ -551,6 +633,7 @@ def test_heal_context_blocks_marketplace_sidecar_writes(sidecar, tmp_path):
     ("data_read", {"path": "settings.json"}),
     ("data_list", {"dir": "memory"}),
     ("review_skill", {"skill": "beta"}),
+    ("skill_preflight", {"skill": "beta"}),
 ])
 def test_heal_context_blocks_out_of_scope_data_access(tool_name, args, tmp_path):
     ctx = _make_ctx(tmp_path)
@@ -1043,7 +1126,7 @@ def test_skill_exec_returns_controlled_error_when_payload_becomes_unreadable(
 
 def test_runtime_allowlist_covers_phase3_runtimes():
     allowed = set(skill_exec_mod._ALLOWED_RUNTIMES)
-    assert {"python", "python3", "bash", "node"} <= allowed
+    assert {"python", "python3", "bash", "node", "deno", "ruby", "go"} <= allowed
 
 
 def test_python3_runtime_falls_back_to_python_for_windows():

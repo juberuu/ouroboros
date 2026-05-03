@@ -850,7 +850,54 @@ def ensure_data_skills_seeded() -> int:
     except Exception:  # pragma: no cover - defensive
         log_obj.warning("Native skill version-resync raised", exc_info=True)
         upgraded = 0
+    try:
+        cleanup_orphaned_seed_markers(seed_dir, target_root / "native", log_obj)
+    except Exception:  # pragma: no cover - defensive
+        log_obj.warning("Orphaned seed-marker cleanup raised", exc_info=True)
     return copied + upgraded
+
+
+def cleanup_orphaned_seed_markers(
+    seed_dir: pathlib.Path,
+    native_root: pathlib.Path,
+    log_obj,
+) -> None:
+    """Strip ``.seed-origin`` markers from native skills whose seed has
+    been removed from ``repo/skills/``.
+
+    v5.7.0: ``video_gen`` was removed from the bundled seed in favour
+    of the OuroborosHub-published copy, but existing user installs
+    keep the on-disk ``data/skills/native/video_gen/`` directory plus
+    its launcher-written ``.seed-origin`` marker. Without this helper
+    those installs would still be classified as ``source: native``
+    forever, even though the launcher no longer ships a seed for
+    them. Removing the marker re-classifies them as ``source: external``
+    (user-managed), which is honest about the runtime ownership.
+
+    Idempotent: only strips a marker when the matching seed dir is
+    absent. Never deletes payload files; the user keeps their copy."""
+    if not native_root.is_dir():
+        return
+    for entry in native_root.iterdir():
+        if not entry.is_dir() or entry.name.startswith("."):
+            continue
+        marker = entry / ".seed-origin"
+        if not marker.is_file():
+            continue
+        if (seed_dir / entry.name).is_dir():
+            continue
+        try:
+            marker.unlink()
+            log_obj.info(
+                "Native skill %r seed has been removed from repo/skills/; "
+                "re-classifying installed copy as external (user-managed).",
+                entry.name,
+            )
+        except OSError:  # pragma: no cover - defensive
+            log_obj.warning(
+                "Failed to strip orphaned .seed-origin from %s",
+                entry, exc_info=True,
+            )
 
 
 def bootstrap_native_skills(context: BootstrapContext) -> None:

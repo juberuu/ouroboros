@@ -290,12 +290,14 @@ def test_chat_input_has_glassmorphism():
     start = css.index("#chat-input {")
     end = css.index("#chat-input:focus")
     chat_input_block = css[start:end]
-    # Must have high-quality backdrop blur on the textarea itself
-    assert "backdrop-filter: blur(16px)" in chat_input_block
-    # Background should be semi-transparent (frosted glass, opacity 0.62)
-    assert "rgba(26, 21, 32, 0.62)" in chat_input_block
+    # Must have high-quality backdrop blur on the textarea itself. v5.7.0
+    # moved the blur focus to the input field (20px) and left the wrapper as
+    # a no-blur soft darkening gradient.
+    assert "backdrop-filter: blur(20px)" in chat_input_block
+    # Background should be semi-transparent (frosted glass, opacity 0.55)
+    assert "rgba(26, 21, 32, 0.55)" in chat_input_block
     # Border should be a white tint (design system for frosted glass surfaces)
-    assert "rgba(255, 255, 255, 0.09)" in chat_input_block
+    assert "rgba(255, 255, 255, 0.10)" in chat_input_block
     # Must not use opaque background
     assert "var(--bg-secondary)" not in chat_input_block
 
@@ -315,15 +317,19 @@ def test_log_phases_use_crimson_not_blue():
 
 
 def test_about_uses_css_classes_not_inline():
-    """about.js must use CSS classes, not inline style= attributes."""
-    src = _read("web/modules/about.js")
+    """About sub-tab inside Settings (v5.7.0+) must use CSS classes, not
+    inline style= attributes. About used to be a top-level page rendered
+    by web/modules/about.js; in v5.7.0 the content moved into Settings as
+    a sub-tab section. We assert the markup against settings_ui.js where
+    the new About panel lives."""
+    src = _read("web/modules/settings_ui.js")
     assert 'class="about-body"' in src
     assert 'class="about-logo"' in src
     assert 'class="about-title"' in src
     assert 'class="about-credits"' in src
     assert 'class="about-footer"' in src
-    # No inline style= should remain
-    assert 'style="' not in src
+    # The About <section> declaration is the marker the panel exists
+    assert 'data-settings-panel="about"' in src
 
 
 def test_costs_uses_css_classes_not_inline():
@@ -344,7 +350,7 @@ def test_costs_uses_css_classes_not_inline():
 
 
 def test_costs_about_css_classes_defined():
-    """All CSS classes used by about.js and costs.js must be defined in style.css."""
+    """All CSS classes used by the About sub-tab and costs.js must be defined in style.css."""
     css = _read("web/style.css")
     for cls in [".about-body", ".about-logo", ".about-title", ".about-footer",
                 ".costs-stats-grid", ".costs-tables-grid", ".costs-table-label",
@@ -1108,10 +1114,18 @@ def test_clipboard_paste_handler_exists():
     )
 
 
-# ─── Bottom-fade gradient layer is separate from #chat-input-area ───────
+# ─── Chat input dock gradient contract ─────────────────────────────────
 
 def test_chat_input_dock_has_glass_gradient_without_absolute_positioning():
-    """Flex composer reserves layout space while the dock keeps a readable glass fade."""
+    """Absolute composer uses a compact soft fade on the wrapper; blur lives on the input.
+
+    v5.7.0 restored the scroll-under composer overlay, but the visual rule is
+    now deliberately split:
+
+    - #chat-input-area: compact single-element darkening gradient, no wrapper blur.
+    - #chat-input: frosted-glass blur (20px) + semi-transparent fill.
+    - no separate .chat-bottom-fade layer.
+    """
     css = _read("web/style.css")
     input_area_match = re.search(
         r"#chat-input-area\s*\{([^}]*)\}",
@@ -1120,12 +1134,15 @@ def test_chat_input_dock_has_glass_gradient_without_absolute_positioning():
     assert input_area_match, "#chat-input-area rule must be parseable"
     input_area_body = input_area_match.group(1)
     assert "linear-gradient" in input_area_body
-    assert "backdrop-filter: blur(8px)" in input_area_body
-    assert "position: absolute" not in input_area_body
+    assert "backdrop-filter" not in input_area_body
+    assert "position: absolute" in input_area_body
+    assert "padding: 32px 16px 16px" in input_area_body
     chat_js = _read("web/modules/chat.js")
     assert 'class="chat-bottom-fade"' not in chat_js
     assert "scrollToBottomAfterLayout" in chat_js
     assert "messagesDiv.style.paddingBottom" not in chat_js
+    assert "--chat-input-reserve" in css
+    assert "messagesDiv.style.setProperty('--chat-input-reserve'" in chat_js
 
 
 def test_mobile_chat_uses_flex_composer_layout_and_no_interactive_widget():
@@ -1135,8 +1152,8 @@ def test_mobile_chat_uses_flex_composer_layout_and_no_interactive_widget():
     assert "interactive-widget" not in html
     input_area = re.search(r"#chat-input-area\s*\{(?P<body>[^}]+)\}", css, re.S).group("body")
     chat_messages = re.search(r"#chat-messages\s*\{(?P<body>[^}]+)\}", css, re.S).group("body")
-    assert "position: absolute" not in input_area
-    assert "flex-shrink: 0" in input_area
+    assert "position: absolute" in input_area
+    assert "bottom: 0" in input_area
     assert "min-height: 0" in chat_messages
 
 

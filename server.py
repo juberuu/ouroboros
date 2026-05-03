@@ -1597,6 +1597,8 @@ index_page = make_index_page(web_dir)
 from ouroboros.extensions_api import (
     api_extensions_index,
     api_extension_manifest,
+    api_extension_module,
+    api_extension_settings_section,
     api_extension_dispatch,
     api_skill_toggle,
     api_skill_review,
@@ -1696,6 +1698,16 @@ routes = [
     Route(
         "/api/extensions/{skill}/manifest",
         endpoint=api_extension_manifest,
+        methods=["GET"],
+    ),
+    Route(
+        "/api/extensions/{skill}/module/{entry}",
+        endpoint=api_extension_module,
+        methods=["GET"],
+    ),
+    Route(
+        "/api/extensions/{skill}/settings_section",
+        endpoint=api_extension_settings_section,
         methods=["GET"],
     ),
     Route(

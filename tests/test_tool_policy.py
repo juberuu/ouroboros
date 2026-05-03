@@ -54,6 +54,21 @@ def test_advisory_tools_in_initial_schemas():
     assert "review_status" in names
 
 
+def test_heal_skill_tools_are_core_visible_in_initial_schemas():
+    """v5.7.0 heal prompts must be able to call review_skill and
+    skill_preflight without enable_tools (enable_tools is blocked in heal
+    mode). Pin both the tool_policy SSOT and registry.core_only fallback."""
+    assert "review_skill" in CORE_TOOL_NAMES
+    assert "skill_preflight" in CORE_TOOL_NAMES
+    registry = _build_registry()
+    names = {schema["function"]["name"] for schema in initial_tool_schemas(registry)}
+    assert "review_skill" in names
+    assert "skill_preflight" in names
+    core_only_names = {schema["function"]["name"] for schema in registry.schemas(core_only=True)}
+    assert "review_skill" in core_only_names
+    assert "skill_preflight" in core_only_names
+
+
 def test_enable_tools_does_not_duplicate_active_tool_schemas():
     registry = _build_registry()
     tool_schemas = initial_tool_schemas(registry)

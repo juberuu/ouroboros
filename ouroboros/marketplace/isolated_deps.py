@@ -166,27 +166,38 @@ def install_isolated_dependencies(
     *,
     timeout_sec: int = _DEFAULT_TIMEOUT_SEC,
 ) -> Dict[str, Any]:
-    """Install normalized dependency specs into ``<skill>/.ouroboros_env``."""
+    """Install normalized dependency specs into ``<skill>/.ouroboros_env``.
+
+    v5.7.0: deps.json carries an explicit ``status`` field (``installed``
+    / ``failed`` / ``pending``) plus the ``specs_hash`` so callers can
+    decide whether the install is still in sync with the current
+    provenance. ``failed`` carries the error message; ``installed``
+    keeps the previous shape (installed list, log tail, fingerprint).
+    """
 
     env_root = isolated_env_dir(skill_dir)
     env_root.mkdir(parents=True, exist_ok=True)
     installed: List[Dict[str, Any]] = []
     logs: List[Dict[str, Any]] = []
     python_packages: List[str] = []
-    for spec in specs:
-        kind = str(spec.get("kind") or "").lower()
-        package = str(spec.get("package") or "").strip()
-        if kind in {"pip", "pipx", "uv"}:
-            python_packages.append(package)
-        elif kind in {"node", "npm"}:
-            logs.extend(_install_node_package(package, env_root, timeout_sec))
-        elif kind == "cargo":
-            raise RuntimeError("cargo install specs require manual setup")
-        else:
-            raise RuntimeError(f"unsupported isolated install kind: {kind}")
-        installed.append({"kind": kind, "package": package, "bins": list(spec.get("bins") or [])})
-    if python_packages:
-        logs.extend(_install_python_packages(python_packages, env_root, timeout_sec))
+    failure: Dict[str, Any] = {}
+    try:
+        for spec in specs:
+            kind = str(spec.get("kind") or "").lower()
+            package = str(spec.get("package") or "").strip()
+            if kind in {"pip", "pipx", "uv"}:
+                python_packages.append(package)
+            elif kind in {"node", "npm"}:
+                logs.extend(_install_node_package(package, env_root, timeout_sec))
+            elif kind == "cargo":
+                raise RuntimeError("cargo install specs require manual setup")
+            else:
+                raise RuntimeError(f"unsupported isolated install kind: {kind}")
+            installed.append({"kind": kind, "package": package, "bins": list(spec.get("bins") or [])})
+        if python_packages:
+            logs.extend(_install_python_packages(python_packages, env_root, timeout_sec))
+    except Exception as exc:
+        failure = {"error": f"{type(exc).__name__}: {exc}"}
     fingerprint = {
         "schema_version": 1,
         "installed_at": datetime.now(timezone.utc).isoformat(),
@@ -195,6 +206,8 @@ def install_isolated_dependencies(
         "specs_hash": install_specs_hash(specs),
         "installed": installed,
         "logs": logs[-10:],
+        "status": "failed" if failure else "installed",
+        "error": failure.get("error", ""),
     }
     (env_root / FINGERPRINT_FILENAME).write_text(
         json.dumps(fingerprint, ensure_ascii=False, indent=2) + "\n",
@@ -205,4 +218,27 @@ def install_isolated_dependencies(
         json.dumps(fingerprint, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    if failure:
+        # Re-raise so existing call-sites that rely on the failure
+        # surface (install_skill's deps_status="failed") keep behaving
+        # as before. The fingerprint with status=failed is already
+        # written, so durable state survives the exception.
+        raise RuntimeError(failure["error"])
     return fingerprint
+
+
+def read_deps_state(drive_root: pathlib.Path, skill_name: str) -> Dict[str, Any]:
+    """Return the persisted ``deps.json`` for a skill, or an empty dict.
+
+    v5.7.0 helper used by ``toggle_skill`` to refuse enable when the
+    skill's auto specs are not installed (status != ``installed``) or
+    are stale relative to the current provenance.
+    """
+    try:
+        state_dir = skill_state_dir(drive_root, skill_name)
+        path = state_dir / DEPS_STATE_FILENAME
+        if not path.is_file():
+            return {}
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}

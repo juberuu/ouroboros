@@ -5,13 +5,11 @@ export function initUpdates({ mount, hostPage = 'settings', hostSubtab = 'update
     const page = document.createElement('div');
     page.id = 'page-updates';
     page.className = 'settings-embedded-content settings-updates-panel';
+    // v5.7.0: drop the duplicate inner ".page-header" (the outer Dashboard
+    // tab strip already labels the panel). The "Check for updates" button
+    // moves into ".updates-card-head" alongside the status badge so the
+    // refresh-style action sits with the status it refreshes.
     page.innerHTML = `
-        <div class="page-header">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><path d="M21 12a9 9 0 0 1-15 6.7"/><path d="M3 12a9 9 0 0 1 15-6.7"/><path d="M3 21v-6h6"/><path d="M21 3v6h-6"/></svg>
-            <h2>Updates</h2>
-            <div class="spacer"></div>
-            <button class="btn btn-default btn-sm" id="btn-update-check">Check for updates</button>
-        </div>
         <div class="updates-scroll">
             <section class="updates-card" id="updates-status-card">
                 <div class="updates-card-head">
@@ -19,7 +17,10 @@ export function initUpdates({ mount, hostPage = 'settings', hostSubtab = 'update
                         <div class="section-title">Official Updates</div>
                         <div class="updates-summary" id="updates-summary">Loading update status...</div>
                     </div>
-                    <span class="status-badge offline" id="updates-badge">Idle</span>
+                    <div class="updates-head-actions">
+                        <span class="status-badge offline" id="updates-badge">Idle</span>
+                        <button class="btn btn-default btn-sm" id="btn-update-check">Check for updates</button>
+                    </div>
                 </div>
                 <div class="updates-meta" id="updates-meta"></div>
                 <div class="updates-actions">

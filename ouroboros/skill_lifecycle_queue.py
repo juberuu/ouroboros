@@ -130,8 +130,17 @@ async def run_lifecycle_job(
     runner: Callable[[], Awaitable[Any]],
     result_message: Callable[[Any], str] | None = None,
     result_error: Callable[[Any], str] | None = None,
+    progress_target: Optional["JobProgressTarget"] = None,
 ) -> Any:
-    """Run ``runner`` through the global skill lifecycle lane."""
+    """Run ``runner`` through the global skill lifecycle lane.
+
+    v5.7.0: callers can pass ``progress_target`` (a :class:`JobProgressTarget`
+    box) so they can hand a thread-safe stage-message setter to the worker
+    runner. The setter rewrites this job's ``message`` field while it is
+    the active job, which the Skills/Marketplace UIs poll via
+    ``GET /api/skills/lifecycle-queue``. The setter is best-effort: it
+    no-ops once the job has finished.
+    """
 
     global _active
     job = LifecycleJob(
@@ -142,6 +151,8 @@ async def run_lifecycle_job(
         message=str(message or ""),
     )
     _store(job)
+    if progress_target is not None:
+        progress_target.bind(job)
     async with _get_lock():
         from ouroboros.config import DATA_DIR
 
@@ -166,7 +177,43 @@ async def run_lifecycle_job(
             finally:
                 job.finished_at = _now_iso()
                 _active = None
+                if progress_target is not None:
+                    progress_target.release()
                 _notify_chat(job)
+
+
+class JobProgressTarget:
+    """Tiny thread-safe relay so a worker thread can update a lifecycle
+    job's ``message`` without importing this module's globals.
+
+    Use::
+
+        progress = JobProgressTarget()
+        await run_lifecycle_job(..., runner=..., progress_target=progress)
+
+    The runner (or anything it spawns) calls ``progress.set("Downloading…")``
+    from a worker thread; the setter mutates the active job's ``message``
+    so subsequent ``queue_snapshot()`` calls surface live progress to the
+    UI. After the job finishes, ``release()`` flips an internal flag and
+    further ``set()`` calls become no-ops.
+    """
+
+    __slots__ = ("_job", "_done")
+
+    def __init__(self) -> None:
+        self._job: Optional[LifecycleJob] = None
+        self._done = False
+
+    def bind(self, job: LifecycleJob) -> None:
+        self._job = job
+
+    def release(self) -> None:
+        self._done = True
+
+    def set(self, message: str) -> None:
+        if self._done or self._job is None:
+            return
+        self._job.message = str(message or "")
 
 
 def queue_snapshot() -> Dict[str, Any]:

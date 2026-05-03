@@ -401,14 +401,14 @@ function renderSkillCard(skill, reviewingSkills = new Set()) {
     const isMarketplaceManaged = source === 'clawhub' || source === 'ouroboroshub';
     const provenance = isMarketplaceManaged ? skill.provenance : null;
     const updateBtn = isMarketplaceManaged
-        ? `<button class="skills-menu-item skills-update" data-skill="${safeName}" data-source="${escapeHtml(source)}">Update</button>`
+        ? `<button type="button" role="menuitem" class="skills-menu-item skills-update" data-skill="${safeName}" data-source="${escapeHtml(source)}">Update</button>`
         : '';
     const uninstallBtn = isMarketplaceManaged
-        ? `<button class="skills-menu-item skills-uninstall" data-skill="${safeName}" data-source="${escapeHtml(source)}">Uninstall</button>`
+        ? `<button type="button" role="menuitem" class="skills-menu-item skills-uninstall" data-skill="${safeName}" data-source="${escapeHtml(source)}">Uninstall</button>`
         : '';
     const healBtn = '';
     const reviewMenuBtn = !reviewInProgress && skill.review_status !== 'pending'
-        ? `<button class="skills-menu-item skills-review" data-skill="${safeName}">${skill.review_stale ? 'Re-review' : 'Review again'}</button>`
+        ? `<button type="button" role="menuitem" class="skills-menu-item skills-review" data-skill="${safeName}">${skill.review_stale ? 'Re-review' : 'Review again'}</button>`
         : '';
     const next = skillNextAction(skill, reviewInProgress);
     const nextAttrs = [
@@ -465,6 +465,25 @@ function renderSkillCard(skill, reviewingSkills = new Set()) {
         </details>
     `;
 
+    // v5.7.0 kebab placement: the "more actions" menu (Re-review / Update /
+    // Uninstall) lives in the card HEADER cluster (after the toggle switch),
+    // which is where users hunt for "kebab" affordances per Material 3
+    // / Apple HIG conventions. The popup is a non-modal <dialog> opened
+    // with .show() (not .showModal()) so it appears as an anchored popover
+    // under the trigger instead of as a centered viewport modal that
+    // dimmed the rest of the page.
+    const cardMenu = (updateBtn || uninstallBtn || reviewMenuBtn)
+        ? `
+                    <div class="skills-card-menu">
+                        <button type="button" class="skills-card-menu-trigger" aria-label="More actions" aria-haspopup="menu" aria-expanded="false" data-skill-menu-trigger>⋮</button>
+                        <dialog class="skills-card-menu-dialog" role="menu">
+                            ${reviewMenuBtn}
+                            ${updateBtn}
+                            ${uninstallBtn}
+                        </dialog>
+                    </div>
+                `
+        : '';
     return `
         <article class="skills-card" data-skill="${safeName}" ${reviewInProgress ? 'data-reviewing="1"' : ''}>
             <header class="skills-card-head">
@@ -476,6 +495,7 @@ function renderSkillCard(skill, reviewingSkills = new Set()) {
                     ${statusChip}
                     ${nextButton}
                     ${toggleSwitch}
+                    ${cardMenu}
                 </div>
             </header>
             ${lockHint}
@@ -485,20 +505,6 @@ function renderSkillCard(skill, reviewingSkills = new Set()) {
             ${loadError}
             <footer class="skills-card-actions">
                 ${healBtn}
-                ${(updateBtn || uninstallBtn || reviewMenuBtn) ? `
-                    <div class="skills-card-menu">
-                        <button type="button" class="skills-card-menu-trigger" aria-label="More actions" aria-haspopup="menu" aria-expanded="false" data-skill-menu-trigger>...</button>
-                        <dialog class="skills-card-menu-dialog" role="menu">
-                            <div class="skills-card-menu-head">
-                                <strong>Actions</strong>
-                                <button type="button" class="skills-card-menu-close" data-skill-menu-close aria-label="Close">×</button>
-                            </div>
-                            ${reviewMenuBtn}
-                            ${updateBtn}
-                            ${uninstallBtn}
-                        </dialog>
-                    </div>
-                ` : ''}
                 ${details}
             </footer>
         </article>
@@ -891,13 +897,13 @@ function attachActionHandlers(container, renderFn, reviewingSkills, ctx = {}) {
             closeSkillMenus(opening ? menu : null);
             if (popover && menu) {
                 menuTrigger.setAttribute('aria-expanded', opening ? 'true' : 'false');
-                if (opening) popover.showModal();
+                // v5.7.0: open as a non-modal anchored popover (popover.show()
+                // not .showModal()) so the menu sits under the trigger and
+                // does not dim the rest of the page. Outside clicks close
+                // the menu via the document-level handler installed below.
+                if (opening) popover.show();
                 else popover.close();
             }
-            return;
-        }
-        if (event.target.classList?.contains('skills-card-menu-dialog')) {
-            closeSkillMenus();
             return;
         }
         if (event.target.closest('[data-skill-menu-close]')) {

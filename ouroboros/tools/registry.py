@@ -173,12 +173,31 @@ _HEAL_MODE_ALLOWED_TOOLS = frozenset({
     "data_write",
     "list_skills",
     "review_skill",
+    # v5.7.0: skill_preflight is a read-only syntax validator
+    # (Python compile() / node --check / bash -n + manifest parse). Heal mode
+    # agents use it to catch silly typos before spending money on a
+    # tri-model ``review_skill`` round. It NEVER mutates review state,
+    # NEVER touches enabled.json / grants.json, and NEVER spawns shell
+    # strings (no run_shell escape).
+    "skill_preflight",
 })
 
-_HEAL_PROTECTED_PAYLOAD_FILENAMES = frozenset({".clawhub.json", ".ouroboroshub.json"})
+_HEAL_PROTECTED_PAYLOAD_FILENAMES = frozenset({
+    ".clawhub.json",
+    ".ouroboroshub.json",
+    # v5.7.0: extend heal-mode payload sidecar protection in lockstep with
+    # the central ``is_skill_control_plane_path`` guard in ``tools/core.py``.
+    # Without these the launcher-seeded ``.seed-origin`` markers and the
+    # original OpenClaw-publisher ``SKILL.openclaw.md`` could be silently
+    # rewritten by a heal task — which would either disconnect the skill
+    # from its update lane (.seed-origin) or launder the provenance the
+    # reviewer cross-checks against (SKILL.openclaw.md).
+    "skill.openclaw.md",
+    ".seed-origin",
+})
 
 
-_SKILL_OWNER_STATE_STEMS = ("grants", "review", "enabled", "clawhub")
+_SKILL_OWNER_STATE_STEMS = ("grants", "review", "enabled", "clawhub", "deps")
 _DETACHED_PROCESS_MARKERS = (
     "start_new_session",
     "new_session",
@@ -205,7 +224,7 @@ def _mentions_detached_process(text_lower: str) -> bool:
 
 def _heal_protected_payload_sidecar(path_text: str) -> bool:
     name = pathlib.PurePosixPath(str(path_text or "").replace("\\", "/")).name
-    return name in _HEAL_PROTECTED_PAYLOAD_FILENAMES
+    return name.lower() in _HEAL_PROTECTED_PAYLOAD_FILENAMES
 
 
 _INTERPRETER_BASENAMES = frozenset({
@@ -245,6 +264,38 @@ def _extract_script_file_args(raw_cmd: Any) -> List[str]:
     if not argv:
         return []
 
+    def _option_arity(interpreter: str, option: str) -> int:
+        """Return how many following argv tokens this interpreter option consumes."""
+        if interpreter.startswith("python"):
+            if "=" in option:
+                return 0
+            # Common CPython options with a following argument:
+            # -W action, -X opt, -m module, -c command.
+            if option in {"-c", "-m"}:
+                return -1  # inline/module modes: no script file follows for this invocation
+            if option in {"-W", "-X", "-Q"}:
+                return 1
+            return 0
+        if interpreter in {"node", "nodejs"}:
+            if option.startswith(("--require=", "--import=", "--loader=", "--experimental-loader=")):
+                return 0
+            if "=" in option:
+                return 0
+            # Node options with following values. For --require/-r and
+            # --import, the consumed value is ALSO code that Node loads before
+            # the main script, so scan it too when it looks like a file. The
+            # main loop keeps scanning later positional args after consuming.
+            if option in {"-e", "--eval"}:
+                return -1
+            if option in {"-r", "--require", "--import", "--loader", "--experimental-loader"}:
+                return 1
+            return 0
+        # Shells: -c consumes a command string; otherwise flags generally don't
+        # consume file-like args before the script.
+        if option == "-c":
+            return -1
+        return 0
+
     files: List[str] = []
     i = 0
     while i < len(argv):
@@ -260,22 +311,47 @@ def _extract_script_file_args(raw_cmd: Any) -> List[str]:
         if not is_interpreter:
             i += 1
             continue
-        # Walk forward to find the script file argument.
+        # Walk forward to find every plausible script file argument. Pre-v5.7
+        # code returned the first non-flag after the interpreter; that missed
+        # common arity options like `python -W ignore evil.py` by scanning
+        # `ignore` instead of `evil.py`.
         j = i + 1
         while j < len(argv):
             arg = argv[j]
-            if arg in {"-c", "-m"}:
-                # Inline code or module name: nothing to scan as a file.
-                break
             if arg == "-":
                 # Stdin marker.
                 break
             if arg.startswith("-"):
-                # Standard interpreter flag (-u, -O, -B, --inspect, etc.).
+                # Node supports --require=preload.js / --import=module.mjs
+                # equals-form preload options. These values execute code
+                # before the main script or eval string, so scan them too.
+                if basename in {"node", "nodejs"} and arg.startswith(("--require=", "--import=", "--loader=", "--experimental-loader=")):
+                    value = arg.split("=", 1)[1]
+                    if value and any(value.endswith(ext) for ext in (".js", ".mjs", ".cjs")):
+                        files.append(value)
+                    j += 1
+                    continue
+                arity = _option_arity(basename, arg)
+                if arity < 0:
+                    break
+                if arity > 0:
+                    # If the option value itself is a preload/module path
+                    # (Node --require/--import), scan it too.
+                    if j + 1 < len(argv):
+                        value = argv[j + 1]
+                        if value and not value.startswith("-") and any(
+                            value.endswith(ext) for ext in (".py", ".js", ".mjs", ".cjs", ".sh", ".bash")
+                        ):
+                            files.append(value)
+                    j += 1 + arity
+                    continue
                 j += 1
                 continue
             files.append(arg)
-            break
+            # Keep scanning: e.g. `node --require preload.js evil.js` should
+            # scan both preload.js and evil.js.
+            j += 1
+            continue
         i = j + 1 if j < len(argv) else i + 1
     return files
 
@@ -452,6 +528,10 @@ CORE_TOOL_NAMES = {
     "request_restart", "promote_to_stable",
     "knowledge_read", "knowledge_write", "knowledge_list",
     "browse_page", "browser_action", "analyze_screenshot",
+    # v5.7.0: keep this frozen fallback copy aligned with
+    # tool_capabilities.CORE_TOOL_NAMES. ToolPolicy is the runtime SSOT, but
+    # some schemas(core_only=True) callers still use this local set.
+    "review_skill", "skill_preflight",
 }
 
 
@@ -474,6 +554,8 @@ class ToolRegistry:
         # Phase 3 three-layer refactor: external skill surface
         # (list_skills / review_skill / skill_exec / toggle_skill).
         "skill_exec",
+        # v5.7.0: skill_preflight — read-only payload validator for heal mode.
+        "skill_preflight",
         "tool_discovery", "vision",
     ]
 
@@ -645,7 +727,12 @@ class ToolRegistry:
             except Exception:
                 ext_tool = None
             if ext_tool:
-                return int(ext_tool.get("timeout_sec") or 60)
+                # Extension async handlers enforce their own ``timeout_sec``
+                # via ``asyncio.wait_for`` inside _dispatch_extension_tool.
+                # Give the outer tool executor a small cleanup grace so it
+                # does not return first while the inner coroutine is still
+                # being cancelled.
+                return int(ext_tool.get("timeout_sec") or 60) + 3
         return 360
 
     def _dispatch_extension_tool(self, name: str, ext_tool: Dict[str, Any], args: Optional[Dict[str, Any]]) -> str:
@@ -697,6 +784,52 @@ class ToolRegistry:
                 f"⚠️ extension tool {name!r} failed: "
                 f"{type(exc).__name__}: {exc}"
             )
+        # v5.7.0: extension authors writing async handlers used to silently
+        # fail — register_tool typed handlers as ``Callable[..., str]``
+        # but extension authors regularly registered ``async def`` tools.
+        # ``handler(...)`` returns a coroutine object; ``str(coroutine)``
+        # rendered ``<coroutine object … at 0x…>`` and the agent never saw
+        # the real result (and the coroutine warned about never being
+        # awaited). Detect coroutines and run them on a helper thread with
+        # a fresh event loop. We intentionally do NOT use
+        # ``run_coroutine_threadsafe(get_event_loop()).result()`` here:
+        # if ToolRegistry.execute() is ever called from the same thread as
+        # that running loop, blocking on ``future.result()`` deadlocks the
+        # loop. Helper-thread execution is a little heavier but works in
+        # both normal worker-thread dispatch and same-loop test/API calls.
+        import asyncio as _asyncio
+        import inspect as _inspect
+        import threading as _threading
+        if _inspect.iscoroutine(result):
+            box: Dict[str, Any] = {}
+            timeout = max(1, int(ext_tool.get("timeout_sec") or 60))
+            def _runner() -> None:
+                try:
+                    async def _bounded():
+                        return await _asyncio.wait_for(result, timeout=timeout)
+                    box["value"] = _asyncio.run(_bounded())
+                except Exception as exc:
+                    box["error"] = exc
+
+            thread = _threading.Thread(
+                target=_runner,
+                name=f"ext-tool-{name}-async",
+                daemon=True,
+            )
+            thread.start()
+            thread.join(timeout=timeout + 2)
+            if thread.is_alive():
+                return (
+                    f"⚠️ extension tool {name!r} async handler failed: "
+                    "TimeoutError: handler exceeded timeout"
+                )
+            if "error" in box:
+                exc = box["error"]
+                return (
+                    f"⚠️ extension tool {name!r} async handler failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+            result = box.get("value", "")
         result_str = result if isinstance(result, str) else str(result)
         if _ext_safety_msg:
             return f"{_ext_safety_msg}\n\n---\n{result_str}"
@@ -781,7 +914,29 @@ class ToolRegistry:
         if block_msg:
             return block_msg
 
-        # 4. Protected runtime path writes.
+        # 4. Skill payload control-plane sidecar writes. This is a lexical
+        # defense-in-depth layer for run_shell (the lower-level data_write /
+        # file_browser guards do inode-aware checks). Shell commands are free
+        # form, so we conservatively block when a write-like verb appears with
+        # a protected sidecar path/name.
+        if any(name in cmd_path_lower for name in (
+            ".clawhub.json",
+            ".ouroboroshub.json",
+            "skill.openclaw.md",
+            ".seed-origin",
+            ".ouroboros_env",
+            "node_modules",
+        )) and any(w in cmd_lower for w in _SHELL_WRITE_INDICATORS):
+            return (
+                "⚠️ SAFETY_VIOLATION: Shell command would modify a skill "
+                "provenance / launcher seed / dependency marker (.clawhub.json, "
+                ".ouroboroshub.json, SKILL.openclaw.md, .seed-origin, "
+                ".ouroboros_env, node_modules). "
+                "Use marketplace lifecycle flows or edit user-authored "
+                "payload files instead."
+            )
+
+        # 5. Protected runtime path writes.
         for cf in _PROTECTED_RUNTIME_PATHS_LOWER:
             if cf in cmd_path_lower and any(w in cmd_lower for w in _SHELL_WRITE_INDICATORS):
                 return (
@@ -790,13 +945,13 @@ class ToolRegistry:
                     + ", ".join(sorted(PROTECTED_RUNTIME_PATHS))
                 )
 
-        # 5. GitHub repo create/delete/auth.
+        # 6. GitHub repo create/delete/auth.
         if "gh repo create" in cmd_lower or "gh repo delete" in cmd_lower:
             return "⚠️ SAFETY_VIOLATION: Creating/deleting GitHub repositories requires admin approval."
         if "gh auth" in cmd_lower:
             return "⚠️ SAFETY_VIOLATION: Modifying GitHub authentication is not permitted."
 
-        # 6. Git mutative ban via shell.
+        # 7. Git mutative ban via shell.
         if isinstance(raw_cmd, list):
             cmd_parts_for_git = [str(x) for x in raw_cmd]
         else:
@@ -911,6 +1066,22 @@ class ToolRegistry:
                     "Use review_skill, toggle_skill/the Skills UI, or the "
                     "desktop launcher confirmation flow."
                 )
+            if any(name in content_lower for name in (
+                ".clawhub.json",
+                ".ouroboroshub.json",
+                "skill.openclaw.md",
+                ".seed-origin",
+                ".ouroboros_env",
+                "node_modules",
+            )) and any(w in content_lower for w in _SHELL_WRITE_INDICATORS):
+                return (
+                    f"⚠️ SKILL_STATE_WRITE_BLOCKED: script file "
+                    f"{script_path_str!r} targets skill provenance / launcher "
+                    "seed / dependency sidecars (.clawhub.json, .ouroboroshub.json, "
+                    "SKILL.openclaw.md, .seed-origin, .ouroboros_env, node_modules). "
+                    "Use marketplace lifecycle flows or edit "
+                    "user-authored payload files instead."
+                )
             if "state" in content_lower and "skills" in content_lower and _mentions_detached_process(content_lower):
                 return (
                     f"⚠️ SKILL_STATE_WRITE_BLOCKED: script file "
@@ -942,7 +1113,7 @@ class ToolRegistry:
         root = pathlib.Path(self._ctx.drive_root) / "state" / "skills"
         if not root.is_dir():
             return out
-        protected_skill_state = {"grants.json", "review.json", "enabled.json", "clawhub.json"}
+        protected_skill_state = {"grants.json", "review.json", "enabled.json", "clawhub.json", "deps.json"}
         for path in root.glob("*/*"):
             if path.name.lower() not in protected_skill_state:
                 continue
@@ -957,7 +1128,7 @@ class ToolRegistry:
         root = pathlib.Path(self._ctx.drive_root) / "state" / "skills"
         current = set()
         if root.is_dir():
-            protected_skill_state = {"grants.json", "review.json", "enabled.json", "clawhub.json"}
+            protected_skill_state = {"grants.json", "review.json", "enabled.json", "clawhub.json", "deps.json"}
             current.update(
                 path for path in root.glob("*/*")
                 if path.name.lower() in protected_skill_state
@@ -1032,8 +1203,9 @@ class ToolRegistry:
                 if name == "data_write" and _heal_protected_payload_sidecar(data_path):
                     return (
                         "⚠️ HEAL_MODE_BLOCKED: Heal/Fix may not edit marketplace "
-                        "or official provenance sidecars such as .clawhub.json "
-                        "or .ouroboroshub.json."
+                        "or official provenance sidecars (.clawhub.json, "
+                        ".ouroboroshub.json, SKILL.openclaw.md, .seed-origin). "
+                        "Edit the user-authored payload files instead."
                     )
             if name == "data_list":
                 data_dir = str(args.get("dir", args.get("path", "")) or "")
@@ -1045,6 +1217,8 @@ class ToolRegistry:
                     )
             if name == "review_skill" and str(args.get("skill", "") or "").strip() != heal_skill:
                 return "⚠️ HEAL_MODE_BLOCKED: Heal/Fix may only review the selected skill."
+            if name == "skill_preflight" and str(args.get("skill", "") or "").strip() != heal_skill:
+                return "⚠️ HEAL_MODE_BLOCKED: Heal/Fix may only preflight the selected skill."
             if ext_tool or name not in _HEAL_MODE_ALLOWED_TOOLS:
                 return (
                     "⚠️ HEAL_MODE_BLOCKED: Heal/Fix tasks may inspect/edit skill "

@@ -2,6 +2,7 @@ import { refreshModelCatalog } from './settings_catalog.js';
 import { bindEffortSegments, syncEffortSegments } from './settings_controls.js';
 import { bindLocalModelControls } from './settings_local_model.js';
 import { bindSecretInputs, bindSettingsTabs, renderSettingsPage } from './settings_ui.js';
+import { formatDualVersion } from './utils.js';
 
 function byId(id) {
     return document.getElementById(id);
@@ -38,6 +39,115 @@ function resetSecretClearFlags(root) {
     });
     root.querySelectorAll('.secret-toggle').forEach((button) => {
         button.textContent = 'Show';
+    });
+}
+
+function renderExtensionSettingsSections(root, sections) {
+    const host = root.querySelector('#extension-settings-sections');
+    if (!host) return;
+    const items = Array.isArray(sections) ? sections : [];
+    if (!items.length) {
+        host.innerHTML = '<div class="muted">No extension settings registered.</div>';
+        return;
+    }
+    const cleanExtensionRoute = (value) => {
+        const route = String(value || '').trim().replace(/^\/+/, '');
+        const parts = route.split('/').filter(Boolean);
+        if (!route || route.includes('\\') || parts.some((part) => part === '.' || part === '..')) {
+            return '';
+        }
+        return parts.map(encodeURIComponent).join('/');
+    };
+    const fieldHtml = (field) => {
+        const name = escapeHtml(field.name || '');
+        const label = escapeHtml(field.label || field.name || '');
+        const placeholder = escapeHtml(field.placeholder || '');
+        const type = String(field.type || 'text');
+        if (type === 'textarea') {
+            return `<label class="form-field"><span>${label}</span><textarea name="${name}" placeholder="${placeholder}"></textarea></label>`;
+        }
+        if (type === 'checkbox') {
+            return `<label class="settings-extension-checkbox"><input type="checkbox" name="${name}"><span>${label}</span></label>`;
+        }
+        return `<label class="form-field"><span>${label}</span><input name="${name}" type="${escapeHtml(type)}" placeholder="${placeholder}"></label>`;
+    };
+    const componentHtml = (section, component, idx) => {
+        const type = String(component.type || '');
+        if (type === 'markdown') {
+            return `<div class="settings-section-copy">${escapeHtml(component.text || '')}</div>`;
+        }
+        if (type === 'json') {
+            return `<details class="widget-json"><summary>${escapeHtml(component.label || 'JSON')}</summary><pre>${escapeHtml(JSON.stringify(component.value || component.data || {}, null, 2))}</pre></details>`;
+        }
+        if (type === 'form' || type === 'action') {
+            const fields = Array.isArray(component.fields) ? component.fields : [];
+            const route = cleanExtensionRoute(component.route || component.api_route || '');
+            if (!route) {
+                return '<div class="settings-inline-note">Invalid extension settings route.</div>';
+            }
+            return `
+                <form class="settings-extension-form" data-extension-settings-form data-skill="${escapeHtml(section.skill || '')}" data-route="${escapeHtml(route)}">
+                    <div class="form-grid two">${fields.map(fieldHtml).join('')}</div>
+                    <button class="btn btn-primary btn-sm" type="submit">${escapeHtml(component.submit_label || component.label || 'Save')}</button>
+                    <div class="settings-inline-status" data-extension-settings-status></div>
+                </form>
+            `;
+        }
+        return `<div class="settings-inline-note">Unsupported extension settings component ${idx + 1}: ${escapeHtml(type || 'unknown')}</div>`;
+    };
+    host.innerHTML = items.map((section) => {
+        const title = escapeHtml(section.title || section.section_id || section.key || 'Extension settings');
+        const skill = escapeHtml(section.skill || '');
+        const components = Array.isArray(section.render?.components) ? section.render.components : [];
+        return `
+            <article class="settings-extension-section">
+                <div class="settings-extension-section-head">
+                    <strong>${title}</strong>
+                    ${skill ? `<span class="settings-inline-note">from ${skill}</span>` : ''}
+                </div>
+                <div class="settings-extension-components">
+                    ${components.length ? components.map((component, idx) => componentHtml(section, component, idx)).join('') : '<div class="muted">No declarative components.</div>'}
+                </div>
+            </article>
+        `;
+    }).join('');
+    host.querySelectorAll('[data-extension-settings-form]').forEach((form) => {
+        form.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            const status = form.querySelector('[data-extension-settings-status]');
+            const skill = form.dataset.skill || '';
+            const route = form.dataset.route || '';
+            if (!skill || !route) return;
+            const values = {};
+            new FormData(form).forEach((value, key) => { values[key] = value; });
+            form.querySelectorAll('input[type="checkbox"]').forEach((input) => {
+                values[input.name] = input.checked;
+            });
+            if (status) {
+                status.textContent = 'Saving...';
+                status.dataset.tone = 'muted';
+            }
+            try {
+                const cleanRoute = cleanExtensionRoute(route);
+                if (!cleanRoute) throw new Error('invalid extension settings route');
+                const resp = await fetch(`/api/extensions/${encodeURIComponent(skill)}/${cleanRoute}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(values),
+                });
+                const data = await resp.json().catch(() => ({}));
+                if (!resp.ok || data.error) throw new Error(data.error || `HTTP ${resp.status}`);
+                if (status) {
+                    status.textContent = data.message || 'Saved.';
+                    status.dataset.tone = 'ok';
+                }
+            } catch (err) {
+                if (status) {
+                    status.textContent = err.message || String(err);
+                    status.dataset.tone = 'danger';
+                }
+            }
+        });
     });
 }
 
@@ -91,6 +201,17 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
     bindSecretInputs(page);
     bindEffortSegments(page);
     bindLocalModelControls({ state });
+    // Populate the About sub-tab version label from /api/health so the
+    // existing #nav-version short label and the in-Settings detailed version
+    // string stay consistent. The fetch is best-effort — if it fails the
+    // label simply remains empty rather than blocking settings load.
+    fetch('/api/health')
+        .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+        .then((d) => {
+            const verEl = document.getElementById('about-version');
+            if (verEl) verEl.textContent = formatDualVersion(d);
+        })
+        .catch(() => { /* about version is best-effort */ });
     let currentSettings = {};
     let claudeCodePollStarted = false;
     // v4.33.1 status_label priority fix: even when the user has not configured
@@ -329,11 +450,19 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
     }
 
     async function loadSettings() {
-        const resp = await fetch('/api/settings', { cache: 'no-store' });
-        const data = await resp.json().catch(() => ({}));
-        if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+        const [settingsResp, extResp] = await Promise.all([
+            fetch('/api/settings', { cache: 'no-store' }),
+            fetch('/api/extensions', { cache: 'no-store' }).catch(() => null),
+        ]);
+        const data = await settingsResp.json().catch(() => ({}));
+        const extData = extResp && extResp.ok ? await extResp.json().catch(() => ({})) : {};
+        const sections = Array.isArray(extData?.live?.settings_sections)
+            ? extData.live.settings_sections
+            : [];
+        if (!settingsResp.ok) throw new Error(data.error || `HTTP ${settingsResp.status}`);
         currentSettings = data;
         applySettings(data);
+        renderExtensionSettingsSections(page, sections);
         setSettingsCleanBaseline();
         closeSettingsModelPickers();
         _renderNetworkHint(data._meta);

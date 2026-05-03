@@ -55,6 +55,13 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     "request_restart", "promote_to_stable",
     # Advisory pre-review gate
     "advisory_pre_review", "review_status",
+    # v5.7.0: ``review_skill`` and ``skill_preflight`` are the heal-mode
+    # skill repair lane. They used to be discoverable only via
+    # ``enable_tools`` which made heal prompts impossible to satisfy:
+    # heal blocks ``enable_tools`` so the agent could never reach the very
+    # tools the prompt asked it to call. Promoting both to core makes the
+    # everyday "fix this skill" workflow a one-shot — no enable round-trip.
+    "review_skill", "skill_preflight",
 })
 
 # Meta-tools: always visible alongside core tools
@@ -111,6 +118,12 @@ TOOL_RESULT_LIMITS: dict[str, int] = {
     "knowledge_read": 80_000,
     "run_shell": 80_000,
     "code_search": 80_000,
+    # v5.7.0: ``skill_exec`` returns a JSON wrapper with stdout (256KB cap)
+    # and stderr (128KB cap) plus a small metadata header. With the bumped
+    # caps the wrapped result can reach ~300KB; without an explicit per-
+    # tool limit it would silently fall back to ``DEFAULT_TOOL_RESULT_LIMIT``
+    # (15KB) and the agent would only see the first ~5% of the output.
+    "skill_exec": 300_000,
 }
 
 DEFAULT_TOOL_RESULT_LIMIT: int = 15_000

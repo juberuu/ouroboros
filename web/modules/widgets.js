@@ -274,6 +274,46 @@ function renderDataComponent(tab, component, state, status, componentState = {},
         const bounded = Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 0;
         return `<div class="widget-progress"><progress max="100" value="${bounded}"></progress><span>${bounded}%</span></div>`;
     }
+    // v5.7.0: host-owned ``map`` renderer. Falls back to a flat marker
+    // list when Leaflet is not available; when Leaflet is loaded by the
+    // host (kept off the critical path for now) the markup is upgraded
+    // to a real interactive map. Either way, the widget never exposes
+    // skill-supplied JS to the SPA origin.
+    if (type === 'map') {
+        const markers = Array.isArray(component.markers) ? component.markers : [];
+        const list = markers.length
+            ? `<ul class="widget-map-list">${markers.map((m) => `<li><strong>${escapeHtml(m.label || `${m.lat}, ${m.lon}`)}</strong>${m.popup ? ` — ${escapeHtml(m.popup)}` : ''}</li>`).join('')}</ul>`
+            : '<div class="muted">No map markers.</div>';
+        return `<div class="widget-map" data-widget-map-config="${escapeHtml(JSON.stringify({ tiles_url: component.tiles_url, markers }))}">${list}</div>`;
+    }
+    if (type === 'calendar') {
+        const items = Array.isArray(component.items) ? component.items : (Array.isArray(getPath(data, component.path || '', [])) ? getPath(data, component.path || '', []) : []);
+        if (!items.length) return '<div class="muted">No calendar entries.</div>';
+        const rows = items.map((item) => `<li class="widget-calendar-row"><strong>${escapeHtml(item.label || '—')}</strong>${item.start ? ` <span class="muted">${escapeHtml(item.start)}${item.end ? ' → ' + escapeHtml(item.end) : ''}</span>` : ''}${item.row ? ` <em>${escapeHtml(item.row)}</em>` : ''}</li>`).join('');
+        return `<div class="widget-calendar"><ul class="widget-calendar-list">${rows}</ul></div>`;
+    }
+    if (type === 'kanban') {
+        const columns = Array.isArray(component.columns) ? component.columns : [];
+        if (!columns.length) return '<div class="muted">Kanban has no columns.</div>';
+        const moveRoute = component.on_move?.route ? cleanWidgetRoute(component.on_move.route) : '';
+        const cardsByCol = new Map();
+        for (const col of columns) cardsByCol.set(col.id || col.label, []);
+        const cardsList = Array.isArray(component.cards) ? component.cards : (Array.isArray(getPath(data, component.path || '', [])) ? getPath(data, component.path || '', []) : []);
+        for (const card of cardsList) {
+            const colKey = card.column || card.col || columns[0]?.id || columns[0]?.label;
+            if (!cardsByCol.has(colKey)) cardsByCol.set(colKey, []);
+            cardsByCol.get(colKey).push(card);
+        }
+        const colHtml = columns.map((col) => {
+            const colKey = col.id || col.label;
+            const cards = cardsByCol.get(colKey) || [];
+            return `<div class="widget-kanban-col" data-widget-kanban-col="${escapeHtml(colKey)}">
+                <div class="widget-kanban-col-head"><strong>${escapeHtml(col.label || colKey)}</strong></div>
+                ${cards.map((c, idx) => `<div class="widget-kanban-card" draggable="true" data-widget-kanban-card="${escapeHtml(c.id || `${colKey}-${idx}`)}">${escapeHtml(c.label || c.title || '—')}</div>`).join('')}
+            </div>`;
+        }).join('');
+        return `<div class="widget-kanban" data-widget-kanban-idx="${escapeHtml(componentKey)}" data-widget-kanban-route="${escapeHtml(moveRoute || '')}">${colHtml}</div>`;
+    }
     return '';
 }
 
@@ -612,6 +652,50 @@ async function mountDeclarativeWidget(mount, tab, render) {
                 }
             });
         });
+        mount.querySelectorAll('[data-widget-kanban]').forEach((board) => {
+            const idx = Number(board.dataset.widgetKanbanIdx || 0);
+            const spec = components[idx] || {};
+            let draggedCardId = '';
+            board.querySelectorAll('[data-widget-kanban-card]').forEach((card) => {
+                card.addEventListener('dragstart', (event) => {
+                    draggedCardId = card.dataset.widgetKanbanCard || '';
+                    if (event.dataTransfer) {
+                        event.dataTransfer.effectAllowed = 'move';
+                        event.dataTransfer.setData('text/plain', draggedCardId);
+                    }
+                });
+            });
+            board.querySelectorAll('[data-widget-kanban-col]').forEach((column) => {
+                column.addEventListener('dragover', (event) => {
+                    if (!board.dataset.widgetKanbanRoute) return;
+                    event.preventDefault();
+                    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+                });
+                column.addEventListener('drop', async (event) => {
+                    if (!board.dataset.widgetKanbanRoute) return;
+                    event.preventDefault();
+                    const cardId = event.dataTransfer?.getData('text/plain') || draggedCardId;
+                    const columnId = column.dataset.widgetKanbanCol || '';
+                    if (!cardId || !columnId) return;
+                    const target = spec.target || 'result';
+                    status[target] = 'loading';
+                    renderAll();
+                    try {
+                        const response = await callRoute(
+                            { route: board.dataset.widgetKanbanRoute, method: spec.on_move?.method || 'POST' },
+                            { card_id: cardId, column_id: columnId },
+                        );
+                        if (disposed) return;
+                        state[target] = response;
+                        status[target] = 'success';
+                    } catch (err) {
+                        state[target] = { error: err.message || String(err) };
+                        status[target] = 'error';
+                    }
+                    renderAll();
+                });
+            });
+        });
         mount.querySelectorAll('[data-widget-chart-config]').forEach((canvas) => {
             if (typeof Chart === 'undefined') return;
             try {
@@ -738,6 +822,116 @@ async function mountTab(card, tab) {
     if (render.kind === 'declarative') {
         return mountDeclarativeWidget(mount, tab, render);
     }
+    if (render.kind === 'module' && render.entry) {
+        // v5.7.0: ``kind: "module"`` mounts reviewed JS inside an opaque
+        // sandboxed iframe. We DO NOT load the JS via <script src>, because
+        // a srcdoc iframe without allow-same-origin has an opaque origin and
+        // `script-src 'self'` would not resolve to the parent app origin.
+        // Instead the parent fetches the reviewed static module file from a
+        // dedicated endpoint and embeds the text inline in srcdoc. The iframe
+        // gets a tiny postMessage bridge that overrides fetch(); extension JS
+        // can still call fetch('/api/extensions/<skill>/...'), but the parent
+        // performs the same-origin request and rejects any path outside that
+        // skill route prefix. This keeps the iframe opaque (no cookie/storage
+        // access) while preserving the useful extension-route IO surface.
+        const entryName = String(render.entry).replace(/[^A-Za-z0-9._-]/g, '');
+        const entryUrl = `/api/extensions/${encodeURIComponent(tab.skill)}/module/${encodeURIComponent(entryName)}`;
+        const resp = await fetch(entryUrl, { cache: 'no-store' });
+        const moduleSource = await resp.text();
+        if (!resp.ok) {
+            mount.innerHTML = `<div class="skills-load-error">module load failed: ${escapeHtml(moduleSource || `HTTP ${resp.status}`)}</div>`;
+            return;
+        }
+        const expectedPrefix = `/api/extensions/${encodeURIComponent(tab.skill)}/`;
+        const nonce = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        const csp = [
+            "default-src 'none'",
+            "script-src 'unsafe-inline'",
+            "style-src 'unsafe-inline'",
+            "img-src data:",
+        ].join('; ');
+        const escapeScript = (value) => String(value || '')
+            .replace(/<\/script/gi, '<\\/script')
+            .replace(/<!--/g, '<\\!--');
+        const bridge = `
+            (() => {
+                const nonce = ${JSON.stringify(nonce)};
+                let seq = 0;
+                const pending = new Map();
+                window.addEventListener('message', (event) => {
+                    const msg = event.data || {};
+                    if (msg.type !== 'ouro-widget-fetch-result' || msg.nonce !== nonce) return;
+                    const item = pending.get(msg.id);
+                    if (!item) return;
+                    pending.delete(msg.id);
+                    if (msg.error) {
+                        item.reject(new Error(msg.error));
+                        return;
+                    }
+                    item.resolve(new Response(msg.body || '', {
+                        status: msg.status || 200,
+                        headers: msg.headers || {},
+                    }));
+                });
+                window.fetch = (url, init = {}) => {
+                    const id = ++seq;
+                    return new Promise((resolve, reject) => {
+                        pending.set(id, { resolve, reject });
+                        window.parent.postMessage({
+                            type: 'ouro-widget-fetch',
+                            nonce,
+                            id,
+                            url: String(url || ''),
+                            init: {
+                                method: init.method || 'GET',
+                                headers: init.headers || {},
+                                body: init.body || null,
+                            },
+                        }, '*');
+                    });
+                };
+                window.OuroborosWidget = { fetch: window.fetch };
+            })();
+        `;
+        const srcdoc = `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="${csp}"></head><body><div id="root"></div><script>${bridge}</script><script>${escapeScript(moduleSource)}</script></body></html>`;
+        mount.innerHTML = `<iframe class="widgets-frame" sandbox="allow-scripts" srcdoc="${escapeHtml(srcdoc)}"></iframe>`;
+        const iframe = mount.querySelector('iframe');
+        const onMessage = async (event) => {
+            if (event.source !== iframe.contentWindow) return;
+            const msg = event.data || {};
+            if (msg.type !== 'ouro-widget-fetch' || msg.nonce !== nonce) return;
+            try {
+                const parsed = new URL(String(msg.url || ''), window.location.origin);
+                if (parsed.origin !== window.location.origin || !parsed.pathname.startsWith(expectedPrefix)) {
+                    throw new Error('module widget fetch outside extension route prefix');
+                }
+                const r = await fetch(parsed.pathname + parsed.search, {
+                    method: String(msg.init?.method || 'GET').toUpperCase(),
+                    headers: msg.init?.headers || {},
+                    body: msg.init?.body || undefined,
+                    credentials: 'same-origin',
+                });
+                const body = await r.text();
+                iframe.contentWindow?.postMessage({
+                    type: 'ouro-widget-fetch-result',
+                    nonce,
+                    id: msg.id,
+                    status: r.status,
+                    headers: { 'content-type': r.headers.get('content-type') || '' },
+                    body,
+                }, '*');
+            } catch (err) {
+                iframe.contentWindow?.postMessage({
+                    type: 'ouro-widget-fetch-result',
+                    nonce,
+                    id: msg.id,
+                    error: err.message || String(err),
+                }, '*');
+            }
+        };
+        window.addEventListener('message', onMessage);
+        return () => window.removeEventListener('message', onMessage);
+    }
     mount.innerHTML = `<div class="muted">Widget render kind <code>${escapeHtml(render.kind || 'unknown')}</code> is not supported yet.</div>`;
     return null;
 }
@@ -776,6 +970,12 @@ export function initWidgets(ctx = {}) {
     let renderGeneration = 0;
     let widgetsVisible = false;
     let widgetsMounted = false;
+    // v5.7.0: cache of the most recent successful payload so revisiting
+    // the Widgets page paints from cache immediately and only the
+    // first-ever render shows "Loading…". The cache is also re-rendered
+    // when a fetch is in flight, so a slow GET /api/extensions never
+    // produces an empty viewport mid-typing in another part of the app.
+    let lastTabs = null;
     if (ctx.ws && !widgetsWsBridgeBound) {
         widgetsWsBridgeBound = true;
         ctx.ws.on('message', (msg) => {
@@ -788,11 +988,17 @@ export function initWidgets(ctx = {}) {
         widgetsVisible = true;
         if (widgetsMounted && !force) return;
         disposeMountedWidgets();
-        list.innerHTML = '<div class="muted">Loading widgets…</div>';
+        if (lastTabs) {
+            // Optimistic paint from cache while the fresh fetch is in flight.
+            renderShell(list, lastTabs);
+        } else {
+            list.innerHTML = '<div class="muted">Loading widgets…</div>';
+        }
         try {
             const data = await fetchExtensions();
             if (!widgetsVisible || generation !== renderGeneration) return;
             const tabs = Array.isArray(data.live?.ui_tabs) ? data.live.ui_tabs : [];
+            lastTabs = tabs;
             renderShell(list, tabs);
             widgetsMounted = true;
             for (const tab of tabs) {
@@ -809,7 +1015,11 @@ export function initWidgets(ctx = {}) {
             }
         } catch (err) {
             if (!widgetsVisible || generation !== renderGeneration) return;
-            list.innerHTML = `<div class="skills-load-error">Failed to load widgets: ${escapeHtml(err.message || err)}</div>`;
+            // If we have a cached payload, keep showing it instead of
+            // wiping the page on a transient fetch error.
+            if (!lastTabs) {
+                list.innerHTML = `<div class="skills-load-error">Failed to load widgets: ${escapeHtml(err.message || err)}</div>`;
+            }
             widgetsMounted = false;
         }
     }
@@ -819,10 +1029,13 @@ export function initWidgets(ctx = {}) {
         if (event.detail?.page === 'widgets') {
             render();
         } else {
+            // v5.7.0: leaving the Widgets page no longer wipes the cached
+            // markup. ``widgetsVisible = false`` stops in-flight render()
+            // calls from painting; the next ``render()`` re-uses
+            // ``lastTabs`` for an instant repaint.
             widgetsVisible = false;
             widgetsMounted = false;
             disposeMountedWidgets();
-            list.innerHTML = '';
         }
     });
 }

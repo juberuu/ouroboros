@@ -44,7 +44,20 @@ from typing import Any, Dict, List, Optional, Tuple
 SKILL_MANIFEST_SCHEMA_VERSION = 1
 
 VALID_SKILL_TYPES = frozenset({"instruction", "script", "extension"})
-VALID_SKILL_RUNTIMES = frozenset({"", "python", "python3", "node", "bash"})
+VALID_SKILL_RUNTIMES = frozenset({
+    "",
+    "python",
+    "python3",
+    "node",
+    "bash",
+    # v5.7.0: extended runtime set. The actual binary is still resolved via
+    # ``shutil.which`` at exec time and the skill subprocess fails closed if
+    # the operator's host doesn't ship the runtime, but the manifest
+    # validator no longer rejects these declarations as unknown.
+    "deno",
+    "ruby",
+    "go",
+})
 VALID_SKILL_PERMISSIONS = frozenset(
     {
         "net",

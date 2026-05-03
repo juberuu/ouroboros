@@ -78,151 +78,150 @@ async def api_extensions_index(request: Request) -> JSONResponse:
     ``snapshot()`` of in-process registrations. The UI can cross-
     reference the two to know which extensions are "catalogued but
     not yet loaded" vs "actively dispatching".
+
+    v5.7.0 perf: the synchronous ``discover_skills`` walk + per-extension
+    ``runtime_state_for_skill_name`` (which used to re-walk the entire
+    skills tree) were stalling the asyncio loop and made the Widgets
+    page show "Loading…" with an empty viewport for many seconds while
+    a parallel review/install job was running. Two fixes:
+
+    1. The whole synchronous body runs on a worker thread via
+       ``asyncio.to_thread`` so the loop stays responsive.
+    2. ``runtime_state_for_loaded_skill`` is a new helper that takes the
+       already-discovered ``LoadedSkill`` and skips the second walk,
+       collapsing 1+K filesystem walks into exactly one.
     """
     try:
-        from ouroboros.config import get_skills_repo_path
+        import asyncio
 
-        from ouroboros.extension_loader import extension_name_prefix, runtime_state_for_skill_name
+        from ouroboros.config import get_skills_repo_path
 
         drive_root = _request_drive_root(request)
         repo_path = get_skills_repo_path()
-        live_snapshot = snapshot()
-        # Always scan — ``discover_skills`` still returns the bundled
-        # ``repo/skills/`` reference set even when the user has not
-        # configured ``OUROBOROS_SKILLS_REPO_PATH``. The earlier "only
-        # scan when repo_path is non-empty" check silently dropped
-        # the bundled weather skill on a default install.
-        skills = discover_skills(drive_root, repo_path=repo_path)
-        # Surface EVERY skill type (instruction / script / extension) so
-        # the Skills UI can manage the full lifecycle. The UI filters /
-        # badges by ``type`` client-side.
-        runtime_states = {
-            s.name: runtime_state_for_skill_name(s.name, drive_root, repo_path=repo_path)
-            for s in skills
-            if s.manifest.is_extension()
-        }
-
-        def _live_tool_count(skill_name: str) -> int:
-            prefix = extension_name_prefix(skill_name)
-            return sum(1 for name in live_snapshot.get("tools", []) if str(name).startswith(prefix))
-
-        def _live_route_count(skill_name: str) -> int:
-            prefix = f"/api/extensions/{skill_name}/"
-            return sum(1 for name in live_snapshot.get("routes", []) if str(name).startswith(prefix))
-
-        def _live_ws_count(skill_name: str) -> int:
-            prefix = extension_name_prefix(skill_name)
-            return sum(1 for name in live_snapshot.get("ws_handlers", []) if str(name).startswith(prefix))
-
-        def _pending_ui_tabs(skill_name: str) -> list[str]:
-            prefix = f"{skill_name}:"
-            return [
-                str(name)
-                for name in live_snapshot.get("ui_tabs_pending", [])
-                if str(name).startswith(prefix)
-            ]
-
-        # v5: include marketplace provenance directly on clawhub skills so
-        # the Installed UI can show the registry slug, archive sha256,
-        # homepage / license, adapter warnings, and a "version vs latest"
-        # mismatch hint without making a second round-trip to
-        # ``/api/marketplace/clawhub/installed``. ``read_provenance``
-        # returns ``None`` for any non-clawhub skill (no sidecar present),
-        # so this is a no-op for native / external entries.
-        #
-        # v5 Cycle 1 Gemini Finding 5 + Cycle 2 Opus C2-1 — split the
-        # projection into two slices by *direction of trust*:
-        #
-        # - **Always shown** even when the marketplace surface is
-        #   disabled: ``slug`` (operator-supplied install argument),
-        #   ``version`` (operator-pinned install version),
-        #   ``sha256`` (cryptographic, internally computed),
-        #   ``installed_at`` / ``updated_at`` (internally generated).
-        #   These let the operator inspect what's already on disk
-        #   without re-enabling the marketplace surface.
-        # - Registry-controlled fields ``homepage``, ``license``,
-        #   ``primary_env``, ``adapter_warnings``, ``registry_url``.
-        #   These can carry attacker-shaped strings written into
-        #   provenance at install time, so the UI must keep rendering
-        #   them as text/safe links.
-        try:
-            from ouroboros.marketplace.provenance import read_provenance
-        except Exception:  # pragma: no cover — defensive
-            read_provenance = lambda *_a, **_kw: None  # type: ignore[assignment]
-        marketplace_enabled = True
-
-        catalog = []
-        for s in skills:
-            payload_root = ""
-            try:
-                rel_skill_dir = s.skill_dir.resolve().relative_to(drive_root.resolve())
-                if rel_skill_dir.parts[:1] == ("skills",):
-                    payload_root = rel_skill_dir.as_posix()
-            except Exception:
-                payload_root = ""
-            entry = {
-                "name": s.name,
-                "type": s.manifest.type,
-                "version": s.manifest.version,
-                "description": s.manifest.description,
-                "enabled": s.enabled,
-                "review_status": s.review.status,
-                "review_stale": s.review.is_stale_for(s.content_hash),
-                "permissions": list(s.manifest.permissions or []),
-                "load_error": runtime_states.get(s.name, {}).get("load_error", s.load_error),
-                "desired_live": runtime_states.get(s.name, {}).get("desired_live", False),
-                "live_loaded": runtime_states.get(s.name, {}).get("live_loaded", False),
-                "live_reason": runtime_states.get(s.name, {}).get("reason", "not_extension"),
-                "dispatch_live": bool(
-                    _live_tool_count(s.name)
-                    or _live_route_count(s.name)
-                    or _live_ws_count(s.name)
-                ),
-                "ui_tabs_pending": _pending_ui_tabs(s.name),
-                "review_findings": list(s.review.findings or []),
-                "grants": grant_status_for_skill(drive_root, s),
-                # v4.50: surface the discovery source so the Skills tab
-                # can render a clawhub badge + Update/Uninstall buttons
-                # for marketplace-installed skills. Without this the
-                # /api/extensions catalogue would silently mislabel
-                # clawhub skills as "native" (P6 honesty regression).
-                "source": s.source,
-                "payload_root": payload_root,
-            }
-            if s.source == "clawhub":
-                try:
-                    prov = read_provenance(drive_root, s.name) or {}
-                except Exception:  # pragma: no cover
-                    prov = {}
-                if prov:
-                    # Always-safe fields (regardless of marketplace flag).
-                    entry["provenance"] = {
-                        "slug": prov.get("slug", ""),
-                        "version": prov.get("version", ""),
-                        "sha256": prov.get("sha256", ""),
-                        "adapter_version": prov.get("adapter_version", ""),
-                        "openclaw_compat": dict(prov.get("openclaw_compat") or {}),
-                        "installed_at": prov.get("installed_at", ""),
-                        "updated_at": prov.get("updated_at", ""),
-                    }
-                    # Registry-controlled fields only when the marketplace
-                    # surface is opt-in enabled. These are the strings a
-                    # publisher could shape at install time.
-                    if marketplace_enabled:
-                        entry["provenance"].update({
-                            "homepage": prov.get("homepage", ""),
-                            "license": prov.get("license", ""),
-                            "primary_env": prov.get("primary_env", ""),
-                            "adapter_warnings": list(prov.get("adapter_warnings") or []),
-                            "original_manifest_sha256": prov.get("original_manifest_sha256", ""),
-                            "translated_manifest_sha256": prov.get("translated_manifest_sha256", ""),
-                            "registry_url": prov.get("registry_url", ""),
-                        })
-            catalog.append(entry)
-        return JSONResponse({"skills": catalog, "live": live_snapshot})
+        payload = await asyncio.to_thread(_build_extensions_index, drive_root, repo_path)
+        return JSONResponse(payload)
     except Exception as exc:
         log.exception("api_extensions_index failure")
         return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+def _build_extensions_index(drive_root, repo_path):
+    """Synchronous body of ``GET /api/extensions``. Keep this function
+    pure: it is called via ``asyncio.to_thread`` and must not depend on
+    request scope."""
+    from ouroboros.extension_loader import extension_name_prefix, runtime_state_for_loaded_skill
+
+    live_snapshot = snapshot()
+    # Always scan — ``discover_skills`` still returns the bundled
+    # ``repo/skills/`` reference set even when the user has not
+    # configured ``OUROBOROS_SKILLS_REPO_PATH``. The earlier "only
+    # scan when repo_path is non-empty" check silently dropped
+    # the bundled weather skill on a default install.
+    skills = discover_skills(drive_root, repo_path=repo_path)
+    runtime_states = {
+        s.name: runtime_state_for_loaded_skill(s, drive_root)
+        for s in skills
+        if s.manifest.is_extension()
+    }
+
+    def _live_tool_count(skill_name: str) -> int:
+        prefix = extension_name_prefix(skill_name)
+        return sum(1 for name in live_snapshot.get("tools", []) if str(name).startswith(prefix))
+
+    def _live_route_count(skill_name: str) -> int:
+        prefix = f"/api/extensions/{skill_name}/"
+        return sum(1 for name in live_snapshot.get("routes", []) if str(name).startswith(prefix))
+
+    def _live_ws_count(skill_name: str) -> int:
+        prefix = extension_name_prefix(skill_name)
+        return sum(1 for name in live_snapshot.get("ws_handlers", []) if str(name).startswith(prefix))
+
+    def _pending_ui_tabs(skill_name: str) -> list[str]:
+        prefix = f"{skill_name}:"
+        return [
+            str(name)
+            for name in live_snapshot.get("ui_tabs_pending", [])
+            if str(name).startswith(prefix)
+        ]
+
+    # v5: include marketplace provenance directly on clawhub skills so
+    # the Installed UI can show the registry slug, archive sha256,
+    # homepage / license, adapter warnings, and a "version vs latest"
+    # mismatch hint without making a second round-trip to
+    # ``/api/marketplace/clawhub/installed``. ``read_provenance``
+    # returns ``None`` for any non-clawhub skill (no sidecar present),
+    # so this is a no-op for native / external entries.
+    try:
+        from ouroboros.marketplace.provenance import read_provenance
+    except Exception:  # pragma: no cover — defensive
+        read_provenance = lambda *_a, **_kw: None  # type: ignore[assignment]
+    marketplace_enabled = True
+
+    catalog = []
+    for s in skills:
+        payload_root = ""
+        try:
+            rel_skill_dir = s.skill_dir.resolve().relative_to(drive_root.resolve())
+            if rel_skill_dir.parts[:1] == ("skills",):
+                payload_root = rel_skill_dir.as_posix()
+        except Exception:
+            payload_root = ""
+        entry = {
+            "name": s.name,
+            "type": s.manifest.type,
+            "version": s.manifest.version,
+            "description": s.manifest.description,
+            "enabled": s.enabled,
+            "review_status": s.review.status,
+            "review_stale": s.review.is_stale_for(s.content_hash),
+            "permissions": list(s.manifest.permissions or []),
+            "load_error": runtime_states.get(s.name, {}).get("load_error", s.load_error),
+            "desired_live": runtime_states.get(s.name, {}).get("desired_live", False),
+            "live_loaded": runtime_states.get(s.name, {}).get("live_loaded", False),
+            "live_reason": runtime_states.get(s.name, {}).get("reason", "not_extension"),
+            "dispatch_live": bool(
+                _live_tool_count(s.name)
+                or _live_route_count(s.name)
+                or _live_ws_count(s.name)
+            ),
+            "ui_tabs_pending": _pending_ui_tabs(s.name),
+            "review_findings": list(s.review.findings or []),
+            "grants": grant_status_for_skill(drive_root, s),
+            # v4.50: surface the discovery source so the Skills tab
+            # can render a clawhub badge + Update/Uninstall buttons
+            # for marketplace-installed skills. Without this the
+            # /api/extensions catalogue would silently mislabel
+            # clawhub skills as "native" (P6 honesty regression).
+            "source": s.source,
+            "payload_root": payload_root,
+        }
+        if s.source == "clawhub":
+            try:
+                prov = read_provenance(drive_root, s.name) or {}
+            except Exception:  # pragma: no cover
+                prov = {}
+            if prov:
+                entry["provenance"] = {
+                    "slug": prov.get("slug", ""),
+                    "version": prov.get("version", ""),
+                    "sha256": prov.get("sha256", ""),
+                    "adapter_version": prov.get("adapter_version", ""),
+                    "openclaw_compat": dict(prov.get("openclaw_compat") or {}),
+                    "installed_at": prov.get("installed_at", ""),
+                    "updated_at": prov.get("updated_at", ""),
+                }
+                if marketplace_enabled:
+                    entry["provenance"].update({
+                        "homepage": prov.get("homepage", ""),
+                        "license": prov.get("license", ""),
+                        "primary_env": prov.get("primary_env", ""),
+                        "adapter_warnings": list(prov.get("adapter_warnings") or []),
+                        "original_manifest_sha256": prov.get("original_manifest_sha256", ""),
+                        "translated_manifest_sha256": prov.get("translated_manifest_sha256", ""),
+                        "registry_url": prov.get("registry_url", ""),
+                    })
+        catalog.append(entry)
+    return {"skills": catalog, "live": live_snapshot}
 
 
 async def api_extension_manifest(request: Request) -> JSONResponse:
@@ -262,6 +261,88 @@ async def api_extension_manifest(request: Request) -> JSONResponse:
             "load_error": load_error,
         }
     )
+
+
+async def api_extension_module(request: Request) -> Response:
+    """GET /api/extensions/<skill>/module/<entry> — reviewed widget module JS.
+
+    This is deliberately separate from the catch-all extension route
+    dispatcher: ``kind: "module"`` points at a static JS file inside the
+    reviewed skill payload, not an arbitrary route registered by plugin.py.
+    The handler only serves the exact ``ui_tab.render.entry`` declared in the
+    fresh, enabled extension manifest; it never serves arbitrary files.
+    """
+    from ouroboros.config import get_skills_repo_path
+    from ouroboros.extension_loader import runtime_state_for_skill_name
+
+    skill_name = str(request.path_params.get("skill") or "").strip()
+    entry = str(request.path_params.get("entry") or "").strip()
+    if not skill_name or not entry:
+        return JSONResponse({"error": "missing skill/module entry"}, status_code=400)
+    if "/" in entry or "\\" in entry or ".." in entry or entry.startswith("."):
+        return JSONResponse({"error": "invalid module entry"}, status_code=400)
+
+    drive_root = _request_drive_root(request)
+    repo_path = get_skills_repo_path()
+    state = runtime_state_for_skill_name(skill_name, drive_root, repo_path=repo_path)
+    if not state.get("desired_live"):
+        return JSONResponse(
+            {"error": f"extension {skill_name!r} not live: {state.get('reason')}", "state": state},
+            status_code=409,
+        )
+    loaded = find_skill(drive_root, skill_name, repo_path=repo_path)
+    if loaded is None:
+        return JSONResponse({"error": "skill not found"}, status_code=404)
+    # Authorize against the LIVE registered tab snapshot, not only the
+    # manifest's optional ui_tab block. Extensions may register UI tabs from
+    # plugin.py via PluginAPI without duplicating the declaration in
+    # frontmatter; the Widgets page receives that live snapshot and then asks
+    # this endpoint for ``entry``. If we checked only manifest.ui_tab, valid
+    # live PluginAPI tabs would 404.
+    live = snapshot()
+    module_declared = any(
+        str(tab.get("skill") or "") == skill_name
+        and str((tab.get("render") or {}).get("kind") or "") == "module"
+        and str((tab.get("render") or {}).get("entry") or "") == entry
+        for tab in live.get("ui_tabs", [])
+    )
+    if not module_declared:
+        return JSONResponse({"error": "module entry is not declared by a live widget tab"}, status_code=404)
+    target = (loaded.skill_dir / entry).resolve()
+    try:
+        target.relative_to(loaded.skill_dir.resolve())
+    except ValueError:
+        return JSONResponse({"error": "module entry escapes skill directory"}, status_code=400)
+    if not target.is_file():
+        return JSONResponse({"error": "module entry file not found"}, status_code=404)
+    try:
+        text = target.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return JSONResponse({"error": "module entry is not UTF-8 text"}, status_code=400)
+    return Response(
+        text,
+        media_type="application/javascript; charset=utf-8",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+async def api_extension_settings_section(request: Request) -> JSONResponse:
+    """GET /api/extensions/<skill>/settings_section — declarative Settings sections.
+
+    Extensions register these via ``PluginAPI.register_settings_section``.
+    The response is a stable list (usually length 0 or 1) so future
+    extensions can publish multiple small sections without adding more routes.
+    """
+    skill_name = str(request.path_params.get("skill") or "").strip()
+    if not skill_name:
+        return JSONResponse({"error": "missing skill name"}, status_code=400)
+    live = snapshot()
+    sections = [
+        item
+        for item in live.get("settings_sections", [])
+        if str(item.get("skill") or "") == skill_name
+    ]
+    return JSONResponse({"skill": skill_name, "sections": sections})
 
 
 async def api_extension_dispatch(request: Request) -> Response:
@@ -403,6 +484,43 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
                     "review_stale": stale,
                     "grants": grants,
                 }
+            # v5.7.0: mirror the dependency-state enable guard from the
+            # ``toggle_skill`` tool. The Skills UI uses this HTTP path, so
+            # without the guard users could enable a skill whose isolated deps
+            # failed or whose deps.json is stale/missing.
+            try:
+                from ouroboros.marketplace.provenance import read_provenance
+                from ouroboros.marketplace.install_specs import install_specs_hash
+                from ouroboros.marketplace.isolated_deps import read_deps_state
+
+                prov = read_provenance(drive_root, loaded.name) or {}
+                auto_specs = list((prov.get("install_specs") or {}).get("auto") or [])
+                if auto_specs:
+                    deps_state = read_deps_state(drive_root, loaded.name)
+                    deps_status = str(deps_state.get("status") or "pending")
+                    expected_hash = install_specs_hash(auto_specs)
+                    actual_hash = str(deps_state.get("specs_hash") or "")
+                    if deps_status != "installed":
+                        return {
+                            "error": "cannot enable until isolated dependencies are installed",
+                            "status_code": 409,
+                            "deps_status": deps_status,
+                            "deps_error": deps_state.get("error", ""),
+                            "review_status": loaded.review.status,
+                            "review_stale": stale,
+                            "grants": grants,
+                        }
+                    if actual_hash != expected_hash:
+                        return {
+                            "error": "cannot enable until isolated dependency fingerprint is refreshed",
+                            "status_code": 409,
+                            "deps_status": "stale",
+                            "review_status": loaded.review.status,
+                            "review_stale": stale,
+                            "grants": grants,
+                        }
+            except Exception:
+                log.debug("api_skill_toggle deps probe failed", exc_info=True)
         if not enabled and collision_load_error:
             action = None
             if loaded.name in extension_loader.snapshot()["extensions"]:
@@ -512,8 +630,58 @@ async def api_skill_review(request: Request) -> JSONResponse:
     repo_dir = _request_repo_dir(request)
     repo_path = get_skills_repo_path()
     ctx = _ApiReviewCtx(drive_root, repo_dir)
+
+    async def _reconcile_review_deps() -> tuple[str, str]:
+        """Install/reinstall isolated deps after a PASS review while still
+        inside the same lifecycle job lane.
+
+        Returns ``(deps_status, deps_error)`` for response payload and
+        lifecycle error classification.
+        """
+        try:
+            from ouroboros.marketplace.provenance import read_provenance
+            from ouroboros.marketplace.install_specs import install_specs_hash
+            from ouroboros.marketplace.isolated_deps import (
+                install_isolated_dependencies,
+                read_deps_state,
+            )
+            from ouroboros.skill_loader import find_skill
+
+            prov = read_provenance(drive_root, skill_name) or {}
+            auto_specs = list((prov.get("install_specs") or {}).get("auto") or [])
+            if not auto_specs:
+                return "not_required", ""
+            deps_state = read_deps_state(drive_root, skill_name)
+            expected_hash = install_specs_hash(auto_specs)
+            if (
+                str(deps_state.get("status") or "") == "installed"
+                and deps_state.get("specs_hash") == expected_hash
+            ):
+                return "installed", ""
+            skill = find_skill(drive_root, skill_name, repo_path=repo_path)
+            if skill is None:
+                return "failed", "skill not found during dependency reconciliation"
+            await asyncio.to_thread(
+                install_isolated_dependencies,
+                drive_root,
+                skill_name,
+                skill.skill_dir,
+                auto_specs,
+            )
+            return "installed", ""
+        except Exception as exc:
+            log.debug("post-review deps reconcile failed", exc_info=True)
+            return "failed", f"{type(exc).__name__}: {exc}"
+
     async def _run_review() -> Any:
-        return await asyncio.to_thread(_review_skill_impl, ctx, skill_name)
+        outcome_obj = await asyncio.to_thread(_review_skill_impl, ctx, skill_name)
+        deps_status = "not_required"
+        deps_error = ""
+        if getattr(outcome_obj, "status", "") == "pass":
+            deps_status, deps_error = await _reconcile_review_deps()
+        setattr(outcome_obj, "deps_status", deps_status)
+        setattr(outcome_obj, "deps_error", deps_error)
+        return outcome_obj
 
     outcome = await run_lifecycle_job(
         kind="review",
@@ -522,7 +690,7 @@ async def api_skill_review(request: Request) -> JSONResponse:
         message=f"Reviewing {skill_name}",
         runner=_run_review,
         result_message=lambda item: f"Review {getattr(item, 'status', 'pending')}",
-        result_error=lambda item: getattr(item, "error", "") or "",
+        result_error=lambda item: getattr(item, "error", "") or getattr(item, "deps_error", "") or "",
     )
     live_state = reconcile_extension(
         skill_name,
@@ -564,6 +732,8 @@ async def api_skill_review(request: Request) -> JSONResponse:
             "error": outcome.error,
             "reviewer_models": outcome.reviewer_models,
             "content_hash": outcome.content_hash,
+            "deps_status": getattr(outcome, "deps_status", "not_required"),
+            "deps_error": getattr(outcome, "deps_error", ""),
             "extension_action": live_state.get("action"),
             "extension_reason": live_state.get("reason"),
         }
@@ -634,6 +804,8 @@ async def api_skill_reconcile(request: Request) -> JSONResponse:
 __all__ = [
     "api_extensions_index",
     "api_extension_manifest",
+    "api_extension_module",
+    "api_extension_settings_section",
     "api_extension_dispatch",
     "api_skill_toggle",
     "api_skill_review",

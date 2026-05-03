@@ -140,6 +140,10 @@ TOOL_POLICY: Dict[str, str] = {
     # v5.1.2 Frame A: runtime_mode no longer gates execution. We still
     # keep a cheap per-call LLM recheck as defense in depth.
     "skill_exec": POLICY_CHECK,
+    # v5.7.0: read-only argv-only syntax validator for skill payloads
+    # (Python compile() / node --check / bash -n + manifest parse). Heal-allowed.
+    # No state mutation, no shell strings, scrubbed env, 30s/file cap.
+    "skill_preflight": POLICY_SKIP,
 
     # --- Conditional: run_shell (safe-subject whitelist) ---
     "run_shell": POLICY_CHECK_CONDITIONAL,

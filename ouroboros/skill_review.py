@@ -50,9 +50,17 @@ _SKILL_CHECKLIST_SECTION = "Skill Review Checklist"
 # File extensions that represent LOADABLE native code. These are hard-
 # blocked by review because the subprocess can load them via
 # ``ctypes.CDLL`` / ``import _somemodule`` / Node native addons, which
-# would run code the reviewer never saw. Inert binary assets (``.png``,
-# ``.mp3``, ``.wav``, etc.) are still allowed with a filename+size
-# omission note — their bytes can't be executed as code by the runtime.
+# would run code the reviewer never saw.
+#
+# v5.7.0 stale-comment fix: the previous comment claimed inert binary
+# assets (``.png``, ``.mp3``, ``.wav``) were "still allowed with a
+# filename+size omission note" — that has not been true since v4.x.
+# ``_read_capped_text`` raises ``_SkillBinaryPayload`` for ANY non-UTF-8
+# file in the runtime-reachable surface, regardless of extension. Phase
+# 3 onwards is text-only. The explicit loadable-binary extension set
+# below is kept around as a belt-and-braces signal so the rejection
+# error surface can name the offending category before the UTF-8
+# decode branch fires; it is NOT an allowlist of "safe" extensions.
 _LOADABLE_BINARY_EXTENSIONS = frozenset(
     {
         ".so", ".dylib", ".dll",          # native shared libs
@@ -152,6 +160,16 @@ _SKILL_REVIEW_ITEMS = (
     "env_allowlist",
     "timeout_and_output_discipline",
     "extension_namespace_discipline",
+    # v5.7.0: ``kind: "module"`` widgets ship arbitrary JS that the host
+    # mounts inside a sandboxed ``<iframe srcdoc>`` with a strict CSP.
+    # Reviewers MUST verify the JS does not touch ``document.cookie``,
+    # ``localStorage``/``sessionStorage``, or ``fetch`` URLs outside
+    # ``/api/extensions/<skill>/`` — even though the host CSP also
+    # blocks those, defense-in-depth at review time prevents shipping
+    # code whose intent is to escape the iframe sandbox. Non-module
+    # widgets and non-extension skills MUST be marked ``PASS`` with
+    # reason "Not applicable".
+    "widget_module_safety",
 )
 _CRITICAL_ITEMS = frozenset(
     {
@@ -383,7 +401,7 @@ contradicts the runtime's constitutional commitments.
 
 {bible_text}
 
-## Skill files (manifest + scripts/ + assets/ + manifest-declared entry/scripts paths)
+## Skill files (every runtime-reachable file in skill_dir, text-only)
 
 {file_pack}
 
@@ -511,11 +529,17 @@ def _parse_json_array(content: str) -> List[Any]:
 def _aggregate_status(
     findings: List[Dict[str, Any]],
     skill_type: str,
+    *,
+    is_module_widget: bool = False,
 ) -> str:
     """Collapse per-reviewer findings into a single status.
 
     - any critical FAIL on a checklist item that is always-critical
-      (or on ``extension_namespace_discipline`` when ``type==extension``)
+      (or on ``extension_namespace_discipline`` when ``type==extension``;
+      or on ``widget_module_safety`` for any extension. Reviewers mark it
+      PASS/Not applicable for non-module widgets, but modules can be
+      registered dynamically from plugin.py so manifest-only detection is
+      not enough.)
       → ``fail``;
     - any advisory FAIL without a matching critical FAIL → ``advisory``;
     - otherwise → ``pass``.
@@ -537,6 +561,8 @@ def _aggregate_status(
             if item in _CRITICAL_ITEMS:
                 has_critical_fail = True
             elif item == "extension_namespace_discipline" and is_extension:
+                has_critical_fail = True
+            elif item == "widget_module_safety" and is_extension:
                 has_critical_fail = True
             else:
                 has_advisory_fail = True
@@ -745,7 +771,16 @@ def review_skill(
             raw_result=_truncate_raw_result(result_json_text),
         )
 
-    status = _aggregate_status(findings, skill_type=skill.manifest.type)
+    is_module_widget = (
+        skill.manifest.is_extension()
+        and isinstance(skill.manifest.ui_tab, dict)
+        and str(((skill.manifest.ui_tab or {}).get("render") or {}).get("kind") or "") == "module"
+    )
+    status = _aggregate_status(
+        findings,
+        skill_type=skill.manifest.type,
+        is_module_widget=is_module_widget,
+    )
     outcome = SkillReviewOutcome(
         skill_name=skill.name,
         status=status,
