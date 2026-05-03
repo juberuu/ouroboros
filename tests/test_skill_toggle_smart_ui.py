@@ -34,9 +34,15 @@ def test_skill_cards_keep_toggle_but_move_secondary_actions_to_menu():
     assert "skills-menu-item skills-update" in source
     assert "skills-menu-item skills-uninstall" in source
     assert "skills-card-menu-dialog" in source
-    assert "showModal()" in source
-    assert "event.target.classList?.contains('skills-card-menu-dialog')" in source
+    # v5.7.0: secondary actions moved to the card header kebab and open as
+    # anchored non-modal popovers. Modal dialogs/backdrops caused the menu to
+    # appear detached from the skill card and dim the whole page.
+    assert "if (opening) popover.show();" in source
+    assert "if (opening) popover.showModal();" not in source
+    assert "event.target.closest('[data-skill-menu-close]')" in source
     assert ".skills-card-menu-dialog" in css
-    assert "::backdrop" in css
+    assert ".skills-card-menu-dialog::backdrop" not in css
+    assert "top: calc(100% + 6px)" in css
+    assert "right: 0" in css
     assert ".skills-menu-item" in css
     assert ">Heal<" not in source
