@@ -182,7 +182,27 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
             except (ValueError, SyntaxError):
                 pass
         # 3. Shell-style string: "grep -rn pattern ."
+        #
+        # If the input STARTED with `[` or `{` and both structured-parse
+        # layers failed, it's a malformed JSON/Python literal — NOT a
+        # shell command. Refuse here rather than letting shlex.split strip
+        # the brackets and produce garbage argv that subprocess will fail
+        # to exec with a useless ENOENT (e.g. ``'[git,'``). 2026-05-03
+        # production bug.
         if recovered is None:
+            stripped = cmd.lstrip()
+            if stripped[:1] in ("[", "{"):
+                return (
+                    '⚠️ SHELL_ARG_ERROR: `cmd` looks like a JSON/Python list literal '
+                    'but failed to parse cleanly (likely an escape or quote-mismatch '
+                    'issue). Pass cmd as an actual array, not a stringified array.\n\n'
+                    'Correct usage:\n'
+                    '  run_shell(cmd=["git", "log", "--oneline", "-10"])\n\n'
+                    'Wrong usage (the failure that brought you here):\n'
+                    '  run_shell(cmd=\'["git", "log", "--oneline", "-10"]\')\n\n'
+                    'For reading files, prefer `repo_read` / `data_read`.\n'
+                    'For searching code, prefer `code_search`.'
+                )
             try:
                 parts = shlex.split(cmd)
                 if parts:
@@ -473,10 +493,31 @@ def get_tools() -> List[ToolEntry]:
     return [
         ToolEntry("run_shell", {
             "name": "run_shell",
-            "description": "Run a shell command (list of args) inside the repo. Returns stdout+stderr.",
+            "description": (
+                "Run a command inside the repo. Returns stdout+stderr. "
+                "cmd MUST be an array of strings, never a single shell-style "
+                "string. Use cwd= for working directory; cd is rejected. "
+                "For pipes/chaining use [\"sh\", \"-c\", \"cmd1 && cmd2\"]."
+            ),
             "parameters": {"type": "object", "properties": {
-                "cmd": {"type": "array", "items": {"type": "string"}},
-                "cwd": {"type": "string", "default": ""},
+                "cmd": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Argv as a JSON array of strings. Example: "
+                        "[\"git\", \"log\", \"--oneline\", \"-10\"]. NEVER "
+                        "pass a single string like \"git log\" or a "
+                        "stringified array like '[\"git\", \"log\"]'."
+                    ),
+                },
+                "cwd": {
+                    "type": "string", "default": "",
+                    "description": (
+                        "Working directory relative to the repo root. Use "
+                        "this instead of `cd` (which is a shell builtin "
+                        "and is rejected)."
+                    ),
+                },
             }, "required": ["cmd"]},
         }, _run_shell, is_code_tool=True, timeout_sec=_RUN_SHELL_DEFAULT_TIMEOUT_SEC),
         ToolEntry("claude_code_edit", {
