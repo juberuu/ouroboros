@@ -1222,7 +1222,25 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
                 pass
             if not already_on_target:
                 return _fail(f"⚠️ GIT_ERROR (checkout): {err_msg}")
-            # else: already on branch_dev; proceed to stage.
+            try:
+                unmerged = run_cmd(
+                    ["git", "diff", "--name-only", "--diff-filter=U"],
+                    cwd=ctx.repo_dir,
+                ).strip()
+            except Exception as status_err:
+                return _fail(
+                    "⚠️ GIT_ERROR (checkout): "
+                    f"{err_msg}\n\nCould not verify index state after checkout failure: "
+                    f"{_sanitize_git_error(str(status_err))}"
+                )
+            if unmerged:
+                return _fail(
+                    "⚠️ GIT_ERROR (checkout): "
+                    f"{err_msg}\n\nRepository has unmerged paths; refusing to treat "
+                    "the checkout failure as an incidental dirty-tree no-op.\n"
+                    f"{unmerged}"
+                )
+            # else: already on branch_dev with a clean merge index; proceed to stage.
         outcome = _run_reviewed_stage_cycle(
             ctx,
             commit_message,

@@ -125,6 +125,72 @@ def test_checkout_on_different_branch_with_failure_aborts_cleanly(tmp_path):
     )
 
 
+def test_checkout_failure_on_target_branch_blocks_unmerged_index(tmp_path):
+    """Already being on branch_dev is not enough when the index is unmerged."""
+    from ouroboros.tools import git as git_module
+
+    ctx = _ctx(tmp_path)
+    cycle_called = []
+
+    def fake_run(cmd, cwd=None, **_):
+        if cmd[:2] == ["git", "checkout"]:
+            raise Exception("would overwrite local changes")
+        if cmd[:3] == ["git", "rev-parse", "--abbrev-ref"]:
+            return "ouroboros\n"
+        if cmd[:4] == ["git", "diff", "--name-only", "--diff-filter=U"]:
+            return "ouroboros/tools/git.py\n"
+        return ""
+
+    def fake_stage_cycle(*args, **kwargs):
+        cycle_called.append(True)
+        return {"status": "passed"}
+
+    with patch.object(git_module, "run_cmd", side_effect=fake_run), \
+         patch.object(git_module, "_run_reviewed_stage_cycle",
+                      side_effect=fake_stage_cycle), \
+         patch.object(git_module, "_acquire_git_lock", return_value=None), \
+         patch.object(git_module, "_release_git_lock"), \
+         patch.object(git_module, "_record_commit_attempt"):
+        result = git_module._repo_commit_push(ctx, "test commit")
+
+    assert "GIT_ERROR" in result and "unmerged paths" in result
+    assert "ouroboros/tools/git.py" in result
+    assert not cycle_called
+
+
+def test_checkout_failure_on_target_branch_blocks_unknown_index_state(tmp_path):
+    """If index state cannot be verified, keep checkout failure blocking."""
+    from ouroboros.tools import git as git_module
+
+    ctx = _ctx(tmp_path)
+    cycle_called = []
+
+    def fake_run(cmd, cwd=None, **_):
+        if cmd[:2] == ["git", "checkout"]:
+            raise Exception("would overwrite local changes")
+        if cmd[:3] == ["git", "rev-parse", "--abbrev-ref"]:
+            return "ouroboros\n"
+        if cmd[:4] == ["git", "diff", "--name-only", "--diff-filter=U"]:
+            raise Exception("index.lock exists")
+        return ""
+
+    def fake_stage_cycle(*args, **kwargs):
+        cycle_called.append(True)
+        return {"status": "passed"}
+
+    with patch.object(git_module, "run_cmd", side_effect=fake_run), \
+         patch.object(git_module, "_run_reviewed_stage_cycle",
+                      side_effect=fake_stage_cycle), \
+         patch.object(git_module, "_acquire_git_lock", return_value=None), \
+         patch.object(git_module, "_release_git_lock"), \
+         patch.object(git_module, "_record_commit_attempt"):
+        result = git_module._repo_commit_push(ctx, "test commit")
+
+    assert "GIT_ERROR" in result and "Could not verify index state" in result
+    assert "index.lock exists" in result
+    assert not cycle_called
+
+
 def test_checkout_succeeds_normally_when_clean(tmp_path):
     """Happy path: checkout succeeds, cycle proceeds. The fix must not
     change behavior when checkout works the first time."""
