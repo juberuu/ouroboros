@@ -157,6 +157,23 @@ _SHELL_INTERPRETERS = frozenset({
 })
 _ENV_REF_PATTERN = re.compile(r'\$(?:\{[A-Z][A-Z0-9_]*\}|[A-Z][A-Z0-9_]*)')
 
+# 2026-05-04: detect bash-shell regex idioms that don't work in argv mode.
+# In bash, ``grep "A\|B"`` works because basic-regex with `\|` as alternation
+# is a GNU extension (and shell doesn't expand the backslash inside double
+# quotes). In argv mode it's literal: BSD grep on macOS treats ``\|`` as the
+# literal two-character sequence, so the pattern matches nothing. Smaller
+# models that learned ``grep "A\|B"`` from bash scripts hit this when their
+# tool calls go to subprocess directly. Refuse with a teachable error
+# pointing at the correct argv form (``-E "A|B"`` or ``-e "A" -e "B"``).
+_GREP_TOOLS = frozenset(("grep", "egrep", "fgrep"))
+_GREP_REGEX_MODE_FLAGS = frozenset((
+    "-E", "--extended-regexp",
+    "-P", "--perl-regexp",
+    "-F", "--fixed-strings",
+    "-G", "--basic-regexp",
+))
+_BASH_REGEX_ESCAPE_PATTERN = re.compile(r'\\[|()+?{}]')
+
 
 # ---------------------------------------------------------------------------
 # run_shell
@@ -232,6 +249,29 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
             'be executed directly via subprocess. '
             'Use ["sh", "-c", "your command"] if you need shell builtins.'
         )
+
+    # 2026-05-04: detect bash-shell regex idioms in grep argv that don't
+    # work in subprocess mode (see _BASH_REGEX_ESCAPE_PATTERN comment).
+    # Only fires when the user hasn't explicitly chosen a regex flavor —
+    # if they passed -E / -G / -P / -F they know what they're asking for.
+    if cmd and pathlib.Path(cmd[0]).name.lower() in _GREP_TOOLS:
+        if not any(arg in _GREP_REGEX_MODE_FLAGS for arg in cmd):
+            for arg in cmd[1:]:
+                if isinstance(arg, str) and _BASH_REGEX_ESCAPE_PATTERN.search(arg):
+                    return (
+                        f'⚠️ SHELL_REGEX_HINT: argv contains backslash-escaped '
+                        f'regex metachar (e.g. \\|, \\(, \\+) in arg {arg!r}. '
+                        'Backslash expansion of regex alternation is a bash/'
+                        'GNU-grep idiom; argv mode passes the literal string, '
+                        'and BSD grep on macOS treats \\| as the literal '
+                        'two-character sequence. Fixes:\n'
+                        '  - Extended regex (no escaping): grep -E "A|B" file\n'
+                        '  - Multiple patterns: grep -e "A" -e "B" file\n'
+                        '  - Force basic regex with GNU-style alternation: '
+                        'grep -G "A\\|B" file (only works on GNU grep, not BSD)\n'
+                        '  - Or use code_search for symbolic lookups inside '
+                        'the repo.'
+                    )
 
     # Reject shell operators in cmd array (subprocess doesn't interpret them)
     found_ops = _SHELL_OPERATORS.intersection(cmd)
