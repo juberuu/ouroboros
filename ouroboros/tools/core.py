@@ -213,19 +213,22 @@ def _repo_read(ctx: ToolContext, path: str, max_lines: int = 2000, start_line: i
     ``data_root/memory/`` AND are already injected into the system prompt —
     re-reading wastes rounds.
     """
-    norm = path.strip().lstrip("./").replace("\\", "/")
-    base = norm.rsplit("/", 1)[-1]
-    if "/" not in norm and base in _MEMORY_AT_DRIVE_MEMORY:
-        title = base.split('.')[0].title()
-        return (
-            f"⚠️ NOT_FOUND: '{path}' is not at the repo root.\n\n"
-            f"This file lives at `data_root/memory/{base}` AND is already "
-            f"injected into your system prompt above as `## {title}`. "
-            f"You don't need to read it — the content is already in your "
-            f"context. If you genuinely need the raw file, call "
-            f"`data_read(path='memory/{base}')`."
-        )
-    content = read_text(ctx.repo_path(path))
+    try:
+        content = read_text(ctx.repo_path(path))
+    except FileNotFoundError:
+        norm = path.strip().lstrip("./").replace("\\", "/")
+        base = norm.rsplit("/", 1)[-1]
+        if "/" not in norm and base in _MEMORY_AT_DRIVE_MEMORY:
+            title = base.split('.')[0].title()
+            return (
+                f"⚠️ NOT_FOUND: '{path}' is not at the repo root.\n\n"
+                f"This file lives at `data_root/memory/{base}` AND is already "
+                f"injected into your system prompt above as `## {title}`. "
+                f"You don't need to read it — the content is already in your "
+                f"context. If you genuinely need the raw file, call "
+                f"`data_read(path='memory/{base}')`."
+            )
+        raise
     lines = content.splitlines(keepends=True)
     total = len(lines)
     start = max(1, min(start_line, total + 1))
@@ -267,7 +270,26 @@ def _data_read(ctx: ToolContext, path: str) -> str:
                 norm = after[len("data/"):]
             else:
                 norm = after
-    return read_text(ctx.drive_path(norm))
+    try:
+        return read_text(ctx.drive_path(norm))
+    except FileNotFoundError:
+        if norm.replace("\\", "/").startswith("memory/"):
+            explanation = (
+                "Memory artifacts under memory/ are created lazily on first "
+                "write. Treat this as an empty/absent state and proceed with "
+                "initialization if that is the task."
+            )
+        else:
+            explanation = (
+                "This path does not exist yet. Treat it as an empty/absent "
+                "state. Lazy-creation is not guaranteed for paths outside "
+                "memory/; if this path was expected to exist, verify it was "
+                "written correctly."
+            )
+        return (
+            f"⚠️ DATA_NOT_YET_CREATED: {path}\n\n"
+            f"{explanation} Use data_list to confirm what currently exists."
+        )
 
 
 def _data_list(ctx: ToolContext, dir: str = ".", max_entries: int = 500) -> str:

@@ -82,6 +82,28 @@ def test_repo_read_normal_file_unchanged(tmp_path):
     assert "NOT_FOUND" not in result
 
 
+@pytest.mark.parametrize("name", [
+    "identity.md",
+    "scratchpad.md",
+    "registry.md",
+])
+def test_repo_read_real_memory_named_file_at_repo_root_wins(tmp_path, name):
+    """The friendly hint is only for missing files, not real repo files."""
+    from ouroboros.tools.core import _repo_read
+
+    ctx = _FakeCtx(
+        repo_dir=tmp_path / "repo",
+        drive_root=tmp_path / "data",
+    )
+    (tmp_path / "repo").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "repo" / name).write_text("repo-local content", encoding="utf-8")
+
+    result = _repo_read(ctx, name)
+    assert "repo-local content" in result
+    assert "NOT_FOUND" not in result
+    assert "data_read(path=" not in result
+
+
 def test_repo_read_subdirectory_path_unchanged(tmp_path):
     """Memory artifact requested with a directory prefix is treated as a
     regular request — only bare-name lookups at repo root trigger the hint."""
@@ -159,6 +181,41 @@ def test_data_read_normal_relative_path_unchanged(tmp_path):
     )
     result = _data_read(ctx, "memory/identity.md")
     assert "identity" in result
+
+
+def test_data_read_missing_memory_path_returns_sentinel(tmp_path):
+    """Missing memory paths get the cold-start sentinel, not raw ENOENT."""
+    from ouroboros.tools.core import _data_read
+
+    drive = tmp_path / "data"
+    drive.mkdir(parents=True, exist_ok=True)
+
+    ctx = _FakeCtx(
+        repo_dir=tmp_path / "repo",
+        drive_root=drive,
+    )
+
+    result = _data_read(ctx, "memory/knowledge/patterns.md")
+    assert "DATA_NOT_YET_CREATED" in result
+    assert "lazily on first write" in result
+
+
+def test_data_read_missing_non_memory_path_uses_narrower_sentinel(tmp_path):
+    """Non-memory paths should not overclaim lazy creation."""
+    from ouroboros.tools.core import _data_read
+
+    drive = tmp_path / "data"
+    drive.mkdir(parents=True, exist_ok=True)
+
+    ctx = _FakeCtx(
+        repo_dir=tmp_path / "repo",
+        drive_root=drive,
+    )
+
+    result = _data_read(ctx, "logs/missing.jsonl")
+    assert "DATA_NOT_YET_CREATED" in result
+    assert "lazily on first write" not in result
+    assert "not guaranteed" in result
 
 
 # ---------------------------------------------------------------------------
