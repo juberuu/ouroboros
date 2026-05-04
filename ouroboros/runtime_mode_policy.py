@@ -48,6 +48,16 @@ PROTECTED_RUNTIME_PATHS = (
     | RELEASE_INVARIANT_PATHS
 )
 
+# Case-insensitive lookup tables. On case-insensitive filesystems (macOS HFS+
+# default, Windows NTFS), `repo_write("bible.md", ...)` writes to BIBLE.md
+# but the literal string "bible.md" doesn't match SAFETY_CRITICAL_PATHS' uppercase
+# entry, bypassing the safety guard. Matching the lowercased form via these
+# frozensets closes the bypass.
+_SAFETY_CRITICAL_LOWER = frozenset(p.lower() for p in SAFETY_CRITICAL_PATHS)
+_FROZEN_CONTRACT_LOWER = frozenset(p.lower() for p in FROZEN_CONTRACT_PATHS)
+_FROZEN_CONTRACT_PREFIXES_LOWER = tuple(p.lower() for p in FROZEN_CONTRACT_PATH_PREFIXES)
+_RELEASE_INVARIANT_LOWER = frozenset(p.lower() for p in RELEASE_INVARIANT_PATHS)
+
 
 @dataclass(frozen=True)
 class ProtectedPath:
@@ -64,17 +74,28 @@ def normalize_repo_path(path: str) -> str:
 
 
 def protected_path_category(path: str) -> str:
-    """Return the protected-surface category for *path*, or ``""``."""
+    """Return the protected-surface category for *path*, or ``""``.
+
+    Lookup is case-insensitive. On case-insensitive filesystems (macOS
+    HFS+ default, Windows NTFS), `repo_write("bible.md", ...)` writes to
+    BIBLE.md but the literal lowercase string would bypass the strict
+    uppercase membership check. Compare lowercased forms to close the
+    bypass.
+    """
     norm = normalize_repo_path(path)
     if not norm or norm == ".":
         return ""
-    if norm in SAFETY_CRITICAL_PATHS:
+    norm_lower = norm.lower()
+    if norm in SAFETY_CRITICAL_PATHS or norm_lower in _SAFETY_CRITICAL_LOWER:
         return "safety-critical"
-    if norm in FROZEN_CONTRACT_PATHS or any(
-        norm.startswith(prefix) for prefix in FROZEN_CONTRACT_PATH_PREFIXES
+    if (
+        norm in FROZEN_CONTRACT_PATHS
+        or norm_lower in _FROZEN_CONTRACT_LOWER
+        or any(norm.startswith(prefix) for prefix in FROZEN_CONTRACT_PATH_PREFIXES)
+        or any(norm_lower.startswith(prefix) for prefix in _FROZEN_CONTRACT_PREFIXES_LOWER)
     ):
         return "frozen-contract"
-    if norm in RELEASE_INVARIANT_PATHS:
+    if norm in RELEASE_INVARIANT_PATHS or norm_lower in _RELEASE_INVARIANT_LOWER:
         return "release-invariant"
     return ""
 

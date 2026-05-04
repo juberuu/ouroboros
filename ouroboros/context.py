@@ -871,11 +871,27 @@ from ouroboros.context_compaction import (
 
 
 def safe_read(path: pathlib.Path, fallback: str = "") -> str:
-    """Read a file, returning fallback if it doesn't exist or errors."""
+    """Read a file, returning fallback if it doesn't exist or errors.
+
+    Distinguishes "file doesn't exist" (DEBUG) from "file exists but
+    unreadable" (WARNING). For critical files (BIBLE.md, identity.md,
+    ARCHITECTURE.md), an empty value is indistinguishable from "file
+    doesn't exist", so the agent silently runs without its constitutional
+    core when the file is corrupt or has bad permissions. Surface the
+    real-infrastructure-problem case at WARNING.
+    """
     try:
-        if path.exists():
-            return read_text(path)
+        exists = path.exists()
     except Exception:
-        log.debug(f"Failed to read file {path} in safe_read", exc_info=True)
-        pass
-    return fallback
+        log.debug("safe_read: path.exists() raised for %s", path, exc_info=True)
+        return fallback
+    if not exists:
+        return fallback
+    try:
+        return read_text(path)
+    except Exception as exc:
+        log.warning(
+            "safe_read: file %s exists but read failed (%s: %s); using fallback",
+            path, type(exc).__name__, exc,
+        )
+        return fallback

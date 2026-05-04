@@ -190,16 +190,28 @@ def _has_ws_clients() -> bool:
         return bool(_ws_clients)
 
 async def broadcast_ws(msg: dict) -> None:
-    """Send a message to all connected WebSocket clients."""
+    """Send a message to all connected WebSocket clients.
+
+    Send-failures are surfaced at INFO with the message type so silent UI
+    desync is visible in the server log; a structured
+    ``broadcast_partial_failure`` event is emitted to events.jsonl when at
+    least one client failed, so the signal also lands in the events stream
+    that operators tail.
+    """
     data = json.dumps(msg, ensure_ascii=False, default=str)
+    msg_type = str(msg.get("type", "unknown"))
     with _ws_lock:
         clients = list(_ws_clients)
+        total_clients = len(clients)
     dead = []
     for ws in clients:
         try:
             await ws.send_text(data)
-        except Exception:
-            log.debug("Dropping dead WebSocket client during broadcast", exc_info=True)
+        except Exception as exc:
+            log.info(
+                "WebSocket send failed for msg type=%s; dropping client (%s)",
+                msg_type, type(exc).__name__,
+            )
             dead.append(ws)
     if dead:
         with _ws_lock:
@@ -208,6 +220,23 @@ async def broadcast_ws(msg: dict) -> None:
                     _ws_clients.remove(ws)
                 except ValueError:
                     pass
+        try:
+            from ouroboros.utils import utc_now_iso, append_jsonl
+            import pathlib as _pl
+            _data_dir = os.environ.get("OUROBOROS_DATA_DIR", "")
+            if _data_dir:
+                append_jsonl(
+                    _pl.Path(_data_dir) / "logs" / "events.jsonl",
+                    {
+                        "ts": utc_now_iso(),
+                        "type": "broadcast_partial_failure",
+                        "msg_type": msg_type,
+                        "dead_clients": len(dead),
+                        "total_clients": total_clients,
+                    },
+                )
+        except Exception:
+            log.debug("Failed to emit broadcast_partial_failure event", exc_info=True)
 
 
 def broadcast_ws_sync(msg: dict) -> None:
