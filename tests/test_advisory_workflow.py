@@ -1389,6 +1389,8 @@ def test_reviewed_stage_cycle_advisory_scope_covers_full_staged_index(tmp_path, 
             return ""
         if cmd == ["git", "status", "--porcelain"]:
             return " M foo.py\n M bar.py\n"
+        if cmd == ["git", "diff", "--cached", "--name-status", "-M"]:
+            return "M\tfoo.py\nM\tbar.py\n"
         if cmd == ["git", "diff", "--cached", "--name-only"]:
             return "foo.py\nbar.py\n"
         if cmd == ["git", "reset", "HEAD"]:

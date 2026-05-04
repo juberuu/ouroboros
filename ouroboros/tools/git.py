@@ -93,12 +93,12 @@ def _fingerprint_staged_diff(repo_dir: pathlib.Path) -> Dict[str, Any]:
     }
 
 
-def _staged_paths_for_protection(repo_dir: pathlib.Path) -> list[str]:
+def _staged_paths_for_protection(repo_dir: pathlib.Path) -> Optional[list[str]]:
     """Return staged paths including both sides of renames/copies."""
     try:
         raw = run_cmd(["git", "diff", "--cached", "--name-status", "-M"], cwd=repo_dir)
     except Exception:
-        return []
+        return None
     paths: list[str] = []
     for line in raw.splitlines():
         if not line.strip():
@@ -110,6 +110,8 @@ def _staged_paths_for_protection(repo_dir: pathlib.Path) -> list[str]:
             paths.extend([parts[1], parts[2]])
         elif len(parts) >= 2:
             paths.append(parts[-1])
+        elif parts:
+            paths.append(parts[0])
     return paths
 
 
@@ -207,6 +209,38 @@ def _diff_is_doc_only(staged_paths: List[str]) -> bool:
     return saw_any
 
 
+def _mark_failed_bypass_advisory_stale(
+    ctx: ToolContext,
+    commit_message: str,
+    advisory_paths: Optional[List[str]],
+) -> None:
+    """Prevent a failed bypass preflight from satisfying later freshness checks."""
+    try:
+        from ouroboros.review_state import (
+            compute_snapshot_hash,
+            make_repo_key,
+            update_state,
+            _utc_now,
+        )
+
+        snapshot_hash = compute_snapshot_hash(
+            pathlib.Path(ctx.repo_dir),
+            commit_message,
+            paths=advisory_paths,
+        )
+        repo_key = make_repo_key(pathlib.Path(ctx.repo_dir))
+
+        def _mutate(state):
+            state.mark_stale(snapshot_hash)
+            state.last_stale_from_edit_ts = _utc_now()
+            state.last_stale_reason = "tests_preflight_blocked"
+            state.last_stale_repo_key = repo_key
+
+        update_state(pathlib.Path(ctx.drive_root), _mutate)
+    except Exception:
+        log.debug("Failed to stale bypass advisory after preflight block", exc_info=True)
+
+
 def _run_reviewed_stage_cycle(
     ctx: ToolContext,
     commit_message: str,
@@ -262,7 +296,7 @@ def _run_reviewed_stage_cycle(
     # in the same lock. The blocking review and `git commit` step always operate
     # on the full staged index, so advisory must match that scope.
     staged_paths = _staged_paths_for_protection(pathlib.Path(ctx.repo_dir))
-    if not staged_paths:
+    if staged_paths is None:
         try:
             staged_names_raw = run_cmd(
                 ["git", "diff", "--cached", "--name-only"],
@@ -372,30 +406,7 @@ def _run_reviewed_stage_cycle(
                 block_details=msg,
                 duration_sec=time.time() - commit_start,
             )
-            try:
-                from ouroboros.review_state import (
-                    compute_snapshot_hash,
-                    make_repo_key,
-                    update_state,
-                    _utc_now,
-                )
-
-                snapshot_hash = compute_snapshot_hash(
-                    pathlib.Path(ctx.repo_dir),
-                    commit_message,
-                    paths=advisory_paths,
-                )
-                repo_key = make_repo_key(pathlib.Path(ctx.repo_dir))
-
-                def _mark_failed_bypass_stale(state):
-                    state.mark_stale(snapshot_hash)
-                    state.last_stale_from_edit_ts = _utc_now()
-                    state.last_stale_reason = "tests_preflight_blocked"
-                    state.last_stale_repo_key = repo_key
-
-                update_state(pathlib.Path(ctx.drive_root), _mark_failed_bypass_stale)
-            except Exception:
-                log.debug("Failed to stale bypass advisory after preflight block", exc_info=True)
+            _mark_failed_bypass_advisory_stale(ctx, commit_message, advisory_paths)
             return {
                 "status": "blocked",
                 "message": msg,
