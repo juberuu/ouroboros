@@ -226,19 +226,16 @@ async def broadcast_ws(msg: dict) -> None:
                     pass
         try:
             from ouroboros.utils import utc_now_iso, append_jsonl
-            import pathlib as _pl
-            _data_dir = os.environ.get("OUROBOROS_DATA_DIR", "")
-            if _data_dir:
-                append_jsonl(
-                    _pl.Path(_data_dir) / "logs" / "events.jsonl",
-                    {
-                        "ts": utc_now_iso(),
-                        "type": "broadcast_partial_failure",
-                        "msg_type": msg_type,
-                        "dead_clients": len(dead),
-                        "total_clients": total_clients,
-                    },
-                )
+            append_jsonl(
+                DATA_DIR / "logs" / "events.jsonl",
+                {
+                    "ts": utc_now_iso(),
+                    "type": "broadcast_partial_failure",
+                    "msg_type": msg_type,
+                    "dead_clients": len(dead),
+                    "total_clients": total_clients,
+                },
+            )
         except Exception:
             log.debug("Failed to emit broadcast_partial_failure event", exc_info=True)
 
