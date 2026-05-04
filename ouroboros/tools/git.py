@@ -177,15 +177,17 @@ def _finalize_blocked_review(
     return combined_msg
 
 
-_DOC_ONLY_EXTENSIONS = (".md", ".txt", ".rst", ".json")
+_DOC_ONLY_EXTENSIONS = (".md", ".txt", ".rst")
 
 
 def _diff_is_doc_only(staged_paths: List[str]) -> bool:
     """Return True iff every staged path is a documentation file outside ``tests/``.
 
-    Docs/.md/.txt/.rst/.json changes can't break test behaviour, so the
+    Prose docs (.md/.txt/.rst) changes can't break test behaviour, so the
     preflight test gate is wasteful for them. The maintainer hit a 6-retry
     loop on a doc-only commit (39 rounds, 3 hours) before this check existed.
+    JSON is intentionally excluded: config/schema/package JSON can affect
+    runtime behaviour and must keep the preflight.
     Defensive: any staged file under ``tests/`` triggers the full preflight,
     even if the extension is .md, since test fixtures can be markdown.
     """
@@ -328,9 +330,10 @@ def _run_reviewed_stage_cycle(
     #   1. ``skip_tests=True`` — explicit caller opt-out. Previously this flag
     #      was silently ignored when advisory was bypassed (the agent surfaced
     #      this bug at 16:25:32 after a 39-round commit-loop task).
-    #   2. Doc-only diffs — `.md`/`.txt`/`.rst`/`.json` changes outside
+    #   2. Doc-only diffs — prose `.md`/`.txt`/`.rst` changes outside
     #      ``tests/`` can't affect test behaviour, so running the full
-    #      pytest suite is pure overhead. Disable via
+    #      pytest suite is pure overhead. JSON/config files are excluded.
+    #      Disable via
     #      ``OUROBOROS_PREFLIGHT_DIFF_AWARE=false`` if the heuristic ever
     #      misfires.
     _advisory_bypassed = skip_advisory_pre_review or not os.environ.get("ANTHROPIC_API_KEY", "")

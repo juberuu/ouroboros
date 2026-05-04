@@ -5,6 +5,9 @@ rounds, 3 hours) before this check existed. Each retry was running the
 full pytest suite against a `.md`-only diff. The fix in
 `ouroboros/tools/git.py::_diff_is_doc_only` short-circuits that case.
 
+JSON is deliberately not doc-only: config/schema/package JSON can change
+runtime behaviour and should keep the test preflight.
+
 Defensive: any staged file under ``tests/`` triggers the full preflight,
 even if the extension is markdown (test fixtures can be markdown).
 """
@@ -20,7 +23,6 @@ from ouroboros.tools.git import _diff_is_doc_only
     ["README.md"],
     ["docs/CHANGELOG.md"],
     ["docs/architecture.md", "README.md"],
-    ["data.json"],
     ["notes.txt"],
     ["docs/api.rst"],
 ])
@@ -33,6 +35,11 @@ def test_doc_only_diffs_match(paths):
     ["docs/CHANGELOG.md", "ouroboros/agent.py"],   # mixed → not doc-only
     ["setup.py"],
     ["pyproject.toml"],
+    ["data.json"],
+    ["package.json"],
+    ["config/settings.json"],
+    ["schemas/tool.schema.json"],
+    ["docs/metadata.json"],
 ])
 def test_non_doc_diffs_do_not_match(paths):
     assert _diff_is_doc_only(paths) is False
