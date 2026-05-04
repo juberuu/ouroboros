@@ -295,20 +295,20 @@ def _run_reviewed_stage_cycle(
     # single file satisfy the gate even if unrelated files were staged earlier
     # in the same lock. The blocking review and `git commit` step always operate
     # on the full staged index, so advisory must match that scope.
-    staged_paths = _staged_paths_for_protection(pathlib.Path(ctx.repo_dir))
-    if staged_paths is None:
-        try:
-            staged_names_raw = run_cmd(
-                ["git", "diff", "--cached", "--name-only"],
-                cwd=ctx.repo_dir,
-            )
-        except Exception as exc:
-            return _failed(f"⚠️ GIT_ERROR (staged-names): {_sanitize_git_error(str(exc))}")
-        staged_paths = [
-            line.strip() for line in staged_names_raw.splitlines() if line.strip()
-        ]
-    advisory_paths = staged_paths or None
-    protected_staged_paths = protected_paths_in(staged_paths)
+    try:
+        staged_names_raw = run_cmd(
+            ["git", "diff", "--cached", "--name-only"],
+            cwd=ctx.repo_dir,
+        )
+    except Exception as exc:
+        return _failed(f"⚠️ GIT_ERROR (staged-names): {_sanitize_git_error(str(exc))}")
+    advisory_paths = [
+        line.strip() for line in staged_names_raw.splitlines() if line.strip()
+    ] or None
+    classification_paths = _staged_paths_for_protection(pathlib.Path(ctx.repo_dir))
+    if classification_paths is None:
+        classification_paths = advisory_paths or []
+    protected_staged_paths = protected_paths_in(classification_paths)
     runtime_mode = _current_runtime_mode()
     if protected_staged_paths and not mode_allows_protected_write(runtime_mode):
         msg = _protected_paths_block_message(
@@ -376,7 +376,7 @@ def _run_reviewed_stage_cycle(
     #      misfires.
     _advisory_bypassed = skip_advisory_pre_review or not os.environ.get("ANTHROPIC_API_KEY", "")
     _diff_aware = (os.environ.get("OUROBOROS_PREFLIGHT_DIFF_AWARE", "true") or "true").strip().lower() in ("true", "1", "yes")
-    _doc_only = _diff_aware and _diff_is_doc_only(advisory_paths or [])
+    _doc_only = _diff_aware and _diff_is_doc_only(classification_paths)
     if _advisory_bypassed and not skip_tests and not _doc_only:
         try:
             ctx.emit_progress_fn(
