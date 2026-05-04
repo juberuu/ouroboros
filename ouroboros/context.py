@@ -201,12 +201,22 @@ def build_memory_sections(memory: Memory, partition: str = "all") -> List[str]:
     if include_volatile:
         scratchpad_raw = memory.load_scratchpad()
         _warn_if_over_budget("scratchpad", scratchpad_raw)
-        sections.append("## Scratchpad\n\n" + scratchpad_raw)
+        # Annotate the header so the agent knows scratchpad is already in
+        # context — re-reading via repo_read("scratchpad.md") or data_read
+        # wastes rounds. Companion guard: tools/core.py::_repo_read returns
+        # a NOT_FOUND hint when the agent tries it anyway.
+        sections.append(
+            "## Scratchpad (from `memory/scratchpad.md` — already loaded; "
+            "do not re-read via repo_read or data_read)\n\n" + scratchpad_raw
+        )
 
     if include_stable:
         identity_raw = memory.load_identity()
         _warn_if_over_budget("identity", identity_raw)
-        sections.append("## Identity\n\n" + identity_raw)
+        sections.append(
+            "## Identity (from `memory/identity.md` — already loaded; "
+            "do not re-read via repo_read or data_read)\n\n" + identity_raw
+        )
 
     try:
         from ouroboros.consolidator import migrate_dialogue_summary_to_blocks
