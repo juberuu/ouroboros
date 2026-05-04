@@ -11,6 +11,7 @@ import re
 import shlex
 import signal
 import subprocess
+import sys
 import threading
 from subprocess import Popen, CompletedProcess
 from typing import Any, Dict, List
@@ -420,9 +421,10 @@ def _get_diff_stat(repo_dir: pathlib.Path) -> str:
 
 def _run_validation(repo_dir: pathlib.Path) -> str:
     """Run basic validation after edit (tests). Returns summary."""
+    agent_python = sys.executable or os.environ.get("OUROBOROS_AGENT_PYTHON") or "python3"
     try:
         res = subprocess.run(
-            ["python", "-m", "pytest", "tests/", "--tb=line", "-q"],
+            [agent_python, "-m", "pytest", "tests/", "--tb=line", "-q"],
             cwd=str(repo_dir), capture_output=True, text=True, timeout=60,
         )
         if res.returncode == 0:

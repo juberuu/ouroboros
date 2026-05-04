@@ -11,6 +11,7 @@ import os
 import pathlib
 import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -1221,9 +1222,10 @@ def _run_review_preflight_tests(
     if not tests_dir.exists():
         return None
     MAX_OUTPUT = 8000
+    agent_python = sys.executable or os.environ.get("OUROBOROS_AGENT_PYTHON") or "python3"
     try:
         result = subprocess.run(
-            ["pytest", "tests/", "-q", "--tb=line", "--no-header"],
+            [agent_python, "-m", "pytest", "tests/", "-q", "--tb=line", "--no-header"],
             cwd=str(repo_dir), capture_output=True, text=True, timeout=timeout,
         )
         if result.returncode == 0:
@@ -1233,7 +1235,7 @@ def _run_review_preflight_tests(
     except subprocess.TimeoutExpired:
         return f"⚠️ Tests timed out after {timeout} seconds"
     except FileNotFoundError:
-        return "⚠️ pytest not found — install pytest or set OUROBOROS_PRE_PUSH_TESTS=0 to skip"
+        return f"⚠️ pytest not available via interpreter: {agent_python}"
     except Exception as exc:
         logger.warning("_run_review_preflight_tests failed: %s", exc, exc_info=True)
         return f"⚠️ Unexpected error running tests: {exc}"

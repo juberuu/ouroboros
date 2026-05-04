@@ -59,6 +59,10 @@ DEFAULT_PORT = int(os.environ.get("OUROBOROS_SERVER_PORT", "8765"))
 PORT_FILE = DATA_DIR / "state" / "server_port"
 
 sys.path.insert(0, str(REPO_DIR))
+if not os.environ.get("OUROBOROS_AGENT_PYTHON"):
+    _agent_python = sys.executable
+    if isinstance(_agent_python, str) and _agent_python:
+        os.environ["OUROBOROS_AGENT_PYTHON"] = _agent_python
 
 # ---------------------------------------------------------------------------
 # Logging

@@ -49,6 +49,91 @@ def test_data_read_memory_file_never_truncated():
     assert result == big
 
 
+def test_data_read_cold_start_returns_sentinel(tmp_path):
+    from ouroboros.tools.core import _data_read
+
+    ctx = MagicMock()
+    ctx.drive_path.side_effect = lambda p: tmp_path / p
+
+    result = _data_read(ctx, "memory/knowledge/patterns.md")
+    assert "DATA_NOT_YET_CREATED" in result
+    assert "memory/knowledge/patterns.md" in result
+    assert "lazily on first write" in result
+
+
+def test_data_read_existing_file_still_read_verbatim(tmp_path):
+    from ouroboros.tools.core import _data_read
+
+    target = tmp_path / "memory" / "scratchpad.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("real scratchpad content\n", encoding="utf-8")
+
+    ctx = MagicMock()
+    ctx.drive_path.side_effect = lambda p: tmp_path / p
+
+    assert _data_read(ctx, "memory/scratchpad.md") == "real scratchpad content\n"
+
+
+def test_data_read_propagates_non_filenotfound_errors(tmp_path, monkeypatch):
+    import pytest
+    import ouroboros.tools.core as core_mod
+    from ouroboros.tools.core import _data_read
+
+    ctx = MagicMock()
+    ctx.drive_path.side_effect = lambda p: tmp_path / p
+
+    def _raise_permission(path):
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(core_mod, "read_text", _raise_permission)
+    with pytest.raises(PermissionError):
+        _data_read(ctx, "memory/scratchpad.md")
+
+    def _raise_is_dir(path):
+        raise IsADirectoryError(21, "Is a directory", str(path))
+
+    monkeypatch.setattr(core_mod, "read_text", _raise_is_dir)
+    with pytest.raises(IsADirectoryError):
+        _data_read(ctx, "memory/knowledge/")
+
+
+def test_data_read_toctou_race_handled_by_sentinel(tmp_path, monkeypatch):
+    import ouroboros.tools.core as core_mod
+    from ouroboros.tools.core import _data_read
+
+    target = tmp_path / "memory" / "racy.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("content that is about to vanish\n", encoding="utf-8")
+
+    ctx = MagicMock()
+    ctx.drive_path.side_effect = lambda p: tmp_path / p
+
+    def _raise_file_not_found(path):
+        raise FileNotFoundError(2, "No such file or directory", str(path))
+
+    monkeypatch.setattr(core_mod, "read_text", _raise_file_not_found)
+
+    result = _data_read(ctx, "memory/racy.md")
+    assert "DATA_NOT_YET_CREATED" in result
+    assert "memory/racy.md" in result
+
+
+def test_data_read_sentinel_narrower_for_non_memory_paths(tmp_path):
+    from ouroboros.tools.core import _data_read
+
+    ctx = MagicMock()
+    ctx.drive_path.side_effect = lambda p: tmp_path / p
+
+    mem_result = _data_read(ctx, "memory/knowledge/patterns.md")
+    assert "DATA_NOT_YET_CREATED" in mem_result
+    assert "lazily on first write" in mem_result
+
+    non_mem_result = _data_read(ctx, "logs/nonexistent.jsonl")
+    assert "DATA_NOT_YET_CREATED" in non_mem_result
+    assert "lazily on first write" not in non_mem_result
+    assert "not guaranteed" in non_mem_result
+
+
 def test_repo_read_prompt_file_never_truncated():
     from ouroboros.loop_tool_execution import _truncate_tool_result
     big = "p" * 90000
