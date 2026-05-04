@@ -1202,7 +1202,45 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
         try:
             run_cmd(["git", "checkout", ctx.branch_dev], cwd=ctx.repo_dir)
         except Exception as e:
-            return _fail(f"⚠️ GIT_ERROR (checkout): {_sanitize_git_error(str(e))}")
+            # The original code aborted on ANY checkout failure — including
+            # the common case where the agent is already on ``branch_dev``
+            # with a dirty tree because the dirty files ARE what they're
+            # trying to commit. When checkout fails, check whether we're
+            # already on the right branch. If so, the checkout failure is
+            # incidental (typically a no-op-but-git-complained on a dirty
+            # tree) and we can proceed to staging. Only abort when on a
+            # different branch — where the checkout was actually needed.
+            err_msg = _sanitize_git_error(str(e))
+            already_on_target = False
+            try:
+                current_branch = run_cmd(
+                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                    cwd=ctx.repo_dir,
+                ).strip()
+                already_on_target = (current_branch == ctx.branch_dev)
+            except Exception:
+                pass
+            if not already_on_target:
+                return _fail(f"⚠️ GIT_ERROR (checkout): {err_msg}")
+            try:
+                unmerged = run_cmd(
+                    ["git", "diff", "--name-only", "--diff-filter=U"],
+                    cwd=ctx.repo_dir,
+                ).strip()
+            except Exception as status_err:
+                return _fail(
+                    "⚠️ GIT_ERROR (checkout): "
+                    f"{err_msg}\n\nCould not verify index state after checkout failure: "
+                    f"{_sanitize_git_error(str(status_err))}"
+                )
+            if unmerged:
+                return _fail(
+                    "⚠️ GIT_ERROR (checkout): "
+                    f"{err_msg}\n\nRepository has unmerged paths; refusing to treat "
+                    "the checkout failure as an incidental dirty-tree no-op.\n"
+                    f"{unmerged}"
+                )
+            # else: already on branch_dev with a clean merge index; proceed to stage.
         outcome = _run_reviewed_stage_cycle(
             ctx,
             commit_message,
