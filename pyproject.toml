@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ouroboros"
-version = "5.7.0"
+version = "5.7.1"
 description = "Self-creating AI agent with constitution, background consciousness, and persistent identity"
 readme = "README.md"
 license = {text = "MIT"}
@@ -35,6 +35,7 @@ dependencies = [
     "python-multipart",
     "uvicorn[standard]",
     "websockets",
+    "pytest>=7.0",
     "claude-agent-sdk>=0.1.60",
     "a2a-sdk[http-server]>=0.3.20,<1.0.0",
     # Declared explicitly so ``ouroboros/contracts/api_v1.py`` can rely on

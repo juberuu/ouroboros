@@ -1,4 +1,4 @@
-# Ouroboros v5.7.0 — Architecture & Reference
+# Ouroboros v5.7.1 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -105,7 +105,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── parallel_review.py ← Parallel triad+scope orchestration and verdict aggregation (extracted from git.py)
       │   ├── plan_review.py     ← Pre-implementation design review (2–3 distinct parallel full-codebase reviewers, plan_task tool)
       │   ├── review.py          ← Triad diff review (>=2 reviewer models in parallel against CHECKLISTS.md; ships with 3, capped at 10)
-      │   ├── review_helpers.py  ← Shared review helpers (section loader, file packs, intent)
+      │   ├── review_helpers.py  ← Shared review helpers (section loader, file packs, intent, pytest preflight via agent interpreter)
       │   ├── review_revalidation.py ← Reviewed-commit fingerprint revalidation helpers (blocks when staged diff changes after review)
       │   ├── scope_review.py   ← Blocking scope reviewer (configurable, fail-closed)
       │   ├── skill_exec.py      ← Phase 3 external-skill surface: list_skills, review_skill, toggle_skill, skill_exec (subprocess runner with cwd confinement, env scrubbing, timeout, runtime allowlist python/python3/bash/node/deno/ruby/go; gated by enabled + PASS review + fresh content hash — v5.1.2 Frame A: runtime_mode no longer blocks execution)
@@ -294,6 +294,27 @@ by every subprocess (pytest runs, A2A agent-card builder via
 `_build_skills_from_registry`, supervisor-side `_get_chat_agent`), any of those
 code paths would steal the agent's in-progress edits into a commit. The v4.36.1
 change removes that duplicate rescue mechanism entirely.
+
+### Agent interpreter handle (`OUROBOROS_AGENT_PYTHON`)
+
+`server.py` exposes the interpreter that launched Ouroboros as
+`OUROBOROS_AGENT_PYTHON` early in startup, immediately after `REPO_DIR` is added
+to `sys.path` and before workers or review subprocesses are spawned. Existing
+operator/test overrides are respected; the assignment is guarded so exotic
+embedded runtimes with `sys.executable is None` or `""` do not write an invalid
+environment value.
+
+The three pytest subprocess surfaces use the same fallback chain:
+`sys.executable or os.environ["OUROBOROS_AGENT_PYTHON"] or "python3"`, then run
+`-m pytest` through that interpreter:
+
+- `ouroboros/tools/review_helpers.py::_run_review_preflight_tests`
+- `ouroboros/tools/git.py::_run_pre_push_tests`
+- `ouroboros/tools/shell.py::_run_validation`
+
+This keeps packaged app bundles from depending on a `pytest` or `python`
+executable on the user's PATH; the test runner comes from the same Python
+environment that has Ouroboros dependencies installed.
 
 ---
 
@@ -694,9 +715,11 @@ runtime authority.
 - Browser tools use thread-sticky executor (Playwright greenlet affinity)
 - All tools have hard timeout (default 600s, per-tool overrides for browser/search/vision); `OUROBOROS_TOOL_TIMEOUT_SEC` in `settings.json` is the runtime SSOT override read on each tool call. The actual timeout is `max(settings_value, per_tool_declared)` so tools declaring a higher minimum (e.g. `claude_code_edit` at 1200s) are never silently capped by a lower global default.
 - Layered safety: hardcoded sandbox (registry.py) → policy-based LLM safety check (safety.py `TOOL_POLICY`, single light-model call; unknown tools fall through to `DEFAULT_POLICY = check`)
-- Tool results use explicit per-tool caps with visible truncation markers (`repo_read`/`data_read`/`knowledge_read`/`run_shell`: 80k, default: 15k chars). Cognitive reads (`memory/*`, prompts, BIBLE/docs, commit/review outputs) are exempt from silent clipping.
+- Tool results use explicit per-tool caps with visible truncation markers (`repo_read`/`data_read`/`knowledge_read`/`run_shell`: 80k, default: 15k chars). Cognitive reads (`memory/*`, prompts, BIBLE/docs, commit/review outputs) are exempt from silent clipping. `data_read` returns `DATA_NOT_YET_CREATED` only for genuine `FileNotFoundError`; permission, directory, and other I/O errors still propagate so missing-state recovery does not hide real filesystem faults.
+- `repo_read` gives a friendly memory-artifact hint for bare `identity.md` / `scratchpad.md`-style paths only after the repo-root file is actually missing. A real repo file with the same name wins and is read normally.
 - `run_shell` now treats non-zero exits as explicit failed tool outcomes and records exit/signal metadata in the tool trace.
-- `run_shell` recovers `cmd` passed as a string via a three-step cascade: `json.loads` (JSON array strings) → `ast.literal_eval` (Python literal lists) → `shlex.split` (plain shell strings). Only truly unrecoverable input returns `SHELL_ARG_ERROR`. The `cmd` parameter schema remains `type: array` (intended contract), but the runtime gracefully handles LLM misformatting.
+- `run_shell` recovers `cmd` passed as a string via a three-step cascade: `json.loads` (JSON array strings) → `ast.literal_eval` (Python literal lists) → `shlex.split` (plain shell strings). Malformed JSON/Python-shaped strings are refused before `shlex` so they do not become garbage argv; POSIX `[ ... ]` test commands remain valid shell-string recovery. The `cmd` parameter schema remains `type: array` (intended contract), but the runtime gracefully handles LLM misformatting.
+- `run_shell` detects the specific GNU/BSD `grep "A\|B"` argv-mode trap and returns `SHELL_REGEX_HINT`; explicit regex/string modes (`-E`, `-G`, `-P`, `-F`, including clustered flags like `-rnE`) and valid BRE/fixed-string patterns pass through.
 - `set_tool_timeout` persists `OUROBOROS_TOOL_TIMEOUT_SEC` to `settings.json` and hot-applies it without restart.
 - `/api/claude-code/status` returns app-managed Claude runtime status (SDK version, CLI path/version, app-managed flag, legacy detection, API key readiness, last stderr on failure); `/api/claude-code/install` repairs/updates the app-managed runtime.
 - Desktop onboarding shows Claude runtime status and repair action (the runtime is managed automatically by the app).
