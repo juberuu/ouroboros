@@ -210,8 +210,8 @@ def _repo_read(ctx: ToolContext, path: str, max_lines: int = 2000, start_line: i
     When the requested path is a known memory artifact (identity.md,
     scratchpad.md, etc.) at the repo root level, return a hint rather than
     letting an opaque ENOENT scroll past. These files live at
-    ``data_root/memory/`` AND are already injected into the system prompt —
-    re-reading wastes rounds.
+    ``data_root/memory/``; some are already present in context, and all raw
+    memory files should be read through ``data_read`` rather than ``repo_read``.
     """
     try:
         content = read_text(ctx.repo_path(path))
@@ -222,10 +222,10 @@ def _repo_read(ctx: ToolContext, path: str, max_lines: int = 2000, start_line: i
             title = base.split('.')[0].title()
             return (
                 f"⚠️ NOT_FOUND: '{path}' is not at the repo root.\n\n"
-                f"This file lives at `data_root/memory/{base}` AND is already "
-                f"injected into your system prompt above as `## {title}`. "
-                f"You don't need to read it — the content is already in your "
-                f"context. If you genuinely need the raw file, call "
+                f"This file lives at `data_root/memory/{base}`, not in the "
+                f"git repo. Some memory artifacts are already summarized in "
+                f"context as `## {title}`, but raw memory state must be read "
+                f"from the data root. If you need the raw file, call "
                 f"`data_read(path='memory/{base}')`."
             )
         raise

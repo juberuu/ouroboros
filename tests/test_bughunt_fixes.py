@@ -81,8 +81,8 @@ def test_append_jsonl_returns_true_on_success(tmp_path):
     assert rows == [{"event": "test"}]
 
 
-def test_append_jsonl_returns_false_on_total_failure(tmp_path, monkeypatch):
-    """If all write attempts fail, return False (not None)."""
+def test_append_jsonl_returns_false_and_warns_on_total_failure(tmp_path, monkeypatch, caplog):
+    """If all write attempts fail, return False and log a visible warning."""
     from ouroboros.utils import append_jsonl
 
     # Make any open() call inside append_jsonl raise.
@@ -96,8 +96,10 @@ def test_append_jsonl_returns_false_on_total_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(pathlib.Path, "open", lambda *a, **kw: (_ for _ in ()).throw(OSError("simulated")))
 
     p = tmp_path / "log.jsonl"
+    caplog.set_level("WARNING")
     result = append_jsonl(p, {"event": "test"})
     assert result is False
+    assert "append_jsonl: all write attempts failed" in caplog.text
 
 
 # ---------------------------------------------------------------------------

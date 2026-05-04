@@ -1280,6 +1280,41 @@ class TestBypassPathTestsRun:
         assert outcome["block_reason"] == "tests_preflight_blocked"
         assert "TESTS_PREFLIGHT_BLOCKED" in outcome["message"]
 
+    def test_failed_bypass_preflight_stales_bypass_record(self, tmp_path, monkeypatch):
+        """A failed bypass attempt must not leave a fresh bypass snapshot."""
+        from ouroboros.review_state import load_state
+        from ouroboros.tools import git as git_mod
+
+        ctx = self._make_staged_repo(tmp_path)
+        called = {"parallel": 0}
+
+        def _fake_preflight(ctx, *, timeout=120):
+            return "FAILED: 2 failed, 5 passed"
+
+        def _fake_parallel(*a, **kw):
+            called["parallel"] += 1
+            return None, {}, "", []
+
+        monkeypatch.setattr(git_mod, "_run_review_preflight_tests", _fake_preflight)
+        monkeypatch.setattr(git_mod, "_run_parallel_review", _fake_parallel)
+
+        outcome = git_mod._run_reviewed_stage_cycle(
+            ctx,
+            commit_message="bypass stale test",
+            commit_start=0.0,
+            skip_advisory_pre_review=True,
+        )
+
+        assert outcome["block_reason"] == "tests_preflight_blocked"
+        assert called["parallel"] == 0
+        state = load_state(tmp_path / "drive")
+        matching = [
+            run for run in state.advisory_runs
+            if run.commit_message == "bypass stale test"
+        ]
+        assert matching, "bypass attempt should still be durably auditable"
+        assert all(run.status not in ("fresh", "bypassed", "skipped") for run in matching)
+
     def test_bypass_preflight_pass_proceeds_to_review(self, tmp_path, monkeypatch):
         """When preflight passes in the bypass path, control reaches the
         parallel review. The review itself is stubbed (no LLM calls)."""

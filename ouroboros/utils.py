@@ -147,6 +147,8 @@ def append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> bool:
                 _log_sink(obj)
             except Exception:
                 pass
+    if not _written:
+        log.warning("append_jsonl: all write attempts failed for %s", path)
     return _written
 
 

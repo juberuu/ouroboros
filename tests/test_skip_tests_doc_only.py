@@ -45,6 +45,16 @@ def test_non_doc_diffs_do_not_match(paths):
     assert _diff_is_doc_only(paths) is False
 
 
+def test_code_to_doc_rename_is_not_doc_only():
+    """Rename/copy checks must consider both source and destination paths."""
+    assert _diff_is_doc_only(["ouroboros/old.py", "docs/old.md"]) is False
+
+
+def test_doc_to_doc_rename_is_doc_only():
+    """Pure prose-doc renames can still skip the bypass preflight."""
+    assert _diff_is_doc_only(["old.md", "docs/new.md"]) is True
+
+
 @pytest.mark.parametrize("paths", [
     ["tests/test_foo.md"],
     ["tests/fixtures/sample.md"],

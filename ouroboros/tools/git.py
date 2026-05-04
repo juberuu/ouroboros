@@ -261,17 +261,20 @@ def _run_reviewed_stage_cycle(
     # single file satisfy the gate even if unrelated files were staged earlier
     # in the same lock. The blocking review and `git commit` step always operate
     # on the full staged index, so advisory must match that scope.
-    try:
-        staged_names_raw = run_cmd(
-            ["git", "diff", "--cached", "--name-only"],
-            cwd=ctx.repo_dir,
-        )
-    except Exception as exc:
-        return _failed(f"⚠️ GIT_ERROR (staged-names): {_sanitize_git_error(str(exc))}")
-    advisory_paths = [
-        line.strip() for line in staged_names_raw.splitlines() if line.strip()
-    ] or None
-    protected_staged_paths = protected_paths_in(_staged_paths_for_protection(pathlib.Path(ctx.repo_dir)))
+    staged_paths = _staged_paths_for_protection(pathlib.Path(ctx.repo_dir))
+    if not staged_paths:
+        try:
+            staged_names_raw = run_cmd(
+                ["git", "diff", "--cached", "--name-only"],
+                cwd=ctx.repo_dir,
+            )
+        except Exception as exc:
+            return _failed(f"⚠️ GIT_ERROR (staged-names): {_sanitize_git_error(str(exc))}")
+        staged_paths = [
+            line.strip() for line in staged_names_raw.splitlines() if line.strip()
+        ]
+    advisory_paths = staged_paths or None
+    protected_staged_paths = protected_paths_in(staged_paths)
     runtime_mode = _current_runtime_mode()
     if protected_staged_paths and not mode_allows_protected_write(runtime_mode):
         msg = _protected_paths_block_message(
@@ -369,6 +372,30 @@ def _run_reviewed_stage_cycle(
                 block_details=msg,
                 duration_sec=time.time() - commit_start,
             )
+            try:
+                from ouroboros.review_state import (
+                    compute_snapshot_hash,
+                    make_repo_key,
+                    update_state,
+                    _utc_now,
+                )
+
+                snapshot_hash = compute_snapshot_hash(
+                    pathlib.Path(ctx.repo_dir),
+                    commit_message,
+                    paths=advisory_paths,
+                )
+                repo_key = make_repo_key(pathlib.Path(ctx.repo_dir))
+
+                def _mark_failed_bypass_stale(state):
+                    state.mark_stale(snapshot_hash)
+                    state.last_stale_from_edit_ts = _utc_now()
+                    state.last_stale_reason = "tests_preflight_blocked"
+                    state.last_stale_repo_key = repo_key
+
+                update_state(pathlib.Path(ctx.drive_root), _mark_failed_bypass_stale)
+            except Exception:
+                log.debug("Failed to stale bypass advisory after preflight block", exc_info=True)
             return {
                 "status": "blocked",
                 "message": msg,

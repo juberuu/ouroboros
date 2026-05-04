@@ -61,7 +61,7 @@ def test_repo_read_memory_artifact_returns_hint(tmp_path, name):
     assert "NOT_FOUND" in result
     assert "data_root/memory/" in result
     assert name in result
-    assert "already injected" in result.lower()
+    assert "raw memory state" in result.lower()
     # Suggested replacement call
     assert f"data_read(path='memory/{name}')" in result
 
@@ -102,6 +102,27 @@ def test_repo_read_real_memory_named_file_at_repo_root_wins(tmp_path, name):
     assert "repo-local content" in result
     assert "NOT_FOUND" not in result
     assert "data_read(path=" not in result
+
+
+@pytest.mark.parametrize("name", [
+    "deep_review.md",
+    "WORLD.md",
+])
+def test_repo_read_memory_hint_does_not_claim_artifact_is_loaded(tmp_path, name):
+    """Hints for partial/not-always-loaded artifacts must not discourage raw reads."""
+    from ouroboros.tools.core import _repo_read
+
+    ctx = _FakeCtx(
+        repo_dir=tmp_path / "repo",
+        drive_root=tmp_path / "data",
+    )
+    (tmp_path / "repo").mkdir(parents=True, exist_ok=True)
+
+    result = _repo_read(ctx, name)
+    assert "NOT_FOUND" in result
+    assert "already injected" not in result.lower()
+    assert "don't need to read" not in result.lower()
+    assert f"data_read(path='memory/{name}')" in result
 
 
 def test_repo_read_subdirectory_path_unchanged(tmp_path):
