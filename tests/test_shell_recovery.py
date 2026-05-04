@@ -124,6 +124,20 @@ class TestShellArgContract:
         assert "SHELL_ARG_ERROR" not in result
         assert "exit_code=0" in result
 
+    def test_posix_bracket_test_command_still_recovers_via_shlex(self, monkeypatch):
+        """POSIX `[` is a real command, not a malformed JSON list."""
+        ctx = SimpleNamespace(repo_dir="/tmp", drive_logs=lambda: __import__("pathlib").Path("/tmp"))
+
+        def fake_run(cmd, **kwargs):
+            assert cmd == ["[", "-f", "file.txt", "]"]
+            return CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr("ouroboros.tools.shell._tracked_subprocess_run", fake_run)
+        monkeypatch.setattr("ouroboros.tools.shell.load_settings", lambda: {})
+        result = _run_shell(ctx, "[ -f file.txt ]")
+        assert "SHELL_ARG_ERROR" not in result
+        assert "exit_code=0" in result
+
     def test_refusal_message_points_at_correct_usage(self):
         """The error must teach the fix, not just refuse. Contains the
         canonical example so a smaller model can pattern-match."""

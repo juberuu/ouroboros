@@ -191,7 +191,8 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
         # production bug.
         if recovered is None:
             stripped = cmd.lstrip()
-            if stripped[:1] in ("[", "{"):
+            is_posix_test_cmd = stripped.startswith("[ ") and stripped.rstrip().endswith(" ]")
+            if stripped[:1] in ("[", "{") and not is_posix_test_cmd:
                 return (
                     '⚠️ SHELL_ARG_ERROR: `cmd` looks like a JSON/Python list literal '
                     'but failed to parse cleanly (likely an escape or quote-mismatch '
