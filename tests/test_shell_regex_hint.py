@@ -1,4 +1,4 @@
-"""Tests for the 2026-05-04 grep regex-escape hint.
+r"""Tests for the 2026-05-04 grep regex-escape hint.
 
 Bash idiom ``grep "A\|B" file`` doesn't work in argv mode — backslashes
 aren't expanded by the shell, so BSD grep on macOS treats ``\|`` as the
@@ -32,18 +32,34 @@ def test_grep_with_backslash_pipe_returns_hint(tmp_path):
     assert "grep -e" in result
 
 
-def test_grep_with_backslash_paren_returns_hint(tmp_path):
-    """Backslash-paren ``\\(`` is also basic-regex bash idiom."""
+def test_grep_with_backslash_paren_passes_through(tmp_path, monkeypatch):
+    """Backslash-paren is valid POSIX BRE grouping, not this hint class."""
     ctx = _ctx(tmp_path)
+
+    from subprocess import CompletedProcess
+
+    def fake_run(cmd, **kwargs):
+        return CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr("ouroboros.tools.shell._tracked_subprocess_run", fake_run)
+    monkeypatch.setattr("ouroboros.tools.shell.load_settings", lambda: {})
     result = _run_shell(ctx, ["grep", "\\(foo\\)", "/tmp/x"])
-    assert "SHELL_REGEX_HINT" in result
+    assert "SHELL_REGEX_HINT" not in result
 
 
-def test_grep_with_backslash_plus_returns_hint(tmp_path):
-    """Backslash-plus ``\\+`` is GNU basic-regex one-or-more."""
+def test_grep_with_backslash_plus_passes_through(tmp_path, monkeypatch):
+    """Backslash-plus is a grep BRE extension, but not the macOS \\| trap."""
     ctx = _ctx(tmp_path)
+
+    from subprocess import CompletedProcess
+
+    def fake_run(cmd, **kwargs):
+        return CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr("ouroboros.tools.shell._tracked_subprocess_run", fake_run)
+    monkeypatch.setattr("ouroboros.tools.shell.load_settings", lambda: {})
     result = _run_shell(ctx, ["grep", "ab\\+c", "/tmp/x"])
-    assert "SHELL_REGEX_HINT" in result
+    assert "SHELL_REGEX_HINT" not in result
 
 
 def test_grep_E_extended_regex_skips_hint(tmp_path, monkeypatch):
@@ -59,6 +75,20 @@ def test_grep_E_extended_regex_skips_hint(tmp_path, monkeypatch):
     # -E uses ``|`` as alternation directly; ``\|`` would be a literal
     # pipe, but that's user choice.
     result = _run_shell(ctx, ["grep", "-E", "A\\|B", "/tmp/x"])
+    assert "SHELL_REGEX_HINT" not in result
+
+
+def test_grep_clustered_E_flag_skips_hint(tmp_path, monkeypatch):
+    """Combined short flags like -rnE are still explicit extended regex."""
+    ctx = _ctx(tmp_path)
+    from subprocess import CompletedProcess
+
+    def fake_run(cmd, **kwargs):
+        return CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr("ouroboros.tools.shell._tracked_subprocess_run", fake_run)
+    monkeypatch.setattr("ouroboros.tools.shell.load_settings", lambda: {})
+    result = _run_shell(ctx, ["grep", "-rnE", "A\\|B", "/tmp/x"])
     assert "SHELL_REGEX_HINT" not in result
 
 
@@ -104,17 +134,18 @@ def test_grep_legitimate_no_backslash_no_hint(tmp_path, monkeypatch):
     assert "SHELL_REGEX_HINT" not in result
 
 
-def test_egrep_also_caught(tmp_path):
-    """Variants ``egrep`` / ``fgrep`` also fire the hint."""
+def test_egrep_and_fgrep_skip_hint(tmp_path, monkeypatch):
+    """egrep/fgrep already choose regex/string flavor."""
     ctx = _ctx(tmp_path)
-    result = _run_shell(ctx, ["egrep", "A\\|B", "/tmp/x"])
-    # egrep is `grep -E`-equivalent so technically should be fine, but
-    # most shells alias it and it still treats backslash differently —
-    # we don't have egrep in the skip-flag set, so it would fire. Worth
-    # keeping the hint for clarity.
-    # Actually: egrep treats \| as basic-regex ALSO since GNU grep, so
-    # this might over-fire. Document the behavior either way.
-    assert "SHELL_REGEX_HINT" in result or "exit_code" in result
+    from subprocess import CompletedProcess
+
+    def fake_run(cmd, **kwargs):
+        return CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr("ouroboros.tools.shell._tracked_subprocess_run", fake_run)
+    monkeypatch.setattr("ouroboros.tools.shell.load_settings", lambda: {})
+    assert "SHELL_REGEX_HINT" not in _run_shell(ctx, ["egrep", "A\\|B", "/tmp/x"])
+    assert "SHELL_REGEX_HINT" not in _run_shell(ctx, ["fgrep", "A\\|B", "/tmp/x"])
 
 
 def test_non_grep_command_unaffected(tmp_path, monkeypatch):

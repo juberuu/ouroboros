@@ -157,11 +157,11 @@ _SHELL_INTERPRETERS = frozenset({
 })
 _ENV_REF_PATTERN = re.compile(r'\$(?:\{[A-Z][A-Z0-9_]*\}|[A-Z][A-Z0-9_]*)')
 
-# 2026-05-04: detect bash-shell regex idioms that don't work in argv mode.
-# In bash, ``grep "A\|B"`` works because basic-regex with `\|` as alternation
-# is a GNU extension (and shell doesn't expand the backslash inside double
-# quotes). In argv mode it's literal: BSD grep on macOS treats ``\|`` as the
-# literal two-character sequence, so the pattern matches nothing. Smaller
+# 2026-05-04: detect one bash/GNU grep alternation idiom that doesn't work
+# portably in argv mode. In bash, ``grep "A\|B"`` works on GNU grep because
+# basic-regex with `\|` as alternation is a GNU extension (and shell doesn't
+# expand the backslash inside double quotes). BSD grep on macOS treats ``\|``
+# as the literal two-character sequence, so the pattern matches nothing. Smaller
 # models that learned ``grep "A\|B"`` from bash scripts hit this when their
 # tool calls go to subprocess directly. Refuse with a teachable error
 # pointing at the correct argv form (``-E "A|B"`` or ``-e "A" -e "B"``).
@@ -172,7 +172,27 @@ _GREP_REGEX_MODE_FLAGS = frozenset((
     "-F", "--fixed-strings",
     "-G", "--basic-regexp",
 ))
-_BASH_REGEX_ESCAPE_PATTERN = re.compile(r'\\[|()+?{}]')
+_GREP_BACKSLASH_PIPE_PATTERN = re.compile(r'\\\|')
+
+
+def _grep_has_explicit_regex_mode(cmd: List[str]) -> bool:
+    """Return True when grep argv explicitly chooses regex/string flavor."""
+    if not cmd:
+        return False
+    tool = pathlib.Path(cmd[0]).name.lower()
+    if tool in ("egrep", "fgrep"):
+        return True
+    for arg in cmd[1:]:
+        if not isinstance(arg, str):
+            continue
+        if arg in _GREP_REGEX_MODE_FLAGS:
+            return True
+        if arg.startswith("--"):
+            continue
+        # Short options may be clustered, e.g. `grep -rnE pattern path`.
+        if arg.startswith("-") and any(flag in arg[1:] for flag in ("E", "P", "F", "G")):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -250,21 +270,21 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
             'Use ["sh", "-c", "your command"] if you need shell builtins.'
         )
 
-    # 2026-05-04: detect bash-shell regex idioms in grep argv that don't
-    # work in subprocess mode (see _BASH_REGEX_ESCAPE_PATTERN comment).
+    # 2026-05-04: detect bash/GNU grep `\|` alternation in argv when it
+    # has not explicitly selected a regex flavor (see comment above).
     # Only fires when the user hasn't explicitly chosen a regex flavor —
     # if they passed -E / -G / -P / -F they know what they're asking for.
     if cmd and pathlib.Path(cmd[0]).name.lower() in _GREP_TOOLS:
-        if not any(arg in _GREP_REGEX_MODE_FLAGS for arg in cmd):
+        if not _grep_has_explicit_regex_mode(cmd):
             for arg in cmd[1:]:
-                if isinstance(arg, str) and _BASH_REGEX_ESCAPE_PATTERN.search(arg):
+                if isinstance(arg, str) and _GREP_BACKSLASH_PIPE_PATTERN.search(arg):
                     return (
                         f'⚠️ SHELL_REGEX_HINT: argv contains backslash-escaped '
-                        f'regex metachar (e.g. \\|, \\(, \\+) in arg {arg!r}. '
-                        'Backslash expansion of regex alternation is a bash/'
-                        'GNU-grep idiom; argv mode passes the literal string, '
-                        'and BSD grep on macOS treats \\| as the literal '
-                        'two-character sequence. Fixes:\n'
+                        f'grep alternation (\\|) in arg {arg!r}. '
+                        'GNU grep accepts \\| as a basic-regex extension, '
+                        'but BSD grep on macOS treats it as the literal '
+                        'two-character sequence unless a compatible mode is '
+                        'selected. Fixes:\n'
                         '  - Extended regex (no escaping): grep -E "A|B" file\n'
                         '  - Multiple patterns: grep -e "A" -e "B" file\n'
                         '  - Force basic regex with GNU-style alternation: '
