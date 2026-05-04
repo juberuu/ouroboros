@@ -65,6 +65,86 @@ class TestShellArgContract:
         result = _run_shell(ctx, 'curl -H "x-api-key: $SECRET"')
         assert "SHELL_ENV_ERROR" in result
 
+    # -----------------------------------------------------------------
+    # JSON-shape refusal — 2026-05-03 production bug.
+    # When cmd arrives as a malformed JSON/Python literal (looks like a
+    # list but won't parse), the cascade used to fall through to
+    # shlex.split, which strips the brackets and produces garbage argv
+    # that subprocess fails to exec with a useless ``[Errno 2] '[git,'``.
+    # The cascade now refuses with a targeted error before shlex runs.
+    # -----------------------------------------------------------------
+
+    def test_malformed_json_array_refused_not_shlex_split(self):
+        """A string starting with `[` that fails json.loads + ast.literal_eval
+        must NOT fall through to shlex.split — that produced ``'[git,'``
+        argv tokens which fail at exec time with a useless error."""
+        ctx = SimpleNamespace(repo_dir="/tmp", drive_logs=lambda: __import__("pathlib").Path("/tmp"))
+        # Trailing comma — JSON rejects, ast.literal_eval might tolerate
+        # but in malformed cases neither parses; bracket prefix triggers refusal.
+        result = _run_shell(ctx, '["git", "log",')  # unclosed bracket
+        assert "SHELL_ARG_ERROR" in result
+        assert "stringified array" in result.lower()
+        # The old failure mode emitted "[Errno 2]" — make sure we don't
+        # get there.
+        assert "Errno" not in result
+
+    def test_malformed_dict_literal_refused(self):
+        """Same refusal for `{`-prefixed garbage so the model gets a
+        clear error instead of subprocess noise."""
+        ctx = SimpleNamespace(repo_dir="/tmp", drive_logs=lambda: __import__("pathlib").Path("/tmp"))
+        result = _run_shell(ctx, '{key: value, broken')
+        assert "SHELL_ARG_ERROR" in result
+        assert "Errno" not in result
+
+    def test_valid_json_array_still_works_after_refusal_branch(self, monkeypatch):
+        """Regression guard: the refusal must NOT fire when JSON parses
+        cleanly. ``["echo", "ok"]`` → recovered → executed."""
+        ctx = SimpleNamespace(repo_dir="/tmp", drive_logs=lambda: __import__("pathlib").Path("/tmp"))
+
+        def fake_run(cmd, **kwargs):
+            return CompletedProcess(cmd, 0, "ok", "")
+
+        monkeypatch.setattr("ouroboros.tools.shell._tracked_subprocess_run", fake_run)
+        monkeypatch.setattr("ouroboros.tools.shell.load_settings", lambda: {})
+        result = _run_shell(ctx, '["echo", "ok"]')
+        assert "SHELL_ARG_ERROR" not in result
+        assert "exit_code=0" in result
+
+    def test_legitimate_shell_string_still_recovers_via_shlex(self, monkeypatch):
+        """Regression guard: the refusal must NOT fire for plain shell
+        strings (no leading bracket). ``echo hello`` → shlex.split works."""
+        ctx = SimpleNamespace(repo_dir="/tmp", drive_logs=lambda: __import__("pathlib").Path("/tmp"))
+
+        def fake_run(cmd, **kwargs):
+            return CompletedProcess(cmd, 0, "hello", "")
+
+        monkeypatch.setattr("ouroboros.tools.shell._tracked_subprocess_run", fake_run)
+        monkeypatch.setattr("ouroboros.tools.shell.load_settings", lambda: {})
+        result = _run_shell(ctx, "echo hello")
+        assert "SHELL_ARG_ERROR" not in result
+        assert "exit_code=0" in result
+
+    def test_posix_bracket_test_command_still_recovers_via_shlex(self, monkeypatch):
+        """POSIX `[` is a real command, not a malformed JSON list."""
+        ctx = SimpleNamespace(repo_dir="/tmp", drive_logs=lambda: __import__("pathlib").Path("/tmp"))
+
+        def fake_run(cmd, **kwargs):
+            assert cmd == ["[", "-f", "file.txt", "]"]
+            return CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr("ouroboros.tools.shell._tracked_subprocess_run", fake_run)
+        monkeypatch.setattr("ouroboros.tools.shell.load_settings", lambda: {})
+        result = _run_shell(ctx, "[ -f file.txt ]")
+        assert "SHELL_ARG_ERROR" not in result
+        assert "exit_code=0" in result
+
+    def test_refusal_message_points_at_correct_usage(self):
+        """The error must teach the fix, not just refuse. Contains the
+        canonical example so a smaller model can pattern-match."""
+        ctx = SimpleNamespace(repo_dir="/tmp", drive_logs=lambda: __import__("pathlib").Path("/tmp"))
+        result = _run_shell(ctx, '["git", "log",')
+        assert 'run_shell(cmd=["git"' in result
+
     def test_list_cmd_is_accepted(self):
         """List cmd should not trigger arg error."""
         src = inspect.getsource(_run_shell)
