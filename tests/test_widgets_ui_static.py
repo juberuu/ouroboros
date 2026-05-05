@@ -148,6 +148,16 @@ def test_widgets_use_design_radius_tokens():
     assert "border-radius: 9px;" not in block
 
 
+def test_widgets_refresh_button_shows_loading_state():
+    source = _widgets_js()
+    css = (REPO_ROOT / "web" / "style.css").read_text(encoding="utf-8")
+
+    assert "refreshBtn.classList.add('is-loading')" in source
+    assert "refreshBtn.classList.remove('is-loading')" in source
+    assert "refreshBtn.disabled = true" in source
+    assert "#widgets-refresh.is-loading::after" in css
+
+
 def test_widgets_inline_card_preserves_session_state():
     source = _widgets_js()
     assert "const saved = widgetSessionState.get(persistenceKey) || {};" in source

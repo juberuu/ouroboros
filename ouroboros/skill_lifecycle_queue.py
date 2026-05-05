@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import itertools
 import pathlib
+import re
 import threading
 from collections import deque
 from dataclasses import dataclass, field
@@ -96,6 +97,26 @@ def _store(job: LifecycleJob) -> None:
         _events.append(job)
 
 
+def _chat_task_id(job: LifecycleJob) -> str:
+    suffix = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(job.target or "skill")).strip("_")
+    return f"skill_lifecycle_{job.kind}_{suffix or 'skill'}"
+
+
+def _notify_chat_progress(job: LifecycleJob, phase: str) -> None:
+    try:
+        from supervisor.message_bus import send_with_budget
+
+        detail = job.error or job.message or job.status
+        send_with_budget(
+            0,
+            f"Skill {job.kind}: `{job.target}` — {phase}{f' — {detail}' if detail else ''}",
+            is_progress=True,
+            task_id=_chat_task_id(job),
+        )
+    except Exception:
+        return
+
+
 @contextlib.asynccontextmanager
 async def _async_thread_lock(lock: threading.Lock):
     acquired = False
@@ -170,6 +191,7 @@ async def async_skill_lifecycle_file_lock(drive_root: pathlib.Path):
 def _notify_chat(job: LifecycleJob) -> None:
     if job.status not in {"succeeded", "failed"}:
         return
+    _notify_chat_progress(job, "completed" if job.status == "succeeded" else "failed")
     try:
         from supervisor.message_bus import send_with_budget
 
@@ -218,6 +240,7 @@ async def run_lifecycle_job(
         message=str(message or ""),
     )
     _register_dedupe(job)
+    _notify_chat_progress(job, "queued")
     if opts.progress_target is not None:
         opts.progress_target.bind(job)
     result: Any = None
@@ -227,6 +250,7 @@ async def run_lifecycle_job(
             _active = job
             job.status = "running"
             job.started_at = _now_iso()
+            _notify_chat_progress(job, "running")
             if opts.on_started is not None:
                 opts.on_started(job)
             if opts.drive_root is None:
@@ -358,6 +382,7 @@ class JobProgressTarget:
         if self._done or self._job is None:
             return
         self._job.message = str(message or "")
+        _notify_chat_progress(self._job, "running")
 
 
 def queue_snapshot() -> Dict[str, Any]:

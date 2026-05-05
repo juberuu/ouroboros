@@ -33,6 +33,8 @@ def test_skill_cards_keep_toggle_but_move_secondary_actions_to_menu():
     assert "data-skill-menu-trigger" in source
     assert "skills-menu-item skills-update" in source
     assert "skills-menu-item skills-uninstall" in source
+    assert "skills-menu-item skills-review" in source
+    assert "skill.review_status === 'pending' ? 'Review'" in source
     assert "skills-card-menu-dialog" in source
     # v5.7.0: secondary actions moved to the card header kebab and open as
     # anchored non-modal popovers. Modal dialogs/backdrops caused the menu to

@@ -2734,6 +2734,11 @@ body {
     gap: 14px;
 }
 
+.updates-card-head-main {
+    min-width: 0;
+    flex: 1 1 auto;
+}
+
 /* v5.7.0: actions cluster (status badge + relocated Check-for-updates
    button) sits to the right of the head row, replacing the duplicate
    inner page-header that used to host the button. */
@@ -2747,6 +2752,8 @@ body {
 .updates-summary {
     color: var(--text-secondary);
     line-height: 1.55;
+    overflow-wrap: break-word;
+    word-break: normal;
 }
 
 .updates-meta,
@@ -3145,7 +3152,8 @@ body {
     to { transform: rotate(360deg); }
 }
 
-#skills-refresh.is-loading::after {
+#skills-refresh.is-loading::after,
+#widgets-refresh.is-loading::after {
     content: '';
     display: inline-block;
     width: 10px;
@@ -4408,6 +4416,16 @@ body {
 
     .costs-scroll {
         padding: 12px 12px;
+    }
+
+    .updates-card-head {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .updates-head-actions {
+        justify-content: flex-start;
+        flex-wrap: wrap;
     }
 
     /* Skills page — reduce padding so cards don't get squeezed. */

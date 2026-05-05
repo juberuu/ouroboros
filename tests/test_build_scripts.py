@@ -155,7 +155,7 @@ class TestBuildWindowsPs1:
 
     def test_playwright_install_chromium_present(self):
         src = _read("build_windows.ps1")
-        assert "playwright install chromium" in src
+        assert "playwright install --only-shell chromium" in src
 
     def test_playwright_browsers_path_zero_set(self):
         src = _read("build_windows.ps1")
@@ -166,13 +166,19 @@ class TestBuildWindowsPs1:
 
     def test_playwright_install_before_pyinstaller(self):
         src = _read("build_windows.ps1")
-        pw_pos = src.find("playwright install chromium")
+        pw_pos = src.find("playwright install --only-shell chromium")
         pi_pos = _find_pyinstaller_cmd_pos(src)
         assert pw_pos != -1
         assert pi_pos != -1
         assert pw_pos < pi_pos, (
-            "playwright install chromium must appear BEFORE PyInstaller in build_windows.ps1"
+            "playwright install --only-shell chromium must appear BEFORE PyInstaller in build_windows.ps1"
         )
+
+    def test_windows_build_has_path_length_guard(self):
+        src = _read("build_windows.ps1")
+        assert "Checking Windows archive path lengths" in src
+        assert "Length -gt 200" in src
+        assert "paths longer than 200 chars" in src
 
     def test_repo_bundle_generation_before_pyinstaller(self):
         src = _read("build_windows.ps1")
@@ -394,6 +400,26 @@ class TestMacOSSigning:
                 f"guard) so build.sh can run `xcrun notarytool` when it is "
                 f"configured. Expected line: {expected!r}"
             )
+
+    def test_release_waits_for_non_provider_smoke_jobs(self):
+        src = _read(self._CI_PATH)
+        release_idx = src.find("\n  release:\n")
+        assert release_idx != -1, "release job not found"
+        release_block = src[release_idx:]
+        needs_line = next(
+            line.strip()
+            for line in release_block.splitlines()
+            if line.strip().startswith("needs:")
+        )
+        for job in ("marker-guards", "ui-smoke", "docker-ui-smoke", "docker-portable-test"):
+            assert job in needs_line, f"release job must wait for {job}"
+
+    def test_marker_guard_uses_pipefail(self):
+        src = _read(self._CI_PATH)
+        guard_idx = src.find("Guard non-empty browser marker lanes")
+        assert guard_idx != -1, "marker guard step not found"
+        guard_block = src[guard_idx:guard_idx + 700]
+        assert "set -euo pipefail" in guard_block
 
     def test_ci_uses_env_context_for_condition(self):
         """No `if:` expression in ci.yml (step-level OR job-level) may

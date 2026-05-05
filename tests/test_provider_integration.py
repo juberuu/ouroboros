@@ -107,6 +107,21 @@ def test_anthropic_direct_basic_chat():
     _assert_basic_response(result, expected_provider="anthropic")
 
 
+@integration
+@pytest.mark.skipif(
+    not os.environ.get("CLOUDRU_FOUNDATION_MODELS_API_KEY"),
+    reason="CLOUDRU_FOUNDATION_MODELS_API_KEY not set",
+)
+def test_cloudru_basic_chat():
+    """Verify Cloud.ru Foundation Models direct routing works."""
+    client = _get_llm_client()
+    result = client.chat(
+        messages=[{"role": "user", "content": "Respond with exactly: OK"}],
+        model="cloudru::zai-org/GLM-4.7",
+    )
+    _assert_basic_response(result, expected_provider="cloudru")
+
+
 # Isolation tests: clear competing provider keys so LLMClient can only route
 # through the single provider under test.
 
@@ -171,5 +186,23 @@ def test_anthropic_direct_isolation(monkeypatch):
     result = client.chat(
         messages=[{"role": "user", "content": "Say hello"}],
         model="anthropic::claude-sonnet-4-6",
+    )
+    _assert_basic_response(result)
+
+
+@integration
+@pytest.mark.skipif(
+    not os.environ.get("CLOUDRU_FOUNDATION_MODELS_API_KEY"),
+    reason="CLOUDRU_FOUNDATION_MODELS_API_KEY not set",
+)
+def test_cloudru_isolation(monkeypatch):
+    """Cloud.ru works when it is the only configured provider."""
+    for key in _COMPETING_KEYS:
+        if key != "CLOUDRU_FOUNDATION_MODELS_API_KEY":
+            monkeypatch.delenv(key, raising=False)
+    client = _get_llm_client()
+    result = client.chat(
+        messages=[{"role": "user", "content": "Say hello"}],
+        model="cloudru::zai-org/GLM-4.7",
     )
     _assert_basic_response(result)

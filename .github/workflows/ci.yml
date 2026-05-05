@@ -5,7 +5,8 @@
 # Tier 2.5 (Integration): Push to main / ouroboros / ouroboros-stable / manual / tag  → Real-provider tests       (~2 min)
 # Tier 3 (Build+Release): Tag v*                                                       → PyInstaller + GitHub Release (~15 min)
 #
-# Tier 2.5 requires OPENROUTER_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY in
+# Tier 2.5 requires OPENROUTER_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY /
+# CLOUDRU_FOUNDATION_MODELS_API_KEY in
 # repository secrets and runs the `integration` pytest marker; locally these
 # tests are excluded by `addopts = -m 'not integration'` in pyproject.toml.
 
@@ -92,7 +93,7 @@ jobs:
   # Tier 2.5: Integration tests against real provider APIs
   # Triggered on push to main / ouroboros / ouroboros-stable, manual,
   # or tag v*. Requires OPENROUTER_API_KEY / OPENAI_API_KEY /
-  # ANTHROPIC_API_KEY in repository secrets. The `integration` pytest
+  # ANTHROPIC_API_KEY / CLOUDRU_FOUNDATION_MODELS_API_KEY in repository secrets. The `integration` pytest
   # marker (in pyproject.toml) controls inclusion via `-m integration`;
   # within an included test file, missing-key skipping is done by per-
   # test `@pytest.mark.skipif(not os.environ.get(KEY))` decorators (see
@@ -122,7 +123,96 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLOUDRU_FOUNDATION_MODELS_API_KEY: ${{ secrets.CLOUDRU_FOUNDATION_MODELS_API_KEY }}
+          CLOUDRU_FOUNDATION_MODELS_BASE_URL: ${{ secrets.CLOUDRU_FOUNDATION_MODELS_BASE_URL }}
         run: python -m pytest tests/test_provider_integration.py -m integration -q --tb=short
+
+  marker-guards:
+    if: |
+      github.event_name == 'workflow_dispatch'
+      || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest
+      - name: Guard non-empty browser marker lanes
+        run: |
+          set -euo pipefail
+          python -m pytest tests/ --collect-only -m browser -q | tee /tmp/browser-collect.txt
+          python -m pytest tests/ --collect-only -m ui_browser -q | tee /tmp/ui-collect.txt
+          python -m pytest tests/ --collect-only -m ui_browser_docker -q | tee /tmp/ui-docker-collect.txt
+          python -m pytest tests/ --collect-only -m portable_detail -q | tee /tmp/portable-collect.txt
+          ! grep -q "no tests collected" /tmp/browser-collect.txt
+          ! grep -q "no tests collected" /tmp/ui-collect.txt
+          ! grep -q "no tests collected" /tmp/ui-docker-collect.txt
+          ! grep -q "no tests collected" /tmp/portable-collect.txt
+
+  ui-smoke:
+    if: |
+      github.event_name == 'workflow_dispatch'
+      || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+      - name: Install UI smoke dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest playwright
+          python -m playwright install --with-deps chromium
+      - name: Run host UI smoke
+        env:
+          OUROBOROS_RUN_UI_SMOKE: "1"
+        run: python -m pytest tests/test_ui_smoke_playwright.py -m ui_browser -q --tb=short
+      - name: Run browser tools Chromium smoke
+        run: python -m pytest tests/test_browser_tools_smoke.py -m browser -q --tb=short
+
+  docker-ui-smoke:
+    if: |
+      github.event_name == 'workflow_dispatch'
+      || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: docker build -t ouroboros-web:test .
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install UI smoke dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest playwright
+          python -m playwright install --with-deps chromium
+      - name: Run Docker UI smoke
+        env:
+          OUROBOROS_RUN_DOCKER_UI_SMOKE: "1"
+          OUROBOROS_DOCKER_UI_IMAGE: ouroboros-web:test
+        run: python -m pytest tests/test_ui_smoke_playwright.py -m ui_browser_docker -q --tb=short
+
+  docker-portable-test:
+    if: |
+      github.event_name == 'workflow_dispatch'
+      || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: docker build -t ouroboros-web:test .
+      - name: Run portable detail tests in Docker
+        run: |
+          docker run --rm --entrypoint sh -e OUROBOROS_EXPECT_HEADLESS_SHELL=1 ouroboros-web:test -c \
+            "PLAYWRIGHT_BROWSERS_PATH=0 python -m playwright install --only-shell chromium && python -m pytest tests/ -m portable_detail -q --tb=short"
 
   # ──────────────────────────────────────────────────────────────────
   # Tier 3: Build & Release (tag push only)
@@ -361,7 +451,7 @@ jobs:
   # ──────────────────────────────────────────────────────────────────
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, release-preflight]
+    needs: [build, release-preflight, marker-guards, ui-smoke, docker-ui-smoke, docker-portable-test]
     runs-on: ubuntu-latest
     permissions:
       contents: write

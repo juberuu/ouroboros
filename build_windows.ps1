@@ -30,7 +30,7 @@ New-Item -ItemType Directory -Force -Path $env:PYINSTALLER_CONFIG_DIR | Out-Null
 
 Write-Host "--- Installing Chromium for browser tools (bundled into python-standalone) ---"
 $env:PLAYWRIGHT_BROWSERS_PATH = "0"
-& "python-standalone\python.exe" -m playwright install chromium
+& "python-standalone\python.exe" -m playwright install --only-shell chromium
 
 Write-Host "--- Building embedded managed repo bundle ---"
 git rev-parse -q --verify "refs/tags/$ReleaseTag" | Out-Null
@@ -49,6 +49,15 @@ python scripts/build_repo_bundle.py --source-branch $ManagedSourceBranch
 
 Write-Host "--- Running PyInstaller ---"
 python -m PyInstaller Ouroboros.spec --clean --noconfirm
+
+Write-Host "--- Checking Windows archive path lengths ---"
+$TooLong = Get-ChildItem -Path "dist\Ouroboros" -Recurse -Force | Where-Object {
+    $_.FullName.Substring((Resolve-Path "dist\Ouroboros").Path.Length).TrimStart('\').Length -gt 200
+}
+if ($TooLong) {
+    $Sample = ($TooLong | Select-Object -First 10 | ForEach-Object { $_.FullName }) -join "`n"
+    throw "Windows build contains paths longer than 200 chars under dist\Ouroboros:`n$Sample"
+}
 
 Write-Host ""
 Write-Host "=== Creating archive ==="

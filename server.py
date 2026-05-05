@@ -1917,7 +1917,11 @@ async def lifespan(app):
     try:
         from ouroboros.launcher_bootstrap import ensure_data_skills_seeded
         ensure_data_skills_seeded()
-        from ouroboros.skill_migrations import migrate_generation_skill_names
+        from ouroboros.skill_migrations import (
+            migrate_generation_skill_names,
+            migrate_unseeded_native_skills_to_external,
+        )
+        migrate_unseeded_native_skills_to_external()
         migrate_generation_skill_names()
     except Exception:
         log.warning("Native skills bootstrap failed", exc_info=True)

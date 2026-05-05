@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ouroboros"
-version = "5.7.6"
+version = "5.8.0rc1"
 description = "Self-creating AI agent with constitution, background consciousness, and persistent identity"
 readme = "README.md"
 license = {text = "MIT"}
@@ -69,9 +69,13 @@ python_functions = ["test_*"]
 # Default local runs exclude the `integration` marker so contributors do not
 # accidentally burn provider tokens on every `pytest`. CI Tier 2.5 opts in
 # explicitly with `pytest -m integration` (the CLI -m overrides addopts -m).
-addopts = "-q --tb=short -m 'not integration'"
+addopts = "-q --tb=short -m 'not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail'"
 markers = [
-    "integration: requires real provider API keys (OPENROUTER_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY); excluded from default local runs, opt in via `pytest -m integration`",
+    "integration: requires real provider API keys (OPENROUTER_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY / CLOUDRU_FOUNDATION_MODELS_API_KEY); excluded from default local runs, opt in via `pytest -m integration`",
+    "browser: launches real Playwright Chromium; excluded from default local runs, opt in via `pytest -m browser`",
+    "ui_browser: launches the real Ouroboros web UI in host/direct mode; excluded from default local runs",
+    "ui_browser_docker: launches UI smoke checks against Docker runtime; excluded from default local runs",
+    "portable_detail: portable/build artifact detail checks; excluded from default local runs",
 ]
 
 [tool.setuptools]

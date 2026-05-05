@@ -334,10 +334,10 @@ skill trust/control-plane state: they are mutated only through the review,
 toggle, launcher-grant, and marketplace paths, not through generic
 agent/browser file writes.
 
-The Skills UI Heal affordance is only a task starter: it asks Ouroboros
+The Skills UI Repair affordance is only a task starter: it asks Ouroboros
 to edit payload files and rerun `review_skill`. It must not write
 trust/control-plane state directly, auto-enable a repaired skill, or
-grant keys. Heal tasks carry a `HEAL_MODE_NO_ENABLE` marker so deterministic
+grant keys. Repair tasks carry the legacy `HEAL_MODE_NO_ENABLE` marker so deterministic
 tool guards allow only `list_skills`, payload-oriented read/write tools,
 `review_skill`, and (v5.7.0+) `skill_preflight` for cheap offline
 syntax/manifest validation, and block `toggle_skill`, `skill_exec`,
@@ -348,7 +348,10 @@ Payload data access is scoped to the selected non-native skill under
 `data/skills/external/<skill>/`, `data/skills/clawhub/<skill>/`, or
 `data/skills/ouroboroshub/<skill>/`. Marketplace/official provenance
 sidecars inside those payload roots (`.clawhub.json`, `.ouroboroshub.json`)
-remain control-plane state and are not writable from Heal mode.
+remain control-plane state and are not writable from Repair mode. User-managed
+payloads accidentally left under `data/skills/native/` are migrated into
+`external/`; the Repair guard still does not grant write access to true native
+launcher-seeded skills.
 
 ### Output contract
 
@@ -427,6 +430,10 @@ two manifests as part of items 2 (`permissions_honesty`) and 5
    ``openclaw.plugin.json`` in the file pack means the install
    pipeline should have aborted, which FAILs item 1
    (`manifest_schema`) because the skill should not have landed.
+   v5.8 generalises the same readiness contract to official and local
+   manifests that declare reviewed `install` / `dependencies` metadata:
+   PASS review installs auto specs into `.ouroboros_env`, and enable/load/exec
+   paths refuse missing, failed, or stale dependency fingerprints.
 4. **Plugin packages** — `openclaw.plugin.json` in the file pack means
    the publisher shipped a Node/TS plugin. The adapter refuses these,
    so seeing one in a successfully-installed skill is a contradiction

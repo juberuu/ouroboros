@@ -365,7 +365,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
     }
 
     function isTerminalTaskPhase(phase = '') {
-        return phase === 'done';
+        return phase === 'done' || phase === 'lifecycle_error';
     }
 
     function createTaskUiState(taskId) {

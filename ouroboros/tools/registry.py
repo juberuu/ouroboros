@@ -1196,13 +1196,13 @@ class ToolRegistry:
                 data_path = str(args.get("path", "") or "")
                 if not _heal_data_path_allowed(data_path, heal_payload_root, pathlib.Path(self._ctx.drive_root)):
                     return (
-                        "⚠️ HEAL_MODE_BLOCKED: Heal/Fix data access is limited "
+                        "⚠️ HEAL_MODE_BLOCKED: Repair data access is limited "
                         "to the selected skill payload under data/skills/external "
                         "data/skills/clawhub, or data/skills/ouroboroshub."
                     )
                 if name == "data_write" and _heal_protected_payload_sidecar(data_path):
                     return (
-                        "⚠️ HEAL_MODE_BLOCKED: Heal/Fix may not edit marketplace "
+                        "⚠️ HEAL_MODE_BLOCKED: Repair may not edit marketplace "
                         "or official provenance sidecars (.clawhub.json, "
                         ".ouroboroshub.json, SKILL.openclaw.md, .seed-origin). "
                         "Edit the user-authored payload files instead."
@@ -1211,17 +1211,17 @@ class ToolRegistry:
                 data_dir = str(args.get("dir", args.get("path", "")) or "")
                 if not _heal_data_path_allowed(data_dir, heal_payload_root, pathlib.Path(self._ctx.drive_root)):
                     return (
-                        "⚠️ HEAL_MODE_BLOCKED: Heal/Fix data listing is limited "
+                        "⚠️ HEAL_MODE_BLOCKED: Repair data listing is limited "
                         "to the selected skill payload under data/skills/external "
                         "data/skills/clawhub, or data/skills/ouroboroshub."
                     )
             if name == "review_skill" and str(args.get("skill", "") or "").strip() != heal_skill:
-                return "⚠️ HEAL_MODE_BLOCKED: Heal/Fix may only review the selected skill."
+                return "⚠️ HEAL_MODE_BLOCKED: Repair may only review the selected skill."
             if name == "skill_preflight" and str(args.get("skill", "") or "").strip() != heal_skill:
-                return "⚠️ HEAL_MODE_BLOCKED: Heal/Fix may only preflight the selected skill."
+                return "⚠️ HEAL_MODE_BLOCKED: Repair may only preflight the selected skill."
             if ext_tool or name not in _HEAL_MODE_ALLOWED_TOOLS:
                 return (
-                    "⚠️ HEAL_MODE_BLOCKED: Heal/Fix tasks may inspect/edit skill "
+                    "⚠️ HEAL_MODE_BLOCKED: Repair tasks may inspect/edit skill "
                     "payloads and run review_skill only. Shell, browser automation, "
                     "repo mutation, skill execution, extension tools, delegation, "
                     "and enable/disable flows are unavailable. Use the Skills UI "

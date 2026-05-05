@@ -97,6 +97,17 @@ def test_update_panel_surfaces_unmanaged_checkouts_as_unavailable():
     assert "applyBtn.textContent = 'Unavailable'" in updates
 
 
+def test_update_panel_mobile_headline_does_not_squeeze_summary():
+    updates = _read("web/modules/updates.js")
+    css = _read("web/style.css")
+
+    assert "updates-card-head-main" in updates
+    assert ".updates-card-head-main" in css
+    assert "min-width: 0;" in css
+    assert ".updates-card-head" in css
+    assert "flex-direction: column;" in css
+
+
 def test_update_apply_consumes_intent_before_restart():
     server = _read("server.py")
     git_ops = _read("supervisor/git_ops.py")

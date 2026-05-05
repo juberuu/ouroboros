@@ -13,7 +13,7 @@ export function initUpdates({ mount, hostPage = 'settings', hostSubtab = 'update
         <div class="updates-scroll">
             <section class="updates-card" id="updates-status-card">
                 <div class="updates-card-head">
-                    <div>
+                    <div class="updates-card-head-main">
                         <div class="section-title">Official Updates</div>
                         <div class="updates-summary" id="updates-summary">Loading update status...</div>
                     </div>

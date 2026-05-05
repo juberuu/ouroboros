@@ -16,6 +16,8 @@ from typing import Any, Dict, List, Optional
 
 from ouroboros.config import get_ouroboroshub_catalog_url, get_ouroboroshub_skills_dir
 from ouroboros.marketplace.fetcher import FetchError
+from ouroboros.marketplace.install_specs import install_specs_hash
+from ouroboros.skill_dependencies import normalize_declared_dependency_specs
 from ouroboros.skill_loader import _sanitize_skill_name
 
 
@@ -49,6 +51,7 @@ class HubSkillSummary:
     version: str = ""
     homepage: str = ""
     files: List[Dict[str, Any]] = field(default_factory=list)
+    install_specs: Any = field(default_factory=list)
     raw: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -60,6 +63,7 @@ class HubSkillSummary:
             "latest_version": self.version,
             "versions": [self.version] if self.version else [],
             "homepage": self.homepage,
+            "install_specs": self.install_specs,
             "source": "ouroboroshub",
             "stats": {},
             "badges": {"official": True},
@@ -145,6 +149,7 @@ def _summaries(catalog: Dict[str, Any]) -> List[HubSkillSummary]:
                 version=str(item.get("version") or ""),
                 homepage=str(item.get("homepage") or ""),
                 files=list(item.get("files") or []),
+                install_specs=item.get("install_specs") or item.get("install") or [],
                 raw=item,
             )
         )
@@ -257,6 +262,16 @@ def install(slug: str, *, overwrite: bool = False) -> HubInstallResult:
             "installed_at": datetime.now(timezone.utc).isoformat(),
             "files": summary.files,
         }
+        raw_install = summary.install_specs or summary.raw.get("dependencies") or []
+        auto_specs, manual_specs, _warnings = normalize_declared_dependency_specs(raw_install)
+        if auto_specs or manual_specs:
+            provenance["install_specs"] = {
+                "schema_version": 1,
+                "auto": auto_specs,
+                "manual": manual_specs,
+                "raw": raw_install,
+                "specs_hash": install_specs_hash(auto_specs),
+            }
         (staging / ".ouroboroshub.json").write_text(
             json.dumps(provenance, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",

@@ -39,6 +39,9 @@ def test_lifecycle_job_success_notifies(monkeypatch):
     assert result == {"ok": True}
     assert snap["events"][-1]["status"] == "succeeded"
     assert sent
+    progress = [kwargs for _args, kwargs in sent if kwargs.get("is_progress")]
+    assert progress
+    assert any(item.get("task_id") == "skill_lifecycle_review_weather" for item in progress)
 
 
 def test_lifecycle_job_failure_records_error(monkeypatch):
@@ -57,6 +60,7 @@ def test_lifecycle_job_failure_records_error(monkeypatch):
     assert event["status"] == "failed"
     assert event["error"] == "boom"
     assert sent
+    assert any(kwargs.get("is_progress") for _args, kwargs in sent)
 
 
 def test_lifecycle_jobs_serialize():

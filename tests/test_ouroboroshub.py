@@ -24,6 +24,56 @@ def test_ouroboroshub_stages_under_target_root(monkeypatch, tmp_path):
     seen["staging"].relative_to(hub_root / ".staging")
 
 
+def test_ouroboroshub_persists_catalog_dependency_specs(monkeypatch, tmp_path):
+    hub_root = tmp_path / "hub"
+    monkeypatch.setattr(ouroboroshub, "get_ouroboroshub_skills_dir", lambda: hub_root)
+    summary = ouroboroshub.HubSkillSummary(
+        slug="duckduckgo",
+        name="duckduckgo",
+        version="1.0.0",
+        files=[{"path": "SKILL.md", "sha256": "x", "size": 1}],
+        install_specs=["ddgs"],
+    )
+    monkeypatch.setattr(ouroboroshub, "load_catalog", lambda: {"raw_base_url": "https://raw.githubusercontent.com/joi-lab/OuroborosHub/main"})
+    monkeypatch.setattr(ouroboroshub, "_summaries", lambda _catalog: [summary])
+
+    def fake_download(_summary, _raw_base, staging_dir):
+        (staging_dir / "SKILL.md").write_text("---\nname: duckduckgo\n---\n", encoding="utf-8")
+
+    monkeypatch.setattr(ouroboroshub, "_download_skill_files", fake_download)
+
+    result = ouroboroshub.install("duckduckgo")
+
+    assert result.ok
+    assert result.provenance["install_specs"]["auto"][0]["package"] == "ddgs"
+    assert (hub_root / "duckduckgo" / ".ouroboroshub.json").is_file()
+
+
+def test_ouroboroshub_preserves_dict_dependency_specs(monkeypatch, tmp_path):
+    hub_root = tmp_path / "hub"
+    monkeypatch.setattr(ouroboroshub, "get_ouroboroshub_skills_dir", lambda: hub_root)
+    summary = ouroboroshub.HubSkillSummary(
+        slug="duckduckgo",
+        name="duckduckgo",
+        version="1.0.0",
+        files=[{"path": "SKILL.md", "sha256": "x", "size": 1}],
+        install_specs={"python": ["ddgs"]},
+    )
+    monkeypatch.setattr(ouroboroshub, "load_catalog", lambda: {"raw_base_url": "https://raw.githubusercontent.com/joi-lab/OuroborosHub/main"})
+    monkeypatch.setattr(ouroboroshub, "_summaries", lambda _catalog: [summary])
+
+    def fake_download(_summary, _raw_base, staging_dir):
+        (staging_dir / "SKILL.md").write_text("---\nname: duckduckgo\n---\n", encoding="utf-8")
+
+    monkeypatch.setattr(ouroboroshub, "_download_skill_files", fake_download)
+
+    result = ouroboroshub.install("duckduckgo")
+
+    assert result.ok
+    assert result.provenance["install_specs"]["auto"][0]["package"] == "ddgs"
+    assert summary.to_dict()["install_specs"] == {"python": ["ddgs"]}
+
+
 def test_ouroboroshub_atomic_land_restores_old_on_move_failure(monkeypatch, tmp_path):
     target = tmp_path / "demo"
     target.mkdir()

@@ -479,12 +479,11 @@ def _skill_deps_exec_block(drive_root: pathlib.Path, loaded: Any) -> str:
     corrupted, or failed after enablement.
     """
     try:
-        from ouroboros.marketplace.provenance import read_provenance
         from ouroboros.marketplace.install_specs import install_specs_hash as _specs_hash
         from ouroboros.marketplace.isolated_deps import read_deps_state
+        from ouroboros.skill_dependencies import auto_install_specs_for_skill
 
-        prov = read_provenance(drive_root, loaded.name) or {}
-        auto_specs = list((prov.get("install_specs") or {}).get("auto") or [])
+        auto_specs = auto_install_specs_for_skill(drive_root, loaded)
         if not auto_specs:
             return ""
         deps_state = read_deps_state(drive_root, loaded.name)
@@ -880,11 +879,10 @@ def _handle_toggle_skill(
             # could toggle an extension whose ``import requests`` would
             # ImportError mid-dispatch.
             try:
-                from ouroboros.marketplace.provenance import read_provenance
                 from ouroboros.marketplace.install_specs import install_specs_hash as _specs_hash
                 from ouroboros.marketplace.isolated_deps import read_deps_state
-                prov = read_provenance(drive_root, loaded.name) or {}
-                auto_specs = list((prov.get("install_specs") or {}).get("auto") or [])
+                from ouroboros.skill_dependencies import auto_install_specs_for_skill
+                auto_specs = auto_install_specs_for_skill(drive_root, loaded)
                 if auto_specs:
                     deps_state = read_deps_state(drive_root, loaded.name)
                     deps_status = str(deps_state.get("status") or "pending")

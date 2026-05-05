@@ -50,6 +50,12 @@ from ouroboros.skill_lifecycle_queue import JobProgressTarget, LifecycleJobOptio
 log = logging.getLogger(__name__)
 
 
+def _reconcile_deps_after_review(drive_root: pathlib.Path, skill_name: str) -> tuple[str, str]:
+    from ouroboros.skill_review_runner import _reconcile_deps_after_pass_review
+
+    return _reconcile_deps_after_pass_review(drive_root, skill_name)
+
+
 def _request_drive_root(request: Request) -> pathlib.Path:
     from ouroboros.config import DATA_DIR
 
@@ -592,6 +598,16 @@ async def api_ouroboroshub_install(request: Request) -> JSONResponse:
                 result.sanitized_name,
             )
             payload.update({"review_status": status, "review_findings": findings, "review_error": error})
+            if status == "pass" and not error:
+                deps_status, deps_error = await asyncio.to_thread(
+                    _reconcile_deps_after_review,
+                    drive_root,
+                    result.sanitized_name,
+                )
+                payload.update({"deps_status": deps_status, "deps_error": deps_error})
+                if deps_status == "failed":
+                    payload["ok"] = False
+                    payload["error"] = deps_error
         return payload
 
     payload = await run_lifecycle_job(
@@ -647,7 +663,19 @@ async def api_ouroboroshub_update(request: Request) -> JSONResponse:
                 result.sanitized_name,
             )
             payload.update({"review_status": status, "review_findings": findings, "review_error": error})
-            if was_live and status == "pass" and not error:
+            deps_status = "not_required"
+            deps_error = ""
+            if status == "pass" and not error:
+                deps_status, deps_error = await asyncio.to_thread(
+                    _reconcile_deps_after_review,
+                    drive_root,
+                    result.sanitized_name,
+                )
+                payload.update({"deps_status": deps_status, "deps_error": deps_error})
+                if deps_status == "failed":
+                    payload["ok"] = False
+                    payload["error"] = deps_error
+            if was_live and status == "pass" and not error and deps_status != "failed":
                 try:
                     from ouroboros.config import load_settings
                     from ouroboros.extension_loader import reconcile_extension

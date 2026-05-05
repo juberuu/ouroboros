@@ -59,7 +59,7 @@ def test_marketplace_empty_and_timeout_copy_is_human_readable():
 
 def test_marketplace_review_failure_points_to_heal_flow():
     source = _marketplace_js()
-    assert "Fix" in source
+    assert "Repair" in source
     assert "Start a repair task" in source
     assert "visible_text:" in source
     assert "AUTO-REVIEW FAILED" not in source

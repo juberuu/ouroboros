@@ -56,7 +56,7 @@ def test_live_card_recovery_keeps_step_failures_non_terminal():
     chat_source = _read("web/modules/chat.js")
     log_source = _read("web/modules/log_events.js")
 
-    assert "return phase === 'done';" in chat_source
+    assert "return phase === 'done' || phase === 'lifecycle_error';" in chat_source
     assert "if (phase === 'warn') return 'Notice';" in chat_source
     assert "record.finished = isTerminalTaskPhase(nextPhase);" in chat_source
     assert "const activePhase = ['error', 'timeout'].includes(phase) ? phase : 'done';" in chat_source
@@ -617,6 +617,16 @@ def test_sync_history_two_pass_progress_before_finalize():
 
     assert "if (taskState.completed) continue;" not in pass1_body, \
         "Pass 1 must not skip progress messages due to taskState.completed"
+
+
+def test_skill_lifecycle_terminal_progress_can_finish_live_card():
+    source = _read("web/modules/log_events.js")
+    chat_source = _read("web/modules/chat.js")
+
+    assert "startsWith('skill_lifecycle_')" in source
+    assert "completed|failed" in source
+    assert "lifecycleTerminal" in source
+    assert "phase === 'done' || phase === 'lifecycle_error'" in chat_source
 
 
 def test_sync_history_shows_typing_for_ongoing_tasks():

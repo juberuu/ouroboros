@@ -491,12 +491,11 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
             # without the guard users could enable a skill whose isolated deps
             # failed or whose deps.json is stale/missing.
             try:
-                from ouroboros.marketplace.provenance import read_provenance
                 from ouroboros.marketplace.install_specs import install_specs_hash
                 from ouroboros.marketplace.isolated_deps import read_deps_state
+                from ouroboros.skill_dependencies import auto_install_specs_for_skill
 
-                prov = read_provenance(drive_root, loaded.name) or {}
-                auto_specs = list((prov.get("install_specs") or {}).get("auto") or [])
+                auto_specs = auto_install_specs_for_skill(drive_root, loaded)
                 if auto_specs:
                     deps_state = read_deps_state(drive_root, loaded.name)
                     deps_status = str(deps_state.get("status") or "pending")

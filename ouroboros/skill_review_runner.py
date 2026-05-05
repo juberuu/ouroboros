@@ -219,15 +219,18 @@ def _reconcile_deps_after_pass_review(
     """Install/reinstall isolated deps after a PASS review."""
 
     try:
-        from ouroboros.marketplace.provenance import read_provenance
         from ouroboros.marketplace.install_specs import install_specs_hash
         from ouroboros.marketplace.isolated_deps import (
             install_isolated_dependencies,
             read_deps_state,
         )
 
-        prov = read_provenance(drive_root, skill_name) or {}
-        auto_specs = list((prov.get("install_specs") or {}).get("auto") or [])
+        loaded = find_skill(drive_root, skill_name, repo_path=repo_path)
+        if loaded is None:
+            return "failed", "skill not found during dependency reconciliation"
+        from ouroboros.skill_dependencies import auto_install_specs_for_skill
+
+        auto_specs = auto_install_specs_for_skill(drive_root, loaded)
         if not auto_specs:
             return "not_required", ""
         deps_state = read_deps_state(drive_root, skill_name)
@@ -237,9 +240,6 @@ def _reconcile_deps_after_pass_review(
             and deps_state.get("specs_hash") == expected_hash
         ):
             return "installed", ""
-        loaded = find_skill(drive_root, skill_name, repo_path=repo_path)
-        if loaded is None:
-            return "failed", "skill not found during dependency reconciliation"
         install_isolated_dependencies(drive_root, skill_name, loaded.skill_dir, auto_specs)
         return "installed", ""
     except Exception as exc:

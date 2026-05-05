@@ -37,6 +37,12 @@ The **runtime ownership** of an installed skill is also tagged:
 - `clawhub`: installed via the ClawHub marketplace.
 - `ouroboroshub`: installed via the official OuroborosHub catalog.
 
+User-authored or manually copied skills belong under
+`data/skills/external/<name>/`. The `native` bucket is reserved for
+launcher-seeded skills that carry a `.seed-origin` marker. If a user
+payload is accidentally left under `native/`, Ouroboros migrates it to
+`external/` so the Repair workflow can edit and re-review it.
+
 ## Manifest schema (`SKILL.md` frontmatter or `skill.json`)
 
 A manifest is YAML frontmatter inside `SKILL.md`, OR a standalone
@@ -103,8 +109,8 @@ flowchart LR
     review -- PASS --> deps[isolated deps install]
     deps --> enable[owner toggles enabled=true]
     enable --> execute[skill_exec / dispatch]
-    review -- FAIL/ADVISORY --> heal[heal/fix → re-review]
-    heal --> review
+    review -- FAIL/ADVISORY --> repair[Repair → re-review]
+    repair --> review
 ```
 
 - **Install** lands the payload under the appropriate bucket
@@ -121,6 +127,28 @@ flowchart LR
   Skills UI surfaces a toggle; agents can also call `toggle_skill`.
 - **Execute**: `skill_exec` runs `type: script` skills as
   subprocess; `type: extension` runs in-process via the loader.
+
+### Declaring dependencies
+
+Skills may declare auto-installable dependencies in frontmatter:
+
+```yaml
+dependencies: [ddgs]
+```
+
+or with explicit install specs:
+
+```yaml
+install:
+  - kind: pip
+    package: ddgs
+```
+
+Bare `dependencies` entries are treated as Python packages. `pip`,
+`pipx`, `uv`, `npm`, and `node` specs are installed only after a fresh
+PASS review and only under the skill's `.ouroboros_env` directory.
+Global package-manager or arbitrary-download specs remain manual setup
+guidance.
 
 ## The `skill_preflight` tool
 
@@ -325,13 +353,14 @@ the OuroborosHub catalog:
 - `weather` — `type: extension`, declarative inline-card widget,
   reads no env keys.
 - `duckduckgo` — `type: extension`, declarative form widget, no
-  env keys, requires the `ddgs` Python package.
+  env keys, declares the `ddgs` Python package as an isolated dependency.
 - `perplexity` — `type: extension`, declarative form widget,
   `read_settings` for `OPENROUTER_API_KEY`.
 
 You can read their full source under
-`data/skills/native/<name>/` (after the launcher seeds them from
-`repo/skills/`) or by browsing `joi-lab/OuroborosHub` on GitHub.
+`data/skills/native/<name>/` for launcher-seeded examples, under
+`data/skills/external/<name>/` for your own local skills, or by browsing
+`joi-lab/OuroborosHub` on GitHub.
 
 ## Publishing
 
@@ -381,7 +410,7 @@ def register(api):
 | `SKILL_EXEC_BLOCKED: review status is 'pending'` | Run `review_skill` for this skill. |
 | `SKILL_TOGGLE_ERROR: dependency fingerprint is stale` | Re-run `review_skill`; the post-PASS deps reconciliation will reinstall. |
 | `EXTENSION_NOT_LIVE` on tool dispatch | The skill is disabled or the loader had a load_error — check the Skills UI. |
-| `HEAL_MODE_BLOCKED: ...` | The agent tried to call a tool the heal-mode allowlist does not permit; finish the heal flow with `review_skill` and exit. |
+| `HEAL_MODE_BLOCKED: ...` | The Repair task tried to call a tool the internal heal-mode allowlist does not permit; finish the Repair flow with `review_skill` and exit. |
 | `PluginAPI.register_*` raises `ExtensionRegistrationError` | The skill is missing the matching permission in its manifest. |
 | Reviewer marks `widget_module_safety: FAIL` | `widget.js` is touching `document.cookie` / `localStorage` / cross-origin `fetch`. Move the data through `/api/extensions/<skill>/` routes. |
 

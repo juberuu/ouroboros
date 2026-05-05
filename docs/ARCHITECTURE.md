@@ -1,4 +1,4 @@
-# Ouroboros v5.7.6 — Architecture & Reference
+# Ouroboros v5.8.0-rc.1 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -63,14 +63,15 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── reflection.py        ← Execution reflection and pattern capture
       ├── review_evidence.py   ← Structured review findings/obligations snapshot for summaries and reflections
       ├── skill_loader.py      ← Skill discovery + durable skill state (v5.5: walks data/skills/{native,clawhub,ouroboroshub,external}/ + optional OUROBOROS_SKILLS_REPO_PATH; persists to data/state/skills/<name>/; tags each LoadedSkill with `source`)
+      ├── skill_dependencies.py ← Shared dependency-spec resolution for skill payloads across manifests, sidecars, and provenance
       ├── skill_review.py      ← Tri-model skill review reusing the repo-review infrastructure against the Skill Review Checklist section of docs/CHECKLISTS.md
       ├── extension_loader.py  ← Phase 4 in-process loader for type: extension skills; discovers + imports plugin.py via importlib with a narrow PluginAPIImpl, tracks registrations per-skill for atomic unload
       ├── extensions_api.py    ← Phase 5 HTTP surface for extensions (GET /api/extensions, GET /api/extensions/<skill>/manifest, ALL /api/extensions/<skill>/<rest:path> catch-all dispatch, POST /api/skills/<skill>/toggle, POST /api/skills/<skill>/review, POST /api/skills/<skill>/grants)
       ├── marketplace/         ← ClawHub + OuroborosHub marketplace package (clawhub.py registry client, ouroboroshub.py static GitHub catalog client, fetcher.py staging, adapter.py OpenClaw->Ouroboros translation, install.py orchestration, isolated_deps.py per-skill dependency prefix, provenance.py durable provenance)
       ├── marketplace_api.py   ← HTTP surface for marketplaces (/api/marketplace/clawhub/* and /api/marketplace/ouroboroshub/*); always-on with registry host allowlists and hash checks
-      ├── skill_lifecycle_queue.py ← single FIFO lane for mutating skill lifecycle actions (install/update/review/deps/enable/disable/uninstall) with recent event snapshot for Skills UI, dedupe keys, and sync tool wrapper
+      ├── skill_lifecycle_queue.py ← single FIFO lane for mutating skill lifecycle actions (install/update/review/deps/enable/disable/uninstall) with recent event snapshot for Skills UI, chat live-card progress, dedupe keys, and sync tool wrapper
       ├── skill_review_runner.py ← v5.7.2 shared lifecycle-backed skill review runner for API + agent tool paths; writes review_job.json + skill_review_* events
-      ├── skill_migrations.py  ← one-shot data-plane migrations for renamed official generation skills (image_gen→nanobanana, audio_gen→music_gen)
+      ├── skill_migrations.py  ← one-shot data-plane migrations for renamed official generation skills (image_gen→nanobanana, audio_gen→music_gen) and user-managed skills accidentally left under native/
       ├── server_auth.py       ← Non-localhost auth gate (OUROBOROS_NETWORK_PASSWORD)
       ├── server_control.py    ← Process-control helpers: restart, panic stop
       ├── server_entrypoint.py ← CLI argument parsing, port-binding helpers
@@ -343,7 +344,7 @@ The web UI is a single-page app (`web/index.html` + `web/style.css` + ES modules
 - `settings_catalog.js` — optional model-catalog refresh helper; handles `/api/model-catalog`, browser timeout, stale-response suppression, and model-picker catalog broadcasts
 - `costs.js` — cost breakdown tables
 - `page_header.js` — v5.7.2 shared page-header/tab-strip renderer used by Settings, Dashboard, Skills, Widgets, Files, and Chat; escapes title/description/labels and emits shared `app-page-*` / `app-tab-*` classes without inline styles.
-- `skills.js` — Skills page (discover + enable/disable + review trigger + Heal task affordance for non-native failing skills + key-grant state + live-vs-catalog extension status; reads `/api/state` + `/api/extensions`, writes through `/api/skills/<name>/toggle` + `/api/skills/<name>/review`, sends Heal prompts through `/api/command`, and requests key grants through the desktop launcher bridge)
+- `skills.js` — Skills page (discover + enable/disable + review trigger + Repair task affordance for non-native failing skills + key-grant state + live-vs-catalog extension status; reads `/api/state` + `/api/extensions`, writes through `/api/skills/<name>/toggle` + `/api/skills/<name>/review`, sends Repair prompts through `/api/command`, and requests key grants through the desktop launcher bridge)
 - `widgets.js` — Widgets page for reviewed extension UI surfaces declared through `register_ui_tab`; hosts legacy `inline_card`/`iframe` plus declarative v1 widgets (forms/actions, async job forms/actions, markdown, code, JSON, key/value, tables, tabs, charts, stream, progress, `subscription` WS updates, poll with `auto_start`, files, galleries, image/audio/video media, **map/calendar/kanban (v5.7.0)**) and tears down widget timers/listeners/streams on remount while resuming async jobs by `job_id`. **v5.7.0** also adds `kind: "module"` widgets: the host fetches reviewed `widget.js` through `/api/extensions/<skill>/module/<entry>`, embeds it into a sandboxed `<iframe srcdoc sandbox="allow-scripts">` with no `allow-same-origin`, and injects a parent-mediated `fetch` bridge restricted to `/api/extensions/<skill>/...`.
 
 (`about.js` was removed in v5.7.0 when About moved into Settings as a sub-tab.)
@@ -577,7 +578,7 @@ authentication. If the password is blank, non-loopback access stays open by desi
 | POST | `/api/marketplace/ouroboroshub/install` | Queue official skill install from pinned raw GitHub files and auto-review. |
 | POST | `/api/marketplace/ouroboroshub/update/{name}` | Queue official skill update (install with overwrite). |
 | POST | `/api/marketplace/ouroboroshub/uninstall/{name}` | Queue official skill uninstall. |
-| POST | `/api/command` | Queue a local command/task payload. Optional `visible_text` broadcasts and logs a short system status (used by skill Fix/repair) while the full payload stays off the visible chat transcript. |
+| POST | `/api/command` | Queue a local command/task payload. Optional `visible_text` broadcasts and logs a short system status (used by skill Repair) while the full payload stays off the visible chat transcript; skill review/dependency lifecycle progress uses the live-card stream separately. |
 | POST | `/api/reset` | Delete all runtime data, restart for fresh onboarding |
 | GET | `/api/git/log` | Recent commits + tags + current branch/sha |
 | POST | `/api/git/rollback` | Rollback to a specific commit/tag `{target: "sha"}` |
@@ -1679,7 +1680,9 @@ Four-tier GitHub Actions workflow:
 |------|---------|-----------|------|
 | Quick | Push to `ouroboros` (code paths only) | Ubuntu-only: `pytest` | ~1 min |
 | Full | Push to `ouroboros-stable`, manual (`workflow_dispatch`), or tag `v*` | Matrix: Ubuntu + Windows + macOS: `pytest` | ~5 min |
-| Integration | Push to `main`, `ouroboros`, or `ouroboros-stable`, manual (`workflow_dispatch`), or tag `v*` | Ubuntu-only: `pytest tests/test_provider_integration.py -m integration` against real OpenRouter / OpenAI / Anthropic keys (skipped per-provider when its key is unset) | ~2 min |
+| Integration | Push to `main`, `ouroboros`, or `ouroboros-stable`, manual (`workflow_dispatch`), or tag `v*` | Ubuntu-only: `pytest tests/test_provider_integration.py -m integration` against real OpenRouter / OpenAI / Anthropic / Cloud.ru keys (skipped per-provider when its key is unset) | ~2 min |
+| UI smoke | Manual (`workflow_dispatch`) or tag `v*` | Host-side Playwright UI smoke plus real Chromium browser-tool smoke (`browser`, `ui_browser`) with collect-only marker guards | ~5 min |
+| Docker smoke | Manual (`workflow_dispatch`) or tag `v*` | Build `ouroboros-web:test`, run Docker UI smoke (`ui_browser_docker`), and run `portable_detail` tests inside the container | ~10 min |
 | Build + Release | Tag `v*` (after full-test passes) | Matrix: PyInstaller build → `.dmg` / `.tar.gz` / `.zip` (macOS optionally codesigned + notarized when Apple secrets are configured) + GitHub Release | ~15 min |
 
 Path filters for branch pushes: `ouroboros/**`, `supervisor/**`, `server.py`, `launcher.py`,
@@ -1765,8 +1768,8 @@ data tree and is resolved at runtime by the embedded interpreter. Data bundles i
 `server.py`, `launcher.py`, `BIBLE.md`, `README.md`, `VERSION`, `pyproject.toml`, `Makefile`,
 `requirements.txt`, `requirements-launcher.txt`, `.gitignore`, `repo.bundle`,
 `repo_bundle_manifest.json`, and `python-standalone/` (the embedded
-Python runtime that carries all agent dependencies — and, from v4.40.3, the bundled
-Chromium binary installed via `PLAYWRIGHT_BROWSERS_PATH=0 playwright install chromium`
+Python runtime that carries all agent dependencies — and the bundled
+Playwright browser payload installed via `PLAYWRIGHT_BROWSERS_PATH=0 playwright install ... chromium`
 before PyInstaller runs; see *Bundled Chromium* paragraph below).
 
 **Bundled Chromium / headless shell (build scripts v4.40.2+; runtime detection v4.40.3+):**
@@ -1775,12 +1778,14 @@ with `PLAYWRIGHT_BROWSERS_PATH` set to `0`, **before** PyInstaller packages the 
 This stores the browser payload inside the playwright package directory
 (`driver/package/.local-browsers/`), which is already part of the `python-standalone`
 data tree bundled by PyInstaller. macOS now bundles **only the Chromium headless shell**
-because the full nested Chrome app bundle trips PyInstaller's macOS codesign path;
-Linux and Windows still bundle the regular Chromium payload. The exact shell syntax differs:
+because the full nested Chrome app bundle trips PyInstaller's macOS codesign path.
+Windows also bundles only the headless shell from v5.8 onward so the release zip stays
+below Explorer's MAX_PATH extraction limit. Linux still bundles the regular Chromium
+payload. The exact shell syntax differs:
 
 - macOS (bash): `PLAYWRIGHT_BROWSERS_PATH=0 python-standalone/bin/python3 -m playwright install --only-shell chromium`
 - Linux (bash): `PLAYWRIGHT_BROWSERS_PATH=0 python-standalone/bin/python3 -m playwright install chromium`
-- Windows (PowerShell): `$env:PLAYWRIGHT_BROWSERS_PATH = "0"; python-standalone\python.exe -m playwright install chromium`
+- Windows (PowerShell): `$env:PLAYWRIGHT_BROWSERS_PATH = "0"; python-standalone\python.exe -m playwright install --only-shell chromium`
 
 At runtime, `ouroboros/tools/browser.py::_set_playwright_browsers_path_if_bundled()`
 runs at module import time. It sets `PLAYWRIGHT_BROWSERS_PATH=0` **only** when
@@ -1789,7 +1794,7 @@ runs at module import time. It sets `PLAYWRIGHT_BROWSERS_PATH=0` **only** when
 platform-matching browser payload with a real executable. Accepted layouts include the
 regular Chromium tree (`chromium-*` with `chrome-mac-*`, `chrome-linux*`, `chrome-win*`)
 and the headless-shell tree (`chromium_headless_shell-*` with
-`chrome-headless-shell-mac-*` on macOS). This two-level check prevents false positives
+`chrome-headless-shell-{mac,linux,win}-*`). This two-level check prevents false positives
 from foreign-platform payloads or partial downloads. Source/dev installs that already
 have Chromium in `~/.cache/ms-playwright/` are unaffected — they never trigger the check
 and continue using the standard cache path. If the environment variable is already set
@@ -1805,6 +1810,11 @@ Alternatively install the equivalent distro packages directly
 (`libnss3`, `libatk-bridge2.0-0`, `libdrm2`, etc.). This is a host OS dependency,
 not a bundle issue — the bare `playwright` CLI command is not on PATH in packaged
 installs.
+
+Windows builds run an additional path-length guard after PyInstaller and before
+`Compress-Archive`: any path longer than 200 characters relative to `dist\Ouroboros`
+fails the build, leaving headroom for the user-selected extraction folder so plain
+Explorer **Extract All** succeeds without requiring 7-Zip or long-path registry changes.
 
 ### Docker (`Dockerfile`)
 
@@ -2046,6 +2056,18 @@ walks the data plane plus the optional external checkout, tagging each
 ``LoadedSkill`` with ``source`` (``native`` / ``clawhub`` /
 ``ouroboroshub`` / ``external`` / ``user_repo``).
 
+v5.8 adds a topology repair migration:
+``skill_migrations.migrate_unseeded_native_skills_to_external`` moves any
+``data/skills/native/<skill>/`` directory that lacks the launcher-written
+``.seed-origin`` marker into ``data/skills/external/``. This keeps the
+honesty rule ("unmarked native is user-managed external") aligned with the
+Repair guard, which intentionally only grants payload writes under
+``external``, ``clawhub``, or ``ouroboroshub``. If the external destination
+already exists, the migration lands the moved payload under a unique
+``*_migrated`` identity, rewrites the manifest ``name``, copies non-trust
+state best-effort, and drops stale trust files so the new identity requires a
+fresh review.
+
 Per-skill durable state lives on the Ouroboros data plane, not inside
 the skill checkout:
 
@@ -2065,6 +2087,15 @@ and `run_shell` post-execution owner-state restore) protect
 `enabled.json`, `review.json`, `grants.json`, and `clawhub.json`; payload
 repair happens under `data/skills/...` and must flow back through
 `review_skill`, Skills UI enablement, and the launcher grant bridge.
+
+Declared dependencies share one install/readiness contract. ClawHub
+provenance, OuroborosHub sidecars/catalog metadata, and reviewed manifest
+extras such as ``install`` or ``dependencies`` are normalized by
+``skill_dependencies.auto_install_specs_for_skill`` into the same isolated
+``pip``/``npm`` specs consumed by ``marketplace.isolated_deps``. A PASS
+review triggers installation under ``<skill>/.ouroboros_env``; enable,
+extension reload, and ``skill_exec`` all refuse stale/missing/failed
+dependency fingerprints.
 
 ``__extension_imports/<uuid>/skill/`` is created by
 ``ouroboros.extension_loader._stage_extension_import_tree`` on every

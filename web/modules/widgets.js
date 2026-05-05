@@ -992,6 +992,8 @@ export function initWidgets(ctx = {}) {
         const generation = ++renderGeneration;
         widgetsVisible = true;
         if (widgetsMounted && !force) return;
+        refreshBtn.disabled = true;
+        refreshBtn.classList.add('is-loading');
         disposeMountedWidgets();
         if (lastTabs) {
             // Optimistic paint from cache while the fresh fetch is in flight.
@@ -1026,6 +1028,11 @@ export function initWidgets(ctx = {}) {
                 list.innerHTML = `<div class="skills-load-error">Failed to load widgets: ${escapeHtml(err.message || err)}</div>`;
             }
             widgetsMounted = false;
+        } finally {
+            if (widgetsVisible && generation === renderGeneration) {
+                refreshBtn.disabled = false;
+                refreshBtn.classList.remove('is-loading');
+            }
         }
     }
 

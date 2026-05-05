@@ -426,8 +426,12 @@ export function summarizeChatLiveEvent(evt) {
     const progressText = describeText(String(evt.content || evt.text || '').replace(/^💬\s*/, ''), 240);
 
     if (evt.is_progress || t === 'send_message') {
+        const lifecycleTerminal = String(evt.task_id || '').startsWith('skill_lifecycle_')
+            && /\s—\s(completed|failed)\b/i.test(progressText.full);
         return {
-            phase: evt.task_id === 'bg-consciousness' ? 'thinking' : 'working',
+            phase: evt.task_id === 'bg-consciousness'
+                ? 'thinking'
+                : (lifecycleTerminal ? (/failed\b/i.test(progressText.full) ? 'lifecycle_error' : 'done') : 'working'),
             headline: progressText.preview || 'Working...',
             fullHeadline: progressText.full || '',
             body: '',

@@ -463,6 +463,25 @@ Rules for widget changes:
 
 ## Build & CI
 
+### Pytest marker lanes
+
+Default local pytest excludes costly or environment-dependent lanes:
+`integration`, `browser`, `ui_browser`, `ui_browser_docker`, and
+`portable_detail`. CI opts into them explicitly:
+
+- `integration` runs real provider checks, including Cloud.ru when
+  `CLOUDRU_FOUNDATION_MODELS_API_KEY` is configured.
+- `browser` launches real Playwright Chromium for agent browser tools.
+- `ui_browser` launches the host-side web UI under Playwright.
+- `ui_browser_docker` talks to an `ouroboros-web:test` container and must
+  skip cleanly when Docker is unavailable locally.
+- `portable_detail` covers build/portable artifact invariants and also runs
+  inside Docker in the manual/tag CI tier.
+
+When adding a new opt-in lane, register the marker in `pyproject.toml`, add
+a collect-only zero-test guard in CI, and keep the default local addopts
+token-safe and Docker-safe.
+
 ### GitHub Actions: secrets in step-level `if:` conditions
 
 GitHub Actions **rejects** `secrets.*` references inside step-level `if:`
