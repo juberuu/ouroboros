@@ -144,19 +144,34 @@ loadVersion();
 
 // Visual viewport height — keeps layout above soft keyboard on iOS/Android.
 // Updates a <style> tag (not element.style) to set --vvh without inline styles.
+// Also toggles ``keyboard-open`` so CSS can drop the mobile nav reservation
+// while the soft keyboard is visible.
 (function () {
     const vvhStyle = document.createElement('style');
     vvhStyle.id = 'runtime-vvh';
     document.head.appendChild(vvhStyle);
     const updateVvh = () => {
-        const h = window.visualViewport ? window.visualViewport.height : window.innerHeight;
-        vvhStyle.textContent = ':root{--vvh:' + h + 'px}';
+        const viewport = window.visualViewport;
+        const h = viewport ? viewport.height : window.innerHeight;
+        const offset = viewport ? viewport.offsetTop : 0;
+        vvhStyle.textContent = ':root{--vvh:' + h + 'px;--vvh-offset:' + offset + 'px}';
+
+        if (window.innerWidth <= 640) {
+            const layoutHeight = window.innerHeight || h;
+            const keyboardVisible = viewport
+                ? (layoutHeight - h) > Math.max(120, layoutHeight * 0.25)
+                : false;
+            document.body.classList.toggle('keyboard-open', keyboardVisible);
+        } else {
+            document.body.classList.remove('keyboard-open');
+        }
     };
     if (window.visualViewport) {
         window.visualViewport.addEventListener('resize', updateVvh);
         window.visualViewport.addEventListener('scroll', updateVvh);
     }
     window.addEventListener('resize', updateVvh);
+    window.addEventListener('orientationchange', updateVvh);
     updateVvh();
 }());
 

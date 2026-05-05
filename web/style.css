@@ -4315,6 +4315,56 @@ body {
         overflow-x: hidden;
     }
 
+    /* Keyboard-open chat layout: keep the composer inside the visual viewport
+       while iOS/Android shrink and offset the viewport for the soft keyboard. */
+    body.keyboard-open #nav-rail {
+        display: none;
+    }
+
+    body.keyboard-open #content {
+        height: var(--vvh);
+        max-height: var(--vvh);
+        padding-bottom: 0;
+        overflow: hidden;
+    }
+
+    body.keyboard-open #page-chat.active {
+        position: fixed;
+        top: var(--vvh-offset, 0px);
+        left: 0;
+        right: 0;
+        height: var(--vvh);
+        max-height: var(--vvh);
+        display: flex;
+        flex-direction: column;
+        z-index: 20;
+        overflow: hidden;
+    }
+
+    body.keyboard-open #page-chat.active .chat-page-header {
+        flex-shrink: 0;
+        position: relative;
+    }
+
+    body.keyboard-open #page-chat.active #chat-messages {
+        flex: 1;
+        min-height: 0;
+        position: relative;
+        height: auto;
+        max-height: none;
+        padding-top: 0;
+        padding-bottom: 0;
+        overflow-y: auto;
+    }
+
+    body.keyboard-open #page-chat.active #chat-input-area {
+        flex-shrink: 0;
+        position: relative;
+        bottom: auto;
+        padding-top: 8px;
+        padding-bottom: 8px;
+    }
+
     /* Logs page — reduce horizontal padding on filters and entries margin. */
     .logs-filters {
         padding: 8px 12px;

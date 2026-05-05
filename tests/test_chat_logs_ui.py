@@ -1165,3 +1165,55 @@ def test_budget_pill_navigates_to_settings_costs():
     assert "openDashboardTab('costs')" in source
     budget_block = re.search(r"\.chat-budget-pill\s*\{(?P<body>[^}]+)\}", css, re.S).group("body")
     assert "cursor: pointer" in budget_block
+
+
+def test_mobile_keyboard_open_uses_visual_viewport_flex_stack():
+    """Static contract test: keyboard-open JS toggle + CSS layout rules exist."""
+    js = _read("web/app.js")
+    css = _read("web/style.css")
+
+    assert "keyboard-open" in js
+    assert "visualViewport" in js
+    assert "window.innerHeight" in js
+    assert "--vvh-offset" in js
+    assert "(layoutHeight - h) > Math.max(120, layoutHeight * 0.25)" in js
+
+    assert "body.keyboard-open #nav-rail" in css
+    assert "body.keyboard-open #content" in css
+    assert "body.keyboard-open #page-chat.active" in css
+    assert "body.keyboard-open #page-chat.active .chat-page-header" in css
+    assert "body.keyboard-open #page-chat.active #chat-input-area" in css
+    assert "body.keyboard-open #page-chat.active #chat-messages" in css
+    assert "body.keyboard-open #page-chat {" not in css
+
+    nav_block = re.search(
+        r"body\.keyboard-open\s+#nav-rail\s*\{(?P<body>[^}]+)\}", css, re.S
+    ).group("body")
+    assert "display: none" in nav_block
+
+    page_chat_block = re.search(
+        r"body\.keyboard-open\s+#page-chat\.active\s*\{(?P<body>[^}]+)\}", css, re.S
+    ).group("body")
+    assert "position: fixed" in page_chat_block
+    assert "flex-direction: column" in page_chat_block
+    assert "var(--vvh-offset" in page_chat_block
+    assert "height: var(--vvh)" in page_chat_block
+
+    header_block = re.search(
+        r"body\.keyboard-open\s+#page-chat\.active\s+\.chat-page-header\s*\{(?P<body>[^}]+)\}", css, re.S
+    ).group("body")
+    assert "flex-shrink: 0" in header_block
+    assert "position: relative" in header_block
+
+    messages_block = re.search(
+        r"body\.keyboard-open\s+#page-chat\.active\s+#chat-messages\s*\{(?P<body>[^}]+)\}", css, re.S
+    ).group("body")
+    assert "flex: 1" in messages_block
+    assert "min-height: 0" in messages_block
+    assert "overflow-y: auto" in messages_block
+
+    input_block = re.search(
+        r"body\.keyboard-open\s+#page-chat\.active\s+#chat-input-area\s*\{(?P<body>[^}]+)\}", css, re.S
+    ).group("body")
+    assert "flex-shrink: 0" in input_block
+    assert "position: relative" in input_block
