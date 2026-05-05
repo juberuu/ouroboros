@@ -1,4 +1,4 @@
-# Ouroboros v5.8.0-rc.1 — Architecture & Reference
+# Ouroboros v5.8.0-rc.2 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -1815,6 +1815,10 @@ Windows builds run an additional path-length guard after PyInstaller and before
 `Compress-Archive`: any path longer than 200 characters relative to `dist\Ouroboros`
 fails the build, leaving headroom for the user-selected extraction folder so plain
 Explorer **Extract All** succeeds without requiring 7-Zip or long-path registry changes.
+Before packaging, `build_windows.ps1` prunes optional Chromium headless-shell resources
+known to exceed that budget (`PrivacySandboxAttestationsPreloaded` and the reading-mode
+Google Docs accessibility helper). Browser tools do not depend on those optional files,
+and the pruning keeps the release zip compatible with Explorer extraction.
 
 ### Docker (`Dockerfile`)
 

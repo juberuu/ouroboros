@@ -180,6 +180,12 @@ class TestBuildWindowsPs1:
         assert "Length -gt 200" in src
         assert "paths longer than 200 chars" in src
 
+    def test_windows_build_prunes_optional_long_chromium_paths(self):
+        src = _read("build_windows.ps1")
+        assert "Pruning optional Chromium resources with long Windows paths" in src
+        assert "PrivacySandboxAttestationsPreloaded" in src
+        assert "reading_mode_gdocs_helper" in src
+
     def test_repo_bundle_generation_before_pyinstaller(self):
         src = _read("build_windows.ps1")
         bundle_pos = src.find("scripts/build_repo_bundle.py")

@@ -32,6 +32,25 @@ Write-Host "--- Installing Chromium for browser tools (bundled into python-stand
 $env:PLAYWRIGHT_BROWSERS_PATH = "0"
 & "python-standalone\python.exe" -m playwright install --only-shell chromium
 
+Write-Host "--- Pruning optional Chromium resources with long Windows paths ---"
+$LocalBrowsers = "python-standalone\Lib\site-packages\playwright\driver\package\.local-browsers"
+if (Test-Path $LocalBrowsers) {
+    Get-ChildItem -Path $LocalBrowsers -Directory -Filter "chromium_headless_shell-*" | ForEach-Object {
+        $ShellRoot = $_.FullName
+        $OptionalPaths = @(
+            "chrome-headless-shell-win64\PrivacySandboxAttestationsPreloaded",
+            "chrome-headless-shell-win64\resources\accessibility\reading_mode_gdocs_helper",
+            "chrome-headless-shell-win64\resources\accessibility\reading_mode_gdocs_helper_manifest.json"
+        )
+        foreach ($Rel in $OptionalPaths) {
+            $Target = Join-Path $ShellRoot $Rel
+            if (Test-Path $Target) {
+                Remove-Item -Recurse -Force $Target
+            }
+        }
+    }
+}
+
 Write-Host "--- Building embedded managed repo bundle ---"
 git rev-parse -q --verify "refs/tags/$ReleaseTag" | Out-Null
 if ($LASTEXITCODE -ne 0) {
