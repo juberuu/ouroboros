@@ -1,4 +1,4 @@
-# Ouroboros v5.7.2 — Architecture & Reference
+# Ouroboros v5.7.3 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -218,12 +218,11 @@ launcher.py main()
   │                               repo.bundle + validates repo_bundle_manifest.json;
   │                               subsequent runs verify the managed clone's bootstrap pin
   │                               (source_sha + release_tag + bundle_sha256) and ensure the
-  │                               managed remote is configured. The actual
-  │                               fetch + reset to managed/<branch> lives in
-  │                               supervisor/git_ops.checkout_and_reset(), called by
-  │                               server.py::_bootstrap_supervisor_repo() on restart,
-  │                               not in ensure_managed_repo itself — no per-launch
-  │                               file overwrite from the packaged workspace.
+  │                               managed remote metadata exists. Ordinary restart cleanup
+  │                               lives in supervisor/git_ops.checkout_and_reset(), called by
+  │                               server.py::_bootstrap_supervisor_repo(); it preserves the
+  │                               local branch HEAD and cleans only the working tree. Explicit
+  │                               Update Now uses a pinned update-intent SHA for official reset.
   ├── _run_first_run_wizard()   → Show shared setup wizard if no runnable config
   │                               (access entry → models → review mode → budget → summary)
   │                               Saves to ~/Ouroboros/data/settings.json
@@ -257,7 +256,12 @@ Packaged releases ship an embedded git bundle (`repo.bundle`) plus
 - checks the bundle SHA-256,
 - initializes `~/Ouroboros/repo/` as a managed git checkout,
 - checks out the manifest-pinned `source_sha`,
-- then resumes normal managed-remote branch following on later launches.
+- then keeps the managed checkout as the self-modifying local branch.
+  Later launches clean the working tree without moving local commits;
+  official branch following happens only through explicit managed updates.
+  If a newer app bundle carries different embedded repo metadata, the
+  launcher refreshes the managed remote/manifest metadata in place instead
+  of archiving and replacing an existing git checkout.
 
 Safety-critical protection is no longer implemented as "copy these files from the
 bundle on every launch". The runtime guardrails are the hardcoded sandbox /
@@ -268,8 +272,9 @@ post-edit revert in `registry.py` plus the launcher-managed repo integrity check
 A dirty worktree (uncommitted changes inherited from the previous session) is
 handled by exactly ONE mechanism: `safe_restart(..., unsynced_policy="rescue_and_reset")`
 called from `server.py::_bootstrap_supervisor_repo()` at supervisor startup. It
-creates a proper rescue snapshot branch via `supervisor/git_ops.py::_create_rescue_snapshot`
-and leaves the `ouroboros` dev branch clean, so the worker respawn and
+creates a proper rescue snapshot via `supervisor/git_ops.py::_create_rescue_snapshot`
+and leaves the `ouroboros` dev branch's working tree clean without moving the
+branch tip away from local self-modification commits, so the worker respawn and
 pytest-subprocess paths never see a dirty tree they could accidentally commit.
 
 ```mermaid
@@ -277,8 +282,8 @@ flowchart TD
     L[launcher.py] -->|spawn| S[server.py lifespan]
     S --> B["_bootstrap_supervisor_repo()"]
     B --> SR["safe_restart(rescue_and_reset)"]
-    SR --> RS["_create_rescue_snapshot() → rescue branch<br/>(only if dirty tree)"]
-    SR --> RB[reset to managed/<branch>]
+    SR --> RS["_create_rescue_snapshot() → rescue directory<br/>(only if dirty tree)"]
+    SR --> RB[checkout local branch + reset --hard HEAD]
     RB --> SW["spawn_workers() → worker_main"]
     SW --> MA["make_agent() → OuroborosAgent.__init__"]
     MA --> LB["_log_worker_boot_once()"]
@@ -488,9 +493,9 @@ See section 3.8 (Evolution) for the combined page.
 
 ### 3.9 Dashboard → Updates
 
-- **Official update card**: shows current version/SHA, latest official remote SHA/message, dirty/ahead/behind state, and an explicit **Check for updates** action. Passive status reads do not fetch; manual Check fetches the launcher-managed `managed` remote, which is normalized to the hardcoded official repo `https://github.com/joi-lab/ouroboros-desktop`. Source-mode checkouts without launcher-managed metadata report managed updates as unavailable rather than pretending an `origin` pull can be applied by the launcher restart path.
+- **Official update card**: shows current version/SHA, latest official remote SHA/message, dirty/ahead/behind state, and an explicit **Check for updates** action. Passive status reads are strictly read-only: they do not fetch, create remotes, rewrite remote URLs, or otherwise mutate `.git`. Manual Check may normalize/fetch the launcher-managed `managed` remote, which points to the hardcoded official repo `https://github.com/joi-lab/ouroboros-desktop`. Source-mode checkouts without launcher-managed metadata report managed updates as unavailable rather than pretending an `origin` pull can be applied by the launcher restart path.
 - **Official releases vs local recovery**: official tags come from the official managed remote. Local commits/tags remain visible only in the Local Recovery area and are labelled as recovery/developer refs, not official releases.
-- **Update Now / Update with Options** → POST `/api/update/apply`. Safe clean updates are one-click. Divergent/dirty worktrees show an explicit options prompt; the backend always writes a rescue snapshot first, always preserves ahead commits on a `local-keep-*` branch, and writes a one-shot update-intent marker pinned to the exact target SHA before restart. The current process may pre-checkout that SHA before exiting so the launcher starts the updated `server.py`, but the marker is intentionally kept until post-restart bootstrap; `checkout_and_reset` consumes and clears it only there so the restarted process applies the commit the user approved, not a later moving branch tip.
+- **Update Now / Update with Options** → POST `/api/update/apply`. Safe clean updates are one-click. Divergent/dirty worktrees show an explicit confirmation; the backend always writes a rescue snapshot first, preserves ahead commits on a `local-keep-*` branch before any official reset, and writes a one-shot update-intent marker pinned to the exact target SHA before restart. The current process may pre-checkout that SHA before exiting so the launcher starts the updated `server.py`, but the marker is intentionally kept until post-restart bootstrap; `checkout_and_reset` consumes and clears it only there so the restarted process applies the commit the user approved, not a later moving branch tip. Ordinary restarts without an update intent never reset the active local branch to `managed/<branch>`.
 - **Current branch + SHA** displayed at top.
 - **Recent Commits** list with SHA, date, message, and "Restore" button.
 - **Tags** list with tag name, date, message, and "Restore" button.
@@ -577,9 +582,9 @@ authentication. If the password is blank, non-loopback access stays open by desi
 | GET | `/api/git/log` | Recent commits + tags + current branch/sha |
 | POST | `/api/git/rollback` | Rollback to a specific commit/tag `{target: "sha"}` |
 | POST | `/api/git/promote` | Promote ouroboros → ouroboros-stable |
-| GET | `/api/update/status` | Passive managed-update status: current/latest SHA/version, divergence, dirty state, and whether a one-click update is safe. Does not fetch. |
-| POST | `/api/update/check` | Fetch the launcher-managed remote and return fresh update status. |
-| POST | `/api/update/apply` | Prepare a managed update, writing a rescue snapshot first and optionally preserving local HEAD on `local-keep-*`; then request restart so `safe_restart` applies the managed remote. |
+| GET | `/api/update/status` | Passive managed-update status: current SHA/version, dirty state, and whether a check is needed. Does not fetch or mutate `.git` / remotes. |
+| POST | `/api/update/check` | Ensure/fetch the official launcher-managed remote and return fresh latest SHA/version, divergence, and safety status. |
+| POST | `/api/update/apply` | Prepare a managed update, writing a rescue snapshot first and preserving local ahead commits on `local-keep-*`; then request restart so `safe_restart` applies the pinned update-intent SHA. |
 | GET | `/api/cost-breakdown` | Cost dashboard aggregation by model/key/category |
 | POST | `/api/local-model/start` | Start/download local model server |
 | POST | `/api/local-model/stop` | Stop local model server |
@@ -1658,8 +1663,11 @@ Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent acce
 - **ouroboros-stable** — promoted stable version. Updated via "Promote to Stable" button.
 - **main** — protected branch. Agent never touches it.
 
-`safe_restart()` does `git checkout -f ouroboros` + `git reset --hard` on the repo.
-Uncommitted changes are rescued to `~/Ouroboros/data/archive/rescue/` before reset.
+`safe_restart()` checks out the local `ouroboros` branch, resets the working tree
+to that local `HEAD`, and cleans untracked files after a successful rescue. It
+does not move the local `ouroboros` branch tip to `managed/<branch>` unless an
+explicit one-shot update-intent marker exists. Uncommitted changes are rescued
+to `~/Ouroboros/data/archive/rescue/` before reset/clean.
 
 ---
 
@@ -1906,7 +1914,9 @@ automatically on completion or via `kill_all_tracked_subprocesses()` on panic.
 5. **State locking**: `state.json` uses file locks for concurrent read-modify-write
 6. **Budget tracking**: per-LLM-call cost events with model/key/category breakdown
 7. **Launcher-managed repo bootstrap**: packaged builds bootstrap from the manifest-pinned
-   `repo.bundle` once, then continue from the managed git checkout / managed remote flow
+   `repo.bundle` once, then continue from the managed git checkout. Ordinary
+   restarts preserve the local branch tip; explicit Update Now is the only
+   path that resets the active branch to a user-approved official SHA.
 8. **Zero orphans on close**: shutdown MUST kill all child processes (see Section 9)
 9. **Panic MUST kill everything**: all processes (workers, subprocesses, subprocess
    trees, consciousness, evolution) are killed and the application exits completely.
@@ -1939,8 +1949,11 @@ automatically on completion or via `kill_all_tracked_subprocesses()` on panic.
     sticky skill finding cannot block repo commits and vice versa.
 12. **Single-source startup rescue**: a dirty worktree inherited across sessions is
     rescued by exactly one mechanism — `safe_restart(..., "rescue_and_reset")` in
-    `_bootstrap_supervisor_repo()`. `OuroborosAgent` construction and worker boot
-    (including `_log_worker_boot_once → check_uncommitted_changes`) must never run
+    `_bootstrap_supervisor_repo()`. The rescue path may clean dirty/untracked files
+    back to `HEAD`, but it must not move the local `ouroboros` branch tip to the
+    official managed remote unless a one-shot update-intent marker exists.
+    `OuroborosAgent` construction and worker boot (including
+    `_log_worker_boot_once → check_uncommitted_changes`) must never run
     `git add`/`git commit`. This keeps pytest subprocesses, A2A card builder, and
     supervisor-side `_get_chat_agent()` from stealing in-progress edits into the
     `ouroboros` branch.

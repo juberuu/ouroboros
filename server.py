@@ -1554,16 +1554,24 @@ async def api_update_apply(request: Request) -> JSONResponse:
         body = {}
     try:
         strategy = str(body.get("strategy") or "replace")
-        from supervisor.git_ops import BRANCH_DEV, checkout_and_reset, prepare_managed_update
+        from supervisor.git_ops import BRANCH_DEV, _clear_update_intent, checkout_and_reset, prepare_managed_update
         ok, payload = prepare_managed_update(strategy)
         if not ok:
             return JSONResponse(payload, status_code=409)
-        checkout_ok, checkout_msg = checkout_and_reset(
-            BRANCH_DEV,
-            reason="ui_update_apply",
-            unsynced_policy="ignore",
-        )
+        try:
+            checkout_ok, checkout_msg = checkout_and_reset(
+                BRANCH_DEV,
+                reason="ui_update_apply",
+                unsynced_policy="ignore",
+            )
+        except Exception as checkout_exc:
+            _clear_update_intent()
+            return JSONResponse(
+                {"error": f"Prepared update but checkout failed: {checkout_exc}", **payload},
+                status_code=409,
+            )
         if not checkout_ok:
+            _clear_update_intent()
             return JSONResponse(
                 {"error": f"Prepared update but checkout failed: {checkout_msg}", **payload},
                 status_code=409,

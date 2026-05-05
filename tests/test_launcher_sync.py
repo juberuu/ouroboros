@@ -169,7 +169,7 @@ def test_sync_existing_repo_from_bundle_replaces_legacy_snapshot(tmp_path):
     assert (archived[0] / "server.py").read_text(encoding="utf-8") == "print('legacy-snapshot')\n"
 
 
-def test_ensure_managed_repo_replaces_repo_when_embedded_bundle_changes(tmp_path):
+def test_ensure_managed_repo_preserves_checkout_when_embedded_bundle_changes(tmp_path):
     bootstrap = _reload_bootstrap()
     src = _make_bundle_source(tmp_path)
     bundle_dir = tmp_path / "bundle"
@@ -179,6 +179,10 @@ def test_ensure_managed_repo_replaces_repo_when_embedded_bundle_changes(tmp_path
     ctx = _make_context(bundle_dir, repo_dir)
     assert bootstrap.ensure_managed_repo(ctx) == "created"
     _run(["git", "remote", "add", "origin", "https://github.com/example/fork.git"], cwd=repo_dir)
+    (repo_dir / "server.py").write_text("print('local-self-modification')\n", encoding="utf-8")
+    _run(["git", "add", "server.py"], cwd=repo_dir)
+    _run(["git", "commit", "-m", "local self modification"], cwd=repo_dir)
+    local_head = _git_output(repo_dir, "rev-parse", "HEAD")
 
     (src / "server.py").write_text("print('bundle-v2')\n", encoding="utf-8")
     _run(["git", "add", "server.py"], cwd=src)
@@ -192,11 +196,12 @@ def test_ensure_managed_repo_replaces_repo_when_embedded_bundle_changes(tmp_path
 
     outcome = bootstrap.ensure_managed_repo(ctx)
 
-    assert outcome == "replaced"
-    assert (repo_dir / "server.py").read_text(encoding="utf-8") == "print('bundle-v2')\n"
+    assert outcome == "metadata-updated"
+    assert _git_output(repo_dir, "rev-parse", "HEAD") == local_head
+    assert (repo_dir / "server.py").read_text(encoding="utf-8") == "print('local-self-modification')\n"
     assert set(_git_output(repo_dir, "remote").splitlines()) == {"managed", "origin"}
-    archives = list((ctx.data_dir / "archive" / "managed_repo").iterdir())
-    assert archives
+    assert bootstrap.load_repo_manifest(repo_dir)["source_sha"] == _git_output(src, "rev-parse", "HEAD")
+    assert not (ctx.data_dir / "archive" / "managed_repo").exists()
 
 
 def test_load_bundle_manifest_rejects_app_version_mismatch(tmp_path):

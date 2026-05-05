@@ -32,7 +32,7 @@ def check_uncommitted_changes(env: Any) -> Tuple[dict, int]:
     Rescue of a dirty worktree is owned by the supervisor-side mechanism
     ``safe_restart(..., unsynced_policy='rescue_and_reset')`` in
     ``server.py::_bootstrap_supervisor_repo``, which creates a proper rescue
-    snapshot branch via ``supervisor/git_ops.py::_create_rescue_snapshot`` —
+    snapshot directory via ``supervisor/git_ops.py::_create_rescue_snapshot`` —
     it runs exactly once per supervisor start and does not pollute the
     ``ouroboros`` dev branch.
 

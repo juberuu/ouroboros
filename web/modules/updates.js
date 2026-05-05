@@ -220,17 +220,11 @@ export function initUpdates({ mount, hostPage = 'settings', hostSubtab = 'update
         let strategy = 'replace';
         if (!safe) {
             const localBits = divergenceText(latestStatus);
-            const choice = prompt(
-                `This update will replace the current managed checkout.\n\nLocal state: ${localBits}\n\nAhead commits are always preserved on a local-keep-* branch. Dirty files are saved in a rescue snapshot. Type "preserve" to continue with an explicit preservation marker, or "replace" to continue with rescue-only dirty-file recovery.`,
-                latestStatus.ahead ? 'preserve' : 'replace',
+            const proceed = confirm(
+                `This update will replace the active managed checkout with the selected official version.\n\nLocal state: ${localBits}\n\nLocal commits will be preserved on a local-keep-* branch before the active branch moves. Dirty files will be saved in a rescue snapshot. Continue?`,
             );
-            if (choice === null) return;
-            strategy = String(choice || '').trim().toLowerCase();
-            if (strategy === 'preserve') strategy = 'stash';
-            if (!['stash', 'replace', 'force'].includes(strategy)) {
-                alert('Update cancelled: expected "preserve" or "replace".');
-                return;
-            }
+            if (!proceed) return;
+            strategy = latestStatus.ahead ? 'stash' : 'replace';
         }
         applyBtn.disabled = true;
         applyBtn.textContent = 'Preparing...';
@@ -242,7 +236,7 @@ export function initUpdates({ mount, hostPage = 'settings', hostSubtab = 'update
             });
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
-            const keep = data.keep_branch ? `\nLocal HEAD preserved as ${data.keep_branch}.` : '';
+            const keep = data.keep_branch ? `\nLocal commits preserved as ${data.keep_branch}.` : '';
             alert(`Update prepared. Server is restarting.${keep}`);
         } catch (err) {
             alert('Update failed: ' + (err.message || err));

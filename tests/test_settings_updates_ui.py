@@ -78,11 +78,15 @@ def test_update_panel_contract_exists():
     assert "UPDATE_INTENT_MARKER_NAME" in git_ops
     assert "_write_update_intent" in git_ops
     assert "_read_update_intent" in git_ops
-    assert "if int(status.get(\"ahead\") or 0) > 0:" in git_ops
+    assert "count_ok, ahead, count_error = _compute_ref_ahead_count(BRANCH_DEV, target_sha)" in git_ops
     assert "[\"git\", \"reset\", \"--hard\", \"HEAD\"]" in git_ops
     assert "[\"git\", \"reset\", \"--hard\", target_ref]" in git_ops
     assert "expected {update_intent_target}" in git_ops
     assert 'str(reason or "") != "ui_update_apply"' in git_ops
+    assert "if fetch and remote_name:" in git_ops
+    assert "Ordinary restarts without an update intent never reset" in _read("docs/ARCHITECTURE.md")
+    assert "confirm(" in updates
+    assert "prompt(" not in updates
 
 
 def test_update_panel_surfaces_unmanaged_checkouts_as_unavailable():
@@ -96,11 +100,15 @@ def test_update_panel_surfaces_unmanaged_checkouts_as_unavailable():
 def test_update_apply_consumes_intent_before_restart():
     server = _read("server.py")
     git_ops = _read("supervisor/git_ops.py")
+    apply_block = server[server.index("async def api_update_apply"):server.index("\n\n_evo_cache", server.index("async def api_update_apply"))]
 
-    assert "checkout_and_reset(" in server
-    assert 'reason="ui_update_apply"' in server
+    assert "checkout_and_reset(" in apply_block
+    assert 'reason="ui_update_apply"' in apply_block
+    assert "_clear_update_intent()" in apply_block
+    assert "except Exception as checkout_exc:" in apply_block
+    assert apply_block.index("except Exception as checkout_exc:") < apply_block.index("_request_restart_exit()")
     assert 'str(reason or "") != "ui_update_apply"' in git_ops
-    assert "_request_restart_exit()" in server
+    assert "_request_restart_exit()" in apply_block
 
 
 def test_button_design_system_contract_exists():

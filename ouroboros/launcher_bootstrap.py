@@ -339,7 +339,11 @@ def ensure_managed_repo(context: BootstrapContext) -> str:
     if not (context.repo_dir / ".git").exists():
         return _install_managed_repo(context, manifest, reason="legacy-no-git")
     if not _repo_manifest_matches(context.repo_dir, manifest):
-        return _install_managed_repo(context, manifest, reason="bundle-upgrade")
+        _ensure_managed_remote(context, context.repo_dir, manifest)
+        context.log.info(
+            "Updated managed repo metadata for embedded bundle without replacing local checkout."
+        )
+        return "metadata-updated"
 
     _ensure_managed_remote(context, context.repo_dir, manifest)
     return "unchanged"
