@@ -27,7 +27,7 @@ def test_chat_id_zero_preserved_not_nulled():
     chat_id=0 sessions to None. The repaired logic must preserve 0."""
     import inspect
     import ouroboros.agent as agent_mod
-    body = pathlib.Path(agent_mod.__file__).read_text()
+    body = pathlib.Path(agent_mod.__file__).read_text(encoding="utf-8")
     # Confirm the broken pattern is gone
     assert 'int(task.get("chat_id") or 0) or None' not in body
     # Confirm the new explicit None-vs-int branch is present
