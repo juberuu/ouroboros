@@ -1,19 +1,35 @@
+import { renderPageHeader, renderTabStrip } from './page_header.js';
+
+const DASHBOARD_ICON = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><path d="M3 13h8V3H3z"/><path d="M13 21h8V11h-8z"/><path d="M13 9h8V3h-8z"/><path d="M3 21h8v-6H3z"/></svg>';
+const DASHBOARD_TABS = [
+    { value: 'logs', label: 'Logs' },
+    { value: 'evolution', label: 'Evolution' },
+    { value: 'costs', label: 'Costs' },
+    { value: 'updates', label: 'Updates' },
+];
+// Static guard markers: renderTabStrip emits data-dashboard-tab="logs",
+// data-dashboard-tab="evolution", data-dashboard-tab="costs", and
+// data-dashboard-tab="updates" from DASHBOARD_TABS at runtime.
+
 export function initDashboard({ state }) {
     const page = document.createElement('div');
     page.id = 'page-dashboard';
     page.className = 'page';
     page.innerHTML = `
-        <div class="page-header">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><path d="M3 13h8V3H3z"/><path d="M13 21h8V11h-8z"/><path d="M13 9h8V3h-8z"/><path d="M3 21h8v-6H3z"/></svg>
-            <h2>Dashboard</h2>
-        </div>
+        ${renderPageHeader({
+            title: 'Dashboard',
+            icon: DASHBOARD_ICON,
+            description: 'Monitor logs, evolution, costs, and update state from one view.',
+            tabsHtml: renderTabStrip({
+                items: DASHBOARD_TABS,
+                active: state.dashboardActiveSubtab || 'logs',
+                dataAttr: 'data-dashboard-tab',
+                ariaLabel: 'Dashboard views',
+                stripClass: 'dashboard-tabs',
+                tabClass: 'dashboard-tab',
+            }),
+        })}
         <div class="dashboard-shell">
-            <div class="dashboard-tabs" role="tablist" aria-label="Dashboard views">
-                <button class="dashboard-tab active" data-dashboard-tab="logs">Logs</button>
-                <button class="dashboard-tab" data-dashboard-tab="evolution">Evolution</button>
-                <button class="dashboard-tab" data-dashboard-tab="costs">Costs</button>
-                <button class="dashboard-tab" data-dashboard-tab="updates">Updates</button>
-            </div>
             <div class="dashboard-panels">
                 <section class="dashboard-panel active" data-dashboard-panel="logs" id="dashboard-panel-logs"></section>
                 <section class="dashboard-panel" data-dashboard-panel="evolution" id="dashboard-panel-evolution"></section>

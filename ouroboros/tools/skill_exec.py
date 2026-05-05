@@ -81,6 +81,7 @@ log = logging.getLogger(__name__)
 # — ``skill_exec`` is for bounded, synchronous helper calls, not for
 # long-running worker tasks.
 _HARD_TIMEOUT_CEILING_SEC = 300
+_SKILL_REVIEW_TOOL_TIMEOUT_SEC = int(os.environ.get("OUROBOROS_SKILL_REVIEW_TOOL_TIMEOUT_SEC", "1800"))
 _DEFAULT_TIMEOUT_SEC = 60
 # v5.7.0: bumped from 64KB / 32KB. Real script skills (image-gen prompt
 # trace, deep-research dump, batch summarisation) routinely produced
@@ -459,96 +460,15 @@ def _handle_review_skill(ctx: ToolContext, skill: str = "", **_kwargs: Any) -> s
     skill_name = str(skill or "").strip()
     if not skill_name:
         return "⚠️ SKILL_REVIEW_ERROR: 'skill' argument is required."
-    from ouroboros.skill_lifecycle_queue import skill_lifecycle_file_lock
+    from ouroboros.skill_review_runner import run_skill_review_lifecycle_blocking
 
-    with skill_lifecycle_file_lock(pathlib.Path(ctx.drive_root)):
-        outcome = _review_skill_impl(ctx, skill_name)
-        deps_status, deps_error = _reconcile_deps_after_pass_review(
-            pathlib.Path(ctx.drive_root),
-            skill_name,
-        ) if outcome.status == "pass" else ("not_required", "")
-    payload = {
-        "skill": outcome.skill_name,
-        "status": outcome.status,
-        "content_hash": outcome.content_hash,
-        "reviewer_models": outcome.reviewer_models,
-        "findings": outcome.findings,
-        "error": outcome.error,
-        "deps_status": deps_status,
-        "deps_error": deps_error,
-    }
-    heal_mode = any(
-        isinstance(message.get("content"), str) and "HEAL_MODE_NO_ENABLE" in message.get("content", "")
-        for message in (getattr(ctx, "messages", None) or [])
+    payload = run_skill_review_lifecycle_blocking(
+        ctx,
+        skill_name,
+        source="tool",
+        review_impl=_review_skill_impl,
     )
-    if heal_mode:
-        try:
-            from ouroboros import extension_loader
-
-            if skill_name in extension_loader.snapshot()["extensions"]:
-                extension_loader.unload_extension(skill_name)
-                payload["extension_action"] = "extension_unloaded"
-                payload["extension_reason"] = "heal_review_only"
-            else:
-                payload["extension_action"] = "extension_heal_review_only"
-                payload["extension_reason"] = "heal_review_only"
-        except Exception:
-            payload["extension_action"] = "extension_heal_review_only"
-            payload["extension_reason"] = "heal_review_only"
-        return json.dumps(payload, ensure_ascii=False, indent=2)
-    try:
-        from ouroboros import extension_loader
-        from ouroboros.config import load_settings as _load_settings
-
-        live_state = extension_loader.reconcile_extension(
-            skill_name,
-            pathlib.Path(ctx.drive_root),
-            _load_settings,
-            retry_load_error=True,
-        )
-        payload["extension_action"] = live_state.get("action")
-        payload["extension_reason"] = live_state.get("reason")
-    except Exception:
-        payload["extension_action"] = None
-        payload["extension_reason"] = None
     return json.dumps(payload, ensure_ascii=False, indent=2)
-
-
-def _reconcile_deps_after_pass_review(drive_root: pathlib.Path, skill_name: str) -> tuple[str, str]:
-    """Install/reinstall isolated deps after a PASS review for the tool path.
-
-    Mirrors ``extensions_api.api_skill_review`` so both review entrypoints
-    clear the dependency gate. Must be called while the caller holds the skill
-    lifecycle file lock (the tool path does; the HTTP path wraps this inside
-    ``run_lifecycle_job``).
-    """
-    try:
-        from ouroboros.marketplace.provenance import read_provenance
-        from ouroboros.marketplace.install_specs import install_specs_hash
-        from ouroboros.marketplace.isolated_deps import (
-            install_isolated_dependencies,
-            read_deps_state,
-        )
-
-        prov = read_provenance(drive_root, skill_name) or {}
-        auto_specs = list((prov.get("install_specs") or {}).get("auto") or [])
-        if not auto_specs:
-            return "not_required", ""
-        deps_state = read_deps_state(drive_root, skill_name)
-        expected_hash = install_specs_hash(auto_specs)
-        if (
-            str(deps_state.get("status") or "") == "installed"
-            and deps_state.get("specs_hash") == expected_hash
-        ):
-            return "installed", ""
-        loaded = find_skill(drive_root, skill_name)
-        if loaded is None:
-            return "failed", "skill not found during dependency reconciliation"
-        install_isolated_dependencies(drive_root, skill_name, loaded.skill_dir, auto_specs)
-        return "installed", ""
-    except Exception as exc:
-        log.debug("tool review dependency reconciliation failed", exc_info=True)
-        return "failed", f"{type(exc).__name__}: {exc}"
 
 
 def _skill_deps_exec_block(drive_root: pathlib.Path, loaded: Any) -> str:
@@ -1127,7 +1047,7 @@ def get_tools() -> List[ToolEntry]:
             schema=_REVIEW_SCHEMA,
             handler=_handle_review_skill,
             is_code_tool=False,
-            timeout_sec=_HARD_TIMEOUT_CEILING_SEC,
+            timeout_sec=_SKILL_REVIEW_TOOL_TIMEOUT_SEC,
         ),
         ToolEntry(
             name="skill_exec",
@@ -1145,9 +1065,9 @@ def get_tools() -> List[ToolEntry]:
         ),
     ]
 
-
-    __all__ = [
+__all__ = [
     "get_tools",
     "_ALLOWED_RUNTIMES",
     "_HARD_TIMEOUT_CEILING_SEC",
-    ]
+    "_SKILL_REVIEW_TOOL_TIMEOUT_SEC",
+]

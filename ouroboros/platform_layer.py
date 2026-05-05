@@ -168,6 +168,18 @@ def file_unlock(fd: int) -> None:
         fcntl.flock(fd, fcntl.LOCK_UN)
 
 
+def pid_is_alive(pid: int) -> bool:
+    """Return whether a PID appears alive without exposing os.kill to callers."""
+
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Windows file locking via LockFileEx / UnlockFileEx (ctypes)
 #

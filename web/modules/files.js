@@ -1,3 +1,7 @@
+import { renderPageHeader } from './page_header.js';
+
+const FILES_ICON = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><path d="M3 7h5l2 2h11v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M3 7V5a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v2"/></svg>';
+
 function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
@@ -29,12 +33,12 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
     page.id = 'page-files';
     page.className = 'page';
     page.innerHTML = `
-        <div class="page-header">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><path d="M3 7h5l2 2h11v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M3 7V5a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v2"/></svg>
-            <h2>Files</h2>
-            <div class="spacer"></div>
-            <button class="btn btn-default" id="files-refresh">Refresh</button>
-        </div>
+        ${renderPageHeader({
+            title: 'Files',
+            icon: FILES_ICON,
+            description: defaultDirectoryMeta(),
+            actionsHtml: '<button class="btn btn-default" id="files-refresh">Refresh</button>',
+        })}
         <div class="files-layout">
             <section class="files-sidebar">
                 <div class="files-toolbar">

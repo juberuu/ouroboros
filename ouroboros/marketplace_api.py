@@ -45,7 +45,7 @@ from ouroboros.marketplace.install import (
 )
 from ouroboros.marketplace.provenance import read_provenance
 from ouroboros.marketplace import ouroboroshub
-from ouroboros.skill_lifecycle_queue import JobProgressTarget, run_lifecycle_job
+from ouroboros.skill_lifecycle_queue import JobProgressTarget, LifecycleJobOptions, run_lifecycle_job
 
 log = logging.getLogger(__name__)
 
@@ -351,16 +351,18 @@ async def api_marketplace_install(request: Request) -> JSONResponse:
             source="clawhub",
             message=f"Installing {slug}",
             runner=_run_install,
-            progress_target=install_progress,
-            result_message=lambda item: (
-                f"Installed as {item.sanitized_name}"
-                if getattr(item, "ok", False)
-                else getattr(item, "error", "install failed")
-            ),
-            result_error=lambda item: (
-                getattr(item, "error", "install failed")
-                if not getattr(item, "ok", False)
-                else (getattr(item, "deps_error", "") if getattr(item, "deps_status", "") == "failed" else "")
+            options=LifecycleJobOptions(
+                progress_target=install_progress,
+                result_message=lambda item: (
+                    f"Installed as {item.sanitized_name}"
+                    if getattr(item, "ok", False)
+                    else getattr(item, "error", "install failed")
+                ),
+                result_error=lambda item: (
+                    getattr(item, "error", "install failed")
+                    if not getattr(item, "ok", False)
+                    else (getattr(item, "deps_error", "") if getattr(item, "deps_status", "") == "failed" else "")
+                ),
             ),
         )
     except PermissionError as exc:
@@ -405,15 +407,17 @@ async def api_marketplace_update(request: Request) -> JSONResponse:
             source="clawhub",
             message=f"Updating {sanitized}",
             runner=_run_update,
-            result_message=lambda item: (
-                f"Updated {item.sanitized_name}"
-                if getattr(item, "ok", False)
-                else getattr(item, "error", "update failed")
-            ),
-            result_error=lambda item: (
-                getattr(item, "error", "update failed")
-                if not getattr(item, "ok", False)
-                else (getattr(item, "deps_error", "") if getattr(item, "deps_status", "") == "failed" else "")
+            options=LifecycleJobOptions(
+                result_message=lambda item: (
+                    f"Updated {item.sanitized_name}"
+                    if getattr(item, "ok", False)
+                    else getattr(item, "error", "update failed")
+                ),
+                result_error=lambda item: (
+                    getattr(item, "error", "update failed")
+                    if not getattr(item, "ok", False)
+                    else (getattr(item, "deps_error", "") if getattr(item, "deps_status", "") == "failed" else "")
+                ),
             ),
         )
     except PermissionError as exc:
@@ -467,12 +471,14 @@ async def api_marketplace_uninstall(request: Request) -> JSONResponse:
             source="clawhub",
             message=f"Uninstalling {sanitized}",
             runner=_run_uninstall,
-            result_message=lambda item: (
-                f"Uninstalled {item.sanitized_name}"
-                if getattr(item, "ok", False)
-                else getattr(item, "error", "uninstall failed")
+            options=LifecycleJobOptions(
+                result_message=lambda item: (
+                    f"Uninstalled {item.sanitized_name}"
+                    if getattr(item, "ok", False)
+                    else getattr(item, "error", "uninstall failed")
+                ),
+                result_error=lambda item: "" if getattr(item, "ok", False) else getattr(item, "error", "uninstall failed"),
             ),
-            result_error=lambda item: "" if getattr(item, "ok", False) else getattr(item, "error", "uninstall failed"),
         )
     except PermissionError as exc:
         return JSONResponse({"error": str(exc), "code": "marketplace_disabled"}, status_code=403)
@@ -594,12 +600,14 @@ async def api_ouroboroshub_install(request: Request) -> JSONResponse:
         source="ouroboroshub",
         message=f"Installing {slug}",
         runner=_run_install,
-        result_message=lambda item: (
-            f"Installed as {item.get('sanitized_name')}"
-            if item.get("ok")
-            else item.get("error", "install failed")
+        options=LifecycleJobOptions(
+            result_message=lambda item: (
+                f"Installed as {item.get('sanitized_name')}"
+                if item.get("ok")
+                else item.get("error", "install failed")
+            ),
+            result_error=lambda item: "" if item.get("ok") else item.get("error", "install failed"),
         ),
-        result_error=lambda item: "" if item.get("ok") else item.get("error", "install failed"),
     )
     return JSONResponse(payload, status_code=200 if payload.get("ok") else 400)
 
@@ -671,12 +679,14 @@ async def api_ouroboroshub_update(request: Request) -> JSONResponse:
         source="ouroboroshub",
         message=f"Updating {name}",
         runner=_run_update,
-        result_message=lambda item: (
-            f"Updated {item.get('sanitized_name')}"
-            if item.get("ok")
-            else item.get("error", "update failed")
+        options=LifecycleJobOptions(
+            result_message=lambda item: (
+                f"Updated {item.get('sanitized_name')}"
+                if item.get("ok")
+                else item.get("error", "update failed")
+            ),
+            result_error=lambda item: "" if item.get("ok") else item.get("error", "update failed"),
         ),
-        result_error=lambda item: "" if item.get("ok") else item.get("error", "update failed"),
     )
     return JSONResponse(payload, status_code=200 if payload.get("ok") else 400)
 
@@ -728,12 +738,14 @@ async def api_ouroboroshub_uninstall(request: Request) -> JSONResponse:
         source="ouroboroshub",
         message=f"Uninstalling {sanitized}",
         runner=_run_uninstall,
-        result_message=lambda item: (
-            f"Uninstalled {item.get('sanitized_name')}"
-            if item.get("ok")
-            else item.get("error", "uninstall failed")
+        options=LifecycleJobOptions(
+            result_message=lambda item: (
+                f"Uninstalled {item.get('sanitized_name')}"
+                if item.get("ok")
+                else item.get("error", "uninstall failed")
+            ),
+            result_error=lambda item: "" if item.get("ok") else item.get("error", "uninstall failed"),
         ),
-        result_error=lambda item: "" if item.get("ok") else item.get("error", "uninstall failed"),
     )
     return JSONResponse(payload, status_code=200 if payload.get("ok") else 400)
 

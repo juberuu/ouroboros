@@ -1,5 +1,13 @@
 import { initMarketplace } from './marketplace.js';
 import { initOuroborosHub } from './ouroboroshub.js';
+import { renderPageHeader, renderTabStrip } from './page_header.js';
+
+const SKILLS_ICON = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18"/><path d="M3 12h18"/><path d="M5 5l14 14"/><path d="M19 5L5 19"/></svg>';
+const SKILLS_TABS = [
+    { value: 'installed', label: 'My skills', pillId: 'skills-tab-pill-installed', pillClass: 'skills-tab-pill' },
+    { value: 'marketplace', label: 'ClawHub', pillId: 'skills-tab-pill-marketplace', pillClass: 'skills-tab-pill' },
+    { value: 'ouroboroshub', label: 'OuroborosHub', pillId: 'skills-tab-pill-ouroboroshub', pillClass: 'skills-tab-pill' },
+];
 
 /**
  * Ouroboros Skills UI — Phase 5.
@@ -14,27 +22,20 @@ import { initOuroborosHub } from './ouroboroshub.js';
 function skillsPageTemplate() {
     return `
         <section class="page" id="page-skills">
-            <div class="skills-header">
-                <h2>Skills</h2>
-                <p class="muted">
-                    Skills extend Ouroboros with new tools, routes, and widgets.
-                    Each skill is reviewed for safety before you turn it on.
-                </p>
-                <div class="skills-tabs" role="tablist" aria-label="Skills views">
-                    <button class="skills-tab is-active" data-tab="installed" role="tab" aria-selected="true">
-                        My skills
-                        <span class="skills-tab-pill" id="skills-tab-pill-installed" hidden></span>
-                    </button>
-                    <button class="skills-tab" data-tab="marketplace" role="tab" aria-selected="false">
-                        ClawHub
-                        <span class="skills-tab-pill" id="skills-tab-pill-marketplace" hidden></span>
-                    </button>
-                    <button class="skills-tab" data-tab="ouroboroshub" role="tab" aria-selected="false">
-                        OuroborosHub
-                        <span class="skills-tab-pill" id="skills-tab-pill-ouroboroshub" hidden></span>
-                    </button>
-                </div>
-            </div>
+            ${renderPageHeader({
+                title: 'Skills',
+                icon: SKILLS_ICON,
+                description: 'Skills extend Ouroboros with new tools, routes, and widgets. Each skill is reviewed for safety before you turn it on.',
+                tabsHtml: renderTabStrip({
+                    items: SKILLS_TABS,
+                    active: 'installed',
+                    dataAttr: 'data-tab',
+                    activeClass: 'is-active',
+                    ariaLabel: 'Skills views',
+                    stripClass: 'skills-tabs',
+                    tabClass: 'skills-tab',
+                }),
+            })}
             <div class="skills-tab-panel" id="skills-pane-installed" data-pane="installed">
                 <div id="skills-migration-banner" class="skills-migration-banner" hidden></div>
                 <div class="skills-controls">

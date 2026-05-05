@@ -7,12 +7,14 @@ trivial python3 script. No network, no real LLM calls — the
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import pathlib
 import shutil
 import sys
 import tempfile
+import threading
 from unittest.mock import patch
 
 import pytest
@@ -126,6 +128,14 @@ def test_skill_exec_tools_register_in_registry(tmp_path):
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
     names = {t["function"]["name"] for t in registry.schemas()}
     assert {"list_skills", "review_skill", "skill_exec", "toggle_skill", "skill_preflight"} <= names
+
+
+def test_review_skill_uses_long_timeout_separate_from_skill_exec():
+    entries = {entry.name: entry for entry in skill_exec_mod.get_tools()}
+
+    assert entries["skill_exec"].timeout_sec == skill_exec_mod._HARD_TIMEOUT_CEILING_SEC
+    assert entries["review_skill"].timeout_sec >= 1800
+    assert entries["review_skill"].timeout_sec > entries["skill_exec"].timeout_sec
 
 
 def test_skill_preflight_success_and_no_pycache(tmp_path, monkeypatch):
@@ -740,6 +750,148 @@ def test_heal_review_does_not_reconcile_live_extension(tmp_path, monkeypatch):
 
     assert calls == []
     assert result["extension_reason"] == "heal_review_only"
+
+
+def test_review_skill_tool_records_lifecycle_job_state_and_events(tmp_path, monkeypatch):
+    from ouroboros.skill_review import SkillReviewOutcome
+    import ouroboros.skill_lifecycle_queue as lifecycle_queue
+
+    lifecycle_queue._events.clear()
+    lifecycle_queue._active = None
+    lifecycle_queue._lock = None
+    lifecycle_queue._dedupe_jobs.clear()
+
+    ctx = _make_ctx(tmp_path)
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir()
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    skill_dir = _build_skill(skills_root, "alpha")
+    content_hash = compute_content_hash(skill_dir)
+
+    monkeypatch.setattr(
+        skill_exec_mod,
+        "_review_skill_impl",
+        lambda _ctx, skill_name: SkillReviewOutcome(
+            skill_name=skill_name,
+            status="pass",
+            content_hash=content_hash,
+            reviewer_models=["fake/reviewer"],
+            findings=[],
+            error="",
+        ),
+    )
+
+    result = json.loads(skill_exec_mod._handle_review_skill(ctx, skill="alpha"))
+
+    assert result["status"] == "pass"
+    assert result["deps_status"] == "not_required"
+    review_job = json.loads(
+        (ctx.drive_root / "state" / "skills" / "alpha" / "review_job.json").read_text(encoding="utf-8")
+    )
+    assert review_job["status"] == "completed"
+    assert review_job["review_status"] == "pass"
+    assert review_job["job_id"].startswith("skill-job-")
+    lifecycle_event = lifecycle_queue.queue_snapshot()["events"][-1]
+    assert lifecycle_event["kind"] == "review"
+    assert lifecycle_event["target"] == "alpha"
+    events_text = (ctx.drive_root / "logs" / "events.jsonl").read_text(encoding="utf-8")
+    assert "skill_review_started" in events_text
+    assert "skill_review_completed" in events_text
+
+
+def test_stale_review_job_is_marked_interrupted(tmp_path, monkeypatch):
+    from ouroboros.skill_review_runner import (
+        mark_stale_review_job_interrupted,
+        review_job_state_path,
+    )
+
+    ctx = _make_ctx(tmp_path)
+    job_path = review_job_state_path(ctx.drive_root, "alpha")
+    job_path.write_text(
+        json.dumps(
+            {
+                "status": "running",
+                "skill": "alpha",
+                "content_hash": "abc",
+                "job_id": "skill-job-old",
+                "started_at": "2026-01-01T00:00:00+00:00",
+                "last_heartbeat_at": "2026-01-01T00:00:00+00:00",
+                "pid": 123456,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("ouroboros.skill_review_runner._pid_alive", lambda _pid: False)
+
+    mark_stale_review_job_interrupted(ctx.drive_root, "alpha", current_content_hash="abc")
+
+    data = json.loads(job_path.read_text(encoding="utf-8"))
+    assert data["status"] == "interrupted"
+    assert data["interrupt_reason"] == "owner_process_exited"
+    events_text = (ctx.drive_root / "logs" / "events.jsonl").read_text(encoding="utf-8")
+    assert "skill_review_interrupted" in events_text
+
+
+def test_async_review_cancellation_waits_for_review_thread(tmp_path, monkeypatch):
+    from ouroboros.skill_review import SkillReviewOutcome
+    from ouroboros.skill_review_runner import run_skill_review_lifecycle
+    import ouroboros.skill_lifecycle_queue as lifecycle_queue
+
+    lifecycle_queue._events.clear()
+    lifecycle_queue._active = None
+    lifecycle_queue._lock = None
+    lifecycle_queue._dedupe_jobs.clear()
+
+    ctx = _make_ctx(tmp_path)
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir()
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    skill_dir = _build_skill(skills_root, "alpha")
+    content_hash = compute_content_hash(skill_dir)
+    started = threading.Event()
+    release = threading.Event()
+
+    def fake_review(_ctx, skill_name):
+        started.set()
+        release.wait(2)
+        return SkillReviewOutcome(
+            skill_name=skill_name,
+            status="pass",
+            content_hash=content_hash,
+            reviewer_models=["fake/reviewer"],
+            findings=[],
+            error="",
+        )
+
+    async def main():
+        task = asyncio.create_task(
+            run_skill_review_lifecycle(ctx, "alpha", source="test", review_impl=fake_review)
+        )
+        assert await asyncio.to_thread(started.wait, 2)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        active = lifecycle_queue.queue_snapshot()["active"]
+        assert active is not None
+        assert active["target"] == "alpha"
+        quick = asyncio.create_task(
+            lifecycle_queue.run_lifecycle_job(
+                kind="review",
+                target="beta",
+                dedupe_key="review:beta:hash",
+                runner=lambda: asyncio.sleep(0, result={"quick": True}),
+            )
+        )
+        await asyncio.sleep(0.05)
+        assert not quick.done()
+        release.set()
+        result = await asyncio.wait_for(task, timeout=2)
+        assert result["status"] == "pass"
+        assert await asyncio.wait_for(quick, timeout=2) == {"quick": True}
+        assert lifecycle_queue.queue_snapshot()["active"] is None
+
+    asyncio.run(main())
 
 
 def test_toggle_skill_requires_both_args(tmp_path, monkeypatch):

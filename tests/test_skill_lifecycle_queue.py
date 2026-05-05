@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import threading
 
+import pytest
 import ouroboros.skill_lifecycle_queue as q
 
 
@@ -9,6 +12,7 @@ def _reset_queue():
     q._events.clear()
     q._active = None
     q._lock = None
+    q._dedupe_jobs.clear()
 
 
 def test_lifecycle_job_success_notifies(monkeypatch):
@@ -23,7 +27,14 @@ def test_lifecycle_job_success_notifies(monkeypatch):
     async def runner():
         return {"ok": True}
 
-    result = asyncio.run(q.run_lifecycle_job(kind="review", target="weather", runner=runner, result_message=lambda _r: "done"))
+    result = asyncio.run(
+        q.run_lifecycle_job(
+            kind="review",
+            target="weather",
+            runner=runner,
+            options=q.LifecycleJobOptions(result_message=lambda _r: "done"),
+        )
+    )
     snap = q.queue_snapshot()
     assert result == {"ok": True}
     assert snap["events"][-1]["status"] == "succeeded"
@@ -85,3 +96,194 @@ def test_lifecycle_queue_keeps_recent_80_events():
     assert len(events) == 80
     assert events[0]["target"] == "5"
     assert events[-1]["target"] == "84"
+
+
+def test_lifecycle_job_blocking_wrapper_records_event():
+    _reset_queue()
+
+    result = q.run_lifecycle_job_blocking(
+        kind="review",
+        target="weather",
+        dedupe_key="review:weather:abc",
+        runner=lambda: {"ok": True},
+        options=q.LifecycleJobOptions(result_message=lambda _r: "done"),
+    )
+
+    assert result == {"ok": True}
+    event = q.queue_snapshot()["events"][-1]
+    assert event["kind"] == "review"
+    assert event["dedupe_key"] == "review:weather:abc"
+    assert event["status"] == "succeeded"
+
+
+def test_lifecycle_dedupe_rejects_active_duplicate():
+    _reset_queue()
+    started = threading.Event()
+    release = threading.Event()
+
+    async def runner():
+        started.set()
+        await asyncio.to_thread(release.wait)
+        return {"ok": True}
+
+    async def main():
+        first = asyncio.create_task(
+            q.run_lifecycle_job(
+                kind="review",
+                target="weather",
+                dedupe_key="review:weather:abc",
+                runner=runner,
+            )
+        )
+        assert await asyncio.to_thread(started.wait, 2)
+        with pytest.raises(q.DuplicateLifecycleJobError) as exc:
+            await q.run_lifecycle_job(
+                kind="review",
+                target="weather",
+                dedupe_key="review:weather:abc",
+                runner=runner,
+            )
+        assert exc.value.job.target == "weather"
+        release.set()
+        assert await first == {"ok": True}
+
+    asyncio.run(main())
+
+
+def test_cancelled_waiting_lifecycle_job_releases_lock_and_dedupe():
+    _reset_queue()
+    first_started = threading.Event()
+    release_first = threading.Event()
+
+    async def blocking_runner():
+        first_started.set()
+        await asyncio.to_thread(release_first.wait)
+        return {"first": True}
+
+    async def quick_runner():
+        return {"ok": True}
+
+    async def main():
+        first = asyncio.create_task(
+            q.run_lifecycle_job(
+                kind="review",
+                target="alpha",
+                dedupe_key="review:alpha:hash",
+                runner=blocking_runner,
+            )
+        )
+        assert await asyncio.to_thread(first_started.wait, 2)
+        second = asyncio.create_task(
+            q.run_lifecycle_job(
+                kind="review",
+                target="beta",
+                dedupe_key="review:beta:hash",
+                runner=quick_runner,
+            )
+        )
+        await asyncio.sleep(0.05)
+        second.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await second
+        release_first.set()
+        assert await asyncio.wait_for(first, timeout=2) == {"first": True}
+        assert await asyncio.wait_for(
+            q.run_lifecycle_job(
+                kind="review",
+                target="beta",
+                dedupe_key="review:beta:hash",
+                runner=quick_runner,
+            ),
+            timeout=2,
+        ) == {"ok": True}
+
+    asyncio.run(main())
+
+
+def test_cancelled_file_lock_wait_cleans_active_job(monkeypatch):
+    _reset_queue()
+    entered_file_lock = threading.Event()
+    release_file_lock = threading.Event()
+    finished = []
+
+    @contextlib.asynccontextmanager
+    async def fake_file_lock(_drive_root):
+        entered_file_lock.set()
+        await asyncio.to_thread(release_file_lock.wait)
+        yield
+
+    monkeypatch.setattr(q, "async_skill_lifecycle_file_lock", fake_file_lock)
+
+    async def runner():
+        return {"ok": True}
+
+    async def main():
+        task = asyncio.create_task(
+            q.run_lifecycle_job(
+                kind="review",
+                target="alpha",
+                dedupe_key="review:alpha:file-lock",
+                runner=runner,
+                options=q.LifecycleJobOptions(
+                    on_finished=lambda job, _result, exc: finished.append(
+                        (job.status, type(exc).__name__ if exc else "")
+                    ),
+                ),
+            )
+        )
+        assert await asyncio.to_thread(entered_file_lock.wait, 2)
+        assert q.queue_snapshot()["active"]["target"] == "alpha"
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert q.queue_snapshot()["active"] is None
+        assert finished == [("cancelled", "CancelledError")]
+        release_file_lock.set()
+        assert await asyncio.wait_for(
+            q.run_lifecycle_job(
+                kind="review",
+                target="alpha",
+                dedupe_key="review:alpha:file-lock",
+                runner=runner,
+            ),
+            timeout=2,
+        ) == {"ok": True}
+
+    asyncio.run(main())
+
+
+def test_async_file_lock_cancelled_wait_has_no_late_unlock(tmp_path, monkeypatch):
+    import ouroboros.platform_layer as platform_layer
+
+    allow_lock = threading.Event()
+    attempts = []
+    unlocks = []
+
+    def fake_lock(_fd):
+        attempts.append("lock")
+        if not allow_lock.is_set():
+            raise OSError("busy")
+
+    def fake_unlock(_fd):
+        unlocks.append("unlock")
+
+    monkeypatch.setattr(platform_layer, "file_lock_exclusive_nb", fake_lock)
+    monkeypatch.setattr(platform_layer, "file_unlock", fake_unlock)
+
+    async def wait_on_lock():
+        async with q.async_skill_lifecycle_file_lock(tmp_path):
+            return True
+
+    async def main():
+        task = asyncio.create_task(wait_on_lock())
+        await asyncio.sleep(0.06)
+        assert attempts
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert unlocks == []
+        allow_lock.set()
+        assert await wait_on_lock() is True
+        assert unlocks == ["unlock"]
+
+    asyncio.run(main())

@@ -413,7 +413,8 @@ The Logs page phase badges now match Chat live card colors.
 JS modules that generate HTML must use CSS class names, not `style=""` attributes.
 This is enforced by reviewer policy — `.style.*` assignments on DOM elements (e.g.
 `element.style.display`, `element.style.color`) will produce a REVIEW_BLOCKED finding.
-Existing classes (`.stat-card`, `.page-header`, `.about-*`, `.costs-*`) cover common layouts.
+Existing classes (`.stat-card`, `.page-header`, `.app-page-*`, `.app-tab-*`, `.about-*`, `.costs-*`) cover common layouts.
+For new top-level pages, prefer `web/modules/page_header.js` over bespoke header/tab markup.
 Add new classes to `web/style.css` when needed.
 Before staging any `web/modules/*.js` file: `grep -n "\.style\." web/modules/*.js`
 and fix any hits.

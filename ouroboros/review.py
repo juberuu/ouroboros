@@ -74,7 +74,7 @@ MAX_FUNCTION_LINES = 300
 # larger than the pre-release scope; the ceiling bump stays consistent
 # with how MAX_TOTAL_FUNCTIONS has grown through v4.40→v4.47 as each
 # phase shipped.
-MAX_TOTAL_FUNCTIONS = 1697  # v5.7.1: contributor reliability integration adds focused regression helpers for git/shell/data_read edge cases; next broad tools pass should pay this down by extracting git commit/review helpers.
+MAX_TOTAL_FUNCTIONS = 1731  # v5.7.2: lifecycle-backed skill review observability and shared UI header helpers add focused functions; next broad tools/UI pass should pay this down by extracting review/job state utilities.
 # v4.40.0 adds claude_advisory_review.py to the grandfathered set: the file
 # grew to 1731 lines across v4.37-v4.39 (plan_task quorum + direct-provider
 # fallback + convergence rule + syntax preflight + reflection decoupling).

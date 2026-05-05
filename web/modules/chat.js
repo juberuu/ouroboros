@@ -1,4 +1,5 @@
 import { escapeHtml, renderMarkdown } from './utils.js';
+import { renderPageHeader } from './page_header.js';
 import {
     getLogTaskGroupId,
     isGroupedTaskEvent,
@@ -10,6 +11,7 @@ const CHAT_STORAGE_KEY = 'ouro_chat';
 const CHAT_INPUT_HISTORY_KEY = 'ouro_chat_input_history';
 const CHAT_SESSION_ID_KEY = 'ouro_chat_session_id';
 const PLAN_PREFIX = 'Please do multi-model planning (plan_task tool) and web-search before answering or starting this task:\n\n';
+const CHAT_ICON = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z"/><path d="M7 11h10"/><path d="M7 15h6"/><path d="M7 7h8"/></svg>';
 
 function getOrCreateChatSessionId() {
     try {
@@ -48,25 +50,28 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
     page.id = 'page-chat';
     page.className = 'page active';
     page.innerHTML = `
-        <div class="page-header chat-page-header">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z"/><path d="M7 11h10"/><path d="M7 15h6"/><path d="M7 7h8"/></svg>
-            <h2>Chat</h2>
-            <div class="spacer"></div>
-            <div class="chat-header-actions" id="chat-header-actions">
-                <button class="chat-header-btn" type="button" data-chat-command="evolve" title="Toggle evolution mode">Evolve</button>
-                <button class="chat-header-btn" type="button" data-chat-command="bg" title="Toggle background consciousness">Consciousness</button>
-                <button class="chat-header-btn" type="button" data-chat-command="review" title="Run review now">Review</button>
-                <button class="chat-header-btn" type="button" data-chat-command="restart" title="Restart agent">Restart</button>
-                <button class="chat-header-btn danger" type="button" data-chat-command="panic" title="Stop all workers">Panic</button>
-            </div>
-            <button class="chat-budget-pill" id="chat-budget-pill" type="button" title="Open budget controls" aria-label="Open budget controls">
-                <span class="chat-budget-text" id="chat-budget-text">$0 / $0</span>
-                <div class="chat-budget-bar">
-                    <div class="chat-budget-bar-fill" id="chat-budget-bar-fill"></div>
+        ${renderPageHeader({
+            title: 'Chat',
+            icon: CHAT_ICON,
+            variant: 'overlay',
+            className: 'chat-page-header',
+            actionsHtml: `
+                <div class="chat-header-actions" id="chat-header-actions">
+                    <button class="chat-header-btn" type="button" data-chat-command="evolve" title="Toggle evolution mode">Evolve</button>
+                    <button class="chat-header-btn" type="button" data-chat-command="bg" title="Toggle background consciousness">Consciousness</button>
+                    <button class="chat-header-btn" type="button" data-chat-command="review" title="Run review now">Review</button>
+                    <button class="chat-header-btn" type="button" data-chat-command="restart" title="Restart agent">Restart</button>
+                    <button class="chat-header-btn danger" type="button" data-chat-command="panic" title="Stop all workers">Panic</button>
                 </div>
-            </button>
-            <span id="chat-status" class="status-badge offline">Connecting...</span>
-        </div>
+                <button class="chat-budget-pill" id="chat-budget-pill" type="button" title="Open budget controls" aria-label="Open budget controls">
+                    <span class="chat-budget-text" id="chat-budget-text">$0 / $0</span>
+                    <div class="chat-budget-bar">
+                        <div class="chat-budget-bar-fill" id="chat-budget-bar-fill"></div>
+                    </div>
+                </button>
+                <span id="chat-status" class="status-badge offline">Connecting...</span>
+            `,
+        })}
         <div id="chat-messages"></div>
         <div id="chat-input-area">
             <div id="chat-attachment-preview" class="chat-attachment-preview"></div>

@@ -1,3 +1,17 @@
+import { renderPageHeader, renderTabStrip } from './page_header.js';
+
+const SETTINGS_ICON = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><circle cx="12" cy="12" r="3"/></svg>';
+const SETTINGS_TABS = [
+    { value: 'providers', label: 'Providers' },
+    { value: 'models', label: 'Models' },
+    { value: 'behavior', label: 'Behavior' },
+    { value: 'integrations', label: 'Integrations' },
+    { value: 'advanced', label: 'Advanced' },
+    { value: 'about', label: 'About' },
+];
+// Static guard markers: renderTabStrip emits data-settings-tab="behavior"
+// and data-settings-tab="advanced" from SETTINGS_TABS at runtime.
+
 function providerCard({ id, title, icon, hint, body, open = false }) {
     return `
         <details class="settings-provider-card" data-provider-card="${id}" ${open ? 'open' : ''}>
@@ -68,23 +82,25 @@ function effortField({ id, label, defaultValue }) {
 
 export function renderSettingsPage() {
     return `
-        <div class="page-header">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><circle cx="12" cy="12" r="3"/></svg>
-            <h2>Settings</h2>
-        </div>
-        <div class="settings-shell">
-            <div class="settings-tabs-bar">
-                <button type="button" class="settings-mobile-back" data-settings-back hidden>Settings</button>
-                <div class="settings-tabs">
-                    <button class="settings-tab active" data-settings-tab="providers">Providers</button>
-                    <button class="settings-tab" data-settings-tab="models">Models</button>
-                    <button class="settings-tab" data-settings-tab="behavior">Behavior</button>
-                    <button class="settings-tab" data-settings-tab="integrations">Integrations</button>
-                    <button class="settings-tab" data-settings-tab="advanced">Advanced</button>
-                    <button class="settings-tab" data-settings-tab="about">About</button>
+        ${renderPageHeader({
+            title: 'Settings',
+            icon: SETTINGS_ICON,
+            description: 'Configure providers, models, behavior, integrations, and runtime controls.',
+            tabsHtml: `
+                <div class="settings-tabs-bar">
+                    <button type="button" class="settings-mobile-back" data-settings-back hidden>Settings</button>
+                    ${renderTabStrip({
+                        items: SETTINGS_TABS,
+                        active: 'providers',
+                        dataAttr: 'data-settings-tab',
+                        ariaLabel: 'Settings sections',
+                        stripClass: 'settings-tabs',
+                        tabClass: 'settings-tab',
+                    })}
                 </div>
-            </div>
-
+            `,
+        })}
+        <div class="settings-shell">
             <div class="settings-scroll">
                 <section class="settings-panel active" data-settings-panel="providers">
                     <div class="settings-section-copy">

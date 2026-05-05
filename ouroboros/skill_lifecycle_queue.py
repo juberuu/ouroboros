@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import itertools
 import pathlib
+import threading
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -31,6 +32,7 @@ class LifecycleJob:
     kind: str
     target: str
     source: str = ""
+    dedupe_key: str = ""
     status: str = "queued"
     message: str = ""
     error: str = ""
@@ -44,6 +46,7 @@ class LifecycleJob:
             "kind": self.kind,
             "target": self.target,
             "source": self.source,
+            "dedupe_key": self.dedupe_key,
             "status": self.status,
             "message": self.message,
             "error": self.error,
@@ -53,22 +56,78 @@ class LifecycleJob:
         }
 
 
+@dataclass
+class LifecycleJobOptions:
+    """Optional lifecycle hooks and formatters kept out of the main API arity."""
+
+    drive_root: pathlib.Path | str | None = None
+    result_message: Callable[[Any], str] | None = None
+    result_error: Callable[[Any], str] | None = None
+    progress_target: Optional["JobProgressTarget"] = None
+    on_started: Callable[[LifecycleJob], None] | None = None
+    on_finished: Callable[[LifecycleJob, Any, BaseException | None], None] | None = None
+
+
 _job_counter = itertools.count(1)
-_lock: Optional[asyncio.Lock] = None
+_lock: Optional[threading.Lock] = None
+_state_lock = threading.Lock()
+_dedupe_jobs: Dict[str, LifecycleJob] = {}
 _events: Deque[LifecycleJob] = deque(maxlen=_MAX_EVENTS)
 _active: Optional[LifecycleJob] = None
 
 
-def _get_lock() -> asyncio.Lock:
+class DuplicateLifecycleJobError(RuntimeError):
+    """Raised when a caller attempts to queue an already active lifecycle job."""
+
+    def __init__(self, job: LifecycleJob) -> None:
+        self.job = job
+        super().__init__(f"lifecycle job already {job.status}: {job.kind}:{job.target}")
+
+
+def _get_lock() -> threading.Lock:
     global _lock
     if _lock is None:
-        _lock = asyncio.Lock()
+        _lock = threading.Lock()
     return _lock
 
 
 def _store(job: LifecycleJob) -> None:
     if job not in _events:
         _events.append(job)
+
+
+@contextlib.asynccontextmanager
+async def _async_thread_lock(lock: threading.Lock):
+    acquired = False
+    while not acquired:
+        acquired = lock.acquire(blocking=False)
+        if not acquired:
+            await asyncio.sleep(0.01)
+    try:
+        yield
+    finally:
+        if acquired:
+            lock.release()
+
+
+def _register_dedupe(job: LifecycleJob) -> None:
+    if not job.dedupe_key:
+        _store(job)
+        return
+    with _state_lock:
+        existing = _dedupe_jobs.get(job.dedupe_key)
+        if existing is not None and existing.status in {"queued", "running"}:
+            raise DuplicateLifecycleJobError(existing)
+        _dedupe_jobs[job.dedupe_key] = job
+        _store(job)
+
+
+def _release_dedupe(job: LifecycleJob) -> None:
+    if not job.dedupe_key:
+        return
+    with _state_lock:
+        if _dedupe_jobs.get(job.dedupe_key) is job:
+            _dedupe_jobs.pop(job.dedupe_key, None)
 
 
 @contextlib.contextmanager
@@ -88,17 +147,24 @@ def skill_lifecycle_file_lock(drive_root: pathlib.Path):
 
 @contextlib.asynccontextmanager
 async def async_skill_lifecycle_file_lock(drive_root: pathlib.Path):
-    from ouroboros.platform_layer import file_lock_exclusive, file_unlock
+    from ouroboros.platform_layer import file_lock_exclusive_nb, file_unlock
 
     lock_dir = pathlib.Path(drive_root) / "state"
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_path = lock_dir / "skill_lifecycle.lock"
     with lock_path.open("a+") as fh:
-        await asyncio.to_thread(file_lock_exclusive, fh.fileno())
+        acquired = False
+        while not acquired:
+            try:
+                file_lock_exclusive_nb(fh.fileno())
+                acquired = True
+            except OSError:
+                await asyncio.sleep(0.05)
         try:
             yield
         finally:
-            await asyncio.to_thread(file_unlock, fh.fileno())
+            if acquired:
+                file_unlock(fh.fileno())
 
 
 def _notify_chat(job: LifecycleJob) -> None:
@@ -125,12 +191,11 @@ async def run_lifecycle_job(
     *,
     kind: str,
     target: str,
+    runner: Callable[[], Awaitable[Any]],
     source: str = "",
     message: str = "",
-    runner: Callable[[], Awaitable[Any]],
-    result_message: Callable[[Any], str] | None = None,
-    result_error: Callable[[Any], str] | None = None,
-    progress_target: Optional["JobProgressTarget"] = None,
+    dedupe_key: str = "",
+    options: LifecycleJobOptions | None = None,
 ) -> Any:
     """Run ``runner`` through the global skill lifecycle lane.
 
@@ -143,43 +208,118 @@ async def run_lifecycle_job(
     """
 
     global _active
+    opts = options or LifecycleJobOptions()
     job = LifecycleJob(
         id=f"skill-job-{next(_job_counter)}",
         kind=str(kind or "operation"),
         target=str(target or "skill"),
         source=str(source or ""),
+        dedupe_key=str(dedupe_key or ""),
         message=str(message or ""),
     )
-    _store(job)
-    if progress_target is not None:
-        progress_target.bind(job)
-    async with _get_lock():
-        from ouroboros.config import DATA_DIR
+    _register_dedupe(job)
+    if opts.progress_target is not None:
+        opts.progress_target.bind(job)
+    result: Any = None
+    error_obj: BaseException | None = None
+    try:
+        async with _async_thread_lock(_get_lock()):
+            _active = job
+            job.status = "running"
+            job.started_at = _now_iso()
+            if opts.on_started is not None:
+                opts.on_started(job)
+            if opts.drive_root is None:
+                from ouroboros.config import DATA_DIR
 
-        _active = job
-        job.status = "running"
-        job.started_at = _now_iso()
-        async with async_skill_lifecycle_file_lock(pathlib.Path(DATA_DIR)):
+                lock_root = pathlib.Path(DATA_DIR)
+            else:
+                lock_root = pathlib.Path(opts.drive_root)
             try:
-                result = await runner()
-                error = result_error(result) if result_error else ""
+                async with async_skill_lifecycle_file_lock(lock_root):
+                    result = await runner()
+                error = opts.result_error(result) if opts.result_error else ""
                 job.error = str(error or "")
                 job.status = "failed" if job.error else "succeeded"
-                if result_message:
-                    job.message = result_message(result)
+                if opts.result_message:
+                    job.message = opts.result_message(result)
                 elif not job.message:
                     job.message = job.status
                 return result
-            except Exception as exc:
-                job.status = "failed"
-                job.error = str(exc)
+            except BaseException as exc:
+                error_obj = exc
+                job.status = "cancelled" if isinstance(exc, asyncio.CancelledError) else "failed"
+                job.error = str(exc) or type(exc).__name__
                 raise
             finally:
                 job.finished_at = _now_iso()
+                if opts.on_finished is not None:
+                    opts.on_finished(job, result, error_obj)
+                _release_dedupe(job)
                 _active = None
-                if progress_target is not None:
-                    progress_target.release()
+                if opts.progress_target is not None:
+                    opts.progress_target.release()
                 _notify_chat(job)
+    except asyncio.CancelledError:
+        job.status = "cancelled"
+        job.error = job.error or "CancelledError"
+        job.finished_at = job.finished_at or _now_iso()
+        _release_dedupe(job)
+        if opts.progress_target is not None:
+            opts.progress_target.release()
+        raise
+
+
+def run_lifecycle_job_blocking(
+    *,
+    kind: str,
+    target: str,
+    runner: Callable[[], Any],
+    source: str = "",
+    message: str = "",
+    dedupe_key: str = "",
+    options: LifecycleJobOptions | None = None,
+) -> Any:
+    """Run a lifecycle job from a synchronous tool handler.
+
+    Tool handlers already run outside the Starlette event loop. This wrapper
+    gives them the same lifecycle lane, dedupe, and notifications as HTTP
+    handlers without making each caller manage an event loop.
+    """
+
+    async def _runner() -> Any:
+        return await asyncio.to_thread(runner)
+
+    async def _main() -> Any:
+        return await run_lifecycle_job(
+            kind=kind,
+            target=target,
+            source=source,
+            message=message,
+            dedupe_key=dedupe_key,
+            runner=_runner,
+            options=options,
+        )
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(_main())
+
+    box: Dict[str, Any] = {}
+
+    def _thread_main() -> None:
+        try:
+            box["result"] = asyncio.run(_main())
+        except BaseException as exc:
+            box["error"] = exc
+
+    thread = threading.Thread(target=_thread_main, name=f"skill-lifecycle-{kind}", daemon=False)
+    thread.start()
+    thread.join()
+    if "error" in box:
+        raise box["error"]
+    return box.get("result")
 
 
 class JobProgressTarget:
@@ -189,7 +329,11 @@ class JobProgressTarget:
     Use::
 
         progress = JobProgressTarget()
-        await run_lifecycle_job(..., runner=..., progress_target=progress)
+        await run_lifecycle_job(
+            ...,
+            runner=...,
+            options=LifecycleJobOptions(progress_target=progress),
+        )
 
     The runner (or anything it spawns) calls ``progress.set("Downloading…")``
     from a worker thread; the setter mutates the active job's ``message``

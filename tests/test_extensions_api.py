@@ -831,6 +831,36 @@ def test_api_skill_review_offloads_to_thread_and_returns_outcome(tmp_path, monke
         _stop_patches(patches)
 
 
+def test_lifecycle_queue_endpoint_marks_stale_review_job_interrupted(tmp_path, monkeypatch):
+    client, drive_root, patches = _make_client(tmp_path, monkeypatch)
+    job_dir = drive_root / "state" / "skills" / "alpha"
+    job_dir.mkdir(parents=True)
+    job_path = job_dir / "review_job.json"
+    job_path.write_text(
+        json.dumps(
+            {
+                "status": "running",
+                "skill": "alpha",
+                "content_hash": "abc",
+                "job_id": "skill-job-old",
+                "started_at": "2026-01-01T00:00:00+00:00",
+                "last_heartbeat_at": "2026-01-01T00:00:00+00:00",
+                "pid": 123456,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("ouroboros.skill_review_runner._pid_alive", lambda _pid: False)
+    try:
+        resp = client.get("/api/skills/lifecycle-queue")
+        assert resp.status_code == 200
+        data = json.loads(job_path.read_text(encoding="utf-8"))
+        assert data["status"] == "interrupted"
+        assert data["interrupt_reason"] == "owner_process_exited"
+    finally:
+        _stop_patches(patches)
+
+
 def test_ws_endpoint_dispatches_ext_prefixed_messages():
     """Phase 5 regression: server.py::ws_endpoint must route
     provider-safe extension WS messages through ``extension_loader.list_ws_handlers()``.

@@ -1,3 +1,7 @@
+import { renderPageHeader } from './page_header.js';
+
+const WIDGETS_ICON = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>';
+
 function escapeHtml(value) {
     return String(value ?? '')
         .replace(/&/g, '&amp;')
@@ -29,11 +33,12 @@ function renderMarkdownSafe(rawMd) {
 function pageTemplate() {
     return `
         <section class="page" id="page-widgets">
-            <div class="page-header">
-                <h2>Widgets</h2>
-                <button id="widgets-refresh" class="btn btn-default btn-sm">Refresh</button>
-            </div>
-            <p class="muted">Reviewed extension UI surfaces live here, separate from the skill catalogue.</p>
+            ${renderPageHeader({
+                title: 'Widgets',
+                icon: WIDGETS_ICON,
+                description: 'Reviewed extension UI surfaces live here, separate from the skill catalogue.',
+                actionsHtml: '<button id="widgets-refresh" class="btn btn-default btn-sm">Refresh</button>',
+            })}
             <div id="widgets-list" class="widgets-list"></div>
         </section>
     `;

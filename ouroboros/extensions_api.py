@@ -25,7 +25,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from ouroboros.extension_loader import list_routes, snapshot
-from ouroboros.skill_lifecycle_queue import queue_snapshot, run_lifecycle_job
+from ouroboros.skill_lifecycle_queue import LifecycleJobOptions, queue_snapshot, run_lifecycle_job
 from ouroboros.skill_loader import (
     discover_skills,
     find_skill,
@@ -95,9 +95,11 @@ async def api_extensions_index(request: Request) -> JSONResponse:
         import asyncio
 
         from ouroboros.config import get_skills_repo_path
+        from ouroboros.skill_review_runner import reconcile_stale_review_jobs
 
         drive_root = _request_drive_root(request)
         repo_path = get_skills_repo_path()
+        await asyncio.to_thread(reconcile_stale_review_jobs, drive_root)
         payload = await asyncio.to_thread(_build_extensions_index, drive_root, repo_path)
         return JSONResponse(payload)
     except Exception as exc:
@@ -565,11 +567,13 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
         source=initial.source,
         message=("Enabling" if enabled else "Disabling") + f" {initial.name}",
         runner=_run_toggle,
-        result_message=lambda item: (
-            item.get("error", "")
-            or (("Enabled" if enabled else "Disabled") + f" {item.get('skill', initial.name)}")
+        options=LifecycleJobOptions(
+            result_message=lambda item: (
+                item.get("error", "")
+                or (("Enabled" if enabled else "Disabled") + f" {item.get('skill', initial.name)}")
+            ),
+            result_error=lambda item: item.get("error", ""),
         ),
-        result_error=lambda item: item.get("error", ""),
     )
     if queued.get("error"):
         return JSONResponse(queued, status_code=int(queued.get("status_code") or 400))
@@ -616,133 +620,38 @@ async def api_skill_review(request: Request) -> JSONResponse:
     event loop keeps serving other requests / WebSocket traffic while
     the review runs.
     """
-    import asyncio
-    from ouroboros.skill_review import review_skill as _review_skill_impl
-
-    from ouroboros.config import get_skills_repo_path, load_settings
-    from ouroboros.extension_loader import reconcile_extension
-
     skill_name = str(request.path_params.get("skill") or "").strip()
     if not skill_name:
         return JSONResponse({"error": "missing skill name"}, status_code=400)
 
     drive_root = _request_drive_root(request)
     repo_dir = _request_repo_dir(request)
-    repo_path = get_skills_repo_path()
     ctx = _ApiReviewCtx(drive_root, repo_dir)
-
-    async def _reconcile_review_deps() -> tuple[str, str]:
-        """Install/reinstall isolated deps after a PASS review while still
-        inside the same lifecycle job lane.
-
-        Returns ``(deps_status, deps_error)`` for response payload and
-        lifecycle error classification.
-        """
-        try:
-            from ouroboros.marketplace.provenance import read_provenance
-            from ouroboros.marketplace.install_specs import install_specs_hash
-            from ouroboros.marketplace.isolated_deps import (
-                install_isolated_dependencies,
-                read_deps_state,
-            )
-            from ouroboros.skill_loader import find_skill
-
-            prov = read_provenance(drive_root, skill_name) or {}
-            auto_specs = list((prov.get("install_specs") or {}).get("auto") or [])
-            if not auto_specs:
-                return "not_required", ""
-            deps_state = read_deps_state(drive_root, skill_name)
-            expected_hash = install_specs_hash(auto_specs)
-            if (
-                str(deps_state.get("status") or "") == "installed"
-                and deps_state.get("specs_hash") == expected_hash
-            ):
-                return "installed", ""
-            skill = find_skill(drive_root, skill_name, repo_path=repo_path)
-            if skill is None:
-                return "failed", "skill not found during dependency reconciliation"
-            await asyncio.to_thread(
-                install_isolated_dependencies,
-                drive_root,
-                skill_name,
-                skill.skill_dir,
-                auto_specs,
-            )
-            return "installed", ""
-        except Exception as exc:
-            log.debug("post-review deps reconcile failed", exc_info=True)
-            return "failed", f"{type(exc).__name__}: {exc}"
-
-    async def _run_review() -> Any:
-        outcome_obj = await asyncio.to_thread(_review_skill_impl, ctx, skill_name)
-        deps_status = "not_required"
-        deps_error = ""
-        if getattr(outcome_obj, "status", "") == "pass":
-            deps_status, deps_error = await _reconcile_review_deps()
-        setattr(outcome_obj, "deps_status", deps_status)
-        setattr(outcome_obj, "deps_error", deps_error)
-        return outcome_obj
-
-    outcome = await run_lifecycle_job(
-        kind="review",
-        target=skill_name,
-        source="skills",
-        message=f"Reviewing {skill_name}",
-        runner=_run_review,
-        result_message=lambda item: f"Review {getattr(item, 'status', 'pending')}",
-        result_error=lambda item: getattr(item, "error", "") or getattr(item, "deps_error", "") or "",
+    from ouroboros.skill_review_runner import (
+        publish_skill_review_summary,
+        run_skill_review_lifecycle,
     )
-    live_state = reconcile_extension(
+    from ouroboros.skill_review import review_skill as _review_skill_impl
+
+    payload = await run_skill_review_lifecycle(
+        ctx,
         skill_name,
-        drive_root,
-        load_settings,
-        repo_path=repo_path,
-        retry_load_error=True,
+        source="skills",
+        review_impl=_review_skill_impl,
     )
-    try:
-        from supervisor.message_bus import send_with_budget
-
-        findings = outcome.findings or []
-        top_findings = []
-        for item in findings[:5]:
-            if isinstance(item, dict):
-                label = item.get("item") or item.get("check") or item.get("title") or "finding"
-                verdict = item.get("verdict") or item.get("severity") or ""
-                reason = item.get("reason") or item.get("message") or ""
-                top_findings.append(f"- {verdict} {label}: {reason}".strip())
-        details = "\n".join(top_findings) if top_findings else "- No reviewer findings."
-        send_with_budget(
-            0,
-            (
-                f"### Skill review: `{outcome.skill_name}`\n"
-                f"Status: `{outcome.status}`\n\n"
-                f"{details}\n\n"
-                "Full findings are available in the Skills page."
-            ),
-            fmt="markdown",
-            task_id="api_skill_review",
-        )
-    except Exception:
-        log.debug("Could not publish skill review summary to chat", exc_info=True)
-    return JSONResponse(
-        {
-            "skill": outcome.skill_name,
-            "status": outcome.status,
-            "findings": outcome.findings,
-            "error": outcome.error,
-            "reviewer_models": outcome.reviewer_models,
-            "content_hash": outcome.content_hash,
-            "deps_status": getattr(outcome, "deps_status", "not_required"),
-            "deps_error": getattr(outcome, "deps_error", ""),
-            "extension_action": live_state.get("action"),
-            "extension_reason": live_state.get("reason"),
-        }
-    )
+    publish_skill_review_summary(payload)
+    return JSONResponse(payload)
 
 
 async def api_skill_lifecycle_queue(request: Request) -> JSONResponse:
     """GET /api/skills/lifecycle-queue — recent mutating skill operations."""
 
+    try:
+        from ouroboros.skill_review_runner import reconcile_stale_review_jobs
+
+        reconcile_stale_review_jobs(_request_drive_root(request))
+    except Exception:
+        log.debug("stale review job reconciliation failed", exc_info=True)
     return JSONResponse(queue_snapshot())
 
 
