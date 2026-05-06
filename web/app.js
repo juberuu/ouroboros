@@ -150,20 +150,80 @@ loadVersion();
     const vvhStyle = document.createElement('style');
     vvhStyle.id = 'runtime-vvh';
     document.head.appendChild(vvhStyle);
+
+    let wasKeyboardOpen = false;
+    let keyboardTouchStartY = 0;
+    let frozenBaseline = 0;
+
+    function findChatMessagesNode(target) {
+        let el = target;
+        while (el && el !== document.body) {
+            if (el.id === 'chat-messages') return el;
+            el = el.parentElement;
+        }
+        return null;
+    }
+
+    function lockTouchStart(e) {
+        if (e.touches && e.touches.length) keyboardTouchStartY = e.touches[0].clientY;
+    }
+
+    // Keep #chat-messages scrollable, but stop its top/bottom overscroll from
+    // chaining into document/visualViewport movement while the keyboard is open.
+    function lockBoundaryTouch(e) {
+        const touch = e.touches && e.touches.length ? e.touches[0] : null;
+        const messages = findChatMessagesNode(e.target);
+        if (messages && touch) {
+            const dy = touch.clientY - keyboardTouchStartY;
+            const atTop = messages.scrollTop <= 0;
+            const atBottom = Math.ceil(messages.scrollTop + messages.clientHeight) >= messages.scrollHeight;
+            if ((!atTop && dy > 0) || (!atBottom && dy < 0)) return;
+        }
+        e.preventDefault();
+    }
+
+    function captureFrozenBaseline() {
+        if (window.innerWidth > 640 || wasKeyboardOpen) return;
+        const candidates = [
+            document.documentElement.clientHeight,
+            window.innerHeight,
+            window.screen.availHeight || 0,
+            window.screen.height || 0,
+        ];
+        const best = Math.max(...candidates);
+        if (best > frozenBaseline) frozenBaseline = best;
+    }
+
+    captureFrozenBaseline();
+
     const updateVvh = () => {
         const viewport = window.visualViewport;
         const h = viewport ? viewport.height : window.innerHeight;
-        const offset = viewport ? viewport.offsetTop : 0;
-        vvhStyle.textContent = ':root{--vvh:' + h + 'px;--vvh-offset:' + offset + 'px}';
+        vvhStyle.textContent = ':root{--vvh:' + h + 'px}';
 
         if (window.innerWidth <= 640) {
-            const layoutHeight = window.innerHeight || h;
+            if (!wasKeyboardOpen) captureFrozenBaseline();
+            const stableHeight = frozenBaseline || document.documentElement.clientHeight;
             const keyboardVisible = viewport
-                ? (layoutHeight - h) > Math.max(120, layoutHeight * 0.25)
+                ? (stableHeight - h) > Math.max(120, stableHeight * 0.25)
                 : false;
+
+            if (keyboardVisible && !wasKeyboardOpen) {
+                window.scrollTo(0, 0);
+                document.addEventListener('touchstart', lockTouchStart, { passive: true });
+                document.addEventListener('touchmove', lockBoundaryTouch, { passive: false });
+            }
+            if (!keyboardVisible && wasKeyboardOpen) {
+                document.removeEventListener('touchstart', lockTouchStart);
+                document.removeEventListener('touchmove', lockBoundaryTouch);
+            }
+            document.documentElement.classList.toggle('keyboard-open', keyboardVisible);
             document.body.classList.toggle('keyboard-open', keyboardVisible);
+            wasKeyboardOpen = keyboardVisible;
         } else {
+            document.documentElement.classList.remove('keyboard-open');
             document.body.classList.remove('keyboard-open');
+            wasKeyboardOpen = false;
         }
     };
     if (window.visualViewport) {
@@ -171,7 +231,11 @@ loadVersion();
         window.visualViewport.addEventListener('scroll', updateVvh);
     }
     window.addEventListener('resize', updateVvh);
-    window.addEventListener('orientationchange', updateVvh);
+    window.addEventListener('orientationchange', () => {
+        frozenBaseline = 0;
+        captureFrozenBaseline();
+        updateVvh();
+    });
     updateVvh();
 }());
 

@@ -4323,22 +4323,39 @@ body {
         overflow-x: hidden;
     }
 
-    /* Keyboard-open chat layout: keep the composer inside the visual viewport
-       while iOS/Android shrink and offset the viewport for the soft keyboard. */
+    /* Keyboard-open chat layout: make the document itself no taller than the
+       visual viewport, then keep only #chat-messages scrollable. Boundary-aware
+       touch handling in web/app.js prevents message overscroll from chaining
+       back into page / visualViewport movement on iOS and Android browsers. */
+    html.keyboard-open,
+    body.keyboard-open {
+        position: fixed;
+        inset: 0;
+        width: 100%;
+        height: var(--vvh);
+        max-height: var(--vvh);
+        overflow: hidden;
+        overscroll-behavior: none;
+    }
+
     body.keyboard-open #nav-rail {
         display: none;
     }
 
     body.keyboard-open #content {
+        position: fixed;
+        inset: 0;
         height: var(--vvh);
         max-height: var(--vvh);
+        padding-left: 0;
         padding-bottom: 0;
         overflow: hidden;
+        overscroll-behavior: none;
     }
 
     body.keyboard-open #page-chat.active {
         position: fixed;
-        top: var(--vvh-offset, 0px);
+        top: 0;
         left: 0;
         right: 0;
         height: var(--vvh);
@@ -4347,6 +4364,7 @@ body {
         flex-direction: column;
         z-index: 20;
         overflow: hidden;
+        overscroll-behavior: none;
     }
 
     body.keyboard-open #page-chat.active .chat-page-header {
@@ -4363,6 +4381,8 @@ body {
         padding-top: 0;
         padding-bottom: 0;
         overflow-y: auto;
+        overscroll-behavior: contain;
+        -webkit-overflow-scrolling: touch;
     }
 
     body.keyboard-open #page-chat.active #chat-input-area {
