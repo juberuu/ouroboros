@@ -155,10 +155,14 @@ loadVersion();
     let keyboardTouchStartY = 0;
     let frozenBaseline = 0;
 
-    function findChatMessagesNode(target) {
+    function findScrollableKeyboardNode(target) {
         let el = target;
         while (el && el !== document.body) {
-            if (el.id === 'chat-messages') return el;
+            if (
+                el.id === 'chat-messages'
+                || el.id === 'chat-input'
+                || el.classList.contains('chat-live-timeline')
+            ) return el;
             el = el.parentElement;
         }
         return null;
@@ -168,15 +172,16 @@ loadVersion();
         if (e.touches && e.touches.length) keyboardTouchStartY = e.touches[0].clientY;
     }
 
-    // Keep #chat-messages scrollable, but stop its top/bottom overscroll from
-    // chaining into document/visualViewport movement while the keyboard is open.
+    // Keep internal scrollable chat surfaces usable, but stop their top/bottom
+    // overscroll from chaining into document/visualViewport movement while the
+    // keyboard is open.
     function lockBoundaryTouch(e) {
         const touch = e.touches && e.touches.length ? e.touches[0] : null;
-        const messages = findChatMessagesNode(e.target);
-        if (messages && touch) {
+        const scrollable = findScrollableKeyboardNode(e.target);
+        if (scrollable && touch) {
             const dy = touch.clientY - keyboardTouchStartY;
-            const atTop = messages.scrollTop <= 0;
-            const atBottom = Math.ceil(messages.scrollTop + messages.clientHeight) >= messages.scrollHeight;
+            const atTop = scrollable.scrollTop <= 0;
+            const atBottom = Math.ceil(scrollable.scrollTop + scrollable.clientHeight) >= scrollable.scrollHeight;
             if ((!atTop && dy > 0) || (!atBottom && dy < 0)) return;
         }
         e.preventDefault();
@@ -221,6 +226,10 @@ loadVersion();
             document.body.classList.toggle('keyboard-open', keyboardVisible);
             wasKeyboardOpen = keyboardVisible;
         } else {
+            if (wasKeyboardOpen) {
+                document.removeEventListener('touchstart', lockTouchStart);
+                document.removeEventListener('touchmove', lockBoundaryTouch);
+            }
             document.documentElement.classList.remove('keyboard-open');
             document.body.classList.remove('keyboard-open');
             wasKeyboardOpen = false;
