@@ -161,7 +161,7 @@ loadVersion();
             if (
                 el.id === 'chat-messages'
                 || el.id === 'chat-input'
-                || el.classList.contains('chat-live-timeline')
+                || el.classList?.contains('chat-live-timeline')
             ) return el;
             el = el.parentElement;
         }

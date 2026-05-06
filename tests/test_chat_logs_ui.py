@@ -1190,8 +1190,13 @@ def test_mobile_keyboard_open_uses_visual_viewport_flex_stack():
     assert "lockBoundaryTouch" in js
     assert "findScrollableKeyboardNode" in js
     assert "el.id === 'chat-input'" in js
-    assert "chat-live-timeline" in js
-    assert "removeEventListener('touchmove', lockBoundaryTouch)" in js
+    assert "classList?.contains('chat-live-timeline')" in js
+    wide_viewport_cleanup = re.search(
+        r"\}\s+else\s+\{(?P<body>.*?)document\.documentElement\.classList\.remove\('keyboard-open'\)", js, re.S
+    ).group("body")
+    assert "if (wasKeyboardOpen)" in wide_viewport_cleanup
+    assert "document.removeEventListener('touchstart', lockTouchStart);" in wide_viewport_cleanup
+    assert "document.removeEventListener('touchmove', lockBoundaryTouch);" in wide_viewport_cleanup
     assert "--vvh-offset" not in js
 
     assert "html.keyboard-open" in css
