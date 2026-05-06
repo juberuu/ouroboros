@@ -66,6 +66,7 @@ def _write_ext_skill(
     permissions: list[str],
     env_from_settings: list[str] | None = None,
     entry: str = "plugin.py",
+    extra_frontmatter: str = "",
 ) -> pathlib.Path:
     skill_dir = repo_root / name
     skill_dir.mkdir(parents=True, exist_ok=True)
@@ -81,6 +82,7 @@ def _write_ext_skill(
             f"entry: {entry}\n"
             f"permissions: {perms_yaml}\n"
             f"env_from_settings: {env_yaml}\n"
+            f"{extra_frontmatter}"
             "---\n"
             "body\n"
         ),
@@ -98,18 +100,20 @@ def _prepare_extension(
     plugin_body: str,
     permissions: list[str],
     env_from_settings: list[str] | None = None,
+    extra_frontmatter: str = "",
 ):
     """Write + enable + PASS-review an extension so the loader accepts it."""
     from ouroboros.skill_loader import find_skill
     repo_root = tmp_path / "skills"
     drive_root = tmp_path / "drive"
-    drive_root.mkdir()
+    drive_root.mkdir(exist_ok=True)
     skill_dir = _write_ext_skill(
         repo_root,
         name,
         plugin_body=plugin_body,
         permissions=permissions,
         env_from_settings=env_from_settings,
+        extra_frontmatter=extra_frontmatter,
     )
     loaded = find_skill(drive_root, name, repo_path=str(repo_root))
     assert loaded is not None
@@ -123,6 +127,25 @@ def _prepare_extension(
     loaded = find_skill(drive_root, name, repo_path=str(repo_root))
     assert loaded is not None
     return loaded, repo_root, drive_root
+
+
+def _mark_isolated_deps_installed(drive_root: pathlib.Path, loaded) -> None:
+    from ouroboros.marketplace.install_specs import install_specs_hash
+    from ouroboros.skill_dependencies import auto_install_specs_for_skill
+    from ouroboros.skill_loader import skill_state_dir
+
+    auto_specs = auto_install_specs_for_skill(drive_root, loaded)
+    assert auto_specs
+    state_dir = skill_state_dir(drive_root, loaded.name)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "deps.json").write_text(
+        json.dumps({
+            "status": "installed",
+            "specs_hash": install_specs_hash(auto_specs),
+            "installed": auto_specs,
+        }),
+        encoding="utf-8",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +208,7 @@ def test_register_settings_section_lifecycle(tmp_path):
         permissions=["widget"],
     )
 
-    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
+    err = extension_loader.load_extension(loaded, lambda: {})
     assert err is None, err
     sections = extension_loader.snapshot()["settings_sections"]
     assert len(sections) == 1
@@ -304,10 +327,386 @@ def test_load_extension_rejects_outward_symlink_in_skill_tree(tmp_path):
 
     loaded = find_skill(drive_root, "symlinked", repo_path=str(skill_dir.parent))
     assert loaded is not None
-    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
+    err = extension_loader.load_extension(loaded, lambda: {})
     assert err is not None
     assert "symlink" in err.lower()
     assert extension_loader.get_tool(extension_loader.extension_surface_name("symlinked", "echo")) is None
+
+
+def test_load_extension_ignores_isolated_env_symlinks_when_staging(tmp_path):
+    import os
+    import platform
+
+    if platform.system() == "Windows":
+        pytest.skip("symlink creation requires admin on Windows")
+    loaded, repo_root, drive_root = _prepare_extension(
+        tmp_path,
+        "env_symlink",
+        (
+            "def register(api):\n"
+            "    api.register_tool('ok', lambda ctx: 'ok', description='ok', schema={})\n"
+        ),
+        permissions=["tool"],
+    )
+    skill_dir = repo_root / "env_symlink"
+    bin_dir = skill_dir / ".ouroboros_env" / "python" / "bin"
+    bin_dir.mkdir(parents=True)
+    os.symlink("/usr/bin/env", bin_dir / "python")
+
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
+
+    assert err is None, err
+    with extension_loader._lock:
+        import_root = pathlib.Path(extension_loader._extensions["env_symlink"].import_root)
+    assert not (import_root / "skill" / ".ouroboros_env").exists()
+    extension_loader.unload_extension("env_symlink")
+
+
+def test_load_extension_does_not_import_untracked_isolated_python_deps(tmp_path):
+    import sys
+
+    loaded, repo_root, _drive_root = _prepare_extension(
+        tmp_path,
+        "env_untracked",
+        (
+            "import dummy_untracked_pkg\n"
+            "def register(api):\n"
+            "    api.register_tool('value', lambda ctx: dummy_untracked_pkg.VALUE, description='value', schema={})\n"
+        ),
+        permissions=["tool"],
+    )
+    skill_dir = repo_root / "env_untracked"
+    pkg_dir = (
+        skill_dir
+        / ".ouroboros_env"
+        / "python"
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+        / "dummy_untracked_pkg"
+    )
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / "__init__.py").write_text("VALUE = 'untracked'\n", encoding="utf-8")
+
+    err = extension_loader.load_extension(loaded, lambda: {})
+
+    assert err is not None
+    assert "dummy_untracked_pkg" in err
+
+
+def test_load_extension_imports_and_unloads_isolated_python_deps(tmp_path):
+    import importlib
+    import sys
+
+    loaded, repo_root, drive_root = _prepare_extension(
+        tmp_path,
+        "env_import",
+        (
+            "import dummy_pkg\n"
+            "def register(api):\n"
+            "    api.register_tool('value', lambda ctx: dummy_pkg.VALUE, description='value', schema={})\n"
+        ),
+        permissions=["tool"],
+        extra_frontmatter="dependencies:\n  - dummy_pkg\n",
+    )
+    skill_dir = repo_root / "env_import"
+    site_dir = (
+        skill_dir
+        / ".ouroboros_env"
+        / "python"
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+    pkg_dir = site_dir / "dummy_pkg"
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / "__init__.py").write_text("VALUE = 'from-isolated-env'\n", encoding="utf-8")
+    _mark_isolated_deps_installed(drive_root, loaded)
+
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
+
+    assert err is None, err
+    tool = extension_loader.get_tool(extension_loader.extension_surface_name("env_import", "value"))
+    assert tool is not None
+    assert tool["handler"](None) == "from-isolated-env"
+    assert str(site_dir.resolve()) not in sys.path
+
+    extension_loader.unload_extension("env_import")
+
+    assert str(site_dir.resolve()) not in sys.path
+    assert "dummy_pkg" not in sys.modules
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("dummy_pkg")
+
+
+def test_load_extension_does_not_execute_isolated_deps_pth_files(tmp_path):
+    import sys
+
+    marker = tmp_path / "pth_executed.txt"
+    loaded, repo_root, drive_root = _prepare_extension(
+        tmp_path,
+        "env_pth",
+        (
+            "import dummy_pth_pkg\n"
+            "def register(api):\n"
+            "    api.register_tool('value', lambda ctx: dummy_pth_pkg.VALUE, description='value', schema={})\n"
+        ),
+        permissions=["tool"],
+        extra_frontmatter="dependencies:\n  - dummy_pth_pkg\n",
+    )
+    skill_dir = repo_root / "env_pth"
+    site_dir = (
+        skill_dir
+        / ".ouroboros_env"
+        / "python"
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+    pkg_dir = site_dir / "dummy_pth_pkg"
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / "__init__.py").write_text("VALUE = 'ok'\n", encoding="utf-8")
+    (site_dir / "danger.pth").write_text(
+        f"import pathlib; pathlib.Path({str(marker)!r}).write_text('boom', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    _mark_isolated_deps_installed(drive_root, loaded)
+
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
+
+    assert err is None, err
+    assert not marker.exists()
+    extension_loader.unload_extension("env_pth")
+
+
+def test_isolated_python_deps_do_not_leak_to_other_extensions(tmp_path):
+    import sys
+
+    loaded_a, repo_root, drive_root = _prepare_extension(
+        tmp_path,
+        "env_owner",
+        (
+            "import shared_pkg\n"
+            "def register(api):\n"
+            "    api.register_tool('value', lambda ctx: shared_pkg.VALUE, description='value', schema={})\n"
+        ),
+        permissions=["tool"],
+        extra_frontmatter="dependencies:\n  - shared_pkg\n",
+    )
+    owner_dir = repo_root / "env_owner"
+    site_dir = (
+        owner_dir
+        / ".ouroboros_env"
+        / "python"
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+    pkg_dir = site_dir / "shared_pkg"
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / "__init__.py").write_text("VALUE = 'owned'\n", encoding="utf-8")
+    _mark_isolated_deps_installed(drive_root, loaded_a)
+
+    err_a = extension_loader.load_extension(loaded_a, lambda: {}, drive_root=drive_root)
+    assert err_a is None, err_a
+    tool = extension_loader.get_tool(extension_loader.extension_surface_name("env_owner", "value"))
+    assert tool is not None and tool["handler"](None) == "owned"
+
+    loaded_b, _repo_root, _drive_root = _prepare_extension(
+        tmp_path,
+        "env_neighbor",
+        (
+            "import shared_pkg\n"
+            "def register(api):\n"
+            "    api.register_tool('value', lambda ctx: shared_pkg.VALUE, description='value', schema={})\n"
+        ),
+        permissions=["tool"],
+    )
+    err_b = extension_loader.load_extension(loaded_b, lambda: {}, drive_root=drive_root)
+
+    assert err_b is not None
+    assert "shared_pkg" in err_b
+    assert extension_loader.get_tool(extension_loader.extension_surface_name("env_neighbor", "value")) is None
+    extension_loader.unload_extension("env_owner")
+
+
+def test_isolated_namespace_packages_are_purged_after_import_scope(tmp_path):
+    import sys
+
+    loaded, repo_root, drive_root = _prepare_extension(
+        tmp_path,
+        "env_namespace",
+        (
+            "import ns_pkg.sub as sub\n"
+            "def register(api):\n"
+            "    api.register_tool('value', lambda ctx: sub.VALUE, description='value', schema={})\n"
+        ),
+        permissions=["tool"],
+        extra_frontmatter="dependencies:\n  - ns_pkg\n",
+    )
+    skill_dir = repo_root / "env_namespace"
+    site_dir = (
+        skill_dir
+        / ".ouroboros_env"
+        / "python"
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+    ns_dir = site_dir / "ns_pkg"
+    ns_dir.mkdir(parents=True)
+    (ns_dir / "sub.py").write_text("VALUE = 'namespace-ok'\n", encoding="utf-8")
+    _mark_isolated_deps_installed(drive_root, loaded)
+
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
+
+    assert err is None, err
+    assert "ns_pkg" not in sys.modules
+    assert "ns_pkg.sub" not in sys.modules
+    extension_loader.unload_extension("env_namespace")
+
+
+def test_isolated_python_deps_do_not_leak_during_overlapping_handlers(tmp_path):
+    import sys
+    import threading
+
+    started = threading.Event()
+    release = threading.Event()
+    loaded_a, repo_root, drive_root = _prepare_extension(
+        tmp_path,
+        "env_overlap_owner",
+        (
+            "def _slow(ctx):\n"
+            "    ctx['started'].set()\n"
+            "    ctx['release'].wait(2)\n"
+            "    import overlap_pkg\n"
+            "    return overlap_pkg.VALUE\n"
+            "def register(api):\n"
+            "    api.register_tool('slow', _slow, description='slow', schema={})\n"
+        ),
+        permissions=["tool"],
+        extra_frontmatter="dependencies:\n  - overlap_pkg\n",
+    )
+    owner_dir = repo_root / "env_overlap_owner"
+    site_dir = (
+        owner_dir
+        / ".ouroboros_env"
+        / "python"
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+    pkg_dir = site_dir / "overlap_pkg"
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / "__init__.py").write_text("VALUE = 'owner'\n", encoding="utf-8")
+    _mark_isolated_deps_installed(drive_root, loaded_a)
+    err_a = extension_loader.load_extension(loaded_a, lambda: {}, drive_root=drive_root)
+    assert err_a is None, err_a
+    tool = extension_loader.get_tool(extension_loader.extension_surface_name("env_overlap_owner", "slow"))
+    assert tool is not None
+
+    loaded_b, _repo_root, _drive_root = _prepare_extension(
+        tmp_path,
+        "env_overlap_neighbor",
+        (
+            "import overlap_pkg\n"
+            "def register(api):\n"
+            "    api.register_tool('value', lambda ctx: overlap_pkg.VALUE, description='value', schema={})\n"
+        ),
+        permissions=["tool"],
+    )
+    slow_result = {}
+    neighbor_result = {}
+
+    def run_slow():
+        slow_result["value"] = tool["handler"]({"started": started, "release": release})
+
+    def load_neighbor():
+        neighbor_result["err"] = extension_loader.load_extension(loaded_b, lambda: {}, drive_root=drive_root)
+
+    t1 = threading.Thread(target=run_slow)
+    t1.start()
+    assert started.wait(2)
+    t2 = threading.Thread(target=load_neighbor)
+    t2.start()
+    t2.join(timeout=0.1)
+    assert t2.is_alive()
+    release.set()
+    t1.join(timeout=2)
+    t2.join(timeout=2)
+
+    assert slow_result["value"] == "owner"
+    assert neighbor_result["err"] is not None
+    assert "overlap_pkg" in neighbor_result["err"]
+    extension_loader.unload_extension("env_overlap_owner")
+
+
+def test_isolated_python_deps_do_not_leak_during_overlapping_async_handlers(tmp_path):
+    import asyncio
+    import sys
+
+    loaded_a, repo_root, drive_root = _prepare_extension(
+        tmp_path,
+        "env_async_owner",
+        (
+            "async def _slow(ctx):\n"
+            "    ctx['started'].set()\n"
+            "    await ctx['release'].wait()\n"
+            "    import async_pkg\n"
+            "    return async_pkg.VALUE\n"
+            "def register(api):\n"
+            "    api.register_tool('slow', _slow, description='slow', schema={})\n"
+        ),
+        permissions=["tool"],
+        extra_frontmatter="dependencies:\n  - async_pkg\n",
+    )
+    owner_dir = repo_root / "env_async_owner"
+    site_dir = (
+        owner_dir
+        / ".ouroboros_env"
+        / "python"
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+    pkg_dir = site_dir / "async_pkg"
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / "__init__.py").write_text("VALUE = 'async-owner'\n", encoding="utf-8")
+    _mark_isolated_deps_installed(drive_root, loaded_a)
+
+    loaded_b, _repo_root, _drive_root = _prepare_extension(
+        tmp_path,
+        "env_async_neighbor",
+        (
+            "async def _value(ctx):\n"
+            "    import async_pkg\n"
+            "    return async_pkg.VALUE\n"
+            "def register(api):\n"
+            "    api.register_tool('value', _value, description='value', schema={})\n"
+        ),
+        permissions=["tool"],
+    )
+    assert extension_loader.load_extension(loaded_a, lambda: {}, drive_root=drive_root) is None
+    assert extension_loader.load_extension(loaded_b, lambda: {}, drive_root=drive_root) is None
+    tool_a = extension_loader.get_tool(extension_loader.extension_surface_name("env_async_owner", "slow"))
+    tool_b = extension_loader.get_tool(extension_loader.extension_surface_name("env_async_neighbor", "value"))
+
+    async def main():
+        started = asyncio.Event()
+        release = asyncio.Event()
+        task_a = asyncio.create_task(tool_a["handler"]({"started": started, "release": release}))
+        await asyncio.wait_for(started.wait(), timeout=2)
+        task_b = asyncio.create_task(tool_b["handler"]({}))
+        await asyncio.sleep(0.05)
+        assert not task_b.done()
+        release.set()
+        assert await asyncio.wait_for(task_a, timeout=2) == "async-owner"
+        with pytest.raises(ModuleNotFoundError):
+            await asyncio.wait_for(task_b, timeout=2)
+
+    asyncio.run(main())
+    extension_loader.unload_extension("env_async_owner")
+    extension_loader.unload_extension("env_async_neighbor")
 
 
 def test_load_extension_registers_route_with_prefix(tmp_path):

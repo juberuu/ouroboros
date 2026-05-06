@@ -1184,10 +1184,22 @@ def test_mobile_keyboard_open_uses_visual_viewport_flex_stack():
 
     assert "keyboard-open" in js
     assert "visualViewport" in js
-    assert "window.innerHeight" in js
-    assert "--vvh-offset" in js
-    assert "(layoutHeight - h) > Math.max(120, layoutHeight * 0.25)" in js
+    assert "frozenBaseline" in js
+    assert "documentElement.clientHeight" in js
+    assert "touchmove" in js
+    assert "lockBoundaryTouch" in js
+    assert "findScrollableKeyboardNode" in js
+    assert "el.id === 'chat-input'" in js
+    assert "classList?.contains('chat-live-timeline')" in js
+    wide_viewport_cleanup = re.search(
+        r"\}\s+else\s+\{(?P<body>.*?)document\.documentElement\.classList\.remove\('keyboard-open'\)", js, re.S
+    ).group("body")
+    assert "if (wasKeyboardOpen)" in wide_viewport_cleanup
+    assert "document.removeEventListener('touchstart', lockTouchStart);" in wide_viewport_cleanup
+    assert "document.removeEventListener('touchmove', lockBoundaryTouch);" in wide_viewport_cleanup
+    assert "--vvh-offset" not in js
 
+    assert "html.keyboard-open" in css
     assert "body.keyboard-open #nav-rail" in css
     assert "body.keyboard-open #content" in css
     assert "body.keyboard-open #page-chat.active" in css
@@ -1206,8 +1218,9 @@ def test_mobile_keyboard_open_uses_visual_viewport_flex_stack():
     ).group("body")
     assert "position: fixed" in page_chat_block
     assert "flex-direction: column" in page_chat_block
-    assert "var(--vvh-offset" in page_chat_block
+    assert "top: 0" in page_chat_block
     assert "height: var(--vvh)" in page_chat_block
+    assert "var(--vvh-offset" not in page_chat_block
 
     header_block = re.search(
         r"body\.keyboard-open\s+#page-chat\.active\s+\.chat-page-header\s*\{(?P<body>[^}]+)\}", css, re.S
@@ -1221,6 +1234,7 @@ def test_mobile_keyboard_open_uses_visual_viewport_flex_stack():
     assert "flex: 1" in messages_block
     assert "min-height: 0" in messages_block
     assert "overflow-y: auto" in messages_block
+    assert "overscroll-behavior: contain" in messages_block
 
     input_block = re.search(
         r"body\.keyboard-open\s+#page-chat\.active\s+#chat-input-area\s*\{(?P<body>[^}]+)\}", css, re.S

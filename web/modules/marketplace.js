@@ -9,6 +9,16 @@
  * is automatic.
  */
 
+import {
+    getPending,
+    getPendingBySlug,
+    lifecycleCardClassFor,
+    lifecycleSpinnerFor,
+    setPending,
+    startLifecyclePoller,
+} from './lifecycle_card.js';
+import { openConfirmDialog } from './confirm_dialog.js';
+
 function escapeHtml(value) {
     return String(value ?? '')
         .replace(/&/g, '&amp;')
@@ -188,9 +198,9 @@ function lifecycleFor(summary, installed, pending) {
                 tone: pending.tone || 'danger',
                 label: pending.label || 'Failed',
                 hint: pending.message || '',
-                action: pending.retry_action || 'install',
+                action: pending.retry_action || '',
                 button: pending.retry_label || 'Retry',
-                disabled: false,
+                disabled: !pending.retry_action,
             };
         }
         return {
@@ -325,7 +335,7 @@ function buildHealPrompt(installed, summary) {
 
 function summaryCard(summary, installedMap, isPlugin) {
     const slug = summary.slug;
-    const pending = installedMap.pendingBySlug?.get(slug);
+    const pending = getPending(slug);
     const installed = installedMap.get(slug);
     const installedAtVersion = installed?.provenance?.version || installed?.version || '';
     const isInstalled = !!installed;
@@ -347,9 +357,7 @@ function summaryCard(summary, installedMap, isPlugin) {
     const lifecycleHint = lifecycle.hint
         ? `<div class="marketplace-card-state-hint">${escapeHtml(lifecycle.hint)}</div>`
         : '';
-    const workingIndicator = pending
-        ? '<span class="marketplace-working-spinner" aria-hidden="true"></span>'
-        : '';
+    const workingIndicator = lifecycleSpinnerFor(pending);
     const primaryButton = isPlugin
         ? `<button class="btn btn-default" disabled title="OpenClaw Node/TypeScript plugins are not installable in Ouroboros. Use a Python port or MCP bridge.">Plugin</button>`
         : `<button class="btn btn-primary marketplace-next-action"
@@ -370,7 +378,7 @@ function summaryCard(summary, installedMap, isPlugin) {
         <div class="marketplace-primary-action">${primaryButton}</div>
         <div class="marketplace-secondary-actions">${secondaryButtons}</div>
     `;
-    const cardClass = pending ? 'marketplace-card is-working' : 'marketplace-card';
+    const cardClass = lifecycleCardClassFor(pending);
     const pluginBadge = isPlugin
         ? '<span class="skills-badge skills-badge-danger">plugin unsupported</span>'
         : '';
@@ -790,7 +798,6 @@ export function initMarketplace(pane) {
         nextCursor: '',
         registryPath: 'packages',
         registryAttempts: [],
-        pendingBySlug: new Map(),
     };
 
     const queryInput = pane.querySelector('#mp-query');
@@ -837,7 +844,7 @@ export function initMarketplace(pane) {
             if (myToken !== refreshToken) return;
             state.results = data.results || [];
             state.installedMap = installedMap;
-            state.installedMap.pendingBySlug = state.pendingBySlug;
+            state.installedMap.pendingBySlug = getPendingBySlug();
             state.nextCursor = data.next_cursor || '';
             state.registryPath = data.registry_path || 'packages';
             state.registryAttempts = data.registry_attempts || [];
@@ -888,82 +895,15 @@ export function initMarketplace(pane) {
 
     pane._marketplaceRefresh = () => scheduleRefresh(true);
 
-    // v5.7.0 lifecycle polling: while any slug is pending (e.g. mid-install)
-    // we poll /api/skills/lifecycle-queue every 1s and surface the active
-    // job's `message` (e.g. "Downloading…" → "Adapting…" → "Running review…"
-    // → "Installing dependencies…") in the per-card pending hint so the user
-    // sees real progress instead of a frozen spinner. The poller stops as
-    // soon as state.pendingBySlug empties to avoid background load.
-    let lifecyclePollTimer = null;
-    async function tickLifecyclePoll() {
-        if (state.pendingBySlug.size === 0) {
-            lifecyclePollTimer = null;
-            return;
-        }
-        try {
-            const data = await fetch('/api/skills/lifecycle-queue', { cache: 'no-store' })
-                .then((r) => (r.ok ? r.json() : { active: null, events: [] }))
-                .catch(() => ({ active: null, events: [] }));
-            const active = data?.active;
-            const events = Array.isArray(data?.events) ? data.events : [];
-            // Update per-pending-slug hint text from queue messages. We
-            // match by event.target — for ClawHub install jobs that target
-            // is the slug; for already-sanitized targets we fall back to
-            // any name match to keep messaging useful regardless.
-            let hasQueuedOrRunningJob = false;
-            for (const slug of Array.from(state.pendingBySlug.keys())) {
-                let job = events.find((e) => e?.target === slug && (e?.status === 'running' || e?.status === 'queued'));
-                if (!job && active?.target === slug) job = active;
-                if (!job) continue;
-                if (job.status === 'running' || job.status === 'queued') {
-                    hasQueuedOrRunningJob = true;
-                }
-                const prev = state.pendingBySlug.get(slug) || {};
-                const nextMsg = String(job.message || prev.message || '').trim();
-                if (nextMsg && nextMsg !== prev.message) {
-                    state.pendingBySlug.set(slug, { ...prev, message: nextMsg });
-                    state.installedMap.pendingBySlug = state.pendingBySlug;
-                    renderResults(resultsHost, state.results, state.installedMap, state.results.length, {
-                        query: state.query,
-                        official: state.onlyOfficial,
-                        registryPath: state.registryPath,
-                        attempts: state.registryAttempts,
-                    });
-                }
-            }
-            if (!hasQueuedOrRunningJob) {
-                // Keep terminal failed cards visible (they intentionally stay
-                // in pendingBySlug for display), but stop the background poller
-                // once no queued/running lifecycle job remains.
-                lifecyclePollTimer = null;
-                return;
-            }
-        } catch (_) {
-            /* polling is best-effort */
-        }
-        if (state.pendingBySlug.size > 0) {
-            lifecyclePollTimer = setTimeout(tickLifecyclePoll, 1000);
-        } else {
-            lifecyclePollTimer = null;
-        }
-    }
-    function ensureLifecyclePoll() {
-        if (lifecyclePollTimer || state.pendingBySlug.size === 0) return;
-        lifecyclePollTimer = setTimeout(tickLifecyclePoll, 1000);
-    }
-
-    function setPending(slug, pending) {
-        if (pending) state.pendingBySlug.set(slug, pending);
-        else state.pendingBySlug.delete(slug);
-        state.installedMap.pendingBySlug = state.pendingBySlug;
-        ensureLifecyclePoll();
+    startLifecyclePoller(() => {
+        state.installedMap.pendingBySlug = getPendingBySlug();
         renderResults(resultsHost, state.results, state.installedMap, state.results.length, {
             query: state.query,
             official: state.onlyOfficial,
             registryPath: state.registryPath,
             attempts: state.registryAttempts,
         });
-    }
+    });
 
     async function toggleInstalledSkill(installed, enabled) {
         return fetchJson(`/api/skills/${encodeURIComponent(installed.name)}/toggle`, {
@@ -995,7 +935,11 @@ export function initMarketplace(pane) {
         if (action === 'grant' && installed) {
             const keys = installed.grants?.missing_keys || installed.grants?.requested_keys || [];
             if (!keys.length) throw new Error('No grant keys reported for this skill.');
-            const ok = confirm(`Grant ${installed.name} access to these core settings keys?\n\n${keys.join('\n')}\n\nOnly grant access to reviewed skills you trust.`);
+            const ok = await openConfirmDialog({
+                title: `Grant access to ${installed.name}`,
+                body: `Grant ${installed.name} access to these core settings keys?\n\n${keys.join('\n')}\n\nOnly grant access to reviewed skills you trust.`,
+                confirmLabel: 'Grant access',
+            });
             if (!ok) return;
             const bridge = window.pywebview?.api?.request_skill_key_grant;
             if (!bridge) {
@@ -1008,7 +952,11 @@ export function initMarketplace(pane) {
             return;
         }
         if (action === 'fix' && installed) {
-            const ok = confirm(`Start a repair task for ${installed.name || slug}? Ouroboros will edit only the skill payload and re-run review.`);
+            const ok = await openConfirmDialog({
+                title: `Repair ${installed.name || slug}`,
+                body: `Start a repair task for ${installed.name || slug}? Ouroboros will edit only the skill payload and re-run review.`,
+                confirmLabel: 'Start repair',
+            });
             if (!ok) return;
             setPending(slug, { label: 'Repair requested', tone: 'warn', message: 'Queueing repair task…' });
             await fetchJson('/api/command', {
@@ -1036,6 +984,22 @@ export function initMarketplace(pane) {
                 `${slug}: review ${result.status}${result.error ? ` — ${result.error}` : ''}`,
                 result.status === 'pass' ? 'ok' : (result.status === 'fail' || result.error ? 'danger' : 'warn'),
             );
+            return;
+        }
+        if (action === 'update' && installed) {
+            setPending(slug, {
+                label: 'Updating',
+                tone: 'warn',
+                message: 'Updating skill…',
+                target: installed.name,
+            });
+            const result = await fetchJson(`/api/marketplace/clawhub/update/${encodeURIComponent(installed.name)}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({}),
+            });
+            if (!result.ok) throw new Error(result.error || 'update failed');
+            showStatus(pane, `Updated ${slug} — review ${result.review_status}`, result.review_status === 'pass' ? 'ok' : 'warn');
             return;
         }
         if (action === 'install') {
@@ -1204,6 +1168,12 @@ export function initMarketplace(pane) {
             }
             const targetVersion = (userVersion || '').trim();
             showStatus(pane, `Updating ${slug}${targetVersion ? ` → v${targetVersion}` : ' (latest)'}…`, 'muted');
+            setPending(slug, {
+                label: 'Updating',
+                tone: 'warn',
+                message: 'Updating skill…',
+                target: sanitized,
+            });
             try {
                 const body = targetVersion ? { version: targetVersion } : {};
                 const result = await fetchJson(`/api/marketplace/clawhub/update/${encodeURIComponent(sanitized)}`, {
@@ -1212,11 +1182,21 @@ export function initMarketplace(pane) {
                     body: JSON.stringify(body),
                 });
                 if (!result.ok) {
-                    showStatus(pane, `Update failed: ${result.error}`, 'danger');
+                    throw new Error(result.error || 'update failed');
                 } else {
                     showStatus(pane, `Updated ${slug} — review ${result.review_status}`, result.review_status === 'pass' ? 'ok' : 'warn');
+                    setPending(slug, null);
                 }
             } catch (err) {
+                setPending(slug, {
+                    label: 'Failed',
+                    tone: 'danger',
+                    message: err.message || String(err),
+                    failed: true,
+                    retry_action: 'update',
+                    retry_label: 'Retry update',
+                    target: sanitized,
+                });
                 showStatus(pane, `Update error: ${err.message}`, 'danger');
             } finally {
                 updateBtn.disabled = false;
@@ -1227,7 +1207,13 @@ export function initMarketplace(pane) {
         if (uninstallBtn) {
             const slug = uninstallBtn.dataset.mpUninstall;
             const sanitized = uninstallBtn.dataset.name;
-            if (!confirm(`Uninstall ${slug}? This deletes data/skills/clawhub/${sanitized}/.`)) return;
+            const ok = await openConfirmDialog({
+                title: `Uninstall ${slug}`,
+                body: `Uninstall ${slug}? This deletes data/skills/clawhub/${sanitized}/.`,
+                confirmLabel: 'Uninstall',
+                danger: true,
+            });
+            if (!ok) return;
             uninstallBtn.disabled = true;
             try {
                 await fetchJson(`/api/marketplace/clawhub/uninstall/${encodeURIComponent(sanitized)}`, {

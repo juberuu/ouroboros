@@ -3008,6 +3008,16 @@ body {
     white-space: nowrap;
 }
 
+.skills-status-chip.is-clickable,
+.skills-lock-hint.is-clickable {
+    cursor: pointer;
+}
+
+.skills-status-chip.is-clickable:hover,
+.skills-lock-hint.is-clickable:hover {
+    filter: brightness(1.12);
+}
+
 .skills-status-ok {
     background: rgba(34, 197, 94, 0.12);
     color: #4ade80;
@@ -3118,6 +3128,15 @@ body {
     display: flex;
     align-items: center;
     gap: 6px;
+}
+
+.skills-lock-hint[role="button"] {
+    outline: none;
+}
+
+.skills-lock-hint[role="button"]:focus-visible,
+.skills-status-chip[role="button"]:focus-visible {
+    box-shadow: 0 0 0 2px rgba(201, 53, 69, 0.55);
 }
 
 .skills-lock-hint::before {
@@ -3291,6 +3310,10 @@ body {
 }
 
 .skills-next-action {
+    min-width: 130px;
+}
+
+.skills-primary-action {
     min-width: 130px;
 }
 
@@ -3812,6 +3835,15 @@ body {
     box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
 }
 
+.confirm-dialog {
+    max-width: 520px;
+}
+
+.confirm-dialog .marketplace-modal-body p {
+    margin: 0;
+    white-space: pre-line;
+}
+
 .marketplace-modal-head {
     display: flex;
     align-items: center;
@@ -4323,22 +4355,39 @@ body {
         overflow-x: hidden;
     }
 
-    /* Keyboard-open chat layout: keep the composer inside the visual viewport
-       while iOS/Android shrink and offset the viewport for the soft keyboard. */
+    /* Keyboard-open chat layout: make the document itself no taller than the
+       visual viewport, then keep only #chat-messages scrollable. Boundary-aware
+       touch handling in web/app.js prevents message overscroll from chaining
+       back into page / visualViewport movement on iOS and Android browsers. */
+    html.keyboard-open,
+    body.keyboard-open {
+        position: fixed;
+        inset: 0;
+        width: 100%;
+        height: var(--vvh);
+        max-height: var(--vvh);
+        overflow: hidden;
+        overscroll-behavior: none;
+    }
+
     body.keyboard-open #nav-rail {
         display: none;
     }
 
     body.keyboard-open #content {
+        position: fixed;
+        inset: 0;
         height: var(--vvh);
         max-height: var(--vvh);
+        padding-left: 0;
         padding-bottom: 0;
         overflow: hidden;
+        overscroll-behavior: none;
     }
 
     body.keyboard-open #page-chat.active {
         position: fixed;
-        top: var(--vvh-offset, 0px);
+        top: 0;
         left: 0;
         right: 0;
         height: var(--vvh);
@@ -4347,6 +4396,7 @@ body {
         flex-direction: column;
         z-index: 20;
         overflow: hidden;
+        overscroll-behavior: none;
     }
 
     body.keyboard-open #page-chat.active .chat-page-header {
@@ -4363,6 +4413,8 @@ body {
         padding-top: 0;
         padding-bottom: 0;
         overflow-y: auto;
+        overscroll-behavior: contain;
+        -webkit-overflow-scrolling: touch;
     }
 
     body.keyboard-open #page-chat.active #chat-input-area {

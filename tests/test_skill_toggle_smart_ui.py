@@ -27,6 +27,28 @@ def test_skill_toggle_requires_fresh_pass_before_enable():
     assert "await toggleSkillEnabled(name, wantsEnabled);" in source
 
 
+def test_skill_card_primary_actions_and_lock_surfaces_use_shared_modal():
+    source = _read("web/modules/skills.js")
+    css = _read("web/style.css")
+    dialog = _read("web/modules/confirm_dialog.js")
+
+    assert "import { openConfirmDialog } from './confirm_dialog.js';" in source
+    assert "function getSkillPrimaryAction" in source
+    assert "skills-primary-action" in source
+    assert "data-skill-action" in source
+    assert "skills-status-chip" in source and "role=\"button\"" in source
+    assert "skills-lock-hint" in source and "role=\"button\"" in source
+    assert "event.target.closest('[data-skill-action]')" in source
+    assert "triggerSkillAction(name, action" in source
+    assert "openConfirmDialog({" in source
+    assert ".skills-primary-action" in css
+    assert "export function openConfirmDialog" in dialog
+
+    primary_action = source.split("function getSkillPrimaryAction", 1)[1].split("function renderSkillCard", 1)[0]
+    assert primary_action.index("skill.review_status === 'fail'") < primary_action.index("!reviewReady(skill)")
+    assert primary_action.index("!reviewReady(skill)") < primary_action.index("!grantReady(skill)")
+
+
 def test_skill_cards_keep_toggle_but_move_secondary_actions_to_menu():
     source = _read("web/modules/skills.js")
     css = _read("web/style.css")

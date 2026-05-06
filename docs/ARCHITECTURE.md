@@ -1,4 +1,4 @@
-# Ouroboros v5.8.0-rc.4 — Architecture & Reference
+# Ouroboros v5.8.0-rc.6 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -66,6 +66,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── skill_dependencies.py ← Shared dependency-spec resolution for skill payloads across manifests, sidecars, and provenance
       ├── skill_review.py      ← Tri-model skill review reusing the repo-review infrastructure against the Skill Review Checklist section of docs/CHECKLISTS.md
       ├── extension_loader.py  ← Phase 4 in-process loader for type: extension skills; discovers + imports plugin.py via importlib with a narrow PluginAPIImpl, tracks registrations per-skill for atomic unload
+      ├── extension_isolated_deps.py ← Per-extension bridge that exposes reviewed `.ouroboros_env` Python site-packages to in-process extensions while they are loaded
       ├── extensions_api.py    ← Phase 5 HTTP surface for extensions (GET /api/extensions, GET /api/extensions/<skill>/manifest, ALL /api/extensions/<skill>/<rest:path> catch-all dispatch, POST /api/skills/<skill>/toggle, POST /api/skills/<skill>/review, POST /api/skills/<skill>/grants)
       ├── marketplace/         ← ClawHub + OuroborosHub marketplace package (clawhub.py registry client, ouroboroshub.py static GitHub catalog client, fetcher.py staging, adapter.py OpenClaw->Ouroboros translation, install.py orchestration, isolated_deps.py per-skill dependency prefix, provenance.py durable provenance)
       ├── marketplace_api.py   ← HTTP surface for marketplaces (/api/marketplace/clawhub/* and /api/marketplace/ouroboroshub/*); always-on with registry host allowlists and hash checks
@@ -328,7 +329,7 @@ environment that has Ouroboros dependencies installed.
 ## 3. Web UI Pages & Buttons
 
 The web UI is a single-page app (`web/index.html` + `web/style.css` + ES modules).
-`web/app.js` is the thin orchestrator (~90 lines) that imports from `web/modules/`:
+`web/app.js` is the SPA orchestrator and viewport bootstrap that imports from `web/modules/`:
 - `ws.js` — WebSocket connection manager
 - `utils.js` — shared utilities (markdown rendering, escapeHtml, matrix rain)
 - `chat.js` — chat page with message rendering, live task card, compact runtime controls, and budget pill
@@ -376,7 +377,7 @@ v5.7.2 normalizes page-level headers and top tab strips through `web/modules/pag
 - **Empty-chat init**: if neither server history nor sessionStorage has messages, the UI shows a transient assistant bubble: `Ouroboros has awakened`. This is visual-only and is not written to chat history.
 - **Telegram bridge**: Web UI initiated chats can be mirrored into the bound Telegram chat, Telegram text input is injected back into the same live chat timeline, and Telegram photos are bridged as image-aware user messages (including while a direct-chat turn is already running).
 - **Live card cleanup and reconnect recovery**: after a 2-minute `scheduleTaskUiCleanup` timer, finished task cards are **left fully intact** — the DOM node, backing `rec.items` array, and `liveCardRecords` entry are all preserved so the card remains visible with working expand/collapse interactions and so a later reconnect `syncHistory` can rebind the existing node without creating a duplicate. Only the task ID is added to `retiredTaskIds` so routine incremental `scheduleHistorySync()` calls (fired 700ms after each new task) do NOT re-build the card from history mid-session. On soft restart (same-SHA WS reconnect), `syncHistory` receives `fromReconnect=true` so `retiredTaskIds` is cleared and server history is authoritative — cards are reconstructed from `progress.jsonl` entries. The final `liveCardRecords` sweep in `syncHistory` skips cards where `ts.cardVisible === false && ts.completed === true` (trivial 0-tool-call tasks) to avoid a cluster of invisible placeholder nodes appearing at the end of the chat.
-- **Mobile keyboard safety**: `web/app.js` creates a `<style id="runtime-vvh">` element at startup and updates its `textContent` with `:root{--vvh:Npx;--vvh-offset:Npx}` on every `visualViewport` resize/scroll event (falling back to `window.innerHeight` for browsers without the API). `body`, `#app`, `#nav-rail`, and `.evolution-container` use `var(--vvh)` instead of `100vh`, keeping the chat input above the soft keyboard on iOS/Android and preventing the Evolution page from overflowing past the visible viewport. `--vvh` defaults to `100dvh` in `:root` so desktop layout is unchanged. On narrow viewports (`≤640px`), `updateVvh()` detects keyboard-open state via `(layoutHeight - visualViewport.height) > max(120px, 25%)`, toggles `body.keyboard-open`, and exposes `--vvh-offset` from `visualViewport.offsetTop` so the fixed chat container starts at the visual viewport origin. CSS hides `#nav-rail` and, only when Chat is the active SPA page, makes `#page-chat.active` a `position: fixed` flex-column container with `top: var(--vvh-offset, 0px)` and `height: var(--vvh)`; `.chat-page-header`, `#chat-messages`, and `#chat-input-area` become flex children so the transcript fills the remaining space and the composer stays visible without gaps while inactive pages remain controlled by the `.page.active` invariant. `renderMarkdown` wraps generated tables in `<div class="md-table-wrap">` for `overflow-x: auto` horizontal scrolling on narrow screens. On narrow viewports (`@media (max-width: 640px)`) the Costs stat/budget/tables grids and Evolution version columns collapse to single-column, and `.form-field input/select` carry `max-width: 100%` so the desktop-default `width: 320px` never overflows a narrow container.
+- **Mobile keyboard safety**: `web/app.js` creates a `<style id="runtime-vvh">` element at startup and updates its `textContent` with `:root{--vvh:Npx}` on every `visualViewport` resize/scroll event (falling back to `window.innerHeight` for browsers without the API). `--vvh` defaults to `100dvh` in `:root` so desktop layout is unchanged. On narrow viewports (`≤640px`), `updateVvh()` uses a frozen baseline captured from `documentElement.clientHeight`, `window.innerHeight`, and `screen.height/availHeight` while the keyboard is closed; this avoids the platform split where iOS makes `innerHeight == visualViewport.height` and Android/Opera may shrink `clientHeight` with the keyboard. When `(baseline - visualViewport.height) > max(120px, baseline * 0.25)`, it toggles both `html.keyboard-open` and `body.keyboard-open`, writes the current `--vvh`, scrolls the document back to the top, and installs touch listeners that allow normal scrolling inside `#chat-messages`, `#chat-input`, and `.chat-live-timeline` but prevent top/bottom overscroll from chaining into page or `visualViewport` movement. CSS constrains `html`, `body`, and `#content` to `height: var(--vvh)` with `overflow: hidden`, hides `#nav-rail`, and, only when Chat is the active SPA page, makes `#page-chat.active` a `position: fixed` flex-column container with `top: 0` and `height: var(--vvh)`. `.chat-page-header`, `#chat-messages`, and `#chat-input-area` become flex children; `#chat-messages` is the only scrollable area (`overscroll-behavior: contain`), so the transcript fills the remaining space and the composer stays visible without gaps while inactive pages remain controlled by the `.page.active` invariant. `renderMarkdown` wraps generated tables in `<div class="md-table-wrap">` for `overflow-x: auto` horizontal scrolling on narrow screens. On narrow viewports (`@media (max-width: 640px)`) the Costs stat/budget/tables grids and Evolution version columns collapse to single-column, and `.form-field input/select` carry `max-width: 100%` so the desktop-default `width: 320px` never overflows a narrow container.
 - Messages sent via WebSocket `{type: "chat", content: text, sender_session_id: "uuid"}`.
 - Responses arrive via WebSocket `{type: "chat", role, content, ts, source?, sender_label?, sender_session_id?, client_message_id?}` and `{type: "photo", role, image_base64, mime, caption?, ts, source?, sender_label?}`. On page-load history sync, `/api/chat/history` can also return `role: "system"` entries for internal summaries plus metadata for multi-user reconstruction.
 - Supports slash commands: `/status`, `/evolve`, `/review`, `/bg`, `/restart`, `/panic`.
@@ -2116,6 +2117,25 @@ the staging step. This split exists so rapid in-place edits to
 each reload works against a fresh staged copy whose import root cannot
 collide with a previous load's ``sys.modules`` entries.
 
+Generated dependency caches are deliberately outside the staged import tree.
+``.ouroboros_env`` is already excluded from content hashing and review packs
+by ``skill_loader._SKILL_DIR_CACHE_NAMES``; the extension staging step applies
+the same cache-dir skip before symlink validation and ``copytree`` so a normal
+Python venv symlink such as ``.ouroboros_env/python/bin/python`` cannot make an
+otherwise-reviewed extension fail to load. When an extension has reviewed
+Python dependencies installed under ``.ouroboros_env/python/.../site-packages``,
+``load_extension`` temporarily prepends those site directories to ``sys.path``
+before importing ``plugin.py``. The bridge deliberately does not use
+``site.addsitedir`` because dependency-owned ``.pth`` files can execute
+``import`` lines at path-registration time; only ordinary import resolution is
+enabled. The injection is scoped by
+``extension_isolated_deps.isolated_site_dirs_scope`` around plugin import and
+wrapped tool/route/WS handler execution. Scope exit immediately removes the
+temporary paths, drops importer-cache entries, and purges file-backed and
+namespace-package modules loaded from those site-packages; ``unload_extension``
+then only owns the staged import root, registered surfaces, callbacks, and
+extension module namespace.
+
 ### 12.2 Lifecycle
 
 1. **Discover**: ``list_skills`` tool (via ``summarize_skills``) returns
@@ -2348,10 +2368,13 @@ search time and refused at install time.
 | ``ouroboros/marketplace/install.py`` | End-to-end ClawHub pipeline: ``info`` -> ``download`` -> ``stage`` -> ``adapt`` -> atomically swap the staged tree into ``data/skills/clawhub/<sanitized>/`` -> auto-trigger ``review_skill`` -> only after fresh PASS install auto-isolated dependencies -> persist provenance. Also exposes ``update_skill`` (re-install at newer version) and ``uninstall_skill``. |
 | ``ouroboros/marketplace/ouroboroshub.py`` | Read-only static GitHub catalog client. Loads ``catalog.json`` from ``OUROBOROS_HUB_CATALOG_URL``, downloads only the selected skill files from raw GitHub URLs pinned by catalog metadata, verifies every file sha256, and lands into ``data/skills/ouroboroshub/<slug>/`` with ``.ouroboroshub.json`` provenance. |
 | ``ouroboros/marketplace/provenance.py`` | Atomic JSON read/write helper for ``data/state/skills/<name>/clawhub.json``. Schema: ``{schema_version, source, slug, sanitized_name, version, sha256, original_manifest_sha256, translated_manifest_sha256, registry_url, license, primary_env, adapter_warnings, installed_at, updated_at}``. |
+| ``ouroboros/extension_isolated_deps.py`` | Bridges reviewed isolated Python dependencies into the in-process extension loader. It finds ``.ouroboros_env/python/.../site-packages`` dirs, serializes plugin import/handler execution while those dirs are exposed via direct ``sys.path`` additions (no ``site.addsitedir`` / ``.pth`` execution), then purges file-backed and namespace-package modules loaded from those dirs at scope exit. |
 | ``ouroboros/marketplace_api.py`` | Starlette routes wired in ``server.py`` under ``/api/marketplace/clawhub/*`` and ``/api/marketplace/ouroboroshub/*``. Registry and install work dispatch through ``asyncio.to_thread`` to keep the event loop responsive; mutating routes pass through ``skill_lifecycle_queue``. |
 | ``ouroboros/skill_lifecycle_queue.py`` | Process-local global FIFO for mutating skill lifecycle operations. Recent job state feeds My skills virtual rows, tab badges, and chat/system summaries. |
+| ``web/modules/lifecycle_card.js`` | Shared marketplace-card pending-state helper. ClawHub and OuroborosHub cards use the same ``marketplace-card.is-working`` pulse, spinner, lifecycle-queue polling, and live hint text for install/review/update work. |
+| ``web/modules/confirm_dialog.js`` | Shared Promise-based confirmation modal used by Skills and marketplace actions instead of ad-hoc native ``confirm()`` calls. |
 | ``web/modules/marketplace.js`` | ClawHub UI lazily loaded by the Skills page. Provides lexical search, official-only filtering, cards, detail modal, and queued lifecycle actions. Failed installs remain visible instead of being immediately erased by refresh. |
-| ``web/modules/ouroboroshub.js`` | Official hub UI backed by the static GitHub catalog. Lists 10-50 official skills without a server-side search service; install pulls only the selected skill files. |
+| ``web/modules/ouroboroshub.js`` | Official hub UI backed by the static GitHub catalog. Lists 10-50 official skills without a server-side search service; install pulls only the selected skill files and uses the shared lifecycle-card pending UI while install/review is running. |
 | ``web/modules/widgets.js`` | Widgets page host for reviewed ``register_ui_tab`` declarations. Supports legacy ``iframe`` / ``inline_card`` and declarative v1 components without loading arbitrary skill JavaScript. Declarative widget state persists across tab switches for the current browser session. |
 
 #### 12.6.2 Frontmatter mapping (OpenClaw -> Ouroboros)

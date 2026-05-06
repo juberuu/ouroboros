@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import inspect
 import hashlib
 import logging
 import pathlib
@@ -50,7 +51,13 @@ from ouroboros.contracts.plugin_api import (
     VALID_EXTENSION_PERMISSIONS,
     VALID_EXTENSION_ROUTE_METHODS,
 )
+from ouroboros.extension_isolated_deps import (
+    async_isolated_site_dirs_scope,
+    isolated_site_dirs_scope,
+    is_skill_cache_path,
+)
 from ouroboros.skill_loader import (
+    _SKILL_DIR_CACHE_NAMES,
     LoadedSkill,
     SkillPayloadUnreadable,
     compute_content_hash,
@@ -549,6 +556,7 @@ class PluginAPIImpl:
         settings_reader: Callable[[], Dict[str, Any]],
         granted_keys: Sequence[str] | None = None,
         skill_dir: pathlib.Path | None = None,
+        dependency_site_dirs_enabled: bool = False,
     ) -> None:
         self._skill = skill_name
         self._permissions = frozenset(str(p).strip() for p in (permissions or []))
@@ -558,6 +566,7 @@ class PluginAPIImpl:
         # v5.7.0: store the skill payload directory so get_runtime_info()
         # can return it without re-doing manifest discovery.
         self._skill_dir = pathlib.Path(skill_dir) if skill_dir is not None else None
+        self._dependency_site_dirs_enabled = bool(dependency_site_dirs_enabled)
         self._settings_reader = settings_reader
         self._registration_closed = False
         self._runtime_closing = False
@@ -597,6 +606,27 @@ class PluginAPIImpl:
                 f"skill {self._skill!r} cannot register after unload has started"
             )
 
+    def _wrap_runtime_handler(self, handler: Callable[..., Any]) -> Callable[..., Any]:
+        if self._skill_dir is None:
+            return handler
+
+        if inspect.iscoroutinefunction(handler):
+            async def _async_wrapped(*args: Any, **kwargs: Any) -> Any:
+                async with async_isolated_site_dirs_scope(
+                    self._skill_dir,
+                    enabled=self._dependency_site_dirs_enabled,
+                ):
+                    return await handler(*args, **kwargs)
+
+            return _async_wrapped
+
+        def _wrapped(*args: Any, **kwargs: Any) -> Any:
+            with isolated_site_dirs_scope(self._skill_dir, enabled=self._dependency_site_dirs_enabled):
+                result = handler(*args, **kwargs)
+                return result
+
+        return _wrapped
+
     # --- registration ---
 
     def register_tool(
@@ -619,7 +649,7 @@ class PluginAPIImpl:
                 )
             _tools[full] = {
                 "name": full,
-                "handler": handler,
+                "handler": self._wrap_runtime_handler(handler),
                 "description": str(description or ""),
                 "schema": dict(schema or {}),
                 "timeout_sec": max(1, int(timeout_sec)),
@@ -661,7 +691,7 @@ class PluginAPIImpl:
                 )
             _routes[mount] = {
                 "path": mount,
-                "handler": handler,
+                "handler": self._wrap_runtime_handler(handler),
                 "methods": norm_methods,
                 "skill": self._skill,
             }
@@ -683,7 +713,7 @@ class PluginAPIImpl:
                 )
             _ws_handlers[full] = {
                 "type": full,
-                "handler": handler,
+                "handler": self._wrap_runtime_handler(handler),
                 "skill": self._skill,
             }
             _extensions.setdefault(self._skill, _ExtensionRegistrations()).ws_handlers.append(full)
@@ -959,6 +989,8 @@ def _stage_extension_import_tree(
     resolved_root = skill.skill_dir.resolve()
     relative_entry = entry_path.relative_to(resolved_root)
     for path in sorted(skill.skill_dir.rglob("*")):
+        if is_skill_cache_path(path, resolved_root):
+            continue
         if not path.is_symlink():
             continue
         try:
@@ -971,7 +1003,11 @@ def _stage_extension_import_tree(
     import_root = state_dir / "__extension_imports" / uuid.uuid4().hex
     staged_skill_dir = import_root / "skill"
     import_root.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(skill.skill_dir, staged_skill_dir)
+    shutil.copytree(
+        skill.skill_dir,
+        staged_skill_dir,
+        ignore=shutil.ignore_patterns(*_SKILL_DIR_CACHE_NAMES),
+    )
     _purge_extension_bytecode(staged_skill_dir)
     staged_entry = (staged_skill_dir / relative_entry).resolve()
     staged_entry.relative_to(staged_skill_dir.resolve())
@@ -1268,6 +1304,17 @@ def load_extension(
     if drive_root is None:
         drive_root = pathlib.Path.home() / "Ouroboros" / "data"
     state_dir = skill_state_dir(drive_root, skill.name)
+    try:
+        from ouroboros.skill_dependencies import auto_install_specs_for_skill
+
+        auto_specs = auto_install_specs_for_skill(pathlib.Path(drive_root), skill)
+    except Exception:
+        log.debug("extension dependency spec probe failed for %s", skill.name, exc_info=True)
+        auto_specs = []
+    if auto_specs:
+        deps_reason = _deps_block_reason(pathlib.Path(drive_root), skill)
+        if deps_reason:
+            return f"skill {skill.name!r} cannot load until isolated dependencies are ready: {deps_reason}"
 
     # v5.2.2 dual-track grants: extensions may declare core / forbidden
     # settings keys in their manifest, but the loader only forwards the
@@ -1295,7 +1342,6 @@ def load_extension(
                 f"{missing_grants}. Grant access from the Skills tab."
             )
     staged_import_root: Optional[pathlib.Path] = None
-
     module_key = _module_key(skill.name)
     try:
         importlib.invalidate_caches()
@@ -1318,40 +1364,42 @@ def load_extension(
             return f"skill {skill.name!r}: importlib could not build spec"
         module = importlib.util.module_from_spec(spec)
         sys.modules[module_key] = module
-        spec.loader.exec_module(module)
-        register = getattr(module, "register", None)
-        if not callable(register):
-            # ``plugin.py`` may have imported sibling modules during
-            # ``exec_module`` — use ``unload_extension`` so every
-            # ``ouroboros._extensions.<skill>.*`` entry is purged, not
-            # just the top-level module.
-            unload_extension(skill.name)
-            return (
-                f"skill {skill.name!r} plugin.py does not export a "
-                "register(api) callable"
+        with isolated_site_dirs_scope(skill.skill_dir, enabled=bool(auto_specs)):
+            spec.loader.exec_module(module)
+            register = getattr(module, "register", None)
+            if not callable(register):
+                # ``plugin.py`` may have imported sibling modules during
+                # ``exec_module`` — use ``unload_extension`` so every
+                # ``ouroboros._extensions.<skill>.*`` entry is purged, not
+                # just the top-level module.
+                unload_extension(skill.name)
+                return (
+                    f"skill {skill.name!r} plugin.py does not export a "
+                    "register(api) callable"
+                )
+            api = PluginAPIImpl(
+                skill_name=skill.name,
+                permissions=list(skill.manifest.permissions or []),
+                env_allowlist=list(skill.manifest.env_from_settings or []),
+                state_dir=state_dir,
+                settings_reader=settings_reader,
+                granted_keys=granted_core,
+                skill_dir=skill.skill_dir,
+                dependency_site_dirs_enabled=bool(auto_specs),
             )
-        api = PluginAPIImpl(
-            skill_name=skill.name,
-            permissions=list(skill.manifest.permissions or []),
-            env_allowlist=list(skill.manifest.env_from_settings or []),
-            state_dir=state_dir,
-            settings_reader=settings_reader,
-            granted_keys=granted_core,
-            skill_dir=skill.skill_dir,
-        )
-        with _lock:
-            bundle = _extensions.get(skill.name)
-            if bundle is None:
-                bundle = _ExtensionRegistrations()
-                _extensions[skill.name] = bundle
-            bundle.content_hash = current_hash
-            bundle.skill_dir = str(skill.skill_dir.resolve())
-            bundle.import_root = str(staged_import_root) if staged_import_root is not None else None
-            bundle.api_instances.append(api)
-            _extension_modules[skill.name] = module
-            _load_failures.pop(skill.name, None)
-        register(api)
-        api._close_registration()
+            with _lock:
+                bundle = _extensions.get(skill.name)
+                if bundle is None:
+                    bundle = _ExtensionRegistrations()
+                    _extensions[skill.name] = bundle
+                bundle.content_hash = current_hash
+                bundle.skill_dir = str(skill.skill_dir.resolve())
+                bundle.import_root = str(staged_import_root) if staged_import_root is not None else None
+                bundle.api_instances.append(api)
+                _extension_modules[skill.name] = module
+                _load_failures.pop(skill.name, None)
+            register(api)
+            api._close_registration()
     except ExtensionRegistrationError as exc:
         # Tear down any partial registrations the plugin managed before
         # the error.
@@ -1362,8 +1410,9 @@ def load_extension(
         log.exception("extension %s failed to load", skill.name)
         return f"skill {skill.name!r} load failure: {type(exc).__name__}: {exc}"
     finally:
-        if staged_import_root is not None and skill.name not in _extensions:
-            shutil.rmtree(staged_import_root, ignore_errors=True)
+        if skill.name not in _extensions:
+            if staged_import_root is not None:
+                shutil.rmtree(staged_import_root, ignore_errors=True)
     return None
 
 

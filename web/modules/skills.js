@@ -1,6 +1,7 @@
 import { initMarketplace } from './marketplace.js';
 import { initOuroborosHub } from './ouroboroshub.js';
 import { renderPageHeader, renderTabStrip } from './page_header.js';
+import { openConfirmDialog } from './confirm_dialog.js';
 
 const SKILLS_ICON = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18"/><path d="M3 12h18"/><path d="M5 5l14 14"/><path d="M19 5L5 19"/></svg>';
 const SKILLS_TABS = [
@@ -339,6 +340,33 @@ function skillNextAction(skill, reviewInProgress = false) {
     return { label: '', className: '', disabled: true };
 }
 
+function getSkillPrimaryAction(skill, reviewInProgress = false) {
+    if (reviewInProgress) {
+        return { action: '', label: 'Reviewing...', disabled: true };
+    }
+    if ((skill.load_error && !isMissingGrantLoadError(skill)) || skill.review_status === 'fail') {
+        if (healReady(skill)) {
+            return { action: 'repair', label: 'Repair', danger: true };
+        }
+        return { action: '', label: '', disabled: true };
+    }
+    if (!reviewReady(skill)) {
+        return {
+            action: skill.review_stale ? 'rereview' : 'review',
+            label: skill.review_stale ? 'Re-review' : 'Review',
+        };
+    }
+    if (!grantReady(skill)) {
+        const grants = skill.grants || {};
+        const keys = Array.isArray(grants.missing_keys) ? grants.missing_keys : (grants.requested_keys || []);
+        return { action: 'grant', label: 'Grant access', keys: keys.join(',') };
+    }
+    if (skill.enabled && skill.type === 'extension' && skill.live_loaded && skill.dispatch_live) {
+        return { action: 'open_widgets', label: 'Open widgets' };
+    }
+    return { action: '', label: '' };
+}
+
 function renderSkillCard(skill, reviewingSkills = new Set()) {
     const safeName = escapeHtml(skill.name);
     const description = escapeHtml(skill.description || '');
@@ -346,6 +374,10 @@ function renderSkillCard(skill, reviewingSkills = new Set()) {
     const reviewInProgress = reviewingSkills.has(skill.name);
 
     const lockReason = toggleLockReason(skill);
+    const primaryAction = getSkillPrimaryAction(skill, reviewInProgress);
+    const actionAttrs = primaryAction.action
+        ? `data-skill="${safeName}" data-skill-action="${escapeHtml(primaryAction.action)}" role="button" tabindex="0"`
+        : '';
     // v5.2.2/3: enable transitions are locked by review + grant gates.
     // Disable transitions stay clickable so an owner can always pull
     // a misbehaving skill offline even if its review goes stale.
@@ -358,11 +390,14 @@ function renderSkillCard(skill, reviewingSkills = new Set()) {
         : skill.name;
 
     const status = skillStatusChip(skill);
-    const statusChip = `<span class="skills-status-chip skills-status-${status.tone}">${escapeHtml(status.label)}</span>`;
+    const statusChip = `<span class="skills-status-chip skills-status-${status.tone} ${primaryAction.action ? 'is-clickable' : ''}" ${actionAttrs}>${escapeHtml(status.label)}</span>`;
     const sourceChip = skillSourceChip(skill);
 
+    const toggleActionAttrs = toggleLocked && primaryAction.action
+        ? `data-skill="${safeName}" data-skill-action="${escapeHtml(primaryAction.action)}"`
+        : '';
     const toggleSwitch = skill.lifecycle_virtual ? '' : `
-        <label class="skills-switch ${toggleLocked ? 'is-locked' : ''}" title="${escapeHtml(toggleLocked ? `Locked: ${lockReason}` : (skill.enabled ? 'Turn skill off' : 'Turn skill on'))}">
+        <label class="skills-switch ${toggleLocked ? 'is-locked' : ''}" ${toggleActionAttrs} title="${escapeHtml(toggleLocked ? `Locked: ${lockReason}` : (skill.enabled ? 'Turn skill off' : 'Turn skill on'))}">
             <input type="checkbox"
                    class="skills-toggle"
                    role="switch"
@@ -378,7 +413,7 @@ function renderSkillCard(skill, reviewingSkills = new Set()) {
     `;
 
     const lockHint = toggleLocked
-        ? `<div class="skills-lock-hint" title="${escapeHtml(lockReason)}">Locked: ${escapeHtml(lockReason)}</div>`
+        ? `<div class="skills-lock-hint ${primaryAction.action ? 'is-clickable' : ''}" title="${escapeHtml(lockReason)}" ${actionAttrs}>Locked: ${escapeHtml(lockReason)}</div>`
         : '';
     const reviewProgress = reviewInProgress
         ? `
@@ -424,6 +459,16 @@ function renderSkillCard(skill, reviewingSkills = new Set()) {
     const nextButton = next.label ? `
         <button class="btn btn-primary skills-next-action ${escapeHtml(next.className)}" ${nextAttrs}>
             ${escapeHtml(next.label)}
+        </button>
+    ` : '';
+    const primaryButton = primaryAction.action ? `
+        <button type="button"
+                class="btn btn-primary skills-primary-action"
+                data-skill="${safeName}"
+                data-skill-action="${escapeHtml(primaryAction.action)}"
+                ${primaryAction.keys ? `data-keys="${escapeHtml(primaryAction.keys)}"` : ''}
+                ${primaryAction.disabled ? 'disabled' : ''}>
+            ${escapeHtml(primaryAction.label)}
         </button>
     ` : '';
 
@@ -497,7 +542,7 @@ function renderSkillCard(skill, reviewingSkills = new Set()) {
                 </div>
                 <div class="skills-card-toggle">
                     ${statusChip}
-                    ${nextButton}
+                    ${primaryButton || nextButton}
                     ${toggleSwitch}
                     ${cardMenu}
                 </div>
@@ -786,10 +831,11 @@ function attachActionHandlers(container, renderFn, reviewingSkills, ctx = {}) {
     async function requestMissingKeyGrants(name, keys) {
         const cleanKeys = (keys || []).map((k) => String(k || '').trim()).filter(Boolean);
         if (!cleanKeys.length) return;
-        const ok = confirm(
-            `Allow ${name} to use these core settings keys?\n\n${cleanKeys.join('\n')}\n\n`
-            + 'The desktop launcher will request a second confirmation. Only grant access to reviewed skills you trust.'
-        );
+        const ok = await openConfirmDialog({
+            title: `Grant access to ${name}`,
+            body: `Grant access to ${cleanKeys.join(', ')} for ${name}? Required keys are taken from your settings. The desktop launcher will request a second confirmation.`,
+            confirmLabel: 'Grant access',
+        });
         if (!ok) throw new Error('Skill key grant cancelled.');
         const bridge = window.pywebview?.api?.request_skill_key_grant;
         if (!bridge) {
@@ -800,6 +846,59 @@ function attachActionHandlers(container, renderFn, reviewingSkills, ctx = {}) {
             throw new Error(result?.error || 'Skill key grant was cancelled.');
         }
         return result;
+    }
+
+    async function triggerSkillAction(name, action, options = {}) {
+        if (!name || !action) return;
+        if (action === 'open_widgets') {
+            document.querySelector('.nav-btn[data-page="widgets"]')?.click();
+            return;
+        }
+        const { skills } = await fetchSkills();
+        const skill = (skills || []).find((item) => item.name === name);
+        if (!skill) throw new Error('Skill not found in current catalogue.');
+
+        if (action === 'review' || action === 'rereview') {
+            const ok = await openConfirmDialog({
+                title: action === 'rereview' ? `Re-review ${name}` : `Review ${name}`,
+                body: `Run security review for ${name}? It can take a few minutes and runs in the background.`,
+                confirmLabel: action === 'rereview' ? 'Re-review' : 'Run review',
+            });
+            if (!ok) return;
+            await reviewSkillInBackground(name);
+            return;
+        }
+
+        if (action === 'grant') {
+            const grants = skill.grants || {};
+            const keys = (options.keys || '').split(',').map((k) => k.trim()).filter(Boolean);
+            const missing = keys.length ? keys : (Array.isArray(grants.missing_keys) ? grants.missing_keys : (grants.requested_keys || []));
+            const result = await requestMissingKeyGrants(name, missing);
+            if (result) showBanner(`${name}: requested key grants saved`, 'ok');
+            return;
+        }
+
+        if (action === 'repair') {
+            const ok = await openConfirmDialog({
+                title: `Repair ${name}`,
+                body: `Send a repair task for ${name} to Ouroboros? The agent will work on the skill in chat.`,
+                confirmLabel: 'Start repair',
+                danger: true,
+            });
+            if (!ok) return;
+            const prompt = buildHealPrompt(skill);
+            await postWithFeedback('/api/command', {
+                cmd: prompt,
+                visible_text: `Repair task queued for ${name}. Ouroboros will inspect the skill payload and re-run review.`,
+                visible_task_id: `skill_repair_${name}`,
+            });
+            showBanner(`${name}: repair task sent to Ouroboros`, 'ok');
+            if (typeof ctx.showPage === 'function') {
+                ctx.showPage('chat');
+            } else {
+                document.querySelector('.nav-btn[data-page="chat"]')?.click();
+            }
+        }
     }
 
     async function toggleSkillEnabled(name, wantsEnabled) {
@@ -886,6 +985,13 @@ function attachActionHandlers(container, renderFn, reviewingSkills, ctx = {}) {
             renderFn();
         }
     });
+    container.addEventListener('keydown', (event) => {
+        const actionTarget = event.target.closest?.('[data-skill-action]');
+        if (!actionTarget) return;
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        actionTarget.click();
+    });
     container.addEventListener('click', async (event) => {
         const menuTrigger = event.target.closest('[data-skill-menu-trigger]');
         if (menuTrigger) {
@@ -906,6 +1012,21 @@ function attachActionHandlers(container, renderFn, reviewingSkills, ctx = {}) {
         }
         if (event.target.closest('[data-skill-menu-close]')) {
             closeSkillMenus();
+            return;
+        }
+        const actionTarget = event.target.closest('[data-skill-action]');
+        if (actionTarget) {
+            const name = actionTarget.dataset.skill;
+            const action = actionTarget.dataset.skillAction;
+            actionTarget.disabled = true;
+            try {
+                await triggerSkillAction(name, action, { keys: actionTarget.dataset.keys || '' });
+            } catch (err) {
+                showBanner(`${name}: ${err.message || err}`, (err.message || '').includes('cancel') ? 'warn' : 'danger');
+            } finally {
+                actionTarget.disabled = false;
+                renderFn();
+            }
             return;
         }
         const target = event.target.closest('button[data-skill]');
@@ -1013,7 +1134,13 @@ function attachActionHandlers(container, renderFn, reviewingSkills, ctx = {}) {
                 }
             } else if (target.classList.contains('skills-uninstall')) {
                 const source = target.dataset.source === 'ouroboroshub' ? 'ouroboroshub' : 'clawhub';
-                if (!confirm(`Uninstall ${name}? This deletes data/skills/${source}/${name}/.`)) {
+                const ok = await openConfirmDialog({
+                    title: `Uninstall ${name}`,
+                    body: `Uninstall ${name}? This deletes data/skills/${source}/${name}/.`,
+                    confirmLabel: 'Uninstall',
+                    danger: true,
+                });
+                if (!ok) {
                     return;
                 }
                 const url = source === 'ouroboroshub'

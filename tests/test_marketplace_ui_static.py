@@ -24,6 +24,12 @@ def _skills_js() -> str:
     )
 
 
+def _ouroboroshub_js() -> str:
+    return (REPO_ROOT / "web" / "modules" / "ouroboroshub.js").read_text(
+        encoding="utf-8"
+    )
+
+
 def test_marketplace_search_mode_hides_pagination_and_keeps_official_clickable():
     source = _marketplace_js()
     assert "const searchMode = Boolean(String(query || '').trim());" in source
@@ -68,13 +74,44 @@ def test_marketplace_review_failure_points_to_heal_flow():
 
 def test_marketplace_cards_have_lifecycle_next_action():
     source = _marketplace_js()
+    lifecycle_card = _read("web/modules/lifecycle_card.js")
     css = _read("web/style.css")
     assert "function lifecycleFor" in source
     assert "marketplace-next-action" in source
-    assert "marketplace-working-spinner" in source
+    assert "marketplace-working-spinner" in lifecycle_card
     assert ".marketplace-working-spinner" in css
     assert "data-mp-action" in source
-    assert "state.pendingBySlug" in source
+    assert "getPendingBySlug" in source
+    assert "./lifecycle_card.js" in source
+    assert "import { openConfirmDialog } from './confirm_dialog.js';" in source
+
+
+def test_ouroboroshub_cards_share_lifecycle_pending_ui():
+    source = _ouroboroshub_js()
+    lifecycle_card = _read("web/modules/lifecycle_card.js")
+
+    assert "./lifecycle_card.js" in source
+    assert "setPending" in source
+    assert "startLifecyclePoller" in source
+    assert "marketplace-working-spinner" in lifecycle_card
+    assert "marketplace-card-state-hint" in source
+    assert "marketplace-card is-working" not in source
+    assert "lifecycleCardClassFor(pending)" in source
+    assert "if (!data.ok) throw new Error(data.error || 'install failed')" in source
+
+
+def test_shared_confirm_dialog_module_replaces_native_marketplace_confirms():
+    source = _marketplace_js()
+    dialog = _read("web/modules/confirm_dialog.js")
+    css = _read("web/style.css")
+
+    assert "openConfirmDialog({" in source
+    assert "confirm(" not in source
+    assert "export function openConfirmDialog" in dialog
+    assert "let activeClose" in dialog
+    assert "document.removeEventListener('keydown', onKey);" in dialog
+    assert "if (activeClose) activeClose(false);" in dialog
+    assert ".confirm-dialog" in css
 
 
 def test_marketplace_fix_prompt_has_heal_payload_root_marker():
@@ -113,3 +150,16 @@ def test_marketplace_pending_or_stale_lifecycle_uses_review_not_fix():
     assert "installed.review_status === 'fail'" in lifecycle
     assert "action: 'review'" in lifecycle
     assert "button: installed.review_stale ? 'Re-review' : 'Review'" in lifecycle
+
+
+def test_marketplace_update_uses_shared_pending_lifecycle_card():
+    source = _marketplace_js()
+    update_block = source.split("if (updateBtn)", 1)[1].split("if (uninstallBtn)", 1)[0]
+    poller = _read("web/modules/lifecycle_card.js")
+
+    assert "setPending(slug, {" in update_block
+    assert "label: 'Updating'" in update_block
+    assert "target: sanitized" in update_block
+    assert "throw new Error(result.error || 'update failed')" in update_block
+    assert "retry_action: 'update'" in update_block
+    assert "targets.has(e?.target)" in poller
