@@ -1177,6 +1177,31 @@ def test_budget_pill_navigates_to_settings_costs():
     assert "cursor: pointer" in budget_block
 
 
+def test_desktop_vvh_uses_dvh_unit_not_px_snapshot():
+    js = _read("web/app.js")
+    css = _read("web/style.css")
+
+    assert "vvhStyle.textContent = ':root{--vvh:100dvh}';" in js
+    assert "const safeHeight = Math.max(320, Math.ceil(h || window.innerHeight || 0));" in js
+    assert "vvhStyle.textContent = ':root{--vvh:' + safeHeight + 'px}';" in js
+    assert "vvhStyle.textContent = ':root{--vvh:' + h + 'px}';" not in js
+
+    wide_viewport_block = re.search(
+        r"\}\s+else\s+\{(?P<body>.*?)vvhStyle\.textContent = ':root\{--vvh:100dvh\}';",
+        js,
+        re.S,
+    ).group("body")
+    assert "document.documentElement.classList.remove('keyboard-open');" in wide_viewport_block
+    assert "document.body.classList.remove('keyboard-open');" in wide_viewport_block
+
+    root_block = re.search(r":root\s*\{(?P<body>[^}]+)\}", css, re.S).group("body")
+    body_block = re.search(r"body\s*\{(?P<body>[^}]+)\}", css, re.S).group("body")
+    app_block = re.search(r"#app\s*\{(?P<body>[^}]+)\}", css, re.S).group("body")
+    assert "--vvh: 100dvh" in root_block
+    assert "height: var(--vvh)" in body_block
+    assert "height: var(--vvh)" in app_block
+
+
 def test_mobile_keyboard_open_uses_visual_viewport_flex_stack():
     """Static contract test: keyboard-open JS toggle + CSS layout rules exist."""
     js = _read("web/app.js")

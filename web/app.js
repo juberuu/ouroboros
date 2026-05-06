@@ -204,9 +204,10 @@ loadVersion();
     const updateVvh = () => {
         const viewport = window.visualViewport;
         const h = viewport ? viewport.height : window.innerHeight;
-        vvhStyle.textContent = ':root{--vvh:' + h + 'px}';
 
         if (window.innerWidth <= 640) {
+            const safeHeight = Math.max(320, Math.ceil(h || window.innerHeight || 0));
+            vvhStyle.textContent = ':root{--vvh:' + safeHeight + 'px}';
             if (!wasKeyboardOpen) captureFrozenBaseline();
             const stableHeight = frozenBaseline || document.documentElement.clientHeight;
             const keyboardVisible = viewport
@@ -233,6 +234,7 @@ loadVersion();
             document.documentElement.classList.remove('keyboard-open');
             document.body.classList.remove('keyboard-open');
             wasKeyboardOpen = false;
+            vvhStyle.textContent = ':root{--vvh:100dvh}';
         }
     };
     if (window.visualViewport) {

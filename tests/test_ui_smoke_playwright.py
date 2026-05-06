@@ -165,6 +165,82 @@ def test_ui_smoke_direct_mode_creates_task_with_mock_provider(direct_server):
         raise
 
 
+@pytest.mark.ui_browser
+def test_ui_smoke_direct_mode_chat_scrolls_on_desktop(direct_server):
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    from playwright.sync_api import Error as PlaywrightError
+    from playwright.sync_api import sync_playwright
+
+    def scroll_metrics(page):
+        return page.evaluate(
+            """() => {
+                const messages = document.querySelector('#chat-messages');
+                if (!messages) return null;
+                messages.scrollTop = 0;
+                const top = messages.scrollTop;
+                messages.scrollTop = messages.scrollHeight;
+                const bottom = messages.scrollTop;
+                return {
+                    clientHeight: messages.clientHeight,
+                    scrollHeight: messages.scrollHeight,
+                    top,
+                    bottom,
+                    overflowY: getComputedStyle(messages).overflowY,
+                    runtimeVvh: document.getElementById('runtime-vvh')?.textContent || '',
+                    bodyHeight: Math.round(document.body.getBoundingClientRect().height),
+                    windowHeight: window.innerHeight,
+                };
+            }"""
+        )
+
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page(viewport={"width": 1280, "height": 800})
+            try:
+                page.goto(direct_server, wait_until="domcontentloaded", timeout=30_000)
+                page.wait_for_selector("#chat-messages", timeout=30_000)
+                page.evaluate(
+                    """() => {
+                        const messages = document.querySelector('#chat-messages');
+                        messages.replaceChildren();
+                        for (let i = 0; i < 48; i += 1) {
+                            const bubble = document.createElement('div');
+                            bubble.className = 'chat-bubble assistant';
+                            bubble.textContent = `Desktop scroll probe ${i} `.repeat(16);
+                            bubble.style.minHeight = '48px';
+                            messages.appendChild(bubble);
+                        }
+                    }"""
+                )
+
+                metrics = scroll_metrics(page)
+                assert metrics is not None
+                assert metrics["overflowY"] in {"auto", "scroll"}
+                assert metrics["scrollHeight"] > metrics["clientHeight"] + 100
+                assert metrics["bottom"] > metrics["top"] + 100
+                assert "--vvh:100dvh" in metrics["runtimeVvh"]
+                assert abs(metrics["bodyHeight"] - metrics["windowHeight"]) <= 2
+
+                page.set_viewport_size({"width": 1280, "height": 400})
+                page.wait_for_timeout(100)
+                page.set_viewport_size({"width": 1280, "height": 800})
+                page.wait_for_timeout(100)
+
+                metrics_after_resize = scroll_metrics(page)
+                assert metrics_after_resize is not None
+                assert metrics_after_resize["scrollHeight"] > metrics_after_resize["clientHeight"] + 100
+                assert metrics_after_resize["bottom"] > metrics_after_resize["top"] + 100
+                assert "--vvh:100dvh" in metrics_after_resize["runtimeVvh"]
+                assert abs(metrics_after_resize["bodyHeight"] - metrics_after_resize["windowHeight"]) <= 2
+            finally:
+                browser.close()
+    except PlaywrightError as exc:
+        if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc).lower():
+            pytest.skip(str(exc))
+        raise
+
+
 @pytest.mark.ui_browser_docker
 def test_ui_smoke_docker_mode_loads_health():
     if os.environ.get("OUROBOROS_RUN_DOCKER_UI_SMOKE") != "1":
