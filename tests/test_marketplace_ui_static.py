@@ -98,9 +98,13 @@ def test_marketplace_install_does_not_silently_enable():
 def test_installed_skills_keep_review_before_fix_for_pending_or_stale():
     source = _skills_js()
     next_action = source.split("function skillNextAction", 1)[1].split("function renderSkillCard", 1)[0]
+    toggle_lock = source.split("function toggleLockReason", 1)[1].split("function skillNextAction", 1)[0]
     assert "skill.review_status === 'fail'" in next_action
-    assert "needs a fresh security review before it can be enabled" in source
-    assert "await reviewSkillInBackground(name);" in source
+    assert "review is stale — re-review the skill first" in toggle_lock
+    assert "review is still pending" in toggle_lock
+    assert "review has not passed yet" in toggle_lock
+    assert "Run review and wait for a fresh PASS before enabling this skill." in source
+    assert "needs a fresh security review before it can be enabled" not in source
 
 
 def test_marketplace_pending_or_stale_lifecycle_uses_review_not_fix():
