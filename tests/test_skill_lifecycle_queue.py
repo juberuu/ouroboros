@@ -41,7 +41,8 @@ def test_lifecycle_job_success_notifies(monkeypatch):
     assert sent
     progress = [kwargs for _args, kwargs in sent if kwargs.get("is_progress")]
     assert progress
-    assert any(item.get("task_id") == "skill_lifecycle_review_weather" for item in progress)
+    assert any(str(item.get("task_id") or "").startswith("skill_lifecycle_review_weather_") for item in progress)
+    assert not any(kwargs.get("task_id") == "skill_lifecycle_review" for _args, kwargs in sent)
 
 
 def test_lifecycle_job_failure_records_error(monkeypatch):
@@ -61,6 +62,51 @@ def test_lifecycle_job_failure_records_error(monkeypatch):
     assert event["error"] == "boom"
     assert sent
     assert any(kwargs.get("is_progress") for _args, kwargs in sent)
+
+
+def test_repeated_lifecycle_jobs_get_distinct_chat_task_ids(monkeypatch):
+    _reset_queue()
+    sent = []
+    monkeypatch.setattr("supervisor.message_bus.send_with_budget", lambda *a, **k: sent.append((a, k)))
+
+    async def runner():
+        return {"ok": True}
+
+    async def main():
+        await q.run_lifecycle_job(kind="review", target="weather", runner=runner)
+        await q.run_lifecycle_job(kind="review", target="weather", runner=runner)
+
+    asyncio.run(main())
+
+    completed_ids = [
+        kwargs.get("task_id")
+        for args, kwargs in sent
+        if kwargs.get("is_progress") and "completed" in str(args[1])
+    ]
+    assert len(completed_ids) == 2
+    assert len(set(completed_ids)) == 2
+    assert all(str(task_id).startswith("skill_lifecycle_review_weather_") for task_id in completed_ids)
+
+
+def test_lifecycle_chat_task_ids_remain_distinct_after_queue_reset(monkeypatch):
+    _reset_queue()
+    sent = []
+    monkeypatch.setattr("supervisor.message_bus.send_with_budget", lambda *a, **k: sent.append((a, k)))
+
+    async def runner():
+        return {"ok": True}
+
+    asyncio.run(q.run_lifecycle_job(kind="review", target="weather", runner=runner))
+    _reset_queue()
+    asyncio.run(q.run_lifecycle_job(kind="review", target="weather", runner=runner))
+
+    completed_ids = [
+        kwargs.get("task_id")
+        for args, kwargs in sent
+        if kwargs.get("is_progress") and "completed" in str(args[1])
+    ]
+    assert len(completed_ids) == 2
+    assert len(set(completed_ids)) == 2
 
 
 def test_lifecycle_jobs_serialize():

@@ -12,14 +12,17 @@ def _read(rel: str) -> str:
     return (REPO / rel).read_text(encoding="utf-8")
 
 
-def test_skill_toggle_runs_review_and_grant_before_enable():
+def test_skill_toggle_requires_fresh_pass_before_enable():
     source = _read("web/modules/skills.js")
 
     assert "async function requestMissingKeyGrants" in source
-    assert "async function reviewSkillInBackground" in source
     assert "async function toggleSkillEnabled" in source
-    assert "needs a fresh security review before it can be enabled" in source
-    assert "await reviewSkillInBackground(name);" in source
+    assert "review is stale — re-review the skill first" in source
+    assert "review is still pending" in source
+    assert "review has not passed yet" in source
+    assert "Run review and wait for a fresh PASS before enabling this skill." in source
+    assert "needs a fresh security review before it can be enabled" not in source
+    assert "Review did not pass. Use Repair if the skill needs repair." not in source
     assert "await requestMissingKeyGrants(name, missing);" in source
     assert "await toggleSkillEnabled(name, wantsEnabled);" in source
 

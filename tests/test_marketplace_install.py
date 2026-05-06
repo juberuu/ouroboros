@@ -289,10 +289,17 @@ def test_update_swaps_to_new_version(enable_marketplace, stub_review, marketplac
     )
     with mock.patch.object(install_mod, "_registry_info", return_value=summary):
         with mock.patch.object(install_mod, "_registry_download", return_value=archive_obj):
+            progress = []
             updated = install_mod.update_skill(
-                data_dir, repo_dir, sanitized_name="owner__x", version="2.0.0"
+                data_dir,
+                repo_dir,
+                sanitized_name="owner__x",
+                version="2.0.0",
+                progress_callback=progress.append,
             )
     assert updated.ok, updated.error
+    assert "Resolving registry…" in progress
+    assert "Downloading v2.0.0…" in progress
     prov = json.loads((data_dir / "state" / "skills" / "owner__x" / "clawhub.json").read_text(encoding="utf-8"))
     assert prov["version"] == "2.0.0"
 

@@ -626,10 +626,7 @@ async def api_skill_review(request: Request) -> JSONResponse:
     drive_root = _request_drive_root(request)
     repo_dir = _request_repo_dir(request)
     ctx = _ApiReviewCtx(drive_root, repo_dir)
-    from ouroboros.skill_review_runner import (
-        publish_skill_review_summary,
-        run_skill_review_lifecycle,
-    )
+    from ouroboros.skill_review_runner import run_skill_review_lifecycle
     from ouroboros.skill_review import review_skill as _review_skill_impl
 
     payload = await run_skill_review_lifecycle(
@@ -638,7 +635,6 @@ async def api_skill_review(request: Request) -> JSONResponse:
         source="skills",
         review_impl=_review_skill_impl,
     )
-    publish_skill_review_summary(payload)
     return JSONResponse(payload)
 
 

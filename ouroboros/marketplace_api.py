@@ -397,6 +397,7 @@ async def api_marketplace_update(request: Request) -> JSONResponse:
     version = str(body.get("version") or "").strip() or None
     drive_root = _request_drive_root(request)
     repo_dir = _request_repo_dir(request)
+    update_progress = JobProgressTarget()
     async def _run_update() -> Any:
         return await asyncio.to_thread(
             update_skill,
@@ -404,6 +405,7 @@ async def api_marketplace_update(request: Request) -> JSONResponse:
             repo_dir,
             sanitized_name=sanitized,
             version=version,
+            progress_callback=update_progress.set,
         )
 
     try:
@@ -414,6 +416,7 @@ async def api_marketplace_update(request: Request) -> JSONResponse:
             message=f"Updating {sanitized}",
             runner=_run_update,
             options=LifecycleJobOptions(
+                progress_target=update_progress,
                 result_message=lambda item: (
                     f"Updated {item.sanitized_name}"
                     if getattr(item, "ok", False)
@@ -578,8 +581,10 @@ async def api_ouroboroshub_install(request: Request) -> JSONResponse:
     auto_review = _coerce_bool(body.get("auto_review"), True)
     drive_root = _request_drive_root(request)
     repo_dir = _request_repo_dir(request)
+    install_progress = JobProgressTarget()
 
     async def _run_install() -> Dict[str, Any]:
+        install_progress.set("Downloading from OuroborosHub…")
         result = await asyncio.to_thread(ouroboroshub.install, slug, overwrite=overwrite)
         payload: Dict[str, Any] = {
             "ok": result.ok,
@@ -591,6 +596,7 @@ async def api_ouroboroshub_install(request: Request) -> JSONResponse:
         if result.target_dir is not None:
             payload["target_dir"] = str(result.target_dir)
         if result.ok and auto_review:
+            install_progress.set("Running tri-model review…")
             status, findings, error = await asyncio.to_thread(
                 _run_skill_review,
                 drive_root,
@@ -599,6 +605,7 @@ async def api_ouroboroshub_install(request: Request) -> JSONResponse:
             )
             payload.update({"review_status": status, "review_findings": findings, "review_error": error})
             if status == "pass" and not error:
+                install_progress.set("Installing dependencies…")
                 deps_status, deps_error = await asyncio.to_thread(
                     _reconcile_deps_after_review,
                     drive_root,
@@ -617,6 +624,7 @@ async def api_ouroboroshub_install(request: Request) -> JSONResponse:
         message=f"Installing {slug}",
         runner=_run_install,
         options=LifecycleJobOptions(
+            progress_target=install_progress,
             result_message=lambda item: (
                 f"Installed as {item.get('sanitized_name')}"
                 if item.get("ok")
@@ -635,6 +643,7 @@ async def api_ouroboroshub_update(request: Request) -> JSONResponse:
         return JSONResponse({"error": err}, status_code=400)
     drive_root = _request_drive_root(request)
     repo_dir = _request_repo_dir(request)
+    update_progress = JobProgressTarget()
 
     async def _run_update() -> Dict[str, Any]:
         was_live = False
@@ -642,9 +651,11 @@ async def api_ouroboroshub_update(request: Request) -> JSONResponse:
             from ouroboros.extension_loader import is_extension_live, unload_extension
 
             was_live = bool(is_extension_live(name, drive_root))
+            update_progress.set("Unloading existing extension…")
             unload_extension(name)
         except Exception:
             log.debug("OuroborosHub pre-update extension unload failed for %s", name, exc_info=True)
+        update_progress.set("Downloading from OuroborosHub…")
         result = await asyncio.to_thread(ouroboroshub.install, name, overwrite=True)
         payload: Dict[str, Any] = {
             "ok": result.ok,
@@ -656,6 +667,7 @@ async def api_ouroboroshub_update(request: Request) -> JSONResponse:
         if result.target_dir is not None:
             payload["target_dir"] = str(result.target_dir)
         if result.ok:
+            update_progress.set("Running tri-model review…")
             status, findings, error = await asyncio.to_thread(
                 _run_skill_review,
                 drive_root,
@@ -666,6 +678,7 @@ async def api_ouroboroshub_update(request: Request) -> JSONResponse:
             deps_status = "not_required"
             deps_error = ""
             if status == "pass" and not error:
+                update_progress.set("Installing dependencies…")
                 deps_status, deps_error = await asyncio.to_thread(
                     _reconcile_deps_after_review,
                     drive_root,
@@ -680,6 +693,7 @@ async def api_ouroboroshub_update(request: Request) -> JSONResponse:
                     from ouroboros.config import load_settings
                     from ouroboros.extension_loader import reconcile_extension
 
+                    update_progress.set("Reloading extension…")
                     live_state = await asyncio.to_thread(
                         reconcile_extension,
                         result.sanitized_name,
@@ -708,6 +722,7 @@ async def api_ouroboroshub_update(request: Request) -> JSONResponse:
         message=f"Updating {name}",
         runner=_run_update,
         options=LifecycleJobOptions(
+            progress_target=update_progress,
             result_message=lambda item: (
                 f"Updated {item.get('sanitized_name')}"
                 if item.get("ok")

@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict
 from ouroboros.config import get_skills_repo_path, load_settings
 from ouroboros.skill_lifecycle_queue import (
     DuplicateLifecycleJobError,
+    JobProgressTarget,
     LifecycleJob,
     LifecycleJobOptions,
     run_lifecycle_job,
@@ -416,6 +417,38 @@ def _duplicate_payload(skill_name: str, content_hash: str, duplicate: LifecycleJ
     }
 
 
+def _review_finding_summary(outcome: Any) -> str:
+    def _is_pass(item: Dict[str, Any]) -> bool:
+        signal = str(item.get("verdict") or item.get("status") or "").strip().lower()
+        return signal in {"pass", "passed", "ok"}
+
+    def _chat_headline(text: str, max_chars: int = 180) -> str:
+        text = str(text or "").strip()
+        if len(text) <= max_chars:
+            return text
+        marker = "... [omitted {count} chars; full findings in Skills page]"
+        budget = max(1, max_chars - len(marker.format(count=0)))
+        omitted = max(0, len(text) - budget)
+        return text[:budget].rstrip() + marker.format(count=omitted)
+
+    findings = [item for item in (getattr(outcome, "findings", None) or []) if isinstance(item, dict)]
+    for item in sorted(findings, key=lambda item: 1 if _is_pass(item) else 0):
+        label = str(item.get("item") or item.get("check") or item.get("title") or "finding").strip()
+        verdict = str(item.get("verdict") or item.get("severity") or "").strip()
+        reason = str(item.get("reason") or item.get("message") or "").strip()
+        pieces = [piece for piece in (verdict, label, reason) if piece]
+        if pieces:
+            summary = ": ".join((" ".join(pieces[:2]), pieces[2])) if len(pieces) > 2 else " ".join(pieces)
+            return _chat_headline(summary)
+    return ""
+
+
+def _review_result_message(outcome: Any) -> str:
+    status = str(getattr(outcome, "status", "") or "pending")
+    summary = _review_finding_summary(outcome)
+    return f"Review {status}{f': {summary}' if summary else ''}"
+
+
 async def run_skill_review_lifecycle(
     ctx: Any,
     skill_name: str,
@@ -430,13 +463,16 @@ async def run_skill_review_lifecycle(
     mark_stale_review_job_interrupted(drive_root, skill_name, current_content_hash=content_hash)
     dedupe_key = _review_dedupe_key(skill_name, content_hash)
     started_monotonic: Dict[str, float] = {}
+    progress = JobProgressTarget()
 
     async def _run_review() -> SkillReviewOutcome:
         with _review_job_heartbeat(drive_root, skill_name):
+            progress.set("Running tri-model review…")
             outcome = await _to_thread_preserving_result(review_impl, ctx, skill_name)
         deps_status = "not_required"
         deps_error = ""
         if getattr(outcome, "status", "") == "pass":
+            progress.set("Installing dependencies…")
             deps_status, deps_error = await _to_thread_preserving_result(
                 _reconcile_deps_after_pass_review,
                 drive_root,
@@ -445,6 +481,15 @@ async def run_skill_review_lifecycle(
             )
         setattr(outcome, "deps_status", deps_status)
         setattr(outcome, "deps_error", deps_error)
+        progress.set("Reloading extension…")
+        extension_action, extension_reason = _reconcile_extension_payload(
+            ctx,
+            skill_name,
+            repo_path=repo_path,
+            heal_mode=_heal_mode(ctx),
+        )
+        setattr(outcome, "extension_action", extension_action)
+        setattr(outcome, "extension_reason", extension_reason)
         return outcome
 
     try:
@@ -457,7 +502,8 @@ async def run_skill_review_lifecycle(
             runner=_run_review,
             options=LifecycleJobOptions(
                 drive_root=drive_root,
-                result_message=lambda item: f"Review {getattr(item, 'status', 'pending')}",
+                progress_target=progress,
+                result_message=_review_result_message,
                 result_error=lambda item: getattr(item, "error", "") or getattr(item, "deps_error", "") or "",
                 on_started=_on_started(drive_root, skill_name, content_hash, started_monotonic),
                 on_finished=_on_finished(drive_root, skill_name, content_hash, started_monotonic),
@@ -466,18 +512,12 @@ async def run_skill_review_lifecycle(
     except DuplicateLifecycleJobError as exc:
         return _duplicate_payload(skill_name, content_hash, exc.job)
 
-    extension_action, extension_reason = _reconcile_extension_payload(
-        ctx,
-        skill_name,
-        repo_path=repo_path,
-        heal_mode=_heal_mode(ctx),
-    )
     return _outcome_payload(
         outcome,
         deps_status=getattr(outcome, "deps_status", "not_required"),
         deps_error=getattr(outcome, "deps_error", ""),
-        extension_action=extension_action,
-        extension_reason=extension_reason,
+        extension_action=getattr(outcome, "extension_action", None),
+        extension_reason=getattr(outcome, "extension_reason", None),
     )
 
 
@@ -495,13 +535,16 @@ def run_skill_review_lifecycle_blocking(
     mark_stale_review_job_interrupted(drive_root, skill_name, current_content_hash=content_hash)
     dedupe_key = _review_dedupe_key(skill_name, content_hash)
     started_monotonic: Dict[str, float] = {}
+    progress = JobProgressTarget()
 
     def _run_review() -> SkillReviewOutcome:
         with _review_job_heartbeat(drive_root, skill_name):
+            progress.set("Running tri-model review…")
             outcome = review_impl(ctx, skill_name)
         deps_status = "not_required"
         deps_error = ""
         if getattr(outcome, "status", "") == "pass":
+            progress.set("Installing dependencies…")
             deps_status, deps_error = _reconcile_deps_after_pass_review(
                 drive_root,
                 skill_name,
@@ -509,6 +552,15 @@ def run_skill_review_lifecycle_blocking(
             )
         setattr(outcome, "deps_status", deps_status)
         setattr(outcome, "deps_error", deps_error)
+        progress.set("Reloading extension…")
+        extension_action, extension_reason = _reconcile_extension_payload(
+            ctx,
+            skill_name,
+            repo_path=repo_path,
+            heal_mode=_heal_mode(ctx),
+        )
+        setattr(outcome, "extension_action", extension_action)
+        setattr(outcome, "extension_reason", extension_reason)
         return outcome
 
     try:
@@ -521,7 +573,8 @@ def run_skill_review_lifecycle_blocking(
             runner=_run_review,
             options=LifecycleJobOptions(
                 drive_root=drive_root,
-                result_message=lambda item: f"Review {getattr(item, 'status', 'pending')}",
+                progress_target=progress,
+                result_message=_review_result_message,
                 result_error=lambda item: getattr(item, "error", "") or getattr(item, "deps_error", "") or "",
                 on_started=_on_started(drive_root, skill_name, content_hash, started_monotonic),
                 on_finished=_on_finished(drive_root, skill_name, content_hash, started_monotonic),
@@ -530,45 +583,11 @@ def run_skill_review_lifecycle_blocking(
     except DuplicateLifecycleJobError as exc:
         return _duplicate_payload(skill_name, content_hash, exc.job)
 
-    extension_action, extension_reason = _reconcile_extension_payload(
-        ctx,
-        skill_name,
-        repo_path=repo_path,
-        heal_mode=_heal_mode(ctx),
-    )
     return _outcome_payload(
         outcome,
         deps_status=getattr(outcome, "deps_status", "not_required"),
         deps_error=getattr(outcome, "deps_error", ""),
-        extension_action=extension_action,
-        extension_reason=extension_reason,
+        extension_action=getattr(outcome, "extension_action", None),
+        extension_reason=getattr(outcome, "extension_reason", None),
     )
-
-
-def publish_skill_review_summary(outcome_payload: Dict[str, Any]) -> None:
-    try:
-        from supervisor.message_bus import send_with_budget
-
-        findings = outcome_payload.get("findings") or []
-        top_findings = []
-        for item in findings[:5]:
-            if isinstance(item, dict):
-                label = item.get("item") or item.get("check") or item.get("title") or "finding"
-                verdict = item.get("verdict") or item.get("severity") or ""
-                reason = item.get("reason") or item.get("message") or ""
-                top_findings.append(f"- {verdict} {label}: {reason}".strip())
-        details = "\n".join(top_findings) if top_findings else "- No reviewer findings."
-        send_with_budget(
-            0,
-            (
-                f"### Skill review: `{outcome_payload.get('skill', '')}`\n"
-                f"Status: `{outcome_payload.get('status', 'pending')}`\n\n"
-                f"{details}\n\n"
-                "Full findings are available in the Skills page."
-            ),
-            fmt="markdown",
-            task_id="api_skill_review",
-        )
-    except Exception:
-        log.debug("Could not publish skill review summary to chat", exc_info=True)
 

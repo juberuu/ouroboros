@@ -32,7 +32,7 @@ def test_ouroboroshub_persists_catalog_dependency_specs(monkeypatch, tmp_path):
         name="duckduckgo",
         version="1.0.0",
         files=[{"path": "SKILL.md", "sha256": "x", "size": 1}],
-        install_specs=["ddgs"],
+        install_specs=[{"kind": "pip", "package": "ddgs"}],
     )
     monkeypatch.setattr(ouroboroshub, "load_catalog", lambda: {"raw_base_url": "https://raw.githubusercontent.com/joi-lab/OuroborosHub/main"})
     monkeypatch.setattr(ouroboroshub, "_summaries", lambda _catalog: [summary])

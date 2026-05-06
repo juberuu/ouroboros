@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import itertools
 import pathlib
 import re
 import threading
+import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -69,7 +69,6 @@ class LifecycleJobOptions:
     on_finished: Callable[[LifecycleJob, Any, BaseException | None], None] | None = None
 
 
-_job_counter = itertools.count(1)
 _lock: Optional[threading.Lock] = None
 _state_lock = threading.Lock()
 _dedupe_jobs: Dict[str, LifecycleJob] = {}
@@ -99,7 +98,8 @@ def _store(job: LifecycleJob) -> None:
 
 def _chat_task_id(job: LifecycleJob) -> str:
     suffix = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(job.target or "skill")).strip("_")
-    return f"skill_lifecycle_{job.kind}_{suffix or 'skill'}"
+    job_suffix = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(job.id or "")).strip("_")
+    return f"skill_lifecycle_{job.kind}_{suffix or 'skill'}_{job_suffix or 'job'}"
 
 
 def _notify_chat_progress(job: LifecycleJob, phase: str) -> None:
@@ -192,21 +192,6 @@ def _notify_chat(job: LifecycleJob) -> None:
     if job.status not in {"succeeded", "failed"}:
         return
     _notify_chat_progress(job, "completed" if job.status == "succeeded" else "failed")
-    try:
-        from supervisor.message_bus import send_with_budget
-
-        tone = "completed" if job.status == "succeeded" else "failed"
-        detail = job.error or job.message or job.status
-        send_with_budget(
-            0,
-            f"### Skill lifecycle: `{job.target}` {tone}\n\n`{job.kind}`: {detail}",
-            fmt="markdown",
-            task_id=f"skill_lifecycle_{job.kind}",
-        )
-    except Exception:
-        # Notification must never turn a completed lifecycle operation into an
-        # API failure. Logs can still capture import/runtime issues upstream.
-        return
 
 
 async def run_lifecycle_job(
@@ -232,7 +217,7 @@ async def run_lifecycle_job(
     global _active
     opts = options or LifecycleJobOptions()
     job = LifecycleJob(
-        id=f"skill-job-{next(_job_counter)}",
+        id=f"skill-job-{uuid.uuid4().hex}",
         kind=str(kind or "operation"),
         target=str(target or "skill"),
         source=str(source or ""),

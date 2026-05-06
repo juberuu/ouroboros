@@ -616,6 +616,7 @@ def update_skill(
     *,
     sanitized_name: str,
     version: Optional[str] = None,
+    progress_callback: Optional[Callable[[str], None]] = None,
 ) -> InstallResult:
     """Reinstall a ClawHub skill at a newer version.
 
@@ -624,6 +625,15 @@ def update_skill(
     the registry lookup.
     """
     record = read_provenance(drive_root, sanitized_name)
+
+    def _progress(stage: str) -> None:
+        if progress_callback is None:
+            return
+        try:
+            progress_callback(stage)
+        except Exception:
+            log.debug("update_skill progress callback raised", exc_info=True)
+
     if not record:
         return InstallResult(
             ok=False,
@@ -648,6 +658,7 @@ def update_skill(
     try:
         from ouroboros.extension_loader import is_extension_live, unload_extension
         was_live = bool(is_extension_live(sanitized_name, drive_root))
+        _progress("Unloading existing extension…")
         unload_extension(sanitized_name)
     except Exception:  # pragma: no cover — defensive
         log.debug("pre-update unload failed for %s", sanitized_name, exc_info=True)
@@ -658,11 +669,13 @@ def update_skill(
         version=version,
         auto_review=True,
         overwrite=True,
+        progress_callback=progress_callback,
     )
     if was_live and (not getattr(result, "ok", False) or getattr(result, "review_status", "") == "pass"):
         try:
             from ouroboros.extension_loader import reconcile_extension
             from ouroboros.config import load_settings
+            _progress("Reloading extension…")
             reconcile_extension(sanitized_name, drive_root, load_settings)
         except Exception:  # pragma: no cover — defensive
             log.debug("post-update reconcile failed for %s", sanitized_name, exc_info=True)

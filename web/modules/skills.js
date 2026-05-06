@@ -305,12 +305,14 @@ function renderProvenanceBlock(prov) {
 
 
 function toggleLockReason(skill) {
-    // v5.2.2: an enable-toggle is "locked" when either the review is
-    // not fresh PASS or any requested core key grant is missing. Both
-    // gates are also enforced server-side in ``api_skill_toggle``;
-    // surfacing them on the card prevents users from clicking a
-    // button that will only fail with HTTP 409.
+    // Enable transitions are locked unless the skill has a fresh PASS review.
+    // The server enforces the same gate in ``api_skill_toggle``; this UI guard
+    // keeps stale/review/repair work as explicit actions instead of hiding them
+    // behind the toggle.
     if (skill.review_status === 'fail') return 'review failed — repair the skill first';
+    if (skill.review_stale) return 'review is stale — re-review the skill first';
+    if (skill.review_status === 'pending') return 'review is still pending';
+    if (skill.review_status !== 'pass') return 'review has not passed yet';
     if (skill.load_error && !isMissingGrantLoadError(skill)) return 'load error — repair the skill first';
     return '';
 }
@@ -863,13 +865,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, ctx = {}) {
                     throw new Error('Repair this skill before enabling it.');
                 }
                 if (!reviewReady(current)) {
-                    const ok = confirm(`${name} needs a fresh security review before it can be enabled.\n\nStart review now? It can take a few minutes and will run in the background.`);
-                    if (!ok) throw new Error('Review cancelled.');
-                    await reviewSkillInBackground(name);
-                    current = (await fetchSkills()).skills.find((skill) => skill.name === name);
-                    if (!current || !reviewReady(current)) {
-                        throw new Error('Review did not pass. Use Repair if the skill needs repair.');
-                    }
+                    throw new Error('Run review and wait for a fresh PASS before enabling this skill.');
                 }
                 if (!grantReady(current)) {
                     const grants = current.grants || {};
