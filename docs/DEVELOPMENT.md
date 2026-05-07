@@ -440,8 +440,10 @@ the module cannot access app cookies or `localStorage`.
 
 Rules for widget changes:
 
-- Escape every untrusted string with `escapeHtml`; use DOMPurify only for
-  markdown blocks.
+- Escape by HTML context: use `escapeHtmlText()` for text-node content and
+  markdown fallbacks, `escapeHtmlAttr()` for interpolated attribute values
+  (`data-*`, `src`, `alt`, `title`, `href`, `value`) and mixed template
+  snippets, and DOMPurify only for markdown blocks.
 - Media sources must be extension routes under `/api/extensions/<skill>/...`
   or explicitly safe `data:` URLs for image/audio/video MIME types.
 - Long-running user actions (image/music/research generation) must use the

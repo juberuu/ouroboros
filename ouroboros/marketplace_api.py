@@ -72,11 +72,6 @@ def _request_repo_dir(request: Request) -> pathlib.Path:
     return pathlib.Path(REPO_DIR)
 
 
-def _enabled_check() -> Optional[JSONResponse]:
-    """Compatibility no-op; ClawHub is no longer user-disabled."""
-    return None
-
-
 def _coerce_bool(value: Any, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
@@ -116,9 +111,6 @@ def _client_error_response(exc: Exception, *, default_status: int = 502) -> JSON
 
 
 async def api_marketplace_search(request: Request) -> JSONResponse:
-    blocked = _enabled_check()
-    if blocked:
-        return blocked
     qp = request.query_params
     query = qp.get("q") or qp.get("query") or ""
     sort = qp.get("sort") or "registry"
@@ -167,9 +159,6 @@ async def api_marketplace_search(request: Request) -> JSONResponse:
 
 
 async def api_marketplace_info(request: Request) -> JSONResponse:
-    blocked = _enabled_check()
-    if blocked:
-        return blocked
     slug = (request.path_params.get("slug") or "").strip()
     if not slug:
         return JSONResponse({"error": "missing slug"}, status_code=400)
@@ -259,9 +248,6 @@ def _preview_pipeline(slug: str, version: Optional[str]) -> Dict[str, Any]:
 
 
 async def api_marketplace_preview(request: Request) -> JSONResponse:
-    blocked = _enabled_check()
-    if blocked:
-        return blocked
     slug = (request.path_params.get("slug") or "").strip()
     if not slug:
         return JSONResponse({"error": "missing slug"}, status_code=400)
@@ -319,9 +305,6 @@ def _serialize_install_result(result: Any) -> Dict[str, Any]:
 
 
 async def api_marketplace_install(request: Request) -> JSONResponse:
-    blocked = _enabled_check()
-    if blocked:
-        return blocked
     try:
         body = await request.json()
     except Exception:
@@ -371,8 +354,6 @@ async def api_marketplace_install(request: Request) -> JSONResponse:
                 ),
             ),
         )
-    except PermissionError as exc:
-        return JSONResponse({"error": str(exc), "code": "marketplace_disabled"}, status_code=403)
     except Exception as exc:
         log.exception("marketplace install failed")
         return JSONResponse({"error": str(exc)}, status_code=500)
@@ -381,9 +362,6 @@ async def api_marketplace_install(request: Request) -> JSONResponse:
 
 
 async def api_marketplace_update(request: Request) -> JSONResponse:
-    blocked = _enabled_check()
-    if blocked:
-        return blocked
     sanitized = (request.path_params.get("name") or "").strip()
     err = _validate_path_param_name(sanitized)
     if err:
@@ -429,8 +407,6 @@ async def api_marketplace_update(request: Request) -> JSONResponse:
                 ),
             ),
         )
-    except PermissionError as exc:
-        return JSONResponse({"error": str(exc), "code": "marketplace_disabled"}, status_code=403)
     except Exception as exc:
         log.exception("marketplace update failed")
         return JSONResponse({"error": str(exc)}, status_code=500)
@@ -458,9 +434,6 @@ def _validate_path_param_name(name: str) -> Optional[str]:
 
 
 async def api_marketplace_uninstall(request: Request) -> JSONResponse:
-    blocked = _enabled_check()
-    if blocked:
-        return blocked
     sanitized = (request.path_params.get("name") or "").strip()
     err = _validate_path_param_name(sanitized)
     if err:
@@ -489,8 +462,9 @@ async def api_marketplace_uninstall(request: Request) -> JSONResponse:
                 result_error=lambda item: "" if getattr(item, "ok", False) else getattr(item, "error", "uninstall failed"),
             ),
         )
-    except PermissionError as exc:
-        return JSONResponse({"error": str(exc), "code": "marketplace_disabled"}, status_code=403)
+    except Exception as exc:
+        log.exception("marketplace uninstall failed")
+        return JSONResponse({"error": str(exc)}, status_code=500)
     return JSONResponse(
         {
             "ok": result.ok,
@@ -503,9 +477,6 @@ async def api_marketplace_uninstall(request: Request) -> JSONResponse:
 
 async def api_marketplace_installed(request: Request) -> JSONResponse:
     """List ClawHub-installed skills + provenance for the UI."""
-    blocked = _enabled_check()
-    if blocked:
-        return blocked
     drive_root = _request_drive_root(request)
     from ouroboros.skill_loader import discover_skills, grant_status_for_skill
     from ouroboros.config import get_skills_repo_path

@@ -18,15 +18,7 @@ import {
     startLifecyclePoller,
 } from './lifecycle_card.js';
 import { openConfirmDialog } from './confirm_dialog.js';
-
-function escapeHtml(value) {
-    return String(value ?? '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-}
+import { escapeHtmlAttr as escapeHtml } from './utils.js';
 
 function isRateLimitError(message) {
     const text = String(message || '').toLowerCase();

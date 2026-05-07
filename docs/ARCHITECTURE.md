@@ -1,4 +1,4 @@
-# Ouroboros v5.8.2 — Architecture & Reference
+# Ouroboros v5.8.3-rc.1 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -354,6 +354,15 @@ Navigation is a left sidebar with 6 pages (Chat, Files, Skills, Widgets, Dashboa
 
 v5.7.2 normalizes page-level headers and top tab strips through `web/modules/page_header.js`: Settings, Dashboard, Skills, Widgets, Files, and Chat share the same title/action/tab structure and `app-page-*` / `app-tab-*` CSS rhythm. Chat keeps the `chat-page-header` overlay variant for scroll-under behavior; Settings/Dashboard/Skills tabs are all horizontal pill strips.
 
+v5.8.3-rc.1 splits web escaping by context in `web/modules/utils.js`. Use
+`escapeHtmlText()` for text-node HTML and markdown fallbacks, `escapeHtmlAttr()`
+for interpolated attributes and mixed template snippets, and keep the legacy
+`escapeHtml` export as a text-context compatibility alias only. Declarative
+extension widgets and marketplace/skill cards use the attribute-safe helper
+because their untrusted values frequently land in `data-*`, `src`, `alt`, and
+`title` attributes. Cost displays use the shared `formatUsdWhole`,
+`formatUsd2`, and `formatUsd4` helpers instead of one-off `toFixed` strings.
+
 ### 3.1 Chat
 
 - **Status badge** (top-right): "Online" (green) / "Thinking..." / "Working..." (amber pulse) / "Reconnecting..." (muted offline).
@@ -469,10 +478,12 @@ The Dashboard tab is the operational hub. It hosts four full-height sub-tabs:
 - Repeated startup/system events such as verification bursts are compacted in the UI.
 - Max 500 entries in view (oldest removed).
 
-### 3.6 Versions (merged into Evolution in v4.10.0)
+### 3.6 Versions (retired as a standalone/Evolution surface)
 
-The standalone Versions tab has been merged into the Evolution page as a sub-tab.
-See section 3.8 (Evolution) for the combined page.
+The old standalone Versions tab was first merged into Evolution and is now
+retired there as well. Commit/tag recovery, Restore, and Promote to Stable live
+only in Dashboard → Updates; see section 3.9. Evolution now stays focused on
+runtime status and historical metrics.
 
 ### 3.7 Dashboard → Costs
 
@@ -1122,10 +1133,11 @@ the constitutional guard is that the file itself must remain non-deletable.
 - Secondary reflection/pattern prompts use explicit truncation markers when compacted for prompt size; no silent clipping of these helper summaries.
 - Daemon-thread post-task processing tolerates worker shutdown — queued `restart_request` events fire after `send_message`/`task_metrics`/`task_done` so the daemon thread has a best-effort window to flush.
 
-### Crash report injection (agent.py)
+### Crash report injection (`agent_startup_checks.py`)
 
-- On startup, `_verify_system_state()` checks for `state/crash_report.json`
-- If present, logs `crash_rollback_detected` event to `events.jsonl`
+- On startup, `verify_system_state()` runs startup checks and
+  `inject_crash_report()` checks for `state/crash_report.json`.
+- If present, `inject_crash_report()` logs `crash_rollback_detected` event to `events.jsonl`
 - File is NOT deleted — persists so `build_health_invariants()` surfaces
   CRITICAL: RECENT CRASH ROLLBACK on every task until the agent investigates
 
@@ -1274,11 +1286,11 @@ The commit pipeline runs review stages before creating a git commit:
 
 Shared helpers live in `tools/review_helpers.py`: checklist section loader,
 touched-file pack builder (`build_touched_file_pack`, 1MB file limit; sensitive files omitted case-insensitively before any read), full repo pack builder
-(`build_full_repo_pack` — no char cap, binary/vendored/sensitive filtering, replaces deprecated
-`build_broader_repo_pack`; excludes `assets/` and `tests/` in addition to the standard skip
-list — untouched test files are excluded to reduce scope review prompt size; scope review
-does not duplicate touched tests as full current-file snapshots, but every touched test still
-appears in the staged diff and in the explicit context-deduplication note), HEAD snapshot section builder, goal/scope resolution,
+(`build_full_repo_pack` — no char cap, binary/vendored/sensitive filtering; excludes `assets/`
+and `tests/` in addition to the standard skip list — untouched test files are excluded to
+reduce scope review prompt size; scope review does not duplicate touched tests as full current-file
+snapshots, but every touched test still appears in the staged diff and in the explicit
+context-deduplication note), HEAD snapshot section builder, goal/scope resolution,
 advisory SDK diagnostic helpers (`get_advisory_runtime_diagnostics`, `format_advisory_sdk_error`)
 shared with `claude_advisory_review.py` to keep that module closer to the one-context-window target (P7).
 `_FILE_SIZE_LIMIT` was raised from 100KB to 1MB in v4.13.0 to stop cutting off normal-sized files.
@@ -1566,7 +1578,8 @@ errors surface via the same observability path.
   output, and pre-commit git-add hygiene is the correct layer to prevent that.
   `build_head_snapshot_section` in `review_helpers.py` remains and is still used by `plan_task`,
   which has no diff to draw from.
-- **Full repo pack** (v4.13.0): `build_full_repo_pack` replaces the deprecated `build_broader_repo_pack`.
+- **Full repo pack** (v4.13.0): `build_full_repo_pack` is the only full-repository
+  pack builder used by review surfaces.
   No hardcoded char cap. Excludes: binary/media files (`_FULL_REPO_BINARY_EXTENSIONS`), vendored/minified
   (`.min.js`, `.min.css`, named vendored assets), sensitive files (`.env`, `.pem`, `.key`, etc.),
   oversized (>1MB), and directory prefixes `.cursor/`, `.github/`, `.vscode/`, `.idea/`, `assets/`,

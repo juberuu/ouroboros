@@ -1,4 +1,4 @@
-import { escapeHtml } from './utils.js';
+import { escapeHtmlAttr as escapeHtml } from './utils.js';
 
 export function initUpdates({ mount, hostPage = 'settings', hostSubtab = 'updates', state = {} }) {
     const host = mount || document.getElementById('content');

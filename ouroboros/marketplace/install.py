@@ -73,15 +73,6 @@ class UninstallResult:
     error: str = ""
 
 
-def _ensure_marketplace_enabled() -> None:
-    """Compatibility no-op: ClawHub is always available.
-
-    Registry host validation and archive/review gates remain the safety
-    boundaries; the old user-facing opt-in switch was removed.
-    """
-    return None
-
-
 def _clawhub_skills_root(drive_root: pathlib.Path) -> pathlib.Path:
     """Return ``<drive_root>/skills/clawhub/`` (created on demand).
 
@@ -250,7 +241,6 @@ def install_skill(
         except Exception:
             log.debug("install_skill progress callback raised", exc_info=True)
 
-    _ensure_marketplace_enabled()
     _progress("Resolving registry…")
 
     cleaned_slug = (slug or "").strip()
@@ -525,8 +515,6 @@ def uninstall_skill(
        contract says "uninstall a marketplace skill", not "rm -rf
        arbitrary directory under data/skills/clawhub/").
     """
-    _ensure_marketplace_enabled()
-
     from ouroboros.skill_loader import _sanitize_skill_name
 
     cleaned = (sanitized_name or "").strip()

@@ -2,14 +2,58 @@
  * Utility functions shared across modules.
  */
 
-export function escapeHtml(text) {
+export function escapeHtmlText(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
 }
 
+export function escapeHtmlAttr(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;')
+        .replace(/`/g, '&#96;');
+}
+
+export const escapeHtml = escapeHtmlText;
+
+export function safeExternalUrl(value) {
+    const text = String(value ?? '').trim();
+    if (!text) return '#';
+    try {
+        const parsed = new URL(text);
+        return ['http:', 'https:', 'mailto:'].includes(parsed.protocol) ? parsed.href : '#';
+    } catch {
+        return '#';
+    }
+}
+
+export function decodeHtmlEntities(value) {
+    const textarea = document.createElement('textarea');
+    textarea.innerHTML = String(value ?? '');
+    return textarea.value;
+}
+
+export function formatUsdWhole(value) {
+    const num = Number(value);
+    return Number.isFinite(num) ? `$${num.toFixed(0)}` : '$0';
+}
+
+export function formatUsd2(value) {
+    const num = Number(value);
+    return Number.isFinite(num) ? `$${num.toFixed(2)}` : '$0.00';
+}
+
+export function formatUsd4(value) {
+    const num = Number(value);
+    return Number.isFinite(num) && num > 0 ? `$${num.toFixed(4)}` : '';
+}
+
 export function renderMarkdown(text) {
-    let html = escapeHtml(text);
+    let html = escapeHtmlText(text);
     // Code blocks (``` ... ```)
     html = html.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>');
     // Inline code
@@ -28,8 +72,8 @@ export function renderMarkdown(text) {
     html = html.replace(/^- (.+)$/gm, '<span class="md-li">\u2022 $1</span>');
     // Links
     html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, function(_, text, url) {
-        const safe = /^https?:|^mailto:/i.test(url) ? url : '#';
-        return '<a href="' + safe + '" target="_blank" rel="noopener noreferrer" class="md-link">' + text + '</a>';
+        const safe = safeExternalUrl(decodeHtmlEntities(url));
+        return '<a href="' + escapeHtmlAttr(safe) + '" target="_blank" rel="noopener noreferrer" class="md-link">' + text + '</a>';
     });
     // Tables: detect header row + separator + data rows
     html = html.replace(/((?:^\|.+\|$\n?)+)/gm, function(block) {

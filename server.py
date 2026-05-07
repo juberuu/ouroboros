@@ -620,7 +620,7 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
             from supervisor.queue import SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC
 
             status = status_text(ctx.WORKERS, ctx.PENDING, ctx.RUNNING, SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC)
-            ctx.send_with_budget(chat_id, status, force_budget=True)
+            ctx.send_with_budget(chat_id, status)
         else:
             ctx.consciousness.inject_observation(f"Owner message: {log_text}")
             agent = ctx.get_chat_agent()

@@ -129,9 +129,6 @@ Write the reflection now. Plain text, no markdown headers except the exact final
 _REFLECTION_PROMPT_ERROR_FULL = _REFLECTION_PROMPT_ERROR + _REFLECTION_PROMPT_TAIL
 _REFLECTION_PROMPT_NONTRIVIAL_FULL = _REFLECTION_PROMPT_NONTRIVIAL + _REFLECTION_PROMPT_TAIL
 
-# Legacy alias — kept so any external caller that imports the old name still works.
-_REFLECTION_PROMPT = _REFLECTION_PROMPT_ERROR_FULL
-
 
 # ── Trigger logic ────────────────────────────────────────────────────────────
 

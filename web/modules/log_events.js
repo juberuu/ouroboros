@@ -1,3 +1,5 @@
+import { formatUsd4 } from './utils.js';
+
 export const LOG_CATEGORIES = {
     tools: { label: 'Tools', color: 'var(--blue)' },
     llm: { label: 'LLM', color: 'var(--accent)' },
@@ -47,9 +49,7 @@ function describeText(text, maxLen = 180) {
 }
 
 export function formatLogMoney(value) {
-    const num = Number(value);
-    if (!Number.isFinite(num) || num <= 0) return '';
-    return `$${num.toFixed(4)}`;
+    return formatUsd4(value);
 }
 
 export function formatLogDuration(sec) {

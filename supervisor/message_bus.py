@@ -14,7 +14,7 @@ import mimetypes
 import queue
 import re
 import threading
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -569,14 +569,6 @@ class LocalChatBridge:
         self._send_telegram_photo(photo_bytes, caption=caption, mime=mime, preferred_chat_id=chat_id)
         return True, "ok"
 
-    def download_file_base64(
-        self,
-        file_id: str,
-        max_bytes: int = 10_000_000,
-    ) -> Tuple[Optional[str], str]:
-        """Placeholder for future web UI file upload support."""
-        return None, ""
-
     # Log streaming
     def push_log(self, event: dict):
         """Called by append_jsonl hook to stream log events to the UI."""
@@ -635,19 +627,6 @@ class LocalChatBridge:
 # ---------------------------------------------------------------------------
 # Formatting helpers
 # ---------------------------------------------------------------------------
-
-def split_message(text: str, limit: int = 4000) -> List[str]:
-    chunks: List[str] = []
-    s = text
-    while len(s) > limit:
-        cut = s.rfind("\n", 0, limit)
-        if cut < 100:
-            cut = limit
-        chunks.append(s[:cut])
-        s = s[cut:]
-    chunks.append(s)
-    return chunks
-
 
 def _strip_markdown(text: str) -> str:
     """Strip all markdown formatting markers, leaving only plain text."""
@@ -756,10 +735,9 @@ def log_chat(
 
 
 def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
-                     force_budget: bool = False, fmt: str = "",
+                     fmt: str = "",
                      is_progress: bool = False, task_id: str = "",
                      ts: Optional[str] = None) -> None:
-    # force_budget kept in signature for caller compat but is a no-op since 3.3.0
     st = load_state()
     owner_id = int(st.get("owner_id") or 0)
     _text = str(text or "")

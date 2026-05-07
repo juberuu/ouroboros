@@ -1,11 +1,4 @@
-function escapeHtml(value) {
-    return String(value ?? '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-}
+import { escapeHtmlAttr as escapeHtml } from './utils.js';
 
 function classAttr(parts) {
     return parts.filter(Boolean).join(' ');

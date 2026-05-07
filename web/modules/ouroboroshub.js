@@ -7,16 +7,7 @@ import {
     setPending,
     startLifecyclePoller,
 } from './lifecycle_card.js';
-
-function escapeHtml(value) {
-    return String(value ?? '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-}
-
+import { escapeHtmlAttr as escapeHtml } from './utils.js';
 
 async function fetchJson(url, init) {
     const resp = await fetch(url, init);

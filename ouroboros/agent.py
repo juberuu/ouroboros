@@ -34,9 +34,6 @@ from ouroboros.context import build_llm_messages
 from ouroboros.loop import run_llm_loop
 from ouroboros.config import resolve_effort
 from ouroboros.agent_startup_checks import (
-    check_budget,
-    check_uncommitted_changes,
-    check_version_sync,
     inject_crash_report,
     verify_restart,
     verify_system_state,
@@ -62,14 +59,6 @@ class Env:
 
     def drive_path(self, rel: str) -> pathlib.Path:
         return (self.drive_root / safe_relpath(rel)).resolve()
-
-
-# ---------------------------------------------------------------------------
-# Backward-compat shim — kept so existing tests that import this symbol
-# directly do not break. New code should call config.resolve_effort().
-# ---------------------------------------------------------------------------
-def _resolve_initial_effort(task_type: str) -> str:
-    return resolve_effort(task_type)
 
 
 class OuroborosAgent:
@@ -144,27 +133,6 @@ class OuroborosAgent:
         except Exception:
             log.warning("Worker boot logging failed", exc_info=True)
             return
-
-    # Backward-compat wrappers for legacy tests and internal callers
-    def _verify_restart(self, git_sha: str) -> None:
-        verify_restart(self.env, git_sha)
-
-    def _verify_system_state(self, git_sha: str) -> None:
-        # crash_rollback_detected events are emitted via inject_crash_report();
-        # keep the marker here for legacy source-inspecting tests.
-        verify_system_state(self.env, git_sha)
-
-    def _check_uncommitted_changes(self):
-        return check_uncommitted_changes(self.env)
-
-    def _check_version_sync(self):
-        # Backward-compat note for tests: VERSION sync includes
-        # ARCHITECTURE.md header checks and stores architecture_version.
-        # The executable logic lives in agent_startup_checks.check_version_sync().
-        return check_version_sync(self.env)
-
-    def _check_budget(self):
-        return check_budget(self.env)
 
     def _prepare_task_context(self, task: Dict[str, Any]) -> Tuple[ToolContext, List[Dict[str, Any]], Dict[str, Any]]:
         """Set up ToolContext, build messages, return (ctx, messages, cap_info)."""
@@ -422,9 +390,6 @@ class OuroborosAgent:
                 heartbeat_stop.set()
             self._current_task_type = None
             self._current_task_id = None
-
-    # Keep _build_trace_summary as a static method for backward compat
-    _build_trace_summary = staticmethod(build_trace_summary)
 
     def _emit_progress(self, text: str) -> None:
         self._last_progress_ts = time.time()

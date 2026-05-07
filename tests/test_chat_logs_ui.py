@@ -377,15 +377,14 @@ def test_history_api_passes_task_summary_metadata():
 
 
 # ---------------------------------------------------------------------------
-# Evolution Versions sub-tab: no inline styles, CSS-class-based structure
+# Updates versions surface: no inline styles, CSS-class-based structure
 # ---------------------------------------------------------------------------
 
-def test_evolution_versions_subtab_uses_css_classes_not_inline_styles():
-    """Evolution Versions sub-tab must use CSS classes, not inline style="" attributes."""
-    source = _read("web/modules/evolution.js")
+def test_updates_versions_surface_uses_css_classes_not_inline_styles():
+    """Updates commits/tags surface must use CSS classes, not inline style="" attributes."""
+    source = _read("web/modules/updates.js")
 
     # Container and layout classes must be present
-    assert 'class="evo-versions-content"' in source
     assert 'class="evo-versions-header"' in source
     assert 'class="evo-versions-branch"' in source
     assert 'class="evo-versions-cols"' in source
@@ -404,42 +403,27 @@ def test_evolution_versions_subtab_uses_css_classes_not_inline_styles():
     # renderRow innerHTML must not contain inline style= attributes
     # (row.style.xxx JS property assignments are irrelevant — only template literal innerHTML is checked)
     render_row_match = re.search(
-        r'function renderRow\(.*?\{(.*?)\n    \}', source, re.DOTALL
+        r'function renderVersionRow\(.*?\{(.*?)\n    \}', source, re.DOTALL
     )
-    assert render_row_match, "renderRow function not found in evolution.js"
+    assert render_row_match, "renderVersionRow function not found in updates.js"
     render_row_body = render_row_match.group(1)
     inner_html_parts = re.findall(r'innerHTML\s*=\s*`(.+?)`', render_row_body, re.DOTALL)
-    assert inner_html_parts, "renderRow should set innerHTML via template literal"
+    assert inner_html_parts, "renderVersionRow should set innerHTML via template literal"
     for part in inner_html_parts:
-        assert 'style=' not in part, f"renderRow innerHTML still contains inline style=: {part[:120]}"
+        assert 'style=' not in part, f"renderVersionRow innerHTML still contains inline style=: {part[:120]}"
 
-    # Versions sub-tab container HTML: confirm class-based markers are present and no inline styles
-    # Extract between the two known comment anchors that exist in the file
-    versions_block_match = re.search(
-        r'<!-- Versions sub-tab -->(.*?)<!-- Chart sub-tab|<!-- Versions sub-tab -->(.*?)$',
-        source, re.DOTALL
-    )
-    if versions_block_match:
-        versions_html = versions_block_match.group(1) or versions_block_match.group(2) or ''
-        # Verify class markers are present
-        assert 'evo-versions-content' in versions_html
-        assert 'evo-versions-header' in versions_html
-        # Verify no inline style= in the static template HTML
-        # (JS .style property assignments are not in the template string)
-        template_literal_match = re.search(r'page\.innerHTML\s*=\s*`(.*?)`\s*;', source, re.DOTALL)
-        if template_literal_match:
-            template = template_literal_match.group(1)
-            # Find the versions section in the template and assert no style= there
-            versions_in_template = template[template.find('<!-- Versions sub-tab -->'):]
-            assert 'style=' not in versions_in_template[:2000], \
-                "Versions sub-tab template still contains inline style= attributes"
+    template_literal_match = re.search(r'page\.innerHTML\s*=\s*`(.*?)`\s*;', source, re.DOTALL)
+    assert template_literal_match, "updates page template not found"
+    template = template_literal_match.group(1)
+    assert 'evo-versions-header' in template
+    assert 'evo-versions-cols' in template
+    assert 'style=' not in template, "Updates versions template still contains inline style= attributes"
 
 
-def test_evolution_versions_css_classes_defined():
-    """CSS classes introduced for Versions sub-tab must be defined in style.css."""
+def test_updates_versions_css_classes_defined():
+    """CSS classes used by the Updates versions surface must be defined in style.css."""
     css = _read("web/style.css")
     for cls in [
-        ".evo-versions-content",
         ".evo-versions-header",
         ".evo-versions-branch",
         ".evo-versions-cols",
@@ -454,9 +438,9 @@ def test_evolution_versions_css_classes_defined():
         assert cls in css, f"Missing CSS class in style.css: {cls}"
 
 
-def test_evolution_load_versions_error_handling():
-    """loadVersions() must guard resp.ok and clear all three UI surfaces on error."""
-    source = _read("web/modules/evolution.js")
+def test_updates_load_versions_error_handling():
+    """loadVersions() must guard resp.ok and clear local version surfaces on error."""
+    source = _read("web/modules/updates.js")
 
     # Must check resp.ok before parsing JSON (guards non-2xx responses)
     assert "if (!resp.ok) throw new Error" in source, \
@@ -469,13 +453,12 @@ def test_evolution_load_versions_error_handling():
     fn_body = source[load_versions_start:rollback_start]
 
     # The catch branch must clear all three surfaces
-    catch_start = fn_body.rfind("} catch (e) {")
+    catch_start = fn_body.rfind("} catch (")
     assert catch_start != -1, "loadVersions catch block not found"
     catch_body = fn_body[catch_start:]
     assert 'commitsDiv.innerHTML' in catch_body, "catch must clear commitsDiv"
     assert 'tagsDiv.innerHTML' in catch_body, "catch must clear tagsDiv"
-    assert 'currentDiv.textContent' in catch_body, "catch must reset currentDiv"
-    assert 'versionsLoaded = false' in catch_body, "catch must reset versionsLoaded"
+    assert 'current.textContent' in catch_body, "catch must reset current branch label"
 
 
 def test_evolution_runtime_card_uses_crimson_border():
@@ -492,6 +475,14 @@ def test_evolution_runtime_card_uses_crimson_border():
     assert "201, 53, 69" in rule_body, "evo-runtime-card should use crimson accent border"
     # Must NOT use the old neutral white border
     assert "255, 255, 255, 0.08" not in rule_body, "evo-runtime-card should not use neutral white border"
+
+
+def test_evolution_tags_table_escapes_untrusted_tag_names():
+    """Evolution tag rows are rendered via innerHTML, so tag/date strings must be escaped."""
+    source = _read("web/modules/evolution.js")
+    assert "escapeHtmlText(p.tag || '')" in source
+    assert "escapeHtmlText(dateStr)" in source
+    assert "<td><code>${p.tag}</code></td>" not in source
 
 
 def test_live_card_timeline_no_hardcoded_item_cap():

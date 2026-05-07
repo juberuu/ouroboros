@@ -418,10 +418,10 @@ def test_migrate_remote_credentials_uses_configure_remote():
 # --- ARCHITECTURE version sync (Phase 5) ---
 
 def test_version_sync_checks_architecture_md():
-    """_check_version_sync must compare VERSION with ARCHITECTURE.md header."""
+    """check_version_sync must compare VERSION with ARCHITECTURE.md header."""
     sys.path.insert(0, REPO)
-    agent_mod = importlib.import_module("ouroboros.agent")
-    source = inspect.getsource(agent_mod.OuroborosAgent._check_version_sync)
+    startup_mod = importlib.import_module("ouroboros.agent_startup_checks")
+    source = inspect.getsource(startup_mod.check_version_sync)
     assert "ARCHITECTURE" in source
     assert "architecture_version" in source
 

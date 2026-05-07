@@ -3,8 +3,6 @@
 import os
 from unittest.mock import patch
 from ouroboros.config import resolve_effort
-# Backward-compat shim in agent.py must still work
-from ouroboros.agent import _resolve_initial_effort
 
 
 # ---------------------------------------------------------------------------
@@ -103,15 +101,3 @@ def test_task_type_is_case_insensitive():
         assert resolve_effort("EVOLUTION") == "high"
         assert resolve_effort("Review") == "medium"
         assert resolve_effort("CONSCIOUSNESS") == "low"
-
-
-# ---------------------------------------------------------------------------
-# Backward-compat shim
-# ---------------------------------------------------------------------------
-
-def test_shim_still_works():
-    """_resolve_initial_effort in agent.py is still callable and correct."""
-    with patch.dict(os.environ, {}, clear=True):
-        assert _resolve_initial_effort("task") == "medium"
-        assert _resolve_initial_effort("evolution") == "high"
-        assert _resolve_initial_effort("review") == "medium"

@@ -542,67 +542,6 @@ def build_blocking_findings_json_section(
 
 
 # ---------------------------------------------------------------------------
-# 3. build_broader_repo_pack
-# ---------------------------------------------------------------------------
-
-def build_broader_repo_pack(
-    repo_dir: Path,
-    exclude_paths: set[str],
-    max_chars: int = 500_000,
-) -> str:
-    """Read all tracked files except *exclude_paths*, up to *max_chars*.
-
-    .. deprecated::
-        Use :func:`build_full_repo_pack` instead — it applies proper binary/sensitive/vendored
-        filtering without a hardcoded char cap. Kept for backward compatibility until all callers
-        are migrated.
-    """
-    result = subprocess.run(
-        ["git", "ls-files"],
-        cwd=repo_dir,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    tracked = result.stdout.splitlines()
-
-    parts: list[str] = []
-    total = 0
-
-    for rel in tracked:
-        if rel in exclude_paths:
-            continue
-        fp = repo_dir / rel
-
-        # Skip files inside non-code dirs
-        if any(part in SKIP_DIRS for part in Path(rel).parts):
-            continue
-
-        if fp.suffix.lower() in BINARY_EXTENSIONS:
-            continue
-        if not fp.is_file():
-            continue
-
-        try:
-            content = fp.read_text(encoding="utf-8", errors="replace")
-        except Exception:
-            logger.warning("Could not read repo file: %s", rel, exc_info=True)
-            continue
-
-        chunk = f"### {rel}\n```{fp.suffix.lstrip('.')}\n{content}\n```\n\n"
-        if total + len(chunk) > max_chars:
-            parts.append(
-                f"\n*(broader repo pack truncated at {max_chars:,} chars — "
-                f"remaining files omitted)*\n"
-            )
-            break
-        parts.append(chunk)
-        total += len(chunk)
-
-    return "".join(parts)
-
-
-# ---------------------------------------------------------------------------
 # 3b. _is_probably_binary (content sniffer, mirrors deep_self_review.py)
 # ---------------------------------------------------------------------------
 

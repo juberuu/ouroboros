@@ -35,10 +35,6 @@ def canonical_tool_name(name: str) -> str:
     return OPENCLAW_TOOL_ALIASES.get(text, text)
 
 
-def is_tool_alias(name: str) -> bool:
-    return canonical_tool_name(name) != str(name or "").strip()
-
-
 def adapt_tool_args(name: str, args: Dict[str, Any] | None) -> Dict[str, Any]:
     """Translate common OpenClaw-style argument names to canonical shapes."""
 
@@ -104,5 +100,4 @@ __all__ = [
     "alias_schema",
     "aliases_for_canonical",
     "canonical_tool_name",
-    "is_tool_alias",
 ]

@@ -1,4 +1,14 @@
 (() => {
+    function escapeHtml(value) {
+        return String(value ?? '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;')
+            .replace(/`/g, '&#96;');
+    }
+
     const bootstrap = window.__OURO_ONBOARDING_BOOTSTRAP__ || {};
     const HOST_MODE = bootstrap.hostMode || 'desktop';
     const LOCAL_RUNTIME_CONTROLS = Boolean(bootstrap.supportsLocalRuntimeControls);
@@ -67,14 +77,6 @@
 
     function trim(value) {
         return String(value || '').trim();
-    }
-
-    function escapeHtml(value) {
-        return String(value || '')
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;');
     }
 
     function formatUsd(value) {

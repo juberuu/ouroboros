@@ -1,7 +1,7 @@
 """Tests for crash report lifecycle and health invariant integrity.
 
 Verifies:
-- crash_report.json is NOT deleted by _verify_system_state (stays for health_invariants)
+- crash_report.json is NOT deleted during startup verification
 - build_health_invariants detects crash_report.json
 """
 import importlib
@@ -14,15 +14,16 @@ sys.path.insert(0, REPO)
 
 
 def test_verify_system_state_does_not_delete_crash_file():
-    """_verify_system_state must NOT call unlink() on the crash report file.
+    """Startup verification must NOT call unlink() on the crash report file.
 
     The crash_report.json must persist so build_health_invariants() surfaces
     it on every task until the agent investigates and removes it.
     """
-    from ouroboros.agent import OuroborosAgent
-    source = inspect.getsource(OuroborosAgent._verify_system_state)
+    from ouroboros import agent_startup_checks
+    source = inspect.getsource(agent_startup_checks.verify_system_state)
+    source += inspect.getsource(agent_startup_checks.inject_crash_report)
     assert "unlink" not in source, (
-        "_verify_system_state still deletes crash_report.json — "
+        "startup verification still deletes crash_report.json — "
         "health_invariants won't see it. File must persist until agent clears it."
     )
 
@@ -40,9 +41,9 @@ def test_health_invariants_detects_crash_report():
 
 
 def test_crash_event_logged_at_startup():
-    """_verify_system_state must log crash_rollback_detected event."""
-    from ouroboros.agent import OuroborosAgent
-    source = inspect.getsource(OuroborosAgent._verify_system_state)
+    """Startup crash-report injection must log crash_rollback_detected event."""
+    from ouroboros.agent_startup_checks import inject_crash_report
+    source = inspect.getsource(inject_crash_report)
     assert "crash_rollback_detected" in source, (
-        "_verify_system_state does not log crash_rollback_detected event"
+        "startup crash-report injection does not log crash_rollback_detected event"
     )

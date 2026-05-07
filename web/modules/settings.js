@@ -2,7 +2,7 @@ import { refreshModelCatalog } from './settings_catalog.js';
 import { bindEffortSegments, syncEffortSegments } from './settings_controls.js';
 import { bindLocalModelControls } from './settings_local_model.js';
 import { bindSecretInputs, bindSettingsTabs, renderSettingsPage } from './settings_ui.js';
-import { formatDualVersion } from './utils.js';
+import { escapeHtmlAttr as escapeHtml, formatDualVersion } from './utils.js';
 
 function byId(id) {
     return document.getElementById(id);
@@ -175,15 +175,6 @@ const SETTINGS_FALLBACK_MODELS = [
 ];
 
 let settingsModelCatalogItems = SETTINGS_FALLBACK_MODELS.map((value) => ({ value, label: 'Suggested model' }));
-
-function escapeHtml(value) {
-    return String(value ?? '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-}
 
 export function initSettings({ state, setBeforePageLeave } = {}) {
     const page = document.createElement('div');

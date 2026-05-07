@@ -196,6 +196,11 @@ def migrate_generation_skill_names(data_dir: pathlib.Path | None = None) -> None
     The migration is intentionally conservative: it only copies when the
     destination is absent, then renames the old payload directory aside as a
     ``.replaced-5.5.0`` backup so discovery ignores it.
+
+    Temporary compatibility debt: keep this idempotent migration through the
+    v5 line for users upgrading from pre-OuroborosHub builds, then retire it
+    in the next major cleanup cycle once old ``image_gen`` / ``audio_gen``
+    installs no longer need automatic rescue.
     """
 
     data = pathlib.Path(data_dir or DATA_DIR)

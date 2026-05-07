@@ -850,38 +850,6 @@ body {
     width: 0;
 }
 
-/* Evolution sub-tabs */
-.evo-subtabs {
-    display: flex;
-    gap: 4px;
-    padding: 0 4px;
-}
-
-.evo-subtab {
-    padding: 6px 16px;
-    border: 1px solid rgba(201, 53, 69, 0.10);
-    border-radius: 999px;
-    background: rgba(201, 53, 69, 0.03);
-    color: var(--text-secondary);
-    font-size: 12px;
-    font-weight: 600;
-    font-family: inherit;
-    cursor: pointer;
-    transition: all 0.15s;
-}
-
-.evo-subtab:hover {
-    border-color: rgba(201, 53, 69, 0.22);
-    background: rgba(201, 53, 69, 0.08);
-    color: var(--text-primary);
-}
-
-.evo-subtab.active {
-    border-color: rgba(201, 53, 69, 0.38);
-    background: rgba(201, 53, 69, 0.14);
-    color: var(--accent-light);
-}
-
 /* Status badge */
 .status-badge {
     padding: 4px 10px;
@@ -1034,6 +1002,12 @@ body {
     line-height: 1.5;
     color: var(--text-primary);
     white-space: pre-wrap;
+}
+
+.chat-photo {
+    max-width: 100%;
+    border-radius: 8px;
+    cursor: pointer;
 }
 
 .chat-bubble.user .message { color: rgba(215, 230, 255, 0.96); }
@@ -2847,15 +2821,6 @@ body {
     overflow: hidden;
 }
 
-/* Evolution Versions sub-tab layout */
-.evo-versions-content {
-    display: none;
-    flex: 1;
-    flex-direction: column;
-    overflow: hidden;
-    padding: 20px;
-}
-
 .evo-versions-header {
     display: flex;
     align-items: center;
@@ -4436,15 +4401,11 @@ body {
         overflow-x: hidden;
     }
 
-    /* Evolution page — stack version columns and use taller chart area. */
+    /* Updates page — stack version columns and use taller chart area. */
     .evo-versions-cols {
         flex-direction: column;
         gap: 16px;
         overflow: visible;
-    }
-
-    .evo-versions-content {
-        padding: 12px;
     }
 
     .evo-chart-wrap {

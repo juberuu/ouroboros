@@ -144,11 +144,6 @@ def normalize_reasoning_effort(value: str, default: str = "medium") -> str:
     return v if v in allowed else default
 
 
-def reasoning_rank(value: str) -> int:
-    order = {"none": 0, "minimal": 1, "low": 2, "medium": 3, "high": 4, "xhigh": 5}
-    return int(order.get(str(value or "").strip().lower(), 3))
-
-
 def add_usage(total: Dict[str, Any], usage: Dict[str, Any]) -> None:
     """Accumulate usage from one LLM call into a running total."""
     for k in ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens", "cache_write_tokens"):
@@ -434,10 +429,6 @@ class LLMClient:
             )
             self._local_port = port
         return self._local_client
-
-    def _get_async_client(self):
-        target = self._resolve_remote_target("openrouter::")
-        return self._get_async_remote_client(target)
 
     def _get_async_remote_client(self, target: Dict[str, Any]):
         base_url = str(target.get("base_url") or "")
@@ -900,71 +891,6 @@ class LLMClient:
         msg["content"] = reasoning or None
         log.info("Parsed %d local tool call(s) from text output", len(tool_calls))
         return msg
-
-    @staticmethod
-    def _truncate_messages_for_context(
-        messages: List[Dict[str, Any]], ctx_len: int, max_tokens: int,
-    ) -> None:
-        """Hard-truncate message content so total fits within the context window.
-
-        Uses a conservative 3-chars-per-token ratio to avoid underestimating.
-        """
-        available_tokens = ctx_len - max_tokens - 64
-        if available_tokens < 256:
-            available_tokens = 256
-        target_chars = available_tokens * 3
-
-        total_chars = sum(len(str(m.get("content", ""))) for m in messages)
-        if total_chars <= target_chars:
-            return
-
-        for msg in messages:
-            if msg["role"] == "system" and isinstance(msg.get("content"), str):
-                content = msg["content"]
-                other_chars = total_chars - len(content)
-                allowed = max(512, target_chars - other_chars)
-                if len(content) > allowed:
-                    msg["content"] = content[:allowed] + "\n\n[Context truncated to fit model window]"
-                    log.info("Truncated system message from %d to %d chars for %d-token context",
-                             len(content), allowed, ctx_len)
-                return
-
-    @staticmethod
-    def _shrink_messages_from_error(
-        messages: List[Dict[str, Any]], error_text: str,
-    ) -> None:
-        """Parse a context_length_exceeded error and shrink the largest message."""
-        m = re.search(r"requested (\d+) tokens.*?(\d+) in the messages", error_text)
-        if not m:
-            for msg in messages:
-                if msg["role"] == "system" and isinstance(msg.get("content"), str):
-                    msg["content"] = msg["content"][:len(msg["content"]) // 2]
-                    return
-            return
-
-        requested = int(m.group(1))
-        msg_tokens = int(m.group(2))
-        # Find max context from "maximum context length is N tokens"
-        ctx_match = re.search(r"maximum context length is (\d+)", error_text)
-        ctx_max = int(ctx_match.group(1)) if ctx_match else 16384
-        comp_match = re.search(r"(\d+) in the completion", error_text)
-        comp_tokens = int(comp_match.group(1)) if comp_match else 2048
-
-        target_msg_tokens = ctx_max - comp_tokens - 64
-        if target_msg_tokens < 256:
-            target_msg_tokens = 256
-        ratio = target_msg_tokens / max(msg_tokens, 1)
-        if ratio >= 1.0:
-            ratio = 0.5
-
-        for msg in messages:
-            if msg["role"] == "system" and isinstance(msg.get("content"), str):
-                content = msg["content"]
-                new_len = max(512, int(len(content) * ratio))
-                if new_len < len(content):
-                    msg["content"] = content[:new_len] + "\n\n[Context truncated to fit model window]"
-                    log.info("Retry-truncated system message to %d chars (ratio=%.2f)", new_len, ratio)
-                return
 
     @staticmethod
     def _stringify_anthropic_content(value: Any) -> str:
@@ -1547,19 +1473,6 @@ class LLMClient:
         )
         resp = client.chat.completions.create(**kwargs)
         return self._normalize_remote_response(resp.model_dump(), target)
-
-    def _chat_openrouter(
-        self,
-        messages: List[Dict[str, Any]],
-        model: str,
-        tools: Optional[List[Dict[str, Any]]],
-        reasoning_effort: str,
-        max_tokens: int,
-        tool_choice: str,
-        temperature: Optional[float] = None,
-    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        target = self._resolve_remote_target(model)
-        return self._chat_remote(target, messages, tools, reasoning_effort, max_tokens, tool_choice, temperature)
 
     def vision_query(
         self,

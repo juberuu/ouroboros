@@ -25,11 +25,6 @@ def _mailbox_path(drive_root: pathlib.Path, task_id: str) -> pathlib.Path:
     return drive_root / _MAILBOX_DIR / f"{task_id}.jsonl"
 
 
-def get_pending_path(drive_root: pathlib.Path) -> pathlib.Path:
-    """Legacy compat: path to old global pending file (for cleanup on startup)."""
-    return drive_root / "memory/owner_messages_pending.jsonl"
-
-
 def write_owner_message(
     drive_root: pathlib.Path,
     text: str,

@@ -1,4 +1,4 @@
-import { escapeHtml, renderMarkdown } from './utils.js';
+import { escapeHtmlAttr, escapeHtmlText as escapeHtml, formatUsdWhole, renderMarkdown } from './utils.js';
 import { renderPageHeader } from './page_header.js';
 import {
     getLogTaskGroupId,
@@ -323,7 +323,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         const limit = data?.budget_limit || 10;
         const budgetText = document.getElementById('chat-budget-text');
         const budgetFill = document.getElementById('chat-budget-bar-fill');
-        if (budgetText) budgetText.textContent = `$${spent.toFixed(0)} / $${limit.toFixed(0)}`;
+        if (budgetText) budgetText.textContent = `${formatUsdWhole(spent)} / ${formatUsdWhole(limit)}`;
         if (budgetFill) budgetFill.style.width = `${Math.min(100, (spent / limit) * 100)}%`;
     }
 
@@ -710,7 +710,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
                 <button
                     type="button"
                     class="chat-live-line-toggle"
-                    data-live-line-toggle="${escapeHtml(item.lineKey)}"
+                    data-live-line-toggle="${escapeHtmlAttr(item.lineKey)}"
                     aria-expanded="${expanded ? 'true' : 'false'}"
                 >
                     <span class="chat-live-line-head">${headContent}</span>
@@ -721,7 +721,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         return `
             <div
                 class="chat-live-line ${item.phase || 'working'}${expandable ? ' expandable' : ''}"
-                data-live-line-key="${escapeHtml(item.lineKey || '')}"
+                data-live-line-key="${escapeHtmlAttr(item.lineKey || '')}"
                 data-expanded="${expanded ? '1' : '0'}"
             >
                 ${headHtml}
@@ -1020,7 +1020,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         const sender = getSenderLabel(role, isProgress, systemType, { source, senderLabel, senderSessionId });
         const rendered = role === 'user' ? escapeHtml(text) : renderMarkdown(text);
         const timeFmt = formatMsgTime(ts);
-        const timeHtml = timeFmt ? `<div class="msg-time" title="${timeFmt.full}">${timeFmt.short}</div>` : '';
+        const timeHtml = timeFmt ? `<div class="msg-time" title="${escapeHtmlAttr(timeFmt.full)}">${escapeHtml(timeFmt.short)}</div>` : '';
         const pendingHtml = pending ? `<div class="msg-pending">Queued until reconnect</div>` : '';
         bubble.innerHTML = `
             <div class="sender">${escapeHtml(sender)}</div>
@@ -1618,14 +1618,23 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         const bubble = document.createElement('div');
         bubble.className = `chat-bubble ${role}`;
         const timeFmt = formatMsgTime(msg.ts || new Date().toISOString());
-        const timeHtml = timeFmt ? `<div class="msg-time" title="${timeFmt.full}">${timeFmt.short}</div>` : '';
+        const timeHtml = timeFmt ? `<div class="msg-time" title="${escapeHtmlAttr(timeFmt.full)}">${escapeHtml(timeFmt.short)}</div>` : '';
         const captionHtml = msg.caption ? `<div class="message">${escapeHtml(msg.caption)}</div>` : '';
+        const mime = /^image\/[a-z0-9.+-]+$/i.test(String(msg.mime || '')) ? String(msg.mime) : 'image/png';
+        const imageBase64 = /^[A-Za-z0-9+/=\s]+$/.test(String(msg.image_base64 || ''))
+            ? String(msg.image_base64 || '').replace(/\s+/g, '')
+            : '';
+        const imageUrl = imageBase64 ? `data:${mime};base64,${imageBase64}` : '';
         bubble.innerHTML = `
             <div class="sender">${escapeHtml(sender)}</div>
             ${captionHtml}
-            <div class="message"><img src="data:${msg.mime || 'image/png'};base64,${msg.image_base64}" style="max-width:100%;border-radius:8px;cursor:pointer" onclick="window.open(this.src,'_blank')" /></div>
+            <div class="message"><img class="chat-photo" src="${escapeHtmlAttr(imageUrl)}" alt="Photo attachment"></div>
             ${timeHtml}
         `;
+        const img = bubble.querySelector('.chat-photo');
+        if (img && imageUrl) {
+            img.addEventListener('click', () => window.open(imageUrl, '_blank'));
+        }
         insertMessageNode(bubble);
         incrementUnreadIfNeeded();
     });

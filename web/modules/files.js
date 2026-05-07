@@ -1,12 +1,7 @@
 import { renderPageHeader } from './page_header.js';
+import { escapeHtmlAttr, escapeHtmlText as escapeHtml } from './utils.js';
 
 const FILES_ICON = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><path d="M3 7h5l2 2h11v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M3 7V5a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v2"/></svg>';
-
-function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
 
 function formatFileSize(size) {
     const num = Number(size);
@@ -442,18 +437,18 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
             setPreview({
                 path: data.display_path || state.rootPath || 'Files',
                 meta: `${formatFileSize(data.size)} • ${data.media_type || 'image'}`,
-                html: `<img class="files-preview-image" src="${escapeHtml(data.content_url)}" alt="${escapeHtml(data.name || data.path || 'image')}">`,
+                html: `<img class="files-preview-image" src="${escapeHtmlAttr(data.content_url)}" alt="${escapeHtmlAttr(data.name || data.path || 'image')}">`,
             });
             return;
         }
 
         if (data.is_pdf && data.content_url) {
             resetEditorState();
-            const safeUrl = escapeHtml(data.content_url);
+            const safeUrl = escapeHtmlAttr(data.content_url);
             setPreview({
                 path: data.display_path || state.rootPath || 'Files',
                 meta: `${formatFileSize(data.size)} • PDF preview`,
-                html: `<iframe class="files-preview-frame" sandbox="allow-same-origin" src="${safeUrl}" title="${escapeHtml(data.name || 'PDF preview')}"></iframe>`,
+                html: `<iframe class="files-preview-frame" sandbox="allow-same-origin" src="${safeUrl}" title="${escapeHtmlAttr(data.name || 'PDF preview')}"></iframe>`,
             });
             return;
         }

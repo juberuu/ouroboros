@@ -150,9 +150,10 @@ class TestBroaderRepoPack:
             cwd=str(tmp_path), capture_output=True,
         )
         mod = _get_module("ouroboros.tools.review_helpers")
-        pack = mod.build_broader_repo_pack(tmp_path, exclude_paths={"a.py"})
+        pack, omitted = mod.build_full_repo_pack(tmp_path, exclude_paths={"a.py"})
         assert "BBB" in pack
         assert "AAA" not in pack
+        assert "a.py" not in omitted
 
 
 # ---------------------------------------------------------------------------

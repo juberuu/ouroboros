@@ -548,16 +548,23 @@ class TestRenderMarkdownLinkSanitization:
     def test_safe_https_link_preserved(self):
         content = open("web/modules/utils.js").read()
         # Safe https:// links should pass the allowlist
-        assert '/^https?:/' in content or "^https?:" in content, (
+        assert "'https:'" in content or '"https:"' in content, (
             "renderMarkdown must allowlist https:// scheme for links"
         )
 
     def test_unsafe_scheme_falls_back_to_hash(self):
         content = open("web/modules/utils.js").read()
-        # javascript: and other unsafe schemes must be blocked — the safe variable falls back to '#'
-        # Code pattern: const safe = /^https?:|^mailto:/i.test(url) ? url : '#';
-        assert ": '#'" in content or ': "#"' in content or "? url : '#'" in content or '? url : "#"' in content, (
-            "renderMarkdown must fall back to '#' for unsafe URL schemes (const safe = ... ? url : '#')"
+        assert "return '#'" in content, (
+            "renderMarkdown must fall back to '#' for unsafe URL schemes"
+        )
+
+    def test_relative_urls_are_not_resolved_against_origin(self):
+        content = open("web/modules/utils.js").read()
+        assert "new URL(text, window.location.origin)" not in content, (
+            "safeExternalUrl must not resolve relative URLs into same-origin links"
+        )
+        assert "new URL(text)" in content, (
+            "safeExternalUrl must require explicit http(s)/mailto URLs"
         )
 
     def test_rel_noopener_noreferrer_on_links(self):
@@ -572,4 +579,11 @@ class TestRenderMarkdownLinkSanitization:
         # mailto: is a safe and useful scheme that should be allowed
         assert "mailto:" in content, (
             "renderMarkdown should allowlist mailto: scheme in link sanitizer"
+        )
+
+    def test_markdown_link_urls_are_decoded_before_validation(self):
+        content = open("web/modules/utils.js").read()
+        assert "decodeHtmlEntities(url)" in content, (
+            "renderMarkdown must validate URLs after undoing HTML entity escaping "
+            "so query separators like & are not double-encoded"
         )

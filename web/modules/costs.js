@@ -1,3 +1,5 @@
+import { formatUsd2 } from './utils.js';
+
 export function initCosts({ ws, state, mount = null, embedded = false, hostPage = 'settings', hostSubtab = 'costs' }) {
     const page = document.createElement('div');
     page.id = 'page-costs';
@@ -84,7 +86,7 @@ export function initCosts({ ws, state, mount = null, embedded = false, hostPage 
 
             const tdCost = document.createElement('td');
             tdCost.className = 'cost-cell-right';
-            tdCost.textContent = '$' + info.cost.toFixed(3);
+            tdCost.textContent = formatUsd2(info.cost);
 
             const bar = document.createElement('div');
             bar.className = 'cost-bar';
@@ -112,7 +114,7 @@ export function initCosts({ ws, state, mount = null, embedded = false, hostPage 
         try {
             const resp = await fetch('/api/cost-breakdown');
             const d = await resp.json();
-            document.getElementById('cost-total').textContent = '$' + (d.total_cost || 0).toFixed(2);
+            document.getElementById('cost-total').textContent = formatUsd2(d.total_cost || 0);
             document.getElementById('cost-calls').textContent = d.total_calls || 0;
             const models = Object.entries(d.by_model || {});
             document.getElementById('cost-top-model').textContent = models.length > 0 ? models[0][0] : '-';
