@@ -34,7 +34,7 @@ from ouroboros.skill_loader import (
     skill_state_dir,
 )
 from ouroboros.skill_review import SkillReviewOutcome, review_skill as _default_review_skill
-from ouroboros.utils import append_jsonl, utc_now_iso
+from ouroboros.utils import append_jsonl, atomic_write_json, read_json_dict, utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -54,18 +54,11 @@ def _events_path(drive_root: pathlib.Path) -> pathlib.Path:
 
 
 def _write_json_atomic(path: pathlib.Path, payload: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    atomic_write_json(path, payload, trailing_newline=True)
 
 
 def _read_review_job(path: pathlib.Path) -> Dict[str, Any]:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+    return read_json_dict(path) or {}
 
 
 def _pid_alive(pid: int) -> bool:

@@ -31,6 +31,31 @@ logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
+
+def load_governance_doc(
+    repo_dir: Path,
+    rel_path: str,
+    *,
+    on_missing: str = "explicit",
+    fallback: str = "",
+) -> str:
+    """Load a governance/review document relative to ``repo_dir`` with explicit miss policy."""
+    path = Path(repo_dir) / rel_path
+    try:
+        if path.is_file():
+            return path.read_text(encoding="utf-8")
+    except Exception as exc:
+        if on_missing == "silent":
+            return fallback
+        if on_missing == "placeholder":
+            return fallback
+        return f"[⚠️ OMISSION: {rel_path} could not be loaded ({path}): {exc}]"
+    if on_missing == "silent":
+        return fallback
+    if on_missing == "placeholder":
+        return fallback if fallback else f"({rel_path} not found)"
+    return f"[⚠️ OMISSION: {rel_path} not found at {path}]"
+
 BINARY_EXTENSIONS = frozenset({
     # Compiled / archive
     ".so", ".dylib", ".dll", ".pyc", ".whl", ".egg",

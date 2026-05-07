@@ -121,6 +121,11 @@ def _is_wildcard_host(host: str) -> bool:
     return host in _WILDCARD_HOSTS
 
 
+def _trust_nonlocal_bind_without_password_enabled() -> bool:
+    raw = os.environ.get("OUROBOROS_TRUST_NONLOCAL_BIND_WITHOUT_PASSWORD", "")
+    return str(raw or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 from ouroboros.platform_layer import is_container_env
 
 
@@ -1229,6 +1234,7 @@ async def api_settings_post(request: Request) -> JSONResponse:
             from ouroboros.server_auth import is_loopback_host
             desired_host = str(current.get("OUROBOROS_SERVER_HOST") or "").strip()
             desired_password = str(current.get("OUROBOROS_NETWORK_PASSWORD") or "").strip()
+            trust_unauth = _trust_nonlocal_bind_without_password_enabled()
             allowed_saved_hosts = {"", "127.0.0.1", "localhost", "::1", "[::1]", "0.0.0.0", "::", "[::]"}
             if desired_host and desired_host not in allowed_saved_hosts:
                 return JSONResponse(
@@ -1242,7 +1248,7 @@ async def api_settings_post(request: Request) -> JSONResponse:
                     },
                     status_code=400,
                 )
-            if desired_host and not is_loopback_host(desired_host) and not desired_password:
+            if desired_host and not is_loopback_host(desired_host) and not desired_password and not trust_unauth:
                 return JSONResponse(
                     {
                         "error": (
@@ -1264,6 +1270,7 @@ async def api_settings_post(request: Request) -> JSONResponse:
                 and not is_loopback_host(current_effective_host)
                 and old_password
                 and not desired_password
+                and not trust_unauth
             ):
                 return JSONResponse(
                     {
@@ -1358,10 +1365,17 @@ async def api_settings_post(request: Request) -> JSONResponse:
             desired_host = str(current.get("OUROBOROS_SERVER_HOST") or "").strip()
             desired_password = str(current.get("OUROBOROS_NETWORK_PASSWORD") or "").strip()
             if desired_host and not is_loopback_host(desired_host) and not desired_password:
-                warnings.append(
-                    "Server Bind Host is non-localhost and Network Password is empty; "
-                    "after restart the app will be reachable on the network without a password."
-                )
+                if _trust_nonlocal_bind_without_password_enabled():
+                    warnings.append(
+                        "OUROBOROS_TRUST_NONLOCAL_BIND_WITHOUT_PASSWORD=1 allows this "
+                        "non-localhost bind without Ouroboros's internal Network Password. "
+                        "Use only behind ingress auth, VPN, private networking, or an auth proxy."
+                    )
+                else:
+                    warnings.append(
+                        "Server Bind Host is non-localhost and Network Password is empty; "
+                        "after restart the app will be reachable on the network without a password."
+                    )
         except Exception:
             pass
         _repo_slug = current.get("GITHUB_REPO", "")

@@ -1,4 +1,4 @@
-# Ouroboros v5.8.3-rc.1 — Architecture & Reference
+# Ouroboros v5.8.3-rc.2 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -84,7 +84,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── tool_aliases.py      ← OpenClaw-compatible alias boundary; normalizes alias names/args to canonical tools before safety, timeout, dispatch, and truncation
       ├── tool_capabilities.py ← SSOT for tool sets (core, parallel-safe, truncation, browser)
       ├── tool_policy.py       ← Tool access policy and gating (imports from tool_capabilities)
-      ├── utils.py             ← Shared utilities
+      ├── utils.py             ← Shared utilities; v5.8.3-rc.2 SSOT for JSON atomic writes/reads, UTC timestamps, hashes, log sanitization, and subprocess helpers
       ├── world_profiler.py    ← System profile generator (WORLD.md)
       ├── contracts/           ← Frozen ABI (Phase 1 Protocols + TypedDicts + SkillManifest; Phase 4 adds plugin_api.py with PluginAPI + ExtensionRegistrationError + permission/route-method/forbidden-settings tuples)
       │   ├── tool_context.py  ← ToolContextProtocol (minimum tool ABI, duck-typed)
@@ -161,7 +161,8 @@ Dockerfile                    ← Docker image (web UI runtime)
 │   │   ├── ARCHITECTURE.md ← This document
 │   │   ├── DEVELOPMENT.md  ← Engineering handbook (naming, entity types, review protocol)
 │   │   ├── CHECKLISTS.md   ← Pre-commit review checklists (single source of truth)
-│   │   └── CREATING_SKILLS.md ← Skill author guide (manifest schema, PluginAPI, widgets, publishing)
+│   │   ├── CREATING_SKILLS.md ← Skill author guide (manifest schema, PluginAPI, widgets, publishing)
+│   │   └── DEPLOYMENT.md ← Deployment notes, including trusted Docker/Kubernetes non-local bind policy
 │   └── prompts/        ← System prompts (SYSTEM.md, SAFETY.md, CONSCIOUSNESS.md)
 ├── data/
 │   ├── settings.json   ← User settings (API keys, models, budget)
@@ -402,6 +403,7 @@ because their untrusted values frequently land in `data-*`, `src`, `alt`, and
   Network/Docker access requires an explicit `OUROBOROS_FILE_BROWSER_DEFAULT` directory.
 - **Network policy**: `OUROBOROS_NETWORK_PASSWORD` is optional. When configured, non-loopback browser/API access is gated.
   When omitted, the full HTTP/WebSocket surface remains reachable by design. `/api/health` always stays public.
+  `OUROBOROS_TRUST_NONLOCAL_BIND_WITHOUT_PASSWORD=1` is a Docker/Kubernetes escape hatch for deployments already protected by ingress auth, VPN, private networking, or an auth proxy; it lets Settings save ordinary changes while `OUROBOROS_SERVER_HOST` is non-localhost and `OUROBOROS_NETWORK_PASSWORD` is empty, but still returns a visible warning.
 - **Symlink policy**: entries are constrained lexically to the configured root, but symlink targets may resolve outside that root intentionally.
   External symlink paths support list/read/download/content/write/mkdir/upload/copy/move/delete. Root-delete protection still applies only to the configured root itself.
 - **Transfer semantics**: copy/move of symlink entries preserves the link object; writing through a symlink-backed file edits the target content.
@@ -1667,6 +1669,7 @@ Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent acce
 | TELEGRAM_CHAT_ID | "" | Optional. Pin replies to a specific Telegram chat |
 | OUROBOROS_NETWORK_PASSWORD | "" | Optional. Enables the non-loopback auth gate when set; empty still allows open bind, but startup logs a warning |
 | OUROBOROS_SERVER_HOST | 127.0.0.1 | Server bind host. Use `0.0.0.0` for LAN/Docker access; restart required. |
+| OUROBOROS_TRUST_NONLOCAL_BIND_WITHOUT_PASSWORD | unset | Env-only Docker/Kubernetes escape hatch. When set to `1`, Settings may save ordinary changes while a wildcard/non-localhost bind has no `OUROBOROS_NETWORK_PASSWORD`; use only behind ingress auth, VPN, private networking, or an auth proxy. |
 | OUROBOROS_MODEL | anthropic/claude-opus-4.6 | Main reasoning model |
 | OUROBOROS_MODEL_CODE | anthropic/claude-opus-4.6 | Code editing model |
 | OUROBOROS_MODEL_LIGHT | anthropic/claude-sonnet-4.6 | Fast/cheap model (safety, consciousness) |

@@ -50,6 +50,7 @@ from ouroboros.tools.review_helpers import (
     CRITICAL_FINDING_CALIBRATION,
     get_advisory_runtime_diagnostics as _get_runtime_diagnostics,
     format_advisory_sdk_error as _format_advisory_error,
+    load_governance_doc,
     normalize_reviewer_obligation_id,
     strip_obligation_suffix,
     _ANTI_THRASHING_RULE_VERDICT,
@@ -123,13 +124,7 @@ def _emit_advisory_usage(
 
 _ADVISORY_PROMPT_MAX_CHARS = 1_600_000  # ~400K tokens; non-blocking skip when exceeded
 def _load_doc(repo_dir: pathlib.Path, relpath: str, fallback: str = "") -> str:
-    try:
-        p = repo_dir / relpath
-        if p.is_file():
-            return p.read_text(encoding="utf-8")
-    except Exception:
-        pass
-    return fallback
+    return load_governance_doc(repo_dir, relpath, on_missing="placeholder", fallback=fallback)
 
 
 def _get_staged_diff(

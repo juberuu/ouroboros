@@ -34,42 +34,19 @@ Schema (v1)::
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 import pathlib
-import threading
-import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from ouroboros.skill_loader import skill_state_dir
+from ouroboros.utils import atomic_write_json, read_json_dict
 
 log = logging.getLogger(__name__)
 
 
 _SCHEMA_VERSION = 1
 PROVENANCE_FILENAME = "clawhub.json"
-
-
-def _atomic_write_json(path: pathlib.Path, payload: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_name = (
-        f".{path.name}.tmp.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}"
-    )
-    tmp = path.with_name(tmp_name)
-    try:
-        tmp.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
 
 
 def write_provenance(
@@ -91,7 +68,7 @@ def write_provenance(
     now_iso = datetime.now(timezone.utc).isoformat()
     payload.setdefault("installed_at", now_iso)
     payload["updated_at"] = now_iso
-    _atomic_write_json(target, payload)
+    atomic_write_json(target, payload, trailing_newline=True)
     return target
 
 
@@ -104,14 +81,7 @@ def read_provenance(
     target = state_dir / PROVENANCE_FILENAME
     if not target.is_file():
         return None
-    try:
-        data = json.loads(target.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        log.warning("Failed to parse provenance file %s", target, exc_info=True)
-        return None
-    if not isinstance(data, dict):
-        return None
-    return data
+    return read_json_dict(target)
 
 
 def delete_provenance(drive_root: pathlib.Path, skill_name: str) -> None:

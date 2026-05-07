@@ -8,7 +8,7 @@ import pathlib
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from ouroboros.utils import utc_now_iso
+from ouroboros.utils import atomic_write_json, utc_now_iso
 
 _CONTINUATION_DIR_RELPATH = "state/review_continuations"
 _CORRUPT_DIR_NAME = "corrupt"
@@ -113,9 +113,7 @@ def save_review_continuation(
     continuation.updated_ts = now_ts
 
     payload = asdict(continuation)
-    tmp_path = path.parent / f"{task_id}.json.tmp"
-    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp_path, path)
+    atomic_write_json(path, payload)
     return continuation
 
 

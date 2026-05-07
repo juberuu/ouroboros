@@ -16,7 +16,7 @@ from typing import Optional
 
 from ouroboros.platform_layer import pid_lock_acquire as _compat_pid_lock_acquire
 from ouroboros.platform_layer import pid_lock_release as _compat_pid_lock_release
-from ouroboros.provider_models import migrate_model_value
+from ouroboros.provider_models import compute_direct_review_models_fallback, migrate_model_value
 
 
 # ---------------------------------------------------------------------------
@@ -306,23 +306,13 @@ def direct_provider_review_models_fallback(provider: str) -> list[str]:
         os.environ.get("OUROBOROS_MODEL", SETTINGS_DEFAULTS["OUROBOROS_MODEL"]) or ""
     ).strip()
     main_model = migrate_model_value(provider, main_model)
-    provider_prefix = f"{provider}::"
-    if not main_model.startswith(provider_prefix):
-        return []
-    from ouroboros.provider_models import (
-        OPENAI_DIRECT_DEFAULTS, ANTHROPIC_DIRECT_DEFAULTS,
-    )
-    _defaults = {
-        "openai": OPENAI_DIRECT_DEFAULTS,
-        "anthropic": ANTHROPIC_DIRECT_DEFAULTS,
-    }.get(provider, {})
     user_light_raw = str(os.environ.get("OUROBOROS_MODEL_LIGHT", "") or "").strip()
-    user_light = migrate_model_value(provider, user_light_raw) if user_light_raw else ""
-    default_light = migrate_model_value(provider, _defaults.get("light", ""))
-    light_slot = user_light if user_light.startswith(provider_prefix) else default_light
-    if light_slot and light_slot != main_model:
-        return [main_model, light_slot, light_slot]
-    return [main_model] * _DIRECT_PROVIDER_REVIEW_RUNS
+    return compute_direct_review_models_fallback(
+        provider,
+        main_model,
+        user_light_raw,
+        review_runs=_DIRECT_PROVIDER_REVIEW_RUNS,
+    )
 
 
 def get_review_models() -> list[str]:

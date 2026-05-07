@@ -14,6 +14,7 @@ import platform
 import signal
 import subprocess
 import sys
+import time
 from typing import Any, List, Optional
 
 log = logging.getLogger(__name__)
@@ -44,6 +45,68 @@ def is_container_env() -> bool:
     if IS_LINUX and pathlib.Path("/.dockerenv").exists():
         return True
     return False
+
+
+def acquire_exclusive_file_lock(
+    lock_path: pathlib.Path,
+    *,
+    timeout_sec: float = 4.0,
+    stale_sec: float = 90.0,
+    metadata: str = "",
+    poll_sec: float = 0.05,
+) -> Optional[int]:
+    """Acquire a portable lockfile using O_EXCL and return its file descriptor."""
+    lock_path = pathlib.Path(lock_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    started = time.time()
+    while (time.time() - started) < timeout_sec:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            try:
+                text = metadata or f"pid={os.getpid()} ts={time.time()}\n"
+                os.write(fd, text.encode("utf-8"))
+            except Exception:
+                log.debug("Failed to write lock metadata to %s", lock_path, exc_info=True)
+            return fd
+        except (FileExistsError, PermissionError):
+            try:
+                age = time.time() - lock_path.stat().st_mtime
+                if age > stale_sec:
+                    lock_path.unlink()
+                    continue
+            except Exception:
+                log.debug("Failed to inspect/remove stale lock %s", lock_path, exc_info=True)
+            time.sleep(poll_sec)
+        except Exception:
+            log.warning("Failed to acquire lock at %s", lock_path, exc_info=True)
+            break
+    return None
+
+
+def release_exclusive_file_lock(lock_path: pathlib.Path, lock_fd: Optional[int]) -> None:
+    """Release a lock acquired by :func:`acquire_exclusive_file_lock`."""
+    lock_path = pathlib.Path(lock_path)
+    if lock_fd is None:
+        return
+    try:
+        os.close(lock_fd)
+    except Exception:
+        log.debug("Failed to close lock fd %s for %s", lock_fd, lock_path, exc_info=True)
+    try:
+        if lock_path.exists():
+            lock_path.unlink()
+    except Exception:
+        log.debug("Failed to unlink lock file %s", lock_path, exc_info=True)
+
+
+def unlink_lockfile(lock_path: pathlib.Path) -> None:
+    """Best-effort cleanup for path-only locks whose fd was closed after acquire."""
+    lock_path = pathlib.Path(lock_path)
+    try:
+        if lock_path.exists():
+            lock_path.unlink()
+    except Exception:
+        log.debug("Failed to unlink lock file %s", lock_path, exc_info=True)
 
 
 def open_path_external(path: pathlib.Path) -> None:

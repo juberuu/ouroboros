@@ -37,6 +37,7 @@ from ouroboros.tools.review_helpers import (
     _SENSITIVE_NAMES,
     format_obligation_excerpt,
     format_prompt_code_block,
+    load_governance_doc,
     normalize_reviewer_items,
     _ANTI_THRASHING_RULE_VERDICT,
     _ANTI_THRASHING_RULE_ITEM_NAME,
@@ -145,13 +146,7 @@ _CURRENT_TOUCHED_CONTEXT_SKIP_PREFIXES = (
 
 
 def _load_doc(repo_dir: pathlib.Path, rel_path: str) -> str:
-    try:
-        p = repo_dir / rel_path
-        if p.is_file():
-            return p.read_text(encoding="utf-8")
-    except Exception:
-        pass
-    return f"({rel_path} not found)"
+    return load_governance_doc(repo_dir, rel_path, on_missing="placeholder")
 
 
 def _load_dev_guide(repo_dir: pathlib.Path) -> str:

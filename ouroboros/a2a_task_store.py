@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import pathlib
 import time
-import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
+
+from ouroboros.utils import atomic_write_json
 
 try:
     from a2a.server.tasks import TaskStore
@@ -73,17 +73,7 @@ class FileTaskStore(TaskStore):
     async def save(self, task: Task, context=None) -> None:
         path = self._task_path(task.id)
         data = task.model_dump(mode="json", exclude_none=True)
-        content = json.dumps(data, ensure_ascii=False, indent=2)
-        # Atomic write: tmp -> rename
-        tmp = path.with_name(f".{path.name}.tmp.{uuid.uuid4().hex[:8]}")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
-        try:
-            os.write(fd, content.encode("utf-8"))
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        os.replace(str(tmp), str(path))
+        atomic_write_json(path, data, fsync=True)
 
     async def delete(self, task_id: str, context=None) -> None:
         path = self._task_path(task_id)

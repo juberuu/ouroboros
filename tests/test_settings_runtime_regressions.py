@@ -226,6 +226,55 @@ def test_api_settings_post_requires_password_for_nonloopback_bind(monkeypatch, t
     assert "requires a Network Password" in payload["error"]
 
 
+def test_api_settings_post_trusted_nonlocal_bind_allows_normal_save(monkeypatch, tmp_path):
+    monkeypatch.setenv("OUROBOROS_TRUST_NONLOCAL_BIND_WITHOUT_PASSWORD", "1")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-existing")
+    server_module = _reload_server(monkeypatch, tmp_path)
+
+    class _Request:
+        async def json(self):
+            return {
+                "OUROBOROS_SERVER_HOST": "0.0.0.0",
+                "OUROBOROS_NETWORK_PASSWORD": "",
+                "OPENROUTER_API_KEY": "sk-updated",
+            }
+
+    response = asyncio.run(server_module.api_settings_post(_Request()))
+    payload = json.loads(response.body.decode("utf-8"))
+
+    assert response.status_code == 200
+    assert payload["status"] == "saved"
+    assert any(
+        "OUROBOROS_TRUST_NONLOCAL_BIND_WITHOUT_PASSWORD=1" in warning
+        for warning in payload.get("warnings", [])
+    )
+
+
+def test_api_settings_post_cannot_enable_trusted_nonlocal_bind_via_body(monkeypatch, tmp_path):
+    server_module = _reload_server(monkeypatch, tmp_path)
+
+    class _TrustRequest:
+        async def json(self):
+            return {"OUROBOROS_TRUST_NONLOCAL_BIND_WITHOUT_PASSWORD": True}
+
+    response = asyncio.run(server_module.api_settings_post(_TrustRequest()))
+    assert response.status_code == 200
+    assert not os.environ.get("OUROBOROS_TRUST_NONLOCAL_BIND_WITHOUT_PASSWORD")
+
+    class _BindRequest:
+        async def json(self):
+            return {
+                "OUROBOROS_SERVER_HOST": "0.0.0.0",
+                "OUROBOROS_NETWORK_PASSWORD": "",
+            }
+
+    response = asyncio.run(server_module.api_settings_post(_BindRequest()))
+    payload = json.loads(response.body.decode("utf-8"))
+
+    assert response.status_code == 400
+    assert "requires a Network Password" in payload["error"]
+
+
 def test_api_settings_post_rejects_specific_lan_host(monkeypatch, tmp_path):
     server_module = _reload_server(monkeypatch, tmp_path)
 

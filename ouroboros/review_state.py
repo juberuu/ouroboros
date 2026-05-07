@@ -21,16 +21,16 @@ import json
 import logging
 import os
 import pathlib
-import time
-import uuid
 from dataclasses import asdict, dataclass, field
 import re
 from typing import Any, Callable, Dict, List, Optional
 
 from ouroboros.utils import (
+    atomic_write_json,
     truncate_review_artifact as _truncate_review_artifact,
     truncate_review_reason as _truncate_review_reason,
 )
+from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
 
 log = logging.getLogger(__name__)
 
@@ -1407,9 +1407,7 @@ def _save_state_unlocked(drive_root: pathlib.Path, state: AdvisoryReviewState) -
         "last_stale_repo_key": state.last_stale_repo_key,
         "saved_at": _utc_now(),
     }
-    tmp = path.with_name(f".{path.name}.tmp.{uuid.uuid4().hex}")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_write_json(path, data)
 
 
 def save_state(drive_root: pathlib.Path, state: AdvisoryReviewState) -> None:
@@ -1450,44 +1448,17 @@ def acquire_review_state_lock(
     stale_sec: float = 90.0,
 ) -> Optional[int]:
     lock_path = drive_root / _LOCK_RELPATH
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    started = time.time()
-    while (time.time() - started) < timeout_sec:
-        try:
-            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-            meta = f"pid={os.getpid()} ts={_utc_now()}\n".encode("utf-8")
-            try:
-                os.write(fd, meta)
-            except Exception:
-                log.debug("Failed to write review-state lock metadata", exc_info=True)
-            return fd
-        except (FileExistsError, PermissionError):
-            try:
-                age = time.time() - lock_path.stat().st_mtime
-                if age > stale_sec:
-                    lock_path.unlink()
-                    continue
-            except Exception:
-                log.debug("Failed to inspect/remove stale review-state lock", exc_info=True)
-            time.sleep(0.05)
-        except Exception:
-            log.warning("Failed to acquire review-state lock at %s", lock_path, exc_info=True)
-            break
-    return None
+    return acquire_exclusive_file_lock(
+        lock_path,
+        timeout_sec=timeout_sec,
+        stale_sec=stale_sec,
+        metadata=f"pid={os.getpid()} ts={_utc_now()}\n",
+    )
 
 
 def release_review_state_lock(drive_root: pathlib.Path, lock_fd: Optional[int]) -> None:
     lock_path = drive_root / _LOCK_RELPATH
-    if lock_fd is not None:
-        try:
-            os.close(lock_fd)
-        except Exception:
-            log.debug("Failed to close review-state lock fd", exc_info=True)
-    try:
-        if lock_path.exists():
-            lock_path.unlink()
-    except Exception:
-        log.debug("Failed to unlink review-state lock", exc_info=True)
+    release_exclusive_file_lock(lock_path, lock_fd)
 
 
 # --- Snapshot hash / repo identity ---

@@ -32,6 +32,7 @@ from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.tools.review_helpers import (
     build_full_repo_pack,
     build_head_snapshot_section,
+    load_governance_doc,
     load_checklist_section,
 )
 from ouroboros.utils import estimate_tokens
@@ -895,16 +896,4 @@ def _load_bible(repo_dir: Path) -> str:
 
 
 def _load_doc(repo_dir: Path, rel_path: str) -> str:
-    """Load a documentation file relative to the repo root.
-
-    Returns file contents on success. On failure, returns an explicit omission
-    note so the reviewer knows that context is missing rather than silently
-    receiving an empty string.
-    """
-    p = repo_dir / rel_path
-    try:
-        if p.is_file():
-            return p.read_text(encoding="utf-8")
-        return f"[⚠️ OMISSION: {rel_path} not found at {p}]"
-    except Exception as e:
-        return f"[⚠️ OMISSION: {rel_path} could not be loaded ({p}): {e}]"
+    return load_governance_doc(repo_dir, rel_path, on_missing="explicit")

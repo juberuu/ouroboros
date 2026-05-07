@@ -15,6 +15,8 @@ import time
 import uuid
 from typing import Any, Dict, Optional
 
+from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
+
 log = logging.getLogger(__name__)
 
 
@@ -72,47 +74,16 @@ def json_load_file(path: pathlib.Path) -> Optional[Dict[str, Any]]:
 
 def acquire_file_lock(lock_path: pathlib.Path, timeout_sec: float = 4.0,
                       stale_sec: float = 90.0) -> Optional[int]:
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    started = time.time()
-    while (time.time() - started) < timeout_sec:
-        try:
-            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-            try:
-                os.write(fd, f"pid={os.getpid()} ts={datetime.datetime.now(datetime.timezone.utc).isoformat()}\n".encode("utf-8"))
-            except Exception:
-                log.debug(f"Failed to write lock metadata to {lock_path}", exc_info=True)
-                pass
-            return fd
-        except FileExistsError:
-            try:
-                age = time.time() - lock_path.stat().st_mtime
-                if age > stale_sec:
-                    lock_path.unlink()
-                    continue
-            except Exception:
-                log.debug(f"Failed to check/remove stale lock at {lock_path}", exc_info=True)
-                pass
-            time.sleep(0.05)
-        except Exception:
-            log.warning(f"Failed to acquire lock at {lock_path}", exc_info=True)
-            break
-    return None
+    return acquire_exclusive_file_lock(
+        lock_path,
+        timeout_sec=timeout_sec,
+        stale_sec=stale_sec,
+        metadata=f"pid={os.getpid()} ts={datetime.datetime.now(datetime.timezone.utc).isoformat()}\n",
+    )
 
 
 def release_file_lock(lock_path: pathlib.Path, lock_fd: Optional[int]) -> None:
-    if lock_fd is None:
-        return
-    try:
-        os.close(lock_fd)
-    except Exception:
-        log.debug(f"Failed to close lock fd {lock_fd} for {lock_path}", exc_info=True)
-        pass
-    try:
-        if lock_path.exists():
-            lock_path.unlink()
-    except Exception:
-        log.debug(f"Failed to unlink lock file {lock_path}", exc_info=True)
-        pass
+    release_exclusive_file_lock(lock_path, lock_fd)
 
 
 # Re-export append_jsonl from ouroboros.utils (single source of truth)

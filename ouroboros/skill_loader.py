@@ -39,11 +39,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import pathlib
 import tempfile
-import threading
-import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -54,6 +51,7 @@ from ouroboros.contracts.skill_manifest import (
     parse_skill_manifest_text,
 )
 from ouroboros.contracts.plugin_api import FORBIDDEN_SKILL_SETTINGS
+from ouroboros.utils import atomic_write_json, read_json_dict
 
 log = logging.getLogger(__name__)
 
@@ -601,48 +599,8 @@ def compute_content_hash(
 # ---------------------------------------------------------------------------
 
 
-def _atomic_write_json(path: pathlib.Path, payload: Dict[str, Any]) -> None:
-    """Atomically write ``payload`` as JSON to ``path``.
-
-    Uses a unique temp filename (pid + thread id + uuid4 fragment) so
-    two concurrent writes to the same durable-state file — whether
-    from different threads inside one process or from a reviewer tool
-    racing with a ``toggle_skill`` — cannot stomp each other's temp
-    files or hit ``FileNotFoundError`` in ``os.replace``.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_name = (
-        f".{path.name}.tmp.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}"
-    )
-    tmp = path.with_name(tmp_name)
-    try:
-        tmp.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        os.replace(tmp, path)
-    except Exception:
-        # Best-effort cleanup of a stale temp; os.replace failure shouldn't
-        # leave dot-turds sitting next to the real file.
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
-
-
-def _read_json(path: pathlib.Path) -> Optional[Dict[str, Any]]:
-    if not path.is_file():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        log.warning("Failed to parse skill state file %s", path, exc_info=True)
-        return None
-    return data if isinstance(data, dict) else None
-
-
 def load_enabled(drive_root: pathlib.Path, name: str) -> bool:
-    state = _read_json(skill_state_dir(drive_root, name) / "enabled.json")
+    state = read_json_dict(skill_state_dir(drive_root, name) / "enabled.json")
     if not isinstance(state, dict):
         return False
     enabled = state.get("enabled")
@@ -650,7 +608,7 @@ def load_enabled(drive_root: pathlib.Path, name: str) -> bool:
 
 
 def save_enabled(drive_root: pathlib.Path, name: str, enabled: bool) -> None:
-    _atomic_write_json(
+    atomic_write_json(
         skill_state_dir(drive_root, name) / "enabled.json",
         {
             "enabled": bool(enabled),
@@ -660,7 +618,7 @@ def save_enabled(drive_root: pathlib.Path, name: str, enabled: bool) -> None:
 
 
 def load_review_state(drive_root: pathlib.Path, name: str) -> SkillReviewState:
-    data = _read_json(skill_state_dir(drive_root, name) / "review.json")
+    data = read_json_dict(skill_state_dir(drive_root, name) / "review.json")
     if not isinstance(data, dict):
         return SkillReviewState()
     raw_status = str(data.get("status") or _REVIEW_STATUS_PENDING).lower()
@@ -704,7 +662,7 @@ def save_review_state(
     name: str,
     review: SkillReviewState,
 ) -> None:
-    _atomic_write_json(
+    atomic_write_json(
         skill_state_dir(drive_root, name) / "review.json",
         review.to_dict(),
     )
@@ -722,7 +680,7 @@ def requested_core_setting_keys(env_keys: List[str]) -> List[str]:
 
 
 def load_skill_grants(drive_root: pathlib.Path, name: str) -> Dict[str, Any]:
-    data = _read_json(skill_state_dir(drive_root, name) / GRANTS_FILENAME)
+    data = read_json_dict(skill_state_dir(drive_root, name) / GRANTS_FILENAME)
     if not isinstance(data, dict):
         return {"granted_keys": [], "updated_at": ""}
     keys = []
@@ -778,7 +736,7 @@ def save_skill_grants(
         key = str(raw_key or "").strip().upper()
         if key and key in allowed and key not in merged:
             merged.append(key)
-    _atomic_write_json(
+    atomic_write_json(
         skill_state_dir(drive_root, name) / GRANTS_FILENAME,
         {
             "granted_keys": merged,

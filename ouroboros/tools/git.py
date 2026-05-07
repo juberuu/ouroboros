@@ -26,6 +26,7 @@ from ouroboros.runtime_mode_policy import (
     protected_paths_in,
     protected_write_block_message,
 )
+from ouroboros.platform_layer import acquire_exclusive_file_lock, unlink_lockfile
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.tools.commit_gate import (
     _check_advisory_freshness,
@@ -714,34 +715,24 @@ def _acquire_git_lock(ctx: ToolContext, timeout_sec: int = 120) -> pathlib.Path:
     lock_dir = ctx.drive_path("locks")
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_path = lock_dir / "git.lock"
-    stale_sec = 600
-    deadline = time.time() + timeout_sec
-    while time.time() < deadline:
-        if lock_path.exists():
-            try:
-                age = time.time() - lock_path.stat().st_mtime
-                if age > stale_sec:
-                    lock_path.unlink()
-                    continue
-            except (FileNotFoundError, OSError):
-                pass
+    fd = acquire_exclusive_file_lock(
+        lock_path,
+        timeout_sec=float(timeout_sec),
+        stale_sec=600.0,
+        metadata=f"locked_at={utc_now_iso()}\n",
+        poll_sec=0.5,
+    )
+    if fd is not None:
         try:
-            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-            try:
-                os.write(fd, f"locked_at={utc_now_iso()}\n".encode("utf-8"))
-            finally:
-                os.close(fd)
-            return lock_path
-        except FileExistsError:
-            time.sleep(0.5)
+            os.close(fd)
+        except OSError:
+            pass
+        return lock_path
     raise TimeoutError(f"Git lock not acquired within {timeout_sec}s: {lock_path}")
 
 
 def _release_git_lock(lock_path: pathlib.Path) -> None:
-    try:
-        lock_path.unlink()
-    except FileNotFoundError:
-        pass
+    unlink_lockfile(lock_path)
 
 MAX_TEST_OUTPUT = 8000
 _consecutive_test_failures: int = 0

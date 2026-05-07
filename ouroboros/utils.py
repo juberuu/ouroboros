@@ -14,7 +14,9 @@ import logging
 import os
 import pathlib
 import subprocess
+import threading
 import time
+import uuid
 from typing import Any, Callable, Dict, List, Optional
 
 log = logging.getLogger(__name__)
@@ -57,6 +59,55 @@ def read_text(path: pathlib.Path) -> str:
 def write_text(path: pathlib.Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+
+def atomic_write_json(
+    path: pathlib.Path,
+    payload: Dict[str, Any],
+    *,
+    trailing_newline: bool = False,
+    fsync: bool = False,
+) -> None:
+    """Atomically persist a JSON object using a unique sibling temp file."""
+    path = pathlib.Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_name = (
+        f".{path.name}.tmp.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}"
+    )
+    tmp = path.with_name(tmp_name)
+    content = json.dumps(payload, ensure_ascii=False, indent=2)
+    if trailing_newline:
+        content += "\n"
+    try:
+        if fsync:
+            fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+            try:
+                os.write(fd, content.encode("utf-8"))
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        else:
+            tmp.write_text(content, encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def read_json_dict(path: pathlib.Path) -> Optional[Dict[str, Any]]:
+    """Return a JSON object from ``path`` or ``None`` when absent/invalid."""
+    path = pathlib.Path(path)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        log.warning("Failed to parse JSON file %s", path, exc_info=True)
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> bool:

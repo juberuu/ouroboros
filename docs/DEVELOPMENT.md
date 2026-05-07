@@ -245,6 +245,23 @@ Before every commit, verify the following:
 
 All platform-specific code **MUST** go through `ouroboros/platform_layer.py`.
 
+### Shared State-File Helpers
+
+Durable JSON state files should use the SSOT helpers in `ouroboros/utils.py`:
+`atomic_write_json(path, payload, trailing_newline=False, fsync=False)` for
+write-then-rename persistence and `read_json_dict(path)` for dict-shaped JSON
+reads. Lockfile acquisition should go through
+`platform_layer.acquire_exclusive_file_lock` /
+`release_exclusive_file_lock` rather than reimplementing `O_CREAT|O_EXCL`
+loops in feature modules.
+
+Narrow exceptions are allowed only when the file's contract is not JSON-object
+state or intentionally has extra durability semantics: `supervisor/state.py`
+keeps `atomic_write_text` for mirrored `state.json` / `state.last_good.json`
+text writes, and `ouroboros/config.py` keeps its settings-file lock because the
+settings path is bootstrapped before broader runtime helpers should depend on
+settings state.
+
 ### What counts as platform-specific
 
 - Direct use of: `os.kill`, `os.setsid`, `os.killpg`, `os.getpgid`, `signal.SIGKILL`, `signal.SIGTERM`
