@@ -95,6 +95,66 @@ def _handle_text_response(
     return (content or ""), accumulated_usage, llm_trace
 
 
+def _skill_names_touched_by_trace(llm_trace: Dict[str, Any]) -> List[str]:
+    names: List[str] = []
+    for call in llm_trace.get("tool_calls") or []:
+        if not isinstance(call, dict):
+            continue
+        tool = str(call.get("tool") or "")
+        if tool not in {"data_write", "claude_code_edit", "str_replace_editor"}:
+            continue
+        args = call.get("args") if isinstance(call.get("args"), dict) else {}
+        candidates = [str(args.get("cwd") or "")] if tool == "claude_code_edit" else [str(args.get("path") or "")]
+        for raw in candidates:
+            norm = raw.replace("\\", "/").strip().lstrip("/")
+            if norm.startswith("data/"):
+                norm = norm[len("data/"):]
+            parts = pathlib.PurePosixPath(norm).parts
+            if len(parts) >= 3 and parts[0] == "skills" and parts[1] in {"external", "clawhub", "ouroboroshub", "native"}:
+                name = parts[2]
+                if name and name not in names:
+                    names.append(name)
+    return names
+
+
+def _skill_finalization_message(drive_root: pathlib.Path, llm_trace: Dict[str, Any]) -> str:
+    names = _skill_names_touched_by_trace(llm_trace)
+    if not names:
+        return ""
+    try:
+        from ouroboros.skill_loader import find_skill, grant_status_for_skill
+    except Exception:
+        return ""
+    blockers: List[str] = []
+    for name in names:
+        try:
+            skill = find_skill(pathlib.Path(drive_root), name)
+            if skill is None or not getattr(skill, "is_self_authored", False):
+                continue
+            stale = skill.review.is_stale_for(skill.content_hash)
+            grants = grant_status_for_skill(pathlib.Path(drive_root), skill)
+            ready = (
+                skill.review.status == "pass"
+                and not stale
+                and skill.enabled
+                and grants.get("all_granted", True)
+            )
+        except Exception:
+            continue
+        if not ready:
+            blockers.append(
+                f"{skill.name}: status={skill.review.status!r}, stale={stale}, "
+                f"enabled={skill.enabled}, missing_grants={grants.get('missing_keys', [])}"
+            )
+    if not blockers:
+        return ""
+    return (
+        "⚠️ SKILL_NOT_FINALIZED: You edited self-authored skill payloads but "
+        "they are not ready yet. Call review_skill for each skill before "
+        "declaring the task done. Current blockers: " + "; ".join(blockers)
+    )
+
+
 def _check_budget_limits(
     budget_remaining_usd: Optional[float],
     accumulated_usage: Dict[str, Any],
@@ -691,6 +751,14 @@ def run_llm_loop(
             tool_calls = msg.get("tool_calls") or []
             content = msg.get("content")
             if not tool_calls:
+                finalization_msg = _skill_finalization_message(drive_root, llm_trace) if drive_root is not None else ""
+                if finalization_msg and not getattr(tools._ctx, "_skill_finalization_injected", False):
+                    tools._ctx._skill_finalization_injected = True
+                    messages.append({"role": "assistant", "content": content or ""})
+                    messages.append({"role": "system", "content": finalization_msg})
+                    emit_progress(finalization_msg)
+                    llm_trace["reasoning_notes"].append(finalization_msg)
+                    continue
                 return _handle_text_response(content, llm_trace, accumulated_usage)
 
             messages.append({"role": "assistant", "content": content or "", "tool_calls": tool_calls})

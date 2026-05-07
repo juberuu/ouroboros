@@ -20,7 +20,7 @@ from ouroboros.platform_layer import IS_WINDOWS, kill_process_tree, subprocess_n
 from ouroboros.config import load_settings
 from ouroboros.tools.commit_gate import _invalidate_advisory
 from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.utils import utc_now_iso, run_cmd
+from ouroboros.utils import safe_relpath, utc_now_iso, run_cmd
 
 log = logging.getLogger(__name__)
 
@@ -456,22 +456,52 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
 
     work_dir = str(ctx.repo_dir)
     if cwd and cwd.strip() not in ("", ".", "./"):
-        candidate = (ctx.repo_dir / cwd).resolve()
+        raw_cwd = cwd.strip()
+        norm_cwd = raw_cwd.replace("\\", "/").strip().lstrip("/")
+        if norm_cwd.startswith("data/"):
+            norm_cwd = norm_cwd[len("data/"):]
+        if norm_cwd.startswith("skills/"):
+            try:
+                candidate = (pathlib.Path(ctx.drive_root) / safe_relpath(norm_cwd)).resolve()
+            except ValueError:
+                return "⚠️ CLAUDE_CODE_ERROR: skill cwd escapes data root."
+            try:
+                candidate.relative_to(pathlib.Path(ctx.drive_root).resolve())
+            except ValueError:
+                return "⚠️ CLAUDE_CODE_ERROR: skill cwd escapes data root."
+            rel_parts = candidate.relative_to(pathlib.Path(ctx.drive_root).resolve()).parts
+            if (
+                len(rel_parts) >= 3
+                and rel_parts[0] == "skills"
+                and rel_parts[1] == "native"
+                and not ((pathlib.Path(ctx.drive_root) / "skills" / "native" / rel_parts[2]) / ".seed-origin").is_file()
+            ):
+                return (
+                    "⚠️ CLAUDE_CODE_ERROR: data/skills/native/<skill>/ is "
+                    "reserved for launcher-seeded skills. Use "
+                    "data/skills/external/<skill>/ for authored skills."
+                )
+        else:
+            candidate = (ctx.repo_dir / raw_cwd).resolve()
         if candidate.exists():
             work_dir = str(candidate)
     work_dir_path = pathlib.Path(work_dir).resolve()
-    target_repo_root = _resolve_git_root(work_dir_path) or pathlib.Path(ctx.repo_dir)
+    target_repo_root = _resolve_git_root(work_dir_path)
+    repo_mode = target_repo_root is not None
+    if target_repo_root is None:
+        target_repo_root = work_dir_path
     before_changed = _status_snapshot(target_repo_root)
 
     from ouroboros.gateways.claude_code import resolve_claude_code_model
     model = resolve_claude_code_model()
 
-    lock = _acquire_git_lock(ctx)
+    lock = _acquire_git_lock(ctx) if repo_mode else None
     try:
-        try:
-            run_cmd(["git", "checkout", ctx.branch_dev], cwd=ctx.repo_dir)
-        except Exception as e:
-            return f"⚠️ GIT_ERROR (checkout): {e}"
+        if repo_mode:
+            try:
+                run_cmd(["git", "checkout", ctx.branch_dev], cwd=ctx.repo_dir)
+            except Exception as e:
+                return f"⚠️ GIT_ERROR (checkout): {e}"
 
         ctx.emit_progress_fn("Delegating to Claude Agent SDK...")
 
@@ -520,7 +550,7 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
                 return f"⚠️ CLAUDE_CODE_ERROR: {result.error}\n\n{result.result_text}"
 
             after_changed = _status_snapshot(target_repo_root)
-            if after_changed != before_changed:
+            if repo_mode and after_changed != before_changed:
                 _invalidate_advisory(
                     ctx,
                     changed_paths=result.changed_files or after_changed or before_changed,
@@ -549,7 +579,8 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
             )
 
     finally:
-        _release_git_lock(lock)
+        if lock is not None:
+            _release_git_lock(lock)
 
 
 def get_tools() -> List[ToolEntry]:

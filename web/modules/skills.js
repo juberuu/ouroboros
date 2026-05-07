@@ -150,6 +150,7 @@ function skillSourceChip(skill) {
     const labelMap = {
         clawhub: { label: 'ClawHub', tone: 'warn' },
         ouroboroshub: { label: 'OuroborosHub', tone: 'ok' },
+        self_authored: { label: 'Authored', tone: 'ok' },
         external: { label: 'External', tone: 'muted' },
         user_repo: { label: 'User repo', tone: 'muted' },
     };
@@ -432,6 +433,7 @@ function renderSkillCard(skill, reviewingSkills = new Set()) {
     const source = (skill.source || 'native').toLowerCase();
     const sourceLabel = source === 'clawhub' ? 'ClawHub'
         : source === 'ouroboroshub' ? 'OuroborosHub'
+        : source === 'self_authored' ? 'Authored'
         : source === 'native' ? 'Built-in'
         : source === 'external' ? 'External'
         : source === 'user_repo' ? 'User repo'

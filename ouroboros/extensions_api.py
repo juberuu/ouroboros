@@ -112,6 +112,9 @@ def _build_extensions_index(drive_root, repo_path):
     pure: it is called via ``asyncio.to_thread`` and must not depend on
     request scope."""
     from ouroboros.extension_loader import extension_name_prefix, runtime_state_for_loaded_skill
+    from ouroboros.skill_migrations import migrate_unseeded_native_skills_to_external
+
+    migrate_unseeded_native_skills_to_external(pathlib.Path(drive_root))
 
     live_snapshot = snapshot()
     # Always scan — ``discover_skills`` still returns the bundled
@@ -189,6 +192,7 @@ def _build_extensions_index(drive_root, repo_path):
             "ui_tabs_pending": _pending_ui_tabs(s.name),
             "review_findings": list(s.review.findings or []),
             "grants": grant_status_for_skill(drive_root, s),
+            "is_self_authored": bool(getattr(s, "is_self_authored", False)),
             # v4.50: surface the discovery source so the Skills tab
             # can render a clawhub badge + Update/Uninstall buttons
             # for marketplace-installed skills. Without this the

@@ -203,7 +203,83 @@ def test_skill_preflight_missing_validator_runtime_is_not_ok(tmp_path, monkeypat
     result = json.loads(sp._handle_skill_preflight(ctx, skill="alpha", paths=["scripts/check.js"]))
 
     assert result["ok"] is False
-    assert result["files"][0]["skipped"] is True
+
+
+def test_skill_preflight_validates_literal_widget_schema(tmp_path, monkeypatch):
+    ctx = _make_ctx(tmp_path)
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir()
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    manifest = (
+        "---\n"
+        "name: alpha\n"
+        "description: widget test\n"
+        "version: 0.1.0\n"
+        "type: extension\n"
+        "entry: plugin.py\n"
+        "permissions: [widget, route]\n"
+        "---\n"
+        "body\n"
+    )
+    skill_dir = skills_root / "alpha"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(manifest, encoding="utf-8")
+    (skill_dir / "plugin.py").write_text(
+        "_UI_RENDER = {\n"
+        "    'kind': 'declarative',\n"
+        "    'schema_version': 1,\n"
+        "    'components': [\n"
+        "        {'type': 'form', 'action_route': 'generate', 'fields': [{'name': 'prompt'}]},\n"
+        "    ],\n"
+        "}\n"
+        "def register(api):\n"
+        "    api.register_ui_tab('main', 'Main', render=_UI_RENDER)\n",
+        encoding="utf-8",
+    )
+
+    from ouroboros.tools import skill_preflight as sp
+
+    result = json.loads(sp._handle_skill_preflight(ctx, skill="alpha"))
+
+    assert result["ok"] is False
+    assert any("requires route or api_route" in item["detail"] for item in result["widgets"])
+
+
+def test_skill_preflight_reports_missing_pluginapi_permissions(tmp_path, monkeypatch):
+    ctx = _make_ctx(tmp_path)
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir()
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    manifest = (
+        "---\n"
+        "name: alpha\n"
+        "description: permissions test\n"
+        "version: 0.1.0\n"
+        "type: extension\n"
+        "entry: plugin.py\n"
+        "permissions: [net]\n"
+        "env_from_settings: [OPENROUTER_API_KEY]\n"
+        "---\n"
+        "body\n"
+    )
+    skill_dir = skills_root / "alpha"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(manifest, encoding="utf-8")
+    (skill_dir / "plugin.py").write_text(
+        "def register(api):\n"
+        "    api.register_route('status', lambda request: {})\n"
+        "    api.register_ui_tab('main', 'Main', render={'kind':'declarative','schema_version':1,'components': []})\n"
+        "    api.get_settings(['OPENROUTER_API_KEY'])\n",
+        encoding="utf-8",
+    )
+
+    from ouroboros.tools import skill_preflight as sp
+
+    result = json.loads(sp._handle_skill_preflight(ctx, skill="alpha"))
+
+    assert result["ok"] is False
+    missing = {item["permission"] for item in result["permissions"] if not item["ok"]}
+    assert {"route", "widget", "read_settings"} <= missing
 
 
 def test_run_shell_script_scan_handles_interpreter_option_values(tmp_path):
@@ -217,6 +293,101 @@ def test_run_shell_script_scan_handles_interpreter_option_values(tmp_path):
     assert _extract_script_file_args(["node", "--require", "preload.js", "evil.js"]) == ["preload.js", "evil.js"]
     assert _extract_script_file_args(["node", "--require=preload.js", "-e", "console.log(1)"]) == ["preload.js"]
     assert _extract_script_file_args(["node", "--import=preload.mjs", "evil.js"]) == ["preload.mjs", "evil.js"]
+
+
+def test_run_shell_blocks_self_authored_marker_writes(tmp_path):
+    ctx = _make_ctx(tmp_path)
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+    registry._ctx = ctx
+
+    result = registry.execute(
+        "run_shell",
+        {"cmd": ["sh", "-c", "printf '{}' > /tmp/x/.self_authored.json"]},
+    )
+
+    assert "SAFETY_VIOLATION" in result
+    assert ".self_authored.json" in result
+
+
+def test_run_shell_restores_obfuscated_self_authored_state_marker(tmp_path):
+    ctx = _make_ctx(tmp_path)
+    marker = ctx.drive_root / "state" / "skills" / "alpha" / "self_authored.json"
+    marker.parent.mkdir(parents=True)
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+    registry._ctx = ctx
+
+    before = registry._snapshot_owner_files()
+    marker.write_text('{"origin":"self_authored"}', encoding="utf-8")
+
+    restored = registry._restore_owner_files(before)
+
+    assert restored is True
+    assert not marker.exists()
+
+
+def test_claude_code_edit_resolves_skill_cwd_under_drive_root(tmp_path, monkeypatch):
+    from ouroboros.tools import shell as shell_mod
+    import sys
+    import types
+
+    ctx = _make_ctx(tmp_path)
+    skill_dir = ctx.drive_root / "skills" / "external" / "alpha"
+    skill_dir.mkdir(parents=True)
+    seen = {}
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr("ouroboros.tools.git._acquire_git_lock", lambda _ctx: object())
+    monkeypatch.setattr("ouroboros.tools.git._release_git_lock", lambda _lock: None)
+    fake_module = types.ModuleType("ouroboros.gateways.claude_code")
+    fake_module.DEFAULT_CLAUDE_CODE_MAX_TURNS = 3
+    fake_module.resolve_claude_code_model = lambda: "claude-test"
+
+    class _Result:
+        success = True
+        cost_usd = 0.0
+        usage = {}
+        changed_files = []
+        diff_stat = ""
+        validation_summary = ""
+        error = ""
+        result_text = ""
+
+        def to_tool_output(self):
+            return "OK"
+
+    def fake_run_edit(**kwargs):
+        seen.update(kwargs)
+        return _Result()
+
+    fake_module.run_edit = fake_run_edit
+    monkeypatch.setitem(sys.modules, "ouroboros.gateways.claude_code", fake_module)
+
+    result = shell_mod._claude_code_edit(ctx, prompt="edit", cwd="skills/external/alpha")
+
+    assert result == "OK"
+    assert seen["cwd"] == str(skill_dir.resolve())
+
+
+def test_claude_code_edit_rejects_escaping_skill_cwd(tmp_path, monkeypatch):
+    from ouroboros.tools import shell as shell_mod
+
+    ctx = _make_ctx(tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+
+    result = shell_mod._claude_code_edit(ctx, prompt="edit", cwd="skills/../../repo")
+
+    assert "escapes data root" in result
+
+
+def test_claude_code_edit_blocks_unseeded_native_skill_cwd(tmp_path, monkeypatch):
+    from ouroboros.tools import shell as shell_mod
+
+    ctx = _make_ctx(tmp_path)
+    (ctx.drive_root / "skills" / "native" / "alpha").mkdir(parents=True)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+
+    result = shell_mod._claude_code_edit(ctx, prompt="edit", cwd="skills/native/alpha")
+
+    assert "reserved for launcher-seeded skills" in result
 
 
 def test_skill_exec_tools_have_policy_entries():
@@ -716,6 +887,25 @@ def test_heal_context_rejects_traversal_payload_root_marker(tmp_path):
     registry._ctx = ctx
 
     result = registry.execute("data_read", {"path": "memory/identity.md"})
+
+    assert "HEAL_MODE_BLOCKED" in result
+
+
+def test_heal_context_blocks_self_authored_marker_write(tmp_path):
+    ctx = _make_ctx(tmp_path)
+    payload = ctx.drive_root / "skills" / "external" / "alpha"
+    payload.mkdir(parents=True)
+    ctx.messages = [{
+        "role": "user",
+        "content": 'HEAL_MODE_NO_ENABLE\nHEAL_SKILL_NAME_JSON="alpha"\nHEAL_SKILL_PAYLOAD_ROOT_JSON="skills/external/alpha"\nrepair',
+    }]
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+    registry._ctx = ctx
+
+    result = registry.execute(
+        "data_write",
+        {"path": "skills/external/alpha/.self_authored.json", "content": '{"origin":"self_authored"}'},
+    )
 
     assert "HEAL_MODE_BLOCKED" in result
 

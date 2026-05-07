@@ -115,6 +115,7 @@ VALID_REVIEW_STATUSES = frozenset(
     }
 )
 GRANTS_FILENAME = "grants.json"
+SELF_AUTHORED_MARKER_FILENAME = ".self_authored.json"
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +187,7 @@ class LoadedSkill:
     review: SkillReviewState = field(default_factory=SkillReviewState)
     load_error: str = ""
     source: str = "native"
+    is_self_authored: bool = False
 
     @property
     def available_for_execution(self) -> bool:
@@ -289,6 +291,51 @@ def _sanitize_skill_name(name: str) -> str:
     if not cleaned:
         return "_unnamed"
     return cleaned[:64]  # also bound length to keep state paths sane
+
+
+def is_self_authored_skill_dir(
+    skill_dir: pathlib.Path,
+    *,
+    drive_root: pathlib.Path | None = None,
+) -> bool:
+    """Return True when a skill carries the agent-authored provenance marker."""
+    skill_dir = pathlib.Path(skill_dir)
+    marker = skill_dir / SELF_AUTHORED_MARKER_FILENAME
+    if not marker.is_file():
+        return False
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    try:
+        payload_schema = int(data.get("schema_version") or 0)
+    except (TypeError, ValueError):
+        return False
+    if not (
+        isinstance(data, dict)
+        and payload_schema == 1
+        and str(data.get("origin") or "") == "self_authored"
+    ):
+        return False
+    try:
+        if drive_root is None:
+            from ouroboros.config import DATA_DIR
+            drive_root = pathlib.Path(DATA_DIR)
+        state_marker = pathlib.Path(drive_root) / "state" / "skills" / _sanitize_skill_name(skill_dir.name) / "self_authored.json"
+        state_data = json.loads(state_marker.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    try:
+        state_schema = int(state_data.get("schema_version") or 0)
+    except (TypeError, ValueError):
+        return False
+    return (
+        isinstance(state_data, dict)
+        and state_schema == 1
+        and str(state_data.get("origin") or "") == "self_authored"
+        and str(state_data.get("task_id") or "") == str(data.get("task_id") or "")
+        and str(state_data.get("created_at") or "") == str(data.get("created_at") or "")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -901,6 +948,7 @@ def load_skill(
         enabled=enabled,
         review=review,
         load_error=load_error,
+        is_self_authored=is_self_authored_skill_dir(skill_dir, drive_root=drive_root),
     )
 
 
@@ -1047,6 +1095,7 @@ def _classify_skill_source(
         SKILL_SOURCE_EXTERNAL,
         SKILL_SOURCE_NATIVE,
         SKILL_SOURCE_OUROBOROSHUB,
+        SKILL_SOURCE_SELF_AUTHORED,
         SKILL_SOURCE_USER_REPO,
         SKILL_SOURCE_SUBDIRS,
     )
@@ -1059,6 +1108,12 @@ def _classify_skill_source(
             rel = resolved.relative_to(data_skills_root.resolve())
             parts = rel.parts
             if parts:
+                try:
+                    marker_drive_root = data_skills_root.resolve().parent
+                except OSError:
+                    marker_drive_root = None
+                if is_self_authored_skill_dir(resolved, drive_root=marker_drive_root):
+                    return SKILL_SOURCE_SELF_AUTHORED
                 bucket = parts[0]
                 if bucket in SKILL_SOURCE_SUBDIRS:
                     if bucket == SKILL_SOURCE_NATIVE:
@@ -1338,6 +1393,7 @@ __all__ = [
     "find_skill",
     "grant_status_for_skill",
     "is_runtime_eligible_for_execution",
+    "is_self_authored_skill_dir",
     "list_available_for_execution",
     "load_enabled",
     "load_review_state",

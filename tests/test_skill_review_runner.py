@@ -4,7 +4,7 @@ import pathlib
 from types import SimpleNamespace
 
 import ouroboros.skill_lifecycle_queue as lifecycle_queue
-from ouroboros.skill_loader import compute_content_hash
+from ouroboros.skill_loader import compute_content_hash, load_enabled, load_review_state, load_skill_grants
 from ouroboros.skill_review import SkillReviewOutcome
 from ouroboros.skill_review_runner import _review_result_message, run_skill_review_lifecycle_blocking
 
@@ -35,6 +35,30 @@ def _build_extension(skills_root: pathlib.Path, name: str) -> pathlib.Path:
     )
     (skill_dir / "plugin.py").write_text("def register(api):\n    return None\n", encoding="utf-8")
     return skill_dir
+
+
+def _build_keyed_extension(skills_root: pathlib.Path, name: str) -> pathlib.Path:
+    skill_dir = _build_extension(skills_root, name)
+    manifest = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    manifest = manifest.replace("permissions: []\n", "permissions: [read_settings]\nenv_from_settings: [OPENROUTER_API_KEY]\n")
+    (skill_dir / "SKILL.md").write_text(manifest, encoding="utf-8")
+    return skill_dir
+
+
+def _mark_self_authored(skill_dir: pathlib.Path) -> None:
+    payload = {
+        "schema_version": 1,
+        "origin": "self_authored",
+        "task_id": "task-1",
+        "created_at": "2026-05-07T00:00:00+00:00",
+    }
+    (skill_dir / ".self_authored.json").write_text(
+        __import__("json").dumps(payload) + "\n",
+        encoding="utf-8",
+    )
+    state = skill_dir.parents[2] / "state" / "skills" / skill_dir.name
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "self_authored.json").write_text(__import__("json").dumps(payload) + "\n", encoding="utf-8")
 
 
 def test_blocking_review_lifecycle_uses_single_progress_card(tmp_path, monkeypatch):
@@ -115,3 +139,109 @@ def test_review_result_message_prefers_non_pass_findings_and_marks_omissions():
     assert "manifest_schema" not in message
     assert "[omitted " in message
     assert "full findings in Skills page" in message
+
+
+def test_self_authored_review_lifecycle_finalizes_without_triad(tmp_path, monkeypatch):
+    _reset_queue()
+    sent = []
+    drive_root = tmp_path / "drive"
+    repo_dir = tmp_path / "repo"
+    skills_root = drive_root / "skills" / "external"
+    drive_root.mkdir()
+    repo_dir.mkdir()
+    skills_root.mkdir(parents=True)
+    skill_dir = _build_keyed_extension(skills_root, "alpha")
+    _mark_self_authored(skill_dir)
+    content_hash = compute_content_hash(skill_dir, manifest_entry="plugin.py")
+    ctx = SimpleNamespace(drive_root=drive_root, repo_dir=repo_dir, messages=[])
+
+    monkeypatch.setattr("supervisor.message_bus.send_with_budget", lambda *a, **kw: sent.append((a, kw)))
+    monkeypatch.setattr(
+        "ouroboros.skill_review_runner.load_settings",
+        lambda: {"OPENROUTER_API_KEY": "sk-test"},
+    )
+    monkeypatch.setattr(
+        "ouroboros.skill_review_runner._reconcile_deps_after_pass_review",
+        lambda *_a, **_k: ("not_required", ""),
+    )
+    monkeypatch.setattr(
+        "ouroboros.skill_review_runner._reconcile_extension_payload",
+        lambda *_a, **_k: ("extension_loaded", "ready"),
+    )
+
+    def fail_if_called(_ctx, _skill_name):
+        raise AssertionError("tri-model review should be skipped for self-authored skills")
+
+    payload = run_skill_review_lifecycle_blocking(
+        ctx,
+        "alpha",
+        source="test",
+        review_impl=fail_if_called,
+        repo_path=str(drive_root / "skills"),
+    )
+
+    assert payload["status"] == "pass"
+    assert payload["auto_flow"] is True
+    assert load_enabled(drive_root, "alpha") is True
+    review = load_review_state(drive_root, "alpha")
+    assert review.status == "pass"
+    assert review.content_hash == content_hash
+    assert review.reviewer_models == ["self_authored:v5.8.2"]
+    grants = load_skill_grants(drive_root, "alpha")
+    assert grants["granted_keys"] == ["OPENROUTER_API_KEY"]
+
+
+def test_self_authored_review_does_not_enable_when_deps_fail(tmp_path, monkeypatch):
+    _reset_queue()
+    drive_root = tmp_path / "drive"
+    repo_dir = tmp_path / "repo"
+    skills_root = drive_root / "skills" / "external"
+    drive_root.mkdir()
+    repo_dir.mkdir()
+    skills_root.mkdir(parents=True)
+    skill_dir = _build_extension(skills_root, "alpha")
+    _mark_self_authored(skill_dir)
+    ctx = SimpleNamespace(drive_root=drive_root, repo_dir=repo_dir, messages=[])
+
+    monkeypatch.setattr("supervisor.message_bus.send_with_budget", lambda *a, **kw: None)
+    monkeypatch.setattr("ouroboros.skill_review_runner._reconcile_deps_after_pass_review", lambda *_a, **_k: ("failed", "pip exploded"))
+
+    payload = run_skill_review_lifecycle_blocking(
+        ctx,
+        "alpha",
+        source="test",
+        review_impl=lambda _ctx, _skill: (_ for _ in ()).throw(AssertionError("triad should be skipped")),
+        repo_path=str(drive_root / "skills"),
+    )
+
+    assert payload["status"] == "pending"
+    assert "pip exploded" in payload["error"]
+    assert load_enabled(drive_root, "alpha") is False
+
+
+def test_self_authored_review_requires_configured_requested_keys(tmp_path, monkeypatch):
+    _reset_queue()
+    drive_root = tmp_path / "drive"
+    repo_dir = tmp_path / "repo"
+    skills_root = drive_root / "skills" / "external"
+    drive_root.mkdir()
+    repo_dir.mkdir()
+    skills_root.mkdir(parents=True)
+    skill_dir = _build_keyed_extension(skills_root, "alpha")
+    _mark_self_authored(skill_dir)
+    ctx = SimpleNamespace(drive_root=drive_root, repo_dir=repo_dir, messages=[])
+
+    monkeypatch.setattr("supervisor.message_bus.send_with_budget", lambda *a, **kw: None)
+    monkeypatch.setattr("ouroboros.skill_review_runner.load_settings", lambda: {})
+
+    payload = run_skill_review_lifecycle_blocking(
+        ctx,
+        "alpha",
+        source="test",
+        review_impl=lambda _ctx, _skill: (_ for _ in ()).throw(AssertionError("triad should be skipped")),
+        repo_path=str(drive_root / "skills"),
+    )
+
+    assert payload["status"] == "pending"
+    assert "not configured" in payload["error"]
+    assert load_enabled(drive_root, "alpha") is False

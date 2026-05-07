@@ -246,7 +246,8 @@ _CONTROL_PLANE_FILES_API_ERROR = JSONResponse(
     {
         "error": (
             "Refusing to modify skill provenance / launcher seed marker "
-            "(.clawhub.json, .ouroboroshub.json, SKILL.openclaw.md, .seed-origin). "
+            "(.clawhub.json, .ouroboroshub.json, .self_authored.json, "
+            "SKILL.openclaw.md, .seed-origin). "
             "Use marketplace Uninstall/Update flows or edit user-authored payload files instead."
         ),
     },

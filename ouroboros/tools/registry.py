@@ -168,11 +168,14 @@ def _heal_data_path_allowed(path_text: str, payload_root: str, drive_root: pathl
 
 
 _HEAL_MODE_ALLOWED_TOOLS = frozenset({
+    "code_search",
+    "claude_code_edit",
     "data_read",
     "data_list",
     "data_write",
     "list_skills",
     "review_skill",
+    "str_replace_editor",
     # v5.7.0: skill_preflight is a read-only syntax validator
     # (Python compile() / node --check / bash -n + manifest parse). Heal mode
     # agents use it to catch silly typos before spending money on a
@@ -185,6 +188,7 @@ _HEAL_MODE_ALLOWED_TOOLS = frozenset({
 _HEAL_PROTECTED_PAYLOAD_FILENAMES = frozenset({
     ".clawhub.json",
     ".ouroboroshub.json",
+    ".self_authored.json",
     # v5.7.0: extend heal-mode payload sidecar protection in lockstep with
     # the central ``is_skill_control_plane_path`` guard in ``tools/core.py``.
     # Without these the launcher-seeded ``.seed-origin`` markers and the
@@ -197,7 +201,7 @@ _HEAL_PROTECTED_PAYLOAD_FILENAMES = frozenset({
 })
 
 
-_SKILL_OWNER_STATE_STEMS = ("grants", "review", "enabled", "clawhub", "deps")
+_SKILL_OWNER_STATE_STEMS = ("grants", "review", "enabled", "clawhub", "deps", "self_authored")
 _DETACHED_PROCESS_MARKERS = (
     "start_new_session",
     "new_session",
@@ -225,6 +229,34 @@ def _mentions_detached_process(text_lower: str) -> bool:
 def _heal_protected_payload_sidecar(path_text: str) -> bool:
     name = pathlib.PurePosixPath(str(path_text or "").replace("\\", "/")).name
     return name.lower() in _HEAL_PROTECTED_PAYLOAD_FILENAMES
+
+
+def _skill_payload_cwd_allowed(cwd_text: str, drive_root: pathlib.Path) -> bool:
+    raw = str(cwd_text or "").strip()
+    if not raw:
+        return False
+    norm = raw.replace("\\", "/").strip("/")
+    if norm.startswith("data/"):
+        norm = norm[len("data/"):]
+    try:
+        drive = pathlib.Path(drive_root).resolve(strict=False)
+        target = pathlib.Path(os.path.realpath(drive / safe_relpath(norm)))
+        rel = target.relative_to(drive)
+    except (OSError, ValueError):
+        return False
+    parts = rel.parts
+    if len(parts) < 3 or parts[0] != "skills" or parts[1] not in {"external", "clawhub", "ouroboroshub", "native"}:
+        return False
+    if any(part in {"", ".", ".."} for part in parts):
+        return False
+    payload_root = drive / "skills" / parts[1] / parts[2]
+    if parts[1] == "native" and not (payload_root / ".seed-origin").is_file():
+        return False
+    try:
+        target.relative_to(payload_root)
+    except ValueError:
+        return False
+    return True
 
 
 _INTERPRETER_BASENAMES = frozenset({
@@ -922,6 +954,7 @@ class ToolRegistry:
         if any(name in cmd_path_lower for name in (
             ".clawhub.json",
             ".ouroboroshub.json",
+            ".self_authored.json",
             "skill.openclaw.md",
             ".seed-origin",
             ".ouroboros_env",
@@ -930,7 +963,7 @@ class ToolRegistry:
             return (
                 "⚠️ SAFETY_VIOLATION: Shell command would modify a skill "
                 "provenance / launcher seed / dependency marker (.clawhub.json, "
-                ".ouroboroshub.json, SKILL.openclaw.md, .seed-origin, "
+                ".ouroboroshub.json, .self_authored.json, SKILL.openclaw.md, .seed-origin, "
                 ".ouroboros_env, node_modules). "
                 "Use marketplace lifecycle flows or edit user-authored "
                 "payload files instead."
@@ -1069,6 +1102,7 @@ class ToolRegistry:
             if any(name in content_lower for name in (
                 ".clawhub.json",
                 ".ouroboroshub.json",
+                ".self_authored.json",
                 "skill.openclaw.md",
                 ".seed-origin",
                 ".ouroboros_env",
@@ -1078,7 +1112,7 @@ class ToolRegistry:
                     f"⚠️ SKILL_STATE_WRITE_BLOCKED: script file "
                     f"{script_path_str!r} targets skill provenance / launcher "
                     "seed / dependency sidecars (.clawhub.json, .ouroboroshub.json, "
-                    "SKILL.openclaw.md, .seed-origin, .ouroboros_env, node_modules). "
+                    ".self_authored.json, SKILL.openclaw.md, .seed-origin, .ouroboros_env, node_modules). "
                     "Use marketplace lifecycle flows or edit "
                     "user-authored payload files instead."
                 )
@@ -1113,7 +1147,7 @@ class ToolRegistry:
         root = pathlib.Path(self._ctx.drive_root) / "state" / "skills"
         if not root.is_dir():
             return out
-        protected_skill_state = {"grants.json", "review.json", "enabled.json", "clawhub.json", "deps.json"}
+        protected_skill_state = {"grants.json", "review.json", "enabled.json", "clawhub.json", "deps.json", "self_authored.json"}
         for path in root.glob("*/*"):
             if path.name.lower() not in protected_skill_state:
                 continue
@@ -1128,7 +1162,7 @@ class ToolRegistry:
         root = pathlib.Path(self._ctx.drive_root) / "state" / "skills"
         current = set()
         if root.is_dir():
-            protected_skill_state = {"grants.json", "review.json", "enabled.json", "clawhub.json", "deps.json"}
+            protected_skill_state = {"grants.json", "review.json", "enabled.json", "clawhub.json", "deps.json", "self_authored.json"}
             current.update(
                 path for path in root.glob("*/*")
                 if path.name.lower() in protected_skill_state
@@ -1215,6 +1249,21 @@ class ToolRegistry:
                         "to the selected skill payload under data/skills/external "
                         "data/skills/clawhub, or data/skills/ouroboroshub."
                     )
+            if name == "str_replace_editor":
+                edit_path = str(args.get("path", "") or "")
+                if not _heal_data_path_allowed(edit_path, heal_payload_root, pathlib.Path(self._ctx.drive_root)):
+                    return "⚠️ HEAL_MODE_BLOCKED: Repair str_replace_editor is limited to the selected skill payload."
+                if _heal_protected_payload_sidecar(edit_path):
+                    return (
+                        "⚠️ HEAL_MODE_BLOCKED: Repair may not edit marketplace "
+                        "or official provenance sidecars (.clawhub.json, "
+                        ".ouroboroshub.json, SKILL.openclaw.md, .seed-origin). "
+                        "Edit the user-authored payload files instead."
+                    )
+            if name == "claude_code_edit":
+                cwd_text = str(args.get("cwd", "") or "")
+                if not _heal_data_path_allowed(cwd_text, heal_payload_root, pathlib.Path(self._ctx.drive_root)):
+                    return "⚠️ HEAL_MODE_BLOCKED: Repair claude_code_edit cwd must be the selected skill payload."
             if name == "review_skill" and str(args.get("skill", "") or "").strip() != heal_skill:
                 return "⚠️ HEAL_MODE_BLOCKED: Repair may only review the selected skill."
             if name == "skill_preflight" and str(args.get("skill", "") or "").strip() != heal_skill:
@@ -1254,7 +1303,12 @@ class ToolRegistry:
                 "stage_pr_merge",
             }
         )
-        if _runtime_mode == "light" and name in _REPO_MUTATION_TOOLS:
+        light_skill_scoped_claude = (
+            _runtime_mode == "light"
+            and name == "claude_code_edit"
+            and _skill_payload_cwd_allowed(str(args.get("cwd", "") or ""), pathlib.Path(self._ctx.drive_root))
+        )
+        if _runtime_mode == "light" and name in _REPO_MUTATION_TOOLS and not light_skill_scoped_claude:
             return (
                 "⚠️ LIGHT_MODE_BLOCKED: runtime_mode=light disables "
                 "repo self-modification. Tool "

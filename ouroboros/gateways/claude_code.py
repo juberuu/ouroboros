@@ -181,6 +181,24 @@ def make_path_guard(cwd: str):
         # Use pathlib.as_posix() for cross-platform forward-slash comparison
         rel = target.relative_to(cwd_resolved).as_posix()
         try:
+            from ouroboros.config import DATA_DIR
+            from ouroboros.tools.core import is_skill_control_plane_path
+
+            if is_skill_control_plane_path(target, pathlib.Path(DATA_DIR).resolve(strict=False)):
+                return {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": (
+                            "SAFETY: Write blocked — skill provenance, "
+                            "launcher seed, marketplace, dependency, and "
+                            "self-authored markers are control-plane state."
+                        ),
+                    }
+                }
+        except Exception:
+            log.debug("Claude Code skill control-plane guard probe failed", exc_info=True)
+        try:
             runtime_mode = get_runtime_mode()
         except Exception:
             runtime_mode = "advanced"

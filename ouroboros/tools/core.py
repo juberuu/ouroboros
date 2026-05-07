@@ -22,6 +22,7 @@ _SKILL_OWNER_STATE_FILENAMES = frozenset({
     "grants.json",
     "review.json",
     "clawhub.json",
+    "self_authored.json",
     # v5.7.0: isolated dependency install state/fingerprint. If agents can
     # forge ``deps.json`` to {"status":"installed"} they can bypass the
     # new dependency enable gate. Treat it as owner/lifecycle state.
@@ -39,6 +40,7 @@ _SKILL_OWNER_STATE_FILENAMES = frozenset({
 _SKILL_PAYLOAD_CONTROL_PLANE_FILENAMES = frozenset({
     ".clawhub.json",
     ".ouroboroshub.json",
+    ".self_authored.json",
     "skill.openclaw.md",
     ".seed-origin",
 })
@@ -58,6 +60,80 @@ _SKILL_PAYLOAD_BUCKETS = frozenset({
     "clawhub",
     "ouroboroshub",
 })
+
+_SELF_AUTHORED_MARKER = ".self_authored.json"
+
+
+def _render_line_slice(path: str, content: str, max_lines: int = 2000, start_line: int = 1) -> str:
+    """Return a line-ranged file view with the shared read-tool header."""
+    start_raw, max_raw = _coerce_line_window(start_line, max_lines)
+    max_raw = max(1, max_raw)
+    lines = content.splitlines(keepends=True)
+    total = len(lines)
+    start = max(1, min(start_raw, total + 1))
+    end = min(start + max_raw - 1, total)
+    result = "".join(lines[start - 1:end])
+    header = f"# {path} — lines {start}\u2013{end} of {total}\n"
+    return header + result
+
+
+def _coerce_line_window(start_line: Any = 1, max_lines: Any = 2000) -> tuple[int, int]:
+    try:
+        start_raw = int(start_line)
+    except (TypeError, ValueError):
+        start_raw = 1
+    try:
+        max_raw = int(max_lines)
+    except (TypeError, ValueError):
+        max_raw = 2000
+    return start_raw, max(1, max_raw)
+
+
+def _is_cognitive_data_path(norm: str) -> bool:
+    text = str(norm or "").replace("\\", "/").lstrip("./")
+    return text.startswith("memory/") or text in _MEMORY_AT_DRIVE_MEMORY
+
+
+def _skill_payload_parts(target: pathlib.Path, data_root: pathlib.Path) -> tuple[str, str, pathlib.Path] | None:
+    """Return (bucket, skill, payload_root) for data/skills payload paths."""
+    for candidate in (target, pathlib.Path(target).resolve(strict=False)):
+        try:
+            rel = candidate.relative_to(data_root)
+        except (OSError, ValueError):
+            continue
+        parts = rel.parts
+        if len(parts) < 3 or parts[0].lower() != "skills":
+            continue
+        bucket = parts[1]
+        if bucket.lower() not in _SKILL_PAYLOAD_BUCKETS:
+            continue
+        skill_name = parts[2]
+        if not skill_name or skill_name in {".", ".."}:
+            continue
+        return bucket.lower(), skill_name, data_root / "skills" / bucket / skill_name
+    return None
+
+
+def _native_payload_without_seed(target: pathlib.Path, data_root: pathlib.Path) -> bool:
+    payload = _skill_payload_parts(target, data_root)
+    if payload is None:
+        return False
+    bucket, _skill_name, payload_root = payload
+    return bucket == "native" and not (payload_root / ".seed-origin").is_file()
+
+
+def _looks_like_serialized_tool_result(content: Any) -> bool:
+    text = str(content or "").lstrip()
+    if not (text.startswith("{'content'") or text.startswith('{"content"')):
+        return False
+    try:
+        parsed = ast.literal_eval(text)
+    except Exception:
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return False
+    return isinstance(parsed, dict) and isinstance(parsed.get("content"), str)
 
 
 def _is_skill_owner_state_target(target: pathlib.Path, data_root: pathlib.Path) -> bool:
@@ -229,30 +305,16 @@ def _repo_read(ctx: ToolContext, path: str, max_lines: int = 2000, start_line: i
                 f"`data_read(path='memory/{base}')`."
             )
         raise
-    lines = content.splitlines(keepends=True)
-    total = len(lines)
-    start = max(1, min(start_line, total + 1))
-    end = min(start + max_lines - 1, total)
-    slice_lines = lines[start - 1:end]
-    result = "".join(slice_lines)
-    header = f"# {path} — lines {start}\u2013{end} of {total}\n"
-    return header + result
+    return _render_line_slice(path, content, max_lines=max_lines, start_line=start_line)
 
 
 def _repo_list(ctx: ToolContext, dir: str = ".", max_entries: int = 500) -> str:
     return json.dumps(_list_dir(ctx.repo_dir, dir, max_entries), ensure_ascii=False, indent=2)
 
 
-def _data_read(ctx: ToolContext, path: str) -> str:
-    """Read a UTF-8 text file from the drive (relative to drive_root).
+def _normalize_data_read_path(ctx: ToolContext, path: str) -> str:
+    """Normalize paths that redundantly include the drive root."""
 
-    Paths that include the drive_root prefix (e.g.
-    ``.tmp-data-qwen-coder-next/data/memory/identity.md`` or the absolute
-    ``/Users/.../data/memory/...``) used to silently fail with ENOENT
-    because ``drive_path()`` prepends drive_root again, producing a doubled
-    path. Strip the duplicate prefix when we recognize one so the call works
-    rather than burning a round on a confusing path-doubling error.
-    """
     norm = str(path).strip().replace("\\", "/")
     if norm.startswith("./"):
         norm = norm[2:]
@@ -270,8 +332,26 @@ def _data_read(ctx: ToolContext, path: str) -> str:
                 norm = after[len("data/"):]
             else:
                 norm = after
+    return norm
+
+
+def _data_read(ctx: ToolContext, path: str, max_lines: int = 2000, start_line: int = 1) -> str:
+    """Read a UTF-8 text file from the drive, optionally slicing lines.
+
+    Paths that include the drive_root prefix (e.g.
+    ``.tmp-data-qwen-coder-next/data/memory/identity.md`` or the absolute
+    ``/Users/.../data/memory/...``) used to silently fail with ENOENT
+    because ``drive_path()`` prepends drive_root again, producing a doubled
+    path. Strip the duplicate prefix when we recognize one so the call works
+    rather than burning a round on a confusing path-doubling error.
+    """
+    norm = _normalize_data_read_path(ctx, path)
     try:
-        return read_text(ctx.drive_path(norm))
+        content = read_text(ctx.drive_path(norm))
+        start_raw, max_raw = _coerce_line_window(start_line, max_lines)
+        if _is_cognitive_data_path(norm) and start_raw == 1 and max_raw == 2000:
+            return content
+        return _render_line_slice(norm, content, max_lines=max_raw, start_line=start_raw)
     except FileNotFoundError:
         if norm.replace("\\", "/").startswith("memory/"):
             explanation = (
@@ -316,6 +396,20 @@ def _data_write(ctx: ToolContext, path: str, content: str, mode: str = "overwrit
     settings_path = pathlib.Path(_cfg.SETTINGS_PATH)
     data_root = pathlib.Path(_cfg.DATA_DIR).resolve(strict=False)
     lexical_target = pathlib.Path(ctx.drive_root).resolve(strict=False) / safe_relpath(path)
+    suffix = pathlib.PurePosixPath(str(path or "")).suffix.lower()
+    if suffix in {".py", ".md", ".json", ".sh"} and _looks_like_serialized_tool_result(content):
+        return (
+            "⚠️ DATA_WRITE_BLOCKED: content looks like a serialized tool result "
+            "object (for example {'content': ...}) rather than file text. "
+            "Extract the actual file body before calling data_write."
+        )
+    if _native_payload_without_seed(lexical_target, data_root) or _native_payload_without_seed(target_path, data_root):
+        return (
+            "⚠️ DATA_WRITE_BLOCKED: data/skills/native/<skill>/ is reserved "
+            "for launcher-seeded skills that carry a .seed-origin marker. "
+            "Write user- or agent-authored skill payloads under "
+            "data/skills/external/<skill>/ instead."
+        )
     skill_owner_state_path = (
         _is_skill_owner_state_target(lexical_target, data_root)
         or _is_skill_owner_state_target(target_path, data_root)
@@ -374,12 +468,52 @@ def _data_write(ctx: ToolContext, path: str, content: str, mode: str = "overwrit
             "owner-only values, stop the agent, edit ~/Ouroboros/data/settings.json "
             "directly, then restart."
         )
+    marker_payload = _skill_payload_parts(lexical_target, data_root) or _skill_payload_parts(target_path, data_root)
+    should_mark_self_authored = False
+    marker_path: pathlib.Path | None = None
+    if (
+        mode == "overwrite"
+        and marker_payload is not None
+        and marker_payload[0] == "external"
+        and pathlib.PurePosixPath(str(path or "")).name.lower() in {"skill.md", "skill.json"}
+        and not target_path.exists()
+    ):
+        marker_path = marker_payload[2] / _SELF_AUTHORED_MARKER
+        should_mark_self_authored = not marker_path.exists()
+
     p.parent.mkdir(parents=True, exist_ok=True)
     if mode == "overwrite":
         p.write_text(content, encoding="utf-8")
     else:
         with p.open("a", encoding="utf-8") as f:
             f.write(content)
+    if should_mark_self_authored and marker_path is not None:
+        from ouroboros.skill_loader import compute_content_hash
+
+        marker_payload[2].mkdir(parents=True, exist_ok=True)
+        try:
+            initial_hash = compute_content_hash(marker_payload[2])
+        except Exception:
+            initial_hash = ""
+        marker_payload_data = {
+            "schema_version": 1,
+            "origin": "self_authored",
+            "created_at": utc_now_iso(),
+            "chat_id": int(getattr(ctx, "current_chat_id", 0) or 0),
+            "task_id": str(getattr(ctx, "task_id", "") or ""),
+            "created_by_tool": "data_write",
+            "initial_content_hash": initial_hash,
+        }
+        marker_path.write_text(
+            json.dumps(marker_payload_data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        state_marker = pathlib.Path(ctx.drive_root) / "state" / "skills" / marker_payload[1] / "self_authored.json"
+        state_marker.parent.mkdir(parents=True, exist_ok=True)
+        state_marker.write_text(
+            json.dumps(marker_payload_data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
     return f"OK: wrote {mode} {path} ({len(content)} chars)"
 
 
@@ -826,8 +960,18 @@ def get_tools() -> List[ToolEntry]:
         }, _repo_list),
         ToolEntry("data_read", {
             "name": "data_read",
-            "description": "Read a UTF-8 text file from the local data directory.",
-            "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+            "description": (
+                "Read a UTF-8 text file from the local data directory. "
+                "Use max_lines (default 2000) and start_line (default 1) "
+                "to read large data/skill files in chunks."
+            ),
+            "parameters": {"type": "object", "properties": {
+                "path": {"type": "string"},
+                "max_lines": {"type": "integer", "default": 2000,
+                              "description": "Maximum number of lines to return (default 2000)."},
+                "start_line": {"type": "integer", "default": 1,
+                               "description": "1-indexed line to start reading from (default 1)."},
+            }, "required": ["path"]},
         }, _data_read),
         ToolEntry("data_list", {
             "name": "data_list",

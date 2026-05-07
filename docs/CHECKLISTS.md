@@ -329,21 +329,39 @@ Skills default to **disabled** and cannot be executed by `skill_exec`
 until review produces a PASS verdict. Skill review output is persisted
 to `~/Ouroboros/data/state/skills/<name>/review.json` with a content
 hash so an edit to the skill invalidates the previous verdict.
-`review.json`, `enabled.json`, `grants.json`, and ClawHub provenance are
-skill trust/control-plane state: they are mutated only through the review,
-toggle, launcher-grant, and marketplace paths, not through generic
-agent/browser file writes.
+`review.json`, `enabled.json`, `grants.json`, and marketplace/self-authored
+provenance are skill trust/control-plane state: they are mutated only
+through the review, toggle, launcher-grant, self-authored finalize, and
+marketplace paths, not through generic agent/browser file writes.
+
+Self-authored skills are a deliberately separate, owner-selected trust
+path. This is not a marketplace / user-drop bypass and not an exemption
+for arbitrary external code: it applies only when the active Ouroboros
+agent creates a new `data/skills/external/<skill>/SKILL.md` through the
+tool layer, which records both payload-local `.self_authored.json` and
+owner-state `data/state/skills/<skill>/self_authored.json`. For that
+dual-marked payload, `review_skill` uses deterministic preflight instead
+of tri-model reviewer models: syntax checks, manifest checks,
+entry/script existence, and widget render-schema validation. If
+preflight passes, `review_skill` may persist a PASS with
+`reviewer_models=["self_authored:v5.8.2"]`, auto-grant configured core
+keys requested by the manifest, enable the skill after dependency
+reconciliation, and reconcile extension registrations. If preflight
+fails, keys are missing from settings, or dependencies fail, no
+enablement is written. This is an explicit owner policy trade-off for
+agent-authored local capabilities; third-party folders and marketplace
+skills still use tri-model skill review and owner grant/enable flows.
 
 The Skills UI Repair affordance is only a task starter: it asks Ouroboros
 to edit payload files and rerun `review_skill`. It must not write
 trust/control-plane state directly, auto-enable a repaired skill, or
 grant keys. Repair tasks carry the legacy `HEAL_MODE_NO_ENABLE` marker so deterministic
-tool guards allow only `list_skills`, payload-oriented read/write tools,
-`review_skill`, and (v5.7.0+) `skill_preflight` for cheap offline
-syntax/manifest validation, and block `toggle_skill`, `skill_exec`,
-shell/browser indirection, extension tools, repo mutation, and subtask
-delegation while
-the repair task is active.
+tool guards allow `list_skills`, payload-oriented read/write tools,
+scoped `str_replace_editor`, scoped `claude_code_edit`, `code_search`,
+`review_skill`, and `skill_preflight` for cheap offline syntax/manifest/widget
+validation, and block `toggle_skill`, `skill_exec`, shell/browser
+indirection, extension tools, broad repo mutation, and subtask delegation
+while the repair task is active.
 Payload data access is scoped to the selected non-native skill under
 `data/skills/external/<skill>/`, `data/skills/clawhub/<skill>/`, or
 `data/skills/ouroboroshub/<skill>/`. Marketplace/official provenance

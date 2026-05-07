@@ -198,6 +198,161 @@ def test_data_write_blocks_skill_grants_json(tmp_path, monkeypatch):
     assert not (drive_root / "state" / "skills" / "weather" / "grants.json").exists()
 
 
+def test_data_read_supports_line_ranges(tmp_path):
+    from ouroboros.tools.core import _data_read
+
+    ctx = _make_drive_ctx(tmp_path)
+    target = ctx.drive_root / "skills" / "external" / "demo" / "notes.txt"
+    target.parent.mkdir(parents=True)
+    target.write_text("one\ntwo\nthree\nfour\n", encoding="utf-8")
+
+    result = _data_read(ctx, "skills/external/demo/notes.txt", start_line=2, max_lines=2)
+
+    assert "lines 2–3 of 4" in result
+    assert "two\nthree\n" in result
+    assert "one" not in result
+
+
+def test_data_read_does_not_slice_memory_by_default(tmp_path):
+    from ouroboros.tools.core import _data_read
+
+    ctx = _make_drive_ctx(tmp_path)
+    target = ctx.drive_root / "memory" / "identity.md"
+    target.parent.mkdir(parents=True)
+    body = "\n".join(f"line-{idx}" for idx in range(2105)) + "\n"
+    target.write_text(body, encoding="utf-8")
+
+    result = _data_read(ctx, "memory/identity.md")
+
+    assert result == body
+    assert "lines 1–2000" not in result
+
+
+def test_data_read_cognitive_bad_line_args_are_tolerant(tmp_path):
+    from ouroboros.tools.core import _data_read
+
+    ctx = _make_drive_ctx(tmp_path)
+    target = ctx.drive_root / "memory" / "identity.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("alpha\nbeta\n", encoding="utf-8")
+
+    result = _data_read(ctx, "memory/identity.md", start_line="abc", max_lines="bad")
+
+    assert result == "alpha\nbeta\n"
+
+
+def test_data_write_marks_new_external_skill_self_authored(tmp_path, monkeypatch):
+    from ouroboros import config as cfg
+    from ouroboros.tools.core import _data_write
+
+    drive_root = tmp_path / "data"
+    drive_root.mkdir()
+    monkeypatch.setattr(cfg, "DATA_DIR", drive_root, raising=True)
+    ctx = _make_drive_ctx(tmp_path)
+    ctx.current_chat_id = 123
+    ctx.task_id = "task-1"
+
+    result = _data_write(
+        ctx,
+        "skills/external/demo/SKILL.md",
+        "---\nname: demo\ntype: instruction\n---\nbody\n",
+    )
+
+    assert result.startswith("OK:")
+    marker = drive_root / "skills" / "external" / "demo" / ".self_authored.json"
+    data = json.loads(marker.read_text(encoding="utf-8"))
+    assert data["origin"] == "self_authored"
+    assert data["chat_id"] == 123
+    assert data["task_id"] == "task-1"
+    state_marker = drive_root / "state" / "skills" / "demo" / "self_authored.json"
+    assert json.loads(state_marker.read_text(encoding="utf-8"))["task_id"] == "task-1"
+
+
+def test_malformed_self_authored_marker_is_not_trusted(tmp_path, monkeypatch):
+    from ouroboros import config as cfg
+    from ouroboros.skill_loader import is_self_authored_skill_dir
+
+    drive_root = tmp_path / "data"
+    skill_dir = drive_root / "skills" / "external" / "demo"
+    state_dir = drive_root / "state" / "skills" / "demo"
+    skill_dir.mkdir(parents=True)
+    state_dir.mkdir(parents=True)
+    (skill_dir / ".self_authored.json").write_text('{"schema_version":"x","origin":"self_authored"}', encoding="utf-8")
+    (state_dir / "self_authored.json").write_text('{"schema_version":1,"origin":"self_authored"}', encoding="utf-8")
+    monkeypatch.setattr(cfg, "DATA_DIR", drive_root, raising=True)
+
+    assert is_self_authored_skill_dir(skill_dir, drive_root=drive_root) is False
+
+
+def test_data_write_blocks_self_authored_state_marker(tmp_path, monkeypatch):
+    from ouroboros import config as cfg
+    from ouroboros.tools.core import _data_write
+
+    drive_root = tmp_path / "data"
+    drive_root.mkdir()
+    monkeypatch.setattr(cfg, "DATA_DIR", drive_root, raising=True)
+    ctx = _make_drive_ctx(tmp_path)
+
+    result = _data_write(ctx, "state/skills/demo/self_authored.json", '{"origin":"self_authored"}')
+
+    assert "DATA_WRITE_BLOCKED" in result
+    assert not (drive_root / "state" / "skills" / "demo" / "self_authored.json").exists()
+
+
+def test_data_write_blocks_unseeded_native_payload(tmp_path, monkeypatch):
+    from ouroboros import config as cfg
+    from ouroboros.tools.core import _data_write
+
+    drive_root = tmp_path / "data"
+    drive_root.mkdir()
+    monkeypatch.setattr(cfg, "DATA_DIR", drive_root, raising=True)
+    ctx = _make_drive_ctx(tmp_path)
+
+    result = _data_write(
+        ctx,
+        "skills/native/demo/SKILL.md",
+        "---\nname: demo\ntype: instruction\n---\nbody\n",
+    )
+
+    assert "DATA_WRITE_BLOCKED" in result
+    assert "data/skills/native" in result
+    assert not (drive_root / "skills" / "native" / "demo" / "SKILL.md").exists()
+
+
+def test_data_write_blocks_serialized_content_object(tmp_path, monkeypatch):
+    from ouroboros import config as cfg
+    from ouroboros.tools.core import _data_write
+
+    drive_root = tmp_path / "data"
+    drive_root.mkdir()
+    monkeypatch.setattr(cfg, "DATA_DIR", drive_root, raising=True)
+    ctx = _make_drive_ctx(tmp_path)
+
+    result = _data_write(ctx, "skills/external/demo/plugin.py", "{'content': 'print(1)\\n'}")
+
+    assert "DATA_WRITE_BLOCKED" in result
+    assert "serialized tool result" in result
+
+
+def test_str_replace_blocks_self_authored_marker(tmp_path, monkeypatch):
+    from ouroboros.tools.git import _str_replace_editor
+
+    ctx = _make_drive_ctx(tmp_path)
+    marker = ctx.drive_root / "skills" / "external" / "demo" / ".self_authored.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text('{"origin":"self_authored"}\n', encoding="utf-8")
+
+    result = _str_replace_editor(
+        ctx,
+        "skills/external/demo/.self_authored.json",
+        "self_authored",
+        "evil",
+    )
+
+    assert "STR_REPLACE_BLOCKED" in result
+    assert "self_authored" in marker.read_text(encoding="utf-8")
+
+
 @pytest.mark.parametrize("filename", ["review.json", "enabled.json", "clawhub.json"])
 def test_data_write_blocks_skill_trust_state_json(filename, tmp_path, monkeypatch):
     from ouroboros import config as cfg

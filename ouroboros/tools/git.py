@@ -37,6 +37,7 @@ from ouroboros.tools.review_revalidation import handle_revalidation_failure
 from ouroboros.utils import utc_now_iso, write_text, safe_relpath, run_cmd
 from ouroboros.tools.parallel_review import run_parallel_review as _run_parallel_review, aggregate_review_verdict as _aggregate_review_verdict
 from ouroboros.tools.review_helpers import _run_review_preflight_tests
+from ouroboros.tools.core import is_skill_control_plane_path
 _CONTENT_OMITTED_PREFIX = "<<CONTENT_OMITTED"
 log = logging.getLogger(__name__)
 
@@ -52,6 +53,24 @@ def _current_runtime_mode() -> str:
         return get_runtime_mode()
     except Exception:
         return "advanced"
+
+
+def _data_skill_path(path: str, drive_root: pathlib.Path) -> pathlib.Path | None:
+    norm = str(path or "").replace("\\", "/").strip().lstrip("/")
+    if norm.startswith("data/"):
+        norm = norm[len("data/"):]
+    parts = pathlib.PurePosixPath(norm).parts
+    if len(parts) < 4 or parts[0] != "skills" or parts[1] not in {"external", "clawhub", "ouroboroshub"}:
+        return None
+    if any(part in {"", ".", ".."} for part in parts):
+        return None
+    target = (pathlib.Path(drive_root) / safe_relpath(norm)).resolve()
+    allowed = (pathlib.Path(drive_root) / "skills" / parts[1] / parts[2]).resolve()
+    try:
+        target.relative_to(allowed)
+    except ValueError:
+        return None
+    return target
 
 
 def _protected_paths_block_message(paths, *, runtime_mode: str, action: str) -> str:
@@ -1043,10 +1062,22 @@ def _str_replace_editor(ctx: ToolContext, path: str, old_str: str, new_str: str)
             action="edit",
         )
 
-    try:
-        target = ctx.repo_path(path)
-    except ValueError as e:
-        return f"⚠️ PATH_ERROR: {e}"
+    data_skill_target = _data_skill_path(path, pathlib.Path(ctx.drive_root))
+    if data_skill_target is not None:
+        if is_skill_control_plane_path(data_skill_target, pathlib.Path(ctx.drive_root).resolve(strict=False)):
+            return (
+                "⚠️ STR_REPLACE_BLOCKED: skill provenance, launcher seed, "
+                "marketplace, dependency, and self-authored markers are "
+                "control-plane state. Edit user-authored payload files instead."
+            )
+        target = data_skill_target
+        invalidation_root = pathlib.Path(ctx.drive_root)
+    else:
+        try:
+            target = ctx.repo_path(path)
+        except ValueError as e:
+            return f"⚠️ PATH_ERROR: {e}"
+        invalidation_root = pathlib.Path(ctx.repo_dir)
 
     if not target.exists():
         return f"⚠️ STR_REPLACE_ERROR: file not found: {path}"
@@ -1093,15 +1124,18 @@ def _str_replace_editor(ctx: ToolContext, path: str, old_str: str, new_str: str)
     _invalidate_advisory(
         ctx,
         changed_paths=[path],
-        mutation_root=pathlib.Path(ctx.repo_dir),
+        mutation_root=invalidation_root,
         source_tool="str_replace_editor",
     )
     result = (
         f"✅ Replaced in {path} (line {replacement_line}).\n"
         f"Context:\n{context_preview}\n\n"
-        "File is on disk but NOT committed. Run repo_commit when ready.\n"
-        "⚠️ Advisory pre-review is now stale — run advisory_pre_review before repo_commit."
+        "File is on disk but NOT committed."
     )
+    if data_skill_target is None:
+        result += "\nRun repo_commit when ready.\n⚠️ Advisory pre-review is now stale — run advisory_pre_review before repo_commit."
+    else:
+        result += "\nRun review_skill for this skill before enabling or declaring it ready."
     if is_protected_runtime_path(norm) and mode_allows_protected_write(_current_runtime_mode()):
         result += "\n\n" + core_patch_notice([norm])
     return result

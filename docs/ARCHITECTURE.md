@@ -1,4 +1,4 @@
-# Ouroboros v5.8.1 — Architecture & Reference
+# Ouroboros v5.8.2 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -62,7 +62,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── runtime_mode_policy.py ← Runtime-mode protected-path policy (safety-critical files, frozen contracts, release/managed invariants) shared by registry, git tools, and Claude gateway guards
       ├── reflection.py        ← Execution reflection and pattern capture
       ├── review_evidence.py   ← Structured review findings/obligations snapshot for summaries and reflections
-      ├── skill_loader.py      ← Skill discovery + durable skill state (v5.5: walks data/skills/{native,clawhub,ouroboroshub,external}/ + optional OUROBOROS_SKILLS_REPO_PATH; persists to data/state/skills/<name>/; tags each LoadedSkill with `source`)
+      ├── skill_loader.py      ← Skill discovery + durable skill state (v5.8.2: walks data/skills/{native,clawhub,ouroboroshub,external}/ + optional OUROBOROS_SKILLS_REPO_PATH; persists to data/state/skills/<name>/; tags each LoadedSkill with `source` and `.self_authored.json` provenance)
       ├── skill_dependencies.py ← Shared dependency-spec resolution for skill payloads across manifests, sidecars, and provenance
       ├── skill_review.py      ← Tri-model skill review reusing the repo-review infrastructure against the Skill Review Checklist section of docs/CHECKLISTS.md
       ├── extension_loader.py  ← Phase 4 in-process loader for type: extension skills; discovers + imports plugin.py via importlib with a narrow PluginAPIImpl, tracks registrations per-skill for atomic unload
@@ -71,7 +71,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── marketplace/         ← ClawHub + OuroborosHub marketplace package (clawhub.py registry client, ouroboroshub.py static GitHub catalog client, fetcher.py staging, adapter.py OpenClaw->Ouroboros translation, install.py orchestration, isolated_deps.py per-skill dependency prefix, provenance.py durable provenance)
       ├── marketplace_api.py   ← HTTP surface for marketplaces (/api/marketplace/clawhub/* and /api/marketplace/ouroboroshub/*); always-on with registry host allowlists and hash checks
       ├── skill_lifecycle_queue.py ← single FIFO lane for mutating skill lifecycle actions (install/update/review/deps/enable/disable/uninstall) with recent event snapshot for Skills UI, chat live-card progress, dedupe keys, and sync tool wrapper
-      ├── skill_review_runner.py ← v5.7.2 shared lifecycle-backed skill review runner for API + agent tool paths; writes review_job.json + skill_review_* events
+      ├── skill_review_runner.py ← v5.8.2 shared lifecycle-backed skill review runner for API + agent tool paths; writes review_job.json + skill_review_* events and finalizes self-authored skills through deterministic preflight, auto-grants, enable, and extension reconcile
       ├── skill_migrations.py  ← one-shot data-plane migrations for renamed official generation skills (image_gen→nanobanana, audio_gen→music_gen) and user-managed skills accidentally left under native/
       ├── server_auth.py       ← Non-localhost auth gate (OUROBOROS_NETWORK_PASSWORD)
       ├── server_control.py    ← Process-control helpers: restart, panic stop
@@ -726,7 +726,7 @@ runtime authority.
 - Browser tools use thread-sticky executor (Playwright greenlet affinity)
 - All tools have hard timeout (default 600s, per-tool overrides for browser/search/vision); `OUROBOROS_TOOL_TIMEOUT_SEC` in `settings.json` is the runtime SSOT override read on each tool call. The actual timeout is `max(settings_value, per_tool_declared)` so tools declaring a higher minimum (e.g. `claude_code_edit` at 1200s) are never silently capped by a lower global default.
 - Layered safety: hardcoded sandbox (registry.py) → policy-based LLM safety check (safety.py `TOOL_POLICY`, single light-model call; unknown tools fall through to `DEFAULT_POLICY = check`)
-- Tool results use explicit per-tool caps with visible truncation markers (`repo_read`/`data_read`/`knowledge_read`/`run_shell`: 80k, default: 15k chars). Cognitive reads (`memory/*`, prompts, BIBLE/docs, commit/review outputs) are exempt from silent clipping. `data_read` returns `DATA_NOT_YET_CREATED` only for genuine `FileNotFoundError`; permission, directory, and other I/O errors still propagate so missing-state recovery does not hide real filesystem faults.
+- Tool results use explicit per-tool caps with visible truncation markers (`repo_read`/`data_read`/`knowledge_read`/`run_shell`: 80k, default: 15k chars). Cognitive reads (`memory/*`, prompts, BIBLE/docs, commit/review outputs) are exempt from silent clipping. `data_read` now mirrors `repo_read` line-range parameters (`start_line`, `max_lines`) so agents can inspect large skill payloads without shell workarounds. It returns `DATA_NOT_YET_CREATED` only for genuine `FileNotFoundError`; permission, directory, and other I/O errors still propagate so missing-state recovery does not hide real filesystem faults.
 - `repo_read` gives a friendly memory-artifact hint for bare `identity.md` / `scratchpad.md`-style paths only after the repo-root file is actually missing. A real repo file with the same name wins and is read normally.
 - `run_shell` now treats non-zero exits as explicit failed tool outcomes and records exit/signal metadata in the tool trace.
 - `run_shell` recovers `cmd` passed as a string via a three-step cascade: `json.loads` (JSON array strings) → `ast.literal_eval` (Python literal lists) → `shlex.split` (plain shell strings). Malformed JSON/Python-shaped strings are refused before `shlex` so they do not become garbage argv; POSIX `[ ... ]` test commands remain valid shell-string recovery. The `cmd` parameter schema remains `type: array` (intended contract), but the runtime gracefully handles LLM misformatting.
@@ -824,6 +824,44 @@ runtime authority.
 - Safety-critical files mirror: `BIBLE.md`, `ouroboros/safety.py`,
   `ouroboros/runtime_mode_policy.py`, `ouroboros/tools/registry.py`,
   `prompts/SAFETY.md`
+
+### Skills self-authored fast path (v5.8.2)
+
+- Agent-created skill manifests are written under
+  `data/skills/external/<skill>/` by `data_write`. When the first
+  `SKILL.md` / `skill.json` lands in a new external payload, the file
+  tool writes payload-local `.self_authored.json` and owner-state
+  `data/state/skills/<skill>/self_authored.json` with chat/task
+  provenance and the initial content hash. Both markers are
+  control-plane state: generic file tools, shell guards, scoped
+  editors, and the Files API treat them like marketplace/seed sidecars.
+- `LoadedSkill.is_self_authored` and `source="self_authored"` are
+  derived from the marker at discovery time. User-dropped folders in
+  `external/` do not get the marker and continue through normal
+  tri-model skill review.
+- `review_skill` is the atomic finalize operation for self-authored
+  skills. It runs deterministic `skill_preflight`, records a fresh
+  PASS with `reviewer_models=["self_authored:v5.8.2"]`, reconciles
+  isolated dependencies, grants any requested core keys already present
+  in settings, writes `enabled.json` after dependencies are ready, and
+  reconciles the extension loader. No desktop owner prompt is required
+  for this owner-selected self-authored path; third-party folders and
+  marketplace skills still use the tri-model review + owner grant flow.
+- `skill_preflight` validates widget render schemas statically via the
+  same `_validate_ui_render` contract used by the extension loader. It
+  catches literal `_UI_RENDER` mistakes (for example `action_route`
+  where `route` is required) before review/enable/load.
+- The LLM loop checks final text responses after skill payload edits.
+  If a self-authored skill is not fresh PASS + enabled + grant-ready,
+  the loop injects one `SKILL_NOT_FINALIZED` system message and gives
+  the agent another round to call `review_skill` instead of declaring
+  the task done.
+- `data/skills/native/<skill>/` remains reserved for launcher-seeded
+  packages with `.seed-origin`. Writes to unseeded native payloads are
+  blocked with an actionable message, and `/api/extensions` runs the
+  existing native-to-external migration before building the Skills
+  catalogue so legacy trapped payloads become repairable without a
+  restart.
 
 ### PR integration tools (tools/git_pr.py + tools/github.py)
 

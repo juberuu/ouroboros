@@ -18,9 +18,15 @@ Review Checklist" section of [`docs/CHECKLISTS.md`](CHECKLISTS.md).
 A **skill** is a small package that adds capabilities to Ouroboros:
 new tools the agent can call, HTTP routes the desktop app can fetch,
 WebSocket message handlers, and host-rendered widget UIs. Skills are
-**reviewed** before they can run — every payload goes through a
-tri-model security review and is gated behind owner toggles, so a
-malicious or buggy skill cannot silently mutate the runtime.
+**reviewed** before they can run. Skills dropped in from disk or
+marketplaces go through tri-model review and explicit owner lifecycle
+actions. Skills authored by the current Ouroboros agent session carry
+both payload-local `.self_authored.json` and owner-state
+`data/state/skills/<name>/self_authored.json` markers. They use the
+self-authored fast path: `review_skill` runs deterministic preflight,
+records a content-bound PASS, grants requested configured core keys,
+enables the skill after dependencies are ready, and reconciles
+extension registrations in one operation.
 
 There are three skill types:
 
@@ -33,6 +39,9 @@ There are three skill types:
 The **runtime ownership** of an installed skill is also tagged:
 
 - `native`: bundled with the launcher (e.g. `weather`).
+- `self_authored`: created by Ouroboros itself in the current data
+  plane; marked by `.self_authored.json` and finalized automatically
+  by `review_skill`.
 - `external`: dropped into `data/skills/external/` by the user.
 - `clawhub`: installed via the ClawHub marketplace.
 - `ouroboroshub`: installed via the official OuroborosHub catalog.
@@ -41,7 +50,9 @@ User-authored or manually copied skills belong under
 `data/skills/external/<name>/`. The `native` bucket is reserved for
 launcher-seeded skills that carry a `.seed-origin` marker. If a user
 payload is accidentally left under `native/`, Ouroboros migrates it to
-`external/` so the Repair workflow can edit and re-review it.
+`external/` so the Repair workflow can edit and re-review it. Generic
+file tools also refuse new writes under unseeded `native/` payloads and
+tell the agent to use `external/` instead.
 
 ## Manifest schema (`SKILL.md` frontmatter or `skill.json`)
 
@@ -105,11 +116,14 @@ runtime; otherwise `skill_exec` fails closed with a clear error.
 
 ```mermaid
 flowchart LR
-    install[install] --> review[tri-model review_skill]
-    review -- PASS --> deps[isolated deps install]
+    install[install] --> review[review_skill]
+    review -- self-authored --> fast[self-authored preflight + PASS]
+    review -- external/marketplace --> triad[tri-model skill review]
+    fast --> deps[isolated deps install]
+    triad -- PASS --> deps
     deps --> enable[owner toggles enabled=true]
     enable --> execute[skill_exec / dispatch]
-    review -- FAIL/ADVISORY --> repair[Repair → re-review]
+    review -- FAIL/PREFLIGHT --> repair[Repair → re-review]
     repair --> review
 ```
 
@@ -119,12 +133,19 @@ flowchart LR
 - **Review** runs three reviewer models in parallel against the
   Skill Review Checklist (see [`docs/CHECKLISTS.md`](CHECKLISTS.md)).
   The review pack hashes every runtime-reachable file in the skill
-  directory; any later edit invalidates the PASS verdict.
+  directory; any later edit invalidates the PASS verdict. For
+  `.self_authored.json` skills, `review_skill` skips the LLM reviewers
+  and instead runs deterministic `skill_preflight`, persists
+  `reviewer_models=["self_authored:v5.8.2"]`, grants configured
+  `env_from_settings` core keys, enables the skill, and reloads the
+  extension.
 - **Isolated deps** (pip / npm / uv / node) install into
   `data/skills/<bucket>/<name>/.ouroboros_env/`. Status is recorded
   in `data/state/skills/<name>/deps.json`.
 - **Enable** flips `enabled.json` after PASS + grants + deps. The
   Skills UI surfaces a toggle; agents can also call `toggle_skill`.
+  Self-authored skills are enabled automatically by `review_skill`
+  after preflight/deps/grants succeed.
 - **Execute**: `skill_exec` runs `type: script` skills as
   subprocess; `type: extension` runs in-process via the loader.
 
@@ -156,10 +177,14 @@ When you are writing a skill (or repairing one in heal mode),
 `skill_preflight` runs cheap, offline syntax validators on the
 payload — in-process Python `compile()` for `.py` files (no
 `__pycache__` writes), `node --check` for `.js`/`.mjs`/`.cjs`,
-`bash -n` for `.sh`/`.bash`, plus a manifest parse and explicit
-entry/script existence checks. It does not call any LLM and does not
-mutate review state, so the agent can iterate without burning review
-tokens.
+`bash -n` for `.sh`/`.bash`, plus a manifest parse, explicit
+entry/script existence checks, and static widget render-schema
+validation. It validates manifest `ui_tab.render` and literal
+`_UI_RENDER = {...}` declarations in `plugin.py` through the same
+runtime validator as `extension_loader`, so typos such as
+`action_route` instead of `route` fail before any LLM review or enable
+attempt. It does not call any LLM and does not mutate review state, so
+the agent can iterate without burning review tokens.
 
 ```text
 skill_preflight(skill="weather")
@@ -199,7 +224,10 @@ captures explicit, content-hash-bound consent before forwarding.
 The Skills UI surfaces missing grants on the skill card. The agent
 can also call `toggle_skill enabled=true` only after grants are
 approved (the tool returns `SKILL_TOGGLE_ERROR: cannot enable until
-requested key grants are approved`).
+requested key grants are approved`). Self-authored skills are the
+exception: when `review_skill` finalizes a `.self_authored.json` skill,
+it auto-grants requested core keys that are already present in
+`settings.json`, then enables and reconciles the skill.
 
 ## PluginAPI reference
 
