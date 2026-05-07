@@ -1209,8 +1209,8 @@ def test_acquire_review_state_lock_retries_permission_error_contention(tmp_path,
         if lock_path.exists():
             lock_path.unlink()
 
-    monkeypatch.setattr("ouroboros.review_state.os.open", fake_open)
-    monkeypatch.setattr("ouroboros.review_state.time.sleep", fake_sleep)
+    monkeypatch.setattr("ouroboros.platform_layer.os.open", fake_open)
+    monkeypatch.setattr("ouroboros.platform_layer.time.sleep", fake_sleep)
 
     lock_fd = acquire_review_state_lock(tmp_path, timeout_sec=0.5, stale_sec=90.0)
     assert lock_fd is not None

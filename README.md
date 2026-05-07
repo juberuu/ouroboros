@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 5.8.3-rc.3](https://img.shields.io/badge/version-5.8.3--rc.3-green.svg)](VERSION)
+[![Version 5.8.3-rc.4](https://img.shields.io/badge/version-5.8.3--rc.4-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -456,6 +456,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 5.8.3-rc.4 | 2026-05-08 | **test(ci): align review-state lock regression with platform-layer lock helpers.** The fourth release-candidate pass keeps the v5.8.3 refactor unchanged but updates the cross-platform reviewed-commit workflow test to patch the new `platform_layer` lock helper instead of the retired `review_state.time.sleep` path, restoring quick/full CI compatibility across Linux, macOS, and Windows. |
 | 5.8.3-rc.3 | 2026-05-08 | **fix(skills): harden repair, reflection, finalization, and skill-authoring guidance.** Repair mode now detects HEAL markers only from the active user task, preventing log/tool-output marker leaks from blocking normal tools. Long tool arguments log as explicit `<TRUNCATED:...>` placeholders so reflection does not mistake log metadata for real tool input, and skill finalization reminders can re-arm after more tool work. The release also tightens Repair prompts, removes the dangling `skill-creation-recipe` reference, documents widget composition and async job error contracts, adds safer path/polling prompt guidance, and introduces shared pytest fixtures for skill/git test scaffolding. |
 | 5.8.3-rc.2 | 2026-05-08 | **refactor(infra): centralize durable JSON, lock files, review docs, and trusted network bind policy.** The second pre-release pass introduces shared `atomic_write_json`, `read_json_dict`, and exclusive lock helpers for durable state files, consolidates direct-provider review fallback selection and governance-doc loading, and adds `OUROBOROS_TRUST_NONLOCAL_BIND_WITHOUT_PASSWORD=1` for trusted Docker/Kubernetes deployments that already enforce access through ingress auth, VPN, private networking, or an auth proxy. |
 | 5.8.3-rc.1 | 2026-05-08 | **refactor(core+ui): remove dead compatibility paths and harden shared web escaping.** The first pre-release refactor pass deletes unused LLM/message-bus/marketplace compatibility helpers, retires the hidden Evolution Versions sub-tab in favour of Dashboard → Updates as the single commit/tag surface, migrates legacy source-inspection tests to their real startup/review helpers, and introduces `escapeHtmlText` / `escapeHtmlAttr` plus USD-formatting utilities for safer shared web rendering. Legacy official generation-skill migration remains idempotent for the v5 line and is now documented as v6 cleanup debt. |
