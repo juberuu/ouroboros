@@ -2,6 +2,12 @@
 #
 # Loaded automatically by pytest before any test module runs.
 import asyncio
+import json
+import pathlib
+import subprocess
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
 import pytest
 
 
@@ -112,3 +118,78 @@ def pytest_runtest_teardown(item, nextitem):  # noqa: ARG001
     yield  # fixture finalizers and teardown run here
     teardown_loop.close()
     asyncio.set_event_loop(None)
+
+
+@pytest.fixture
+def make_git_repo(tmp_path):
+    """Return a helper that creates a minimal committed git repo."""
+    def _make(files=None, message="init") -> pathlib.Path:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+        for rel, content in dict(files or {"README.md": "init\n"}).items():
+            path = repo / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.email=test@ouroboros", "-c", "user.name=TestBot", "commit", "-m", message],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+        )
+        return repo
+    return _make
+
+
+@pytest.fixture
+def tool_context(tmp_path):
+    repo_dir = tmp_path / "repo"
+    drive_root = tmp_path / "data"
+    repo_dir.mkdir()
+    drive_root.mkdir()
+    return SimpleNamespace(
+        repo_dir=repo_dir,
+        drive_root=drive_root,
+        pending_events=[],
+        current_chat_id=0,
+        task_id="test-task",
+        repo_path=lambda rel: (repo_dir / rel).resolve(),
+        drive_path=lambda rel: (drive_root / rel).resolve(),
+        drive_logs=lambda: (drive_root / "logs").resolve(),
+        emit_progress_fn=lambda _msg: None,
+    )
+
+
+@pytest.fixture
+def make_chat_mock():
+    def _make(content="", usage=None):
+        mock = MagicMock()
+        mock.chat.return_value = (
+            {"content": content, "tool_calls": []},
+            usage or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        )
+        return mock
+    return _make
+
+
+@pytest.fixture
+def make_extension_skill(tmp_path):
+    def _make(root=None, name="demo", *, plugin="", permissions=None, render=None) -> pathlib.Path:
+        root_path = pathlib.Path(root or tmp_path)
+        skill_dir = root_path / name
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        perms = permissions or ["tool", "route", "widget"]
+        manifest = {
+            "name": name,
+            "type": "extension",
+            "version": "0.1.0",
+            "permissions": perms,
+            "entry": "plugin.py",
+        }
+        if render is not None:
+            manifest["ui_tab"] = {"tab_id": "main", "title": "Main", "render": render}
+        (skill_dir / "skill.json").write_text(json.dumps(manifest), encoding="utf-8")
+        (skill_dir / "plugin.py").write_text(plugin or "def register(api):\n    return None\n", encoding="utf-8")
+        return skill_dir
+    return _make

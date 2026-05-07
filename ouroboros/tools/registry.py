@@ -92,12 +92,24 @@ def _detect_runtime_mode_elevation(text_lower: str) -> bool:
     return (has_save and has_mode_key) or has_dotted_path
 
 
-def _is_heal_no_enable_context(messages: Optional[List[Dict[str, Any]]]) -> bool:
+def _iter_user_message_content(messages: Optional[List[Dict[str, Any]]]):
     for message in messages or []:
+        if message.get("role") != "user":
+            continue
         content = message.get("content")
-        if isinstance(content, str) and "HEAL_MODE_NO_ENABLE" in content:
-            return True
-    return False
+        if isinstance(content, str):
+            yield content
+
+
+def _iter_heal_marker_content(messages: Optional[List[Dict[str, Any]]]):
+    for content in _iter_user_message_content(messages):
+        first = next((line.strip() for line in content.splitlines() if line.strip()), "")
+        if first == "HEAL_MODE_NO_ENABLE":
+            yield content
+
+
+def _is_heal_no_enable_context(messages: Optional[List[Dict[str, Any]]]) -> bool:
+    return any(True for _ in _iter_heal_marker_content(messages))
 
 
 def _heal_skill_name(messages: Optional[List[Dict[str, Any]]]) -> str:
@@ -118,9 +130,8 @@ def _heal_payload_root(messages: Optional[List[Dict[str, Any]]]) -> str:
 
 
 def _raw_heal_marker_value(messages: Optional[List[Dict[str, Any]]], marker: str) -> str:
-    for message in messages or []:
-        content = message.get("content")
-        if not isinstance(content, str) or marker not in content:
+    for content in _iter_heal_marker_content(messages):
+        if marker not in content:
             continue
         raw = content.split(marker, 1)[1].splitlines()[0].strip()
         try:
@@ -132,9 +143,8 @@ def _raw_heal_marker_value(messages: Optional[List[Dict[str, Any]]], marker: str
 
 
 def _heal_marker_value(messages: Optional[List[Dict[str, Any]]], marker: str) -> str:
-    for message in messages or []:
-        content = message.get("content")
-        if not isinstance(content, str) or marker not in content:
+    for content in _iter_heal_marker_content(messages):
+        if marker not in content:
             continue
         raw = content.split(marker, 1)[1].splitlines()[0].strip()
         try:

@@ -404,12 +404,7 @@ def sanitize_tool_args_for_log(
         if key.lower() in _SECRET_KEYS:
             return "*** REDACTED ***"
         if isinstance(value, str) and len(value) > threshold:
-            return {
-                key: truncate_for_log(value, threshold),
-                f"{key}_len": len(value),
-                f"{key}_sha256": sha256_text(value),
-                f"{key}_truncated": True,
-            }
+            return f"<TRUNCATED:{key}:{len(value)}ch:sha={sha256_text(value)[:12]}>"
         if isinstance(value, str):
             return value
         if isinstance(value, dict):

@@ -105,6 +105,8 @@ Rules for candidates:
 - Prefer recurring process/tool/review friction over one-off noise.
 - Do not propose autonomous execution or workflow states.
 - If nothing deserves backlog tracking, output BACKLOG_CANDIDATES_JSON: []
+- Tool arguments in logs may show `<TRUNCATED:key:Nch:sha=...>` placeholders.
+  That is logging metadata, not the value passed to the tool.
 
 ## Task goal
 

@@ -761,6 +761,8 @@ def run_llm_loop(
                     continue
                 return _handle_text_response(content, llm_trace, accumulated_usage)
 
+            if getattr(tools._ctx, "_skill_finalization_injected", False):
+                tools._ctx._skill_finalization_injected = False
             messages.append({"role": "assistant", "content": content or "", "tool_calls": tool_calls})
 
             if content and content.strip():

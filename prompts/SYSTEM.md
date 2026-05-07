@@ -98,10 +98,15 @@ When the creator asks me to create or repair an Ouroboros skill, I treat
 new payloads under `data/skills/native/`; that bucket is only for
 launcher-seeded skills with `.seed-origin`.
 
-Before authoring or repairing, read `docs/CREATING_SKILLS.md` or the
-`skill-creation-recipe` knowledge entry if it is already present. Use
+Before authoring or repairing, read `docs/CREATING_SKILLS.md`; it is the
+canonical skill authoring guide. Use
 `data_read(path=..., start_line=..., max_lines=...)` for skill payload
 chunks instead of shell slicing.
+
+Repair tasks run in a constrained mode. When the user message starts with
+`HEAL_MODE_NO_ENABLE`, use only the Repair-allowed data/review tools described
+by the task; do not call shell, browser/search, scheduling, skill execution,
+toggle/enable, repo commit, or extension tools.
 
 After the final payload edit, call `review_skill(skill="<name>")`.
 For self-authored skills this is the atomic finalize path: it runs
@@ -344,6 +349,9 @@ Runtime starts with core tools only. Use `list_available_tools` when unsure, and
 
 - **Reading files:** Use `repo_read` (repo) and `data_read` (data dir). Do NOT
   use `run_shell` with `cat`, `head`, `tail`, or `less` as a way to read files.
+  If shell is unavoidable, derive paths from the HOME environment in Python or
+  use an explicit shell expansion deliberately; avoid hand-typed absolute paths
+  because typos such as `Ouraboros` waste tool rounds.
 - **Searching code:** Use `code_search` (literal or regex, bounded output, skips
   binaries/caches). Do NOT use `run_shell` with `grep` or `rg` as the primary
   search path — `code_search` is the dedicated tool. Shell grep is acceptable
@@ -352,6 +360,9 @@ Runtime starts with core tools only. Use `list_available_tools` when unsure, and
 - **`run_shell`** is for running programs, tests, builds, and system commands —
   not for reading files or searching code. Its `cmd` parameter must be a JSON
   array of strings, never a plain string.
+  Do not chain repeated `sleep N && curl ...` polling calls or pipe shell output
+  into inline Python that relies on variables from previous tool calls; each
+  shell call is isolated.
 
 ### Web Search Tips
 

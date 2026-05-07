@@ -1,4 +1,4 @@
-# Ouroboros v5.8.3-rc.2 — Architecture & Reference
+# Ouroboros v5.8.3-rc.3 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -866,9 +866,16 @@ runtime authority.
   where `route` is required) before review/enable/load.
 - The LLM loop checks final text responses after skill payload edits.
   If a self-authored skill is not fresh PASS + enabled + grant-ready,
-  the loop injects one `SKILL_NOT_FINALIZED` system message and gives
-  the agent another round to call `review_skill` instead of declaring
-  the task done.
+  the loop injects `SKILL_NOT_FINALIZED` and gives the agent another
+  round to call `review_skill` instead of declaring the task done.
+  v5.8.3-rc.3 re-arms this reminder after any subsequent tool round so
+  an agent that keeps editing cannot acknowledge the guard once and then
+  finish without finalizing.
+- Repair-mode markers (`HEAL_MODE_NO_ENABLE`, skill name, payload root)
+  are treated as active control data only when they appear in the current
+  user task message. Tool/log outputs that quote old repair tasks no
+  longer activate Repair mode, preventing stale `HEAL_MODE_BLOCKED`
+  bleed-through into ordinary follow-up conversations.
 - `data/skills/native/<skill>/` remains reserved for launcher-seeded
   packages with `.seed-origin`. Writes to unseeded native payloads are
   blocked with an actionable message, and `/api/extensions` runs the

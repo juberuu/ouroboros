@@ -345,6 +345,44 @@ markdown / json / kv / status / tabs / progress / gallery /
 image / audio / video / file / map / calendar / kanban). They
 handle XSS / CSRF / lifecycle automatically.
 
+### Widget composition rules
+
+The host validates widget render schemas before load. A top-level `tabs`
+component may group passive display components, but each
+`tabs[].components[]` list must not contain interactive or nested lifecycle
+components:
+
+| Parent component | Forbidden child component types |
+|------------------|---------------------------------|
+| `tabs` → `tabs[].components[]` | `form`, `action`, `poll`, `subscription`, `stream`, `tabs` |
+
+Put interactive forms/actions/polls at the top level, or split the workflow
+across separate tabs/widgets. This mirrors the runtime validator in
+`extension_loader._validate_ui_render` and avoids nested remount/polling states
+the host renderer does not own.
+
+### Async job error contract
+
+Long-running widget actions should follow the declarative async job contract
+from `docs/DEVELOPMENT.md`: the start route returns `job_id`, the status route
+returns `queued`, `running`, `done`, or `error`, and the host resumes polling by
+`job_id` after tab switches. The Widgets host reads `status`, `error`,
+`message`, and `progress` from the status response.
+
+If you use `asyncio.gather(..., return_exceptions=True)`, convert exceptions
+into an explicit job failure (or a visible warning that the UI understands)
+instead of only logging them:
+
+```python
+results = await asyncio.gather(*tasks, return_exceptions=True)
+errors = [item for item in results if isinstance(item, Exception)]
+if errors:
+    job["status"] = "error"
+    job["error"] = "; ".join(str(error) for error in errors[:3])
+else:
+    job["status"] = "done"
+```
+
 ## Skill Review Checklist (eight items)
 
 Reviewers grade your skill on eight checklist items
