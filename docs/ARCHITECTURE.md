@@ -1,4 +1,4 @@
-# Ouroboros v6.0.0 — Architecture & Reference
+# Ouroboros v6.0.1 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -1908,13 +1908,16 @@ processes. No zombies, no workers lingering in background.**
    b. wait 10s for exit
    c. if still alive → SIGKILL     ← hard kill (workers may orphan)
 3. _kill_orphaned_children()        ← SAFETY NET
-   a. _kill_stale_on_port(8765)    ← lsof port, SIGKILL any survivors
-   b. multiprocessing.active_children() → SIGKILL each
+   a. _kill_stale_on_port(8765)    ← launcher-owned UI/server port only
+   b. read data/state/extension_companions.json and kill listed companions/ports
+   c. multiprocessing.active_children() → SIGKILL each
 4. release_pid_lock()               ← delete ~/Ouroboros/ouroboros.pid
 ```
 
-This three-layer approach (graceful → force-kill server → sweep port/children)
-guarantees no orphans even if the server hangs or workers resist SIGTERM.
+Inside `server.py` ordinary lifespan shutdown relies on graceful uvicorn
+teardown for the Host Service listener; it does **not** blindly kill
+`OUROBOROS_HOST_SERVICE_PORT` on normal non-restart exit. Blind port sweeping is
+reserved for panic/emergency fallback and launcher-owned orphan cleanup.
 
 ### 9.2 Panic Stop (`/panic` command or Panic Stop button)
 

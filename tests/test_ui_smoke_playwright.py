@@ -114,6 +114,7 @@ def direct_server(tmp_path):
             "OUROBOROS_REPO_DIR": REPO_ROOT,
             "OUROBOROS_SERVER_HOST": "127.0.0.1",
             "OUROBOROS_SERVER_PORT": str(port),
+            "OUROBOROS_HOST_SERVICE_PORT": str(port + 1),
             "OUROBOROS_NETWORK_PASSWORD": "ui-smoke-password",
         }
         proc = subprocess.Popen(

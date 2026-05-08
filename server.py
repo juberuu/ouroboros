@@ -2034,9 +2034,12 @@ async def lifespan(app):
             except Exception:
                 pass
         if host_service_task is not None:
-            host_service_task.cancel()
             with suppress(asyncio.CancelledError, asyncio.TimeoutError):
                 await asyncio.wait_for(host_service_task, timeout=5)
+            if not host_service_task.done():
+                host_service_task.cancel()
+                with suppress(asyncio.CancelledError, asyncio.TimeoutError):
+                    await asyncio.wait_for(host_service_task, timeout=2)
         ws_heartbeat_task.cancel()
         with suppress(asyncio.CancelledError):
             await ws_heartbeat_task
@@ -2076,7 +2079,7 @@ app.app.state.drive_root = pathlib.Path(DATA_DIR)  # type: ignore[attr-defined]
 app.app.state.repo_dir = pathlib.Path(REPO_DIR)  # type: ignore[attr-defined]
 
 
-def _emergency_process_cleanup() -> None:
+def _emergency_process_cleanup(*, port_sweep: bool = True) -> None:
     """Kill all child processes, workers, and port holders. Called before any os._exit()."""
     try:
         from ouroboros.tools.shell import kill_all_tracked_subprocesses
@@ -2095,13 +2098,15 @@ def _emergency_process_cleanup() -> None:
             force_kill_pid(child.pid)
         except (ProcessLookupError, PermissionError):
             pass
-    kill_process_on_port(DEFAULT_PORT)
-    kill_process_on_port(8766)
+    if port_sweep:
+        kill_process_on_port(DEFAULT_PORT)
+        kill_process_on_port(8766)
     try:
         from ouroboros.extension_companion import panic_kill_all
         from ouroboros.host_service_api import host_service_port
         panic_kill_all()
-        kill_process_on_port(host_service_port())
+        if port_sweep:
+            kill_process_on_port(host_service_port())
     except Exception:
         pass
 
@@ -2189,12 +2194,11 @@ def main() -> int:
 
     if _restart_requested.is_set():
         log.info("Exiting with code %d (restart signal).", RESTART_EXIT_CODE)
-        _emergency_process_cleanup()
+        _emergency_process_cleanup(port_sweep=False)
         if not _LAUNCHER_MANAGED:
             _restart_current_process(args.host, actual_port)
         os._exit(RESTART_EXIT_CODE)
 
-    _emergency_process_cleanup()
     return 0
 
 
