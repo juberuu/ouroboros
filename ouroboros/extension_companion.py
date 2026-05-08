@@ -129,7 +129,8 @@ class CompanionSupervisor:
                 "stdout": subprocess.PIPE,
                 "stderr": subprocess.PIPE,
             }
-            popen_kwargs.update(subprocess_new_group_kwargs())
+            if not IS_WINDOWS:
+                popen_kwargs.update(subprocess_new_group_kwargs())
             popen_kwargs = merge_hidden_kwargs(popen_kwargs)
             proc = subprocess.Popen(descriptor.command, **popen_kwargs)  # noqa: S603
             job_handle = None

@@ -1,4 +1,5 @@
 import pathlib
+import subprocess
 import sys
 
 from ouroboros.extension_companion import (
@@ -109,3 +110,40 @@ def test_plugin_api_companion_uses_staged_skill_root_as_cwd(tmp_path: pathlib.Pa
     assert (descriptor.cwd / "scripts" / "daemon.py").is_file()
     assert descriptor.env["HOST_SERVICE_URL"].startswith("http://127.0.0.1:")
     assert descriptor.env["HOST_SERVICE_TOKEN"] != "evil"
+
+
+def test_windows_companion_start_does_not_request_console_process_group(tmp_path: pathlib.Path, monkeypatch) -> None:
+    captured = {}
+
+    class FakeProcess:
+        pid = 12345
+        stdout = None
+        stderr = None
+
+        def poll(self):
+            return None
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr("ouroboros.extension_companion.IS_WINDOWS", True)
+    monkeypatch.setattr("ouroboros.extension_companion.create_kill_on_close_job", lambda: object())
+    monkeypatch.setattr("ouroboros.extension_companion.assign_pid_to_job", lambda _job, _pid: True)
+    monkeypatch.setattr("ouroboros.extension_companion.close_job", lambda _job: None)
+
+    def fake_popen(command, **kwargs):
+        captured.update(kwargs)
+        return FakeProcess()
+
+    monkeypatch.setattr("ouroboros.extension_companion.subprocess.Popen", fake_popen)
+    supervisor = CompanionSupervisor(tmp_path)
+    descriptor = CompanionDescriptor(
+        skill_name="skill",
+        name="daemon",
+        command=["python", "-c", "print('ok')"],
+        cwd=tmp_path,
+        env={},
+    )
+
+    assert supervisor.start(descriptor) is True
+    assert captured.get("creationflags", 0) & getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) == 0
