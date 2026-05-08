@@ -36,6 +36,7 @@ dataclass shape.
 from __future__ import annotations
 
 import json
+import pathlib
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -75,8 +76,13 @@ VALID_SKILL_PERMISSIONS = frozenset(
         "tool",
         "read_settings",
         "iframe_raw",
+        "companion_process",
+        "supervised_task",
+        "subscribe_event",
+        "inject_chat",
     }
 )
+_EVENT_TOPIC_RE = re.compile(r"^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$")
 
 
 class SkillManifestError(ValueError):
@@ -107,6 +113,8 @@ class SkillManifest:
     # extension-typed manifests point at a Python entry module.
     entry: str = ""
     permissions: List[str] = field(default_factory=list)
+    subscribe_events: List[str] = field(default_factory=list)
+    companion_processes: List[Dict[str, Any]] = field(default_factory=list)
     ui_tab: Optional[Dict[str, Any]] = None
     # Human-readable body from SKILL.md after the closing ``---`` line.
     body: str = ""
@@ -148,6 +156,12 @@ class SkillManifest:
                 warnings.append(
                     f"unknown permission '{perm}' (expected one of "
                     f"{sorted(VALID_SKILL_PERMISSIONS)})"
+                )
+        for topic in self.subscribe_events:
+            if not _EVENT_TOPIC_RE.match(topic):
+                warnings.append(
+                    f"invalid subscribe_events topic '{topic}' "
+                    "(expected lower.dotted format)"
                 )
         if self.is_extension() and not self.entry:
             warnings.append("type=extension requires non-empty 'entry'")
@@ -252,6 +266,8 @@ def _manifest_from_mapping(data: Dict[str, Any], *, body: str) -> SkillManifest:
         "scripts",
         "entry",
         "permissions",
+        "subscribe_events",
+        "companion_processes",
         "ui_tab",
         "schema_version",
     }
@@ -283,6 +299,52 @@ def _manifest_from_mapping(data: Dict[str, Any], *, body: str) -> SkillManifest:
     if ui_tab is not None and not isinstance(ui_tab, dict):
         raise SkillManifestError("'ui_tab' must be a mapping when provided")
 
+    companion_raw = data.get("companion_processes", [])
+    if companion_raw in (None, ""):
+        companion_raw = []
+    if not isinstance(companion_raw, list):
+        raise SkillManifestError("'companion_processes' must be a list when provided")
+    companion_processes: List[Dict[str, Any]] = []
+    for item in companion_raw:
+        if not isinstance(item, dict):
+            raise SkillManifestError("each 'companion_processes' item must be a mapping")
+        if not str(item.get("name") or "").strip():
+            raise SkillManifestError("each 'companion_processes' item must include name")
+        if not isinstance(item.get("command"), list) or not item.get("command"):
+            raise SkillManifestError("each 'companion_processes' item must include a non-empty command list")
+        runtime = str(item.get("runtime") or "").strip().lower()
+        if not runtime:
+            raise SkillManifestError("each 'companion_processes' item must include runtime")
+        if runtime and runtime not in VALID_SKILL_RUNTIMES:
+            raise SkillManifestError(
+                f"companion_processes runtime '{runtime}' is not supported"
+            )
+        command0 = str((item.get("command") or [""])[0] or "").strip().lower()
+        command = [str(part or "").strip() for part in (item.get("command") or [])]
+        inline_flags = {"-c", "-m", "-e", "--eval", "eval"}
+        if any(arg in inline_flags for arg in command[1:]):
+            raise SkillManifestError("companion inline/eval commands are not allowed")
+        for arg in command[1:]:
+            arg_path = pathlib.PurePosixPath(arg)
+            if arg_path.is_absolute() or ".." in arg_path.parts:
+                raise SkillManifestError("companion command arguments must stay inside the reviewed skill tree")
+        if runtime in {"python", "python3"} and command0 not in {"python", "python3"}:
+            raise SkillManifestError("python companion runtime must use python/python3 command")
+        if runtime in {"python", "python3"}:
+            if len(command) < 2:
+                raise SkillManifestError("python companion command must name a reviewed script")
+            if pathlib.PurePosixPath(command[1]).is_absolute() or ".." in pathlib.PurePosixPath(command[1]).parts:
+                raise SkillManifestError("python companion script must be a relative reviewed path")
+        if runtime in {"node", "npm"} and command0 not in {"node", "npm"}:
+            raise SkillManifestError("node companion runtime must use node/npm command")
+        if runtime in {"bash", "deno", "ruby", "go"} and command0 != runtime:
+            raise SkillManifestError(f"{runtime} companion runtime must use {runtime} command")
+        if runtime in {"bash", "deno", "ruby", "go"} and len(command) > 1:
+            script_path = pathlib.PurePosixPath(command[1])
+            if script_path.is_absolute() or ".." in script_path.parts:
+                raise SkillManifestError(f"{runtime} companion script must be a relative reviewed path")
+        companion_processes.append(dict(item))
+
     schema_version = data.get("schema_version", SKILL_MANIFEST_SCHEMA_VERSION)
     try:
         schema_version_int = int(schema_version)
@@ -308,6 +370,8 @@ def _manifest_from_mapping(data: Dict[str, Any], *, body: str) -> SkillManifest:
         scripts=scripts,
         entry=str(data.get("entry") or "").strip(),
         permissions=_string_list(data.get("permissions")),
+        subscribe_events=_string_list(data.get("subscribe_events")),
+        companion_processes=companion_processes,
         ui_tab=ui_tab,
         body=body,
         raw_extra=extras,

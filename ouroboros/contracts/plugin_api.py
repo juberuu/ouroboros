@@ -46,6 +46,10 @@ from __future__ import annotations
 
 from typing import Any, Awaitable, Callable, Dict, List, Protocol, Sequence, runtime_checkable
 
+from ouroboros.skill_token import SkillToken
+
+PLUGIN_API_VERSION = "1.1"
+
 
 # Forbidden / "core" settings keys. Both in-process extensions
 # (``PluginAPI.get_settings``) and out-of-process script skills
@@ -83,6 +87,10 @@ VALID_EXTENSION_PERMISSIONS: frozenset[str] = frozenset(
         "route",
         "tool",
         "read_settings",
+        "companion_process",
+        "supervised_task",
+        "subscribe_event",
+        "inject_chat",
     }
 )
 
@@ -223,6 +231,51 @@ class PluginAPI(Protocol):
         """
         ...
 
+    def register_supervised_task(
+        self,
+        name: str,
+        factory: Callable[[], Awaitable[None]],
+        *,
+        restart_policy: str = "on_failure",
+        max_restarts: int = 5,
+        backoff_seconds: float = 2.0,
+    ) -> None:
+        """Register a long-lived in-process asyncio task.
+
+        The task lifecycle is bound to the owning skill's enabled state.
+        Requires the manifest ``supervised_task`` permission.
+        """
+        ...
+
+    def register_companion_process(
+        self,
+        name: str,
+    ) -> None:
+        """Register a host-supervised companion subprocess.
+
+        Command/runtime/restart settings are read from the reviewed
+        ``companion_processes`` manifest entry with the same ``name``.
+        Requires the manifest ``companion_process`` permission.
+        """
+        ...
+
+    def subscribe_event(
+        self,
+        topic: str,
+        handler: Callable[[Dict[str, Any]], Awaitable[None] | None],
+    ) -> str:
+        """Subscribe to a manifest-declared host event topic.
+
+        The runtime rejects topics not listed in ``subscribe_events`` and all
+        subscriptions are removed when the skill unloads. Requires the manifest
+        ``subscribe_event`` permission.
+        """
+        ...
+
+    def get_skill_token(self) -> SkillToken:
+        """Return the opaque Host Service API token for this skill."""
+        ...
+
     def on_unload(self, callback: Callable[[], Any]) -> None:
         """Register a best-effort cleanup callback.
 
@@ -315,6 +368,7 @@ __all__ = [
     "ExtensionRegistrationError",
     "FORBIDDEN_SKILL_SETTINGS",
     "FORBIDDEN_EXTENSION_SETTINGS",
+    "PLUGIN_API_VERSION",
     "VALID_EXTENSION_PERMISSIONS",
     "VALID_EXTENSION_ROUTE_METHODS",
 ]

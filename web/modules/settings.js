@@ -42,6 +42,12 @@ function resetSecretClearFlags(root) {
     });
 }
 
+function applySecretInputs(root, settings) {
+    root.querySelectorAll('[data-secret-setting]').forEach((input) => {
+        applyInputValue(input.id, settings[input.dataset.secretSetting]);
+    });
+}
+
 function renderExtensionSettingsSections(root, sections) {
     const host = root.querySelector('#extension-settings-sections');
     if (!host) return;
@@ -376,8 +382,6 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
         applyInputValue('s-anthropic', s.ANTHROPIC_API_KEY);
         applyInputValue('s-network-password', s.OUROBOROS_NETWORK_PASSWORD);
         applyInputValue('s-server-host', s.OUROBOROS_SERVER_HOST || '127.0.0.1');
-        applyInputValue('s-telegram-token', s.TELEGRAM_BOT_TOKEN);
-        applyInputValue('s-telegram-chat-id', s.TELEGRAM_CHAT_ID);
 
         applyInputValue('s-model', s.OUROBOROS_MODEL);
         applyInputValue('s-model-code', s.OUROBOROS_MODEL_CODE);
@@ -402,6 +406,8 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
         applyInputValue('s-websearch-model', s.OUROBOROS_WEBSEARCH_MODEL);
         applyInputValue('s-gh-token', s.GITHUB_TOKEN);
         applyInputValue('s-gh-repo', s.GITHUB_REPO);
+        applySecretInputs(page, s);
+        applyInputValue('s-telegram-chat-id', s.TELEGRAM_CHAT_ID);
         applyInputValue('s-local-source', s.LOCAL_MODEL_SOURCE);
         applyInputValue('s-local-filename', s.LOCAL_MODEL_FILENAME);
         if (s.LOCAL_MODEL_PORT) byId('s-local-port').value = s.LOCAL_MODEL_PORT;
@@ -412,14 +418,6 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
         applyCheckboxValue('s-local-code', s.USE_LOCAL_CODE);
         applyCheckboxValue('s-local-light', s.USE_LOCAL_LIGHT);
         applyCheckboxValue('s-local-fallback', s.USE_LOCAL_FALLBACK);
-        // A2A settings
-        applyCheckboxValue('s-a2a-enabled', s.A2A_ENABLED);
-        if (s.A2A_PORT) applyInputValue('s-a2a-port', s.A2A_PORT);
-        applyInputValue('s-a2a-host', s.A2A_HOST);
-        applyInputValue('s-a2a-agent-name', s.A2A_AGENT_NAME);
-        applyInputValue('s-a2a-agent-description', s.A2A_AGENT_DESCRIPTION);
-        if (s.A2A_MAX_CONCURRENT) applyInputValue('s-a2a-max-concurrent', s.A2A_MAX_CONCURRENT);
-        if (s.A2A_TASK_TTL_HOURS) applyInputValue('s-a2a-ttl-hours', s.A2A_TASK_TTL_HOURS);
         resetSecretClearFlags(page);
         syncEffortSegments(page);
         syncRuntimeModeBridgeState();
@@ -538,28 +536,20 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
             USE_LOCAL_CODE: byId('s-local-code').checked,
             USE_LOCAL_LIGHT: byId('s-local-light').checked,
             USE_LOCAL_FALLBACK: byId('s-local-fallback').checked,
-            // A2A settings
-            A2A_ENABLED: byId('s-a2a-enabled')?.checked ?? false,
-            A2A_PORT: readInt('s-a2a-port', 18800),
-            A2A_HOST: (byId('s-a2a-host')?.value || '127.0.0.1').trim(),
-            A2A_AGENT_NAME: (byId('s-a2a-agent-name')?.value || '').trim(),
-            A2A_AGENT_DESCRIPTION: (byId('s-a2a-agent-description')?.value || '').trim(),
-            A2A_MAX_CONCURRENT: readInt('s-a2a-max-concurrent', 3),
-            A2A_TASK_TTL_HOURS: readInt('s-a2a-ttl-hours', 24),
             OPENAI_BASE_URL: byId('s-openai-base-url').value.trim(),
             OPENAI_COMPATIBLE_BASE_URL: byId('s-openai-compatible-base-url').value.trim(),
             CLOUDRU_FOUNDATION_MODELS_BASE_URL: byId('s-cloudru-base-url').value.trim(),
-            TELEGRAM_CHAT_ID: byId('s-telegram-chat-id').value.trim(),
+            TELEGRAM_CHAT_ID: byId('s-telegram-chat-id')?.value.trim() || '',
         };
 
-        collectSecretValue('s-openrouter', body);
-        collectSecretValue('s-openai', body);
-        collectSecretValue('s-openai-compatible-key', body);
-        collectSecretValue('s-cloudru-key', body);
-        collectSecretValue('s-anthropic', body);
-        collectSecretValue('s-network-password', body);
-        collectSecretValue('s-telegram-token', body);
-        collectSecretValue('s-gh-token', body);
+        page.querySelectorAll('[data-secret-setting]').forEach((input) => {
+            collectSecretValue(input.id, body);
+        });
+        const customKey = (byId('s-custom-secret-key')?.value || '').trim().toUpperCase();
+        const customValue = byId('s-custom-secret-value')?.value || '';
+        if (/^[A-Z][A-Z0-9_]{2,}$/.test(customKey)) {
+            body[customKey] = customValue;
+        }
 
         return body;
     }

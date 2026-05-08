@@ -352,9 +352,6 @@ def test_immediate_changed_flag_for_budget_keys():
     assert "OUROBOROS_SOFT_TIMEOUT_SEC" in immediate_keys
     assert "OUROBOROS_HARD_TIMEOUT_SEC" in immediate_keys
     assert "OUROBOROS_TOOL_TIMEOUT_SEC" in immediate_keys
-    # Integrations applied inside api_settings_post — also immediate
-    assert "TELEGRAM_BOT_TOKEN" in immediate_keys
-    assert "TELEGRAM_CHAT_ID" in immediate_keys
     assert "GITHUB_TOKEN" in immediate_keys
     assert "GITHUB_REPO" in immediate_keys
     # PER_TASK_COST_USD is NOT immediate — it applies on next task via agent.py
@@ -381,6 +378,23 @@ def test_next_task_changed_excludes_immediate_and_restart():
         if k not in _IMMEDIATE_KEYS and k not in _RESTART_REQUIRED_KEYS
     ]
     assert next_task == ["OUROBOROS_MODEL"]
+
+
+def test_merge_settings_payload_accepts_custom_secret_keys():
+    import server as srv
+
+    merged = srv._merge_settings_payload({}, {"SLACK_WEBHOOK_URL": "https://hooks.example/token"})
+
+    assert merged["SLACK_WEBHOOK_URL"] == "https://hooks.example/token"
+    assert "OUROBOROS_EVIL" not in srv._merge_settings_payload({}, {"OUROBOROS_EVIL": "1"})
+
+
+def test_merge_settings_payload_preserves_telegram_chat_id():
+    import server as srv
+
+    merged = srv._merge_settings_payload({}, {"TELEGRAM_CHAT_ID": "12345"})
+
+    assert merged["TELEGRAM_CHAT_ID"] == "12345"
 
 
 def test_handle_task_hot_reload_failure_does_not_crash(tmp_path, monkeypatch):

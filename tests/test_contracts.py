@@ -821,6 +821,10 @@ def test_plugin_api_surface_is_frozen():
         "get_settings",
         "get_state_dir",
         "get_runtime_info",
+        "register_supervised_task",
+        "register_companion_process",
+        "subscribe_event",
+        "get_skill_token",
     }
     members = {
         m for m in dir(PluginAPI)

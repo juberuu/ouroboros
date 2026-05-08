@@ -3,6 +3,7 @@ import { renderPageHeader, renderTabStrip } from './page_header.js';
 const SETTINGS_ICON = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><circle cx="12" cy="12" r="3"/></svg>';
 const SETTINGS_TABS = [
     { value: 'providers', label: 'Providers' },
+    { value: 'secrets', label: 'Secrets' },
     { value: 'models', label: 'Models' },
     { value: 'behavior', label: 'Behavior' },
     { value: 'integrations', label: 'Integrations' },
@@ -77,6 +78,61 @@ function effortField({ id, label, defaultValue }) {
                 <button type="button" class="settings-effort-btn" data-effort-value="high">High</button>
             </div>
         </div>
+    `;
+}
+
+const SECRET_KEYS = [
+    ['OPENROUTER_API_KEY', 'OpenRouter API Key', 'sk-or-...'],
+    ['OPENAI_API_KEY', 'OpenAI API Key', 'sk-...'],
+    ['OPENAI_COMPATIBLE_API_KEY', 'OpenAI-compatible API Key', 'Compatible provider key'],
+    ['CLOUDRU_FOUNDATION_MODELS_API_KEY', 'Cloud.ru Foundation Models API Key', 'Cloud.ru key'],
+    ['ANTHROPIC_API_KEY', 'Anthropic API Key', 'sk-ant-...'],
+    ['TELEGRAM_BOT_TOKEN', 'Telegram Bot Token', 'BotFather token'],
+    ['GITHUB_TOKEN', 'GitHub Token', 'ghp_...'],
+    ['OUROBOROS_NETWORK_PASSWORD', 'Network Password', 'Required for LAN/Docker binds'],
+];
+
+function secretSettingsSection() {
+    return `
+        <section class="settings-card">
+            <h3>Stored Secrets</h3>
+            <div class="settings-section-copy">
+                Central place for API keys, bridge tokens, passwords, and future skill-requested secrets.
+                Skills only receive grant-only keys after explicit owner approval.
+            </div>
+            <div class="form-grid two">
+                ${SECRET_KEYS.map(([key, label, placeholder]) => secretField({
+                    id: `s-secret-${key.toLowerCase().replace(/_/g, '-')}`,
+                    settingKey: key,
+                    label,
+                    placeholder,
+                })).join('')}
+                <div class="form-field">
+                    <label>Telegram Chat ID (optional)</label>
+                    <input id="s-telegram-chat-id" placeholder="123456789">
+                    <div class="settings-inline-note">Used by the optional Telegram bridge skill to pin replies to one chat.</div>
+                </div>
+            </div>
+        </section>
+        <section class="settings-card">
+            <h3>Add Custom Key</h3>
+            <div class="settings-section-copy">
+                Optional key/value storage for future skills. Use uppercase names such as <code>SLACK_WEBHOOK_URL</code>.
+                Saving an empty value clears that custom key.
+            </div>
+            <div class="form-row">
+                <div class="form-field">
+                    <label>Key</label>
+                    <input id="s-custom-secret-key" placeholder="SLACK_WEBHOOK_URL" spellcheck="false">
+                </div>
+                <div class="form-field">
+                    <label>Value</label>
+                    <div class="secret-input-row">
+                        <input id="s-custom-secret-value" class="secret-input" type="password" placeholder="Secret value">
+                    </div>
+                </div>
+            </div>
+        </section>
     `;
 }
 
@@ -226,6 +282,10 @@ export function renderSettingsPage() {
                     </div>
                 </section>
 
+                <section class="settings-panel" data-settings-panel="secrets">
+                    ${secretSettingsSection()}
+                </section>
+
                 <section class="settings-panel" data-settings-panel="models">
                     <div class="form-section">
                         <h3>Model Routing</h3>
@@ -364,23 +424,6 @@ export function renderSettingsPage() {
 
                 <section class="settings-panel" data-settings-panel="integrations">
                     <div class="form-section">
-                        <h3>Telegram Bridge</h3>
-                        <div class="form-row">${secretField({
-                            id: 's-telegram-token',
-                            settingKey: 'TELEGRAM_BOT_TOKEN',
-                            label: 'Bot Token',
-                            placeholder: '123456:ABCDEF...',
-                        })}</div>
-                        <div class="form-row">
-                            <div class="form-field">
-                                <label>Primary Chat ID (optional)</label>
-                                <input id="s-telegram-chat-id" placeholder="123456789">
-                            </div>
-                        </div>
-                        <div class="settings-inline-note">If no primary chat is pinned, the bridge binds to the first active Telegram chat and keeps replies attached there.</div>
-                    </div>
-
-                    <div class="form-section">
                         <h3>GitHub</h3>
                         <div class="form-row">${secretField({
                             id: 's-gh-token',
@@ -395,46 +438,6 @@ export function renderSettingsPage() {
                             </div>
                         </div>
                         <div class="settings-inline-note">Only needed for in-app remote sync features. Safe to leave empty if you work locally.</div>
-                    </div>
-                    <div class="form-section">
-                        <h3>A2A Protocol</h3>
-                        <div class="settings-section-copy">Agent-to-Agent communication server. Disabled by default. Requires restart to toggle.</div>
-                        <div class="form-row">
-                            <div class="form-field checkbox-field">
-                                <label for="s-a2a-enabled">Enable A2A Server</label>
-                                <input type="checkbox" id="s-a2a-enabled">
-                            </div>
-                        </div>
-                        <div class="form-grid two">
-                            <div class="form-field">
-                                <label for="s-a2a-host">A2A Host</label>
-                                <input type="text" id="s-a2a-host" placeholder="127.0.0.1">
-                            </div>
-                            <div class="form-field">
-                                <label for="s-a2a-port">A2A Port</label>
-                                <input type="number" id="s-a2a-port" placeholder="18800">
-                            </div>
-                        </div>
-                        <div class="form-grid two">
-                            <div class="form-field">
-                                <label for="s-a2a-agent-name">Agent Name (override)</label>
-                                <input type="text" id="s-a2a-agent-name" placeholder="Auto-detected from identity.md">
-                            </div>
-                            <div class="form-field">
-                                <label for="s-a2a-agent-description">Agent Description (override)</label>
-                                <input type="text" id="s-a2a-agent-description" placeholder="Auto-detected from identity.md">
-                            </div>
-                        </div>
-                        <div class="form-grid two">
-                            <div class="form-field">
-                                <label for="s-a2a-max-concurrent">Max Concurrent Tasks</label>
-                                <input type="number" id="s-a2a-max-concurrent" placeholder="3">
-                            </div>
-                            <div class="form-field">
-                                <label for="s-a2a-ttl-hours">Task TTL (hours)</label>
-                                <input type="number" id="s-a2a-ttl-hours" placeholder="24">
-                            </div>
-                        </div>
                     </div>
                 </section>
 

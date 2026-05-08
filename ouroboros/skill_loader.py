@@ -671,18 +671,55 @@ def save_review_state(
 def requested_core_setting_keys(env_keys: List[str]) -> List[str]:
     """Return manifest-requested core keys that require explicit grants."""
     forbidden_upper = {key.upper() for key in FORBIDDEN_SKILL_SETTINGS}
+    try:
+        from ouroboros.config import SETTINGS_DEFAULTS, load_settings
+        settings = load_settings()
+        custom_secret_upper = {
+            str(key).upper()
+            for key in settings
+            if str(key).upper() not in SETTINGS_DEFAULTS
+            and str(key).upper().replace("_", "").isalnum()
+        }
+    except Exception:
+        custom_secret_upper = set()
     out: List[str] = []
     for raw_key in env_keys or []:
         key = str(raw_key or "").strip().upper()
-        if key and key in forbidden_upper and key not in out:
+        if key and (key in forbidden_upper or key in custom_secret_upper) and key not in out:
             out.append(key)
     return out
+
+
+_GRANTABLE_SKILL_PERMISSIONS = frozenset({
+    "inject_chat",
+    "subscribe_event:chat.outbound",
+    "subscribe_event:chat.typing",
+    "subscribe_event:chat.photo",
+})
+
+
+def requested_skill_permissions(
+    permissions: List[str],
+    subscribe_events: Optional[List[str]] = None,
+) -> List[str]:
+    """Return manifest-requested privileged permissions needing owner grants."""
+    requested: List[str] = []
+    permission_set = {str(item or "").strip() for item in (permissions or [])}
+    if "inject_chat" in permission_set:
+        requested.append("inject_chat")
+    if "subscribe_event" in permission_set:
+        for raw_topic in subscribe_events or []:
+            topic = str(raw_topic or "").strip()
+            grant = f"subscribe_event:{topic}"
+            if grant in _GRANTABLE_SKILL_PERMISSIONS and grant not in requested:
+                requested.append(grant)
+    return requested
 
 
 def load_skill_grants(drive_root: pathlib.Path, name: str) -> Dict[str, Any]:
     data = read_json_dict(skill_state_dir(drive_root, name) / GRANTS_FILENAME)
     if not isinstance(data, dict):
-        return {"granted_keys": [], "updated_at": ""}
+        return {"granted_keys": [], "granted_permissions": [], "updated_at": ""}
     keys = []
     for raw_key in data.get("granted_keys") or []:
         key = str(raw_key or "").strip().upper()
@@ -693,9 +730,21 @@ def load_skill_grants(drive_root: pathlib.Path, name: str) -> Dict[str, Any]:
         key = str(raw_key or "").strip().upper()
         if key and key not in requested:
             requested.append(key)
+    permissions = []
+    for raw_permission in data.get("granted_permissions") or []:
+        permission = str(raw_permission or "").strip()
+        if permission and permission not in permissions:
+            permissions.append(permission)
+    requested_permissions = []
+    for raw_permission in data.get("requested_permissions") or []:
+        permission = str(raw_permission or "").strip()
+        if permission and permission not in requested_permissions:
+            requested_permissions.append(permission)
     return {
         "granted_keys": keys,
         "requested_keys": requested,
+        "granted_permissions": permissions,
+        "requested_permissions": requested_permissions,
         "content_hash": str(data.get("content_hash") or ""),
         "updated_at": str(data.get("updated_at") or ""),
     }
@@ -708,6 +757,8 @@ def save_skill_grants(
     *,
     content_hash: str,
     requested_keys: List[str],
+    granted_permissions: Optional[List[str]] = None,
+    requested_permissions: Optional[List[str]] = None,
 ) -> None:
     """Persist a skill key grant.
 
@@ -736,11 +787,24 @@ def save_skill_grants(
         key = str(raw_key or "").strip().upper()
         if key and key in allowed and key not in merged:
             merged.append(key)
+    allowed_permissions = set(requested_permissions or [])
+    existing_permissions: List[str] = []
+    if persisted_match:
+        for raw_permission in existing.get("granted_permissions") or []:
+            permission = str(raw_permission or "").strip()
+            if permission and permission in allowed_permissions and permission not in existing_permissions:
+                existing_permissions.append(permission)
+    for raw_permission in granted_permissions or []:
+        permission = str(raw_permission or "").strip()
+        if permission and permission in allowed_permissions and permission not in existing_permissions:
+            existing_permissions.append(permission)
     atomic_write_json(
         skill_state_dir(drive_root, name) / GRANTS_FILENAME,
         {
             "granted_keys": merged,
             "requested_keys": sorted(allowed),
+            "granted_permissions": sorted(existing_permissions),
+            "requested_permissions": sorted(allowed_permissions),
             "content_hash": str(content_hash or ""),
             "updated_at": datetime.now(timezone.utc).isoformat(),
         },
@@ -749,12 +813,24 @@ def save_skill_grants(
 
 def grant_status_for_skill(drive_root: pathlib.Path, skill: LoadedSkill) -> Dict[str, Any]:
     requested = requested_core_setting_keys(list(skill.manifest.env_from_settings or []))
+    requested_permissions = requested_skill_permissions(
+        list(skill.manifest.permissions or []),
+        list(getattr(skill.manifest, "subscribe_events", []) or []),
+    )
     grants = load_skill_grants(drive_root, skill.name)
     grant_hash_ok = str(grants.get("content_hash") or "") == str(skill.content_hash or "")
     grant_request_ok = sorted(grants.get("requested_keys") or []) == sorted(requested)
+    permission_request_ok = sorted(grants.get("requested_permissions") or []) == sorted(requested_permissions)
     persisted_grants = set(grants.get("granted_keys") or []) if grant_hash_ok and grant_request_ok else set()
+    persisted_permissions = (
+        set(grants.get("granted_permissions") or [])
+        if grant_hash_ok and permission_request_ok
+        else set()
+    )
     granted = [key for key in requested if key in persisted_grants]
+    granted_permissions = [perm for perm in requested_permissions if perm in persisted_permissions]
     missing = [key for key in requested if key not in set(granted)]
+    missing_permissions = [perm for perm in requested_permissions if perm not in set(granted_permissions)]
     review_ready = skill.review.status == _REVIEW_STATUS_PASS and not skill.review.is_stale_for(skill.content_hash)
     # v5.2.2 dual-track grants: both ``script`` and ``extension`` skills
     # are eligible for owner core-key grants. ``script`` skills get the
@@ -763,13 +839,16 @@ def grant_status_for_skill(drive_root: pathlib.Path, skill: LoadedSkill) -> Dict
     # in-process plugin code. Other manifest types (``instruction``)
     # cannot receive core keys at all.
     eligible_type = skill.manifest.is_script() or skill.manifest.is_extension()
-    unsupported = bool(requested and not eligible_type)
+    unsupported = bool((requested or requested_permissions) and not eligible_type)
     return {
         "requested_keys": requested,
         "granted_keys": granted,
         "missing_keys": missing,
-        "all_granted": not missing and not unsupported,
-        "usable": review_ready and not missing and not unsupported,
+        "requested_permissions": requested_permissions,
+        "granted_permissions": granted_permissions,
+        "missing_permissions": missing_permissions,
+        "all_granted": not missing and not missing_permissions and not unsupported,
+        "usable": review_ready and not missing and not missing_permissions and not unsupported,
         "unsupported_for_skill_type": unsupported,
         "content_hash": grants.get("content_hash", ""),
         "updated_at": grants.get("updated_at", ""),

@@ -19,6 +19,7 @@ import pathlib
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
 from ouroboros.utils import utc_now_iso, read_text, write_text
 
 from ouroboros.platform_layer import (
@@ -478,9 +479,8 @@ def _count_lines(path: pathlib.Path) -> int:
 def _read_chat_entries(path: pathlib.Path) -> List[Dict[str, Any]]:
     """Read ALL entries from chat.jsonl.
 
-    Filters out entries with negative chat_id values (e.g. A2A virtual
-    chat_ids starting at -1001) so they do not pollute the agent's
-    long-term dialogue memory. This guard is in sync with the same filter
+    Filters out entries with A2A virtual chat_id values so they do not
+    pollute the agent's long-term dialogue memory. This guard is in sync with the same filter
     in memory.py::chat_history and server_history_api.py::api_chat_history.
     """
     if not path.exists():
@@ -495,11 +495,8 @@ def _read_chat_entries(path: pathlib.Path) -> List[Dict[str, Any]]:
                 entry = json.loads(line)
             except (json.JSONDecodeError, ValueError):
                 continue
-            try:
-                if int(entry.get("chat_id", 1)) < 0:
-                    continue
-            except (TypeError, ValueError):
-                pass
+            if is_a2a_chat_id(entry.get("chat_id", 1)):
+                continue
             entries.append(entry)
     return entries
 

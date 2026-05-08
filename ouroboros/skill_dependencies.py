@@ -49,7 +49,9 @@ def normalize_declared_dependency_specs(raw: Any) -> tuple[List[Dict[str, Any]],
 
 def _manifest_install_specs(manifest: Any) -> List[Dict[str, Any]]:
     extras = dict(getattr(manifest, "raw_extra", {}) or {})
-    raw = extras.get("install")
+    raw = extras.get("install_specs")
+    if raw in (None, "", [], {}):
+        raw = extras.get("install")
     if raw in (None, "", [], {}):
         raw = extras.get("dependencies")
     auto, _manual, _warnings = normalize_declared_dependency_specs(raw)

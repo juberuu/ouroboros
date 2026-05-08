@@ -334,23 +334,12 @@ provenance are skill trust/control-plane state: they are mutated only
 through the review, toggle, launcher-grant, self-authored finalize, and
 marketplace paths, not through generic agent/browser file writes.
 
-Self-authored skills are a deliberately separate, owner-selected trust
-path. This is not a marketplace / user-drop bypass and not an exemption
-for arbitrary external code: it applies only when the active Ouroboros
-agent creates a new `data/skills/external/<skill>/SKILL.md` through the
-tool layer, which records both payload-local `.self_authored.json` and
-owner-state `data/state/skills/<skill>/self_authored.json`. For that
-dual-marked payload, `review_skill` uses deterministic preflight instead
-of tri-model reviewer models: syntax checks, manifest checks,
-entry/script existence, and widget render-schema validation. If
-preflight passes, `review_skill` may persist a PASS with
-`reviewer_models=["self_authored:v5.8.2"]`, auto-grant configured core
-keys requested by the manifest, enable the skill after dependency
-reconciliation, and reconcile extension registrations. If preflight
-fails, keys are missing from settings, or dependencies fail, no
-enablement is written. This is an explicit owner policy trade-off for
-agent-authored local capabilities; third-party folders and marketplace
-skills still use tri-model skill review and owner grant/enable flows.
+Self-authored skills carry payload-local `.self_authored.json` and
+owner-state `data/state/skills/<skill>/self_authored.json` provenance,
+but they do not bypass review. As of v5.9.0, `review_skill` routes them
+through the same tri-model skill review as marketplace and user-managed
+skills; no deterministic PASS, key grant, permission grant, or enablement
+is written automatically.
 
 The Skills UI Repair affordance is only a task starter: it asks Ouroboros
 to edit payload files and rerun `review_skill`. It must not write
@@ -373,7 +362,7 @@ launcher-seeded skills.
 
 ### Output contract
 
-Reviewers return a JSON array with one entry per item below (8 entries
+Reviewers return a JSON array with one entry per item below (12 entries
 total). Each entry carries `item`, `verdict` (`PASS`/`FAIL`), `severity`
 (`critical`/`advisory`), and `reason`.
 
@@ -389,6 +378,10 @@ total). Each entry carries `item`, `verdict` (`PASS`/`FAIL`), `severity`
 | 6 | timeout_and_output_discipline | Is `timeout_sec` reasonable for the stated workload (default 60, hard cap 300)? Do scripts print to stdout in chunks that the runtime can cap, rather than streaming unbounded output? Unbounded loops without a `break`/timeout path are a concrete FAIL. | advisory |
 | 7 | extension_namespace_discipline | `type: extension` only: does the extension register its tool/route/ws-handler/ui-tab under the namespace derived from its `name` (e.g. provider-safe tool/ws names like `ext_<len>_<token>_<surface>`, route `/api/extensions/<name>/…`)? Tool and WS short names must be alphanumeric/underscore and at most 24 characters. Namespace collisions with built-in surfaces are a concrete FAIL. If the extension uses `api.send_ws_message`, are emitted event names short/provider-safe and paired with reviewed host-owned widget `subscription` components rather than arbitrary same-origin JavaScript? If the extension declares streaming UI, is it a reviewed extension route consumed by a host-owned `stream` component? If the extension owns background resources (threads, sockets, EventSource clients, subprocesses), does it register cleanup with `api.on_unload(callback)`? If the extension declares a widget render block, is it one of the host-owned schemas (`iframe`, `inline_card`, or declarative v1: forms/actions, markdown/code, JSON/kv/table, tabs/chart, stream/subscription, progress/poll, file/gallery/media, **map/calendar/kanban (v5.7.0)**), with media sourced from extension routes or safe data URLs and no arbitrary same-origin JavaScript? For non-extension skills, verdict PASS with reason "Not applicable — type != extension." | critical |
 | 8 | widget_module_safety | **v5.7.0+. ``kind: "module"`` widgets only.** Does the extension-supplied ``widget.js`` avoid touching ``document.cookie``, ``localStorage``, ``sessionStorage``, ``window.parent`` data, or ``fetch``/``XMLHttpRequest`` URLs OUTSIDE ``/api/extensions/<skill>/``? The host fetches reviewed ``widget.js`` through ``GET /api/extensions/<skill>/module/<entry>``, embeds the source into a sandboxed ``<iframe srcdoc sandbox="allow-scripts">`` with no ``allow-same-origin``, and injects a parent-mediated ``fetch`` bridge that rejects paths outside the owning skill route prefix. Reviewers must still confirm at the source level that the script is NOT trying to escape the sandbox via arbitrary ``postMessage`` protocols, opaque-origin storage probes, or unauthorised cross-origin fetches. Acceptable interactions: ``fetch('/api/extensions/<skill>/...')`` (through the host bridge), ``window.OuroborosWidget.fetch('/api/extensions/<skill>/...')``, and host-supplied data attributes. Mark non-module widgets and non-extension skills PASS with reason "Not applicable". | critical (when kind=module) |
+| 9 | inject_chat_minimization | Does any use of the `inject_chat` permission have a narrow, user-facing transport purpose? The skill must never synthesize owner-like slash commands, must tag injected messages with its skill source, and must rate-limit or backpressure inbound traffic. Any attempt to inject `/panic`, `/restart`, `/review`, `/evolve`, `/bg`, `/status`, or owner-impersonating instructions is a concrete FAIL. Mark PASS with reason "Not applicable" when `inject_chat` is not declared. | critical |
+| 10 | event_subscription_minimization | Are `subscribe_event` and `subscribe_events` limited to the minimum host event topics required by the skill? `chat.outbound`, `chat.typing`, and `chat.photo` expose owner/agent conversation data and require explicit justification. Wildcards, undeclared topics, or forwarding subscribed chat content to unrelated external services are concrete FAILs. Mark PASS with reason "Not applicable" when `subscribe_event` is not declared. | critical |
+| 11 | companion_process_safety | For `companion_process` / `supervised_task` skills: is every command declared as an argument list (not shell string), using an allowlisted runtime, with no writes outside `skill_dir` / `state_dir`, no unbounded restart loop, and cleanup on unload/panic? Does the process avoid inheriting secrets except through reviewed `env_from_settings` grants? Mark PASS with reason "Not applicable" when no long-lived process/task is declared. | critical |
+| 12 | host_token_handling | If the skill calls the Host Service API, does it use the provided `SkillToken.use_in_request()` only at request construction sites, avoid logging/serializing tokens, and keep all host-service calls on the loopback endpoint? Printing, persisting, exfiltrating, or embedding the token into user-visible output is a concrete FAIL. Mark PASS with reason "Not applicable" when the skill does not access the Host Service API. | critical |
 
 ### Severity rules
 
@@ -409,6 +402,9 @@ total). Each entry carries `item`, `verdict` (`PASS`/`FAIL`), `severity`
   runtime rule deliberately does not rely only on manifest `ui_tab`
   detection because extensions can register module widgets dynamically from
   `plugin.py` via `PluginAPI.register_ui_tab`.
+- Items 9–12 are critical only when their corresponding capability is
+  declared or used. Reviewers MUST mark them PASS with reason "Not
+  applicable" for skills outside that surface.
 
 ### Marketplace-installed skill review (ClawHub provenance)
 
@@ -419,7 +415,7 @@ publisher-authored manifest, preserved by the marketplace adapter
 (`ouroboros/marketplace/adapter.py`) before it wrote the translated
 `SKILL.md` that the runtime executes. Reviewers MUST cross-check the
 two manifests as part of items 2 (`permissions_honesty`) and 5
-(`env_allowlist`) without inflating the structured 8-item output:
+(`env_allowlist`) without inflating the structured 12-item output:
 
 1. **Permissions parity** — confirm the translated `permissions` list
    captures every effect the original `metadata.openclaw.requires.bins`

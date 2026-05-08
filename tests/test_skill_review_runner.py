@@ -4,7 +4,14 @@ import pathlib
 from types import SimpleNamespace
 
 import ouroboros.skill_lifecycle_queue as lifecycle_queue
-from ouroboros.skill_loader import compute_content_hash, load_enabled, load_review_state, load_skill_grants
+from ouroboros.skill_loader import (
+    SkillReviewState,
+    compute_content_hash,
+    load_enabled,
+    load_review_state,
+    load_skill_grants,
+    save_review_state,
+)
 from ouroboros.skill_review import SkillReviewOutcome
 from ouroboros.skill_review_runner import _review_result_message, run_skill_review_lifecycle_blocking
 
@@ -141,7 +148,7 @@ def test_review_result_message_prefers_non_pass_findings_and_marks_omissions():
     assert "full findings in Skills page" in message
 
 
-def test_self_authored_review_lifecycle_finalizes_without_triad(tmp_path, monkeypatch):
+def test_self_authored_review_lifecycle_uses_triad(tmp_path, monkeypatch):
     _reset_queue()
     sent = []
     drive_root = tmp_path / "drive"
@@ -169,26 +176,43 @@ def test_self_authored_review_lifecycle_finalizes_without_triad(tmp_path, monkey
         lambda *_a, **_k: ("extension_loaded", "ready"),
     )
 
-    def fail_if_called(_ctx, _skill_name):
-        raise AssertionError("tri-model review should be skipped for self-authored skills")
+    def fake_review(_ctx, _skill_name):
+        outcome = SkillReviewOutcome(
+            skill_name="alpha",
+            status="pass",
+            content_hash=content_hash,
+            reviewer_models=["reviewer-a", "reviewer-b", "reviewer-c"],
+            findings=[],
+        )
+        save_review_state(
+            drive_root,
+            "alpha",
+            SkillReviewState(
+                status=outcome.status,
+                content_hash=outcome.content_hash,
+                findings=outcome.findings,
+                reviewer_models=outcome.reviewer_models,
+            ),
+        )
+        return outcome
 
     payload = run_skill_review_lifecycle_blocking(
         ctx,
         "alpha",
         source="test",
-        review_impl=fail_if_called,
+        review_impl=fake_review,
         repo_path=str(drive_root / "skills"),
     )
 
     assert payload["status"] == "pass"
-    assert payload["auto_flow"] is True
-    assert load_enabled(drive_root, "alpha") is True
+    assert payload["auto_flow"] is False
+    assert load_enabled(drive_root, "alpha") is False
     review = load_review_state(drive_root, "alpha")
     assert review.status == "pass"
     assert review.content_hash == content_hash
-    assert review.reviewer_models == ["self_authored:v5.8.2"]
+    assert review.reviewer_models == ["reviewer-a", "reviewer-b", "reviewer-c"]
     grants = load_skill_grants(drive_root, "alpha")
-    assert grants["granted_keys"] == ["OPENROUTER_API_KEY"]
+    assert grants["granted_keys"] == []
 
 
 def test_self_authored_review_does_not_enable_when_deps_fail(tmp_path, monkeypatch):
@@ -210,12 +234,18 @@ def test_self_authored_review_does_not_enable_when_deps_fail(tmp_path, monkeypat
         ctx,
         "alpha",
         source="test",
-        review_impl=lambda _ctx, _skill: (_ for _ in ()).throw(AssertionError("triad should be skipped")),
+        review_impl=lambda _ctx, _skill: SkillReviewOutcome(
+            skill_name="alpha",
+            status="pass",
+            content_hash=compute_content_hash(skill_dir, manifest_entry="plugin.py"),
+            reviewer_models=["reviewer"],
+        ),
         repo_path=str(drive_root / "skills"),
     )
 
-    assert payload["status"] == "pending"
-    assert "pip exploded" in payload["error"]
+    assert payload["status"] == "pass"
+    assert payload["deps_status"] == "failed"
+    assert "pip exploded" in payload["deps_error"]
     assert load_enabled(drive_root, "alpha") is False
 
 
@@ -238,10 +268,14 @@ def test_self_authored_review_requires_configured_requested_keys(tmp_path, monke
         ctx,
         "alpha",
         source="test",
-        review_impl=lambda _ctx, _skill: (_ for _ in ()).throw(AssertionError("triad should be skipped")),
+        review_impl=lambda _ctx, _skill: SkillReviewOutcome(
+            skill_name="alpha",
+            status="pass",
+            content_hash=compute_content_hash(skill_dir, manifest_entry="plugin.py"),
+            reviewer_models=["reviewer"],
+        ),
         repo_path=str(drive_root / "skills"),
     )
 
-    assert payload["status"] == "pending"
-    assert "not configured" in payload["error"]
+    assert payload["status"] == "pass"
     assert load_enabled(drive_root, "alpha") is False

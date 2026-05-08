@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
 import os
 import pathlib
@@ -456,125 +455,6 @@ def _review_result_message(outcome: Any) -> str:
     return f"Review {status}{f': {summary}' if summary else ''}"
 
 
-def _preflight_self_authored_skill(ctx: Any, skill_name: str) -> tuple[bool, list[dict[str, Any]], str]:
-    """Run cheap preflight for a self-authored skill without mutating review state."""
-    try:
-        from ouroboros.tools.skill_preflight import _handle_skill_preflight  # pylint: disable=W0212
-
-        raw = _handle_skill_preflight(ctx, skill=skill_name)
-        data = json.loads(raw)
-        findings: list[dict[str, Any]] = []
-        for section in ("manifest", "widgets", "permissions", "files"):
-            for item in data.get(section) or []:
-                if isinstance(item, dict):
-                    findings.append({"section": section, **item})
-        return bool(data.get("ok")), findings, ""
-    except Exception as exc:
-        return False, [], f"{type(exc).__name__}: {exc}"
-
-
-def _auto_grant_self_authored_keys(drive_root: pathlib.Path, loaded: Any, content_hash: str) -> tuple[list[str], list[str]]:
-    requested = requested_core_setting_keys(list(loaded.manifest.env_from_settings or []))
-    if not requested:
-        return [], []
-    settings = load_settings()
-    granted = [key for key in requested if settings.get(key)]
-    if granted:
-        save_skill_grants(
-            drive_root,
-            loaded.name,
-            granted,
-            content_hash=content_hash,
-            requested_keys=requested,
-        )
-    return requested, granted
-
-
-def _self_authored_outcome(
-    ctx: Any,
-    skill_name: str,
-    *,
-    repo_path: str | None,
-    progress: JobProgressTarget | None = None,
-) -> SkillReviewOutcome:
-    """Finalize an agent-authored skill without spending tri-model review tokens."""
-    drive_root = pathlib.Path(ctx.drive_root)
-    loaded = find_skill(drive_root, skill_name, repo_path=repo_path)
-    if loaded is None:
-        return SkillReviewOutcome(skill_name=skill_name, status="pending", error=f"Skill {skill_name!r} not found")
-    if not getattr(loaded, "is_self_authored", False):
-        return _default_review_skill(ctx, skill_name)
-    if loaded.load_error:
-        return SkillReviewOutcome(skill_name=loaded.name, status="pending", error=f"Skill loader rejected payload: {loaded.load_error}")
-    if progress is not None:
-        progress.set("Running self-authored skill preflight...")
-    ok, preflight_findings, preflight_error = _preflight_self_authored_skill(ctx, loaded.name)
-    if not ok:
-        error = preflight_error or "self-authored preflight failed"
-        return SkillReviewOutcome(
-            skill_name=loaded.name,
-            status="pending",
-            findings=preflight_findings,
-            reviewer_models=["self_authored_preflight"],
-            content_hash=loaded.content_hash,
-            error=error,
-            raw_result=json.dumps({"preflight": preflight_findings, "error": error}, ensure_ascii=False),
-        )
-    content_hash = compute_content_hash(
-        loaded.skill_dir,
-        manifest_entry=loaded.manifest.entry,
-        manifest_scripts=loaded.manifest.scripts,
-    )
-    if progress is not None:
-        progress.set("Recording self-authored PASS...")
-    review_state = SkillReviewState(
-        status="pass",
-        content_hash=content_hash,
-        findings=[
-            {
-                "item": "self_authored_fast_path",
-                "verdict": "PASS",
-                "severity": "advisory",
-                "reason": "Agent-authored skill passed deterministic preflight; tri-model review skipped by owner policy.",
-                "model": "self_authored:v5.8.2",
-            }
-        ],
-        reviewer_models=["self_authored:v5.8.2"],
-        timestamp=utc_now_iso(),
-        raw_result=json.dumps({"preflight": preflight_findings}, ensure_ascii=False),
-    )
-    save_review_state(drive_root, loaded.name, review_state)
-    if progress is not None:
-        progress.set("Granting self-authored keys...")
-    requested_keys, granted_keys = _auto_grant_self_authored_keys(drive_root, loaded, content_hash)
-    missing_keys = [key for key in requested_keys if key not in set(granted_keys)]
-    if missing_keys:
-        return SkillReviewOutcome(
-            skill_name=loaded.name,
-            status="pending",
-            findings=review_state.findings,
-            reviewer_models=review_state.reviewer_models,
-            content_hash=content_hash,
-            error=(
-                "Self-authored skill requested core settings keys that are "
-                f"not configured in settings.json: {missing_keys}"
-            ),
-            raw_result=review_state.raw_result,
-        )
-    outcome = SkillReviewOutcome(
-        skill_name=loaded.name,
-        status="pass",
-        findings=review_state.findings,
-        reviewer_models=review_state.reviewer_models,
-        content_hash=content_hash,
-        raw_result=review_state.raw_result,
-    )
-    setattr(outcome, "auto_flow", True)
-    setattr(outcome, "auto_granted_keys", granted_keys)
-    setattr(outcome, "requested_keys", requested_keys)
-    return outcome
-
-
 async def run_skill_review_lifecycle(
     ctx: Any,
     skill_name: str,
@@ -593,19 +473,8 @@ async def run_skill_review_lifecycle(
 
     async def _run_review() -> SkillReviewOutcome:
         with _review_job_heartbeat(drive_root, skill_name):
-            loaded = find_skill(drive_root, skill_name, repo_path=repo_path)
-            if loaded is not None and getattr(loaded, "is_self_authored", False):
-                progress.set("Finalizing self-authored skill...")
-                outcome = await _to_thread_preserving_result(
-                    _self_authored_outcome,
-                    ctx,
-                    skill_name,
-                    repo_path=repo_path,
-                    progress=progress,
-                )
-            else:
-                progress.set("Running tri-model review…")
-                outcome = await _to_thread_preserving_result(review_impl, ctx, skill_name)
+            progress.set("Running tri-model review…")
+            outcome = await _to_thread_preserving_result(review_impl, ctx, skill_name)
         deps_status = "not_required"
         deps_error = ""
         if getattr(outcome, "status", "") == "pass":
@@ -681,18 +550,8 @@ def run_skill_review_lifecycle_blocking(
 
     def _run_review() -> SkillReviewOutcome:
         with _review_job_heartbeat(drive_root, skill_name):
-            loaded = find_skill(drive_root, skill_name, repo_path=repo_path)
-            if loaded is not None and getattr(loaded, "is_self_authored", False):
-                progress.set("Finalizing self-authored skill...")
-                outcome = _self_authored_outcome(
-                    ctx,
-                    skill_name,
-                    repo_path=repo_path,
-                    progress=progress,
-                )
-            else:
-                progress.set("Running tri-model review…")
-                outcome = review_impl(ctx, skill_name)
+            progress.set("Running tri-model review…")
+            outcome = review_impl(ctx, skill_name)
         deps_status = "not_required"
         deps_error = ""
         if getattr(outcome, "status", "") == "pass":

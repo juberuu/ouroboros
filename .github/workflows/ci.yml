@@ -62,6 +62,8 @@ jobs:
           pip install pytest
       - name: Run tests
         run: python -m pytest tests/ -q --tb=short
+      - name: Guard extracted transport imports stay out of core
+        run: python -m pytest tests/test_no_core_a2a_telegram_imports.py -q
 
   # ──────────────────────────────────────────────────────────────────
   # Tier 2: Full matrix (stable branch, manual, or tag push)
@@ -88,6 +90,8 @@ jobs:
           pip install pytest
       - name: Run tests
         run: python -m pytest tests/ -q --tb=short
+      - name: Guard extracted transport imports stay out of core
+        run: python -m pytest tests/test_no_core_a2a_telegram_imports.py -q
 
   # ──────────────────────────────────────────────────────────────────
   # Tier 2.5: Integration tests against real provider APIs

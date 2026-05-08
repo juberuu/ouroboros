@@ -81,8 +81,6 @@ TOOL_POLICY: Dict[str, str] = {
     "vlm_query": POLICY_SKIP,
     "browse_page": POLICY_SKIP,
     "browser_action": POLICY_SKIP,
-    "a2a_discover": POLICY_SKIP,
-    "a2a_status": POLICY_SKIP,
     "list_github_prs": POLICY_SKIP,
     "get_github_pr": POLICY_SKIP,
     "list_github_issues": POLICY_SKIP,
@@ -160,7 +158,6 @@ TOOL_POLICY: Dict[str, str] = {
     "comment_on_issue": POLICY_CHECK,
     "close_github_issue": POLICY_CHECK,
     "create_github_issue": POLICY_CHECK,
-    "a2a_send": POLICY_CHECK,
 
     # Delegates to the external Claude Agent SDK/CLI: the code actually
     # mutating the repo runs outside this process, so we keep one cheap LLM

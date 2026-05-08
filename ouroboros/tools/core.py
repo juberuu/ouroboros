@@ -23,6 +23,7 @@ _SKILL_OWNER_STATE_FILENAMES = frozenset({
     "review.json",
     "clawhub.json",
     "self_authored.json",
+    "auth_token.json",
     # v5.7.0: isolated dependency install state/fingerprint. If agents can
     # forge ``deps.json`` to {"status":"installed"} they can bypass the
     # new dependency enable gate. Treat it as owner/lifecycle state.
@@ -346,8 +347,11 @@ def _data_read(ctx: ToolContext, path: str, max_lines: int = 2000, start_line: i
     rather than burning a round on a confusing path-doubling error.
     """
     norm = _normalize_data_read_path(ctx, path)
+    target = ctx.drive_path(norm)
+    if _is_skill_owner_state_target(target, pathlib.Path(ctx.drive_root)):
+        return "DATA_READ_BLOCKED: skill owner state is not readable through generic data tools."
     try:
-        content = read_text(ctx.drive_path(norm))
+        content = read_text(target)
         start_raw, max_raw = _coerce_line_window(start_line, max_lines)
         if _is_cognitive_data_path(norm) and start_raw == 1 and max_raw == 2000:
             return content

@@ -52,6 +52,7 @@ SETTINGS_DEFAULTS = {
 
     "OUROBOROS_NETWORK_PASSWORD": "",
     "OUROBOROS_SERVER_HOST": "127.0.0.1",
+    "OUROBOROS_HOST_SERVICE_PORT": 8767,
     "OUROBOROS_MODEL": "anthropic/claude-opus-4.6",
     "OUROBOROS_MODEL_CODE": "anthropic/claude-opus-4.6",
     "OUROBOROS_MODEL_LIGHT": "anthropic/claude-sonnet-4.6",
@@ -108,14 +109,6 @@ SETTINGS_DEFAULTS = {
     "USE_LOCAL_LIGHT": False,
     "USE_LOCAL_FALLBACK": False,
     "OUROBOROS_FILE_BROWSER_DEFAULT": "",
-    # A2A (Agent-to-Agent) protocol — disabled by default; requires restart to toggle
-    "A2A_ENABLED": False,
-    "A2A_PORT": 18800,
-    "A2A_HOST": "127.0.0.1",
-    "A2A_AGENT_NAME": "",
-    "A2A_AGENT_DESCRIPTION": "",
-    "A2A_MAX_CONCURRENT": 3,
-    "A2A_TASK_TTL_HOURS": 24,
 }
 
 _VALID_EFFORTS = ("none", "low", "medium", "high")
@@ -773,6 +766,7 @@ def apply_settings_to_env(settings: dict) -> None:
         "OUROBOROS_SCOPE_REVIEW_MODEL",
         # Phase 2 runtime-mode + skills-repo plumbing (no runtime gating yet).
         "OUROBOROS_RUNTIME_MODE", "OUROBOROS_SKILLS_REPO_PATH",
+        "OUROBOROS_HOST_SERVICE_PORT",
         # v4.50+ ClawHub marketplace registry URL.
         "OUROBOROS_CLAWHUB_REGISTRY_URL",
         "OUROBOROS_EFFORT_TASK", "OUROBOROS_EFFORT_EVOLUTION",
@@ -783,9 +777,6 @@ def apply_settings_to_env(settings: dict) -> None:
         "LOCAL_MODEL_CHAT_FORMAT",
         "USE_LOCAL_MAIN", "USE_LOCAL_CODE", "USE_LOCAL_LIGHT", "USE_LOCAL_FALLBACK",
         "OUROBOROS_FILE_BROWSER_DEFAULT",
-        "A2A_ENABLED", "A2A_PORT", "A2A_HOST",
-        "A2A_AGENT_NAME", "A2A_AGENT_DESCRIPTION",
-        "A2A_MAX_CONCURRENT", "A2A_TASK_TTL_HOURS",
     ]
     for k in env_keys:
         val = settings.get(k)

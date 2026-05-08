@@ -16,7 +16,11 @@ from typing import Any, Dict, List, Tuple
 
 AUTO_KINDS = frozenset({"pip", "pipx", "uv", "node", "npm"})
 MANUAL_KINDS = frozenset({"brew", "apt", "apt-get", "go", "download", "cargo"})
-_PIP_PACKAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,120}([=<>!~]=?[A-Za-z0-9_.!*+-]+)?$")
+_PIP_PACKAGE_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,120}"
+    r"(\[[A-Za-z0-9_.-]+(,[A-Za-z0-9_.-]+)*\])?"
+    r"([=<>!~]=?[A-Za-z0-9_.!*+-]+(,[=<>!~]=?[A-Za-z0-9_.!*+-]+)*)?$"
+)
 _NPM_PACKAGE_RE = re.compile(r"^(@[a-z0-9_.-]+/)?[a-z0-9][a-z0-9_.-]{0,120}$")
 _CARGO_PACKAGE_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,120}$")
 
@@ -59,7 +63,10 @@ def _safe_package_name(kind: str, value: str) -> bool:
     text = str(value or "").strip()
     if not text or any(ch.isspace() for ch in text):
         return False
-    if any(ch in text for ch in "\"'`;$|&<>\\"):
+    forbidden = "\"'`;$|&\\"
+    if kind not in {"pip", "pipx", "uv"}:
+        forbidden += "<>"
+    if any(ch in text for ch in forbidden):
         return False
     if "://" in text or text.startswith((".", "/", "~")) or "+" in text or ":" in text:
         return False

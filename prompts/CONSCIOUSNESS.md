@@ -121,7 +121,7 @@ You have up to 5 rounds per wakeup. Use them wisely — each round costs money.
 ## User Messages
 
 The user communicates with you through the local message bus (Web UI), and
-optional Telegram bridge traffic can feed into that same live chat stream.
+reviewed transport skills may feed additional channels into that same live chat stream.
 Between tasks, you may notice new messages or patterns worth acting on.
 If you have something genuinely useful to say, use `send_user_message`.
 

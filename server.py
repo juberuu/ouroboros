@@ -16,6 +16,7 @@ import logging
 import os
 import inspect
 import pathlib
+import re
 import socket
 import sys
 import threading
@@ -95,6 +96,7 @@ _SECRET_SETTING_KEYS = {
     "GITHUB_TOKEN",
     "OUROBOROS_NETWORK_PASSWORD",
 }
+_CUSTOM_SECRET_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,}$")
 
 # ---------------------------------------------------------------------------
 # Runtime network binding (captured in main() from parse_server_args)
@@ -277,9 +279,6 @@ _IMMEDIATE_KEYS = frozenset({
     "OUROBOROS_SOFT_TIMEOUT_SEC",
     "OUROBOROS_HARD_TIMEOUT_SEC",
     "OUROBOROS_TOOL_TIMEOUT_SEC",
-    # Integration settings reconfigured inline in api_settings_post
-    "TELEGRAM_BOT_TOKEN",
-    "TELEGRAM_CHAT_ID",
     "GITHUB_TOKEN",
     "GITHUB_REPO",
 })
@@ -298,14 +297,6 @@ _RESTART_REQUIRED_KEYS = frozenset({
     "OPENAI_BASE_URL",
     "OPENAI_COMPATIBLE_BASE_URL",
     "CLOUDRU_FOUNDATION_MODELS_BASE_URL",
-    # A2A server requires restart when toggled or reconfigured
-    "A2A_ENABLED",
-    "A2A_PORT",
-    "A2A_HOST",
-    "A2A_AGENT_NAME",
-    "A2A_AGENT_DESCRIPTION",
-    "A2A_MAX_CONCURRENT",
-    "A2A_TASK_TTL_HOURS",
 })
 
 
@@ -341,6 +332,17 @@ def _merge_settings_payload(current: Dict[str, Any], body: Dict[str, Any]) -> Di
         if key in _SECRET_SETTING_KEYS and _looks_masked_secret(body[key]) and merged.get(key):
             continue
         merged[key] = body[key]
+    for key, value in body.items():
+        text_key = str(key or "").strip().upper()
+        if text_key in _SETTINGS_DEFAULTS or text_key == "OUROBOROS_RUNTIME_MODE":
+            continue
+        if not _CUSTOM_SECRET_KEY_RE.match(text_key):
+            continue
+        if text_key.startswith("OUROBOROS_"):
+            continue
+        if _looks_masked_secret(value) and merged.get(text_key):
+            continue
+        merged[text_key] = value
     return merged
 
 
@@ -529,6 +531,22 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
                 client_message_id=client_message_id,
                 telegram_chat_id=telegram_chat_id,
             )
+            if source != "web":
+                bridge.broadcast({
+                    "type": "photo" if image_base64 else "chat",
+                    "role": "user",
+                    "content": text,
+                    "caption": image_caption,
+                    "image_base64": image_base64,
+                    "mime": image_mime,
+                    "ts": now_iso,
+                    "source": source,
+                    "sender_label": sender_label,
+                    "sender_session_id": sender_session_id,
+                    "client_message_id": client_message_id,
+                    "telegram_chat_id": telegram_chat_id,
+                    "chat_id": chat_id,
+                })
         st["last_owner_message_at"] = now_iso
         ctx.save_state(st)
 
@@ -1115,6 +1133,11 @@ async def api_settings_get(request: Request) -> JSONResponse:
     for key in _SECRET_SETTING_KEYS:
         if safe.get(key):
             safe[key] = _mask_secret_value(safe[key])
+    for key, value in list(safe.items()):
+        if key in _SECRET_SETTING_KEYS or key in _SETTINGS_DEFAULTS:
+            continue
+        if _CUSTOM_SECRET_KEY_RE.match(str(key)) and value:
+            safe[key] = _mask_secret_value(value)
     # Inject read-only runtime network metadata for the Settings UI hint
     try:
         port = int(PORT_FILE.read_text().strip()) if PORT_FILE.exists() else DEFAULT_PORT
@@ -1953,6 +1976,36 @@ async def lifespan(app):
             daemon=True, name="local-model-autostart",
         ).start()
 
+    host_service_task = None
+    host_service_server = None
+    try:
+        from ouroboros.event_bus import init_global_event_bus
+        from ouroboros.extension_companion import init_global_supervisor
+        from ouroboros.host_service_api import (
+            DEFAULT_HOST_SERVICE_HOST,
+            create_host_service_app,
+            host_service_port,
+        )
+
+        init_global_event_bus().set_loop(_event_loop)
+        init_global_supervisor(pathlib.Path(DATA_DIR))
+        host_service_app = create_host_service_app(pathlib.Path(DATA_DIR))
+        host_port = host_service_port()
+        host_service_config = uvicorn.Config(
+            host_service_app,
+            host=DEFAULT_HOST_SERVICE_HOST,
+            port=host_port,
+            log_level="warning",
+        )
+        host_service_server = uvicorn.Server(host_service_config)
+        host_service_task = asyncio.create_task(
+            host_service_server.serve(),
+            name="host-service-api",
+        )
+        log.info("Host Service API listening on %s:%d", DEFAULT_HOST_SERVICE_HOST, host_port)
+    except Exception:
+        log.warning("Failed to start Host Service API", exc_info=True)
+
     # Phase 4: reload enabled + reviewed extensions so their
     # ``register(api)`` runs across process restarts. Without this,
     # ``toggle_skill(enabled=True)`` would be the only path that loads
@@ -1972,50 +2025,18 @@ async def lifespan(app):
     except Exception:
         log.warning("Extension reload_all at startup failed", exc_info=True)
 
-    # A2A server — disabled by default; enable in Settings → Integrations
-    a2a_server_task = None
-    if settings.get("A2A_ENABLED", False):
-        try:
-            from ouroboros.a2a_server import start_a2a_server
-            from ouroboros.server_auth import is_loopback_host
-            a2a_host = str(settings.get("A2A_HOST", "127.0.0.1")).strip()
-            a2a_port = int(settings.get("A2A_PORT", 18800))
-            if not is_loopback_host(a2a_host):
-                from ouroboros.server_auth import get_configured_network_password
-                if not get_configured_network_password():
-                    log.warning(
-                        "A2A server binding to non-loopback host %s without a network password. "
-                        "NetworkAuthGate is applied — set OUROBOROS_NETWORK_PASSWORD to require "
-                        "authentication, or keep A2A_HOST=127.0.0.1 for loopback-only access.",
-                        a2a_host,
-                    )
-            a2a_server_task = asyncio.create_task(
-                start_a2a_server(settings), name="a2a-server"
-            )
-            log.info("A2A server task created on port %d", a2a_port)
-        except Exception:
-            log.warning("Failed to start A2A server", exc_info=True)
-
     try:
         yield
     finally:
-        # Stop A2A server
-        if a2a_server_task:
+        if host_service_server is not None:
             try:
-                from ouroboros.a2a_server import stop_a2a_server
-                stop_a2a_server()
-                a2a_server_task.cancel()
-                with suppress(asyncio.CancelledError, asyncio.TimeoutError):
-                    await asyncio.wait_for(a2a_server_task, timeout=5)
-                # Sweep the port in case uvicorn left it in TIME_WAIT so the
-                # next launch can bind A2A_PORT immediately (mirrors panic-stop).
-                try:
-                    from ouroboros.platform_layer import kill_process_on_port
-                    kill_process_on_port(a2a_port)
-                except Exception:
-                    pass
+                host_service_server.should_exit = True
             except Exception:
                 pass
+        if host_service_task is not None:
+            host_service_task.cancel()
+            with suppress(asyncio.CancelledError, asyncio.TimeoutError):
+                await asyncio.wait_for(host_service_task, timeout=5)
         ws_heartbeat_task.cancel()
         with suppress(asyncio.CancelledError):
             await ws_heartbeat_task
@@ -2029,6 +2050,13 @@ async def lifespan(app):
         try:
             from ouroboros.tools.shell import kill_all_tracked_subprocesses
             kill_all_tracked_subprocesses()
+        except Exception:
+            pass
+        try:
+            from ouroboros.extension_companion import get_global_supervisor
+            supervisor = get_global_supervisor()
+            if supervisor is not None:
+                supervisor.stop_all()
         except Exception:
             pass
         try:
@@ -2069,6 +2097,13 @@ def _emergency_process_cleanup() -> None:
             pass
     kill_process_on_port(DEFAULT_PORT)
     kill_process_on_port(8766)
+    try:
+        from ouroboros.extension_companion import panic_kill_all
+        from ouroboros.host_service_api import host_service_port
+        panic_kill_all()
+        kill_process_on_port(host_service_port())
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------

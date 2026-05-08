@@ -14,6 +14,7 @@ import pathlib
 from collections import Counter
 from typing import Any, Dict, List, Optional
 
+from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
 from ouroboros.utils import utc_now_iso, read_text, write_text, append_jsonl, short
 
 from ouroboros.platform_layer import (
@@ -271,8 +272,8 @@ class Memory:
                     log.debug(f"Failed to parse JSON line in chat_history: {line[:100]}")
                     continue
 
-            # Filter out A2A synthetic traffic (negative chat_id) — only human dialogue
-            entries = [e for e in entries if (e.get("chat_id") or 0) >= 0]
+            # Filter out A2A synthetic traffic — only human dialogue
+            entries = [e for e in entries if not is_a2a_chat_id(e.get("chat_id"))]
 
             if search:
                 search_lower = search.lower()

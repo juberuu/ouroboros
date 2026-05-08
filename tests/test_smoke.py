@@ -140,8 +140,6 @@ EXPECTED_TOOLS = [
     "plan_task",
     # CI
     "run_ci_tests",
-    # A2A (Agent-to-Agent protocol, non-core: require enable_tools)
-    "a2a_discover", "a2a_send", "a2a_status",
     # Phase 3 three-layer refactor: external skill surface
     # (non-core: require enable_tools, except review_skill which is core
     # in v5.7.0+ so heal mode can satisfy its own prompt without a

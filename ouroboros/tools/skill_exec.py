@@ -202,21 +202,23 @@ def _scrub_env(
         # before lookup. Compare on the upper form so a manifest that
         # tries to sneak in ``openrouter_api_key`` (lowercase) is still
         # refused.
-        forbidden_upper = {k.upper() for k in _FORBIDDEN_ENV_FORWARD_KEYS}
+        from ouroboros.skill_loader import requested_core_setting_keys
+        protected_upper = {k.upper() for k in _FORBIDDEN_ENV_FORWARD_KEYS}
+        protected_upper.update(requested_core_setting_keys(list(manifest_env_keys or [])))
         granted_upper = {str(k).strip().upper() for k in (granted_keys or []) if str(k).strip()}
         allow = {str(k).strip() for k in manifest_env_keys if str(k).strip()}
         for key in allow:
             canonical = key.upper()
-            if canonical in forbidden_upper and canonical not in granted_upper:
+            if canonical in protected_upper and canonical not in granted_upper:
                 log.warning(
                     "Skill %s asked env_from_settings for %s; refusing without explicit grant.",
                     skill_name, key,
                 )
                 continue
-            val = settings.get(canonical) if canonical in forbidden_upper else settings.get(key)
+            val = settings.get(canonical) if canonical in protected_upper else settings.get(key)
             if val is None or val == "":
                 continue
-            env[canonical if canonical in forbidden_upper else key] = str(val)
+            env[canonical if canonical in protected_upper else key] = str(val)
     env["OUROBOROS_SKILL_NAME"] = skill_name
     env["OUROBOROS_SKILL_STATE_DIR"] = str(skill_state_dir_path)
     return env

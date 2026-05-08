@@ -22,11 +22,9 @@ WebSocket message handlers, and host-rendered widget UIs. Skills are
 marketplaces go through tri-model review and explicit owner lifecycle
 actions. Skills authored by the current Ouroboros agent session carry
 both payload-local `.self_authored.json` and owner-state
-`data/state/skills/<name>/self_authored.json` markers. They use the
-self-authored fast path: `review_skill` runs deterministic preflight,
-records a content-bound PASS, grants requested configured core keys,
-enables the skill after dependencies are ready, and reconciles
-extension registrations in one operation.
+`data/state/skills/<name>/self_authored.json` markers for provenance,
+but they still go through the same tri-model skill review before they
+can run.
 
 There are three skill types:
 
@@ -40,8 +38,8 @@ The **runtime ownership** of an installed skill is also tagged:
 
 - `native`: bundled with the launcher (e.g. `weather`).
 - `self_authored`: created by Ouroboros itself in the current data
-  plane; marked by `.self_authored.json` and finalized automatically
-  by `review_skill`.
+  plane; marked by `.self_authored.json` and reviewed through the
+  standard tri-model skill-review path.
 - `external`: dropped into `data/skills/external/` by the user.
 - `clawhub`: installed via the ClawHub marketplace.
 - `ouroboroshub`: installed via the official OuroborosHub catalog.
@@ -117,9 +115,7 @@ runtime; otherwise `skill_exec` fails closed with a clear error.
 ```mermaid
 flowchart LR
     install[install] --> review[review_skill]
-    review -- self-authored --> fast[self-authored preflight + PASS]
-    review -- external/marketplace --> triad[tri-model skill review]
-    fast --> deps[isolated deps install]
+    review --> triad[tri-model skill review]
     triad -- PASS --> deps
     deps --> enable[owner toggles enabled=true]
     enable --> execute[skill_exec / dispatch]
@@ -133,19 +129,15 @@ flowchart LR
 - **Review** runs three reviewer models in parallel against the
   Skill Review Checklist (see [`docs/CHECKLISTS.md`](CHECKLISTS.md)).
   The review pack hashes every runtime-reachable file in the skill
-  directory; any later edit invalidates the PASS verdict. For
-  `.self_authored.json` skills, `review_skill` skips the LLM reviewers
-  and instead runs deterministic `skill_preflight`, persists
-  `reviewer_models=["self_authored:v5.8.2"]`, grants configured
-  `env_from_settings` core keys, enables the skill, and reloads the
-  extension.
+  directory; any later edit invalidates the PASS verdict. `.self_authored.json`
+  is provenance only; self-authored skills use the same tri-model review,
+  grant, enable, and extension reload flow as other executable skills.
 - **Isolated deps** (pip / npm / uv / node) install into
   `data/skills/<bucket>/<name>/.ouroboros_env/`. Status is recorded
   in `data/state/skills/<name>/deps.json`.
 - **Enable** flips `enabled.json` after PASS + grants + deps. The
   Skills UI surfaces a toggle; agents can also call `toggle_skill`.
-  Self-authored skills are enabled automatically by `review_skill`
-  after preflight/deps/grants succeed.
+  Self-authored provenance does not change the enablement path.
 - **Execute**: `skill_exec` runs `type: script` skills as
   subprocess; `type: extension` runs in-process via the loader.
 
@@ -206,28 +198,32 @@ calls and runtime behaviours:
 | `route` | The skill may call `register_route`. |
 | `tool` | The skill may call `register_tool`. |
 | `read_settings` | The skill may call `api.get_settings([...])`. |
+| `supervised_task` | The skill may register an in-process host-supervised async task. |
+| `companion_process` | The skill may register a manifest-declared companion subprocess supervised by the host. |
+| `subscribe_event` | The skill may subscribe to manifest-declared host event topics such as `chat.outbound`. Chat topics require owner permission grants. |
+| `inject_chat` | The skill may request Host Service chat injection after an explicit owner permission grant. |
 
 A missing permission causes the matching `register_*` call to raise
 `ExtensionRegistrationError`, surfaced as a skill load error in the
 Skills UI.
 
-## Grants for "core" keys
+## Grants for protected keys and host permissions
 
 Some settings keys are protected: `OPENROUTER_API_KEY`,
 `OPENAI_API_KEY`, `OPENAI_COMPATIBLE_API_KEY`, `ANTHROPIC_API_KEY`,
 `CLOUDRU_FOUNDATION_MODELS_API_KEY`, `TELEGRAM_BOT_TOKEN`,
 `GITHUB_TOKEN`, `OUROBOROS_NETWORK_PASSWORD`. These keys are NEVER
 forwarded to a skill by default, even when listed in
-`env_from_settings`. The desktop launcher's owner-grant bridge
-captures explicit, content-hash-bound consent before forwarding.
+`env_from_settings`. Custom secret keys stored in Settings → Secrets
+are treated the same way. Host permissions such as `inject_chat` and
+chat event subscriptions also require explicit, content-hash-bound owner
+consent. The desktop launcher's owner-grant bridge records these grants.
 
 The Skills UI surfaces missing grants on the skill card. The agent
 can also call `toggle_skill enabled=true` only after grants are
 approved (the tool returns `SKILL_TOGGLE_ERROR: cannot enable until
-requested key grants are approved`). Self-authored skills are the
-exception: when `review_skill` finalizes a `.self_authored.json` skill,
-it auto-grants requested core keys that are already present in
-`settings.json`, then enables and reconciles the skill.
+requested key grants are approved`). Self-authored markers are
+provenance only; they do not auto-grant keys or auto-enable skills.
 
 ## PluginAPI reference
 
@@ -386,14 +382,10 @@ else:
 ## Skill Review Checklist
 
 Reviewers grade your skill on the checklist defined in
-[`docs/CHECKLISTS.md`](CHECKLISTS.md) §"Skill Review Checklist" (currently
-eight items: `manifest_schema`, `permissions_honesty`,
-`no_repo_mutation`, `path_confinement`, `env_allowlist`,
-`timeout_and_output_discipline`, `extension_namespace_discipline`, and
-`widget_module_safety`). That file is the authoritative SSOT — read it
-there once and consult it whenever you author or repair a skill instead
-of reading a paraphrase here. All items must reach `PASS` for
-`status=pass`.
+[`docs/CHECKLISTS.md`](CHECKLISTS.md) §"Skill Review Checklist". That file is
+the authoritative SSOT — read it there once and consult it whenever you author
+or repair a skill instead of reading a paraphrase here. All items must reach
+`PASS` for `status=pass`.
 
 ## Reference skills
 
@@ -465,5 +457,5 @@ def register(api):
 | Reviewer marks `widget_module_safety: FAIL` | `widget.js` is touching `document.cookie` / `localStorage` / cross-origin `fetch`. Move the data through `/api/extensions/<skill>/` routes. |
 
 For deeper integration questions read
-[`docs/ARCHITECTURE.md`](ARCHITECTURE.md) §12 (extensions runtime)
+[`docs/ARCHITECTURE.md`](ARCHITECTURE.md) §13 (external skills layer)
 and [`docs/CHECKLISTS.md`](CHECKLISTS.md) §"Skill Review Checklist".

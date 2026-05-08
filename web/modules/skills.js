@@ -169,19 +169,25 @@ function renderReviewFindings(skill) {
 function renderGrantBlock(skill) {
     const grants = skill.grants || {};
     const requested = Array.isArray(grants.requested_keys) ? grants.requested_keys : [];
+    const requestedPermissions = Array.isArray(grants.requested_permissions) ? grants.requested_permissions : [];
     // v5.2.3: keep the affordance discoverable but quiet the copy.
     // Skills that do not request any core keys get a single muted
     // line at the bottom of the Details disclosure instead of a
     // dedicated section on the front face of the card.
-    if (!requested.length) {
+    if (!requested.length && !requestedPermissions.length) {
         return '';
     }
     const missing = Array.isArray(grants.missing_keys) ? grants.missing_keys : [];
+    const missingPermissions = Array.isArray(grants.missing_permissions) ? grants.missing_permissions : [];
     const granted = Array.isArray(grants.granted_keys) ? grants.granted_keys : [];
+    const grantedPermissions = Array.isArray(grants.granted_permissions) ? grants.granted_permissions : [];
     const unsupported = grants.unsupported_for_skill_type === true;
     const reviewBlocked = !reviewReady(skill);
 
     const requestedKeysHtml = requested
+        .map((key) => `<code>${escapeHtml(key)}</code>`)
+        .join(' ');
+    const requestedPermsHtml = requestedPermissions
         .map((key) => `<code>${escapeHtml(key)}</code>`)
         .join(' ');
 
@@ -190,7 +196,7 @@ function renderGrantBlock(skill) {
     if (unsupported) {
         statusLine = 'This skill type cannot receive core API keys.';
         statusTone = 'muted';
-    } else if (!missing.length) {
+    } else if (!missing.length && !missingPermissions.length) {
         statusLine = 'Access granted.';
         statusTone = 'ok';
     } else if (reviewBlocked) {
@@ -208,10 +214,11 @@ function renderGrantBlock(skill) {
     return `
         <div class="skills-access skills-access-${statusTone}">
             <div class="skills-access-row">
-                <span class="skills-access-label">Needs API keys</span>
-                ${requestedKeysHtml}
+                <span class="skills-access-label">Needs access</span>
+                ${requestedKeysHtml} ${requestedPermsHtml}
             </div>
             ${grantedRow}
+            ${grantedPermissions.length ? `<div class="skills-access-row"><span class="skills-access-label">Granted permissions</span> ${grantedPermissions.map((k) => `<code>${escapeHtml(k)}</code>`).join(' ')}</div>` : ''}
             <div class="skills-access-status">${escapeHtml(statusLine)}</div>
         </div>
     `;
@@ -336,7 +343,10 @@ function getSkillPrimaryAction(skill, reviewInProgress = false) {
     if (!grantReady(skill)) {
         const grants = skill.grants || {};
         const keys = Array.isArray(grants.missing_keys) ? grants.missing_keys : (grants.requested_keys || []);
-        return { action: 'grant', label: 'Grant access', keys: keys.join(',') };
+        const permissions = Array.isArray(grants.missing_permissions)
+            ? grants.missing_permissions
+            : (grants.requested_permissions || []);
+        return { action: 'grant', label: 'Grant access', keys: [...keys, ...permissions].join(',') };
     }
     if (skill.enabled && skill.type === 'extension' && skill.live_loaded && skill.dispatch_live) {
         return { action: 'open_widgets', label: 'Open widgets' };
@@ -846,7 +856,9 @@ function attachActionHandlers(container, renderFn, reviewingSkills, ctx = {}) {
         if (action === 'grant') {
             const grants = skill.grants || {};
             const keys = (options.keys || '').split(',').map((k) => k.trim()).filter(Boolean);
-            const missing = keys.length ? keys : (Array.isArray(grants.missing_keys) ? grants.missing_keys : (grants.requested_keys || []));
+            const missingKeys = Array.isArray(grants.missing_keys) ? grants.missing_keys : (grants.requested_keys || []);
+            const missingPermissions = Array.isArray(grants.missing_permissions) ? grants.missing_permissions : (grants.requested_permissions || []);
+            const missing = keys.length ? keys : [...missingKeys, ...missingPermissions];
             const result = await requestMissingKeyGrants(name, missing);
             if (result) showBanner(`${name}: requested key grants saved`, 'ok');
             return;

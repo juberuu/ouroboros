@@ -907,6 +907,54 @@ def test_grant_status_supports_extension_skills(tmp_path):
     assert granted["granted_keys"] == ["OPENROUTER_API_KEY"]
 
 
+def test_grant_status_supports_privileged_permissions(tmp_path):
+    from ouroboros.contracts.skill_manifest import SkillManifest
+    from ouroboros.skill_loader import (
+        LoadedSkill,
+        SkillReviewState,
+        grant_status_for_skill,
+        save_skill_grants,
+    )
+
+    drive_root = tmp_path / "drive"
+    skill_dir = tmp_path / "ext"
+    drive_root.mkdir()
+    skill_dir.mkdir()
+    manifest = SkillManifest(
+        name="injector",
+        description="inject grant test",
+        version="0.1",
+        type="extension",
+        permissions=["inject_chat", "subscribe_event"],
+        subscribe_events=["chat.outbound"],
+    )
+    skill = LoadedSkill(
+        name="injector",
+        skill_dir=skill_dir,
+        manifest=manifest,
+        content_hash="inject-hash",
+        review=SkillReviewState(status="pass", content_hash="inject-hash"),
+    )
+
+    missing = grant_status_for_skill(drive_root, skill)
+    assert missing["missing_permissions"] == ["inject_chat", "subscribe_event:chat.outbound"]
+    assert missing["usable"] is False
+
+    save_skill_grants(
+        drive_root,
+        "injector",
+        [],
+        content_hash="inject-hash",
+        requested_keys=[],
+        granted_permissions=["inject_chat", "subscribe_event:chat.outbound"],
+        requested_permissions=["inject_chat", "subscribe_event:chat.outbound"],
+    )
+    granted = grant_status_for_skill(drive_root, skill)
+    assert granted["all_granted"] is True
+    assert granted["usable"] is True
+    assert granted["granted_permissions"] == ["inject_chat", "subscribe_event:chat.outbound"]
+
+
 def test_save_skill_grants_merges_partial_approvals(tmp_path):
     """A subsequent partial-key grant must not silently revoke
     previously-approved keys. The merge is bound to the same

@@ -15,6 +15,7 @@ Responsibilities:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import pathlib
@@ -564,11 +565,12 @@ def _request_skill_key_grant(skill: str, keys: list, confirm_fn) -> dict:
     from ouroboros.skill_loader import (
         find_skill,
         requested_core_setting_keys,
+        requested_skill_permissions,
         save_skill_grants,
     )
 
     skill_name = str(skill or "").strip()
-    requested = [str(k or "").strip().upper() for k in (keys or []) if str(k or "").strip()]
+    requested_raw = [str(k or "").strip() for k in (keys or []) if str(k or "").strip()]
     loaded = find_skill(
         DATA_DIR,
         skill_name,
@@ -581,11 +583,25 @@ def _request_skill_key_grant(skill: str, keys: list, confirm_fn) -> dict:
     if loaded.review.status != "pass" or loaded.review.is_stale_for(loaded.content_hash):
         return {"ok": False, "error": "Key grants require a fresh PASS review."}
     allowed = requested_core_setting_keys(list(loaded.manifest.env_from_settings or []))
-    if not requested or any(key not in allowed for key in requested):
-        return {"ok": False, "error": f"Grant keys must be requested by the current manifest: {allowed}"}
+    allowed_permissions = requested_skill_permissions(
+        list(getattr(loaded.manifest, "permissions", []) or []),
+        list(getattr(loaded.manifest, "subscribe_events", []) or []),
+    )
+    allowed_permission_map = {permission.lower(): permission for permission in allowed_permissions}
+    requested_keys = [item.upper() for item in requested_raw if item.upper() in allowed]
+    requested_permissions = [
+        allowed_permission_map[item.lower()]
+        for item in requested_raw
+        if item.lower() in allowed_permission_map
+    ]
+    if not requested_raw or len(requested_keys) + len(requested_permissions) != len(requested_raw):
+        return {
+            "ok": False,
+            "error": f"Grant items must be requested by the current manifest: keys={allowed}, permissions={allowed_permissions}",
+        }
     message = (
-        f"Grant skill {loaded.name!r} access to these settings keys?\n\n"
-        + "\n".join(requested)
+        f"Grant skill {loaded.name!r} access to these settings keys / host permissions?\n\n"
+        + "\n".join([*requested_keys, *requested_permissions])
         + "\n\nOnly grant keys to reviewed skills you trust."
     )
     if not confirm_fn("Confirm Skill Key Grant", message):
@@ -593,9 +609,11 @@ def _request_skill_key_grant(skill: str, keys: list, confirm_fn) -> dict:
     save_skill_grants(
         DATA_DIR,
         loaded.name,
-        requested,
+        requested_keys,
         content_hash=loaded.content_hash,
         requested_keys=allowed,
+        granted_permissions=requested_permissions,
+        requested_permissions=allowed_permissions,
     )
     # v5.2.2 dual-track grants: extensions need a runtime reconcile so
     # the just-granted core key reaches ``PluginAPIImpl.get_settings``
@@ -644,7 +662,8 @@ def _request_skill_key_grant(skill: str, keys: list, confirm_fn) -> dict:
     return {
         "ok": True,
         "skill": loaded.name,
-        "granted_keys": requested,
+        "granted_keys": requested_keys,
+        "granted_permissions": requested_permissions,
         "extension_action": extension_action,
         "extension_reason": extension_reason,
         "load_error": extension_load_error,
@@ -985,6 +1004,23 @@ def main():
         """Final safety net: kill any processes still on the server port."""
         _kill_stale_on_port(port)
         _kill_stale_on_port(8766)
+        try:
+            companions = json.loads((DATA_DIR / "state" / "extension_companions.json").read_text(encoding="utf-8"))
+            if isinstance(companions, dict):
+                for item in companions.values():
+                    if not isinstance(item, dict):
+                        continue
+                    try:
+                        force_kill_pid(int(item.get("pid") or 0))
+                    except (TypeError, ValueError, ProcessLookupError, PermissionError, OSError):
+                        pass
+                    for companion_port in item.get("ports") or []:
+                        try:
+                            kill_process_on_port(int(companion_port))
+                        except (TypeError, ValueError, OSError):
+                            pass
+        except Exception:
+            pass
         for child in __import__("multiprocessing").active_children():
             try:
                 force_kill_pid(child.pid)

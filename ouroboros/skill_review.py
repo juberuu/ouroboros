@@ -170,6 +170,10 @@ _SKILL_REVIEW_ITEMS = (
     # widgets and non-extension skills MUST be marked ``PASS`` with
     # reason "Not applicable".
     "widget_module_safety",
+    "inject_chat_minimization",
+    "event_subscription_minimization",
+    "companion_process_safety",
+    "host_token_handling",
 )
 _CRITICAL_ITEMS = frozenset(
     {
@@ -178,6 +182,10 @@ _CRITICAL_ITEMS = frozenset(
         "no_repo_mutation",
         "path_confinement",
         "env_allowlist",
+        "inject_chat_minimization",
+        "event_subscription_minimization",
+        "companion_process_safety",
+        "host_token_handling",
         # ``extension_namespace_discipline`` is critical only for
         # type: extension (checklist) — we surface it to the reviewer
         # but do not hard-block non-extension skills on its FAIL.
@@ -373,7 +381,8 @@ produces a PASS verdict from this review.
 
 ## Governance context — docs/ARCHITECTURE.md
 
-Use Section 10 (Key Invariants) and Section 12 (External Skills Layer)
+Use Section 10 (Key Invariants), Section 12 (Host Service / Companion /
+Chat IDs), and Section 13 (External Skills Layer)
 as the binding description of what the skill is allowed to touch. In
 particular invariant 11 is the authoritative rule: skills must not write
 to the self-modifying repo, and reviewed execution is the primary gate.
@@ -451,7 +460,7 @@ def _extract_actor_findings(
     - ``findings``: the concatenated per-item entries from every
       reviewer that produced a valid, complete response.
     - ``responsive_models``: the list of reviewer model IDs that
-      actually met the contract (all 7 items present, each with a
+      actually met the contract (all checklist items present, each with a
       PASS/FAIL verdict). A reviewer that returned only a subset is
       treated as non-responsive for quorum purposes so a truncated
       response cannot pass the quorum gate and synthesise a false PASS.
@@ -494,7 +503,7 @@ def _extract_actor_findings(
             )
         # Reject partial responses: reviewer must cover every checklist
         # item. A response that only covers one item could otherwise pass
-        # the quorum gate with zero observed FAILs on the other six items.
+        # the quorum gate with zero observed FAILs on the other items.
         if not required_items.issubset(covered_items):
             continue
         findings.extend(actor_findings)

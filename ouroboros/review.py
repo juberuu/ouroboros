@@ -91,7 +91,13 @@ MAX_TOTAL_FUNCTIONS = 2000  # v5.7.4: preserves headroom after managed-restart p
 # reviewed-commit staging, doc-only preflight, and dirty-tree checkout
 # pushed the file over the hard gate. This is accepted as short-lived debt;
 # split commit/review orchestration into a helper module in the next tools pass.
-GRANDFATHERED_OVERSIZED_MODULES = {"llm.py", "claude_advisory_review.py", "review_state.py", "server.py", "git.py"}
+GRANDFATHERED_OVERSIZED_MODULES = {
+    "llm.py",
+    "claude_advisory_review.py",
+    "review_state.py",
+    "server.py",
+    "git.py",
+}
 # Immutable bundle-only entrypoints ship with release artifacts but should not
 # count against the self-editable codebase function budget.
 FUNCTION_COUNT_EXCLUDED_FILES = {"launcher.py"}

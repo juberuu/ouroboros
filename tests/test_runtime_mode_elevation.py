@@ -620,6 +620,53 @@ def test_launcher_skill_key_grant_validates_review_and_manifest(monkeypatch, tmp
     assert result.get("extension_reason") is None
 
 
+def test_launcher_skill_grant_supports_permission_grants(monkeypatch, tmp_path):
+    import launcher
+
+    class _Manifest:
+        env_from_settings = []
+        permissions = ["inject_chat", "subscribe_event"]
+        subscribe_events = ["chat.outbound"]
+        def is_script(self):
+            return False
+        def is_extension(self):
+            return True
+
+    class _Review:
+        status = "pass"
+        def is_stale_for(self, _hash):
+            return False
+
+    loaded = types.SimpleNamespace(
+        name="bridge",
+        manifest=_Manifest(),
+        review=_Review(),
+        content_hash="hash-a",
+    )
+    captured = {}
+    monkeypatch.setattr(launcher, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(launcher, "_load_settings", lambda: {"OUROBOROS_SKILLS_REPO_PATH": ""})
+    monkeypatch.setattr("ouroboros.skill_loader.find_skill", lambda *_a, **_kw: loaded)
+    monkeypatch.setattr(
+        "ouroboros.skill_loader.save_skill_grants",
+        lambda drive, name, keys, **kw: captured.update(
+            {"drive": drive, "name": name, "keys": keys, **kw}
+        ),
+    )
+    monkeypatch.setattr("urllib.request.urlopen", lambda *_a, **_kw: types.SimpleNamespace(read=lambda: b'{"ok": true}'))
+
+    result = launcher._request_skill_key_grant(
+        "bridge",
+        ["inject_chat", "subscribe_event:chat.outbound"],
+        lambda _title, _message: True,
+    )
+
+    assert result["ok"] is True
+    assert captured["keys"] == []
+    assert captured["granted_permissions"] == ["inject_chat", "subscribe_event:chat.outbound"]
+    assert captured["requested_permissions"] == ["inject_chat", "subscribe_event:chat.outbound"]
+
+
 def test_launcher_skill_key_grant_supports_extensions(monkeypatch, tmp_path):
     """v5.2.2 dual-track grants: ``type: extension`` skills can be
     granted core keys and the launcher posts to the agent server's

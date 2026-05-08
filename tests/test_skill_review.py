@@ -34,6 +34,14 @@ from ouroboros.skill_review import (
 from ouroboros.tools.registry import ToolContext
 
 
+_NEW_SKILL_REVIEW_PASS_ITEMS = [
+    {"item": "inject_chat_minimization", "verdict": "PASS", "severity": "critical", "reason": "Not applicable"},
+    {"item": "event_subscription_minimization", "verdict": "PASS", "severity": "critical", "reason": "Not applicable"},
+    {"item": "companion_process_safety", "verdict": "PASS", "severity": "critical", "reason": "Not applicable"},
+    {"item": "host_token_handling", "verdict": "PASS", "severity": "critical", "reason": "Not applicable"},
+]
+
+
 def _pass_array_for_script_skill() -> str:
     """Return a JSON array that PASSes every applicable skill checklist item."""
     return json.dumps(
@@ -56,6 +64,7 @@ def _pass_array_for_script_skill() -> str:
                 "severity": "critical",
                 "reason": "Not applicable — no module widget",
             },
+            *_NEW_SKILL_REVIEW_PASS_ITEMS,
         ]
     )
 
@@ -71,6 +80,7 @@ def _fail_array_on_manifest() -> str:
             {"item": "timeout_and_output_discipline", "verdict": "PASS", "severity": "advisory", "reason": "ok"},
             {"item": "extension_namespace_discipline", "verdict": "PASS", "severity": "critical", "reason": "ok"},
             {"item": "widget_module_safety", "verdict": "PASS", "severity": "critical", "reason": "ok"},
+            *_NEW_SKILL_REVIEW_PASS_ITEMS,
         ]
     )
 
@@ -86,6 +96,7 @@ def _advisory_only_array() -> str:
             {"item": "timeout_and_output_discipline", "verdict": "FAIL", "severity": "advisory", "reason": "unbounded loop"},
             {"item": "extension_namespace_discipline", "verdict": "PASS", "severity": "critical", "reason": "ok"},
             {"item": "widget_module_safety", "verdict": "PASS", "severity": "critical", "reason": "ok"},
+            *_NEW_SKILL_REVIEW_PASS_ITEMS,
         ]
     )
 
@@ -179,7 +190,7 @@ def test_extract_actor_findings_reads_flat_text_field():
         ]
     }
     findings, responded = _extract_actor_findings(result_json)
-    assert len(findings) == 16
+    assert len(findings) == 24
     assert set(responded) == {
         "openai/gpt-5.5",
         "google/gemini-3.1-pro-preview",

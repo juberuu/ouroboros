@@ -39,6 +39,8 @@ _SKILL_OWNER_STATE_FILENAMES = frozenset({
     "review.json",
     "clawhub.json",
     "deps.json",
+    "self_authored.json",
+    "auth_token.json",
 })
 
 
@@ -403,6 +405,8 @@ async def api_files_read(request: Request) -> JSONResponse:
             return JSONResponse({"error": f"Path not found: {rel_path}"}, status_code=404)
         if not target.is_file():
             return JSONResponse({"error": f"Not a file: {rel_path}"}, status_code=400)
+        if _is_owner_only_file(target):
+            return JSONResponse({"error": "Owner-only state is not readable from Files."}, status_code=403)
 
         size = int(target.stat().st_size)
         rel = _relative_path(root_dir, target)
@@ -487,6 +491,8 @@ async def api_files_download(request: Request) -> FileResponse | JSONResponse:
             return JSONResponse({"error": f"Path not found: {rel_path}"}, status_code=404)
         if not target.is_file():
             return JSONResponse({"error": f"Not a file: {rel_path}"}, status_code=400)
+        if _is_owner_only_file(target):
+            return JSONResponse({"error": "Owner-only state cannot be downloaded."}, status_code=403)
         return FileResponse(str(target), filename=target.name)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -504,6 +510,8 @@ async def api_files_content(request: Request) -> FileResponse | JSONResponse:
             return JSONResponse({"error": f"Path not found: {rel_path}"}, status_code=404)
         if not target.is_file():
             return JSONResponse({"error": f"Not a file: {rel_path}"}, status_code=400)
+        if _is_owner_only_file(target):
+            return JSONResponse({"error": "Owner-only state cannot be served."}, status_code=403)
         return FileResponse(str(target), media_type=_guess_media_type(target))
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)

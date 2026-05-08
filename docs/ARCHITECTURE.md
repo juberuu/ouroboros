@@ -1,4 +1,4 @@
-# Ouroboros v5.8.3-rc.5 — Architecture & Reference
+# Ouroboros v6.0.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -20,7 +20,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
   ├── web/                     ← Web UI (SPA with ES modules in web/modules/)
   │
   ├── supervisor/              ← Background thread inside server.py
-  │   ├── message_bus.py       ← Queue-based message bus + Telegram bridge (LocalChatBridge)
+  │   ├── message_bus.py       ← Queue-based local message bus (Web UI + reviewed transport skills)
   │   ├── workers.py           ← Multiprocessing worker pool (fork/spawn by platform)
   │   ├── state.py             ← Persistent state (state.json) with file locking
   │   ├── queue.py             ← Task queue management (PENDING/RUNNING lists)
@@ -33,9 +33,9 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── chat_upload_api.py   ← Chat file attachment upload/delete endpoints
       ├── agent_startup_checks.py ← Startup verification and health checks
       ├── agent_task_pipeline.py  ← Task execution pipeline orchestration
-      ├── a2a_executor.py      ← A2A AgentExecutor bridging A2A protocol to supervisor via handle_chat_direct
-      ├── a2a_server.py        ← A2A Starlette/uvicorn server (port 18800, dynamic Agent Card, JSON-RPC)
-      ├── a2a_task_store.py    ← File-based A2A TaskStore (atomic writes, TTL cleanup)
+      ├── host_service_api.py  ← Loopback-only Host Service API for reviewed skill callbacks
+      ├── extension_companion.py ← Host-supervised companion processes for transport skills
+      ├── event_bus.py         ← Typed in-process event bus for skill subscriptions
       ├── improvement_backlog.py ← Minimal durable advisory backlog helpers + digest formatting
       ├── loop.py              ← High-level LLM tool loop
       ├── loop_llm_call.py     ← Single-round LLM call + usage accounting
@@ -66,12 +66,14 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── skill_dependencies.py ← Shared dependency-spec resolution for skill payloads across manifests, sidecars, and provenance
       ├── skill_review.py      ← Tri-model skill review reusing the repo-review infrastructure against the Skill Review Checklist section of docs/CHECKLISTS.md
       ├── extension_loader.py  ← Phase 4 in-process loader for type: extension skills; discovers + imports plugin.py via importlib with a narrow PluginAPIImpl, tracks registrations per-skill for atomic unload
+      ├── extension_ui_validation.py ← Host-owned widget/settings render-schema validation shared by extension loader and skill preflight
       ├── extension_isolated_deps.py ← Per-extension bridge that exposes reviewed `.ouroboros_env` Python site-packages to in-process extensions while they are loaded
       ├── extensions_api.py    ← Phase 5 HTTP surface for extensions (GET /api/extensions, GET /api/extensions/<skill>/manifest, ALL /api/extensions/<skill>/<rest:path> catch-all dispatch, POST /api/skills/<skill>/toggle, POST /api/skills/<skill>/review, POST /api/skills/<skill>/grants)
+      ├── skill_token.py       ← Opaque Host Service API token wrapper used by reviewed skills/companions
       ├── marketplace/         ← ClawHub + OuroborosHub marketplace package (clawhub.py registry client, ouroboroshub.py static GitHub catalog client, fetcher.py staging, adapter.py OpenClaw->Ouroboros translation, install.py orchestration, isolated_deps.py per-skill dependency prefix, provenance.py durable provenance)
       ├── marketplace_api.py   ← HTTP surface for marketplaces (/api/marketplace/clawhub/* and /api/marketplace/ouroboroshub/*); always-on with registry host allowlists and hash checks
       ├── skill_lifecycle_queue.py ← single FIFO lane for mutating skill lifecycle actions (install/update/review/deps/enable/disable/uninstall) with recent event snapshot for Skills UI, chat live-card progress, dedupe keys, and sync tool wrapper
-      ├── skill_review_runner.py ← v5.8.2 shared lifecycle-backed skill review runner for API + agent tool paths; writes review_job.json + skill_review_* events and finalizes self-authored skills through deterministic preflight, auto-grants, enable, and extension reconcile
+      ├── skill_review_runner.py ← shared lifecycle-backed skill review runner for API + agent tool paths; writes review_job.json + skill_review_* events and routes all executable skills (including self-authored provenance) through tri-model review
       ├── skill_migrations.py  ← one-shot data-plane migrations for renamed official generation skills (image_gen→nanobanana, audio_gen→music_gen) and user-managed skills accidentally left under native/
       ├── server_auth.py       ← Non-localhost auth gate (OUROBOROS_NETWORK_PASSWORD)
       ├── server_control.py    ← Process-control helpers: restart, panic stop
@@ -90,6 +92,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── tool_context.py  ← ToolContextProtocol (minimum tool ABI, duck-typed)
       │   ├── tool_abi.py      ← ToolEntryProtocol + GetToolsProtocol
       │   ├── api_v1.py        ← WS/HTTP envelope TypedDicts
+      │   ├── chat_id_policy.py ← SSOT for human-visible vs synthetic transport chat ids
       │   ├── skill_manifest.py ← Unified SKILL.md / skill.json parser (instruction|script|extension)
       │   ├── schema_versions.py ← Opt-in _schema_version helpers
       │   └── plugin_api.py    ← Phase 4: PluginAPI Protocol + ExtensionRegistrationError + FORBIDDEN_EXTENSION_SETTINGS + VALID_EXTENSION_PERMISSIONS + VALID_EXTENSION_ROUTE_METHODS
@@ -98,7 +101,6 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── tools/               ← Auto-discovered tool plugins
       │   ├── release_sync.py    ← Release-metadata sync library; used by _preflight_check check 7 for P9 history-limit validation (check_history_limit) and by agents for version-carrier sync (sync_release_metadata)
       │   ├── review_synthesis.py ← LLM-based claim synthesis (Phase 1): deduplicates raw multi-reviewer findings into canonical issues before durable obligations are created; called from commit_gate._record_commit_attempt; fail-open (returns original on any error)
-      │   ├── a2a.py             ← A2A client tools: a2a_discover, a2a_send, a2a_status (non-core, require enable_tools)
       │   ├── ci.py              ← CI trigger and monitoring (GitHub Actions API)
       │   ├── claude_advisory_review.py ← Advisory pre-review tool (read-only Claude Agent SDK)
       │   ├── commit_gate.py     ← Advisory freshness gate and commit-attempt recording (extracted from git.py); `_record_commit_attempt` runs LLM-based claim synthesis (via `review_synthesis.py`) on blocked attempts before durable obligations are created
@@ -171,13 +173,15 @@ Dockerfile                    ← Docker image (web UI runtime)
 │   │   ├── advisory_review.json ← Durable advisory/review ledger (runs, attempts, obligations, commit-readiness debts)
 │   │   ├── evolution_metrics_cache.json ← Cached per-tag Evolution metrics (schema 1; regenerated by `/api/evolution-data` / `collect_evolution_metrics`)
 │   │   ├── queue_snapshot.json
+│   │   ├── extension_companions.json ← Runtime snapshot for live extension companion processes
 │   │   ├── review_continuations/ ← Per-task blocked-review continuation payloads (+ quarantined corrupt files under `corrupt/`)
 │   │   └── skills/              ← Phase 3 external-skill state plane (sibling of advisory_review.json, not shared)
 │   │       └── <skill_name>/
 │   │           ├── enabled.json ← {"enabled": bool, "updated_at": iso_ts}
 │   │           ├── review.json  ← {"status": "pass|fail|advisory|pending", "content_hash": str, "findings": [...], "reviewer_models": [...], "timestamp": iso_ts, ...}  (Phase 3 ``pending_phase4`` status retired in Phase 4 — legacy files migrate on load)
 │   │           ├── deps.json    ← isolated dependency install fingerprint for skills with reviewed install specs
-│   │           └── __extension_imports/<uuid>/skill/  ← Phase 4 staged import tree for type:extension skills (created on load, removed on unload; see §12.1)
+│   │           ├── auth_token.json ← content-hash-bound Host Service token for reviewed live extensions
+│   │           └── __extension_imports/<uuid>/skill/  ← Phase 4 staged import tree for type:extension skills (created on load, removed on unload; see §13.1)
 │   ├── memory/
 │   │   ├── identity.md     ← Agent's self-description (persistent)
 │   │   ├── scratchpad.md   ← Working memory (auto-generated from scratchpad_blocks.json)
@@ -201,8 +205,7 @@ Dockerfile                    ← Docker image (web UI runtime)
 │   │   ├── tools.jsonl     ← Tool call log with args/results
 │   │   ├── supervisor.jsonl ← Supervisor-level events
 │   │   ├── task_reflections.jsonl ← Execution reflections (process memory)
-│   │   └── a2a.log         ← A2A server logs (RotatingFileHandler, 2 MB × 3 backups)
-│   ├── a2a_tasks/          ← A2A task persistence (FileTaskStore, atomic JSON files with TTL)
+│   │   └── skills/         ← Optional skill/companion runtime logs
 │   ├── archive/            ← Rotated logs, rescue snapshots
 │   └── uploads/            ← Chat file attachments (uploaded via paperclip button)
 └── ouroboros.pid           ← PID lock file (platform lock — auto-released on crash)
@@ -351,7 +354,7 @@ The web UI is a single-page app (`web/index.html` + `web/style.css` + ES modules
 
 (`about.js` was removed in v5.7.0 when About moved into Settings as a sub-tab.)
 
-Navigation is a left sidebar with 6 pages (Chat, Files, Skills, Widgets, Dashboard, Settings). About lives as a sub-tab inside Settings (v5.7.0+) — there is no top-level About page; the desktop launcher's `#nav-version` span keeps a compact version label visible above the rail's footer. Dashboard is the operational hub for Logs, Evolution, Costs, and Updates; Settings holds Providers / Models / Behavior / Integrations / Advanced / About sub-tabs. The Dashboard nav button uses the Lucide `gauge` icon (a half-circle speedometer with needle) — the previous `layout-dashboard` glyph was visually indistinguishable from the `layout-grid` Widgets glyph at 20×20 px. On narrow viewports (`@media (max-width: 640px)`) `#nav-rail` collapses to a horizontal bottom bar — `position: fixed; bottom: 0; flex-direction: row; justify-content: safe center` with `padding-bottom: calc(6px + env(safe-area-inset-bottom, 0px))` for the iOS home-indicator and `#content { padding-left: 0; padding-bottom: calc(62px + env(safe-area-inset-bottom, 0px)) }` to clear the bar. Mobile Settings keeps the horizontal pill strip (no drill-down accordion) — the active pill auto-scrolls into view via `scrollIntoView({ inline: 'center' })`. The Skills page manages external + bundled skill packages — review trigger, key grants, enable/disable, status badges, and live-vs-catalog extension state — and reads from `/api/state` + `/api/extensions`. Each skill card carries a kebab (⋮) menu in its header (right of the toggle) that opens as an anchored non-modal popover via `dialog.show()`; the menu hosts Re-review / Update / Uninstall actions. The Widgets page hosts reviewed extension UI declarations separately so useful widgets do not get buried in long skill lists; inline-card widgets now preserve their current state across SPA tab switches.
+Navigation is a left sidebar with 6 pages (Chat, Files, Skills, Widgets, Dashboard, Settings). About lives as a sub-tab inside Settings (v5.7.0+) — there is no top-level About page; the desktop launcher's `#nav-version` span keeps a compact version label visible above the rail's footer. Dashboard is the operational hub for Logs, Evolution, Costs, and Updates; Settings holds Providers / Secrets / Models / Behavior / Integrations / Advanced / About sub-tabs. The Dashboard nav button uses the Lucide `gauge` icon (a half-circle speedometer with needle) — the previous `layout-dashboard` glyph was visually indistinguishable from the `layout-grid` Widgets glyph at 20×20 px. On narrow viewports (`@media (max-width: 640px)`) `#nav-rail` collapses to a horizontal bottom bar — `position: fixed; bottom: 0; flex-direction: row; justify-content: safe center` with `padding-bottom: calc(6px + env(safe-area-inset-bottom, 0px))` for the iOS home-indicator and `#content { padding-left: 0; padding-bottom: calc(62px + env(safe-area-inset-bottom, 0px)) }` to clear the bar. Mobile Settings keeps the horizontal pill strip (no drill-down accordion) — the active pill auto-scrolls into view via `scrollIntoView({ inline: 'center' })`. The Skills page manages external + bundled skill packages — review trigger, key grants, enable/disable, status badges, and live-vs-catalog extension state — and reads from `/api/state` + `/api/extensions`. Each skill card carries a kebab (⋮) menu in its header (right of the toggle) that opens as an anchored non-modal popover via `dialog.show()`; the menu hosts Re-review / Update / Uninstall actions. The Widgets page hosts reviewed extension UI declarations separately so useful widgets do not get buried in long skill lists; inline-card widgets now preserve their current state across SPA tab switches.
 
 v5.7.2 normalizes page-level headers and top tab strips through `web/modules/page_header.js`: Settings, Dashboard, Skills, Widgets, Files, and Chat share the same title/action/tab structure and `app-page-*` / `app-tab-*` CSS rhythm. Chat keeps the `chat-page-header` overlay variant for scroll-under behavior; Settings/Dashboard/Skills tabs are all horizontal pill strips.
 
@@ -385,7 +388,7 @@ because their untrusted values frequently land in `data-*`, `src`, `alt`, and
 - **Persistence**: chat history loaded from server on page load (`/api/chat/history`), survives app restarts. Fallback to sessionStorage. `syncHistory` uses two-pass processing: progress/summary messages are replayed first (building live card timelines), then regular assistant/user messages are processed (calling `finishLiveCard`). This guarantees thinking bubbles are never discarded due to `taskState.completed` being set before progress events are applied. After first load, if any live card is still active (task ongoing mid-reload), `showTyping()` is called to restore the typing indicator.
 - **Duplicate-bubble prevention**: queued local user bubbles carry a `client_message_id`; echoed WebSocket/history messages with the same id are merged instead of duplicated.
 - **Empty-chat init**: if neither server history nor sessionStorage has messages, the UI shows a transient assistant bubble: `Ouroboros has awakened`. This is visual-only and is not written to chat history.
-- **Telegram bridge**: Web UI initiated chats can be mirrored into the bound Telegram chat, Telegram text input is injected back into the same live chat timeline, and Telegram photos are bridged as image-aware user messages (including while a direct-chat turn is already running).
+- **Transport skills**: reviewed skills can inject external transport messages into the same live chat timeline through the loopback Host Service API.
 - **Live card cleanup and reconnect recovery**: after a 2-minute `scheduleTaskUiCleanup` timer, finished task cards are **left fully intact** — the DOM node, backing `rec.items` array, and `liveCardRecords` entry are all preserved so the card remains visible with working expand/collapse interactions and so a later reconnect `syncHistory` can rebind the existing node without creating a duplicate. Only the task ID is added to `retiredTaskIds` so routine incremental `scheduleHistorySync()` calls (fired 700ms after each new task) do NOT re-build the card from history mid-session. On soft restart (same-SHA WS reconnect), `syncHistory` receives `fromReconnect=true` so `retiredTaskIds` is cleared and server history is authoritative — cards are reconstructed from `progress.jsonl` entries. The final `liveCardRecords` sweep in `syncHistory` skips cards where `ts.cardVisible === false && ts.completed === true` (trivial 0-tool-call tasks) to avoid a cluster of invisible placeholder nodes appearing at the end of the chat.
 - **Mobile keyboard safety**: `web/app.js` creates a `<style id="runtime-vvh">` element at startup. On desktop/wide viewports (`>640px`), `updateVvh()` writes `:root{--vvh:100dvh}` so the browser owns dynamic viewport sizing and transient `visualViewport.height` pixel snapshots cannot collapse the Chat flex scroll chain until a resize. On narrow viewports (`≤640px`), it writes a clamped pixel value (`max(320px, visualViewport.height || window.innerHeight)`) because mobile keyboard layout still needs the live visual viewport height. `--vvh` also defaults to `100dvh` in `:root`. The narrow branch uses a frozen baseline captured from `documentElement.clientHeight`, `window.innerHeight`, and `screen.height/availHeight` while the keyboard is closed; this avoids the platform split where iOS makes `innerHeight == visualViewport.height` and Android/Opera may shrink `clientHeight` with the keyboard. When `(baseline - visualViewport.height) > max(120px, baseline * 0.25)`, it toggles both `html.keyboard-open` and `body.keyboard-open`, scrolls the document back to the top, and installs touch listeners that allow normal scrolling inside `#chat-messages`, `#chat-input`, and `.chat-live-timeline` while preventing document/visualViewport overscroll at their boundaries. When the keyboard closes or the viewport widens beyond 640px, the listeners are removed and both `keyboard-open` classes are cleared. The CSS keyboard block is scoped to `@media (max-width: 640px)`: `html.keyboard-open`, `body.keyboard-open`, `#content`, and `#page-chat.active` become fixed `height: var(--vvh)` containers, `#nav-rail` is hidden, the chat header/input become normal flex children, and only `#chat-messages` keeps `overflow-y: auto` (`overscroll-behavior: contain`) so messages scroll without revealing background pages.
 - Messages sent via WebSocket `{type: "chat", content: text, sender_session_id: "uuid"}`.
@@ -420,9 +423,9 @@ The Dashboard tab is the operational hub. It hosts four full-height sub-tabs:
 
 ### 3.4 Settings
 
-- **Tabbed layout (v5.7.0+)**: `Providers`, `Models`, `Behavior`, `Integrations`, `Advanced`, `About`. On every viewport (including mobile) the tab row stays a horizontal-scroll pill strip; the active pill auto-scrolls into view. The v5.6.0 mobile drill-down with Back-to-Settings button has been retired — `bindSettingsTabs` no longer toggles `settings-subtab-open` and the `.settings-mobile-back` element is hidden via CSS for back-compat with anyone querying it from outside.
+- **Tabbed layout (v5.7.0+)**: `Providers`, `Secrets`, `Models`, `Behavior`, `Integrations`, `Advanced`, `About`. On every viewport (including mobile) the tab row stays a horizontal-scroll pill strip; the active pill auto-scrolls into view. The v5.6.0 mobile drill-down with Back-to-Settings button has been retired — `bindSettingsTabs` no longer toggles `settings-subtab-open` and the `.settings-mobile-back` element is hidden via CSS for back-compat with anyone querying it from outside.
 - **Provider cards**: OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, Anthropic, plus optional Network Password. Cards are collapsible and use masked-secret inputs with show/hide toggles.
-- **API Keys**: OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, Anthropic, Telegram Bot Token, GitHub Token, and Network Password.
+- **Secrets**: OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, Anthropic, bridge tokens, GitHub Token, Network Password, and custom skill keys live in one Secrets section.
   Keys are displayed as masked values (e.g., `sk-or-v1...`), can be explicitly cleared, and are only overwritten on save if the user enters a new value (not containing `...`).
 - **Claude Runtime Status**: the Anthropic card shows app-managed Claude runtime status with a `Repair Runtime` action. The card is visible when the user has configured `ANTHROPIC_API_KEY` **or** when the last `/api/claude-code/status` poll stored a non-empty `error` on the runtime card state (`claudeRuntimeHasError` in `web/modules/settings.js::applyClaudeCodeStatus`). Two distinct paths set that `error`: (a) backend `ouroboros/platform_layer.py::resolve_claude_runtime` marks the SDK below the `_CLAUDE_SDK_MIN_VERSION` baseline (the only backend-originated path today — other not-ready conditions such as a missing bundled CLI currently fall through to `status_label() == "no_api_key"` until a key is configured); (b) the browser-side `refreshClaudeCodeStatus` `catch` block synthesizes an error payload for any `/api/claude-code/status` transport failure, non-OK HTTP response, or JSON parse error, so loss of connectivity to the backend also surfaces the card before a key is configured. The Claude runtime (SDK + bundled CLI) powers delegated code editing and advisory review and is managed automatically by the app.
 - **Providers tab**: also contains `Legacy OpenAI Base URL` (backward-compatibility escape hatch for older installs) and `Network Gate` (optional non-localhost password + restart-required `OUROBOROS_SERVER_HOST`) at the bottom. The Network Gate section also shows a read-only LAN hint (via `_meta` from `/api/settings`): loopback-bound instances show a restart instruction, LAN-reachable instances show a clickable URL, and non-loopback binds without `OUROBOROS_NETWORK_PASSWORD` render as a warning with a set-password CTA. Saving a non-loopback host through `/api/settings` is limited to wildcard hosts (`0.0.0.0`, `::`) and requires a non-empty `OUROBOROS_NETWORK_PASSWORD` in the same save; specific LAN IP binds are manual/env-only so the desktop launcher can keep probing loopback reliably. Manual env/settings-before-launch and Docker flows may still bind open by explicit operator choice. Bracketed IPv6 literals (e.g. `[::1]`) are normalized by `_build_network_meta` — brackets are stripped before the `is_loopback_host` classification, and URL construction uniformly re-brackets IPv6 addresses so there is no double-bracketing.
@@ -454,13 +457,12 @@ The Dashboard tab is the operational hub. It hosts four full-height sub-tabs:
 - **ClawHub Marketplace**: always-on Marketplace sub-tab backed by `OUROBOROS_CLAWHUB_REGISTRY_URL` (default `https://clawhub.ai/api/v1`). The old `OUROBOROS_CLAWHUB_ENABLED` key is ignored when present in legacy settings and is no longer part of defaults or env propagation. Browse uses `/packages?family=skill`; text search uses `/search?q=&limit=16` (full-index relevance ranking, single-page) and enriches thin hits through a merged `/packages/<slug>` + `/skills/<slug>` detail lookup to recover stats, official badges, license, and homepage metadata. The Official-only checkbox is clickable in both modes: browse forwards `isOfficial=true` to the catalogue, while text search applies it after enrichment because `/search` has no official filter parameter. Registry reads and downloads retry bounded 429 responses with `Retry-After` when present; persistent rate limits surface as a human-readable "try again later" state with a retry affordance instead of a raw HTTP 429. Every install runs through a fixed pipeline — registry resolve -> archive download (50 MB cap, text-only, sensitive-filename + loadable-binary refusal) -> staging extract -> OpenClaw frontmatter translation (writing original `SKILL.md` aside as `SKILL.openclaw.md` for audit) -> atomic land into `data/skills/clawhub/<owner>__<slug>/` -> tri-model `review_skill` auto-trigger -> durable provenance at `data/state/skills/<name>/clawhub.json`. v5.4.0 adds a card-level lifecycle CTA: install auto-runs review, then the card offers Enable only after a fresh PASS review and any required grants; otherwise the same card becomes Fix / Grant / Enable / Open widgets / Disable / Uninstall. Plugins (Node/TS) are filtered at search time and refused at install time; only skill packages are accepted. The registry-host allowlist prevents a settings override from redirecting HTTP traffic, and a custom redirect handler re-validates the host on every 30x hop. Core settings keys (`OPENROUTER_API_KEY` etc.) requested by OpenClaw `requires.env` become per-skill grant requirements and are forwarded only after fresh PASS review plus desktop-launcher owner grant; this is a trust-local model with `_data_write`, Files API, and `run_shell` owner-state defenses rather than an OS-level same-user sandbox.
 - **Advanced tab**: local model runtime, max workers, tool timeout, soft/hard timeout, and reset controls. Total budget and per-task cost cap live in **Dashboard → Costs**.
 - **Local Model Runtime**: source, GGUF filename, port, GPU layers, context length, chat format, start/stop/test buttons, live local-model status, real download progress bar (updates via `download_progress` from `/api/local-model/status`), and an **Install Local Runtime** button (hidden until runtime is missing). The Start button performs a preflight check via `/api/local-model/start` before downloading; on a `runtime_missing` (HTTP 412) response it surfaces the install button and a human-readable hint instead of a raw traceback. After install completes (`runtime_status == "install_ok"`), the start flow resumes automatically if a source was configured. `LOCAL_MODEL_FILENAME` now accepts subfolder paths (`quant/model.gguf`) and split GGUF patterns (`quant/model-00001-of-00003.gguf`); all shards are downloaded automatically and the server is started with the first shard. If the user omits the subfolder prefix (types just the bare filename), `_resolve_hf_path` auto-resolves the full path by querying `list_repo_files` on the HF repo (fail-open on network errors).
-- **Telegram**: Bot Token and primary chat id. If no primary chat id is pinned, the bridge binds to the first active Telegram chat and keeps replies attached there.
 - **GitHub**: Token + Repo (for remote sync).
 - **Save Settings** button → POST `/api/settings`. Hot-reload contract:
-  - **Budget (`TOTAL_BUDGET`), timeouts (`OUROBOROS_SOFT_TIMEOUT_SEC`, `OUROBOROS_HARD_TIMEOUT_SEC`, `OUROBOROS_TOOL_TIMEOUT_SEC`), and integrations (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `GITHUB_TOKEN`, `GITHUB_REPO`)**: refresh immediately in the running supervisor (no restart, no task boundary). `/status` reads live timeout values.
+  - **Budget (`TOTAL_BUDGET`), timeouts (`OUROBOROS_SOFT_TIMEOUT_SEC`, `OUROBOROS_HARD_TIMEOUT_SEC`, `OUROBOROS_TOOL_TIMEOUT_SEC`), and GitHub settings (`GITHUB_TOKEN`, `GITHUB_REPO`)**: refresh immediately in the running supervisor (no restart, no task boundary). `/status` reads live timeout values.
   - **Models, API keys, effort, review settings, `OUROBOROS_PER_TASK_COST_USD`**: applied via `apply_settings_to_env(load_settings())` at the start of the **next task**. Current in-flight task is unaffected.
   - **Local model server, worker count, base URLs, and some provider runtime parameters**: require a full process restart to take effect.
-  - Save response always includes `status: "saved"`. Optional keys present only when applicable: `no_changes` (bool), `restart_required` (bool) + `restart_keys` (list), `immediate_changed` (bool, true when any key from `_IMMEDIATE_KEYS` changed — budget, timeouts, Telegram, GitHub), `next_task_changed` (bool, true when any other hot-reloadable key changed — models, API keys, effort, review settings, per-task cost), `warnings` (list). UI shows a 5-state message: no changes → restart required → mixed immediate+next-task → immediate only → next-task only; warnings appended to all branches.
+  - Save response always includes `status: "saved"`. Optional keys present only when applicable: `no_changes` (bool), `restart_required` (bool) + `restart_keys` (list), `immediate_changed` (bool, true when any key from `_IMMEDIATE_KEYS` changed — budget, timeouts, GitHub), `next_task_changed` (bool, true when any other hot-reloadable key changed — models, API keys, effort, review settings, per-task cost), `warnings` (list). UI shows a 5-state message: no changes → restart required → mixed immediate+next-task → immediate only → next-task only; warnings appended to all branches.
 - **Reset All Data** button (Danger Zone) → POST `/api/reset`.
   Deletes: state/, memory/, logs/, archive/, uploads/, settings.json.
   Keeps: repo/ (agent code).
@@ -592,6 +594,7 @@ authentication. If the password is blank, non-loopback access stays open by desi
 | POST | `/api/marketplace/ouroboroshub/install` | Queue official skill install from pinned raw GitHub files and auto-review. |
 | POST | `/api/marketplace/ouroboroshub/update/{name}` | Queue official skill update (install with overwrite). |
 | POST | `/api/marketplace/ouroboroshub/uninstall/{name}` | Queue official skill uninstall. |
+| HOST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}` | Separate loopback-only Host Service API for reviewed skill callbacks. This is not mounted on the public web app. Routes: `GET /identity`, `GET /tools/schemas`, `POST /chat/inject`, `POST /chat/allocate-internal`, `WS /events`. Every route requires a content-bound `X-Skill-Token`; companion skills receive an opaque `SkillToken` and must explicitly call `use_in_request()` at request construction sites. |
 | POST | `/api/command` | Queue a local command/task payload. Optional `visible_text` broadcasts and logs a short system status (used by skill Repair) while the full payload stays off the visible chat transcript; skill review/dependency lifecycle progress uses the live-card stream separately. |
 | POST | `/api/reset` | Delete all runtime data, restart for fresh onboarding |
 | GET | `/api/git/log` | Recent commits + tags + current branch/sha |
@@ -615,12 +618,9 @@ authentication. If the password is blank, non-loopback access stays open by desi
 | WS | `/ws` | WebSocket: chat messages, commands, log streaming |
 | GET | `/static/*` | Static files from `web/` directory (NoCacheStaticFiles wrapper forces revalidation) |
 
-**A2A endpoints (port 18800, served by separate uvicorn server when `A2A_ENABLED=True`):**
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/.well-known/agent-card.json` (port 18800) | A2A Agent Card — dynamic JSON describing agent identity, skills, capabilities |
-| POST | `/` (port 18800) | A2A JSON-RPC endpoint — message/send, tasks/get, tasks/cancel |
+**Transport skill endpoints:** A2A and other external bridge protocols are
+provided by reviewed skills from OuroborosHub. Their public listener ports are
+owned by companion processes, not by the core server.
 
 ### WebSocket protocol
 
@@ -838,7 +838,7 @@ runtime authority.
   `ouroboros/runtime_mode_policy.py`, `ouroboros/tools/registry.py`,
   `prompts/SAFETY.md`
 
-### Skills self-authored fast path (v5.8.2)
+### Self-authored skills
 
 - Agent-created skill manifests are written under
   `data/skills/external/<skill>/` by `data_write`. When the first
@@ -853,13 +853,11 @@ runtime authority.
   `external/` do not get the marker and continue through normal
   tri-model skill review.
 - `review_skill` is the atomic finalize operation for self-authored
-  skills. It runs deterministic `skill_preflight`, records a fresh
-  PASS with `reviewer_models=["self_authored:v5.8.2"]`, reconciles
-  isolated dependencies, grants any requested core keys already present
-  in settings, writes `enabled.json` after dependencies are ready, and
-  reconciles the extension loader. No desktop owner prompt is required
-  for this owner-selected self-authored path; third-party folders and
-  marketplace skills still use the tri-model review + owner grant flow.
+  skills. As of v5.9.0, self-authored payloads go through the same
+  tri-model skill review as marketplace/user-managed skills; there is no
+  deterministic PASS fast path and no automatic key/permission grant.
+  This keeps daemon-capable and host-callback-capable skills inside the
+  normal P3 immune system.
 - `skill_preflight` validates widget render schemas statically via the
   same `_validate_ui_render` contract used by the extension loader. It
   catches literal `_UI_RENDER` mistakes (for example `action_route`
@@ -1080,21 +1078,16 @@ the constitutional guard is that the file itself must remain non-deletable.
 
 ### A2A (Agent-to-Agent) protocol
 
-- **Disabled by default** (`A2A_ENABLED=False`). Enable in Settings → Integrations; requires restart.
-- **Dual-server model**: when enabled, `server.py` lifespan spawns a second `asyncio.create_task(start_a2a_server(settings))` running `uvicorn` on port 18800 (configurable via `A2A_HOST`/`A2A_PORT`). The main server (port 8765) is unaffected.
-- **Security**: the A2A Starlette app is wrapped in `NetworkAuthGate` (same middleware as the main server) before being passed to uvicorn. Non-loopback binding without `OUROBOROS_NETWORK_PASSWORD` logs a warning but is allowed — the gate rejects unauthenticated non-local requests when a password is configured.
-- **Agent Card** (`GET /.well-known/agent-card.json`): dynamic JSON served via `A2AStarletteApplication`. Card fields (name, description) are read from `memory/identity.md`; skills are populated live from `ToolRegistry.schemas()` on each request via `card_modifier=_refresh_skills`. Falls back to a generic "General Assistant" skill if the registry is not yet available.
-- **Task execution** (`POST /`): `OuroborosA2AExecutor` bridges A2A tasks to the supervisor via `LocalChatBridge.handle_chat_direct()`. Uses a response-subscription API (`subscribe_response`/`unsubscribe_response`) added to `LocalChatBridge` for async response routing.
-- **Task persistence**: `FileTaskStore` stores tasks as atomic JSON files in `data/a2a_tasks/`. TTL-based cleanup loop runs every hour, removing expired tasks (default TTL: 24 hours, configurable via `A2A_TASK_TTL_HOURS`).
-- **Logging**: structured logs written to `data/logs/a2a.log` (RotatingFileHandler, 2 MB × 3 backups).
-- **Client tools** (non-core, require `enable_tools("a2a_discover,a2a_send,a2a_status")`): `a2a_discover` fetches remote Agent Cards, `a2a_send` sends tasks and waits for results, `a2a_status` polls task status.
-- **Settings**: `A2A_ENABLED` (bool), `A2A_HOST` (default `127.0.0.1`), `A2A_PORT` (default `18800`), `A2A_MAX_CONCURRENT` (default `3`), `A2A_AGENT_NAME`, `A2A_AGENT_DESCRIPTION`, `A2A_TASK_TTL_HOURS` (default `24`). All changes require restart (all seven keys are in `server.py::_RESTART_REQUIRED_KEYS`; all included in `apply_settings_to_env` for consistency).
-- **Base dependency**: `a2a-sdk[http-server]>=0.3.20,<1.0.0` is part of the base runtime in `requirements.txt` and `pyproject.toml`. The `a2a` extra remains as compatibility metadata for package installers that still request it explicitly. All four A2A modules (`a2a_server.py`, `a2a_executor.py`, `a2a_task_store.py`, `tools/a2a.py`) still guard their top-level `from a2a.*` imports with `try/except ImportError` so source checkouts with incomplete dependency installs fail gracefully. `start_a2a_server` returns early with a warning if the SDK is missing.
-- **Concurrency safety**: `supervisor/workers.py` exposes a module-level `_chat_agent_lock` (`threading.Lock`) that `handle_chat_direct` acquires before touching the shared `_chat_agent` singleton. This serializes all callers — A2A tasks (via `asyncio.to_thread`) and Web UI direct-chat — against the agent's mutable per-call state (`_busy`, `_current_chat_id`, `_current_task_id`). A2A tasks are accepted up to `A2A_MAX_CONCURRENT` (semaphore) but their supervisor dispatches are serialized through this shared lock.
-- **Client auth**: `A2A_CLIENT_PASSWORD` env var (not a settings key — read at call time). When set, `a2a_discover`, `a2a_send`, and `a2a_status` pass it as HTTP Basic auth (`ouroboros:<password>`) so they can reach remote A2A servers protected by `NetworkAuthGate` / `OUROBOROS_NETWORK_PASSWORD`.
-- **Memory isolation**: A2A traffic uses negative `chat_id` values (base `-1001`, decremented per task) to distinguish it from human dialogue. `supervisor/message_bus.py::broadcast` and `send_message` check `chat_id >= 0` before WebSocket broadcast; `ouroboros/server_history_api.py` filters negative `chat_id` from `/api/chat/history` replay; `ouroboros/consolidator.py::_read_chat_entries` skips `chat_id < 0` entries to prevent A2A traffic from contaminating `dialogue_blocks.json`; `ouroboros/memory.py::chat_history` (exposed as the `chat_history` tool) filters `chat_id < 0` entries so A2A traffic never appears in the agent's dialogue tool results. Raw A2A entries may still be present in `data/logs/chat.jsonl` (written by `log_chat`); all consumer paths above guard against them. Structured A2A audit logs also go to `data/logs/a2a.log`.
-- **Panic cleanup**: `ouroboros/server_control.py::execute_panic_stop` sweeps the A2A port (`A2A_PORT`, default `18800`) alongside the main server port (`8765`) and local-model port (`8766`) so a stuck A2A uvicorn server does not leave the port in `TIME_WAIT` after an emergency stop.
-- **Frozen-bundle support:** `tools/a2a.py` is listed in `_FROZEN_TOOL_MODULES` in `registry.py`, so the three A2A client tools (`a2a_discover`, `a2a_send`, `a2a_status`) are loaded in packaged `.app` / `.tar.gz` / `.zip` bundles alongside the dev/source auto-discovery path. The A2A server itself (port 18800) starts normally in packaged builds when `A2A_ENABLED=True`.
+- A2A is no longer a base runtime module. Install the official
+  `a2a` skill from OuroborosHub to expose an A2A-compatible server and
+  client tools.
+- The skill runs its server as a host-supervised companion process,
+  calls back into the loopback Host Service API, and stores task state
+  under `data/state/skills/a2a/`.
+- The base runtime keeps only the generic Host Service API, companion
+  supervisor, and chat-id policy needed by transport skills. Packaged
+  offline builds do not include A2A unless the skill and its dependencies
+  have already been installed.
 
 ### Block-wise dialogue consolidation (consolidator.py)
 
@@ -1645,9 +1638,9 @@ Single source of truth for:
 - **Constants**: RESTART_EXIT_CODE (42), AGENT_SERVER_PORT (8765)
 - **Settings defaults**: all model names, budget, timeouts, worker count
 - **Functions**: `load_settings()`, `save_settings()`,
-  `apply_settings_to_env()` (copies all hot-reloadable keys — models, API keys,
-  Telegram/GitHub integrations, review/effort settings, local-model config,
-  `A2A_*` keys, and the Phase 2 three-layer-refactor axes
+  `apply_settings_to_env()` (copies hot-reloadable/runtime keys — models, API keys,
+  GitHub integration settings, review/effort settings, local-model config,
+  and the Phase 2 three-layer-refactor axes
   `OUROBOROS_RUNTIME_MODE` + `OUROBOROS_SKILLS_REPO_PATH` — from the
   settings dict into `os.environ`),
   `normalize_runtime_mode()` (SSOT clamp for `OUROBOROS_RUNTIME_MODE`,
@@ -1672,8 +1665,8 @@ Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent acce
 | CLOUDRU_FOUNDATION_MODELS_API_KEY | "" | Optional. Cloud.ru Foundation Models provider key |
 | CLOUDRU_FOUNDATION_MODELS_BASE_URL | `https://foundation-models.api.cloud.ru/v1` | Cloud.ru provider base URL |
 | ANTHROPIC_API_KEY | "" | Optional. Enables direct Anthropic runtime routing (`anthropic::...` model values) and Claude Agent SDK tools (`claude_code_edit`, `advisory_pre_review`) |
-| TELEGRAM_BOT_TOKEN | "" | Optional. Enables Telegram bridge polling/sending |
-| TELEGRAM_CHAT_ID | "" | Optional. Pin replies to a specific Telegram chat |
+| TELEGRAM_BOT_TOKEN | "" | Optional stored secret used by the Telegram bridge skill after owner grant |
+| TELEGRAM_CHAT_ID | "" | Optional stored setting used by the Telegram bridge skill |
 | OUROBOROS_NETWORK_PASSWORD | "" | Optional. Enables the non-loopback auth gate when set; empty still allows open bind, but startup logs a warning |
 | OUROBOROS_SERVER_HOST | 127.0.0.1 | Server bind host. Use `0.0.0.0` for LAN/Docker access; restart required. |
 | OUROBOROS_TRUST_NONLOCAL_BIND_WITHOUT_PASSWORD | unset | Env-only Docker/Kubernetes escape hatch. When set to `1`, Settings may save ordinary changes while a wildcard/non-localhost bind has no `OUROBOROS_NETWORK_PASSWORD`; use only behind ingress auth, VPN, private networking, or an auth proxy. |
@@ -1713,6 +1706,7 @@ Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent acce
 | OUROBOROS_BG_WAKEUP_MAX | 7200 | Max wakeup interval (seconds) |
 | OUROBOROS_EVO_COST_THRESHOLD | 0.10 | Min cost per evolution cycle |
 | LOCAL_MODEL_PORT | 8766 | Port for local llama-cpp server |
+| OUROBOROS_HOST_SERVICE_PORT | 8767 | Loopback-only Host Service API port used by reviewed skills/companions to call back into the host. Must not be exposed in Docker/LAN port mappings. |
 | LOCAL_MODEL_CHAT_FORMAT | "" | Chat format for local model (`""` = auto-detect) |
 | GITHUB_TOKEN | "" | Optional. GitHub PAT for remote sync |
 | GITHUB_REPO | "" | Optional. GitHub repo (owner/name) for sync |
@@ -2052,7 +2046,8 @@ via `tests/test_contracts.py`.
 | `ToolContextProtocol` — 6-attribute + 3-method minimum every tool handler relies on (attributes: `repo_dir`, `drive_root`, `pending_events`, `emit_progress_fn`, `current_chat_id`, `task_id`; methods: `repo_path`, `drive_path`, `drive_logs`) | `ouroboros/contracts/tool_context.py` | `ouroboros.tools.registry.ToolContext` must satisfy it (duck-typed check + AST field parity) |
 | `ToolEntryProtocol` + `GetToolsProtocol` — the tool-module ABI | `ouroboros/contracts/tool_abi.py` | Every entry returned by `ToolRegistry._entries` must satisfy `ToolEntryProtocol` |
 | `api_v1` WS/HTTP envelopes — inbound: `ChatInbound`, `CommandInbound`; outbound WS: `ChatOutbound`, `PhotoOutbound`, `TypingOutbound`, `LogOutbound`; HTTP: `HealthResponse`, `StateResponse` (Phase 2 adds `runtime_mode: str` and `skills_repo_configured: bool`), `EvolutionStateSnapshot`, `SettingsNetworkMeta` | `ouroboros/contracts/api_v1.py` | AST scans of `supervisor/message_bus.py` chat envelopes, `server.py::api_state`, `server.py::api_health`, `server.py::_build_network_meta`, and `server.py::ws_endpoint` inbound dispatch assert no un-declared keys leak out; `tests/test_contracts.py::test_state_response_declares_phase2_runtime_mode_keys` explicitly pins the two new Phase 2 fields |
-| `PluginAPI` (Phase 4) + `ExtensionRegistrationError` + `FORBIDDEN_EXTENSION_SETTINGS` + `VALID_EXTENSION_PERMISSIONS` + `VALID_EXTENSION_ROUTE_METHODS` — the surface every `type: extension` skill's `plugin.py::register(api)` binds against (`register_tool`, `register_route`, `register_ws_handler`, `register_ui_tab`, `register_settings_section`, `send_ws_message`, `on_unload`, `log`, `get_settings`, `get_state_dir`, `get_runtime_info`). `VALID_EXTENSION_ROUTE_METHODS` is the frozen tuple of HTTP methods accepted by `register_route`; the Phase 5 catch-all dispatcher in `server.py` validates against the same set. | `ouroboros/contracts/plugin_api.py` | `tests/test_contracts.py::test_plugin_api_surface_is_frozen` pins the frozen method set; `tests/test_contracts.py::test_extension_route_methods_contract_matches_server_dispatch` pins the route-methods tuple; `tests/test_extension_loader.py::test_plugin_api_impl_matches_protocol` asserts the concrete `PluginAPIImpl` structurally satisfies the runtime-checkable Protocol |
+| `chat_id_policy` — SSOT for A2A/synthetic chat-id filtering across message bus, history, memory, and consolidation | `ouroboros/contracts/chat_id_policy.py` | `tests/test_chat_id_policy.py` pins boundaries and human/transport positive ids |
+| `PluginAPI` (Phase 4, v1.1) + `ExtensionRegistrationError` + `FORBIDDEN_EXTENSION_SETTINGS` + `VALID_EXTENSION_PERMISSIONS` + `VALID_EXTENSION_ROUTE_METHODS` — the surface every `type: extension` skill's `plugin.py::register(api)` binds against (`register_tool`, `register_route`, `register_ws_handler`, `register_ui_tab`, `register_settings_section`, `register_supervised_task`, `register_companion_process`, `subscribe_event`, `get_skill_token`, `send_ws_message`, `on_unload`, `log`, `get_settings`, `get_state_dir`, `get_runtime_info`). `VALID_EXTENSION_PERMISSIONS` includes host-mediated permissions (`companion_process`, `supervised_task`, `subscribe_event`, `inject_chat`) that require review/owner grants as documented in CHECKLISTS.md. | `ouroboros/contracts/plugin_api.py` | `tests/test_contracts.py::test_plugin_api_surface_is_frozen` pins the frozen method set; `tests/test_contracts.py::test_extension_route_methods_contract_matches_server_dispatch` pins the route-methods tuple; `tests/test_extension_loader.py::test_plugin_api_impl_matches_protocol` asserts the concrete `PluginAPIImpl` structurally satisfies the runtime-checkable Protocol |
 | `SkillManifest` — unified `SKILL.md` / `skill.json` format (`type: instruction \| script \| extension`) | `ouroboros/contracts/skill_manifest.py` | `parse_skill_manifest_text()` tolerates missing optional fields; `validate()` returns warnings without raising |
 | `schema_versions` — opt-in `_schema_version` key + `with_schema_version`/`read_schema_version` helpers | `ouroboros/contracts/schema_versions.py` | Not yet wired into existing state files; groundwork only |
 
@@ -2081,16 +2076,91 @@ a version bump + a migration note in the release row.
 
 ---
 
-## 12. External Skills Layer (Phase 3, refactored in v4.50)
+## 12. Host Service, Companion Processes, and Chat IDs
+
+### Host Service API
+
+Reviewed skills can now call a narrow host-owned API on a separate
+loopback listener (`127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}`).
+This API is deliberately **not** mounted under the main Starlette app
+that serves the browser UI, so LAN/Docker exposure of port 8765 does
+not expose skill-to-host callbacks. The service provides:
+
+- `POST /chat/inject` — enqueue an inbound message from a reviewed
+  transport skill. The host rejects slash-command-shaped input
+  (`/panic`, `/restart`, `/review`, etc.) because runtime control
+  commands remain direct-owner-only.
+- `WS /events` — subscribe to the three shipped host topics:
+  `chat.outbound`, `chat.typing`, and `chat.photo`.
+- `GET /identity` — current identity summary for transport protocol
+  metadata such as an A2A Agent Card.
+- `GET /tools/schemas` — filtered agent-facing tool schemas for
+  protocol metadata.
+- `POST /chat/allocate-internal` — allocate synthetic A2A chat ids
+  from the reserved negative range.
+
+Every request requires a content-hash-bound skill token. Tokens are
+stored in the skill state plane, are revoked on content-hash changes,
+and are exposed to skill code as an opaque `SkillToken`; accidental
+stringification is redacted, and deliberate request construction must
+call `use_in_request()`. This makes the credential boundary visible in
+review while keeping ordinary logging safe.
+
+### Companion Process Supervisor
+
+`ouroboros/extension_companion.py` owns long-lived companion processes
+registered through `PluginAPI.register_companion_process`. The supervisor
+runs only in the main server process; worker processes can load extension
+tools but never spawn duplicate companions. Each companion starts in an
+isolated process group/session (POSIX) or Job Object/new process group
+(Windows), has stdout/stderr drained with byte caps, and appears in a
+durable runtime snapshot under `data/state/extension_companions.json`.
+Panic stop walks the companion table and kills process groups plus
+declared ports, preserving the Emergency Stop invariant.
+
+### Internal Chat ID Policy
+
+`ouroboros/contracts/chat_id_policy.py` is the SSOT for chat id classes.
+Human and external transport chats use positive ids (including Telegram).
+A2A-style synthetic task conversations use the reserved negative range
+and are excluded from browser history, consolidation, and `chat_history`.
+Source attribution belongs in the event/message payload (`source:
+"skill:telegram-bridge"`, `source: "a2a"`, etc.), not in the numeric id.
+
+### PluginAPI v1.1 Extension Surface
+
+The frozen `PluginAPI` adds four capabilities:
+`register_supervised_task`, `register_companion_process`,
+`subscribe_event`, and `get_skill_token`. Manifests can declare
+`companion_processes` and `subscribe_events`; `inject_chat` and chat
+event subscriptions are owner-granted permissions in the same
+content-bound grant plane as protected settings keys.
+
+### Settings Secrets
+
+Settings now has a Secrets section for all API keys, bridge tokens,
+passwords, and custom future-skill keys. Provider cards may still show
+compatibility fields during the extraction transition, but the canonical
+grantable values live in the same settings file and are surfaced together
+for owner review.
+
+**Rationale:** the skill model remains declarative at registration time,
+but transport skills need a narrow callback path into the host. Keeping
+that path on a separate loopback-only listener preserves the public web
+surface while avoiding runtime core patching by skills.
+
+---
+
+## 13. External Skills Layer (Phase 3, refactored in v4.50)
 
 Phase 3 of the three-layer refactor introduced a safe, plug-and-play
 external skill surface that lives **outside** the self-modifying
 Ouroboros repository. v4.50 moved the runtime location from the
 git-tracked ``repo/skills/`` seed directory into the data plane and
-added a ClawHub marketplace surface (Section 12.6) on top of that
+added a ClawHub marketplace surface (Section 13.6) on top of that
 foundation.
 
-### 12.1 Topology
+### 13.1 Topology
 
 ```
 ~/Ouroboros/data/skills/                  ← primary discovery root (v4.50)
@@ -2197,7 +2267,7 @@ namespace-package modules loaded from those site-packages; ``unload_extension``
 then only owns the staged import root, registered surfaces, callbacks, and
 extension module namespace.
 
-### 12.2 Lifecycle
+### 13.2 Lifecycle
 
 1. **Discover**: ``list_skills`` tool (via ``summarize_skills``) returns
    the catalogue. Skills start with ``enabled=False`` and
@@ -2254,7 +2324,7 @@ extension module namespace.
    (wall-clock) surfaces as ``SKILL_EXEC_TIMEOUT`` with captured
    partial output.
 
-### 12.3 Gating invariants (all must hold for ``skill_exec`` to run)
+### 13.3 Gating invariants (all must hold for ``skill_exec`` to run)
 
 - A skill is discoverable in ``data/skills/{native,clawhub,external}/``
   OR via ``OUROBOROS_SKILLS_REPO_PATH`` (the legacy "external skills
@@ -2301,7 +2371,7 @@ extension module namespace.
   temporarily-unreadable payload cannot slip a PASS verdict through
   and then execute once permissions change.
 
-### 12.4 Review surface split (DRY against repo review)
+### 13.4 Review surface split (DRY against repo review)
 
 - Repo review (triad + scope + advisory) protects the self-modifying
   ``~/Ouroboros/repo/``. Its state lives in
@@ -2316,7 +2386,7 @@ and the ``_handle_multi_model_review`` plumbing but are otherwise
 siloed — a blocked skill review cannot create repo-review obligations
 or commit-readiness debt and vice versa.
 
-### 12.5 Extension Loader (Phase 4)
+### 13.5 Extension Loader (Phase 4)
 
 ``type: extension`` skills run IN-PROCESS via
 ``ouroboros/extension_loader.py``, not via the subprocess substrate.
@@ -2407,7 +2477,7 @@ Defense in depth against reviewer misses:
   message-type; errors tear down any partial registrations and
   surface as a ``load_error`` on the skill.
 
-### 12.6 Skills Marketplace: My skills, ClawHub, and OuroborosHub (v5.5)
+### 13.6 Skills Marketplace: My skills, ClawHub, and OuroborosHub (v5.5)
 
 Always-on surface for browsing, installing, reviewing, and enabling
 skills. The Skills page exposes three operator-facing tabs:
@@ -2417,7 +2487,7 @@ registry), and ``OuroborosHub`` (official static GitHub catalog at
 Node/TypeScript plugins (``openclaw.plugin.json``) are filtered at
 search time and refused at install time.
 
-#### 12.6.1 Module layout
+#### 13.6.1 Module layout
 
 | Module | Role |
 |---|---|
@@ -2438,7 +2508,7 @@ search time and refused at install time.
 | ``web/modules/ouroboroshub.js`` | Official hub UI backed by the static GitHub catalog. Lists 10-50 official skills without a server-side search service; install pulls only the selected skill files and uses the shared lifecycle-card pending UI while install/review is running. |
 | ``web/modules/widgets.js`` | Widgets page host for reviewed ``register_ui_tab`` declarations. Supports legacy ``iframe`` / ``inline_card`` and declarative v1 components without loading arbitrary skill JavaScript. Declarative widget state persists across tab switches for the current browser session. |
 
-#### 12.6.2 Frontmatter mapping (OpenClaw -> Ouroboros)
+#### 13.6.2 Frontmatter mapping (OpenClaw -> Ouroboros)
 
 | OpenClaw field | Ouroboros field | Mapping rule |
 |---|---|---|
@@ -2456,7 +2526,7 @@ search time and refused at install time.
 | ``license`` | provenance JSON | Preserved at ``data/state/skills/<name>/clawhub.json::license``; surfaced in the marketplace UI cards (display-only, never enforced). |
 | ``homepage`` / ``website`` | provenance JSON | Preserved at ``data/state/skills/<name>/clawhub.json::homepage``; surfaced as a marketplace card link with strict scheme validation (``http``/``https`` only). |
 
-#### 12.6.3 Defense in depth
+#### 13.6.3 Defense in depth
 
 The marketplace inherits every gate that protects the existing skill
 surface (review, runtime mode, sandbox env scrub, byte caps,

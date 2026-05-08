@@ -35,8 +35,10 @@ import importlib.util
 import inspect
 import hashlib
 import logging
+import os
 import pathlib
 import re
+import secrets
 import shutil
 import sys
 import threading
@@ -51,7 +53,15 @@ from ouroboros.contracts.plugin_api import (
     VALID_EXTENSION_PERMISSIONS,
     VALID_EXTENSION_ROUTE_METHODS,
 )
+from ouroboros.event_bus import get_global_event_bus
+from ouroboros.extension_companion import (
+    CompanionDescriptor,
+    get_global_supervisor,
+    is_server_process,
+)
+from ouroboros.host_service_api import AUTH_TOKEN_FILENAME
 from ouroboros.extension_isolated_deps import (
+    _isolated_python_site_dirs,
     async_isolated_site_dirs_scope,
     isolated_site_dirs_scope,
     is_skill_cache_path,
@@ -63,10 +73,14 @@ from ouroboros.skill_loader import (
     compute_content_hash,
     discover_skills,
     find_skill,
+    grant_status_for_skill,
     load_skill_grants,
     requested_core_setting_keys,
     skill_state_dir,
 )
+from ouroboros.skill_token import SkillToken
+from ouroboros.tools.skill_exec import _scrub_env
+from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -86,6 +100,9 @@ class _ExtensionRegistrations:
     ui_tabs: List[str] = field(default_factory=list)
     settings_sections: List[str] = field(default_factory=list)
     unload_callbacks: List[Callable[[], Any]] = field(default_factory=list)
+    event_subscriptions: List[str] = field(default_factory=list)
+    companion_names: List[str] = field(default_factory=list)
+    supervised_futures: List[Any] = field(default_factory=list)
     api_instances: List[Any] = field(default_factory=list)
     content_hash: Optional[str] = None
     skill_dir: Optional[str] = None
@@ -99,6 +116,9 @@ class _ExtensionRegistrations:
             or self.ws_handlers
             or self.ui_tabs
             or self.unload_callbacks
+            or self.event_subscriptions
+            or self.companion_names
+            or self.supervised_futures
         )
 
 
@@ -107,6 +127,21 @@ class _ExtensionLoadFailure:
     content_hash: str
     skill_dir: str
     error: str
+
+
+@dataclass
+class _PluginAPIConfig:
+    skill_name: str
+    permissions: Sequence[str]
+    env_allowlist: Sequence[str]
+    state_dir: pathlib.Path
+    settings_reader: Callable[[], Dict[str, Any]]
+    granted_keys: Sequence[str] | None = None
+    subscribe_events: Sequence[str] | None = None
+    companion_processes: Sequence[Dict[str, Any]] | None = None
+    skill_dir: pathlib.Path | None = None
+    runtime_skill_dir: pathlib.Path | None = None
+    dependency_site_dirs_enabled: bool = False
 
 
 # Module-global, lock-guarded registries. Separate dicts make unload
@@ -249,273 +284,7 @@ def _assert_tool_name(name: str) -> str:
     return candidate
 
 
-_UI_RENDER_KINDS = {"", "iframe", "inline_card", "declarative", "module"}
-_DECLARATIVE_WIDGET_COMPONENTS = {
-    "action",
-    "audio",
-    "chart",
-    "code",
-    "file",
-    "form",
-    "gallery",
-    "image",
-    "json",
-    "kv",
-    "markdown",
-    "poll",
-    "progress",
-    "status",
-    "stream",
-    "subscription",
-    "tabs",
-    "table",
-    "video",
-    # v5.7.0 additions: host-owned declarative components for richer
-    # widget surfaces. None of these add ``kind: "module"`` JS — they
-    # are still pure declarative schemas that the browser renders with
-    # vetted host code (Leaflet for ``map``, host SVG for ``calendar``,
-    # HTML5 drag API for ``kanban``).
-    "map",
-    "calendar",
-    "kanban",
-}
-
-
-def _validate_ui_render(render: Dict[str, Any]) -> Dict[str, Any]:
-    """Validate the browser-hosted widget declaration surface."""
-    if not isinstance(render, dict):
-        raise ExtensionRegistrationError("ui render must be an object")
-    clean = dict(render)
-    kind = str(clean.get("kind") or "").strip()
-    if kind not in _UI_RENDER_KINDS:
-        raise ExtensionRegistrationError(
-            f"ui render kind {kind!r} is unsupported; "
-            f"expected one of {sorted(_UI_RENDER_KINDS - {''})}"
-        )
-    if kind == "module":
-        # v5.7.0: ``kind: "module"`` lets a reviewed extension supply its
-        # own widget.js. The host renderer mounts it inside a sandboxed
-        # ``<iframe srcdoc>`` with a strict CSP so the script cannot
-        # touch ``document.cookie`` / ``localStorage`` of the SPA origin
-        # and can only ``fetch`` back into ``/api/extensions/<skill>/``.
-        # The ``widget_module_safety`` review item enforces source-level
-        # discipline; this validator only rejects pathological declarations.
-        entry = str(clean.get("entry") or "").strip()
-        if not entry:
-            raise ExtensionRegistrationError(
-                "module widget render requires entry filename (e.g. 'widget.js')"
-            )
-        if "/" in entry or ".." in entry or entry.startswith(".") or entry.endswith("/"):
-            raise ExtensionRegistrationError(
-                f"module widget entry {entry!r} must be a bare filename inside the skill directory"
-            )
-        if not entry.endswith(".js") and not entry.endswith(".mjs"):
-            raise ExtensionRegistrationError(
-                "module widget entry must be a .js / .mjs file"
-            )
-        return clean
-    if kind == "declarative":
-        try:
-            schema_version = int(clean.get("schema_version", 1))
-        except (TypeError, ValueError) as exc:
-            raise ExtensionRegistrationError(
-                "declarative widget schema_version must be 1"
-            ) from exc
-        if schema_version != 1:
-            raise ExtensionRegistrationError(
-                "declarative widget schema_version must be 1"
-            )
-        components = clean.get("components")
-        if not isinstance(components, list):
-            raise ExtensionRegistrationError(
-                "declarative widget render requires components[]"
-            )
-        for idx, component in enumerate(components):
-            if not isinstance(component, dict):
-                raise ExtensionRegistrationError(
-                    f"declarative widget component {idx} must be an object"
-                )
-            component_type = str(component.get("type") or "").strip()
-            if component_type not in _DECLARATIVE_WIDGET_COMPONENTS:
-                raise ExtensionRegistrationError(
-                    "declarative widget component "
-                    f"{idx} has unsupported type {component_type!r}"
-                )
-            if (
-                component_type in {"form", "action", "poll"}
-                and not str(component.get("route") or component.get("api_route") or "").strip()
-            ):
-                raise ExtensionRegistrationError(
-                    f"declarative widget component {idx} requires route or api_route"
-                )
-            if component_type == "subscription":
-                event_name = str(component.get("event") or component.get("message_type") or "").strip()
-                if not event_name:
-                    raise ExtensionRegistrationError(
-                        f"declarative widget component {idx} requires event or message_type"
-                    )
-                _assert_ws_message_type(event_name)
-            if component_type == "stream" and not str(component.get("route") or component.get("api_route") or "").strip():
-                raise ExtensionRegistrationError(
-                    f"declarative widget component {idx} requires route or api_route"
-                )
-            if component_type == "tabs":
-                tabs = component.get("tabs")
-                if not isinstance(tabs, list) or not tabs:
-                    raise ExtensionRegistrationError(
-                        f"declarative widget component {idx} requires non-empty tabs[]"
-                    )
-                for tab_idx, tab in enumerate(tabs):
-                    if not isinstance(tab, dict) or not str(tab.get("label") or "").strip():
-                        raise ExtensionRegistrationError(
-                            f"declarative widget component {idx} tab {tab_idx} requires label"
-                        )
-                    tab_components = tab.get("components", [])
-                    if not isinstance(tab_components, list):
-                        raise ExtensionRegistrationError(
-                            f"declarative widget component {idx} tab {tab_idx} components must be a list"
-                        )
-                    for child_idx, child in enumerate(tab_components):
-                        child_type = str((child or {}).get("type") or "") if isinstance(child, dict) else ""
-                        if child_type in {"form", "action", "poll", "subscription", "stream", "tabs"}:
-                            raise ExtensionRegistrationError(
-                                f"declarative widget component {idx} tab {tab_idx} child {child_idx} "
-                                f"cannot use interactive type {child_type!r}"
-                            )
-                    _validate_ui_render({
-                        "kind": "declarative",
-                        "schema_version": schema_version,
-                        "components": tab_components,
-                    })
-            method = str(component.get("method") or "GET").upper()
-            if method not in VALID_EXTENSION_ROUTE_METHODS:
-                raise ExtensionRegistrationError(
-                    f"declarative widget component {idx} has unsupported method {method!r}"
-                )
-            if component_type == "stream" and method != "GET":
-                raise ExtensionRegistrationError(
-                    f"declarative widget component {idx} stream method must be GET"
-                )
-            if component_type == "form":
-                fields = component.get("fields")
-                if not isinstance(fields, list) or not fields:
-                    raise ExtensionRegistrationError(
-                        f"declarative widget component {idx} requires non-empty fields[]"
-                    )
-                for field_idx, field in enumerate(component.get("fields") or []):
-                    if not isinstance(field, dict) or not str(field.get("name") or "").strip():
-                        raise ExtensionRegistrationError(
-                            f"declarative widget component {idx} field {field_idx} requires name"
-                        )
-            if component_type == "kv":
-                fields = component.get("fields")
-                if not isinstance(fields, list) or not fields:
-                    raise ExtensionRegistrationError(
-                        f"declarative widget component {idx} requires non-empty fields[]"
-                    )
-                for field_idx, field in enumerate(component.get("fields") or []):
-                    if not isinstance(field, dict) or not str(field.get("path") or "").strip():
-                        raise ExtensionRegistrationError(
-                            f"declarative widget component {idx} field {field_idx} requires path"
-                        )
-            if component_type == "table":
-                columns = component.get("columns")
-                if not isinstance(columns, list) or not columns:
-                    raise ExtensionRegistrationError(
-                        f"declarative widget component {idx} requires non-empty columns[]"
-                    )
-                for col_idx, column in enumerate(component.get("columns") or []):
-                    if not isinstance(column, dict) or not str(column.get("path") or "").strip():
-                        raise ExtensionRegistrationError(
-                            f"declarative widget component {idx} column {col_idx} requires path"
-                        )
-            if component_type in {"image", "audio", "video", "file"}:
-                has_media_source = any(
-                    str(component.get(key) or "").strip()
-                    for key in ("route", "api_route", "src", "path")
-                )
-                if not has_media_source:
-                    raise ExtensionRegistrationError(
-                        f"declarative widget component {idx} requires media source"
-                    )
-            if component_type == "gallery" and "items" in component and not isinstance(component.get("items"), list):
-                raise ExtensionRegistrationError(
-                    f"declarative widget component {idx} items must be a list"
-                )
-            if component_type == "gallery":
-                for item_idx, item in enumerate(component.get("items") or []):
-                    if not isinstance(item, dict):
-                        raise ExtensionRegistrationError(
-                            f"declarative widget component {idx} item {item_idx} must be an object"
-                        )
-                    item_type = str(item.get("type") or "image").strip()
-                    if item_type not in {"image", "audio", "video", "file"}:
-                        raise ExtensionRegistrationError(
-                            f"declarative widget component {idx} item {item_idx} has unsupported type {item_type!r}"
-                        )
-                    has_media_source = any(
-                        str(item.get(key) or "").strip()
-                        for key in ("route", "api_route", "src", "path")
-                    )
-                    if not has_media_source:
-                        raise ExtensionRegistrationError(
-                            f"declarative widget component {idx} item {item_idx} requires media source"
-                        )
-            # v5.7.0: host-owned schemas for map / calendar / kanban.
-            # All three are declarative-only — no skill-supplied JS, no
-            # cross-origin fetches, the renderer is vetted host code.
-            if component_type == "map":
-                tiles_url = str(component.get("tiles_url") or "").strip()
-                # Be permissive: ``tiles_url`` is optional (renderer falls
-                # back to OpenStreetMap defaults) but if supplied it must
-                # be https for non-local tiles.
-                if tiles_url and not (tiles_url.startswith("https://") or tiles_url.startswith("http://localhost") or tiles_url.startswith("http://127.")):
-                    raise ExtensionRegistrationError(
-                        f"declarative widget component {idx} map tiles_url must be https or local"
-                    )
-                markers = component.get("markers")
-                if markers is not None and not isinstance(markers, list):
-                    raise ExtensionRegistrationError(
-                        f"declarative widget component {idx} map markers must be a list"
-                    )
-                for m_idx, marker in enumerate(markers or []):
-                    if not isinstance(marker, dict):
-                        raise ExtensionRegistrationError(
-                            f"declarative widget component {idx} marker {m_idx} must be an object"
-                        )
-                    try:
-                        float(marker.get("lat"))
-                        float(marker.get("lon"))
-                    except (TypeError, ValueError) as exc:
-                        raise ExtensionRegistrationError(
-                            f"declarative widget component {idx} marker {m_idx} requires numeric lat/lon"
-                        ) from exc
-            if component_type == "calendar":
-                items = component.get("items")
-                if items is not None and not isinstance(items, list):
-                    raise ExtensionRegistrationError(
-                        f"declarative widget component {idx} calendar items must be a list"
-                    )
-            if component_type == "kanban":
-                columns = component.get("columns")
-                if not isinstance(columns, list) or not columns:
-                    raise ExtensionRegistrationError(
-                        f"declarative widget component {idx} kanban requires non-empty columns[]"
-                    )
-                for col_idx, col in enumerate(columns):
-                    if not isinstance(col, dict) or not str(col.get("id") or col.get("label") or "").strip():
-                        raise ExtensionRegistrationError(
-                            f"declarative widget component {idx} kanban column {col_idx} requires id+label"
-                        )
-                if "on_move" in component:
-                    on_move = component.get("on_move")
-                    if not isinstance(on_move, dict) or not str(on_move.get("route") or "").strip():
-                        raise ExtensionRegistrationError(
-                            f"declarative widget component {idx} kanban on_move requires {{route}}"
-                        )
-    return clean
-
-
+from ouroboros.extension_ui_validation import validate_ui_render as _validate_ui_render
 def _assert_ws_message_type(message_type: str) -> str:
     candidate = str(message_type or "").strip()
     if not candidate:
@@ -546,28 +315,26 @@ class PluginAPIImpl:
     calling extension's scope.
     """
 
-    def __init__(
-        self,
-        *,
-        skill_name: str,
-        permissions: Sequence[str],
-        env_allowlist: Sequence[str],
-        state_dir: pathlib.Path,
-        settings_reader: Callable[[], Dict[str, Any]],
-        granted_keys: Sequence[str] | None = None,
-        skill_dir: pathlib.Path | None = None,
-        dependency_site_dirs_enabled: bool = False,
-    ) -> None:
-        self._skill = skill_name
-        self._permissions = frozenset(str(p).strip() for p in (permissions or []))
-        self._env_allow = frozenset(str(k).strip() for k in (env_allowlist or []))
+    def __init__(self, config: _PluginAPIConfig | None = None, **legacy: Any) -> None:
+        if config is None:
+            config = _PluginAPIConfig(**legacy)
+        self._skill = config.skill_name
+        self._permissions = frozenset(str(p).strip() for p in (config.permissions or []))
+        self._env_allow = frozenset(str(k).strip() for k in (config.env_allowlist or []))
         self._env_allow_upper = frozenset(k.upper() for k in self._env_allow)
-        self._state_dir = pathlib.Path(state_dir)
+        self._state_dir = pathlib.Path(config.state_dir)
+        self._subscribe_events = frozenset(str(t).strip() for t in (config.subscribe_events or []) if str(t).strip())
+        self._companion_specs = {
+            str(item.get("name") or "").strip(): dict(item)
+            for item in (config.companion_processes or [])
+            if isinstance(item, dict) and str(item.get("name") or "").strip()
+        }
         # v5.7.0: store the skill payload directory so get_runtime_info()
         # can return it without re-doing manifest discovery.
-        self._skill_dir = pathlib.Path(skill_dir) if skill_dir is not None else None
-        self._dependency_site_dirs_enabled = bool(dependency_site_dirs_enabled)
-        self._settings_reader = settings_reader
+        self._skill_dir = pathlib.Path(config.skill_dir) if config.skill_dir is not None else None
+        self._runtime_skill_dir = pathlib.Path(config.runtime_skill_dir) if config.runtime_skill_dir is not None else self._skill_dir
+        self._dependency_site_dirs_enabled = bool(config.dependency_site_dirs_enabled)
+        self._settings_reader = config.settings_reader
         self._registration_closed = False
         self._runtime_closing = False
         self._runtime_closed = False
@@ -582,7 +349,7 @@ class PluginAPIImpl:
         # call. Without a grant, the forbidden denylist still drops the
         # value silently — same defense-in-depth as the script flow.
         self._granted_upper = frozenset(
-            str(k).strip().upper() for k in (granted_keys or []) if str(k).strip()
+            str(k).strip().upper() for k in (config.granted_keys or []) if str(k).strip()
         )
 
     # --- internal helpers ---
@@ -802,6 +569,130 @@ class PluginAPIImpl:
             }
             _extensions.setdefault(self._skill, _ExtensionRegistrations()).settings_sections.append(key)
 
+    def register_supervised_task(
+        self,
+        name: str,
+        factory: Callable[[], Any],
+        *,
+        restart_policy: str = "on_failure",
+        max_restarts: int = 5,
+        backoff_seconds: float = 2.0,
+    ) -> None:
+        """Record a supervised task declaration.
+
+        Actual task scheduling is wired in the server process once the
+        companion/task supervisor is initialized. Workers intentionally no-op.
+        """
+        self._require("supervised_task")
+        clean_name = _assert_tool_name(name)
+        future = None
+        if is_server_process():
+            loop = getattr(get_global_event_bus(), "_loop", None)
+            if loop is not None and loop.is_running():
+                import asyncio
+
+                async def _runner() -> None:
+                    restarts = 0
+                    while True:
+                        try:
+                            result = factory()
+                            if inspect.isawaitable(result):
+                                await result
+                            return
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:
+                            restarts += 1
+                            if restart_policy != "on_failure" or restarts > max_restarts:
+                                log.warning("supervised task %s/%s stopped after failure", self._skill, clean_name, exc_info=True)
+                                return
+                            await asyncio.sleep(max(0.1, float(backoff_seconds)))
+
+                future = asyncio.run_coroutine_threadsafe(_runner(), loop)
+        with _lock:
+            self._require_open_locked()
+            bundle = _extensions.setdefault(self._skill, _ExtensionRegistrations())
+            bundle.companion_names.append(f"task:{clean_name}")
+            if future is not None:
+                bundle.supervised_futures.append(future)
+
+    def register_companion_process(
+        self,
+        name: str,
+    ) -> None:
+        self._require("companion_process")
+        clean_name = _assert_tool_name(name)
+        spec = self._companion_specs.get(clean_name)
+        if spec is None:
+            raise ExtensionRegistrationError(
+                f"companion {clean_name!r} is not declared in manifest.companion_processes"
+            )
+        expected_cmd = [str(part) for part in (spec.get("command") or []) if str(part)]
+        expected_runtime = str(spec.get("runtime") or "").strip()
+        cmd = list(expected_cmd)
+        if not cmd:
+            raise ExtensionRegistrationError("companion command must be declared in manifest")
+        if expected_runtime in {"python", "python3"} and cmd[0] in {"python", "python3"}:
+            cmd = [sys.executable, *cmd[1:]]
+        if not is_server_process():
+            with _lock:
+                _extensions.setdefault(self._skill, _ExtensionRegistrations()).companion_names.append(
+                    f"worker-skip:{clean_name}"
+                )
+            return
+        supervisor = get_global_supervisor()
+        if supervisor is None:
+            raise ExtensionRegistrationError("companion supervisor is not initialized")
+        base_env = _scrub_env(
+            list(self._env_allow),
+            self._state_dir,
+            self._skill,
+            granted_keys=list(self._granted_upper),
+        )
+        reserved_env = {"HOST_SERVICE_TOKEN", "HOST_SERVICE_URL"}
+        for key, value in (spec.get("env") or {}).items():
+            key_text = str(key)
+            if key_text.upper() in FORBIDDEN_EXTENSION_SETTINGS or key_text.upper() in reserved_env:
+                continue
+            base_env[key_text] = str(value)
+        token = self.get_skill_token()
+        base_env["HOST_SERVICE_TOKEN"] = token.use_in_request()
+        from ouroboros.host_service_api import DEFAULT_HOST_SERVICE_HOST, host_service_port
+        base_env["HOST_SERVICE_URL"] = f"http://{DEFAULT_HOST_SERVICE_HOST}:{host_service_port()}"
+        if self._skill_dir is not None:
+            site_dirs = [str(path) for path in _isolated_python_site_dirs(self._skill_dir)]
+            if site_dirs:
+                existing_pythonpath = base_env.get("PYTHONPATH")
+                base_env["PYTHONPATH"] = os.pathsep.join(
+                    [*site_dirs, existing_pythonpath] if existing_pythonpath else site_dirs
+                )
+        workdir = self._runtime_skill_dir or self._skill_dir or self._state_dir
+        descriptor = CompanionDescriptor(
+            skill_name=self._skill,
+            name=clean_name,
+            command=cmd,
+            cwd=workdir,
+            env=base_env,
+            ports=[int(port) for port in (spec.get("ports") or []) if str(port).isdigit()],
+            restart_policy=str(spec.get("restart_policy") or "on_failure"),
+            max_restarts=max(0, int(spec.get("max_restarts") or 5)),
+        )
+        supervisor.start(descriptor)
+        with _lock:
+            _extensions.setdefault(self._skill, _ExtensionRegistrations()).companion_names.append(clean_name)
+
+    def subscribe_event(self, topic: str, handler: Callable[[Dict[str, Any]], Any]) -> str:
+        self._require("subscribe_event")
+        topic = str(topic or "").strip()
+        if topic not in self._subscribe_events:
+            raise ExtensionRegistrationError(
+                f"skill {self._skill!r} cannot subscribe to undeclared topic {topic!r}"
+            )
+        sub_id = get_global_event_bus().subscribe(self._skill, topic, self._wrap_runtime_handler(handler))
+        with _lock:
+            _extensions.setdefault(self._skill, _ExtensionRegistrations()).event_subscriptions.append(sub_id)
+        return sub_id
+
     def send_ws_message(self, message_type: str, data: Dict[str, Any]) -> None:
         if "ws_handler" not in self._permissions:
             raise ExtensionRegistrationError(
@@ -874,26 +765,54 @@ class PluginAPIImpl:
                 if self._runtime_closing or self._runtime_closed or self._skill in _unloading:
                     return {}
             out: Dict[str, Any] = {}
-            forbidden_upper = {k.upper() for k in FORBIDDEN_EXTENSION_SETTINGS}
+            protected_upper = {k.upper() for k in FORBIDDEN_EXTENSION_SETTINGS}
+            protected_upper.update(requested_core_setting_keys(list(self._env_allow)))
             for raw_key in keys or ():
                 key = str(raw_key).strip()
                 canonical = key.upper()
                 if not key:
                     continue
-                if canonical in forbidden_upper and canonical not in self._granted_upper:
+                if canonical in protected_upper and canonical not in self._granted_upper:
                     # Forbidden / "core" key without an owner grant — drop
                     # silently so a malicious or buggy plugin cannot probe
                     # for its presence by ``get_settings`` length.
                     continue
                 if key not in self._env_allow and canonical not in self._env_allow_upper:
                     continue
-                settings_key = canonical if canonical in forbidden_upper else key
+                settings_key = canonical if canonical in protected_upper else key
                 if settings_key in settings:
                     out[settings_key] = settings[settings_key]
             return out
 
     def get_state_dir(self) -> str:
         return str(self._state_dir)
+
+    def get_skill_token(self) -> SkillToken:
+        token_path = self._state_dir / AUTH_TOKEN_FILENAME
+        payload = read_json_dict(token_path) or {}
+        token = str(payload.get("token") or "")
+        content_hash = ""
+        if self._skill_dir is not None:
+            try:
+                content_hash = compute_content_hash(self._skill_dir)
+            except Exception:
+                content_hash = ""
+        if not token or str(payload.get("content_hash") or "") != content_hash:
+            token = secrets.token_urlsafe(32)
+            atomic_write_json(
+                token_path,
+                {
+                    "token": token,
+                    "issued_at": utc_now_iso(),
+                    "skill": self._skill,
+                    "content_hash": content_hash,
+                },
+            )
+            try:
+                token_path.chmod(0o600)
+            except OSError:
+                log.debug("Failed to chmod skill token file %s", token_path, exc_info=True)
+        return SkillToken(token)
 
     def get_runtime_info(self) -> Dict[str, Any]:
         """Return a read-only runtime snapshot for the calling extension.
@@ -1316,12 +1235,19 @@ def load_extension(
         if deps_reason:
             return f"skill {skill.name!r} cannot load until isolated dependencies are ready: {deps_reason}"
 
-    # v5.2.2 dual-track grants: extensions may declare core / forbidden
-    # settings keys in their manifest, but the loader only forwards the
-    # subset the owner has explicitly granted through the desktop
-    # launcher's native confirmation bridge. The grant is bound to the
-    # current content hash + the exact requested set so a tampered
-    # plugin or rotated manifest invalidates the grant automatically.
+    # Grants: extensions may request core settings and privileged host
+    # capabilities. Both are content-hash-bound before load.
+    grant_status = grant_status_for_skill(pathlib.Path(drive_root), skill)
+    if not grant_status.get("all_granted", True):
+        missing_bits = []
+        if grant_status.get("missing_keys"):
+            missing_bits.append(f"keys={grant_status.get('missing_keys')}")
+        if grant_status.get("missing_permissions"):
+            missing_bits.append(f"permissions={grant_status.get('missing_permissions')}")
+        return (
+            f"skill {skill.name!r} is missing owner grants for "
+            f"{', '.join(missing_bits)}. Grant access from the Skills tab."
+        )
     requested_core = requested_core_setting_keys(list(skill.manifest.env_from_settings or []))
     granted_core: List[str] = []
     if requested_core:
@@ -1377,16 +1303,19 @@ def load_extension(
                     f"skill {skill.name!r} plugin.py does not export a "
                     "register(api) callable"
                 )
-            api = PluginAPIImpl(
+            api = PluginAPIImpl(_PluginAPIConfig(
                 skill_name=skill.name,
                 permissions=list(skill.manifest.permissions or []),
                 env_allowlist=list(skill.manifest.env_from_settings or []),
                 state_dir=state_dir,
                 settings_reader=settings_reader,
                 granted_keys=granted_core,
+                subscribe_events=list(getattr(skill.manifest, "subscribe_events", []) or []),
+                companion_processes=list(getattr(skill.manifest, "companion_processes", []) or []),
                 skill_dir=skill.skill_dir,
+                runtime_skill_dir=(staged_import_root / "skill") if staged_import_root is not None else None,
                 dependency_site_dirs_enabled=bool(auto_specs),
-            )
+            ))
             with _lock:
                 bundle = _extensions.get(skill.name)
                 if bundle is None:
@@ -1439,6 +1368,9 @@ def _unload_extension_locked(skill_name: str) -> None:
         import_root = pathlib.Path(bundle.import_root) if bundle and bundle.import_root else None
         callbacks = list(bundle.unload_callbacks) if bundle else []
         api_instances = list(bundle.api_instances) if bundle else []
+        event_subscriptions = list(bundle.event_subscriptions) if bundle else []
+        companion_names = list(bundle.companion_names) if bundle else []
+        supervised_futures = list(bundle.supervised_futures) if bundle else []
         if bundle:
             _unloading.add(skill_name)
         if bundle:
@@ -1452,6 +1384,20 @@ def _unload_extension_locked(skill_name: str) -> None:
                 _ui_tabs.pop(key, None)
             for key in bundle.settings_sections:
                 _settings_sections.pop(key, None)
+    bus = get_global_event_bus()
+    for sub_id in event_subscriptions:
+        bus.unsubscribe(sub_id)
+    for future in supervised_futures:
+        try:
+            future.cancel()
+        except Exception:
+            log.debug("Failed to cancel supervised task for %s", skill_name, exc_info=True)
+    supervisor = get_global_supervisor()
+    if supervisor is not None:
+        for raw_name in companion_names:
+            name = str(raw_name or "")
+            if name and not name.startswith(("task:", "worker-skip:")):
+                supervisor.stop(skill_name, name)
     for api in api_instances:
         close = getattr(api, "_close_runtime_access", None)
         if callable(close):
