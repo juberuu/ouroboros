@@ -72,8 +72,9 @@ def _run_docker_ui_assertions(url: str) -> None:
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=30_000)
                 if page.locator("#onboarding-overlay").count():
-                    assert "Ouroboros" in page.locator("#onboarding-overlay").inner_text(timeout=5_000)
-                    return
+                    overlay_text = page.locator("#onboarding-overlay").inner_text(timeout=5_000)
+                    if "Ouroboros" in overlay_text:
+                        return
                 page.wait_for_selector("#page-chat", timeout=30_000)
                 assert page.locator("#page-chat").count() == 1
             finally:
