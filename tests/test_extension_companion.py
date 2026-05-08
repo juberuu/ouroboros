@@ -114,6 +114,9 @@ def test_plugin_api_companion_uses_staged_skill_root_as_cwd(tmp_path: pathlib.Pa
 
 def test_windows_companion_start_does_not_request_console_process_group(tmp_path: pathlib.Path, monkeypatch) -> None:
     captured = {}
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret-should-not-leak")
+    monkeypatch.setenv("windir", "C:\\Windows")
+    monkeypatch.setenv("ComSpec", "C:\\Windows\\System32\\cmd.exe")
 
     class FakeProcess:
         pid = 12345
@@ -147,3 +150,7 @@ def test_windows_companion_start_does_not_request_console_process_group(tmp_path
 
     assert supervisor.start(descriptor) is True
     assert captured.get("creationflags", 0) & getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) == 0
+    assert "PATH" in captured["env"] or "Path" in captured["env"]
+    assert captured["env"]["windir"] == "C:\\Windows"
+    assert captured["env"]["ComSpec"].endswith("cmd.exe")
+    assert "OPENROUTER_API_KEY" not in captured["env"]

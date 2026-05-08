@@ -30,6 +30,25 @@ log = logging.getLogger(__name__)
 
 _SERVER_PROCESS_PID = int(os.environ.get("OUROBOROS_SERVER_PROCESS_PID") or "-1")
 _GLOBAL_SUPERVISOR: Optional["CompanionSupervisor"] = None
+_COMPANION_BASE_ENV_KEYS = {
+    "PATH",
+    "SYSTEMROOT",
+    "WINDIR",
+    "COMSPEC",
+    "PATHEXT",
+    "TEMP",
+    "TMP",
+    "HOME",
+    "USERPROFILE",
+}
+
+
+def _companion_base_env() -> Dict[str, str]:
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key.upper() in _COMPANION_BASE_ENV_KEYS
+    }
 
 
 def _drain_companion_pipe(pipe, cap: int, buf: bytearray, overflow_flag: Dict[str, bool], label: str) -> None:
@@ -124,7 +143,7 @@ class CompanionSupervisor:
                     raise RuntimeError(f"port {port} is already in use")
             popen_kwargs: Dict[str, Any] = {
                 "cwd": str(descriptor.cwd),
-                "env": dict(descriptor.env),
+                "env": {**_companion_base_env(), **dict(descriptor.env)},
                 "stdin": subprocess.DEVNULL,
                 "stdout": subprocess.PIPE,
                 "stderr": subprocess.PIPE,
