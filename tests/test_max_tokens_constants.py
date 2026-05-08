@@ -80,57 +80,60 @@ def test_claude_code_sdk_only_no_cli_fallback():
     assert "ensure_claude_cli" not in src, "CLI install function should be gone"
 
 
-def test_scope_review_budget_limit():
-    """scope_review.py budget gate must sit at the unified 850K input-token budget.
+def test_review_prompt_token_budget_is_ssot():
+    """``review_helpers.REVIEW_PROMPT_TOKEN_BUDGET`` is the single source of
+    truth for the unified scope/plan/deep-review input gate (850K). Bumping
+    the constant must move all three call sites in lockstep so the skip
+    threshold cannot silently desync between modules.
 
-    Note: Claude Opus 4.6 has a 1M context window SHARED between input and output.
-    estimate_tokens (chars/4) under-counts by ~15%, so at gate=850K actual input
-    is ≈1M tokens and output max_tokens draws from the same 1M ceiling. The skip
-    path is best-effort — 850K is a conscious trade that lets scope prompts that
-    previously skipped at ~778K actually run.
+    Note: Claude Opus 4.6 has a 1M context window SHARED between input and
+    output. ``estimate_tokens`` (chars/4) under-counts by ~15%, so at
+    gate=850K actual input is ≈1M tokens and output max_tokens draws from
+    the same 1M ceiling. The skip path is best-effort.
     """
+    from ouroboros.tools.review_helpers import REVIEW_PROMPT_TOKEN_BUDGET
     from ouroboros.tools.scope_review import _SCOPE_BUDGET_TOKEN_LIMIT
-    assert _SCOPE_BUDGET_TOKEN_LIMIT == 850_000, (
-        f"_SCOPE_BUDGET_TOKEN_LIMIT ({_SCOPE_BUDGET_TOKEN_LIMIT}) must equal 850_000 "
-        "to match the unified scope/plan/deep-review input budget."
-    )
-
-
-def test_plan_review_budget_limit():
-    """plan_review.py _PLAN_BUDGET_TOKEN_LIMIT must match the unified 850K budget."""
     from ouroboros.tools.plan_review import _PLAN_BUDGET_TOKEN_LIMIT
-    assert _PLAN_BUDGET_TOKEN_LIMIT == 850_000, (
-        f"_PLAN_BUDGET_TOKEN_LIMIT ({_PLAN_BUDGET_TOKEN_LIMIT}) must equal 850_000 "
-        "to match the unified scope/plan/deep-review input budget."
+
+    assert REVIEW_PROMPT_TOKEN_BUDGET == 850_000, (
+        f"REVIEW_PROMPT_TOKEN_BUDGET drifted to {REVIEW_PROMPT_TOKEN_BUDGET}; "
+        "see review_helpers.py docstring before changing — call sites do "
+        "not silently re-pin to 850K."
+    )
+    assert _SCOPE_BUDGET_TOKEN_LIMIT == REVIEW_PROMPT_TOKEN_BUDGET, (
+        f"_SCOPE_BUDGET_TOKEN_LIMIT ({_SCOPE_BUDGET_TOKEN_LIMIT}) must equal "
+        f"the SSOT REVIEW_PROMPT_TOKEN_BUDGET ({REVIEW_PROMPT_TOKEN_BUDGET})."
+    )
+    assert _PLAN_BUDGET_TOKEN_LIMIT == REVIEW_PROMPT_TOKEN_BUDGET, (
+        f"_PLAN_BUDGET_TOKEN_LIMIT ({_PLAN_BUDGET_TOKEN_LIMIT}) must equal "
+        f"the SSOT REVIEW_PROMPT_TOKEN_BUDGET ({REVIEW_PROMPT_TOKEN_BUDGET})."
     )
 
 
-def test_deep_self_review_budget_limit():
-    """deep_self_review.py pack-size gate must match the unified 850K budget
-    and must gate on the FULL assembled prompt (system + user), not just the pack.
-
-    The deep self-review runner rejects packs whose shared estimate_tokens
-    (chars/4) estimate exceeds the gate. This test pins the numeric threshold,
-    the use of the shared helper, AND the requirement that the gate reflects
-    the full assembled prompt — matching how scope_review and plan_review gate.
+def test_deep_self_review_budget_uses_ssot():
+    """``deep_self_review`` must gate on the SSOT constant (not a hardcoded
+    literal) and must gate on the FULL assembled prompt (system + user)
+    using the shared ``estimate_tokens(chars/4)`` helper, matching
+    scope_review and plan_review.
     """
     import pathlib
     src = pathlib.Path("ouroboros/deep_self_review.py").read_text(encoding="utf-8")
-    assert "estimated_tokens > 850_000" in src, (
-        "deep_self_review must gate on estimated_tokens > 850_000"
+    assert "REVIEW_PROMPT_TOKEN_BUDGET" in src, (
+        "deep_self_review must import the SSOT constant from review_helpers"
     )
-    assert "Maximum is ~850,000 tokens" in src, (
-        "deep_self_review error message must reference 850,000 tokens"
+    assert "estimated_tokens > REVIEW_PROMPT_TOKEN_BUDGET" in src, (
+        "deep_self_review must compare against the SSOT constant, not a literal"
     )
     assert "estimate_tokens(_SYSTEM_PROMPT + pack_text)" in src, (
         "deep_self_review must gate on the FULL assembled prompt "
-        "(system + user) using the shared estimate_tokens(chars/4) helper, "
-        "matching scope_review and plan_review. Gating on pack_text alone "
-        "understates the real request size."
+        "(system + user) using the shared estimate_tokens(chars/4) helper."
+    )
+    # Old hardcoded literals must not survive — drift would silently desync.
+    assert "estimated_tokens > 850_000" not in src, (
+        "deep_self_review still has the old hardcoded literal; switch to the SSOT constant"
     )
     assert "int(stats[\"total_chars\"] / 3.5)" not in src, (
-        "deep_self_review must not use its old chars/3.5 estimator — it diverges "
-        "from the scope/plan review chars/4 budget at the same nominal token gate"
+        "deep_self_review must not use its old chars/3.5 estimator"
     )
 
 

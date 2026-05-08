@@ -159,3 +159,41 @@ class TestSettingsUiGuards(unittest.TestCase):
         self.assertIn("wizard-model-suggestions", wizard)
         self.assertIn(".wizard-model-suggestions", css)
         self.assertIn("overscroll-behavior: contain;", css)
+
+    def test_settings_fallback_models_pin_current_config_defaults(self):
+        """``SETTINGS_FALLBACK_MODELS`` in ``settings.js`` must list every
+        model id that ``ouroboros/config.py::SETTINGS_DEFAULTS`` currently
+        ships as a default model lane. Without this guard, bumping a
+        default model in ``config.py`` would silently strand the Settings
+        UI suggestion list on a stale id; the user would still see the
+        old model as a "Suggested model" pill until someone noticed.
+
+        This is a structural pin only — the JS list may include extra
+        suggestions (direct-provider variants like ``openai::gpt-5.5``
+        that are not the OpenRouter default but are still useful pills);
+        we only assert that nothing currently shipped as a default is
+        missing.
+        """
+        from ouroboros.config import SETTINGS_DEFAULTS
+        source = self._read_settings_sources()["settings"]
+        # Extract the literal list block.
+        block_start = source.index("const SETTINGS_FALLBACK_MODELS = [")
+        block_end = source.index("];", block_start)
+        block = source[block_start:block_end]
+        for key in (
+            "OUROBOROS_MODEL",
+            "OUROBOROS_MODEL_CODE",
+            "OUROBOROS_MODEL_LIGHT",
+            "OUROBOROS_MODEL_FALLBACK",
+        ):
+            default = str(SETTINGS_DEFAULTS.get(key, "")).strip()
+            if not default:
+                continue
+            self.assertIn(
+                default,
+                block,
+                f"SETTINGS_DEFAULTS[{key!r}] = {default!r} is not in the JS "
+                f"SETTINGS_FALLBACK_MODELS suggestion list — re-sync them "
+                "(SSOT discipline; in v5.8.3-rc.5 we left the JS list as "
+                "a static fallback rather than emit it from the server).",
+            )

@@ -5,7 +5,7 @@ Verifies:
 - tool_policy.py imports from capabilities (no local copy)
 - loop_tool_execution.py imports from capabilities (no local copy)
 - code_search is classified correctly
-- run_shell rejects string cmd
+- run_shell list-cmd happy path (string-cmd cascade lives in test_shell_recovery.py)
 - code_search tool works
 """
 import inspect
@@ -219,23 +219,12 @@ def test_code_search_invalid_regex(tmp_path):
 # ---------------------------------------------------------------------------
 # run_shell string contract
 # ---------------------------------------------------------------------------
-
-
-def test_run_shell_string_cmd_is_hard_error(tmp_path):
-    """run_shell recovers string cmd via cascade (shlex.split for plain strings)."""
-    from ouroboros.tools.shell import _run_shell
-    from unittest.mock import MagicMock, patch
-    from subprocess import CompletedProcess
-    from ouroboros.tools.registry import ToolContext
-    ctx = MagicMock(spec=ToolContext)
-    ctx.repo_dir = tmp_path
-    ctx.drive_logs.return_value = tmp_path
-    with patch("ouroboros.tools.shell._tracked_subprocess_run",
-               return_value=CompletedProcess(["echo", "hello"], 0, "hello", "")), \
-         patch("ouroboros.tools.shell.load_settings", return_value={}):
-        result = _run_shell(ctx, "echo hello")
-    assert "SHELL_ARG_ERROR" not in result
-    assert "exit_code=0" in result
+#
+# String-cmd recovery (shlex.split for plain strings, json.loads for JSON
+# arrays, ast.literal_eval for Python literals) is covered by
+# tests/test_shell_recovery.py::TestShellArgContract.  This file keeps only
+# the list-cmd happy-path sibling so the capability sets module owns the
+# round-1 tool surface assertions, not the string-cascade contract itself.
 
 
 def test_run_shell_list_cmd_works(tmp_path):

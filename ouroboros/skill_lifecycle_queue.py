@@ -16,15 +16,12 @@ import threading
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Deque, Dict, Optional
+
+from ouroboros.utils import utc_now_iso as _now_iso
 
 
 _MAX_EVENTS = 80
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 @dataclass

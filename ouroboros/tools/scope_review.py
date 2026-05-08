@@ -65,7 +65,9 @@ _SCOPE_MAX_TOKENS = 100_000  # 100K output tokens
 # guarantee — some API-level rejections at 850K are still possible. This is a
 # conscious trade: 850K lets scope-review prompts that previously skipped at
 # ~778K actually run.
-_SCOPE_BUDGET_TOKEN_LIMIT = 850_000
+from ouroboros.tools.review_helpers import REVIEW_PROMPT_TOKEN_BUDGET as _REVIEW_BUDGET
+
+_SCOPE_BUDGET_TOKEN_LIMIT = _REVIEW_BUDGET
 
 # Defense-in-depth cap for deleted-file content inlined into the scope prompt.
 # Matches the >1MB guard that `build_head_snapshot_section` applied before

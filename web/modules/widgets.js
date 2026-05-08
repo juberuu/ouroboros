@@ -1,26 +1,10 @@
 import { renderPageHeader } from './page_header.js';
-import { escapeHtmlAttr as escapeHtml } from './utils.js';
+import {
+    escapeHtmlAttr as escapeHtml,
+    renderMarkdownSafe,
+} from './utils.js';
 
 const WIDGETS_ICON = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>';
-
-function renderMarkdownSafe(rawMd) {
-    const text = String(rawMd ?? '');
-    if (!text) return '';
-    if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') {
-        return `<pre><code>${escapeHtml(text)}</code></pre>`;
-    }
-    try {
-        const rendered = marked.parse(text, { async: false, gfm: true, breaks: false });
-        return DOMPurify.sanitize(rendered, {
-            USE_PROFILES: { html: true },
-            FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'form', 'input', 'img', 'video', 'audio', 'source'],
-            FORBID_ATTR: ['style', 'src', 'srcset', 'srcdoc'],
-        });
-    } catch (err) {
-        console.warn('widgets: markdown render failed', err);
-        return `<pre><code>${escapeHtml(text)}</code></pre>`;
-    }
-}
 
 function pageTemplate() {
     return `

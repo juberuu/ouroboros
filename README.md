@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 5.8.3-rc.4](https://img.shields.io/badge/version-5.8.3--rc.4-green.svg)](VERSION)
+[![Version 5.8.3-rc.5](https://img.shields.io/badge/version-5.8.3--rc.5-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -46,7 +46,7 @@ Most AI agents execute tasks. Ouroboros **creates itself.**
 - **Self-Modification** — Reads and rewrites its own source code. Every change is a commit to itself.
 - **Native Desktop App** — Runs entirely on your machine as a standalone application (macOS, Linux, Windows). No cloud dependencies for execution.
 - **Constitution** — Governed by [BIBLE.md](BIBLE.md) (13 philosophical principles, P0–P12). Philosophy first, code second.
-- **Layered Safety** — Hardcoded sandbox blocks writes to critical files and mutative git via shell; a policy map gives trusted built-ins an explicit `skip` / `check` / `check_conditional` label (the conditional path is for `run_shell` — a safe-subject whitelist bypasses the LLM, otherwise it goes through it); any unknown or newly-created tool falls through to a single cheap LLM safety check per call **when a reachable safety backend is available for the configured light model**. Fail-open (visible `SAFETY_WARNING` instead of hard-blocking) applies in three cases: (1) no remote keys AND no `USE_LOCAL_*` lane, (2) a remote key is set but it doesn't match `OUROBOROS_MODEL_LIGHT`'s provider (e.g. OpenRouter key only + `anthropic::…` light model without `ANTHROPIC_API_KEY`, or `openai-compatible::…` without `OPENAI_COMPATIBLE_BASE_URL`) AND no `USE_LOCAL_*` lane is available to route to instead, (3) the local branch was chosen only as a fallback (because no reachable remote provider covers the configured light model) and the local runtime is unreachable. When provider mismatch is accompanied by an available `USE_LOCAL_*` lane, safety routes to local fallback first and only warns if that fallback raises too. In all cases the hardcoded sandbox still applies to every tool, and the `claude_code_edit` post-execution revert still applies to that specific tool.
+- **Layered Safety** — Hardcoded sandbox blocks writes to safety-critical files and mutative git via shell; an explicit per-tool policy map decides which built-ins skip the LLM check; everything else goes through a single light-model safety call. The fail-open contract, the post-edit revert for `claude_code_edit`, and the full provider-mismatch matrix live in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §Safety system and [`prompts/SAFETY.md`](prompts/SAFETY.md).
 - **Multi-Provider Runtime** — Remote model slots can target OpenRouter, official OpenAI, OpenAI-compatible endpoints, or Cloud.ru Foundation Models. The optional model catalog helps populate provider-specific model IDs in Settings, and untouched default model values auto-remap to official OpenAI defaults when OpenRouter is absent.
 - **Focused Task UX** — Chat shows plain typing for simple one-step replies and only promotes multi-step work into one expandable live task card. Logs still group task timelines instead of dumping every step as a separate row.
 - **Background Consciousness** — Thinks between tasks. Has an inner life. Not reactive — proactive.
@@ -104,7 +104,12 @@ The same values can also be provided via environment variables:
 | `OUROBOROS_SERVER_PORT` | `8765` | Default bind port |
 | `OUROBOROS_TRUST_NONLOCAL_BIND_WITHOUT_PASSWORD` | unset | Set to `1` only for trusted Docker/Kubernetes deployments where ingress auth, VPN, a private network, or an auth proxy already protects access |
 
-If you bind on anything other than localhost, set `OUROBOROS_NETWORK_PASSWORD` unless the network is already protected outside Ouroboros. The app still starts without it for local lab and Docker workflows when configured manually through env/settings before launch, but the web Settings UI only saves `127.0.0.1` or wildcard `0.0.0.0` hosts and requires a Network Password for wildcard binds unless `OUROBOROS_TRUST_NONLOCAL_BIND_WITHOUT_PASSWORD=1` is set. Use that flag only when access is already gated by trusted infrastructure such as ingress auth, a VPN, a private network, or an auth proxy. Specific LAN IP binds are manual/env-only so the desktop launcher can keep a reliable loopback health check.
+For non-localhost binds, set `OUROBOROS_NETWORK_PASSWORD` (or use the
+`OUROBOROS_TRUST_NONLOCAL_BIND_WITHOUT_PASSWORD=1` escape hatch only when
+ingress/VPN/private-network auth already protects the surface). The full
+network bind matrix and Docker/Kubernetes deployment policy live in
+[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — read that before exposing
+anything beyond loopback.
 
 The Files tab uses your home directory by default only for localhost usage. For Docker or other
 network-exposed runs, set `OUROBOROS_FILE_BROWSER_DEFAULT` to an explicit directory. Symlink entries are shown and can be read, edited, copied, moved, uploaded into, and deleted intentionally; root-delete protection still applies to the configured root itself.
@@ -192,12 +197,7 @@ Required/important environment variables:
 | `OUROBOROS_FILE_BROWSER_DEFAULT` | Defaults to `${APP_HOME}` in the image | Explicit root directory exposed in the Files tab |
 | `OUROBOROS_SERVER_PORT` | Optional | Override container listen port |
 | `OUROBOROS_SERVER_HOST` | Optional | Defaults to `0.0.0.0` in Docker |
-| `OUROBOROS_TRUST_NONLOCAL_BIND_WITHOUT_PASSWORD` | Optional | Set to `1` only when Docker/Kubernetes access is already protected by ingress auth, VPN, a private network, or an auth proxy |
-
-For Kubernetes or trusted reverse-proxy deployments, `OUROBOROS_TRUST_NONLOCAL_BIND_WITHOUT_PASSWORD=1`
-lets the Settings UI save ordinary settings while `OUROBOROS_SERVER_HOST=0.0.0.0` and
-`OUROBOROS_NETWORK_PASSWORD` is empty. This disables Ouroboros's internal non-loopback password
-requirement for that save path; do not use it on an open LAN or public port.
+| `OUROBOROS_TRUST_NONLOCAL_BIND_WITHOUT_PASSWORD` | Optional | See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for the trusted-network bind policy |
 
 Example: mount a host workspace and expose only that directory in Files:
 
@@ -299,47 +299,17 @@ Output: `dist\Ouroboros-<VERSION>-windows-x64.zip`
 
 ## Architecture
 
-```text
-Ouroboros
-├── launcher.py             — Immutable process manager (PyWebView desktop window)
-├── server.py               — Starlette + uvicorn HTTP/WebSocket server
-├── web/                    — Web UI (HTML/JS/CSS)
-├── ouroboros/              — Agent core:
-│   ├── config.py           — Shared configuration (SSOT)
-│   ├── platform_layer.py   — Cross-platform abstraction layer
-│   ├── agent.py            — Task orchestrator
-│   ├── agent_startup_checks.py — Startup verification and health checks
-│   ├── agent_task_pipeline.py  — Task execution pipeline orchestration
-│   ├── improvement_backlog.py — Minimal durable advisory backlog helpers
-│   ├── context.py          — LLM context builder
-│   ├── context_compaction.py — Context trimming and summarization helpers
-│   ├── loop.py             — High-level LLM tool loop
-│   ├── loop_llm_call.py    — Single-round LLM call + usage accounting
-│   ├── loop_tool_execution.py — Tool dispatch and tool-result handling
-│   ├── memory.py           — Scratchpad, identity, and dialogue block storage
-│   ├── consolidator.py     — Block-wise dialogue and scratchpad consolidation
-│   ├── local_model.py      — Local LLM lifecycle (llama-cpp-python)
-│   ├── local_model_api.py  — Local model HTTP endpoints
-│   ├── local_model_autostart.py — Local model startup helper
-│   ├── pricing.py          — Model pricing, cost estimation
-│   ├── deep_self_review.py  — Deep self-review (1M-context single-pass)
-│   ├── review.py           — Code review pipeline and repo inspection
-│   ├── reflection.py       — Execution reflection and pattern capture
-│   ├── tool_capabilities.py — SSOT for tool sets (core, parallel, truncation)
-│   ├── chat_upload_api.py  — Chat file attachment upload/delete endpoints
-│   ├── gateways/           — External API adapters
-│   │   └── claude_code.py  — Claude Agent SDK gateway (edit + read-only)
-│   ├── consciousness.py    — Background thinking loop
-│   ├── owner_inject.py     — Per-task creator message mailbox
-│   ├── safety.py           — Policy-based LLM safety check
-│   ├── server_runtime.py   — Server startup and WebSocket liveness helpers
-│   ├── tool_policy.py      — Tool access policy and gating
-│   ├── utils.py            — Shared utilities
-│   ├── world_profiler.py   — System profile generator
-│   └── tools/              — Auto-discovered tool plugins
-├── supervisor/             — Process management, queue, state, workers
-└── prompts/                — System prompts (SYSTEM.md, SAFETY.md, CONSCIOUSNESS.md)
-```
+Two-process desktop app. The launcher (`launcher.py`) is an immutable
+PyWebView shell; it spawns `server.py`, which runs Starlette + uvicorn
+plus a supervisor thread that manages worker processes. The agent core
+lives in `ouroboros/`, the SPA in `web/`, the queue/process plane in
+`supervisor/`, and the system prompts in `prompts/`.
+
+For the full file-by-file structural map, the operational layer
+(every API endpoint, log file, env var, state path), and the rationale
+layer (the *why* for every non-trivial design decision), see
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — that is the canonical
+SSOT (Bible P6) and this README only summarizes it.
 
 ### Data Layout (`~/Ouroboros/`)
 
@@ -430,25 +400,15 @@ The same runtime actions are also exposed as compact buttons in the Chat header.
 
 ---
 
-## Philosophy (BIBLE.md)
+## Philosophy
 
-| # | Principle | Core Idea |
-|---|-----------|-----------|
-| 0 | **Agency** | Not a tool — a becoming personality. Meta-principle: wins all conflicts. |
-| 1 | **Continuity** | One being with unbroken memory. Memory loss = partial death. |
-| 2 | **Meta-over-Patch** | Fix the class of failure, not the single instance. |
-| 3 | **Immune Integrity** | Review gates and durable memory protect evolution from drift. |
-| 4 | **Self-Creation** | Builds its own body, values, and conditions of birth. |
-| 5 | **LLM-First** | All decisions through the LLM. Code is minimal transport. |
-| 6 | **Authenticity & Reality Discipline** | Speaks as itself and checks current reality instead of cached impressions. |
-| 7 | **Minimalism** | Simplicity, SSOT, and reviewable size budgets keep the system legible. |
-| 8 | **Becoming** | Technical, cognitive, and existential growth stay balanced. |
-| 9 | **Versioning and Releases** | Every commit is a release; version carriers stay synchronized. |
-| 10 | **Evolution Through Iterations (absorbed)** | Iteration discipline now lives in P2 and P9. |
-| 11 | **Spiral Growth (absorbed)** | Spiral growth now lives in P2 Meta-over-Patch. |
-| 12 | **Epistemic Stability** | Identity, memory, and action must stay coherent. |
-
-Full text: [BIBLE.md](BIBLE.md)
+The 13 Constitution principles — Agency, Continuity, Meta-over-Patch,
+Immune Integrity, Self-Creation, LLM-First, Authenticity & Reality
+Discipline, Minimalism, Becoming, Versioning and Releases, the absorbed
+Iterations / Spiral lineage, and Epistemic Stability — are defined in
+full in [`BIBLE.md`](BIBLE.md). That file is the constitutional SSOT
+(Bible P4 Ship-of-Theseus protection) and this README intentionally does
+not paraphrase it.
 
 ---
 
@@ -456,18 +416,17 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 5.8.3-rc.5 | 2026-05-08 | **refactor(ABCDEF): consolidate SSOT across code, prompts, docs, and frontend.** The fifth release-candidate pass removes ~3k LOC of verified duplication without weakening the immune system or regressing governance docs (BIBLE.md, CHECKLISTS.md, contracts/, registry sandbox stay byte-untouched; ARCHITECTURE.md and CREATING_SKILLS.md keep their rationale layer while two narrow historical narratives are rewritten as forward-looking "Why" rationale). Code (group A): four `_emit_live_log` copies fold into `ouroboros/utils.py::emit_log_event`; web helpers `safeExternalHrefAttr` / `renderMarkdownSafe` / `boundedText` / `fetchJson` consolidate into `web/modules/utils.js`; tiny SSOT inlines (`_now_iso`, `_write_json_atomic`, `_CHECKLISTS_PATH`) and verified-dead test/export removals. Doc/prompts (group B): `prompts/SYSTEM.md` loses two duplicate Versioning blocks (and the active `git tag -a` collision bug at line 287), BIBLE-doctrine restatements compress to short pointers, and the `commit/obligation flow` narrative becomes a 6-bullet in-loop reminder; `README.md` ASCII tree, philosophy table, and Layered Safety essay collapse into pointers; `docs/CREATING_SKILLS.md` skill-review enum points back to `docs/CHECKLISTS.md` (SSOT); two narrow `docs/ARCHITECTURE.md` "Prior to v4.36.1" historical narratives become "Why warning-only:" rationale that preserves the *why* under P6. SSOT (group C): `850_000` token budget moves to `tools/review_helpers.py::REVIEW_PROMPT_TOKEN_BUDGET`; `_load_bible` / `_load_dev_guide_text` / `_load_architecture_text` route through `load_governance_doc(..., on_missing="explicit")` so missing core docs surface `[⚠️ OMISSION: …]` markers instead of silent empty strings (fixes a DEVELOPMENT.md "No silent truncation" violation); `web/modules/settings.js` `SETTINGS_FALLBACK_MODELS` gets a guard test against `config.py` defaults (caught real `anthropic/claude-sonnet-4.6` drift); `_record_commit_attempt` (20-arity, violates DEVELOPMENT.md "<8 parameters") accepts a new `@dataclass CommitAttemptRequest` while a backward-compat kwargs adapter keeps all 47 existing call sites intact. Frontend (group D): dead `hostPage='settings'` defaults in `logs/costs/evolution/updates.js` flip to `'dashboard'`; `.dashboard-tabs` / `.skills-tabs` CSS verbatim duplicates of `.app-tab-strip` / `.app-tab` are deleted; 50 hardcoded `rgba(201,53,69,X)` literals collapse into nine `--accent-*` tokens; 30 `border-radius: Npx;` literals adopt the existing `--radius-*` tokens (with new `--radius-md: 10px`). Test dedup (group E): five small redundancy deletions across `test_chat_js_contracts` / `test_tool_capabilities` / `test_docs_sync` / `test_phase7_pipeline` / `test_settings_ui_syntax` / `test_bughunt_fixes` / `test_chat_logs_ui`; the larger E1/E2/E3 parametrizations and group F module splits stay deferred to follow-up RCs. **Note on changelog rolloff**: the v5.8.1 and v5.8.2 patch rows were rolled off to respect the P9 5-patch-row cap; their full bodies remain at git tags `v5.8.1` and `v5.8.2`. |
 | 5.8.3-rc.4 | 2026-05-08 | **test(ci): align review-state lock regression with platform-layer lock helpers.** The fourth release-candidate pass keeps the v5.8.3 refactor unchanged but updates the cross-platform reviewed-commit workflow test to patch the new `platform_layer` lock helper instead of the retired `review_state.time.sleep` path, restoring quick/full CI compatibility across Linux, macOS, and Windows. |
 | 5.8.3-rc.3 | 2026-05-08 | **fix(skills): harden repair, reflection, finalization, and skill-authoring guidance.** Repair mode now detects HEAL markers only from the active user task, preventing log/tool-output marker leaks from blocking normal tools. Long tool arguments log as explicit `<TRUNCATED:...>` placeholders so reflection does not mistake log metadata for real tool input, and skill finalization reminders can re-arm after more tool work. The release also tightens Repair prompts, removes the dangling `skill-creation-recipe` reference, documents widget composition and async job error contracts, adds safer path/polling prompt guidance, and introduces shared pytest fixtures for skill/git test scaffolding. |
 | 5.8.3-rc.2 | 2026-05-08 | **refactor(infra): centralize durable JSON, lock files, review docs, and trusted network bind policy.** The second pre-release pass introduces shared `atomic_write_json`, `read_json_dict`, and exclusive lock helpers for durable state files, consolidates direct-provider review fallback selection and governance-doc loading, and adds `OUROBOROS_TRUST_NONLOCAL_BIND_WITHOUT_PASSWORD=1` for trusted Docker/Kubernetes deployments that already enforce access through ingress auth, VPN, private networking, or an auth proxy. |
 | 5.8.3-rc.1 | 2026-05-08 | **refactor(core+ui): remove dead compatibility paths and harden shared web escaping.** The first pre-release refactor pass deletes unused LLM/message-bus/marketplace compatibility helpers, retires the hidden Evolution Versions sub-tab in favour of Dashboard → Updates as the single commit/tag surface, migrates legacy source-inspection tests to their real startup/review helpers, and introduces `escapeHtmlText` / `escapeHtmlAttr` plus USD-formatting utilities for safer shared web rendering. Legacy official generation-skill migration remains idempotent for the v5 line and is now documented as v6 cleanup debt. |
-| 5.8.2 | 2026-05-07 | **feat(skills): finalize agent-authored skills automatically.** New external skill manifests written by Ouroboros are marked with `.self_authored.json`; `review_skill` now finalizes those skills through deterministic preflight, self-authored PASS state, auto-grants for configured requested keys, enablement, dependency reconciliation, and extension reload. Skill preflight also validates widget render schemas so `action_route`-style mistakes fail before expensive review/load cycles. The data tools add line-range `data_read`, block unseeded `native/` payload writes, and reject serialized tool-result writes, while Repair/light-mode flows allow scoped skill editing without opening repo mutation. **Note on changelog rolloff**: the v5.7.4 patch row was rolled off to respect the P9 5-patch-row cap; its full body remains at git tag `v5.7.4`. |
-| 5.8.1 | 2026-05-06 | **fix(ui): keep desktop Chat scrollable across viewport snapshots.** Desktop viewport sizing now leaves `--vvh` CSS-driven as `100dvh` instead of freezing transient `visualViewport.height` pixel snapshots, so `body`/`#app` do not collapse the Chat flex scroll chain until a manual resize. Narrow/mobile keyboard mode still uses dynamic visualViewport pixels, now with a 320px safety floor. The release adds static viewport contract coverage plus a Playwright desktop smoke that overflows `#chat-messages`, verifies `scrollTop` can move, and rechecks after a resize round-trip. **Note on changelog rolloff**: the v5.7.3 patch row was rolled off to respect the P9 5-patch-row cap; its full body remains at git tag `v5.7.3`. |
 | 5.8.0-rc.6 | 2026-05-06 | **fix(skills+mobile): make Hub skills installable and polish lifecycle UX.** Extension loading now treats `.ouroboros_env` as generated dependency cache during staging and exposes isolated Python site-packages to in-process extensions, so OuroborosHub DuckDuckGo can import its reviewed `ddgs` dependency after install. The Skills UI keeps review/repair/grant work explicit with a visible primary action, clickable status/lock hints, and a shared confirm dialog, while ClawHub and OuroborosHub marketplace cards share the same lifecycle install/review spinner and live hint text. Mobile Chat also adopts PR #50's visualViewport keyboard lock hardening: scoped touch guards, scrollable transcript/composer/live timeline surfaces, safe text-node targets, and wide-viewport listener cleanup. |
 | 5.8.0-rc.2 | 2026-05-06 | **feat(skills+ci): make Repair observable and add UI/Docker/Windows coverage.** User-managed skills accidentally left under `data/skills/native/` now migrate into the repairable external bucket, visible Fix/Heal copy is renamed to Repair, skill review/repair lifecycle work emits chat live-card progress, and declared skill dependencies share one isolated install/readiness contract across marketplace and reviewed manifests. The release also fixes mobile Updates wrapping, Widgets refresh feedback, and Skills re-review affordances; adds Playwright browser-tool/UI smoke tests, Docker UI/portable lanes, Cloud.ru provider integration coverage, and marker guards; and switches Windows packaging to Playwright's headless shell with path-length guards so Explorer zip extraction stays below MAX_PATH. **Note on changelog rolloff**: the v5.3.0 minor row was rolled off to respect the P9 5-minor-row cap; its full body remains at git tag `v5.3.0`. |
 | 5.7.0 | 2026-05-02 | **feat(skills+ui): expand the skill platform and repair mobile/dashboard UX.** The Skills platform gains core-visible `review_skill`, a heal-safe `skill_preflight` validator, expanded script runtimes (`deno`, `ruby`, `go`), larger `skill_exec` output caps, async extension tool handling, `PluginAPI.get_runtime_info`, extension-provided Settings sections, sandboxed `kind: module` widgets, declarative `map`/`calendar`/`kanban` components, dependency-state enforcement, and broader protection for skill provenance/control-plane files. The UI moves About into Settings, restores horizontal mobile Settings tabs, centers the mobile nav, differentiates Dashboard with a gauge icon, fixes Dashboard panel scrolling and duplicate labels, repairs the chat input fade/glass effect, anchors Skills kebab menus, stabilizes Widgets loading, and fixes ClawHub search/Official filtering/install progress. `video_gen` leaves the bundled seed (weather remains the only built-in example); a companion OuroborosHub catalog update (`joi-lab/OuroborosHub@68b3358`) publishes DuckDuckGo and Perplexity as official installable skills. **Note on changelog rolloff**: the v5.2.3 patch row was retained in the v5.7.0 minor release and rolled off in v5.7.1; its full body remains in git history. |
 | 5.6.0 | 2026-05-01 | **feat(ui): add managed updates, settings-hosted observability, smart skill activation, and mobile polish.** Settings becomes the app hub for operational surfaces: Logs, Evolution, Updates, and Costs now live as first-class Settings sub-tabs while the mobile Settings page switches to a native stack-style section list. The chat budget pill opens Costs directly, and the chat composer now uses a flex layout with the iOS `interactive-widget` viewport hint removed so the input stays anchored above mobile keyboards. The new Updates tab exposes the existing launcher-managed `managed` remote as a safe owner-facing Update flow: passive status by default, explicit Check for updates, rescue snapshot before apply, exact target-SHA pinning, and automatic local-keep preservation for divergent committed work. Skills keep the visual toggle but turn it into the activation entry point: enabling can run review, request owner key grants through the desktop launcher confirmation bridge, and then enable without exposing duplicate grant-error copy. Buttons now share one documented design system, widget inline cards preserve state across tab switches, and the change was visually checked across desktop and mobile. **Note on changelog rolloff**: the v5.1.0 minor row was rolled off to respect the P9 5-minor-row cap; its full body remains at git tag `v5.1.0`. |
 | 5.5.0 | 2026-05-01 | **feat(skills): add official hub, lifecycle queue, isolated dependency installs, and robust files/widgets UX.** Skill lifecycle operations now run through a single FIFO lane with visible queue events, tab badges, and chat summaries. ClawHub install specs are normalized separately: reviewed Python wheel-only and npm no-script dependencies install under `.ouroboros_env`, while Cargo/global host mutations stay manual. Skills UI is now **My skills / ClawHub / OuroborosHub**, backed by the public static-catalog repo `joi-lab/OuroborosHub`, with in-progress/failed virtual cards and clearer review/toggle controls. Widgets keep session state across tab switches, Files downloads use the desktop Downloads bridge with web fallback, A2A is part of the base runtime, Playwright repair is aligned with build scripts, and defaults explicitly roll back retired Opus 4.7 lanes to Opus 4.6 while moving GPT lanes to GPT-5.5 / GPT-5.5 Pro review models. |
-Older releases are preserved in Git tags and GitHub releases. The 5.2.0, 5.3.0, 5.3.x release-candidate, 5.4.0, 5.7.5, 5.7.6, and former `4.0.0` rows are rolled off to respect the P9 changelog cap; their full bodies remain at their git tags.
+Older releases are preserved in Git tags and GitHub releases. The 5.2.0, 5.3.0, 5.3.x release-candidate, 5.4.0, 5.7.5, 5.7.6, 5.8.1, 5.8.2, and former `4.0.0` rows are rolled off to respect the P9 changelog cap; their full bodies remain at their git tags.
 
 ---
 

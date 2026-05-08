@@ -341,10 +341,11 @@ class TestReviewHistoryBuilding:
 
 
 class TestReviewQuorumLogic:
-    def test_review_models_configured(self):
-        from ouroboros.config import get_review_models
-        models = get_review_models()
-        assert len(models) >= 2  # config.py is single source of truth
+    # ``test_review_models_configured`` was removed in v5.8.3-rc.5 — the
+    # ``len(get_review_models()) >= 2`` quorum assertion is already covered
+    # in ``tests/test_settings_effort.py`` (3 cases). This class keeps the
+    # checklist-path / loader smoke tests below which are unique to the
+    # phase-7 pipeline contract.
 
     def test_checklist_path_exists(self):
         review = _get_review_module()
@@ -697,23 +698,13 @@ class TestReviewEnforcementModes:
 # --- Unified review wired into commit functions ---
 
 class TestReviewInCommitPipeline:
-    def test_repo_commit_calls_unified_review(self):
-        git_mod = _get_git_module()
-        source = inspect.getsource(git_mod._repo_commit_push)
-        assert "_run_reviewed_stage_cycle" in source
-        shared_source = inspect.getsource(git_mod._run_reviewed_stage_cycle)
-        assert "_run_parallel_review" in shared_source
-        parallel_source = inspect.getsource(git_mod._run_parallel_review)
-        assert "_run_unified_review" in parallel_source
-
-    def test_repo_write_commit_calls_unified_review(self):
-        git_mod = _get_git_module()
-        source = inspect.getsource(git_mod._repo_write_commit)
-        assert "_run_reviewed_stage_cycle" in source
-        shared_source = inspect.getsource(git_mod._run_reviewed_stage_cycle)
-        assert "_run_parallel_review" in shared_source
-        parallel_source = inspect.getsource(git_mod._run_parallel_review)
-        assert "_run_unified_review" in parallel_source
+    # ``test_repo_commit_calls_unified_review`` and
+    # ``test_repo_write_commit_calls_unified_review`` were removed in
+    # v5.8.3-rc.5 — both are strict subsets of
+    # ``tests/test_scope_review.py::TestScopeReview::test_scope_review_wired_in_commit``
+    # and ``test_repo_write_commit_not_bypass_scope`` (lines 538-560 there)
+    # which additionally verify ``run_scope_review`` is reached and the
+    # ``ThreadPoolExecutor`` parallelism contract holds.
 
     def test_blocked_review_unstages(self):
         """When review blocks, git reset HEAD must be called."""

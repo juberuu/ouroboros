@@ -152,7 +152,9 @@ def test_chat_input_field_has_no_ambient_halo():
 
     # Focus state keeps the focus ring (3px solid-tone outline) so
     # accessibility / keyboard users still see "this is focused".
-    assert "0 0 0 3px rgba(201, 53, 69, 0.10)" in focus_block
+    # v5.8.3-rc.5 swapped the ``rgba(201, 53, 69, 0.10)`` literal for the
+    # SSOT ``var(--accent-10)`` token defined in ``:root``.
+    assert "0 0 0 3px var(--accent-10)" in focus_block
     assert "0 4px 24px" not in focus_block
 
 
@@ -462,18 +464,21 @@ def test_updates_load_versions_error_handling():
 
 
 def test_evolution_runtime_card_uses_crimson_border():
-    """evo-runtime-card and evo-chart-wrap must use crimson accent border, not neutral white."""
+    """evo-runtime-card and evo-chart-wrap must use the crimson accent
+    border (either the literal rgba — historical — or the v5.8.3-rc.5
+    SSOT ``var(--accent-*)`` token), not the neutral-white default. The
+    accent token expansions all reduce to ``rgba(201, 53, 69, ...)`` so
+    either form satisfies the visual-contract intent."""
     css = _read("web/style.css")
-    # The rule should contain a crimson rgba border, not the old neutral white
     import re
     rule_match = re.search(
         r'\.evo-runtime-card,\s*\.evo-chart-wrap\s*\{(.+?)\}', css, re.DOTALL
     )
     assert rule_match, ".evo-runtime-card rule not found in style.css"
     rule_body = rule_match.group(1)
-    # Must have a crimson border (201, 53, 69)
-    assert "201, 53, 69" in rule_body, "evo-runtime-card should use crimson accent border"
-    # Must NOT use the old neutral white border
+    # Either the legacy literal or the new SSOT token counts as crimson.
+    has_crimson = "201, 53, 69" in rule_body or "var(--accent" in rule_body
+    assert has_crimson, "evo-runtime-card must use crimson accent border (literal rgba or SSOT --accent token)"
     assert "255, 255, 255, 0.08" not in rule_body, "evo-runtime-card should not use neutral white border"
 
 
@@ -792,39 +797,17 @@ def test_skill_review_click_guard_prevents_duplicate_posts():
     assert "reviewingSkills.add(name);" in source
 
 
-def test_plan_mode_send_message_accepts_plan_flag():
-    """sendMessage must accept a planMode parameter."""
-    source = _read("web/modules/chat.js")
-    assert "async function sendMessage(planMode = false)" in source, \
-        "sendMessage must accept planMode=false as default parameter"
-
-
-def test_plan_mode_prefix_constant_defined():
-    """PLAN_PREFIX constant must be defined with planning instruction."""
-    source = _read("web/modules/chat.js")
-    assert "const PLAN_PREFIX" in source, "PLAN_PREFIX constant must be defined"
-    assert "plan_task" in source, "PLAN_PREFIX should reference plan_task tool"
-    assert "web-search" in source, "PLAN_PREFIX should reference web-search"
-
-
-def test_plan_mode_wire_text_uses_prefix():
-    """Plan mode must prepend the prefix to wire text, but not for slash commands."""
-    source = _read("web/modules/chat.js")
-    # Must include slash-command bypass guard
-    assert "planMode && !text.startsWith('/')" in source, \
-        "Plan mode must bypass PLAN_PREFIX for slash commands"
-    assert "PLAN_PREFIX + text" in source, \
-        "Plan mode must prepend PLAN_PREFIX to regular messages"
-
-
-def test_plan_mode_remember_input_uses_raw_text():
-    """rememberInput must be called before prefix is applied (no recall pollution)."""
-    source = _read("web/modules/chat.js")
-    # rememberInput must appear before wireText assignment
-    remember_idx = source.index("rememberInput(text)")
-    wire_idx = source.index("const wireText = (planMode")
-    assert remember_idx < wire_idx, \
-        "rememberInput must be called with raw text before wireText prefix is applied"
+# ``test_plan_mode_send_message_accepts_plan_flag``,
+# ``test_plan_mode_prefix_constant_defined``,
+# ``test_plan_mode_wire_text_uses_prefix``, and
+# ``test_plan_mode_remember_input_uses_raw_text`` were retired in
+# v5.8.3-rc.5 — all four are covered by
+# ``tests/test_chat_js_contracts.py`` (the ``PLAN_PREFIX`` const-position,
+# ``PLAN_PREFIX + text``, ``planMode && !text.startsWith('/')``, and
+# ``rememberInput(text)`` before ``wireText`` invariants live there as
+# the canonical chat.js structural pin). The DOM-elements test below
+# stays here because it asserts on the chat_logs_ui template (id /
+# class structure), which is this file's surface.
 
 
 def test_plan_mode_send_listener_uses_arrow_function():

@@ -18,7 +18,13 @@ import {
     startLifecyclePoller,
 } from './lifecycle_card.js';
 import { openConfirmDialog } from './confirm_dialog.js';
-import { escapeHtmlAttr as escapeHtml } from './utils.js';
+import {
+    boundedText,
+    escapeHtmlAttr as escapeHtml,
+    fetchJson,
+    renderMarkdownSafe as renderMarkdownSafeShared,
+    safeExternalHrefAttr,
+} from './utils.js';
 
 function isRateLimitError(message) {
     const text = String(message || '').toLowerCase();
@@ -32,88 +38,21 @@ function installErrorCopy(message) {
 }
 
 
-/**
- * Render an untrusted Markdown string from the registry as sanitised HTML.
- *
- * The vendored ``marked`` (parser) + ``DOMPurify`` (sanitiser) globals are
- * loaded at page boot from ``index.html``. We pass marked's output through
- * DOMPurify with a conservative allowlist that bans every script-bearing
- * tag and any ``javascript:`` / ``data:`` URLs in attributes.
- *
- * If either library is missing (e.g. the operator runs against an older
- * cached ``index.html``), we fall back to a plain ``<pre><code>`` block —
- * still safe because the HTML is escaped, just not styled as Markdown.
- */
+// ``renderMarkdownSafe`` and ``safeExternalUrl`` previously had local
+// copies here.  They live in ``utils.js`` now (single source of truth for
+// publisher-supplied markdown + untrusted href validation across
+// marketplace.js, skills.js, widgets.js, and ouroboroshub.js). We keep
+// thin local aliases so the marketplace-specific defaults — empty-state
+// HTML and the ``marketplace-skillmd`` fallback ``<pre>`` class — stay
+// declared next to the call sites that depend on them.
 function renderMarkdownSafe(rawMd) {
-    const text = String(rawMd ?? '');
-    if (!text) return '<div class="muted"><i>empty</i></div>';
-    if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') {
-        return `<pre class="marketplace-skillmd"><code>${escapeHtml(text)}</code></pre>`;
-    }
-    try {
-        // ``async: false`` forces a synchronous string return.
-        // ``mangle`` and ``headerIds`` were removed in marked@5.0.0
-        // (we vendor v12.0.2), so passing them here is a no-op; the
-        // explicit options below are the actually-honored set.
-        const rendered = marked.parse(text, {
-            async: false,
-            gfm: true,
-            breaks: false,
-        });
-        // ``img`` is forbidden so a malicious publisher cannot ship a
-        // SKILL.md with ``<img src="https://attacker.com/track.png">``
-        // and use the marketplace preview modal as a tracking-pixel
-        // beacon. The preview is meant to be a *static* description of
-        // the skill — anything that reaches out to a remote host
-        // breaks that contract. ``style`` is refused for the same
-        // reason. ``href`` survives but DOMPurify's default URI regex
-        // restricts it to safe schemes.
-        //
-        // NOTE: on-event attributes (onclick, onerror, etc.) are
-        // already blocked by DOMPurify's default ALLOWED_ATTR
-        // allowlist, NOT by an explicit denylist (the ``'on*'`` token
-        // was misleading dead code — DOMPurify v3.1.0 does exact-match
-        // attribute lookups, not glob expansion). If a future
-        // contributor adds an attribute via ``ADD_ATTR``, they must
-        // re-verify the on-handler protection still holds — DOMPurify
-        // does NOT reapply the on-handler rule to attributes that
-        // ADD_ATTR explicitly admits.
-        return DOMPurify.sanitize(rendered, {
-            USE_PROFILES: { html: true },
-            FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'form', 'input', 'img', 'video', 'audio', 'source'],
-            FORBID_ATTR: ['style', 'srcset', 'srcdoc'],
-        });
-    } catch (err) {
-        console.warn('marketplace: markdown render failed', err);
-        return `<pre class="marketplace-skillmd"><code>${escapeHtml(text)}</code></pre>`;
-    }
+    return renderMarkdownSafeShared(rawMd, {
+        emptyHtml: '<div class="muted"><i>empty</i></div>',
+        preClass: 'marketplace-skillmd',
+    });
 }
 
-
-/**
- * Validate that an untrusted URL string uses a safe scheme before
- * rendering it as an `<a href="...">` target. Registry-supplied
- * homepage / website fields can carry `javascript:` / `data:` /
- * `vbscript:` payloads that escapeHtml does NOT neutralise — the
- * browser decodes the entity escapes inside `href` BEFORE scheme
- * parsing, so a `javascript:fetch(...)` payload still executes on
- * click. Returns the (escaped) URL when the scheme is http/https,
- * empty string otherwise.
- */
-function safeExternalUrl(value) {
-    const text = String(value ?? '').trim();
-    if (!text) return '';
-    try {
-        const parsed = new URL(text);
-        if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
-            return escapeHtml(parsed.toString());
-        }
-    } catch {
-        // Not a parseable absolute URL — refuse rather than guessing
-        // (a relative path in homepage doesn't make sense anyway).
-    }
-    return '';
-}
+const safeExternalUrl = safeExternalHrefAttr;
 
 
 function formatNumber(value) {
@@ -176,11 +115,6 @@ function topReviewFinding(installed) {
     const verdict = first.verdict || first.severity || '';
     const reason = first.reason || first.message || '';
     return `${verdict ? `${verdict} ` : ''}${label}: ${reason}`.trim();
-}
-
-function boundedText(value, maxLen = 1200) {
-    const text = String(value ?? '');
-    return text.length > maxLen ? `${text.slice(0, maxLen)}…[truncated]` : text;
 }
 
 function lifecycleFor(summary, installed, pending) {
@@ -472,24 +406,11 @@ function showStatus(host, message, tone) {
 // ---------------------------------------------------------------------------
 // Network helpers
 // ---------------------------------------------------------------------------
-
-
-async function fetchJson(url, init) {
-    const resp = await fetch(url, init);
-    let body = null;
-    try {
-        body = await resp.json();
-    } catch (err) {
-        body = { error: `non-json response (HTTP ${resp.status})` };
-    }
-    if (!resp.ok) {
-        const err = new Error(body?.error || `HTTP ${resp.status}`);
-        err.status = resp.status;
-        err.body = body;
-        throw err;
-    }
-    return body;
-}
+//
+// ``fetchJson`` lives in ``utils.js`` (single source of truth shared with
+// ouroboroshub.js). The contract: parsed body always returned; non-2xx
+// throws ``Error`` with ``err.status`` (used here for 429 retry handling)
+// and ``err.body``.
 
 
 async function loadInstalled({ signal: externalSignal } = {}) {
@@ -1263,6 +1184,3 @@ export function initMarketplace(pane) {
 
     refresh();
 }
-
-
-export default { initMarketplace };

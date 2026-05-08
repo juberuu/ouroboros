@@ -29,8 +29,13 @@ from typing import Any, Callable, Dict, List, Optional
 
 from ouroboros.loop_tool_execution import StatefulToolExecutor, _truncate_tool_result
 from ouroboros.utils import (
-    utc_now_iso, read_text, append_jsonl,
-    truncate_for_log, sanitize_tool_result_for_log, sanitize_tool_args_for_log,
+    append_jsonl,
+    emit_log_event,
+    read_text,
+    sanitize_tool_args_for_log,
+    sanitize_tool_result_for_log,
+    truncate_for_log,
+    utc_now_iso,
 )
 from ouroboros.config import resolve_effort
 from ouroboros.llm import LLMClient, DEFAULT_LIGHT_MODEL
@@ -159,21 +164,18 @@ class BackgroundConsciousness:
             pass
 
     def _emit_live_log(self, event_type: str, **fields: Any) -> None:
-        if self._event_queue is None:
-            return
-        try:
-            self._event_queue.put({
-                "type": "log_event",
-                "data": {
-                    "type": event_type,
-                    "ts": utc_now_iso(),
-                    "task_id": "bg-consciousness",
-                    "task_type": "consciousness",
-                    **fields,
-                },
-            })
-        except Exception:
-            log.debug("Failed to emit consciousness live log", exc_info=True)
+        emit_log_event(
+            self._event_queue,
+            {
+                "type": event_type,
+                "ts": utc_now_iso(),
+                "task_id": "bg-consciousness",
+                "task_type": "consciousness",
+                **fields,
+            },
+            blocking=True,
+            log_label="consciousness live",
+        )
 
     # -------------------------------------------------------------------
     # Main loop

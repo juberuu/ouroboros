@@ -794,12 +794,11 @@ def _git_commit_with_tests(ctx: ToolContext) -> Optional[str]:
     return None
 
 
-from ouroboros.tools.review import (  # noqa: F401
-    _run_unified_review,
-    _load_checklist_section,
-    _CHECKLISTS_PATH,
-    _parse_review_json,
-)
+# Compatibility re-exports for ``ouroboros.tools.review`` symbols that
+# external integrations historically imported from this module were
+# retired in v5.8.3-rc.5; nothing inside the repo depends on them and a
+# repo-wide grep confirms no external import path. Pull from
+# ``ouroboros.tools.review`` directly going forward.
 
 
 def _post_commit_result(ctx, commit_message, skip_tests, tw_ref):

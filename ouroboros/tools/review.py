@@ -56,10 +56,10 @@ err on the side of NOT recommending it and explain the tension.
 """
 
 
-_CHECKLISTS_PATH = pathlib.Path(__file__).resolve().parent.parent.parent / "docs" / "CHECKLISTS.md"
-
 from ouroboros.tools.review_helpers import (
+    REPO_ROOT as _REPO_ROOT,
     load_checklist_section as _load_checklist_section_precise,
+    load_governance_doc,
     build_touched_file_pack,
     build_goal_section,
     build_rebuttal_section as _shared_build_rebuttal_section,
@@ -74,20 +74,44 @@ from ouroboros.tools.review_helpers import (
 )
 
 
+# Single source of truth: ``review_helpers.REPO_ROOT`` is the canonical
+# repo-root anchor (also used by ``load_checklist_section``). Keep
+# ``_CHECKLISTS_PATH`` as a derived alias for the existing public-ish
+# import path used by ``tests/test_phase7_pipeline.py`` and the legacy
+# re-exports — this removes the duplicate pathlib walk that previously
+# lived right above this comment.
+_CHECKLISTS_PATH = _REPO_ROOT / "docs" / "CHECKLISTS.md"
+
+
 def _load_bible() -> str:
-    candidates = [
-        pathlib.Path(__file__).resolve().parent.parent.parent / "BIBLE.md",
-        pathlib.Path.cwd() / "BIBLE.md",
-        pathlib.Path(os.environ.get("OUROBOROS_REPO_DIR", "")) / "BIBLE.md",
-    ]
-    for p in candidates:
-        try:
-            if p.is_file():
-                return p.read_text(encoding="utf-8")
-        except Exception:
+    """Load ``BIBLE.md`` for the triad reviewer preamble.
+
+    Routes through the SSOT ``review_helpers.load_governance_doc`` so the
+    silent-empty-string fallback (which would have caused triad reviewers
+    to ignore constitutional context without warning, in violation of
+    DEVELOPMENT.md "No silent truncation") is replaced by an explicit
+    ``[⚠️ OMISSION: ...]`` marker. Walks the same candidate roots the
+    older inline implementation tried, in order of priority, so a
+    pytest-style ``Path.cwd()`` invocation still finds the constitution
+    when the repo-relative resolution misses.
+    """
+    for candidate_root in (
+        pathlib.Path(__file__).resolve().parent.parent.parent,
+        pathlib.Path.cwd(),
+        pathlib.Path(os.environ.get("OUROBOROS_REPO_DIR", "")),
+    ):
+        if not str(candidate_root):
             continue
-    log.warning("BIBLE.md not found for review context")
-    return ""
+        loaded = load_governance_doc(
+            candidate_root, "BIBLE.md", on_missing="silent", fallback="",
+        )
+        if loaded:
+            return loaded
+    return load_governance_doc(
+        pathlib.Path(__file__).resolve().parent.parent.parent,
+        "BIBLE.md",
+        on_missing="explicit",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -853,25 +877,19 @@ def _build_rebuttal_section(review_rebuttal: str) -> str:
 
 
 def _load_dev_guide_text(repo_dir: pathlib.Path) -> str:
-    dev_guide_path = repo_dir / "docs" / "DEVELOPMENT.md"
-    try:
-        if dev_guide_path.exists():
-            return dev_guide_path.read_text(encoding="utf-8")
-    except Exception:
-        pass
-    return ""
+    """Load ``docs/DEVELOPMENT.md`` for the triad reviewer preamble.
+
+    Routes through ``review_helpers.load_governance_doc`` so a missing
+    file produces an explicit ``[⚠️ OMISSION: ...]`` marker instead of an
+    invisible empty string. DEVELOPMENT.md "Core Governance Artifacts"
+    forbids silent omission of the core docs.
+    """
+    return load_governance_doc(repo_dir, "docs/DEVELOPMENT.md", on_missing="explicit")
 
 
 def _load_architecture_text(repo_dir: pathlib.Path) -> str:
-    """Load ARCHITECTURE.md in full — core cognitive artifact, must not be omitted."""
-    arch_path = repo_dir / "docs" / "ARCHITECTURE.md"
-    try:
-        if arch_path.exists():
-            return arch_path.read_text(encoding="utf-8")
-    except Exception:
-        pass
-    log.warning("docs/ARCHITECTURE.md not found for triad review context")
-    return ""
+    """Load ``docs/ARCHITECTURE.md`` in full — core cognitive artifact, must not be omitted."""
+    return load_governance_doc(repo_dir, "docs/ARCHITECTURE.md", on_missing="explicit")
 
 
 def _collect_review_findings(ctx: ToolContext, model_results: list) -> tuple[list[str], list[str], list[str], list[dict]]:

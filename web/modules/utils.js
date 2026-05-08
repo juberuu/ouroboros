@@ -31,6 +31,115 @@ export function safeExternalUrl(value) {
     }
 }
 
+/**
+ * Validate an untrusted URL string for use as an `<a href="...">` attribute
+ * value. Unlike ``safeExternalUrl`` (which returns ``#`` for bad input —
+ * suitable for inline markdown anchors that always render), this helper
+ * returns the empty string so callers can use the result as a truthy gate:
+ *
+ *     const href = safeExternalHrefAttr(value);
+ *     if (href) html += `<a href="${href}" target="_blank" rel="noopener">…</a>`;
+ *
+ * Only ``http:`` / ``https:`` schemes survive (no ``mailto:``, no
+ * ``javascript:`` / ``data:``). The returned string is HTML-attribute
+ * escaped so it is safe to interpolate directly into template literals.
+ */
+export function safeExternalHrefAttr(value) {
+    const text = String(value ?? '').trim();
+    if (!text) return '';
+    try {
+        const parsed = new URL(text);
+        if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+            return escapeHtmlAttr(parsed.toString());
+        }
+    } catch {
+        // Not a parseable absolute URL — refuse rather than guessing.
+    }
+    return '';
+}
+
+/**
+ * Truncate untrusted text to ``maxLen`` chars with a visible
+ * ``…[truncated]`` marker so downstream consumers (cards, modals,
+ * tooltips, log-finding excerpts) cannot smuggle multi-megabyte
+ * publisher payloads into the DOM.
+ */
+export function boundedText(value, maxLen = 1200) {
+    const text = String(value ?? '');
+    return text.length > maxLen ? `${text.slice(0, maxLen)}…[truncated]` : text;
+}
+
+/**
+ * Shared JSON fetch wrapper.  Behaviour:
+ *
+ * - Always parses the response body as JSON.  If the body is not valid
+ *   JSON (HTML 502 page from a misbehaving proxy, etc.) it is replaced
+ *   with ``{ error: 'non-json response (HTTP <code>)' }`` so callers do
+ *   not need a separate try/catch around ``resp.json()``.
+ * - On non-2xx responses, throws ``Error`` with ``err.status`` (HTTP
+ *   code, useful for 429-aware retry logic) and ``err.body`` (the
+ *   parsed JSON payload, useful for surfacing structured error fields).
+ */
+export async function fetchJson(url, init) {
+    const resp = await fetch(url, init);
+    let body = null;
+    try {
+        body = await resp.json();
+    } catch {
+        body = { error: `non-json response (HTTP ${resp.status})` };
+    }
+    if (!resp.ok) {
+        const err = new Error(body?.error || `HTTP ${resp.status}`);
+        err.status = resp.status;
+        err.body = body;
+        throw err;
+    }
+    return body;
+}
+
+/**
+ * Render Markdown (via the vendored ``marked``) and run the result
+ * through ``DOMPurify`` with a conservative allowlist that bans every
+ * script-bearing tag and any ``style``/``src``/``srcset``/``srcdoc``
+ * attribute.  Used by extension widgets and the marketplace preview
+ * modal — both render publisher-supplied markdown that must NOT be able
+ * to ship a tracking-pixel ``<img>``, smuggle a ``<script>``, or pivot
+ * to a remote host through ``<iframe>``.
+ *
+ * If either ``marked`` or ``DOMPurify`` is missing (e.g. the user is on
+ * a stale cached ``index.html``), falls back to a plain
+ * ``<pre><code>``-escaped rendering — still safe, just unstyled.
+ *
+ * Options:
+ *   ``emptyHtml`` — what to return for empty input (default ``''``).
+ *   ``preClass``  — CSS class added to the fallback ``<pre>`` element
+ *                   (e.g. ``'marketplace-skillmd'``).
+ */
+export function renderMarkdownSafe(rawMd, { emptyHtml = '', preClass = '' } = {}) {
+    const text = String(rawMd ?? '');
+    if (!text) return emptyHtml;
+    const preAttr = preClass ? ` class="${preClass}"` : '';
+    const fallback = `<pre${preAttr}><code>${escapeHtmlText(text)}</code></pre>`;
+    if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') {
+        return fallback;
+    }
+    try {
+        const rendered = marked.parse(text, {
+            async: false,
+            gfm: true,
+            breaks: false,
+        });
+        return DOMPurify.sanitize(rendered, {
+            USE_PROFILES: { html: true },
+            FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'form', 'input', 'img', 'video', 'audio', 'source'],
+            FORBID_ATTR: ['style', 'src', 'srcset', 'srcdoc'],
+        });
+    } catch (err) {
+        console.warn('renderMarkdownSafe: markdown render failed', err);
+        return fallback;
+    }
+}
+
 export function decodeHtmlEntities(value) {
     const textarea = document.createElement('textarea');
     textarea.innerHTML = String(value ?? '');

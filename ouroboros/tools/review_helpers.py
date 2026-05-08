@@ -31,6 +31,19 @@ logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
+# Shared best-effort token budget for review-stack prompts (scope review,
+# plan review, deep self-review). ``estimate_tokens`` (chars/4) under-counts
+# real tokens by ~15%, so at gate=850 000 actual input lands at ≈1M tokens —
+# right at the API ceiling on default 1M-context reviewer models. The skip
+# path is non-blocking (warning, not failure); some API-level rejections at
+# this gate are still possible, especially on reviewers configured below the
+# 1M-context floor. Bump together with the corresponding reviewer model
+# routing — keeping it here as the single source of truth means a future
+# move to a larger context window only needs one edit. ``deep_self_review``
+# also references this constant for the message string in its rejection
+# path, so a number bump there does not silently desync from the real gate.
+REVIEW_PROMPT_TOKEN_BUDGET = 850_000
+
 
 def load_governance_doc(
     repo_dir: Path,

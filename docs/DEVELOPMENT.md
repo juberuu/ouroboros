@@ -379,6 +379,7 @@ Use the primary accent for new features. Avoid introducing additional red/crimso
 |-------|-------|-------|
 | `--radius-xs` | `3px` | Micro accents (progress bars) |
 | `--radius-sm` | `8px` | Small controls, filter chips |
+| `--radius-md` | `10px` | Chips, log-counter pills, page-fade rules |
 | `--radius` | `12px` | Inputs, inner cards |
 | `--radius-lg` | `16px` | Nav buttons, chat/live cards |
 | `--radius-xl` | `20px` | Logo images, large media |

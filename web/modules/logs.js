@@ -10,7 +10,13 @@ import {
     summarizeLogEvent,
 } from './log_events.js';
 
-export function initLogs({ ws, state, mount = null, embedded = false, hostPage = 'settings', hostSubtab = 'logs' }) {
+// ``hostPage`` defaults to ``'dashboard'`` because the embedded sub-tab
+// migration (v5.7+) put Logs/Costs/Evolution/Updates inside the
+// Dashboard page; the legacy ``'settings'`` value is no longer passed
+// by ``app.js``. Default updated in v5.8.3-rc.5; the legacy
+// ``state.settingsActiveSubtab`` branch has been removed because no
+// caller can reach it anymore.
+export function initLogs({ ws, state, mount = null, embedded = false, hostPage = 'dashboard', hostSubtab = 'logs' }) {
     const MAX_LOGS = 500;
     const MAX_TASK_EVENTS = 30;
     const duplicateWindowMs = 5000;
@@ -51,7 +57,7 @@ export function initLogs({ ws, state, mount = null, embedded = false, hostPage =
     const logEntries = page.querySelector('#log-entries');
     function isLogsVisible() {
         return embedded
-            ? state.activePage === hostPage && (hostPage === 'dashboard' ? state.dashboardActiveSubtab : state.settingsActiveSubtab) === hostSubtab
+            ? state.activePage === hostPage && state.dashboardActiveSubtab === hostSubtab
             : state.activePage === 'logs';
     }
 
@@ -63,7 +69,7 @@ export function initLogs({ ws, state, mount = null, embedded = false, hostPage =
     }
 
     function updateVisibility(entry) {
-        entry.style.display = state.activeFilters[entry.dataset.category] ? '' : 'none';
+        entry.hidden = !state.activeFilters[entry.dataset.category];
     }
 
     function renderFilters() {
@@ -143,7 +149,7 @@ export function initLogs({ ws, state, mount = null, embedded = false, hostPage =
                 const repeatEl = last.entry.querySelector('.log-repeat');
                 if (repeatEl) {
                     repeatEl.textContent = `x${last.count}`;
-                    repeatEl.style.display = '';
+                    repeatEl.hidden = false;
                 }
                 const tsEl = last.entry.querySelector('.log-ts');
                 if (tsEl) tsEl.textContent = normalizeLogTs(evt.ts || evt.timestamp);
@@ -167,7 +173,7 @@ export function initLogs({ ws, state, mount = null, embedded = false, hostPage =
                 <span class="log-type ${cat}">${escapeHtml(view.typeLabel)}</span>
                 <span class="log-phase ${escapeHtml(view.phase || 'info')}">${escapeHtml(view.phase || 'info')}</span>
                 <span class="log-headline">${escapeHtml(view.headline || 'Event')}</span>
-                <span class="log-repeat" style="display:none"></span>
+                <span class="log-repeat" hidden></span>
             </div>
             ${metaPills(view.meta)}
             ${bodyHtml}
@@ -199,7 +205,7 @@ export function initLogs({ ws, state, mount = null, embedded = false, hostPage =
                 <span class="log-type ${escapeHtml(category)}" data-task-kind>${groupId === 'bg-consciousness' ? 'background' : 'task'}</span>
                 <span class="log-phase info" data-task-phase>info</span>
                 <span class="log-headline" data-task-headline>Task activity</span>
-                <span class="log-repeat" data-task-count style="display:none"></span>
+                <span class="log-repeat" data-task-count hidden></span>
             </div>
             <div class="log-task-summary" data-task-summary></div>
             <details class="log-task-details">
@@ -231,7 +237,7 @@ export function initLogs({ ws, state, mount = null, embedded = false, hostPage =
                     <span class="log-ts">${escapeHtml(item.ts)}</span>
                     <span class="log-phase ${escapeHtml(item.phase || 'info')}">${escapeHtml(item.phase || 'info')}</span>
                     <span class="log-headline">${escapeHtml(item.headline)}</span>
-                    <span class="log-repeat" style="${item.count > 1 ? '' : 'display:none'}">${item.count > 1 ? `x${item.count}` : ''}</span>
+                    <span class="log-repeat"${item.count > 1 ? '' : ' hidden'}>${item.count > 1 ? `x${item.count}` : ''}</span>
                 </div>
                 ${metaPills(item.meta)}
                 ${item.body ? `<div class="log-body">${escapeHtml(item.body)}</div>` : ''}
@@ -269,7 +275,7 @@ export function initLogs({ ws, state, mount = null, embedded = false, hostPage =
         record.phase.className = `log-phase ${view.phase || 'info'}`;
         record.headline.textContent = view.headline || 'Task activity';
         record.count.textContent = `x${record.events}`;
-        record.count.style.display = record.events > 1 ? '' : 'none';
+        record.count.hidden = record.events <= 1;
         record.summary.innerHTML = metaPills([
             groupId === 'bg-consciousness' ? 'background' : `task=${groupId}`,
             ...view.meta,

@@ -53,10 +53,6 @@ def _events_path(drive_root: pathlib.Path) -> pathlib.Path:
     return pathlib.Path(drive_root) / "logs" / "events.jsonl"
 
 
-def _write_json_atomic(path: pathlib.Path, payload: Dict[str, Any]) -> None:
-    atomic_write_json(path, payload, trailing_newline=True)
-
-
 def _read_review_job(path: pathlib.Path) -> Dict[str, Any]:
     return read_json_dict(path) or {}
 
@@ -103,7 +99,7 @@ def mark_stale_review_job_interrupted(
         "interrupt_reason": "owner_process_exited" if pid_dead else "heartbeat_stale",
         "content_hash": data.get("content_hash") or current_content_hash,
     }
-    _write_json_atomic(path, payload)
+    atomic_write_json(path, payload, trailing_newline=True)
     append_jsonl(
         _events_path(drive_root),
         {
@@ -149,7 +145,7 @@ def _patch_review_job(drive_root: pathlib.Path, skill_name: str, **updates: Any)
     path = review_job_state_path(drive_root, skill_name)
     data = _read_review_job(path)
     data.update(updates)
-    _write_json_atomic(path, data)
+    atomic_write_json(path, data, trailing_newline=True)
 
 
 @contextlib.contextmanager
@@ -347,7 +343,7 @@ def _on_started(
             "duration_sec": None,
             "pid": os.getpid(),
         }
-        _write_json_atomic(review_job_state_path(drive_root, skill_name), payload)
+        atomic_write_json(review_job_state_path(drive_root, skill_name), payload, trailing_newline=True)
         append_jsonl(
             _events_path(drive_root),
             {
@@ -393,7 +389,7 @@ def _on_finished(
             "error": error,
             "deps_error": deps_error,
         }
-        _write_json_atomic(review_job_state_path(drive_root, skill_name), payload)
+        atomic_write_json(review_job_state_path(drive_root, skill_name), payload, trailing_newline=True)
         append_jsonl(
             _events_path(drive_root),
             {

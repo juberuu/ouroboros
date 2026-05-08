@@ -1,4 +1,4 @@
-# Ouroboros v5.8.3-rc.4 — Architecture & Reference
+# Ouroboros v5.8.3-rc.5 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -297,12 +297,12 @@ flowchart TD
 Worker-side `ouroboros/agent_startup_checks.py::check_uncommitted_changes()` is
 **warning-only**: it emits a `supervisor_side_rescue_owns_this` skip marker in
 its result when the tree is dirty, and never runs `git add` or `git commit`.
-Prior to v4.36.1, the worker-side path performed its own `auto-rescue` commit
-directly on `ouroboros`; because `OUROBOROS_MANAGED_BY_LAUNCHER=1` is inherited
-by every subprocess (pytest runs, A2A agent-card builder via
-`_build_skills_from_registry`, supervisor-side `_get_chat_agent`), any of those
-code paths would steal the agent's in-progress edits into a commit. The v4.36.1
-change removes that duplicate rescue mechanism entirely.
+**Why warning-only:** `OUROBOROS_MANAGED_BY_LAUNCHER=1` is inherited by every
+subprocess (pytest runs, A2A agent-card builder via
+`_build_skills_from_registry`, supervisor-side `_get_chat_agent`); a duplicate
+worker-side `auto-rescue` commit would let any of those subprocess paths steal
+the agent's in-progress edits into a commit on `ouroboros`. The single rescue
+path lives in `safe_restart` so subprocesses cannot race it.
 
 ### Agent interpreter handle (`OUROBOROS_AGENT_PYTHON`)
 
@@ -1094,7 +1094,7 @@ the constitutional guard is that the file itself must remain non-deletable.
 - **Client auth**: `A2A_CLIENT_PASSWORD` env var (not a settings key — read at call time). When set, `a2a_discover`, `a2a_send`, and `a2a_status` pass it as HTTP Basic auth (`ouroboros:<password>`) so they can reach remote A2A servers protected by `NetworkAuthGate` / `OUROBOROS_NETWORK_PASSWORD`.
 - **Memory isolation**: A2A traffic uses negative `chat_id` values (base `-1001`, decremented per task) to distinguish it from human dialogue. `supervisor/message_bus.py::broadcast` and `send_message` check `chat_id >= 0` before WebSocket broadcast; `ouroboros/server_history_api.py` filters negative `chat_id` from `/api/chat/history` replay; `ouroboros/consolidator.py::_read_chat_entries` skips `chat_id < 0` entries to prevent A2A traffic from contaminating `dialogue_blocks.json`; `ouroboros/memory.py::chat_history` (exposed as the `chat_history` tool) filters `chat_id < 0` entries so A2A traffic never appears in the agent's dialogue tool results. Raw A2A entries may still be present in `data/logs/chat.jsonl` (written by `log_chat`); all consumer paths above guard against them. Structured A2A audit logs also go to `data/logs/a2a.log`.
 - **Panic cleanup**: `ouroboros/server_control.py::execute_panic_stop` sweeps the A2A port (`A2A_PORT`, default `18800`) alongside the main server port (`8765`) and local-model port (`8766`) so a stuck A2A uvicorn server does not leave the port in `TIME_WAIT` after an emergency stop.
-- **Frozen-bundle support (v4.36.1+):** `tools/a2a.py` is listed in `_FROZEN_TOOL_MODULES` in `registry.py`, so the three A2A client tools (`a2a_discover`, `a2a_send`, `a2a_status`) are loaded in packaged `.app` / `.tar.gz` / `.zip` bundles alongside the dev/source auto-discovery path. The A2A server itself (port 18800) starts normally in packaged builds when `A2A_ENABLED=True`. Prior to v4.36.1 the client tools were dev-only while a bundle with updated `registry.py` was pending; that limitation is now lifted.
+- **Frozen-bundle support:** `tools/a2a.py` is listed in `_FROZEN_TOOL_MODULES` in `registry.py`, so the three A2A client tools (`a2a_discover`, `a2a_send`, `a2a_status`) are loaded in packaged `.app` / `.tar.gz` / `.zip` bundles alongside the dev/source auto-discovery path. The A2A server itself (port 18800) starts normally in packaged builds when `A2A_ENABLED=True`.
 
 ### Block-wise dialogue consolidation (consolidator.py)
 

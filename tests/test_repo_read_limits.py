@@ -350,11 +350,26 @@ def test_triad_review_prompt_includes_architecture_md(tmp_path):
     assert "## ARCHITECTURE.md" in rendered
 
 
-def test_load_architecture_text_returns_empty_on_missing(tmp_path):
-    """_load_architecture_text returns empty string (not an exception) when file is absent."""
+def test_load_architecture_text_emits_explicit_omission_marker_on_missing(tmp_path):
+    """``_load_architecture_text`` must emit a visible ``[⚠️ OMISSION: ...]``
+    marker (not a silent empty string) when ARCHITECTURE.md is absent.
+
+    DEVELOPMENT.md "No silent truncation" forbids the silent-empty-string
+    fallback that the function used pre-v5.8.3-rc.5 — invisible omission
+    of a core governance artifact in a triad-review prompt would let
+    reviewers PASS without ever seeing the architectural rationale they
+    are supposed to grade against. The function now routes through the
+    SSOT ``review_helpers.load_governance_doc`` which returns an explicit
+    ``[⚠️ OMISSION: docs/ARCHITECTURE.md not found at <path>]`` so the
+    review prompt and any downstream operator inspection see the gap.
+    """
     from ouroboros.tools.review import _load_architecture_text
     result = _load_architecture_text(tmp_path)
-    assert result == "", "Missing ARCHITECTURE.md should return empty string, not raise"
+    assert result.startswith("[⚠️ OMISSION:"), (
+        f"Missing ARCHITECTURE.md should yield an explicit omission marker, got: {result!r}"
+    )
+    assert "docs/ARCHITECTURE.md" in result
+    # Never raises — the function still degrades gracefully.
 
 
 def test_consciousness_logs_warning_when_architecture_md_missing(tmp_path):

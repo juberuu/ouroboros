@@ -11,6 +11,21 @@
     --accent-light: #f07a86;
     --accent-dim: rgba(201, 53, 69, 0.15);
     --accent-glow: rgba(201, 53, 69, 0.08);
+    /* Numbered fade tokens for the accent — used to retire 50+ hardcoded
+       ``rgba(201, 53, 69, 0.XX)`` literals scattered across the file in
+       v5.8.3-rc.5. Keep tokens as multiples of 0.02 so future tweaks stay
+       expressible without re-introducing literals. The naming uses the
+       integer percentage of the alpha channel for intuitive pairing
+       (``--accent-04`` → ``rgba(..., 0.04)``). */
+    --accent-04: rgba(201, 53, 69, 0.04);
+    --accent-05: rgba(201, 53, 69, 0.05);
+    --accent-08: rgba(201, 53, 69, 0.08);
+    --accent-10: rgba(201, 53, 69, 0.10);
+    --accent-12: rgba(201, 53, 69, 0.12);
+    --accent-18: rgba(201, 53, 69, 0.18);
+    --accent-22: rgba(201, 53, 69, 0.22);
+    --accent-25: rgba(201, 53, 69, 0.25);
+    --accent-55: rgba(201, 53, 69, 0.55);
     --blue: #3b82f6;
     --blue-dim: rgba(30, 64, 175, 0.3);
     --amber: #f59e0b;
@@ -22,6 +37,10 @@
     --divider: rgba(255, 255, 255, 0.06);
     --radius-xs: 3px;
     --radius-sm: 8px;
+    /* ``--radius-md`` (10 px) is the in-between size used by chips, log
+       repeat counters, and page-fade rules.  Pre-v5.8.3-rc.5 these were
+       hardcoded ``border-radius: 10px`` literals. */
+    --radius-md: 10px;
     --radius: 12px;
     --radius-lg: 16px;
     --radius-xl: 20px;
@@ -106,8 +125,8 @@ body {
     gap: 4px;
     padding: 10px 6px;
     width: 64px;
-    border: 1px solid rgba(201, 53, 69, 0.08);
-    background: rgba(201, 53, 69, 0.04);
+    border: 1px solid var(--accent-08);
+    background: var(--accent-04);
     backdrop-filter: blur(8px);
     color: var(--text-secondary);
     cursor: pointer;
@@ -137,19 +156,19 @@ body {
 }
 
 .nav-btn:hover {
-    background: rgba(201, 53, 69, 0.10);
-    border-color: rgba(201, 53, 69, 0.18);
+    background: var(--accent-10);
+    border-color: var(--accent-18);
     color: var(--text-primary);
     transform: scale(1.04);
-    box-shadow: 0 2px 12px rgba(201, 53, 69, 0.08);
+    box-shadow: 0 2px 12px var(--accent-08);
 }
 .nav-btn.active {
-    background: rgba(201, 53, 69, 0.12);
-    border-color: rgba(201, 53, 69, 0.25);
+    background: var(--accent-12);
+    border-color: var(--accent-25);
     color: var(--accent);
     box-shadow:
-        0 0 16px rgba(201, 53, 69, 0.10),
-        inset 0 0 12px rgba(201, 53, 69, 0.05);
+        0 0 16px var(--accent-10),
+        inset 0 0 12px var(--accent-05);
 }
 
 #divider {
@@ -248,7 +267,7 @@ body {
     background: rgba(255, 255, 255, 0.04);
     border: 1px solid var(--divider);
     color: var(--text-primary);
-    border-radius: 10px;
+    border-radius: var(--radius-md);
     padding: 10px 12px;
 }
 
@@ -317,7 +336,7 @@ body {
     border: none;
     background: transparent;
     color: var(--text-primary);
-    border-radius: 10px;
+    border-radius: var(--radius-md);
     padding: 10px 12px;
     cursor: pointer;
     text-align: left;
@@ -332,8 +351,8 @@ body {
 }
 
 .files-entry.selected {
-    background: rgba(201, 53, 69, 0.10);
-    box-shadow: inset 0 0 0 1px rgba(201, 53, 69, 0.22);
+    background: var(--accent-10);
+    box-shadow: inset 0 0 0 1px var(--accent-22);
 }
 
 .files-entry-icon {
@@ -366,7 +385,7 @@ body {
     display: flex;
     flex-direction: column;
     background:
-        linear-gradient(180deg, rgba(201, 53, 69, 0.05), transparent 120px),
+        linear-gradient(180deg, var(--accent-05), transparent 120px),
         rgba(255, 255, 255, 0.015);
 }
 
@@ -425,7 +444,7 @@ body {
 .files-editor-name {
     width: 100%;
     border: 1px solid var(--divider);
-    border-radius: 10px;
+    border-radius: var(--radius-md);
     padding: 10px 12px;
     background: rgba(255, 255, 255, 0.04);
     color: var(--text-primary);
@@ -454,7 +473,7 @@ body {
     max-width: 100%;
     max-height: 100%;
     margin: 0 auto;
-    border-radius: 12px;
+    border-radius: var(--radius);
     box-shadow: 0 18px 50px rgba(0, 0, 0, 0.28);
 }
 
@@ -462,7 +481,7 @@ body {
     width: 100%;
     min-height: 70vh;
     border: 1px solid var(--divider);
-    border-radius: 12px;
+    border-radius: var(--radius);
     background: #111827;
 }
 
@@ -484,9 +503,9 @@ body {
 
 .files-drop-card {
     padding: 22px 28px;
-    border-radius: 16px;
-    border: 1px dashed rgba(201, 53, 69, 0.55);
-    background: rgba(201, 53, 69, 0.10);
+    border-radius: var(--radius-lg);
+    border: 1px dashed var(--accent-55);
+    background: var(--accent-10);
     color: var(--text-primary);
     font-size: 14px;
     font-weight: 600;
@@ -498,7 +517,7 @@ body {
     position: fixed;
     min-width: 160px;
     padding: 6px;
-    border-radius: 12px;
+    border-radius: var(--radius);
     border: 1px solid var(--divider);
     background: rgba(18, 20, 26, 0.96);
     box-shadow: 0 20px 45px rgba(0, 0, 0, 0.35);
@@ -508,7 +527,7 @@ body {
 .files-context-item {
     width: 100%;
     border: none;
-    border-radius: 8px;
+    border-radius: var(--radius-sm);
     padding: 10px 12px;
     background: transparent;
     color: var(--text-primary);
@@ -552,7 +571,7 @@ body {
     border-radius: 18px;
     border: 1px solid rgba(255, 255, 255, 0.08);
     background:
-        linear-gradient(180deg, rgba(201, 53, 69, 0.10), transparent 100px),
+        linear-gradient(180deg, var(--accent-10), transparent 100px),
         rgba(18, 20, 26, 0.98);
     box-shadow: 0 28px 70px rgba(0, 0, 0, 0.45);
 }
@@ -574,7 +593,7 @@ body {
     width: 100%;
     margin-top: 14px;
     border: 1px solid var(--divider);
-    border-radius: 10px;
+    border-radius: var(--radius-md);
     padding: 11px 12px;
     background: rgba(255, 255, 255, 0.04);
     color: var(--text-primary);
@@ -853,7 +872,7 @@ body {
 /* Status badge */
 .status-badge {
     padding: 4px 10px;
-    border-radius: 12px;
+    border-radius: var(--radius);
     font-size: 11px;
     font-weight: 500;
     background: rgba(26, 21, 32, 0.78);
@@ -974,7 +993,7 @@ body {
 }
 
 .chat-bubble.assistant {
-    background: linear-gradient(135deg, rgba(201, 53, 69, 0.18), rgba(120, 24, 36, 0.18));
+    background: linear-gradient(135deg, var(--accent-18), rgba(120, 24, 36, 0.18));
     border: 1px solid rgba(240, 122, 134, 0.24);
     box-shadow: inset 0 1px 0 rgba(255, 214, 220, 0.05);
     align-self: flex-start;
@@ -1006,7 +1025,7 @@ body {
 
 .chat-photo {
     max-width: 100%;
-    border-radius: 8px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
 }
 
@@ -1079,16 +1098,16 @@ body {
     max-width: calc(100% - 20%);
     margin-right: 20%;
     padding: 0;
-    border-radius: 16px;
-    border: 1px solid rgba(201, 53, 69, 0.15);
-    background: rgba(201, 53, 69, 0.04);
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--accent-dim);
+    background: var(--accent-04);
     backdrop-filter: blur(12px);
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18), inset 0 1px 0 rgba(255, 200, 210, 0.03);
     overflow: hidden;
 }
 
 .chat-live-card[data-finished="1"] {
-    border-color: rgba(201, 53, 69, 0.08);
+    border-color: var(--accent-08);
     background: rgba(201, 53, 69, 0.02);
 }
 
@@ -1168,7 +1187,7 @@ body {
 .chat-live-line-phase.boot {
     color: rgba(248, 130, 140, 0.95);
     border-color: rgba(201, 53, 69, 0.24);
-    background: rgba(201, 53, 69, 0.10);
+    background: var(--accent-10);
 }
 
 /* Active (non-finished) live card: pulse the Working/Thinking phase badge */
@@ -1229,7 +1248,7 @@ body {
     width: 4px;
     height: 4px;
     border-radius: 50%;
-    background: rgba(201, 53, 69, 0.55);
+    background: var(--accent-55);
     animation: typing-bounce 1.4s ease-in-out infinite;
 }
 
@@ -1313,7 +1332,7 @@ body {
 }
 
 .chat-live-line.expandable {
-    border-radius: 12px;
+    border-radius: var(--radius);
     transition: background 0.18s ease;
 }
 
@@ -1761,7 +1780,7 @@ body {
     border-color: rgba(232, 93, 111, 0.4);
     background: rgba(26, 21, 32, 0.85);
     /* Focus ring only — no ambient halo. */
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 0 0 3px rgba(201, 53, 69, 0.10);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 0 0 3px var(--accent-10);
 }
 #chat-input::placeholder { color: var(--text-muted); }
 
@@ -1801,10 +1820,10 @@ body {
 }
 .chat-send-inline:hover {
     opacity: 1;
-    background: rgba(201, 53, 69, 0.10);
+    background: var(--accent-10);
 }
 .chat-send-inline:active {
-    background: rgba(201, 53, 69, 0.18);
+    background: var(--accent-18);
     opacity: 1;
 }
 
@@ -1840,7 +1859,7 @@ body {
 .chat-send-chevron:hover,
 .chat-send-chevron.active {
     opacity: 1;
-    background: rgba(201, 53, 69, 0.10);
+    background: var(--accent-10);
 }
 .chat-send-group[data-send-mode="plan"] .chat-send-chevron {
     color: var(--amber);
@@ -1888,7 +1907,7 @@ body {
     opacity: 0.85;
 }
 .chat-send-dropdown-item:hover {
-    background: rgba(201, 53, 69, 0.12);
+    background: var(--accent-12);
     color: var(--accent);
     opacity: 1;
 }
@@ -1911,7 +1930,7 @@ body {
     background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.02));
     border-radius: var(--radius);
     padding: 16px 20px;
-    border: 1px solid rgba(201, 53, 69, 0.08);
+    border: 1px solid var(--accent-08);
     backdrop-filter: blur(14px);
     box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
     transition: border-color 0.3s;
@@ -1954,7 +1973,7 @@ body {
 .toggle {
     width: 44px;
     height: 24px;
-    border-radius: 12px;
+    border-radius: var(--radius);
     background: rgba(255, 255, 255, 0.12);
     border: none;
     cursor: pointer;
@@ -2003,7 +2022,7 @@ body {
 
 .btn:active {
     transform: scale(0.98);
-    box-shadow: 0 0 0 3px rgba(201, 53, 69, 0.08);
+    box-shadow: 0 0 0 3px var(--accent-08);
 }
 
 .btn:disabled {
@@ -2019,7 +2038,7 @@ body {
     border-color: rgba(201, 53, 69, 0.20);
 }
 .btn-primary:hover {
-    background: rgba(201, 53, 69, 0.25);
+    background: var(--accent-25);
     border-color: rgba(232, 93, 111, 0.35);
 }
 .btn-secondary {
@@ -2167,7 +2186,7 @@ body {
 
 .filter-chip {
     padding: 4px 12px;
-    border-radius: 16px;
+    border-radius: var(--radius-lg);
     border: 1px solid var(--divider);
     background: transparent;
     color: var(--text-secondary);
@@ -2197,7 +2216,7 @@ body {
 
 .log-entry {
     padding: 10px 12px;
-    border-radius: 8px;
+    border-radius: var(--radius-sm);
     display: flex;
     flex-direction: column;
     gap: 6px;
@@ -2250,8 +2269,8 @@ body {
 .log-entry .log-phase.working,
 .log-entry .log-phase.thinking {
     color: rgba(248, 130, 140, 0.95);
-    border-color: rgba(201, 53, 69, 0.25);
-    background: rgba(201, 53, 69, 0.10);
+    border-color: var(--accent-25);
+    background: var(--accent-10);
 }
 
 .log-entry .log-phase.done,
@@ -2338,7 +2357,7 @@ body {
 .log-raw {
     margin: 0;
     padding: 10px;
-    border-radius: 8px;
+    border-radius: var(--radius-sm);
     background: rgba(0, 0, 0, 0.25);
     color: var(--text-secondary);
     overflow-x: auto;
@@ -2354,7 +2373,7 @@ body {
 .log-type.consciousness { color: #d68cff; }
 
 .log-task-card {
-    border-color: rgba(201, 53, 69, 0.12);
+    border-color: var(--accent-12);
     background:
         linear-gradient(135deg, rgba(201, 53, 69, 0.07), rgba(255,255,255,0.01)),
         rgba(255,255,255,0.015);
@@ -2387,7 +2406,7 @@ body {
 
 .log-task-event {
     padding: 8px 10px;
-    border-radius: 8px;
+    border-radius: var(--radius-sm);
     background: rgba(0, 0, 0, 0.16);
     border: 1px solid rgba(255,255,255,0.04);
     display: flex;
@@ -2398,7 +2417,7 @@ body {
 /* Scrollbar */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(201, 53, 69, 0.2); border-radius: 3px; }
+::-webkit-scrollbar-thumb { background: rgba(201, 53, 69, 0.2); border-radius: var(--radius-xs); }
 ::-webkit-scrollbar-thumb:hover { background: rgba(201, 53, 69, 0.35); }
 
 /* Reconnecting overlay */
@@ -2503,9 +2522,9 @@ body {
 .evo-runtime-card,
 .evo-chart-wrap {
     background:
-        linear-gradient(180deg, rgba(201, 53, 69, 0.05), rgba(255, 255, 255, 0.02)),
+        linear-gradient(180deg, var(--accent-05), rgba(255, 255, 255, 0.02)),
         rgba(255, 255, 255, 0.02);
-    border: 1px solid rgba(201, 53, 69, 0.12);
+    border: 1px solid var(--accent-12);
     border-radius: var(--radius-lg);
     box-shadow: 0 14px 36px rgba(0, 0, 0, 0.18);
     backdrop-filter: blur(14px);
@@ -2649,7 +2668,7 @@ body {
 .costs-budget-card {
     background: rgba(26, 21, 32, 0.72);
     backdrop-filter: blur(12px);
-    border: 1px solid rgba(201, 53, 69, 0.18);
+    border: 1px solid var(--accent-18);
     border-radius: 18px;
     padding: 20px 24px;
     margin-bottom: 20px;
@@ -2752,37 +2771,12 @@ body {
     overflow: hidden;
 }
 
-.dashboard-tabs {
-    display: flex;
-    gap: 10px;
-    padding: 8px 0 12px;
-    overflow-x: auto;
-    scrollbar-width: none;
-}
-
-.dashboard-tabs::-webkit-scrollbar {
-    display: none;
-}
-
-.dashboard-tab {
-    flex: 0 0 auto;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    background: rgba(255, 255, 255, 0.03);
-    color: var(--text-secondary);
-    border-radius: 999px;
-    padding: 9px 16px;
-    font: inherit;
-    font-size: 13px;
-    font-weight: 600;
-    cursor: pointer;
-}
-
-.dashboard-tab:hover,
-.dashboard-tab.active {
-    color: var(--text-primary);
-    border-color: rgba(232, 93, 111, 0.4);
-    background: rgba(232, 93, 111, 0.12);
-}
+/* ``.dashboard-tabs`` and ``.dashboard-tab`` previously redeclared the
+   same flex/pill styling already covered by ``.app-tab-strip`` and
+   ``.app-tab`` (lines 662-696). Both class names still ride along with
+   the JS query selectors used by ``dashboard.js`` (so the layout
+   selectors remain stable), but the styling now inherits from the
+   shared ``.app-tab*`` rules — no duplicate CSS declaration. */
 
 .dashboard-panels,
 .dashboard-panel {
@@ -2917,7 +2911,7 @@ body {
  * card and folds everything else into "Show details". */
 .skills-card {
     border: 1px solid rgba(250, 250, 250, 0.08);
-    border-radius: 12px;
+    border-radius: var(--radius);
     padding: 16px 18px;
     background: rgba(255, 255, 255, 0.025);
     display: flex;
@@ -3101,7 +3095,7 @@ body {
 
 .skills-lock-hint[role="button"]:focus-visible,
 .skills-status-chip[role="button"]:focus-visible {
-    box-shadow: 0 0 0 2px rgba(201, 53, 69, 0.55);
+    box-shadow: 0 0 0 2px var(--accent-55);
 }
 
 .skills-lock-hint::before {
@@ -3118,7 +3112,7 @@ body {
     padding: 6px 10px;
     border-radius: 999px;
     border: 1px solid rgba(201, 53, 69, 0.24);
-    background: rgba(201, 53, 69, 0.08);
+    background: var(--accent-08);
     color: rgba(255, 220, 226, 0.86);
     font-size: 12px;
 }
@@ -3155,7 +3149,7 @@ body {
  * requested OPENROUTER_API_KEY; granted none; missing: ..." */
 .skills-access {
     border: 1px solid rgba(250, 250, 250, 0.1);
-    border-radius: 10px;
+    border-radius: var(--radius-md);
     padding: 10px 12px;
     background: rgba(255, 255, 255, 0.02);
     display: flex;
@@ -3340,7 +3334,7 @@ body {
     margin: 0;
     min-width: 160px;
     padding: 6px;
-    border-radius: 12px;
+    border-radius: var(--radius);
     border: 1px solid rgba(255, 255, 255, 0.08);
     background: rgba(18, 20, 26, 0.96);
     color: var(--text-primary);
@@ -3353,7 +3347,7 @@ body {
     border: 0;
     background: transparent;
     color: var(--text-secondary);
-    border-radius: 8px;
+    border-radius: var(--radius-sm);
     padding: 9px 10px;
     text-align: left;
     cursor: pointer;
@@ -3362,7 +3356,7 @@ body {
 }
 
 .skills-menu-item:hover {
-    background: rgba(201, 53, 69, 0.10);
+    background: var(--accent-10);
     color: var(--text-primary);
 }
 
@@ -3404,7 +3398,7 @@ body {
 
 .skills-badge {
     padding: 2px 8px;
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
     font-size: 11px;
     font-family: 'JetBrains Mono', monospace;
     text-transform: uppercase;
@@ -3429,43 +3423,14 @@ body {
 .skills-banner-warn { background: rgba(245, 158, 11, 0.08); border-color: rgba(245, 158, 11, 0.3); color: #f59e0b; }
 .skills-banner-muted { background: rgba(250, 250, 250, 0.04); border-color: rgba(250, 250, 250, 0.1); color: rgba(250, 250, 250, 0.7); }
 
-/* ----- Skills tab navigation (Installed / Marketplace) ----- */
+/* ----- Skills tab navigation (Installed / Marketplace) -----
+   Layout/look is inherited from the shared ``.app-tab-strip`` and
+   ``.app-tab`` rules above (lines 662-696); ``.skills-tabs`` /
+   ``.skills-tab`` previously redeclared the same flex/pill styling
+   verbatim. Only the Skills-page-specific spacing override survives. */
 
 .skills-tabs {
-    display: flex;
-    gap: 10px;
     margin-bottom: 14px;
-    padding: 8px 0 12px;
-    overflow-x: auto;
-    border-bottom: none;
-    scrollbar-width: none;
-}
-
-.skills-tabs::-webkit-scrollbar {
-    display: none;
-}
-
-.skills-tab {
-    appearance: none;
-    flex: 0 0 auto;
-    white-space: nowrap;
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    color: var(--text-secondary);
-    cursor: pointer;
-    font: inherit;
-    font-size: 13px;
-    font-weight: 600;
-    padding: 9px 16px;
-    border-radius: 999px;
-    transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
-}
-
-.skills-tab:hover,
-.skills-tab.is-active {
-    color: var(--text-primary);
-    border-color: rgba(232, 93, 111, 0.4);
-    background: rgba(232, 93, 111, 0.12);
 }
 
 .skills-tab-pill {
@@ -3623,7 +3588,7 @@ body {
 .marketplace-filter-track {
     width: 36px;
     height: 20px;
-    border-radius: 10px;
+    border-radius: var(--radius-md);
     background: rgba(255, 255, 255, 0.12);
     border: 1px solid rgba(255, 255, 255, 0.06);
     position: relative;
@@ -3790,7 +3755,7 @@ body {
 .marketplace-modal {
     background: var(--bg, #0e0e10);
     border: 1px solid rgba(250, 250, 250, 0.08);
-    border-radius: 10px;
+    border-radius: var(--radius-md);
     padding: 16px;
     max-width: 900px;
     width: 100%;
@@ -3922,7 +3887,7 @@ body {
 .marketplace-skillmd-rendered code {
     background: rgba(255, 255, 255, 0.07);
     padding: 1px 5px;
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
     font-size: 12px;
 }
 .marketplace-skillmd-rendered pre {
@@ -4008,7 +3973,7 @@ body {
     align-items: flex-start;
     justify-content: space-between;
     padding: 10px 14px;
-    border-radius: 8px;
+    border-radius: var(--radius-sm);
     border: 1px solid rgba(232, 165, 53, 0.35);
     background: linear-gradient(135deg, rgba(232, 165, 53, 0.10), rgba(180, 110, 30, 0.06));
 }
@@ -4043,7 +4008,7 @@ body {
 }
 
 .skill-widget-weather-city:focus {
-    outline: 2px solid rgba(201, 53, 69, 0.25);
+    outline: 2px solid var(--accent-25);
 }
 
 .skill-widget-weather-body[data-state="loading"] {
@@ -4209,7 +4174,7 @@ body {
    third-party dependency in this update. */
 .widget-map {
     border: 1px solid rgba(255, 255, 255, 0.06);
-    border-radius: 8px;
+    border-radius: var(--radius-sm);
     padding: 10px;
     background: rgba(255, 255, 255, 0.02);
 }
@@ -4234,7 +4199,7 @@ body {
 }
 .widget-kanban-col {
     background: rgba(255, 255, 255, 0.03);
-    border-radius: 8px;
+    border-radius: var(--radius-sm);
     padding: 10px;
     min-height: 120px;
 }

@@ -1,6 +1,8 @@
 import { escapeHtmlText, formatUsd2 } from './utils.js';
 
-export function initEvolution({ ws, state, mount = null, embedded = false, chartOnly = false, hostPage = 'settings', hostSubtab = 'evolution' }) {
+// ``hostPage`` defaults to ``'dashboard'`` (Dashboard sub-tab migration v5.7+);
+// the legacy ``'settings'`` value is no longer passed by ``app.js``.
+export function initEvolution({ ws, state, mount = null, embedded = false, chartOnly = false, hostPage = 'dashboard', hostSubtab = 'evolution' }) {
     const page = document.createElement('div');
     page.id = 'page-evolution';
     page.className = embedded ? 'settings-embedded-content settings-evolution-panel' : 'page';
@@ -51,7 +53,7 @@ export function initEvolution({ ws, state, mount = null, embedded = false, chart
 
     function isEvolutionVisible() {
         return embedded
-            ? state.activePage === hostPage && (hostPage === 'dashboard' ? state.dashboardActiveSubtab : state.settingsActiveSubtab) === hostSubtab
+            ? state.activePage === hostPage && state.dashboardActiveSubtab === hostSubtab
             : state.activePage === 'evolution';
     }
 

@@ -1,6 +1,8 @@
 import { formatUsd2 } from './utils.js';
 
-export function initCosts({ ws, state, mount = null, embedded = false, hostPage = 'settings', hostSubtab = 'costs' }) {
+// ``hostPage`` defaults to ``'dashboard'`` (Dashboard sub-tab migration v5.7+);
+// the legacy ``'settings'`` value is no longer passed by ``app.js``.
+export function initCosts({ ws, state, mount = null, embedded = false, hostPage = 'dashboard', hostSubtab = 'costs' }) {
     const page = document.createElement('div');
     page.id = 'page-costs';
     page.className = embedded ? 'settings-embedded-content settings-costs-panel' : 'page';

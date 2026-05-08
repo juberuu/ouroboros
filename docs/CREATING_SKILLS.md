@@ -383,33 +383,17 @@ else:
     job["status"] = "done"
 ```
 
-## Skill Review Checklist (eight items)
+## Skill Review Checklist
 
-Reviewers grade your skill on eight checklist items
-(see [`docs/CHECKLISTS.md`](CHECKLISTS.md) §"Skill Review Checklist"
-for the authoritative text). All items must reach `PASS` for
-`status=pass`:
-
-1. **manifest_schema** — does the manifest parse, and do `type` /
-   `runtime` / `timeout_sec` cohere with the actual payload?
-2. **permissions_honesty** — does the manifest declare every
-   capability the code actually uses (e.g. `net` if you import
-   `httpx`, `subprocess` if you spawn a child)?
-3. **no_repo_mutation** — does the skill avoid writing into
-   `~/Ouroboros/repo/` or staging git commits?
-4. **path_confinement** — do scripts stay inside `skill_dir` and
-   `state_dir`? Absolute paths and `..` traversal fail this item.
-5. **env_allowlist** — is `env_from_settings` short and justified?
-   Core keys require explicit owner grants and a stated need.
-6. **timeout_and_output_discipline** — is `timeout_sec` reasonable;
-   does the script avoid unbounded loops; does stdout output stay
-   under the byte caps?
-7. **extension_namespace_discipline** — for `type: extension`, do
-   tool/route/ws-handler names live under the `ext_<len>_<token>_…`
-   namespace; do widget components use the host-owned schema?
-8. **widget_module_safety** (v5.7.0+) — for `kind: "module"`
-   widgets, does `widget.js` avoid `document.cookie`, `localStorage`,
-   `sessionStorage`, and `fetch` URLs outside `/api/extensions/`?
+Reviewers grade your skill on the checklist defined in
+[`docs/CHECKLISTS.md`](CHECKLISTS.md) §"Skill Review Checklist" (currently
+eight items: `manifest_schema`, `permissions_honesty`,
+`no_repo_mutation`, `path_confinement`, `env_allowlist`,
+`timeout_and_output_discipline`, `extension_namespace_discipline`, and
+`widget_module_safety`). That file is the authoritative SSOT — read it
+there once and consult it whenever you author or repair a skill instead
+of reading a paraphrase here. All items must reach `PASS` for
+`status=pass`.
 
 ## Reference skills
 

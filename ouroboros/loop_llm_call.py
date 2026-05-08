@@ -18,21 +18,18 @@ import logging
 
 from ouroboros.llm import LLMClient, LocalContextTooLargeError, add_usage
 from ouroboros.pricing import emit_llm_usage_event, estimate_cost, infer_model_category
-from ouroboros.utils import utc_now_iso, append_jsonl
+from ouroboros.utils import emit_log_event, utc_now_iso, append_jsonl
 
 log = logging.getLogger(__name__)
 
 
 def _emit_live_log(event_queue: Optional[queue.Queue], payload: Dict[str, Any]) -> None:
-    if not event_queue:
-        return
-    try:
-        event_queue.put_nowait({
-            "type": "log_event",
-            "data": {"ts": utc_now_iso(), **payload},
-        })
-    except Exception:
-        log.debug("Failed to emit live LLM log event", exc_info=True)
+    """Thin wrapper around the SSOT helper — keeps the call-site signature stable."""
+    emit_log_event(
+        event_queue,
+        {"ts": utc_now_iso(), **payload},
+        log_label="LLM live",
+    )
 
 
 def _short_error_text(value: Any, limit: int = 220) -> str:

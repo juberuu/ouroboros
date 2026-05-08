@@ -265,13 +265,14 @@ def run_deep_self_review(
         # input at gate=850K is ≈1M. Output `max_tokens` lives inside the same
         # window, so near-gate prompts sit close to the API ceiling — the skip
         # path is best-effort, not a hard guarantee.
+        from ouroboros.tools.review_helpers import REVIEW_PROMPT_TOKEN_BUDGET
         full_prompt_chars = len(_SYSTEM_PROMPT) + len(pack_text)
         estimated_tokens = estimate_tokens(_SYSTEM_PROMPT + pack_text)
-        if estimated_tokens > 850_000:
+        if estimated_tokens > REVIEW_PROMPT_TOKEN_BUDGET:
             return (
                 f"❌ Review pack too large: ~{estimated_tokens:,} tokens "
                 f"({full_prompt_chars:,} chars of system+pack, {stats['file_count']} files). "
-                f"Maximum is ~850,000 tokens. Reduce codebase size or split review."
+                f"Maximum is ~{REVIEW_PROMPT_TOKEN_BUDGET:,} tokens. Reduce codebase size or split review."
             ), {}
 
         # 3. Determine model

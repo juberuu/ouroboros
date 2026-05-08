@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from ouroboros.tools.registry import ToolContext
@@ -19,6 +20,40 @@ from ouroboros.utils import (
 )
 
 log = logging.getLogger(__name__)
+
+
+@dataclass
+class CommitAttemptRequest:
+    """Structured payload passed to ``_record_commit_attempt``.
+
+    Replaces the prior 20-positional/keyword-argument signature. The
+    function-arity ceiling lives in ``docs/DEVELOPMENT.md`` ("<8
+    parameters"); a dataclass keeps all the optional fields explicit
+    while reducing the public callable to two params (``ctx`` +
+    ``request``). Legacy keyword call sites stay supported through
+    ``_record_commit_attempt(ctx, commit_message, status, **kwargs)``
+    which constructs this dataclass internally.
+    """
+
+    commit_message: str
+    status: str
+    block_reason: str = ""
+    block_details: str = ""
+    duration_sec: float = 0.0
+    snapshot_hash: str = ""
+    critical_findings: Optional[List[Dict[str, Any]]] = None
+    advisory_findings: Optional[List[Dict[str, Any]]] = None
+    readiness_warnings: Optional[List[str]] = None
+    late_result_pending: bool = False
+    phase: Optional[str] = None
+    pre_review_fingerprint: str = ""
+    post_review_fingerprint: str = ""
+    fingerprint_status: str = ""
+    degraded_reasons: Optional[List[str]] = None
+    triad_models: Optional[List[str]] = None
+    scope_model: str = ""
+    triad_raw_results: Optional[List[Dict[str, Any]]] = None
+    scope_raw_result: Optional[Dict[str, Any]] = None
 
 
 def _current_review_tool_name(ctx: ToolContext) -> str:
@@ -73,22 +108,53 @@ def _attempt_accepts_reviewing_update(existing: Any) -> bool:
     return bool(existing.status == "reviewing" or existing.late_result_pending)
 
 
-def _record_commit_attempt(ctx: ToolContext, commit_message: str, status: str,
-                           block_reason: str = "", block_details: str = "",
-                           duration_sec: float = 0.0, snapshot_hash: str = "",
-                           critical_findings: Optional[List[Dict[str, Any]]] = None,
-                           advisory_findings: Optional[List[Dict[str, Any]]] = None,
-                           readiness_warnings: Optional[List[str]] = None,
-                           late_result_pending: bool = False,
-                           phase: Optional[str] = None,
-                           pre_review_fingerprint: str = "",
-                           post_review_fingerprint: str = "",
-                           fingerprint_status: str = "",
-                           degraded_reasons: Optional[List[str]] = None,
-                           triad_models: Optional[List[str]] = None,
-                           scope_model: str = "",
-                           triad_raw_results: Optional[List[Dict[str, Any]]] = None,
-                           scope_raw_result: Optional[Dict[str, Any]] = None) -> None:
+def _record_commit_attempt(
+    ctx: ToolContext,
+    commit_message_or_request: Any = None,
+    status: Optional[str] = None,
+    **legacy_kwargs: Any,
+) -> None:
+    """Record a commit attempt in durable advisory state.
+
+    Three valid call shapes (all-kwargs preserves the existing 47 call
+    sites that pass ``commit_message=...`` as a keyword argument):
+
+    1. **New (preferred):** ``_record_commit_attempt(ctx, request)``
+       where ``request`` is a ``CommitAttemptRequest`` dataclass —
+       satisfies the DEVELOPMENT.md ``<8 parameters`` rule cleanly.
+
+    2. **Positional legacy:** ``_record_commit_attempt(ctx,
+       commit_message, status, **fields)``.
+
+    3. **All-kwargs legacy:** ``_record_commit_attempt(ctx,
+       commit_message="...", status="...", **fields)``.
+
+    Internally shapes (2) and (3) build a ``CommitAttemptRequest`` from
+    those kwargs and re-enter the dataclass path.
+    """
+    if isinstance(commit_message_or_request, CommitAttemptRequest):
+        if status is not None or legacy_kwargs:
+            raise TypeError(
+                "_record_commit_attempt: pass either a CommitAttemptRequest "
+                "OR positional commit_message + status + kwargs, not both"
+            )
+        request = commit_message_or_request
+    else:
+        if commit_message_or_request is not None:
+            legacy_kwargs.setdefault("commit_message", commit_message_or_request)
+        if status is not None:
+            legacy_kwargs.setdefault("status", status)
+        if "commit_message" not in legacy_kwargs:
+            raise TypeError(
+                "_record_commit_attempt: commit_message is required "
+                "(positional, kwarg, or via CommitAttemptRequest.commit_message)"
+            )
+        if "status" not in legacy_kwargs:
+            raise TypeError(
+                "_record_commit_attempt: status is required "
+                "(positional, kwarg, or via CommitAttemptRequest.status)"
+            )
+        request = CommitAttemptRequest(**legacy_kwargs)
     try:
         from ouroboros.review_state import (
             CommitAttemptRecord,
@@ -96,6 +162,25 @@ def _record_commit_attempt(ctx: ToolContext, commit_message: str, status: str,
             update_state,
             _utc_now,
         )
+        commit_message = request.commit_message
+        status = request.status
+        block_reason = request.block_reason
+        block_details = request.block_details
+        duration_sec = request.duration_sec
+        snapshot_hash = request.snapshot_hash
+        critical_findings = request.critical_findings
+        advisory_findings = request.advisory_findings
+        readiness_warnings = request.readiness_warnings
+        late_result_pending = request.late_result_pending
+        phase = request.phase
+        pre_review_fingerprint = request.pre_review_fingerprint
+        post_review_fingerprint = request.post_review_fingerprint
+        fingerprint_status = request.fingerprint_status
+        degraded_reasons = request.degraded_reasons
+        triad_models = request.triad_models
+        scope_model = request.scope_model
+        triad_raw_results = request.triad_raw_results
+        scope_raw_result = request.scope_raw_result
         dr = pathlib.Path(ctx.drive_root)
         repo_key = make_repo_key(pathlib.Path(ctx.repo_dir))
         tool_name = _current_review_tool_name(ctx)

@@ -53,7 +53,9 @@ _PLAN_REVIEW_EFFORT = "high"
 # `estimate_tokens` (chars/4) under-counts real tokens by ~15%, so at gate=850K
 # actual input reaches ≈1M tokens; the skip path is best-effort and individual
 # reviewers may still reject oversized requests at the API level.
-_PLAN_BUDGET_TOKEN_LIMIT = 850_000
+from ouroboros.tools.review_helpers import REVIEW_PROMPT_TOKEN_BUDGET as _REVIEW_BUDGET
+
+_PLAN_BUDGET_TOKEN_LIMIT = _REVIEW_BUDGET
 
 
 # ------------------------------------------------------------------ #

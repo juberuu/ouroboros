@@ -31,7 +31,14 @@ from ouroboros.tool_capabilities import (
     UNTRUNCATED_REPO_READ_PATHS as _UNTRUNCATED_REPO_READ_PATHS,
 )
 from ouroboros.tools.registry import ToolRegistry
-from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log, sanitize_tool_result_for_log
+from ouroboros.utils import (
+    append_jsonl,
+    emit_log_event,
+    sanitize_tool_args_for_log,
+    sanitize_tool_result_for_log,
+    truncate_for_log,
+    utc_now_iso,
+)
 
 log = logging.getLogger(__name__)
 
@@ -50,16 +57,17 @@ _REVIEWED_MUTATIVE_HARD_CEILING = 1800
 
 
 def _emit_live_log(tools: ToolRegistry, payload: Dict[str, Any]) -> None:
+    """Thin wrapper around the SSOT helper — keeps the call-site signature stable.
+
+    The encapsulation leak (reaching into ``tools._ctx``) is now
+    contained here; the SSOT helper only sees the queue handle.
+    """
     event_queue = getattr(getattr(tools, "_ctx", None), "event_queue", None)
-    if event_queue is None:
-        return
-    try:
-        event_queue.put_nowait({
-            "type": "log_event",
-            "data": {"ts": utc_now_iso(), **payload},
-        })
-    except Exception:
-        log.debug("Failed to emit live tool log event", exc_info=True)
+    emit_log_event(
+        event_queue,
+        {"ts": utc_now_iso(), **payload},
+        log_label="tool live",
+    )
 
 
 def _get_tool_timeout(tools: ToolRegistry, tool_name: str) -> int:

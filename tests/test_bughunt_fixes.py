@@ -220,18 +220,8 @@ def test_pid_lock_acquire_closes_fd_on_failure(tmp_path, monkeypatch):
     platform_layer.pid_lock_release(str(lock_path))
 
 
-# ---------------------------------------------------------------------------
-# Sanity — full suite must remain green after these fixes
-# ---------------------------------------------------------------------------
-
-def test_imports_after_bughunt_dont_raise():
-    """All modified modules must still import cleanly. Catches the kind of
-    structural breakage that occurred during this very landing."""
-    import ouroboros.agent  # noqa: F401
-    import ouroboros.context  # noqa: F401
-    import ouroboros.llm  # noqa: F401
-    import ouroboros.loop_tool_execution  # noqa: F401
-    import ouroboros.platform_layer  # noqa: F401
-    import ouroboros.tools.git  # noqa: F401
-    import ouroboros.tools.registry  # noqa: F401
-    import ouroboros.utils  # noqa: F401
+# ``test_imports_after_bughunt_dont_raise`` was retired in v5.8.3-rc.5.
+# pytest itself imports every test module during collection, and
+# ``tests/test_smoke.py`` already pins the broader import surface; the
+# bughunt-specific list above duplicated coverage that pytest collection +
+# smoke already provide.

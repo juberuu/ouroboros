@@ -41,6 +41,52 @@ def utc_now_iso() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Live log emission to the supervisor event queue
+# ---------------------------------------------------------------------------
+#
+# Four call sites (loop_llm_call, loop_tool_execution, agent.py, and
+# consciousness.py) used to maintain near-identical ``_emit_live_log``
+# wrappers — each building the same ``{"type": "log_event", "data": ...}``
+# envelope and swallowing put errors. Consolidated in v5.8.3-rc.5; the
+# wrappers now delegate here so a future change to the envelope shape or
+# the error-handling discipline only happens in one place.
+
+def emit_log_event(
+    event_queue: Any,
+    payload: Dict[str, Any],
+    *,
+    blocking: bool = False,
+    log_label: str = "live log",
+) -> None:
+    """Best-effort publish of a ``log_event`` to the supervisor/UI queue.
+
+    ``event_queue`` may be ``None`` for off-supervisor contexts (worker
+    bootstrap, tests) — in that case this is a no-op.
+
+    ``blocking=False`` (default) uses ``put_nowait`` so a full queue is
+    dropped silently rather than blocking the producer; the agent and
+    consciousness paths pass ``blocking=True`` to keep parity with their
+    pre-consolidation behaviour where a slow UI consumer could not lose
+    events.
+
+    ``payload`` is the already-built ``data`` block. Caller owns the
+    ``ts`` / ``type`` / contextual fields so each producer can keep its
+    own contract (e.g. consciousness pre-fills ``task_id``,
+    ``task_type``).
+    """
+    if event_queue is None:
+        return
+    try:
+        envelope = {"type": "log_event", "data": dict(payload)}
+        if blocking:
+            event_queue.put(envelope)
+        else:
+            event_queue.put_nowait(envelope)
+    except Exception:
+        log.debug("Failed to emit %s event", log_label, exc_info=True)
+
+
+# ---------------------------------------------------------------------------
 # Hashing
 # ---------------------------------------------------------------------------
 

@@ -22,9 +22,14 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 log = logging.getLogger(__name__)
 
 from ouroboros.utils import (
-    utc_now_iso, read_text, append_jsonl,
-    safe_relpath, truncate_for_log,
-    get_git_info, sanitize_task_for_event,
+    append_jsonl,
+    emit_log_event,
+    get_git_info,
+    read_text,
+    safe_relpath,
+    sanitize_task_for_event,
+    truncate_for_log,
+    utc_now_iso,
 )
 from ouroboros.llm import LLMClient
 from ouroboros.tools import ToolRegistry
@@ -104,16 +109,12 @@ class OuroborosAgent:
 
     def _emit_live_log(self, event_type: str, **fields: Any) -> None:
         """Send a session-only live log event to supervisor/UI."""
-        if self._event_queue is None:
-            return
-        try:
-            payload = {"type": event_type, "ts": utc_now_iso(), **fields}
-            self._event_queue.put({
-                "type": "log_event",
-                "data": payload,
-            })
-        except Exception:
-            log.warning("Failed to emit live log event", exc_info=True)
+        emit_log_event(
+            self._event_queue,
+            {"type": event_type, "ts": utc_now_iso(), **fields},
+            blocking=True,
+            log_label="agent live",
+        )
 
     def _log_worker_boot_once(self) -> None:
         global _worker_boot_logged

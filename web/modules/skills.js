@@ -2,7 +2,11 @@ import { initMarketplace } from './marketplace.js';
 import { initOuroborosHub } from './ouroboroshub.js';
 import { renderPageHeader, renderTabStrip } from './page_header.js';
 import { openConfirmDialog } from './confirm_dialog.js';
-import { escapeHtmlAttr as escapeHtml } from './utils.js';
+import {
+    boundedText,
+    escapeHtmlAttr as escapeHtml,
+    safeExternalHrefAttr as safeExternalUrl,
+} from './utils.js';
 
 const SKILLS_ICON = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18"/><path d="M3 12h18"/><path d="M5 5l14 14"/><path d="M19 5L5 19"/></svg>';
 const SKILLS_TABS = [
@@ -244,21 +248,6 @@ function extensionLiveNote(skill) {
         ? 'extension runtime: live'
         : (skill.live_loaded ? 'extension runtime: loaded' : 'extension runtime');
     return `<div class="muted">${prefix}${skill.live_loaded && skill.dispatch_live ? '' : ` (${reason})`}</div>`;
-}
-
-
-function safeExternalUrl(value) {
-    const text = String(value ?? '').trim();
-    if (!text) return '';
-    try {
-        const parsed = new URL(text);
-        if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
-            return escapeHtml(parsed.toString());
-        }
-    } catch {
-        // Not a parseable absolute URL — refuse rather than guessing.
-    }
-    return '';
 }
 
 
@@ -751,11 +740,6 @@ function showBanner(message, tone) {
     banner.textContent = message;
     document.getElementById('page-skills')?.prepend(banner);
     setTimeout(() => banner.remove(), 6000);
-}
-
-function boundedText(value, maxLen = 1200) {
-    const text = String(value ?? '');
-    return text.length > maxLen ? `${text.slice(0, maxLen)}…[truncated]` : text;
 }
 
 function buildHealPrompt(skill) {

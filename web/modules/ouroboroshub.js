@@ -7,18 +7,10 @@ import {
     setPending,
     startLifecyclePoller,
 } from './lifecycle_card.js';
-import { escapeHtmlAttr as escapeHtml } from './utils.js';
-
-async function fetchJson(url, init) {
-    const resp = await fetch(url, init);
-    const body = await resp.json().catch(() => ({}));
-    if (!resp.ok) {
-        const err = new Error(body.error || `HTTP ${resp.status}`);
-        err.body = body;
-        throw err;
-    }
-    return body;
-}
+import {
+    escapeHtmlAttr as escapeHtml,
+    fetchJson,
+} from './utils.js';
 
 
 function lifecycleFor(installed, pending) {

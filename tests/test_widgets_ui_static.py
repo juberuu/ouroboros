@@ -69,11 +69,20 @@ def test_widgets_support_declarative_schema_components():
 
 
 def test_widgets_escape_and_sanitize_untrusted_content():
+    """Widgets must reach the sanitised markdown helper through the v5.8.3-rc.5
+    SSOT (``web/modules/utils.js::renderMarkdownSafe``); the DOMPurify
+    allowlist itself moved to that module and is pinned by
+    ``tests/test_web_utils_ssot.py::test_render_markdown_safe_strips_dangerous_tags_and_attrs``.
+    Widgets-side this test now only verifies the import and the
+    escapeHtml-around-untrusted-content discipline that remains local
+    (table cells, JSON dumps).
+    """
     source = _widgets_js()
-    assert "function renderMarkdownSafe" in source
-    assert "DOMPurify.sanitize" in source
-    assert "FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'form', 'input', 'img', 'video', 'audio', 'source']" in source
-    assert "FORBID_ATTR: ['style', 'src', 'srcset', 'srcdoc']" in source
+    assert "renderMarkdownSafe" in source
+    # Widgets must NOT redeclare the SSOT helper locally.
+    assert "function renderMarkdownSafe" not in source, (
+        "widgets.js must use renderMarkdownSafe from utils.js (SSOT), not a local copy"
+    )
     assert "escapeHtml(JSON.stringify(value, null, 2))" in source
     assert "escapeHtml(getPath(row, c.path, ''))" in source
 

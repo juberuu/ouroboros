@@ -1,4 +1,13 @@
 (() => {
+    // ``escapeHtml`` here is intentionally a verbatim mirror of
+    // ``escapeHtmlAttr`` in ``web/modules/utils.js``. The onboarding
+    // wizard ships as a self-contained IIFE bundle (loaded by both the
+    // pywebview launcher and the server-rendered web overlay), not as
+    // an ES module, so a real ``import`` would force a bootstrap
+    // restructuring beyond the scope of v5.8.3-rc.5. The drift is
+    // pinned by ``tests/test_web_utils_ssot.py::
+    // test_onboarding_escape_mirrors_utils`` so any divergence on a
+    // security boundary fails immediately.
     function escapeHtml(value) {
         return String(value ?? '')
             .replace(/&/g, '&amp;')
@@ -368,7 +377,7 @@
 
     function syncClaudeCliVisibility() {
         const card = document.getElementById('wizard-claude-card');
-        if (card) card.style.display = shouldShowClaudeCliCta() ? '' : 'none';
+        if (card) card.hidden = !shouldShowClaudeCliCta();
         renderClaudeCliStatus();
     }
 
@@ -377,7 +386,7 @@
         const statusEl = document.getElementById('wizard-claude-status');
         const installButton = document.getElementById('wizard-claude-install');
         const skipButton = document.getElementById('wizard-claude-skip');
-        if (card) card.style.display = shouldShowClaudeCliCta() ? '' : 'none';
+        if (card) card.hidden = !shouldShowClaudeCliCta();
         if (statusEl) {
             statusEl.textContent = state.claudeCliStatusText || 'Checking Claude runtime...';
             statusEl.dataset.tone = state.claudeCliTone || 'muted';
@@ -405,7 +414,7 @@
         if (stopButton) stopButton.disabled = !state.localRuntimeReady;
         if (testButton) testButton.disabled = !state.localRuntimeReady;
         if (resultEl) {
-            resultEl.style.display = state.localTestResult ? 'block' : 'none';
+            resultEl.hidden = !state.localTestResult;
             resultEl.dataset.tone = state.localTestTone || 'muted';
             resultEl.textContent = state.localTestResult || '';
         }
@@ -471,7 +480,7 @@
 
     function renderClaudeCliControls() {
         return `
-            <div class="panel-card" id="wizard-claude-card" style="${shouldShowClaudeCliCta() ? '' : 'display:none;'}">
+            <div class="panel-card" id="wizard-claude-card"${shouldShowClaudeCliCta() ? '' : ' hidden'}>
                 <h3>Claude Runtime</h3>
                 <p>Claude runtime powers delegated code editing and advisory review. It is managed automatically by the app.</p>
                 <div class="wizard-runtime-strip">

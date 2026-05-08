@@ -1,6 +1,8 @@
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 
-export function initUpdates({ mount, hostPage = 'settings', hostSubtab = 'updates', state = {} }) {
+// ``hostPage`` defaults to ``'dashboard'`` (Dashboard sub-tab migration v5.7+);
+// the legacy ``'settings'`` value is no longer passed by ``app.js``.
+export function initUpdates({ mount, hostPage = 'dashboard', hostSubtab = 'updates', state = {} }) {
     const host = mount || document.getElementById('content');
     const page = document.createElement('div');
     page.id = 'page-updates';

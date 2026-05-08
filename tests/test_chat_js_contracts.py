@@ -11,50 +11,20 @@ inbound bubbles show the raw ``msg.text`` / ``msg.content`` (the plan
 preamble is intentionally visible so the user can see what was actually
 sent on the wire).
 
-This file now has two complementary layers aligned with that reality:
-1. Structural (source-text) — verify the actual patterns in chat.js
-   (``slice(-50)``, last-element dedup, inline ``PLAN_PREFIX + text``
-   etc.). Breaks on deletion/rename.
-2. Executable (logic port) — preserve the Python ports of the
-   ``stripPlanPrefix`` and ``extractRecallEntries`` helpers so that if
-   they ever get implemented in JS, the Python-port tests are the
-   authoritative spec for their behaviour.
+These tests are structural (source-text) — verify the actual patterns in
+chat.js (``slice(-50)``, last-element dedup, inline ``PLAN_PREFIX + text``
+etc.). Breaks on deletion/rename.  The previous "executable port" layer
+that shadowed never-landed JS helpers (``stripPlanPrefix``,
+``extractRecallEntries``) was retired in v5.8.3-rc.5 — see the absent-by-
+design ``stripPlanPrefix`` regression below for the canonical guard.
 """
 import pathlib
-import re
 
 CHAT_JS = pathlib.Path(__file__).parent.parent / "web" / "modules" / "chat.js"
-
-_PLAN_PREFIX = (
-    "Please do multi-model planning (plan_task tool) and web-search before "
-    "answering or starting this task:\n\n"
-)
 
 
 def _src() -> str:
     return CHAT_JS.read_text(encoding="utf-8")
-
-
-# ── Portable Python ports of the JS pure helpers ─────────────────────────────
-
-def _strip_plan_prefix(text: str) -> str:
-    """Python port of chat.js::stripPlanPrefix."""
-    return text[len(_PLAN_PREFIX):].lstrip() if text.startswith(_PLAN_PREFIX) else text
-
-
-def _extract_recall_entries(messages: list, existing=None) -> list:
-    """Python port of chat.js::extractRecallEntries."""
-    seen = set(existing or [])
-    out = []
-    for msg in messages:
-        if msg.get("role") != "user":
-            continue
-        text = _strip_plan_prefix((msg.get("text") or "").strip())
-        if not text or text in seen:
-            continue
-        out.append(text)
-        seen.add(text)
-    return out
 
 
 # ── visibilitychange fix ──────────────────────────────────────────────────────
@@ -276,8 +246,6 @@ def test_chat_js_saves_input_history_on_remember():
 
 # ── PLAN_PREFIX application ───────────────────────────────────────────────────
 
-_PLAN_PREFIX = 'Please do multi-model planning (plan_task tool) and web-search before answering or starting this task:\n\n'
-
 
 def test_chat_js_applies_plan_prefix_inline_in_sendmessage():
     """``sendMessage`` applies PLAN_PREFIX inline via ``PLAN_PREFIX + text`` when
@@ -361,84 +329,20 @@ def test_chat_js_input_history_index_reset_after_seeding():
     assert "inputHistoryIndex = inputHistory.length" in src
 
 
-# ── Executable behavior tests (Python port of JS pure helpers) ────────────────
+# ── Absent-by-design regression: stripPlanPrefix never landed ────────────────
 
-def test_strip_plan_prefix_removes_prefix():
-    """stripPlanPrefix strips the plan preamble and trims leading whitespace."""
-    result = _strip_plan_prefix(_PLAN_PREFIX + "What is 2+2?")
-    assert result == "What is 2+2?"
-
-
-def test_strip_plan_prefix_leaves_normal_text_unchanged():
-    """stripPlanPrefix does not modify messages that don't start with PLAN_PREFIX."""
-    msg = "Hello, what can you do?"
-    assert _strip_plan_prefix(msg) == msg
-
-
-def test_strip_plan_prefix_handles_empty_string():
-    """stripPlanPrefix handles empty input gracefully."""
-    assert _strip_plan_prefix("") == ""
-
-
-def test_extract_recall_entries_filters_non_user_roles():
-    """extractRecallEntries only includes user-role messages."""
-    messages = [
-        {"role": "assistant", "text": "Hello"},
-        {"role": "user", "text": "Hi there"},
-        {"role": "system", "text": "System msg"},
-    ]
-    result = _extract_recall_entries(messages)
-    assert result == ["Hi there"]
-
-
-def test_extract_recall_entries_strips_plan_prefix():
-    """extractRecallEntries strips PLAN_PREFIX before adding to recall."""
-    messages = [{"role": "user", "text": _PLAN_PREFIX + "Search for X"}]
-    result = _extract_recall_entries(messages)
-    assert result == ["Search for X"]
-
-
-def test_extract_recall_entries_deduplicates_against_existing():
-    """extractRecallEntries skips messages already in the existing set."""
-    existing = {"already there"}
-    messages = [
-        {"role": "user", "text": "already there"},
-        {"role": "user", "text": "new message"},
-    ]
-    result = _extract_recall_entries(messages, existing)
-    assert result == ["new message"]
-
-
-def test_extract_recall_entries_deduplicates_within_batch():
-    """extractRecallEntries skips duplicate messages within the same batch."""
-    messages = [
-        {"role": "user", "text": "hello"},
-        {"role": "user", "text": "hello"},
-    ]
-    result = _extract_recall_entries(messages)
-    assert result == ["hello"]
-
-
-def test_extract_recall_entries_skips_empty_text():
-    """extractRecallEntries skips messages with empty or whitespace-only text."""
-    messages = [
-        {"role": "user", "text": ""},
-        {"role": "user", "text": "   "},
-        {"role": "user", "text": "real message"},
-    ]
-    result = _extract_recall_entries(messages)
-    assert result == ["real message"]
-
-
-def test_plan_prefix_js_constant_matches_python_port():
-    """The canonical PLAN_PREFIX string in chat.js must match the Python port
-    so that the Python port's ``_strip_plan_prefix`` would successfully strip
-    what ``sendMessage`` actually sends on the wire."""
+def test_strip_plan_prefix_helper_remains_absent_in_chat_js():
+    """``stripPlanPrefix`` must NOT exist in chat.js — the recall/render path
+    intentionally surfaces the raw wire text (plan preamble visible). If a
+    future change reintroduces this helper, ``rememberInput`` and
+    ``syncHistory`` must be re-audited because their current contracts
+    assume no stripping."""
     src = _src()
-    # PLAN_PREFIX in chat.js may be written as a template literal with \n\n
-    # escapes or as a regular string; accept both forms.
-    assert _PLAN_PREFIX.replace("\n\n", "\\n\\n") in src or _PLAN_PREFIX in src, (
-        "PLAN_PREFIX const in chat.js must match the Python port's canonical string"
+    assert "stripPlanPrefix" not in src, (
+        "stripPlanPrefix helper reappeared — re-audit the recall pipeline"
+    )
+    assert "extractRecallEntries" not in src, (
+        "extractRecallEntries helper reappeared — re-audit the recall pipeline"
     )
 
 
