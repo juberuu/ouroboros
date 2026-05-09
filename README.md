@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 5.10.1](https://img.shields.io/badge/version-5.10.1-green.svg)](VERSION)
+[![Version 5.10.2](https://img.shields.io/badge/version-5.10.2-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -416,6 +416,7 @@ not paraphrase it.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 5.10.2 | 2026-05-09 | **fix(ui): restore page isolation after sticky headers.** Skills and Widgets keep their inner scroll regions without overriding the global `.page` visibility contract, and a Cursor visual-verification rule now requires screenshot inspection for future UI changes. |
 | 5.10.1 | 2026-05-09 | **fix(skills): finish transport repair CI follow-ups.** Align skill-requested secret grants, `/api/command` task-constraint kwargs, and skill-flow tests with the structured repair contract so the full quick-test lane stays green after the v5.10 transport refactor. |
 | 5.10.0 | 2026-05-09 | **feat(skills): generalize transport and repair flows.** Core chat provenance now uses a generic `transport` envelope instead of messenger-specific fields, skill repair tasks use structured `task_constraint` payload confinement instead of prompt markers, and Settings separates base secrets, skill-requested secrets, custom keys, and GitHub repo metadata. Skills and Widgets keep their headers fixed while scrolling content, and the paired OuroborosHub catalog update for `a2a`/`telegram-bridge` adds local slash-command rejection plus inbound backpressure before Host Service injection. |
 | 5.9.2 | 2026-05-08 | **test(ci): harden companion and Docker UI smoke assertions.** Windows companion tests now assert environment preservation case-insensitively, and Docker UI smoke tolerates an already-initialized overlay before checking the chat page, matching CI runner behavior without changing runtime semantics. |

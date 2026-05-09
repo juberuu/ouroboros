@@ -2877,7 +2877,6 @@ body {
 /* Phase 5: Skills page                                               */
 /* ------------------------------------------------------------------ */
 #page-skills {
-    display: flex;
     flex-direction: column;
     min-height: 0;
     padding: 16px 24px;
@@ -4052,7 +4051,6 @@ body {
 }
 
 #page-widgets {
-    display: flex;
     flex-direction: column;
     min-height: 0;
     padding: 16px 24px;
