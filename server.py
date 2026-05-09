@@ -92,7 +92,6 @@ _SECRET_SETTING_KEYS = {
     "OPENAI_COMPATIBLE_API_KEY",
     "CLOUDRU_FOUNDATION_MODELS_API_KEY",
     "ANTHROPIC_API_KEY",
-    "TELEGRAM_BOT_TOKEN",
     "GITHUB_TOKEN",
     "OUROBOROS_NETWORK_PASSWORD",
 }
@@ -499,11 +498,12 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
         sender_label = str(msg.get("sender_label") or "")
         sender_session_id = str(msg.get("sender_session_id") or "")
         client_message_id = str(msg.get("client_message_id") or "")
-        telegram_chat_id = int(msg.get("telegram_chat_id") or 0)
+        transport = msg.get("transport") if isinstance(msg.get("transport"), dict) else {}
         image_base64 = str(msg.get("image_base64") or "")
         image_mime = str(msg.get("image_mime") or "image/jpeg")
         image_caption = str(msg.get("image_caption") or "")
         suppress_chat_log = bool(msg.get("suppress_chat_log"))
+        task_constraint = msg.get("task_constraint") if isinstance(msg.get("task_constraint"), dict) else None
         image_data = (
             (image_base64, image_mime, image_caption)
             if image_base64
@@ -529,7 +529,7 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
                 sender_label=sender_label,
                 sender_session_id=sender_session_id,
                 client_message_id=client_message_id,
-                telegram_chat_id=telegram_chat_id,
+                transport=transport,
             )
             if source != "web":
                 bridge.broadcast({
@@ -544,7 +544,7 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
                     "sender_label": sender_label,
                     "sender_session_id": sender_session_id,
                     "client_message_id": client_message_id,
-                    "telegram_chat_id": telegram_chat_id,
+                    "transport": transport,
                     "chat_id": chat_id,
                 })
         st["last_owner_message_at"] = now_iso
@@ -647,20 +647,28 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
         else:
             ctx.consciousness.inject_observation(f"Owner message: {log_text}")
             agent = ctx.get_chat_agent()
-            if agent._busy:
-                agent.inject_message(text or image_caption, image_data=image_data)
-            else:
-                ctx.consciousness.pause()
 
-                def _run_and_resume(cid, txt, img):
-                    try:
-                        ctx.handle_chat_direct(cid, txt, img)
-                    finally:
+            def _run_constrained_or_resume(cid, txt, img, constraint, resume_consciousness: bool):
+                try:
+                    ctx.handle_chat_direct(cid, txt, img, task_constraint=constraint)
+                finally:
+                    if resume_consciousness:
                         ctx.consciousness.resume()
 
+            if agent._busy:
+                if task_constraint:
+                    threading.Thread(
+                        target=_run_constrained_or_resume,
+                        args=(chat_id, text or image_caption, image_data, task_constraint, False),
+                        daemon=True,
+                    ).start()
+                else:
+                    agent.inject_message(text or image_caption, image_data=image_data)
+            else:
+                ctx.consciousness.pause()
                 threading.Thread(
-                    target=_run_and_resume,
-                    args=(chat_id, text or image_caption, image_data),
+                    target=_run_constrained_or_resume,
+                    args=(chat_id, text or image_caption, image_data, task_constraint, True),
                     daemon=True,
                 ).start()
     return offset
@@ -1143,7 +1151,15 @@ async def api_settings_get(request: Request) -> JSONResponse:
         port = int(PORT_FILE.read_text().strip()) if PORT_FILE.exists() else DEFAULT_PORT
     except (ValueError, OSError):
         port = DEFAULT_PORT
-    safe["_meta"] = _build_network_meta(_BIND_HOST, port)
+    meta = _build_network_meta(_BIND_HOST, port)
+    meta["custom_secret_keys"] = sorted(
+        key for key in settings
+        if key not in _SECRET_SETTING_KEYS
+        and key not in _SETTINGS_DEFAULTS
+        and _CUSTOM_SECRET_KEY_RE.match(str(key))
+        and settings.get(key)
+    )
+    safe["_meta"] = meta
     return JSONResponse(safe)
 
 
@@ -1466,7 +1482,8 @@ async def api_command(request: Request) -> JSONResponse:
             from supervisor.message_bus import get_bridge, log_chat
             bridge = get_bridge()
             visible_text = str(body.get("visible_text") or "").strip()
-            bridge.ui_send(cmd, broadcast=False, suppress_chat_log=bool(visible_text))
+            task_constraint = body.get("task_constraint") if isinstance(body.get("task_constraint"), dict) else None
+            bridge.ui_send(cmd, broadcast=False, suppress_chat_log=bool(visible_text), task_constraint=task_constraint)
             if visible_text:
                 task_id = str(body.get("visible_task_id") or "skill_repair")
                 ts = datetime.now(timezone.utc).isoformat()

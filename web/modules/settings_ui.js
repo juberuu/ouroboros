@@ -6,7 +6,6 @@ const SETTINGS_TABS = [
     { value: 'secrets', label: 'Secrets' },
     { value: 'models', label: 'Models' },
     { value: 'behavior', label: 'Behavior' },
-    { value: 'integrations', label: 'Integrations' },
     { value: 'advanced', label: 'Advanced' },
     { value: 'about', label: 'About' },
 ];
@@ -87,7 +86,6 @@ const SECRET_KEYS = [
     ['OPENAI_COMPATIBLE_API_KEY', 'OpenAI-compatible API Key', 'Compatible provider key'],
     ['CLOUDRU_FOUNDATION_MODELS_API_KEY', 'Cloud.ru Foundation Models API Key', 'Cloud.ru key'],
     ['ANTHROPIC_API_KEY', 'Anthropic API Key', 'sk-ant-...'],
-    ['TELEGRAM_BOT_TOKEN', 'Telegram Bot Token', 'BotFather token'],
     ['GITHUB_TOKEN', 'GitHub Token', 'ghp_...'],
     ['OUROBOROS_NETWORK_PASSWORD', 'Network Password', 'Required for LAN/Docker binds'],
 ];
@@ -107,31 +105,24 @@ function secretSettingsSection() {
                     label,
                     placeholder,
                 })).join('')}
-                <div class="form-field">
-                    <label>Telegram Chat ID (optional)</label>
-                    <input id="s-telegram-chat-id" placeholder="123456789">
-                    <div class="settings-inline-note">Used by the optional Telegram bridge skill to pin replies to one chat.</div>
-                </div>
             </div>
         </section>
         <section class="settings-card">
-            <h3>Add Custom Key</h3>
+            <h3>Requested By Skills</h3>
+            <div class="settings-section-copy">
+                Secrets requested by installed skills appear here only when a skill asks for them.
+            </div>
+            <div id="skill-requested-secrets" class="settings-secret-list">
+                <div class="muted">No skill-requested secrets.</div>
+            </div>
+        </section>
+        <section class="settings-card">
+            <h3>Custom Keys</h3>
             <div class="settings-section-copy">
                 Optional key/value storage for future skills. Use uppercase names such as <code>SLACK_WEBHOOK_URL</code>.
-                Saving an empty value clears that custom key.
             </div>
-            <div class="form-row">
-                <div class="form-field">
-                    <label>Key</label>
-                    <input id="s-custom-secret-key" placeholder="SLACK_WEBHOOK_URL" spellcheck="false">
-                </div>
-                <div class="form-field">
-                    <label>Value</label>
-                    <div class="secret-input-row">
-                        <input id="s-custom-secret-value" class="secret-input" type="password" placeholder="Secret value">
-                    </div>
-                </div>
-            </div>
+            <div id="custom-secrets-list" class="settings-secret-list"></div>
+            <button type="button" class="settings-ghost-btn" id="btn-add-custom-secret">Add custom key</button>
         </section>
     `;
 }
@@ -141,7 +132,7 @@ export function renderSettingsPage() {
         ${renderPageHeader({
             title: 'Settings',
             icon: SETTINGS_ICON,
-            description: 'Configure providers, models, behavior, integrations, and runtime controls.',
+            description: 'Configure providers, secrets, models, behavior, source control, and runtime controls.',
             tabsHtml: `
                 <div class="settings-tabs-bar">
                     <button type="button" class="settings-mobile-back" data-settings-back hidden>Settings</button>
@@ -422,26 +413,18 @@ export function renderSettingsPage() {
                     </div>
                 </section>
 
-                <section class="settings-panel" data-settings-panel="integrations">
+                <section class="settings-panel" data-settings-panel="advanced">
                     <div class="form-section">
-                        <h3>GitHub</h3>
-                        <div class="form-row">${secretField({
-                            id: 's-gh-token',
-                            settingKey: 'GITHUB_TOKEN',
-                            label: 'GitHub Token',
-                            placeholder: 'ghp_...',
-                        })}</div>
+                        <h3>Source Control</h3>
+                        <div class="settings-section-copy">Repository metadata for GitHub integration. Tokens live in Secrets; this is not secret.</div>
                         <div class="form-row">
                             <div class="form-field">
                                 <label>GitHub Repo</label>
                                 <input id="s-gh-repo" placeholder="owner/repo-name">
                             </div>
                         </div>
-                        <div class="settings-inline-note">Only needed for in-app remote sync features. Safe to leave empty if you work locally.</div>
                     </div>
-                </section>
 
-                <section class="settings-panel" data-settings-panel="advanced">
                     <div class="form-section">
                         <h3>Local Model Runtime</h3>
                         <div class="settings-section-copy">Only fill this in when you want Ouroboros to start and route to a GGUF model on this machine.</div>

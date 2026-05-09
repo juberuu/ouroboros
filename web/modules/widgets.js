@@ -15,7 +15,9 @@ function pageTemplate() {
                 description: 'Reviewed extension UI surfaces live here, separate from the skill catalogue.',
                 actionsHtml: '<button id="widgets-refresh" class="btn btn-default btn-sm">Refresh</button>',
             })}
-            <div id="widgets-list" class="widgets-list"></div>
+            <div class="widgets-scroll">
+                <div id="widgets-list" class="widgets-list"></div>
+            </div>
         </section>
     `;
 }

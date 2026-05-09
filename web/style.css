@@ -2877,8 +2877,18 @@ body {
 /* Phase 5: Skills page                                               */
 /* ------------------------------------------------------------------ */
 #page-skills {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
     padding: 16px 24px;
+    overflow: hidden;
+}
+
+.skills-scroll {
+    flex: 1;
+    min-height: 0;
     overflow-y: auto;
+    padding-right: 2px;
 }
 
 .skills-header h2 {
@@ -4042,8 +4052,18 @@ body {
 }
 
 #page-widgets {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
     padding: 16px 24px;
+    overflow: hidden;
+}
+
+.widgets-scroll {
+    flex: 1;
+    min-height: 0;
     overflow-y: auto;
+    padding-right: 2px;
 }
 
 .widgets-list {

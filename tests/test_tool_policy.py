@@ -126,3 +126,10 @@ def test_non_core_listing_includes_live_extension_tools(monkeypatch):
     finally:
         with extension_loader._lock:
             extension_loader._tools.pop(tool_name, None)
+
+
+def test_list_skills_is_core_visible_for_repair(tmp_path):
+    from ouroboros.tools.registry import ToolRegistry
+    registry = ToolRegistry(repo_dir=tmp_path / "repo", drive_root=tmp_path / "data")
+    names = {schema.get("name") or schema.get("function", {}).get("name") for schema in registry.schemas(core_only=True)}
+    assert "list_skills" in names

@@ -114,11 +114,12 @@ def test_shared_confirm_dialog_module_replaces_native_marketplace_confirms():
     assert ".confirm-dialog" in css
 
 
-def test_marketplace_fix_prompt_has_heal_payload_root_marker():
+def test_marketplace_fix_prompt_uses_structured_task_constraint():
     source = _marketplace_js()
-    assert "HEAL_SKILL_PAYLOAD_ROOT_JSON" in source
-    assert "diagnostics.payload_root" in source
-    assert "Final non-negotiable rules:" in source
+    assert "task_constraint" in source
+    assert "HEAL_SKILL_PAYLOAD_ROOT_JSON" not in source
+    assert "payload_root" in source
+    assert "structured skill_repair task constraint" in source
     assert ".replace(/`/g, \"'\")" in source
     assert "Start a repair task" in source
     assert "visible_text:" in source

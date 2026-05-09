@@ -118,6 +118,26 @@ def test_chat_inject_tags_skill_source(tmp_path: pathlib.Path) -> None:
     assert bridge.messages[0]["chat_id"] == 1234
 
 
+def test_chat_inject_preserves_transport_metadata(tmp_path: pathlib.Path) -> None:
+    _seed_token(tmp_path, skill="transport_bridge", token="token", permissions=["inject_chat"])
+    bridge = FakeBridge()
+    app = create_host_service_app(tmp_path, bridge_getter=lambda: bridge)
+    client = TestClient(app)
+
+    response = client.post(
+        "/chat/inject",
+        headers={"X-Skill-Token": "token"},
+        json={
+            "text": "hello",
+            "chat_id": 1234,
+            "transport": {"kind": "messenger", "conversation_id": "abc", "sender_label": "Messenger"},
+        },
+    )
+
+    assert response.status_code == 202
+    assert bridge.messages[0]["transport"] == {"kind": "messenger", "conversation_id": "abc", "sender_label": "Messenger"}
+
+
 def test_chat_inject_wait_for_response_unsubscribes(tmp_path: pathlib.Path) -> None:
     _seed_token(tmp_path, skill="waiter", token="token", permissions=["inject_chat"])
     bridge = FakeBridge()

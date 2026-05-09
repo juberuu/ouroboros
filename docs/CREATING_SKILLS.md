@@ -183,6 +183,26 @@ skill_preflight(skill="weather")
 skill_preflight(skill="weather", paths=["plugin.py"])
 ```
 
+## Repair task path scheme and edit tools
+
+Skills repaired from the Skills or Marketplace UI run under a structured
+`task_constraint.mode="skill_repair"`. The constraint identifies the selected
+skill and payload root, so repair tools use payload-relative paths:
+
+| Tool | Repair path example | Use when |
+|------|---------------------|----------|
+| `data_read` / `data_list` | `plugin.py`, `scripts/main.py` | Inspect payload files. |
+| `str_replace_editor` | `plugin.py` | One exact replacement in an existing file. |
+| `claude_code_edit` | `cwd="."` or omitted | Coordinated multi-hunk edits; cwd is forced to the payload root. |
+| `data_write` | `new_module.py` | New files or intentional full-file rewrites. |
+| `skill_preflight` | `skill="weather"` | Cheap read-only syntax/schema check before LLM review. |
+| `review_skill` | `skill="weather"` | Required final tri-model review. |
+
+Repair mode blocks shell, browser/search, scheduling, skill execution,
+repo commits, extension tools, key grants, and enable/disable flows. Finish
+with `skill_preflight` and `review_skill`; the owner enables or grants access
+after a fresh PASS review.
+
 ## Permissions
 
 The manifest's `permissions` list authorises specific PluginAPI

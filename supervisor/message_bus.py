@@ -82,6 +82,7 @@ class LocalChatBridge:
         # A2A response subscriptions: {subscription_id: (chat_id, callback)}
         self._response_subs: Dict[str, tuple] = {}
         self._response_subs_lock = threading.Lock()
+        self._chat_transports: Dict[int, Dict[str, Any]] = {}
         if settings:
             self.configure_from_settings(settings)
 
@@ -120,15 +121,21 @@ class LocalChatBridge:
                 "text": str(msg.get("text") or ""),
                 "source": str(msg.get("source") or "web"),
             }
+            chat_id_value = int(msg.get("chat_id") or 1)
+            if isinstance(msg.get("transport"), dict) and msg.get("transport") and chat_id_value != 1:
+                self._chat_transports[chat_id_value] = dict(msg.get("transport") or {})
+            else:
+                self._chat_transports.pop(chat_id_value, None)
             for key in (
                 "sender_label",
                 "sender_session_id",
                 "client_message_id",
-                "telegram_chat_id",
+                "transport",
                 "image_base64",
                 "image_mime",
                 "image_caption",
                 "suppress_chat_log",
+                "task_constraint",
             ):
                 value = msg.get(key)
                 if value not in (None, "", 0):
@@ -191,8 +198,7 @@ class LocalChatBridge:
             sender_label="",
             sender_session_id=sender_session_id,
             client_message_id=client_message_id,
-            telegram_chat_id=0,
-        )
+                    )
 
     def enqueue_local_message(
         self,
@@ -204,11 +210,12 @@ class LocalChatBridge:
         sender_label: str = "",
         sender_session_id: str = "",
         client_message_id: str = "",
-        telegram_chat_id: int = 0,
+        transport: Optional[Dict[str, Any]] = None,
         image_base64: str = "",
         image_mime: str = "",
         image_caption: str = "",
         suppress_chat_log: bool = False,
+        task_constraint: Optional[Dict[str, Any]] = None,
     ) -> None:
         clean_text = str(text or "").strip()
         caption_text = str(image_caption or "").strip()
@@ -225,11 +232,12 @@ class LocalChatBridge:
             "sender_label": str(sender_label or ""),
             "sender_session_id": str(sender_session_id or ""),
             "client_message_id": str(client_message_id or ""),
-            "telegram_chat_id": int(telegram_chat_id or 0),
+            "transport": dict(transport or {}),
             "image_base64": image_b64,
             "image_mime": str(image_mime or ""),
             "image_caption": caption_text,
             "suppress_chat_log": bool(suppress_chat_log),
+            "task_constraint": dict(task_constraint or {}),
         })
 
     def send_message(
@@ -244,6 +252,7 @@ class LocalChatBridge:
         """Put a message in the outbox for the UI to consume."""
         clean_text = _strip_markdown(text) if not parse_mode else text
         message_ts = ts or datetime.datetime.now(datetime.timezone.utc).isoformat()
+        transport = dict(self._chat_transports.get(int(chat_id or 0), {}) or {})
         msg = {
             "type": "text",
             "content": clean_text,
@@ -272,6 +281,7 @@ class LocalChatBridge:
                 "is_progress": bool(is_progress),
                 "ts": message_ts,
                 "task_id": str(task_id or ""),
+                "transport": transport,
             })
         if not is_a2a_chat_id(chat_id):
             publish_event(CHAT_OUTBOUND, {
@@ -281,6 +291,7 @@ class LocalChatBridge:
                 "is_progress": bool(is_progress),
                 "ts": message_ts,
                 "task_id": str(task_id or ""),
+                "transport": transport,
             })
         return True, "ok"
 
@@ -294,7 +305,8 @@ class LocalChatBridge:
         })
         if self._broadcast_fn:
             self._broadcast_fn({"type": "typing", "action": action})
-        publish_event(CHAT_TYPING, {"chat_id": int(chat_id or 0), "action": str(action or "")})
+        typing_transport = dict(self._chat_transports.get(int(chat_id or 0), {}) or {})
+        publish_event(CHAT_TYPING, {"chat_id": int(chat_id or 0), "action": str(action or ""), "transport": typing_transport})
         return True
 
     def send_photo(
@@ -319,8 +331,10 @@ class LocalChatBridge:
         self._outbox.put(msg)
         if self._broadcast_fn:
             self._broadcast_fn(msg)
+        photo_transport = dict(self._chat_transports.get(int(chat_id or 0), {}) or {})
         publish_event(CHAT_PHOTO, {
             "chat_id": int(chat_id or 0),
+            "transport": photo_transport,
             "caption": str(caption or ""),
             "image_base64": b64_str,
             "mime": str(mime or ""),
@@ -364,6 +378,7 @@ class LocalChatBridge:
         sender_session_id: str = "",
         client_message_id: str = "",
         suppress_chat_log: bool = False,
+        task_constraint: Optional[Dict[str, Any]] = None,
     ):
         """Called by the web UI to send a message to the agent."""
         if broadcast:
@@ -373,7 +388,7 @@ class LocalChatBridge:
                 client_message_id=client_message_id,
             )
             return
-        self.enqueue_local_message(text, suppress_chat_log=suppress_chat_log)
+        self.enqueue_local_message(text, suppress_chat_log=suppress_chat_log, task_constraint=task_constraint)
 
     def ui_receive(self, timeout: float = 0.1) -> Optional[Dict[str, Any]]:
         """Called by the web UI to check for new messages from the agent."""
@@ -472,7 +487,7 @@ def log_chat(
     sender_label: str = "",
     sender_session_id: str = "",
     client_message_id: str = "",
-    telegram_chat_id: int = 0,
+    transport: Optional[Dict[str, Any]] = None,
     task_id: str = "",
 ) -> None:
     if DATA_DIR:
@@ -488,7 +503,7 @@ def log_chat(
             "sender_label": sender_label,
             "sender_session_id": sender_session_id,
             "client_message_id": client_message_id,
-            "telegram_chat_id": int(telegram_chat_id or 0),
+            "transport": dict(transport or {}),
             "task_id": str(task_id or ""),
         })
 

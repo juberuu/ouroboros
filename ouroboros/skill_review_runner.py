@@ -247,15 +247,11 @@ def _reconcile_deps_after_pass_review(
 
 
 def _heal_mode(ctx: Any) -> bool:
-    return any(
-        message.get("role") == "user"
-        and isinstance(message.get("content"), str)
-        and next(
-            (line.strip() for line in message.get("content", "").splitlines() if line.strip()),
-            "",
-        ) == "HEAL_MODE_NO_ENABLE"
-        for message in (getattr(ctx, "messages", None) or [])
-    )
+    try:
+        constraint = getattr(ctx, "task_constraint", None)
+        return bool(constraint and getattr(constraint, "mode", "") == "skill_repair")
+    except Exception:
+        return False
 
 
 def _outcome_payload(

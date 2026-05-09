@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 5.9.2](https://img.shields.io/badge/version-5.9.2-green.svg)](VERSION)
+[![Version 5.10.0](https://img.shields.io/badge/version-5.10.0-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -416,6 +416,7 @@ not paraphrase it.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 5.10.0 | 2026-05-09 | **feat(skills): generalize transport and repair flows.** Core chat provenance now uses a generic `transport` envelope instead of messenger-specific fields, skill repair tasks use structured `task_constraint` payload confinement instead of prompt markers, and Settings separates base secrets, skill-requested secrets, custom keys, and GitHub repo metadata. Skills and Widgets keep their headers fixed while scrolling content, and the paired OuroborosHub catalog update for `a2a`/`telegram-bridge` adds local slash-command rejection plus inbound backpressure before Host Service injection. |
 | 5.9.2 | 2026-05-08 | **test(ci): harden companion and Docker UI smoke assertions.** Windows companion tests now assert environment preservation case-insensitively, and Docker UI smoke tolerates an already-initialized overlay before checking the chat page, matching CI runner behavior without changing runtime semantics. |
 | 5.9.1 | 2026-05-08 | **fix(companions): preserve Windows subprocess environment.** Companion startup now merges reviewed descriptor env over a small allowlisted base environment so Windows subprocesses retain required variables such as `SystemRoot`, restoring tagged Windows CI while keeping POSIX process-group isolation and avoiding broad host-env leakage. |
 | 5.9.0 | 2026-05-08 | **feat(skills): move A2A and Telegram into reviewed transport skills.** A new loopback-only Host Service API, companion-process supervisor, event bus, opaque skill tokens, permission grants, and chat-id policy let reviewed skills inject transport messages without patching the core. Base-runtime A2A modules/deps and Telegram polling code are removed, Settings gains a unified Secrets surface, and this core release is paired with an external OuroborosHub catalog update that publishes the official `a2a` and `telegram-bridge` skills. Host Service, companion, grant, event-bus, shutdown, and transport-extraction tests cover the new flow. |

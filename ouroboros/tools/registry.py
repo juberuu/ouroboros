@@ -31,6 +31,7 @@ from ouroboros.tool_aliases import (
     canonical_tool_name,
 )
 from ouroboros.utils import safe_relpath
+from ouroboros.contracts.task_constraint import TaskConstraint, normalize_task_constraint, resolve_payload_path
 
 log = logging.getLogger(__name__)
 
@@ -92,93 +93,18 @@ def _detect_runtime_mode_elevation(text_lower: str) -> bool:
     return (has_save and has_mode_key) or has_dotted_path
 
 
-def _iter_user_message_content(messages: Optional[List[Dict[str, Any]]]):
-    for message in messages or []:
-        if message.get("role") != "user":
-            continue
-        content = message.get("content")
-        if isinstance(content, str):
-            yield content
 
-
-def _iter_heal_marker_content(messages: Optional[List[Dict[str, Any]]]):
-    for content in _iter_user_message_content(messages):
-        first = next((line.strip() for line in content.splitlines() if line.strip()), "")
-        if first == "HEAL_MODE_NO_ENABLE":
-            yield content
-
-
-def _is_heal_no_enable_context(messages: Optional[List[Dict[str, Any]]]) -> bool:
-    return any(True for _ in _iter_heal_marker_content(messages))
-
-
-def _heal_skill_name(messages: Optional[List[Dict[str, Any]]]) -> str:
-    return _heal_marker_value(messages, "HEAL_SKILL_NAME_JSON=")
-
-
-def _heal_payload_root(messages: Optional[List[Dict[str, Any]]]) -> str:
-    raw = _raw_heal_marker_value(messages, "HEAL_SKILL_PAYLOAD_ROOT_JSON=")
-    path = raw.replace("\\", "/").strip("/")
-    if ".." in path:
-        return ""
-    parts = pathlib.PurePosixPath(path).parts
-    if len(parts) < 3 or parts[0] != "skills" or parts[1] not in {"external", "clawhub", "ouroboroshub"}:
-        return ""
-    if any(part in {"", ".", ".."} for part in parts):
-        return ""
-    return "/".join(parts)
-
-
-def _raw_heal_marker_value(messages: Optional[List[Dict[str, Any]]], marker: str) -> str:
-    for content in _iter_heal_marker_content(messages):
-        if marker not in content:
-            continue
-        raw = content.split(marker, 1)[1].splitlines()[0].strip()
-        try:
-            value = json.loads(raw)
-        except Exception:
-            value = raw.strip('"')
-        return str(value or "").strip()
-    return ""
-
-
-def _heal_marker_value(messages: Optional[List[Dict[str, Any]]], marker: str) -> str:
-    for content in _iter_heal_marker_content(messages):
-        if marker not in content:
-            continue
-        raw = content.split(marker, 1)[1].splitlines()[0].strip()
-        try:
-            value = json.loads(raw)
-        except Exception:
-            value = raw.strip('"')
-        text = str(value or "").strip()
-        if (
-            not text
-            or "/" in text
-            or "\\" in text
-            or text in {".", ".."}
-            or any(part in {".", ".."} for part in pathlib.PurePosixPath(text).parts)
-        ):
-            return ""
-        return text
-    return ""
-
-
-def _heal_data_path_allowed(path_text: str, payload_root: str, drive_root: pathlib.Path) -> bool:
-    if not payload_root:
+def _task_constraint_path_allowed(path_text: str, constraint: Optional[TaskConstraint], drive_root: pathlib.Path) -> bool:
+    if not constraint or constraint.mode != "skill_repair" or not constraint.payload_root:
         return False
     try:
-        drive = pathlib.Path(drive_root).resolve(strict=False)
-        allowed_root = pathlib.Path(os.path.realpath(drive / safe_relpath(payload_root)))
-        target = pathlib.Path(os.path.realpath(drive / safe_relpath(path_text or "")))
-        target.relative_to(allowed_root)
+        resolve_payload_path(drive_root, constraint, path_text or "")
         return True
     except (OSError, ValueError):
         return False
 
 
 _HEAL_MODE_ALLOWED_TOOLS = frozenset({
-    "code_search",
     "claude_code_edit",
     "data_read",
     "data_list",
@@ -513,6 +439,9 @@ class ToolContext:
     # Conversation messages (set by loop.py so safety checks have context)
     messages: Optional[List[Dict[str, Any]]] = None
 
+    # Structured per-task constraints, e.g. skill repair payload confinement.
+    task_constraint: Optional[TaskConstraint] = None
+
     # Task depth for fork bomb protection
     task_depth: int = 0
 
@@ -573,7 +502,7 @@ CORE_TOOL_NAMES = {
     # v5.7.0: keep this frozen fallback copy aligned with
     # tool_capabilities.CORE_TOOL_NAMES. ToolPolicy is the runtime SSOT, but
     # some schemas(core_only=True) callers still use this local set.
-    "review_skill", "skill_preflight",
+    "list_skills", "review_skill", "skill_preflight",
 }
 
 
@@ -1232,13 +1161,13 @@ class ToolRegistry:
         except Exception:
             _runtime_mode = "advanced"
 
-        heal_no_enable = _is_heal_no_enable_context(getattr(self._ctx, "messages", None))
+        task_constraint = normalize_task_constraint(getattr(self._ctx, "task_constraint", None))
+        heal_no_enable = bool(task_constraint and task_constraint.mode == "skill_repair")
         if heal_no_enable:
-            heal_skill = _heal_skill_name(getattr(self._ctx, "messages", None))
-            heal_payload_root = _heal_payload_root(getattr(self._ctx, "messages", None))
+            heal_skill = task_constraint.skill_name if task_constraint else ""
             if name in {"data_read", "data_write"}:
                 data_path = str(args.get("path", "") or "")
-                if not _heal_data_path_allowed(data_path, heal_payload_root, pathlib.Path(self._ctx.drive_root)):
+                if not _task_constraint_path_allowed(data_path, task_constraint, pathlib.Path(self._ctx.drive_root)):
                     return (
                         "⚠️ HEAL_MODE_BLOCKED: Repair data access is limited "
                         "to the selected skill payload under data/skills/external "
@@ -1253,7 +1182,7 @@ class ToolRegistry:
                     )
             if name == "data_list":
                 data_dir = str(args.get("dir", args.get("path", "")) or "")
-                if not _heal_data_path_allowed(data_dir, heal_payload_root, pathlib.Path(self._ctx.drive_root)):
+                if not _task_constraint_path_allowed(data_dir, task_constraint, pathlib.Path(self._ctx.drive_root)):
                     return (
                         "⚠️ HEAL_MODE_BLOCKED: Repair data listing is limited "
                         "to the selected skill payload under data/skills/external "
@@ -1261,7 +1190,7 @@ class ToolRegistry:
                     )
             if name == "str_replace_editor":
                 edit_path = str(args.get("path", "") or "")
-                if not _heal_data_path_allowed(edit_path, heal_payload_root, pathlib.Path(self._ctx.drive_root)):
+                if not _task_constraint_path_allowed(edit_path, task_constraint, pathlib.Path(self._ctx.drive_root)):
                     return "⚠️ HEAL_MODE_BLOCKED: Repair str_replace_editor is limited to the selected skill payload."
                 if _heal_protected_payload_sidecar(edit_path):
                     return (
@@ -1272,7 +1201,7 @@ class ToolRegistry:
                     )
             if name == "claude_code_edit":
                 cwd_text = str(args.get("cwd", "") or "")
-                if not _heal_data_path_allowed(cwd_text, heal_payload_root, pathlib.Path(self._ctx.drive_root)):
+                if not _task_constraint_path_allowed(cwd_text, task_constraint, pathlib.Path(self._ctx.drive_root)):
                     return "⚠️ HEAL_MODE_BLOCKED: Repair claude_code_edit cwd must be the selected skill payload."
             if name == "review_skill" and str(args.get("skill", "") or "").strip() != heal_skill:
                 return "⚠️ HEAL_MODE_BLOCKED: Repair may only review the selected skill."

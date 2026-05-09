@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Tuple
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import read_text, safe_relpath, utc_now_iso
+from ouroboros.contracts.task_constraint import normalize_task_constraint, resolve_payload_path
 
 log = logging.getLogger(__name__)
 
@@ -346,8 +347,15 @@ def _data_read(ctx: ToolContext, path: str, max_lines: int = 2000, start_line: i
     path. Strip the duplicate prefix when we recognize one so the call works
     rather than burning a round on a confusing path-doubling error.
     """
+    task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
     norm = _normalize_data_read_path(ctx, path)
-    target = ctx.drive_path(norm)
+    if task_constraint and task_constraint.mode == "skill_repair" and task_constraint.payload_root:
+        try:
+            target = resolve_payload_path(pathlib.Path(ctx.drive_root), task_constraint, norm)
+        except ValueError as e:
+            return f"⚠️ DATA_READ_BLOCKED: {e}"
+    else:
+        target = ctx.drive_path(norm)
     if _is_skill_owner_state_target(target, pathlib.Path(ctx.drive_root)):
         return "DATA_READ_BLOCKED: skill owner state is not readable through generic data tools."
     try:
@@ -377,11 +385,25 @@ def _data_read(ctx: ToolContext, path: str, max_lines: int = 2000, start_line: i
 
 
 def _data_list(ctx: ToolContext, dir: str = ".", max_entries: int = 500) -> str:
+    task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
+    if task_constraint and task_constraint.mode == "skill_repair" and task_constraint.payload_root:
+        try:
+            root = resolve_payload_path(pathlib.Path(ctx.drive_root), task_constraint, dir)
+        except ValueError as e:
+            return json.dumps([f"⚠️ DATA_LIST_BLOCKED: {e}"], ensure_ascii=False, indent=2)
+        return json.dumps(_list_dir(root, ".", max_entries), ensure_ascii=False, indent=2)
     return json.dumps(_list_dir(ctx.drive_root, dir, max_entries), ensure_ascii=False, indent=2)
 
 
 def _data_write(ctx: ToolContext, path: str, content: str, mode: str = "overwrite") -> str:
-    p = ctx.drive_path(path)
+    task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
+    if task_constraint and task_constraint.mode == "skill_repair" and task_constraint.payload_root:
+        try:
+            p = resolve_payload_path(pathlib.Path(ctx.drive_root), task_constraint, path)
+        except ValueError as e:
+            return f"⚠️ DATA_WRITE_ERROR: {e}"
+    else:
+        p = ctx.drive_path(path)
     # v5.1.2 elevation ratchet defense-in-depth: settings.json is owner-only.
     # The chokepoint in ``ouroboros.config.save_settings`` already refuses
     # disk-level elevation; blocking ``data_write`` here turns the whole
@@ -399,7 +421,10 @@ def _data_write(ctx: ToolContext, path: str, content: str, mode: str = "overwrit
     target_path = pathlib.Path(p)
     settings_path = pathlib.Path(_cfg.SETTINGS_PATH)
     data_root = pathlib.Path(_cfg.DATA_DIR).resolve(strict=False)
-    lexical_target = pathlib.Path(ctx.drive_root).resolve(strict=False) / safe_relpath(path)
+    if task_constraint and task_constraint.mode == "skill_repair" and task_constraint.payload_root:
+        lexical_target = pathlib.Path(p).resolve(strict=False)
+    else:
+        lexical_target = pathlib.Path(ctx.drive_root).resolve(strict=False) / safe_relpath(path)
     suffix = pathlib.PurePosixPath(str(path or "")).suffix.lower()
     if suffix in {".py", ".md", ".json", ".sh"} and _looks_like_serialized_tool_result(content):
         return (
@@ -477,6 +502,7 @@ def _data_write(ctx: ToolContext, path: str, content: str, mode: str = "overwrit
     marker_path: pathlib.Path | None = None
     if (
         mode == "overwrite"
+        and not (task_constraint and task_constraint.mode == "skill_repair")
         and marker_payload is not None
         and marker_payload[0] == "external"
         and pathlib.PurePosixPath(str(path or "")).name.lower() in {"skill.md", "skill.json"}

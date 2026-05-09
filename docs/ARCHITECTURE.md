@@ -1,4 +1,4 @@
-# Ouroboros v5.9.2 — Architecture & Reference
+# Ouroboros v5.10.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -93,6 +93,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── tool_abi.py      ← ToolEntryProtocol + GetToolsProtocol
       │   ├── api_v1.py        ← WS/HTTP envelope TypedDicts
       │   ├── chat_id_policy.py ← SSOT for human-visible vs synthetic transport chat ids
+      │   ├── task_constraint.py ← Structured per-task execution constraints for skill repair payload confinement
       │   ├── skill_manifest.py ← Unified SKILL.md / skill.json parser (instruction|script|extension)
       │   ├── schema_versions.py ← Opt-in _schema_version helpers
       │   └── plugin_api.py    ← Phase 4: PluginAPI Protocol + ExtensionRegistrationError + FORBIDDEN_EXTENSION_SETTINGS + VALID_EXTENSION_PERMISSIONS + VALID_EXTENSION_ROUTE_METHODS
@@ -423,9 +424,9 @@ The Dashboard tab is the operational hub. It hosts four full-height sub-tabs:
 
 ### 3.4 Settings
 
-- **Tabbed layout (v5.7.0+)**: `Providers`, `Secrets`, `Models`, `Behavior`, `Integrations`, `Advanced`, `About`. On every viewport (including mobile) the tab row stays a horizontal-scroll pill strip; the active pill auto-scrolls into view. The v5.6.0 mobile drill-down with Back-to-Settings button has been retired — `bindSettingsTabs` no longer toggles `settings-subtab-open` and the `.settings-mobile-back` element is hidden via CSS for back-compat with anyone querying it from outside.
+- **Tabbed layout (v5.7.0+)**: `Providers`, `Secrets`, `Models`, `Behavior`, `Advanced`, `About`. On every viewport (including mobile) the tab row stays a horizontal-scroll pill strip; the active pill auto-scrolls into view. The v5.6.0 mobile drill-down with Back-to-Settings button has been retired — `bindSettingsTabs` no longer toggles `settings-subtab-open` and the `.settings-mobile-back` element is hidden via CSS for back-compat with anyone querying it from outside.
 - **Provider cards**: OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, Anthropic, plus optional Network Password. Cards are collapsible and use masked-secret inputs with show/hide toggles.
-- **Secrets**: OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, Anthropic, bridge tokens, GitHub Token, Network Password, and custom skill keys live in one Secrets section.
+- **Secrets**: OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, Anthropic, GitHub Token, and Network Password are always visible in Secrets. Skill-requested secrets appear only when installed skills ask for them, and custom keys live in a separate editable list.
   Keys are displayed as masked values (e.g., `sk-or-v1...`), can be explicitly cleared, and are only overwritten on save if the user enters a new value (not containing `...`).
 - **Claude Runtime Status**: the Anthropic card shows app-managed Claude runtime status with a `Repair Runtime` action. The card is visible when the user has configured `ANTHROPIC_API_KEY` **or** when the last `/api/claude-code/status` poll stored a non-empty `error` on the runtime card state (`claudeRuntimeHasError` in `web/modules/settings.js::applyClaudeCodeStatus`). Two distinct paths set that `error`: (a) backend `ouroboros/platform_layer.py::resolve_claude_runtime` marks the SDK below the `_CLAUDE_SDK_MIN_VERSION` baseline (the only backend-originated path today — other not-ready conditions such as a missing bundled CLI currently fall through to `status_label() == "no_api_key"` until a key is configured); (b) the browser-side `refreshClaudeCodeStatus` `catch` block synthesizes an error payload for any `/api/claude-code/status` transport failure, non-OK HTTP response, or JSON parse error, so loss of connectivity to the backend also surfaces the card before a key is configured. The Claude runtime (SDK + bundled CLI) powers delegated code editing and advisory review and is managed automatically by the app.
 - **Providers tab**: also contains `Legacy OpenAI Base URL` (backward-compatibility escape hatch for older installs) and `Network Gate` (optional non-localhost password + restart-required `OUROBOROS_SERVER_HOST`) at the bottom. The Network Gate section also shows a read-only LAN hint (via `_meta` from `/api/settings`): loopback-bound instances show a restart instruction, LAN-reachable instances show a clickable URL, and non-loopback binds without `OUROBOROS_NETWORK_PASSWORD` render as a warning with a set-password CTA. Saving a non-loopback host through `/api/settings` is limited to wildcard hosts (`0.0.0.0`, `::`) and requires a non-empty `OUROBOROS_NETWORK_PASSWORD` in the same save; specific LAN IP binds are manual/env-only so the desktop launcher can keep probing loopback reliably. Manual env/settings-before-launch and Docker flows may still bind open by explicit operator choice. Bracketed IPv6 literals (e.g. `[::1]`) are normalized by `_build_network_meta` — brackets are stripped before the `is_loopback_host` classification, and URL construction uniformly re-brackets IPv6 addresses so there is no double-bracketing.
@@ -439,6 +440,7 @@ The Dashboard tab is the operational hub. It hosts four full-height sub-tabs:
   - OpenAI-compatible model values use `openai-compatible::...`.
   - Cloud.ru model values use `cloudru::...`.
   - Anthropic model values use `anthropic::...` (e.g. `anthropic::claude-opus-4-6`).
+- **Advanced → Source Control**: `GITHUB_REPO` lives here as non-secret repository metadata; `GITHUB_TOKEN` lives in Secrets.
 - **Behavior tab**: agent-behavior policy settings — Reasoning Effort, Review Enforcement (the two-button advisory/blocking toggle), **Runtime Mode** (Phase 2, three-button segmented control: `Light` / `Advanced` / `Pro`), and **External Skills Repo** (text field bound to `OUROBOROS_SKILLS_REPO_PATH`). Review models and Web Search Model live in the Models tab alongside model routing.
 - **Reasoning Effort**: Five segmented controls for task/chat, evolution, review, scope review, and consciousness.
   Backed by `OUROBOROS_EFFORT_TASK`, `OUROBOROS_EFFORT_EVOLUTION`, `OUROBOROS_EFFORT_REVIEW`,
@@ -629,7 +631,7 @@ owned by companion processes, not by the core server.
 - `{type: "command", cmd: "/status"}` — send slash command
 
 **Server → Client:**
-- `{type: "chat", role, content, ts, source?, sender_label?, sender_session_id?, client_message_id?, telegram_chat_id?}` — user/assistant/system chat payloads
+- `{type: "chat", role, content, ts, source?, sender_label?, sender_session_id?, client_message_id?, transport?}` — user/assistant/system chat payloads
 - `{type: "log", data: {type, ts, ...}}` — real-time log event
 - `{type: "typing", action: "typing"}` — typing indicator (show animation)
 - `{type: "photo", image_base64, mime, caption, ts}` — assistant image/photo payload
@@ -1617,7 +1619,7 @@ errors surface via the same observability path.
   (Ubuntu + Windows + macOS) via `workflow_dispatch`.
 - Uses **GitHub REST API** directly (`urllib.request`) — no `gh` CLI dependency.
 - **Parameters**: `wait` (bool, default true — poll for results), `timeout_minutes` (1-30, default 15).
-- **Requires**: `GITHUB_TOKEN` + `GITHUB_REPO` configured in Settings → Integrations.
+- **Requires**: `GITHUB_TOKEN` configured in Settings → Secrets and `GITHUB_REPO` configured in Settings → Advanced → Source Control.
 - **Non-core tool**: available via `enable_tools("run_ci_tests")`, not loaded by default.
 - **Workflow**: push branch → find `ci.yml` workflow ID → trigger `workflow_dispatch` →
   poll every 30s → return pass/fail with per-OS failure details and log tails.
@@ -1665,8 +1667,8 @@ Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent acce
 | CLOUDRU_FOUNDATION_MODELS_API_KEY | "" | Optional. Cloud.ru Foundation Models provider key |
 | CLOUDRU_FOUNDATION_MODELS_BASE_URL | `https://foundation-models.api.cloud.ru/v1` | Cloud.ru provider base URL |
 | ANTHROPIC_API_KEY | "" | Optional. Enables direct Anthropic runtime routing (`anthropic::...` model values) and Claude Agent SDK tools (`claude_code_edit`, `advisory_pre_review`) |
-| TELEGRAM_BOT_TOKEN | "" | Optional stored secret used by the Telegram bridge skill after owner grant |
-| TELEGRAM_CHAT_ID | "" | Optional stored setting used by the Telegram bridge skill |
+| transport-skill requested bot token | "" | Optional stored secret used by the Telegram bridge skill after owner grant |
+| transport-skill local chat id | "" | Optional stored setting used by the Telegram bridge skill |
 | OUROBOROS_NETWORK_PASSWORD | "" | Optional. Enables the non-loopback auth gate when set; empty still allows open bind, but startup logs a warning |
 | OUROBOROS_SERVER_HOST | 127.0.0.1 | Server bind host. Use `0.0.0.0` for LAN/Docker access; restart required. |
 | OUROBOROS_TRUST_NONLOCAL_BIND_WITHOUT_PASSWORD | unset | Env-only Docker/Kubernetes escape hatch. When set to `1`, Settings may save ordinary changes while a wildcard/non-localhost bind has no `OUROBOROS_NETWORK_PASSWORD`; use only behind ingress auth, VPN, private networking, or an auth proxy. |
@@ -2567,3 +2569,13 @@ surface (review, runtime mode, sandbox env scrub, byte caps,
   records the original + translated manifest sha256 pair so a later
   reviewer (human or LLM) can verify the adapter did not silently
   drop permissions or env keys.
+
+
+### Generic Transport Metadata and Skill Repair Constraints
+
+Bridge skills pass external-chat provenance through a generic `transport` object (`kind`, `conversation_id`, `sender_label`) instead of core owning any one messenger chat-id field. Skill repair tasks use `/api/command` `task_constraint` with `mode="skill_repair"`, `skill_name`, and `payload_root`; the registry enforces the constraint and edit tools resolve paths relative to that payload root.
+
+
+### TaskConstraint Contract Status
+
+`ouroboros/contracts/task_constraint.py` is an internal structured task envelope used by server, worker, and tool-registry code to carry skill-repair constraints. It is contract-tested by `tests/test_task_constraint_tools.py` and `tests/test_task_constraint_server_routing.py`, but it is not a public PluginAPI surface.

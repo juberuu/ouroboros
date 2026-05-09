@@ -39,6 +39,7 @@ from ouroboros.utils import utc_now_iso, write_text, safe_relpath, run_cmd
 from ouroboros.tools.parallel_review import run_parallel_review as _run_parallel_review, aggregate_review_verdict as _aggregate_review_verdict
 from ouroboros.tools.review_helpers import _run_review_preflight_tests
 from ouroboros.tools.core import is_skill_control_plane_path
+from ouroboros.contracts.task_constraint import normalize_task_constraint, resolve_payload_path
 _CONTENT_OMITTED_PREFIX = "<<CONTENT_OMITTED"
 log = logging.getLogger(__name__)
 
@@ -1052,22 +1053,38 @@ def _str_replace_editor(ctx: ToolContext, path: str, old_str: str, new_str: str)
             action="edit",
         )
 
-    data_skill_target = _data_skill_path(path, pathlib.Path(ctx.drive_root))
-    if data_skill_target is not None:
-        if is_skill_control_plane_path(data_skill_target, pathlib.Path(ctx.drive_root).resolve(strict=False)):
+    data_skill_target = None
+    task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
+    if task_constraint and task_constraint.mode == "skill_repair" and task_constraint.payload_root:
+        try:
+            target = resolve_payload_path(pathlib.Path(ctx.drive_root), task_constraint, path)
+            data_skill_target = target
+        except ValueError as e:
+            return f"⚠️ STR_REPLACE_ERROR: {e}"
+        if is_skill_control_plane_path(target, pathlib.Path(ctx.drive_root).resolve(strict=False)):
             return (
                 "⚠️ STR_REPLACE_BLOCKED: skill provenance, launcher seed, "
                 "marketplace, dependency, and self-authored markers are "
                 "control-plane state. Edit user-authored payload files instead."
             )
-        target = data_skill_target
         invalidation_root = pathlib.Path(ctx.drive_root)
     else:
-        try:
-            target = ctx.repo_path(path)
-        except ValueError as e:
-            return f"⚠️ PATH_ERROR: {e}"
-        invalidation_root = pathlib.Path(ctx.repo_dir)
+        data_skill_target = _data_skill_path(path, pathlib.Path(ctx.drive_root))
+        if data_skill_target is not None:
+            if is_skill_control_plane_path(data_skill_target, pathlib.Path(ctx.drive_root).resolve(strict=False)):
+                return (
+                    "⚠️ STR_REPLACE_BLOCKED: skill provenance, launcher seed, "
+                    "marketplace, dependency, and self-authored markers are "
+                    "control-plane state. Edit user-authored payload files instead."
+                )
+            target = data_skill_target
+            invalidation_root = pathlib.Path(ctx.drive_root)
+        else:
+            try:
+                target = ctx.repo_path(path)
+            except ValueError as e:
+                return f"⚠️ PATH_ERROR: {e}"
+            invalidation_root = pathlib.Path(ctx.repo_dir)
 
     if not target.exists():
         return f"⚠️ STR_REPLACE_ERROR: file not found: {path}"

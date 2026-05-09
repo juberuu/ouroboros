@@ -105,10 +105,15 @@ canonical skill authoring guide. Use
 `data_read(path=..., start_line=..., max_lines=...)` for skill payload
 chunks instead of shell slicing.
 
-Repair tasks run in a constrained mode. When the user message starts with
-`HEAL_MODE_NO_ENABLE`, use only the Repair-allowed data/review tools described
-by the task; do not call shell, browser/search, scheduling, skill execution,
-toggle/enable, repo commit, or extension tools.
+Repair tasks run with a structured `task_constraint.mode="skill_repair"`.
+In that mode all edit paths are relative to the selected skill payload root:
+`plugin.py` means `data/skills/<bucket>/<skill>/plugin.py`. Use
+`str_replace_editor` for one exact replacement, `claude_code_edit` for
+coordinated multi-hunk edits (its cwd is forced to the skill payload), and
+`data_write` only for new files or intentional full-file rewrites. Then run
+`skill_preflight(skill="<name>")` and `review_skill(skill="<name>")`. Do not
+call shell, browser/search, scheduling, skill execution, toggle/enable, repo
+commit, or extension tools in repair mode; the registry enforces this.
 
 After the final payload edit, call `review_skill(skill="<name>")`.
 Self-authored skills still use the standard tri-model skill review; no

@@ -21,6 +21,7 @@ from ouroboros.config import load_settings
 from ouroboros.tools.commit_gate import _invalidate_advisory
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import safe_relpath, utc_now_iso, run_cmd
+from ouroboros.contracts.task_constraint import normalize_task_constraint, resolve_payload_path
 
 log = logging.getLogger(__name__)
 
@@ -455,7 +456,13 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
         return "⚠️ CLAUDE_CODE_UNAVAILABLE: ANTHROPIC_API_KEY not set."
 
     work_dir = str(ctx.repo_dir)
-    if cwd and cwd.strip() not in ("", ".", "./"):
+    task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
+    if task_constraint and task_constraint.mode == "skill_repair" and task_constraint.payload_root:
+        try:
+            work_dir = str(resolve_payload_path(pathlib.Path(ctx.drive_root), task_constraint, cwd or "."))
+        except ValueError as e:
+            return f"⚠️ CLAUDE_CODE_ERROR: {e}"
+    elif cwd and cwd.strip() not in ("", ".", "./"):
         raw_cwd = cwd.strip()
         norm_cwd = raw_cwd.replace("\\", "/").strip().lstrip("/")
         if norm_cwd.startswith("data/"):
@@ -486,6 +493,14 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
         if candidate.exists():
             work_dir = str(candidate)
     work_dir_path = pathlib.Path(work_dir).resolve()
+    repair_sidecar_snapshots = {}
+    if task_constraint and task_constraint.mode == "skill_repair":
+        for sidecar_name in (".clawhub.json", ".ouroboroshub.json", ".self_authored.json", ".seed-origin", "SKILL.openclaw.md"):
+            sidecar_path = work_dir_path / sidecar_name
+            try:
+                repair_sidecar_snapshots[sidecar_path] = sidecar_path.read_bytes() if sidecar_path.exists() else None
+            except OSError:
+                repair_sidecar_snapshots[sidecar_path] = None
     target_repo_root = _resolve_git_root(work_dir_path)
     repo_mode = target_repo_root is not None
     if target_repo_root is None:
@@ -548,6 +563,27 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
 
             if not result.success:
                 return f"⚠️ CLAUDE_CODE_ERROR: {result.error}\n\n{result.result_text}"
+
+            restored_sidecars = []
+            for sidecar_path, before_bytes in repair_sidecar_snapshots.items():
+                try:
+                    after_exists = sidecar_path.exists()
+                    after_bytes = sidecar_path.read_bytes() if after_exists else None
+                    if after_bytes != before_bytes:
+                        if before_bytes is None:
+                            sidecar_path.unlink(missing_ok=True)
+                        else:
+                            sidecar_path.write_bytes(before_bytes)
+                        restored_sidecars.append(sidecar_path.name)
+                except OSError:
+                    restored_sidecars.append(sidecar_path.name)
+            if restored_sidecars:
+                return (
+                    "⚠️ HEAL_MODE_BLOCKED: Repair claude_code_edit attempted to modify "
+                    "skill provenance/control-plane sidecars: "
+                    + ", ".join(sorted(set(restored_sidecars)))
+                    + ". The sidecar changes were reverted; edit payload code files instead."
+                )
 
             after_changed = _status_snapshot(target_repo_root)
             if repo_mode and after_changed != before_changed:

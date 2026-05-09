@@ -68,6 +68,15 @@ class ChatInbound(TypedDict):
     client_message_id: NotRequired[str]
 
 
+class TaskConstraintInbound(TypedDict, total=False):
+    mode: str
+    skill_name: str
+    payload_root: str
+    allow_enable: bool
+    allow_review: bool
+    extra_allowlist: list[str]
+
+
 class CommandInbound(TypedDict):
     """Inbound WS command message (header buttons).
 
@@ -84,13 +93,21 @@ class CommandInbound(TypedDict):
 # WebSocket — outbound (``supervisor.message_bus`` / ``server.broadcast_ws``)
 # ---------------------------------------------------------------------------
 
+class TransportMetadata(TypedDict, total=False):
+    """Generic external transport provenance for bridge skills."""
+
+    kind: str
+    conversation_id: str
+    sender_label: str
+
+
 class ChatOutbound(TypedDict):
     """Outbound WS chat frame.
 
     Required keys are the ones every ``_broadcast_fn({...})`` call in
     ``supervisor/message_bus.py`` sets unconditionally. Provenance fields
     (``source``, ``sender_label``, …) are populated only by some code paths
-    (Telegram ingestion, web handler) and are ``NotRequired``.
+    (external transport ingestion, web handler) and are ``NotRequired``.
     """
 
     type: Literal["chat"]
@@ -104,6 +121,8 @@ class ChatOutbound(TypedDict):
     sender_label: NotRequired[str]
     sender_session_id: NotRequired[str]
     client_message_id: NotRequired[str]
+    transport: NotRequired[TransportMetadata]
+    # Deprecated compatibility field: runtime emits `transport` instead.
     telegram_chat_id: NotRequired[int]
 
 
@@ -118,6 +137,8 @@ class PhotoOutbound(TypedDict):
     caption: NotRequired[str]
     source: NotRequired[str]
     sender_label: NotRequired[str]
+    transport: NotRequired[TransportMetadata]
+    # Deprecated compatibility field: runtime emits `transport` instead.
     telegram_chat_id: NotRequired[int]
 
 

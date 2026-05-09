@@ -47,6 +47,7 @@ from ouroboros.agent_task_pipeline import (
     build_trace_summary, emit_task_results, build_review_context,
 )
 from ouroboros.task_results import STATUS_RUNNING, write_task_result
+from ouroboros.contracts.task_constraint import normalize_task_constraint
 
 
 _worker_boot_logged = False
@@ -168,6 +169,7 @@ class OuroborosAgent:
             emit_progress_fn=self._emit_progress,
             task_depth=int(task.get("depth", 0)),
             is_direct_chat=bool(task.get("_is_direct_chat")),
+            task_constraint=normalize_task_constraint(task.get("task_constraint")),
         )
         self.tools.set_context(ctx)
 

@@ -287,6 +287,7 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
             image_base64=str(payload.get("image_base64") or ""),
             image_mime=str(payload.get("image_mime") or ""),
             image_caption=image_caption,
+            transport=payload.get("transport") if isinstance(payload.get("transport"), dict) else {},
         )
         if not wait_for_response:
             return JSONResponse({"ok": True, "status": "queued"}, status_code=202)

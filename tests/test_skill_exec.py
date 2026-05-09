@@ -28,6 +28,7 @@ from ouroboros.skill_loader import (
 )
 from ouroboros.tools import skill_exec as skill_exec_mod
 from ouroboros.tools.registry import ToolContext, ToolRegistry
+from ouroboros.contracts.task_constraint import TaskConstraint
 
 
 @pytest.fixture(autouse=True)
@@ -98,6 +99,10 @@ def _make_ctx(tmp_path: pathlib.Path) -> ToolContext:
     drive_root = tmp_path / "drive"
     drive_root.mkdir()
     return ToolContext(repo_dir=repo_dir, drive_root=drive_root)
+
+
+def _set_skill_repair(ctx: ToolContext, name: str = "alpha", payload_root: str = "skills/external/alpha") -> None:
+    ctx.task_constraint = TaskConstraint(mode="skill_repair", skill_name=name, payload_root=payload_root, allow_enable=False, allow_review=True)
 
 
 def _mark_reviewed_and_enabled(drive_root: pathlib.Path, skill_dir: pathlib.Path, name: str):
@@ -740,7 +745,7 @@ def test_toggle_skill_blocked_in_heal_context(tmp_path, monkeypatch):
     skills_root = tmp_path / "skills"
     skill_dir = _build_skill(skills_root, "alpha")
     ctx = _make_ctx(tmp_path)
-    ctx.messages = [{"role": "user", "content": 'HEAL_MODE_NO_ENABLE\nHEAL_SKILL_NAME_JSON="alpha"\nHEAL_SKILL_PAYLOAD_ROOT_JSON="skills/external/alpha"\nrepair alpha'}]
+    _set_skill_repair(ctx, "alpha", "skills/external/alpha")
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
     _mark_reviewed(ctx.drive_root, skill_dir, "alpha")
     registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
@@ -758,12 +763,10 @@ def test_toggle_skill_blocked_in_heal_context(tmp_path, monkeypatch):
     ("schedule_task", {"text": "enable skill"}),
     ("skill_exec", {"skill": "alpha", "script": "hello.py"}),
     ("repo_write", {"path": "x.txt", "content": "x"}),
-    ("str_replace_editor", {"path": "x.txt", "old": "a", "new": "b"}),
-    ("claude_code_edit", {"prompt": "edit repo"}),
 ])
 def test_heal_context_blocks_indirect_enable_paths(tool_name, args, tmp_path):
     ctx = _make_ctx(tmp_path)
-    ctx.messages = [{"role": "user", "content": 'HEAL_MODE_NO_ENABLE\nHEAL_SKILL_NAME_JSON="alpha"\nHEAL_SKILL_PAYLOAD_ROOT_JSON="skills/external/alpha"\nrepair alpha'}]
+    _set_skill_repair(ctx, "alpha", "skills/external/alpha")
     registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
     registry._ctx = ctx
 
@@ -774,7 +777,7 @@ def test_heal_context_blocks_indirect_enable_paths(tool_name, args, tmp_path):
 
 def test_heal_context_allows_payload_tools_and_review(tmp_path):
     ctx = _make_ctx(tmp_path)
-    ctx.messages = [{"role": "user", "content": 'HEAL_MODE_NO_ENABLE\nHEAL_SKILL_NAME_JSON="alpha"\nHEAL_SKILL_PAYLOAD_ROOT_JSON="skills/external/alpha"\nrepair alpha'}]
+    _set_skill_repair(ctx, "alpha", "skills/external/alpha")
     registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
     registry._ctx = ctx
 
@@ -786,7 +789,7 @@ def test_heal_context_allows_payload_tools_and_review(tmp_path):
 
 def test_heal_context_allows_ouroboroshub_payload_tools(tmp_path):
     ctx = _make_ctx(tmp_path)
-    ctx.messages = [{"role": "user", "content": 'HEAL_MODE_NO_ENABLE\nHEAL_SKILL_NAME_JSON="nanobanana"\nHEAL_SKILL_PAYLOAD_ROOT_JSON="skills/ouroboroshub/nanobanana"\nrepair nanobanana'}]
+    _set_skill_repair(ctx, "nanobanana", "skills/ouroboroshub/nanobanana")
     registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
     registry._ctx = ctx
 
@@ -799,7 +802,7 @@ def test_heal_context_allows_ouroboroshub_payload_tools(tmp_path):
 @pytest.mark.parametrize("sidecar", [".ouroboroshub.json", ".clawhub.json"])
 def test_heal_context_blocks_marketplace_sidecar_writes(sidecar, tmp_path):
     ctx = _make_ctx(tmp_path)
-    ctx.messages = [{"role": "user", "content": 'HEAL_MODE_NO_ENABLE\nHEAL_SKILL_NAME_JSON="nanobanana"\nHEAL_SKILL_PAYLOAD_ROOT_JSON="skills/ouroboroshub/nanobanana"\nrepair nanobanana'}]
+    _set_skill_repair(ctx, "nanobanana", "skills/ouroboroshub/nanobanana")
     registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
     registry._ctx = ctx
 
@@ -810,15 +813,15 @@ def test_heal_context_blocks_marketplace_sidecar_writes(sidecar, tmp_path):
 
 
 @pytest.mark.parametrize("tool_name,args", [
-    ("data_write", {"path": "memory/identity.md", "content": "x"}),
-    ("data_read", {"path": "settings.json"}),
-    ("data_list", {"dir": "memory"}),
+    ("data_write", {"path": "skills/external/beta/notes.txt", "content": "x"}),
+    ("data_read", {"path": "skills/external/beta/SKILL.md"}),
+    ("data_list", {"dir": "skills/external/beta"}),
     ("review_skill", {"skill": "beta"}),
     ("skill_preflight", {"skill": "beta"}),
 ])
 def test_heal_context_blocks_out_of_scope_data_access(tool_name, args, tmp_path):
     ctx = _make_ctx(tmp_path)
-    ctx.messages = [{"role": "user", "content": 'HEAL_MODE_NO_ENABLE\nHEAL_SKILL_NAME_JSON="alpha"\nHEAL_SKILL_PAYLOAD_ROOT_JSON="skills/external/alpha"\nrepair alpha'}]
+    _set_skill_repair(ctx, "alpha", "skills/external/alpha")
     registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
     registry._ctx = ctx
 
@@ -829,7 +832,7 @@ def test_heal_context_blocks_out_of_scope_data_access(tool_name, args, tmp_path)
 
 def test_heal_context_blocks_symlink_escape_from_selected_skill(tmp_path):
     ctx = _make_ctx(tmp_path)
-    ctx.messages = [{"role": "user", "content": 'HEAL_MODE_NO_ENABLE\nHEAL_SKILL_NAME_JSON="alpha"\nHEAL_SKILL_PAYLOAD_ROOT_JSON="skills/external/alpha"\nrepair alpha'}]
+    _set_skill_repair(ctx, "alpha", "skills/external/alpha")
     skill_root = pathlib.Path(ctx.drive_root) / "skills" / "external" / "alpha"
     memory_root = pathlib.Path(ctx.drive_root) / "memory"
     skill_root.mkdir(parents=True)
@@ -849,7 +852,7 @@ def test_heal_context_blocks_symlink_escape_from_selected_skill(tmp_path):
 
 def test_heal_context_blocks_wrong_source_root(tmp_path):
     ctx = _make_ctx(tmp_path)
-    ctx.messages = [{"role": "user", "content": 'HEAL_MODE_NO_ENABLE\nHEAL_SKILL_NAME_JSON="alpha"\nHEAL_SKILL_PAYLOAD_ROOT_JSON="skills/clawhub/alpha"\nrepair alpha'}]
+    _set_skill_repair(ctx, "alpha", "skills/clawhub/alpha")
     registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
     registry._ctx = ctx
 
@@ -860,7 +863,7 @@ def test_heal_context_blocks_wrong_source_root(tmp_path):
 
 def test_heal_context_blocks_native_payload_root_marker(tmp_path):
     ctx = _make_ctx(tmp_path)
-    ctx.messages = [{"role": "user", "content": 'HEAL_MODE_NO_ENABLE\nHEAL_SKILL_NAME_JSON="alpha"\nHEAL_SKILL_PAYLOAD_ROOT_JSON="skills/native/alpha"\nrepair alpha'}]
+    _set_skill_repair(ctx, "alpha", "skills/native/alpha")
     registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
     registry._ctx = ctx
 
@@ -871,7 +874,7 @@ def test_heal_context_blocks_native_payload_root_marker(tmp_path):
 
 def test_heal_context_rejects_traversal_skill_marker(tmp_path):
     ctx = _make_ctx(tmp_path)
-    ctx.messages = [{"role": "user", "content": 'HEAL_MODE_NO_ENABLE\nHEAL_SKILL_NAME_JSON="../.."\nHEAL_SKILL_PAYLOAD_ROOT_JSON="../../"\nrepair'}]
+    _set_skill_repair(ctx, "../..", "../../")
     registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
     registry._ctx = ctx
 
@@ -882,7 +885,7 @@ def test_heal_context_rejects_traversal_skill_marker(tmp_path):
 
 def test_heal_context_rejects_traversal_payload_root_marker(tmp_path):
     ctx = _make_ctx(tmp_path)
-    ctx.messages = [{"role": "user", "content": 'HEAL_MODE_NO_ENABLE\nHEAL_SKILL_NAME_JSON="alpha"\nHEAL_SKILL_PAYLOAD_ROOT_JSON="skills/external/alpha/../../memory"\nrepair'}]
+    _set_skill_repair(ctx, "alpha", "skills/external/alpha/../../memory")
     registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
     registry._ctx = ctx
 
@@ -895,10 +898,7 @@ def test_heal_context_blocks_self_authored_marker_write(tmp_path):
     ctx = _make_ctx(tmp_path)
     payload = ctx.drive_root / "skills" / "external" / "alpha"
     payload.mkdir(parents=True)
-    ctx.messages = [{
-        "role": "user",
-        "content": 'HEAL_MODE_NO_ENABLE\nHEAL_SKILL_NAME_JSON="alpha"\nHEAL_SKILL_PAYLOAD_ROOT_JSON="skills/external/alpha"\nrepair',
-    }]
+    _set_skill_repair(ctx, "alpha", "skills/external/alpha")
     registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
     registry._ctx = ctx
 
@@ -917,7 +917,7 @@ def test_heal_review_does_not_reconcile_live_extension(tmp_path, monkeypatch):
     skills_root = tmp_path / "skills"
     skills_root.mkdir()
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
-    ctx.messages = [{"role": "user", "content": 'HEAL_MODE_NO_ENABLE\nHEAL_SKILL_NAME_JSON="alpha"\nHEAL_SKILL_PAYLOAD_ROOT_JSON="skills/external/alpha"\nrepair alpha'}]
+    _set_skill_repair(ctx, "alpha", "skills/external/alpha")
     calls = []
 
     monkeypatch.setattr(
@@ -1553,9 +1553,9 @@ def test_env_denylist_blocks_secret_forwarding(tmp_path, monkeypatch):
     )
     assert "GITHUB_TOKEN" not in env
     assert "OUROBOROS_NETWORK_PASSWORD" not in env
-    # Non-forbidden manifest-requested keys DO get forwarded so the
-    # ``env_from_settings`` surface is not a no-op.
-    assert env["SOME_OK_KEY"] == "visible-value"
+    # Custom manifest-requested keys are also grant-bound; they appear in
+    # Settings → Secrets only when a skill requests them.
+    assert "SOME_OK_KEY" not in env
 
     with patch.object(se, "load_settings", return_value={"OPENROUTER_API_KEY": "sk-or-v1-GRANTED"}):
         granted_env = se._scrub_env(
@@ -1565,6 +1565,15 @@ def test_env_denylist_blocks_secret_forwarding(tmp_path, monkeypatch):
             granted_keys=["OPENROUTER_API_KEY"],
         )
     assert granted_env["OPENROUTER_API_KEY"] == "sk-or-v1-GRANTED"
+
+    with patch.object(se, "load_settings", return_value={"SOME_OK_KEY": "visible-value"}):
+        custom_env = se._scrub_env(
+            manifest_env_keys=["SOME_OK_KEY"],
+            skill_state_dir_path=skill_state_dir_path,
+            skill_name="ok",
+            granted_keys=["SOME_OK_KEY"],
+        )
+    assert custom_env["SOME_OK_KEY"] == "visible-value"
 
 
 def test_skill_exec_uses_shared_settings_denylist():

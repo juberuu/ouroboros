@@ -61,7 +61,7 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     # heal blocks ``enable_tools`` so the agent could never reach the very
     # tools the prompt asked it to call. Promoting both to core makes the
     # everyday "fix this skill" workflow a one-shot — no enable round-trip.
-    "review_skill", "skill_preflight",
+    "list_skills", "review_skill", "skill_preflight",
 })
 
 # Meta-tools: always visible alongside core tools

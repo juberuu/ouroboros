@@ -4,6 +4,8 @@ import { bindLocalModelControls } from './settings_local_model.js';
 import { bindSecretInputs, bindSettingsTabs, renderSettingsPage } from './settings_ui.js';
 import { escapeHtmlAttr as escapeHtml, formatDualVersion } from './utils.js';
 
+let markSettingsDirty = () => {};
+
 function byId(id) {
     return document.getElementById(id);
 }
@@ -45,6 +47,67 @@ function resetSecretClearFlags(root) {
 function applySecretInputs(root, settings) {
     root.querySelectorAll('[data-secret-setting]').forEach((input) => {
         applyInputValue(input.id, settings[input.dataset.secretSetting]);
+    });
+}
+
+
+function wireSecretRow(row) {
+    const input = row.querySelector('.secret-input');
+    const toggle = row.querySelector('[data-row-secret-toggle]');
+    const clear = row.querySelector('[data-row-secret-clear]');
+    if (input) input.addEventListener('input', () => { if (input.value.trim()) delete input.dataset.forceClear; });
+    if (toggle && input) toggle.addEventListener('click', () => { input.type = input.type === 'password' ? 'text' : 'password'; toggle.textContent = input.type === 'password' ? 'Show' : 'Hide'; });
+    if (clear && input) clear.addEventListener('click', () => { input.value = ''; input.type = 'password'; input.dataset.forceClear = '1'; if (toggle) toggle.textContent = 'Show'; markSettingsDirty(); });
+}
+
+function customSecretRow(key = '', value = '') {
+    const id = `custom-secret-${Math.random().toString(36).slice(2)}`;
+    const row = document.createElement('div');
+    row.className = 'settings-custom-secret-row';
+    row.dataset.customSecretRow = '1';
+    row.innerHTML = `
+        <div class="form-field"><label>Key</label><input data-custom-secret-key value="${escapeHtml(key)}" placeholder="SLACK_WEBHOOK_URL" spellcheck="false"></div>
+        <div class="form-field"><label>Value</label><div class="secret-input-row">
+            <input id="${id}" data-custom-secret-value class="secret-input" type="password" value="${escapeHtml(value || '')}" placeholder="Secret value">
+            <button type="button" class="settings-ghost-btn" data-row-secret-toggle>Show</button>
+            <button type="button" class="settings-ghost-btn" data-row-secret-clear>Clear</button>
+            <button type="button" class="settings-ghost-btn" data-custom-secret-remove>Remove</button>
+        </div><div class="settings-inline-note" data-custom-secret-error hidden></div></div>`;
+    wireSecretRow(row);
+    row.querySelector('[data-custom-secret-remove]')?.addEventListener('click', () => { row.dataset.removeCustomSecret = '1'; row.hidden = true; markSettingsDirty(); });
+    return row;
+}
+
+function renderCustomSecrets(root, settings) {
+    const host = root.querySelector('#custom-secrets-list');
+    if (!host) return;
+    host.innerHTML = '';
+    const keys = Array.isArray(settings?._meta?.custom_secret_keys) ? settings._meta.custom_secret_keys : [];
+    keys.forEach((key) => host.appendChild(customSecretRow(key, settings[key] || '')));
+    if (!keys.length) host.innerHTML = '<div class="muted">No custom keys yet.</div>';
+}
+
+function renderRequestedSkillSecrets(root, skills, settings) {
+    const host = root.querySelector('#skill-requested-secrets');
+    if (!host) return;
+    const rows = [];
+    (Array.isArray(skills) ? skills : []).forEach((skill) => {
+        (skill?.grants?.requested_keys || []).forEach((key) => { if (key) rows.push({ key: String(key), skill: String(skill.name || '') }); });
+    });
+    const unique = []; const seen = new Set();
+    rows.forEach((row) => { const id = `${row.key}:${row.skill}`; if (!seen.has(id)) { seen.add(id); unique.push(row); } });
+    if (!unique.length) { host.innerHTML = '<div class="muted">No skill-requested secrets.</div>'; return; }
+    host.innerHTML = '';
+    unique.forEach((row, idx) => {
+        const id = `requested-secret-${idx}`;
+        const el = document.createElement('div');
+        el.className = 'settings-requested-secret-row';
+        el.innerHTML = `<div class="form-field"><label>${escapeHtml(row.key)}</label><div class="secret-input-row">
+            <input id="${id}" data-secret-setting="${escapeHtml(row.key)}" class="secret-input" type="password" value="${escapeHtml(settings[row.key] || '')}" placeholder="Requested by ${escapeHtml(row.skill)}">
+            <button type="button" class="settings-ghost-btn" data-row-secret-toggle>Show</button>
+            <button type="button" class="settings-ghost-btn" data-row-secret-clear>Clear</button>
+        </div><div class="settings-inline-note">Requested by ${escapeHtml(row.skill)}</div></div>`;
+        wireSecretRow(el); host.appendChild(el);
     });
 }
 
@@ -404,10 +467,8 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
         if (s.OUROBOROS_HARD_TIMEOUT_SEC) byId('s-hard-timeout').value = s.OUROBOROS_HARD_TIMEOUT_SEC;
         if (s.OUROBOROS_TOOL_TIMEOUT_SEC) byId('s-tool-timeout').value = s.OUROBOROS_TOOL_TIMEOUT_SEC;
         applyInputValue('s-websearch-model', s.OUROBOROS_WEBSEARCH_MODEL);
-        applyInputValue('s-gh-token', s.GITHUB_TOKEN);
         applyInputValue('s-gh-repo', s.GITHUB_REPO);
         applySecretInputs(page, s);
-        applyInputValue('s-telegram-chat-id', s.TELEGRAM_CHAT_ID);
         applyInputValue('s-local-source', s.LOCAL_MODEL_SOURCE);
         applyInputValue('s-local-filename', s.LOCAL_MODEL_FILENAME);
         if (s.LOCAL_MODEL_PORT) byId('s-local-port').value = s.LOCAL_MODEL_PORT;
@@ -461,12 +522,15 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
         currentSettings = data;
         applySettings(data);
         renderExtensionSettingsSections(page, sections);
+        renderRequestedSkillSecrets(page, extData.skills || [], data);
+        renderCustomSecrets(page, data);
         setSettingsCleanBaseline();
         closeSettingsModelPickers();
         _renderNetworkHint(data._meta);
         renderClaudeCodeUi();
         settingsLoaded = true;
-        syncSettingsLoadState();
+        markSettingsDirty = updateSettingsDirtyState;
+    syncSettingsLoadState();
         // Always start polling so a below-baseline SDK surfaces even before
         // the user sets ANTHROPIC_API_KEY. `refreshClaudeCodeStatus` is now
         // unconditional, and `shouldShowClaudeRuntimeCard` uses the runtime
@@ -539,17 +603,22 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
             OPENAI_BASE_URL: byId('s-openai-base-url').value.trim(),
             OPENAI_COMPATIBLE_BASE_URL: byId('s-openai-compatible-base-url').value.trim(),
             CLOUDRU_FOUNDATION_MODELS_BASE_URL: byId('s-cloudru-base-url').value.trim(),
-            TELEGRAM_CHAT_ID: byId('s-telegram-chat-id')?.value.trim() || '',
         };
 
         page.querySelectorAll('[data-secret-setting]').forEach((input) => {
             collectSecretValue(input.id, body);
         });
-        const customKey = (byId('s-custom-secret-key')?.value || '').trim().toUpperCase();
-        const customValue = byId('s-custom-secret-value')?.value || '';
-        if (/^[A-Z][A-Z0-9_]{2,}$/.test(customKey)) {
-            body[customKey] = customValue;
-        }
+        page.querySelectorAll('[data-custom-secret-row]').forEach((row) => {
+            const keyInput = row.querySelector('[data-custom-secret-key]');
+            const valueInput = row.querySelector('[data-custom-secret-value]');
+            const key = (keyInput?.value || '').trim().toUpperCase();
+            const error = row.querySelector('[data-custom-secret-error]');
+            if (!key) return;
+            if (!/^[A-Z][A-Z0-9_]{2,}$/.test(key)) { if (error) { error.hidden = false; error.textContent = 'Use uppercase letters, numbers, and underscores.'; } return; }
+            if (row.dataset.removeCustomSecret === '1' || valueInput?.dataset.forceClear === '1') { body[key] = ''; return; }
+            const value = valueInput?.value || '';
+            if (value && !value.includes('...')) body[key] = value;
+        });
 
         return body;
     }
@@ -596,9 +665,16 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
     page.addEventListener('input', updateSettingsDirtyState);
     page.addEventListener('change', updateSettingsDirtyState);
     page.addEventListener('click', (event) => {
-        if (event.target.closest('[data-effort-value], .secret-clear')) {
+        if (event.target.closest('[data-effort-value], .secret-clear, [data-row-secret-clear], [data-custom-secret-remove]')) {
             queueMicrotask(updateSettingsDirtyState);
         }
+    });
+    byId('btn-add-custom-secret')?.addEventListener('click', () => {
+        const host = byId('custom-secrets-list');
+        if (!host) return;
+        if (host.querySelector('.muted')) host.innerHTML = '';
+        host.appendChild(customSecretRow());
+        markSettingsDirty();
     });
 
     function closeSettingsModelPickers(exceptPicker = null) {

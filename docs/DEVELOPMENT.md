@@ -224,6 +224,17 @@ Before every commit, verify the following:
 - [ ] New Gateway (if extracted)? Contains no business logic, only transport.
 - [ ] New memory/data files? Should they appear in LLM context (`context.py`)?
 
+#### Skill Repair Task Constraints
+- Skill repair tasks use structured `task_constraint.mode="skill_repair"`, not prompt markers.
+- In repair mode, edit paths are payload-relative: `plugin.py` means the selected `data/skills/<bucket>/<skill>/plugin.py`.
+- Use `str_replace_editor` for one exact replacement, `claude_code_edit` for coordinated multi-hunk edits, and `data_write` only for new files or intentional full rewrites.
+- Finish repair with `skill_preflight` and `review_skill`; grants and enablement stay owner-controlled.
+
+#### Page Header Layout
+- Top-level page chrome (`renderPageHeader`, tab strips, primary actions) must sit outside the scrolling content region.
+- Pages use an outer flex column plus an inner `<page>-scroll` body with `overflow-y:auto`. Skills, Widgets, Settings, and Chat follow this pattern.
+- A new top-level page that scrolls its header together with content violates the architecture mirror: fix the layout, not the symptom.
+
 #### LLM Call Rules
 - [ ] New LLM calls go through the shared `LLMClient` / `llm.py` layer — no ad-hoc HTTP clients or direct provider SDKs outside that layer. **Exception (v5.7.0+):** skill / extension `plugin.py` modules may call providers directly because they have not yet been migrated to a host-mediated `api.invoke_llm(...)` bridge. When that bridge lands, the exception goes away. Runtime callers (anything inside `ouroboros/`) must still use `LLMClient`.
 
