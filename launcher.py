@@ -35,6 +35,7 @@ from ouroboros.config import (
     REPO_DIR,
     RESTART_EXIT_CODE,
     SETTINGS_PATH,
+    SETTINGS_DEFAULTS,
     acquire_pid_lock,
     apply_settings_to_env as _apply_settings_to_env,
     load_settings,
@@ -424,6 +425,23 @@ def _kill_stale_on_port(port: int) -> None:
         kill_process_on_port(port)
 
 
+def _host_service_port() -> int:
+    default_port = int(SETTINGS_DEFAULTS.get("OUROBOROS_HOST_SERVICE_PORT", 8767))
+    try:
+        raw_port = os.environ.get("OUROBOROS_HOST_SERVICE_PORT")
+        if not str(raw_port or "").strip():
+            raw_port = _load_settings().get("OUROBOROS_HOST_SERVICE_PORT", default_port)
+        return int(raw_port)
+    except (TypeError, ValueError, OSError):
+        return default_port
+
+
+def _kill_stale_runtime_ports(port: int) -> None:
+    """Clear all core runtime listener ports before starting or restarting."""
+    _kill_stale_on_port(port)
+    _kill_stale_on_port(_host_service_port())
+
+
 def _wait_for_server(port: int, timeout: float = 30.0) -> bool:
     """Wait for the agent HTTP server to become responsive."""
     import urllib.request
@@ -461,7 +479,7 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
     global _agent_proc, _agent_job
     crash_times: list[float] = []
 
-    _kill_stale_on_port(port)
+    _kill_stale_runtime_ports(port)
 
     while not _shutdown_event.is_set():
         try:
@@ -491,7 +509,7 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
         if exit_code == PANIC_EXIT_CODE:
             log.info("Panic stop (exit code %d) — shutting down completely.", PANIC_EXIT_CODE)
             _shutdown_event.set()
-            _kill_stale_on_port(port)
+            _kill_stale_runtime_ports(port)
             import multiprocessing as _mp
 
             for child in _mp.active_children():
@@ -512,7 +530,7 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
             log.info("Agent requested restart (exit code 42). Restarting...")
             _sync_existing_repo_from_bundle()
             _install_deps()
-            _kill_stale_on_port(port)
+            _kill_stale_runtime_ports(port)
             continue
 
         now = time.time()
@@ -523,7 +541,7 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
             break
 
         log.info("Agent crashed. Restarting in 3s...")
-        _kill_stale_on_port(port)
+        _kill_stale_runtime_ports(port)
         time.sleep(3)
 
 
@@ -1001,8 +1019,8 @@ def main():
     )
 
     def _kill_orphaned_children() -> None:
-        """Final safety net: kill any processes still on the server port."""
-        _kill_stale_on_port(port)
+        """Final safety net: kill any processes still on runtime ports."""
+        _kill_stale_runtime_ports(port)
         _kill_stale_on_port(8766)
         try:
             companions = json.loads((DATA_DIR / "state" / "extension_companions.json").read_text(encoding="utf-8"))
