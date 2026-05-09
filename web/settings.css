@@ -59,7 +59,7 @@
     display: flex;
     flex-direction: column;
     gap: 18px;
-    padding: 4px 2px 18px;
+    padding: 4px 2px 88px;
 }
 
 .settings-panel {
@@ -101,6 +101,27 @@
 
 .settings-shell .form-section h3 {
     margin-bottom: 0;
+}
+
+.settings-card {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 18px;
+    border-radius: 18px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.settings-card h3 {
+    margin: 0;
+}
+
+.settings-card-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 14px;
 }
 
 .settings-provider-card {
@@ -388,6 +409,32 @@
     border-color: rgba(232, 93, 111, 0.35);
 }
 
+.settings-secret-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.settings-custom-secret-row {
+    display: grid;
+    grid-template-columns: minmax(180px, 0.65fr) minmax(260px, 1.35fr) auto;
+    gap: 10px;
+    align-items: end;
+    padding: 12px;
+    border-radius: var(--radius);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    background: rgba(255, 255, 255, 0.025);
+}
+
+.settings-custom-secret-row .secret-input-row {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+}
+
+.settings-custom-secret-remove {
+    min-height: 40px;
+    padding: 0 12px;
+}
+
 .settings-model-grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -646,6 +693,12 @@
 
     .secret-input-row {
         grid-template-columns: 1fr;
+    }
+
+    .settings-card-head,
+    .settings-custom-secret-row {
+        grid-template-columns: 1fr;
+        align-items: stretch;
     }
 
     .settings-effort-group {

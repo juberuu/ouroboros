@@ -546,7 +546,7 @@ def _drain_incoming_messages(
         for dmsg in drive_msgs:
             messages.append({
                 "role": "user",
-                "content": f"[Owner message during task]: {dmsg}",
+                "content": f"[Message from my human]: {dmsg}",
             })
             if event_queue is not None:
                 try:

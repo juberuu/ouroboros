@@ -233,6 +233,9 @@ Before every commit, verify the following:
 #### Page Header Layout
 - Top-level page chrome (`renderPageHeader`, tab strips, primary actions) must sit outside the scrolling content region.
 - Pages use an outer flex column plus an inner `<page>-scroll` body with `overflow-y:auto`. Skills, Widgets, Settings, and Chat follow this pattern.
+- Page icons come from `web/modules/page_icons.js`; do not paste divergent SVGs into individual page modules or the navigation rail.
+- Primary page actions, including Refresh, live in the `renderPageHeader({ actionsHtml })` slot on the right. Do not add ad-hoc refresh rows inside scroll bodies.
+- Non-chat top-level pages use `.app-page-glass` for the shared dim/brand backdrop. Header padding should stay compact; if a page needs more space, simplify its copy rather than growing the chrome.
 - A new top-level page that scrolls its header together with content violates the architecture mirror: fix the layout, not the symptom.
 
 #### LLM Call Rules
@@ -374,6 +377,16 @@ horizontal-scroll pills with `scrollIntoView({ inline: 'center' })`
 on activation so the active pill is always visible. Do not reintroduce
 the v5.6.0 drill-down accordion (`settings-subtab-open` /
 `settings-mobile-back`) — it traded one tap for two.
+
+### Notifications
+
+Transient status must use `web/modules/toast.js::showToast()`, which renders
+fixed-position notifications in `#toast-stack`. Toasts must not be inserted
+into page content or headers, because that shifts the interface while the
+person is reading or clicking. Use reserved inline status rows only when the
+status belongs to a specific control group and that row is always present
+(for example marketplace search status). Do not create page-prepended banners
+for short-lived events such as review started, install queued, or grant saved.
 
 ### Accent colors
 

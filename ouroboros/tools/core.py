@@ -1067,9 +1067,9 @@ def get_tools() -> List[ToolEntry]:
             "name": "forward_to_worker",
             "description": (
                 "Forward a message to a running worker task's mailbox. "
-                "Use when the owner sends a message during your active conversation "
+                "Use when my human sends a message during your active conversation "
                 "that is relevant to a specific running background task. "
-                "The worker will see it as [Owner message during task] on its next LLM round."
+                "The worker will see it as [Message from my human] on its next LLM round."
             ),
             "parameters": {"type": "object", "properties": {
                 "task_id": {"type": "string", "description": "ID of the running task to forward to"},

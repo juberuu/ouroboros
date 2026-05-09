@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import asyncio
 
 import server
 
@@ -42,3 +43,99 @@ def test_constrained_repair_is_not_injected_into_busy_agent(monkeypatch):
 
     assert calls["inject"] == 0
     assert calls["direct"] == [{"mode": "skill_repair", "skill_name": "alpha", "payload_root": "skills/external/alpha"}]
+
+
+def test_visible_repair_command_is_deduped(monkeypatch):
+    calls = []
+
+    class Request:
+        async def json(self):
+            return {
+                "cmd": "repair",
+                "visible_text": "Repair task queued",
+                "visible_task_id": "skill_repair_alpha",
+                "task_constraint": {"mode": "skill_repair", "skill_name": "alpha", "payload_root": "skills/external/alpha"},
+            }
+
+    class Bridge:
+        def ui_send(self, text, **kwargs):
+            calls.append((text, kwargs))
+
+    monkeypatch.setattr(server, "_RECENT_VISIBLE_COMMANDS", {})
+    monkeypatch.setattr("supervisor.message_bus.get_bridge", lambda: Bridge())
+    monkeypatch.setattr("supervisor.message_bus.log_chat", lambda *a, **k: None)
+    monkeypatch.setattr(server, "broadcast_ws_sync", lambda payload: None)
+
+    first = asyncio.run(server.api_command(Request()))
+    second = asyncio.run(server.api_command(Request()))
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert len(calls) == 1
+
+
+def test_failed_visible_repair_command_does_not_poison_dedupe(monkeypatch):
+    calls = []
+    bridges = []
+
+    class Request:
+        async def json(self):
+            return {
+                "cmd": "repair",
+                "visible_text": "Repair task queued",
+                "visible_task_id": "skill_repair_alpha",
+                "task_constraint": {"mode": "skill_repair", "skill_name": "alpha", "payload_root": "skills/external/alpha"},
+            }
+
+    class FailingBridge:
+        def ui_send(self, text, **kwargs):
+            raise RuntimeError("bus down")
+
+    class HealthyBridge:
+        def ui_send(self, text, **kwargs):
+            calls.append((text, kwargs))
+
+    bridges.extend([FailingBridge(), HealthyBridge()])
+    monkeypatch.setattr(server, "_RECENT_VISIBLE_COMMANDS", {})
+    monkeypatch.setattr("supervisor.message_bus.get_bridge", lambda: bridges.pop(0))
+    monkeypatch.setattr("supervisor.message_bus.log_chat", lambda *a, **k: None)
+    monkeypatch.setattr(server, "broadcast_ws_sync", lambda payload: None)
+
+    first = asyncio.run(server.api_command(Request()))
+    second = asyncio.run(server.api_command(Request()))
+
+    assert first.status_code == 400
+    assert second.status_code == 200
+    assert len(calls) == 1
+
+
+def test_visible_repair_command_can_retry_after_short_dedupe_window(monkeypatch):
+    calls = []
+    now = {"value": 100.0}
+
+    class Request:
+        async def json(self):
+            return {
+                "cmd": "repair",
+                "visible_text": "Repair task queued",
+                "visible_task_id": "skill_repair_alpha",
+                "task_constraint": {"mode": "skill_repair", "skill_name": "alpha", "payload_root": "skills/external/alpha"},
+            }
+
+    class Bridge:
+        def ui_send(self, text, **kwargs):
+            calls.append((text, kwargs))
+
+    monkeypatch.setattr(server, "_RECENT_VISIBLE_COMMANDS", {})
+    monkeypatch.setattr(server.time, "monotonic", lambda: now["value"])
+    monkeypatch.setattr("supervisor.message_bus.get_bridge", lambda: Bridge())
+    monkeypatch.setattr("supervisor.message_bus.log_chat", lambda *a, **k: None)
+    monkeypatch.setattr(server, "broadcast_ws_sync", lambda payload: None)
+
+    first = asyncio.run(server.api_command(Request()))
+    now["value"] += server._VISIBLE_COMMAND_DEDUPE_SEC + 0.1
+    second = asyncio.run(server.api_command(Request()))
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert len(calls) == 2

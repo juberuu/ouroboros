@@ -1,6 +1,6 @@
 import { renderPageHeader, renderTabStrip } from './page_header.js';
+import { PAGE_ICONS } from './page_icons.js';
 
-const SETTINGS_ICON = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><circle cx="12" cy="12" r="3"/></svg>';
 const SETTINGS_TABS = [
     { value: 'providers', label: 'Providers' },
     { value: 'secrets', label: 'Secrets' },
@@ -80,7 +80,7 @@ function effortField({ id, label, defaultValue }) {
     `;
 }
 
-const SECRET_KEYS = [
+export const SECRET_KEYS = [
     ['OPENROUTER_API_KEY', 'OpenRouter API Key', 'sk-or-...'],
     ['OPENAI_API_KEY', 'OpenAI API Key', 'sk-...'],
     ['OPENAI_COMPATIBLE_API_KEY', 'OpenAI-compatible API Key', 'Compatible provider key'],
@@ -96,7 +96,7 @@ function secretSettingsSection() {
             <h3>Stored Secrets</h3>
             <div class="settings-section-copy">
                 Central place for API keys, bridge tokens, passwords, and future skill-requested secrets.
-                Skills only receive grant-only keys after explicit owner approval.
+                Skills only receive grant-only keys after explicit human approval.
             </div>
             <div class="form-grid two">
                 ${SECRET_KEYS.map(([key, label, placeholder]) => secretField({
@@ -117,12 +117,16 @@ function secretSettingsSection() {
             </div>
         </section>
         <section class="settings-card">
-            <h3>Custom Keys</h3>
-            <div class="settings-section-copy">
-                Optional key/value storage for future skills. Use uppercase names such as <code>SLACK_WEBHOOK_URL</code>.
+            <div class="settings-card-head">
+                <div>
+                    <h3>Custom Keys</h3>
+                    <div class="settings-section-copy">
+                        Optional key/value storage for future skills. Use uppercase names such as <code>SLACK_WEBHOOK_URL</code>.
+                    </div>
+                </div>
+                <button type="button" class="btn btn-default btn-sm" id="btn-add-custom-secret">Add custom key</button>
             </div>
-            <div id="custom-secrets-list" class="settings-secret-list"></div>
-            <button type="button" class="settings-ghost-btn" id="btn-add-custom-secret">Add custom key</button>
+            <div id="custom-secrets-list" class="settings-secret-list settings-custom-secret-list"></div>
         </section>
     `;
 }
@@ -131,7 +135,7 @@ export function renderSettingsPage() {
     return `
         ${renderPageHeader({
             title: 'Settings',
-            icon: SETTINGS_ICON,
+            icon: PAGE_ICONS.settings,
             description: 'Configure providers, secrets, models, behavior, source control, and runtime controls.',
             tabsHtml: `
                 <div class="settings-tabs-bar">
@@ -361,7 +365,7 @@ export function renderSettingsPage() {
                             <code>Light</code> blocks repo self-modification but allows reviewed + enabled skills to run.
                             <code>Advanced</code> is the default &mdash; self-modify the evolutionary layer; protected core/contract/release files stay guarded by the shared runtime-mode policy.
                             <code>Pro</code> can edit protected core/contract/release surfaces, but commits still go through the normal triad + scope review gate; Advanced remains limited to the evolutionary layer.
-                            <br><strong>Owner controlled:</strong> desktop builds ask the launcher for native confirmation before saving a mode change.
+                            <br><strong>Human controlled:</strong> desktop builds ask the launcher for native confirmation before saving a mode change.
                             Web/Docker sessions can view the current mode but cannot elevate it from this page.
                         </div>
                         <div class="settings-effort-card">

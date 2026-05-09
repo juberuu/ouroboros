@@ -19,6 +19,7 @@ import inspect
 import json
 import logging
 import pathlib
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 from starlette.requests import Request
@@ -163,6 +164,20 @@ def _build_extensions_index(drive_root, repo_path):
     marketplace_enabled = True
 
     catalog = []
+
+    def _path_installed_at(skill_dir: pathlib.Path) -> str:
+        candidates = [skill_dir / "SKILL.md", skill_dir / "plugin.py", skill_dir]
+        stamps: list[float] = []
+        for candidate in candidates:
+            try:
+                if candidate.exists():
+                    stamps.append(candidate.stat().st_mtime)
+            except OSError:
+                continue
+        if not stamps:
+            return ""
+        return datetime.fromtimestamp(min(stamps), tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
     for s in skills:
         payload_root = ""
         try:
@@ -200,6 +215,7 @@ def _build_extensions_index(drive_root, repo_path):
             # clawhub skills as "native" (P6 honesty regression).
             "source": s.source,
             "payload_root": payload_root,
+            "installed_at": _path_installed_at(s.skill_dir),
         }
         if s.source == "clawhub":
             try:
@@ -207,6 +223,8 @@ def _build_extensions_index(drive_root, repo_path):
             except Exception:  # pragma: no cover
                 prov = {}
             if prov:
+                if prov.get("installed_at"):
+                    entry["installed_at"] = str(prov.get("installed_at") or "")
                 entry["provenance"] = {
                     "slug": prov.get("slug", ""),
                     "version": prov.get("version", ""),

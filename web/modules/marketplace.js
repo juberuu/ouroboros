@@ -37,6 +37,12 @@ function installErrorCopy(message) {
         : message;
 }
 
+function emitSkillLifecycle(action, name, extra = {}) {
+    window.dispatchEvent(new CustomEvent('ouro:skill-lifecycle', {
+        detail: { action, name, ...extra },
+    }));
+}
+
 
 // ``renderMarkdownSafe`` and ``safeExternalUrl`` previously had local
 // copies here.  They live in ``utils.js`` now (single source of truth for
@@ -105,6 +111,10 @@ function grantReady(installed) {
 
 function reviewReady(installed) {
     return installed?.review_status === 'pass' && !installed?.review_stale;
+}
+
+function hasInstalledUiTab(installed) {
+    return installed?.has_ui_tab === true;
 }
 
 function topReviewFinding(installed) {
@@ -181,7 +191,7 @@ function lifecycleFor(summary, installed, pending) {
         return {
             tone: 'warn',
             label: 'Needs key grant',
-            hint: missing.length ? `Missing: ${missing.join(', ')}` : 'Owner key grant required.',
+            hint: missing.length ? `Missing: ${missing.join(', ')}` : 'Human key grant required.',
             action: 'grant',
             button: 'Grant',
         };
@@ -195,13 +205,22 @@ function lifecycleFor(summary, installed, pending) {
             button: 'Enable',
         };
     }
-    if (installed.type === 'extension') {
+    if (installed.type === 'extension' && hasInstalledUiTab(installed)) {
         return {
             tone: 'ok',
             label: 'Enabled',
             hint: 'Extension skills expose tools/routes and may add Widgets after loading.',
             action: 'widgets',
             button: 'Open widgets',
+        };
+    }
+    if (installed.type === 'extension') {
+        return {
+            tone: 'ok',
+            label: 'Enabled',
+            hint: 'Extension is active. This skill does not expose a widget.',
+            action: 'disable',
+            button: 'Disable',
         };
     }
     return {
@@ -421,9 +440,14 @@ async function loadInstalled({ signal: externalSignal } = {}) {
             fetchJson('/api/marketplace/clawhub/installed', { signal: controller.signal }),
             fetchJson('/api/extensions', { signal: controller.signal }).catch(() => ({ skills: [] })),
         ]);
+        const uiTabSkills = new Set(
+            (catalog.live?.ui_tabs || [])
+                .map((tab) => String(tab?.skill || tab?.skill_name || tab?.extension || ''))
+                .filter(Boolean)
+        );
         const byName = new Map();
         for (const skill of catalog.skills || []) {
-            if (skill.name) byName.set(skill.name, skill);
+            if (skill.name) byName.set(skill.name, { ...skill, has_ui_tab: uiTabSkills.has(skill.name) });
         }
         const map = new Map();
         for (const skill of data.skills || []) {
@@ -828,14 +852,16 @@ export function initMarketplace(pane) {
         }
         if (action === 'disable' && installed) {
             setPending(slug, { label: 'Turning off', tone: 'warn', message: 'Disabling skill…' });
-            await toggleInstalledSkill(installed, false);
+            const result = await toggleInstalledSkill(installed, false);
             showStatus(pane, `${slug} disabled`, 'ok');
+            emitSkillLifecycle('disable', installed.name, result);
             return;
         }
         if (action === 'enable' && installed) {
             setPending(slug, { label: 'Enabling', tone: 'warn', message: 'Turning skill on…' });
-            await toggleInstalledSkill(installed, true);
+            const result = await toggleInstalledSkill(installed, true);
             showStatus(pane, `${slug} enabled`, 'ok');
+            emitSkillLifecycle('enable', installed.name, result);
             return;
         }
         if (action === 'grant' && installed) {
@@ -851,10 +877,11 @@ export function initMarketplace(pane) {
             if (!bridge) {
                 throw new Error('Skill key grants require the desktop launcher confirmation bridge.');
             }
-            setPending(slug, { label: 'Granting', tone: 'warn', message: 'Waiting for owner confirmation…' });
+            setPending(slug, { label: 'Granting', tone: 'warn', message: 'Waiting for human confirmation…' });
             const result = await bridge(installed.name, keys);
             if (!result?.ok) throw new Error(result?.error || 'Skill key grant was cancelled.');
             showStatus(pane, `${slug} grant saved`, 'ok');
+            emitSkillLifecycle('grant', installed.name, result);
             return;
         }
         if (action === 'fix' && installed) {
@@ -876,6 +903,7 @@ export function initMarketplace(pane) {
                 }),
             });
             showStatus(pane, `${slug}: repair task queued`, 'ok');
+            emitSkillLifecycle('repair', installed.name || slug);
             document.querySelector('.nav-btn[data-page="chat"]')?.click();
             return;
         }
@@ -891,6 +919,7 @@ export function initMarketplace(pane) {
                 `${slug}: review ${result.status}${result.error ? ` — ${result.error}` : ''}`,
                 result.status === 'pass' ? 'ok' : (result.status === 'fail' || result.error ? 'danger' : 'warn'),
             );
+            emitSkillLifecycle('review', installed.name, result);
             return;
         }
         if (action === 'update' && installed) {
@@ -907,6 +936,7 @@ export function initMarketplace(pane) {
             });
             if (!result.ok) throw new Error(result.error || 'update failed');
             showStatus(pane, `Updated ${slug} — review ${result.review_status}`, result.review_status === 'pass' ? 'ok' : 'warn');
+            emitSkillLifecycle('update', installed.name, result);
             return;
         }
         if (action === 'install') {
@@ -928,6 +958,7 @@ export function initMarketplace(pane) {
             } else {
                 showStatus(pane, `Installed ${slug}; review ${result.review_status || 'pending'}`, result.review_status === 'pass' ? 'ok' : 'warn');
             }
+            emitSkillLifecycle('install', installedName || slug, result);
         }
     }
 
@@ -1038,6 +1069,7 @@ export function initMarketplace(pane) {
                     );
                 } else {
                     showStatus(pane, `Installed ${slug} — review ${result.review_status}`, result.review_status === 'pass' ? 'ok' : 'warn');
+                    emitSkillLifecycle('install', result.sanitized_name || slug, result);
                 }
             } catch (err) {
                 showStatus(pane, `Install error: ${installErrorCopy(err.message)}`, isRateLimitError(err.message) ? 'warn' : 'danger');
@@ -1093,6 +1125,7 @@ export function initMarketplace(pane) {
                 } else {
                     showStatus(pane, `Updated ${slug} — review ${result.review_status}`, result.review_status === 'pass' ? 'ok' : 'warn');
                     setPending(slug, null);
+                    emitSkillLifecycle('update', sanitized, result);
                 }
             } catch (err) {
                 setPending(slug, {
@@ -1129,6 +1162,7 @@ export function initMarketplace(pane) {
                     body: JSON.stringify({}),
                 });
                 showStatus(pane, `Uninstalled ${slug}`, 'ok');
+                emitSkillLifecycle('uninstall', sanitized);
             } catch (err) {
                 showStatus(pane, `Uninstall error: ${err.message}`, 'danger');
             } finally {
@@ -1165,6 +1199,7 @@ export function initMarketplace(pane) {
                 if (backdrop) backdrop.remove();
             } else {
                 showStatus(pane, `Installed ${slug} — review ${result.review_status}`, result.review_status === 'pass' ? 'ok' : 'warn');
+                emitSkillLifecycle('install', result.sanitized_name || slug, result);
                 const backdrop = modalHost.querySelector('[data-mp-modal]');
                 if (backdrop) backdrop.remove();
             }

@@ -1,10 +1,11 @@
 import { refreshModelCatalog } from './settings_catalog.js';
 import { bindEffortSegments, syncEffortSegments } from './settings_controls.js';
 import { bindLocalModelControls } from './settings_local_model.js';
-import { bindSecretInputs, bindSettingsTabs, renderSettingsPage } from './settings_ui.js';
+import { SECRET_KEYS, bindSecretInputs, bindSettingsTabs, renderSettingsPage } from './settings_ui.js';
 import { escapeHtmlAttr as escapeHtml, formatDualVersion } from './utils.js';
 
 let markSettingsDirty = () => {};
+const BASE_SECRET_KEYS = new Set(SECRET_KEYS.map(([key]) => key));
 
 function byId(id) {
     return document.getElementById(id);
@@ -66,13 +67,13 @@ function customSecretRow(key = '', value = '') {
     row.className = 'settings-custom-secret-row';
     row.dataset.customSecretRow = '1';
     row.innerHTML = `
-        <div class="form-field"><label>Key</label><input data-custom-secret-key value="${escapeHtml(key)}" placeholder="SLACK_WEBHOOK_URL" spellcheck="false"></div>
-        <div class="form-field"><label>Value</label><div class="secret-input-row">
+        <div class="form-field settings-custom-secret-key"><label>Key</label><input data-custom-secret-key value="${escapeHtml(key)}" placeholder="SLACK_WEBHOOK_URL" spellcheck="false"></div>
+        <div class="form-field settings-custom-secret-value"><label>Value</label><div class="secret-input-row">
             <input id="${id}" data-custom-secret-value class="secret-input" type="password" value="${escapeHtml(value || '')}" placeholder="Secret value">
             <button type="button" class="settings-ghost-btn" data-row-secret-toggle>Show</button>
             <button type="button" class="settings-ghost-btn" data-row-secret-clear>Clear</button>
-            <button type="button" class="settings-ghost-btn" data-custom-secret-remove>Remove</button>
-        </div><div class="settings-inline-note" data-custom-secret-error hidden></div></div>`;
+        </div><div class="settings-inline-note" data-custom-secret-error hidden></div></div>
+        <button type="button" class="settings-ghost-btn settings-custom-secret-remove" data-custom-secret-remove>Remove</button>`;
     wireSecretRow(row);
     row.querySelector('[data-custom-secret-remove]')?.addEventListener('click', () => { row.dataset.removeCustomSecret = '1'; row.hidden = true; markSettingsDirty(); });
     return row;
@@ -90,23 +91,25 @@ function renderCustomSecrets(root, settings) {
 function renderRequestedSkillSecrets(root, skills, settings) {
     const host = root.querySelector('#skill-requested-secrets');
     if (!host) return;
-    const rows = [];
+    const keys = [];
     (Array.isArray(skills) ? skills : []).forEach((skill) => {
-        (skill?.grants?.requested_keys || []).forEach((key) => { if (key) rows.push({ key: String(key), skill: String(skill.name || '') }); });
+        (skill?.grants?.requested_keys || []).forEach((key) => {
+            const normalized = String(key || '').trim();
+            if (normalized && !BASE_SECRET_KEYS.has(normalized)) keys.push(normalized);
+        });
     });
-    const unique = []; const seen = new Set();
-    rows.forEach((row) => { const id = `${row.key}:${row.skill}`; if (!seen.has(id)) { seen.add(id); unique.push(row); } });
+    const unique = Array.from(new Set(keys)).sort((a, b) => a.localeCompare(b));
     if (!unique.length) { host.innerHTML = '<div class="muted">No skill-requested secrets.</div>'; return; }
     host.innerHTML = '';
-    unique.forEach((row, idx) => {
+    unique.forEach((key, idx) => {
         const id = `requested-secret-${idx}`;
         const el = document.createElement('div');
         el.className = 'settings-requested-secret-row';
-        el.innerHTML = `<div class="form-field"><label>${escapeHtml(row.key)}</label><div class="secret-input-row">
-            <input id="${id}" data-secret-setting="${escapeHtml(row.key)}" class="secret-input" type="password" value="${escapeHtml(settings[row.key] || '')}" placeholder="Requested by ${escapeHtml(row.skill)}">
+        el.innerHTML = `<div class="form-field"><label>${escapeHtml(key)}</label><div class="secret-input-row">
+            <input id="${id}" data-secret-setting="${escapeHtml(key)}" class="secret-input" type="password" value="${escapeHtml(settings[key] || '')}" placeholder="Secret value">
             <button type="button" class="settings-ghost-btn" data-row-secret-toggle>Show</button>
             <button type="button" class="settings-ghost-btn" data-row-secret-clear>Clear</button>
-        </div><div class="settings-inline-note">Requested by ${escapeHtml(row.skill)}</div></div>`;
+        </div></div>`;
         wireSecretRow(el); host.appendChild(el);
     });
 }
@@ -257,7 +260,7 @@ let settingsModelCatalogItems = SETTINGS_FALLBACK_MODELS.map((value) => ({ value
 export function initSettings({ state, setBeforePageLeave } = {}) {
     const page = document.createElement('div');
     page.id = 'page-settings';
-    page.className = 'page';
+    page.className = 'page app-page-glass';
     page.innerHTML = renderSettingsPage();
     document.getElementById('content').appendChild(page);
 
@@ -283,6 +286,7 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
         .catch(() => { /* about version is best-effort */ });
     let currentSettings = {};
     let claudeCodePollStarted = false;
+    let extensionRefreshPending = false;
     // v4.33.1 status_label priority fix: even when the user has not configured
     // ANTHROPIC_API_KEY, we still surface the runtime card when the backend
     // reports status="error" (e.g. SDK below baseline). Otherwise a version-gate
@@ -563,6 +567,23 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
         }
     }
 
+    async function refreshSettingsAfterExtensionChange(reason = 'skills changed') {
+        if (extensionRefreshPending) return;
+        if (settingsDirty) {
+            setStatus(`Settings changed externally (${reason}). Reload after saving or discarding your draft.`, 'warn');
+            return;
+        }
+        extensionRefreshPending = true;
+        try {
+            await loadSettings();
+            setStatus('Settings refreshed', 'ok');
+        } catch (error) {
+            setStatus(`Settings refresh failed: ${error.message || error}`, 'warn');
+        } finally {
+            extensionRefreshPending = false;
+        }
+    }
+
     function collectBody() {
         const body = {
             OUROBOROS_MODEL: byId('s-model').value,
@@ -673,8 +694,20 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
         const host = byId('custom-secrets-list');
         if (!host) return;
         if (host.querySelector('.muted')) host.innerHTML = '';
-        host.appendChild(customSecretRow());
+        const row = customSecretRow();
+        host.appendChild(row);
+        row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        row.querySelector('[data-custom-secret-key]')?.focus();
         markSettingsDirty();
+    });
+
+    window.addEventListener('ouro:skill-lifecycle', (event) => {
+        const action = String(event.detail?.action || 'skills changed');
+        refreshSettingsAfterExtensionChange(action);
+    });
+
+    window.addEventListener('ouro:page-shown', (event) => {
+        if (event.detail?.page === 'settings') refreshSettingsAfterExtensionChange('settings page shown');
     });
 
     function closeSettingsModelPickers(exceptPicker = null) {

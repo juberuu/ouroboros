@@ -12,6 +12,12 @@ import {
     fetchJson,
 } from './utils.js';
 
+function emitSkillLifecycle(action, name, extra = {}) {
+    window.dispatchEvent(new CustomEvent('ouro:skill-lifecycle', {
+        detail: { action, name, ...extra },
+    }));
+}
+
 
 function lifecycleFor(installed, pending) {
     if (pending) {
@@ -183,6 +189,7 @@ export function initOuroborosHub(pane) {
                 data.review_status ? `${slug}: installed, review ${data.review_status}` : `${slug}: installed`,
                 data.ok ? 'ok' : 'warn',
             );
+            emitSkillLifecycle('install', data.sanitized_name || slug, data);
             clearPending(slug);
         } catch (err) {
             setPending(slug, {

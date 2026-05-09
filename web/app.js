@@ -21,6 +21,7 @@ import { initSkills } from './modules/skills.js';
 import { initWidgets } from './modules/widgets.js';
 import { initUpdates } from './modules/updates.js';
 import { initDashboard } from './modules/dashboard.js';
+import { hydrateNavIcons } from './modules/page_icons.js';
 
 import { initOnboardingOverlay } from './modules/onboarding_overlay.js';
 
@@ -102,6 +103,7 @@ document.querySelectorAll('.nav-btn').forEach(btn => {
         showPage(btn.dataset.page);
     });
 });
+hydrateNavIcons();
 
 // ---------------------------------------------------------------------------
 // Initialize All Pages (registers WS listeners before connection opens)

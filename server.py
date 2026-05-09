@@ -96,6 +96,8 @@ _SECRET_SETTING_KEYS = {
     "OUROBOROS_NETWORK_PASSWORD",
 }
 _CUSTOM_SECRET_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,}$")
+_RECENT_VISIBLE_COMMANDS: Dict[str, float] = {}
+_VISIBLE_COMMAND_DEDUPE_SEC = 5.0
 
 # ---------------------------------------------------------------------------
 # Runtime network binding (captured in main() from parse_server_args)
@@ -645,7 +647,7 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
             status = status_text(ctx.WORKERS, ctx.PENDING, ctx.RUNNING, SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC)
             ctx.send_with_budget(chat_id, status)
         else:
-            ctx.consciousness.inject_observation(f"Owner message: {log_text}")
+            ctx.consciousness.inject_observation(f"Message from my human: {log_text}")
             agent = ctx.get_chat_agent()
 
             def _run_constrained_or_resume(cid, txt, img, constraint, resume_consciousness: bool):
@@ -1483,12 +1485,25 @@ async def api_command(request: Request) -> JSONResponse:
             bridge = get_bridge()
             visible_text = str(body.get("visible_text") or "").strip()
             task_constraint = body.get("task_constraint") if isinstance(body.get("task_constraint"), dict) else None
+            visible_task_id = str(body.get("visible_task_id") or "").strip()
+            if visible_task_id:
+                now = time.monotonic()
+                expired = [
+                    key for key, ts in _RECENT_VISIBLE_COMMANDS.items()
+                    if now - ts > _VISIBLE_COMMAND_DEDUPE_SEC
+                ]
+                for key in expired:
+                    _RECENT_VISIBLE_COMMANDS.pop(key, None)
+                if visible_task_id in _RECENT_VISIBLE_COMMANDS:
+                    return JSONResponse({"ok": True, "deduped": True, "task_id": visible_task_id})
             send_kwargs = {"broadcast": False, "suppress_chat_log": bool(visible_text)}
             if task_constraint:
                 send_kwargs["task_constraint"] = task_constraint
             bridge.ui_send(cmd, **send_kwargs)
+            if visible_task_id:
+                _RECENT_VISIBLE_COMMANDS[visible_task_id] = time.monotonic()
             if visible_text:
-                task_id = str(body.get("visible_task_id") or "skill_repair")
+                task_id = visible_task_id or "skill_repair"
                 ts = datetime.now(timezone.utc).isoformat()
                 payload = {
                     "type": "chat",

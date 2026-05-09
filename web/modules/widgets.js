@@ -1,17 +1,16 @@
 import { renderPageHeader } from './page_header.js';
+import { PAGE_ICONS } from './page_icons.js';
 import {
     escapeHtmlAttr as escapeHtml,
     renderMarkdownSafe,
 } from './utils.js';
 
-const WIDGETS_ICON = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>';
-
 function pageTemplate() {
     return `
-        <section class="page" id="page-widgets">
+        <section class="page app-page-glass" id="page-widgets">
             ${renderPageHeader({
                 title: 'Widgets',
-                icon: WIDGETS_ICON,
+                icon: PAGE_ICONS.widgets,
                 description: 'Reviewed extension UI surfaces live here, separate from the skill catalogue.',
                 actionsHtml: '<button id="widgets-refresh" class="btn btn-default btn-sm">Refresh</button>',
             })}
@@ -44,8 +43,10 @@ function renderShell(host, tabs) {
         const subtitle = tab.skill && tab.skill !== title
             ? `<span class="widgets-card-source">from ${escapeHtml(tab.skill)}</span>`
             : '';
+        const span = Number(tab.span || tab.grid_span || 1);
+        const spanClass = span >= 2 ? ' widgets-card-span-2' : '';
         return `
-        <article class="widgets-card" data-widget-key="${escapeHtml(tab.key || `${tab.skill}:${tab.tab_id}`)}">
+        <article class="widgets-card${spanClass}" data-widget-key="${escapeHtml(tab.key || `${tab.skill}:${tab.tab_id}`)}">
             <div class="widgets-card-head">
                 <strong>${escapeHtml(title)}</strong>
                 ${subtitle}

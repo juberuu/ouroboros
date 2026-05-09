@@ -1,4 +1,4 @@
-# Ouroboros v5.10.2 — Architecture & Reference
+# Ouroboros v5.10.3 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -350,6 +350,8 @@ The web UI is a single-page app (`web/index.html` + `web/style.css` + ES modules
 - `settings_catalog.js` — optional model-catalog refresh helper; handles `/api/model-catalog`, browser timeout, stale-response suppression, and model-picker catalog broadcasts
 - `costs.js` — cost breakdown tables
 - `page_header.js` — v5.7.2 shared page-header/tab-strip renderer used by Settings, Dashboard, Skills, Widgets, Files, and Chat; escapes title/description/labels and emits shared `app-page-*` / `app-tab-*` classes without inline styles.
+- `page_icons.js` — shared page/nav icon source of truth; the SPA hydrates the nav rail from this module and page headers import the same SVGs.
+- `toast.js` — fixed-position notification helper used for transient skill/marketplace/status feedback without shifting page layout.
 - `skills.js` — Skills page (discover + enable/disable + review trigger + Repair task affordance for non-native failing skills + key-grant state + live-vs-catalog extension status; reads `/api/state` + `/api/extensions`, writes through `/api/skills/<name>/toggle` + `/api/skills/<name>/review`, sends Repair prompts through `/api/command`, and requests key grants through the desktop launcher bridge)
 - `widgets.js` — Widgets page for reviewed extension UI surfaces declared through `register_ui_tab`; hosts legacy `inline_card`/`iframe` plus declarative v1 widgets (forms/actions, async job forms/actions, markdown, code, JSON, key/value, tables, tabs, charts, stream, progress, `subscription` WS updates, poll with `auto_start`, files, galleries, image/audio/video media, **map/calendar/kanban (v5.7.0)**) and tears down widget timers/listeners/streams on remount while resuming async jobs by `job_id`. **v5.7.0** also adds `kind: "module"` widgets: the host fetches reviewed `widget.js` through `/api/extensions/<skill>/module/<entry>`, embeds it into a sandboxed `<iframe srcdoc sandbox="allow-scripts">` with no `allow-same-origin`, and injects a parent-mediated `fetch` bridge restricted to `/api/extensions/<skill>/...`.
 

@@ -1,7 +1,6 @@
 import { renderPageHeader } from './page_header.js';
+import { PAGE_ICONS } from './page_icons.js';
 import { escapeHtmlAttr, escapeHtmlText as escapeHtml } from './utils.js';
-
-const FILES_ICON = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><path d="M3 7h5l2 2h11v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M3 7V5a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v2"/></svg>';
 
 function formatFileSize(size) {
     const num = Number(size);
@@ -26,11 +25,11 @@ function defaultDirectoryContent() {
 export function initFiles({ state: appState, setBeforePageLeave } = {}) {
     const page = document.createElement('div');
     page.id = 'page-files';
-    page.className = 'page';
+    page.className = 'page app-page-glass';
     page.innerHTML = `
         ${renderPageHeader({
             title: 'Files',
-            icon: FILES_ICON,
+            icon: PAGE_ICONS.files,
             description: defaultDirectoryMeta(),
             actionsHtml: '<button class="btn btn-default" id="files-refresh">Refresh</button>',
         })}
@@ -96,6 +95,9 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
     const previewMetaEl = page.querySelector('#files-preview-meta');
     const previewContentEl = page.querySelector('#files-preview-content');
     const contextMenuEl = page.querySelector('#files-context-menu');
+    const contextMenuPositionStyle = document.createElement('style');
+    contextMenuPositionStyle.id = 'files-context-menu-position-style';
+    page.appendChild(contextMenuPositionStyle);
     const modalEl = page.querySelector('#files-modal');
     const modalTitleEl = page.querySelector('#files-modal-title');
     const modalMessageEl = page.querySelector('#files-modal-message');
@@ -280,14 +282,16 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
         const rect = contextMenuEl.getBoundingClientRect();
         const left = Math.min(Math.max(margin, x), Math.max(margin, window.innerWidth - rect.width - margin));
         const top = Math.min(Math.max(margin, y), Math.max(margin, window.innerHeight - rect.height - margin));
-        contextMenuEl.style.left = `${left}px`;
-        contextMenuEl.style.top = `${top}px`;
+        contextMenuPositionStyle.textContent = `#files-context-menu[data-open="1"]{left:${Math.round(left)}px;top:${Math.round(top)}px;}`;
+        contextMenuEl.dataset.open = '1';
     }
 
     function hideContextMenu() {
         state.contextPath = '';
         state.contextEntryType = '';
         state.contextDestinationPath = '.';
+        delete contextMenuEl.dataset.open;
+        contextMenuPositionStyle.textContent = '';
         contextMenuEl.hidden = true;
     }
 

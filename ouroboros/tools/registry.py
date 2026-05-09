@@ -1247,11 +1247,29 @@ class ToolRegistry:
             and name == "claude_code_edit"
             and _skill_payload_cwd_allowed(str(args.get("cwd", "") or ""), pathlib.Path(self._ctx.drive_root))
         )
-        if _runtime_mode == "light" and name in _REPO_MUTATION_TOOLS and not light_skill_scoped_claude:
+        light_skill_scoped_str_replace = (
+            _runtime_mode == "light"
+            and name == "str_replace_editor"
+            and task_constraint is not None
+            and task_constraint.mode == "skill_repair"
+            and _task_constraint_path_allowed(
+                str(args.get("path", "") or ""),
+                task_constraint,
+                pathlib.Path(self._ctx.drive_root),
+            )
+        )
+        if (
+            _runtime_mode == "light"
+            and name in _REPO_MUTATION_TOOLS
+            and not light_skill_scoped_claude
+            and not light_skill_scoped_str_replace
+        ):
             return (
                 "⚠️ LIGHT_MODE_BLOCKED: runtime_mode=light disables "
                 "repo self-modification. Tool "
                 f"{name!r} would mutate the Ouroboros repository. "
+                "Skill-repair payload edits are allowed only when constrained "
+                "by task_constraint.mode='skill_repair'. "
                 "Switch to 'advanced' or 'pro' in Settings → Behavior "
                 "→ Runtime Mode to re-enable self-modification."
             )

@@ -2,13 +2,14 @@ import { initMarketplace } from './marketplace.js';
 import { initOuroborosHub } from './ouroboroshub.js';
 import { renderPageHeader, renderTabStrip } from './page_header.js';
 import { openConfirmDialog } from './confirm_dialog.js';
+import { PAGE_ICONS } from './page_icons.js';
+import { showToast } from './toast.js';
 import {
     boundedText,
     escapeHtmlAttr as escapeHtml,
     safeExternalHrefAttr as safeExternalUrl,
 } from './utils.js';
 
-const SKILLS_ICON = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18"/><path d="M3 12h18"/><path d="M5 5l14 14"/><path d="M19 5L5 19"/></svg>';
 const SKILLS_TABS = [
     { value: 'installed', label: 'My skills', pillId: 'skills-tab-pill-installed', pillClass: 'skills-tab-pill' },
     { value: 'marketplace', label: 'ClawHub', pillId: 'skills-tab-pill-marketplace', pillClass: 'skills-tab-pill' },
@@ -27,11 +28,12 @@ const SKILLS_TABS = [
 
 function skillsPageTemplate() {
     return `
-        <section class="page" id="page-skills">
+        <section class="page app-page-glass" id="page-skills">
             ${renderPageHeader({
                 title: 'Skills',
-                icon: SKILLS_ICON,
+                icon: PAGE_ICONS.skills,
                 description: 'Skills extend Ouroboros with new tools, routes, and widgets. Each skill is reviewed for safety before you turn it on.',
+                actionsHtml: '<button id="skills-refresh" class="btn btn-default btn-sm">Refresh</button>',
                 tabsHtml: renderTabStrip({
                     items: SKILLS_TABS,
                     active: 'installed',
@@ -45,9 +47,6 @@ function skillsPageTemplate() {
             <div class="skills-scroll">
                 <div class="skills-tab-panel" id="skills-pane-installed" data-pane="installed">
                 <div id="skills-migration-banner" class="skills-migration-banner" hidden></div>
-                <div class="skills-controls">
-                    <button id="skills-refresh" class="btn btn-default btn-sm">Refresh</button>
-                </div>
                 <div id="skills-list" class="skills-list"></div>
                 <div id="skills-empty" class="muted" hidden>
                     No skills yet. Browse <b>ClawHub</b> or
@@ -98,11 +97,25 @@ function isRateLimitError(message) {
     return text.includes('rate limit') || text.includes('too many requests') || text.includes('http 429');
 }
 
+function emitSkillLifecycle(action, name, extra = {}) {
+    window.dispatchEvent(new CustomEvent('ouro:skill-lifecycle', {
+        detail: { action, name, ...extra },
+    }));
+}
+
+function hasSkillUiTab(skill, live = {}) {
+    const tabs = Array.isArray(live?.ui_tabs) ? live.ui_tabs : [];
+    return tabs.some((tab) => {
+        const owner = tab?.skill || tab?.skill_name || tab?.extension || '';
+        return owner === skill.name;
+    });
+}
+
 // v5.2.3: collapse the previous wall of competing badges
 // (NATIVE / PASS / LIVE / ENABLED / GRANT MISSING / etc.) into a single
 // human-readable status chip per card. The detailed flags stay
 // available under the Details disclosure for advanced operators.
-function skillStatusChip(skill) {
+function skillStatusChip(skill, live = {}) {
     if (!grantReady(skill)) {
         return { tone: 'warn', label: 'Needs access grant' };
     }
@@ -117,10 +130,10 @@ function skillStatusChip(skill) {
     }
     if (skill.enabled) {
         if (skill.type === 'extension') {
-            if (skill.live_loaded && skill.dispatch_live) {
+            if (skill.live_loaded && (skill.dispatch_live || hasSkillUiTab(skill, live))) {
                 return { tone: 'ok', label: 'Active' };
             }
-            if (skill.live_loaded && !skill.dispatch_live) {
+            if (skill.live_loaded && !skill.dispatch_live && !hasSkillUiTab(skill, live)) {
                 return { tone: 'warn', label: 'Loaded — UI tab pending' };
             }
             return { tone: 'warn', label: 'Enabled — not loaded' };
@@ -291,6 +304,36 @@ function renderProvenanceBlock(prov) {
 }
 
 
+function installTimestamp(skill) {
+    const raw = skill.installed_at || skill.provenance?.installed_at || skill.provenance?.updated_at || '';
+    const time = Date.parse(raw);
+    return Number.isFinite(time) ? time : 0;
+}
+
+function installedAgo(skill) {
+    const time = installTimestamp(skill);
+    if (!time) return '';
+    const seconds = Math.max(0, Math.floor((Date.now() - time) / 1000));
+    if (seconds < 90) return 'Just installed';
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 90) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 48) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    if (days < 45) return `${days}d ago`;
+    const date = new Date(time);
+    return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function sortSkillsForDisplay(skills) {
+    return [...skills].sort((a, b) => {
+        if (a.lifecycle_virtual && !b.lifecycle_virtual) return -1;
+        if (!a.lifecycle_virtual && b.lifecycle_virtual) return 1;
+        return installTimestamp(b) - installTimestamp(a) || String(a.name || '').localeCompare(String(b.name || ''));
+    });
+}
+
+
 function toggleLockReason(skill) {
     // Enable transitions are locked unless the skill has a fresh PASS review.
     // The server enforces the same gate in ``api_skill_toggle``; this UI guard
@@ -304,9 +347,12 @@ function toggleLockReason(skill) {
     return '';
 }
 
-function skillNextAction(skill, reviewInProgress = false) {
+function skillNextAction(skill, reviewInProgress = false, repairInProgress = false, live = {}) {
     if (reviewInProgress) {
         return { label: 'Reviewing...', className: '', disabled: true };
+    }
+    if (repairInProgress) {
+        return { label: 'Repairing...', className: '', disabled: true };
     }
     if (skill.lifecycle_virtual && skill.source === 'clawhub' && isRateLimitError(skill.load_error)) {
         return { label: 'Retry install', className: 'skills-retry-install', disabled: false };
@@ -320,15 +366,18 @@ function skillNextAction(skill, reviewInProgress = false) {
     if (healReady(skill)) {
         return { label: 'Repair', className: 'skills-heal', disabled: false };
     }
-    if (skill.enabled && skill.type === 'extension' && skill.live_loaded && skill.dispatch_live) {
+    if (skill.enabled && skill.type === 'extension' && skill.live_loaded && hasSkillUiTab(skill, live)) {
         return { label: 'Open widgets', className: 'skills-open-widgets', disabled: false };
     }
     return { label: '', className: '', disabled: true };
 }
 
-function getSkillPrimaryAction(skill, reviewInProgress = false) {
+function getSkillPrimaryAction(skill, reviewInProgress = false, repairInProgress = false, live = {}) {
     if (reviewInProgress) {
         return { action: '', label: 'Reviewing...', disabled: true };
+    }
+    if (repairInProgress) {
+        return { action: '', label: 'Repairing...', disabled: true };
     }
     if ((skill.load_error && !isMissingGrantLoadError(skill)) || skill.review_status === 'fail') {
         if (healReady(skill)) {
@@ -358,20 +407,21 @@ function getSkillPrimaryAction(skill, reviewInProgress = false) {
             : (grants.requested_permissions || []);
         return { action: 'grant', label: 'Grant access', keys: [...keys, ...permissions].join(',') };
     }
-    if (skill.enabled && skill.type === 'extension' && skill.live_loaded && skill.dispatch_live) {
+    if (skill.enabled && skill.type === 'extension' && skill.live_loaded && hasSkillUiTab(skill, live)) {
         return { action: 'open_widgets', label: 'Open widgets' };
     }
     return { action: '', label: '' };
 }
 
-function renderSkillCard(skill, reviewingSkills = new Set()) {
+function renderSkillCard(skill, reviewingSkills = new Set(), repairingSkills = new Set(), live = {}) {
     const safeName = escapeHtml(skill.name);
     const description = escapeHtml(skill.description || '');
     const installedVersion = skill.version || '—';
     const reviewInProgress = reviewingSkills.has(skill.name);
+    const repairInProgress = repairingSkills.has(skill.name);
 
     const lockReason = toggleLockReason(skill);
-    const primaryAction = getSkillPrimaryAction(skill, reviewInProgress);
+    const primaryAction = getSkillPrimaryAction(skill, reviewInProgress, repairInProgress, live);
     const actionAttrs = primaryAction.action
         ? `data-skill="${safeName}" data-skill-action="${escapeHtml(primaryAction.action)}" role="button" tabindex="0"`
         : '';
@@ -386,9 +436,10 @@ function renderSkillCard(skill, reviewingSkills = new Set()) {
         ? `${skill.name} (locked: ${lockReason})`
         : skill.name;
 
-    const status = skillStatusChip(skill);
+    const status = skillStatusChip(skill, live);
     const statusChip = `<span class="skills-status-chip skills-status-${status.tone} ${primaryAction.action ? 'is-clickable' : ''}" ${actionAttrs}>${escapeHtml(status.label)}</span>`;
     const sourceChip = skillSourceChip(skill);
+    const installedLabel = installedAgo(skill);
 
     const toggleActionAttrs = toggleLocked && primaryAction.action
         ? `data-skill="${safeName}" data-skill-action="${escapeHtml(primaryAction.action)}"`
@@ -420,6 +471,14 @@ function renderSkillCard(skill, reviewingSkills = new Set()) {
             </div>
         `
         : '';
+    const repairProgress = repairInProgress
+        ? `
+            <div class="skills-review-progress skills-repair-progress" role="status" aria-live="polite">
+                <span class="skills-review-spinner" aria-hidden="true"></span>
+                <span>Repair task is being queued</span>
+            </div>
+        `
+        : '';
 
     const missingGrantError = isMissingGrantLoadError(skill);
     const loadError = skill.load_error && !missingGrantError
@@ -447,7 +506,7 @@ function renderSkillCard(skill, reviewingSkills = new Set()) {
     const reviewMenuBtn = !reviewInProgress
         ? `<button type="button" role="menuitem" class="skills-menu-item skills-review" data-skill="${safeName}">${skill.review_status === 'pending' ? 'Review' : (skill.review_stale ? 'Re-review' : 'Review again')}</button>`
         : '';
-    const next = skillNextAction(skill, reviewInProgress);
+    const next = skillNextAction(skill, reviewInProgress, repairInProgress, live);
     const nextAttrs = [
         `data-skill="${safeName}"`,
         next.keys ? `data-keys="${escapeHtml(next.keys)}"` : '',
@@ -484,7 +543,7 @@ function renderSkillCard(skill, reviewingSkills = new Set()) {
     const versionDrift = (provenanceVersion && provenanceVersion !== installedVersion)
         ? `<div class="skills-detail-row"><span class="skills-detail-label">Version drift</span> manifest ${escapeHtml(installedVersion)} vs registry ${escapeHtml(provenanceVersion)}</div>`
         : '';
-    const liveLine = (skill.type === 'extension' && skill.live_loaded && skill.dispatch_live)
+    const liveLine = (skill.type === 'extension' && skill.live_loaded && hasSkillUiTab(skill, live))
         ? `<div class="skills-detail-row"><span class="skills-detail-label">Visual widgets</span> available on the Widgets tab</div>`
         : '';
     const provenanceBlock = renderProvenanceBlock(provenance);
@@ -532,11 +591,12 @@ function renderSkillCard(skill, reviewingSkills = new Set()) {
                 `
         : '';
     return `
-        <article class="skills-card" data-skill="${safeName}" ${reviewInProgress ? 'data-reviewing="1"' : ''}>
+        <article class="skills-card" data-skill="${safeName}" ${reviewInProgress ? 'data-reviewing="1"' : ''} ${repairInProgress ? 'data-repairing="1"' : ''}>
             <header class="skills-card-head">
                 <div class="skills-card-title">
                     <h3>${safeName}${sourceChip ? ` ${sourceChip}` : ''}</h3>
                     ${description ? `<p class="skills-card-desc">${description}</p>` : ''}
+                    ${installedLabel ? `<div class="skills-card-installed muted">${escapeHtml(installedLabel)}</div>` : ''}
                 </div>
                 <div class="skills-card-toggle">
                     ${statusChip}
@@ -547,6 +607,7 @@ function renderSkillCard(skill, reviewingSkills = new Set()) {
             </header>
             ${lockHint}
             ${reviewProgress}
+            ${repairProgress}
             ${renderGrantBlock(skill)}
             ${reviewFindings}
             ${loadError}
@@ -635,26 +696,15 @@ function updateQueueBadges(events) {
 }
 
 
-async function renderSkillsList(container, emptyEl, runtimeModeEl, reviewingSkills = new Set()) {
-    const { runtimeMode, skillsRepoConfigured, skills } = await fetchSkills();
-    // v5.2.3: ``runtime_mode: light`` is technical jargon irrelevant
-    // to the typical user; show it only as a discreet annotation when
-    // the element is present in the page template (some hosts strip
-    // it for a cleaner header).
-    if (runtimeModeEl) {
-        runtimeModeEl.textContent = runtimeMode === 'pro'
-            ? 'Pro mode'
-            : runtimeMode === 'advanced'
-            ? ''
-            : `${runtimeMode} mode`;
-    }
+async function renderSkillsList(container, emptyEl, reviewingSkills = new Set(), repairingSkills = new Set()) {
+    const { skillsRepoConfigured, skills, live } = await fetchSkills();
     if (!skills.length && !skillsRepoConfigured) {
         container.innerHTML = '';
         if (emptyEl) emptyEl.hidden = false;
         return;
     }
     if (emptyEl) emptyEl.hidden = true;
-    container.innerHTML = skills.map((skill) => renderSkillCard(skill, reviewingSkills)).join('')
+    container.innerHTML = sortSkillsForDisplay(skills).map((skill) => renderSkillCard(skill, reviewingSkills, repairingSkills, live)).join('')
         || '<div class="muted">No skills yet. Add one from <b>ClawHub</b> or <b>OuroborosHub</b>.</div>';
     // v5: surface unread native-skill upgrade migrations so the
     // operator is told when the launcher silently rewrote an
@@ -752,14 +802,7 @@ async function postWithFeedback(url, body) {
 
 
 function showBanner(message, tone) {
-    const existing = document.getElementById('skills-banner');
-    if (existing) existing.remove();
-    const banner = document.createElement('div');
-    banner.id = 'skills-banner';
-    banner.className = `skills-banner skills-banner-${tone}`;
-    banner.textContent = message;
-    document.getElementById('page-skills')?.prepend(banner);
-    setTimeout(() => banner.remove(), 6000);
+    return showToast(message, tone);
 }
 
 function buildHealPrompt(skill) {
@@ -802,7 +845,7 @@ function buildHealPrompt(skill) {
 }
 
 
-function attachActionHandlers(container, renderFn, reviewingSkills, ctx = {}) {
+function attachActionHandlers(container, renderFn, reviewingSkills, repairingSkills, ctx = {}) {
     function closeSkillMenus(exceptMenu = null) {
         container.querySelectorAll('.skills-card-menu').forEach((menu) => {
             if (menu === exceptMenu) return;
@@ -861,7 +904,10 @@ function attachActionHandlers(container, renderFn, reviewingSkills, ctx = {}) {
             const missingPermissions = Array.isArray(grants.missing_permissions) ? grants.missing_permissions : (grants.requested_permissions || []);
             const missing = keys.length ? keys : [...missingKeys, ...missingPermissions];
             const result = await requestMissingKeyGrants(name, missing);
-            if (result) showBanner(`${name}: requested key grants saved`, 'ok');
+            if (result) {
+                showBanner(`${name}: requested key grants saved`, 'ok');
+                emitSkillLifecycle('grant', name, result);
+            }
             return;
         }
 
@@ -877,6 +923,10 @@ function attachActionHandlers(container, renderFn, reviewingSkills, ctx = {}) {
         }
 
         if (action === 'repair') {
+            if (repairingSkills.has(name)) {
+                showBanner(`${name}: repair is already being queued`, 'muted');
+                return;
+            }
             const ok = await openConfirmDialog({
                 title: `Repair ${name}`,
                 body: `Send a repair task for ${name} to Ouroboros? The agent will work on the skill in chat.`,
@@ -884,18 +934,26 @@ function attachActionHandlers(container, renderFn, reviewingSkills, ctx = {}) {
                 danger: true,
             });
             if (!ok) return;
-            const prompt = buildHealPrompt(skill);
-            await postWithFeedback('/api/command', {
-                cmd: prompt,
-                task_constraint: { mode: 'skill_repair', skill_name: skill.name || name, payload_root: skill.payload_root || '', allow_enable: false, allow_review: true },
-                visible_text: `Repair task queued for ${name}. Ouroboros will inspect the skill payload and re-run review.`,
-                visible_task_id: `skill_repair_${name}`,
-            });
-            showBanner(`${name}: repair task sent to Ouroboros`, 'ok');
-            if (typeof ctx.showPage === 'function') {
-                ctx.showPage('chat');
-            } else {
-                document.querySelector('.nav-btn[data-page="chat"]')?.click();
+            repairingSkills.add(name);
+            renderFn();
+            try {
+                const prompt = buildHealPrompt(skill);
+                await postWithFeedback('/api/command', {
+                    cmd: prompt,
+                    task_constraint: { mode: 'skill_repair', skill_name: skill.name || name, payload_root: skill.payload_root || '', allow_enable: false, allow_review: true },
+                    visible_text: `Repair task queued for ${name}. Ouroboros will inspect the skill payload and re-run review.`,
+                    visible_task_id: `skill_repair_${name}`,
+                });
+                showBanner(`${name}: repair task sent to Ouroboros`, 'ok');
+                emitSkillLifecycle('repair', name);
+                if (typeof ctx.showPage === 'function') {
+                    ctx.showPage('chat');
+                } else {
+                    document.querySelector('.nav-btn[data-page="chat"]')?.click();
+                }
+            } finally {
+                repairingSkills.delete(name);
+                renderFn();
             }
         }
     }
@@ -915,6 +973,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, ctx = {}) {
         const friendlyAction = actionLabels[result.extension_action];
         const tail = friendlyAction ? ` — ${friendlyAction}` : '';
         showBanner(`${name} ${wantsEnabled ? 'turned on' : 'turned off'}${tail}`, 'ok');
+        emitSkillLifecycle(wantsEnabled ? 'enable' : 'disable', name, result);
         return result;
     }
 
@@ -936,6 +995,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, ctx = {}) {
                     : (result.error || result.status === 'fail') ? 'danger'
                     : 'warn'
             );
+            emitSkillLifecycle('review', name, result);
             return result;
         } finally {
             reviewingSkills.delete(name);
@@ -1017,6 +1077,9 @@ function attachActionHandlers(container, renderFn, reviewingSkills, ctx = {}) {
         if (actionTarget) {
             const name = actionTarget.dataset.skill;
             const action = actionTarget.dataset.skillAction;
+            if (action === 'repair' && repairingSkills.has(name)) {
+                return;
+            }
             actionTarget.disabled = true;
             try {
                 await triggerSkillAction(name, action, { keys: actionTarget.dataset.keys || '' });
@@ -1119,18 +1182,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, ctx = {}) {
                 if (!skill) {
                     throw new Error('Skill not found in current catalogue.');
                 }
-                const prompt = buildHealPrompt(skill);
-                await postWithFeedback('/api/command', {
-                    cmd: prompt,
-                    visible_text: `Repair task queued for ${name}. Ouroboros will inspect the skill payload and re-run review.`,
-                    visible_task_id: `skill_repair_${name}`,
-                });
-                showBanner(`${name}: repair task sent to Ouroboros`, 'ok');
-                if (typeof ctx.showPage === 'function') {
-                    ctx.showPage('chat');
-                } else {
-                    document.querySelector('.nav-btn[data-page="chat"]')?.click();
-                }
+                await triggerSkillAction(name, 'repair');
             } else if (target.classList.contains('skills-uninstall')) {
                 const source = target.dataset.source === 'ouroboroshub' ? 'ouroboroshub' : 'clawhub';
                 const ok = await openConfirmDialog({
@@ -1150,6 +1202,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, ctx = {}) {
                     result.ok ? `${name}: uninstalled` : `${name}: uninstall failed — ${result.error}`,
                     result.ok ? 'ok' : 'danger',
                 );
+                if (result.ok) emitSkillLifecycle('uninstall', name, result);
             }
         } catch (err) {
             showBanner(`${name}: ${err.message || err}`, 'danger');
@@ -1237,9 +1290,9 @@ export function initSkills(ctx) {
 
     const container = document.getElementById('skills-list');
     const emptyEl = document.getElementById('skills-empty');
-    const runtimeModeEl = document.getElementById('skills-runtime-mode');
     const refreshBtn = document.getElementById('skills-refresh');
     const reviewingSkills = new Set();
+    const repairingSkills = new Set();
 
     const renderFn = async () => {
         refreshBtn.disabled = true;
@@ -1248,7 +1301,7 @@ export function initSkills(ctx) {
         refreshBtn.textContent = 'Refreshing';
         try {
             await Promise.all([
-                renderSkillsList(container, emptyEl, runtimeModeEl, reviewingSkills),
+                renderSkillsList(container, emptyEl, reviewingSkills, repairingSkills),
                 new Promise((resolve) => setTimeout(resolve, 250)),
             ]);
         } catch (err) {
@@ -1262,7 +1315,7 @@ export function initSkills(ctx) {
     };
 
     refreshBtn.addEventListener('click', renderFn);
-    attachActionHandlers(container, renderFn, reviewingSkills, ctx);
+    attachActionHandlers(container, renderFn, reviewingSkills, repairingSkills, ctx);
 
     document.querySelectorAll('.skills-tab').forEach((btn) => {
         btn.addEventListener('click', () => {

@@ -167,6 +167,16 @@ def test_widgets_refresh_button_shows_loading_state():
     assert "#widgets-refresh.is-loading::after" in css
 
 
+def test_widgets_cards_do_not_stretch_to_row_height():
+    source = _widgets_js()
+    css = (REPO_ROOT / "web" / "style.css").read_text(encoding="utf-8")
+    assert "const span = Number(tab.span || tab.grid_span || 1);" in source
+    assert "widgets-card-span-2" in source
+    widgets_block = css.split(".widgets-list {", 1)[1].split("}", 1)[0]
+    assert "align-items: start;" in widgets_block
+    assert ".widgets-card-span-2" in css
+
+
 def test_widgets_inline_card_preserves_session_state():
     source = _widgets_js()
     assert "const saved = widgetSessionState.get(persistenceKey) || {};" in source

@@ -120,3 +120,24 @@ def test_payload_root_must_match_skill_name(tmp_path):
         assert "does not match" in str(exc)
     else:
         raise AssertionError("mismatched skill_name/payload_root was accepted")
+
+
+def test_light_mode_allows_constrained_str_replace_editor_payload_edit(tmp_path, monkeypatch):
+    from ouroboros import config as cfg
+    from ouroboros.tools.registry import ToolRegistry
+
+    ctx, skill = _ctx(tmp_path)
+    target = skill / "plugin.py"
+    target.write_text("VALUE = 1\n", encoding="utf-8")
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+    registry._ctx = ctx
+    monkeypatch.setattr(cfg, "get_runtime_mode", lambda: "light")
+
+    result = registry.execute(
+        "str_replace_editor",
+        {"path": "plugin.py", "old_str": "VALUE = 1", "new_str": "VALUE = 2"},
+    )
+
+    assert "LIGHT_MODE_BLOCKED" not in result
+    assert "Replaced" in result
+    assert target.read_text(encoding="utf-8") == "VALUE = 2\n"

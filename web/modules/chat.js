@@ -1,5 +1,6 @@
 import { escapeHtmlAttr, escapeHtmlText as escapeHtml, formatUsdWhole, renderMarkdown } from './utils.js';
 import { renderPageHeader } from './page_header.js';
+import { PAGE_ICONS } from './page_icons.js';
 import {
     getLogTaskGroupId,
     isGroupedTaskEvent,
@@ -11,7 +12,6 @@ const CHAT_STORAGE_KEY = 'ouro_chat';
 const CHAT_INPUT_HISTORY_KEY = 'ouro_chat_input_history';
 const CHAT_SESSION_ID_KEY = 'ouro_chat_session_id';
 const PLAN_PREFIX = 'Please do multi-model planning (plan_task tool) and web-search before answering or starting this task:\n\n';
-const CHAT_ICON = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z"/><path d="M7 11h10"/><path d="M7 15h6"/><path d="M7 7h8"/></svg>';
 
 function getOrCreateChatSessionId() {
     try {
@@ -52,7 +52,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
     page.innerHTML = `
         ${renderPageHeader({
             title: 'Chat',
-            icon: CHAT_ICON,
+            icon: PAGE_ICONS.chat,
             variant: 'overlay',
             className: 'chat-page-header',
             actionsHtml: `

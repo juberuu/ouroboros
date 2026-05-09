@@ -101,6 +101,27 @@ class TestSettingsUiGuards(unittest.TestCase):
         source = self._read_settings_sources()["settings"]
         self.assertIn("await loadSettings();", source)
 
+    def test_skill_requested_secrets_dedupe_and_exclude_base_keys(self):
+        sources = self._read_settings_sources()
+        settings = sources["settings"]
+        settings_ui = sources["settings_ui"]
+        self.assertIn("export const SECRET_KEYS", settings_ui)
+        self.assertIn("const BASE_SECRET_KEYS = new Set", settings)
+        self.assertIn("!BASE_SECRET_KEYS.has(normalized)", settings)
+        self.assertIn("Array.from(new Set(keys)).sort", settings)
+        self.assertNotIn("Requested by ${escapeHtml(row.skill)}", settings)
+        self.assertIn("window.addEventListener('ouro:skill-lifecycle'", settings)
+        self.assertIn("event.detail?.page === 'settings'", settings)
+
+    def test_custom_secret_rows_are_compact_grid(self):
+        settings = self._read_settings_sources()["settings"]
+        settings_ui = self._read_settings_sources()["settings_ui"]
+        css = (REPO / "web/settings.css").read_text(encoding="utf-8")
+        self.assertIn('class="btn btn-default btn-sm" id="btn-add-custom-secret"', settings_ui)
+        self.assertIn("settings-custom-secret-row", settings)
+        self.assertIn("grid-template-columns: minmax(180px, 0.65fr) minmax(260px, 1.35fr) auto;", css)
+        self.assertNotIn(".settings-add-secret-btn", css)
+
     def test_model_picker_uses_single_custom_dropdown(self):
         sources = self._read_settings_sources()
         self.assertNotIn('list="settings-model-catalog"', sources["settings_ui"])
