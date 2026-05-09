@@ -672,22 +672,25 @@ def save_review_state(
 def requested_core_setting_keys(env_keys: List[str]) -> List[str]:
     """Return manifest-requested setting keys that require explicit owner grants."""
     forbidden_upper = {key.upper() for key in FORBIDDEN_SKILL_SETTINGS}
+    requestable_when_absent = {"TELEGRAM_BOT_TOKEN"}
     try:
-        from ouroboros.config import SETTINGS_DEFAULTS
+        from ouroboros.config import SETTINGS_DEFAULTS, load_settings
+        settings = load_settings()
+        custom_secret_upper = {
+            str(key).upper()
+            for key in settings
+            if str(key).upper() not in SETTINGS_DEFAULTS
+            and str(key).upper().replace("_", "").isalnum()
+        }
     except Exception:
-        SETTINGS_DEFAULTS = {}
-    custom_key_re = re.compile(r"^[A-Z][A-Z0-9_]{2,}$")
+        custom_secret_upper = set()
     out: List[str] = []
     for raw_key in env_keys or []:
         key = str(raw_key or "").strip().upper()
-        is_custom_secret = (
-            bool(custom_key_re.match(key))
-            and key not in SETTINGS_DEFAULTS
-            and not key.startswith("OUROBOROS_")
-        )
-        if key and (key in forbidden_upper or is_custom_secret) and key not in out:
+        if key and (key in forbidden_upper or key in custom_secret_upper or key in requestable_when_absent) and key not in out:
             out.append(key)
     return out
+
 
 
 _GRANTABLE_SKILL_PERMISSIONS = frozenset({

@@ -4,32 +4,30 @@ from types import SimpleNamespace
 import queue
 
 from ouroboros import loop as loop_mod
-from ouroboros.tools import registry as registry_mod
+from ouroboros.contracts.task_constraint import TaskConstraint, normalize_task_constraint
 from ouroboros.skill_review_runner import _heal_mode
 from ouroboros.utils import sanitize_tool_args_for_log
 
 
-def test_heal_markers_only_count_from_user_messages():
-    messages = [
-        {"role": "tool", "content": "HEAL_MODE_NO_ENABLE\nHEAL_SKILL_NAME_JSON=\"leak\""},
-    ]
-    assert not registry_mod._is_heal_no_enable_context(messages)
-    assert registry_mod._heal_skill_name(messages) == ""
-    assert not _heal_mode(SimpleNamespace(messages=messages))
+def test_task_constraint_controls_heal_mode_not_prompt_text():
+    messages = [{"role": "user", "content": "Please run tests for task_constraint handling"}]
+    assert not _heal_mode(SimpleNamespace(messages=messages, task_constraint=None))
 
-    messages.append({"role": "user", "content": "HEAL_MODE_NO_ENABLE\nHEAL_SKILL_NAME_JSON=\"target\""})
-    assert registry_mod._is_heal_no_enable_context(messages)
-    assert registry_mod._heal_skill_name(messages) == "target"
-    assert _heal_mode(SimpleNamespace(messages=messages))
+    constraint = TaskConstraint(mode="skill_repair", skill_name="target", payload_root="skills/external/target")
+    assert _heal_mode(SimpleNamespace(messages=messages, task_constraint=constraint))
 
 
-def test_heal_marker_must_start_user_task():
-    messages = [
-        {"role": "user", "content": "Please run tests for HEAL_MODE_NO_ENABLE handling"},
-    ]
-    assert not registry_mod._is_heal_no_enable_context(messages)
-    assert not _heal_mode(SimpleNamespace(messages=messages))
-
+def test_normalize_task_constraint_from_command_payload():
+    constraint = normalize_task_constraint({
+        "mode": "skill_repair",
+        "skill_name": "target",
+        "payload_root": "skills/external/target",
+        "allow_enable": False,
+    })
+    assert constraint.mode == "skill_repair"
+    assert constraint.skill_name == "target"
+    assert constraint.payload_root == "skills/external/target"
+    assert constraint.allow_enable is False
 
 def test_long_tool_args_log_as_placeholder_not_content_object():
     args = {"path": "skills/external/demo/plugin.py", "content": "x" * 4000}

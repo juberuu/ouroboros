@@ -1553,9 +1553,9 @@ def test_env_denylist_blocks_secret_forwarding(tmp_path, monkeypatch):
     )
     assert "GITHUB_TOKEN" not in env
     assert "OUROBOROS_NETWORK_PASSWORD" not in env
-    # Custom manifest-requested keys are also grant-bound; they appear in
-    # Settings → Secrets only when a skill requests them.
-    assert "SOME_OK_KEY" not in env
+    # Non-protected manifest-requested keys still flow without grants; custom
+    # secrets become grant-bound after the owner stores them in Settings.
+    assert env["SOME_OK_KEY"] == "visible-value"
 
     with patch.object(se, "load_settings", return_value={"OPENROUTER_API_KEY": "sk-or-v1-GRANTED"}):
         granted_env = se._scrub_env(

@@ -1483,7 +1483,10 @@ async def api_command(request: Request) -> JSONResponse:
             bridge = get_bridge()
             visible_text = str(body.get("visible_text") or "").strip()
             task_constraint = body.get("task_constraint") if isinstance(body.get("task_constraint"), dict) else None
-            bridge.ui_send(cmd, broadcast=False, suppress_chat_log=bool(visible_text), task_constraint=task_constraint)
+            send_kwargs = {"broadcast": False, "suppress_chat_log": bool(visible_text)}
+            if task_constraint:
+                send_kwargs["task_constraint"] = task_constraint
+            bridge.ui_send(cmd, **send_kwargs)
             if visible_text:
                 task_id = str(body.get("visible_task_id") or "skill_repair")
                 ts = datetime.now(timezone.utc).isoformat()
