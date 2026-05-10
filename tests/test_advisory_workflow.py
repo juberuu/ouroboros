@@ -32,6 +32,12 @@ def _make_drive_root(tmp_path: pathlib.Path) -> pathlib.Path:
     return tmp_path
 
 
+@pytest.fixture
+def drive_root(tmp_path):
+    """Yield a directory ready to back ``state/`` writes for advisory tests."""
+    return _make_drive_root(tmp_path)
+
+
 def _make_blocking_attempt(
     commit_message: str = "test commit",
     block_reason: str = "critical_findings",
@@ -56,8 +62,7 @@ def _make_blocking_attempt(
 # 1. mark_advisory_stale_after_edit
 # ---------------------------------------------------------------------------
 
-def test_mark_stale_after_edit_invalidates_fresh_run(tmp_path):
-    drive_root = _make_drive_root(tmp_path)
+def test_mark_stale_after_edit_invalidates_fresh_run(drive_root):
     from ouroboros.review_state import (
         AdvisoryRunRecord, AdvisoryReviewState,
         load_state, save_state, mark_advisory_stale_after_edit, _utc_now,
@@ -565,8 +570,7 @@ def test_advisory_pre_review_recomputes_debt_after_resolving_obligation(tmp_path
 # 6. Serialization roundtrip for new fields
 # ---------------------------------------------------------------------------
 
-def test_serialization_roundtrip_new_fields(tmp_path):
-    drive_root = _make_drive_root(tmp_path)
+def test_serialization_roundtrip_new_fields(drive_root):
     from ouroboros.review_state import (
         AdvisoryReviewState, load_state, save_state,
     )
@@ -604,8 +608,7 @@ def test_old_state_loads_cleanly_without_new_fields(tmp_path):
     assert loaded.last_stale_from_edit_ts == ""
 
 
-def test_commit_attempt_with_critical_findings_roundtrip(tmp_path):
-    drive_root = _make_drive_root(tmp_path)
+def test_commit_attempt_with_critical_findings_roundtrip(drive_root):
     from ouroboros.review_state import (
         AdvisoryReviewState, load_state, save_state,
     )
@@ -692,8 +695,7 @@ def test_format_status_no_obligations_section_when_clean():
 # 8. _build_blocking_history_section reads full history
 # ---------------------------------------------------------------------------
 
-def test_build_blocking_history_section_empty_when_no_history(tmp_path):
-    drive_root = _make_drive_root(tmp_path)
+def test_build_blocking_history_section_empty_when_no_history(drive_root):
     from ouroboros.review_state import save_state, AdvisoryReviewState
     save_state(drive_root, AdvisoryReviewState())
 
@@ -702,8 +704,7 @@ def test_build_blocking_history_section_empty_when_no_history(tmp_path):
     assert result == ""
 
 
-def test_build_blocking_history_section_contains_all_obligations(tmp_path):
-    drive_root = _make_drive_root(tmp_path)
+def test_build_blocking_history_section_contains_all_obligations(drive_root):
     from ouroboros.review_state import AdvisoryReviewState, save_state
     state = AdvisoryReviewState()
     # Two distinct blocking rounds with different issues
@@ -728,8 +729,7 @@ def test_build_blocking_history_section_contains_all_obligations(tmp_path):
     assert "recent_blocking_attempts" in result
 
 
-def test_build_blocking_history_section_instructions_present(tmp_path):
-    drive_root = _make_drive_root(tmp_path)
+def test_build_blocking_history_section_instructions_present(drive_root):
     from ouroboros.review_state import AdvisoryReviewState, save_state
     state = AdvisoryReviewState()
     state.add_blocking_attempt(_make_blocking_attempt())
@@ -854,8 +854,7 @@ def test_review_status_surfaces_explicit_stale_reason(tmp_path):
     assert result["stale_reason"] == state.last_stale_reason
 
 
-def test_review_status_includes_open_obligations(tmp_path):
-    drive_root = _make_drive_root(tmp_path)
+def test_review_status_includes_open_obligations(tmp_path, drive_root):
     from ouroboros.review_state import AdvisoryReviewState, save_state
     state = AdvisoryReviewState()
     state.add_blocking_attempt(_make_blocking_attempt(critical_findings=[
@@ -876,8 +875,7 @@ def test_review_status_includes_open_obligations(tmp_path):
     assert result["open_obligations"][0]["item"] == "tests_affected"
 
 
-def test_review_status_next_step_after_edit_staleness(tmp_path):
-    drive_root = _make_drive_root(tmp_path)
+def test_review_status_next_step_after_edit_staleness(tmp_path, drive_root):
     from ouroboros.review_state import (
         AdvisoryReviewState, AdvisoryRunRecord, save_state, _utc_now,
     )
@@ -901,8 +899,7 @@ def test_review_status_next_step_after_edit_staleness(tmp_path):
 # 11. _check_advisory_freshness includes obligation summary
 # ---------------------------------------------------------------------------
 
-def test_check_advisory_freshness_shows_obligations_in_error(tmp_path):
-    drive_root = _make_drive_root(tmp_path)
+def test_check_advisory_freshness_shows_obligations_in_error(tmp_path, drive_root):
     from ouroboros.review_state import AdvisoryReviewState, save_state
     state = AdvisoryReviewState()
     state.add_blocking_attempt(_make_blocking_attempt(critical_findings=[

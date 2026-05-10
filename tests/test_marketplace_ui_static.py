@@ -119,11 +119,18 @@ def test_marketplace_fix_prompt_uses_structured_task_constraint():
     assert "task_constraint" in source
     assert "HEAL_SKILL_PAYLOAD_ROOT_JSON" not in source
     assert "payload_root" in source
-    assert "structured skill_repair task constraint" in source
+    # Repair-prompt body lives in the shared utils.js helper now (one source
+    # of truth for skills.js + marketplace.js healing prompts).
+    assert "renderSkillRepairPrompt" in source
     assert ".replace(/`/g, \"'\")" in source
     assert "Start a repair task" in source
     assert "visible_text:" in source
     assert "data-page=\"chat\"" in source
+
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parents[1]
+    utils_source = (repo_root / "web" / "modules" / "utils.js").read_text(encoding="utf-8")
+    assert "structured skill_repair task constraint" in utils_source
 
 
 def test_marketplace_install_does_not_silently_enable():
