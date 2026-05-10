@@ -152,7 +152,7 @@ export function renderSettingsPage() {
             `,
         })}
         <div class="settings-shell">
-            <div class="settings-scroll">
+            <div class="settings-scroll scroll-fade-y">
                 <section class="settings-panel active" data-settings-panel="providers">
                     <div class="settings-section-copy">
                         Configure remote providers and the optional network gate. Secret fields now have explicit

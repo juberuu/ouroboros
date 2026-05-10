@@ -1093,6 +1093,7 @@ async def api_state(request: Request) -> JSONResponse:
         from supervisor.workers import WORKERS, PENDING, RUNNING
         from supervisor.queue import get_evolution_status_snapshot
         from ouroboros.config import get_runtime_mode, get_skills_repo_path
+        from ouroboros.tools.github import github_token_from_env_or_settings
         st = load_state()
         alive = 0
         total_w = 0
@@ -1132,6 +1133,7 @@ async def api_state(request: Request) -> JSONResponse:
             # without leaking the absolute path.
             "runtime_mode": get_runtime_mode(),
             "skills_repo_configured": bool(get_skills_repo_path()),
+            "github_token_configured": bool(github_token_from_env_or_settings()),
         })
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)

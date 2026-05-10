@@ -18,7 +18,7 @@ def test_skills_and_widgets_use_inner_scroll_regions():
     skills = (ROOT / "web" / "modules" / "skills.js").read_text(encoding="utf-8")
     widgets = (ROOT / "web" / "modules" / "widgets.js").read_text(encoding="utf-8")
     css = (ROOT / "web" / "style.css").read_text(encoding="utf-8")
-    assert 'class="skills-scroll"' in skills
-    assert 'class="widgets-scroll"' in widgets
+    assert 'class="skills-scroll scroll-fade-y"' in skills
+    assert 'class="widgets-scroll scroll-fade-y"' in widgets
     assert ".skills-scroll" in css and "overflow-y: auto" in css
     assert ".widgets-scroll" in css and "overflow-y: auto" in css

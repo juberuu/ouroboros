@@ -148,6 +148,7 @@ EXPECTED_TOOLS = [
     # v5.7.0: skill_preflight — heal-allowed validator that runs
     # Python compile() / node --check / bash -n on a skill's payload.
     "skill_preflight",
+    "submit_skill_to_hub",
 ]
 
 

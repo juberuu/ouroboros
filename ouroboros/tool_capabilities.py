@@ -62,6 +62,7 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     # tools the prompt asked it to call. Promoting both to core makes the
     # everyday "fix this skill" workflow a one-shot — no enable round-trip.
     "list_skills", "review_skill", "skill_preflight",
+    "submit_skill_to_hub",
 })
 
 # Meta-tools: always visible alongside core tools

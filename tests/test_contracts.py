@@ -841,9 +841,8 @@ def test_extension_route_methods_contract_matches_server_dispatch():
     assert VALID_EXTENSION_ROUTE_METHODS == {"GET", "HEAD", "POST", "PUT", "DELETE", "PATCH"}
 
 
-def test_state_response_declares_phase2_runtime_mode_keys():
-    """Phase 2 extends the frozen ``StateResponse`` surface with
-    ``runtime_mode`` + ``skills_repo_configured``.
+def test_state_response_declares_runtime_and_capability_keys():
+    """StateResponse exposes runtime-mode and capability booleans.
 
     ARCHITECTURE.md §11.3 requires contract extensions under
     ``ouroboros/contracts/`` to be backed by regression assertions in
@@ -855,8 +854,8 @@ def test_state_response_declares_phase2_runtime_mode_keys():
     from ouroboros.contracts.api_v1 import StateResponse
 
     keys = set(StateResponse.__annotations__.keys())
-    for required in ("runtime_mode", "skills_repo_configured"):
+    for required in ("runtime_mode", "skills_repo_configured", "github_token_configured"):
         assert required in keys, (
-            f"StateResponse lost the Phase 2 key {required!r}; "
+            f"StateResponse lost the runtime/capability key {required!r}; "
             "ARCHITECTURE.md §11.3 contract is out of sync."
         )

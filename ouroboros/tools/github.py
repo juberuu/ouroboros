@@ -17,6 +17,18 @@ log = logging.getLogger(__name__)
 # Helpers
 # ---------------------------------------------------------------------------
 
+def github_token_from_env_or_settings() -> str:
+    """Return configured GitHub token without exposing it to callers."""
+    from ouroboros.config import load_settings
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
+    if not token:
+        try:
+            token = load_settings().get("GITHUB_TOKEN", "")
+        except Exception:
+            token = ""
+    return str(token or "").strip()
+
+
 def _gh_env(ctx: ToolContext) -> dict:
     """Build env for gh CLI: inject GITHUB_TOKEN / GH_TOKEN without gh auth login.
 
@@ -27,15 +39,8 @@ def _gh_env(ctx: ToolContext) -> dict:
     This avoids any interactive `gh auth login` and works in packaged mode.
     ToolContext has no .settings field; load_settings() is the correct path.
     """
-    from ouroboros.config import load_settings
     env = os.environ.copy()
-    token = env.get("GITHUB_TOKEN") or env.get("GH_TOKEN") or ""
-    if not token:
-        try:
-            settings = load_settings()
-            token = settings.get("GITHUB_TOKEN", "")
-        except Exception:
-            pass
+    token = github_token_from_env_or_settings()
     if token:
         env["GH_TOKEN"] = token
         env["GITHUB_TOKEN"] = token

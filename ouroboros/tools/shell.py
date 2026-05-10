@@ -20,8 +20,9 @@ from ouroboros.platform_layer import IS_WINDOWS, kill_process_tree, subprocess_n
 from ouroboros.config import load_settings
 from ouroboros.tools.commit_gate import _invalidate_advisory
 from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.utils import safe_relpath, utc_now_iso, run_cmd
-from ouroboros.contracts.task_constraint import normalize_task_constraint, resolve_payload_path
+from ouroboros.utils import utc_now_iso, run_cmd
+from ouroboros.contracts.task_constraint import normalize_task_constraint
+from ouroboros.contracts.skill_payload_policy import SkillPayloadPathError, resolve_skill_payload_target
 
 log = logging.getLogger(__name__)
 
@@ -456,47 +457,46 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
         return "⚠️ CLAUDE_CODE_UNAVAILABLE: ANTHROPIC_API_KEY not set."
 
     work_dir = str(ctx.repo_dir)
+    skill_payload_root = None
     task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
     if task_constraint and task_constraint.mode == "skill_repair" and task_constraint.payload_root:
         try:
-            work_dir = str(resolve_payload_path(pathlib.Path(ctx.drive_root), task_constraint, cwd or "."))
-        except ValueError as e:
+            resolved_skill_target = resolve_skill_payload_target(
+                pathlib.Path(ctx.drive_root),
+                cwd or ".",
+                constraint=task_constraint,
+                allow_short_relative=True,
+            )
+            work_dir = str(resolved_skill_target.target_path)
+            skill_payload_root = resolved_skill_target.payload_root
+        except (SkillPayloadPathError, ValueError) as e:
             return f"⚠️ CLAUDE_CODE_ERROR: {e}"
     elif cwd and cwd.strip() not in ("", ".", "./"):
         raw_cwd = cwd.strip()
-        norm_cwd = raw_cwd.replace("\\", "/").strip().lstrip("/")
-        if norm_cwd.startswith("data/"):
-            norm_cwd = norm_cwd[len("data/"):]
-        if norm_cwd.startswith("skills/"):
+        try:
+            resolved_skill_target = resolve_skill_payload_target(pathlib.Path(ctx.drive_root), raw_cwd)
+            candidate = resolved_skill_target.target_path
+            skill_payload_root = resolved_skill_target.payload_root
+        except SkillPayloadPathError as exc:
+            normalized_cwd = raw_cwd.replace("\\", "/").strip().lstrip("/")
+            if normalized_cwd.startswith("data/skills/") or normalized_cwd.startswith("skills/"):
+                return f"⚠️ CLAUDE_CODE_ERROR: skill cwd is invalid: {exc}"
             try:
-                candidate = (pathlib.Path(ctx.drive_root) / safe_relpath(norm_cwd)).resolve()
+                pathlib.Path(raw_cwd).resolve(strict=False).relative_to(pathlib.Path(ctx.drive_root).resolve(strict=False))
             except ValueError:
-                return "⚠️ CLAUDE_CODE_ERROR: skill cwd escapes data root."
-            try:
-                candidate.relative_to(pathlib.Path(ctx.drive_root).resolve())
-            except ValueError:
-                return "⚠️ CLAUDE_CODE_ERROR: skill cwd escapes data root."
-            rel_parts = candidate.relative_to(pathlib.Path(ctx.drive_root).resolve()).parts
-            if (
-                len(rel_parts) >= 3
-                and rel_parts[0] == "skills"
-                and rel_parts[1] == "native"
-                and not ((pathlib.Path(ctx.drive_root) / "skills" / "native" / rel_parts[2]) / ".seed-origin").is_file()
-            ):
-                return (
-                    "⚠️ CLAUDE_CODE_ERROR: data/skills/native/<skill>/ is "
-                    "reserved for launcher-seeded skills. Use "
-                    "data/skills/external/<skill>/ for authored skills."
-                )
-        else:
+                pass
+            else:
+                return f"⚠️ CLAUDE_CODE_ERROR: skill cwd is invalid: {exc}"
             candidate = (ctx.repo_dir / raw_cwd).resolve()
-        if candidate.exists():
-            work_dir = str(candidate)
+        if not candidate.exists() or not candidate.is_dir():
+            return f"⚠️ CLAUDE_CODE_ERROR: cwd not found or not a directory: {cwd}"
+        work_dir = str(candidate)
     work_dir_path = pathlib.Path(work_dir).resolve()
     repair_sidecar_snapshots = {}
-    if task_constraint and task_constraint.mode == "skill_repair":
+    sidecar_root = pathlib.Path(skill_payload_root).resolve() if skill_payload_root is not None else None
+    if sidecar_root is not None:
         for sidecar_name in (".clawhub.json", ".ouroboroshub.json", ".self_authored.json", ".seed-origin", "SKILL.openclaw.md"):
-            sidecar_path = work_dir_path / sidecar_name
+            sidecar_path = sidecar_root / sidecar_name
             try:
                 repair_sidecar_snapshots[sidecar_path] = sidecar_path.read_bytes() if sidecar_path.exists() else None
             except OSError:
@@ -579,7 +579,7 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
                     restored_sidecars.append(sidecar_path.name)
             if restored_sidecars:
                 return (
-                    "⚠️ HEAL_MODE_BLOCKED: Repair claude_code_edit attempted to modify "
+                    "⚠️ SKILL_PAYLOAD_CONTROL_BLOCKED: claude_code_edit attempted to modify "
                     "skill provenance/control-plane sidecars: "
                     + ", ".join(sorted(set(restored_sidecars)))
                     + ". The sidecar changes were reverted; edit payload code files instead."

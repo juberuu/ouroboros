@@ -429,16 +429,22 @@ You can read their full source under
 ### OuroborosHub (official, curated)
 
 `joi-lab/OuroborosHub` is the official catalog Ouroboros installs
-from. Publishing:
+from. The normal publishing path is agent-driven:
 
-1. Add a directory `skills/<slug>/` containing `SKILL.md` (and
-   `plugin.py` for extensions / `scripts/<file>` for scripts).
-2. Append an entry to `catalog.json` with the slug, name,
-   description, version, type, and `files: [{path, sha256, size}]`.
-   Recompute the sha256 every time you change the file bytes.
-3. Open a PR. After it merges, the Ouroboros Skills UI's
-   OuroborosHub tab will list the new skill within the catalog
-   client cache TTL (~5 min on raw.githubusercontent.com).
+1. Finish the local skill under `data/skills/<bucket>/<slug>/`.
+2. Run `skill_preflight` and `review_skill`; submission requires a
+   fresh `PASS` review whose stored `content_hash` matches the current
+   payload.
+3. Configure `GITHUB_TOKEN` in Settings → Secrets.
+4. Use the Skills card menu → **Submit to OuroborosHub**, or ask in
+   chat: `Submit skill <slug> to OuroborosHub`.
+
+The agent calls `submit_skill_to_hub`, infers the upstream destination
+from `OUROBOROS_HUB_CATALOG_URL`, creates or reuses the user's GitHub
+fork, commits `skills/<slug>/...` plus an updated `catalog.json` on a
+`submit/<slug>-v<version>` branch, and opens a PR. If the same version
+already exists in the catalog, bump the skill version and re-review
+before submitting again.
 
 ### ClawHub (third-party, registry-driven)
 

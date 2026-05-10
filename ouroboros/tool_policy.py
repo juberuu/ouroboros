@@ -11,8 +11,14 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Protocol
 
+import json
+import logging
+
 from ouroboros.tool_aliases import canonical_tool_name
 from ouroboros.tool_capabilities import CORE_TOOL_NAMES, META_TOOL_NAMES
+
+log = logging.getLogger(__name__)
+_INITIAL_EXTENSION_SCHEMA_BUDGET = 8_000
 
 
 class ToolSchemaProvider(Protocol):
@@ -29,13 +35,32 @@ def is_initial_task_tool(name: str) -> bool:
     return canonical in CORE_TOOL_NAMES or canonical in META_TOOL_NAMES
 
 
+def is_initial_extension_tool(name: str) -> bool:
+    """Live extension tool schemas are visible from round 1."""
+
+    from ouroboros.extension_loader import parse_extension_surface_name
+    return parse_extension_surface_name(name) is not None
+
+
 def initial_tool_schemas(registry: ToolSchemaProvider) -> List[Dict[str, Any]]:
     """Return the schemas that should be present from round 1."""
 
     result = []
+    extension_bytes = 0
     for schema in registry.schemas():
         name = schema.get("function", {}).get("name", "")
         if is_initial_task_tool(name):
+            result.append(schema)
+            continue
+        if is_initial_extension_tool(name):
+            encoded = len(json.dumps(schema, ensure_ascii=False, default=str))
+            if extension_bytes + encoded > _INITIAL_EXTENSION_SCHEMA_BUDGET:
+                log.warning(
+                    "Skipping initial extension tool schema %s: extension schema budget exceeded",
+                    name,
+                )
+                continue
+            extension_bytes += encoded
             result.append(schema)
     return result
 

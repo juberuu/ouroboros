@@ -1,5 +1,6 @@
 import { renderPageHeader } from './page_header.js';
 import { PAGE_ICONS } from './page_icons.js';
+import { applyMasonry } from './masonry.js';
 import {
     escapeHtmlAttr as escapeHtml,
     renderMarkdownSafe,
@@ -14,7 +15,7 @@ function pageTemplate() {
                 description: 'Reviewed extension UI surfaces live here, separate from the skill catalogue.',
                 actionsHtml: '<button id="widgets-refresh" class="btn btn-default btn-sm">Refresh</button>',
             })}
-            <div class="widgets-scroll">
+            <div class="widgets-scroll scroll-fade-y">
                 <div id="widgets-list" class="widgets-list"></div>
             </div>
         </section>
@@ -977,6 +978,7 @@ export function initWidgets(ctx = {}) {
         if (lastTabs) {
             // Optimistic paint from cache while the fresh fetch is in flight.
             renderShell(list, lastTabs);
+            applyMasonry(list);
         } else {
             list.innerHTML = '<div class="muted">Loading widgets…</div>';
         }
@@ -986,6 +988,7 @@ export function initWidgets(ctx = {}) {
             const tabs = Array.isArray(data.live?.ui_tabs) ? data.live.ui_tabs : [];
             lastTabs = tabs;
             renderShell(list, tabs);
+            applyMasonry(list);
             widgetsMounted = true;
             for (const tab of tabs) {
                 if (!widgetsVisible || generation !== renderGeneration) return;
@@ -994,11 +997,14 @@ export function initWidgets(ctx = {}) {
                 if (!card) continue;
                 try {
                     await mountTrackedTab(card, tab);
+                    applyMasonry(list);
                 } catch (err) {
                     const mount = card.querySelector('[data-widget-mount]');
                     if (mount) mount.innerHTML = `<div class="skills-load-error">widget failed: ${escapeHtml(err.message || err)}</div>`;
+                    applyMasonry(list);
                 }
             }
+            applyMasonry(list);
         } catch (err) {
             if (!widgetsVisible || generation !== renderGeneration) return;
             // If we have a cached payload, keep showing it instead of

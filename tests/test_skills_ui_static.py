@@ -68,6 +68,16 @@ def test_skill_lifecycle_events_refresh_dependent_ui():
         assert f"emitSkillLifecycle('{action}'" in source
 
 
+def test_submit_hub_hidden_for_native_skills_without_fake_seed_flag():
+    source = _skills_js()
+    assert "function submitHubReady" in source
+    assert "['external', 'self_authored', 'user_repo'].includes(source)" in source
+    assert "source === 'native' && !skill.seed_origin" not in source
+    assert "skills-submit-hub" in source
+    assert "Submit to OuroborosHub" in source
+    assert "Open a public GitHub pull request" in source
+
+
 def test_skills_feedback_uses_fixed_toast_not_page_banner():
     source = _skills_js()
     css = (REPO_ROOT / "web" / "style.css").read_text(encoding="utf-8")

@@ -226,9 +226,11 @@ Before every commit, verify the following:
 
 #### Skill Repair Task Constraints
 - Skill repair tasks use structured `task_constraint.mode="skill_repair"`, not prompt markers.
-- In repair mode, edit paths are payload-relative: `plugin.py` means the selected `data/skills/<bucket>/<skill>/plugin.py`.
+- In repair mode, edit paths are payload-relative: `plugin.py` means the selected `data/skills/{external,clawhub,ouroboroshub}/<skill>/plugin.py`.
 - Use `str_replace_editor` for one exact replacement, `claude_code_edit` for coordinated multi-hunk edits, and `data_write` only for new files or intentional full rewrites.
 - Finish repair with `skill_preflight` and `review_skill`; grants and enablement stay owner-controlled.
+- Repair mode is a stricter UI lane, not the only path for skill authoring. In `runtime_mode=light`, ordinary chat tasks may edit explicit `data/skills/{external,clawhub,ouroboroshub}/<skill>/...` payload paths via `str_replace_editor`, `data_write`, or `claude_code_edit`; core/repo paths, `data/skills/native/*`, `data/state/skills/*`, marketplace/provenance sidecars, and `run_shell` write scripts remain blocked.
+- New path checks for skill edits must use `ouroboros.contracts.skill_payload_policy` rather than reimplementing bucket/path traversal logic in each tool.
 
 #### Page Header Layout
 - Top-level page chrome (`renderPageHeader`, tab strips, primary actions) must sit outside the scrolling content region.
@@ -237,6 +239,10 @@ Before every commit, verify the following:
 - Primary page actions, including Refresh, live in the `renderPageHeader({ actionsHtml })` slot on the right. Do not add ad-hoc refresh rows inside scroll bodies.
 - Non-chat top-level pages use `.app-page-glass` for the shared dim/brand backdrop. Header padding should stay compact; if a page needs more space, simplify its copy rather than growing the chrome.
 - A new top-level page that scrolls its header together with content violates the architecture mirror: fix the layout, not the symptom.
+- Top-level tab/pill buttons are a single design-system control: `renderTabStrip` + `.app-tab-strip` + `.app-tab` + the `--pill-*` CSS variables in `web/style.css`. Do not redeclare per-page tab padding, font size, border radius, or active styling in page CSS files.
+- Scrollable page bodies use the shared `.scroll-fade-y` mask when content can pass under fixed page chrome. Do not copy/paste custom gradient masks into page modules; extend the shared class if the fade rhythm changes.
+- Masonry-style widget packing uses `web/modules/masonry.js::applyMasonry`. Do not reintroduce CSS Grid row packing (`align-items: start`) for unequal-height widget cards; it leaves row gaps under shorter cards.
+- New visual dimensions should become CSS variables first (`--pill-*`, `--button-*`, `--page-header-*`, etc.) and then be consumed by shared classes. Hardcoded page-local dimensions are review debt unless the component is genuinely unique.
 
 #### LLM Call Rules
 - [ ] New LLM calls go through the shared `LLMClient` / `llm.py` layer — no ad-hoc HTTP clients or direct provider SDKs outside that layer. **Exception (v5.7.0+):** skill / extension `plugin.py` modules may call providers directly because they have not yet been migrated to a host-mediated `api.invoke_llm(...)` bridge. When that bridge lands, the exception goes away. Runtime callers (anything inside `ouroboros/`) must still use `LLMClient`.

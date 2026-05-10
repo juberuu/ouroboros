@@ -1369,6 +1369,20 @@ def summarize_skills(drive_root: pathlib.Path) -> Dict[str, Any]:
     that need the detail should call ``discover_skills`` directly.
     """
     skills = discover_skills(drive_root)
+    tool_surfaces_by_skill: Dict[str, List[Dict[str, str]]] = {}
+    try:
+        from ouroboros.extension_loader import _lock as _ext_lock, _tools as _ext_tools
+        with _ext_lock:
+            for tool in _ext_tools.values():
+                skill_name = str(tool.get("skill") or "")
+                if not skill_name:
+                    continue
+                tool_surfaces_by_skill.setdefault(skill_name, []).append({
+                    "name": str(tool.get("name") or ""),
+                    "description": str(tool.get("description") or ""),
+                })
+    except Exception:
+        tool_surfaces_by_skill = {}
     from ouroboros.config import get_runtime_mode
     runtime_mode = get_runtime_mode()
     return {
@@ -1404,6 +1418,8 @@ def summarize_skills(drive_root: pathlib.Path) -> Dict[str, Any]:
         "skills": [
             {
                 "name": s.name,
+                "description": s.manifest.description,
+                "when_to_use": s.manifest.when_to_use,
                 "type": s.manifest.type,
                 "version": s.manifest.version,
                 "enabled": s.enabled,
@@ -1413,6 +1429,8 @@ def summarize_skills(drive_root: pathlib.Path) -> Dict[str, Any]:
                     is_runtime_eligible_for_execution(s)
                     and grant_status_for_skill(drive_root, s).get("usable", True)
                 ),
+                "runnable_via_skill_exec": s.available_for_execution,
+                "tool_surfaces": tool_surfaces_by_skill.get(s.name, []),
                 "static_ready": s.available_for_execution,
                 "blocked_by_grants": not grant_status_for_skill(drive_root, s).get("usable", True),
                 "runtime_blocked_by_mode": False,  # v5.1.2: never blocked by mode.

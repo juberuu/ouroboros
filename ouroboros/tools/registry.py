@@ -32,6 +32,7 @@ from ouroboros.tool_aliases import (
 )
 from ouroboros.utils import safe_relpath
 from ouroboros.contracts.task_constraint import TaskConstraint, normalize_task_constraint, resolve_payload_path
+from ouroboros.contracts.skill_payload_policy import is_skill_payload_path
 
 log = logging.getLogger(__name__)
 
@@ -95,13 +96,13 @@ def _detect_runtime_mode_elevation(text_lower: str) -> bool:
 
 
 def _task_constraint_path_allowed(path_text: str, constraint: Optional[TaskConstraint], drive_root: pathlib.Path) -> bool:
-    if not constraint or constraint.mode != "skill_repair" or not constraint.payload_root:
-        return False
-    try:
-        resolve_payload_path(drive_root, constraint, path_text or "")
-        return True
-    except (OSError, ValueError):
-        return False
+    return is_skill_payload_path(
+        drive_root,
+        path_text or "",
+        constraint=constraint,
+        allow_short_relative=True,
+        allow_control_plane=True,
+    )
 
 
 _HEAL_MODE_ALLOWED_TOOLS = frozenset({
@@ -168,31 +169,7 @@ def _heal_protected_payload_sidecar(path_text: str) -> bool:
 
 
 def _skill_payload_cwd_allowed(cwd_text: str, drive_root: pathlib.Path) -> bool:
-    raw = str(cwd_text or "").strip()
-    if not raw:
-        return False
-    norm = raw.replace("\\", "/").strip("/")
-    if norm.startswith("data/"):
-        norm = norm[len("data/"):]
-    try:
-        drive = pathlib.Path(drive_root).resolve(strict=False)
-        target = pathlib.Path(os.path.realpath(drive / safe_relpath(norm)))
-        rel = target.relative_to(drive)
-    except (OSError, ValueError):
-        return False
-    parts = rel.parts
-    if len(parts) < 3 or parts[0] != "skills" or parts[1] not in {"external", "clawhub", "ouroboroshub", "native"}:
-        return False
-    if any(part in {"", ".", ".."} for part in parts):
-        return False
-    payload_root = drive / "skills" / parts[1] / parts[2]
-    if parts[1] == "native" and not (payload_root / ".seed-origin").is_file():
-        return False
-    try:
-        target.relative_to(payload_root)
-    except ValueError:
-        return False
-    return True
+    return is_skill_payload_path(drive_root, cwd_text, allow_control_plane=False)
 
 
 _INTERPRETER_BASENAMES = frozenset({
@@ -502,7 +479,7 @@ CORE_TOOL_NAMES = {
     # v5.7.0: keep this frozen fallback copy aligned with
     # tool_capabilities.CORE_TOOL_NAMES. ToolPolicy is the runtime SSOT, but
     # some schemas(core_only=True) callers still use this local set.
-    "list_skills", "review_skill", "skill_preflight",
+    "list_skills", "review_skill", "skill_preflight", "submit_skill_to_hub",
 }
 
 
@@ -525,6 +502,7 @@ class ToolRegistry:
         # Phase 3 three-layer refactor: external skill surface
         # (list_skills / review_skill / skill_exec / toggle_skill).
         "skill_exec",
+        "skill_publish",
         # v5.7.0: skill_preflight — read-only payload validator for heal mode.
         "skill_preflight",
         "tool_discovery", "vision",
@@ -1245,17 +1223,23 @@ class ToolRegistry:
         light_skill_scoped_claude = (
             _runtime_mode == "light"
             and name == "claude_code_edit"
-            and _skill_payload_cwd_allowed(str(args.get("cwd", "") or ""), pathlib.Path(self._ctx.drive_root))
+            and is_skill_payload_path(
+                pathlib.Path(self._ctx.drive_root),
+                str(args.get("cwd") or "."),
+                constraint=task_constraint,
+                allow_short_relative=bool(task_constraint and task_constraint.mode == "skill_repair"),
+                allow_control_plane=False,
+            )
         )
         light_skill_scoped_str_replace = (
             _runtime_mode == "light"
             and name == "str_replace_editor"
-            and task_constraint is not None
-            and task_constraint.mode == "skill_repair"
-            and _task_constraint_path_allowed(
-                str(args.get("path", "") or ""),
-                task_constraint,
+            and is_skill_payload_path(
                 pathlib.Path(self._ctx.drive_root),
+                str(args.get("path", "") or ""),
+                constraint=task_constraint,
+                allow_short_relative=bool(task_constraint and task_constraint.mode == "skill_repair"),
+                allow_control_plane=False,
             )
         )
         if (

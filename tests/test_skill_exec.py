@@ -380,10 +380,10 @@ def test_claude_code_edit_rejects_escaping_skill_cwd(tmp_path, monkeypatch):
 
     result = shell_mod._claude_code_edit(ctx, prompt="edit", cwd="skills/../../repo")
 
-    assert "escapes data root" in result
+    assert "skill cwd is invalid" in result
 
 
-def test_claude_code_edit_blocks_unseeded_native_skill_cwd(tmp_path, monkeypatch):
+def test_claude_code_edit_blocks_native_skill_cwd(tmp_path, monkeypatch):
     from ouroboros.tools import shell as shell_mod
 
     ctx = _make_ctx(tmp_path)
@@ -392,7 +392,7 @@ def test_claude_code_edit_blocks_unseeded_native_skill_cwd(tmp_path, monkeypatch
 
     result = shell_mod._claude_code_edit(ctx, prompt="edit", cwd="skills/native/alpha")
 
-    assert "reserved for launcher-seeded skills" in result
+    assert "skill cwd is invalid" in result
 
 
 def test_skill_exec_tools_have_policy_entries():

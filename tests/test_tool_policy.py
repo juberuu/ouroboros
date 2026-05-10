@@ -105,7 +105,7 @@ def test_list_available_tools_hides_enabled_extra_tools():
     assert "multi_model_review" not in after
 
 
-def test_non_core_listing_includes_live_extension_tools(monkeypatch):
+def test_live_extension_tools_are_initial_not_non_core(monkeypatch):
     from ouroboros import extension_loader
 
     registry = _build_registry()
@@ -121,8 +121,10 @@ def test_non_core_listing_includes_live_extension_tools(monkeypatch):
         }
     monkeypatch.setattr(extension_loader, "is_extension_live", lambda *_a, **_k: True)
     try:
-        names = {entry["name"] for entry in list_non_core_tools(registry)}
-        assert tool_name in names
+        initial_names = {schema["function"]["name"] for schema in initial_tool_schemas(registry)}
+        non_core_names = {entry["name"] for entry in list_non_core_tools(registry)}
+        assert tool_name in initial_names
+        assert tool_name in non_core_names
     finally:
         with extension_loader._lock:
             extension_loader._tools.pop(tool_name, None)

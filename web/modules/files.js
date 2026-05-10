@@ -46,7 +46,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
                         <button class="btn btn-default" id="files-new-dir" title="Create directory">+ Dir</button>
                     </div>
                 </div>
-                <div id="files-list" class="files-list"></div>
+                <div id="files-list" class="files-list scroll-fade-y"></div>
             </section>
             <section class="files-preview">
                 <div class="files-preview-header">
@@ -60,7 +60,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
                         <button class="btn btn-primary" id="files-save" hidden disabled>Save</button>
                     </div>
                 </div>
-                <div id="files-preview-content" class="files-preview-content">${defaultDirectoryContent()}</div>
+                <div id="files-preview-content" class="files-preview-content scroll-fade-y">${defaultDirectoryContent()}</div>
             </section>
             <div class="files-drop-overlay" aria-hidden="true">
                 <div class="files-drop-card">Drop files to upload into the current folder</div>

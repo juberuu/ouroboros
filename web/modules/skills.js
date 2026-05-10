@@ -44,7 +44,7 @@ function skillsPageTemplate() {
                     tabClass: 'skills-tab',
                 }),
             })}
-            <div class="skills-scroll">
+            <div class="skills-scroll scroll-fade-y">
                 <div class="skills-tab-panel" id="skills-pane-installed" data-pane="installed">
                 <div id="skills-migration-banner" class="skills-migration-banner" hidden></div>
                 <div id="skills-list" class="skills-list"></div>
@@ -86,6 +86,19 @@ function healReady(skill) {
     const missingGrantError = !grantReady(skill) && String(skill.load_error || '').includes('missing owner grants');
     return payloadRoot.startsWith('skills/')
         && (skill.review_status === 'fail' || (Boolean(skill.load_error) && !missingGrantError));
+}
+
+function submitHubReady(skill, githubTokenConfigured = false) {
+    const source = (skill.source || 'native').toLowerCase();
+    const sourceAllowed = ['external', 'self_authored', 'user_repo'].includes(source);
+    if (!sourceAllowed) return { visible: false, disabled: true, reason: '' };
+    if (!githubTokenConfigured) {
+        return { visible: true, disabled: true, reason: 'Configure GITHUB_TOKEN in Settings -> Secrets' };
+    }
+    if (!reviewReady(skill)) {
+        return { visible: true, disabled: true, reason: 'Skill needs a fresh PASS review before submission' };
+    }
+    return { visible: true, disabled: false, reason: 'Open a PR to OuroborosHub from your GitHub fork' };
 }
 
 function isMissingGrantLoadError(skill) {
@@ -413,7 +426,7 @@ function getSkillPrimaryAction(skill, reviewInProgress = false, repairInProgress
     return { action: '', label: '' };
 }
 
-function renderSkillCard(skill, reviewingSkills = new Set(), repairingSkills = new Set(), live = {}) {
+function renderSkillCard(skill, reviewingSkills = new Set(), repairingSkills = new Set(), live = {}, options = {}) {
     const safeName = escapeHtml(skill.name);
     const description = escapeHtml(skill.description || '');
     const installedVersion = skill.version || '—';
@@ -506,6 +519,10 @@ function renderSkillCard(skill, reviewingSkills = new Set(), repairingSkills = n
     const reviewMenuBtn = !reviewInProgress
         ? `<button type="button" role="menuitem" class="skills-menu-item skills-review" data-skill="${safeName}">${skill.review_status === 'pending' ? 'Review' : (skill.review_stale ? 'Re-review' : 'Review again')}</button>`
         : '';
+    const submitHub = submitHubReady(skill, Boolean(options.githubTokenConfigured));
+    const submitHubBtn = submitHub.visible
+        ? `<button type="button" role="menuitem" class="skills-menu-item skills-submit-hub" data-skill="${safeName}" ${submitHub.disabled ? 'disabled' : ''} title="${escapeHtml(submitHub.reason)}">Submit to OuroborosHub</button>`
+        : '';
     const next = skillNextAction(skill, reviewInProgress, repairInProgress, live);
     const nextAttrs = [
         `data-skill="${safeName}"`,
@@ -578,12 +595,13 @@ function renderSkillCard(skill, reviewingSkills = new Set(), repairingSkills = n
     // with .show() (not .showModal()) so it appears as an anchored popover
     // under the trigger instead of as a centered viewport modal that
     // dimmed the rest of the page.
-    const cardMenu = (updateBtn || uninstallBtn || reviewMenuBtn)
+    const cardMenu = (updateBtn || uninstallBtn || reviewMenuBtn || submitHubBtn)
         ? `
                     <div class="skills-card-menu">
                         <button type="button" class="skills-card-menu-trigger" aria-label="More actions" aria-haspopup="menu" aria-expanded="false" data-skill-menu-trigger>⋮</button>
                         <dialog class="skills-card-menu-dialog" role="menu">
                             ${reviewMenuBtn}
+                            ${submitHubBtn}
                             ${updateBtn}
                             ${uninstallBtn}
                         </dialog>
@@ -631,10 +649,12 @@ async function fetchSkills() {
     // synthesize the per-skill list via the extensions catalogue +
     // the runtime-mode / skills-repo boolean.
     const skillsRepoConfigured = Boolean(stateResp.skills_repo_configured);
+    const githubTokenConfigured = Boolean(stateResp.github_token_configured);
     const runtimeMode = stateResp.runtime_mode || 'advanced';
     return {
         runtimeMode,
         skillsRepoConfigured,
+        githubTokenConfigured,
         skills: mergeLifecycleEvents(extResp.skills || [], queueResp.events || []),
         live: extResp.live || {},
         queue: queueResp,
@@ -697,14 +717,20 @@ function updateQueueBadges(events) {
 
 
 async function renderSkillsList(container, emptyEl, reviewingSkills = new Set(), repairingSkills = new Set()) {
-    const { skillsRepoConfigured, skills, live } = await fetchSkills();
+    const { skillsRepoConfigured, githubTokenConfigured, skills, live } = await fetchSkills();
     if (!skills.length && !skillsRepoConfigured) {
         container.innerHTML = '';
         if (emptyEl) emptyEl.hidden = false;
         return;
     }
     if (emptyEl) emptyEl.hidden = true;
-    container.innerHTML = sortSkillsForDisplay(skills).map((skill) => renderSkillCard(skill, reviewingSkills, repairingSkills, live)).join('')
+    container.innerHTML = sortSkillsForDisplay(skills).map((skill) => renderSkillCard(
+        skill,
+        reviewingSkills,
+        repairingSkills,
+        live,
+        { githubTokenConfigured },
+    )).join('')
         || '<div class="muted">No skills yet. Add one from <b>ClawHub</b> or <b>OuroborosHub</b>.</div>';
     // v5: surface unread native-skill upgrade migrations so the
     // operator is told when the launcher silently rewrote an
@@ -955,6 +981,30 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
                 repairingSkills.delete(name);
                 renderFn();
             }
+            return;
+        }
+
+        if (action === 'submit_hub') {
+            const ok = await openConfirmDialog({
+                title: `Submit ${name} to OuroborosHub`,
+                body: `Open a public GitHub pull request submitting ${name} to OuroborosHub? The PR will contain the reviewed skill payload and an updated catalog entry.`,
+                confirmLabel: 'Submit to OuroborosHub',
+                danger: true,
+            });
+            if (!ok) return;
+            const message = `Submit skill ${name} to OuroborosHub`;
+            await postWithFeedback('/api/command', {
+                cmd: message,
+                visible_text: `Submission task queued for ${name}. Ouroboros will open a PR to OuroborosHub if validation passes.`,
+                visible_task_id: `skill_submit_${name}`,
+            });
+            showBanner(`${name}: submission task sent to Ouroboros`, 'ok');
+            emitSkillLifecycle('submit_hub', name);
+            if (typeof ctx.showPage === 'function') {
+                ctx.showPage('chat');
+            } else {
+                document.querySelector('.nav-btn[data-page="chat"]')?.click();
+            }
         }
     }
 
@@ -1183,6 +1233,8 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
                     throw new Error('Skill not found in current catalogue.');
                 }
                 await triggerSkillAction(name, 'repair');
+            } else if (target.classList.contains('skills-submit-hub')) {
+                await triggerSkillAction(name, 'submit_hub');
             } else if (target.classList.contains('skills-uninstall')) {
                 const source = target.dataset.source === 'ouroboroshub' ? 'ouroboroshub' : 'clawhub';
                 const ok = await openConfirmDialog({

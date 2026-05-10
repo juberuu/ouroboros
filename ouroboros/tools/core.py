@@ -50,6 +50,7 @@ _SKILL_PAYLOAD_CONTROL_PLANE_FILENAMES = frozenset({
 _SKILL_PAYLOAD_CONTROL_PLANE_DIRNAMES = frozenset({
     ".ouroboros_env",
     "node_modules",
+    "__pycache__",
 })
 
 # Buckets in ``data/skills/<bucket>/<skill>/`` where the payload

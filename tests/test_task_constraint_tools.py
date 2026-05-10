@@ -98,7 +98,49 @@ def test_claude_code_edit_reverts_repair_sidecars(tmp_path, monkeypatch):
 
     result = _claude_code_edit(ctx, "edit", cwd=".")
 
-    assert "HEAL_MODE_BLOCKED" in result
+    assert "SKILL_PAYLOAD_CONTROL_BLOCKED" in result
+    assert sidecar.read_text(encoding="utf-8") == "original"
+
+
+def test_claude_code_edit_reverts_normal_skill_sidecars(tmp_path, monkeypatch):
+    from types import ModuleType, SimpleNamespace
+    import sys
+    from ouroboros.tools.shell import _claude_code_edit
+
+    gateway = ModuleType("ouroboros.gateways.claude_code")
+    gateway.resolve_claude_code_model = lambda: "test-model"
+    gateway.DEFAULT_CLAUDE_CODE_MAX_TURNS = 1
+    sys.modules["ouroboros.gateways.claude_code"] = gateway
+
+    repo = tmp_path / "repo"
+    drive = tmp_path / "data"
+    repo.mkdir()
+    skill = drive / "skills" / "external" / "alpha"
+    skill.mkdir(parents=True)
+    sidecar = skill / ".self_authored.json"
+    sidecar.write_text("original", encoding="utf-8")
+    ctx = ToolContext(repo_dir=repo, drive_root=drive)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    def fake_run_edit(**kwargs):
+        sidecar.write_text("modified", encoding="utf-8")
+        return SimpleNamespace(
+            success=True,
+            error="",
+            result_text="ok",
+            cost_usd=0.0,
+            usage={},
+            changed_files=[],
+            diff_stat="",
+            validation_summary="",
+            to_tool_output=lambda: "OK",
+        )
+
+    gateway.run_edit = fake_run_edit
+
+    result = _claude_code_edit(ctx, "edit", cwd="skills/external/alpha")
+
+    assert "SKILL_PAYLOAD_CONTROL_BLOCKED" in result
     assert sidecar.read_text(encoding="utf-8") == "original"
 
 
@@ -122,6 +164,26 @@ def test_payload_root_must_match_skill_name(tmp_path):
         raise AssertionError("mismatched skill_name/payload_root was accepted")
 
 
+def test_registry_rejects_mismatched_repair_payload_root(tmp_path):
+    from ouroboros.tools.registry import ToolRegistry
+
+    repo = tmp_path / "repo"
+    drive = tmp_path / "data"
+    repo.mkdir()
+    (drive / "skills" / "external" / "beta").mkdir(parents=True)
+    bad_ctx = ToolContext(
+        repo_dir=repo,
+        drive_root=drive,
+        task_constraint=TaskConstraint(mode="skill_repair", skill_name="alpha", payload_root="skills/external/beta"),
+    )
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    registry._ctx = bad_ctx
+
+    result = registry.execute("data_write", {"path": "plugin.py", "content": "x"})
+
+    assert "HEAL_MODE_BLOCKED" in result
+
+
 def test_light_mode_allows_constrained_str_replace_editor_payload_edit(tmp_path, monkeypatch):
     from ouroboros import config as cfg
     from ouroboros.tools.registry import ToolRegistry
@@ -141,3 +203,155 @@ def test_light_mode_allows_constrained_str_replace_editor_payload_edit(tmp_path,
     assert "LIGHT_MODE_BLOCKED" not in result
     assert "Replaced" in result
     assert target.read_text(encoding="utf-8") == "VALUE = 2\n"
+
+
+def test_light_mode_allows_normal_skill_str_replace_without_repair_constraint(tmp_path, monkeypatch):
+    from ouroboros import config as cfg
+    from ouroboros.tools.registry import ToolRegistry
+
+    repo = tmp_path / "repo"
+    drive = tmp_path / "data"
+    repo.mkdir()
+    skill = drive / "skills" / "clawhub" / "alpha"
+    skill.mkdir(parents=True)
+    target = skill / "plugin.py"
+    target.write_text("VALUE = 1\n", encoding="utf-8")
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    monkeypatch.setattr(cfg, "get_runtime_mode", lambda: "light")
+
+    result = registry.execute(
+        "str_replace_editor",
+        {"path": "skills/clawhub/alpha/plugin.py", "old_str": "VALUE = 1", "new_str": "VALUE = 2"},
+    )
+
+    assert "LIGHT_MODE_BLOCKED" not in result
+    assert "Replaced" in result
+    assert target.read_text(encoding="utf-8") == "VALUE = 2\n"
+
+
+def test_light_mode_blocks_normal_skill_sidecar_str_replace(tmp_path, monkeypatch):
+    from ouroboros import config as cfg
+    from ouroboros.tools.registry import ToolRegistry
+
+    repo = tmp_path / "repo"
+    drive = tmp_path / "data"
+    repo.mkdir()
+    skill = drive / "skills" / "ouroboroshub" / "alpha"
+    skill.mkdir(parents=True)
+    sidecar = skill / ".ouroboroshub.json"
+    sidecar.write_text('{"version":"1"}\n', encoding="utf-8")
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    monkeypatch.setattr(cfg, "get_runtime_mode", lambda: "light")
+
+    result = registry.execute(
+        "str_replace_editor",
+        {"path": "skills/ouroboroshub/alpha/.ouroboroshub.json", "old_str": "1", "new_str": "2"},
+    )
+
+    assert "Replaced" not in result
+    assert "BLOCKED" in result
+    assert sidecar.read_text(encoding="utf-8") == '{"version":"1"}\n'
+
+
+def test_light_mode_blocks_review_excluded_skill_dirs(tmp_path, monkeypatch):
+    from ouroboros import config as cfg
+    from ouroboros.tools.registry import ToolRegistry
+
+    repo = tmp_path / "repo"
+    drive = tmp_path / "data"
+    repo.mkdir()
+    target_dir = drive / "skills" / "external" / "alpha" / "node_modules"
+    target_dir.mkdir(parents=True)
+    target = target_dir / "dep.js"
+    target.write_text("VALUE = 1\n", encoding="utf-8")
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    monkeypatch.setattr(cfg, "get_runtime_mode", lambda: "light")
+
+    result = registry.execute(
+        "str_replace_editor",
+        {"path": "skills/external/alpha/node_modules/dep.js", "old_str": "VALUE = 1", "new_str": "VALUE = 2"},
+    )
+
+    assert "LIGHT_MODE_BLOCKED" in result
+    assert target.read_text(encoding="utf-8") == "VALUE = 1\n"
+
+
+def test_data_write_blocks_review_excluded_skill_dirs(tmp_path, monkeypatch):
+    from ouroboros import config as cfg
+    from ouroboros.tools.core import _data_write
+
+    repo = tmp_path / "repo"
+    drive = tmp_path / "data"
+    repo.mkdir()
+    drive.mkdir()
+    monkeypatch.setattr(cfg, "DATA_DIR", drive)
+    ctx = ToolContext(repo_dir=repo, drive_root=drive)
+
+    result = _data_write(ctx, "skills/external/alpha/__pycache__/evil.py", "VALUE = 2\n")
+
+    assert "DATA_WRITE_BLOCKED" in result
+
+
+def test_light_mode_allows_claude_code_edit_absolute_skill_cwd(tmp_path, monkeypatch):
+    from ouroboros import config as cfg
+    from ouroboros.tools.registry import ToolEntry, ToolRegistry
+
+    repo = tmp_path / "repo"
+    drive = tmp_path / "data"
+    repo.mkdir()
+    skill = drive / "skills" / "external" / "alpha"
+    skill.mkdir(parents=True)
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    monkeypatch.setattr(cfg, "get_runtime_mode", lambda: "light")
+    registry._entries["claude_code_edit"] = ToolEntry(
+        name="claude_code_edit",
+        schema={"name": "claude_code_edit", "description": "test", "parameters": {"type": "object"}},
+        handler=lambda ctx, **kwargs: "claude-ok",
+        is_code_tool=True,
+    )
+
+    result = registry.execute("claude_code_edit", {"prompt": "edit", "cwd": str(skill)})
+
+    assert "LIGHT_MODE_BLOCKED" not in result
+    assert "claude-ok" in result
+
+
+def test_light_mode_allows_repair_claude_code_edit_with_omitted_cwd(tmp_path, monkeypatch):
+    from ouroboros import config as cfg
+    from ouroboros.tools.registry import ToolEntry, ToolRegistry
+
+    ctx, _skill = _ctx(tmp_path)
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+    registry._ctx = ctx
+    monkeypatch.setattr(cfg, "get_runtime_mode", lambda: "light")
+    registry._entries["claude_code_edit"] = ToolEntry(
+        name="claude_code_edit",
+        schema={"name": "claude_code_edit", "description": "test", "parameters": {"type": "object"}},
+        handler=lambda ctx, **kwargs: "claude-ok",
+        is_code_tool=True,
+    )
+
+    result = registry.execute("claude_code_edit", {"prompt": "edit"})
+
+    assert "LIGHT_MODE_BLOCKED" not in result
+    assert "claude-ok" in result
+
+
+def test_light_mode_still_blocks_repo_str_replace_without_repair_constraint(tmp_path, monkeypatch):
+    from ouroboros import config as cfg
+    from ouroboros.tools.registry import ToolRegistry
+
+    repo = tmp_path / "repo"
+    drive = tmp_path / "data"
+    repo.mkdir()
+    drive.mkdir()
+    (repo / "README.md").write_text("VALUE = 1\n", encoding="utf-8")
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    monkeypatch.setattr(cfg, "get_runtime_mode", lambda: "light")
+
+    result = registry.execute(
+        "str_replace_editor",
+        {"path": "README.md", "old_str": "VALUE = 1", "new_str": "VALUE = 2"},
+    )
+
+    assert "LIGHT_MODE_BLOCKED" in result

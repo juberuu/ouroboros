@@ -40,6 +40,7 @@ from ouroboros.tools.parallel_review import run_parallel_review as _run_parallel
 from ouroboros.tools.review_helpers import _run_review_preflight_tests
 from ouroboros.tools.core import is_skill_control_plane_path
 from ouroboros.contracts.task_constraint import normalize_task_constraint, resolve_payload_path
+from ouroboros.contracts.skill_payload_policy import SkillPayloadPathError, resolve_skill_payload_target
 _CONTENT_OMITTED_PREFIX = "<<CONTENT_OMITTED"
 log = logging.getLogger(__name__)
 
@@ -58,21 +59,10 @@ def _current_runtime_mode() -> str:
 
 
 def _data_skill_path(path: str, drive_root: pathlib.Path) -> pathlib.Path | None:
-    norm = str(path or "").replace("\\", "/").strip().lstrip("/")
-    if norm.startswith("data/"):
-        norm = norm[len("data/"):]
-    parts = pathlib.PurePosixPath(norm).parts
-    if len(parts) < 4 or parts[0] != "skills" or parts[1] not in {"external", "clawhub", "ouroboroshub"}:
-        return None
-    if any(part in {"", ".", ".."} for part in parts):
-        return None
-    target = (pathlib.Path(drive_root) / safe_relpath(norm)).resolve()
-    allowed = (pathlib.Path(drive_root) / "skills" / parts[1] / parts[2]).resolve()
     try:
-        target.relative_to(allowed)
-    except ValueError:
+        return resolve_skill_payload_target(pathlib.Path(drive_root), path).target_path
+    except SkillPayloadPathError:
         return None
-    return target
 
 
 def _protected_paths_block_message(paths, *, runtime_mode: str, action: str) -> str:

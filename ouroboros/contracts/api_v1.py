@@ -224,6 +224,7 @@ class StateResponse(TypedDict):
     # checkout path is configured. Values live in ``ouroboros.config``.
     runtime_mode: str
     skills_repo_configured: bool
+    github_token_configured: bool
 
 
 class SettingsNetworkMeta(TypedDict):
