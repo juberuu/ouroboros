@@ -23,70 +23,32 @@ import types
 
 import pytest
 
+from tests._shared import ensure_claude_agent_sdk_mock
 
-def _ensure_sdk_mock():
-    """Install a lightweight mock of claude_agent_sdk only when the package is truly absent.
-
-    Uses importlib.util.find_spec to check real availability, not sys.modules presence,
-    so an installed but not-yet-imported SDK is never masked.
-    Required so gateway tests can run without the SDK installed.
-    """
-    import importlib.util as _ilu
-    try:
-        spec = _ilu.find_spec("claude_agent_sdk")
-        sdk_available = spec is not None
-    except (ValueError, ModuleNotFoundError):
-        # find_spec raises ValueError when an already-injected mock module has __spec__=None
-        sdk_available = "claude_agent_sdk" in sys.modules
-    if not sdk_available:
-        mock_sdk = types.ModuleType("claude_agent_sdk")
-        mock_sdk.ClaudeAgentOptions = type("ClaudeAgentOptions", (), {})
-        mock_sdk.ClaudeSDKClient = type("ClaudeSDKClient", (), {})
-        mock_sdk.HookMatcher = type("HookMatcher", (), {"__init__": lambda self, **kw: None})
-        mock_sdk.AssistantMessage = type("AssistantMessage", (), {})
-        mock_sdk.ResultMessage = type("ResultMessage", (), {})
-        mock_sdk.query = lambda **kw: None
-        sys.modules["claude_agent_sdk"] = mock_sdk
-
-
-_ensure_sdk_mock()
+ensure_claude_agent_sdk_mock()
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _get_git_module():
-    sys.path.insert(0, REPO)
     return importlib.import_module("ouroboros.tools.git")
 
 
 def _get_registry_module():
-    sys.path.insert(0, REPO)
     return importlib.import_module("ouroboros.tools.registry")
 
 
 def _get_git_ops_module():
-    sys.path.insert(0, REPO)
     return importlib.import_module("supervisor.git_ops")
 
 
 # --- Tool registration tests ---
 
-def test_pull_from_remote_registered():
+@pytest.mark.parametrize("tool_name", ["pull_from_remote", "restore_to_head", "revert_commit"])
+def test_tool_registered(tool_name):
     git_mod = _get_git_module()
     names = [t.name for t in git_mod.get_tools()]
-    assert "pull_from_remote" in names
-
-
-def test_restore_to_head_registered():
-    git_mod = _get_git_module()
-    names = [t.name for t in git_mod.get_tools()]
-    assert "restore_to_head" in names
-
-
-def test_revert_commit_registered():
-    git_mod = _get_git_module()
-    names = [t.name for t in git_mod.get_tools()]
-    assert "revert_commit" in names
+    assert tool_name in names
 
 
 def test_non_committing_review_cycle_exists_and_reuses_shared_stage_cycle():

@@ -24,21 +24,9 @@ import pytest
 # Mock SDK so the gateway can be imported on Python 3.9 / without SDK
 # ---------------------------------------------------------------------------
 
-def _ensure_gateway_importable():
-    """Install a lightweight mock of claude_agent_sdk if the real one is absent."""
-    if "claude_agent_sdk" not in sys.modules:
-        mock_sdk = types.ModuleType("claude_agent_sdk")
-        # Provide the names the gateway expects at import time
-        mock_sdk.ClaudeAgentOptions = type("ClaudeAgentOptions", (), {})
-        mock_sdk.ClaudeSDKClient = type("ClaudeSDKClient", (), {})
-        mock_sdk.HookMatcher = type("HookMatcher", (), {"__init__": lambda self, **kw: None})
-        mock_sdk.AssistantMessage = type("AssistantMessage", (), {})
-        mock_sdk.ResultMessage = type("ResultMessage", (), {})
-        mock_sdk.query = lambda **kw: None  # async generator mock
-        sys.modules["claude_agent_sdk"] = mock_sdk
+from tests._shared import ensure_claude_agent_sdk_mock
 
-
-_ensure_gateway_importable()
+ensure_claude_agent_sdk_mock()
 
 
 async def _async_gen(items):
@@ -285,7 +273,7 @@ class TestImportFallback:
             sys.modules.update(saved_modules)
             # If nothing was saved (SDK not installed), ensure mock is in place
             if not saved_modules:
-                _ensure_gateway_importable()
+                ensure_claude_agent_sdk_mock()
             # Re-import gateway with real/mock SDK
             sys.modules.pop("ouroboros.gateways.claude_code", None)
             importlib.import_module("ouroboros.gateways.claude_code")

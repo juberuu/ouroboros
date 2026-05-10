@@ -9,6 +9,8 @@ Ref: v4.16.1 — review pipeline fidelity fix.
 import json
 from typing import Any, Dict, List
 
+import pytest
+
 
 # ---------------------------------------------------------------------------
 # Helpers — build minimal dataclass stand-ins to avoid full state setup
@@ -183,45 +185,25 @@ class TestFormatStatusSection:
 
         return state, findings, warnings, obs
 
-    def test_more_than_five_findings_all_shown(self):
-        """Old cap was [:3] on critical_findings in recent attempts section."""
+    @pytest.mark.parametrize(
+        "case_id,n_findings,n_warnings,n_obs,prefix,count",
+        [
+            ("more_than_five_findings_all_shown", 7, 0, 1, "problem ", 7),
+            ("more_than_three_warnings_all_shown", 1, 5, 1, "warning text ", 5),
+            ("more_than_six_obligations_all_shown", 1, 0, 9, "ob", 9),
+        ],
+    )
+    def test_truncation_caps_removed(self, case_id, n_findings, n_warnings, n_obs, prefix, count):
+        """Old [:3] / [:5] / [:6] caps must be gone — every item appears."""
         from ouroboros.review_state import format_status_section
 
-        state, findings, _, _ = self._build_state_with_blocked_attempt(
-            n_findings=7, n_warnings=0, n_obs=1
-        )
-        # repo_dir=None → no filesystem lookup; uses all advisory_runs/attempts
-        output = format_status_section(state, repo_dir=None)
-        assert "... and" not in output, (
-            f"Truncation marker found. Output snippet: {output[:800]}"
-        )
-        # All finding reasons should appear
-        for i in range(7):
-            assert f"problem {i}" in output, f"Missing finding for problem {i}"
-
-    def test_more_than_three_warnings_all_shown(self):
-        """Old cap was [:3] on readiness_warnings."""
-        from ouroboros.review_state import format_status_section
-
-        state, _, warnings, _ = self._build_state_with_blocked_attempt(
-            n_findings=1, n_warnings=5, n_obs=1
+        state, *_ = self._build_state_with_blocked_attempt(
+            n_findings=n_findings, n_warnings=n_warnings, n_obs=n_obs,
         )
         output = format_status_section(state, repo_dir=None)
-        for i in range(5):
-            assert f"warning text {i}" in output, f"Missing warning {i}"
-        assert "... and" not in output
-
-    def test_more_than_six_obligations_all_shown(self):
-        """Old cap was [:6] on open_obs in format_status_section."""
-        from ouroboros.review_state import format_status_section
-
-        state, _, _, obs = self._build_state_with_blocked_attempt(
-            n_findings=1, n_warnings=0, n_obs=9
-        )
-        output = format_status_section(state, repo_dir=None)
-        for i in range(9):
-            assert f"ob{i}" in output, f"Missing obligation ob{i}"
-        assert "... and" not in output
+        for i in range(count):
+            assert f"{prefix}{i}" in output, f"Missing {prefix}{i} in output"
+        assert "... and" not in output, f"Truncation marker found. Snippet: {output[:800]}"
 
     def test_more_than_three_advisory_runs_all_shown(self):
         """Old cap was advisory_runs[-3:] — 5 runs must all appear."""

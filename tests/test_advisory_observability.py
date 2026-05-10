@@ -3,38 +3,19 @@
 Split from test_commit_gate.py to keep each test module within the ~1000-line limit (P7).
 """
 import importlib
-import importlib.util as _ilu
 import json
 import os
 import sys
-import types
 
 import asyncio
 
 import pytest
 
+from tests._shared import ensure_claude_agent_sdk_mock
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-
-def _ensure_sdk_mock():
-    """Install a lightweight mock of claude_agent_sdk only when truly absent."""
-    try:
-        spec = _ilu.find_spec("claude_agent_sdk")
-        sdk_available = spec is not None
-    except (ValueError, ModuleNotFoundError):
-        sdk_available = "claude_agent_sdk" in sys.modules
-    if not sdk_available:
-        mock_sdk = types.ModuleType("claude_agent_sdk")
-        mock_sdk.ClaudeAgentOptions = type("ClaudeAgentOptions", (), {})
-        mock_sdk.ClaudeSDKClient = type("ClaudeSDKClient", (), {})
-        mock_sdk.HookMatcher = type("HookMatcher", (), {"__init__": lambda self, **kw: None})
-        mock_sdk.AssistantMessage = type("AssistantMessage", (), {})
-        mock_sdk.ResultMessage = type("ResultMessage", (), {})
-        mock_sdk.query = lambda **kw: None
-        sys.modules["claude_agent_sdk"] = mock_sdk
-
-
-_ensure_sdk_mock()
+ensure_claude_agent_sdk_mock()
 
 
 def _get_advisory_module():
@@ -46,31 +27,22 @@ def _get_advisory_module():
 # Model-drift: resolve_claude_code_model
 # ---------------------------------------------------------------------------
 
-def test_resolve_claude_code_model_returns_env_value(monkeypatch):
-    """resolve_claude_code_model must return CLAUDE_CODE_MODEL env var value."""
+@pytest.mark.parametrize(
+    "case_id,env_value,expected",
+    [
+        ("returns_env_value", "sonnet", "sonnet"),
+        ("falls_back_to_shipped_default", None, "claude-opus-4-6[1m]"),
+        ("strips_whitespace", "  claude-opus-4.6  ", "claude-opus-4.6"),
+    ],
+)
+def test_resolve_claude_code_model(monkeypatch, case_id, env_value, expected):
     sys.path.insert(0, REPO)
     gw = importlib.import_module("ouroboros.gateways.claude_code")
-    monkeypatch.setenv("CLAUDE_CODE_MODEL", "sonnet")
-    assert gw.resolve_claude_code_model() == "sonnet"
-
-
-def test_resolve_claude_code_model_falls_back_to_shipped_default(monkeypatch):
-    """resolve_claude_code_model defaults to shipped SETTINGS_DEFAULTS value
-    when env var is absent. Keeping the fallback aligned with the shipped
-    default avoids cross-module drift where code reached before settings
-    are applied would resolve differently than fresh installs see in UI."""
-    sys.path.insert(0, REPO)
-    gw = importlib.import_module("ouroboros.gateways.claude_code")
-    monkeypatch.delenv("CLAUDE_CODE_MODEL", raising=False)
-    assert gw.resolve_claude_code_model() == "claude-opus-4-6[1m]"
-
-
-def test_resolve_claude_code_model_strips_whitespace(monkeypatch):
-    """resolve_claude_code_model strips leading/trailing whitespace."""
-    sys.path.insert(0, REPO)
-    gw = importlib.import_module("ouroboros.gateways.claude_code")
-    monkeypatch.setenv("CLAUDE_CODE_MODEL", "  claude-opus-4.6  ")
-    assert gw.resolve_claude_code_model() == "claude-opus-4.6"
+    if env_value is None:
+        monkeypatch.delenv("CLAUDE_CODE_MODEL", raising=False)
+    else:
+        monkeypatch.setenv("CLAUDE_CODE_MODEL", env_value)
+    assert gw.resolve_claude_code_model() == expected
 
 
 def test_shell_edit_uses_resolve_claude_code_model_helper():
@@ -170,68 +142,64 @@ def _make_minimal_git_repo(tmp_path):
     (tmp_path / "state").mkdir(parents=True, exist_ok=True)
 
 
-def test_advisory_budget_gate_returns_skipped_on_large_prompt(monkeypatch, tmp_path):
-    """_run_claude_advisory must return ADVISORY_SKIPPED when prompt exceeds budget gate."""
+@pytest.fixture
+def budget_gate_env(monkeypatch, tmp_path):
+    """Pin the prompt budget to 10 chars and prepare a minimal env+repo.
+
+    Yields ``(adv_mod, tmp_path)`` so callers can build their own ctx and
+    invoke the advisory entrypoint they care about. Restores the original
+    ``_ADVISORY_PROMPT_MAX_CHARS`` at teardown.
+    """
     adv_mod = _get_advisory_module()
     _make_minimal_git_repo(tmp_path)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.setenv("CLAUDE_CODE_MODEL", "opus")
-
     original_limit = adv_mod._ADVISORY_PROMPT_MAX_CHARS
+    adv_mod._ADVISORY_PROMPT_MAX_CHARS = 10
     try:
-        adv_mod._ADVISORY_PROMPT_MAX_CHARS = 10
-        from types import SimpleNamespace
-        ctx = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path,
-                              emit_progress_fn=lambda _: None, pending_events=[])
-        items, raw, _model, _chars = adv_mod._run_claude_advisory(tmp_path, "test commit", ctx)
+        yield adv_mod, tmp_path
     finally:
         adv_mod._ADVISORY_PROMPT_MAX_CHARS = original_limit
 
+
+def _budget_ctx(tmp_path, *, task_id=None):
+    from types import SimpleNamespace
+    ctx_kwargs = {
+        "repo_dir": tmp_path,
+        "drive_root": tmp_path,
+        "emit_progress_fn": lambda _: None,
+        "pending_events": [],
+    }
+    if task_id is not None:
+        ctx_kwargs["task_id"] = task_id
+    return SimpleNamespace(**ctx_kwargs)
+
+
+def test_advisory_budget_gate_returns_skipped_on_large_prompt(budget_gate_env):
+    """_run_claude_advisory must return ADVISORY_SKIPPED when prompt exceeds budget gate."""
+    adv_mod, tmp_path = budget_gate_env
+    ctx = _budget_ctx(tmp_path)
+    items, raw, _model, _chars = adv_mod._run_claude_advisory(tmp_path, "test commit", ctx)
     assert items == []
     assert raw.startswith("⚠️ ADVISORY_SKIPPED:")
     assert "chars" in raw
 
 
-def test_handle_advisory_pre_review_returns_skipped_status_on_budget_gate(
-    monkeypatch, tmp_path
-):
+def test_handle_advisory_pre_review_returns_skipped_status_on_budget_gate(budget_gate_env):
     """_handle_advisory_pre_review must surface ADVISORY_SKIPPED as status='skipped'."""
-    adv_mod = _get_advisory_module()
-    _make_minimal_git_repo(tmp_path)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
-    monkeypatch.setenv("CLAUDE_CODE_MODEL", "opus")
-
-    original_limit = adv_mod._ADVISORY_PROMPT_MAX_CHARS
-    try:
-        adv_mod._ADVISORY_PROMPT_MAX_CHARS = 10
-        from types import SimpleNamespace
-        ctx = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, task_id="t-test",
-                              emit_progress_fn=lambda _: None, pending_events=[])
-        raw_json = adv_mod._handle_advisory_pre_review(ctx, commit_message="test commit")
-    finally:
-        adv_mod._ADVISORY_PROMPT_MAX_CHARS = original_limit
-
+    adv_mod, tmp_path = budget_gate_env
+    ctx = _budget_ctx(tmp_path, task_id="t-test")
+    raw_json = adv_mod._handle_advisory_pre_review(ctx, commit_message="test commit")
     result = json.loads(raw_json)
     assert result["status"] == "skipped"
     assert "ADVISORY_SKIPPED" in result["message"]
 
 
-def test_budget_gate_skip_persists_durable_state(monkeypatch, tmp_path):
+def test_budget_gate_skip_persists_durable_state(budget_gate_env):
     """Budget-gate skip must write status='skipped' to state; is_fresh() must return True."""
-    adv_mod = _get_advisory_module()
-    _make_minimal_git_repo(tmp_path)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
-    monkeypatch.setenv("CLAUDE_CODE_MODEL", "opus")
-
-    original_limit = adv_mod._ADVISORY_PROMPT_MAX_CHARS
-    try:
-        adv_mod._ADVISORY_PROMPT_MAX_CHARS = 10
-        from types import SimpleNamespace
-        ctx = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, task_id="t-bg",
-                              emit_progress_fn=lambda _: None, pending_events=[])
-        raw_json = adv_mod._handle_advisory_pre_review(ctx, commit_message="budget gate test")
-    finally:
-        adv_mod._ADVISORY_PROMPT_MAX_CHARS = original_limit
+    adv_mod, tmp_path = budget_gate_env
+    ctx = _budget_ctx(tmp_path, task_id="t-bg")
+    raw_json = adv_mod._handle_advisory_pre_review(ctx, commit_message="budget gate test")
 
     result = json.loads(raw_json)
     assert result["status"] == "skipped"
@@ -708,7 +676,7 @@ class TestParseAdvisoryOutput:
 
     @pytest.fixture(autouse=True)
     def _import(self):
-        _ensure_sdk_mock()
+        ensure_claude_agent_sdk_mock()
         import importlib
         self.mod = importlib.import_module(
             "ouroboros.tools.claude_advisory_review"
@@ -805,7 +773,7 @@ class TestLLMFallbackExtraction:
 
     @pytest.fixture(autouse=True)
     def _import(self):
-        _ensure_sdk_mock()
+        ensure_claude_agent_sdk_mock()
         import importlib
         self.mod = importlib.import_module("ouroboros.tools.claude_advisory_review")
 

@@ -62,6 +62,18 @@ def _make_ctx(tmp_path):
     return ToolContext(repo_dir=repo, drive_root=drive)
 
 
+@pytest.fixture
+def git_ctx(tmp_path):
+    """Yield ``(git_module, ToolContext)`` — the canonical phase7 setup."""
+    return _get_git_module(), _make_ctx(tmp_path)
+
+
+@pytest.fixture
+def review_ctx(tmp_path):
+    """Yield ``(review_module, ToolContext)``."""
+    return _get_review_module(), _make_ctx(tmp_path)
+
+
 # --- repo_write tool registration ---
 
 class TestRepoWriteRegistration:
@@ -98,39 +110,34 @@ class TestRepoWriteRegistration:
 # --- repo_write behavioral tests ---
 
 class TestRepoWriteSingleFile:
-    def test_single_file_write(self, tmp_path):
-        git_mod = _get_git_module()
-        ctx = _make_ctx(tmp_path)
+    def test_single_file_write(self, git_ctx):
+        git_mod, ctx = git_ctx
         result = git_mod._repo_write(ctx, path="hello.py", content="print('hello')")
         assert "Written 1 file" in result
         assert "NOT committed" in result
         assert (ctx.repo_dir / "hello.py").read_text() == "print('hello')"
 
-    def test_single_file_creates_directories(self, tmp_path):
-        git_mod = _get_git_module()
-        ctx = _make_ctx(tmp_path)
+    def test_single_file_creates_directories(self, git_ctx):
+        git_mod, ctx = git_ctx
         result = git_mod._repo_write(ctx, path="deep/nested/file.py", content="x = 1")
         assert "Written 1 file" in result
         assert (ctx.repo_dir / "deep" / "nested" / "file.py").exists()
 
-    def test_rejects_empty_args(self, tmp_path):
-        git_mod = _get_git_module()
-        ctx = _make_ctx(tmp_path)
+    def test_rejects_empty_args(self, git_ctx):
+        git_mod, ctx = git_ctx
         result = git_mod._repo_write(ctx)
         assert "WRITE_ERROR" in result
 
-    def test_rejects_compaction_marker(self, tmp_path):
-        git_mod = _get_git_module()
-        ctx = _make_ctx(tmp_path)
+    def test_rejects_compaction_marker(self, git_ctx):
+        git_mod, ctx = git_ctx
         result = git_mod._repo_write(ctx, path="x.py", content="<<CONTENT_OMITTED something")
         assert "WRITE_ERROR" in result
         assert "compaction marker" in result
 
 
 class TestRepoWriteMultiFile:
-    def test_multi_file_write(self, tmp_path):
-        git_mod = _get_git_module()
-        ctx = _make_ctx(tmp_path)
+    def test_multi_file_write(self, git_ctx):
+        git_mod, ctx = git_ctx
         result = git_mod._repo_write(ctx, files=[
             {"path": "a.py", "content": "# a"},
             {"path": "b.py", "content": "# b"},
@@ -139,24 +146,21 @@ class TestRepoWriteMultiFile:
         assert (ctx.repo_dir / "a.py").read_text() == "# a"
         assert (ctx.repo_dir / "b.py").read_text() == "# b"
 
-    def test_multi_file_rejects_empty_path(self, tmp_path):
-        git_mod = _get_git_module()
-        ctx = _make_ctx(tmp_path)
+    def test_multi_file_rejects_empty_path(self, git_ctx):
+        git_mod, ctx = git_ctx
         result = git_mod._repo_write(ctx, files=[{"path": "", "content": "x"}])
         assert "WRITE_ERROR" in result
 
-    def test_multi_file_blocks_safety_critical(self, tmp_path):
-        git_mod = _get_git_module()
-        ctx = _make_ctx(tmp_path)
+    def test_multi_file_blocks_safety_critical(self, git_ctx):
+        git_mod, ctx = git_ctx
         result = git_mod._repo_write(ctx, files=[
             {"path": "ok.py", "content": "x"},
             {"path": "BIBLE.md", "content": "hacked"},
         ])
         assert "CORE_PROTECTION_BLOCKED" in result
 
-    def test_files_param_takes_priority(self, tmp_path):
-        git_mod = _get_git_module()
-        ctx = _make_ctx(tmp_path)
+    def test_files_param_takes_priority(self, git_ctx):
+        git_mod, ctx = git_ctx
         result = git_mod._repo_write(
             ctx, path="ignored.py", content="ignored",
             files=[{"path": "used.py", "content": "used"}],
@@ -168,156 +172,128 @@ class TestRepoWriteMultiFile:
 
 # --- Unified review gate ---
 
-class TestPreflightCheck:
-    def test_missing_version(self):
-        review = _get_review_module()
-        # Plain filenames without porcelain prefix also work (fallback to "M")
-        result = review._preflight_check(
-            "v3.24.0: big change",
-            "ouroboros/tools/git.py\nREADME.md",
-            "/tmp",
-        )
+# Each tuple: (case_id, message, staged_files, expected_substrings_or_none).
+# expected_substrings_or_none is ``None`` when ``_preflight_check`` should
+# pass; otherwise an iterable of substrings every one of which must appear in
+# the returned blocker text.
+_PREFLIGHT_CASES = [
+    (
+        "missing_version",
+        "v3.24.0: big change",
+        "ouroboros/tools/git.py\nREADME.md",
+        ("PREFLIGHT_BLOCKED", "VERSION"),
+    ),
+    (
+        "missing_readme",
+        "some change",
+        "M  VERSION\nM  ouroboros/tools/git.py",
+        ("README.md",),
+    ),
+    (
+        "all_present_passes",
+        "v3.24.0: change",
+        "M  VERSION\nM  README.md\nM  ouroboros/tools/git.py\nM  tests/test_commit_gate.py",
+        None,
+    ),
+    (
+        "no_version_ref_passes",
+        "fix typo in docs",
+        "M  docs/ARCHITECTURE.md",
+        None,
+    ),
+    (
+        "logic_changed_without_tests_blocked",
+        "fix something",
+        "M  ouroboros/tools/shell.py\nM  VERSION\nM  README.md",
+        ("PREFLIGHT_BLOCKED", "tests/"),
+    ),
+    (
+        "logic_changed_with_tests_passes",
+        "fix something",
+        "M  ouroboros/tools/shell.py\nM  tests/test_shell_recovery.py\nM  VERSION\nM  README.md",
+        None,
+    ),
+    (
+        "supervisor_logic_without_tests_blocked",
+        "update supervisor",
+        "M  supervisor/workers.py",
+        ("PREFLIGHT_BLOCKED",),
+    ),
+    (
+        "docs_only_change_no_tests_required",
+        "update docs",
+        "M  docs/ARCHITECTURE.md\nM  README.md",
+        None,
+    ),
+    (
+        "new_module_without_architecture_blocked",
+        "add new module",
+        "A  ouroboros/new_module.py\nM  tests/test_new_module.py",
+        ("PREFLIGHT_BLOCKED", "ARCHITECTURE.md"),
+    ),
+    (
+        "new_module_with_architecture_passes",
+        "add new module",
+        "A  ouroboros/new_module.py\nM  tests/test_new_module.py\nM  docs/ARCHITECTURE.md",
+        None,
+    ),
+    (
+        "modified_module_without_architecture_passes",
+        "update existing module",
+        "M  ouroboros/tools/shell.py\nM  tests/test_shell_recovery.py",
+        None,
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "case_id,message,staged_files,expected",
+    _PREFLIGHT_CASES,
+    ids=[c[0] for c in _PREFLIGHT_CASES],
+)
+def test_preflight_check(case_id, message, staged_files, expected):
+    review = _get_review_module()
+    result = review._preflight_check(message, staged_files, "/tmp")
+    if expected is None:
+        assert result is None, f"expected pass, got: {result!r}"
+    else:
         assert result is not None
-        assert "PREFLIGHT_BLOCKED" in result
-        assert "VERSION" in result
-
-    def test_missing_readme(self):
-        review = _get_review_module()
-        # VERSION + ouroboros .py → needs README (check 1) and tests (check 3)
-        # Check 1 fires first, so we get README error
-        result = review._preflight_check(
-            "some change",
-            "M  VERSION\nM  ouroboros/tools/git.py",
-            "/tmp",
-        )
-        assert result is not None
-        assert "README.md" in result
-
-    def test_all_present_passes(self):
-        # git.py is an ouroboros/ .py change so tests/ must also be present
-        review = _get_review_module()
-        result = review._preflight_check(
-            "v3.24.0: change",
-            "M  VERSION\nM  README.md\nM  ouroboros/tools/git.py\nM  tests/test_commit_gate.py",
-            "/tmp",
-        )
-        assert result is None
-
-    def test_no_version_ref_passes(self):
-        review = _get_review_module()
-        result = review._preflight_check(
-            "fix typo in docs",
-            "M  docs/ARCHITECTURE.md",
-            "/tmp",
-        )
-        assert result is None
-
-    # --- New preflight check 3: tests_affected ---
-
-    def test_logic_changed_without_tests_blocked(self):
-        """Python code in ouroboros/ changed but no tests/ staged → blocked."""
-        review = _get_review_module()
-        result = review._preflight_check(
-            "fix something",
-            "M  ouroboros/tools/shell.py\nM  VERSION\nM  README.md",
-            "/tmp",
-        )
-        assert result is not None
-        assert "PREFLIGHT_BLOCKED" in result
-        assert "tests/" in result
-
-    def test_logic_changed_with_tests_passes(self):
-        """Python code in ouroboros/ AND tests/ staged → passes."""
-        review = _get_review_module()
-        result = review._preflight_check(
-            "fix something",
-            "M  ouroboros/tools/shell.py\nM  tests/test_shell_recovery.py\nM  VERSION\nM  README.md",
-            "/tmp",
-        )
-        assert result is None
-
-    def test_supervisor_logic_without_tests_blocked(self):
-        """Python code in supervisor/ changed but no tests/ staged → blocked."""
-        review = _get_review_module()
-        result = review._preflight_check(
-            "update supervisor",
-            "M  supervisor/workers.py",
-            "/tmp",
-        )
-        assert result is not None
-        assert "PREFLIGHT_BLOCKED" in result
-
-    def test_docs_only_change_no_tests_required(self):
-        """Docs-only change (no .py in ouroboros/) should not require tests."""
-        review = _get_review_module()
-        result = review._preflight_check(
-            "update docs",
-            "M  docs/ARCHITECTURE.md\nM  README.md",
-            "/tmp",
-        )
-        assert result is None
-
-    # --- New preflight check 4: architecture_doc ---
-
-    def test_new_module_without_architecture_blocked(self):
-        """New .py file added in ouroboros/ but ARCHITECTURE.md not staged → blocked."""
-        review = _get_review_module()
-        # Porcelain format with "A " prefix indicates a new (added) file
-        result = review._preflight_check(
-            "add new module",
-            "A  ouroboros/new_module.py\nM  tests/test_new_module.py",
-            "/tmp",
-        )
-        assert result is not None
-        assert "PREFLIGHT_BLOCKED" in result
-        assert "ARCHITECTURE.md" in result
-
-    def test_new_module_with_architecture_passes(self):
-        """New .py file added AND ARCHITECTURE.md staged → passes."""
-        review = _get_review_module()
-        result = review._preflight_check(
-            "add new module",
-            "A  ouroboros/new_module.py\nM  tests/test_new_module.py\nM  docs/ARCHITECTURE.md",
-            "/tmp",
-        )
-        assert result is None
-
-    def test_modified_module_without_architecture_passes(self):
-        """Modified (not new) .py file without ARCHITECTURE.md → passes (check 4 not triggered)."""
-        review = _get_review_module()
-        result = review._preflight_check(
-            "update existing module",
-            "M  ouroboros/tools/shell.py\nM  tests/test_shell_recovery.py",
-            "/tmp",
-        )
-        assert result is None
+        for needle in expected:
+            assert needle in result, f"missing {needle!r} in: {result!r}"
 
 
-class TestParseReviewJson:
-    def test_plain_json(self):
-        review = _get_review_module()
-        data = '[{"item":"x","verdict":"PASS","severity":"critical","reason":"ok"}]'
-        result = review._parse_review_json(data)
-        assert result is not None
-        assert len(result) == 1
+_PARSE_REVIEW_JSON_CASES = [
+    (
+        "plain_json",
+        '[{"item":"x","verdict":"PASS","severity":"critical","reason":"ok"}]',
+        lambda r: r is not None and len(r) == 1,
+    ),
+    (
+        "markdown_fenced",
+        '```json\n[{"item":"x","verdict":"FAIL","severity":"advisory","reason":"bad"}]\n```',
+        lambda r: r is not None and r[0]["verdict"] == "FAIL",
+    ),
+    (
+        "text_around_json",
+        'Here is my review:\n[{"item":"x","verdict":"PASS","severity":"critical","reason":"ok"}]\nDone.',
+        lambda r: r is not None,
+    ),
+    (
+        "invalid_json",
+        "not json at all",
+        lambda r: r is None,
+    ),
+]
 
-    def test_markdown_fenced(self):
-        review = _get_review_module()
-        data = '```json\n[{"item":"x","verdict":"FAIL","severity":"advisory","reason":"bad"}]\n```'
-        result = review._parse_review_json(data)
-        assert result is not None
-        assert result[0]["verdict"] == "FAIL"
 
-    def test_text_around_json(self):
-        review = _get_review_module()
-        data = 'Here is my review:\n[{"item":"x","verdict":"PASS","severity":"critical","reason":"ok"}]\nDone.'
-        result = review._parse_review_json(data)
-        assert result is not None
-
-    def test_invalid_json(self):
-        review = _get_review_module()
-        result = review._parse_review_json("not json at all")
-        assert result is None
+@pytest.mark.parametrize(
+    "case_id,data,predicate",
+    _PARSE_REVIEW_JSON_CASES,
+    ids=[c[0] for c in _PARSE_REVIEW_JSON_CASES],
+)
+def test_parse_review_json(case_id, data, predicate):
+    review = _get_review_module()
+    assert predicate(review._parse_review_json(data))
 
 
 class TestReviewHistoryBuilding:
@@ -400,9 +376,8 @@ class TestReviewEnforcementModes:
             return ""
         monkeypatch.setattr(review_mod, "run_cmd", _fake_run_cmd)
 
-    def test_blocking_mode_blocks_critical_findings(self, tmp_path, monkeypatch):
-        review = _get_review_module()
-        ctx = _make_ctx(tmp_path)
+    def test_blocking_mode_blocks_critical_findings(self, review_ctx, monkeypatch):
+        review, ctx = review_ctx
         self._mock_staged(monkeypatch, review, changed_files="x.py")
         monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
         monkeypatch.setattr(
@@ -417,9 +392,8 @@ class TestReviewEnforcementModes:
         assert result is not None
         assert "REVIEW_BLOCKED" in result
 
-    def test_advisory_mode_downgrades_critical_findings(self, tmp_path, monkeypatch):
-        review = _get_review_module()
-        ctx = _make_ctx(tmp_path)
+    def test_advisory_mode_downgrades_critical_findings(self, review_ctx, monkeypatch):
+        review, ctx = review_ctx
         self._mock_staged(monkeypatch, review, changed_files="x.py")
         monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
         monkeypatch.setattr(
@@ -443,9 +417,8 @@ class TestReviewEnforcementModes:
         )
         assert ctx._review_iteration_count == 0
 
-    def test_advisory_mode_downgrades_quorum_failure(self, tmp_path, monkeypatch):
-        review = _get_review_module()
-        ctx = _make_ctx(tmp_path)
+    def test_advisory_mode_downgrades_quorum_failure(self, review_ctx, monkeypatch):
+        review, ctx = review_ctx
         self._mock_staged(monkeypatch, review, changed_files="x.py")
         monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
         monkeypatch.setattr(
@@ -464,9 +437,8 @@ class TestReviewEnforcementModes:
             for w in ctx._review_advisory
         )
 
-    def test_advisory_mode_keeps_preflight_as_warning(self, tmp_path, monkeypatch):
-        review = _get_review_module()
-        ctx = _make_ctx(tmp_path)
+    def test_advisory_mode_keeps_preflight_as_warning(self, review_ctx, monkeypatch):
+        review, ctx = review_ctx
         self._mock_staged(monkeypatch, review, changed_files="VERSION")
         monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
         monkeypatch.setattr(

@@ -16,28 +16,14 @@ import pathlib
 import pytest
 
 
+from tests._shared import clean_extension_runtime_state
+
+
 @pytest.fixture(autouse=True)
 def _clean_extensions():
-    from ouroboros import extension_loader
-    with extension_loader._lock:
-        extension_loader._extensions.clear()
-        extension_loader._extension_modules.clear()
-        extension_loader._load_failures.clear()
-        extension_loader._tools.clear()
-        extension_loader._routes.clear()
-        extension_loader._ws_handlers.clear()
-        extension_loader._ui_tabs.clear()
-        extension_loader._settings_sections.clear()
+    clean_extension_runtime_state()
     yield
-    with extension_loader._lock:
-        extension_loader._extensions.clear()
-        extension_loader._extension_modules.clear()
-        extension_loader._load_failures.clear()
-        extension_loader._tools.clear()
-        extension_loader._routes.clear()
-        extension_loader._ws_handlers.clear()
-        extension_loader._ui_tabs.clear()
-        extension_loader._settings_sections.clear()
+    clean_extension_runtime_state()
 
 
 def _write_ext(
@@ -72,7 +58,11 @@ def _write_ext(
 
 
 def _make_client(tmp_path: pathlib.Path, monkeypatch):
-    """Return a Starlette TestClient with drive_root pointed at tmp."""
+    """Return ``(client, drive_root, patches)`` — Starlette TestClient with drive_root pinned.
+
+    Tests that prefer the auto-cleanup variant should use the ``client_env``
+    fixture below instead of calling this directly.
+    """
     from unittest.mock import patch
     from starlette.testclient import TestClient
 
@@ -81,13 +71,11 @@ def _make_client(tmp_path: pathlib.Path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     drive_root = tmp_path / "drive"
     drive_root.mkdir()
-    # Attach drive_root to the INNER Starlette app's state
-    # (``srv.app`` is the NetworkAuthGate wrapper; the inner Starlette
-    # is at ``srv.app.app``).
+    # ``srv.app`` is the NetworkAuthGate wrapper; the inner Starlette is at
+    # ``srv.app.app``. Pin ``drive_root`` / ``repo_dir`` on the inner state.
     srv.app.app.state.drive_root = drive_root  # type: ignore[attr-defined]
     srv.app.app.state.repo_dir = tmp_path / "repo"  # type: ignore[attr-defined]
 
-    # Minimal lifecycle patching — reuse the pattern from other tests.
     patches = [
         patch.object(srv, "_start_supervisor_if_needed", lambda *_a, **_k: None),
         patch.object(srv, "_apply_settings_to_env", lambda *_a, **_k: None),
@@ -106,6 +94,16 @@ def _stop_patches(patches):
             p.stop()
         except RuntimeError:
             pass
+
+
+@pytest.fixture
+def client_env(tmp_path, monkeypatch):
+    """Yield ``(client, drive_root)`` and stop lifecycle patches at teardown."""
+    client, drive_root, patches = _make_client(tmp_path, monkeypatch)
+    try:
+        yield client, drive_root
+    finally:
+        _stop_patches(patches)
 
 
 def test_api_extensions_index_lists_extension_skills(tmp_path, monkeypatch):

@@ -49,6 +49,12 @@ def _make_ctx(tmp_path: pathlib.Path) -> MagicMock:
     return ctx
 
 
+def _setup(tmp_path: pathlib.Path):
+    """Return ``(repo, ctx)`` — the canonical pr_tools test setup."""
+    repo = _make_temp_git_repo(tmp_path)
+    return repo, _make_ctx(repo)
+
+
 def _add_commit(repo: pathlib.Path, filename: str, content: str,
                 msg: str, author_name: str = "External Dev",
                 author_email: str = "ext@example.com") -> str:
@@ -75,8 +81,7 @@ def _add_commit(repo: pathlib.Path, filename: str, content: str,
 
 class TestCreateIntegrationBranch:
     def test_creates_branch_from_ouroboros(self, tmp_path):
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
 
         from ouroboros.tools.git_pr import _create_integration_branch
         result = _create_integration_branch(ctx, pr_number=42)
@@ -90,8 +95,7 @@ class TestCreateIntegrationBranch:
         assert "integrate/pr-42" in branches
 
     def test_rejects_duplicate_branch(self, tmp_path):
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
 
         from ouroboros.tools.git_pr import _create_integration_branch
         _create_integration_branch(ctx, pr_number=42)
@@ -101,16 +105,14 @@ class TestCreateIntegrationBranch:
         assert "already exists" in result
 
     def test_rejects_invalid_pr_number(self, tmp_path):
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
 
         from ouroboros.tools.git_pr import _create_integration_branch
         result = _create_integration_branch(ctx, pr_number=0)
         assert "⚠️" in result
 
     def test_returns_to_integration_branch(self, tmp_path):
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
 
         from ouroboros.tools.git_pr import _create_integration_branch
         _create_integration_branch(ctx, pr_number=7)
@@ -128,8 +130,7 @@ class TestCreateIntegrationBranch:
         so an untracked file present before branch creation would be silently
         included in the final merge commit, contaminating the PR intake.
         """
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
         # Create an untracked file (not staged, not committed)
         (repo / "untracked_noise.py").write_text("noise\n")
 
@@ -144,8 +145,7 @@ class TestCreateIntegrationBranch:
         git checkout carries staged edits onto the new branch, which would
         contaminate the integration branch with unrelated work.
         """
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
 
         # Stage a tracked change without committing
         (tmp_path / "dirty.py").write_text("x = 1\n")
@@ -161,8 +161,7 @@ class TestCreateIntegrationBranch:
 
     def test_rejects_dirty_tracked_unstaged_changes(self, tmp_path):
         """create_integration_branch must refuse if tracked unstaged changes exist."""
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
 
         # Commit a file first, then modify it without staging
         (tmp_path / "tracked.py").write_text("x = 0\n")
@@ -179,8 +178,7 @@ class TestCreateIntegrationBranch:
 
     def test_rejects_option_like_base_branch(self, tmp_path):
         """base_branch values starting with '-' must be rejected (option injection)."""
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
 
         from ouroboros.tools.git_pr import _create_integration_branch
         result = _create_integration_branch(ctx, pr_number=5, base_branch="--abort")
@@ -197,8 +195,7 @@ class TestOptionInjectionGuards:
     """_validate_git_ref_arg must block option-like inputs across all three callers."""
 
     def test_fetch_pr_ref_rejects_option_like_remote(self, tmp_path):
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
 
         from ouroboros.tools.git_pr import _fetch_pr_ref
         result = _fetch_pr_ref(ctx, pr_number=1, remote="--all")
@@ -207,8 +204,7 @@ class TestOptionInjectionGuards:
         assert "INVALID_ARG" in result or "must not start with" in result
 
     def test_stage_pr_merge_rejects_option_like_branch(self, tmp_path):
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
 
         from ouroboros.tools.git_pr import _stage_pr_merge
         result = _stage_pr_merge(ctx, branch="--abort")
@@ -338,8 +334,7 @@ class TestFetchPrRef:
         assert local_sha_after != sha_v1
 
     def test_rejects_nonpositive_pr_number(self, tmp_path):
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
         from ouroboros.tools.git_pr import _fetch_pr_ref
         result = _fetch_pr_ref(ctx, pr_number=0)
         assert "⚠️" in result
@@ -354,8 +349,7 @@ class TestStageAdaptations:
 
     def test_stages_without_committing(self, tmp_path):
         """stage_adaptations must stage files but NOT create a new commit."""
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
         subprocess.run(["git", "checkout", "-b", "integrate/pr-10"], cwd=repo,
                        check=True, capture_output=True)
         (repo / "adapt.py").write_text("adaptation\n")
@@ -381,8 +375,7 @@ class TestStageAdaptations:
         assert "adapt.py" in staged
 
     def test_rejects_on_non_integration_branch(self, tmp_path):
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
         (repo / "x.py").write_text("x\n")
         from ouroboros.tools.git_pr import _stage_adaptations
         result = _stage_adaptations(ctx)
@@ -390,8 +383,7 @@ class TestStageAdaptations:
         assert "integration branch" in result.lower() or "integrate/pr-" in result
 
     def test_rejects_when_nothing_to_stage(self, tmp_path):
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
         subprocess.run(["git", "checkout", "-b", "integrate/pr-10"], cwd=repo,
                        check=True, capture_output=True)
         # data/ is in .gitignore so no untracked files visible to git add -A
@@ -402,8 +394,7 @@ class TestStageAdaptations:
     def test_stage_pr_merge_reports_stash_pop_conflict(self, tmp_path):
         """When stash pop --index fails (adaptation conflicts with merged tree),
         stage_pr_merge must return a clear error — NOT silently claim success."""
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
 
         # Create integration branch diverging from ouroboros
         subprocess.run(["git", "checkout", "-b", "integrate/pr-77"], cwd=repo,
@@ -432,8 +423,7 @@ class TestStageAdaptations:
 
     def test_stage_pr_merge_accepts_staged_adaptations_new_file(self, tmp_path):
         """stage_pr_merge must carry staged new-file adaptations into the merge commit."""
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
 
         subprocess.run(["git", "checkout", "-b", "integrate/pr-10"], cwd=repo,
                        check=True, capture_output=True)
@@ -467,8 +457,7 @@ class TestStageAdaptations:
         must also be cleared (via reset --hard) before checkout to avoid the dirty-tree guard.
         git apply --index must then restore both index AND worktree so no dirty state remains.
         """
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
 
         # ouroboros has tracked.py
         _add_commit(repo, "tracked.py", "original = 1\n", "add tracked.py")
@@ -519,8 +508,7 @@ class TestStageAdaptations:
 
     def test_stage_pr_merge_rejects_unstaged_tracked_changes(self, tmp_path):
         """stage_pr_merge must reject unstaged tracked changes (they'd be lost on checkout)."""
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
 
         subprocess.run(["git", "checkout", "-b", "integrate/pr-10"], cwd=repo,
                        check=True, capture_output=True)
@@ -538,8 +526,7 @@ class TestStageAdaptations:
     def test_stage_pr_merge_rejects_untracked_files(self, tmp_path):
         """stage_pr_merge must reject untracked files — they survive checkout and
         could be swept into the merge commit by repo_commit."""
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
 
         subprocess.run(["git", "checkout", "-b", "integrate/pr-11"], cwd=repo,
                        check=True, capture_output=True)
@@ -570,8 +557,7 @@ class TestCherryPickCommits:
         return [sha1, sha2]
 
     def test_applies_commits_without_committing(self, tmp_path):
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
         shas = self._setup_pr_commits(repo)
 
         # Create integration branch
@@ -607,8 +593,7 @@ class TestCherryPickCommits:
         Author = original contributor (ext@example.com)
         Committer = this repo's user.email (test@ouroboros from _make_temp_git_repo)
         """
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
         shas = self._setup_pr_commits(repo)
 
         subprocess.run(["git", "checkout", "-b", "integrate/pr-99"], cwd=repo,
@@ -635,8 +620,7 @@ class TestCherryPickCommits:
             f"Committer should be repo-configured Ouroboros identity, got: {committer_email}"
 
     def test_rejects_when_not_on_integration_branch(self, tmp_path):
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
 
         from ouroboros.tools.git_pr import _cherry_pick_pr_commits
         # Still on 'ouroboros', not integrate/pr-*
@@ -645,8 +629,7 @@ class TestCherryPickCommits:
         assert "integrate/pr-" in result
 
     def test_rejects_unknown_sha(self, tmp_path):
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
 
         subprocess.run(["git", "checkout", "-b", "integrate/pr-5"], cwd=repo,
                        check=True, capture_output=True)
@@ -657,8 +640,7 @@ class TestCherryPickCommits:
 
     def test_stop_on_conflict_false_keeps_applied_shas(self, tmp_path):
         """When stop_on_conflict=False, prior applied SHAs are NOT reset on conflict."""
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
         shas = self._setup_pr_commits(repo)  # 2 commits from external author
 
         subprocess.run(["git", "checkout", "-b", "integrate/pr-99"], cwd=repo,
@@ -673,16 +655,14 @@ class TestCherryPickCommits:
         assert shas[0][:12] in result or shas[1][:12] in result
 
     def test_rejects_empty_shas(self, tmp_path):
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
 
         from ouroboros.tools.git_pr import _cherry_pick_pr_commits
         result = _cherry_pick_pr_commits(ctx, shas=[])
         assert "⚠️" in result
 
     def test_includes_coauthored_hint(self, tmp_path):
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
         shas = self._setup_pr_commits(repo)
 
         subprocess.run(["git", "checkout", "-b", "integrate/pr-99"], cwd=repo,
@@ -696,8 +676,7 @@ class TestCherryPickCommits:
 
     def test_stop_on_conflict_true_restores_tree_to_clean(self, tmp_path):
         """stop_on_conflict=True must fully restore both index and worktree to HEAD."""
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
 
         # Step 1: add conflict.txt on ouroboros with "line A"
         (tmp_path / "conflict.txt").write_text("line A\n")
@@ -758,8 +737,7 @@ class TestCherryPickCommits:
             on ouroboros, so cherry-picking B onto the integration branch (which has
             the ouroboros version of shared.py) creates a genuine 3-way conflict.
         """
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
 
         # ── Step 1: record the divergence point (HEAD of ouroboros right now) ──
         base_sha = subprocess.run(
@@ -819,8 +797,7 @@ class TestCherryPickCommits:
 
     def test_stop_on_conflict_false_reports_skipped_shas(self, tmp_path):
         """stop_on_conflict=False: skipped SHAs must appear in the return value."""
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
 
         # Good commit (no conflict)
         good_sha = _add_commit(repo, "good.py", "x = 1\n", "good commit")
@@ -860,8 +837,7 @@ class TestCherryPickCommits:
             f"Skipped SHA not reported: {result}"
 
     def test_invalidates_advisory_after_apply(self, tmp_path):
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
         shas = self._setup_pr_commits(repo)
 
         subprocess.run(["git", "checkout", "-b", "integrate/pr-99"], cwd=repo,
@@ -884,8 +860,7 @@ class TestCherryPickCommits:
 
 class TestMergeIntegrationBranch:
     def test_squash_merge_without_committing(self, tmp_path):
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
 
         # Create integration branch with a commit on a file that doesn't exist on ouroboros
         subprocess.run(["git", "checkout", "-b", "integrate/pr-3"], cwd=repo,
@@ -911,8 +886,7 @@ class TestMergeIntegrationBranch:
         assert log_count == "1"
 
     def test_rejects_nonexistent_branch(self, tmp_path):
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
 
         from ouroboros.tools.git_pr import _stage_pr_merge
         result = _stage_pr_merge(ctx, branch="integrate/pr-999")
@@ -920,8 +894,7 @@ class TestMergeIntegrationBranch:
         assert "does not exist" in result
 
     def test_rejects_empty_branch(self, tmp_path):
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
 
         from ouroboros.tools.git_pr import _stage_pr_merge
         result = _stage_pr_merge(ctx, branch="")
@@ -929,8 +902,7 @@ class TestMergeIntegrationBranch:
 
     def test_squash_merge_conflict_restores_tree_to_clean(self, tmp_path):
         """On squash-merge conflict, tree must be fully restored to HEAD (reset --hard)."""
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
 
         # Create the same file on ouroboros with one content
         (tmp_path / "shared.txt").write_text("ouroboros version\n")
@@ -973,8 +945,7 @@ class TestMergeIntegrationBranch:
         assert "AA" not in status, f"Merge conflict markers in index: {status!r}"
 
     def test_integration_branch_left_intact(self, tmp_path):
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
 
         subprocess.run(["git", "checkout", "-b", "integrate/pr-3"], cwd=repo,
                        check=True, capture_output=True)
@@ -1008,8 +979,7 @@ class TestEndToEndPRFlow:
     """
 
     def test_full_pr_intake_with_adaptations(self, tmp_path):
-        repo = _make_temp_git_repo(tmp_path)
-        ctx = _make_ctx(repo)
+        repo, ctx = _setup(tmp_path)
 
         # --- Simulate fetched PR: two external-author commits on pr/1 ---
         subprocess.run(["git", "checkout", "-b", "pr/1"], cwd=repo,

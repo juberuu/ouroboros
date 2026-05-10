@@ -29,33 +29,16 @@ from ouroboros.skill_loader import (
 )
 
 
+from tests._shared import clean_extension_runtime_state
+
+
 @pytest.fixture(autouse=True)
 def _clear_loader_state(monkeypatch):
     """Reset the module-level registries between tests."""
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
-    with extension_loader._lock:
-        extension_loader._extensions.clear()
-        extension_loader._extension_modules.clear()
-        extension_loader._load_failures.clear()
-        extension_loader._unloading.clear()
-        extension_loader._lifecycle_locks.clear()
-        extension_loader._tools.clear()
-        extension_loader._routes.clear()
-        extension_loader._ws_handlers.clear()
-        extension_loader._ui_tabs.clear()
-        extension_loader.set_ws_broadcaster(None)
+    clean_extension_runtime_state()
     yield
-    with extension_loader._lock:
-        extension_loader._extensions.clear()
-        extension_loader._extension_modules.clear()
-        extension_loader._load_failures.clear()
-        extension_loader._unloading.clear()
-        extension_loader._lifecycle_locks.clear()
-        extension_loader._tools.clear()
-        extension_loader._routes.clear()
-        extension_loader._ws_handlers.clear()
-        extension_loader._ui_tabs.clear()
-        extension_loader.set_ws_broadcaster(None)
+    clean_extension_runtime_state()
 
 
 def _write_ext_skill(
@@ -722,39 +705,45 @@ def test_load_extension_registers_route_with_prefix(tmp_path):
     assert "/api/extensions/ext2/weather" in snap["routes"]
 
 
-def test_load_extension_rejects_absolute_route(tmp_path):
-    plugin = (
+_ROUTE_REJECTION_CASES = [
+    (
+        "absolute_route",
+        "ext_abs",
         "def _handler(r): return {}\n"
         "def register(api):\n"
-        "    api.register_route('/absolute', _handler)\n"
-    )
-    loaded, _, _ = _prepare_extension(tmp_path, "ext_abs", plugin, permissions=["route"])
-    err = extension_loader.load_extension(loaded, lambda: {})
-    assert err is not None
-    assert "absolute" in err.lower()
-
-
-def test_load_extension_rejects_traversal_route(tmp_path):
-    plugin = (
+        "    api.register_route('/absolute', _handler)\n",
+        "absolute",
+    ),
+    (
+        "traversal_route",
+        "ext_traverse",
         "def _handler(r): return {}\n"
         "def register(api):\n"
-        "    api.register_route('../escape', _handler)\n"
-    )
-    loaded, _, _ = _prepare_extension(tmp_path, "ext_traverse", plugin, permissions=["route"])
-    err = extension_loader.load_extension(loaded, lambda: {})
-    assert err is not None
-
-
-def test_load_extension_rejects_unsupported_route_method(tmp_path):
-    plugin = (
+        "    api.register_route('../escape', _handler)\n",
+        None,
+    ),
+    (
+        "unsupported_method",
+        "ext_trace",
         "def _handler(r): return {}\n"
         "def register(api):\n"
-        "    api.register_route('weather', _handler, methods=('TRACE',))\n"
-    )
-    loaded, _, _ = _prepare_extension(tmp_path, "ext_trace", plugin, permissions=["route"])
+        "    api.register_route('weather', _handler, methods=('TRACE',))\n",
+        "unsupported",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "case_id,name,plugin,expected_substr",
+    _ROUTE_REJECTION_CASES,
+    ids=[c[0] for c in _ROUTE_REJECTION_CASES],
+)
+def test_load_extension_rejects_route(tmp_path, case_id, name, plugin, expected_substr):
+    loaded, _, _ = _prepare_extension(tmp_path, name, plugin, permissions=["route"])
     err = extension_loader.load_extension(loaded, lambda: {})
     assert err is not None
-    assert "unsupported" in err.lower()
+    if expected_substr is not None:
+        assert expected_substr in err.lower()
 
 
 def test_load_extension_accepts_string_route_method(tmp_path):
@@ -936,82 +925,50 @@ def test_register_ui_tab_surfaces_hostable_widget(tmp_path):
     assert snap["ui_tabs"] == []
 
 
-def test_register_ui_tab_rejects_unsupported_render_kind(tmp_path):
-    loaded, _, _ = _prepare_extension(
-        tmp_path,
+_UI_TAB_REJECTION_CASES = [
+    (
+        "unsupported_render_kind",
         "badui",
         "def register(api):\n"
         "    api.register_ui_tab('bad', 'Bad', render={'kind': 'script_module', 'src': 'x.js'})\n",
-        permissions=["widget"],
-    )
-    err = extension_loader.load_extension(loaded, lambda: {})
-    assert err is not None
-    assert "unsupported" in err
-
-
-def test_register_ui_tab_rejects_bad_declarative_component(tmp_path):
-    loaded, _, _ = _prepare_extension(
-        tmp_path,
+        "unsupported",
+    ),
+    (
+        "bad_declarative_component",
         "baddecl",
         "def register(api):\n"
         "    api.register_ui_tab('bad', 'Bad', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'script'}]})\n",
-        permissions=["widget"],
-    )
-    err = extension_loader.load_extension(loaded, lambda: {})
-    assert err is not None
-    assert "unsupported type" in err
-
-
-def test_register_ui_tab_rejects_declarative_form_without_route(tmp_path):
-    loaded, _, _ = _prepare_extension(
-        tmp_path,
+        "unsupported type",
+    ),
+    (
+        "declarative_form_without_route",
         "badform",
         "def register(api):\n"
         "    api.register_ui_tab('bad', 'Bad', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'form', 'fields': [{'name': 'q'}]}]})\n",
-        permissions=["widget"],
-    )
-    err = extension_loader.load_extension(loaded, lambda: {})
-    assert err is not None
-    assert "requires route or api_route" in err
-
-
-def test_register_ui_tab_rejects_declarative_table_without_columns(tmp_path):
-    loaded, _, _ = _prepare_extension(
-        tmp_path,
+        "requires route or api_route",
+    ),
+    (
+        "declarative_table_without_columns",
         "badtable",
         "def register(api):\n"
         "    api.register_ui_tab('bad', 'Bad', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'table', 'path': 'rows'}]})\n",
-        permissions=["widget"],
-    )
-    err = extension_loader.load_extension(loaded, lambda: {})
-    assert err is not None
-    assert "columns" in err
-
-
-def test_register_ui_tab_rejects_declarative_media_without_source(tmp_path):
-    loaded, _, _ = _prepare_extension(
-        tmp_path,
+        "columns",
+    ),
+    (
+        "declarative_media_without_source",
         "badmedia",
         "def register(api):\n"
         "    api.register_ui_tab('bad', 'Bad', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'image', 'label': 'Preview'}]})\n",
-        permissions=["widget"],
-    )
-    err = extension_loader.load_extension(loaded, lambda: {})
-    assert err is not None
-    assert "media source" in err
-
-
-def test_register_ui_tab_rejects_bad_gallery_item(tmp_path):
-    loaded, _, _ = _prepare_extension(
-        tmp_path,
+        "media source",
+    ),
+    (
+        "bad_gallery_item",
         "badgallery",
         "def register(api):\n"
         "    api.register_ui_tab('bad', 'Bad', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'gallery', 'items': [None]}]})\n",
-        permissions=["widget"],
-    )
-    err = extension_loader.load_extension(loaded, lambda: {})
-    assert err is not None
-    assert "item 0 must be an object" in err
+        "item 0 must be an object",
+    ),
+]
 
 
 def test_register_ui_tab_accepts_declarative_poll_component(tmp_path):
@@ -1062,95 +1019,69 @@ def test_register_ui_tab_accepts_widget_v2_components(tmp_path):
     assert types == ["code", "chart", "tabs", "stream"]
 
 
-def test_register_ui_tab_rejects_bad_tabs_component(tmp_path):
-    loaded, _, _ = _prepare_extension(
-        tmp_path,
+_UI_TAB_REJECTION_CASES.extend([
+    (
+        "bad_tabs_component",
         "badtabs",
         "def register(api):\n"
         "    api.register_ui_tab('tabs', 'Tabs', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'tabs', 'tabs': []}]})\n",
-        permissions=["widget"],
-    )
-    err = extension_loader.load_extension(loaded, lambda: {})
-    assert err is not None
-    assert "tabs" in err
-
-
-def test_register_ui_tab_rejects_invalid_nested_tab_component(tmp_path):
-    loaded, _, _ = _prepare_extension(
-        tmp_path,
+        "tabs",
+    ),
+    (
+        "invalid_nested_tab_component",
         "badnestedtabs",
         "def register(api):\n"
         "    api.register_ui_tab('tabs', 'Tabs', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'tabs', 'tabs': [{'label': 'A', 'components': [{'type': 'image'}]}]}]})\n",
-        permissions=["widget"],
-    )
-    err = extension_loader.load_extension(loaded, lambda: {})
-    assert err is not None
-    assert "media source" in err
-
-
-def test_register_ui_tab_rejects_interactive_nested_tab_component(tmp_path):
-    loaded, _, _ = _prepare_extension(
-        tmp_path,
+        "media source",
+    ),
+    (
+        "interactive_nested_tab_component",
         "badinteractivetabs",
         "def register(api):\n"
         "    api.register_ui_tab('tabs', 'Tabs', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'tabs', 'tabs': [{'label': 'A', 'components': [{'type': 'form', 'route': 'submit', 'fields': [{'name': 'q'}]}]}]}]})\n",
-        permissions=["widget"],
-    )
-    err = extension_loader.load_extension(loaded, lambda: {})
-    assert err is not None
-    assert "interactive type" in err
-
-
-def test_register_ui_tab_rejects_nested_tabs_component(tmp_path):
-    loaded, _, _ = _prepare_extension(
-        tmp_path,
+        "interactive type",
+    ),
+    (
+        "nested_tabs_component",
         "badnestednestedtabs",
         "def register(api):\n"
         "    api.register_ui_tab('tabs', 'Tabs', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'tabs', 'tabs': [{'label': 'A', 'components': [{'type': 'tabs', 'tabs': [{'label': 'B', 'components': []}]}]}]}]})\n",
-        permissions=["widget"],
-    )
-    err = extension_loader.load_extension(loaded, lambda: {})
-    assert err is not None
-    assert "interactive type" in err
-
-
-def test_register_ui_tab_rejects_stream_without_route(tmp_path):
-    loaded, _, _ = _prepare_extension(
-        tmp_path,
+        "interactive type",
+    ),
+    (
+        "stream_without_route",
         "badstream",
         "def register(api):\n"
         "    api.register_ui_tab('stream', 'Stream', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'stream'}]})\n",
-        permissions=["widget"],
-    )
-    err = extension_loader.load_extension(loaded, lambda: {})
-    assert err is not None
-    assert "requires route" in err
-
-
-def test_register_ui_tab_rejects_stream_with_non_get_method(tmp_path):
-    loaded, _, _ = _prepare_extension(
-        tmp_path,
+        "requires route",
+    ),
+    (
+        "stream_with_non_get_method",
         "badstreammethod",
         "def register(api):\n"
         "    api.register_ui_tab('stream', 'Stream', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'stream', 'route': 'events', 'method': 'POST'}]})\n",
-        permissions=["widget"],
-    )
-    err = extension_loader.load_extension(loaded, lambda: {})
-    assert err is not None
-    assert "stream method" in err
-
-
-def test_register_ui_tab_rejects_subscription_component_without_event(tmp_path):
-    loaded, _, _ = _prepare_extension(
-        tmp_path,
+        "stream method",
+    ),
+    (
+        "subscription_without_event",
         "badsubui",
         "def register(api):\n"
         "    api.register_ui_tab('sub', 'Sub', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'subscription'}]})\n",
-        permissions=["widget"],
-    )
+        "requires event",
+    ),
+])
+
+
+@pytest.mark.parametrize(
+    "case_id,name,plugin,expected_substr",
+    _UI_TAB_REJECTION_CASES,
+    ids=[c[0] for c in _UI_TAB_REJECTION_CASES],
+)
+def test_register_ui_tab_rejects(tmp_path, case_id, name, plugin, expected_substr):
+    loaded, _, _ = _prepare_extension(tmp_path, name, plugin, permissions=["widget"])
     err = extension_loader.load_extension(loaded, lambda: {})
     assert err is not None
-    assert "requires event" in err
+    assert expected_substr in err
 
 
 def test_on_unload_callback_runs_during_unload(tmp_path):

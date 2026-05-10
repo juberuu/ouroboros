@@ -31,27 +31,14 @@ from ouroboros.tools.registry import ToolContext, ToolRegistry
 from ouroboros.contracts.task_constraint import TaskConstraint
 
 
+from tests._shared import clean_extension_runtime_state
+
+
 @pytest.fixture(autouse=True)
 def _clean_extension_runtime():
-    from ouroboros import extension_loader
-
-    with extension_loader._lock:
-        extension_loader._extensions.clear()
-        extension_loader._extension_modules.clear()
-        extension_loader._load_failures.clear()
-        extension_loader._tools.clear()
-        extension_loader._routes.clear()
-        extension_loader._ws_handlers.clear()
-        extension_loader._ui_tabs.clear()
+    clean_extension_runtime_state()
     yield
-    with extension_loader._lock:
-        extension_loader._extensions.clear()
-        extension_loader._extension_modules.clear()
-        extension_loader._load_failures.clear()
-        extension_loader._tools.clear()
-        extension_loader._routes.clear()
-        extension_loader._ws_handlers.clear()
-        extension_loader._ui_tabs.clear()
+    clean_extension_runtime_state()
 
 
 def _valid_script_manifest(
