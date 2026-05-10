@@ -1,4 +1,4 @@
-# Ouroboros v5.14.0 — Architecture & Reference
+# Ouroboros v5.15.0-rc.6 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -69,12 +69,13 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── extension_ui_validation.py ← Host-owned widget/settings render-schema validation shared by extension loader and skill preflight
       ├── extension_isolated_deps.py ← Per-extension bridge that exposes reviewed `.ouroboros_env` Python site-packages to in-process extensions while they are loaded
       ├── extensions_api.py    ← Phase 5 HTTP surface for extensions (GET /api/extensions, GET /api/extensions/<skill>/manifest, ALL /api/extensions/<skill>/<rest:path> catch-all dispatch, POST /api/skills/<skill>/toggle, POST /api/skills/<skill>/review, POST /api/skills/<skill>/grants)
+      ├── http_api.py          ← v5.15.0 SSOT for shared HTTP-API plumbing across extensions/marketplace/file_browser/server: ``request_drive_root`` / ``request_repo_dir`` (pin per-request data + repo roots from ``request.app.state``), ``coerce_bool`` / ``coerce_int`` (defensive HTTP-side input parsing), ``json_error`` (single-shape error envelope). Replaces the duplicated copies that previously lived in each route module so per-route HTTP-API contracts evolve in one place.
       ├── skill_token.py       ← Opaque Host Service API token wrapper used by reviewed skills/companions
       ├── marketplace/         ← ClawHub + OuroborosHub marketplace package (clawhub.py registry client, ouroboroshub.py static GitHub catalog client, fetcher.py staging, adapter.py OpenClaw->Ouroboros translation, install.py orchestration, isolated_deps.py per-skill dependency prefix, provenance.py durable provenance)
       ├── marketplace_api.py   ← HTTP surface for marketplaces (/api/marketplace/clawhub/* and /api/marketplace/ouroboroshub/*); always-on with registry host allowlists and hash checks
       ├── skill_lifecycle_queue.py ← single FIFO lane for mutating skill lifecycle actions (install/update/review/deps/enable/disable/uninstall) with recent event snapshot for Skills UI, chat live-card progress, dedupe keys, and sync tool wrapper
       ├── skill_review_runner.py ← shared lifecycle-backed skill review runner for API + agent tool paths; writes review_job.json + skill_review_* events and routes all executable skills (including self-authored provenance) through tri-model review
-      ├── skill_migrations.py  ← one-shot data-plane migrations for renamed official generation skills (image_gen→nanobanana, audio_gen→music_gen) and user-managed skills accidentally left under native/
+      ├── skill_migrations.py  ← topology repair migration that relocates user-managed payloads found under data/skills/native/ into data/skills/external/ (the pre-OuroborosHub generation-skill rename was retired in v5.15.0)
       ├── server_auth.py       ← Non-localhost auth gate (OUROBOROS_NETWORK_PASSWORD)
       ├── server_control.py    ← Process-control helpers: restart, panic stop
       ├── server_entrypoint.py ← CLI argument parsing, port-binding helpers
