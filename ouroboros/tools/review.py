@@ -29,6 +29,7 @@ log = logging.getLogger(__name__)
 
 MAX_MODELS = 10
 CONCURRENCY_LIMIT = 5
+DEFAULT_REVIEW_MODEL_TIMEOUT_SEC = 600.0
 
 _CONSTITUTIONAL_PREAMBLE = """\
 ## CONSTITUTIONAL CONTEXT — TOP PRIORITY
@@ -54,6 +55,35 @@ err on the side of NOT recommending it and explain the tension.
 ---
 
 """
+
+
+def _review_model_timeout_sec() -> float:
+    raw = os.environ.get("OUROBOROS_REVIEW_MODEL_TIMEOUT_SEC", "")
+    if not raw:
+        return DEFAULT_REVIEW_MODEL_TIMEOUT_SEC
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        log.warning(
+            "Invalid OUROBOROS_REVIEW_MODEL_TIMEOUT_SEC=%r; using %.0fs",
+            raw,
+            DEFAULT_REVIEW_MODEL_TIMEOUT_SEC,
+        )
+        return DEFAULT_REVIEW_MODEL_TIMEOUT_SEC
+    if value <= 0:
+        log.warning(
+            "Non-positive OUROBOROS_REVIEW_MODEL_TIMEOUT_SEC=%r; using %.0fs",
+            raw,
+            DEFAULT_REVIEW_MODEL_TIMEOUT_SEC,
+        )
+        return DEFAULT_REVIEW_MODEL_TIMEOUT_SEC
+    return value
+
+
+def _format_timeout_seconds(timeout_sec: float) -> str:
+    if float(timeout_sec).is_integer():
+        return str(int(timeout_sec))
+    return f"{timeout_sec:g}"
 
 
 from ouroboros.tools.review_helpers import (
@@ -171,14 +201,18 @@ def _handle_multi_model_review(ctx: ToolContext, content: str = "",
 
 async def _query_model(llm_client: LLMClient, model: str, messages: list, semaphore):
     async with semaphore:
+        timeout_sec = _review_model_timeout_sec()
         try:
-            msg, usage = await llm_client.chat_async(
-                messages=messages,
-                model=model,
-                reasoning_effort="medium",
-                max_tokens=65536,
-                temperature=0.2,
-                no_proxy=True,
+            msg, usage = await asyncio.wait_for(
+                llm_client.chat_async(
+                    messages=messages,
+                    model=model,
+                    reasoning_effort="medium",
+                    max_tokens=65536,
+                    temperature=0.2,
+                    no_proxy=True,
+                ),
+                timeout=timeout_sec,
             )
             payload = {
                 "choices": [{"message": {"content": msg.get("content") or ""}}],
@@ -186,7 +220,7 @@ async def _query_model(llm_client: LLMClient, model: str, messages: list, semaph
             }
             return model, payload, None
         except asyncio.TimeoutError:
-            return model, "Error: Timeout after 120s", None
+            return model, f"Error: Timeout after {_format_timeout_seconds(timeout_sec)}s", None
         except Exception as e:
             # DEVELOPMENT.md 2(f): review-output / cognitive artifacts MUST
             # NOT use hardcoded [:N] truncation. Full error text (e.g.

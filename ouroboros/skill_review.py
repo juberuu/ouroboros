@@ -801,6 +801,21 @@ def review_skill(
     )
 
     if persist:
+        if getattr(ctx, "_skill_review_lifecycle_guard", False):
+            from ouroboros.skill_review_runner import _can_persist_review_outcome
+
+            if not _can_persist_review_outcome(
+                drive_root,
+                skill.name,
+                content_hash,
+                expected_job_id=str(getattr(ctx, "_skill_review_lifecycle_job_id", "") or ""),
+            ):
+                outcome.status = "pending"
+                outcome.error = (
+                    "review outcome was not persisted because the lifecycle job "
+                    "is already terminal or no longer matches this content hash"
+                )
+                return outcome
         save_review_state(
             drive_root,
             skill.name,

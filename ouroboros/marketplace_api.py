@@ -45,7 +45,12 @@ from ouroboros.marketplace.install import (
 )
 from ouroboros.marketplace.provenance import read_provenance
 from ouroboros.marketplace import ouroboroshub
-from ouroboros.skill_lifecycle_queue import JobProgressTarget, LifecycleJobOptions, run_lifecycle_job
+from ouroboros.skill_lifecycle_queue import (
+    JobProgressTarget,
+    LifecycleJobOptions,
+    run_blocking_preserving_cancellation,
+    run_lifecycle_job,
+)
 
 log = logging.getLogger(__name__)
 
@@ -322,7 +327,7 @@ async def api_marketplace_install(request: Request) -> JSONResponse:
     repo_dir = _request_repo_dir(request)
     install_progress = JobProgressTarget()
     async def _run_install() -> Any:
-        return await asyncio.to_thread(
+        return await run_blocking_preserving_cancellation(
             install_skill,
             drive_root,
             repo_dir,
@@ -331,6 +336,7 @@ async def api_marketplace_install(request: Request) -> JSONResponse:
             auto_review=auto_review,
             overwrite=overwrite,
             progress_callback=install_progress.set,
+            log_label="ClawHub install lifecycle operation",
         )
 
     try:
@@ -377,13 +383,14 @@ async def api_marketplace_update(request: Request) -> JSONResponse:
     repo_dir = _request_repo_dir(request)
     update_progress = JobProgressTarget()
     async def _run_update() -> Any:
-        return await asyncio.to_thread(
+        return await run_blocking_preserving_cancellation(
             update_skill,
             drive_root,
             repo_dir,
             sanitized_name=sanitized,
             version=version,
             progress_callback=update_progress.set,
+            log_label="ClawHub update lifecycle operation",
         )
 
     try:
@@ -440,10 +447,11 @@ async def api_marketplace_uninstall(request: Request) -> JSONResponse:
         return JSONResponse({"error": err}, status_code=400)
     drive_root = _request_drive_root(request)
     async def _run_uninstall() -> Any:
-        return await asyncio.to_thread(
+        return await run_blocking_preserving_cancellation(
             uninstall_skill,
             drive_root,
             sanitized_name=sanitized,
+            log_label="ClawHub uninstall lifecycle operation",
         )
 
     try:
@@ -556,7 +564,12 @@ async def api_ouroboroshub_install(request: Request) -> JSONResponse:
 
     async def _run_install() -> Dict[str, Any]:
         install_progress.set("Downloading from OuroborosHub…")
-        result = await asyncio.to_thread(ouroboroshub.install, slug, overwrite=overwrite)
+        result = await run_blocking_preserving_cancellation(
+            ouroboroshub.install,
+            slug,
+            overwrite=overwrite,
+            log_label="OuroborosHub install lifecycle operation",
+        )
         payload: Dict[str, Any] = {
             "ok": result.ok,
             "sanitized_name": result.sanitized_name,
@@ -568,19 +581,21 @@ async def api_ouroboroshub_install(request: Request) -> JSONResponse:
             payload["target_dir"] = str(result.target_dir)
         if result.ok and auto_review:
             install_progress.set("Running tri-model review…")
-            status, findings, error = await asyncio.to_thread(
+            status, findings, error = await run_blocking_preserving_cancellation(
                 _run_skill_review,
                 drive_root,
                 repo_dir,
                 result.sanitized_name,
+                log_label="OuroborosHub install review lifecycle operation",
             )
             payload.update({"review_status": status, "review_findings": findings, "review_error": error})
             if status == "pass" and not error:
                 install_progress.set("Installing dependencies…")
-                deps_status, deps_error = await asyncio.to_thread(
+                deps_status, deps_error = await run_blocking_preserving_cancellation(
                     _reconcile_deps_after_review,
                     drive_root,
                     result.sanitized_name,
+                    log_label="OuroborosHub install dependency lifecycle operation",
                 )
                 payload.update({"deps_status": deps_status, "deps_error": deps_error})
                 if deps_status == "failed":
@@ -623,11 +638,20 @@ async def api_ouroboroshub_update(request: Request) -> JSONResponse:
 
             was_live = bool(is_extension_live(name, drive_root))
             update_progress.set("Unloading existing extension…")
-            unload_extension(name)
+            await run_blocking_preserving_cancellation(
+                unload_extension,
+                name,
+                log_label="OuroborosHub update extension unload lifecycle operation",
+            )
         except Exception:
             log.debug("OuroborosHub pre-update extension unload failed for %s", name, exc_info=True)
         update_progress.set("Downloading from OuroborosHub…")
-        result = await asyncio.to_thread(ouroboroshub.install, name, overwrite=True)
+        result = await run_blocking_preserving_cancellation(
+            ouroboroshub.install,
+            name,
+            overwrite=True,
+            log_label="OuroborosHub update lifecycle operation",
+        )
         payload: Dict[str, Any] = {
             "ok": result.ok,
             "sanitized_name": result.sanitized_name,
@@ -639,21 +663,23 @@ async def api_ouroboroshub_update(request: Request) -> JSONResponse:
             payload["target_dir"] = str(result.target_dir)
         if result.ok:
             update_progress.set("Running tri-model review…")
-            status, findings, error = await asyncio.to_thread(
+            status, findings, error = await run_blocking_preserving_cancellation(
                 _run_skill_review,
                 drive_root,
                 repo_dir,
                 result.sanitized_name,
+                log_label="OuroborosHub update review lifecycle operation",
             )
             payload.update({"review_status": status, "review_findings": findings, "review_error": error})
             deps_status = "not_required"
             deps_error = ""
             if status == "pass" and not error:
                 update_progress.set("Installing dependencies…")
-                deps_status, deps_error = await asyncio.to_thread(
+                deps_status, deps_error = await run_blocking_preserving_cancellation(
                     _reconcile_deps_after_review,
                     drive_root,
                     result.sanitized_name,
+                    log_label="OuroborosHub update dependency lifecycle operation",
                 )
                 payload.update({"deps_status": deps_status, "deps_error": deps_error})
                 if deps_status == "failed":
@@ -665,11 +691,12 @@ async def api_ouroboroshub_update(request: Request) -> JSONResponse:
                     from ouroboros.extension_loader import reconcile_extension
 
                     update_progress.set("Reloading extension…")
-                    live_state = await asyncio.to_thread(
+                    live_state = await run_blocking_preserving_cancellation(
                         reconcile_extension,
                         result.sanitized_name,
                         drive_root,
                         load_settings,
+                        log_label="OuroborosHub update extension reload lifecycle operation",
                     )
                     payload.update({
                         "extension_action": live_state.get("action"),
@@ -681,7 +708,13 @@ async def api_ouroboroshub_update(request: Request) -> JSONResponse:
             try:
                 from ouroboros.config import load_settings
                 from ouroboros.extension_loader import reconcile_extension
-                await asyncio.to_thread(reconcile_extension, name, drive_root, load_settings)
+                await run_blocking_preserving_cancellation(
+                    reconcile_extension,
+                    name,
+                    drive_root,
+                    load_settings,
+                    log_label="OuroborosHub failed-update extension restore lifecycle operation",
+                )
             except Exception:
                 log.debug("OuroborosHub failed-update re-reconcile failed for %s", name, exc_info=True)
         return payload
@@ -743,7 +776,11 @@ async def api_ouroboroshub_uninstall(request: Request) -> JSONResponse:
         return JSONResponse({"error": err}, status_code=400)
 
     async def _run_uninstall() -> Dict[str, Any]:
-        result = await asyncio.to_thread(ouroboroshub.uninstall, sanitized)
+        result = await run_blocking_preserving_cancellation(
+            ouroboroshub.uninstall,
+            sanitized,
+            log_label="OuroborosHub uninstall lifecycle operation",
+        )
         return {"ok": result.ok, "sanitized_name": result.sanitized_name, "error": result.error}
 
     payload = await run_lifecycle_job(

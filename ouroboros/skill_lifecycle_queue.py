@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import pathlib
 import re
 import threading
@@ -20,6 +21,7 @@ from typing import Any, Awaitable, Callable, Deque, Dict, Optional
 
 from ouroboros.utils import utc_now_iso as _now_iso
 
+log = logging.getLogger(__name__)
 
 _MAX_EVENTS = 80
 
@@ -233,8 +235,6 @@ async def run_lifecycle_job(
             job.status = "running"
             job.started_at = _now_iso()
             _notify_chat_progress(job, "running")
-            if opts.on_started is not None:
-                opts.on_started(job)
             if opts.drive_root is None:
                 from ouroboros.config import DATA_DIR
 
@@ -243,6 +243,8 @@ async def run_lifecycle_job(
                 lock_root = pathlib.Path(opts.drive_root)
             try:
                 async with async_skill_lifecycle_file_lock(lock_root):
+                    if opts.on_started is not None:
+                        opts.on_started(job)
                     result = await runner()
                 error = opts.result_error(result) if opts.result_error else ""
                 job.error = str(error or "")
@@ -276,6 +278,46 @@ async def run_lifecycle_job(
         raise
 
 
+async def run_blocking_preserving_cancellation(
+    func: Callable[..., Any],
+    *args: Any,
+    log_label: str = "lifecycle work",
+    **kwargs: Any,
+) -> Any:
+    """Run blocking lifecycle work without releasing the lane on caller cancellation.
+
+    Python cannot safely kill a thread already inside file I/O, subprocess
+    cleanup, provider SDK code, or extension import/reconcile logic. If the
+    HTTP client disconnects while such work is running, the lifecycle lane must
+    stay occupied until the worker returns; otherwise a second mutating skill
+    operation can overlap with the first thread's side effects.
+    """
+
+    task = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
+    warned = False
+    while True:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                return task.result()
+            if not warned:
+                log.warning(
+                    "Client task was cancelled while %s is still running; "
+                    "waiting for the worker thread to finish because Python threads cannot be killed safely.",
+                    log_label,
+                )
+                warned = True
+            current = asyncio.current_task()
+            if current is not None and hasattr(current, "uncancel"):
+                while current.cancelling():  # type: ignore[attr-defined]
+                    current.uncancel()  # type: ignore[attr-defined]
+            # Python <=3.10 has no cancellation counter to clear. Once the
+            # CancelledError is caught, the next shield await blocks until the
+            # worker finishes or a fresh cancellation arrives; this is covered
+            # by the cancellation-preservation tests running on Python 3.9.
+
+
 def run_lifecycle_job_blocking(
     *,
     kind: str,
@@ -294,7 +336,10 @@ def run_lifecycle_job_blocking(
     """
 
     async def _runner() -> Any:
-        return await asyncio.to_thread(runner)
+        return await run_blocking_preserving_cancellation(
+            runner,
+            log_label=f"blocking {kind} lifecycle operation",
+        )
 
     async def _main() -> Any:
         return await run_lifecycle_job(

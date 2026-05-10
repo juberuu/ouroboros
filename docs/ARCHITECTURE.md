@@ -1,4 +1,4 @@
-# Ouroboros v5.11.0 — Architecture & Reference
+# Ouroboros v5.12.0-rc.1 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -1688,6 +1688,7 @@ Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent acce
 | OUROBOROS_TOOL_TIMEOUT_SEC | 600 | Global tool timeout override (read live from settings.json on each tool call) |
 | OUROBOROS_WEBSEARCH_MODEL | gpt-5.2 | Official OpenAI Responses model for `web_search` when `OPENAI_BASE_URL` is empty |
 | OUROBOROS_REVIEW_MODELS | openai/gpt-5.5,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.6 | Comma-separated OpenRouter model IDs for pre-commit review (min 2 for quorum) |
+| OUROBOROS_REVIEW_MODEL_TIMEOUT_SEC | 600 | Env-only override read directly by `ouroboros.tools.review`. Per-reviewer model call timeout for multi-model review; timed-out reviewers become ERROR actors and quorum still requires at least two parseable reviewers. |
 | OUROBOROS_REVIEW_ENFORCEMENT | advisory | Pre-commit review enforcement: `advisory` or `blocking` |
 | OUROBOROS_RUNTIME_MODE | advanced | Three-layer refactor axis: `light`, `advanced`, or `pro`. Orthogonal to `OUROBOROS_REVIEW_ENFORCEMENT`. Clamped via `normalize_runtime_mode` on both save and read paths. v5.1.2 Frame A: `light` blanket-blocks every repo-mutation tool at the `ToolRegistry.execute` gate plus pattern-matched `run_shell` mutation commands AND refuses runtime_mode self-elevation through every channel (`save_settings` chokepoint, `_data_write` settings.json block, `/api/settings` POST drop), but reviewed + enabled skills (script + extension) execute in light. `advanced` can evolve the application layer but blocks protected core/contract/release paths. `pro` may edit those protected surfaces directly, but committing them still requires the normal triad + scope review to pass. The runtime_mode value itself is owner-only — change it by editing `settings.json` directly while the agent is stopped, then restart. |
 | OUROBOROS_SKILLS_REPO_PATH | "" | Local checkout path for the external skills/extensions repo. Consumed by `ouroboros.skill_loader.discover_skills` (Phase 3); accepts absolute paths or `~`-prefixed paths; `get_skills_repo_path` expands `~` at read time. Ouroboros never clones/pulls this directory. |
@@ -2298,13 +2299,25 @@ extension module namespace.
    ``skill_review_failed``, or ``skill_review_interrupted`` events to
    ``logs/events.jsonl``. The agent tool has a review-specific timeout
    floor (default 1800s via ``OUROBOROS_SKILL_REVIEW_TOOL_TIMEOUT_SEC``)
-   while ``skill_exec`` remains hard-capped at 300s. The underlying
-   review itself runs the tri-model pipeline
+   while ``skill_exec`` remains hard-capped at 300s. The heartbeat records
+   lifecycle-owner liveness only — it proves that the worker process still
+   owns the lane, not that any individual reviewer model is making progress.
+   Each reviewer model call inside the underlying tri-model pipeline is
+   separately bounded by ``OUROBOROS_REVIEW_MODEL_TIMEOUT_SEC`` (default
+   600s); a timed-out reviewer becomes an ERROR actor and the remaining
+   reviewers still determine quorum. Stale or interrupted lifecycle jobs
+   use explicit reasons such as ``owner_process_exited`` or
+   ``heartbeat_stale`` rather than pretending a fresh heartbeat is proof of
+   model progress. The underlying review itself runs the tri-model pipeline
    (``_handle_multi_model_review``) against the dedicated Skill Review
    Checklist section of ``docs/CHECKLISTS.md``. On a successful
    quorum-parseable outcome it persists the verdict + content hash +
    findings to ``review.json`` via ``save_review_state`` (atomic
-   ``tempfile`` + ``os.replace``). Infrastructure-level failures
+   ``tempfile`` + ``os.replace``). When invoked by the lifecycle runner,
+   the review path checks the current ``review_job.json`` so a late
+   reviewer thread from an interrupted or content-stale job cannot silently
+   write or report a fresh PASS over newer lifecycle state; skipped writes emit
+   ``skill_review_persist_skipped`` to ``logs/events.jsonl``. Infrastructure-level failures
    — missing skill, ``load_error``, unreadable / oversized / binary
    payload, non-JSON top-level response, transport exception, sub-
    quorum reviewer count — return a ``SkillReviewOutcome`` with

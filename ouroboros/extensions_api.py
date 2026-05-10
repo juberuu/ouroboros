@@ -15,6 +15,7 @@ from ``extension_loader.snapshot()``.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import logging
@@ -26,7 +27,12 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from ouroboros.extension_loader import list_routes, snapshot
-from ouroboros.skill_lifecycle_queue import LifecycleJobOptions, queue_snapshot, run_lifecycle_job
+from ouroboros.skill_lifecycle_queue import (
+    LifecycleJobOptions,
+    queue_snapshot,
+    run_blocking_preserving_cancellation,
+    run_lifecycle_job,
+)
 from ouroboros.skill_loader import (
     discover_skills,
     find_skill,
@@ -258,10 +264,15 @@ async def api_extension_manifest(request: Request) -> JSONResponse:
         return JSONResponse({"error": "missing skill name"}, status_code=400)
     drive_root = _request_drive_root(request)
     repo_path = get_skills_repo_path()
-    loaded = find_skill(drive_root, skill_name, repo_path=repo_path)
+    loaded = await asyncio.to_thread(find_skill, drive_root, skill_name, repo_path=repo_path)
     if loaded is None:
         return JSONResponse({"error": "skill not found"}, status_code=404)
-    runtime_state = runtime_state_for_skill_name(skill_name, drive_root, repo_path=repo_path)
+    runtime_state = await asyncio.to_thread(
+        runtime_state_for_skill_name,
+        skill_name,
+        drive_root,
+        repo_path=repo_path,
+    )
     load_error = runtime_state.get("load_error")
     if not isinstance(load_error, str) or not load_error.strip():
         load_error = loaded.load_error
@@ -308,13 +319,18 @@ async def api_extension_module(request: Request) -> Response:
 
     drive_root = _request_drive_root(request)
     repo_path = get_skills_repo_path()
-    state = runtime_state_for_skill_name(skill_name, drive_root, repo_path=repo_path)
+    state = await asyncio.to_thread(
+        runtime_state_for_skill_name,
+        skill_name,
+        drive_root,
+        repo_path=repo_path,
+    )
     if not state.get("desired_live"):
         return JSONResponse(
             {"error": f"extension {skill_name!r} not live: {state.get('reason')}", "state": state},
             status_code=409,
         )
-    loaded = find_skill(drive_root, skill_name, repo_path=repo_path)
+    loaded = await asyncio.to_thread(find_skill, drive_root, skill_name, repo_path=repo_path)
     if loaded is None:
         return JSONResponse({"error": "skill not found"}, status_code=404)
     # Authorize against the LIVE registered tab snapshot, not only the
@@ -340,7 +356,7 @@ async def api_extension_module(request: Request) -> Response:
     if not target.is_file():
         return JSONResponse({"error": "module entry file not found"}, status_code=404)
     try:
-        text = target.read_text(encoding="utf-8")
+        text = await asyncio.to_thread(target.read_text, encoding="utf-8")
     except UnicodeDecodeError:
         return JSONResponse({"error": "module entry is not UTF-8 text"}, status_code=400)
     return Response(
@@ -387,9 +403,20 @@ async def api_extension_dispatch(request: Request) -> Response:
     repo_path = get_skills_repo_path()
     spec = list_routes().get(mount)
     if spec is None and skill:
-        state = runtime_state_for_skill_name(skill, drive_root, repo_path=repo_path)
+        state = await asyncio.to_thread(
+            runtime_state_for_skill_name,
+            skill,
+            drive_root,
+            repo_path=repo_path,
+        )
         if state.get("desired_live"):
-            state = reconcile_extension(skill, drive_root, load_settings, repo_path=repo_path)
+            state = await asyncio.to_thread(
+                reconcile_extension,
+                skill,
+                drive_root,
+                load_settings,
+                repo_path=repo_path,
+            )
             spec = list_routes().get(mount)
             if spec is None and state.get("action") == "extension_load_error":
                 return JSONResponse(
@@ -406,9 +433,20 @@ async def api_extension_dispatch(request: Request) -> Response:
             {"error": f"no extension route registered for {mount!r}"},
             status_code=404,
         )
-    state = runtime_state_for_skill_name(str(spec.get("skill") or skill), drive_root, repo_path=repo_path)
+    state = await asyncio.to_thread(
+        runtime_state_for_skill_name,
+        str(spec.get("skill") or skill),
+        drive_root,
+        repo_path=repo_path,
+    )
     if not state.get("desired_live") or not state.get("live_loaded"):
-        state = reconcile_extension(skill, drive_root, load_settings, repo_path=repo_path)
+        state = await asyncio.to_thread(
+            reconcile_extension,
+            skill,
+            drive_root,
+            load_settings,
+            repo_path=repo_path,
+        )
         spec = list_routes().get(mount)
         if state.get("action") == "extension_load_error":
             return JSONResponse(
@@ -440,7 +478,10 @@ async def api_extension_dispatch(request: Request) -> Response:
             {"error": "registered handler is not callable"}, status_code=500
         )
     try:
-        result = handler(request)
+        if inspect.iscoroutinefunction(handler):
+            result = await handler(request)
+        else:
+            result = await asyncio.to_thread(handler, request)
         if inspect.iscoroutine(result):
             result = await result
     except Exception as exc:
@@ -479,10 +520,10 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
     drive_root = _request_drive_root(request)
     repo_path = get_skills_repo_path()
 
-    initial = find_skill(drive_root, skill_name, repo_path=repo_path)
+    initial = await asyncio.to_thread(find_skill, drive_root, skill_name, repo_path=repo_path)
     if initial is None:
         return JSONResponse({"error": "skill not found"}, status_code=404)
-    async def _run_toggle() -> dict[str, Any]:
+    def _run_toggle_sync() -> dict[str, Any]:
         loaded = find_skill(drive_root, skill_name, repo_path=repo_path)
         if loaded is None:
             return {"error": "skill not found", "status_code": 404}
@@ -582,6 +623,12 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
             "live_reason": live_reason,
         }
 
+    async def _run_toggle() -> dict[str, Any]:
+        return await run_blocking_preserving_cancellation(
+            _run_toggle_sync,
+            log_label="skill toggle lifecycle operation",
+        )
+
     queued = await run_lifecycle_job(
         kind="enable" if enabled else "disable",
         target=initial.name,
@@ -666,7 +713,7 @@ async def api_skill_lifecycle_queue(request: Request) -> JSONResponse:
     try:
         from ouroboros.skill_review_runner import reconcile_stale_review_jobs
 
-        reconcile_stale_review_jobs(_request_drive_root(request))
+        await asyncio.to_thread(reconcile_stale_review_jobs, _request_drive_root(request))
     except Exception:
         log.debug("stale review job reconciliation failed", exc_info=True)
     return JSONResponse(queue_snapshot())
@@ -709,7 +756,8 @@ async def api_skill_reconcile(request: Request) -> JSONResponse:
 
     drive_root = _request_drive_root(request)
     repo_path = get_skills_repo_path()
-    state = extension_loader.reconcile_extension(
+    state = await asyncio.to_thread(
+        extension_loader.reconcile_extension,
         skill_name,
         drive_root,
         load_settings,

@@ -18,6 +18,7 @@ from ouroboros.skill_lifecycle_queue import (
     JobProgressTarget,
     LifecycleJob,
     LifecycleJobOptions,
+    run_blocking_preserving_cancellation,
     run_lifecycle_job,
     run_lifecycle_job_blocking,
 )
@@ -140,9 +141,18 @@ def reconcile_stale_review_jobs(
     return count
 
 
-def _patch_review_job(drive_root: pathlib.Path, skill_name: str, **updates: Any) -> None:
+def _patch_review_job(
+    drive_root: pathlib.Path,
+    skill_name: str,
+    *,
+    expected_job_id: str = "",
+    **updates: Any,
+) -> None:
     path = review_job_state_path(drive_root, skill_name)
     data = _read_review_job(path)
+    current_job_id = str(data.get("job_id") or "")
+    if expected_job_id and current_job_id and current_job_id != expected_job_id:
+        return
     data.update(updates)
     atomic_write_json(path, data, trailing_newline=True)
 
@@ -150,11 +160,19 @@ def _patch_review_job(drive_root: pathlib.Path, skill_name: str, **updates: Any)
 @contextlib.contextmanager
 def _review_job_heartbeat(drive_root: pathlib.Path, skill_name: str):
     stop = threading.Event()
+    expected_job_id = str(
+        _read_review_job(review_job_state_path(drive_root, skill_name)).get("job_id") or ""
+    )
 
     def _beat() -> None:
         while not stop.wait(_HEARTBEAT_INTERVAL_SEC):
             try:
-                _patch_review_job(drive_root, skill_name, last_heartbeat_at=utc_now_iso())
+                _patch_review_job(
+                    drive_root,
+                    skill_name,
+                    expected_job_id=expected_job_id,
+                    last_heartbeat_at=utc_now_iso(),
+                )
             except Exception:
                 log.debug("skill review heartbeat update failed", exc_info=True)
 
@@ -186,6 +204,36 @@ def _review_dedupe_key(skill_name: str, content_hash: str) -> str:
     return f"review:{skill_name}:{suffix}"
 
 
+def _call_review_with_lifecycle_guard(
+    review_impl: ReviewImpl,
+    ctx: Any,
+    skill_name: str,
+) -> SkillReviewOutcome:
+    sentinel = object()
+    previous_guard = getattr(ctx, "_skill_review_lifecycle_guard", sentinel)
+    previous_job_id = getattr(ctx, "_skill_review_lifecycle_job_id", sentinel)
+    job_data = _read_review_job(review_job_state_path(pathlib.Path(ctx.drive_root), skill_name))
+    setattr(ctx, "_skill_review_lifecycle_guard", True)
+    setattr(ctx, "_skill_review_lifecycle_job_id", str(job_data.get("job_id") or ""))
+    try:
+        return review_impl(ctx, skill_name)
+    finally:
+        if previous_guard is sentinel:
+            try:
+                delattr(ctx, "_skill_review_lifecycle_guard")
+            except AttributeError:
+                pass
+        else:
+            setattr(ctx, "_skill_review_lifecycle_guard", previous_guard)
+        if previous_job_id is sentinel:
+            try:
+                delattr(ctx, "_skill_review_lifecycle_job_id")
+            except AttributeError:
+                pass
+        else:
+            setattr(ctx, "_skill_review_lifecycle_job_id", previous_job_id)
+
+
 async def _to_thread_preserving_result(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
     """Run blocking work in a thread and preserve its result across cancellation.
 
@@ -194,19 +242,102 @@ async def _to_thread_preserving_result(func: Callable[..., Any], *args: Any, **k
     stay occupied until it finishes instead of reporting a terminal job early.
     """
 
-    task = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
-    while True:
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError:
-            if task.done():
-                return task.result()
-            current = asyncio.current_task()
-            if current is not None and hasattr(current, "uncancel"):
-                while current.cancelling():  # type: ignore[attr-defined]
-                    current.uncancel()  # type: ignore[attr-defined]
-            await asyncio.sleep(0.01)
-            continue
+    return await run_blocking_preserving_cancellation(
+        func,
+        *args,
+        log_label="blocking skill review lifecycle work",
+        **kwargs,
+    )
+
+
+def _emit_review_persist_skipped(
+    drive_root: pathlib.Path,
+    skill_name: str,
+    content_hash: str,
+    *,
+    reason: str,
+    job_status: str = "",
+    job_id: str = "",
+) -> None:
+    now = utc_now_iso()
+    append_jsonl(
+        _events_path(drive_root),
+        {
+            "ts": now,
+            "type": "skill_review_persist_skipped",
+            "skill": skill_name,
+            "content_hash": content_hash,
+            "reason": reason,
+            "job_status": job_status,
+            "job_id": job_id,
+        },
+    )
+
+
+def _can_persist_review_outcome(
+    drive_root: pathlib.Path,
+    skill_name: str,
+    content_hash: str,
+    *,
+    expected_job_id: str = "",
+) -> bool:
+    """Prevent late reviewer threads from overwriting terminal lifecycle state."""
+
+    data = _read_review_job(review_job_state_path(pathlib.Path(drive_root), skill_name))
+    if not data:
+        return True
+    status = str(data.get("status") or "")
+    job_hash = str(data.get("content_hash") or "")
+    job_id = str(data.get("job_id") or "")
+    if expected_job_id and job_id and job_id != expected_job_id:
+        _emit_review_persist_skipped(
+            pathlib.Path(drive_root),
+            skill_name,
+            content_hash,
+            reason="review job id no longer matches lifecycle owner",
+            job_status=status,
+            job_id=job_id,
+        )
+        return False
+    if job_hash and job_hash != content_hash:
+        _emit_review_persist_skipped(
+            pathlib.Path(drive_root),
+            skill_name,
+            content_hash,
+            reason="content hash no longer matches current review job",
+            job_status=status,
+            job_id=job_id,
+        )
+        return False
+    terminal_blocking = {"interrupted", "failed", "cancelled"}
+    if status in terminal_blocking and (not job_hash or job_hash == content_hash):
+        _emit_review_persist_skipped(
+            pathlib.Path(drive_root),
+            skill_name,
+            content_hash,
+            reason=f"review job already {status}",
+            job_status=status,
+            job_id=job_id,
+        )
+        return False
+    return True
+
+
+def _review_job_finish_skip_reason(
+    drive_root: pathlib.Path,
+    skill_name: str,
+    job_id: str,
+) -> str:
+    if not job_id:
+        return ""
+    data = _read_review_job(review_job_state_path(pathlib.Path(drive_root), skill_name))
+    current_job_id = str(data.get("job_id") or "")
+    if current_job_id and current_job_id != job_id:
+        return "review job id no longer matches lifecycle owner"
+    status = str(data.get("status") or "")
+    if status and status != "running":
+        return f"review job already {status}"
+    return ""
 
 
 def _reconcile_deps_after_pass_review(
@@ -364,6 +495,25 @@ def _on_finished(
         duration = None
         if "value" in started_monotonic:
             duration = round(max(0.0, time.monotonic() - started_monotonic["value"]), 3)
+        skip_reason = ""
+        if "value" not in started_monotonic:
+            skip_reason = "review job never acquired lifecycle file lock"
+        else:
+            skip_reason = _review_job_finish_skip_reason(drive_root, skill_name, job.id)
+        if skip_reason:
+            append_jsonl(
+                _events_path(drive_root),
+                {
+                    "ts": now,
+                    "type": "skill_review_finish_skipped",
+                    "skill": skill_name,
+                    "content_hash": content_hash,
+                    "job_id": job.id,
+                    "reason": skip_reason,
+                    "duration_sec": duration,
+                },
+            )
+            return
         review_status = getattr(result, "status", "") if result is not None else ""
         error = str(exc) if exc is not None else (getattr(result, "error", "") if result is not None else "")
         deps_error = getattr(result, "deps_error", "") if result is not None else ""
@@ -470,33 +620,39 @@ async def run_skill_review_lifecycle(
     async def _run_review() -> SkillReviewOutcome:
         with _review_job_heartbeat(drive_root, skill_name):
             progress.set("Running tri-model review…")
-            outcome = await _to_thread_preserving_result(review_impl, ctx, skill_name)
-        deps_status = "not_required"
-        deps_error = ""
-        if getattr(outcome, "status", "") == "pass":
-            progress.set("Installing dependencies…")
-            deps_status, deps_error = await _to_thread_preserving_result(
-                _reconcile_deps_after_pass_review,
-                drive_root,
+            outcome = await _to_thread_preserving_result(
+                _call_review_with_lifecycle_guard,
+                review_impl,
+                ctx,
+                skill_name,
+            )
+            deps_status = "not_required"
+            deps_error = ""
+            if getattr(outcome, "status", "") == "pass":
+                progress.set("Installing dependencies…")
+                deps_status, deps_error = await _to_thread_preserving_result(
+                    _reconcile_deps_after_pass_review,
+                    drive_root,
+                    skill_name,
+                    repo_path=repo_path,
+                )
+            setattr(outcome, "deps_status", deps_status)
+            setattr(outcome, "deps_error", deps_error)
+            if getattr(outcome, "status", "") == "pass" and getattr(outcome, "auto_flow", False) and deps_status == "failed":
+                outcome.status = "pending"
+                outcome.error = deps_error or "self-authored dependency reconciliation failed"
+            if getattr(outcome, "status", "") == "pass" and getattr(outcome, "auto_flow", False):
+                save_enabled(drive_root, skill_name, True)
+            progress.set("Reloading extension…")
+            extension_action, extension_reason = await _to_thread_preserving_result(
+                _reconcile_extension_payload,
+                ctx,
                 skill_name,
                 repo_path=repo_path,
+                heal_mode=_heal_mode(ctx),
             )
-        setattr(outcome, "deps_status", deps_status)
-        setattr(outcome, "deps_error", deps_error)
-        if getattr(outcome, "status", "") == "pass" and getattr(outcome, "auto_flow", False) and deps_status == "failed":
-            outcome.status = "pending"
-            outcome.error = deps_error or "self-authored dependency reconciliation failed"
-        if getattr(outcome, "status", "") == "pass" and getattr(outcome, "auto_flow", False):
-            save_enabled(drive_root, skill_name, True)
-        progress.set("Reloading extension…")
-        extension_action, extension_reason = _reconcile_extension_payload(
-            ctx,
-            skill_name,
-            repo_path=repo_path,
-            heal_mode=_heal_mode(ctx),
-        )
-        setattr(outcome, "extension_action", extension_action)
-        setattr(outcome, "extension_reason", extension_reason)
+            setattr(outcome, "extension_action", extension_action)
+            setattr(outcome, "extension_reason", extension_reason)
         return outcome
 
     try:
@@ -547,32 +703,32 @@ def run_skill_review_lifecycle_blocking(
     def _run_review() -> SkillReviewOutcome:
         with _review_job_heartbeat(drive_root, skill_name):
             progress.set("Running tri-model review…")
-            outcome = review_impl(ctx, skill_name)
-        deps_status = "not_required"
-        deps_error = ""
-        if getattr(outcome, "status", "") == "pass":
-            progress.set("Installing dependencies…")
-            deps_status, deps_error = _reconcile_deps_after_pass_review(
-                drive_root,
+            outcome = _call_review_with_lifecycle_guard(review_impl, ctx, skill_name)
+            deps_status = "not_required"
+            deps_error = ""
+            if getattr(outcome, "status", "") == "pass":
+                progress.set("Installing dependencies…")
+                deps_status, deps_error = _reconcile_deps_after_pass_review(
+                    drive_root,
+                    skill_name,
+                    repo_path=repo_path,
+                )
+            setattr(outcome, "deps_status", deps_status)
+            setattr(outcome, "deps_error", deps_error)
+            if getattr(outcome, "status", "") == "pass" and getattr(outcome, "auto_flow", False) and deps_status == "failed":
+                outcome.status = "pending"
+                outcome.error = deps_error or "self-authored dependency reconciliation failed"
+            if getattr(outcome, "status", "") == "pass" and getattr(outcome, "auto_flow", False):
+                save_enabled(drive_root, skill_name, True)
+            progress.set("Reloading extension…")
+            extension_action, extension_reason = _reconcile_extension_payload(
+                ctx,
                 skill_name,
                 repo_path=repo_path,
+                heal_mode=_heal_mode(ctx),
             )
-        setattr(outcome, "deps_status", deps_status)
-        setattr(outcome, "deps_error", deps_error)
-        if getattr(outcome, "status", "") == "pass" and getattr(outcome, "auto_flow", False) and deps_status == "failed":
-            outcome.status = "pending"
-            outcome.error = deps_error or "self-authored dependency reconciliation failed"
-        if getattr(outcome, "status", "") == "pass" and getattr(outcome, "auto_flow", False):
-            save_enabled(drive_root, skill_name, True)
-        progress.set("Reloading extension…")
-        extension_action, extension_reason = _reconcile_extension_payload(
-            ctx,
-            skill_name,
-            repo_path=repo_path,
-            heal_mode=_heal_mode(ctx),
-        )
-        setattr(outcome, "extension_action", extension_action)
-        setattr(outcome, "extension_reason", extension_reason)
+            setattr(outcome, "extension_action", extension_action)
+            setattr(outcome, "extension_reason", extension_reason)
         return outcome
 
     try:

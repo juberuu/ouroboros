@@ -250,6 +250,95 @@ def test_cancelled_waiting_lifecycle_job_releases_lock_and_dedupe():
     asyncio.run(main())
 
 
+def test_cancelled_blocking_worker_keeps_lifecycle_lane_until_done():
+    _reset_queue()
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_work():
+        started.set()
+        release.wait(2)
+        return {"done": True}
+
+    async def runner():
+        return await q.run_blocking_preserving_cancellation(blocking_work)
+
+    async def quick_runner():
+        return {"quick": True}
+
+    async def main():
+        first = asyncio.create_task(
+            q.run_lifecycle_job(
+                kind="install",
+                target="alpha",
+                dedupe_key="install:alpha",
+                runner=runner,
+            )
+        )
+        assert await asyncio.to_thread(started.wait, 2)
+        first.cancel()
+        await asyncio.sleep(0.05)
+        first.cancel()
+        await asyncio.sleep(0.05)
+        active = q.queue_snapshot()["active"]
+        assert active is not None
+        assert active["target"] == "alpha"
+        second = asyncio.create_task(
+            q.run_lifecycle_job(
+                kind="install",
+                target="beta",
+                dedupe_key="install:beta",
+                runner=quick_runner,
+            )
+        )
+        await asyncio.sleep(0.05)
+        assert not second.done()
+        release.set()
+        assert await asyncio.wait_for(first, timeout=2) == {"done": True}
+        assert await asyncio.wait_for(second, timeout=2) == {"quick": True}
+
+    asyncio.run(main())
+
+
+def test_on_started_runs_only_after_cross_process_file_lock(monkeypatch, tmp_path):
+    _reset_queue()
+    entered_file_lock = threading.Event()
+    release_file_lock = threading.Event()
+    started_called = threading.Event()
+
+    @contextlib.asynccontextmanager
+    async def fake_file_lock(_drive_root):
+        entered_file_lock.set()
+        await asyncio.to_thread(release_file_lock.wait)
+        yield
+
+    monkeypatch.setattr(q, "async_skill_lifecycle_file_lock", fake_file_lock)
+
+    async def runner():
+        return {"ok": True}
+
+    async def main():
+        task = asyncio.create_task(
+            q.run_lifecycle_job(
+                kind="review",
+                target="alpha",
+                runner=runner,
+                options=q.LifecycleJobOptions(
+                    drive_root=tmp_path,
+                    on_started=lambda _job: started_called.set(),
+                ),
+            )
+        )
+        assert await asyncio.to_thread(entered_file_lock.wait, 2)
+        await asyncio.sleep(0.05)
+        assert not started_called.is_set()
+        release_file_lock.set()
+        assert await asyncio.wait_for(task, timeout=2) == {"ok": True}
+        assert started_called.is_set()
+
+    asyncio.run(main())
+
+
 def test_cancelled_file_lock_wait_cleans_active_job(monkeypatch):
     _reset_queue()
     entered_file_lock = threading.Event()
