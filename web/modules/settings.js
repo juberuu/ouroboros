@@ -2,6 +2,7 @@ import { refreshModelCatalog } from './settings_catalog.js';
 import { bindEffortSegments, syncEffortSegments } from './settings_controls.js';
 import { bindLocalModelControls } from './settings_local_model.js';
 import { SECRET_KEYS, bindSecretInputs, bindSettingsTabs, renderSettingsPage } from './settings_ui.js';
+import { showToast } from './toast.js';
 import { escapeHtmlAttr as escapeHtml, formatDualVersion } from './utils.js';
 
 let markSettingsDirty = () => {};
@@ -920,7 +921,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             if (data.status === 'ok') alert('Deleted: ' + (data.deleted.join(', ') || 'nothing') + '\nRestarting...');
             else alert('Error: ' + (data.error || 'unknown'));
         } catch (e) {
-            alert('Reset failed: ' + e.message);
+            showToast('Reset failed: ' + e.message, 'error');
         }
     });
 

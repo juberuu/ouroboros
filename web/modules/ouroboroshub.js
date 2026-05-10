@@ -8,15 +8,10 @@ import {
     startLifecyclePoller,
 } from './lifecycle_card.js';
 import {
+    emitSkillLifecycle,
     escapeHtmlAttr as escapeHtml,
     fetchJson,
 } from './utils.js';
-
-function emitSkillLifecycle(action, name, extra = {}) {
-    window.dispatchEvent(new CustomEvent('ouro:skill-lifecycle', {
-        detail: { action, name, ...extra },
-    }));
-}
 
 
 function lifecycleFor(installed, pending) {

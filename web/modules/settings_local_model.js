@@ -1,3 +1,6 @@
+import { showToast } from './toast.js';
+
+
 function readLocalModelBody() {
     return {
         source: document.getElementById('s-local-source').value.trim(),
@@ -112,7 +115,7 @@ export function bindLocalModelControls({ state }) {
     async function triggerStart() {
         const body = readLocalModelBody();
         if (!body.source) {
-            alert('Enter a model source (HuggingFace repo ID or local path)');
+            showToast('Enter a model source (HuggingFace repo ID or local path)', 'error');
             return;
         }
         setTestResult('');
@@ -153,7 +156,7 @@ export function bindLocalModelControls({ state }) {
             setProgressBar(null);
             updateLocalStatus();
         } catch (e) {
-            alert('Failed: ' + e.message);
+            showToast('Failed: ' + e.message, 'error');
         }
     });
 

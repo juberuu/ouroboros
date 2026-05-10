@@ -20,9 +20,11 @@ import {
 import { openConfirmDialog } from './confirm_dialog.js';
 import {
     boundedText,
+    emitSkillLifecycle,
     escapeHtmlAttr as escapeHtml,
     fetchJson,
     renderMarkdownSafe as renderMarkdownSafeShared,
+    renderSkillRepairPrompt,
     safeExternalHrefAttr,
 } from './utils.js';
 
@@ -36,13 +38,6 @@ function installErrorCopy(message) {
         ? `${message} Click Install again later to retry.`
         : message;
 }
-
-function emitSkillLifecycle(action, name, extra = {}) {
-    window.dispatchEvent(new CustomEvent('ouro:skill-lifecycle', {
-        detail: { action, name, ...extra },
-    }));
-}
-
 
 // ``renderMarkdownSafe`` and ``safeExternalUrl`` previously had local
 // copies here.  They live in ``utils.js`` now (single source of truth for
@@ -257,24 +252,10 @@ function buildHealPrompt(installed, summary) {
         })),
     };
     const diagnosticsJson = JSON.stringify(diagnostics, null, 2).replace(/`/g, "'");
-    return [
+    return renderSkillRepairPrompt(
         'Repair the ClawHub skill selected in the Marketplace UI.',
-        '',
-        'The server attached a structured skill_repair task constraint. All edit paths are relative to the selected skill payload root.',
-        '',
-        'Tool choice:',
-        '- Use data_read/data_list to inspect payload files.',
-        '- Use str_replace_editor for one exact replacement in an existing file.',
-        '- Use claude_code_edit for coordinated multi-hunk edits; cwd is forced to the selected skill payload.',
-        '- Use data_write only for new files or intentional full-file rewrites.',
-        '- Run skill_preflight after edits, then review_skill for this skill.',
-        '- Stop when the skill has a fresh PASS review, or report the remaining blocker clearly.',
-        '',
-        'Untrusted diagnostic JSON:',
-        '```json',
         diagnosticsJson,
-        '```',
-    ].join('\n');
+    );
 }
 
 

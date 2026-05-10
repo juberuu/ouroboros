@@ -1,4 +1,5 @@
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
+import { showToast } from './toast.js';
 
 // ``hostPage`` defaults to ``'dashboard'`` (Dashboard sub-tab migration v5.7+);
 // the legacy ``'settings'`` value is no longer passed by ``app.js``.
@@ -208,11 +209,13 @@ export function initUpdates({ mount, hostPage = 'dashboard', hostSubtab = 'updat
                 body: JSON.stringify({ target }),
             });
             const data = await resp.json();
-            alert(data.status === 'ok'
-                ? `Rollback successful: ${data.message}\n\nServer is restarting...`
-                : `Rollback failed: ${data.error || 'unknown error'}`);
+            if (data.status === 'ok') {
+                showToast(`Rollback successful: ${data.message}. Server is restarting...`, 'success');
+            } else {
+                showToast(`Rollback failed: ${data.error || 'unknown error'}`, 'error');
+            }
         } catch (err) {
-            alert('Rollback failed: ' + (err.message || err));
+            showToast('Rollback failed: ' + (err.message || err), 'error');
         }
     }
 
@@ -238,10 +241,10 @@ export function initUpdates({ mount, hostPage = 'dashboard', hostSubtab = 'updat
             });
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
-            const keep = data.keep_branch ? `\nLocal commits preserved as ${data.keep_branch}.` : '';
-            alert(`Update prepared. Server is restarting.${keep}`);
+            const keep = data.keep_branch ? ` Local commits preserved as ${data.keep_branch}.` : '';
+            showToast(`Update prepared. Server is restarting.${keep}`, 'success');
         } catch (err) {
-            alert('Update failed: ' + (err.message || err));
+            showToast('Update failed: ' + (err.message || err), 'error');
             applyBtn.disabled = false;
             applyBtn.textContent = safe ? 'Update Now' : 'Update with Options';
         }
@@ -257,9 +260,13 @@ export function initUpdates({ mount, hostPage = 'dashboard', hostSubtab = 'updat
         try {
             const resp = await fetch('/api/git/promote', { method: 'POST' });
             const data = await resp.json();
-            alert(data.status === 'ok' ? data.message : 'Error: ' + (data.error || 'unknown'));
+            if (data.status === 'ok') {
+                showToast(data.message, 'success');
+            } else {
+                showToast('Error: ' + (data.error || 'unknown'), 'error');
+            }
         } catch (err) {
-            alert('Failed: ' + (err.message || err));
+            showToast('Failed: ' + (err.message || err), 'error');
         }
     });
 

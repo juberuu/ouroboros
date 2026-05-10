@@ -1,6 +1,7 @@
 import { escapeHtmlAttr, escapeHtmlText as escapeHtml, formatUsdWhole, renderMarkdown } from './utils.js';
 import { renderPageHeader } from './page_header.js';
 import { PAGE_ICONS } from './page_icons.js';
+import { showToast } from './toast.js';
 import {
     getLogTaskGroupId,
     isGroupedTaskEvent,
@@ -1317,7 +1318,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
             // Requires live WebSocket; if offline, upload is rejected to avoid
             // the unsolvable race between queued message delivery and orphan cleanup.
             if (ws.ws?.readyState !== WebSocket.OPEN) {
-                alert('Cannot attach file while offline. Reconnect and try again.');
+                showToast('Cannot attach file while offline. Reconnect and try again.', 'error');
                 return;
             }
             const staged = pendingAttachment;
@@ -1328,7 +1329,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
                 const resp = await fetch('/api/chat/upload', { method: 'POST', body: formData });
                 const data = await resp.json();
                 if (!resp.ok || !data.ok) {
-                    alert('Upload failed: ' + (data.error || resp.statusText));
+                    showToast('Upload failed: ' + (data.error || resp.statusText), 'error');
                     return;  // pendingAttachment and preview remain — user can retry
                 }
                 // Upload succeeded — clear the staged attachment now that it's on the server
@@ -1338,7 +1339,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
                 requestAnimationFrame(() => updateMessagesPadding({ preserveStickiness: false }));
                 text += (text ? '\n\n' : '') + `[Attached file: ${data.display_name || staged.display_name} saved to ${data.path}]`;
             } catch (e) {
-                alert('Upload error: ' + e.message);
+                showToast('Upload error: ' + e.message, 'error');
                 return;  // pendingAttachment and preview remain — user can retry
             } finally {
                 setSendBusy(false);
