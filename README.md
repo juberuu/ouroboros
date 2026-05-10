@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 5.14.0-rc.4](https://img.shields.io/badge/version-5.14.0--rc.4-green.svg)](VERSION)
+[![Version 5.14.0](https://img.shields.io/badge/version-5.14.0-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -416,7 +416,7 @@ not paraphrase it.
 
 | Version | Date | Description |
 |---------|------|-------------|
-| 5.14.0-rc.4 | 2026-05-10 | **test(ui): compress chat/log static UI contracts.** Moves simple chat/live-card/logs substring and regex checks into a JSON fixture with one parametrized runner while keeping order-sensitive UI behavior tests in Python, reducing Python test code without dropping the static coverage. |
+| 5.14.0 | 2026-05-10 | **refactor(ssot+tests): remove verified duplication and compress static UI checks.** Centralizes registry/tool and skill-payload constants, removes dead review scaffolding, routes light-model/pricing/JSON-state paths through shared helpers, deduplicates supervisor timestamps, and moves simple chat/log static UI checks into a compact fixture while preserving order-sensitive behavior tests. |
 | 5.14.0-rc.3 | 2026-05-10 | **refactor(review): remove low-value defensive scaffolding.** Deletes the unused registry-side non-core listing duplicate, removes dead scope-review import fallback scaffolding for an in-tree module, and makes review-claim redaction fail closed instead of passing raw text when redaction fails. |
 | 5.14.0-rc.2 | 2026-05-10 | **refactor(ssot): continue low-risk runtime deduplication.** Adds a `config.get_light_model()` SSOT for the light-model slot, routes repeated light-model fallbacks through it, reuses the shared pricing table for `web_search` cost estimates, and switches narrow skill-dependency/migration JSON reads and writes to the shared JSON state helpers. |
 | 5.14.0-rc.1 | 2026-05-10 | **refactor(ssot): remove first tranche of verified duplication.** The first reduction pass deletes a dead review-state method, removes the stale local `CORE_TOOL_NAMES` copy from the tool registry, centralizes skill payload bucket/control-plane constants, deduplicates supervisor UTC timestamp formatting onto `utc_now_iso()`, and removes duplicate onboarding model suggestions. |
