@@ -256,7 +256,7 @@ def generate_reflection(
 
     Returns a structured dict ready for appending to the reflections JSONL.
     """
-    from ouroboros.llm import DEFAULT_LIGHT_MODEL
+    from ouroboros.config import get_light_model
 
     goal = _truncate_with_notice(task.get("text", ""), 200)
     error_details = _collect_error_details(llm_trace)
@@ -287,7 +287,7 @@ def generate_reflection(
         review_evidence=review_evidence_text,
     )
 
-    light_model = os.environ.get("OUROBOROS_MODEL_LIGHT") or DEFAULT_LIGHT_MODEL
+    light_model = get_light_model()
     try:
         resp_msg, refl_usage = llm_client.chat(
             messages=[{"role": "user", "content": prompt}],
@@ -415,7 +415,8 @@ _PATTERNS_HEADER = (
 
 def _update_patterns(drive_root: pathlib.Path, entry: Dict[str, Any]) -> None:
     """Update patterns.md knowledge base topic via LLM (Pattern Register)."""
-    from ouroboros.llm import LLMClient, DEFAULT_LIGHT_MODEL
+    from ouroboros.config import get_light_model
+    from ouroboros.llm import LLMClient
 
     patterns_path = drive_root / "memory" / "knowledge" / "patterns.md"
     patterns_path.parent.mkdir(parents=True, exist_ok=True)
@@ -440,7 +441,7 @@ def _update_patterns(drive_root: pathlib.Path, entry: Dict[str, Any]) -> None:
         reflection=_truncate_with_notice(entry.get("reflection", ""), 500),
     )
 
-    light_model = os.environ.get("OUROBOROS_MODEL_LIGHT") or DEFAULT_LIGHT_MODEL
+    light_model = get_light_model()
     client = LLMClient()
     resp_msg, patterns_usage = client.chat(
         messages=[{"role": "user", "content": prompt}],

@@ -109,6 +109,15 @@ SETTINGS_DEFAULTS = {
     "OUROBOROS_FILE_BROWSER_DEFAULT": "",
 }
 
+
+def get_light_model() -> str:
+    """Return the configured light-model slot with runtime env override."""
+
+    return (
+        str(os.environ.get("OUROBOROS_MODEL_LIGHT", "") or "").strip()
+        or str(SETTINGS_DEFAULTS["OUROBOROS_MODEL_LIGHT"])
+    )
+
 _VALID_EFFORTS = ("none", "low", "medium", "high")
 _DIRECT_PROVIDER_REVIEW_RUNS = 3
 

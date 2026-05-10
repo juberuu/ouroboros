@@ -400,8 +400,9 @@ def _find_duplicate_task(desc: str, task_context: str, pending: list, running: d
     )
 
     try:
-        from ouroboros.llm import LLMClient, DEFAULT_LIGHT_MODEL
-        light_model = os.environ.get("OUROBOROS_MODEL_LIGHT") or DEFAULT_LIGHT_MODEL
+        from ouroboros.config import get_light_model
+        from ouroboros.llm import LLMClient
+        light_model = get_light_model()
         client = LLMClient()
         resp_msg, usage = client.chat(
             messages=[{"role": "user", "content": prompt}],

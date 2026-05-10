@@ -6,6 +6,7 @@ import pathlib
 from typing import Any, Dict, List
 
 from ouroboros.marketplace.install_specs import normalize_install_specs
+from ouroboros.utils import read_json_dict
 
 
 def _coerce_dependency_specs(raw: Any) -> Any:
@@ -59,15 +60,10 @@ def _manifest_install_specs(manifest: Any) -> List[Dict[str, Any]]:
 
 
 def _payload_sidecar_specs(skill_dir: pathlib.Path) -> List[Dict[str, Any]]:
-    import json
-
     for filename in (".ouroboroshub.json", ".clawhub.json"):
         path = pathlib.Path(skill_dir) / filename
-        if not path.is_file():
-            continue
-        try:
-            record = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
+        record = read_json_dict(path)
+        if not record:
             continue
         auto = list((record.get("install_specs") or {}).get("auto") or [])
         if auto:

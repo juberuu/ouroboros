@@ -36,7 +36,8 @@ import re
 import shlex
 from typing import Tuple, Dict, Any, List, Optional
 
-from ouroboros.llm import LLMClient, DEFAULT_LIGHT_MODEL
+from ouroboros.config import get_light_model
+from ouroboros.llm import LLMClient
 from ouroboros.pricing import emit_llm_usage_event, estimate_cost, infer_provider_from_model
 from ouroboros.tool_aliases import adapt_tool_args, canonical_tool_name
 from supervisor.state import update_budget_from_usage
@@ -547,7 +548,7 @@ def _resolve_safety_routing() -> Tuple[bool, bool, Optional[str]]:
     if str(os.environ.get("USE_LOCAL_LIGHT", "") or "").lower() in ("true", "1"):
         return True, False, None
 
-    light_model = os.environ.get("OUROBOROS_MODEL_LIGHT", DEFAULT_LIGHT_MODEL)
+    light_model = get_light_model()
 
     if _any_remote_provider_configured():
         # The configured light model's provider must itself have a key,
@@ -605,7 +606,7 @@ def _run_llm_check(
     prompt = _build_check_prompt(tool_name, arguments, messages)
     client = LLMClient()
 
-    light_model = os.environ.get("OUROBOROS_MODEL_LIGHT", DEFAULT_LIGHT_MODEL)
+    light_model = get_light_model()
     log.info(f"Running safety check on {tool_name} using {light_model} (local={_use_local_light})")
 
     try:

@@ -37,8 +37,8 @@ from ouroboros.utils import (
     truncate_for_log,
     utc_now_iso,
 )
-from ouroboros.config import resolve_effort
-from ouroboros.llm import LLMClient, DEFAULT_LIGHT_MODEL
+from ouroboros.config import get_light_model, resolve_effort
+from ouroboros.llm import LLMClient
 from ouroboros.memory import Memory
 from ouroboros.context import (
     build_runtime_section, build_memory_sections,
@@ -103,7 +103,7 @@ class BackgroundConsciousness:
 
     @property
     def _model(self) -> str:
-        return os.environ.get("OUROBOROS_MODEL_LIGHT", "") or DEFAULT_LIGHT_MODEL
+        return get_light_model()
 
     def status_snapshot(self) -> Dict[str, Any]:
         return {

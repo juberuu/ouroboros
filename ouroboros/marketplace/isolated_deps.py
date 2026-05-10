@@ -13,6 +13,7 @@ from typing import Any, Dict, List
 
 from ouroboros.marketplace.install_specs import install_specs_hash
 from ouroboros.skill_loader import skill_state_dir
+from ouroboros.utils import read_json_dict
 
 
 ENV_DIRNAME = ".ouroboros_env"
@@ -237,8 +238,6 @@ def read_deps_state(drive_root: pathlib.Path, skill_name: str) -> Dict[str, Any]
     try:
         state_dir = skill_state_dir(drive_root, skill_name)
         path = state_dir / DEPS_STATE_FILENAME
-        if not path.is_file():
-            return {}
-        return json.loads(path.read_text(encoding="utf-8"))
+        return read_json_dict(path) or {}
     except Exception:
         return {}

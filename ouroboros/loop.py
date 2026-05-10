@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import logging
 
 from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage
+from ouroboros.config import get_light_model
 from ouroboros.tool_policy import initial_tool_schemas, list_non_core_tools
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.context import build_user_content
@@ -704,7 +705,7 @@ def run_llm_loop(
                 tools._ctx.messages = messages
             if _compaction_usage:
                 add_usage(accumulated_usage, _compaction_usage)
-                _cm = os.environ.get("OUROBOROS_MODEL_LIGHT") or "anthropic/claude-sonnet-4.6"
+                _cm = get_light_model()
                 _cc = float(_compaction_usage.get("cost") or 0) or estimate_cost(
                     _cm, int(_compaction_usage.get("prompt_tokens") or 0),
                     int(_compaction_usage.get("completion_tokens") or 0),

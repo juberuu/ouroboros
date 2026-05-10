@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import pathlib
 import shutil
 from typing import Dict
 
 from ouroboros.config import DATA_DIR, ensure_data_skills_dir
+from ouroboros.utils import atomic_write_json, read_json_dict
 
 
 _RENAME_SPECS = {
@@ -74,16 +74,13 @@ def _rewrite_manifest_name(payload_dir: pathlib.Path, new_name: str) -> bool:
     skill_json = payload_dir / "skill.json"
     if skill_json.is_file():
         try:
-            data = json.loads(skill_json.read_text(encoding="utf-8"))
-            if not isinstance(data, dict):
+            data = read_json_dict(skill_json)
+            if data is None:
                 return False
             data["name"] = new_name
-            skill_json.write_text(
-                json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
+            atomic_write_json(skill_json, data, trailing_newline=True)
             return True
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        except OSError:
             return False
 
     skill_md = payload_dir / "SKILL.md"
@@ -220,9 +217,15 @@ def migrate_generation_skill_names(data_dir: pathlib.Path | None = None) -> None
         ):
             shutil.copytree(old_payload, new_payload)
             _rewrite_text_files(new_payload, dict(spec["replacements"]))
-            (new_payload / ".ouroboroshub.json").write_text(
-                f'{{"schema_version":1,"source":"ouroboroshub","slug":"{new_name}","migrated_from":"{old_name}"}}\n',
-                encoding="utf-8",
+            atomic_write_json(
+                new_payload / ".ouroboroshub.json",
+                {
+                    "schema_version": 1,
+                    "source": "ouroboroshub",
+                    "slug": new_name,
+                    "migrated_from": old_name,
+                },
+                trailing_newline=True,
             )
             backup = old_payload.with_name(f"{old_payload.name}.replaced-5.5.0")
             if not backup.exists():

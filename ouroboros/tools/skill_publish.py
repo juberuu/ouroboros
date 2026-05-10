@@ -19,8 +19,9 @@ from ouroboros.config import (
     SKILL_SOURCE_SELF_AUTHORED,
     SKILL_SOURCE_USER_REPO,
     get_ouroboroshub_catalog_url,
+    get_light_model,
 )
-from ouroboros.llm import DEFAULT_LIGHT_MODEL, LLMClient
+from ouroboros.llm import LLMClient
 from ouroboros.skill_loader import (
     SkillPayloadUnreadable,
     _iter_payload_files,
@@ -312,7 +313,7 @@ def _generate_pr_body(
         return fallback
     try:
         llm = LLMClient()
-        model = os.environ.get("OUROBOROS_MODEL_LIGHT", "") or DEFAULT_LIGHT_MODEL
+        model = get_light_model()
         prompt = (
             "Write a concise GitHub pull request body in Markdown for publishing an OuroborosHub skill. "
             "Use sections: Summary, What this skill does, Author checklist. "

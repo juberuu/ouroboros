@@ -7,6 +7,7 @@ import logging
 import os
 from typing import Any, Dict, List
 
+from ouroboros.pricing import estimate_cost
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import utc_now_iso
 
@@ -16,27 +17,13 @@ DEFAULT_SEARCH_MODEL = "gpt-5.2"
 DEFAULT_SEARCH_CONTEXT_SIZE = "medium"
 DEFAULT_REASONING_EFFORT = "high"
 
-_OPENAI_PRICING = {
-    "gpt-5.2": (1.75, 14.0),
-    "gpt-5.5-mini": (0.75, 4.5),
-    "gpt-4.1": (2.0, 8.0),
-    "o3": (2.0, 8.0),
-    "o4-mini": (1.10, 4.40),
-}
-
-
 def _estimate_openai_cost(model: str, input_tokens: int, output_tokens: int) -> float:
-    """Estimate cost from token counts. Returns 0 if model pricing unknown."""
-    pricing = _OPENAI_PRICING.get(model)
-    if not pricing:
-        for key, val in _OPENAI_PRICING.items():
-            if key in model:
-                pricing = val
-                break
-    if not pricing:
-        pricing = (2.0, 10.0)
-    input_price, output_price = pricing
-    return round(input_tokens * input_price / 1_000_000 + output_tokens * output_price / 1_000_000, 6)
+    """Estimate cost through the shared pricing table."""
+    pricing_model = model if "/" in str(model or "") else f"openai/{model}"
+    cost = estimate_cost(pricing_model, input_tokens, output_tokens)
+    if cost:
+        return cost
+    return round(input_tokens * 2.0 / 1_000_000 + output_tokens * 10.0 / 1_000_000, 6)
 
 
 def _resolve_openai_client_settings() -> tuple[str, str | None, str, str]:

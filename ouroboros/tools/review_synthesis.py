@@ -290,11 +290,9 @@ def _call_synthesis_llm(prompt: str, *, ctx: Any = None) -> Optional[str]:
     """
     try:
         from ouroboros.llm import LLMClient
-        from ouroboros import config as _cfg
+        from ouroboros.config import get_light_model
 
-        model = os.environ.get("OUROBOROS_MODEL_LIGHT") or _cfg.SETTINGS_DEFAULTS.get(
-            "OUROBOROS_MODEL_LIGHT", "anthropic/claude-sonnet-4.6"
-        )
+        model = get_light_model()
 
         # LLMClient() has no model/queue constructor args — those go to .chat()
         client = LLMClient()
