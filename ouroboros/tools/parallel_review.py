@@ -18,29 +18,12 @@ from __future__ import annotations
 import concurrent.futures as _cf
 import hashlib
 import logging
-from dataclasses import dataclass, field
 from typing import Optional
 
 from ouroboros.utils import run_cmd
+from ouroboros.tools.scope_review import run_scope_review, _get_scope_model
 
 log = logging.getLogger(__name__)
-
-
-@dataclass
-class _FallbackScopeResult:
-    """Minimal fallback used when scope_review module cannot be imported."""
-    blocked: bool = True
-    block_message: str = ""
-    critical_findings: list = field(default_factory=list)
-    advisory_findings: list = field(default_factory=list)
-    # Epistemic fields — always "error" for fallback path
-    raw_text: str = ""
-    model_id: str = ""
-    status: str = "error"
-    prompt_chars: int = 0
-    tokens_in: int = 0
-    tokens_out: int = 0
-    cost_usd: float = 0.0
 
 
 # ── Scope-history helpers ────────────────────────────────────────────────────
@@ -155,7 +138,6 @@ def run_parallel_review(ctx, commit_message, *, goal="", scope="", review_rebutt
 
     def _run_scope():
         try:
-            from ouroboros.tools.scope_review import run_scope_review, _get_scope_model
             ctx._last_scope_model = _get_scope_model()  # forensic: actual resolved model
             return run_scope_review(
                 ctx, commit_message, goal=goal, scope=scope,
@@ -163,13 +145,10 @@ def run_parallel_review(ctx, commit_message, *, goal="", scope="", review_rebutt
                 review_history=_history_snapshot,
                 scope_review_history=_scope_history,
             )
-        except ImportError:
-            return _FallbackScopeResult(blocked=True, block_message=(
-                "⚠️ SCOPE_REVIEW_BLOCKED: scope_review module not available — commit blocked."
-            ))
         except Exception as e:
             log.warning("Scope review raised unexpected exception: %s", e)
-            return _FallbackScopeResult(blocked=True, block_message=(
+            from ouroboros.tools.scope_review import ScopeReviewResult
+            return ScopeReviewResult(blocked=True, block_message=(
                 f"⚠️ SCOPE_REVIEW_BLOCKED: Scope review failed — {e}\nFix the issue and retry."
             ))
 
@@ -196,7 +175,8 @@ def run_parallel_review(ctx, commit_message, *, goal="", scope="", review_rebutt
             scope_result = scope_fut.result()
         except Exception as e:
             log.warning("Scope future raised unexpected exception: %s", e)
-            scope_result = _FallbackScopeResult(blocked=True, block_message=(
+            from ouroboros.tools.scope_review import ScopeReviewResult
+            scope_result = ScopeReviewResult(blocked=True, block_message=(
                 f"⚠️ SCOPE_REVIEW_BLOCKED: Scope review future crashed — {e}\nFix the issue and retry."
             ))
 

@@ -580,34 +580,6 @@ class ToolRegistry:
         # loop can discover them through the standard registry surface.
         return result + extension_schemas
 
-    def list_non_core_tools(self) -> List[Dict[str, str]]:
-        """Return name+description of all non-core tools."""
-        result = []
-        for e in self._entries.values():
-            if e.name not in CORE_TOOL_NAMES:
-                desc = e.schema.get("description", "No description")
-                result.append({"name": e.name, "description": desc})
-        try:
-            from ouroboros.extension_loader import (
-                _tools as _ext_tools,
-                _lock as _ext_lock,
-                is_extension_live as _ext_is_live,
-            )
-            with _ext_lock:
-                for tool in _ext_tools.values():
-                    skill_name = str(tool.get("skill") or "")
-                    if not skill_name or not _ext_is_live(skill_name, pathlib.Path(self._ctx.drive_root)):
-                        continue
-                    result.append(
-                        {
-                            "name": str(tool.get("name") or ""),
-                            "description": str(tool.get("description") or "No description"),
-                        }
-                    )
-        except Exception:
-            pass
-        return result
-
     def get_schema_by_name(self, name: str) -> Optional[Dict[str, Any]]:
         """Return the full schema for a specific tool."""
         requested = str(name or "").strip()

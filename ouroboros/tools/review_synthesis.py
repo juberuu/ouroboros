@@ -80,7 +80,7 @@ def _redact(text: str) -> str:
         redacted, _ = redact_prompt_secrets(str(text or ""))
         return redacted
     except Exception:
-        return str(text or "")
+        return ""
 
 
 def _format_obligations(open_obligations: List[Any]) -> str:
