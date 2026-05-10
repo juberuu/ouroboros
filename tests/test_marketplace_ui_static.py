@@ -122,7 +122,6 @@ def test_marketplace_fix_prompt_uses_structured_task_constraint():
     # Repair-prompt body lives in the shared utils.js helper now (one source
     # of truth for skills.js + marketplace.js healing prompts).
     assert "renderSkillRepairPrompt" in source
-    assert ".replace(/`/g, \"'\")" in source
     assert "Start a repair task" in source
     assert "visible_text:" in source
     assert "data-page=\"chat\"" in source
@@ -131,6 +130,12 @@ def test_marketplace_fix_prompt_uses_structured_task_constraint():
     repo_root = Path(__file__).resolve().parents[1]
     utils_source = (repo_root / "web" / "modules" / "utils.js").read_text(encoding="utf-8")
     assert "structured skill_repair task constraint" in utils_source
+    # v5.15.0-rc.7: backtick / triple-backtick sanitisation lives in the SSOT
+    # helper, not at the call sites — every caller inherits the prompt-injection
+    # guard for free.
+    assert ".replace(/```/g, \"'''\")" in utils_source
+    assert ".replace(/`/g, \"'\")" in utils_source
+    assert "safeDiagnosticsJson" in utils_source
 
 
 def test_marketplace_install_does_not_silently_enable():

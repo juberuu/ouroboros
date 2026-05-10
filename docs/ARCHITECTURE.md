@@ -1,4 +1,4 @@
-# Ouroboros v5.15.0-rc.6 — Architecture & Reference
+# Ouroboros v5.15.0-rc.7 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -450,8 +450,8 @@ The Dashboard tab is the operational hub. It hosts four full-height sub-tabs:
 - **Behavior tab**: agent-behavior policy settings — Reasoning Effort, Review Enforcement (the two-button advisory/blocking toggle), **Runtime Mode** (Phase 2, three-button segmented control: `Light` / `Advanced` / `Pro`), and **External Skills Repo** (text field bound to `OUROBOROS_SKILLS_REPO_PATH`). Review models and Web Search Model live in the Models tab alongside model routing.
 - **Reasoning Effort**: Five segmented controls for task/chat, evolution, review, scope review, and consciousness.
   Backed by `OUROBOROS_EFFORT_TASK`, `OUROBOROS_EFFORT_EVOLUTION`, `OUROBOROS_EFFORT_REVIEW`,
-  `OUROBOROS_EFFORT_SCOPE_REVIEW`, `OUROBOROS_EFFORT_CONSCIOUSNESS`. Loading falls back to legacy
-  v5.15.0 retired the legacy `OUROBOROS_INITIAL_REASONING_EFFORT` alias — use the per-type keys directly.
+  `OUROBOROS_EFFORT_SCOPE_REVIEW`, `OUROBOROS_EFFORT_CONSCIOUSNESS`. v5.15.0 retired the legacy
+  `OUROBOROS_INITIAL_REASONING_EFFORT` alias — use the per-type keys directly.
 - **Review Models**: Comma-separated remote model IDs for pre-commit review.
   Backed by `OUROBOROS_REVIEW_MODELS`.
 - **Scope Review Model**: Single model for the blocking scope reviewer.

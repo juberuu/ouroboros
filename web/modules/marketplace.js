@@ -251,10 +251,9 @@ function buildHealPrompt(installed, summary) {
             reason: boundedText(finding.reason || finding.message || JSON.stringify(finding), 1200),
         })),
     };
-    const diagnosticsJson = JSON.stringify(diagnostics, null, 2).replace(/`/g, "'");
     return renderSkillRepairPrompt(
         'Repair the ClawHub skill selected in the Marketplace UI.',
-        diagnosticsJson,
+        JSON.stringify(diagnostics, null, 2),
     );
 }
 
