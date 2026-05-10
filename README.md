@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 5.13.0-rc.1](https://img.shields.io/badge/version-5.13.0--rc.1-green.svg)](VERSION)
+[![Version 5.13.0](https://img.shields.io/badge/version-5.13.0-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -416,7 +416,7 @@ not paraphrase it.
 
 | Version | Date | Description |
 |---------|------|-------------|
-| 5.13.0-rc.1 | 2026-05-10 | **feat(ui+skills): polish skill surfaces and publishing diagnostics.** Skills marketplace search controls now live in fixed page chrome instead of the scroll fade, toasts use one top-right notification stack that never covers the Chat composer, shell search tools report `exit_code=1 (no matches)` without a false error banner, skill publishing detects real secret values by token format instead of variable names, `PluginAPI.skill_job_dir(job_id)` and the authoring guide document per-job asset isolation, and Settings refreshes extension-provided sections from lifecycle events without requiring a restart. |
+| 5.13.0 | 2026-05-10 | **feat(ui+skills): polish skill surfaces and publishing diagnostics.** Skills marketplace search controls now live in fixed page chrome instead of the scroll fade, toasts use one top-right notification stack that never covers the Chat composer, shell search tools report `exit_code=1 (no matches)` without a false error banner, skill publishing detects real secret values by token format instead of variable names, `PluginAPI.skill_job_dir(job_id)` and the authoring guide document per-job asset isolation, and Settings refreshes extension-provided sections from lifecycle events without requiring a restart. |
 | 5.12.0 | 2026-05-10 | **feat(skills): bound skill review lifecycle hangs.** Triad reviewer actor calls now have a real configurable timeout (`OUROBOROS_REVIEW_MODEL_TIMEOUT_SEC`, default 600s) that produces an ERROR actor instead of hanging the whole review, cancellation no longer spins inside the lifecycle thread bridge, late interrupted review jobs cannot overwrite or report a stale PASS, synchronous extension route dispatch leaves the event loop, and the architecture map documents heartbeat semantics. |
 | 5.11.0 | 2026-05-10 | **feat(skills+ui): publish skills to OuroborosHub and surface live skill capabilities.** Adds `submit_skill_to_hub` PR publishing from reviewed local skills, exposes the action in the Skills UI, lets light-mode authoring edit skill payloads without a special repair task, auto-loads enabled extension tool schemas into round-one context, and unifies page chrome, scroll fades, and widget masonry layout. |
 | 5.10.4 | 2026-05-10 | **fix(release): land reviewed v5.10 skill UX hardening.** Carries the completed triad/scope follow-ups for Settings secret refresh/deduplication, widget gating, repair busy-state/dedupe, shared toasts/icons, Files context-menu positioning without inline styles, identity bootstrap wording, and light-mode skill-repair edit affordances. |
