@@ -43,7 +43,6 @@ import pathlib
 import re
 import tempfile
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from ouroboros.contracts.skill_manifest import (
@@ -52,7 +51,7 @@ from ouroboros.contracts.skill_manifest import (
     parse_skill_manifest_text,
 )
 from ouroboros.contracts.plugin_api import FORBIDDEN_SKILL_SETTINGS
-from ouroboros.utils import atomic_write_json, read_json_dict
+from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -613,7 +612,7 @@ def save_enabled(drive_root: pathlib.Path, name: str, enabled: bool) -> None:
         skill_state_dir(drive_root, name) / "enabled.json",
         {
             "enabled": bool(enabled),
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": utc_now_iso(),
         },
     )
 
@@ -809,7 +808,7 @@ def save_skill_grants(
             "granted_permissions": sorted(existing_permissions),
             "requested_permissions": sorted(allowed_permissions),
             "content_hash": str(content_hash or ""),
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": utc_now_iso(),
         },
     )
 

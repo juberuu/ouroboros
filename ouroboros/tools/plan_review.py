@@ -882,19 +882,7 @@ def _load_plan_checklist() -> str:
 
 
 def _load_bible(repo_dir: Path) -> str:
-    """Load BIBLE.md.
-
-    Returns file contents on success. On failure, returns an explicit omission
-    note so the reviewer knows that the Constitution is missing from context
-    rather than silently receiving an empty string.
-    """
-    p = repo_dir / "BIBLE.md"
-    try:
-        if p.is_file():
-            return p.read_text(encoding="utf-8")
-        return f"[⚠️ OMISSION: BIBLE.md not found at {p}]"
-    except Exception as e:
-        return f"[⚠️ OMISSION: BIBLE.md could not be loaded ({p}): {e}]"
+    return load_governance_doc(repo_dir, "BIBLE.md", on_missing="explicit")
 
 
 def _load_doc(repo_dir: Path, rel_path: str) -> str:

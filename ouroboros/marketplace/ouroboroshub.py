@@ -11,7 +11,6 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from ouroboros.config import get_ouroboroshub_catalog_url, get_ouroboroshub_skills_dir
@@ -19,6 +18,7 @@ from ouroboros.marketplace.fetcher import FetchError
 from ouroboros.marketplace.install_specs import install_specs_hash
 from ouroboros.skill_dependencies import normalize_declared_dependency_specs
 from ouroboros.skill_loader import _sanitize_skill_name
+from ouroboros.utils import utc_now_iso
 
 
 _MAX_CATALOG_BYTES = 2 * 1024 * 1024
@@ -259,7 +259,7 @@ def install(slug: str, *, overwrite: bool = False) -> HubInstallResult:
             "version": summary.version,
             "catalog_url": _catalog_url(),
             "raw_base_url": raw_base,
-            "installed_at": datetime.now(timezone.utc).isoformat(),
+            "installed_at": utc_now_iso(),
             "files": summary.files,
         }
         raw_install = summary.install_specs or summary.raw.get("dependencies") or []

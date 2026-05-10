@@ -61,41 +61,12 @@ def _reconcile_deps_after_review(drive_root: pathlib.Path, skill_name: str) -> t
     return _reconcile_deps_after_pass_review(drive_root, skill_name)
 
 
-def _request_drive_root(request: Request) -> pathlib.Path:
-    from ouroboros.config import DATA_DIR
-
-    if hasattr(request.app, "state") and hasattr(request.app.state, "drive_root"):
-        return pathlib.Path(request.app.state.drive_root)  # type: ignore[attr-defined]
-    return pathlib.Path(DATA_DIR)
-
-
-def _request_repo_dir(request: Request) -> pathlib.Path:
-    from ouroboros.config import REPO_DIR
-
-    if hasattr(request.app, "state") and hasattr(request.app.state, "repo_dir"):
-        return pathlib.Path(request.app.state.repo_dir)  # type: ignore[attr-defined]
-    return pathlib.Path(REPO_DIR)
-
-
-def _coerce_bool(value: Any, default: bool = False) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in {"1", "true", "yes", "on"}:
-            return True
-        if lowered in {"0", "false", "no", "off"}:
-            return False
-    if isinstance(value, int):
-        return bool(value)
-    return default
-
-
-def _coerce_int(value: Any, default: int) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
+from ouroboros.http_api import (
+    coerce_bool as _coerce_bool,
+    coerce_int as _coerce_int,
+    request_drive_root as _request_drive_root,
+    request_repo_dir as _request_repo_dir,
+)
 
 
 def _client_error_response(exc: Exception, *, default_status: int = 502) -> JSONResponse:

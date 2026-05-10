@@ -36,11 +36,10 @@ from __future__ import annotations
 
 import logging
 import pathlib
-from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from ouroboros.skill_loader import skill_state_dir
-from ouroboros.utils import atomic_write_json, read_json_dict
+from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -65,7 +64,7 @@ def write_provenance(
     payload = dict(record or {})
     payload.setdefault("schema_version", _SCHEMA_VERSION)
     payload.setdefault("source", "clawhub")
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = utc_now_iso()
     payload.setdefault("installed_at", now_iso)
     payload["updated_at"] = now_iso
     atomic_write_json(target, payload, trailing_newline=True)

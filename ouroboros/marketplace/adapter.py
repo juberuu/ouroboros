@@ -34,7 +34,6 @@ import pathlib
 import shutil
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from ouroboros.contracts.plugin_api import FORBIDDEN_SKILL_SETTINGS
@@ -45,6 +44,7 @@ from ouroboros.contracts.skill_manifest import (
     parse_skill_manifest_text,
 )
 from ouroboros.marketplace.install_specs import install_specs_hash, normalize_install_specs
+from ouroboros.utils import utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -590,7 +590,7 @@ def adapt_openclaw_skill(
         "sha256": (sha256 or "").strip(),
         "is_plugin": bool(is_plugin),
         "adapter_version": ADAPTER_VERSION,
-        "installed_at": datetime.now(timezone.utc).isoformat(),
+        "installed_at": utc_now_iso(),
     }
 
     if is_plugin:

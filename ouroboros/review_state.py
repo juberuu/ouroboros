@@ -1929,5 +1929,5 @@ def _build_invalidation_reason(
 
 
 def _utc_now() -> str:
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat()
+    from ouroboros.utils import utc_now_iso
+    return utc_now_iso()

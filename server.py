@@ -22,7 +22,7 @@ import sys
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from ouroboros.utils import utc_now_iso
 from typing import Any, Dict, List, Optional
 
 from starlette.applications import Starlette
@@ -512,7 +512,7 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
             else None
         )
         log_text = text or image_caption or ("(image attached)" if image_base64 else "")
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = utc_now_iso()
 
         st = ctx.load_state()
         if st.get("owner_id") is None:
@@ -1056,7 +1056,7 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                     else:
                         bridge.ui_send(payload, broadcast=False)
                 except Exception:
-                    ts = datetime.now(timezone.utc).isoformat()
+                    ts = utc_now_iso()
                     await websocket.send_text(json.dumps({
                         "type": "chat", "role": "assistant",
                         "content": "⚠️ System is still initializing. Please wait a moment and try again.",
@@ -1506,7 +1506,7 @@ async def api_command(request: Request) -> JSONResponse:
                 _RECENT_VISIBLE_COMMANDS[visible_task_id] = time.monotonic()
             if visible_text:
                 task_id = visible_task_id or "skill_repair"
-                ts = datetime.now(timezone.utc).isoformat()
+                ts = utc_now_iso()
                 payload = {
                     "type": "chat",
                     "role": "system",
@@ -1683,7 +1683,7 @@ async def api_evolution_data(request: Request) -> JSONResponse:
     data_points = await _evo_task
     _evo_cache["ts"] = _t.time()
     _evo_cache["points"] = data_points
-    _evo_cache["generated_at"] = datetime.now(timezone.utc).isoformat()
+    _evo_cache["generated_at"] = utc_now_iso()
     return JSONResponse({
         "points": data_points,
         "generated_at": _evo_cache["generated_at"],

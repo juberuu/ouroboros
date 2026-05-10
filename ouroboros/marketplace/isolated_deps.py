@@ -8,12 +8,11 @@ import pathlib
 import shutil
 import subprocess
 import sys
-from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from ouroboros.marketplace.install_specs import install_specs_hash
 from ouroboros.skill_loader import skill_state_dir
-from ouroboros.utils import read_json_dict
+from ouroboros.utils import read_json_dict, utc_now_iso
 
 
 ENV_DIRNAME = ".ouroboros_env"
@@ -201,7 +200,7 @@ def install_isolated_dependencies(
         failure = {"error": f"{type(exc).__name__}: {exc}"}
     fingerprint = {
         "schema_version": 1,
-        "installed_at": datetime.now(timezone.utc).isoformat(),
+        "installed_at": utc_now_iso(),
         "skill": skill_name,
         "env_dir": ENV_DIRNAME,
         "specs_hash": install_specs_hash(specs),

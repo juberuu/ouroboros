@@ -27,6 +27,11 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from ouroboros.extension_loader import list_routes, snapshot
+from ouroboros.http_api import (
+    coerce_bool,
+    request_drive_root as _request_drive_root,
+    request_repo_dir as _request_repo_dir,
+)
 from ouroboros.skill_lifecycle_queue import (
     LifecycleJobOptions,
     queue_snapshot,
@@ -42,38 +47,17 @@ from ouroboros.skill_loader import (
 log = logging.getLogger(__name__)
 
 
-_TRUE_LITERALS = {"true", "yes", "on", "1"}
-_FALSE_LITERALS = {"false", "no", "off", "0"}
-
-
-def _request_drive_root(request: Request) -> pathlib.Path:
-    from ouroboros.config import DATA_DIR
-
-    if hasattr(request.app, "state") and hasattr(request.app.state, "drive_root"):
-        return pathlib.Path(request.app.state.drive_root)  # type: ignore[attr-defined]
-    return pathlib.Path(DATA_DIR)
-
-
-def _request_repo_dir(request: Request) -> pathlib.Path:
-    from ouroboros.config import REPO_DIR
-
-    if hasattr(request.app, "state") and hasattr(request.app.state, "repo_dir"):
-        return pathlib.Path(request.app.state.repo_dir)  # type: ignore[attr-defined]
-    return pathlib.Path(REPO_DIR)
-
-
 def _coerce_bool_arg(value: Any) -> bool | None:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, int) and value in (0, 1):
-        return bool(value)
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in _TRUE_LITERALS:
-            return True
-        if lowered in _FALSE_LITERALS:
-            return False
-    return None
+    """Tri-state coercion: returns ``None`` on unparseable input.
+
+    Distinct from :func:`http_api.coerce_bool` which always falls back to a
+    default; here ``None`` lets the caller decide whether absence means
+    "no override" vs "explicit false". Used by ``api_skill_toggle`` /
+    ``api_extension_dispatch``.
+    """
+    sentinel = object()
+    coerced = coerce_bool(value, default=sentinel)  # type: ignore[arg-type]
+    return None if coerced is sentinel else coerced
 
 
 def _broadcast_extension_lifecycle(request: Request, skill: str, action: Any, reason: Any = "") -> None:

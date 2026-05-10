@@ -18,6 +18,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse
 from starlette.routing import Route
 
+from ouroboros.http_api import json_error
 from ouroboros.server_auth import is_loopback_host
 from ouroboros.utils import safe_relpath
 
@@ -390,23 +391,23 @@ async def api_files_list(request: Request) -> JSONResponse:
             "default_display_path": str(root_dir),
         })
     except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
+        return json_error(str(exc), status=400)
     except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        return json_error(str(exc), status=500)
 
 
 async def api_files_read(request: Request) -> JSONResponse:
     rel_path = request.query_params.get("path", "")
     try:
         if not rel_path:
-            return JSONResponse({"error": "Missing path."}, status_code=400)
+            return json_error("Missing path.", status=400)
         root_dir, target, _ = _resolve_target(request, rel_path)
         if not target.exists():
             return JSONResponse({"error": f"Path not found: {rel_path}"}, status_code=404)
         if not target.is_file():
             return JSONResponse({"error": f"Not a file: {rel_path}"}, status_code=400)
         if _is_owner_only_file(target):
-            return JSONResponse({"error": "Owner-only state is not readable from Files."}, status_code=403)
+            return json_error("Owner-only state is not readable from Files.", status=403)
 
         size = int(target.stat().st_size)
         rel = _relative_path(root_dir, target)
@@ -476,61 +477,61 @@ async def api_files_read(request: Request) -> JSONResponse:
             "truncated": truncated,
         })
     except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
+        return json_error(str(exc), status=400)
     except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        return json_error(str(exc), status=500)
 
 
 async def api_files_download(request: Request) -> FileResponse | JSONResponse:
     rel_path = request.query_params.get("path", "")
     try:
         if not rel_path:
-            return JSONResponse({"error": "Missing path."}, status_code=400)
+            return json_error("Missing path.", status=400)
         _, target, _ = _resolve_target(request, rel_path)
         if not target.exists():
             return JSONResponse({"error": f"Path not found: {rel_path}"}, status_code=404)
         if not target.is_file():
             return JSONResponse({"error": f"Not a file: {rel_path}"}, status_code=400)
         if _is_owner_only_file(target):
-            return JSONResponse({"error": "Owner-only state cannot be downloaded."}, status_code=403)
+            return json_error("Owner-only state cannot be downloaded.", status=403)
         return FileResponse(str(target), filename=target.name)
     except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
+        return json_error(str(exc), status=400)
     except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        return json_error(str(exc), status=500)
 
 
 async def api_files_content(request: Request) -> FileResponse | JSONResponse:
     rel_path = request.query_params.get("path", "")
     try:
         if not rel_path:
-            return JSONResponse({"error": "Missing path."}, status_code=400)
+            return json_error("Missing path.", status=400)
         _, target, _ = _resolve_target(request, rel_path)
         if not target.exists():
             return JSONResponse({"error": f"Path not found: {rel_path}"}, status_code=404)
         if not target.is_file():
             return JSONResponse({"error": f"Not a file: {rel_path}"}, status_code=400)
         if _is_owner_only_file(target):
-            return JSONResponse({"error": "Owner-only state cannot be served."}, status_code=403)
+            return json_error("Owner-only state cannot be served.", status=403)
         return FileResponse(str(target), media_type=_guess_media_type(target))
     except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
+        return json_error(str(exc), status=400)
     except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        return json_error(str(exc), status=500)
 
 
 async def api_files_write(request: Request) -> JSONResponse:
     try:
         payload = await request.json()
     except Exception:
-        return JSONResponse({"error": "Invalid JSON payload."}, status_code=400)
+        return json_error("Invalid JSON payload.", status=400)
 
     try:
         rel_path = str(payload.get("path") or "").strip()
         if not rel_path:
-            return JSONResponse({"error": "Missing path."}, status_code=400)
+            return json_error("Missing path.", status=400)
         if "content" not in payload:
-            return JSONResponse({"error": "Missing content."}, status_code=400)
+            return json_error("Missing content.", status=400)
 
         content = str(payload.get("content"))
         create = bool(payload.get("create"))
@@ -545,7 +546,7 @@ async def api_files_write(request: Request) -> JSONResponse:
             if not target.parent.exists():
                 return JSONResponse({"error": f"Parent directory not found: {target.parent}"}, status_code=404)
             if not target.parent.is_dir():
-                return JSONResponse({"error": "Parent path is not a directory."}, status_code=400)
+                return json_error("Parent path is not a directory.", status=400)
             tmp_target = target.with_name(f".{target.name}.editing")
             try:
                 tmp_target.write_text(content, encoding="utf-8")
@@ -566,7 +567,7 @@ async def api_files_write(request: Request) -> JSONResponse:
         if not target.is_file():
             return JSONResponse({"error": f"Not a file: {rel_path}"}, status_code=400)
         if target.suffix.lower() in _IMAGE_PREVIEW_EXTENSIONS or not _guess_text_file(target):
-            return JSONResponse({"error": "Only text files can be edited in the browser."}, status_code=400)
+            return json_error("Only text files can be edited in the browser.", status=400)
 
         if target.is_symlink():
             target.write_text(content, encoding="utf-8")
@@ -589,16 +590,16 @@ async def api_files_write(request: Request) -> JSONResponse:
             "size": int(target.stat().st_size),
         })
     except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
+        return json_error(str(exc), status=400)
     except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        return json_error(str(exc), status=500)
 
 
 async def api_files_mkdir(request: Request) -> JSONResponse:
     try:
         payload = await request.json()
     except Exception:
-        return JSONResponse({"error": "Invalid JSON payload."}, status_code=400)
+        return json_error("Invalid JSON payload.", status=400)
 
     try:
         rel_dir = str(payload.get("path") or ".").strip() or "."
@@ -627,25 +628,25 @@ async def api_files_mkdir(request: Request) -> JSONResponse:
             "type": "dir",
         })
     except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
+        return json_error(str(exc), status=400)
     except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        return json_error(str(exc), status=500)
 
 
 async def api_files_delete(request: Request) -> JSONResponse:
     try:
         payload = await request.json()
     except Exception:
-        return JSONResponse({"error": "Invalid JSON payload."}, status_code=400)
+        return json_error("Invalid JSON payload.", status=400)
 
     try:
         rel_path = str(payload.get("path") or "").strip()
         if not rel_path:
-            return JSONResponse({"error": "Missing path."}, status_code=400)
+            return json_error("Missing path.", status=400)
 
         root_dir, target, _ = _resolve_target(request, rel_path)
         if target == root_dir:
-            return JSONResponse({"error": "Refusing to delete the configured root directory."}, status_code=400)
+            return json_error("Refusing to delete the configured root directory.", status=400)
         if _contains_owner_only_file(target):
             return _OWNER_ONLY_FILES_API_ERROR
         if _contains_skill_control_plane_file(target):
@@ -668,30 +669,30 @@ async def api_files_delete(request: Request) -> JSONResponse:
 
         return JSONResponse({"ok": True, "path": rel, "type": deleted_type})
     except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
+        return json_error(str(exc), status=400)
     except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        return json_error(str(exc), status=500)
 
 
 async def api_files_transfer(request: Request) -> JSONResponse:
     try:
         payload = await request.json()
     except Exception:
-        return JSONResponse({"error": "Invalid JSON payload."}, status_code=400)
+        return json_error("Invalid JSON payload.", status=400)
 
     try:
         source_rel = str(payload.get("source_path") or "").strip()
         dest_rel = str(payload.get("destination_dir") or ".").strip() or "."
         mode = str(payload.get("mode") or "copy").strip().lower()
         if not source_rel:
-            return JSONResponse({"error": "Missing source_path."}, status_code=400)
+            return json_error("Missing source_path.", status=400)
         if mode not in {"copy", "move"}:
-            return JSONResponse({"error": "Invalid mode. Expected copy or move."}, status_code=400)
+            return json_error("Invalid mode. Expected copy or move.", status=400)
 
         root_dir, source, _ = _resolve_target(request, source_rel)
         _, dest_dir, _ = _resolve_target(request, dest_rel)
         if source == root_dir:
-            return JSONResponse({"error": "Refusing to move or copy the configured root directory."}, status_code=400)
+            return json_error("Refusing to move or copy the configured root directory.", status=400)
         # v5.1.2 iter-2 SR2: refuse if EITHER the source OR the destination
         # resolves to the owner-only settings.json. Source = "move"
         # (deletes settings.json from its expected location), destination
@@ -743,7 +744,7 @@ async def api_files_transfer(request: Request) -> JSONResponse:
         try:
             destination.relative_to(root_dir)
         except ValueError:
-            return JSONResponse({"error": "Destination escapes file browser root."}, status_code=400)
+            return json_error("Destination escapes file browser root.", status=400)
 
         if source.is_dir() and not source.is_symlink():
             try:
@@ -751,7 +752,7 @@ async def api_files_transfer(request: Request) -> JSONResponse:
             except ValueError:
                 pass
             else:
-                return JSONResponse({"error": "Cannot move or copy a directory into itself."}, status_code=400)
+                return json_error("Cannot move or copy a directory into itself.", status=400)
 
         if mode == "copy":
             _copy_path(source, destination)
@@ -768,9 +769,9 @@ async def api_files_transfer(request: Request) -> JSONResponse:
             "type": "dir" if destination.is_dir() else "file",
         })
     except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
+        return json_error(str(exc), status=400)
     except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        return json_error(str(exc), status=500)
 
 
 async def api_files_upload(request: Request) -> JSONResponse:
@@ -779,7 +780,7 @@ async def api_files_upload(request: Request) -> JSONResponse:
         rel_dir = str(form.get("path") or ".")
         upload = form.get("file")
         if not isinstance(upload, UploadFile):
-            return JSONResponse({"error": "Missing file upload."}, status_code=400)
+            return json_error("Missing file upload.", status=400)
 
         root_dir, target_dir, _ = _resolve_target(request, rel_dir)
         if not target_dir.exists():
@@ -829,11 +830,11 @@ async def api_files_upload(request: Request) -> JSONResponse:
             "size": bytes_written,
         })
     except FileBrowserPayloadTooLarge as exc:
-        return JSONResponse({"error": str(exc)}, status_code=413)
+        return json_error(str(exc), status=413)
     except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
+        return json_error(str(exc), status=400)
     except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        return json_error(str(exc), status=500)
 
 
 def file_browser_routes() -> list[Route]:

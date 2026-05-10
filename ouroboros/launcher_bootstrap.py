@@ -570,13 +570,13 @@ def _record_skill_upgrade_migration(
         # record. Operators can dismiss old upgrades while still seeing
         # the next one when a future bump fires.
         key = f"v{new_version}_{skill_name}_upgrade"
-        from datetime import datetime, timezone
+        from ouroboros.utils import utc_now_iso
         existing[key] = {
             "kind": "native_skill_upgrade",
             "skill": skill_name,
             "old_version": old_version,
             "new_version": new_version,
-            "applied_at": datetime.now(timezone.utc).isoformat(),
+            "applied_at": utc_now_iso(),
             "dismissed": False,
             "summary": (
                 f"Native skill ``{skill_name}`` was upgraded from "

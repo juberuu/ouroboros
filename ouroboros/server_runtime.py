@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
 from typing import Awaitable, Callable
 
 from ouroboros.provider_models import (
@@ -13,6 +12,7 @@ from ouroboros.provider_models import (
     migrate_model_value,
 )
 from ouroboros.config import SETTINGS_DEFAULTS, _DIRECT_PROVIDER_REVIEW_RUNS
+from ouroboros.utils import utc_now_iso
 
 
 _DIRECT_PROVIDER_AUTO_DEFAULTS = {
@@ -302,5 +302,5 @@ async def ws_heartbeat_loop(
             continue
         await broadcast_fn({
             "type": "heartbeat",
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": utc_now_iso(),
         })

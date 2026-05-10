@@ -24,7 +24,6 @@ import json
 import logging
 import pathlib
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from ouroboros.skill_loader import (
@@ -34,6 +33,7 @@ from ouroboros.skill_loader import (
     save_review_state,
 )
 from ouroboros.tools.review_helpers import load_checklist_section
+from ouroboros.utils import utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -312,27 +312,20 @@ def _load_governance_artifact(
     repo_root: pathlib.Path,
     relpath: str,
 ) -> str:
-    """Load a core-governance doc for the skill-review prompt.
+    """Thin wrapper around :func:`tools.review_helpers.load_governance_doc`.
 
     DEVELOPMENT.md 'When adding a new reasoning flow' requires every new
-    flow that reasons about code structure or engineering standards to
-    load ``docs/ARCHITECTURE.md`` (and ``docs/DEVELOPMENT.md`` for
-    engineering-standard checks) as first-class context, with an
-    explicit OMISSION NOTE when the file is unavailable so the
-    reviewer cannot silently operate on an incomplete surface.
+    flow that reasons about code structure or engineering standards to load
+    ``docs/ARCHITECTURE.md`` (and ``docs/DEVELOPMENT.md`` for
+    engineering-standard checks) as first-class context, with an explicit
+    OMISSION marker when the file is unavailable so the reviewer cannot
+    silently operate on an incomplete surface. The shared helper emits the
+    canonical ``[⚠️ OMISSION: ...]`` marker used everywhere else in the
+    review pipeline.
     """
-    candidate = repo_root / relpath
-    try:
-        text = candidate.read_text(encoding="utf-8")
-    except OSError:
-        log.warning("Skill review: failed to load governance artifact %s", candidate, exc_info=True)
-        return (
-            f"⚠️ OMISSION NOTE: {relpath} could not be loaded from "
-            f"{repo_root}. Skill review operated without this governance "
-            "artifact — verdicts about architectural/engineering alignment "
-            "may be incomplete."
-        )
-    return text
+    from ouroboros.tools.review_helpers import load_governance_doc
+
+    return load_governance_doc(repo_root, relpath, on_missing="explicit")
 
 
 # Resolve the repo root from this module's location so the governance
@@ -824,7 +817,7 @@ def review_skill(
                 content_hash=content_hash,
                 findings=findings,
                 reviewer_models=responded_models,
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=utc_now_iso(),
                 prompt_chars=outcome.prompt_chars,
                 cost_usd=outcome.cost_usd,
                 raw_result=outcome.raw_result,
