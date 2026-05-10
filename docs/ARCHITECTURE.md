@@ -1,4 +1,4 @@
-# Ouroboros v5.14.0-rc.3 — Architecture & Reference
+# Ouroboros v5.14.0-rc.4 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -544,10 +544,12 @@ The About panel content:
 - Links: @abstractDL (Telegram), GitHub repo
 - "Joi Lab" footer
 
-Static checks: `tests/test_chat_logs_ui.py::test_about_uses_css_classes_not_inline`
-asserts the About markup lives in `web/modules/settings_ui.js` (under
-`data-settings-panel="about"`) and continues to use the `.about-*` CSS
-classes rather than inline `style=""` attributes.
+Static checks in `tests/test_chat_logs_ui.py::test_static_ui_contracts`
+(backed by `tests/fixtures/chat_logs_ui_static_checks.json`, fixture id
+`test_about_uses_css_classes_not_inline`) assert the About markup lives in
+`web/modules/settings_ui.js` (under `data-settings-panel="about"`) and
+continues to use the `.about-*` CSS classes rather than inline `style=""`
+attributes.
 
 ---
 

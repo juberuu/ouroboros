@@ -1,114 +1,33 @@
 """Regression checks for chat live-card and grouped logs UI."""
 
-import os
+from __future__ import annotations
+
+import json
 import pathlib
 import re
 
-REPO = pathlib.Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import pytest
+
+REPO = pathlib.Path(__file__).resolve().parents[1]
+_CHECKS = json.loads((REPO / "tests" / "fixtures" / "chat_logs_ui_static_checks.json").read_text(encoding="utf-8"))
 
 
 def _read(rel: str) -> str:
     return (REPO / rel).read_text(encoding="utf-8")
 
 
-def test_chat_progress_updates_route_into_live_card():
-    source = _read("web/modules/chat.js")
-
-    assert "const liveCardRecords = new Map();" in source
-    assert "const taskUiStates = new Map();" in source
-    assert "summarizeChatLiveEvent" in source
-    assert "Show details" in source
-    assert "if (msg.is_progress) {" in source
-    assert "updateLiveCardFromProgressMessage(msg);" in source
-    assert "appendTaskSummaryToLiveCard(msg);" in source
-    assert "if (explicitTaskId) finishLiveCard(explicitTaskId);" in source
-    assert "ws.on('log', (msg) => {" in source
-    assert "updateLiveCardFromLogEvent(msg.data);" in source
-    assert "if (msg.is_progress) {" in source
-    assert "hideTypingIndicatorOnly();" in source
-    assert "function hasActiveLiveCard()" in source
-    assert "state.activePage !== 'chat'" in source
-    assert "function isNearBottom(threshold = 96)" in source
-    assert "if (node.parentNode === messagesDiv) {" in source
-    assert "if (shouldStick) messagesDiv.scrollTop = messagesDiv.scrollHeight;" in source
-    assert "function markTaskToolCall(taskId, count = 1, minimumOnly = false)" in source
-    assert "taskState.forceCard || taskState.toolCalls > 1 || shouldAlwaysShowTaskCard(taskState.taskId)" in source
-    assert "function forceTaskCard(taskId)" in source
-    assert "function markAssistantReply(taskId = '')" in source
-    assert "function isTerminalTaskPhase(phase = '') {" in source
-    assert "taskState.completed = true;" in source
-    assert "scheduleTaskUiCleanup(taskState, 30000);" in source
-    assert "if (taskState.completed && !isTerminalTaskPhase(summary.phase || '')) {" in source
-    assert "if (record.finished && !isTerminalTaskPhase(nextPhase)) {" in source
-    assert "const taskId = msg.task_id || '';" in source
-    assert "const taskState = getTaskUiState(taskId, true);" in source
-    assert "const wasFinished = record.finished;" in source
-    assert "const justFinished = record.finished && !wasFinished;" in source
-    assert "if (justFinished) {" in source
-    assert "if (!wasFinished) {" in source
-    assert "function setLiveCardExpanded(record, expanded) {" in source
-    assert "record.root.dataset.expanded = expanded ? '1' : '0';" in source
-    assert "function syncLiveCardLayout(record) {" in source
-    assert "record.root.style.minHeight = `${Math.max(summaryHeight + timelineHeight, 0)}px`;" in source
-
-
-def test_live_card_recovery_keeps_step_failures_non_terminal():
-    chat_source = _read("web/modules/chat.js")
-    log_source = _read("web/modules/log_events.js")
-
-    assert "return phase === 'done' || phase === 'lifecycle_error';" in chat_source
-    assert "if (phase === 'warn') return 'Notice';" in chat_source
-    assert "record.finished = isTerminalTaskPhase(nextPhase);" in chat_source
-    assert "const activePhase = ['error', 'timeout'].includes(phase) ? phase : 'done';" in chat_source
-    assert "function extractCommandText(args) {" in log_source
-    assert "evt.status === 'non_zero_exit'" in log_source
-    assert "phase: 'warn'" in log_source
-    assert "A command returned" in log_source
-    assert "commandText.full || errorResult.full" in log_source
-    # v4.34.0: the structured-reflection checkpoint ceremony was retired
-    # (see ouroboros/loop.py::_maybe_inject_self_check). Both
-    # `task_checkpoint_reflection` and `task_checkpoint_anomaly` event types
-    # and their UI handlers were removed. The remaining `task_checkpoint`
-    # event stays as the single observability signal.
-    assert "task_checkpoint_reflection" not in log_source
-    assert "task_checkpoint_anomaly" not in log_source
-    assert "Checkpoint anomaly" not in log_source
-    assert "task_checkpoint" in log_source
-    assert "periodic self-check" in log_source
-
-
-def test_logs_use_shared_log_event_helpers_and_group_task_cards():
-    logs_source = _read("web/modules/logs.js")
-    shared_source = _read("web/modules/log_events.js")
-
-    assert "from './log_events.js'" in logs_source
-    assert "isGroupedTaskEvent(evt)" in logs_source
-    assert "createTaskGroupCard" in logs_source
-    assert "renderTaskTimeline" in logs_source
-    assert "export function summarizeLogEvent" in shared_source
-    assert "export function summarizeChatLiveEvent" in shared_source
-    assert "export function isGroupedTaskEvent" in shared_source
-    assert "export function getLogTaskGroupId" in shared_source
-
-
-def test_styles_cover_chat_header_controls_and_grouped_cards():
-    css = _read("web/style.css")
-
-    assert "--accent-light:" in css
-    assert ".chat-header-actions {" in css
-    assert ".chat-header-btn {" in css
-    assert ".chat-live-card {" in css
-    assert '.chat-live-card[data-finished="1"] {' in css
-    assert ".chat-live-timeline {" in css
-    assert ".chat-live-toggle {" in css
-    assert ".chat-live-summary-button {" in css
-    assert '.chat-live-card[data-expanded="1"] .chat-live-chevron {' in css
-    assert '.chat-live-card[data-expanded="1"] .chat-live-timeline {' in css
-    assert ".log-task-card {" in css
-    assert ".log-task-timeline {" in css
-    assert re.search(r"\.chat-live-title\s*\{[^}]*font-weight:\s*400;", css, re.S)
-    assert re.search(r"\.chat-live-line-title\s*\{[^}]*font-weight:\s*400;", css, re.S)
-    assert re.search(r"\.chat-live-line-body\s*\{[^}]*font-size:\s*\d+px;", css, re.S)
+@pytest.mark.parametrize("check", _CHECKS, ids=lambda item: f"{item['id']}::{item['path']}::{item['kind']}")
+def test_static_ui_contracts(check):
+    source = _read(check["path"])
+    value = check["value"]
+    if check["kind"] == "contains":
+        assert value in source
+    elif check["kind"] == "not_contains":
+        assert value not in source
+    elif check["kind"] == "regex":
+        assert re.search(value, source, re.S)
+    else:  # pragma: no cover
+        raise AssertionError(f"unknown check kind: {check['kind']}")
 
 
 def test_chat_floating_overlays_have_readable_glass_backing():
@@ -135,7 +54,6 @@ def test_chat_floating_overlays_have_readable_glass_backing():
     assert "backdrop-filter: blur(8px)" in attach
     assert "rgba(26, 21, 32, 0.78)" in attach
 
-
 def test_chat_input_field_has_no_ambient_halo():
     """v5: the input field's ambient drop-shadow halo was removed.
     The bottom scrim + the glass background already separate the
@@ -157,69 +75,6 @@ def test_chat_input_field_has_no_ambient_halo():
     assert "0 0 0 3px var(--accent-10)" in focus_block
     assert "0 4px 24px" not in focus_block
 
-
-def test_chat_only_polls_state_when_active():
-    chat_source = _read("web/modules/chat.js")
-
-    assert "state.activePage !== 'chat'" in chat_source
-
-
-def test_live_card_has_inline_typing_dots_and_pulsing_phase_badge():
-    css = _read("web/style.css")
-    chat_source = _read("web/modules/chat.js")
-
-    # Inline typing dots in live card summary
-    assert ".chat-live-typing {" in css
-    assert ".chat-live-typing span {" in css
-    assert 'animation: typing-bounce' in css
-    assert '.chat-live-card[data-finished="1"] .chat-live-typing {' in css
-
-    # Active phase badge should pulse
-    assert "animation: thinking-pulse" in css
-    assert '.chat-live-card:not([data-finished="1"]) .chat-live-phase.working' in css
-
-    # JS: typing visibility helpers exist
-    assert "function setLiveCardTypingVisible(record, visible) {" in chat_source
-    assert "inlineTypingEl: root.querySelector('[data-live-typing]')" in chat_source
-    assert "setLiveCardTypingVisible(record, false);" in chat_source
-    assert "setLiveCardTypingVisible(record, true);" in chat_source
-
-    # HTML template has the typing element
-    assert "data-live-typing" in chat_source
-
-
-def test_live_card_timeline_body_renders_markdown():
-    """Live card timeline body must use renderMarkdown, not escapeHtml."""
-    source = _read("web/modules/chat.js")
-    # The body div inside the timeline must use renderMarkdown so that
-    # markdown formatting (bold, lists, etc.) is rendered correctly.
-    assert "renderMarkdown(displayBody)" in source
-    # escapeHtml must NOT be used for displayBody in the timeline
-    assert "escapeHtml(displayBody)" not in source
-
-
-def test_live_card_timeline_headline_renders_markdown_for_progress():
-    """working/thinking phase lines must render their headline with renderMarkdown."""
-    source = _read("web/modules/chat.js")
-    # isProgressLine must check the actual phase values emitted by summarizeChatLiveEvent
-    assert "isProgressLine" in source
-    assert "isProgressLine ? renderMarkdown(displayHeadline)" in source
-    # Must use 'working' and 'thinking' — NOT the dead 'progress'/'thought' names
-    assert "item.phase === 'working' || item.phase === 'thinking'" in source
-    assert "item.phase === 'progress' || item.phase === 'thought'" not in source
-
-
-def test_chat_history_replays_task_summaries_into_live_cards():
-    history_source = _read("ouroboros/server_history_api.py")
-    chat_source = _read("web/modules/chat.js")
-
-    assert '"task_id": str(entry.get("task_id", ""))' in history_source
-    assert "const taskId = msg.task_id || '';" in chat_source
-    assert "appendTaskSummaryToLiveCard(msg);" in chat_source
-    assert "taskId," in chat_source
-    assert "if (role !== 'user' && !opts.isProgress && opts.taskId) {" in chat_source
-
-
 def test_chat_history_conditionally_forces_live_card_for_task_summaries():
     """Historical task_summary messages must force the live card visible
     only for non-trivial tasks (tool_calls > 0 or rounds > 1).
@@ -237,7 +92,6 @@ def test_chat_history_conditionally_forces_live_card_for_task_summaries():
     idx_force = source.index("taskState.forceCard = true;")
     idx_append = source.index("appendTaskSummaryToLiveCard(msg);")
     assert idx_force < idx_append, "forceCard must be set before appendTaskSummaryToLiveCard"
-
 
 def test_progress_messages_force_live_card_visible():
     """Progress messages (e.g. '🔍 Searching...') must force the live card open.
@@ -262,7 +116,6 @@ def test_progress_messages_force_live_card_visible():
     assert idx_force < idx_queue, \
         "forceCard must be set before queueTaskLiveUpdate in updateLiveCardFromProgressMessage"
 
-
 def test_task_summary_live_card_uses_last_headline_not_finished_task():
     """appendTaskSummaryToLiveCard must NOT use 'Finished task' as headline.
 
@@ -284,7 +137,6 @@ def test_task_summary_live_card_uses_last_headline_not_finished_task():
     assert "visible: false" in func_body, \
         "appendTaskSummaryToLiveCard should set visible: false"
 
-
 def test_chat_input_has_glassmorphism():
     """#chat-input textarea should have frosted-glass styling (blur + semi-transparent bg + white border)."""
     css = _read("web/style.css")
@@ -303,7 +155,6 @@ def test_chat_input_has_glassmorphism():
     # Must not use opaque background
     assert "var(--bg-secondary)" not in chat_input_block
 
-
 def test_log_phases_use_crimson_not_blue():
     """Active log phases (start/progress/working/thinking) should use crimson, not blue."""
     css = _read("web/style.css")
@@ -317,40 +168,6 @@ def test_log_phases_use_crimson_not_blue():
     assert "var(--blue)" not in active_block
     assert "rgba(248, 130, 140" in active_block
 
-
-def test_about_uses_css_classes_not_inline():
-    """About sub-tab inside Settings (v5.7.0+) must use CSS classes, not
-    inline style= attributes. About used to be a top-level page rendered
-    by web/modules/about.js; in v5.7.0 the content moved into Settings as
-    a sub-tab section. We assert the markup against settings_ui.js where
-    the new About panel lives."""
-    src = _read("web/modules/settings_ui.js")
-    assert 'class="about-body"' in src
-    assert 'class="about-logo"' in src
-    assert 'class="about-title"' in src
-    assert 'class="about-credits"' in src
-    assert 'class="about-footer"' in src
-    # The About <section> declaration is the marker the panel exists
-    assert 'data-settings-panel="about"' in src
-
-
-def test_costs_uses_css_classes_not_inline():
-    """costs.js must use CSS classes for layout; bar width via DOM .style.width is acceptable."""
-    src = _read("web/modules/costs.js")
-    # Static HTML uses class= attributes
-    assert 'class="costs-stats-grid"' in src
-    assert 'class="costs-tables-grid"' in src
-    assert 'class="costs-table-label"' in src
-    # DOM-built cells use .className assignments (not class= in innerHTML)
-    assert "className = 'cost-cell-name'" in src
-    assert "className = 'cost-bar'" in src
-    # renderBreakdownTable must use DOM creation (no innerHTML for user data)
-    assert "document.createElement('tr')" in src
-    assert "textContent = name" in src
-    # Only the dynamic bar width remains as .style.width — that's the sole acceptable exception
-    assert "bar.style.width" in src
-
-
 def test_costs_about_css_classes_defined():
     """All CSS classes used by the About sub-tab and costs.js must be defined in style.css."""
     css = _read("web/style.css")
@@ -358,7 +175,6 @@ def test_costs_about_css_classes_defined():
                 ".costs-stats-grid", ".costs-tables-grid", ".costs-table-label",
                 ".cost-cell-name", ".cost-bar-cell", ".cost-bar", ".cost-empty-cell"]:
         assert cls in css, f"Missing CSS class: {cls}"
-
 
 def test_trivial_task_summary_skip_in_backend():
     """_run_task_summary must skip the LLM call for trivial tasks (0 tool calls, ≤1 round)."""
@@ -369,18 +185,12 @@ def test_trivial_task_summary_skip_in_backend():
     assert '"tool_calls": n_tool_calls' in source
     assert '"rounds": rounds' in source
 
-
 def test_history_api_passes_task_summary_metadata():
     """server_history_api must pass tool_calls and rounds fields for task_summary entries."""
     source = (REPO / "ouroboros" / "server_history_api.py").read_text(encoding="utf-8")
     assert 'entry.get("type") == "task_summary"' in source
     assert 'rec["tool_calls"]' in source
     assert 'rec["rounds"]' in source
-
-
-# ---------------------------------------------------------------------------
-# Updates versions surface: no inline styles, CSS-class-based structure
-# ---------------------------------------------------------------------------
 
 def test_updates_versions_surface_uses_css_classes_not_inline_styles():
     """Updates commits/tags surface must use CSS classes, not inline style="" attributes."""
@@ -421,7 +231,6 @@ def test_updates_versions_surface_uses_css_classes_not_inline_styles():
     assert 'evo-versions-cols' in template
     assert 'style=' not in template, "Updates versions template still contains inline style= attributes"
 
-
 def test_updates_versions_css_classes_defined():
     """CSS classes used by the Updates versions surface must be defined in style.css."""
     css = _read("web/style.css")
@@ -438,7 +247,6 @@ def test_updates_versions_css_classes_defined():
         ".btn-xs",
     ]:
         assert cls in css, f"Missing CSS class in style.css: {cls}"
-
 
 def test_updates_load_versions_error_handling():
     """loadVersions() must guard resp.ok and clear local version surfaces on error."""
@@ -462,7 +270,6 @@ def test_updates_load_versions_error_handling():
     assert 'tagsDiv.innerHTML' in catch_body, "catch must clear tagsDiv"
     assert 'current.textContent' in catch_body, "catch must reset current branch label"
 
-
 def test_evolution_runtime_card_uses_crimson_border():
     """evo-runtime-card and evo-chart-wrap must use the crimson accent
     border (either the literal rgba — historical — or the v5.8.3-rc.5
@@ -480,15 +287,6 @@ def test_evolution_runtime_card_uses_crimson_border():
     has_crimson = "201, 53, 69" in rule_body or "var(--accent" in rule_body
     assert has_crimson, "evo-runtime-card must use crimson accent border (literal rgba or SSOT --accent token)"
     assert "255, 255, 255, 0.08" not in rule_body, "evo-runtime-card should not use neutral white border"
-
-
-def test_evolution_tags_table_escapes_untrusted_tag_names():
-    """Evolution tag rows are rendered via innerHTML, so tag/date strings must be escaped."""
-    source = _read("web/modules/evolution.js")
-    assert "escapeHtmlText(p.tag || '')" in source
-    assert "escapeHtmlText(dateStr)" in source
-    assert "<td><code>${p.tag}</code></td>" not in source
-
 
 def test_live_card_timeline_no_hardcoded_item_cap():
     """Live card timeline must not drop items — no 20-item shift() cap."""
@@ -525,7 +323,6 @@ def test_live_card_timeline_no_hardcoded_item_cap():
     assert "const REUSABLE_TASK_IDS = new Set(" in source
     assert "REUSABLE_TASK_IDS.has(resolvedTaskId)" in source
     assert "taskState.completed = false;" in source
-
 
 def test_chat_input_overlay_buttons_css():
     """Regression: paperclip button and send group must be absolute overlays inside the textarea."""
@@ -574,7 +371,6 @@ def test_chat_input_overlay_buttons_css():
         assert "76px" in input_body or "80px" in input_body, \
             "#chat-input must have sufficient right padding for the send group"
 
-
 def test_sync_history_two_pass_progress_before_finalize():
     """syncHistory must use two-pass processing: progress/summary first, then regular messages.
 
@@ -614,33 +410,6 @@ def test_sync_history_two_pass_progress_before_finalize():
     assert "if (taskState.completed) continue;" not in pass1_body, \
         "Pass 1 must not skip progress messages due to taskState.completed"
 
-
-def test_skill_lifecycle_terminal_progress_can_finish_live_card():
-    source = _read("web/modules/log_events.js")
-    chat_source = _read("web/modules/chat.js")
-
-    assert "startsWith('skill_lifecycle_')" in source
-    assert "completed|failed" in source
-    assert "lifecycleTerminal" in source
-    assert "phase === 'done' || phase === 'lifecycle_error'" in chat_source
-
-
-def test_sync_history_shows_typing_for_ongoing_tasks():
-    """syncHistory must call showTyping() after first load if a live card is still active."""
-    source = _read("web/modules/chat.js")
-
-    # The post-load typing check must be present
-    assert "After first load" in source, \
-        "syncHistory must have a post-load typing indicator check"
-    assert "const hasOngoingTask = Array.from(liveCardRecords.values()).some(" in source, \
-        "Must check for active live cards after history load"
-    assert "if (hasOngoingTask) showTyping();" in source, \
-        "Must call showTyping() when an ongoing task is detected"
-    # Guard: only on first load (!historyLoaded)
-    assert "if (!historyLoaded) {" in source, \
-        "Typing restore must only happen on first page load"
-
-
 def test_update_live_card_no_forcecard_for_completed():
     """updateLiveCardFromProgressMessage must not force-open cards for completed tasks."""
     source = _read("web/modules/chat.js")
@@ -652,7 +421,6 @@ def test_update_live_card_no_forcecard_for_completed():
     # Must have the guard !taskState.completed before setting forceCard
     assert "if (taskState && !taskState.completed) taskState.forceCard = true;" in func_body, \
         "updateLiveCardFromProgressMessage must not force-open cards for already-completed tasks"
-
 
 def test_live_card_timeline_css_scrollable():
     """Expanded chat live timeline must be scrollable with a max-height."""
@@ -671,11 +439,6 @@ def test_live_card_timeline_css_scrollable():
     assert "max-height" in rule_body, "timeline must have max-height when expanded"
     assert "420px" in rule_body, "timeline max-height must be 420px"
     assert "overflow-y" in rule_body, "timeline must have overflow-y for scrolling"
-
-
-# ---------------------------------------------------------------------------
-# Live-card DOM ordering on restart / history reload
-# ---------------------------------------------------------------------------
 
 def test_sync_history_suppresses_dom_insert_in_pass1():
     """syncHistory pass 1 must use _syncPass1Active flag to prevent premature DOM insertion."""
@@ -700,7 +463,6 @@ def test_sync_history_suppresses_dom_insert_in_pass1():
     assert "_syncPass1Active" in func_body, \
         "ensureLiveCardVisible must check _syncPass1Active to suppress DOM insertion"
 
-
 def test_sync_history_inserts_card_at_first_message_in_pass2():
     """Pass 2 of syncHistory must insert live cards at the first message for each task."""
     source = _read("web/modules/chat.js")
@@ -724,7 +486,6 @@ def test_sync_history_inserts_card_at_first_message_in_pass2():
     assert "!rec.root.isConnected && !retiredTaskIds.has(tid)" in source, \
         "sweep must skip retired task ids and already-connected cards"
 
-
 def test_sync_history_appends_disconnected_unfinished_cards_at_end():
     """Cards for in-progress tasks (no reply yet) must be appended after all pass-2 messages."""
     source = _read("web/modules/chat.js")
@@ -735,7 +496,6 @@ def test_sync_history_appends_disconnected_unfinished_cards_at_end():
     sweep_idx = source.index("for (const [tid, rec] of liveCardRecords)")
     assert sweep_idx > pass2_idx, \
         "liveCardRecords sweep must appear after pass-2 message loop"
-
 
 def test_chat_send_group_bottom_aligned_for_multiline_composer():
     """Send controls stay anchored near the final textarea line on mobile.
@@ -763,7 +523,6 @@ def test_chat_send_group_bottom_aligned_for_multiline_composer():
     assert "position: absolute" not in send_body, \
         ".chat-send-inline must not use position: absolute (handled by parent .chat-send-group)"
 
-
 def test_chat_attach_button_bottom_aligned_for_multiline_composer():
     """Paperclip button follows the send control at the textarea baseline."""
     css = _read("web/style.css")
@@ -776,65 +535,6 @@ def test_chat_attach_button_bottom_aligned_for_multiline_composer():
         ".chat-attach-btn must anchor to the bottom edge of the multiline composer"
     assert "translateY(-50%)" not in rule_body, \
         ".chat-attach-btn must not vertically center inside a multiline composer"
-
-
-# --- Plan mode send tests ---
-
-def test_plan_mode_dom_elements_present():
-    """The chat input must contain the send group, chevron, and dropdown elements."""
-    source = _read("web/modules/chat.js")
-    assert 'id="chat-send-chevron"' in source, "chat-send-chevron button must be present"
-    assert 'id="chat-send-dropdown"' in source, "chat-send-dropdown div must be present"
-    assert 'id="chat-dropdown-plan"' in source, "chat-dropdown-plan item must be present"
-    assert 'id="chat-dropdown-send"' in source, "chat-dropdown-send item must be present"
-    assert 'class="chat-send-group"' in source, "chat-send-group wrapper must be present"
-
-
-def test_skill_review_click_guard_prevents_duplicate_posts():
-    source = _read("web/modules/skills.js")
-    assert "if (reviewingSkills.has(name)) return;" in source
-    assert "target.disabled = true;" in source
-    assert "reviewingSkills.add(name);" in source
-
-
-# ``test_plan_mode_send_message_accepts_plan_flag``,
-# ``test_plan_mode_prefix_constant_defined``,
-# ``test_plan_mode_wire_text_uses_prefix``, and
-# ``test_plan_mode_remember_input_uses_raw_text`` were retired in
-# v5.8.3-rc.5 — all four are covered by
-# ``tests/test_chat_js_contracts.py`` (the ``PLAN_PREFIX`` const-position,
-# ``PLAN_PREFIX + text``, ``planMode && !text.startsWith('/')``, and
-# ``rememberInput(text)`` before ``wireText`` invariants live there as
-# the canonical chat.js structural pin). The DOM-elements test below
-# stays here because it asserts on the chat_logs_ui template (id /
-# class structure), which is this file's surface.
-
-
-def test_plan_mode_send_listener_uses_arrow_function():
-    """sendBtn click listener reads planMode from DOM dataset — not hardcoded boolean."""
-    source = _read("web/modules/chat.js")
-    # Must derive plan mode from dataset, not hardcode false/true.
-    assert "sendGroup.dataset.sendMode === 'plan'" in source, \
-        "sendBtn listener must read mode from sendGroup.dataset.sendMode, not hardcode false"
-    assert "sendBtn.addEventListener('click', () => sendMessage(sendGroup.dataset.sendMode === 'plan'))" in source, \
-        "sendBtn click listener must use () => sendMessage(sendGroup.dataset.sendMode === 'plan')"
-
-
-def test_plan_mode_default_is_send():
-    """Send mode must default to 'send' on initialisation."""
-    source = _read("web/modules/chat.js")
-    assert "setSendMode('send')" in source, \
-        "setSendMode must be called with 'send' to initialise default mode"
-
-
-def test_plan_mode_set_send_mode_function_exists():
-    """setSendMode function must exist and update sendGroup dataset."""
-    source = _read("web/modules/chat.js")
-    assert "function setSendMode(mode)" in source, \
-        "setSendMode function must be defined"
-    assert "sendGroup.dataset.sendMode = mode" in source, \
-        "setSendMode must write mode to sendGroup.dataset.sendMode (DOM-backed state)"
-
 
 def test_plan_mode_dropdown_switches_mode_not_send():
     """Dropdown items must switch the mode, not immediately send a message."""
@@ -853,35 +553,6 @@ def test_plan_mode_dropdown_switches_mode_not_send():
         "dropdownPlan click must call setSendMode('plan'), not sendMessage"
     assert "sendMessage" not in plan_item_block, \
         "dropdownPlan click must NOT call sendMessage (mode-switch only)"
-
-
-def test_plan_mode_css_dataset_selector_exists():
-    """CSS must have data-send-mode attribute selector for plan mode styling."""
-    css = _read("web/style.css")
-    assert '[data-send-mode="plan"]' in css, \
-        "CSS must use [data-send-mode=\"plan\"] attribute selector for plan mode"
-    assert ".chat-send-group[data-send-mode=\"plan\"] .chat-send-inline" in css, \
-        "Must have amber colour rule for .chat-send-inline in plan mode"
-    assert ".chat-send-group[data-send-mode=\"plan\"] .chat-send-chevron" in css, \
-        "Must have amber colour rule for .chat-send-chevron in plan mode"
-
-
-def test_plan_mode_active_marker_css():
-    """CSS must have active-mode marker rule for dropdown items."""
-    css = _read("web/style.css")
-    assert '[data-mode-active="true"]' in css, \
-        "CSS must have data-mode-active attribute selector for active dropdown item"
-
-
-def test_plan_mode_dropdown_css_exists():
-    """CSS must include send group, chevron, and dropdown rules."""
-    css = _read("web/style.css")
-    assert ".chat-send-group {" in css, "Must have .chat-send-group CSS rule"
-    assert ".chat-send-chevron {" in css, "Must have .chat-send-chevron CSS rule"
-    assert ".chat-send-dropdown {" in css, "Must have .chat-send-dropdown CSS rule"
-    assert ".chat-send-dropdown.open {" in css, "Must have .chat-send-dropdown.open rule"
-    assert ".chat-send-dropdown-item {" in css, "Must have .chat-send-dropdown-item rule"
-
 
 def test_plan_mode_input_padding_accommodates_group():
     """#chat-input padding-right must be wide enough for Send + chevron group (~76px)."""
@@ -903,92 +574,11 @@ def test_plan_mode_input_padding_accommodates_group():
         assert "76px" in rule_body or "80px" in rule_body, \
             "#chat-input must have sufficient right padding for the send+chevron group"
 
-
 def test_plan_mode_dropdown_close_on_escape():
     """Escape key handler must call closeSendDropdown."""
     source = _read("web/modules/chat.js")
     assert "e.key === 'Escape'" in source and "closeSendDropdown()" in source, \
         "Escape key must close the send dropdown"
-
-
-def test_plan_mode_close_on_outside_click():
-    """Outside click handler must close the dropdown."""
-    source = _read("web/modules/chat.js")
-    assert "document.addEventListener('click'" in source, \
-        "A document click listener must exist to close the dropdown on outside click"
-    assert "closeSendDropdown()" in source, \
-        "closeSendDropdown must be called from the outside-click handler"
-
-
-def test_live_card_layout_skipped_when_page_hidden():
-    """syncLiveCardLayout must skip geometry update and set _needsLayoutSync when
-    the card is not inside an active page (getBoundingClientRect returns 0 in that
-    case and would collapse the card to a sliver)."""
-    source = _read("web/modules/chat.js")
-    # Guard must use .page.active class (not inline style, which CSS-controlled pages don't set)
-    assert "record.root.closest('.page.active')" in source, \
-        "syncLiveCardLayout must guard against hidden pages via .closest('.page.active')"
-    assert "_needsLayoutSync = true" in source, \
-        "syncLiveCardLayout must flag _needsLayoutSync when the page is hidden"
-    assert "_needsLayoutSync: false" in source, \
-        "createLiveCardRecord must initialise _needsLayoutSync to false"
-
-
-def test_live_card_layout_resynced_on_page_shown():
-    """When the chat page becomes visible (SPA navigation or browser tab), all
-    connected live cards with a stale layout must be re-synced."""
-    source = _read("web/modules/chat.js")
-    assert "ouro:page-shown" in source, \
-        "chat.js must listen for the ouro:page-shown SPA event"
-    # The handler must iterate liveCardRecords and call syncLiveCardLayout
-    assert "event?.detail?.page !== 'chat'" in source, \
-        "ouro:page-shown handler must guard for page === 'chat'"
-    assert "syncLiveCardLayout(record)" in source, \
-        "ouro:page-shown handler must call syncLiveCardLayout for each card"
-    # visibilitychange covers browser-tab switches
-    assert "visibilitychange" in source, \
-        "chat.js must also listen for visibilitychange to re-sync on browser tab return"
-
-
-def test_sync_history_clears_retired_task_ids():
-    """syncHistory must clear retiredTaskIds on a full rebuild (first load / reconnect)
-    so that server-history is authoritative and cards from a previous live session are
-    reconstructed correctly after a restart/reconnect.  The clear must be guarded so
-    that routine incremental syncs (scheduleHistorySync after task done) do NOT resurrect
-    already-retired cards from the current session.
-
-    Two triggers for the clear:
-    (a) !historyLoaded — hard restart / fresh page load (JS memory is new)
-    (b) fromReconnect  — soft restart / same-SHA WS reconnect where historyLoaded
-        stays true across the reconnect but retiredTaskIds may contain stale IDs from
-        the previous session that need to be cleared so history replay can show them.
-    """
-    source = _read("web/modules/chat.js")
-    # Must clear on both first-load AND reconnect
-    assert "if (!historyLoaded || fromReconnect) retiredTaskIds.clear();" in source, \
-        "syncHistory must clear retiredTaskIds on first load (!historyLoaded) AND on reconnect (fromReconnect)"
-    # fromReconnect param must be declared on the function signature
-    assert "fromReconnect = false" in source, \
-        "syncHistory must accept a fromReconnect parameter defaulting to false"
-    # ws.on('open') must pass isReconnect captured before wsHasConnectedOnce is set
-    assert "const isReconnect = wsHasConnectedOnce;" in source, \
-        "ws.on('open') must capture isReconnect before setting wsHasConnectedOnce=true"
-    assert "fromReconnect: isReconnect" in source, \
-        "ws.on('open') must pass fromReconnect: isReconnect to syncHistory"
-    # scheduleHistorySync must NOT pass fromReconnect (defaults to false)
-    assert "scheduleHistorySync" in source, \
-        "scheduleHistorySync must exist"
-    # Verify the old single-condition guard is gone (replaced by the two-condition guard)
-    assert "if (!historyLoaded) retiredTaskIds.clear();" not in source, \
-        "Old single-condition guard must be replaced by the two-condition version"
-    # Pending reconnect intent must survive an in-flight sync
-    assert "let pendingReconnectSync = false;" in source, \
-        "pendingReconnectSync flag must be declared to preserve reconnect intent across in-flight syncs"
-    assert "if (fromReconnect) pendingReconnectSync = true;" in source, \
-        "When fromReconnect arrives during an in-flight sync, pendingReconnectSync must be set"
-    assert "if (pendingReconnectSync)" in source, \
-        "finally block must check pendingReconnectSync and re-run syncHistory with fromReconnect=true"
-
 
 def test_cleanup_timer_keeps_card_intact_and_adds_to_retired():
     """scheduleTaskUiCleanup must preserve the DOM node, backing arrays, and
@@ -1028,49 +618,6 @@ def test_cleanup_timer_keeps_card_intact_and_adds_to_retired():
         "so incremental syncs don't rebuild the card mid-session"
     )
 
-
-def test_sync_history_sweep_skips_invisible_completed_cards():
-    """The final sweep in syncHistory must skip cards that were never made visible
-    (trivial tasks with 0 tool calls) to avoid a cluster of invisible placeholder
-    nodes appearing at the bottom of the chat after a page reload."""
-    source = _read("web/modules/chat.js")
-
-    # The sweep loop must have a guard for cardVisible on completed tasks
-    assert "ts.cardVisible" in source, (
-        "The final liveCardRecords sweep in syncHistory must check ts.cardVisible "
-        "to avoid inserting invisible completed-task placeholder nodes"
-    )
-    assert "ts.completed" in source, (
-        "The final sweep guard must also check ts.completed so in-progress tasks "
-        "without cardVisible are still appended"
-    )
-
-
-# ─── Autocorrect / spellcheck suppression on #chat-input ────────────────
-
-def test_chat_input_disables_autocorrect():
-    """#chat-input textarea must disable browser autocorrect/spellcheck/autocapitalize.
-
-    These attributes prevent the browser from silently rewriting code,
-    identifiers, slash-commands, and other technical input. Test asserts
-    each attribute by literal substring match against the textarea template
-    string in chat.js (no JSDOM — chat.js builds its own template at runtime).
-    """
-    source = _read("web/modules/chat.js")
-    assert 'id="chat-input"' in source, "chat-input textarea must exist"
-    assert 'autocorrect="off"' in source, (
-        "chat-input textarea must set autocorrect='off'"
-    )
-    assert 'autocapitalize="off"' in source, (
-        "chat-input textarea must set autocapitalize='off'"
-    )
-    assert 'spellcheck="false"' in source, (
-        "chat-input textarea must set spellcheck='false'"
-    )
-
-
-# ─── Clipboard image paste handler ──────────────────────────────────────
-
 def test_clipboard_paste_handler_exists():
     """chat.js must register a `paste` listener that intercepts image/* clipboard
     items and routes them through the same staging path the paperclip uses.
@@ -1096,9 +643,6 @@ def test_clipboard_paste_handler_exists():
     assert "clipboard-" in source, (
         "paste handler must generate a clipboard-prefixed filename"
     )
-
-
-# ─── Chat input dock gradient contract ─────────────────────────────────
 
 def test_chat_input_dock_has_glass_gradient_without_absolute_positioning():
     """Absolute composer uses a compact soft fade on the wrapper; blur lives on the input.
@@ -1128,7 +672,6 @@ def test_chat_input_dock_has_glass_gradient_without_absolute_positioning():
     assert "--chat-input-reserve" in css
     assert "messagesDiv.style.setProperty('--chat-input-reserve'" in chat_js
 
-
 def test_mobile_chat_uses_flex_composer_layout_and_no_interactive_widget():
     css = _read("web/style.css")
     html = _read("web/index.html")
@@ -1140,7 +683,6 @@ def test_mobile_chat_uses_flex_composer_layout_and_no_interactive_widget():
     assert "bottom: 0" in input_area
     assert "min-height: 0" in chat_messages
 
-
 def test_budget_pill_navigates_to_settings_costs():
     source = _read("web/modules/chat.js")
     css = _read("web/style.css")
@@ -1149,7 +691,6 @@ def test_budget_pill_navigates_to_settings_costs():
     assert "openDashboardTab('costs')" in source
     budget_block = re.search(r"\.chat-budget-pill\s*\{(?P<body>[^}]+)\}", css, re.S).group("body")
     assert "cursor: pointer" in budget_block
-
 
 def test_desktop_vvh_uses_dvh_unit_not_px_snapshot():
     js = _read("web/app.js")
@@ -1174,7 +715,6 @@ def test_desktop_vvh_uses_dvh_unit_not_px_snapshot():
     assert "--vvh: 100dvh" in root_block
     assert "height: var(--vvh)" in body_block
     assert "height: var(--vvh)" in app_block
-
 
 def test_mobile_keyboard_open_uses_visual_viewport_flex_stack():
     """Static contract test: keyboard-open JS toggle + CSS layout rules exist."""
