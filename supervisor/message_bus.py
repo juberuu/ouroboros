@@ -8,7 +8,6 @@ Agent Supervisor.
 from __future__ import annotations
 
 import base64
-import datetime
 import logging
 import queue
 import re
@@ -18,6 +17,7 @@ from typing import Any, Dict, List, Optional
 from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
 from ouroboros.event_bus import CHAT_OUTBOUND, CHAT_PHOTO, CHAT_TYPING, publish_event
 from supervisor.state import append_jsonl, load_state, save_state
+from ouroboros.utils import utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -179,7 +179,7 @@ class LocalChatBridge:
         clean_text = str(text or "").strip()
         if not clean_text:
             return
-        ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        ts = utc_now_iso()
         if self._broadcast_fn:
             self._broadcast_fn({
                 "type": "chat",
@@ -251,7 +251,7 @@ class LocalChatBridge:
     ) -> Tuple[bool, str]:
         """Put a message in the outbox for the UI to consume."""
         clean_text = _strip_markdown(text) if not parse_mode else text
-        message_ts = ts or datetime.datetime.now(datetime.timezone.utc).isoformat()
+        message_ts = ts or utc_now_iso()
         transport = dict(self._chat_transports.get(int(chat_id or 0), {}) or {})
         msg = {
             "type": "text",
@@ -326,7 +326,7 @@ class LocalChatBridge:
             "image_base64": b64_str,
             "mime": mime,
             "caption": caption,
-            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "ts": utc_now_iso(),
         }
         self._outbox.put(msg)
         if self._broadcast_fn:
@@ -492,7 +492,7 @@ def log_chat(
 ) -> None:
     if DATA_DIR:
         append_jsonl(DATA_DIR / "logs" / "chat.jsonl", {
-            "ts": ts or datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "ts": ts or utc_now_iso(),
             "session_id": load_state().get("session_id"),
             "direction": direction,
             "chat_id": chat_id,
@@ -515,7 +515,7 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
     st = load_state()
     owner_id = int(st.get("owner_id") or 0)
     _text = str(text or "")
-    msg_ts = ts or datetime.datetime.now(datetime.timezone.utc).isoformat()
+    msg_ts = ts or utc_now_iso()
 
     if is_progress and DATA_DIR:
         append_jsonl(DATA_DIR / "logs" / "progress.jsonl", {

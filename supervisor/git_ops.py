@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from supervisor.state import (
     load_state, save_state, append_jsonl, atomic_write_text,
 )
+from ouroboros.utils import utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -640,7 +641,7 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
             append_jsonl(
                 DRIVE_ROOT / "logs" / "supervisor.jsonl",
                 {
-                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "ts": utc_now_iso(),
                     "type": "reset_fetch_failed",
                     "target_branch": branch, "reason": reason, "error": msg,
                     "remote": fetch_remote,
@@ -680,7 +681,7 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
                     append_jsonl(
                         DRIVE_ROOT / "logs" / "supervisor.jsonl",
                         {
-                            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                            "ts": utc_now_iso(),
                             "type": "reset_blocked_rescue_failed",
                             "target_branch": branch, "reason": reason, "policy": policy,
                             "current_branch": repo_state.get("current_branch"),
@@ -702,7 +703,7 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
                     append_jsonl(
                         DRIVE_ROOT / "logs" / "supervisor.jsonl",
                         {
-                            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                            "ts": utc_now_iso(),
                             "type": "reset_blocked_rescue_incomplete",
                             "target_branch": branch, "reason": reason, "policy": policy,
                             "current_branch": repo_state.get("current_branch"),
@@ -725,7 +726,7 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
                     append_jsonl(
                         DRIVE_ROOT / "logs" / "supervisor.jsonl",
                         {
-                            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                            "ts": utc_now_iso(),
                             "type": "reset_blocked_rescue_incomplete",
                             "target_branch": branch, "reason": reason, "policy": policy,
                             "current_branch": repo_state.get("current_branch"),
@@ -752,7 +753,7 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
                 append_jsonl(
                     DRIVE_ROOT / "logs" / "supervisor.jsonl",
                     {
-                        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        "ts": utc_now_iso(),
                         "type": "reset_blocked_unsynced_state",
                         "target_branch": branch, "reason": reason, "policy": policy,
                         "current_branch": repo_state.get("current_branch"),
@@ -769,7 +770,7 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
             append_jsonl(
                 DRIVE_ROOT / "logs" / "supervisor.jsonl",
                 {
-                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "ts": utc_now_iso(),
                     "type": "reset_unsynced_rescued_then_reset",
                     "target_branch": branch, "reason": reason, "policy": policy,
                     "current_branch": repo_state.get("current_branch"),
@@ -826,7 +827,7 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
                 append_jsonl(
                     DRIVE_ROOT / "logs" / "supervisor.jsonl",
                     {
-                        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        "ts": utc_now_iso(),
                         "type": "ui_update_preserved_late_head",
                         "target_branch": branch,
                         "reason": reason,
@@ -901,7 +902,7 @@ def sync_runtime_dependencies(reason: str) -> Tuple[bool, str]:
         append_jsonl(
             DRIVE_ROOT / "logs" / "supervisor.jsonl",
             {
-                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "ts": utc_now_iso(),
                 "type": "deps_sync_ok", "reason": reason, "source": source,
             },
         )
@@ -911,7 +912,7 @@ def sync_runtime_dependencies(reason: str) -> Tuple[bool, str]:
         append_jsonl(
             DRIVE_ROOT / "logs" / "supervisor.jsonl",
             {
-                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "ts": utc_now_iso(),
                 "type": "deps_sync_error", "reason": reason, "source": source, "error": msg,
             },
         )
@@ -970,7 +971,7 @@ def safe_restart(
     append_jsonl(
         DRIVE_ROOT / "logs" / "supervisor.jsonl",
         {
-            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "ts": utc_now_iso(),
             "type": "safe_restart_dev_import_failed",
             "reason": reason,
             "branch": BRANCH_DEV,
@@ -1245,13 +1246,13 @@ def prepare_managed_update(strategy: str = "replace") -> Tuple[bool, Dict[str, A
         "target_ref": status.get("target_ref") or "",
         "strategy": strategy,
         "keep_branch": keep_branch,
-        "requested_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "requested_at": utc_now_iso(),
     })
 
     append_jsonl(
         DRIVE_ROOT / "logs" / "supervisor.jsonl",
         {
-            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "ts": utc_now_iso(),
             "type": "ui_update_requested",
             "strategy": strategy,
             "status": status,
@@ -1310,7 +1311,7 @@ def rollback_to_version(tag_or_sha: str, reason: str = "manual_rollback") -> Tup
     append_jsonl(
         DRIVE_ROOT / "logs" / "supervisor.jsonl",
         {
-            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "ts": utc_now_iso(),
             "type": "manual_rollback",
             "target": tag_or_sha,
             "reason": reason,

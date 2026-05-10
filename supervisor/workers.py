@@ -9,7 +9,6 @@ from __future__ import annotations
 import logging
 log = logging.getLogger(__name__)
 
-import datetime
 import json
 import multiprocessing as mp
 import os
@@ -24,6 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from supervisor.state import load_state, append_jsonl
 from supervisor import git_ops
 from supervisor.message_bus import send_with_budget
+from ouroboros.utils import utc_now_iso
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +194,7 @@ def _handle_chat_direct_locked(chat_id: int, text: str, image_data: Optional[Uni
         append_jsonl(
             DRIVE_ROOT / "logs" / "supervisor.jsonl",
             {
-                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "ts": utc_now_iso(),
                 "type": "direct_chat_error",
                 "error": repr(e),
                 "traceback": str(traceback.format_exc())[:2000],
@@ -303,13 +303,13 @@ def auto_resume_after_restart() -> None:
             append_jsonl(
                 DRIVE_ROOT / "logs" / "supervisor.jsonl",
                 {
-                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "ts": utc_now_iso(),
                     "type": "auto_resume_triggered",
                 },
             )
     except Exception as e:
         append_jsonl(DRIVE_ROOT / "logs" / "supervisor.jsonl", {
-            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "ts": utc_now_iso(),
             "type": "auto_resume_error",
             "error": repr(e),
         })
@@ -408,7 +408,7 @@ def _log_worker_crash(wid: int, drive_root: pathlib.Path, phase: str, exc: Excep
         path = drive_root / "logs" / "supervisor.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
         entry = json.dumps({
-            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "ts": utc_now_iso(),
             "type": "worker_crash",
             "worker_id": wid,
             "pid": _os.getpid(),
@@ -460,7 +460,7 @@ def _verify_worker_sha_after_spawn(events_offset: int, timeout_sec: float = 90.0
         append_jsonl(
             DRIVE_ROOT / "logs" / "supervisor.jsonl",
             {
-                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "ts": utc_now_iso(),
                 "type": "worker_sha_verify_skipped",
                 "reason": "missing_current_sha",
             },
@@ -479,7 +479,7 @@ def _verify_worker_sha_after_spawn(events_offset: int, timeout_sec: float = 90.0
         append_jsonl(
             DRIVE_ROOT / "logs" / "supervisor.jsonl",
             {
-                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "ts": utc_now_iso(),
                 "type": "worker_sha_verify_timeout",
                 "expected_sha": expected_sha,
             },
@@ -491,7 +491,7 @@ def _verify_worker_sha_after_spawn(events_offset: int, timeout_sec: float = 90.0
     append_jsonl(
         DRIVE_ROOT / "logs" / "supervisor.jsonl",
         {
-            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "ts": utc_now_iso(),
             "type": "worker_sha_verify",
             "ok": ok,
             "expected_sha": expected_sha,
@@ -521,7 +521,7 @@ def spawn_workers(n: int = 0) -> None:
     append_jsonl(
         DRIVE_ROOT / "logs" / "supervisor.jsonl",
         {
-            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "ts": utc_now_iso(),
             "type": "worker_spawn_start",
             "start_method": _WORKER_START_METHOD,
             "count": count,
@@ -580,7 +580,7 @@ def kill_workers(
                 append_jsonl(
                     DRIVE_ROOT / "logs" / "supervisor.jsonl",
                     {
-                        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        "ts": utc_now_iso(),
                         "type": "zombie_prevention_cleanup",
                         "orphaned_running": orphaned_ids,
                         "drained_pending": drained_ids,
@@ -594,7 +594,7 @@ def kill_workers(
         append_jsonl(
             DRIVE_ROOT / "logs" / "supervisor.jsonl",
             {
-                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "ts": utc_now_iso(),
                 "type": "running_cleared_on_kill", "count": cleared_running,
                 "force": force,
             },
@@ -695,7 +695,7 @@ def ensure_workers_healthy() -> None:
             append_jsonl(
                 DRIVE_ROOT / "logs" / "supervisor.jsonl",
                 {
-                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "ts": utc_now_iso(),
                     "type": "worker_dead_detected",
                     "worker_id": wid,
                     "exitcode": exitcode,
@@ -712,7 +712,7 @@ def ensure_workers_healthy() -> None:
                 append_jsonl(
                     DRIVE_ROOT / "logs" / "supervisor.jsonl",
                     {
-                        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        "ts": utc_now_iso(),
                         "type": "worker_crash_task_dump",
                         "worker_id": wid,
                         "task": meta["task"],
@@ -881,7 +881,7 @@ def ensure_workers_healthy() -> None:
         append_jsonl(
             DRIVE_ROOT / "logs" / "supervisor.jsonl",
             {
-                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "ts": utc_now_iso(),
                 "type": "crash_storm_detected",
                 "crash_count": len(CRASH_TS),
                 "worker_count": len(WORKERS),

@@ -1044,9 +1044,6 @@ class AdvisoryReviewState:
                 count += 1
         return count
 
-    def clear_resolved_obligations(self) -> None:
-        self.open_obligations = [ob for ob in self.open_obligations if ob.status == "still_open"]
-
     def get_open_obligations(self, repo_key: str | None = None) -> List[ObligationItem]:
         exact_match_exists = _repo_scope_exact_match_exists(self.open_obligations, repo_key)
         return [

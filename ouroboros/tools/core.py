@@ -15,6 +15,11 @@ from typing import Any, Dict, List, Tuple
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import read_text, safe_relpath, utc_now_iso
 from ouroboros.contracts.task_constraint import normalize_task_constraint, resolve_payload_path
+from ouroboros.contracts.skill_payload_policy import (
+    SKILL_PAYLOAD_ALL_BUCKETS,
+    SKILL_PAYLOAD_CONTROL_DIRNAMES,
+    SKILL_PAYLOAD_CONTROL_FILENAMES,
+)
 
 log = logging.getLogger(__name__)
 
@@ -39,31 +44,6 @@ _SKILL_OWNER_STATE_FILENAMES = frozenset({
 # ``is_skill_control_plane_path`` to refuse writes to these markers.
 # Pre-v5.7.0 these names were only protected in heal mode, leaving normal
 # tool flows free to overwrite provenance.
-_SKILL_PAYLOAD_CONTROL_PLANE_FILENAMES = frozenset({
-    ".clawhub.json",
-    ".ouroboroshub.json",
-    ".self_authored.json",
-    "skill.openclaw.md",
-    ".seed-origin",
-})
-
-_SKILL_PAYLOAD_CONTROL_PLANE_DIRNAMES = frozenset({
-    ".ouroboros_env",
-    "node_modules",
-    "__pycache__",
-})
-
-# Buckets in ``data/skills/<bucket>/<skill>/`` where the payload
-# control-plane filenames are protected. We deliberately list every
-# bucket the launcher / marketplace pipelines own (native is launcher-
-# seeded, the others are user/marketplace-installed).
-_SKILL_PAYLOAD_BUCKETS = frozenset({
-    "native",
-    "external",
-    "clawhub",
-    "ouroboroshub",
-})
-
 _SELF_AUTHORED_MARKER = ".self_authored.json"
 
 
@@ -108,7 +88,7 @@ def _skill_payload_parts(target: pathlib.Path, data_root: pathlib.Path) -> tuple
         if len(parts) < 3 or parts[0].lower() != "skills":
             continue
         bucket = parts[1]
-        if bucket.lower() not in _SKILL_PAYLOAD_BUCKETS:
+        if bucket.lower() not in SKILL_PAYLOAD_ALL_BUCKETS:
             continue
         skill_name = parts[2]
         if not skill_name or skill_name in {".", ".."}:
@@ -211,12 +191,12 @@ def is_skill_control_plane_path(target: pathlib.Path, data_root: pathlib.Path) -
             return False
         if parts[0].lower() != "skills":
             return False
-        if parts[1].lower() not in _SKILL_PAYLOAD_BUCKETS:
+        if parts[1].lower() not in SKILL_PAYLOAD_ALL_BUCKETS:
             return False
         rel_tail = [part.lower() for part in parts[3:]]
-        if any(part in _SKILL_PAYLOAD_CONTROL_PLANE_DIRNAMES for part in rel_tail):
+        if any(part in SKILL_PAYLOAD_CONTROL_DIRNAMES for part in rel_tail):
             return True
-        return candidate.name.lower() in _SKILL_PAYLOAD_CONTROL_PLANE_FILENAMES
+        return candidate.name.lower() in SKILL_PAYLOAD_CONTROL_FILENAMES
 
     if _matches_payload(target):
         return True
@@ -241,11 +221,11 @@ def is_skill_control_plane_path(target: pathlib.Path, data_root: pathlib.Path) -
             return False
         rel = pathlib.Path(target).resolve(strict=False).relative_to(data_root)
         parts = rel.parts
-        if len(parts) < 4 or parts[0].lower() != "skills" or parts[1].lower() not in _SKILL_PAYLOAD_BUCKETS:
+        if len(parts) < 4 or parts[0].lower() != "skills" or parts[1].lower() not in SKILL_PAYLOAD_ALL_BUCKETS:
             return False
         payload_root = data_root / parts[0] / parts[1] / parts[2]
         for protected in payload_root.iterdir():
-            if protected.name.lower() not in _SKILL_PAYLOAD_CONTROL_PLANE_FILENAMES:
+            if protected.name.lower() not in SKILL_PAYLOAD_CONTROL_FILENAMES:
                 continue
             try:
                 if protected.exists() and pathlib.Path(target).samefile(protected):

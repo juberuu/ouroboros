@@ -1,4 +1,4 @@
-# Ouroboros v5.13.0 — Architecture & Reference
+# Ouroboros v5.14.0-rc.1 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -724,9 +724,9 @@ Single source of truth for all tool classification sets:
 - **`UNTRUNCATED_REPO_READ_PATHS`** — repo files that must stay whole when read
 - **`TOOL_RESULT_LIMITS`** — per-tool output size caps (chars)
 
-`tool_policy.py` and `loop_tool_execution.py` import from this module. The legacy
-copy in `tools/registry.py` is kept for backward compatibility but is not the
-runtime authority.
+`tool_policy.py`, `loop_tool_execution.py`, and `tools/registry.py` import from
+this module so round-one visibility, execution policy, and result handling share
+one canonical set.
 
 ### Tool execution (loop.py)
 

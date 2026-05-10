@@ -51,7 +51,7 @@ _LOCAL_PRESETS: Dict[str, Dict[str, Any]] = {
         "chat_format": "",
     },
 }
-_MODEL_SUGGESTIONS = [
+_MODEL_SUGGESTIONS = list(dict.fromkeys([
     "anthropic/claude-opus-4.6",
     "anthropic/claude-opus-4.6",
     "anthropic/claude-sonnet-4.6",
@@ -65,7 +65,7 @@ _MODEL_SUGGESTIONS = [
     "openai::gpt-5.5-mini",
     "openai-compatible::meta-llama/compatible",
     "cloudru::zai-org/GLM-4.7",
-]
+]))
 
 # The onboarding wizard intentionally exposes only the first-run provider
 # surface. Hidden compatibility-only provider knobs must not survive

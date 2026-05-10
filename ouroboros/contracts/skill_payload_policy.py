@@ -15,12 +15,20 @@ SKILL_PAYLOAD_BUCKETS = frozenset({
     "ouroboroshub",
 })
 
+SKILL_PAYLOAD_ALL_BUCKETS = frozenset({
+    "native",
+    *SKILL_PAYLOAD_BUCKETS,
+})
+
 SKILL_PAYLOAD_CONTROL_FILENAMES = frozenset({
     ".clawhub.json",
     ".ouroboroshub.json",
     ".self_authored.json",
     ".seed-origin",
     "skill.openclaw.md",
+})
+
+SKILL_PAYLOAD_CONTROL_DIRNAMES = frozenset({
     ".ouroboros_env",
     "node_modules",
     "__pycache__",
@@ -130,7 +138,10 @@ def resolve_skill_payload_target(
 
     rel_inside = "." if suffix in ("", ".") else suffix
     rel_parts = [part.lower() for part in PurePosixPath(rel_inside).parts]
-    control = any(part in SKILL_PAYLOAD_CONTROL_FILENAMES for part in rel_parts)
+    control = any(
+        part in SKILL_PAYLOAD_CONTROL_FILENAMES or part in SKILL_PAYLOAD_CONTROL_DIRNAMES
+        for part in rel_parts
+    )
     return SkillPayloadTarget(
         bucket=bucket,
         skill=skill,
@@ -163,7 +174,9 @@ def is_skill_payload_path(
 
 __all__ = [
     "SKILL_PAYLOAD_BUCKETS",
+    "SKILL_PAYLOAD_ALL_BUCKETS",
     "SKILL_PAYLOAD_CONTROL_FILENAMES",
+    "SKILL_PAYLOAD_CONTROL_DIRNAMES",
     "SkillPayloadPathError",
     "SkillPayloadTarget",
     "is_skill_payload_path",

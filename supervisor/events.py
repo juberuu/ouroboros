@@ -7,7 +7,6 @@ Extracted from colab_launcher.py main loop to keep it under 500 lines.
 
 from __future__ import annotations
 
-import datetime
 import json
 import logging
 import os
@@ -16,6 +15,7 @@ import time
 import uuid
 from typing import Any, Dict, Optional
 
+from ouroboros.utils import utc_now_iso
 from ouroboros.task_results import (
     STATUS_COMPLETED,
     STATUS_REJECTED_DUPLICATE,
@@ -148,7 +148,7 @@ def _handle_task_heartbeat(evt: Dict[str, Any], ctx: Any) -> None:
         runtime_sec = round(max(0.0, time.time() - started_at), 1) if started_at > 0 else None
         try:
             ctx.bridge.push_log({
-                "ts": evt.get("ts", datetime.datetime.now(datetime.timezone.utc).isoformat()),
+                "ts": evt.get("ts", utc_now_iso()),
                 "type": "task_heartbeat",
                 "task_id": task_id,
                 "task_type": task.get("type"),
@@ -188,7 +188,7 @@ def _handle_send_message(evt: Dict[str, Any], ctx: Any) -> None:
         ctx.append_jsonl(
             ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
             {
-                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "ts": utc_now_iso(),
                 "type": "send_message_event_error", "error": repr(e),
             },
         )
@@ -240,7 +240,7 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
             ctx.append_jsonl(
                 ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
                 {
-                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "ts": utc_now_iso(),
                     "type": "evolution_task_failure_tracked",
                     "task_id": task_id,
                     "consecutive_failures": failures,
@@ -256,7 +256,7 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
     ctx.persist_queue_snapshot(reason="task_done")
     try:
         ctx.bridge.push_log({
-            "ts": evt.get("ts", datetime.datetime.now(datetime.timezone.utc).isoformat()),
+            "ts": evt.get("ts", utc_now_iso()),
             "type": "task_done",
             "task_id": task_id,
             "task_type": task_type,
@@ -290,7 +290,7 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
 
 def _handle_task_metrics(evt: Dict[str, Any], ctx: Any) -> None:
     payload = {
-        "ts": str(evt.get("ts") or datetime.datetime.now(datetime.timezone.utc).isoformat()),
+        "ts": str(evt.get("ts") or utc_now_iso()),
         "type": "task_metrics_event",
         "task_id": str(evt.get("task_id") or ""),
         "task_type": str(evt.get("task_type") or ""),
@@ -560,7 +560,7 @@ def _handle_send_photo(evt: Dict[str, Any], ctx: Any) -> None:
             ctx.append_jsonl(
                 ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
                 {
-                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "ts": utc_now_iso(),
                     "type": "send_photo_error",
                     "chat_id": chat_id, "error": err,
                 },
@@ -569,7 +569,7 @@ def _handle_send_photo(evt: Dict[str, Any], ctx: Any) -> None:
         ctx.append_jsonl(
             ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
             {
-                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "ts": utc_now_iso(),
                 "type": "send_photo_event_error", "error": repr(e),
             },
         )
@@ -602,7 +602,7 @@ def _handle_log_event(evt: Dict[str, Any], ctx: Any) -> None:
     if not isinstance(data, dict):
         return
     payload = {
-        "ts": data.get("ts", datetime.datetime.now(datetime.timezone.utc).isoformat()),
+        "ts": data.get("ts", utc_now_iso()),
         **data,
     }
     try:
@@ -645,7 +645,7 @@ def dispatch_event(evt: Dict[str, Any], ctx: Any) -> None:
         ctx.append_jsonl(
             ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
             {
-                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "ts": utc_now_iso(),
                 "type": "invalid_worker_event",
                 "error": "event is not dict",
                 "event_repr": repr(evt)[:1000],
@@ -658,7 +658,7 @@ def dispatch_event(evt: Dict[str, Any], ctx: Any) -> None:
         ctx.append_jsonl(
             ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
             {
-                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "ts": utc_now_iso(),
                 "type": "invalid_worker_event",
                 "error": "missing event.type",
                 "event_repr": repr(evt)[:1000],
@@ -671,7 +671,7 @@ def dispatch_event(evt: Dict[str, Any], ctx: Any) -> None:
         ctx.append_jsonl(
             ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
             {
-                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "ts": utc_now_iso(),
                 "type": "unknown_worker_event",
                 "event_type": event_type,
                 "event_repr": repr(evt)[:1000],
@@ -685,7 +685,7 @@ def dispatch_event(evt: Dict[str, Any], ctx: Any) -> None:
         ctx.append_jsonl(
             ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
             {
-                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "ts": utc_now_iso(),
                 "type": "worker_event_handler_error",
                 "event_type": event_type,
                 "error": repr(e),

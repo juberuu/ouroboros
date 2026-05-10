@@ -21,6 +21,7 @@ from supervisor.state import (
     budget_remaining, EVOLUTION_BUDGET_RESERVE,
 )
 from supervisor.message_bus import send_with_budget
+from ouroboros.utils import utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -135,7 +136,7 @@ def enqueue_task(task: Dict[str, Any], front: bool = False) -> Dict[str, Any]:
     _att = t.get("_attempt")
     t.setdefault("_attempt", int(_att) if _att is not None else 1)
     t["_queue_seq"] = -seq if front else seq
-    t["queued_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    t["queued_at"] = utc_now_iso()
     PENDING.append(t)
     sort_pending()
     return t
@@ -184,7 +185,7 @@ def persist_queue_snapshot(reason: str = "") -> None:
             "soft_sent": bool(meta.get("soft_sent")), "task": task,
         })
     payload = {
-        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "ts": utc_now_iso(),
         "reason": reason,
         "pending_count": len(PENDING), "running_count": len(RUNNING),
         "pending": pending_rows, "running": running_rows,
@@ -237,7 +238,7 @@ def restore_pending_from_snapshot(max_age_sec: int = 900) -> int:
             append_jsonl(
                 DRIVE_ROOT / "logs" / "supervisor.jsonl",
                 {
-                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "ts": utc_now_iso(),
                     "type": "queue_restored_from_snapshot",
                     "restored_pending": restored,
                 },
@@ -377,7 +378,7 @@ def enforce_task_timeouts() -> None:
             retried["id"] = uuid.uuid4().hex[:8]
             retried["_attempt"] = attempt + 1
             retried["timeout_retry_from"] = task_id
-            retried["timeout_retry_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            retried["timeout_retry_at"] = utc_now_iso()
             enqueue_task(retried, front=True)
             requeued = True
             new_attempt = attempt + 1
@@ -385,7 +386,7 @@ def enforce_task_timeouts() -> None:
         append_jsonl(
             DRIVE_ROOT / "logs" / "supervisor.jsonl",
             {
-                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "ts": utc_now_iso(),
                 "type": "task_hard_timeout",
                 "task_id": task_id, "task_type": task_type,
                 "worker_id": worker_id, "runtime_sec": round(runtime_sec, 2),
@@ -553,6 +554,6 @@ def enqueue_evolution_task_if_needed() -> None:
         "text": build_evolution_task_text(cycle),
     })
     st["evolution_cycle"] = cycle
-    st["last_evolution_task_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    st["last_evolution_task_at"] = utc_now_iso()
     save_state(st)
     send_with_budget(int(owner_chat_id), f"🧬 Evolution #{cycle}: {tid}")

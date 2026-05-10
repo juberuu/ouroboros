@@ -11,12 +11,9 @@ Why this exists: before the tool-capabilities consolidation, CORE_TOOL_NAMES was
 ``ouroboros/loop_tool_execution.py``.  Drift between the copies was a
 recurring source of subtle bugs.
 
-NOTE: ``ouroboros/tools/registry.py`` is a safety-critical file overwritten
-from the app bundle on every restart.  It contains its own
-``CORE_TOOL_NAMES`` used by the ``schemas(core_only=True)`` fallback path.
-That copy is NOT the runtime authority — ``tool_policy.py`` (which imports
-from here) controls task-start visibility, and ``loop_tool_execution.py``
-(also importing from here) controls parallelism / truncation.
+``ouroboros/tools/registry.py`` imports ``CORE_TOOL_NAMES`` from here for
+``schemas(core_only=True)`` so registry visibility, tool policy, and loop
+execution share one canonical set.
 """
 
 from __future__ import annotations

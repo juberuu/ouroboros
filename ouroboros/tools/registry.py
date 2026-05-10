@@ -30,6 +30,7 @@ from ouroboros.tool_aliases import (
     aliases_for_canonical,
     canonical_tool_name,
 )
+from ouroboros.tool_capabilities import CORE_TOOL_NAMES
 from ouroboros.utils import safe_relpath
 from ouroboros.contracts.task_constraint import TaskConstraint, normalize_task_constraint, resolve_payload_path
 from ouroboros.contracts.skill_payload_policy import is_skill_payload_path
@@ -459,28 +460,6 @@ class ToolEntry:
     handler: Callable  # fn(ctx: ToolContext, **args) -> str
     is_code_tool: bool = False
     timeout_sec: int = 360
-
-
-CORE_TOOL_NAMES = {
-    "repo_read", "repo_list", "repo_write", "repo_write_commit", "repo_commit",
-    "data_read", "data_list", "data_write",
-    "run_shell", "claude_code_edit",
-    "ensure_claude_cli",
-    "git_status", "git_diff",
-    "pull_from_remote", "restore_to_head", "revert_commit",
-    "schedule_task", "wait_for_task", "get_task_result",
-    "set_tool_timeout",
-    "update_scratchpad", "update_identity",
-    "chat_history", "web_search",
-    "send_user_message", "switch_model",
-    "request_restart", "promote_to_stable",
-    "knowledge_read", "knowledge_write", "knowledge_list",
-    "browse_page", "browser_action", "analyze_screenshot",
-    # v5.7.0: keep this frozen fallback copy aligned with
-    # tool_capabilities.CORE_TOOL_NAMES. ToolPolicy is the runtime SSOT, but
-    # some schemas(core_only=True) callers still use this local set.
-    "list_skills", "review_skill", "skill_preflight", "submit_skill_to_hub",
-}
 
 
 class ToolRegistry:

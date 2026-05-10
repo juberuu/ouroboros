@@ -9,12 +9,13 @@ The supervisor does NOT write here directly. Only the LLM (via
 forward_to_worker tool) writes to a task's mailbox. Workers drain
 messages for their own task_id on each LLM round.
 """
-import datetime
 import json
 import logging
 import pathlib
 import uuid
 from typing import List, Optional
+
+from ouroboros.utils import utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -36,7 +37,7 @@ def write_owner_message(
     path.parent.mkdir(parents=True, exist_ok=True)
     entry = json.dumps({
         "msg_id": msg_id or uuid.uuid4().hex,
-        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "ts": utc_now_iso(),
         "text": text,
     }, ensure_ascii=False)
     try:

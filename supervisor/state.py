@@ -6,7 +6,6 @@ Persistent state on local disk: load, save, atomic writes, file locks.
 
 from __future__ import annotations
 
-import datetime
 import json
 import logging
 import os
@@ -16,6 +15,7 @@ import uuid
 from typing import Any, Dict, Optional
 
 from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
+from ouroboros.utils import utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -78,7 +78,7 @@ def acquire_file_lock(lock_path: pathlib.Path, timeout_sec: float = 4.0,
         lock_path,
         timeout_sec=timeout_sec,
         stale_sec=stale_sec,
-        metadata=f"pid={os.getpid()} ts={datetime.datetime.now(datetime.timezone.utc).isoformat()}\n",
+        metadata=f"pid={os.getpid()} ts={utc_now_iso()}\n",
     )
 
 
@@ -95,7 +95,7 @@ from ouroboros.utils import append_jsonl  # noqa: F401
 # ---------------------------------------------------------------------------
 
 def ensure_state_defaults(st: Dict[str, Any]) -> Dict[str, Any]:
-    st.setdefault("created_at", datetime.datetime.now(datetime.timezone.utc).isoformat())
+    st.setdefault("created_at", utc_now_iso())
     st.setdefault("owner_id", None)
     st.setdefault("owner_chat_id", None)
     st.setdefault("message_offset", 0)
@@ -198,7 +198,7 @@ def init_state() -> Dict[str, Any]:
             st["session_total_snapshot"] = ground_truth["total_usd"]
             st["openrouter_total_usd"] = ground_truth["total_usd"]
             st["openrouter_daily_usd"] = ground_truth["daily_usd"]
-            st["openrouter_last_check_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            st["openrouter_last_check_at"] = utc_now_iso()
         else:
             # If we can't fetch ground truth, use 0 as baseline
             st["session_total_snapshot"] = 0.0
@@ -342,7 +342,7 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> None:
                 st = _load_state_unlocked()
                 st["openrouter_total_usd"] = ground_truth["total_usd"]
                 st["openrouter_daily_usd"] = ground_truth["daily_usd"]
-                st["openrouter_last_check_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                st["openrouter_last_check_at"] = utc_now_iso()
 
                 session_total_snap = st.get("session_total_snapshot")
                 session_spent_snap = st.get("session_spent_snapshot")
@@ -362,7 +362,7 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> None:
                             append_jsonl(
                                 DRIVE_ROOT / "logs" / "events.jsonl",
                                 {
-                                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                                    "ts": utc_now_iso(),
                                     "event": "budget_drift_warning",
                                     "drift_pct": round(drift_pct, 2),
                                     "our_delta": round(our_delta, 4),
@@ -645,7 +645,7 @@ def rotate_chat_log_if_needed(drive_root: pathlib.Path, max_bytes: int = 800_000
         return
     if chat.stat().st_size < max_bytes:
         return
-    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
+    ts = utc_now_iso().replace("-", "").replace(":", "").split(".")[0]
     archive_path = drive_root / "archive" / f"chat_{ts}.jsonl"
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     archive_path.write_bytes(chat.read_bytes())
