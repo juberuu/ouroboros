@@ -424,12 +424,101 @@ _SECRET_KEYS = frozenset([
 import re as _re
 _SECRET_PATTERNS = _re.compile(
     r'ghp_[A-Za-z0-9]{30,}'       # GitHub personal access token
-    r'|sk-ant-[A-Za-z0-9\-]{30,}' # Anthropic API key
+    r'|gh[ousr]_[A-Za-z0-9]{30,}' # GitHub OAuth/user/server/refresh tokens
+    r'|github_pat_[A-Za-z0-9_]{30,}'  # GitHub fine-grained personal access token
+    r'|AKIA[0-9A-Z]{16}'          # AWS access key id
+    r'|sk_live_[A-Za-z0-9]{24,}'  # Stripe live secret key
+    r'|sk_test_[A-Za-z0-9]{24,}'  # Stripe test secret key
+    r'|sk-ant-[A-Za-z0-9_\-]{30,}' # Anthropic API key
     r'|sk-or-[A-Za-z0-9\-]{30,}'  # OpenRouter API key
+    r'|sk-proj-[A-Za-z0-9_\-]{30,}'  # OpenAI project key
+    r'|sk-svcacct-[A-Za-z0-9_\-]{30,}'  # OpenAI service account key
+    r'|sk-admin-[A-Za-z0-9_\-]{30,}'  # OpenAI admin key
     r'|gsk_[A-Za-z0-9]{30,}'      # Groq API key
     r'|sk-[A-Za-z0-9]{40,}'       # OpenAI API key
     r'|\b[0-9]{8,}:[A-Za-z0-9_\-]{30,}\b'  # Telegram bot token (digits:alphanum)
 )
+_SECRET_BEARER_RE = _re.compile(r'(?i)\bBearer\s+([A-Za-z0-9_\-./+=]{24,})')
+_SECRET_URL_CREDENTIAL_RE = _re.compile(
+    r'(?i)\b(?:postgres|postgresql|mysql|mariadb|mongodb(?:\+srv)?|redis)://[^/\s:@]+:[^/\s@]+@'
+)
+_SECRET_LITERAL_FIELDS_RE = _re.compile(
+    r'(?im)(?:^|[\s,{])["\']?([A-Za-z_][A-Za-z0-9_-]*)["\']?\s*[:=]\s*["\']([^"\']+)["\']'
+)
+_SECRET_BRACKET_LITERAL_RE = _re.compile(
+    r'(?im)\[\s*["\']([A-Za-z_][A-Za-z0-9_-]*)["\']\s*\]\s*[:=]\s*["\']([^"\']+)["\']'
+)
+_SECRET_UNQUOTED_ASSIGNMENT_RE = _re.compile(
+    r'(?im)^([A-Za-z_][A-Za-z0-9_-]*)\s*[:=]\s*([A-Za-z0-9_\-./+=]{16,})\s*$'
+)
+_SECRET_FALLBACK_LITERAL_RE = _re.compile(
+    r'(?i)(?:os\.getenv|os\.environ\.get|settings\.get)\(\s*[\'"]([^\'"]+)[\'"][^)]*,\s*[\'"]([^\'"]+)[\'"]'
+    r'|api\.get_settings\([^)]*\)\.get\(\s*[\'"]([^\'"]+)[\'"][^)]*,\s*[\'"]([^\'"]+)[\'"]'
+    r'|process\.env\.([A-Z0-9_]+)\s*(?:\|\||\?\?)\s*[\'"]([^\'"]+)[\'"]'
+)
+_SECRET_KEY_NAME_RE = _re.compile(
+    r'(?i)^(?:'
+    r'token|access_token|refresh_token|auth_token|secret|secret_key|password|passwd|passphrase|authorization|'
+    r'api[_-]?key|database_url|db_url|ouroboros_network_password|aws_access_key_id|aws_secret_access_key|stripe_secret_key|'
+    r'[a-z0-9_-]+(?:[_-](?:token|secret|password|passwd|passphrase|api[_-]?key))'
+    r')$'
+)
+
+
+def _secret_key_name(key: str) -> bool:
+    raw = str(key or "").strip()
+    snake = raw.lower() if raw.upper() == raw else _re.sub(r"(?<!^)(?=[A-Z])", "_", raw).lower()
+    normalized = _re.sub(r"[^a-z0-9]+", "_", snake).strip("_")
+    return bool(_SECRET_KEY_NAME_RE.match(normalized))
+
+
+def _secret_placeholder_value(value: str) -> bool:
+    cleaned = str(value or "").strip().rstrip(",}]").strip().strip("'\"").strip()
+    if not cleaned:
+        return True
+    lowered = cleaned.lower()
+    if lowered in {"redacted", "***redacted***", "set_via_env", "set-in-settings", "changeme", "example"}:
+        return True
+    if lowered == "bearer":
+        return True
+    if lowered.startswith("bearer "):
+        bearer_value = cleaned[7:].strip()
+        if _secret_placeholder_value(bearer_value):
+            return True
+    if lowered in {"str", "string", "int", "float", "bool", "none", "null", "undefined"}:
+        return True
+    if lowered.startswith(("str ", "str|", "str |", "str)", "str):", "string ", "string|", "string |", "string)", "string):")):
+        return True
+    if lowered.startswith(("os.environ", "os.getenv", "process.env", "settings.", "api.get_settings")):
+        for literal in _re.findall(r"['\"]([^'\"]*)['\"]", cleaned):
+            if literal and not _secret_placeholder_value(literal) and not _secret_key_name(literal):
+                return False
+        return True
+    if lowered.startswith(("f\"", "f'")) and "{" in cleaned:
+        return True
+    if "settings" in lowered and any(word in lowered for word in ("configure", "configured", "set", "enter", "provide")):
+        return True
+    if "+" in cleaned and any(part in lowered for part in ("token", "key", "secret", "settings", "env")):
+        return True
+    if cleaned.startswith(("<", "${", "{")) and (cleaned.endswith((">", "}")) or cleaned.count("{") == 1):
+        return True
+    if _re.match(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+\(?[^)]*\)?$", cleaned):
+        return True
+    if _re.match(r"^[A-Za-z_][A-Za-z0-9_]*\([^)]*\)$", cleaned):
+        return True
+    if _re.match(r"^[a-z_][a-z0-9_]*$", cleaned) and cleaned in {
+        "password",
+        "token",
+        "secret",
+        "api_key",
+        "auth_header",
+        "access_token",
+        "refresh_token",
+    }:
+        return True
+    if cleaned.isupper() and "_" in cleaned and not any(ch.isdigit() for ch in cleaned) and _secret_key_name(cleaned):
+        return True
+    return False
 
 
 def sanitize_tool_result_for_log(result: str) -> str:
@@ -437,6 +526,39 @@ def sanitize_tool_result_for_log(result: str) -> str:
     if not isinstance(result, str) or len(result) < 20:
         return result
     return _SECRET_PATTERNS.sub("***REDACTED***", result)
+
+
+def contains_real_secret_value(text: str) -> tuple[bool, List[str]]:
+    """Detect concrete secret values by format and simple literal assignments."""
+    if not isinstance(text, str) or not text:
+        return False, []
+    matches = [
+        *_SECRET_PATTERNS.findall(text),
+        *_SECRET_BEARER_RE.findall(text),
+        *_SECRET_URL_CREDENTIAL_RE.findall(text),
+    ]
+    matches.extend(
+        literal
+        for env_key, env_literal, api_key, api_literal, js_key, js_literal in _SECRET_FALLBACK_LITERAL_RE.findall(text)
+        for key, literal in ((env_key, env_literal), (api_key, api_literal), (js_key, js_literal))
+        if key and literal and _secret_key_name(key) and not _secret_placeholder_value(literal)
+    )
+    matches.extend(
+        value.strip()
+        for key, value in _SECRET_LITERAL_FIELDS_RE.findall(text)
+        if _secret_key_name(key) and not _secret_placeholder_value(value)
+    )
+    matches.extend(
+        value.strip()
+        for key, value in _SECRET_BRACKET_LITERAL_RE.findall(text)
+        if _secret_key_name(key) and not _secret_placeholder_value(value)
+    )
+    matches.extend(
+        value.strip()
+        for key, value in _SECRET_UNQUOTED_ASSIGNMENT_RE.findall(text)
+        if _secret_key_name(key) and not _secret_placeholder_value(value)
+    )
+    return bool(matches), list(matches)
 
 
 def sanitize_tool_args_for_log(

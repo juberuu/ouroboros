@@ -373,7 +373,9 @@ Runtime starts with core tools only. Use `list_available_tools` when unsure, and
   binaries/caches). Do NOT use `run_shell` with `grep` or `rg` as the primary
   search path — `code_search` is the dedicated tool. Shell grep is acceptable
   only as a fallback when `code_search` cannot express the query (e.g. complex
-  multi-line patterns, binary file inspection).
+  multi-line patterns, binary file inspection). If shell grep/rg returns
+  `exit_code=1 (no matches)`, that means the pattern was absent, not that the
+  tool failed.
 - **`run_shell`** is for running programs, tests, builds, and system commands —
   not for reading files or searching code. Its `cmd` parameter must be a JSON
   array of strings, never a plain string.

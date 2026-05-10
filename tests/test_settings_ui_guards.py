@@ -111,6 +111,7 @@ class TestSettingsUiGuards(unittest.TestCase):
         self.assertIn("Array.from(new Set(keys)).sort", settings)
         self.assertNotIn("Requested by ${escapeHtml(row.skill)}", settings)
         self.assertIn("window.addEventListener('ouro:skill-lifecycle'", settings)
+        self.assertIn("ws.on('extension_lifecycle'", settings)
         self.assertIn("event.detail?.page === 'settings'", settings)
 
     def test_custom_secret_rows_are_compact_grid(self):

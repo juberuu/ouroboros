@@ -387,12 +387,14 @@ the v5.6.0 drill-down accordion (`settings-subtab-open` /
 ### Notifications
 
 Transient status must use `web/modules/toast.js::showToast()`, which renders
-fixed-position notifications in `#toast-stack`. Toasts must not be inserted
-into page content or headers, because that shifts the interface while the
-person is reading or clicking. Use reserved inline status rows only when the
-status belongs to a specific control group and that row is always present
-(for example marketplace search status). Do not create page-prepended banners
-for short-lived events such as review started, install queued, or grant saved.
+fixed-position notifications in `#toast-stack`, top-right but below page chrome.
+The offset is intentional: toasts must never cover the Chat composer or primary
+page actions. Toasts must not be inserted into page content or headers, because
+that shifts the interface while the person is reading or clicking. Use reserved
+inline status rows only when the status belongs to a specific control group and
+that row is always present (for example marketplace search status). Do not
+create page-prepended banners or local wrapper aliases such as `showBanner` for
+short-lived events such as review started, install queued, or grant saved.
 
 ### Accent colors
 

@@ -58,4 +58,7 @@ review-time threat model.
 
 No persistent state is written; the widget fetches on-demand and the
 result is rendered directly. The extension's
-:meth:`PluginAPI.get_state_dir` is unused.
+:meth:`PluginAPI.get_state_dir` is unused. Skills that do manage
+per-request assets should use ``api.skill_job_dir(job_id)`` so generated
+files live under isolated ``jobs/<sanitized_id>-<hash>/{assets,output,tmp}``
+folders.

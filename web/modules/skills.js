@@ -44,6 +44,8 @@ function skillsPageTemplate() {
                     tabClass: 'skills-tab',
                 }),
             })}
+            <div class="skills-search-chrome" id="skills-pane-marketplace-chrome" data-chrome-pane="marketplace" hidden></div>
+            <div class="skills-search-chrome" id="skills-pane-ouroboroshub-chrome" data-chrome-pane="ouroboroshub" hidden></div>
             <div class="skills-scroll scroll-fade-y">
                 <div class="skills-tab-panel" id="skills-pane-installed" data-pane="installed">
                 <div id="skills-migration-banner" class="skills-migration-banner" hidden></div>
@@ -826,11 +828,6 @@ async function postWithFeedback(url, body) {
     return payload;
 }
 
-
-function showBanner(message, tone) {
-    return showToast(message, tone);
-}
-
 function buildHealPrompt(skill) {
     const findings = Array.isArray(skill.review_findings) ? skill.review_findings : [];
     const diagnostics = {
@@ -931,7 +928,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
             const missing = keys.length ? keys : [...missingKeys, ...missingPermissions];
             const result = await requestMissingKeyGrants(name, missing);
             if (result) {
-                showBanner(`${name}: requested key grants saved`, 'ok');
+                showToast(`${name}: requested key grants saved`, 'ok');
                 emitSkillLifecycle('grant', name, result);
             }
             return;
@@ -950,7 +947,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
 
         if (action === 'repair') {
             if (repairingSkills.has(name)) {
-                showBanner(`${name}: repair is already being queued`, 'muted');
+                showToast(`${name}: repair is already being queued`, 'muted');
                 return;
             }
             const ok = await openConfirmDialog({
@@ -970,7 +967,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
                     visible_text: `Repair task queued for ${name}. Ouroboros will inspect the skill payload and re-run review.`,
                     visible_task_id: `skill_repair_${name}`,
                 });
-                showBanner(`${name}: repair task sent to Ouroboros`, 'ok');
+                showToast(`${name}: repair task sent to Ouroboros`, 'ok');
                 emitSkillLifecycle('repair', name);
                 if (typeof ctx.showPage === 'function') {
                     ctx.showPage('chat');
@@ -998,7 +995,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
                 visible_text: `Submission task queued for ${name}. Ouroboros will open a PR to OuroborosHub if validation passes.`,
                 visible_task_id: `skill_submit_${name}`,
             });
-            showBanner(`${name}: submission task sent to Ouroboros`, 'ok');
+            showToast(`${name}: submission task sent to Ouroboros`, 'ok');
             emitSkillLifecycle('submit_hub', name);
             if (typeof ctx.showPage === 'function') {
                 ctx.showPage('chat');
@@ -1022,7 +1019,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
         };
         const friendlyAction = actionLabels[result.extension_action];
         const tail = friendlyAction ? ` — ${friendlyAction}` : '';
-        showBanner(`${name} ${wantsEnabled ? 'turned on' : 'turned off'}${tail}`, 'ok');
+        showToast(`${name} ${wantsEnabled ? 'turned on' : 'turned off'}${tail}`, 'ok');
         emitSkillLifecycle(wantsEnabled ? 'enable' : 'disable', name, result);
         return result;
     }
@@ -1032,14 +1029,14 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
         reviewingSkills.add(name);
         renderFn();
         try {
-            showBanner(`${name}: security review started; this can take a few minutes`, 'muted');
+            showToast(`${name}: security review started; this can take a few minutes`, 'muted');
             const result = await postWithFeedback(
                 `/api/skills/${encodeURIComponent(name)}/review`,
                 {}
             );
             const findings = result.findings?.length ?? 0;
             const errorTail = result.error ? ` — ${result.error}` : '';
-            showBanner(
+            showToast(
                 `${name}: review ${result.status}${findings ? ` (${findings} findings)` : ''}${errorTail}`,
                 result.status === 'pass' ? 'ok'
                     : (result.error || result.status === 'fail') ? 'danger'
@@ -1088,7 +1085,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
             // request failed (e.g. 409 because grants are still missing).
             target.checked = !wantsEnabled;
             target.setAttribute('aria-checked', (!wantsEnabled).toString());
-            showBanner(`${name}: ${err.message || err}`, (err.message || '').includes('cancel') ? 'warn' : 'danger');
+            showToast(`${name}: ${err.message || err}`, (err.message || '').includes('cancel') ? 'warn' : 'danger');
         } finally {
             target.disabled = false;
             renderFn();
@@ -1134,7 +1131,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
             try {
                 await triggerSkillAction(name, action, { keys: actionTarget.dataset.keys || '' });
             } catch (err) {
-                showBanner(`${name}: ${err.message || err}`, (err.message || '').includes('cancel') ? 'warn' : 'danger');
+                showToast(`${name}: ${err.message || err}`, (err.message || '').includes('cancel') ? 'warn' : 'danger');
             } finally {
                 actionTarget.disabled = false;
                 renderFn();
@@ -1155,7 +1152,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
             try {
                 await reviewSkillInBackground(name);
             } catch (err) {
-                showBanner(`${name}: ${err.message || err}`, 'danger');
+                showToast(`${name}: ${err.message || err}`, 'danger');
             } finally {
                 target.disabled = false;
                 renderFn();
@@ -1170,7 +1167,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
             } else if (target.classList.contains('skills-open-widgets')) {
                 document.querySelector('.nav-btn[data-page="widgets"]')?.click();
             } else if (target.classList.contains('skills-retry-install')) {
-                showBanner(`${name}: retrying install from ClawHub`, 'muted');
+                showToast(`${name}: retrying install from ClawHub`, 'muted');
                 const result = await postWithFeedback('/api/marketplace/clawhub/install', {
                     slug: name,
                     auto_review: true,
@@ -1178,11 +1175,11 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
                 if (!result.ok) {
                     throw new Error(result.error || 'install failed');
                 }
-                showBanner(`${name}: install queued/retried`, 'ok');
+                showToast(`${name}: install queued/retried`, 'ok');
             } else if (target.classList.contains('skills-grant')) {
                 const keys = (target.dataset.keys || '').split(',').map((k) => k.trim()).filter(Boolean);
                 if (!keys.length) {
-                    showBanner(`${name}: no requested keys to grant`, 'warn');
+                    showToast(`${name}: no requested keys to grant`, 'warn');
                 } else {
                     const result = await requestMissingKeyGrants(name, keys);
                     // v5.2.2: surface the cross-process reconcile
@@ -1196,31 +1193,31 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
                     const action = result.extension_action;
                     const loadError = result.load_error;
                     if (reason === 'reconcile_call_failed') {
-                        showBanner(
+                        showToast(
                             `${name}: grant saved, but server reconcile failed \u2014 toggle disable/enable to retry`,
                             'warn'
                         );
                     } else if (loadError) {
-                        showBanner(
+                        showToast(
                             `${name}: grant saved, but extension load failed: ${loadError}`,
                             'warn'
                         );
                     } else if (action === 'extension_loaded') {
-                        showBanner(`${name}: grant saved and extension loaded`, 'ok');
+                        showToast(`${name}: grant saved and extension loaded`, 'ok');
                     } else {
-                        showBanner(`${name}: requested key grants saved`, 'ok');
+                        showToast(`${name}: requested key grants saved`, 'ok');
                     }
                 }
             } else if (target.classList.contains('skills-update')) {
                 const source = target.dataset.source === 'ouroboroshub' ? 'ouroboroshub' : 'clawhub';
-                showBanner(`${name}: updating from ${source === 'ouroboroshub' ? 'OuroborosHub' : 'ClawHub'} (this may take ~30s)`, 'muted');
+                showToast(`${name}: updating from ${source === 'ouroboroshub' ? 'OuroborosHub' : 'ClawHub'} (this may take ~30s)`, 'muted');
                 const url = source === 'ouroboroshub'
                     ? `/api/marketplace/ouroboroshub/install`
                     : `/api/marketplace/clawhub/update/${encodeURIComponent(name)}`;
                 const body = source === 'ouroboroshub' ? { slug: name, overwrite: true, auto_review: true } : {};
                 const result = await postWithFeedback(url, body);
                 const tail = result.review_status ? ` — review ${result.review_status}` : '';
-                showBanner(
+                showToast(
                     result.ok
                         ? `${name}: updated${tail}`
                         : `${name}: update failed — ${result.error || 'unknown'}`,
@@ -1250,14 +1247,14 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
                     ? `/api/marketplace/ouroboroshub/uninstall/${encodeURIComponent(name)}`
                     : `/api/marketplace/clawhub/uninstall/${encodeURIComponent(name)}`;
                 const result = await postWithFeedback(url, {});
-                showBanner(
+                showToast(
                     result.ok ? `${name}: uninstalled` : `${name}: uninstall failed — ${result.error}`,
                     result.ok ? 'ok' : 'danger',
                 );
                 if (result.ok) emitSkillLifecycle('uninstall', name, result);
             }
         } catch (err) {
-            showBanner(`${name}: ${err.message || err}`, 'danger');
+            showToast(`${name}: ${err.message || err}`, 'danger');
         } finally {
             target.disabled = false;
             closeSkillMenus();
@@ -1279,6 +1276,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
 function activateTab(tabName) {
     const buttons = document.querySelectorAll('.skills-tab');
     const panels = document.querySelectorAll('.skills-tab-panel');
+    const chromeRows = document.querySelectorAll('.skills-search-chrome');
     buttons.forEach((btn) => {
         const isActive = btn.dataset.tab === tabName;
         btn.classList.toggle('is-active', isActive);
@@ -1286,6 +1284,9 @@ function activateTab(tabName) {
     });
     panels.forEach((panel) => {
         panel.hidden = panel.dataset.pane !== tabName;
+    });
+    chromeRows.forEach((row) => {
+        row.hidden = row.dataset.chromePane !== tabName;
     });
 }
 
@@ -1304,7 +1305,7 @@ async function renderMarketplacePane() {
     }
     pane.innerHTML = '<div class="muted">Loading marketplace…</div>';
     try {
-        initMarketplace(pane);
+        initMarketplace(pane, document.getElementById('skills-pane-marketplace-chrome'));
         pane.dataset.bootstrapped = 'true';
     } catch (err) {
         pane.dataset.bootstrapped = '';
@@ -1325,7 +1326,7 @@ async function renderOuroborosHubPane() {
     }
     pane.innerHTML = '<div class="muted">Loading OuroborosHub…</div>';
     try {
-        initOuroborosHub(pane);
+        initOuroborosHub(pane, document.getElementById('skills-pane-ouroboroshub-chrome'));
         pane.dataset.bootstrapped = 'true';
     } catch (err) {
         pane.dataset.bootstrapped = '';
@@ -1375,11 +1376,11 @@ export function initSkills(ctx) {
             activateTab(tabName);
             if (tabName === 'marketplace') {
                 renderMarketplacePane().catch((err) => {
-                    showBanner(`ClawHub failed: ${err.message || err}`, 'danger');
+                    showToast(`ClawHub failed: ${err.message || err}`, 'danger');
                 });
             } else if (tabName === 'ouroboroshub') {
                 renderOuroborosHubPane().catch((err) => {
-                    showBanner(`OuroborosHub failed: ${err.message || err}`, 'danger');
+                    showToast(`OuroborosHub failed: ${err.message || err}`, 'danger');
                 });
             }
         });

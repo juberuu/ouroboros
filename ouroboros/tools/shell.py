@@ -176,6 +176,16 @@ _GREP_REGEX_MODE_FLAGS = frozenset((
     "-G", "--basic-regexp",
 ))
 _GREP_BACKSLASH_PIPE_PATTERN = re.compile(r'\\\|')
+_NO_MATCH_EXIT_TOOLS = frozenset(("grep", "egrep", "fgrep", "rg", "ag", "ack"))
+
+
+def _is_search_no_match(res: CompletedProcess) -> bool:
+    tool = pathlib.Path(str(res.args[0] if res.args else "")).name.lower()
+    return (
+        int(res.returncode) == 1
+        and tool in _NO_MATCH_EXIT_TOOLS
+        and not str(res.stderr or "").strip()
+    )
 
 
 def _grep_has_explicit_regex_mode(cmd: List[str]) -> bool:
@@ -344,6 +354,11 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
             text=True, timeout=timeout_sec,
         )
         if res.returncode != 0:
+            if _is_search_no_match(res):
+                return (
+                    f"{_describe_returncode(res.returncode)} (no matches)\n"
+                    f"{_format_process_output(res.stdout or '', '')}"
+                )
             return _format_process_failure(
                 "⚠️ SHELL_EXIT_ERROR",
                 "command exited",

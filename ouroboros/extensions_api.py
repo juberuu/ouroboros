@@ -76,6 +76,23 @@ def _coerce_bool_arg(value: Any) -> bool | None:
     return None
 
 
+def _broadcast_extension_lifecycle(request: Request, skill: str, action: Any, reason: Any = "") -> None:
+    if not action:
+        return
+    try:
+        broadcaster = getattr(request.app.state, "broadcast_ws_sync", None)
+    except Exception:
+        broadcaster = None
+    if not callable(broadcaster):
+        return
+    broadcaster({
+        "type": "extension_lifecycle",
+        "skill": str(skill or ""),
+        "action": str(action or ""),
+        "reason": str(reason or ""),
+    })
+
+
 async def api_extensions_index(request: Request) -> JSONResponse:
     """GET /api/extensions — catalogue + live registration snapshot.
 
@@ -645,6 +662,12 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
     )
     if queued.get("error"):
         return JSONResponse(queued, status_code=int(queued.get("status_code") or 400))
+    _broadcast_extension_lifecycle(
+        request,
+        str(queued.get("skill") or initial.name),
+        queued.get("action"),
+        queued.get("live_reason"),
+    )
     return JSONResponse(
         {
             "skill": queued.get("skill", initial.name),
@@ -763,6 +786,12 @@ async def api_skill_reconcile(request: Request) -> JSONResponse:
         load_settings,
         repo_path=repo_path,
         retry_load_error=True,
+    )
+    _broadcast_extension_lifecycle(
+        request,
+        skill_name,
+        state.get("action"),
+        state.get("reason"),
     )
     return JSONResponse(
         {

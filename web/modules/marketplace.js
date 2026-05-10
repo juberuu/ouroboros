@@ -73,21 +73,28 @@ function formatNumber(value) {
 const MARKETPLACE_SEARCH_LIMIT = 16;
 
 
-function paneTemplate() {
+function controlsTemplate() {
+    return `
+        <div class="marketplace-controls">
+            <input type="search" id="mp-query" class="marketplace-search"
+                   placeholder="Search ClawHub skills by name or summary…" autocomplete="off">
+            <button class="btn btn-primary" data-mp-search>Search</button>
+        </div>
+        <div class="marketplace-filters">
+            <label class="marketplace-filter-toggle">
+                <input type="checkbox" id="mp-only-official">
+                <span class="marketplace-filter-track" aria-hidden="true"></span>
+                <span>Official only</span>
+            </label>
+        </div>
+    `;
+}
+
+
+function paneTemplate({ includeControls = true } = {}) {
     return `
         <div class="marketplace-shell">
-            <div class="marketplace-controls">
-                <input type="search" id="mp-query" class="marketplace-search"
-                       placeholder="Search ClawHub skills by name or summary…" autocomplete="off">
-                <button class="btn btn-primary" data-mp-search>Search</button>
-            </div>
-            <div class="marketplace-filters">
-                <label class="marketplace-filter-toggle">
-                    <input type="checkbox" id="mp-only-official">
-                    <span class="marketplace-filter-track" aria-hidden="true"></span>
-                    <span>Official only</span>
-                </label>
-            </div>
+            ${includeControls ? controlsTemplate() : ''}
             <div id="mp-status" class="muted marketplace-status"></div>
             <div id="mp-results" class="marketplace-results"></div>
             <div id="mp-pagination" class="marketplace-pagination" hidden></div>
@@ -714,8 +721,11 @@ async function openDetailModal(host, slug, options) {
 // ---------------------------------------------------------------------------
 
 
-export function initMarketplace(pane) {
-    pane.innerHTML = paneTemplate();
+export function initMarketplace(pane, controlsHost = null) {
+    pane.innerHTML = paneTemplate({ includeControls: !controlsHost });
+    if (controlsHost) {
+        controlsHost.innerHTML = controlsTemplate();
+    }
 
     const state = {
         query: '',
@@ -730,9 +740,10 @@ export function initMarketplace(pane) {
         registryAttempts: [],
     };
 
-    const queryInput = pane.querySelector('#mp-query');
-    const onlyOfficial = pane.querySelector('#mp-only-official');
-    const searchBtn = pane.querySelector('[data-mp-search]');
+    const controlsRoot = controlsHost || pane;
+    const queryInput = controlsRoot.querySelector('#mp-query');
+    const onlyOfficial = controlsRoot.querySelector('#mp-only-official');
+    const searchBtn = controlsRoot.querySelector('[data-mp-search]');
     const resultsHost = pane.querySelector('#mp-results');
     const paginationHost = pane.querySelector('#mp-pagination');
     const modalHost = pane.querySelector('#mp-modal-host');

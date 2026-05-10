@@ -2926,6 +2926,15 @@ body {
     padding-right: 2px;
 }
 
+.skills-search-chrome {
+    flex: 0 0 auto;
+    margin: 2px 0 12px;
+}
+
+.skills-search-chrome[hidden] {
+    display: none !important;
+}
+
 .skills-list {
     display: flex;
     flex-direction: column;
@@ -3447,7 +3456,7 @@ body {
 .toast-stack {
     position: fixed;
     right: 18px;
-    bottom: 18px;
+    top: calc(76px + env(safe-area-inset-top));
     z-index: 120;
     display: flex;
     flex-direction: column;

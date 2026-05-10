@@ -2114,6 +2114,7 @@ async def lifespan(app):
 app = NetworkAuthGate(Starlette(routes=routes, lifespan=lifespan))
 app.app.state.drive_root = pathlib.Path(DATA_DIR)  # type: ignore[attr-defined]
 app.app.state.repo_dir = pathlib.Path(REPO_DIR)  # type: ignore[attr-defined]
+app.app.state.broadcast_ws_sync = broadcast_ws_sync  # type: ignore[attr-defined]
 
 
 def _emergency_process_cleanup(*, port_sweep: bool = True) -> None:

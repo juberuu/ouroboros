@@ -141,6 +141,30 @@ flowchart LR
 - **Execute**: `skill_exec` runs `type: script` skills as
   subprocess; `type: extension` runs in-process via the loader.
 
+## Data layout for stateful skills
+
+Stateful skills should keep every user-visible job/session isolated under a
+per-job directory. For extensions, prefer:
+
+```python
+job_dir = api.skill_job_dir(job_id)
+assets_dir = job_dir / "assets"
+output_dir = job_dir / "output"
+tmp_dir = job_dir / "tmp"
+```
+
+This creates `data/state/skills/<skill>/jobs/<sanitized_id>-<hash>/{assets,output,tmp}`.
+Use it for generated images, audio, video frames, intermediate artifacts, and
+per-request temp files. Keep shared learned data such as prompt lessons or
+small caches at the skill state root only when it is intentionally shared across
+jobs.
+
+Avoid flat content-keyed filenames such as `assets/keyframe_0.png`,
+`concat.txt`, or `_vframe_0.png` directly under `state_dir`; a later or
+parallel job can overwrite them. Retry outputs should include an attempt number
+or short random suffix, and temporary verification files should live under
+`tmp/` and be cleaned when the job finishes.
+
 ### Declaring dependencies
 
 Skills may declare auto-installable dependencies in frontmatter:

@@ -257,7 +257,7 @@ const SETTINGS_FALLBACK_MODELS = [
 
 let settingsModelCatalogItems = SETTINGS_FALLBACK_MODELS.map((value) => ({ value, label: 'Suggested model' }));
 
-export function initSettings({ state, setBeforePageLeave } = {}) {
+export function initSettings({ state, setBeforePageLeave, ws } = {}) {
     const page = document.createElement('div');
     page.id = 'page-settings';
     page.className = 'page app-page-glass';
@@ -705,6 +705,12 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
         const action = String(event.detail?.action || 'skills changed');
         refreshSettingsAfterExtensionChange(action);
     });
+    if (ws && typeof ws.on === 'function') {
+        ws.on('extension_lifecycle', (event) => {
+            const action = String(event?.action || 'extension lifecycle');
+            refreshSettingsAfterExtensionChange(action);
+        });
+    }
 
     window.addEventListener('ouro:page-shown', (event) => {
         if (event.detail?.page === 'settings') refreshSettingsAfterExtensionChange('settings page shown');

@@ -787,6 +787,20 @@ class PluginAPIImpl:
     def get_state_dir(self) -> str:
         return str(self._state_dir)
 
+    def skill_job_dir(self, job_id: str) -> pathlib.Path:
+        raw = str(job_id or "").strip()
+        safe = "".join(
+            ch if ch.isalnum() or ch in "-_." else "_"
+            for ch in raw
+        ).strip("._")
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8]
+        prefix = (safe or "_job")[:55].rstrip("._-") or "_job"
+        safe = f"{prefix}-{digest}"
+        root = self._state_dir / "jobs" / safe
+        for child in ("assets", "output", "tmp"):
+            (root / child).mkdir(parents=True, exist_ok=True)
+        return root
+
     def get_skill_token(self) -> SkillToken:
         token_path = self._state_dir / AUTH_TOKEN_FILENAME
         payload = read_json_dict(token_path) or {}

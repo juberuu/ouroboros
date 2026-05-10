@@ -143,10 +143,13 @@ def test_payload_excludes_control_plane_sidecars(tmp_path):
     assert ".self_authored.json" not in {item["path"] for item in payload}
 
 
-def test_payload_blocks_secret_like_content(tmp_path):
+def test_payload_blocks_real_secret_values(tmp_path):
     ctx = _ctx(tmp_path)
     skill_dir = _write_skill(ctx)
-    (skill_dir / "plugin.py").write_text('OPENROUTER_API_KEY = "sk-secret-value"\n', encoding="utf-8")
+    (skill_dir / "plugin.py").write_text(
+        'OPENROUTER_API_KEY = "sk-or-' + ("A" * 40) + '"\n',
+        encoding="utf-8",
+    )
     from ouroboros.skill_loader import find_skill
 
     loaded = find_skill(pathlib.Path(ctx.drive_root), "demo")
@@ -154,7 +157,146 @@ def test_payload_blocks_secret_like_content(tmp_path):
     with pytest.raises(ValueError) as exc:
         skill_publish._skill_payload_files(skill_dir, loaded.manifest)
 
-    assert "secret-like content" in str(exc.value)
+    assert "secret value" in str(exc.value)
+
+
+def test_payload_allows_env_key_names_without_secret_values(tmp_path):
+    ctx = _ctx(tmp_path)
+    skill_dir = _write_skill(ctx)
+    (skill_dir / "plugin.py").write_text(
+        "import os\nOPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY', '')\n",
+        encoding="utf-8",
+    )
+    from ouroboros.skill_loader import find_skill
+
+    loaded = find_skill(pathlib.Path(ctx.drive_root), "demo")
+    payload = skill_publish._skill_payload_files(skill_dir, loaded.manifest)
+
+    assert any(item["path"] == "plugin.py" for item in payload)
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "github_pat_" + ("A" * 40),
+        "gho_" + ("A" * 40),
+        "ghu_" + ("A" * 40),
+        "ghs_" + ("A" * 40),
+        "ghr_" + ("A" * 40),
+        "sk-proj-" + ("A" * 40),
+        "sk-svcacct-" + ("A" * 40),
+        "sk-admin-" + ("A" * 40),
+        "do not publish sk-ant-api03_" + ("A" * 40),
+        "Authorization: Bearer " + ("A" * 32),
+        "OUROBOROS_NETWORK_PASSWORD=" + ("A" * 32),
+        '{"password":"hunter2"}',
+        '{"name":"demo","password":"hunter2"}',
+        '{"nested":{"password":"hunter2"}}',
+        '{"openRouterApiKey":"abc12345"}',
+        'openRouterApiKey = "abc12345"',
+        'config["password"] = "hunter2"',
+        "config['api_key'] = 'abc12345'",
+        'config = {"api_key": "abc12345"}',
+        'config = {"password": "hunter2"}',
+        'config = {"nested": {"password": "hunter2"}}',
+        'requests.get(url, headers={"Authorization": "Bearer shorttoken"})',
+        'const config = { apiKey: "abc12345" };',
+        'const config = { nested: { password: "hunter2" } };',
+        'headers = { Authorization: "Bearer shorttoken" }',
+        'AWS_ACCESS_KEY_ID="AKIA' + ("A" * 16) + '"',
+        'AWS_SECRET_ACCESS_KEY="' + ("A" * 40) + '"',
+        'STRIPE_SECRET_KEY="sk_live_' + ("A" * 32) + '"',
+        '{"password":"prod_db_password_2026"}',
+        'PASSWORD="prod_db_password_2026"',
+        'api_key = "prod_api_key_2026"',
+        'API_KEY = os.getenv("API_KEY", "prod_api_key_2026")',
+        'password = os.getenv("PASSWORD", "correct horse battery staple!")',
+        'api_key = api.get_settings(["API_KEY"]).get("API_KEY", "prod_api_key_2026")',
+        'const apiKey = process.env.API_KEY || "prod_api_key_2026";',
+        'PASSWORD="PROD_DB_PASSWORD_2026"',
+        'API_KEY="PROD_API_KEY_2026"',
+        'SECRET_KEY="prod_secret_key_2026"',
+        'DATABASE_URL="postgres://user:pass@example.com/db"',
+        'headers["Authorization"] = "Bearer shorttoken"',
+        'API_KEY="abc12345"',
+        'AUTHORIZATION="Bearer shorttoken"',
+        'PASSWORD="correct horse battery staple!"',
+    ],
+)
+def test_payload_blocks_modern_secret_values(tmp_path, secret):
+    ctx = _ctx(tmp_path)
+    skill_dir = _write_skill(ctx)
+    (skill_dir / "plugin.py").write_text(secret + "\n", encoding="utf-8")
+    from ouroboros.skill_loader import find_skill
+
+    loaded = find_skill(pathlib.Path(ctx.drive_root), "demo")
+
+    with pytest.raises(ValueError) as exc:
+        skill_publish._skill_payload_files(skill_dir, loaded.manifest)
+
+    assert "secret value" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "placeholder",
+    [
+        "OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY', '')",
+        'OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")',
+        "API_KEY = api_key",
+        "API_KEY = get_key()",
+        "API_KEY = self.api_key",
+        "password = password",
+        "Authorization = auth_header",
+        'headers = {"Authorization": f"Bearer {token}"}',
+        'headers = {"Authorization": "Bearer " + token}',
+        "Authorization: Bearer <token>",
+        "Authorization: Bearer {token}",
+        "Password: Configure this in Settings before use.",
+        "API_KEY = settings.OPENROUTER_API_KEY",
+        "TOKEN = process.env.GITHUB_TOKEN",
+        "LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')",
+        "PORT = os.getenv('PORT', '8000')",
+        "BASE_URL = os.getenv('BASE_URL', 'https://api.example.com')",
+        "theme = settings.get('THEME', 'dark')",
+        "NODE_ENV = process.env.NODE_ENV || 'production'",
+        "token: str = ''",
+        "api_key: str | None = None",
+        "def auth(token: str):\n    pass",
+        '{"api_key":"set_via_env"}',
+        'PASSWORD="<set in settings>"',
+        'TOKEN="${TOKEN}"',
+    ],
+)
+def test_payload_allows_secret_placeholders(tmp_path, placeholder):
+    ctx = _ctx(tmp_path)
+    skill_dir = _write_skill(ctx)
+    (skill_dir / "plugin.py").write_text(placeholder + "\n", encoding="utf-8")
+    from ouroboros.skill_loader import find_skill
+
+    loaded = find_skill(pathlib.Path(ctx.drive_root), "demo")
+    payload = skill_publish._skill_payload_files(skill_dir, loaded.manifest)
+
+    assert any(item["path"] == "plugin.py" for item in payload)
+
+
+@pytest.mark.parametrize(
+    "safe_config",
+    [
+        "max_tokens = 4096",
+        "TOKENIZERS_PARALLELISM=false",
+        "token_budget: 8192",
+    ],
+)
+def test_payload_allows_non_secret_token_config_names(tmp_path, safe_config):
+    ctx = _ctx(tmp_path)
+    skill_dir = _write_skill(ctx)
+    (skill_dir / "plugin.py").write_text(safe_config + "\n", encoding="utf-8")
+    from ouroboros.skill_loader import find_skill
+
+    loaded = find_skill(pathlib.Path(ctx.drive_root), "demo")
+    payload = skill_publish._skill_payload_files(skill_dir, loaded.manifest)
+
+    assert any(item["path"] == "plugin.py" for item in payload)
 
 
 def test_update_mode_payload_replaces_existing_entry(tmp_path):
@@ -215,7 +357,34 @@ def test_pr_body_fallback_when_llm_fails(tmp_path, monkeypatch):
     assert "Fresh PASS review" in body
 
 
-def test_pr_body_blocks_secret_like_note(tmp_path):
+def test_pr_body_allows_secret_setting_names_in_note(tmp_path, monkeypatch):
+    ctx = _ctx(tmp_path)
+    skill_dir = _write_skill(ctx)
+    from ouroboros.skill_loader import find_skill
+
+    loaded = find_skill(pathlib.Path(ctx.drive_root), "demo")
+    payload = skill_publish._skill_payload_files(skill_dir, loaded.manifest)
+
+    class BrokenLLM:
+        def chat(self, **_kwargs):
+            raise RuntimeError("offline")
+
+    monkeypatch.setattr(skill_publish, "LLMClient", lambda: BrokenLLM())
+
+    body = skill_publish._generate_pr_body(
+        ctx,
+        "add",
+        "demo",
+        loaded.manifest,
+        payload,
+        "Uses OPENROUTER_API_KEY from Settings after owner grant.",
+        skill_dir,
+    )
+
+    assert "OPENROUTER_API_KEY" in body
+
+
+def test_pr_body_blocks_real_secret_value_in_note(tmp_path):
     ctx = _ctx(tmp_path)
     skill_dir = _write_skill(ctx)
     from ouroboros.skill_loader import find_skill
@@ -224,7 +393,15 @@ def test_pr_body_blocks_secret_like_note(tmp_path):
     payload = skill_publish._skill_payload_files(skill_dir, loaded.manifest)
 
     with pytest.raises(ValueError):
-        skill_publish._generate_pr_body(ctx, "add", "demo", loaded.manifest, payload, "TOKEN=abc12345", skill_dir)
+        skill_publish._generate_pr_body(
+            ctx,
+            "add",
+            "demo",
+            loaded.manifest,
+            payload,
+            "token sk-ant-" + ("A" * 40),
+            skill_dir,
+        )
 
 
 def test_full_flow_happy_path(tmp_path, monkeypatch):

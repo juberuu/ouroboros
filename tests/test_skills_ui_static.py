@@ -83,10 +83,34 @@ def test_skills_feedback_uses_fixed_toast_not_page_banner():
     css = (REPO_ROOT / "web" / "style.css").read_text(encoding="utf-8")
     toast = (REPO_ROOT / "web" / "modules" / "toast.js").read_text(encoding="utf-8")
     assert "import { showToast } from './toast.js';" in source
-    assert "return showToast(message, tone);" in source
+    assert "showBanner(" not in source
+    assert "showToast(" in source
     assert "document.getElementById('page-skills')?.prepend" not in source
     assert ".toast-stack" in css and "position: fixed;" in css
+    toast_stack = css.split(".toast-stack", 1)[1].split("}", 1)[0]
+    assert "top: calc(76px + env(safe-area-inset-top));" in toast_stack
+    assert "bottom:" not in toast_stack
     assert "document.body.appendChild(stack);" in toast
+
+
+def test_marketplace_search_chrome_sits_outside_scroll_region():
+    source = _skills_js()
+    marketplace = (REPO_ROOT / "web" / "modules" / "marketplace.js").read_text(encoding="utf-8")
+    hub = (REPO_ROOT / "web" / "modules" / "ouroboroshub.js").read_text(encoding="utf-8")
+    css = (REPO_ROOT / "web" / "style.css").read_text(encoding="utf-8")
+
+    header_idx = source.index("renderPageHeader({")
+    chrome_idx = source.index("skills-pane-marketplace-chrome")
+    scroll_idx = source.index('<div class="skills-scroll scroll-fade-y">')
+    assert header_idx < chrome_idx < scroll_idx
+    assert "data-chrome-pane=\"marketplace\"" in source
+    assert "data-chrome-pane=\"ouroboroshub\"" in source
+    assert "chromeRows.forEach" in source
+    assert "initMarketplace(pane, document.getElementById('skills-pane-marketplace-chrome'))" in source
+    assert "initOuroborosHub(pane, document.getElementById('skills-pane-ouroboroshub-chrome'))" in source
+    assert "function controlsTemplate()" in marketplace
+    assert "function controlsTemplate()" in hub
+    assert ".skills-search-chrome" in css
 
 
 def test_staged_files_module_avoids_inline_style_positioning():

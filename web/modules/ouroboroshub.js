@@ -58,14 +58,21 @@ function lifecycleFor(installed, pending) {
 }
 
 
-function template() {
+function controlsTemplate() {
+    return `
+        <div class="marketplace-controls">
+            <input type="search" id="oh-query" class="marketplace-search"
+                   placeholder="Search official Ouroboros skills…" autocomplete="off">
+            <button class="btn btn-primary" data-oh-search>Search</button>
+        </div>
+    `;
+}
+
+
+function template({ includeControls = true } = {}) {
     return `
         <div class="marketplace-shell">
-            <div class="marketplace-controls">
-                <input type="search" id="oh-query" class="marketplace-search"
-                       placeholder="Search official Ouroboros skills…" autocomplete="off">
-                <button class="btn btn-primary" data-oh-search>Search</button>
-            </div>
+            ${includeControls ? controlsTemplate() : ''}
             <div id="oh-status" class="muted marketplace-status"></div>
             <div id="oh-results" class="marketplace-results"></div>
         </div>
@@ -116,10 +123,14 @@ function card(item, installed) {
 }
 
 
-export function initOuroborosHub(pane) {
-    pane.innerHTML = template();
+export function initOuroborosHub(pane, controlsHost = null) {
+    pane.innerHTML = template({ includeControls: !controlsHost });
+    if (controlsHost) {
+        controlsHost.innerHTML = controlsTemplate();
+    }
     const state = { query: '', results: [], installed: new Map() };
-    const queryInput = pane.querySelector('#oh-query');
+    const controlsRoot = controlsHost || pane;
+    const queryInput = controlsRoot.querySelector('#oh-query');
     const results = pane.querySelector('#oh-results');
     const status = pane.querySelector('#oh-status');
 
@@ -160,7 +171,7 @@ export function initOuroborosHub(pane) {
         clearTimeout(pane._ohTimer);
         pane._ohTimer = setTimeout(refresh, 250);
     });
-    pane.querySelector('[data-oh-search]').addEventListener('click', refresh);
+    controlsRoot.querySelector('[data-oh-search]').addEventListener('click', refresh);
     startLifecyclePoller(() => {
         state.installed.pendingBySlug = getPendingBySlug();
         renderCards();

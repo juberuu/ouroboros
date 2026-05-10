@@ -30,9 +30,8 @@ from ouroboros.skill_loader import (
 )
 from ouroboros.contracts.skill_payload_policy import SKILL_PAYLOAD_CONTROL_FILENAMES
 from ouroboros.tools.github import _gh_cmd, github_token_from_env_or_settings
-from ouroboros.tools.review_helpers import redact_prompt_secrets
 from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.utils import utc_now_iso
+from ouroboros.utils import contains_real_secret_value, utc_now_iso
 
 _MAX_PAYLOAD_BYTES = 5 * 1024 * 1024
 _BRANCH_SEGMENT_RE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -88,9 +87,9 @@ def _skill_payload_files(skill_dir: pathlib.Path, manifest: Any) -> List[Dict[st
         except UnicodeDecodeError:
             text = ""
         if text:
-            _redacted, changed = redact_prompt_secrets(text)
-            if changed:
-                raise ValueError(f"secret-like content found in {rel}; remove it before publishing")
+            has_secret, _matches = contains_real_secret_value(text)
+            if has_secret:
+                raise ValueError(f"secret value found in {rel}; remove it before publishing")
         total += len(data)
         files.append({
             "path": rel,
@@ -293,9 +292,9 @@ def _generate_pr_body(
         f"## Author Checklist\n- Fresh PASS review verified locally.\n- Payload hash matches the reviewed state.\n- No local Ouroboros repo mutation was required.\n"
     )
     if note.strip():
-        _redacted_note, note_changed = redact_prompt_secrets(note)
-        if note_changed:
-            raise ValueError("secret-like content found in submit note")
+        note_has_secret, _matches = contains_real_secret_value(note)
+        if note_has_secret:
+            raise ValueError("secret value found in submit note")
         fallback = f"## Note\n{note.strip()}\n\n" + fallback
     skill_md = ""
     skill_md_path = skill_dir / "SKILL.md"
@@ -304,9 +303,9 @@ def _generate_pr_body(
         if skill_md_path.is_file():
             text = skill_md_path.read_text(encoding="utf-8")
             skill_md = text[:8192]
-            _redacted_skill_md, skill_md_changed = redact_prompt_secrets(skill_md)
-            if skill_md_changed:
-                raise ValueError("secret-like content found in SKILL.md; remove it before publishing")
+            skill_md_has_secret, _matches = contains_real_secret_value(skill_md)
+            if skill_md_has_secret:
+                raise ValueError("secret value found in SKILL.md; remove it before publishing")
     except OSError:
         pass
     if not skill_md:

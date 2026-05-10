@@ -117,6 +117,8 @@ def test_api_extensions_index_lists_extension_skills(tmp_path, monkeypatch):
     _write_ext(skills_root, "ext_a", permissions=["tool"], plugin=plugin)
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
     client, drive_root, patches = _make_client(tmp_path, monkeypatch)
+    broadcasts = []
+    client.app.app.state.broadcast_ws_sync = lambda payload: broadcasts.append(payload)  # type: ignore[attr-defined]
     try:
         resp = client.get("/api/extensions")
         assert resp.status_code == 200
@@ -170,6 +172,8 @@ def test_api_extension_manifest_prefers_runtime_load_error(tmp_path, monkeypatch
     )
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
     client, drive_root, patches = _make_client(tmp_path, monkeypatch)
+    broadcasts = []
+    client.app.app.state.broadcast_ws_sync = lambda payload: broadcasts.append(payload)  # type: ignore[attr-defined]
     try:
         content_hash = compute_content_hash(skill_dir, manifest_entry="plugin.py")
         save_enabled(drive_root, "ext_manifest_error", True)
@@ -261,6 +265,8 @@ def test_api_skill_toggle_enables_and_loads_extension(tmp_path, monkeypatch):
     skill_dir = _write_ext(skills_root, "ext_toggle", permissions=["tool"], plugin=plugin)
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
     client, drive_root, patches = _make_client(tmp_path, monkeypatch)
+    broadcasts = []
+    client.app.app.state.broadcast_ws_sync = lambda payload: broadcasts.append(payload)  # type: ignore[attr-defined]
     try:
         # Pre-mark review PASS so enable actually loads.
         content_hash = compute_content_hash(skill_dir, manifest_entry="plugin.py")
@@ -277,6 +283,9 @@ def test_api_skill_toggle_enables_and_loads_extension(tmp_path, monkeypatch):
         data = resp.json()
         assert data["enabled"] is True
         assert data["extension_action"] == "extension_loaded"
+        assert broadcasts[-1]["type"] == "extension_lifecycle"
+        assert broadcasts[-1]["skill"] == "ext_toggle"
+        assert broadcasts[-1]["action"] == "extension_loaded"
         assert "ext_toggle" in extension_loader.snapshot()["extensions"]
 
         # Disable → unload.
@@ -288,6 +297,7 @@ def test_api_skill_toggle_enables_and_loads_extension(tmp_path, monkeypatch):
         data = resp.json()
         assert data["enabled"] is False
         assert data["extension_action"] == "extension_unloaded"
+        assert broadcasts[-1]["action"] == "extension_unloaded"
         assert "ext_toggle" not in extension_loader.snapshot()["extensions"]
     finally:
         _stop_patches(patches)
@@ -727,6 +737,8 @@ def test_api_skill_reconcile_clears_cached_load_error(tmp_path, monkeypatch):
     )
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
     client, drive_root, patches = _make_client(tmp_path, monkeypatch)
+    broadcasts = []
+    client.app.app.state.broadcast_ws_sync = lambda payload: broadcasts.append(payload)  # type: ignore[attr-defined]
     try:
         first = find_skill(drive_root, "reconcile_demo", repo_path=str(skills_root))
         assert first is not None
@@ -771,6 +783,9 @@ def test_api_skill_reconcile_clears_cached_load_error(tmp_path, monkeypatch):
         assert payload["skill"] == "reconcile_demo"
         assert payload["live_loaded"] is True
         assert payload["extension_action"] == "extension_loaded"
+        assert broadcasts[-1]["type"] == "extension_lifecycle"
+        assert broadcasts[-1]["skill"] == "reconcile_demo"
+        assert broadcasts[-1]["action"] == "extension_loaded"
         with extension_loader._lock:
             assert "reconcile_demo" in extension_loader._extensions
             assert "reconcile_demo" not in extension_loader._load_failures
