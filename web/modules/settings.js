@@ -455,7 +455,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         applyInputValue('s-model-light', s.OUROBOROS_MODEL_LIGHT);
         applyInputValue('s-model-fallback', s.OUROBOROS_MODEL_FALLBACK);
         applyInputValue('s-claude-code-model', s.CLAUDE_CODE_MODEL);
-        byId('s-effort-task').value = s.OUROBOROS_EFFORT_TASK || s.OUROBOROS_INITIAL_REASONING_EFFORT || 'medium';
+        byId('s-effort-task').value = s.OUROBOROS_EFFORT_TASK || 'medium';
         byId('s-effort-evolution').value = s.OUROBOROS_EFFORT_EVOLUTION || 'high';
         byId('s-effort-review').value = s.OUROBOROS_EFFORT_REVIEW || 'medium';
         byId('s-effort-consciousness').value = s.OUROBOROS_EFFORT_CONSCIOUSNESS || 'low';

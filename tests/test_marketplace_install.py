@@ -65,13 +65,6 @@ def _build_archive(*, slug_dir: str, version: str = "1.0.0", with_plugin: bool =
 
 
 @pytest.fixture
-def enable_marketplace(monkeypatch):
-    monkeypatch.setenv("OUROBOROS_CLAWHUB_ENABLED", "true")
-    yield
-    monkeypatch.delenv("OUROBOROS_CLAWHUB_ENABLED", raising=False)
-
-
-@pytest.fixture
 def stub_review(monkeypatch):
     """Patch skill_review.review_skill to a deterministic PASS stub."""
     @dataclass
@@ -148,7 +141,6 @@ def _install_with_archive(
 
 
 def test_install_marketplace_always_on_without_flag(monkeypatch, stub_review, marketplace_drive):
-    monkeypatch.delenv("OUROBOROS_CLAWHUB_ENABLED", raising=False)
     data_dir, repo_dir = marketplace_drive
     archive = _build_archive(slug_dir="always-on", version="1.0.0")
 
@@ -163,7 +155,7 @@ def test_install_marketplace_always_on_without_flag(monkeypatch, stub_review, ma
 
 
 def test_install_lands_skill_and_writes_provenance(
-    enable_marketplace, stub_review, marketplace_drive
+    stub_review, marketplace_drive
 ):
     data_dir, repo_dir = marketplace_drive
     archive = _build_archive(slug_dir="my-skill", version="1.0.0")
@@ -191,7 +183,7 @@ def test_install_lands_skill_and_writes_provenance(
 
 
 def test_install_refuses_plugin_packages(
-    enable_marketplace, stub_review, marketplace_drive
+    stub_review, marketplace_drive
 ):
     data_dir, repo_dir = marketplace_drive
     archive = _build_archive(slug_dir="p", with_plugin=True)
@@ -209,7 +201,7 @@ def test_install_refuses_plugin_packages(
 
 
 def test_install_refuses_when_summary_marks_plugin(
-    enable_marketplace, stub_review, marketplace_drive
+    stub_review, marketplace_drive
 ):
     data_dir, repo_dir = marketplace_drive
     archive = _build_archive(slug_dir="p")
@@ -224,7 +216,7 @@ def test_install_refuses_when_summary_marks_plugin(
     assert "plugin" in result.error.lower()
 
 
-def test_install_rate_limit_error_is_actionable(enable_marketplace, stub_review, marketplace_drive):
+def test_install_rate_limit_error_is_actionable(stub_review, marketplace_drive):
     data_dir, repo_dir = marketplace_drive
     from ouroboros.marketplace import install as install_mod
     from ouroboros.marketplace.clawhub import ClawHubRateLimitError, ClawHubSkillSummary
@@ -250,7 +242,7 @@ def test_install_rate_limit_error_is_actionable(enable_marketplace, stub_review,
 
 
 def test_uninstall_removes_dir_and_provenance(
-    enable_marketplace, stub_review, marketplace_drive
+    stub_review, marketplace_drive
 ):
     data_dir, repo_dir = marketplace_drive
     archive = _build_archive(slug_dir="x")
@@ -266,7 +258,7 @@ def test_uninstall_removes_dir_and_provenance(
     assert not (data_dir / "state" / "skills" / "owner__x" / "clawhub.json").exists()
 
 
-def test_update_swaps_to_new_version(enable_marketplace, stub_review, marketplace_drive):
+def test_update_swaps_to_new_version(stub_review, marketplace_drive):
     data_dir, repo_dir = marketplace_drive
     archive_v1 = _build_archive(slug_dir="x", version="1.0.0")
     install_result = _install_with_archive(
@@ -305,7 +297,7 @@ def test_update_swaps_to_new_version(enable_marketplace, stub_review, marketplac
 
 
 def test_install_review_failure_still_lands_skill(
-    enable_marketplace, marketplace_drive, monkeypatch
+    marketplace_drive, monkeypatch
 ):
     """Review pipeline is best-effort — a transport error should not roll back install."""
     data_dir, repo_dir = marketplace_drive
@@ -342,7 +334,7 @@ def test_install_review_failure_still_lands_skill(
     ],
 )
 def test_uninstall_rejects_path_traversal_names(
-    enable_marketplace, marketplace_drive, hostile_name
+    marketplace_drive, hostile_name
 ):
     """Cycle 2 BLOCKER fix — refuse names that try to escape the bucket.
 
@@ -371,7 +363,7 @@ def test_uninstall_rejects_path_traversal_names(
 
 
 def test_uninstall_refuses_directories_without_provenance_sidecar(
-    enable_marketplace, marketplace_drive
+    marketplace_drive
 ):
     """Cycle 2 honesty gate — directories under data/skills/clawhub/
     that were not actually installed by the marketplace pipeline must
@@ -418,7 +410,7 @@ def test_marketplace_review_ctx_satisfies_tool_context_protocol(tmp_path):
 
 
 def test_uninstall_succeeds_on_clean_provenance(
-    enable_marketplace, marketplace_drive
+    marketplace_drive
 ):
     """Smoke — the cleaned-up sad path should still pass the happy path.
 

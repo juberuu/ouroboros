@@ -16,7 +16,6 @@ from ouroboros.config import (
 def test_initial_effort_default(monkeypatch):
     """Default effort is 'medium' when env var not set."""
     monkeypatch.delenv("OUROBOROS_EFFORT_TASK", raising=False)
-    monkeypatch.delenv("OUROBOROS_INITIAL_REASONING_EFFORT", raising=False)
     assert resolve_effort("task") == "medium"
 
 
@@ -24,14 +23,12 @@ def test_initial_effort_valid_values(monkeypatch):
     """Valid effort values pass through unchanged via OUROBOROS_EFFORT_TASK."""
     for effort in ("none", "low", "medium", "high"):
         monkeypatch.setenv("OUROBOROS_EFFORT_TASK", effort)
-        monkeypatch.delenv("OUROBOROS_INITIAL_REASONING_EFFORT", raising=False)
         assert resolve_effort("task") == effort
 
 
 def test_initial_effort_invalid_falls_back_to_medium(monkeypatch):
     """Invalid effort values fall back to 'medium'."""
     monkeypatch.setenv("OUROBOROS_EFFORT_TASK", "extreme")
-    monkeypatch.delenv("OUROBOROS_INITIAL_REASONING_EFFORT", raising=False)
     assert resolve_effort("task") == "medium"
 
 

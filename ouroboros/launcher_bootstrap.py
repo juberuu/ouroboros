@@ -754,11 +754,11 @@ def _seed_skills_into(seed_dir: pathlib.Path, target_root: pathlib.Path, log_obj
         # been deleted, the operator's intent stands.
         return 0
 
-    # Pre-bootstrap legacy state: if there are existing entries but no
-    # marker (e.g. an in-place upgrade from a pre-v4.50 install where
-    # the user already had data/skills/native/ populated), treat that
-    # as "already seeded by a different mechanism" and just write the
-    # marker without re-copying.
+    # If there are existing entries but no marker (in-place upgrade or
+    # user-managed payload in ``native/``), treat that as "already
+    # seeded by a different mechanism" and just write the marker
+    # without re-copying — this is a safety property: never clobber
+    # user-managed content in ``native/``.
     try:
         existing = [p for p in native_root.iterdir() if not p.name.startswith(".")]
     except OSError:

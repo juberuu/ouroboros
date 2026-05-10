@@ -178,25 +178,8 @@ def test_required_projection_fields_match_between_endpoints(monkeypatch):
         "ouroboros.marketplace_api._request_drive_root",
         lambda req: pathlib.Path("/tmp/notreal_drive"),
     )
-    # Marketplace must be considered enabled so the endpoint does not
-    # 403 us. Patch the function directly (instead of the env var) so
-    # we are immune to test-suite ordering / env-var pollution from
-    # other test files that may unset the variable.
-    monkeypatch.setattr(
-        "ouroboros.config.get_clawhub_enabled",
-        lambda: True,
-    )
-    monkeypatch.setattr(
-        "ouroboros.marketplace_api.get_clawhub_enabled",
-        lambda: True,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        "ouroboros.marketplace.install.get_clawhub_enabled",
-        lambda: True,
-        raising=False,
-    )
-    monkeypatch.setenv("OUROBOROS_CLAWHUB_ENABLED", "true")
+    # v5.15.0: marketplace is always-on; the legacy ``get_clawhub_enabled`` /
+    # ``OUROBOROS_CLAWHUB_ENABLED`` switch is retired. No setup needed here.
 
     loop = asyncio.new_event_loop()
     try:

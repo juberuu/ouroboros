@@ -87,7 +87,6 @@ SETTINGS_DEFAULTS = {
     # Scope review: single-model blocking reviewer (runs after triad review)
     "OUROBOROS_SCOPE_REVIEW_MODEL": "openai/gpt-5.5",
     # Reasoning effort per task type: none | low | medium | high
-    # OUROBOROS_INITIAL_REASONING_EFFORT remains a legacy alias for task/chat.
     "OUROBOROS_EFFORT_TASK": "medium",
     "OUROBOROS_EFFORT_EVOLUTION": "high",
     "OUROBOROS_EFFORT_REVIEW": "medium",
@@ -282,9 +281,10 @@ def resolve_effort(task_type: str) -> str:
         key = "OUROBOROS_EFFORT_CONSCIOUSNESS"
         default = "low"
     else:
-        legacy = os.environ.get("OUROBOROS_INITIAL_REASONING_EFFORT", "")
+        # v5.15.0: legacy ``OUROBOROS_INITIAL_REASONING_EFFORT`` alias retired.
+        # Users on the legacy key need to switch to ``OUROBOROS_EFFORT_TASK``.
         key = "OUROBOROS_EFFORT_TASK"
-        default = legacy if legacy in _VALID_EFFORTS else "medium"
+        default = "medium"
 
     raw = os.environ.get(key, default)
     return raw if raw in _VALID_EFFORTS else default
@@ -501,16 +501,6 @@ def get_ouroboroshub_skills_dir() -> pathlib.Path:
     except OSError:
         pass
     return target
-
-
-def get_clawhub_enabled() -> bool:
-    """Return True; ClawHub is no longer user-disabled by settings.
-
-    Kept as a compatibility helper for older call sites and tests while
-    the public switch is retired. Registry host validation remains the
-    actual safety boundary.
-    """
-    return True
 
 
 def get_clawhub_registry_url() -> str:
