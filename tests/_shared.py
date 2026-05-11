@@ -2,17 +2,13 @@
 
 These functions are reused across multiple ``tests/test_*.py`` modules to
 avoid duplicated boilerplate (extension-loader cleanup, claude_agent_sdk
-mock installation, lazy module getters). They are intentionally plain
-module-level callables, not fixtures — many callers need them at module
-import time.
+mock installation). They are intentionally plain module-level callables,
+not fixtures — many callers need them at module import time.
 """
 from __future__ import annotations
 
-import importlib
-import pathlib
 import sys
 import types
-from unittest.mock import MagicMock
 
 
 def clean_extension_runtime_state() -> None:
@@ -42,17 +38,6 @@ def clean_extension_runtime_state() -> None:
         extension_loader.set_ws_broadcaster(None)
 
 
-def _make_safe_mock_ctx(tmp_path: pathlib.Path) -> MagicMock:
-    """Return a MagicMock ctx whose log paths cannot leak into repo root."""
-    logs = pathlib.Path(tmp_path) / "logs"
-    logs.mkdir(parents=True, exist_ok=True)
-    ctx = MagicMock()
-    ctx.drive_logs.return_value = logs
-    ctx.drive_root = str(tmp_path)
-    ctx.repo_dir = str(tmp_path)
-    return ctx
-
-
 def ensure_claude_agent_sdk_mock() -> None:
     """Install a lightweight ``claude_agent_sdk`` mock when truly absent.
 
@@ -76,15 +61,3 @@ def ensure_claude_agent_sdk_mock() -> None:
     mock_sdk.ResultMessage = type("ResultMessage", (), {})
     mock_sdk.query = lambda **kw: None
     sys.modules["claude_agent_sdk"] = mock_sdk
-
-
-def lazy_import(module_path: str):
-    """Return ``importlib.import_module(module_path)``.
-
-    Tiny wrapper kept for tests that previously used ``_get_*_module``
-    helpers (``ouroboros.tools.git``/``review``/``registry``,
-    ``supervisor.git_ops``, ``ouroboros.tools.claude_advisory_review``).
-    Centralising the call lets us drop the per-file ``sys.path.insert(0, REPO)``
-    boilerplate once and only once.
-    """
-    return importlib.import_module(module_path)

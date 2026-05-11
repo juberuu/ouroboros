@@ -242,14 +242,12 @@ function collectSecretValue(id, body) {
     if (value && !value.includes('...')) body[settingKey] = value;
 }
 
-// Suggestion pills for the model picker.  Must include every default
+// Suggestion pills for the model picker.  Should include every default
 // shipped in ``ouroboros/config.py::SETTINGS_DEFAULTS`` for the four
-// model lanes (main / code / light / fallback) — pinned by
-// ``tests/test_settings_ui_guards.py::
-// test_settings_fallback_models_pin_current_config_defaults`` so a
-// future config bump cannot silently strand the UI on a stale id.
-// Extra direct-provider variants (``openai::gpt-5.5``, etc.) stay as
-// useful pills even when they are not the OpenRouter default.
+// model lanes (main / code / light / fallback) so a future config bump
+// does not silently strand the UI on a stale id. Extra direct-provider
+// variants (``openai::gpt-5.5``, etc.) stay as useful pills even when
+// they are not the OpenRouter default.
 const SETTINGS_FALLBACK_MODELS = [
     'anthropic::claude-opus-4-6',
     'anthropic::claude-sonnet-4-6',

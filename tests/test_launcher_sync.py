@@ -13,10 +13,10 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 BUILD_REPO_BUNDLE = REPO_ROOT / "scripts" / "build_repo_bundle.py"
 
 
-# See tests/test_build_repo_bundle.py for why these keys must be scrubbed
-# from every ``build_repo_bundle.py`` subprocess: GitHub Actions tag-push
-# runs set GITHUB_REF_* globally, which otherwise bleeds into temp-repo
-# subprocesses and confuses ``_resolve_release_tag``.
+# These keys must be scrubbed from every ``build_repo_bundle.py``
+# subprocess: GitHub Actions tag-push runs set GITHUB_REF_* globally,
+# which otherwise bleeds into temp-repo subprocesses and confuses
+# ``_resolve_release_tag``.
 _BUILD_BUNDLE_ENV_SCRUB_KEYS = (
     "OUROBOROS_RELEASE_TAG",
     "GITHUB_REF",
