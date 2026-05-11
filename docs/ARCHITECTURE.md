@@ -1,4 +1,4 @@
-# Ouroboros v5.15.0-rc.9 — Architecture & Reference
+# Ouroboros v5.15.0-rc.10 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.

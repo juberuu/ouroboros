@@ -61,10 +61,18 @@ def _assert_basic_response(result, expected_provider=None):
 
 
 # Provider name → (env var name, model id, expected_provider check)
+#
+# anthropic_direct uses ``claude-3-5-haiku-latest`` (the long-stable
+# Anthropic alias) rather than the production default
+# ``anthropic::claude-sonnet-4-6``: this is a routing-only smoke test —
+# proving direct Anthropic auth + request shape — and the production
+# default model alias rotates faster than the CI cadence. v5.15.0-rc.9
+# tagging caught a transient 400 on ``claude-sonnet-4-6`` while the
+# OpenRouter / OpenAI / Cloud.ru routes were healthy.
 _PROVIDER_MATRIX = [
     ("openrouter",       "OPENROUTER_API_KEY",                 "anthropic/claude-sonnet-4.6", "openrouter"),
     ("openai_direct",    "OPENAI_API_KEY",                     "openai::gpt-4o-mini",         "openai"),
-    ("anthropic_direct", "ANTHROPIC_API_KEY",                  "anthropic::claude-sonnet-4-6", "anthropic"),
+    ("anthropic_direct", "ANTHROPIC_API_KEY",                  "anthropic::claude-3-5-haiku-latest", "anthropic"),
     ("cloudru",          "CLOUDRU_FOUNDATION_MODELS_API_KEY",  "cloudru::zai-org/GLM-4.7",    "cloudru"),
 ]
 
@@ -106,7 +114,7 @@ _COMPETING_KEYS = [
 _ISOLATION_MATRIX = [
     ("openrouter",       "OPENROUTER_API_KEY",                 "anthropic/claude-sonnet-4.6"),
     ("openai_direct",    "OPENAI_API_KEY",                     "openai::gpt-4o-mini"),
-    ("anthropic_direct", "ANTHROPIC_API_KEY",                  "anthropic::claude-sonnet-4-6"),
+    ("anthropic_direct", "ANTHROPIC_API_KEY",                  "anthropic::claude-3-5-haiku-latest"),
     ("cloudru",          "CLOUDRU_FOUNDATION_MODELS_API_KEY",  "cloudru::zai-org/GLM-4.7"),
 ]
 
