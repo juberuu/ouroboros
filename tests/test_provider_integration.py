@@ -76,12 +76,6 @@ _PROVIDER_MATRIX = [
 ]
 
 
-@integration
-@pytest.mark.parametrize(
-    "provider_id,env_key,model,expected_provider",
-    _PROVIDER_MATRIX,
-    ids=[entry[0] for entry in _PROVIDER_MATRIX],
-)
 def _skip_on_provider_environmental_error(provider_id: str, exc: BaseException) -> None:
     """If exc is a known environmental (non-code) provider error, skip the
     test instead of failing.
@@ -110,6 +104,12 @@ def _skip_on_provider_environmental_error(provider_id: str, exc: BaseException) 
         pytest.skip(f"[{provider_id}] environmental provider error (not a routing regression): {body[:200]}")
 
 
+@integration
+@pytest.mark.parametrize(
+    "provider_id,env_key,model,expected_provider",
+    _PROVIDER_MATRIX,
+    ids=[entry[0] for entry in _PROVIDER_MATRIX],
+)
 def test_provider_basic_chat(provider_id, env_key, model, expected_provider):
     """Verify each provider responds to a minimal chat request.
 
