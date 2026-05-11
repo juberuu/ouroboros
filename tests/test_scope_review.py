@@ -373,10 +373,9 @@ class TestRunScopeReviewFailClosed:
 
 
 class TestScopeReviewModule:
-    def test_scope_review_imports(self):
-        mod = _get_module("ouroboros.tools.scope_review")
-        assert hasattr(mod, "run_scope_review")
-        assert callable(mod.run_scope_review)
+    # test_scope_review_imports removed in v5.15.x — pure callable-existence
+    # check. The fail-closed test below already imports the module, and the
+    # behavioral integration tests exercise run_scope_review end-to-end.
 
     def test_scope_review_fail_closed_design(self):
         """run_scope_review must be fail-closed: errors return blocking strings."""

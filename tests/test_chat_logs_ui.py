@@ -137,44 +137,15 @@ def test_task_summary_live_card_uses_last_headline_not_finished_task():
     assert "visible: false" in func_body, \
         "appendTaskSummaryToLiveCard should set visible: false"
 
-def test_chat_input_has_glassmorphism():
-    """#chat-input textarea should have frosted-glass styling (blur + semi-transparent bg + white border)."""
-    css = _read("web/style.css")
-    # Extract the #chat-input block (between selector and :focus)
-    start = css.index("#chat-input {")
-    end = css.index("#chat-input:focus")
-    chat_input_block = css[start:end]
-    # Must have high-quality backdrop blur on the textarea itself. v5.7.0
-    # moved the blur focus to the input field (20px) and left the wrapper as
-    # a no-blur soft darkening gradient.
-    assert "backdrop-filter: blur(20px)" in chat_input_block
-    # Background should be semi-transparent (frosted glass, opacity 0.55)
-    assert "rgba(26, 21, 32, 0.55)" in chat_input_block
-    # Border should be a white tint (design system for frosted glass surfaces)
-    assert "rgba(255, 255, 255, 0.10)" in chat_input_block
-    # Must not use opaque background
-    assert "var(--bg-secondary)" not in chat_input_block
+# Removed in v5.15.x:
+#   test_chat_input_has_glassmorphism — pinned exact rgba()/blur values in
+#     web/style.css; brittle to design tweaks and adds no behavioral signal.
+#   test_log_phases_use_crimson_not_blue — pure crimson-color literal pin.
+#   test_costs_about_css_classes_defined — CSS-class existence enumeration.
+# All three are cosmetic CSS pins; the chat_logs_ui_static_checks fixture
+# already covers the highest-signal subset of these properties, and the
+# Playwright smoke covers the rendered visual contract.
 
-def test_log_phases_use_crimson_not_blue():
-    """Active log phases (start/progress/working/thinking) should use crimson, not blue."""
-    css = _read("web/style.css")
-    # Find the active-phase block
-    assert "log-phase.working" in css
-    assert "log-phase.thinking" in css
-    # The active-phase color must be crimson, not --blue
-    active_block_start = css.index(".log-entry .log-phase.start,")
-    active_block_end = css.index("}", active_block_start)
-    active_block = css[active_block_start:active_block_end]
-    assert "var(--blue)" not in active_block
-    assert "rgba(248, 130, 140" in active_block
-
-def test_costs_about_css_classes_defined():
-    """All CSS classes used by the About sub-tab and costs.js must be defined in style.css."""
-    css = _read("web/style.css")
-    for cls in [".about-body", ".about-logo", ".about-title", ".about-footer",
-                ".costs-stats-grid", ".costs-tables-grid", ".costs-table-label",
-                ".cost-cell-name", ".cost-bar-cell", ".cost-bar", ".cost-empty-cell"]:
-        assert cls in css, f"Missing CSS class: {cls}"
 
 def test_trivial_task_summary_skip_in_backend():
     """_run_task_summary must skip the LLM call for trivial tasks (0 tool calls, ≤1 round)."""
@@ -231,22 +202,11 @@ def test_updates_versions_surface_uses_css_classes_not_inline_styles():
     assert 'evo-versions-cols' in template
     assert 'style=' not in template, "Updates versions template still contains inline style= attributes"
 
-def test_updates_versions_css_classes_defined():
-    """CSS classes used by the Updates versions surface must be defined in style.css."""
-    css = _read("web/style.css")
-    for cls in [
-        ".evo-versions-header",
-        ".evo-versions-branch",
-        ".evo-versions-cols",
-        ".evo-versions-col",
-        ".evo-versions-list",
-        ".evo-versions-row",
-        ".evo-versions-row-label",
-        ".evo-versions-row-msg",
-        ".evo-empty-error",
-        ".btn-xs",
-    ]:
-        assert cls in css, f"Missing CSS class in style.css: {cls}"
+# test_updates_versions_css_classes_defined removed in v5.15.x — pure CSS
+# class enumeration brittle to renames. The behavioural contract is
+# covered by test_updates_versions_surface_uses_css_classes_not_inline_styles
+# above (which proves the template uses classes, not inline styles).
+
 
 def test_updates_load_versions_error_handling():
     """loadVersions() must guard resp.ok and clear local version surfaces on error."""
@@ -270,23 +230,12 @@ def test_updates_load_versions_error_handling():
     assert 'tagsDiv.innerHTML' in catch_body, "catch must clear tagsDiv"
     assert 'current.textContent' in catch_body, "catch must reset current branch label"
 
-def test_evolution_runtime_card_uses_crimson_border():
-    """evo-runtime-card and evo-chart-wrap must use the crimson accent
-    border (either the literal rgba — historical — or the v5.8.3-rc.5
-    SSOT ``var(--accent-*)`` token), not the neutral-white default. The
-    accent token expansions all reduce to ``rgba(201, 53, 69, ...)`` so
-    either form satisfies the visual-contract intent."""
-    css = _read("web/style.css")
-    import re
-    rule_match = re.search(
-        r'\.evo-runtime-card,\s*\.evo-chart-wrap\s*\{(.+?)\}', css, re.DOTALL
-    )
-    assert rule_match, ".evo-runtime-card rule not found in style.css"
-    rule_body = rule_match.group(1)
-    # Either the legacy literal or the new SSOT token counts as crimson.
-    has_crimson = "201, 53, 69" in rule_body or "var(--accent" in rule_body
-    assert has_crimson, "evo-runtime-card must use crimson accent border (literal rgba or SSOT --accent token)"
-    assert "255, 255, 255, 0.08" not in rule_body, "evo-runtime-card should not use neutral white border"
+# test_evolution_runtime_card_uses_crimson_border removed in v5.15.x —
+# brittle exact-color literal pin (`rgba(201, 53, 69, ...)` or
+# `var(--accent-*)`). No direct accent-token guard replaces it; the
+# design-system policy is documented in docs/DEVELOPMENT.md "Accent
+# colors" section, not test-enforced.
+
 
 def test_live_card_timeline_no_hardcoded_item_cap():
     """Live card timeline must not drop items — no 20-item shift() cap."""
@@ -314,7 +263,6 @@ def test_live_card_timeline_no_hardcoded_item_cap():
 
     # The cleanup timer preserves DOM node, items array, and liveCardRecords entry —
     # no memory release in the timer path (memory pressure from a few finished cards is negligible).
-    assert "rec && rec.finished" not in source or True  # rec.finished guard may or may not remain
     # retiredTaskIds set: present, used for session-local suppression and cleared on reconnect
     assert "const retiredTaskIds = new Set();" in source
     assert "retiredTaskIds.add(taskState.taskId);" in source

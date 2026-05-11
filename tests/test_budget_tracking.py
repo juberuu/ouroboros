@@ -161,33 +161,19 @@ class TestPlanReviewUsageEmit:
 # Scope review pending_events fallback
 # ---------------------------------------------------------------------------
 
-class TestProviderAttributionHelper:
-    """infer_provider_from_model must return correct provider for all model prefixes."""
-
-    def _get_fn(self):
-        from ouroboros.pricing import infer_provider_from_model
-        return infer_provider_from_model
-
-    def test_anthropic_prefix(self):
-        assert self._get_fn()("anthropic::claude-opus-4.6") == "anthropic"
-
-    def test_openai_prefix(self):
-        assert self._get_fn()("openai::gpt-5.5") == "openai"
-
-    def test_openai_compatible_prefix(self):
-        assert self._get_fn()("openai-compatible::my-model") == "openai-compatible"
-
-    def test_cloudru_prefix(self):
-        assert self._get_fn()("cloudru::GigaChat-2-Max") == "cloudru"
-
-    def test_unprefixed_openrouter(self):
-        assert self._get_fn()("anthropic/claude-opus-4.6") == "openrouter"
-
-    def test_google_openrouter(self):
-        assert self._get_fn()("google/gemini-3.1-pro-preview") == "openrouter"
-
-    def test_empty_string(self):
-        assert self._get_fn()("") == "openrouter"
+@pytest.mark.parametrize("model,expected_provider", [
+    ("anthropic::claude-opus-4.6", "anthropic"),
+    ("openai::gpt-5.5", "openai"),
+    ("openai-compatible::my-model", "openai-compatible"),
+    ("cloudru::GigaChat-2-Max", "cloudru"),
+    ("anthropic/claude-opus-4.6", "openrouter"),  # unprefixed → OpenRouter
+    ("google/gemini-3.1-pro-preview", "openrouter"),
+    ("", "openrouter"),
+])
+def test_infer_provider_from_model(model, expected_provider):
+    """infer_provider_from_model must return correct provider for all prefixes."""
+    from ouroboros.pricing import infer_provider_from_model
+    assert infer_provider_from_model(model) == expected_provider
 
 
 class TestPlanReviewProviderAttribution:

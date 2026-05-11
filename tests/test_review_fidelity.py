@@ -431,35 +431,28 @@ class TestCommitGateFreshnessMessages:
 class TestCommitGateJsonHelperNotTruncated:
     """build_blocking_findings_json_section must not cap findings or attempts."""
 
-    def test_eight_obligations_all_in_json_payload(self):
-        """build_blocking_findings_json_section with 8 obligations — all must appear."""
+    @pytest.mark.parametrize("count", [6, 8])  # 6 = old cap + 1; 8 = well above old [:5] cap
+    def test_n_obligations_all_in_json_payload(self, count):
+        """All obligations must appear in the JSON section — no [:N] cap.
+
+        Parametrized in v5.15.x — collapsed
+        test_six_obligations_boundary_case + test_eight_obligations_all_in_json_payload.
+        """
         from ouroboros.tools.review_helpers import build_blocking_findings_json_section
 
         obs = [_make_obligation(f"ob{i}", reason=f"gate reason {i}")
-               for i in range(8)]  # 8 > old [:5] cap
+               for i in range(count)]
         attempt = _make_commit_attempt([{"item": "code_quality", "severity": "critical",
                                          "reason": "something"}])
 
         output = build_blocking_findings_json_section(obs, [attempt])
         payload = json.loads(output[output.find("```json") + 7:output.rfind("```")].strip())
 
-        assert len(payload["open_obligations"]) == 8
+        assert len(payload["open_obligations"]) == count
         ids = {ob["obligation_id"] for ob in payload["open_obligations"]}
-        for i in range(8):
+        for i in range(count):
             assert f"ob{i}" in ids, f"Missing obligation ob{i}"
         assert "... and" not in output
-
-    def test_six_obligations_boundary_case(self):
-        """Exactly 6 obligations (old cap + 1) — all must appear."""
-        from ouroboros.tools.review_helpers import build_blocking_findings_json_section
-
-        obs = [_make_obligation(f"ob{i}") for i in range(6)]
-        attempt = _make_commit_attempt([{"item": "code_quality", "severity": "critical",
-                                         "reason": "r"}])
-
-        output = build_blocking_findings_json_section(obs, [attempt])
-        payload = json.loads(output[output.find("```json") + 7:output.rfind("```")].strip())
-        assert len(payload["open_obligations"]) == 6
 
     def test_long_reason_not_silently_truncated(self):
         """reason > 500 chars must survive in full (_sanitize_text no longer truncates)."""

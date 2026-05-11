@@ -21,28 +21,12 @@ def test_scope_review_max_tokens():
     assert _SCOPE_MAX_TOKENS >= 100_000
 
 
-def test_reflection_generate_max_tokens():
-    """reflection.py generate_reflection must use ≥4096 max_tokens."""
-    src = open("ouroboros/reflection.py", encoding="utf-8").read()
-    assert "max_tokens=4096" in src
-
-
-def test_consciousness_max_tokens():
-    """consciousness.py _think must use ≥4096 max_tokens."""
-    src = open("ouroboros/consciousness.py", encoding="utf-8").read()
-    assert "max_tokens=4096" in src
-
-
-def test_compaction_max_tokens():
-    """context_compaction.py _summarize_round_batch must use ≥16384."""
-    src = open("ouroboros/context_compaction.py", encoding="utf-8").read()
-    assert "max_tokens=16384" in src
-
-
-def test_vision_query_default_max_tokens():
-    """llm.py vision_query default max_tokens must be ≥4096."""
-    src = open("ouroboros/llm.py", encoding="utf-8").read()
-    assert "max_tokens: int = 4096" in src
+# Removed in v5.15.x: test_reflection_generate_max_tokens, test_consciousness_max_tokens,
+# test_compaction_max_tokens, test_vision_query_default_max_tokens.
+# All four were single-line `"max_tokens=N" in src` literal pins. The real
+# contract — sufficient output budget for the LLM call — is exercised
+# behaviorally by the reflection / consciousness / compaction / vision
+# integration tests that produce non-truncated output.
 
 
 def test_claude_code_edit_sdk_max_turns():

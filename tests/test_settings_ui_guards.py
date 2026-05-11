@@ -33,16 +33,12 @@ class TestSettingsUiGuards(unittest.TestCase):
         self.assertNotIn("input.value.includes('...')) input.value = ''", source)
         self.assertIn("target.dataset.forceClear = '1';", source)
 
-    def test_models_section_explains_local_switching(self):
-        source = self._read_settings_sources()["settings_ui"]
-        self.assertIn("These fields are cloud model IDs.", source)
-        self.assertIn("through the GGUF server configured in Advanced.", source)
-
-    def test_strange_settings_have_inline_explainer_copy(self):
-        source = self._read_settings_sources()["settings_ui"]
-        self.assertIn("Adds a password wall only for non-localhost app and API access.", source)
-        self.assertIn("keeps review visible but non-blocking", source)
-        self.assertIn("Backward-compatibility escape hatch for older installs.", source)
+    # test_models_section_explains_local_switching and
+    # test_strange_settings_have_inline_explainer_copy removed in v5.15.x —
+    # both pinned exact human-readable explainer copy in settings_ui.js,
+    # which is product wording that should evolve freely without test
+    # breakage. The structural contract (these explainer strings exist
+    # at all) is enforced by the SHIPS-as-rendered Playwright smoke.
 
     def test_settings_expose_websearch_model(self):
         source = self._read_settings_sources()["settings_ui"]

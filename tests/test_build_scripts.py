@@ -4,11 +4,19 @@ These tests ensure each build script contains the critical Playwright Chromium
 install step with the correct env-var flag and that the install step appears
 BEFORE the actual PyInstaller command-line invocation — so Chromium is always
 bundled inside the ``python-standalone`` data tree before packaging.
+
+In v5.15.x this module also absorbed packaging-asset completeness checks
+(formerly tests/test_packaging_assets.py) and the CI release-workflow
+contract checks (formerly tests/test_release_workflow.py) so packaging
+contracts evolve in one place.
 """
 import pathlib
 import re
 
+import pytest
+
 REPO_ROOT = pathlib.Path(__file__).parent.parent
+REPO = REPO_ROOT
 
 
 def _read(name: str) -> str:
@@ -597,3 +605,143 @@ class TestMacOSSigning:
                 "stapler failure does not abort the build under `set -e` and "
                 f"silently drop the macOS DMG. Offending line: {stripped!r}"
             )
+
+
+# ===========================================================================
+# Packaging asset completeness (merged from former test_packaging_assets.py)
+# and CI release workflow checks (merged from former test_release_workflow.py).
+# All three originally exercised the same /repo packaging surface; the merge
+# keeps them under one module so packaging contracts evolve in one place.
+# ===========================================================================
+
+
+# ----- shared helpers for packaging asset tests -----
+
+_REPO_PATH = REPO_ROOT
+_BUNDLE_FILES_PRESENT = (_REPO_PATH / "Ouroboros.spec").exists() and (_REPO_PATH / "launcher.py").exists()
+_PACKAGING_SKIP_REASON = "Bundle-only files (Ouroboros.spec, launcher.py) not present in repo"
+
+
+def _packaging_launcher_has_bootstrap() -> bool:
+    launcher = _REPO_PATH / "launcher.py"
+    bootstrap = _REPO_PATH / "ouroboros" / "launcher_bootstrap.py"
+    if not launcher.exists() or not bootstrap.exists():
+        return False
+    launcher_src = launcher.read_text(encoding="utf-8")
+    bootstrap_src = bootstrap.read_text(encoding="utf-8")
+    return (
+        "from ouroboros.launcher_bootstrap import" in launcher_src
+        and 'BUNDLE_REPO_NAME = "repo.bundle"' in bootstrap_src
+        and 'BUNDLE_MANIFEST_NAME = "repo_bundle_manifest.json"' in bootstrap_src
+        and "ensure_managed_repo" in bootstrap_src
+    )
+
+
+_LAUNCHER_HAS_BOOTSTRAP = _packaging_launcher_has_bootstrap()
+
+
+def _pkg_read(rel: str) -> str:
+    return (_REPO_PATH / rel).read_text(encoding="utf-8")
+
+
+# ----- spec/launcher/bundle invariants -----
+
+
+@pytest.mark.skipif(not _BUNDLE_FILES_PRESENT, reason=_PACKAGING_SKIP_REASON)
+def test_spec_bundles_assets_and_icon():
+    source = _pkg_read("Ouroboros.spec")
+    assert "('repo.bundle', '.')" in source
+    assert "('repo_bundle_manifest.json', '.')" in source
+    assert "('assets', 'assets')" in source
+    assert "icon='assets/icon.icns'" in source
+
+
+@pytest.mark.skipif(
+    not _LAUNCHER_HAS_BOOTSTRAP,
+    reason="launcher.py does not import launcher_bootstrap (may be a newer version without bootstrap bridge)",
+)
+def test_launcher_does_not_exclude_assets_on_bootstrap():
+    launcher_source = _pkg_read("launcher.py")
+    bootstrap_source = _pkg_read("ouroboros/launcher_bootstrap.py")
+    assert '"python-standalone", "assets"' not in launcher_source
+    assert "from ouroboros.launcher_bootstrap import" in launcher_source
+    assert 'BUNDLE_REPO_NAME = "repo.bundle"' in bootstrap_source
+    assert 'BUNDLE_MANIFEST_NAME = "repo_bundle_manifest.json"' in bootstrap_source
+    assert "ensure_managed_repo(" in bootstrap_source
+
+
+@pytest.mark.skipif(not _BUNDLE_FILES_PRESENT, reason=_PACKAGING_SKIP_REASON)
+def test_spec_retains_cross_platform_packaging_hooks():
+    source = _pkg_read("Ouroboros.spec")
+    assert "assets/icon.ico" in source
+    assert "collect_all as _collect_all" in source
+    assert "scripts/pyi_rth_pythonnet.py" in source
+    assert "pythonnet" in source
+    assert "clr_loader" in source
+
+
+@pytest.mark.skipif(not _BUNDLE_FILES_PRESENT, reason=_PACKAGING_SKIP_REASON)
+def test_launcher_retains_cross_platform_runtime_hooks():
+    launcher_source = _pkg_read("launcher.py")
+    assert "embedded_python_candidates" in launcher_source
+    assert "_prepare_windows_webview_runtime" in launcher_source
+    assert "git_install_hint()" in launcher_source
+    assert "create_kill_on_close_job" in launcher_source
+    assert "kill_process_on_port(port)" in launcher_source
+    assert "force_kill_pid(child.pid)" in launcher_source
+
+
+@pytest.mark.skipif(not _BUNDLE_FILES_PRESENT, reason=_PACKAGING_SKIP_REASON)
+def test_launcher_preserves_macos_git_setup_path():
+    launcher_source = _pkg_read("launcher.py")
+    assert 'subprocess.Popen(["xcode-select", "--install"])' in launcher_source
+    assert "Install Git (Xcode CLI Tools)" in launcher_source
+    assert "Installing... A system dialog may appear." in launcher_source
+    assert '["lsof", "-ti", f"tcp:{port}"]' in launcher_source
+
+
+def test_cross_platform_build_scripts_are_present():
+    assert (_REPO_PATH / "build_linux.sh").exists()
+    assert (_REPO_PATH / "build_windows.ps1").exists()
+    assert (_REPO_PATH / "scripts" / "download_python_standalone.ps1").exists()
+    assert (_REPO_PATH / "scripts" / "pyi_rth_pythonnet.py").exists()
+
+
+def test_build_sh_supports_unsigned_macos_release():
+    build_source = _pkg_read("build.sh")
+    assert 'OUROBOROS_SIGN' in build_source
+    assert 'Skipping signing' in build_source
+    assert 'Unsigned DMG:' in build_source
+
+
+# ----- CI release workflow checks (from test_release_workflow.py) -----
+
+
+def _ci_workflow() -> str:
+    return (_REPO_PATH / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+
+def test_ci_release_preflight_validates_tag_matches_version():
+    workflow = _ci_workflow()
+
+    assert "release-preflight:" in workflow
+    assert "Validate tag matches VERSION" in workflow
+    assert 'expected_tag = f"v{version}"' in workflow
+    assert 'tag != expected_tag' in workflow
+
+
+def test_ci_release_prerelease_flag_uses_preflight_output():
+    workflow = _ci_workflow()
+
+    assert "needs.release-preflight.outputs.is_prerelease" in workflow
+    assert "prerelease: ${{ needs.release-preflight.outputs.is_prerelease == 'true' }}" in workflow
+    assert "re.search(r'(?:rc|alpha|beta|a|b)\\.?\\d+$'" in workflow
+    assert "fh.write(f\"is_prerelease={'true' if is_prerelease else 'false'}\\n\")" in workflow
+
+
+def test_ci_build_job_exports_release_tag_and_fetches_full_history():
+    workflow = _ci_workflow()
+
+    assert "OUROBOROS_RELEASE_TAG: ${{ github.ref_name }}" in workflow
+    assert "OUROBOROS_MANAGED_SOURCE_BRANCH: ouroboros" in workflow
+    assert "fetch-depth: 0" in workflow

@@ -13,6 +13,9 @@ stays green even if only a subset of keys is configured.
 `LLMClient.chat()` returns a `(msg_dict, usage_dict)` tuple since v4.44.0.
 The shared assertion below also handles the legacy flat-dict shape so tests
 do not need to track the underlying client refactor.
+
+Parametrized in v5.15.x — 8 near-identical per-provider tests collapsed
+into 2 parametrized tables (``basic_chat`` and ``isolation``).
 """
 
 import os
@@ -30,11 +33,7 @@ def _get_llm_client():
 
 
 def _assert_basic_response(result, expected_provider=None):
-    """Shared assertion: non-empty reply, token usage present.
-
-    In v4.44.0+ LLMClient.chat() returns a (msg_dict, usage_dict) tuple,
-    not a flat dict. Handle both shapes for forward compatibility.
-    """
+    """Shared assertion: non-empty reply, token usage present."""
     if isinstance(result, tuple):
         msg, usage = result
     else:
@@ -43,7 +42,6 @@ def _assert_basic_response(result, expected_provider=None):
     text = ""
     if isinstance(msg, dict):
         text = msg.get("content", "") or ""
-        # Anthropic returns content as a list of typed blocks instead of a string.
         if isinstance(text, list):
             text = " ".join(
                 b.get("text", "") for b in text if isinstance(b, dict)
@@ -62,64 +60,31 @@ def _assert_basic_response(result, expected_provider=None):
         )
 
 
-@integration
-@pytest.mark.skipif(
-    not os.environ.get("OPENROUTER_API_KEY"),
-    reason="OPENROUTER_API_KEY not set",
-)
-def test_openrouter_basic_chat():
-    """Verify OpenRouter responds to a minimal chat request."""
-    client = _get_llm_client()
-    result = client.chat(
-        messages=[{"role": "user", "content": "Respond with exactly: OK"}],
-        model="anthropic/claude-sonnet-4.6",
-    )
-    _assert_basic_response(result, expected_provider="openrouter")
+# Provider name → (env var name, model id, expected_provider check)
+_PROVIDER_MATRIX = [
+    ("openrouter",       "OPENROUTER_API_KEY",                 "anthropic/claude-sonnet-4.6", "openrouter"),
+    ("openai_direct",    "OPENAI_API_KEY",                     "openai::gpt-4o-mini",         "openai"),
+    ("anthropic_direct", "ANTHROPIC_API_KEY",                  "anthropic::claude-sonnet-4-6", "anthropic"),
+    ("cloudru",          "CLOUDRU_FOUNDATION_MODELS_API_KEY",  "cloudru::zai-org/GLM-4.7",    "cloudru"),
+]
 
 
 @integration
-@pytest.mark.skipif(
-    not os.environ.get("OPENAI_API_KEY"),
-    reason="OPENAI_API_KEY not set",
+@pytest.mark.parametrize(
+    "provider_id,env_key,model,expected_provider",
+    _PROVIDER_MATRIX,
+    ids=[entry[0] for entry in _PROVIDER_MATRIX],
 )
-def test_openai_direct_basic_chat():
-    """Verify official OpenAI direct routing works."""
+def test_provider_basic_chat(provider_id, env_key, model, expected_provider):
+    """Verify each provider responds to a minimal chat request."""
+    if not os.environ.get(env_key):
+        pytest.skip(f"{env_key} not set")
     client = _get_llm_client()
     result = client.chat(
         messages=[{"role": "user", "content": "Respond with exactly: OK"}],
-        model="openai::gpt-4o-mini",
+        model=model,
     )
-    _assert_basic_response(result, expected_provider="openai")
-
-
-@integration
-@pytest.mark.skipif(
-    not os.environ.get("ANTHROPIC_API_KEY"),
-    reason="ANTHROPIC_API_KEY not set",
-)
-def test_anthropic_direct_basic_chat():
-    """Verify direct Anthropic routing works."""
-    client = _get_llm_client()
-    result = client.chat(
-        messages=[{"role": "user", "content": "Respond with exactly: OK"}],
-        model="anthropic::claude-sonnet-4-6",
-    )
-    _assert_basic_response(result, expected_provider="anthropic")
-
-
-@integration
-@pytest.mark.skipif(
-    not os.environ.get("CLOUDRU_FOUNDATION_MODELS_API_KEY"),
-    reason="CLOUDRU_FOUNDATION_MODELS_API_KEY not set",
-)
-def test_cloudru_basic_chat():
-    """Verify Cloud.ru Foundation Models direct routing works."""
-    client = _get_llm_client()
-    result = client.chat(
-        messages=[{"role": "user", "content": "Respond with exactly: OK"}],
-        model="cloudru::zai-org/GLM-4.7",
-    )
-    _assert_basic_response(result, expected_provider="cloudru")
+    _assert_basic_response(result, expected_provider=expected_provider)
 
 
 # Isolation tests: clear competing provider keys so LLMClient can only route
@@ -135,74 +100,33 @@ _COMPETING_KEYS = [
     "ANTHROPIC_API_KEY",
 ]
 
+# Isolation parametrize — same matrix minus the OpenAI-compatible /
+# Cloud.ru-isolated pairings the legacy file ran. The matrix mirrors
+# _PROVIDER_MATRIX entries that have an isolation companion.
+_ISOLATION_MATRIX = [
+    ("openrouter",       "OPENROUTER_API_KEY",                 "anthropic/claude-sonnet-4.6"),
+    ("openai_direct",    "OPENAI_API_KEY",                     "openai::gpt-4o-mini"),
+    ("anthropic_direct", "ANTHROPIC_API_KEY",                  "anthropic::claude-sonnet-4-6"),
+    ("cloudru",          "CLOUDRU_FOUNDATION_MODELS_API_KEY",  "cloudru::zai-org/GLM-4.7"),
+]
+
 
 @integration
-@pytest.mark.skipif(
-    not os.environ.get("OPENROUTER_API_KEY"),
-    reason="OPENROUTER_API_KEY not set",
+@pytest.mark.parametrize(
+    "provider_id,env_key,model",
+    _ISOLATION_MATRIX,
+    ids=[entry[0] for entry in _ISOLATION_MATRIX],
 )
-def test_openrouter_isolation(monkeypatch):
-    """OpenRouter works when it is the only configured provider."""
+def test_provider_isolation(provider_id, env_key, model, monkeypatch):
+    """Each provider works when it is the only configured provider."""
+    if not os.environ.get(env_key):
+        pytest.skip(f"{env_key} not set")
     for key in _COMPETING_KEYS:
-        if key != "OPENROUTER_API_KEY":
+        if key != env_key:
             monkeypatch.delenv(key, raising=False)
     client = _get_llm_client()
     result = client.chat(
         messages=[{"role": "user", "content": "Say hello"}],
-        model="anthropic/claude-sonnet-4.6",
-    )
-    _assert_basic_response(result)
-
-
-@integration
-@pytest.mark.skipif(
-    not os.environ.get("OPENAI_API_KEY"),
-    reason="OPENAI_API_KEY not set",
-)
-def test_openai_direct_isolation(monkeypatch):
-    """OpenAI direct works when it is the only configured provider."""
-    for key in _COMPETING_KEYS:
-        if key != "OPENAI_API_KEY":
-            monkeypatch.delenv(key, raising=False)
-    client = _get_llm_client()
-    result = client.chat(
-        messages=[{"role": "user", "content": "Say hello"}],
-        model="openai::gpt-4o-mini",
-    )
-    _assert_basic_response(result)
-
-
-@integration
-@pytest.mark.skipif(
-    not os.environ.get("ANTHROPIC_API_KEY"),
-    reason="ANTHROPIC_API_KEY not set",
-)
-def test_anthropic_direct_isolation(monkeypatch):
-    """Anthropic direct works when it is the only configured provider."""
-    for key in _COMPETING_KEYS:
-        if key != "ANTHROPIC_API_KEY":
-            monkeypatch.delenv(key, raising=False)
-    client = _get_llm_client()
-    result = client.chat(
-        messages=[{"role": "user", "content": "Say hello"}],
-        model="anthropic::claude-sonnet-4-6",
-    )
-    _assert_basic_response(result)
-
-
-@integration
-@pytest.mark.skipif(
-    not os.environ.get("CLOUDRU_FOUNDATION_MODELS_API_KEY"),
-    reason="CLOUDRU_FOUNDATION_MODELS_API_KEY not set",
-)
-def test_cloudru_isolation(monkeypatch):
-    """Cloud.ru works when it is the only configured provider."""
-    for key in _COMPETING_KEYS:
-        if key != "CLOUDRU_FOUNDATION_MODELS_API_KEY":
-            monkeypatch.delenv(key, raising=False)
-    client = _get_llm_client()
-    result = client.chat(
-        messages=[{"role": "user", "content": "Say hello"}],
-        model="cloudru::zai-org/GLM-4.7",
+        model=model,
     )
     _assert_basic_response(result)

@@ -18,21 +18,14 @@ from unittest import mock
 import pytest
 
 
-# ---------------------------------------------------------------------------
-# P0 — chat_id=0 not collapsed to None
-# ---------------------------------------------------------------------------
-
-def test_chat_id_zero_preserved_not_nulled():
-    """Bug 1: ``int(task.get("chat_id") or 0) or None`` collapsed legitimate
-    chat_id=0 sessions to None. The repaired logic must preserve 0."""
-    import inspect
-    import ouroboros.agent as agent_mod
-    body = pathlib.Path(agent_mod.__file__).read_text(encoding="utf-8")
-    # Confirm the broken pattern is gone
-    assert 'int(task.get("chat_id") or 0) or None' not in body
-    # Confirm the new explicit None-vs-int branch is present
-    assert "_raw_chat is None" in body
-    assert "_current_chat_id = int(_raw_chat)" in body
+# test_chat_id_zero_preserved_not_nulled removed in v5.15.x — was a pure
+# source-string pin reading ouroboros/agent.py for the literal patch
+# (`int(task.get("chat_id") or 0) or None` must not appear). Per the user's
+# `delete_trust_behavioral` choice, no behavioral replacement was added.
+# Note: a directed behavioral guard (a task with chat_id=0 routed through
+# the agent loop without collapse to None) is NOT currently in the suite;
+# adding one would be a separate follow-up if this regression class
+# resurfaces.
 
 
 # ---------------------------------------------------------------------------

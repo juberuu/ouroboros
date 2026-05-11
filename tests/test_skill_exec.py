@@ -410,7 +410,7 @@ def test_skill_exec_refuses_when_unconfigured(tmp_path, monkeypatch):
 # ``light`` blocks repo self-modification but ALLOWS reviewed + enabled
 # skills to execute. The previous Frame-B regression (light blocking
 # skill_exec) is replaced by ``test_skill_exec_runs_in_light_mode`` in
-# tests/test_runtime_mode_gating.py — covering the positive path.
+# tests/test_runtime_mode_core.py — covering the positive path.
 # Light still blocks every escalation channel of the runtime_mode axis
 # itself; that is enforced by the chokepoint in
 # ``ouroboros.config.save_settings`` and ``_data_write`` settings.json

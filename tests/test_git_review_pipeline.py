@@ -1,4 +1,9 @@
-"""Behavioral tests for Phase 7: modern commit pipeline, operational resilience.
+"""Behavioral tests for the git+review pipeline.
+
+Renamed in v5.15.x from ``test_phase7_pipeline.py`` — the file is the
+canonical behavioral suite for the modern commit pipeline + operational
+resilience, not a one-shot migration test. The previous name pinned a
+historical migration phase that has long since shipped.
 
 Tests:
 - repo_write single-file and multi-file modes
@@ -64,7 +69,7 @@ def _make_ctx(tmp_path):
 
 @pytest.fixture
 def git_ctx(tmp_path):
-    """Yield ``(git_module, ToolContext)`` — the canonical phase7 setup."""
+    """Yield ``(git_module, ToolContext)`` — the canonical git pipeline setup."""
     return _get_git_module(), _make_ctx(tmp_path)
 
 
@@ -210,7 +215,7 @@ _PREFLIGHT_CASES = [
     (
         "logic_changed_with_tests_passes",
         "fix something",
-        "M  ouroboros/tools/shell.py\nM  tests/test_shell_recovery.py\nM  VERSION\nM  README.md",
+        "M  ouroboros/tools/shell.py\nM  tests/test_shell_run_shell.py\nM  VERSION\nM  README.md",
         None,
     ),
     (
@@ -240,7 +245,7 @@ _PREFLIGHT_CASES = [
     (
         "modified_module_without_architecture_passes",
         "update existing module",
-        "M  ouroboros/tools/shell.py\nM  tests/test_shell_recovery.py",
+        "M  ouroboros/tools/shell.py\nM  tests/test_shell_run_shell.py",
         None,
     ),
 ]

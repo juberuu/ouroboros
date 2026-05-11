@@ -198,20 +198,11 @@ def test_also_stage_in_schema():
 
 
 # --- Auto-tagging ---
-
-def test_auto_tag_function_exists():
-    git_mod = _get_git_module()
-    assert hasattr(git_mod, "_auto_tag_on_version_bump")
-    assert callable(git_mod._auto_tag_on_version_bump)
-
-
-def test_auto_tag_called_in_commit_functions():
-    git_mod = _get_git_module()
-    for fn_name in ("_repo_write_commit", "_repo_commit_push"):
-        source = inspect.getsource(getattr(git_mod, fn_name))
-        assert "_auto_tag_on_version_bump" in source, (
-            f"{fn_name} must call _auto_tag_on_version_bump"
-        )
+# Removed in v5.15.x:
+#   test_auto_tag_function_exists (callable-existence check, no logic)
+#   test_auto_tag_called_in_commit_functions (inspect.getsource substring pin)
+# The actual auto-tag behavior is exercised end-to-end by the git pipeline
+# integration tests in test_git_review_pipeline.py.
 
 
 def test_auto_tag_not_gated_by_test_warnings():
@@ -229,11 +220,10 @@ def test_auto_tag_not_gated_by_test_warnings():
 
 
 # --- Credential helper ---
-
-def test_credential_helper_exists():
-    git_ops = _get_git_ops_module()
-    assert hasattr(git_ops, "_configure_credential_helper")
-    assert callable(git_ops._configure_credential_helper)
+# test_credential_helper_exists removed in v5.15.x — pure callable-existence
+# check; the helper's behavior is exercised by
+# test_configure_remote_uses_clean_url below which calls the public
+# configure_remote() wrapper.
 
 
 def test_configure_remote_uses_clean_url():
@@ -316,12 +306,10 @@ def test_also_stage_blocks_safety_critical():
     )
 
 
-# --- Auto-push (Phase 5) ---
-
-def test_auto_push_function_exists():
-    git_mod = _get_git_module()
-    assert hasattr(git_mod, "_auto_push")
-    assert callable(git_mod._auto_push)
+# --- Auto-push ---
+# test_auto_push_function_exists removed in v5.15.x — callable-existence
+# check superseded by the behavioral tests below that exercise _auto_push
+# wiring inside the commit functions.
 
 
 def test_auto_push_called_in_commit_functions():
@@ -1071,40 +1059,14 @@ def test_development_compliance_checklist_expanded():
         )
 
 
-def test_triad_review_prompt_has_thoroughness_instructions():
-    """Triad review prompt must include thoroughness instructions."""
-    from ouroboros.tools.review import _REVIEW_PROMPT_TEMPLATE
-
-    prompt_lower = _REVIEW_PROMPT_TEMPLATE.lower()
-    required_phrases = [
-        "read the entire",
-        "all bugs, logic errors",
-        "do not stop after finding",
-        "each distinct problem",
-        "pass reasons may be brief",
-        "fail reasons must be detailed",
-        "how-to-fix",
-    ]
-    for phrase in required_phrases:
-        assert phrase in prompt_lower, (
-            f"Triad review prompt missing required thoroughness instruction: '{phrase}'"
-        )
-
-
-def test_triad_review_reasoning_effort_is_medium_not_low():
-    """Triad review models must use at least medium reasoning effort, not 'low'."""
-    import inspect
-    from ouroboros.tools.review import _query_model
-
-    source = inspect.getsource(_query_model)
-    # Must NOT contain reasoning_effort="low"
-    assert 'reasoning_effort="low"' not in source, (
-        "_query_model uses reasoning_effort='low' — must be 'medium' or higher"
-    )
-    # Must contain medium or higher
-    assert 'reasoning_effort="medium"' in source or 'reasoning_effort="high"' in source, (
-        "_query_model must use reasoning_effort='medium' or 'high'"
-    )
+# test_triad_review_prompt_has_thoroughness_instructions and
+# test_triad_review_reasoning_effort_is_medium_not_low removed in v5.15.x —
+# both pinned exact prompt-template / inspect.getsource() substrings.
+# Prompt quality and effort level evolve over time; the behavioral
+# contract (review produces correct verdicts at adequate depth) is
+# exercised by the actual triad-review integration tests in
+# test_review_fidelity.py, test_review_observability.py, and the
+# git+review pipeline suite.
 
 
 def test_advisory_prompt_contains_obligation_targeting_instructions(tmp_path):

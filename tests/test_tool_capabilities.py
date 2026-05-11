@@ -5,7 +5,7 @@ Verifies:
 - tool_policy.py imports from capabilities (no local copy)
 - loop_tool_execution.py imports from capabilities (no local copy)
 - code_search is classified correctly
-- run_shell list-cmd happy path (string-cmd cascade lives in test_shell_recovery.py)
+- run_shell list-cmd happy path (string-cmd cascade lives in test_shell_run_shell.py)
 - code_search tool works
 """
 import inspect
@@ -222,7 +222,7 @@ def test_code_search_invalid_regex(tmp_path):
 #
 # String-cmd recovery (shlex.split for plain strings, json.loads for JSON
 # arrays, ast.literal_eval for Python literals) is covered by
-# tests/test_shell_recovery.py::TestShellArgContract.  This file keeps only
+# tests/test_shell_run_shell.py::TestShellArgContract.  This file keeps only
 # the list-cmd happy-path sibling so the capability sets module owns the
 # round-1 tool surface assertions, not the string-cascade contract itself.
 

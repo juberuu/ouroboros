@@ -366,13 +366,10 @@ class TestSecretRedaction:
         assert "sk-ant-supersecret" not in result
         assert "REDACTED" in result
 
-    def test_redact_called_on_claims(self):
-        """_format_claims must invoke _redact for each claim reason (verified via mock)."""
-        from ouroboros.tools import review_synthesis
-        with patch.object(review_synthesis, "_redact", wraps=review_synthesis._redact) as mock_redact:
-            findings = [_make_finding("code_quality", "some reason text")]
-            review_synthesis._format_claims(findings)
-            assert mock_redact.call_count >= 1
+    # test_redact_called_on_claims removed in v5.15.x — assertion was just
+    # "wraps mock_redact.call_count >= 1"; the behavioral test
+    # `test_format_claims_redacts_secrets_in_reason` above already proves
+    # secrets are scrubbed from the formatted output.
 
 
 class TestCommitGateSynthesisIntegration:
@@ -394,12 +391,9 @@ class TestCommitGateSynthesisIntegration:
             "Synthesis must be gated on status='blocked' with non-empty findings"
         )
 
-    def test_synthesis_import_path_correct(self):
-        """Synthesis must be imported from review_synthesis module."""
-        import inspect
-        from ouroboros.tools import commit_gate
-        source = inspect.getsource(commit_gate._record_commit_attempt)
-        assert "from ouroboros.tools.review_synthesis import synthesize_to_canonical_issues" in source
+    # test_synthesis_import_path_correct removed in v5.15.x — pure inspect.getsource()
+    # literal match. The actual integration is exercised by
+    # test_synthesis_end_to_end_with_mocked_llm below.
 
     def test_synthesis_fail_open_on_exception(self):
         """Synthesis step must be wrapped in try/except for fail-open behavior."""
@@ -410,12 +404,9 @@ class TestCommitGateSynthesisIntegration:
             "Synthesis step must be wrapped in try/except for fail-open behavior"
         )
 
-    def test_synthesis_gated_on_blocked_only(self):
-        """Synthesis runs ONLY when status='blocked' AND findings non-empty."""
-        import inspect
-        from ouroboros.tools import commit_gate
-        source = inspect.getsource(commit_gate._record_commit_attempt)
-        assert 'status == "blocked" and critical_findings' in source
+    # test_synthesis_gated_on_blocked_only removed in v5.15.x — duplicated the
+    # same `status == "blocked" and critical_findings` literal already asserted
+    # by test_synthesis_called_on_blocked_with_findings above.
 
     def test_synthesis_outside_state_lock(self):
         """Synthesis must run BEFORE update_state() so that the single
@@ -448,12 +439,9 @@ class TestCommitGateSynthesisIntegration:
             "Synthesis must pass open_obligations from durable state for obligation_id round-trip"
         )
 
-    def test_synthesis_module_importable(self):
-        """review_synthesis module must be importable without errors."""
-        from ouroboros.tools import review_synthesis
-        assert callable(review_synthesis.synthesize_to_canonical_issues)
-        assert callable(review_synthesis._parse_synthesis_output)
-        assert callable(review_synthesis._call_synthesis_llm)
+    # test_synthesis_module_importable removed in v5.15.x — module
+    # importability is implicitly exercised by every other test in this
+    # file that imports from `ouroboros.tools.review_synthesis`.
 
     def test_synthesis_end_to_end_with_mocked_llm(self):
         """End-to-end: synthesis with mocked LLM produces deduplicated output."""

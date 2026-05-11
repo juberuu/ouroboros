@@ -136,62 +136,47 @@ class TestFullRepoPack:
 
 
 class TestIsProbablyBinary:
-    """Unit tests for _is_probably_binary heuristic."""
+    """Unit tests for _is_probably_binary heuristic.
 
-    def test_nul_byte_returns_true(self, tmp_path):
-        f = tmp_path / "data.bin"
-        f.write_bytes(b"valid text\x00more text")
-        mod = _get_module("ouroboros.tools.review_helpers")
-        assert mod._is_probably_binary(f) is True
+    Parametrized in v5.15.x — 8 single-case tests collapsed into one
+    parametrized table covering NUL bytes, plain text, high non-printable
+    ratios, empty/missing files, invalid UTF-8 high bytes, valid UTF-8
+    Cyrillic, and the multi-byte-at-sample-boundary regression. Some
+    overlap with test_deep_self_review.py's binary suite is intentional —
+    each tests a different module's import surface.
+    """
 
-    def test_plain_text_returns_false(self, tmp_path):
-        f = tmp_path / "script.py"
-        f.write_text("def hello():\n    return 'world'\n", encoding="utf-8")
+    @pytest.mark.parametrize("filename,content,expected", [
+        ("data.bin",      b"valid text\x00more text",        True),   # NUL byte
+        ("script.py",     b"def hello():\n    return 'world'\n", False),  # plain text
+        ("blob.dat",      bytes(range(256)) * 4,             True),   # >30% non-printable
+        ("empty.py",      b"",                               False),  # empty
+        ("latin1.blob",   bytes(range(128, 256)) * 10,       True),   # invalid UTF-8 high bytes
+    ])
+    def test_classification_matrix(self, filename, content, expected, tmp_path):
+        f = tmp_path / filename
+        f.write_bytes(content)
         mod = _get_module("ouroboros.tools.review_helpers")
-        assert mod._is_probably_binary(f) is False
-
-    def test_high_non_printable_ratio_returns_true(self, tmp_path):
-        f = tmp_path / "blob.dat"
-        # >30% non-printable bytes (NUL byte present)
-        f.write_bytes(bytes(range(256)) * 4)
-        mod = _get_module("ouroboros.tools.review_helpers")
-        assert mod._is_probably_binary(f) is True
-
-    def test_empty_file_returns_false(self, tmp_path):
-        f = tmp_path / "empty.py"
-        f.write_bytes(b"")
-        mod = _get_module("ouroboros.tools.review_helpers")
-        assert mod._is_probably_binary(f) is False
+        assert mod._is_probably_binary(f) is expected
 
     def test_missing_file_returns_false(self, tmp_path):
         mod = _get_module("ouroboros.tools.review_helpers")
         assert mod._is_probably_binary(tmp_path / "nonexistent.bin") is False
 
-    def test_invalid_utf8_high_bytes_no_nul_returns_true(self, tmp_path):
-        """Binary blob with high bytes (invalid UTF-8) and no NUL/control chars is caught."""
-        # bytes 0x80-0xFF: valid start of UTF-8 sequences but never valid on their own
-        blob = bytes(range(128, 256)) * 10  # no NUL, few control chars, not valid UTF-8
-        f = tmp_path / "latin1.blob"
-        f.write_bytes(blob)
-        mod = _get_module("ouroboros.tools.review_helpers")
-        assert mod._is_probably_binary(f) is True
-
     def test_valid_utf8_cyrillic_returns_false(self, tmp_path):
         """Valid UTF-8 Cyrillic text must NOT be classified as binary."""
-        cyrillic = "Привет мир!\nЭто тест.\n" * 50
         f = tmp_path / "russian.py"
-        f.write_text(cyrillic, encoding="utf-8")
+        f.write_text("Привет мир!\nЭто тест.\n" * 50, encoding="utf-8")
         mod = _get_module("ouroboros.tools.review_helpers")
         assert mod._is_probably_binary(f) is False
 
     def test_utf8_char_at_sample_boundary_no_false_positive(self, tmp_path):
-        """Valid UTF-8 file whose multi-byte char falls at exact 8192-byte boundary."""
-        # Fill to 8191 bytes of ASCII, then add a 2-byte Cyrillic char at the boundary
+        """Valid UTF-8 file whose multi-byte char falls at exact 8192-byte boundary
+        (regression for incremental decoder with final=False)."""
         content = b"a" * 8191 + "Я".encode("utf-8")  # 2 bytes: 0xD0 0xAF
         f = tmp_path / "boundary.py"
         f.write_bytes(content)
         mod = _get_module("ouroboros.tools.review_helpers")
-        # The incremental decoder with final=False must NOT raise for valid truncated chars
         assert mod._is_probably_binary(f) is False
 
 
@@ -281,26 +266,12 @@ class TestAdvisoryDiffSizeGate:
         assert result.startswith("⚠️") is False
 
 
-class TestRepoWriteCommitScopeReview:
-    """_repo_write_commit must run scope review (same pipeline as _repo_commit_push)."""
-
-    def test_repo_write_commit_calls_scope_review(self):
-        """Source inspection: _repo_write_commit must reuse the shared reviewed stage."""
-        mod = _get_module("ouroboros.tools.git")
-        source = inspect.getsource(mod._repo_write_commit)
-        assert "_run_reviewed_stage_cycle" in source
-        shared_source = inspect.getsource(mod._run_reviewed_stage_cycle)
-        assert "_run_parallel_review" in shared_source
-        parallel_source = inspect.getsource(mod._run_parallel_review)
-        assert "run_scope_review" in parallel_source
-
-    def test_scope_review_import_in_repo_write_commit(self):
-        """The scope review must be reachable from _repo_write_commit via the shared stage helper."""
-        mod = _get_module("ouroboros.tools.git")
-        source = inspect.getsource(mod._repo_write_commit)
-        assert "_run_reviewed_stage_cycle" in source
-        parallel_source = inspect.getsource(mod._run_parallel_review)
-        assert "scope_review" in parallel_source
+# TestRepoWriteCommitScopeReview removed in v5.15.x — both tests were pure
+# inspect.getsource() chains pinning that _repo_write_commit uses the shared
+# `_run_reviewed_stage_cycle` helper which in turn calls `_run_parallel_review`
+# → `run_scope_review`. The behavioral contract is exercised end-to-end by
+# tests in test_phase7_pipeline.py (renamed to test_git_review_pipeline.py)
+# and the scope_review integration tests.
 
 
 class TestHeadSnapshotBinaryGuard:

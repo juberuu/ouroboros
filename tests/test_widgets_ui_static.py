@@ -15,57 +15,25 @@ def _widgets_js() -> str:
 
 
 def test_widgets_support_declarative_schema_components():
+    """Spot-check that widgets.js exposes the declarative schema entry point
+    and a representative set of components. Trimmed in v5.15.x — the full
+    type-marker enumeration (15+ entries) was brittle to schema evolution
+    and added little signal over a smoke check. Security/lifecycle pins
+    moved to the dedicated tests below (escape/sanitize, media source guard,
+    download host helper, etc.)."""
     source = _widgets_js()
     assert "render.kind === 'declarative'" in source
-    for marker in [
-        "type === 'form'",
-        "type === 'action'",
-        "type === 'poll'",
-        "type === 'subscription'",
-        "type === 'kv'",
-        "type === 'table'",
-        "type === 'markdown'",
-        "type === 'json'",
-        "type === 'code'",
-        "type === 'chart'",
-        "type === 'tabs'",
-        "type === 'stream'",
-        "['image', 'audio', 'video', 'file'].includes(type)",
-        "type === 'gallery'",
-        "type === 'progress'",
-    ]:
-        assert marker in source
-    assert "rememberFormValues();" in source
-    assert "formValues[idx][field.name] = fieldValue(form, field);" in source
-    assert "String(optValue) === String(saved ?? '')" in source
-    assert "component.auto_start === true" in source
-    assert "queueMicrotask(() => startPoll(idx));" in source
-    assert "boundedNumber(spec.interval_ms, 2000, 1000, 30000)" in source
+    # Sentinel components — proof the declarative router is wired
+    assert "type === 'form'" in source
+    assert "type === 'action'" in source
+    assert "type === 'table'" in source
+    assert "type === 'markdown'" in source
+    # Lifecycle / cleanup discipline
     assert "disposeMountedWidgets();" in source
-    assert "timers.forEach((timer) => clearTimeout(timer));" in source
-    assert "const controller = new AbortController();" in source
-    assert "controllers.forEach((controller) => controller.abort());" in source
-    assert "widgetMessageHandlers.add(handler);" in source
-    assert "ctx.ws.on('message'" in source
-    assert "msg?.type !== expectedType" in source
-    assert "new EventSource(url)" in source
-    assert "eventSources.forEach((source) => source.close());" in source
-    assert "new Chart(canvas, config)" in source
-    assert "chartInstances.forEach((chart) => chart.destroy());" in source
-    assert "data-widget-tab-key" in source
-    assert "component.job === true || component.mode === 'job'" in source
-    assert "startJobPoll" in source
-    assert "status_route" in source
-    assert "event.detail?.page === 'widgets'" in source
+    assert "let widgetsMounted = false;" in source
+    assert "let renderGeneration = 0;" in source
     page_shown_branch = source.split("window.addEventListener('ouro:page-shown'")[1]
     assert "disposeMountedWidgets();" in page_shown_branch
-    assert "let renderGeneration = 0;" in source
-    assert "generation !== renderGeneration" in source
-    assert "widgetsVisible = false;" in source
-    assert "if (!widgetsVisible || generation !== renderGeneration) return;" in source
-    assert "let widgetsMounted = false;" in source
-    assert "if (widgetsMounted && !force) return;" in source
-    assert "widgetsMounted = false;" in page_shown_branch
 
 
 def test_widgets_escape_and_sanitize_untrusted_content():

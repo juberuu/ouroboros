@@ -54,39 +54,22 @@ def test_settings_mobile_horizontal_pills_contract_exists():
 
 
 def test_update_panel_contract_exists():
+    """Trimmed in v5.15.x — the long literal chain (30+ substrings spanning
+    JS / server.py / git_ops.py / ARCHITECTURE.md) was high-maintenance and
+    duplicated coverage with the behavioral test
+    test_update_apply_consumes_intent_before_restart below. This test now
+    only pins the entry points + the official-remote URL constant; broader
+    update-intent semantics live in the behavioral test."""
     updates = _read("web/modules/updates.js")
     server = _read("server.py")
     git_ops = _read("supervisor/git_ops.py")
 
     assert "export function initUpdates" in updates
-    assert "/api/update/status" in updates
-    assert "/api/update/check" in updates
-    assert "/api/update/apply" in updates
-    assert "api_update_status" in server
-    assert "api_update_check" in server
-    assert "api_update_apply" in server
-    assert "compute_managed_update_status" in git_ops
-    assert "prepare_managed_update" in git_ops
+    for endpoint in ("/api/update/status", "/api/update/check", "/api/update/apply"):
+        assert endpoint in updates
+    for handler in ("api_update_status", "api_update_check", "api_update_apply"):
+        assert handler in server
     assert 'OFFICIAL_UPDATE_REMOTE_URL = "https://github.com/joi-lab/ouroboros-desktop"' in git_ops
-    assert "ensure_official_update_remote" in git_ops
-    assert "list_official_update_tags" in git_ops
-    assert "state[\"managed\"] = False" in git_ops
-    assert "remote_config_error" in git_ops
-    assert "official_tags" in server
-    assert "Official Releases" in updates
-    assert "Local Recovery" in updates
-    assert "UPDATE_INTENT_MARKER_NAME" in git_ops
-    assert "_write_update_intent" in git_ops
-    assert "_read_update_intent" in git_ops
-    assert "count_ok, ahead, count_error = _compute_ref_ahead_count(BRANCH_DEV, target_sha)" in git_ops
-    assert "[\"git\", \"reset\", \"--hard\", \"HEAD\"]" in git_ops
-    assert "[\"git\", \"reset\", \"--hard\", target_ref]" in git_ops
-    assert "expected {update_intent_target}" in git_ops
-    assert 'str(reason or "") != "ui_update_apply"' in git_ops
-    assert "if fetch and remote_name:" in git_ops
-    assert "Ordinary restarts without an update intent never reset" in _read("docs/ARCHITECTURE.md")
-    assert "confirm(" in updates
-    assert "prompt(" not in updates
 
 
 def test_update_panel_surfaces_unmanaged_checkouts_as_unavailable():

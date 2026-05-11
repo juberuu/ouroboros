@@ -141,43 +141,33 @@ def test_adapter_no_scripts_dir_yields_instruction(tmp_path):
     assert result.manifest.runtime == ""
 
 
-def test_adapter_normalises_os_field(tmp_path):
+@pytest.mark.parametrize("os_list,expected_os,slug,name", [
+    (["macos"], "darwin", "x/mac-only", "mac-only"),
+    (["darwin", "linux", "win32"], "any", "x/cross", "cross"),
+])
+def test_adapter_normalises_os_field(os_list, expected_os, slug, name, tmp_path):
+    """OS normalization: single-entry maps to canonical name, full set maps
+    to 'any'. Parametrized in v5.15.x from
+    test_adapter_normalises_os_field + test_adapter_full_os_set_resolves_to_any.
+    """
     staging = tmp_path / "staging"
+    os_block = "[" + ", ".join(os_list) + "]"
     _write_staged_skill(
         staging,
         textwrap.dedent(
-            """
-            name: mac-only
-            description: Mac thing.
+            f"""
+            name: {name}
+            description: Test.
             version: 0.1
             metadata:
               openclaw:
-                os: [macos]
+                os: {os_block}
             """
         ),
     )
-    result = adapt_openclaw_skill(staging, slug="x/mac-only", version="0.1", sha256="y" * 64)
+    result = adapt_openclaw_skill(staging, slug=slug, version="0.1", sha256="y" * 64)
     assert result.ok
-    assert result.manifest.os == "darwin"
-
-
-def test_adapter_full_os_set_resolves_to_any(tmp_path):
-    staging = tmp_path / "staging"
-    _write_staged_skill(
-        staging,
-        textwrap.dedent(
-            """
-            name: cross
-            description: All platforms.
-            version: 0.1
-            metadata:
-              openclaw:
-                os: [darwin, linux, win32]
-            """
-        ),
-    )
-    result = adapt_openclaw_skill(staging, slug="x/cross", version="0.1", sha256="0" * 64)
-    assert result.manifest.os == "any"
+    assert result.manifest.os == expected_os
 
 
 def test_adapter_preserves_openclaw_command_and_gating_metadata(tmp_path):

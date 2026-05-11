@@ -393,23 +393,27 @@ def test_budget_gate_skip_becomes_stale_after_edit(monkeypatch, tmp_path):
 # SDK break-after-ResultMessage fix (spurious exit code 1 prevention)
 # ---------------------------------------------------------------------------
 
-def test_run_readonly_async_breaks_after_result_message():
-    """_run_readonly_async must stop iterating after ResultMessage.
+@pytest.mark.parametrize("mode", ["readonly", "edit"])
+def test_run_async_breaks_after_result_message(mode):
+    """Both ``_run_readonly_async`` (SDK query() generator) and
+    ``_run_edit_async`` (ClaudeSDKClient.receive_response) must stop
+    iterating after ResultMessage. Root cause: the SDK generator raises
+    when iterated past the ResultMessage because the CLI subprocess has
+    exited and the message reader hits a closed pipe.
 
-    Root cause of the spurious 'exit code 1' error: the SDK's query() generator
-    raises when iterated past the ResultMessage because the CLI subprocess has
-    already exited and the message reader tries to read from a closed pipe.
+    The fix adds a ``break`` after processing ResultMessage. The test
+    verifies that the break prevents the post-ResultMessage Exception
+    from reaching the caller as a failure.
 
-    The fix adds a `break` after processing ResultMessage. This test verifies
-    that the break prevents the post-ResultMessage Exception from reaching the
-    caller as a failure.
+    Parametrized in v5.15.x — previously two near-identical tests
+    test_run_{readonly,edit}_async_breaks_after_result_message, ~150 LOC
+    of duplicated mock setup.
     """
     import sys
-    import types
 
     sys.path.insert(0, REPO)
 
-    # Build realistic mock message types
+    # ---- Shared mock message types ------------------------------------
     AssistantMsg = type("AssistantMessage", (), {})
     ResultMsg = type("ResultMessage", (), {})
 
@@ -417,138 +421,104 @@ def test_run_readonly_async_breaks_after_result_message():
         def __init__(self, text):
             self.text = text
 
-    class FakeAssistantMessage(AssistantMsg):
-        def __init__(self):
-            self.content = [FakeTextBlock("Hello")]
-
-    class FakeResultMessage(ResultMsg):
-        session_id = "test-session-123"
-        total_cost_usd = 0.001
-        usage = {"input_tokens": 10, "output_tokens": 5}
-        subtype = "success"
-
-    async def fake_query_raises_after_result(prompt, options):
-        """Simulates SDK: yields AssistantMessage + ResultMessage, then raises on next iteration."""
-        yield FakeAssistantMessage()
-        yield FakeResultMessage()
-        # This raise simulates the CLI pipe-closed error that happened WITHOUT the break fix
-        raise Exception("Command failed with exit code 1 (exit code: 1)\nError output: Check stderr output for details")
-
-    # Patch claude_agent_sdk in the gateway module
-    import ouroboros.gateways.claude_code as gw
-
-    class FakeClaudeAgentOptions:
-        def __init__(self, **kwargs):
-            pass  # accept all kwargs from _run_readonly_async
-
-    orig_query = gw.query
-    orig_AssistantMessage = gw.AssistantMessage
-    orig_ResultMessage = gw.ResultMessage
-    orig_ClaudeAgentOptions = gw.ClaudeAgentOptions
-    try:
-        gw.query = fake_query_raises_after_result
-        gw.AssistantMessage = FakeAssistantMessage
-        gw.ResultMessage = FakeResultMessage
-        gw.ClaudeAgentOptions = FakeClaudeAgentOptions
-
-        result = asyncio.run(gw._run_readonly_async(
-            prompt="test",
-            cwd="/tmp",
-            model="opus",
-            max_turns=1,
-            effort=None,
-        ))
-    finally:
-        gw.query = orig_query
-        gw.AssistantMessage = orig_AssistantMessage
-        gw.ResultMessage = orig_ResultMessage
-        gw.ClaudeAgentOptions = orig_ClaudeAgentOptions
-    assert result.success, f"Expected success but got error: {result.error}"
-    assert result.session_id == "test-session-123"
-    assert "Hello" in result.result_text
-
-
-def test_run_edit_async_breaks_after_result_message():
-    """_run_edit_async must stop iterating after ResultMessage (edit/ClaudeSDKClient path).
-
-    Companion to test_run_readonly_async_breaks_after_result_message.
-    Verifies the same break-after-ResultMessage fix on the ClaudeSDKClient+receive_response path.
-    """
-    import sys
-
-    sys.path.insert(0, REPO)
-
-    AssistantMsg = type("AssistantMessage", (), {})
-    ResultMsg = type("ResultMessage", (), {})
-
-    class FakeTextBlock:
-        def __init__(self, text):
-            self.text = text
+    text_payload = "Edit output" if mode == "edit" else "Hello"
+    session_id = "edit-session-456" if mode == "edit" else "test-session-123"
+    in_tokens = 20 if mode == "edit" else 10
+    out_tokens = 10 if mode == "edit" else 5
+    cost = 0.002 if mode == "edit" else 0.001
 
     class FakeAssistantMessage(AssistantMsg):
         def __init__(self):
-            self.content = [FakeTextBlock("Edit output")]
+            self.content = [FakeTextBlock(text_payload)]
 
     class FakeResultMessage(ResultMsg):
-        session_id = "edit-session-456"
-        total_cost_usd = 0.002
-        usage = {"input_tokens": 20, "output_tokens": 10}
-        subtype = "success"
+        pass
 
-    class FakeSDKClient:
-        """Mock ClaudeSDKClient context manager."""
-        def __init__(self, options=None):
-            self.options = options
-        async def __aenter__(self):
-            return self
-        async def __aexit__(self, *args):
-            pass
-        async def query(self, prompt):
-            pass
-        async def receive_response(self):
-            yield FakeAssistantMessage()
-            yield FakeResultMessage()
-            # This simulates the CLI pipe-closed error WITHOUT the break fix
-            raise Exception("Command failed with exit code 1 (exit code: 1)\nError output: Check stderr output for details")
+    FakeResultMessage.session_id = session_id
+    FakeResultMessage.total_cost_usd = cost
+    FakeResultMessage.usage = {"input_tokens": in_tokens, "output_tokens": out_tokens}
+    FakeResultMessage.subtype = "success"
 
     import ouroboros.gateways.claude_code as gw
 
     class FakeClaudeAgentOptions:
         def __init__(self, **kwargs):
             pass
-
-    orig_ClaudeSDKClient = gw.ClaudeSDKClient
-    orig_AssistantMessage = gw.AssistantMessage
-    orig_ResultMessage = gw.ResultMessage
-    orig_ClaudeAgentOptions = gw.ClaudeAgentOptions
-    orig_HookMatcher = gw.HookMatcher
 
     class FakeHookMatcher:
         def __init__(self, **kwargs):
             pass
 
+    orig_query = gw.query
+    orig_AssistantMessage = gw.AssistantMessage
+    orig_ResultMessage = gw.ResultMessage
+    orig_ClaudeAgentOptions = gw.ClaudeAgentOptions
+    orig_ClaudeSDKClient = gw.ClaudeSDKClient
+    orig_HookMatcher = gw.HookMatcher
+
     try:
-        gw.ClaudeSDKClient = FakeSDKClient
         gw.AssistantMessage = FakeAssistantMessage
         gw.ResultMessage = FakeResultMessage
         gw.ClaudeAgentOptions = FakeClaudeAgentOptions
         gw.HookMatcher = FakeHookMatcher
 
-        result = asyncio.run(gw._run_edit_async(
-            prompt="test edit",
-            cwd="/tmp",
-            model="opus",
-            max_turns=1,
-        ))
+        if mode == "readonly":
+            async def fake_query_raises_after_result(prompt, options):
+                yield FakeAssistantMessage()
+                yield FakeResultMessage()
+                raise Exception(
+                    "Command failed with exit code 1 (exit code: 1)\n"
+                    "Error output: Check stderr output for details"
+                )
+
+            gw.query = fake_query_raises_after_result
+            result = asyncio.run(gw._run_readonly_async(
+                prompt="test",
+                cwd="/tmp",
+                model="opus",
+                max_turns=1,
+                effort=None,
+            ))
+        else:
+            class FakeSDKClient:
+                def __init__(self, options=None):
+                    self.options = options
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *args):
+                    pass
+
+                async def query(self, prompt):
+                    pass
+
+                async def receive_response(self):
+                    yield FakeAssistantMessage()
+                    yield FakeResultMessage()
+                    raise Exception(
+                        "Command failed with exit code 1 (exit code: 1)\n"
+                        "Error output: Check stderr output for details"
+                    )
+
+            gw.ClaudeSDKClient = FakeSDKClient
+            result = asyncio.run(gw._run_edit_async(
+                prompt="test edit",
+                cwd="/tmp",
+                model="opus",
+                max_turns=1,
+            ))
     finally:
-        gw.ClaudeSDKClient = orig_ClaudeSDKClient
+        gw.query = orig_query
         gw.AssistantMessage = orig_AssistantMessage
         gw.ResultMessage = orig_ResultMessage
         gw.ClaudeAgentOptions = orig_ClaudeAgentOptions
+        gw.ClaudeSDKClient = orig_ClaudeSDKClient
         gw.HookMatcher = orig_HookMatcher
+
     assert result.success, f"Expected success but got error: {result.error}"
-    assert result.session_id == "edit-session-456"
-    assert "Edit output" in result.result_text
+    assert result.session_id == session_id
+    assert text_payload in result.result_text
 
 
 @pytest.mark.parametrize(

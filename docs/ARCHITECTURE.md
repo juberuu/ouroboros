@@ -1,4 +1,4 @@
-# Ouroboros v5.15.0-rc.8 — Architecture & Reference
+# Ouroboros v5.15.0-rc.9 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -1219,7 +1219,9 @@ the constitutional guard is that the file itself must remain non-deletable.
   say so explicitly rather than omit the section.
 - **Reviewer slot validation (v5.15.0)**: `_run_plan_review_async` rejects lists
   with fewer than two reviewer slots before repo-pack assembly, but allows
-  duplicate model IDs. Regression guard: `tests/test_plan_review_quorum.py`.
+  duplicate model IDs. Regression guard: `tests/test_plan_review.py`
+  (former `tests/test_plan_review_quorum.py` was merged into the main
+  plan-review test module in v5.15.x).
 - **Aggregate signal — majority-vote (v4.36.2, updated v5.15.0)**: coordination
   across the 2–3 reviewer slots is now:
   - `GREEN` — every reviewer returned a parseable `AGGREGATE: GREEN`.

@@ -92,20 +92,6 @@ class TestScopeHeadroomMetric:
 # ── D3 — block_details stored without truncation ────────────────────────────
 
 class TestBlockDetailsFullRoundTrip:
-    def test_commit_gate_does_not_truncate_block_details_on_write(self):
-        """commit_gate._record_commit_attempt MUST NOT call truncate_review_artifact
-        on block_details — canonical evidence is stored full, display-side
-        truncation happens in review_status / format_status_section.
-        """
-        import inspect
-        from ouroboros.tools import commit_gate
-
-        source = inspect.getsource(commit_gate._record_commit_attempt)
-        # Pre-v4.33 had `block_details=_truncate_review_artifact(block_details)`.
-        # After v4.33 block_details is stored unwrapped.
-        assert "_truncate_review_artifact(block_details)" not in source
-        assert "block_details=block_details" in source
-
     def test_commit_attempt_record_accepts_arbitrarily_long_block_details(self):
         """CommitAttemptRecord has no intrinsic cap on block_details length."""
         from ouroboros.review_state import CommitAttemptRecord
@@ -206,42 +192,10 @@ class TestRunToDictStatusAware:
         assert _run_to_dict(err)["status_summary"] == "error"
 
 
-# ── D6 — build_review_context no longer caps at 1 finding ───────────────────
-
-class TestBuildReviewContextRelaxed:
-    def test_multiple_critical_findings_surfaced(self):
-        """v4.33.0 contract preserved via v4.40.4 refactor: up to 3 critical/advisory
-        findings per continuation, up to 5 continuations. The caps now live in named
-        constants (`_PER_FINDING_CAP`, `_CONTINUATION_CAP`) with explicit
-        `⚠️ OMISSION NOTE` markers instead of bare `[:N]` slices (DEVELOPMENT.md /
-        CHECKLISTS 2(f): no silent truncation of cognitive artifacts). The
-        behavioural contract is unchanged — up to 3 findings per category, up to 5
-        continuations visible."""
-        import inspect
-        from ouroboros import agent_task_pipeline
-
-        source = inspect.getsource(agent_task_pipeline.build_review_context)
-        # Caps still enforced (identical numeric contract)
-        assert "_PER_FINDING_CAP = 3" in source
-        assert "_CONTINUATION_CAP = 5" in source
-        # Findings lists must be iterated per-category (not index-0-only)
-        assert "item.critical_findings" in source
-        assert "item.advisory_findings" in source
-        assert "scoped_continuations" in source
-        # Slicing must be explicit-omission-note style, not silent
-        assert "OMISSION NOTE" in source
-
-
-# ── Soft circuit-breaker hint lowered to attempt 3 ─────────────────────────
-
-class TestCircuitBreakerHintThreshold:
-    def test_hint_fires_at_attempt_three_not_five(self):
-        import inspect
-        from ouroboros.tools import review
-
-        # Find the source of the hint-building block in review.py
-        source_file = pathlib.Path(inspect.getsourcefile(review)).read_text(encoding="utf-8")
-        # v4.33: threshold is 3; old value 5 must be gone from the hint block
-        assert "_review_iteration_count >= 3" in source_file
-        # The BIBLE P2 reference is new in v4.33 and signals the fix-the-class framing
-        assert "BIBLE P2" in source_file
+# TestBuildReviewContextRelaxed + TestCircuitBreakerHintThreshold removed
+# in v5.15.x — both classes pinned implementation strings via
+# inspect.getsource() (`_PER_FINDING_CAP = 3`, `_review_iteration_count >= 3`,
+# `BIBLE P2` literal). The behavioral contracts they were guarding — no
+# silent truncation in cognitive artifacts, attempt-3 circuit breaker — are
+# already covered by behavioral tests in test_review_fidelity.py and the
+# review pipeline integration suite.

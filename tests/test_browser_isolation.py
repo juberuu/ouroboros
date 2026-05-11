@@ -10,33 +10,32 @@ from ouroboros.tools.browser import _is_infrastructure_error, cleanup_browser
 
 
 class TestInfrastructureErrorDetection:
-    """_is_infrastructure_error should detect structural Playwright failures."""
+    """_is_infrastructure_error should detect structural Playwright failures.
 
-    def test_detects_greenlet_switch(self):
-        assert _is_infrastructure_error(RuntimeError("cannot switch to a different green thread"))
+    Parametrized in v5.15.x — 7 single-case detection tests collapsed
+    into one table (5 truthy infrastructure errors + 2 falsy
+    application errors).
+    """
 
-    def test_detects_different_thread(self):
-        assert _is_infrastructure_error(RuntimeError("different thread"))
-
-    def test_detects_browser_closed(self):
-        assert _is_infrastructure_error(Exception("browser has been closed"))
-
-    def test_detects_page_closed(self):
-        assert _is_infrastructure_error(Exception("page has been closed"))
-
-    def test_detects_connection_closed(self):
-        assert _is_infrastructure_error(Exception("Connection closed"))
-
-    def test_ignores_normal_errors(self):
-        assert not _is_infrastructure_error(ValueError("invalid selector"))
-        assert not _is_infrastructure_error(TimeoutError("navigation timeout"))
+    @pytest.mark.parametrize("exc,expected", [
+        (RuntimeError("cannot switch to a different green thread"), True),
+        (RuntimeError("different thread"), True),
+        (Exception("browser has been closed"), True),
+        (Exception("page has been closed"), True),
+        (Exception("Connection closed"), True),
+        (ValueError("invalid selector"), False),
+        (TimeoutError("navigation timeout"), False),
+    ])
+    def test_classification(self, exc, expected):
+        assert _is_infrastructure_error(exc) is expected
 
 
 class TestBrowserModuleState:
     """Module-level state should be properly initialized."""
 
-    def test_is_infrastructure_error_is_function(self):
-        assert callable(_is_infrastructure_error)
+    # test_is_infrastructure_error_is_function removed in v5.15.x —
+    # `assert callable(...)` on a function imported in this module's
+    # imports is trivially true.
 
     def test_ensure_browser_tolerates_missing_thread_id(self, monkeypatch):
         fake_page = types.SimpleNamespace(set_default_timeout=lambda timeout: None)
@@ -90,67 +89,75 @@ class TestBrowserModuleState:
 
 
 class TestHasPlatformChromium:
-    """_has_platform_chromium: two-level check — chromium-* dir + platform-matching subdir."""
+    """_has_platform_chromium: two-level check — chromium-* dir + platform-matching subdir.
 
-    def test_missing_dir_returns_false(self, tmp_path):
-        from ouroboros.tools.browser import _has_platform_chromium
-        assert _has_platform_chromium(tmp_path / "nonexistent") is False
+    Parametrized in v5.15.x — 7 tests collapsed into 2 (one for the
+    "not found" matrix, one for the "found via real executable" matrix).
+    Each subcase builds its filesystem skeleton inside tmp_path via a
+    small builder kwarg.
+    """
 
-    def test_empty_dir_returns_false(self, tmp_path):
-        from ouroboros.tools.browser import _has_platform_chromium
-        assert _has_platform_chromium(tmp_path) is False
+    def _build_fixture(self, tmp_path, kind: str):
+        """kind values:
+        - missing       : nothing exists
+        - empty         : tmp_path has no chromium-* subdir
+        - non_chromium  : a firefox-* dir but no chromium-*
+        - wrong_platform: chromium-X/chrome-linux-x64 (wrong platform on darwin)
+        - metadata_only : chromium-X/chrome-mac-x64/metadata.json (no exe)
+        - real_app      : chromium-X/chrome-mac-x64/Chromium.app/.../Chromium
+        - headless_shell: chromium_headless_shell-X/chrome-headless-shell-mac-arm64/chrome-headless-shell
+        """
+        if kind == "missing":
+            return tmp_path / "nonexistent"
+        if kind == "empty":
+            return tmp_path
+        if kind == "non_chromium":
+            (tmp_path / "firefox-1234").mkdir()
+            return tmp_path
+        if kind == "wrong_platform":
+            cdir = tmp_path / "chromium-1234"
+            cdir.mkdir()
+            (cdir / "chrome-linux-x64").mkdir()
+            return tmp_path
+        if kind == "metadata_only":
+            cdir = tmp_path / "chromium-1234"
+            cdir.mkdir()
+            pdir = cdir / "chrome-mac-x64"
+            pdir.mkdir()
+            (pdir / "metadata.json").write_text("{}", encoding="utf-8")
+            return tmp_path
+        if kind == "real_app":
+            cdir = tmp_path / "chromium-1234"
+            cdir.mkdir()
+            exe = cdir / "chrome-mac-x64" / "Chromium.app" / "Contents" / "MacOS" / "Chromium"
+            exe.parent.mkdir(parents=True)
+            exe.write_text("stub", encoding="utf-8")
+            return tmp_path
+        if kind == "headless_shell":
+            cdir = tmp_path / "chromium_headless_shell-1234"
+            cdir.mkdir()
+            exe = cdir / "chrome-headless-shell-mac-arm64" / "chrome-headless-shell"
+            exe.parent.mkdir(parents=True)
+            exe.write_text("stub", encoding="utf-8")
+            return tmp_path
+        raise ValueError(f"unknown kind: {kind}")
 
-    def test_non_chromium_dir_returns_false(self, tmp_path):
-        from ouroboros.tools.browser import _has_platform_chromium
-        (tmp_path / "firefox-1234").mkdir()
-        assert _has_platform_chromium(tmp_path) is False
-
-    def test_chromium_dir_no_matching_platform_subdir_returns_false(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("kind,expected", [
+        ("missing",        False),
+        ("empty",          False),
+        ("non_chromium",   False),
+        ("wrong_platform", False),
+        ("metadata_only",  False),
+        ("real_app",       True),
+        ("headless_shell", True),
+    ])
+    def test_classification(self, kind, expected, tmp_path, monkeypatch):
         from ouroboros.tools import browser as bmod
         monkeypatch.setattr(bmod.sys, "platform", "darwin", raising=False)
         from ouroboros.tools.browser import _has_platform_chromium
-        chromium_dir = tmp_path / "chromium-1234"
-        chromium_dir.mkdir()
-        (chromium_dir / "chrome-linux-x64").mkdir()  # wrong platform
-        assert _has_platform_chromium(tmp_path) is False
 
-    def test_chromium_dir_with_no_executable_returns_false(self, tmp_path, monkeypatch):
-        """A non-empty chrome-mac-* dir with only metadata (no Chromium.app) must NOT trigger."""
-        from ouroboros.tools import browser as bmod
-        monkeypatch.setattr(bmod.sys, "platform", "darwin", raising=False)
-        from ouroboros.tools.browser import _has_platform_chromium
-        chromium_dir = tmp_path / "chromium-1234"
-        chromium_dir.mkdir()
-        platform_dir = chromium_dir / "chrome-mac-x64"
-        platform_dir.mkdir()
-        (platform_dir / "metadata.json").write_text("{}", encoding="utf-8")  # metadata only
-        assert _has_platform_chromium(tmp_path) is False
-
-    def test_chromium_dir_with_matching_executable_returns_true(self, tmp_path, monkeypatch):
-        """A chrome-mac-* dir with the real macOS Chromium.app executable returns True."""
-        from ouroboros.tools import browser as bmod
-        monkeypatch.setattr(bmod.sys, "platform", "darwin", raising=False)
-        from ouroboros.tools.browser import _has_platform_chromium
-        chromium_dir = tmp_path / "chromium-1234"
-        chromium_dir.mkdir()
-        platform_dir = chromium_dir / "chrome-mac-x64"
-        exe = platform_dir / "Chromium.app" / "Contents" / "MacOS" / "Chromium"
-        exe.parent.mkdir(parents=True)
-        exe.write_text("stub", encoding="utf-8")
-        assert _has_platform_chromium(tmp_path) is True
-
-    def test_headless_shell_dir_with_matching_executable_returns_true(self, tmp_path, monkeypatch):
-        """A bundled chromium_headless_shell payload should also count as usable."""
-        from ouroboros.tools import browser as bmod
-        monkeypatch.setattr(bmod.sys, "platform", "darwin", raising=False)
-        from ouroboros.tools.browser import _has_platform_chromium
-        chromium_dir = tmp_path / "chromium_headless_shell-1234"
-        chromium_dir.mkdir()
-        platform_dir = chromium_dir / "chrome-headless-shell-mac-arm64"
-        exe = platform_dir / "chrome-headless-shell"
-        exe.parent.mkdir(parents=True)
-        exe.write_text("stub", encoding="utf-8")
-        assert _has_platform_chromium(tmp_path) is True
+        root = self._build_fixture(tmp_path, kind)
+        assert _has_platform_chromium(root) is expected
 
 
 class TestSetPlaywrightBrowsersPathIfBundled:

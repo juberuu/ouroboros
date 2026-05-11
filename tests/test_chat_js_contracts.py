@@ -412,38 +412,12 @@ class TestRenderMarkdownNoInlineStyles:
             assert cls in css, f"{cls} must be defined as a CSS rule in web/style.css"
 
 
-class TestVisualViewportListener:
-    """web/app.js must contain the visualViewport listener that drives --vvh."""
-
-    def test_visual_viewport_listener_present(self):
-        content = open("web/app.js").read()
-        assert "window.visualViewport" in content, (
-            "web/app.js must contain a visualViewport listener to update --vvh CSS token"
-        )
-
-    def test_vvh_property_set_in_listener(self):
-        content = open("web/app.js").read()
-        assert "--vvh" in content, (
-            "web/app.js must set --vvh CSS custom property via visualViewport listener"
-        )
-
-    def test_vvh_css_variable_defined_in_root(self):
-        css = open("web/style.css").read()
-        assert "--vvh:" in css, (
-            "--vvh CSS custom property must be defined in :root in web/style.css"
-        )
-
-    def test_body_uses_vvh_not_100vh(self):
-        css = open("web/style.css").read()
-        # body block should use var(--vvh), not 100vh directly
-        body_idx = css.find("body {")
-        body_block = css[body_idx:body_idx+200]
-        assert "var(--vvh)" in body_block, (
-            "body must use height: var(--vvh) for keyboard-safe mobile layout"
-        )
-        assert "100vh" not in body_block, (
-            "body must not use 100vh directly — use var(--vvh) which falls back to 100dvh"
-        )
+# TestVisualViewportListener removed in v5.15.x: the four shallow existence
+# checks (window.visualViewport, --vvh, var(--vvh) in body) are subsumed by
+# the deeper structural checks in
+# tests/test_chat_logs_ui.py::test_desktop_vvh_uses_dvh_unit_not_px_snapshot
+# and ::test_mobile_keyboard_open_uses_visual_viewport_flex_stack, which
+# pin the exact 4-stop logic + keyboard-open layout rules.
 
 
 class TestRenderMarkdownLinkSanitization:

@@ -306,19 +306,19 @@ def test_enabled_round_trip(tmp_path):
     assert load_enabled(drive_root, "x") is False
 
 
-def test_load_enabled_fails_closed_on_non_boolean_payload(tmp_path):
+@pytest.mark.parametrize("payload,write_bytes", [
+    (json.dumps({"enabled": "false"}).encode("utf-8"), None),  # non-boolean value
+    (b"{\"enabled\": \xff}", None),                            # non-UTF-8 bytes
+])
+def test_load_enabled_fails_closed_on_corrupt_state(payload, write_bytes, tmp_path):
+    """load_enabled must default to False on any corrupt state file.
+
+    Parametrized in v5.15.x from test_load_enabled_fails_closed_on_non_boolean_payload
+    + test_load_enabled_fails_closed_on_non_utf8_state_file."""
     drive_root = tmp_path / "drive"
     drive_root.mkdir()
     raw_path = skill_state_dir(drive_root, "x") / "enabled.json"
-    raw_path.write_text(json.dumps({"enabled": "false"}), encoding="utf-8")
-    assert load_enabled(drive_root, "x") is False
-
-
-def test_load_enabled_fails_closed_on_non_utf8_state_file(tmp_path):
-    drive_root = tmp_path / "drive"
-    drive_root.mkdir()
-    raw_path = skill_state_dir(drive_root, "x") / "enabled.json"
-    raw_path.write_bytes(b"{\"enabled\": \xff}")
+    raw_path.write_bytes(payload)
     assert load_enabled(drive_root, "x") is False
 
 

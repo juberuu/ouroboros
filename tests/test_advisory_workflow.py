@@ -44,6 +44,7 @@ def _make_blocking_attempt(
     commit_message: str = "test commit",
     block_reason: str = "critical_findings",
     critical_findings: list | None = None,
+    repo_key: str = "",
 ):
     from ouroboros.review_state import CommitAttemptRecord, _utc_now
     return CommitAttemptRecord(
@@ -53,6 +54,7 @@ def _make_blocking_attempt(
         block_reason=block_reason,
         block_details="CRITICAL: something",
         duration_sec=5.0,
+        repo_key=repo_key,
         critical_findings=critical_findings or [
             {"verdict": "FAIL", "severity": "critical", "item": "tests_affected",
              "reason": "No test changes found", "model": "test-model"},
@@ -1530,5 +1532,702 @@ def test_legacy_schema_state_surfaces_commit_readiness_debt_on_load(tmp_path):
     assert any("obl-0001" in list(debt.source_obligation_ids or []) for debt in debts)
 
 
-# Extended tests moved to tests/test_advisory_workflow_ext.py
-# (snapshot_paths, parse_failure handling, obligation resolution edge cases)
+# ===========================================================================
+# Extended tests merged in v5.15.x from former test_advisory_workflow_ext.py
+# (snapshot_paths, parse_failure handling, obligation resolution edge cases,
+# repo-scoped status formatting, per-finding fingerprint keying).
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# 12. snapshot_paths roundtrip
+# ---------------------------------------------------------------------------
+
+
+def test_snapshot_paths_roundtrip(tmp_path):
+    """snapshot_paths must survive save/load cycle via _record_from_dict."""
+    from ouroboros.review_state import (
+        AdvisoryReviewState, AdvisoryRunRecord, save_state, load_state, _utc_now,
+    )
+    drive_root = _make_drive_root(tmp_path)
+    state = AdvisoryReviewState()
+    paths = ["ouroboros/tools/git.py", "tests/test_git.py"]
+    state.runs.append(AdvisoryRunRecord(
+        snapshot_hash="abc123", commit_message="test", status="fresh",
+        ts=_utc_now(), snapshot_paths=paths,
+    ))
+    save_state(drive_root, state)
+
+    loaded = load_state(drive_root)
+    assert loaded.runs, "Run should be present after load"
+    assert loaded.runs[0].snapshot_paths == paths
+
+
+def test_snapshot_paths_none_roundtrip(tmp_path):
+    """snapshot_paths=None (whole-repo scope) must also survive save/load."""
+    from ouroboros.review_state import (
+        AdvisoryReviewState, AdvisoryRunRecord, save_state, load_state, _utc_now,
+    )
+    drive_root = _make_drive_root(tmp_path)
+    state = AdvisoryReviewState()
+    state.runs.append(AdvisoryRunRecord(
+        snapshot_hash="abc123", commit_message="test", status="fresh",
+        ts=_utc_now(), snapshot_paths=None,
+    ))
+    save_state(drive_root, state)
+
+    loaded = load_state(drive_root)
+    assert loaded.runs[0].snapshot_paths is None
+
+
+# ---------------------------------------------------------------------------
+# 13. parse_failure: effective_status must reflect the real run status, not "stale"
+# ---------------------------------------------------------------------------
+
+
+def test_review_status_parse_failure_reflected_in_effective_status(tmp_path):
+    from tests._shared import _make_safe_mock_ctx
+    drive_root = _make_drive_root(tmp_path)
+    from ouroboros.review_state import (
+        AdvisoryReviewState, AdvisoryRunRecord, save_state, _utc_now,
+        compute_snapshot_hash,
+    )
+
+    current_hash = compute_snapshot_hash(tmp_path, "")
+
+    state = AdvisoryReviewState()
+    state.runs.append(AdvisoryRunRecord(
+        snapshot_hash=current_hash,
+        commit_message="v1.0.0: test",
+        status="parse_failure",
+        ts=_utc_now(),
+    ))
+    save_state(drive_root, state)
+
+    ctx = _make_safe_mock_ctx(tmp_path)
+    ctx.drive_root = str(drive_root)
+    ctx.repo_dir = str(tmp_path)
+
+    from ouroboros.tools.claude_advisory_review import _handle_review_status
+    result = json.loads(_handle_review_status(ctx))
+
+    assert result["latest_advisory_status"] == "parse_failure"
+    assert "stale" not in result.get("message", "").lower() or "parse_failure" in result.get("message", "").lower()
+
+
+def test_review_status_defaults_to_current_repo_scope(tmp_path):
+    from tests._shared import _make_safe_mock_ctx
+    drive_root = _make_drive_root(tmp_path / "drive")
+    from ouroboros.review_state import AdvisoryReviewState, save_state
+
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    repo_a.mkdir()
+    repo_b.mkdir()
+
+    state = AdvisoryReviewState()
+    state.add_blocking_attempt(_make_blocking_attempt(repo_key=str(repo_a)))
+    state.add_blocking_attempt(_make_blocking_attempt(
+        repo_key=str(repo_b),
+        critical_findings=[{
+            "verdict": "FAIL",
+            "severity": "critical",
+            "item": "self_consistency",
+            "reason": "repo b issue",
+        }],
+    ))
+    save_state(drive_root, state)
+
+    ctx = _make_safe_mock_ctx(tmp_path)
+    ctx.drive_root = str(drive_root)
+    ctx.repo_dir = str(repo_b)
+
+    from ouroboros.tools.claude_advisory_review import _handle_review_status
+    result = json.loads(_handle_review_status(ctx))
+
+    assert result["filters"]["repo_key"] == str(repo_b)
+    open_items = [entry["item"] for entry in result["open_obligations"]]
+    assert open_items == ["self_consistency"]
+
+
+# ---------------------------------------------------------------------------
+# 14. _check_advisory_freshness: parse_failure for current snapshot
+# ---------------------------------------------------------------------------
+
+
+def test_check_advisory_freshness_parse_failure_branch(tmp_path):
+    from tests._shared import _make_safe_mock_ctx
+    drive_root = _make_drive_root(tmp_path)
+    from ouroboros.review_state import (
+        AdvisoryReviewState, AdvisoryRunRecord, save_state, _utc_now,
+        compute_snapshot_hash,
+    )
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    current_hash = compute_snapshot_hash(repo_dir, "v1.0.0: test")
+
+    state = AdvisoryReviewState()
+    state.runs.append(AdvisoryRunRecord(
+        snapshot_hash=current_hash,
+        commit_message="v1.0.0: test",
+        status="parse_failure",
+        ts=_utc_now(),
+    ))
+    save_state(drive_root, state)
+
+    ctx = _make_safe_mock_ctx(tmp_path)
+    ctx.drive_root = str(drive_root)
+    ctx.repo_dir = str(repo_dir)
+
+    from ouroboros.tools.commit_gate import _check_advisory_freshness
+    result = _check_advisory_freshness(ctx, "v1.0.0: test")
+
+    assert result is not None
+    assert "parse_failure" in result.lower()
+    assert "snapshot changed" not in result.lower()
+
+
+# ---------------------------------------------------------------------------
+# 15. _resolve_matching_obligations: edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_matching_obligations_contradictory_entries_leave_open(tmp_path):
+    drive_root = _make_drive_root(tmp_path)
+    from ouroboros.review_state import AdvisoryReviewState, save_state
+    from ouroboros.tools.claude_advisory_review import _resolve_matching_obligations
+
+    state = AdvisoryReviewState()
+    state.add_blocking_attempt(_make_blocking_attempt(critical_findings=[
+        {"verdict": "FAIL", "severity": "critical", "item": "tests_affected",
+         "reason": "No tests", "model": "m"},
+    ]))
+    assert len(state.get_open_obligations()) == 1
+
+    contradictory_items = [
+        {"verdict": "PASS", "severity": "critical", "item": "tests_affected", "reason": "Tests found"},
+        {"verdict": "FAIL", "severity": "critical", "item": "tests_affected", "reason": "Missing test X"},
+    ]
+    _resolve_matching_obligations(state, contradictory_items, snapshot_hash="deadbeef")
+
+    assert len(state.get_open_obligations()) == 1
+
+
+def test_handle_review_status_old_parse_failure_different_hash_reports_stale(tmp_path):
+    from tests._shared import _make_safe_mock_ctx
+    drive_root = _make_drive_root(tmp_path)
+    from ouroboros.review_state import (
+        AdvisoryReviewState, AdvisoryRunRecord, save_state, _utc_now,
+    )
+
+    repo_dir = tmp_path / "repo_stale_pf"
+    repo_dir.mkdir()
+
+    state = AdvisoryReviewState()
+    state.add_run(AdvisoryRunRecord(
+        snapshot_hash="definitely_old_hash_not_current",
+        commit_message="old commit",
+        status="parse_failure",
+        ts=_utc_now(),
+    ))
+    save_state(drive_root, state)
+
+    ctx = _make_safe_mock_ctx(tmp_path)
+    ctx.drive_root = str(drive_root)
+    ctx.repo_dir = str(repo_dir)
+
+    from ouroboros.tools.claude_advisory_review import _handle_review_status
+    result = json.loads(_handle_review_status(ctx))
+
+    next_step = result.get("next_step", "")
+    assert "for the current snapshot" not in next_step
+    assert any(word in next_step.lower() for word in ("stale", "re-run", "rerun", "advisory"))
+
+
+def test_review_status_parse_failure_after_edit_reports_parse_failure_not_stale(tmp_path):
+    from tests._shared import _make_safe_mock_ctx
+    drive_root = _make_drive_root(tmp_path)
+    from ouroboros.review_state import (
+        AdvisoryReviewState, AdvisoryRunRecord, load_state, save_state, _utc_now,
+        compute_snapshot_hash, mark_advisory_stale_after_edit,
+    )
+
+    repo_dir = tmp_path / "repo2"
+    repo_dir.mkdir()
+
+    old_hash = "aabbccdd00001111"
+    state = AdvisoryReviewState()
+    state.add_run(AdvisoryRunRecord(
+        snapshot_hash=old_hash, commit_message="v1", status="fresh", ts=_utc_now()
+    ))
+    save_state(drive_root, state)
+
+    mark_advisory_stale_after_edit(drive_root)
+
+    new_hash = compute_snapshot_hash(repo_dir, "v1")
+    state2 = load_state(drive_root)
+    state2.add_run(AdvisoryRunRecord(
+        snapshot_hash=new_hash, commit_message="v1", status="parse_failure", ts=_utc_now()
+    ))
+    save_state(drive_root, state2)
+
+    ctx = _make_safe_mock_ctx(tmp_path)
+    ctx.drive_root = str(drive_root)
+    ctx.repo_dir = str(repo_dir)
+
+    from ouroboros.tools.claude_advisory_review import _handle_review_status
+    result = json.loads(_handle_review_status(ctx))
+
+    assert result["latest_advisory_status"] == "parse_failure"
+    assert "invalidated" not in result.get("next_step", "").lower()
+
+
+def test_next_step_guidance_stale_parse_failure_reports_stale_not_parse_failure(tmp_path):
+    from ouroboros.tools.claude_advisory_review import _next_step_guidance
+    from ouroboros.review_state import AdvisoryReviewState, AdvisoryRunRecord, _utc_now
+
+    state = AdvisoryReviewState()
+    old_run = AdvisoryRunRecord(
+        snapshot_hash="olddeadbeef",
+        commit_message="old commit",
+        status="parse_failure",
+        ts=_utc_now(),
+    )
+    state.runs.append(old_run)
+
+    guidance = _next_step_guidance(
+        latest=old_run,
+        state=state,
+        stale_from_edit=True,
+        stale_from_edit_ts="2026-04-05T10:00",
+        open_obs=[],
+        open_debts=[],
+        effective_is_fresh=False,
+    )
+
+    assert "invalidated" in guidance.lower() or "stale" in guidance.lower()
+    assert "for the current snapshot" not in guidance
+
+
+def test_next_step_guidance_stale_with_open_obligations_requires_reaudit(tmp_path):
+    from ouroboros.tools.claude_advisory_review import _next_step_guidance
+    from ouroboros.review_state import AdvisoryReviewState, AdvisoryRunRecord, ObligationItem, _utc_now
+
+    state = AdvisoryReviewState()
+    old_run = AdvisoryRunRecord(
+        snapshot_hash="olddeadbeef",
+        commit_message="old commit",
+        status="fresh",
+        ts=_utc_now(),
+    )
+    state.runs.append(old_run)
+    open_obs = [ObligationItem(
+        obligation_id="ob-1",
+        item="code_quality",
+        severity="critical",
+        reason="Need broader fix",
+        source_attempt_ts=_utc_now(),
+        source_attempt_msg="blocked",
+        repo_key="repo",
+    )]
+
+    guidance = _next_step_guidance(
+        latest=old_run,
+        state=state,
+        stale_from_edit=True,
+        stale_from_edit_ts="2026-04-05T10:00",
+        open_obs=open_obs,
+        open_debts=[],
+        effective_is_fresh=False,
+    )
+
+    lowered = guidance.lower()
+    assert "invalidated" in lowered or "stale" in lowered
+    assert "re-read the full diff" in lowered
+    assert "group obligations by root cause" in lowered
+    assert "rewrite the plan" in lowered
+
+
+def test_next_step_guidance_parse_failure_with_open_obligations_preserves_parse_failure():
+    from ouroboros.tools.claude_advisory_review import _next_step_guidance
+    from ouroboros.review_state import AdvisoryReviewState, AdvisoryRunRecord, ObligationItem, _utc_now
+
+    state = AdvisoryReviewState()
+    parse_run = AdvisoryRunRecord(
+        snapshot_hash="currenthash",
+        commit_message="current commit",
+        status="parse_failure",
+        ts=_utc_now(),
+    )
+    state.runs.append(parse_run)
+    open_obs = [ObligationItem(
+        obligation_id="ob-2",
+        item="code_quality",
+        severity="critical",
+        reason="Need broader fix",
+        source_attempt_ts=_utc_now(),
+        source_attempt_msg="blocked",
+        repo_key="repo",
+    )]
+
+    guidance = _next_step_guidance(
+        latest=parse_run,
+        state=state,
+        stale_from_edit=False,
+        stale_from_edit_ts=None,
+        open_obs=open_obs,
+        open_debts=[],
+        effective_is_fresh=False,
+    )
+
+    lowered = guidance.lower()
+    assert "parse_failure" in lowered
+    assert "re-read the full diff" in lowered
+    assert "group obligations by root cause" in lowered
+    assert "rewrite the plan" in lowered
+
+
+def test_next_step_guidance_fresh_with_only_open_debts_mentions_debt_not_zero_obligations():
+    from ouroboros.tools.claude_advisory_review import _next_step_guidance
+    from ouroboros.review_state import AdvisoryReviewState, AdvisoryRunRecord, CommitReadinessDebtItem, _utc_now
+
+    state = AdvisoryReviewState()
+    fresh_run = AdvisoryRunRecord(
+        snapshot_hash="currenthash",
+        commit_message="current commit",
+        status="fresh",
+        ts=_utc_now(),
+    )
+    state.runs.append(fresh_run)
+    open_debts = [CommitReadinessDebtItem(
+        debt_id="crd-0001",
+        category="readiness_warning",
+        title="Readiness warning debt",
+        summary="Manual verification still required before commit.",
+        severity="warning",
+        repo_key="repo",
+        fingerprint="readiness_warning:attempt:abc",
+        source="review_state",
+        source_obligation_ids=[],
+        status="detected",
+    )]
+
+    guidance = _next_step_guidance(
+        latest=fresh_run,
+        state=state,
+        stale_from_edit=False,
+        stale_from_edit_ts=None,
+        open_obs=[],
+        open_debts=open_debts,
+        effective_is_fresh=True,
+    )
+
+    lowered = guidance.lower()
+    assert "commit-readiness debt item" in lowered
+    assert "repo_commit will be blocked" in lowered
+    assert "0 open obligation" not in lowered
+
+
+# ---------------------------------------------------------------------------
+# 16. obligation_resolves with unrelated critical FAIL
+# ---------------------------------------------------------------------------
+
+
+def test_obligation_resolves_even_when_advisory_has_unrelated_critical_fail(tmp_path):
+    drive_root = _make_drive_root(tmp_path)
+    from ouroboros.review_state import AdvisoryReviewState, save_state
+    from ouroboros.tools.claude_advisory_review import _resolve_matching_obligations
+
+    state = AdvisoryReviewState()
+    state.add_blocking_attempt(_make_blocking_attempt(critical_findings=[
+        {"verdict": "FAIL", "severity": "critical", "item": "tests_affected",
+         "reason": "No tests provided", "model": "m"},
+    ]))
+    assert len(state.get_open_obligations()) == 1
+
+    mixed_items = [
+        {"verdict": "PASS", "severity": "critical", "item": "tests_affected",
+         "reason": "Tests now present"},
+        {"verdict": "FAIL", "severity": "critical", "item": "code_quality",
+         "reason": "Some unrelated bug"},
+    ]
+    _resolve_matching_obligations(state, mixed_items, snapshot_hash="deadbeef2")
+
+    assert state.get_open_obligations() == []
+
+
+def test_resolve_matching_obligations_unambiguous_pass_resolves(tmp_path):
+    drive_root = _make_drive_root(tmp_path)
+    from ouroboros.review_state import AdvisoryReviewState
+    from ouroboros.tools.claude_advisory_review import _resolve_matching_obligations
+
+    state = AdvisoryReviewState()
+    state.add_blocking_attempt(_make_blocking_attempt(critical_findings=[
+        {"verdict": "FAIL", "severity": "critical", "item": "tests_affected",
+         "reason": "No tests", "model": "m"},
+    ]))
+    assert len(state.get_open_obligations()) == 1
+
+    _resolve_matching_obligations(
+        state,
+        [{"verdict": "PASS", "severity": "critical", "item": "tests_affected", "reason": "Tests present"}],
+        snapshot_hash="deadbeef",
+    )
+
+    assert state.get_open_obligations() == []
+
+
+def test_resolve_matching_obligations_suffix_id_resolves_same_repo(tmp_path):
+    from ouroboros.review_state import AdvisoryReviewState
+    from ouroboros.tools.claude_advisory_review import _resolve_matching_obligations
+
+    state = AdvisoryReviewState()
+    state.add_blocking_attempt(_make_blocking_attempt(
+        repo_key="repo-a",
+        critical_findings=[{
+            "verdict": "FAIL",
+            "severity": "critical",
+            "item": "self_consistency",
+            "reason": "README and docs drift",
+        }],
+    ))
+    open_obs = state.get_open_obligations(repo_key="repo-a")
+    assert len(open_obs) == 1
+    obligation = open_obs[0]
+
+    _resolve_matching_obligations(
+        state,
+        [{
+            "verdict": "PASS",
+            "severity": "critical",
+            "item": f"self_consistency (obligation {obligation.obligation_id})",
+            "reason": "README and docs are now aligned",
+        }],
+        snapshot_hash="feedbeef",
+        repo_key="repo-a",
+    )
+
+    assert state.get_open_obligations(repo_key="repo-a") == []
+
+
+def test_resolve_matching_obligations_does_not_cross_repo_boundaries(tmp_path):
+    from ouroboros.review_state import AdvisoryReviewState
+    from ouroboros.tools.claude_advisory_review import _resolve_matching_obligations
+
+    state = AdvisoryReviewState()
+    state.add_blocking_attempt(_make_blocking_attempt(repo_key="repo-a"))
+    state.add_blocking_attempt(_make_blocking_attempt(repo_key="repo-b"))
+
+    _resolve_matching_obligations(
+        state,
+        [{
+            "verdict": "PASS",
+            "severity": "critical",
+            "item": "tests_affected",
+            "reason": "Repo B now has tests",
+        }],
+        snapshot_hash="cafefeed",
+        repo_key="repo-b",
+    )
+
+    assert len(state.get_open_obligations(repo_key="repo-a")) == 1
+    assert len(state.get_open_obligations(repo_key="repo-b")) == 0
+
+
+# ---------------------------------------------------------------------------
+# 17-18. compute_snapshot_hash empty paths + truncate_review_artifact(None)
+# ---------------------------------------------------------------------------
+
+
+def test_compute_snapshot_hash_empty_paths_equals_whole_repo(tmp_path):
+    from ouroboros.review_state import compute_snapshot_hash
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / "a.py").write_text("print('hello')")
+
+    hash_none = compute_snapshot_hash(repo_dir, "")
+    hash_empty = compute_snapshot_hash(repo_dir, "", paths=[])
+    assert hash_none == hash_empty
+
+
+def test_truncate_review_artifact_handles_none():
+    from ouroboros.utils import truncate_review_artifact, truncate_review_reason
+
+    assert truncate_review_artifact(None) == ""
+    assert truncate_review_reason(None) == ""
+
+
+def test_format_status_section_null_reason_does_not_crash(tmp_path):
+    from ouroboros.review_state import AdvisoryReviewState, format_status_section
+    from ouroboros.review_state import CommitAttemptRecord, _utc_now
+
+    state = AdvisoryReviewState()
+    blocking_attempt = CommitAttemptRecord(
+        ts=_utc_now(),
+        commit_message="v1.0: test",
+        status="blocked",
+        block_reason="critical_findings",
+        block_details="CRITICAL: something",
+        duration_sec=5.0,
+        critical_findings=[
+            {"verdict": "FAIL", "severity": "critical", "item": "tests_affected",
+             "reason": None, "model": "test-model"},
+        ],
+    )
+    state.add_blocking_attempt(blocking_attempt)
+
+    section = format_status_section(state)
+    assert "tests_affected" in section
+
+
+def test_format_status_section_repo_scopes_history_and_obligations(tmp_path):
+    from ouroboros.review_state import (
+        AdvisoryReviewState,
+        AdvisoryRunRecord,
+        CommitAttemptRecord,
+        compute_snapshot_hash,
+        format_status_section,
+        make_repo_key,
+    )
+
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    (repo_a / ".git").mkdir(parents=True)
+    (repo_b / ".git").mkdir(parents=True)
+    (repo_a / "tracked.py").write_text("print('repo a')\n", encoding="utf-8")
+    (repo_b / "tracked.py").write_text("print('repo b')\n", encoding="utf-8")
+
+    repo_a_key = make_repo_key(repo_a)
+    repo_b_key = make_repo_key(repo_b)
+    state = AdvisoryReviewState()
+    state.add_run(AdvisoryRunRecord(
+        snapshot_hash=compute_snapshot_hash(repo_a),
+        commit_message="repo-a fresh",
+        status="fresh",
+        ts="2026-04-07T10:00:00+00:00",
+        repo_key=repo_a_key,
+    ))
+    state.record_attempt(CommitAttemptRecord(
+        ts="2026-04-07T10:01:00+00:00",
+        commit_message="repo-b blocked",
+        status="blocked",
+        repo_key=repo_b_key,
+        tool_name="repo_commit",
+        task_id="task-b",
+        attempt=1,
+        block_reason="critical_findings",
+        critical_findings=[{
+            "item": "foreign_issue",
+            "reason": "other repo only",
+            "severity": "critical",
+            "verdict": "FAIL",
+        }],
+    ))
+
+    section = format_status_section(state, repo_dir=repo_a)
+    assert "repo-a fresh" in section
+    assert "repo-b blocked" not in section
+    assert "foreign_issue" not in section
+
+
+# ---------------------------------------------------------------------------
+# 20. _resolve_matching_obligations: per-finding fingerprint keying
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_item_pass_does_not_clear_other_same_item_obligation(tmp_path):
+    from ouroboros.review_state import AdvisoryReviewState, ObligationItem
+    from ouroboros.tools.claude_advisory_review import _resolve_matching_obligations
+
+    state = AdvisoryReviewState()
+    state.open_obligations.extend([
+        ObligationItem(
+            obligation_id="obl-0001",
+            fingerprint="finding:legacy-a",
+            item="code_quality",
+            severity="critical",
+            reason="Bug in foo.py line 42",
+            source_attempt_ts="2026-04-18T00:00:00Z",
+            source_attempt_msg="legacy attempt 1",
+        ),
+        ObligationItem(
+            obligation_id="obl-0002",
+            fingerprint="finding:legacy-b",
+            item="code_quality",
+            severity="critical",
+            reason="Race condition in bar.py",
+            source_attempt_ts="2026-04-18T00:01:00Z",
+            source_attempt_msg="legacy attempt 2",
+        ),
+    ])
+    assert len(state.get_open_obligations()) == 2
+
+    _resolve_matching_obligations(
+        state,
+        [{"verdict": "PASS", "severity": "critical", "item": "code_quality",
+          "reason": "Fixed foo.py"}],
+        snapshot_hash="aabbcc",
+    )
+    assert len(state.get_open_obligations()) == 2
+
+
+def test_resolve_obligation_id_pass_clears_only_targeted_obligation(tmp_path):
+    from ouroboros.review_state import AdvisoryReviewState, ObligationItem
+    from ouroboros.tools.claude_advisory_review import _resolve_matching_obligations
+
+    state = AdvisoryReviewState()
+    state.open_obligations.extend([
+        ObligationItem(
+            obligation_id="obl-0101",
+            fingerprint="finding:legacy-1",
+            item="code_quality",
+            severity="critical",
+            reason="Bug in foo.py line 42",
+            source_attempt_ts="2026-04-18T00:00:00Z",
+            source_attempt_msg="legacy attempt 1",
+        ),
+        ObligationItem(
+            obligation_id="obl-0102",
+            fingerprint="finding:legacy-2",
+            item="code_quality",
+            severity="critical",
+            reason="Race condition in bar.py",
+            source_attempt_ts="2026-04-18T00:01:00Z",
+            source_attempt_msg="legacy attempt 2",
+        ),
+    ])
+    open_obs = state.get_open_obligations()
+    target = open_obs[0]
+
+    _resolve_matching_obligations(
+        state,
+        [{"verdict": "PASS", "severity": "critical",
+          "item": f"code_quality (obligation {target.obligation_id})",
+          "reason": "foo.py fixed"}],
+        snapshot_hash="deadf00d",
+    )
+    still_open = state.get_open_obligations()
+    assert len(still_open) == 1
+    assert still_open[0].obligation_id != target.obligation_id
+
+
+def test_resolve_item_pass_clears_single_obligation_legacy_fallback(tmp_path):
+    from ouroboros.review_state import AdvisoryReviewState
+    from ouroboros.tools.claude_advisory_review import _resolve_matching_obligations
+
+    state = AdvisoryReviewState()
+    state.add_blocking_attempt(_make_blocking_attempt(critical_findings=[
+        {"verdict": "FAIL", "severity": "critical", "item": "tests_affected",
+         "reason": "No tests staged"},
+    ]))
+    assert len(state.get_open_obligations()) == 1
+
+    _resolve_matching_obligations(
+        state,
+        [{"verdict": "PASS", "severity": "critical", "item": "tests_affected",
+          "reason": "Tests present now"}],
+        snapshot_hash="c0ffeee0",
+    )
+    assert state.get_open_obligations() == []

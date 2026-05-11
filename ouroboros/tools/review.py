@@ -107,9 +107,10 @@ from ouroboros.tools.review_helpers import (
 # Single source of truth: ``review_helpers.REPO_ROOT`` is the canonical
 # repo-root anchor (also used by ``load_checklist_section``). Keep
 # ``_CHECKLISTS_PATH`` as a derived alias for the existing public-ish
-# import path used by ``tests/test_phase7_pipeline.py`` and the legacy
-# re-exports — this removes the duplicate pathlib walk that previously
-# lived right above this comment.
+# import path used by ``tests/test_git_review_pipeline.py`` (renamed
+# from test_phase7_pipeline.py in v5.15.x) and the legacy re-exports —
+# this removes the duplicate pathlib walk that previously lived right
+# above this comment.
 _CHECKLISTS_PATH = _REPO_ROOT / "docs" / "CHECKLISTS.md"
 
 
