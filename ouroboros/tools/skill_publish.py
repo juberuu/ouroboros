@@ -149,6 +149,69 @@ def _update_catalog(catalog: Dict[str, Any], entry: Dict[str, Any]) -> Tuple[str
     return mode, catalog
 
 
+_PROVENANCE_SLUG_MAX = 128
+
+
+def _provenance_hint(skill_dir: pathlib.Path, source: str) -> str:
+    """Return a short ``## Provenance`` Markdown block for marketplace-managed
+    skills, or ``""`` for everything else (including missing/corrupt sidecars).
+
+    Soft fallback: when the sidecar is absent skill_loader reclassifies the
+    skill as ``external`` and submit goes through the existing external flow
+    without a Provenance section — that is the intended behaviour, not a bug.
+
+    Defense-in-depth: although marketplace sidecars are produced by the
+    trusted install pipeline, the slug value still flows into a public PR
+    body. We mirror the secret-scan + safe-escape discipline that ``note``
+    and ``SKILL.md`` already use:
+
+    - reject the block if the slug matches the secret-value heuristic;
+    - strip control characters (``\\n``, ``\\r``, ``\\t``, etc.) so a
+      malicious or corrupted sidecar cannot inject fake Markdown headings
+      into the published PR body;
+    - escape backticks so the slug stays inside the inline-code span;
+    - cap the rendered slug at a reasonable length to keep the block
+      compact regardless of upstream metadata length.
+    """
+    if source == SKILL_SOURCE_OUROBOROSHUB:
+        marker = skill_dir / ".ouroboroshub.json"
+        label = "OuroborosHub"
+        slug_key = "slug"
+    elif source == SKILL_SOURCE_CLAWHUB:
+        marker = skill_dir / ".clawhub.json"
+        label = "ClawHub"
+        slug_key = "clawhub_slug"
+    else:
+        return ""
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8")) if marker.is_file() else {}
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    original = str(data.get(slug_key) or data.get("slug") or "").strip()
+    if not original:
+        return ""
+    has_secret, _matches = contains_real_secret_value(original)
+    if has_secret:
+        # A sidecar slug should never look like a secret; if it does, drop
+        # the Provenance block entirely rather than risk leaking it upstream.
+        return ""
+    # Collapse anything that could break out of the inline-code span or inject
+    # a fake heading: control chars, newlines, backticks.
+    safe = "".join(ch for ch in original if 0x20 <= ord(ch) != 0x7f)
+    safe = safe.replace("`", "").strip()
+    if not safe:
+        return ""
+    if len(safe) > _PROVENANCE_SLUG_MAX:
+        safe = safe[:_PROVENANCE_SLUG_MAX] + "…"
+    return (
+        f"## Provenance\n"
+        f"Locally installed from {label} as `{safe}`. "
+        f"This PR submits a locally adapted version.\n\n"
+    )
+
+
 def _validate_local_skill(ctx: ToolContext, skill: str):
     safe = _sanitize_skill_name(skill)
     if not safe or safe == "_unnamed":
@@ -162,13 +225,13 @@ def _validate_local_skill(ctx: ToolContext, skill: str):
         SKILL_SOURCE_EXTERNAL,
         SKILL_SOURCE_SELF_AUTHORED,
         SKILL_SOURCE_USER_REPO,
+        SKILL_SOURCE_OUROBOROSHUB,
+        SKILL_SOURCE_CLAWHUB,
     }
     if loaded.source == SKILL_SOURCE_NATIVE and not (loaded.skill_dir / ".seed-origin").is_file():
         allowed_sources.add(SKILL_SOURCE_NATIVE)
     if loaded.source not in allowed_sources:
         raise ValueError(f"skill source {loaded.source!r} cannot be submitted to OuroborosHub")
-    if loaded.source in {SKILL_SOURCE_CLAWHUB, SKILL_SOURCE_OUROBOROSHUB}:
-        raise ValueError(f"skill source {loaded.source!r} is already marketplace-managed")
     if loaded.load_error:
         raise ValueError(f"skill has a load error: {loaded.load_error}")
     if loaded.review.status != "pass":
@@ -284,8 +347,10 @@ def _generate_pr_body(
     files: List[Dict[str, Any]],
     note: str,
     skill_dir: pathlib.Path,
+    source: str = "",
 ) -> str:
-    fallback = (
+    provenance = _provenance_hint(skill_dir, source)
+    fallback = provenance + (
         f"## Summary\n"
         f"- {mode.title()} `{skill}` v{manifest.version} to OuroborosHub.\n"
         f"- Type: `{manifest.type}`; files: {len(files)}.\n\n"
@@ -296,7 +361,7 @@ def _generate_pr_body(
         note_has_secret, _matches = contains_real_secret_value(note)
         if note_has_secret:
             raise ValueError("secret value found in submit note")
-        fallback = f"## Note\n{note.strip()}\n\n" + fallback
+        fallback = provenance + f"## Note\n{note.strip()}\n\n" + fallback[len(provenance):]
     skill_md = ""
     skill_md_path = skill_dir / "SKILL.md"
     try:
@@ -320,7 +385,9 @@ def _generate_pr_body(
             "Do not invent claims. Include the optional author note if provided.\n\n"
             f"Mode: {mode}\nSkill: {skill}\nVersion: {manifest.version}\nType: {manifest.type}\n"
             f"Files: {', '.join(f['path'] for f in files[:50])}\n"
-            f"Author note: {note.strip() or '(none)'}\n\nSKILL.md:\n{skill_md}"
+            f"Author note: {note.strip() or '(none)'}\n"
+            + (f"Provenance: {provenance.strip()}\n" if provenance else "")
+            + f"\nSKILL.md:\n{skill_md}"
         )
         response, usage = llm.chat(
             messages=[{"role": "user", "content": prompt}],
@@ -342,7 +409,13 @@ def _generate_pr_body(
             }
             ctx.pending_events.append(event)
         body = str(response.get("content") or "").strip()
-        return body or fallback
+        if not body:
+            return fallback
+        # Force-prefix provenance so the marketplace context is never dropped
+        # silently by the LLM narrative. Cheap markdown duplication is fine.
+        if provenance and "## Provenance" not in body:
+            body = provenance + body
+        return body
     except Exception as exc:
         ctx.emit_progress_fn(f"PR body LLM fallback: {type(exc).__name__}: {exc}")
         return fallback
@@ -397,7 +470,7 @@ def _submit_skill_to_hub(
         additions.append({"path": "catalog.json", "contents": base64.b64encode(catalog_bytes).decode("ascii")})
         title = f"{mode.title()} skill: {safe_skill} v{loaded.manifest.version}"
         _commit_payload(ctx, login, repo, branch, branch_sha, title, additions)
-        body = _generate_pr_body(ctx, mode, safe_skill, loaded.manifest, payload_files, note or "", loaded.skill_dir)
+        body = _generate_pr_body(ctx, mode, safe_skill, loaded.manifest, payload_files, note or "", loaded.skill_dir, loaded.source)
         pr_url = _open_pr(ctx, owner, repo, base_branch, login, branch, title, body)
         return (
             f"✅ PR opened: {pr_url}\n"

@@ -467,3 +467,365 @@ def test_submit_tool_registered_and_policy_covered(tmp_path):
     assert "submit_skill_to_hub" in registry.available_tools()
     core_names = {schema["function"]["name"] for schema in registry.schemas(core_only=True)}
     assert "submit_skill_to_hub" in core_names
+
+
+# ---------------------------------------------------------------------------
+# Marketplace-managed skills: A6 + A7 (v5.16.0-rc.1)
+# ---------------------------------------------------------------------------
+
+
+def _write_marketplace_skill(
+    ctx: ToolContext,
+    bucket: str,
+    name: str,
+    *,
+    version: str = "0.1.0",
+    sidecar: dict | None = None,
+    reviewed: bool = True,
+) -> pathlib.Path:
+    """Like _write_skill but writes into data/skills/<bucket>/<name>/ and
+    optionally drops a marketplace sidecar (.ouroboroshub.json or .clawhub.json).
+    Returns the skill payload directory."""
+    skill_dir = pathlib.Path(ctx.drive_root) / "skills" / bucket / name
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        f"---\n"
+        f"name: {name}\n"
+        f"description: Demo marketplace skill\n"
+        f"version: {version}\n"
+        f"type: extension\n"
+        f"entry: plugin.py\n"
+        f"when_to_use: User wants a demo.\n"
+        f"---\n"
+        f"# Demo\n",
+        encoding="utf-8",
+    )
+    (skill_dir / "plugin.py").write_text("def register(api):\n    pass\n", encoding="utf-8")
+    if sidecar is not None:
+        sidecar_name = ".ouroboroshub.json" if bucket == "ouroboroshub" else ".clawhub.json"
+        (skill_dir / sidecar_name).write_text(
+            json.dumps(sidecar, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    if reviewed:
+        digest = compute_content_hash(skill_dir, manifest_entry="plugin.py", manifest_scripts=[])
+        state_dir = pathlib.Path(ctx.drive_root) / "state" / "skills" / name
+        state_dir.mkdir(parents=True)
+        (state_dir / "review.json").write_text(
+            json.dumps({"status": "pass", "content_hash": digest}),
+            encoding="utf-8",
+        )
+    return skill_dir
+
+
+def _fake_gh_factory(login: str, repo: str, branch: str):
+    """Build a fake _gh_cmd that walks the happy-path GitHub flow once.
+    Returns (fake_gh, calls_list)."""
+    calls = []
+
+    def fake_gh(args, _ctx, timeout=30, input_data=None):
+        calls.append((args, input_data))
+        joined = " ".join(args)
+        if args[:2] == ["api", "/user"]:
+            return login
+        if args[:3] == ["repo", "view", f"{login}/{repo}"]:
+            return json.dumps({"name": repo})
+        if "merge-upstream" in joined:
+            return json.dumps({"merged": True})
+        if "/git/refs/heads/main" in joined:
+            return json.dumps({"object": {"sha": "base-sha"}})
+        if "contents/catalog.json" in joined:
+            raw = base64.b64encode(json.dumps({"skills": []}).encode("utf-8")).decode("ascii")
+            return json.dumps({"content": raw})
+        if f"/git/ref/heads/{branch}" in joined:
+            return "⚠️ GH_ERROR: Not Found"
+        if "/git/refs" in joined:
+            return json.dumps({"ref": f"refs/heads/{branch}", "object": {"sha": "fork-branch-sha"}})
+        if args[:2] == ["api", "graphql"]:
+            return json.dumps({"data": {"createCommitOnBranch": {"commit": {"url": "https://commit"}}}})
+        if args[:3] == ["pr", "create", "--repo"]:
+            return f"https://github.com/joi-lab/{repo}/pull/1"
+        raise AssertionError(args)
+
+    return fake_gh, calls
+
+
+class _BoomLLM:
+    """Force _generate_pr_body into its fallback path so tests can assert
+    on the deterministic fallback body without making a real LLM call."""
+
+    def chat(self, *args, **kwargs):
+        raise RuntimeError("test: LLM disabled")
+
+
+def test_submit_ouroboroshub_managed_skill_includes_provenance(tmp_path, monkeypatch):
+    ctx = _ctx(tmp_path)
+    _write_marketplace_skill(
+        ctx,
+        bucket="ouroboroshub",
+        name="alpha",
+        sidecar={
+            "schema_version": 1,
+            "source": "ouroboroshub",
+            "slug": "alpha-upstream",
+            "sanitized_name": "alpha",
+            "version": "0.1.0",
+        },
+    )
+    monkeypatch.setattr(skill_publish, "github_token_from_env_or_settings", lambda: "token")
+    monkeypatch.setattr(
+        skill_publish,
+        "get_ouroboroshub_catalog_url",
+        lambda: "https://raw.githubusercontent.com/joi-lab/OuroborosHub/main/catalog.json",
+    )
+    fake_gh, calls = _fake_gh_factory("octocat", "OuroborosHub", "submit/alpha-v0.1.0")
+    monkeypatch.setattr(skill_publish, "_gh_cmd", fake_gh)
+    monkeypatch.setattr(skill_publish, "LLMClient", _BoomLLM)
+
+    result = skill_publish._submit_skill_to_hub(
+        ctx, "alpha", confirm_public_submission=True, permission_statement="human asked to submit"
+    )
+
+    assert "PR opened" in result
+    pr_create_call = next(call for call in calls if call[0][:3] == ["pr", "create", "--repo"])
+    body = pr_create_call[1] or ""
+    assert "## Provenance" in body
+    assert "OuroborosHub" in body
+    assert "alpha-upstream" in body
+
+
+def test_submit_clawhub_managed_skill_includes_provenance(tmp_path, monkeypatch):
+    ctx = _ctx(tmp_path)
+    _write_marketplace_skill(
+        ctx,
+        bucket="clawhub",
+        name="beta",
+        sidecar={
+            "schema_version": 1,
+            "source": "clawhub",
+            "clawhub_slug": "upstream-beta",
+            "version": "0.1.0",
+        },
+    )
+    monkeypatch.setattr(skill_publish, "github_token_from_env_or_settings", lambda: "token")
+    monkeypatch.setattr(
+        skill_publish,
+        "get_ouroboroshub_catalog_url",
+        lambda: "https://raw.githubusercontent.com/joi-lab/OuroborosHub/main/catalog.json",
+    )
+    fake_gh, calls = _fake_gh_factory("octocat", "OuroborosHub", "submit/beta-v0.1.0")
+    monkeypatch.setattr(skill_publish, "_gh_cmd", fake_gh)
+    monkeypatch.setattr(skill_publish, "LLMClient", _BoomLLM)
+
+    result = skill_publish._submit_skill_to_hub(
+        ctx, "beta", confirm_public_submission=True, permission_statement="human asked to submit"
+    )
+
+    assert "PR opened" in result
+    pr_create_call = next(call for call in calls if call[0][:3] == ["pr", "create", "--repo"])
+    body = pr_create_call[1] or ""
+    assert "## Provenance" in body
+    assert "ClawHub" in body
+    assert "upstream-beta" in body
+
+
+def test_provenance_hint_drops_secret_looking_slug(tmp_path):
+    """Triad reviewer round 1 finding: _provenance_hint must NOT leak a
+    secret-shaped slug into a public PR body. Even though sidecars are
+    produced by the trusted install pipeline, defense-in-depth requires
+    the same secret-scan that note / SKILL.md already pass."""
+    ctx = _ctx(tmp_path)
+    skill_dir = _write_marketplace_skill(
+        ctx,
+        bucket="ouroboroshub",
+        name="alpha",
+        sidecar={
+            "schema_version": 1,
+            "source": "ouroboroshub",
+            # A slug that contains a real-looking secret heuristic match.
+            "slug": "sk-ant-" + ("A" * 40),
+            "version": "0.1.0",
+        },
+    )
+    hint = skill_publish._provenance_hint(skill_dir, "ouroboroshub")
+    assert hint == "", f"expected empty provenance for secret-looking slug; got: {hint!r}"
+
+
+def test_provenance_hint_neutralises_markdown_injection(tmp_path):
+    """Newlines + backticks + control chars in the slug must NOT escape the
+    inline-code span or inject a fake heading into the public PR body.
+
+    The relevant Markdown invariant is "no line-leading ## injection" — a
+    literal `## ` inside an inline-code span (between backticks) is harmless
+    because Markdown does not treat it as a heading there. The assertion
+    therefore checks that exactly ONE line in the rendered block starts with
+    `## `, namely our own `## Provenance` heading."""
+    ctx = _ctx(tmp_path)
+    skill_dir = _write_marketplace_skill(
+        ctx,
+        bucket="clawhub",
+        name="beta",
+        sidecar={
+            "schema_version": 1,
+            "source": "clawhub",
+            "clawhub_slug": "evil\n## Injected Heading\n```\nbad\n```\nrest",
+            "version": "0.1.0",
+        },
+    )
+    hint = skill_publish._provenance_hint(skill_dir, "clawhub")
+    # No newline-borne heading injection.
+    assert "\n## " not in hint, hint[:200]
+    # No code-fence injection that could break out of the inline-code span.
+    assert "```" not in hint, hint[:200]
+    # The benign part of the slug should still appear inside the inline-code span.
+    assert "evil" in hint
+    # The whole block must still be a well-formed ## Provenance section.
+    assert hint.startswith("## Provenance")
+    # Exactly one heading-level line in the rendered output.
+    heading_lines = [
+        line for line in hint.splitlines() if line.lstrip().startswith("## ")
+    ]
+    assert len(heading_lines) == 1, heading_lines
+
+
+def test_provenance_hint_caps_very_long_slug(tmp_path):
+    """Long slugs must be truncated so the Provenance block stays compact."""
+    ctx = _ctx(tmp_path)
+    skill_dir = _write_marketplace_skill(
+        ctx,
+        bucket="ouroboroshub",
+        name="gamma",
+        sidecar={
+            "schema_version": 1,
+            "source": "ouroboroshub",
+            "slug": "x" * 500,
+            "version": "0.1.0",
+        },
+    )
+    hint = skill_publish._provenance_hint(skill_dir, "ouroboroshub")
+    assert hint, "expected non-empty provenance"
+    # Truncation marker present; rendered slug well under 500 chars.
+    assert "…" in hint
+    assert len(hint) < 300
+
+
+class _CannedLLM:
+    """Returns a fixed body so the LLM-success branch of _generate_pr_body
+    is exercised (instead of always falling through to the fallback). The
+    body deliberately omits a ## Provenance section so the force-prefix
+    branch is the one under test."""
+
+    def __init__(self, body: str = "## Summary\n- LLM body\n"):
+        self._body = body
+
+    def chat(self, *args, **kwargs):
+        return ({"content": self._body}, {"cost": 0.0})
+
+
+def test_generate_pr_body_force_prefixes_provenance_to_llm_output(tmp_path, monkeypatch):
+    """The provenance block must be force-prefixed to the LLM-generated body
+    when the LLM did not include one itself. This is the deterministic
+    guarantee that the marketplace upstream maintainer sees Provenance even
+    if the LLM narrative drops it."""
+    ctx = _ctx(tmp_path)
+    skill_dir = _write_marketplace_skill(
+        ctx,
+        bucket="ouroboroshub",
+        name="alpha",
+        sidecar={
+            "schema_version": 1,
+            "source": "ouroboroshub",
+            "slug": "alpha-upstream",
+            "version": "0.1.0",
+        },
+    )
+    monkeypatch.setattr(skill_publish, "LLMClient", lambda: _CannedLLM("## Summary\n- LLM body\n"))
+
+    from ouroboros.skill_loader import find_skill
+
+    loaded = find_skill(pathlib.Path(ctx.drive_root), "alpha")
+    assert loaded is not None
+    body = skill_publish._generate_pr_body(
+        ctx,
+        "add",
+        "alpha",
+        loaded.manifest,
+        [],
+        "",
+        skill_dir,
+        loaded.source,
+    )
+    assert body.startswith("## Provenance"), body[:120]
+    assert "alpha-upstream" in body
+    assert "## Summary" in body
+    assert "LLM body" in body
+    # Sanity: no double Provenance prefix.
+    assert body.count("## Provenance") == 1
+
+
+def test_generate_pr_body_does_not_double_prefix_when_llm_already_emitted_provenance(tmp_path, monkeypatch):
+    """If the LLM already wrote ## Provenance, the force-prefix is skipped so
+    the body is not duplicated."""
+    ctx = _ctx(tmp_path)
+    skill_dir = _write_marketplace_skill(
+        ctx,
+        bucket="clawhub",
+        name="beta",
+        sidecar={
+            "schema_version": 1,
+            "source": "clawhub",
+            "clawhub_slug": "upstream-beta",
+            "version": "0.1.0",
+        },
+    )
+    llm_body = "## Provenance\nFork of upstream-beta.\n\n## Summary\n- LLM body\n"
+    monkeypatch.setattr(skill_publish, "LLMClient", lambda: _CannedLLM(llm_body))
+
+    from ouroboros.skill_loader import find_skill
+
+    loaded = find_skill(pathlib.Path(ctx.drive_root), "beta")
+    assert loaded is not None
+    body = skill_publish._generate_pr_body(
+        ctx,
+        "update",
+        "beta",
+        loaded.manifest,
+        [],
+        "",
+        skill_dir,
+        loaded.source,
+    )
+    assert body.count("## Provenance") == 1
+
+
+def test_submit_marketplace_skill_without_sidecar_falls_back_to_external(tmp_path, monkeypatch):
+    """If a skill sits under data/skills/ouroboroshub/<name>/ but has no
+    .ouroboroshub.json sidecar, skill_loader reclassifies it as 'external'
+    (honesty gate, skill_loader.py:1221-1222). Submit should still succeed
+    via the existing external flow, and the PR body should NOT contain a
+    Provenance section because there is no marketplace context to surface."""
+    ctx = _ctx(tmp_path)
+    _write_marketplace_skill(
+        ctx,
+        bucket="ouroboroshub",
+        name="orphan",
+        sidecar=None,  # honesty gate downgrades this to source='external'
+    )
+    monkeypatch.setattr(skill_publish, "github_token_from_env_or_settings", lambda: "token")
+    monkeypatch.setattr(
+        skill_publish,
+        "get_ouroboroshub_catalog_url",
+        lambda: "https://raw.githubusercontent.com/joi-lab/OuroborosHub/main/catalog.json",
+    )
+    fake_gh, calls = _fake_gh_factory("octocat", "OuroborosHub", "submit/orphan-v0.1.0")
+    monkeypatch.setattr(skill_publish, "_gh_cmd", fake_gh)
+    monkeypatch.setattr(skill_publish, "LLMClient", _BoomLLM)
+
+    result = skill_publish._submit_skill_to_hub(
+        ctx, "orphan", confirm_public_submission=True, permission_statement="human asked to submit"
+    )
+
+    assert "PR opened" in result
+    pr_create_call = next(call for call in calls if call[0][:3] == ["pr", "create", "--repo"])
+    body = pr_create_call[1] or ""
+    assert "## Provenance" not in body

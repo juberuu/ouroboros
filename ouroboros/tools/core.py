@@ -19,6 +19,8 @@ from ouroboros.contracts.skill_payload_policy import (
     SKILL_PAYLOAD_ALL_BUCKETS,
     SKILL_PAYLOAD_CONTROL_DIRNAMES,
     SKILL_PAYLOAD_CONTROL_FILENAMES,
+    cross_skill_redirect_error,
+    synthesize_payload_constraint,
 )
 
 log = logging.getLogger(__name__)
@@ -376,8 +378,36 @@ def _data_list(ctx: ToolContext, dir: str = ".", max_entries: int = 500) -> str:
     return json.dumps(_list_dir(ctx.drive_root, dir, max_entries), ensure_ascii=False, indent=2)
 
 
-def _data_write(ctx: ToolContext, path: str, content: str, mode: str = "overwrite") -> str:
-    task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
+def _data_write(
+    ctx: ToolContext,
+    path: str,
+    content: str,
+    mode: str = "overwrite",
+    bucket: str = "",
+    skill_name: str = "",
+) -> str:
+    # When the caller supplies bucket+skill_name args, synthesize a
+    # skill_repair-flavoured TaskConstraint so the existing payload-confined
+    # write flow handles the resolution. This is the light-mode short-form
+    # path described in DEVELOPMENT.md (Skill Repair Task Constraints).
+    synth = synthesize_payload_constraint(bucket, skill_name)
+    if (bucket or skill_name) and synth is None:
+        return (
+            "⚠️ DATA_WRITE_ERROR: bucket and skill_name must be supplied together; "
+            "bucket must be one of external/clawhub/ouroboroshub (native excluded); "
+            "skill_name must sanitize to a non-empty slug."
+        )
+    existing_tc = normalize_task_constraint(getattr(ctx, "task_constraint", None))
+    redirect_err = cross_skill_redirect_error(existing_tc, synth)
+    if redirect_err:
+        return f"⚠️ SKILL_REDIRECT_BLOCKED: {redirect_err}"
+    # Real skill_repair task_constraint wins over a synthesized one — repair
+    # confinement is sticky. Cross-skill mismatch is already blocked above; a
+    # matching synth is redundant here.
+    if existing_tc and existing_tc.mode == "skill_repair":
+        task_constraint = existing_tc
+    else:
+        task_constraint = synth or existing_tc
     if task_constraint and task_constraint.mode == "skill_repair" and task_constraint.payload_root:
         try:
             p = resolve_payload_path(pathlib.Path(ctx.drive_root), task_constraint, path)
@@ -995,11 +1025,27 @@ def get_tools() -> List[ToolEntry]:
         }, _data_list),
         ToolEntry("data_write", {
             "name": "data_write",
-            "description": "Write a UTF-8 text file to the local data directory.",
+            "description": (
+                "Write a UTF-8 text file to the local data directory. "
+                "Use mode='append' to write a large file in chunks across multiple calls "
+                "(useful when the full content exceeds a single LLM output budget). "
+                "Optional bucket+skill_name args let runtime_mode=light tasks write a short "
+                "relative path under data/skills/<bucket>/<skill_name>/ without an explicit "
+                "task_constraint."
+            ),
             "parameters": {"type": "object", "properties": {
                 "path": {"type": "string"},
                 "content": {"type": "string"},
                 "mode": {"type": "string", "enum": ["overwrite", "append"], "default": "overwrite"},
+                "bucket": {
+                    "type": "string",
+                    "enum": ["external", "clawhub", "ouroboroshub"],
+                    "description": "Skill payload bucket. Pair with skill_name to use a short relative path under data/skills/<bucket>/<skill_name>/. Requires both args together.",
+                },
+                "skill_name": {
+                    "type": "string",
+                    "description": "Skill slug (sanitized to alnum/_-., ≤64 chars). Requires bucket.",
+                },
             }, "required": ["path", "content"]},
         }, _data_write),
         ToolEntry("send_photo", {

@@ -22,7 +22,12 @@ from ouroboros.tools.commit_gate import _invalidate_advisory
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import utc_now_iso, run_cmd
 from ouroboros.contracts.task_constraint import normalize_task_constraint
-from ouroboros.contracts.skill_payload_policy import SkillPayloadPathError, resolve_skill_payload_target
+from ouroboros.contracts.skill_payload_policy import (
+    SkillPayloadPathError,
+    cross_skill_redirect_error,
+    resolve_skill_payload_target,
+    synthesize_payload_constraint,
+)
 
 log = logging.getLogger(__name__)
 
@@ -459,7 +464,8 @@ def _run_validation(repo_dir: pathlib.Path) -> str:
 # ---------------------------------------------------------------------------
 
 def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
-                      budget: float = 5.0, validate: bool = False) -> str:
+                      budget: float = 5.0, validate: bool = False,
+                      bucket: str = "", skill_name: str = "") -> str:
     """Delegate code edits via the Claude Agent SDK gateway.
 
     Uses the claude-agent-sdk Python package with PreToolUse safety hooks
@@ -473,7 +479,23 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
 
     work_dir = str(ctx.repo_dir)
     skill_payload_root = None
-    task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
+    synth = synthesize_payload_constraint(bucket, skill_name)
+    if (bucket or skill_name) and synth is None:
+        return (
+            "⚠️ CLAUDE_CODE_ERROR: bucket and skill_name must be supplied together; "
+            "bucket must be one of external/clawhub/ouroboroshub (native excluded); "
+            "skill_name must sanitize to a non-empty slug."
+        )
+    existing_tc = normalize_task_constraint(getattr(ctx, "task_constraint", None))
+    redirect_err = cross_skill_redirect_error(existing_tc, synth)
+    if redirect_err:
+        return f"⚠️ SKILL_REDIRECT_BLOCKED: {redirect_err}"
+    # Real skill_repair task_constraint wins over a synthesized one — repair
+    # confinement is sticky.
+    if existing_tc and existing_tc.mode == "skill_repair":
+        task_constraint = existing_tc
+    else:
+        task_constraint = synth or existing_tc
     if task_constraint and task_constraint.mode == "skill_repair" and task_constraint.payload_root:
         try:
             resolved_skill_target = resolve_skill_payload_target(
@@ -672,7 +694,11 @@ def get_tools() -> List[ToolEntry]:
                 "Prefer this for anything beyond one exact replacement: large single-file "
                 "edits, repeated coordinated edits, multi-hunk work, multi-file changes, "
                 "renames/signature changes, or uncertain scope. Prefer it over chaining "
-                "many str_replace_editor calls. Follow with repo_commit."
+                "many str_replace_editor calls. It also subdivides very large writes across "
+                "many small Write/Edit operations inside its own agent loop, so use it for "
+                "files larger than a single LLM output can produce. Follow with repo_commit. "
+                "Optional bucket+skill_name args let runtime_mode=light tasks anchor cwd "
+                "under data/skills/<bucket>/<skill_name>/ without an explicit task_constraint."
             ),
             "parameters": {"type": "object", "properties": {
                 "prompt": {"type": "string"},
@@ -681,6 +707,15 @@ def get_tools() -> List[ToolEntry]:
                            "description": "Max USD for this Claude Code call. Default: 5.0"},
                 "validate": {"type": "boolean", "default": False,
                              "description": "Run post-edit validation (tests). Returns summary in result."},
+                "bucket": {
+                    "type": "string",
+                    "enum": ["external", "clawhub", "ouroboroshub"],
+                    "description": "Skill payload bucket. Pair with skill_name to resolve cwd under data/skills/<bucket>/<skill_name>/. Requires both args together.",
+                },
+                "skill_name": {
+                    "type": "string",
+                    "description": "Skill slug (sanitized to alnum/_-., ≤64 chars). Requires bucket.",
+                },
             }, "required": ["prompt"]},
         }, _claude_code_edit, is_code_tool=True, timeout_sec=1200),
     ]

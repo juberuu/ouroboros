@@ -1,4 +1,4 @@
-# Ouroboros v5.15.0-rc.13 — Architecture & Reference
+# Ouroboros v5.16.0-rc.1 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -117,7 +117,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── review_revalidation.py ← Reviewed-commit fingerprint revalidation helpers (blocks when staged diff changes after review)
       │   ├── scope_review.py   ← Blocking scope reviewer (configurable, fail-closed)
       │   ├── skill_exec.py      ← Phase 3 external-skill surface: list_skills, review_skill, toggle_skill, skill_exec (subprocess runner with cwd confinement, env scrubbing, timeout, runtime allowlist python/python3/bash/node/deno/ruby/go; gated by enabled + fresh executable review + fresh content hash — v5.1.2 Frame A: runtime_mode no longer blocks execution)
-      │   ├── skill_publish.py   ← Agent-callable `submit_skill_to_hub` tool: validates a fresh PASS-reviewed local skill, infers OuroborosHub from `OUROBOROS_HUB_CATALOG_URL`, commits payload + catalog update to the user's fork via GitHub GraphQL, and opens a PR without mutating the local Ouroboros repo.
+      │   ├── skill_publish.py   ← Agent-callable `submit_skill_to_hub` tool: validates a fresh PASS-reviewed local skill (sources `external`/`self_authored`/`user_repo`/`ouroboroshub`/`clawhub`; `native` only when no `.seed-origin` marker), infers OuroborosHub from `OUROBOROS_HUB_CATALOG_URL`, commits payload + catalog update to the user's fork via GitHub GraphQL, and opens a PR without mutating the local Ouroboros repo. For marketplace-managed sources the generated PR body is force-prefixed with a `## Provenance` block read from the local sidecar (`.ouroboroshub.json` slug / `.clawhub.json` clawhub_slug); when no sidecar exists the source is reclassified as `external` by skill_loader and submit proceeds without the block.
       │   └── skill_preflight.py ← v5.7.0 heal-safe, read-only skill payload preflight validator (manifest parse + Python compile() / node --check / bash -n; no review-state mutation)
       └── platform_layer.py    ← Cross-platform process/path/locking helpers
 
@@ -2571,4 +2571,4 @@ Bridge skills pass external-chat provenance through a generic `transport` object
 
 `ouroboros/contracts/task_constraint.py` is an internal structured task envelope used by server, worker, and tool-registry code to carry skill-repair constraints. It is contract-tested by `tests/test_task_constraint_tools.py` and `tests/test_task_constraint_server_routing.py`, but it is not a public PluginAPI surface.
 
-`ouroboros/contracts/skill_payload_policy.py` is an internal shared resolver for tool/runtime policy, not a public PluginAPI surface. It confines explicit `data/skills/{external,clawhub,ouroboroshub}/<skill>/...` payload edits, rejects mismatched `skill_repair` constraints, and centralizes control-plane sidecar detection so registry, shell, and git tools do not copy/paste bucket logic.
+`ouroboros/contracts/skill_payload_policy.py` is an internal shared resolver for tool/runtime policy, not a public PluginAPI surface. It confines explicit `data/skills/{external,clawhub,ouroboroshub}/<skill>/...` payload edits, rejects mismatched `skill_repair` constraints, centralizes control-plane sidecar detection so registry, shell, and git tools do not copy/paste bucket logic, and exposes `synthesize_payload_constraint(bucket, skill_name)` so the `runtime_mode=light` short-form (optional `bucket` + `skill_name` args on `data_write` / `str_replace_editor` / `claude_code_edit`) reuses the `skill_repair`-mode resolution without introducing a new task-constraint mode.

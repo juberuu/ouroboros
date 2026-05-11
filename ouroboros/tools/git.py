@@ -40,7 +40,12 @@ from ouroboros.tools.parallel_review import run_parallel_review as _run_parallel
 from ouroboros.tools.review_helpers import _run_review_preflight_tests
 from ouroboros.tools.core import is_skill_control_plane_path
 from ouroboros.contracts.task_constraint import normalize_task_constraint, resolve_payload_path
-from ouroboros.contracts.skill_payload_policy import SkillPayloadPathError, resolve_skill_payload_target
+from ouroboros.contracts.skill_payload_policy import (
+    SkillPayloadPathError,
+    cross_skill_redirect_error,
+    resolve_skill_payload_target,
+    synthesize_payload_constraint,
+)
 _CONTENT_OMITTED_PREFIX = "<<CONTENT_OMITTED"
 log = logging.getLogger(__name__)
 
@@ -1028,7 +1033,14 @@ def _repo_write(ctx: ToolContext, path: str = "", content: str = "",
     return result
 
 
-def _str_replace_editor(ctx: ToolContext, path: str, old_str: str, new_str: str) -> str:
+def _str_replace_editor(
+    ctx: ToolContext,
+    path: str,
+    old_str: str,
+    new_str: str,
+    bucket: str = "",
+    skill_name: str = "",
+) -> str:
     """Replace exactly one occurrence of old_str with new_str in a file."""
     if not path or not path.strip():
         return "⚠️ STR_REPLACE_ERROR: path is required."
@@ -1043,8 +1055,25 @@ def _str_replace_editor(ctx: ToolContext, path: str, old_str: str, new_str: str)
             action="edit",
         )
 
+    synth = synthesize_payload_constraint(bucket, skill_name)
+    if (bucket or skill_name) and synth is None:
+        return (
+            "⚠️ STR_REPLACE_ERROR: bucket and skill_name must be supplied together; "
+            "bucket must be one of external/clawhub/ouroboroshub (native excluded); "
+            "skill_name must sanitize to a non-empty slug."
+        )
+    existing_tc = normalize_task_constraint(getattr(ctx, "task_constraint", None))
+    redirect_err = cross_skill_redirect_error(existing_tc, synth)
+    if redirect_err:
+        return f"⚠️ SKILL_REDIRECT_BLOCKED: {redirect_err}"
+
     data_skill_target = None
-    task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
+    # Real skill_repair task_constraint wins over a synthesized one — repair
+    # confinement is sticky.
+    if existing_tc and existing_tc.mode == "skill_repair":
+        task_constraint = existing_tc
+    else:
+        task_constraint = synth or existing_tc
     if task_constraint and task_constraint.mode == "skill_repair" and task_constraint.payload_root:
         try:
             target = resolve_payload_path(pathlib.Path(ctx.drive_root), task_constraint, path)
@@ -1689,12 +1718,23 @@ def get_tools() -> List[ToolEntry]:
                 "Surgical edit: replace exactly one occurrence of old_str with new_str in a file. "
                 "Safer than repo_write for existing files — reads the file, verifies the match is unique, "
                 "performs the replacement, and shows context. Use for all edits to existing tracked files. "
-                "For new files or intentional full rewrites, use repo_write instead."
+                "For new files or intentional full rewrites, use repo_write instead. "
+                "Optional bucket+skill_name args let runtime_mode=light tasks address a short relative "
+                "path under data/skills/<bucket>/<skill_name>/ without an explicit task_constraint."
             ),
             "parameters": {"type": "object", "properties": {
                 "path": {"type": "string", "description": "File path relative to repo root"},
                 "old_str": {"type": "string", "description": "Exact string to find (must appear exactly once)"},
                 "new_str": {"type": "string", "description": "Replacement string"},
+                "bucket": {
+                    "type": "string",
+                    "enum": ["external", "clawhub", "ouroboroshub"],
+                    "description": "Skill payload bucket. Pair with skill_name to resolve a short relative path under data/skills/<bucket>/<skill_name>/. Requires both args together.",
+                },
+                "skill_name": {
+                    "type": "string",
+                    "description": "Skill slug (sanitized to alnum/_-., ≤64 chars). Requires bucket.",
+                },
             }, "required": ["path", "old_str", "new_str"]},
         }, _str_replace_editor, is_code_tool=True),
         ToolEntry("repo_write_commit", {

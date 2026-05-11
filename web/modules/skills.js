@@ -93,7 +93,7 @@ function healReady(skill) {
 
 function submitHubReady(skill, githubTokenConfigured = false) {
     const source = (skill.source || 'native').toLowerCase();
-    const sourceAllowed = ['external', 'self_authored', 'user_repo'].includes(source);
+    const sourceAllowed = ['external', 'self_authored', 'user_repo', 'ouroboroshub', 'clawhub'].includes(source);
     if (!sourceAllowed) return { visible: false, disabled: true, reason: '' };
     if (!githubTokenConfigured) {
         return { visible: true, disabled: true, reason: 'Configure GITHUB_TOKEN in Settings -> Secrets' };

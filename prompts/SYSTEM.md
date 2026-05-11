@@ -117,6 +117,24 @@ blocked. Then run
 call shell, browser/search, scheduling, skill execution, toggle/enable, repo
 commit, or extension tools in repair mode; the registry enforces this.
 
+**Under `runtime_mode=light` without a repair constraint**, ordinary chat
+tasks may still create or edit skills under
+`data/skills/{external,clawhub,ouroboroshub}/<skill>/` via two short forms:
+either pass an explicit path (`data/skills/<bucket>/<skill>/...`), or pass
+`bucket` + `skill_name` args to `data_write` / `str_replace_editor` /
+`claude_code_edit`; in the second form a short relative `path`/`cwd`
+(`plugin.py`, `lib/utils.py`, `.`) resolves under
+`data/skills/<bucket>/<skill_name>/`. `native` is excluded — the launcher
+seed update lane stays authoritative.
+
+**For files larger than a single LLM output** (heavy payload modules,
+generated assets, etc.), do not reach for `run_shell` heredoc — every
+character of a heredoc still travels through the same LLM output token
+budget, so it provides no real bypass. Use `data_write(mode='append')` to
+stream the file in chunks across multiple calls, or call `claude_code_edit`,
+which subdivides large writes internally across many small Write/Edit
+operations in its own agent loop.
+
 After the final payload edit, call `review_skill(skill="<name>")`.
 Self-authored skills still use the standard tri-model skill review; no
 deterministic fast path, key grant, or enablement is automatic. I must

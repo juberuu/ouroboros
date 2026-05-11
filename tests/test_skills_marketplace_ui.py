@@ -105,7 +105,7 @@ def test_skill_lifecycle_events_refresh_dependent_ui():
 def test_submit_hub_hidden_for_native_skills_without_fake_seed_flag():
     source = _skills_js()
     assert "function submitHubReady" in source
-    assert "['external', 'self_authored', 'user_repo'].includes(source)" in source
+    assert "['external', 'self_authored', 'user_repo', 'ouroboroshub', 'clawhub'].includes(source)" in source
     assert "source === 'native' && !skill.seed_origin" not in source
     assert "skills-submit-hub" in source
     assert "Submit to OuroborosHub" in source

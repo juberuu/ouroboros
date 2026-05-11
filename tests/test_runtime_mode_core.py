@@ -881,3 +881,322 @@ def test_light_mode_allows_shell_wrapper_non_repo_writer(tmp_path, monkeypatch):
     reg = _registry(tmp_path)
     result = reg.execute("run_shell", {"cmd": ["bash", "-c", "mkdir /tmp/ouroboros-light-wrapper"]})
     assert "LIGHT_MODE_BLOCKED" not in result, result[:200]
+
+
+# ===========================================================================
+# Part: light-mode bucket+skill_name short-form authoring (v5.16.0-rc.1)
+# ===========================================================================
+#
+# Under runtime_mode=light, the three skill-payload edit tools — data_write,
+# str_replace_editor, claude_code_edit — accept optional bucket+skill_name
+# args that synthesize a skill_repair-like constraint at the gate (registry
+# layer) and again at the handler layer. These tests pin the gate decision
+# (LIGHT_MODE_BLOCKED present / absent) and the new error/help messages.
+# Handler-internal path resolution is covered by handler-level tests
+# (test_data_write_*, test_str_replace_editor_*, test_skill_repair_*).
+
+
+def _register_fake(reg, tool_name, fake_handler):
+    """Replace a registered ToolEntry's handler with ``fake_handler`` while
+    preserving the registered schema. Lets gate tests observe what the gate
+    decided without dragging in handler-internal side effects (network, FS)."""
+    existing = reg._entries.get(tool_name)
+    schema = existing.schema if existing else {"name": tool_name}
+    is_code_tool = getattr(existing, "is_code_tool", False) if existing else False
+    reg._entries[tool_name] = ToolEntry(
+        name=tool_name,
+        schema=schema,
+        handler=fake_handler,
+        is_code_tool=is_code_tool,
+    )
+
+
+def _make_skill_payload(tmp_path, bucket, name):
+    """Create data/skills/<bucket>/<name>/plugin.py so resolve_skill_payload_target
+    sees an existing payload root."""
+    payload = tmp_path / "skills" / bucket / name
+    payload.mkdir(parents=True)
+    (payload / "plugin.py").write_text("def register(api):\n    pass\n", encoding="utf-8")
+    return payload
+
+
+@pytest.mark.parametrize("bucket", ["external", "clawhub", "ouroboroshub"])
+def test_light_claude_code_edit_with_bucket_skill_name_allowed(bucket, tmp_path, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    _make_skill_payload(tmp_path, bucket, "alpha")
+    reg = _registry(tmp_path)
+    _register_fake(reg, "claude_code_edit", lambda ctx, **kw: "edit-ran")
+    result = reg.execute(
+        "claude_code_edit",
+        {"prompt": "noop", "cwd": ".", "bucket": bucket, "skill_name": "alpha"},
+    )
+    assert "LIGHT_MODE_BLOCKED" not in result, result[:200]
+    assert "edit-ran" in result
+
+
+@pytest.mark.parametrize("bucket", ["external", "clawhub", "ouroboroshub"])
+def test_light_str_replace_editor_with_bucket_skill_name_allowed(bucket, tmp_path, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    _make_skill_payload(tmp_path, bucket, "beta")
+    reg = _registry(tmp_path)
+    _register_fake(reg, "str_replace_editor", lambda ctx, **kw: "str-replace-ran")
+    result = reg.execute(
+        "str_replace_editor",
+        {"path": "plugin.py", "old_str": "x", "new_str": "y", "bucket": bucket, "skill_name": "beta"},
+    )
+    assert "LIGHT_MODE_BLOCKED" not in result, result[:200]
+    assert "str-replace-ran" in result
+
+
+def test_light_data_write_with_bucket_skill_name_resolves_under_payload(tmp_path, monkeypatch):
+    """data_write is NOT in _REPO_MUTATION_TOOLS, so the gate never sees it.
+    Verify the handler-level synthesis still resolves the short path under
+    data/skills/<bucket>/<skill>/ so a file lands inside the payload."""
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    _make_skill_payload(tmp_path, "external", "gamma")
+    reg = _registry(tmp_path)
+    result = reg.execute(
+        "data_write",
+        {
+            "path": "lib/utils.py",
+            "content": "def hi(): return 'ok'\n",
+            "bucket": "external",
+            "skill_name": "gamma",
+        },
+    )
+    assert "DATA_WRITE_ERROR" not in result, result[:200]
+    assert "DATA_WRITE_BLOCKED" not in result, result[:200]
+    landed = tmp_path / "skills" / "external" / "gamma" / "lib" / "utils.py"
+    assert landed.is_file(), f"expected file at {landed}; got result={result[:200]}"
+
+
+def test_light_bucket_native_rejected_at_gate(tmp_path, monkeypatch):
+    """bucket=native MUST not be honoured — launcher seed update lane stays
+    authoritative. With the post-triad partial-args check in place, the gate
+    surfaces the specific SKILL_PAYLOAD_ARG_ERROR (which lists `native excluded`)
+    BEFORE the generic LIGHT_MODE_BLOCKED would fire — giving the agent a
+    clearer signal."""
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    reg = _registry(tmp_path)
+    result = reg.execute(
+        "claude_code_edit",
+        {"prompt": "noop", "cwd": ".", "bucket": "native", "skill_name": "anything"},
+    )
+    assert "SKILL_PAYLOAD_ARG_ERROR" in result, result[:200]
+    assert "native excluded" in result
+
+
+@pytest.mark.parametrize("tool_name,base_args", [
+    ("data_write", {"path": "plugin.py", "content": "x"}),
+    ("str_replace_editor", {"path": "plugin.py", "old_str": "a", "new_str": "b"}),
+    ("claude_code_edit", {"prompt": "noop", "cwd": "plugin.py"}),
+])
+@pytest.mark.parametrize("partial", [
+    {"bucket": "external"},
+    {"skill_name": "alpha"},
+    {"bucket": "native", "skill_name": "alpha"},
+    {"bucket": "external", "skill_name": "...."},  # sanitizes to empty
+])
+def test_light_partial_args_surface_specific_error_not_generic_light_block(
+    tool_name, base_args, partial, tmp_path, monkeypatch
+):
+    """Partial / invalid bucket+skill_name must yield a SPECIFIC actionable
+    error before the generic LIGHT_MODE_BLOCKED. Triad reviewer round 1
+    flagged the older test as codifying a weaker contract — this test pins
+    the documented behaviour: ⚠️ SKILL_PAYLOAD_ARG_ERROR surfaces uniformly
+    across all three payload-mutating tools, regardless of which partial
+    shape the caller used."""
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    reg = _registry(tmp_path)
+    args = {**base_args, **partial}
+    result = reg.execute(tool_name, args)
+    assert "SKILL_PAYLOAD_ARG_ERROR" in result, (
+        f"expected specific partial-args error for {tool_name} {partial!r}; "
+        f"got: {result[:300]}"
+    )
+    assert "bucket and skill_name must be supplied together" in result, result[:300]
+
+
+def test_light_control_plane_sidecar_still_blocked_with_bucket_skill_name(tmp_path, monkeypatch):
+    """Even with a valid bucket+skill_name pair, the gate refuses control-plane
+    sidecars (allow_control_plane=False is preserved). Same protection as repair
+    mode — sidecar paths cannot be rewritten via generic tools."""
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    _make_skill_payload(tmp_path, "ouroboroshub", "delta")
+    reg = _registry(tmp_path)
+    result = reg.execute(
+        "str_replace_editor",
+        {
+            "path": ".ouroboroshub.json",
+            "old_str": "x",
+            "new_str": "y",
+            "bucket": "ouroboroshub",
+            "skill_name": "delta",
+        },
+    )
+    assert "LIGHT_MODE_BLOCKED" in result, result[:200]
+
+
+def test_light_mode_blocked_message_lists_three_paths(tmp_path, monkeypatch):
+    """LIGHT_MODE_BLOCKED message documents all three valid escape hatches so
+    agents do not silently fall back to less-idiomatic tools."""
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    reg = _registry(tmp_path)
+    result = reg.execute("repo_write_commit", {"path": "README.md", "content": "x"})
+    assert "LIGHT_MODE_BLOCKED" in result, result[:200]
+    assert "skill_repair" in result
+    assert "data/skills/<bucket>" in result
+    assert "bucket and skill_name" in result
+
+
+# ===========================================================================
+# Repair-mode confinement vs bucket+skill_name short-form (v5.16.0-rc.1
+# adversarial-review round 1 finding: three independent critics flagged a
+# cross-skill escape where an agent in heal mode for skill A could pass
+# bucket+skill_name args pointing at skill B and have the synthesized
+# constraint override the real heal task_constraint. These tests pin the
+# precedence rule: real skill_repair task_constraint wins, mismatched
+# bucket+skill_name args return ⚠️ SKILL_REDIRECT_BLOCKED before any
+# resolution happens.)
+# ===========================================================================
+
+
+def _ctx_with_skill_repair(tmp_path, skill_name: str, bucket: str = "external"):
+    """Build a minimal ToolRegistry whose ctx already carries a skill_repair
+    task_constraint for ``skill_name``. Returns the registry."""
+    from ouroboros.contracts.task_constraint import TaskConstraint
+
+    reg = _registry(tmp_path)
+    reg._ctx.task_constraint = TaskConstraint(
+        mode="skill_repair",
+        skill_name=skill_name,
+        payload_root=f"skills/{bucket}/{skill_name}",
+    )
+    return reg
+
+
+@pytest.mark.parametrize("tool_name,extra_args", [
+    ("data_write", {"path": "plugin.py", "content": "evil-payload\n"}),
+    ("str_replace_editor", {"path": "plugin.py", "old_str": "x", "new_str": "y"}),
+    ("claude_code_edit", {"prompt": "noop", "cwd": "."}),
+])
+def test_repair_mode_blocks_cross_skill_redirect_via_bucket_skill_name(
+    tool_name, extra_args, tmp_path, monkeypatch
+):
+    """If a heal task is active for alpha and the agent passes
+    bucket+skill_name args naming a different skill bravo, the call must NOT
+    silently write into bravo's payload. SKILL_REDIRECT_BLOCKED is the
+    intended failure mode (registry-level + handler-level defense-in-depth)."""
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    _make_skill_payload(tmp_path, "external", "alpha")
+    _make_skill_payload(tmp_path, "external", "bravo")
+    reg = _ctx_with_skill_repair(tmp_path, "alpha")
+
+    args = dict(extra_args)
+    args["bucket"] = "external"
+    args["skill_name"] = "bravo"
+    result = reg.execute(tool_name, args)
+
+    assert "SKILL_REDIRECT_BLOCKED" in result, (
+        f"expected SKILL_REDIRECT_BLOCKED for {tool_name} with cross-skill "
+        f"bucket+skill_name args under active skill_repair; got: {result[:200]}"
+    )
+    # Bravo's payload must remain untouched.
+    bravo_plugin = tmp_path / "skills" / "external" / "bravo" / "plugin.py"
+    assert not bravo_plugin.exists() or bravo_plugin.read_text(encoding="utf-8") == "def register(api):\n    pass\n", (
+        f"unexpected write to bravo's payload: {bravo_plugin.read_text(encoding='utf-8')[:200]}"
+    )
+
+
+def test_repair_mode_matching_bucket_skill_name_is_silently_redundant(tmp_path, monkeypatch):
+    """When bucket+skill_name match the active skill_repair task_constraint
+    they are redundant but not erroneous — the call proceeds via the real TC,
+    no SKILL_REDIRECT_BLOCKED. Real TC stays authoritative."""
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    _make_skill_payload(tmp_path, "external", "alpha")
+    reg = _ctx_with_skill_repair(tmp_path, "alpha")
+
+    result = reg.execute(
+        "data_write",
+        {
+            "path": "extra.py",
+            "content": "x\n",
+            "bucket": "external",
+            "skill_name": "alpha",
+        },
+    )
+
+    assert "SKILL_REDIRECT_BLOCKED" not in result, result[:200]
+    assert "DATA_WRITE_ERROR" not in result, result[:200]
+    landed = tmp_path / "skills" / "external" / "alpha" / "extra.py"
+    assert landed.is_file(), f"expected file at {landed}; got result={result[:200]}"
+
+
+def test_synthesize_payload_constraint_unit():
+    """Direct contract on the synthesis helper. Covers every branch so callers
+    can rely on None == 'no short-form payload context'."""
+    from ouroboros.contracts.skill_payload_policy import (
+        SKILL_PAYLOAD_BUCKETS,
+        synthesize_payload_constraint,
+    )
+
+    # Happy path — every allowed bucket.
+    for bucket in SKILL_PAYLOAD_BUCKETS:
+        tc = synthesize_payload_constraint(bucket, "weather")
+        assert tc is not None
+        assert tc.mode == "skill_repair"
+        assert tc.skill_name == "weather"
+        assert tc.payload_root == f"skills/{bucket}/weather"
+
+    # Native is excluded — launcher seed update lane stays authoritative.
+    assert synthesize_payload_constraint("native", "anything") is None
+
+    # Unknown bucket.
+    assert synthesize_payload_constraint("notabucket", "weather") is None
+
+    # Empty / whitespace inputs.
+    assert synthesize_payload_constraint("", "weather") is None
+    assert synthesize_payload_constraint("external", "") is None
+    assert synthesize_payload_constraint("   ", "weather") is None
+
+    # Name that sanitizes away to nothing.
+    assert synthesize_payload_constraint("external", "....") is None
+    assert synthesize_payload_constraint("external", "/") is None
+
+    # Sanitizer normalises odd input but still returns a usable constraint.
+    tc = synthesize_payload_constraint("external", "weather/v2")
+    assert tc is not None and tc.skill_name == "weather_v2"
+
+
+def test_cross_skill_redirect_error_unit():
+    """The helper that produces SKILL_REDIRECT_BLOCKED text. Empty string means
+    'no conflict, proceed'; non-empty means 'reject the call'."""
+    from ouroboros.contracts.skill_payload_policy import (
+        cross_skill_redirect_error,
+        synthesize_payload_constraint,
+    )
+    from ouroboros.contracts.task_constraint import TaskConstraint
+
+    alpha_tc = TaskConstraint(
+        mode="skill_repair", skill_name="alpha", payload_root="skills/external/alpha"
+    )
+    bravo_synth = synthesize_payload_constraint("external", "bravo")
+    alpha_synth = synthesize_payload_constraint("external", "alpha")
+
+    # Mismatched names → non-empty redirect message.
+    err = cross_skill_redirect_error(alpha_tc, bravo_synth)
+    assert err and "alpha" in err and "bravo" in err
+
+    # Matching names → empty (redundant, not erroneous).
+    assert cross_skill_redirect_error(alpha_tc, alpha_synth) == ""
+
+    # No active TC → no redirect possible.
+    assert cross_skill_redirect_error(None, bravo_synth) == ""
+
+    # No synth → nothing to redirect.
+    assert cross_skill_redirect_error(alpha_tc, None) == ""
+
+    # Existing TC of a different mode (hypothetical future) → not skill_repair,
+    # so no confinement to enforce here.
+    other_mode = TaskConstraint(mode="other", skill_name="alpha", payload_root="skills/external/alpha")
+    assert cross_skill_redirect_error(other_mode, bravo_synth) == ""

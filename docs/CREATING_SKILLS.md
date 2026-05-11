@@ -227,6 +227,51 @@ repo commits, extension tools, key grants, and enable/disable flows. Finish
 with `skill_preflight` and `review_skill`; the owner enables or grants access
 after a fresh executable review.
 
+### Light-mode short-form authoring (no repair constraint)
+
+Under `runtime_mode=light` without a `skill_repair` task constraint, the
+same three edit tools (`data_write`, `str_replace_editor`, `claude_code_edit`)
+accept two optional args — `bucket` (one of `external` / `clawhub` /
+`ouroboroshub`; `native` is excluded) and `skill_name`. When both are
+supplied, a short relative `path` / `cwd` (e.g. `plugin.py`, `lib/utils.py`,
+or `.`) resolves under `data/skills/<bucket>/<skill_name>/`, the same payload
+root the repair flow would pick. Supply both args together — passing only
+one returns a clear `bucket and skill_name must be supplied together` error
+instead of silently writing into the drive root.
+
+Equivalent ways to address `data/skills/external/weather/plugin.py` under
+light:
+
+```text
+data_write(path="data/skills/external/weather/plugin.py", content=...)
+data_write(path="plugin.py", content=..., bucket="external", skill_name="weather")
+```
+
+Control-plane sidecars (`.clawhub.json`, `.ouroboroshub.json`,
+`.self_authored.json`, `.seed-origin`, `SKILL.openclaw.md`) stay blocked
+either way — the bucket+skill_name short form does not weaken sidecar
+protection.
+
+### Writing large payload files
+
+The hard ceiling for any single tool call is the LLM output token budget —
+about a few thousand lines of code, depending on the model and prompt
+overhead. Two reliable strategies when a generated payload exceeds that
+ceiling:
+
+1. **`data_write(mode="append")` in chunks.** Each call appends the next
+   slice; the file lands intact across multiple turns. Useful for
+   structured assets (CSV, JSONL, prose corpora) the agent itself is
+   generating.
+2. **`claude_code_edit`.** The Agent SDK gateway subdivides large writes
+   into many small `Write` / `Edit` operations inside its own loop, so a
+   single call can produce a payload that no single `data_write` could
+   fit. Pair with `validate=True` to run smoke tests in the same call.
+
+`run_shell` heredoc is **not** a workaround — every byte of a heredoc body
+still passes through the same LLM output budget, so it offers no real
+bypass and is harder to review.
+
 ## Permissions
 
 The manifest's `permissions` list authorises specific PluginAPI

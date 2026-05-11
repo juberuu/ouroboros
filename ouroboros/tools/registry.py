@@ -34,7 +34,11 @@ from ouroboros.tool_aliases import (
 from ouroboros.tool_capabilities import CORE_TOOL_NAMES
 from ouroboros.utils import safe_relpath
 from ouroboros.contracts.task_constraint import TaskConstraint, normalize_task_constraint, resolve_payload_path
-from ouroboros.contracts.skill_payload_policy import is_skill_payload_path
+from ouroboros.contracts.skill_payload_policy import (
+    cross_skill_redirect_error,
+    is_skill_payload_path,
+    synthesize_payload_constraint,
+)
 
 log = logging.getLogger(__name__)
 
@@ -1044,14 +1048,63 @@ class ToolRegistry:
                 "stage_pr_merge",
             }
         )
+        # bucket+skill_name args (light-mode short-form authoring) synthesize
+        # a skill_repair-flavoured constraint so the gate treats the call as a
+        # payload-confined edit just like an explicit skill_repair task would.
+        raw_bucket = str(args.get("bucket", "") or "")
+        raw_skill_name = str(args.get("skill_name", "") or "")
+        synth_constraint = synthesize_payload_constraint(raw_bucket, raw_skill_name)
+        # Surface a specific partial-args error BEFORE the generic light-mode
+        # block, so an agent that supplied only one of {bucket, skill_name}
+        # (or chose `native`) sees the actionable wording promised in
+        # SYSTEM.md / CREATING_SKILLS.md instead of a generic
+        # LIGHT_MODE_BLOCKED that lists three escape hatches.
+        if (
+            (raw_bucket or raw_skill_name)
+            and synth_constraint is None
+            and name in (
+                "data_write",
+                "str_replace_editor",
+                "claude_code_edit",
+            )
+        ):
+            return (
+                "⚠️ SKILL_PAYLOAD_ARG_ERROR: bucket and skill_name must be "
+                "supplied together; bucket must be one of "
+                "external/clawhub/ouroboroshub (native excluded); "
+                "skill_name must sanitize to a non-empty slug."
+            )
+        # Repair-mode confinement is sticky: a real skill_repair task_constraint
+        # MUST win over a synthesized one. Otherwise an agent active in heal
+        # mode for skill A could redirect a write/edit to skill B by passing
+        # bucket+skill_name args. Reject the conflict early; same wording
+        # surfaces from every payload-mutating tool so the LLM sees a single
+        # consistent class of error.
+        redirect_err = cross_skill_redirect_error(task_constraint, synth_constraint)
+        if redirect_err and name in (
+            "data_write",
+            "str_replace_editor",
+            "claude_code_edit",
+        ):
+            return f"⚠️ SKILL_REDIRECT_BLOCKED: {redirect_err}"
+        # Existing skill_repair task_constraint stays authoritative even when a
+        # synth was also produced and the slugs happen to match (matching synth
+        # is redundant; non-matching synth was already blocked above).
+        if task_constraint and task_constraint.mode == "skill_repair":
+            effective_constraint = task_constraint
+        else:
+            effective_constraint = synth_constraint or task_constraint
+        allow_short_relative = bool(
+            effective_constraint and effective_constraint.mode == "skill_repair"
+        )
         light_skill_scoped_claude = (
             _runtime_mode == "light"
             and name == "claude_code_edit"
             and is_skill_payload_path(
                 pathlib.Path(self._ctx.drive_root),
                 str(args.get("cwd") or "."),
-                constraint=task_constraint,
-                allow_short_relative=bool(task_constraint and task_constraint.mode == "skill_repair"),
+                constraint=effective_constraint,
+                allow_short_relative=allow_short_relative,
                 allow_control_plane=False,
             )
         )
@@ -1061,8 +1114,8 @@ class ToolRegistry:
             and is_skill_payload_path(
                 pathlib.Path(self._ctx.drive_root),
                 str(args.get("path", "") or ""),
-                constraint=task_constraint,
-                allow_short_relative=bool(task_constraint and task_constraint.mode == "skill_repair"),
+                constraint=effective_constraint,
+                allow_short_relative=allow_short_relative,
                 allow_control_plane=False,
             )
         )
@@ -1076,8 +1129,12 @@ class ToolRegistry:
                 "⚠️ LIGHT_MODE_BLOCKED: runtime_mode=light disables "
                 "repo self-modification. Tool "
                 f"{name!r} would mutate the Ouroboros repository. "
-                "Skill-repair payload edits are allowed only when constrained "
-                "by task_constraint.mode='skill_repair'. "
+                "Payload edits under data/skills/{external,clawhub,ouroboroshub}/<skill>/ "
+                "are allowed via three paths: "
+                "(1) task_constraint.mode='skill_repair'; "
+                "(2) an explicit cwd/path under data/skills/<bucket>/<skill>/...; "
+                "(3) supplying bucket and skill_name args (a short relative cwd/path "
+                "then resolves under the skill payload). "
                 "Switch to 'advanced' or 'pro' in Settings → Behavior "
                 "→ Runtime Mode to re-enable self-modification."
             )
