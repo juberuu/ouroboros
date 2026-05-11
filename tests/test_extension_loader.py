@@ -191,7 +191,7 @@ def test_register_settings_section_lifecycle(tmp_path):
         permissions=["widget"],
     )
 
-    err = extension_loader.load_extension(loaded, lambda: {})
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
     assert err is None, err
     sections = extension_loader.snapshot()["settings_sections"]
     assert len(sections) == 1
@@ -232,8 +232,8 @@ def test_load_extension_registers_tool(tmp_path):
         "        schema={'type': 'object', 'properties': {'message': {'type': 'string'}}},\n"
         "    )\n"
     )
-    loaded, _, _ = _prepare_extension(tmp_path, "ext1", plugin, permissions=["tool"])
-    err = extension_loader.load_extension(loaded, lambda: {})
+    loaded, _, drive_root = _prepare_extension(tmp_path, "ext1", plugin, permissions=["tool"])
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
     assert err is None, err
     tool_name = extension_loader.extension_surface_name("ext1", "echo")
     tool = extension_loader.get_tool(tool_name)
@@ -310,7 +310,7 @@ def test_load_extension_rejects_outward_symlink_in_skill_tree(tmp_path):
 
     loaded = find_skill(drive_root, "symlinked", repo_path=str(skill_dir.parent))
     assert loaded is not None
-    err = extension_loader.load_extension(loaded, lambda: {})
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
     assert err is not None
     assert "symlink" in err.lower()
     assert extension_loader.get_tool(extension_loader.extension_surface_name("symlinked", "echo")) is None
@@ -348,7 +348,7 @@ def test_load_extension_ignores_isolated_env_symlinks_when_staging(tmp_path):
 def test_load_extension_does_not_import_untracked_isolated_python_deps(tmp_path):
     import sys
 
-    loaded, repo_root, _drive_root = _prepare_extension(
+    loaded, repo_root, drive_root = _prepare_extension(
         tmp_path,
         "env_untracked",
         (
@@ -371,7 +371,7 @@ def test_load_extension_does_not_import_untracked_isolated_python_deps(tmp_path)
     pkg_dir.mkdir(parents=True)
     (pkg_dir / "__init__.py").write_text("VALUE = 'untracked'\n", encoding="utf-8")
 
-    err = extension_loader.load_extension(loaded, lambda: {})
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
 
     assert err is not None
     assert "dummy_untracked_pkg" in err
@@ -698,8 +698,8 @@ def test_load_extension_registers_route_with_prefix(tmp_path):
         "def register(api):\n"
         "    api.register_route('weather', _handler, methods=('GET',))\n"
     )
-    loaded, _, _ = _prepare_extension(tmp_path, "ext2", plugin, permissions=["route"])
-    err = extension_loader.load_extension(loaded, lambda: {})
+    loaded, _, drive_root = _prepare_extension(tmp_path, "ext2", plugin, permissions=["route"])
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
     assert err is None, err
     snap = extension_loader.snapshot()
     assert "/api/extensions/ext2/weather" in snap["routes"]
@@ -739,8 +739,8 @@ _ROUTE_REJECTION_CASES = [
     ids=[c[0] for c in _ROUTE_REJECTION_CASES],
 )
 def test_load_extension_rejects_route(tmp_path, case_id, name, plugin, expected_substr):
-    loaded, _, _ = _prepare_extension(tmp_path, name, plugin, permissions=["route"])
-    err = extension_loader.load_extension(loaded, lambda: {})
+    loaded, _, drive_root = _prepare_extension(tmp_path, name, plugin, permissions=["route"])
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
     assert err is not None
     if expected_substr is not None:
         assert expected_substr in err.lower()
@@ -752,8 +752,8 @@ def test_load_extension_accepts_string_route_method(tmp_path):
         "def register(api):\n"
         "    api.register_route('weather', _handler, methods='GET')\n"
     )
-    loaded, _, _ = _prepare_extension(tmp_path, "ext_get_string", plugin, permissions=["route"])
-    err = extension_loader.load_extension(loaded, lambda: {})
+    loaded, _, drive_root = _prepare_extension(tmp_path, "ext_get_string", plugin, permissions=["route"])
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
     assert err is None, err
     snap = extension_loader.snapshot()
     assert "/api/extensions/ext_get_string/weather" in snap["routes"]
@@ -784,7 +784,7 @@ def test_load_extension_supports_nested_entry_relative_imports(tmp_path):
     )
     loaded = find_skill(drive_root, "ext_nested", repo_path=str(repo_root))
     assert loaded is not None
-    err = extension_loader.load_extension(loaded, lambda: {})
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
     assert err is None, err
     tool = extension_loader.get_tool(extension_loader.extension_surface_name("ext_nested", "t"))
     assert tool is not None
@@ -841,8 +841,8 @@ def test_load_extension_registers_ws_handler_with_namespace(tmp_path):
         "def register(api):\n"
         "    api.register_ws_handler('message', _handler)\n"
     )
-    loaded, _, _ = _prepare_extension(tmp_path, "ws1", plugin, permissions=["ws_handler"])
-    err = extension_loader.load_extension(loaded, lambda: {})
+    loaded, _, drive_root = _prepare_extension(tmp_path, "ws1", plugin, permissions=["ws_handler"])
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
     assert err is None, err
     handlers = extension_loader.list_ws_handlers()
     assert extension_loader.extension_surface_name("ws1", "message") in handlers
@@ -850,7 +850,7 @@ def test_load_extension_registers_ws_handler_with_namespace(tmp_path):
 
 def test_send_ws_message_broadcasts_namespaced_event(tmp_path):
     sent: list[dict] = []
-    loaded, _, _ = _prepare_extension(
+    loaded, _, drive_root = _prepare_extension(
         tmp_path,
         "push_ext",
         "def register(api):\n"
@@ -859,7 +859,7 @@ def test_send_ws_message_broadcasts_namespaced_event(tmp_path):
     )
     extension_loader.set_ws_broadcaster(sent.append)
 
-    err = extension_loader.load_extension(loaded, lambda: {})
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
 
     assert err is None, err
     assert sent == [
@@ -890,7 +890,7 @@ def test_send_ws_message_still_works_after_registration_phase(tmp_path):
 
 
 def test_send_ws_message_requires_ws_permission(tmp_path):
-    loaded, _, _ = _prepare_extension(
+    loaded, _, drive_root = _prepare_extension(
         tmp_path,
         "no_push_ext",
         "def register(api):\n"
@@ -898,21 +898,21 @@ def test_send_ws_message_requires_ws_permission(tmp_path):
         permissions=[],
     )
 
-    err = extension_loader.load_extension(loaded, lambda: {})
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
 
     assert err is not None
     assert "ws_handler" in err
 
 
 def test_register_ui_tab_surfaces_hostable_widget(tmp_path):
-    loaded, _, _ = _prepare_extension(
+    loaded, _, drive_root = _prepare_extension(
         tmp_path,
         "uiwait",
         "def register(api):\n"
         "    api.register_ui_tab('weather', 'Weather', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'markdown', 'text': 'ok'}]})\n",
         permissions=["widget"],
     )
-    err = extension_loader.load_extension(loaded, lambda: {})
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
     assert err is None, err
     snap = extension_loader.snapshot()
     assert snap["ui_tabs_pending"] == []
@@ -972,14 +972,14 @@ _UI_TAB_REJECTION_CASES = [
 
 
 def test_register_ui_tab_accepts_declarative_poll_component(tmp_path):
-    loaded, _, _ = _prepare_extension(
+    loaded, _, drive_root = _prepare_extension(
         tmp_path,
         "pollui",
         "def register(api):\n"
         "    api.register_ui_tab('poll', 'Poll', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'poll', 'route': 'status', 'auto_start': True}]})\n",
         permissions=["widget"],
     )
-    err = extension_loader.load_extension(loaded, lambda: {})
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
     assert err is None, err
     snap = extension_loader.snapshot()
     assert snap["ui_tabs"][0]["render"]["components"][0]["type"] == "poll"
@@ -987,21 +987,21 @@ def test_register_ui_tab_accepts_declarative_poll_component(tmp_path):
 
 
 def test_register_ui_tab_accepts_subscription_component(tmp_path):
-    loaded, _, _ = _prepare_extension(
+    loaded, _, drive_root = _prepare_extension(
         tmp_path,
         "subui",
         "def register(api):\n"
         "    api.register_ui_tab('sub', 'Sub', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'subscription', 'event': 'progress', 'target': 'result'}, {'type': 'progress', 'path': 'pct'}]})\n",
         permissions=["widget"],
     )
-    err = extension_loader.load_extension(loaded, lambda: {})
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
     assert err is None, err
     snap = extension_loader.snapshot()
     assert snap["ui_tabs"][0]["render"]["components"][0]["type"] == "subscription"
 
 
 def test_register_ui_tab_accepts_widget_v2_components(tmp_path):
-    loaded, _, _ = _prepare_extension(
+    loaded, _, drive_root = _prepare_extension(
         tmp_path,
         "v2ui",
         "def register(api):\n"
@@ -1013,7 +1013,7 @@ def test_register_ui_tab_accepts_widget_v2_components(tmp_path):
         "    ]})\n",
         permissions=["widget"],
     )
-    err = extension_loader.load_extension(loaded, lambda: {})
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
     assert err is None, err
     types = [item["type"] for item in extension_loader.snapshot()["ui_tabs"][0]["render"]["components"]]
     assert types == ["code", "chart", "tabs", "stream"]
@@ -1078,8 +1078,8 @@ _UI_TAB_REJECTION_CASES.extend([
     ids=[c[0] for c in _UI_TAB_REJECTION_CASES],
 )
 def test_register_ui_tab_rejects(tmp_path, case_id, name, plugin, expected_substr):
-    loaded, _, _ = _prepare_extension(tmp_path, name, plugin, permissions=["widget"])
-    err = extension_loader.load_extension(loaded, lambda: {})
+    loaded, _, drive_root = _prepare_extension(tmp_path, name, plugin, permissions=["widget"])
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
     assert err is not None
     assert expected_substr in err
 
@@ -1268,6 +1268,39 @@ def test_concurrent_reconcile_converges_to_one_live_extension(tmp_path):
     assert extension_loader.runtime_state_for_skill_name("race_ext", drive_root, repo_path=repo_path)["reason"] == "ready"
 
 
+def test_reconcile_extension_allows_advisory_pass_review(tmp_path):
+    from ouroboros.skill_loader import find_skill
+
+    loaded, repo_root, drive_root = _prepare_extension(
+        tmp_path,
+        "advisory_live",
+        "def register(api):\n"
+        "    api.register_tool('ping', lambda **kw: 'pong', description='ping', schema={})\n",
+        permissions=["tool"],
+    )
+    save_review_state(
+        drive_root,
+        "advisory_live",
+        SkillReviewState(status="advisory_pass", content_hash=loaded.content_hash),
+    )
+    loaded = find_skill(drive_root, "advisory_live", repo_path=str(repo_root))
+    assert loaded is not None
+
+    state = extension_loader.reconcile_extension(
+        "advisory_live",
+        drive_root,
+        lambda: {},
+        repo_path=str(repo_root),
+    )
+
+    assert state["action"] == "extension_loaded"
+    assert extension_loader.runtime_state_for_skill_name(
+        "advisory_live",
+        drive_root,
+        repo_path=str(repo_root),
+    )["reason"] == "ready"
+
+
 def test_load_extension_permission_gate_tool(tmp_path):
     """Extension without 'tool' permission cannot register a tool."""
     plugin = (
@@ -1275,8 +1308,8 @@ def test_load_extension_permission_gate_tool(tmp_path):
         "def register(api):\n"
         "    api.register_tool('x', _h, description='', schema={})\n"
     )
-    loaded, _, _ = _prepare_extension(tmp_path, "nopoerm", plugin, permissions=["route"])
-    err = extension_loader.load_extension(loaded, lambda: {})
+    loaded, _, drive_root = _prepare_extension(tmp_path, "nopoerm", plugin, permissions=["route"])
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
     assert err is not None
     assert "'tool'" in err
 
@@ -1294,9 +1327,9 @@ def test_load_extension_enforces_review_pass(tmp_path):
     save_enabled(drive_root, "unreviewed", True)
     loaded = find_skill(drive_root, "unreviewed", repo_path=str(repo_root))
     assert loaded is not None
-    err = extension_loader.load_extension(loaded, lambda: {})
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
     assert err is not None
-    assert "PASS review" in err
+    assert "executable review" in err
 
 
 def test_load_extension_refuses_disabled(tmp_path):
@@ -1315,7 +1348,7 @@ def test_load_extension_refuses_disabled(tmp_path):
     )
     # NOT enabled.
     loaded = find_skill(drive_root, "d1", repo_path=str(repo_root))
-    err = extension_loader.load_extension(loaded, lambda: {})
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
     assert err is not None
     assert "disabled" in err
 
@@ -1726,13 +1759,13 @@ def test_unload_removes_all_registrations(tmp_path):
         "    api.register_route('r', _r)\n"
         "    api.register_ws_handler('w', _w)\n"
     )
-    loaded, _, _ = _prepare_extension(
+    loaded, _, drive_root = _prepare_extension(
         tmp_path,
         "full",
         plugin,
         permissions=["tool", "route", "ws_handler"],
     )
-    err = extension_loader.load_extension(loaded, lambda: {})
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
     assert err is None, err
     snap = extension_loader.snapshot()
     assert snap["tools"] and snap["routes"] and snap["ws_handlers"]
@@ -1791,6 +1824,8 @@ def test_reload_all_called_from_server_startup():
                 "startup extension reload must run even when only bundled "
                 "skills are present."
             )
+            assert "pytest_default_real_data_dir" in body_text
+            assert "Skipping extension reload_all against real DATA_DIR during pytest" in body_text
             return
     assert False, "lifespan function not found in server.py"
 
@@ -1807,7 +1842,7 @@ def test_reload_all_tears_down_stale_extensions(tmp_path):
         plugin,
         permissions=["tool"],
     )
-    err = extension_loader.load_extension(loaded, lambda: {})
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
     assert err is None
     assert "staleish" in extension_loader.snapshot()["extensions"]
     # Nuke the skill directory; reload_all should tear it down.
@@ -1876,6 +1911,81 @@ def test_unload_clears_child_module_cache(tmp_path):
     assert child_key not in _sys.modules
 
 
+def test_load_extension_requires_explicit_drive_root(tmp_path):
+    loaded, _repo_root, _drive_root = _prepare_extension(
+        tmp_path,
+        "requires_root",
+        "def register(api):\n    pass\n",
+        [],
+    )
+
+    with pytest.raises(TypeError):
+        extension_loader.load_extension(loaded, lambda: {})
+
+
+def test_clean_extension_runtime_state_unloads_staged_import_root(tmp_path):
+    loaded, _repo_root, drive_root = _prepare_extension(
+        tmp_path,
+        "cleanup_ext",
+        "def register(api):\n    pass\n",
+        [],
+    )
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
+    assert err is None, err
+    with extension_loader._lock:
+        import_root = pathlib.Path(extension_loader._extensions["cleanup_ext"].import_root)
+    assert import_root.exists()
+
+    clean_extension_runtime_state()
+
+    assert not import_root.exists()
+    assert "cleanup_ext" not in extension_loader.snapshot()["extensions"]
+
+
+def test_reload_all_sweeps_stale_extension_imports(tmp_path, monkeypatch):
+    loaded, repo_root, drive_root = _prepare_extension(
+        tmp_path,
+        "sweep_ext",
+        "def register(api):\n    pass\n",
+        [],
+    )
+    stale_root = drive_root / "state" / "skills" / "sweep_ext" / "__extension_imports" / "stale"
+    (stale_root / "skill").mkdir(parents=True)
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(repo_root))
+
+    results = extension_loader.reload_all(drive_root, lambda: {}, repo_path=str(repo_root))
+
+    assert results["sweep_ext"] is None
+    assert not stale_root.exists()
+    live_roots = list((drive_root / "state" / "skills" / "sweep_ext" / "__extension_imports").iterdir())
+    assert len(live_roots) == 1
+    assert (live_roots[0] / "skill").exists()
+
+
+def test_reload_all_preserves_live_import_root_while_sweeping_stale_roots(tmp_path, monkeypatch):
+    loaded, repo_root, drive_root = _prepare_extension(
+        tmp_path,
+        "live_sweep_ext",
+        "def register(api):\n    pass\n",
+        [],
+    )
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
+    assert err is None, err
+    with extension_loader._lock:
+        live_root = pathlib.Path(extension_loader._extensions["live_sweep_ext"].import_root)
+    stale_root = drive_root / "state" / "skills" / "live_sweep_ext" / "__extension_imports" / "stale"
+    (stale_root / "skill").mkdir(parents=True)
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(repo_root))
+
+    results = extension_loader.reload_all(drive_root, lambda: {}, repo_path=str(repo_root))
+
+    assert results["live_sweep_ext"] is None
+    assert live_root.exists()
+    assert not stale_root.exists()
+    live_roots = list((drive_root / "state" / "skills" / "live_sweep_ext" / "__extension_imports").iterdir())
+    assert live_roots == [live_root]
+
+
 def test_tool_registration_collision_raises(tmp_path):
     """Two plugins registering the same tool namespace collide."""
     plugin_a = (
@@ -1883,8 +1993,8 @@ def test_tool_registration_collision_raises(tmp_path):
         "    api.register_tool('same', lambda ctx: 'a', description='', schema={})\n"
         "    api.register_tool('same', lambda ctx: 'b', description='', schema={})\n"
     )
-    loaded, _, _ = _prepare_extension(tmp_path, "collider", plugin_a, permissions=["tool"])
-    err = extension_loader.load_extension(loaded, lambda: {})
+    loaded, _, drive_root = _prepare_extension(tmp_path, "collider", plugin_a, permissions=["tool"])
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
     assert err is not None
     assert "already registered" in err
     # Collision raised mid-registration must tear down the first tool too.

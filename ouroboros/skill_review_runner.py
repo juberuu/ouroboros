@@ -28,6 +28,7 @@ from ouroboros.skill_loader import (
     compute_content_hash,
     find_skill,
     requested_core_setting_keys,
+    review_status_allows_execution,
     save_enabled,
     save_review_state,
     save_skill_grants,
@@ -346,7 +347,7 @@ def _reconcile_deps_after_pass_review(
     *,
     repo_path: str | None = None,
 ) -> tuple[str, str]:
-    """Install/reinstall isolated deps after a PASS review."""
+    """Install/reinstall isolated deps after an executable review."""
 
     try:
         from ouroboros.marketplace.install_specs import install_specs_hash
@@ -628,7 +629,8 @@ async def run_skill_review_lifecycle(
             )
             deps_status = "not_required"
             deps_error = ""
-            if getattr(outcome, "status", "") == "pass":
+            executable_review = review_status_allows_execution(getattr(outcome, "status", ""))
+            if executable_review:
                 progress.set("Installing dependencies…")
                 deps_status, deps_error = await _to_thread_preserving_result(
                     _reconcile_deps_after_pass_review,
@@ -638,10 +640,11 @@ async def run_skill_review_lifecycle(
                 )
             setattr(outcome, "deps_status", deps_status)
             setattr(outcome, "deps_error", deps_error)
-            if getattr(outcome, "status", "") == "pass" and getattr(outcome, "auto_flow", False) and deps_status == "failed":
+            if executable_review and getattr(outcome, "auto_flow", False) and deps_status == "failed":
                 outcome.status = "pending"
                 outcome.error = deps_error or "self-authored dependency reconciliation failed"
-            if getattr(outcome, "status", "") == "pass" and getattr(outcome, "auto_flow", False):
+                executable_review = False
+            if executable_review and getattr(outcome, "auto_flow", False):
                 save_enabled(drive_root, skill_name, True)
             progress.set("Reloading extension…")
             extension_action, extension_reason = await _to_thread_preserving_result(
@@ -706,7 +709,8 @@ def run_skill_review_lifecycle_blocking(
             outcome = _call_review_with_lifecycle_guard(review_impl, ctx, skill_name)
             deps_status = "not_required"
             deps_error = ""
-            if getattr(outcome, "status", "") == "pass":
+            executable_review = review_status_allows_execution(getattr(outcome, "status", ""))
+            if executable_review:
                 progress.set("Installing dependencies…")
                 deps_status, deps_error = _reconcile_deps_after_pass_review(
                     drive_root,
@@ -715,10 +719,11 @@ def run_skill_review_lifecycle_blocking(
                 )
             setattr(outcome, "deps_status", deps_status)
             setattr(outcome, "deps_error", deps_error)
-            if getattr(outcome, "status", "") == "pass" and getattr(outcome, "auto_flow", False) and deps_status == "failed":
+            if executable_review and getattr(outcome, "auto_flow", False) and deps_status == "failed":
                 outcome.status = "pending"
                 outcome.error = deps_error or "self-authored dependency reconciliation failed"
-            if getattr(outcome, "status", "") == "pass" and getattr(outcome, "auto_flow", False):
+                executable_review = False
+            if executable_review and getattr(outcome, "auto_flow", False):
                 save_enabled(drive_root, skill_name, True)
             progress.set("Reloading extension…")
             extension_action, extension_reason = _reconcile_extension_payload(

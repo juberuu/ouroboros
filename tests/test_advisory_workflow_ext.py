@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import json
 import pathlib
-from unittest.mock import MagicMock
 
 import pytest
+
+from tests._shared import _make_safe_mock_ctx
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +119,7 @@ def test_review_status_parse_failure_reflected_in_effective_status(tmp_path):
     ))
     save_state(drive_root, state)
 
-    ctx = MagicMock()
+    ctx = _make_safe_mock_ctx(tmp_path)
     ctx.drive_root = str(drive_root)
     ctx.repo_dir = str(tmp_path)
 
@@ -156,7 +157,7 @@ def test_review_status_defaults_to_current_repo_scope(tmp_path):
     ))
     save_state(drive_root, state)
 
-    ctx = MagicMock()
+    ctx = _make_safe_mock_ctx(tmp_path)
     ctx.drive_root = str(drive_root)
     ctx.repo_dir = str(repo_b)
 
@@ -194,7 +195,7 @@ def test_check_advisory_freshness_parse_failure_branch(tmp_path):
     ))
     save_state(drive_root, state)
 
-    ctx = MagicMock()
+    ctx = _make_safe_mock_ctx(tmp_path)
     ctx.drive_root = str(drive_root)
     ctx.repo_dir = str(repo_dir)
 
@@ -264,7 +265,7 @@ def test_handle_review_status_old_parse_failure_different_hash_reports_stale(tmp
     ))
     save_state(drive_root, state)
 
-    ctx = MagicMock()
+    ctx = _make_safe_mock_ctx(tmp_path)
     ctx.drive_root = str(drive_root)
     ctx.repo_dir = str(repo_dir)
 
@@ -313,7 +314,7 @@ def test_review_status_parse_failure_after_edit_reports_parse_failure_not_stale(
     ))
     save_state(drive_root, state2)
 
-    ctx = MagicMock()
+    ctx = _make_safe_mock_ctx(tmp_path)
     ctx.drive_root = str(drive_root)
     ctx.repo_dir = str(repo_dir)
 

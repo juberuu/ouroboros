@@ -134,8 +134,9 @@ def _skill_finalization_message(drive_root: pathlib.Path, llm_trace: Dict[str, A
                 continue
             stale = skill.review.is_stale_for(skill.content_hash)
             grants = grant_status_for_skill(pathlib.Path(drive_root), skill)
+            from ouroboros.skill_loader import review_status_allows_execution
             ready = (
-                skill.review.status == "pass"
+                review_status_allows_execution(skill.review.status)
                 and not stale
                 and skill.enabled
                 and grants.get("all_granted", True)

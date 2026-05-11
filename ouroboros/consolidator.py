@@ -17,6 +17,7 @@ import logging
 import os
 import pathlib
 import re
+import hashlib
 from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
@@ -205,6 +206,7 @@ def _run_block_consolidation(
 
     if not new_blocks:
         meta["last_consolidated_offset"] = last_offset + processed
+        meta["chat_log_signature"] = _chat_log_signature(source_path)
         _save_meta(meta_path, meta)
         return total_usage if total_usage["cost"] > 0 else None
 
@@ -226,6 +228,7 @@ def _run_block_consolidation(
 
     meta["last_consolidated_offset"] = last_offset + processed
     meta["last_consolidated_at"] = utc_now_iso()
+    meta["chat_log_signature"] = _chat_log_signature(source_path)
     _save_meta(meta_path, meta)
 
     log.info("Block consolidation: %d messages -> %d new blocks (total %d)",
@@ -464,6 +467,25 @@ def _load_meta(path: pathlib.Path) -> Dict[str, Any]:
 def _save_meta(path: pathlib.Path, meta: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     write_text(path, json.dumps(meta, ensure_ascii=False, indent=2))
+
+
+def _chat_log_signature(path: pathlib.Path) -> Dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        stat = path.stat()
+        first = ""
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.strip():
+                    first = line.strip()
+                    break
+        return {
+            "first_line_sha256": hashlib.sha256(first.encode("utf-8", errors="replace")).hexdigest(),
+            "size": int(stat.st_size),
+        }
+    except OSError:
+        return {}
 
 
 def _count_lines(path: pathlib.Path) -> int:

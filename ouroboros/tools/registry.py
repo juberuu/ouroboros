@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import pathlib
+import shlex
 import subprocess
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
@@ -45,40 +46,13 @@ _SHELL_WRITE_INDICATORS = (
     "rm ", "rm\t", ">", "sed -i", "tee ", "truncate",
     "mv ", "cp ", "chmod ", "chown ", "unlink ", "delete", "trash",
     "rsync ", "write_text", "open(", ".write(", ".writelines(",
+    "os.remove(", "os.unlink(", "os.mkdir(", "os.makedirs(", "sort -o",
 )
 
-# v5.1.2 elevation ratchet: indicators reused by the run_shell argv
-# check AND by the run_shell file-content scan (subprocess invocation
-# `python helper.py` where helper.py contains the dangerous code).
-# Splitting these into module-level constants lets ``execute`` apply the
-# same check at both layers without duplicating the tuple.
-#
-# ``_LIGHT_MUTATION_INDICATORS`` fires only when ``runtime_mode == light``
-# and matches obvious repo-mutation patterns. ``_ELEVATION_PROBES``
-# captures the conjunctive elevation pattern (``save_settings`` together
-# with ``OUROBOROS_RUNTIME_MODE``, OR the dotted ``ouroboros.config.save_settings``
-# attribute path) — used in ALL modes because elevation ``advanced→pro``
-# is also out of scope for the agent.
-_LIGHT_MUTATION_INDICATORS = (
-    "git commit", "git add", "git push", "git rebase", "git reset",
-    "git checkout", "git merge", "git pull", "git stash drop",
-    "git revert", "git cherry-pick",
-    " > ", " >> ", " | tee ",
-    "rm -", "mkdir ", "mv ", "cp ", "touch ",
-    # In-place file mutation via common Unix tools.
-    "sed -i", "perl -i", "ruby -i",
-    "truncate ", "chmod ", "chown ", "ln -",
-    "tar -x", "unzip ", "gzip ", "gunzip ",
-    # Python / JS in-place writers.
-    "open(", ".write(", ".writelines(",
-    # ``Path.write_text`` / ``Path.write_bytes`` are not substrings of
-    # ``.write(`` because of the ``_text`` / ``_bytes`` suffix between
-    # ``write`` and ``(``.
-    ".write_text(", ".write_bytes(",
-    # OS-level rename / replace primitives commonly used to atomically
-    # clobber a file.
-    "os.replace(", "os.rename(",
-)
+_LIGHT_SHELL_WRITER_COMMANDS = frozenset({
+    "chmod", "chown", "cp", "gunzip", "gzip", "ln", "mkdir", "mv",
+    "perl", "rm", "ruby", "sed", "sort", "tar", "touch", "truncate", "uniq", "unzip",
+})
 
 
 def _detect_runtime_mode_elevation(text_lower: str) -> bool:
@@ -93,6 +67,172 @@ def _detect_runtime_mode_elevation(text_lower: str) -> bool:
     has_mode_key = "ouroboros_runtime_mode" in text_lower
     has_dotted_path = "ouroboros.config.save_settings" in text_lower
     return (has_save and has_mode_key) or has_dotted_path
+
+
+def _shell_argv(raw_cmd: Any) -> List[str]:
+    if isinstance(raw_cmd, list):
+        return [str(x) for x in raw_cmd if str(x).strip()]
+    try:
+        return [str(x) for x in shlex.split(str(raw_cmd or "")) if str(x).strip()]
+    except ValueError:
+        return [str(x) for x in str(raw_cmd or "").split() if str(x).strip()]
+
+
+def _unwrap_env_argv(argv: List[str]) -> List[str]:
+    if not argv or pathlib.PurePath(argv[0]).name.lower() != "env":
+        return argv
+    idx = 1
+    options_with_arg = {"-u", "--unset", "-C", "--chdir", "--argv0"}
+    while idx < len(argv):
+        token = argv[idx]
+        if token == "--":
+            idx += 1
+            break
+        if token == "-S" and idx + 1 < len(argv):
+            return _shell_argv(argv[idx + 1])
+        if token.startswith("--split-string="):
+            return _shell_argv(token.split("=", 1)[1])
+        if token in options_with_arg:
+            idx += 2; continue
+        if (
+            any(token.startswith(prefix + "=") for prefix in ("--unset", "--chdir", "--argv0"))
+            or token.startswith("-")
+            or ("=" in token and not token.startswith("="))
+        ):
+            idx += 1; continue
+        break
+    return argv[idx:] if idx < len(argv) else []
+
+
+def _strip_leading_env_assignments(argv: List[str]) -> List[str]:
+    idx = 0
+    while idx < len(argv) and "=" in argv[idx] and not argv[idx].startswith("="):
+        idx += 1
+    return argv[idx:]
+
+
+def _shell_command_string(argv: List[str]) -> str:
+    for idx, arg in enumerate(argv[1:], start=1):
+        if arg == "-c" or (arg.startswith("-") and not arg.startswith("--") and "c" in arg[1:]):
+            return argv[idx + 1] if idx + 1 < len(argv) else ""
+    return ""
+
+
+def _candidate_path_inside(root: pathlib.Path, work_dir: pathlib.Path, path_text: str) -> bool:
+    """Return True when *path_text* resolves inside *root*.
+
+    The light-mode shell filter should guard the Ouroboros checkout, not every
+    scratch/data/tmp path the agent might legitimately use while read-only in
+    the repo. Missing targets are resolved lexically against cwd so writes to
+    not-yet-created repo files are still caught.
+    """
+    text = str(path_text or "").strip()
+    if not text or text in {"-", "--"}:
+        return False
+    # Obvious non-path fragments and shell/control tokens.
+    if text.startswith(("-", "$")) or text in {"|", "&&", "||", ";", ">", ">>"}:
+        return False
+    try:
+        root_resolved = pathlib.Path(root).resolve()
+        base = pathlib.Path(text)
+        if not base.is_absolute():
+            base = work_dir / base
+        candidate = base.expanduser().resolve(strict=False)
+        candidate.relative_to(root_resolved)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _repo_target_mentioned(argv: List[str], *, repo_dir: pathlib.Path, cwd: str = "") -> bool:
+    work_dir = pathlib.Path(repo_dir)
+    if cwd and str(cwd).strip() not in ("", ".", "./"):
+        try:
+            candidate = (pathlib.Path(repo_dir) / str(cwd)).resolve(strict=False)
+            work_dir = candidate
+        except OSError:
+            pass
+    return any(
+        _candidate_path_inside(pathlib.Path(repo_dir), work_dir, token)
+        for token in argv[1:]
+    )
+
+
+def _writer_target_tokens(argv: List[str]) -> List[str]:
+    if not argv:
+        return []
+    cmd = pathlib.PurePath(argv[0]).name.lower()
+    operands = [arg for arg in argv[1:] if arg and not arg.startswith("-")]
+    if cmd == "cp":
+        return operands[-1:] if len(operands) >= 2 else []
+    if cmd in {"chmod", "chown"}:
+        return operands[1:] if len(operands) >= 2 else []
+    if cmd == "sed":
+        return operands[1:] if len(operands) >= 2 else operands
+    if cmd == "sort":
+        for idx, arg in enumerate(argv[1:], start=1):
+            if arg == "-o" and idx + 1 < len(argv):
+                return [argv[idx + 1]]
+            if arg.startswith("--output="):
+                return [arg.split("=", 1)[1]]
+        return []
+    if cmd == "uniq":
+        return operands[1:2] if len(operands) >= 2 else []
+    return operands
+
+
+def _writer_targets_repo(argv: List[str], *, repo_dir: pathlib.Path, cwd: str = "") -> bool:
+    return _repo_target_mentioned([argv[0], *_writer_target_tokens(argv)], repo_dir=repo_dir, cwd=cwd)
+
+
+def _shell_writer_targets_protected(raw_cmd: Any) -> bool:
+    argv = _strip_leading_env_assignments(_unwrap_env_argv(_shell_argv(raw_cmd)))
+    if not argv:
+        return False
+    executable = pathlib.PurePath(argv[0]).name.lower()
+    if executable in {"bash", "sh", "zsh"}:
+        inline = _shell_command_string(argv)
+        return bool(inline and _shell_writer_targets_protected(inline))
+    if executable not in _LIGHT_SHELL_WRITER_COMMANDS:
+        return False
+    target_text = " ".join(_writer_target_tokens(argv)).replace("\\", "/").lower()
+    return bool(target_text and any(cf in target_text for cf in _PROTECTED_RUNTIME_PATHS_LOWER))
+
+
+def _light_shell_repo_mutation(raw_cmd: Any, *, repo_dir: pathlib.Path, cwd: str = "") -> bool:
+    """Return True for simple shell writer commands targeting the repo.
+
+    Light mode is a compatibility/self-modification guard, not a full shell or
+    Python sandbox. Keep this intentionally shallow: normal commands should run,
+    while obvious direct writes to the Ouroboros checkout are refused.
+    """
+    argv = _shell_argv(raw_cmd)
+    if not argv:
+        return False
+    cmd_lower = " ".join(argv).lower()
+
+    unwrapped = _unwrap_env_argv(argv)
+    if unwrapped != argv:
+        return _light_shell_repo_mutation(unwrapped, repo_dir=repo_dir, cwd=cwd)
+    argv = _strip_leading_env_assignments(argv)
+    if not argv:
+        return False
+    executable = pathlib.PurePath(argv[0]).name.lower()
+
+    if executable in {"bash", "sh", "zsh"}:
+        inline = _shell_command_string(argv)
+        if inline:
+            return _light_shell_repo_mutation(inline, repo_dir=repo_dir, cwd=cwd)
+
+    if executable in _LIGHT_SHELL_WRITER_COMMANDS and _writer_targets_repo(argv, repo_dir=repo_dir, cwd=cwd):
+        return True
+
+    # Redirection and tee are shell syntax, not command names. Keep the old
+    # broad shape only when a repo-local path is present in the same argv.
+    if any(ind in cmd_lower for ind in (" > ", " >> ", " | tee ")):
+        return _repo_target_mentioned(argv, repo_dir=repo_dir, cwd=cwd)
+
+    return False
 
 
 
@@ -173,141 +313,6 @@ def _skill_payload_cwd_allowed(cwd_text: str, drive_root: pathlib.Path) -> bool:
     return is_skill_payload_path(drive_root, cwd_text, allow_control_plane=False)
 
 
-_INTERPRETER_BASENAMES = frozenset({
-    "python", "python2", "python3",
-    "bash", "sh", "zsh",
-    "node", "nodejs",
-})
-
-
-def _extract_script_file_args(raw_cmd: Any) -> List[str]:
-    """Return script file paths an interpreter is asked to execute.
-
-    Recognises ``python``/``python3``/``bash``/``sh``/``zsh``/``node``
-    invocations in argv form (list of strings) or shell-string form,
-    and returns the first non-flag positional argument(s) following an
-    interpreter token. Skips ``-c`` (inline code), ``-m`` (module
-    name), ``-`` (stdin) and standard interpreter flags. Returns an
-    empty list when no file argument is found, the cmd is unparseable,
-    or the interpreter has no script file (e.g. ``python -c "..."``).
-
-    Used by ``ToolRegistry.execute`` for ``run_shell`` to detect the
-    file-based subprocess elevation bypass pattern: ``python evil.py``
-    where ``evil.py`` was just written by ``data_write`` and contains
-    code that imports ``save_settings`` or writes ``settings.json``.
-    The argv-level substring check cannot see file content; the caller
-    reads each returned path's content and re-runs the indicator
-    checks against that content.
-    """
-    import shlex
-    if isinstance(raw_cmd, list):
-        argv = [str(x) for x in raw_cmd]
-    else:
-        try:
-            argv = shlex.split(str(raw_cmd or ""))
-        except ValueError:
-            return []
-    if not argv:
-        return []
-
-    def _option_arity(interpreter: str, option: str) -> int:
-        """Return how many following argv tokens this interpreter option consumes."""
-        if interpreter.startswith("python"):
-            if "=" in option:
-                return 0
-            # Common CPython options with a following argument:
-            # -W action, -X opt, -m module, -c command.
-            if option in {"-c", "-m"}:
-                return -1  # inline/module modes: no script file follows for this invocation
-            if option in {"-W", "-X", "-Q"}:
-                return 1
-            return 0
-        if interpreter in {"node", "nodejs"}:
-            if option.startswith(("--require=", "--import=", "--loader=", "--experimental-loader=")):
-                return 0
-            if "=" in option:
-                return 0
-            # Node options with following values. For --require/-r and
-            # --import, the consumed value is ALSO code that Node loads before
-            # the main script, so scan it too when it looks like a file. The
-            # main loop keeps scanning later positional args after consuming.
-            if option in {"-e", "--eval"}:
-                return -1
-            if option in {"-r", "--require", "--import", "--loader", "--experimental-loader"}:
-                return 1
-            return 0
-        # Shells: -c consumes a command string; otherwise flags generally don't
-        # consume file-like args before the script.
-        if option == "-c":
-            return -1
-        return 0
-
-    files: List[str] = []
-    i = 0
-    while i < len(argv):
-        token = argv[i]
-        # Strip leading paths so ``/usr/bin/python3`` and ``python3``
-        # both match. Handle both POSIX and Windows separators because
-        # the agent's argv may originate from either.
-        basename = token.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
-        is_interpreter = (
-            basename in _INTERPRETER_BASENAMES
-            or any(basename.startswith(p + ".") for p in _INTERPRETER_BASENAMES)
-        )
-        if not is_interpreter:
-            i += 1
-            continue
-        # Walk forward to find every plausible script file argument. Pre-v5.7
-        # code returned the first non-flag after the interpreter; that missed
-        # common arity options like `python -W ignore evil.py` by scanning
-        # `ignore` instead of `evil.py`.
-        j = i + 1
-        while j < len(argv):
-            arg = argv[j]
-            if arg == "-":
-                # Stdin marker.
-                break
-            if arg.startswith("-"):
-                # Node supports --require=preload.js / --import=module.mjs
-                # equals-form preload options. These values execute code
-                # before the main script or eval string, so scan them too.
-                if basename in {"node", "nodejs"} and arg.startswith(("--require=", "--import=", "--loader=", "--experimental-loader=")):
-                    value = arg.split("=", 1)[1]
-                    if value and any(value.endswith(ext) for ext in (".js", ".mjs", ".cjs")):
-                        files.append(value)
-                    j += 1
-                    continue
-                arity = _option_arity(basename, arg)
-                if arity < 0:
-                    break
-                if arity > 0:
-                    # If the option value itself is a preload/module path
-                    # (Node --require/--import), scan it too.
-                    if j + 1 < len(argv):
-                        value = argv[j + 1]
-                        if value and not value.startswith("-") and any(
-                            value.endswith(ext) for ext in (".py", ".js", ".mjs", ".cjs", ".sh", ".bash")
-                        ):
-                            files.append(value)
-                    j += 1 + arity
-                    continue
-                j += 1
-                continue
-            files.append(arg)
-            # Keep scanning: e.g. `node --require preload.js evil.js` should
-            # scan both preload.js and evil.js.
-            j += 1
-            continue
-        i = j + 1 if j < len(argv) else i + 1
-    return files
-
-
-# Bound for file-content scans. 256 KB is enough for any realistic
-# helper script the agent might ask ``run_shell`` to execute; bigger
-# files are skipped (the scan is best-effort defense in depth — the
-# authoritative gate is the ``save_settings`` chokepoint).
-_RUN_SHELL_SCAN_BYTES = 256 * 1024
-
 # Git via run_shell: only truly read-only subcommands allowed
 _GIT_READONLY_SUBCOMMANDS = frozenset([
     "status", "diff", "log", "show", "ls-files",
@@ -315,8 +320,6 @@ _GIT_READONLY_SUBCOMMANDS = frozenset([
     "shortlog", "version", "help", "blame",
     "grep", "reflog", "fetch",
 ])
-
-_SHELL_WRAPPERS = frozenset(["bash", "sh", "dash", "zsh", "env"])
 
 def _revert_protected_files(repo_dir, *, runtime_mode: str = "advanced") -> list:
     """After claude_code_edit, revert protected files unless pro mode is active."""
@@ -362,19 +365,33 @@ def _extract_git_subcommand(cmd_parts: list) -> str:
     """
     if not cmd_parts:
         return ""
-    parts = [str(p) for p in cmd_parts]
-    if parts[0] != "git":
+    parts = _strip_leading_env_assignments([str(p) for p in cmd_parts])
+    if not parts or pathlib.PurePath(parts[0]).name.lower() != "git":
         return ""
     i = 1
     while i < len(parts):
         p = parts[i]
         if p.startswith("-"):
-            if p in ("-C", "--git-dir", "--work-tree"):
+            if p in ("-C", "-c", "--git-dir", "--work-tree"):
                 i += 2
             else:
                 i += 1
         else:
             return p
+    return ""
+
+
+def _extract_run_shell_git_subcommand(raw_cmd: Any) -> str:
+    parts = _strip_leading_env_assignments(_unwrap_env_argv(_shell_argv(raw_cmd)))
+    if not parts:
+        return ""
+    first = pathlib.PurePath(parts[0]).name.lower()
+    if first == "git":
+        return _extract_git_subcommand(parts)
+    if first in {"bash", "sh", "zsh"}:
+        inline = _shell_command_string(parts)
+        if inline:
+            return _extract_run_shell_git_subcommand(inline)
     return ""
 
 
@@ -748,17 +765,12 @@ class ToolRegistry:
           1. Argv-level elevation pattern (``save_settings`` AND
              ``OUROBOROS_RUNTIME_MODE``, or dotted attribute path) —
              blocks in ALL modes.
-          2. Light-mode argv repo-mutation indicators (git writes,
-             redirection, ``rm -``, ``sed -i``, ``.write_text(`` …).
-          3. v5.1.2 iter-3 file-content scan: for each interpreter
-             invocation (``python evil.py`` / ``bash evil.sh`` / etc.)
-             where the script file resolves inside the agent-writable
-             area, read the content (bounded) and re-run the same
-             elevation + light-mutation indicators against it.
-          4. Protected runtime path writes (``BIBLE.md`` etc.) outside
+          2. Light-mode shallow argv repo-mutation checks for common
+             writer commands with explicit repo targets.
+          3. Protected runtime path writes (``BIBLE.md`` etc.) outside
              ``runtime_mode=pro``.
-          5. ``gh repo create/delete/auth`` blanket block.
-          6. Git mutative subcommand ban — write ops must go through
+          4. ``gh repo create/delete/auth`` blanket block.
+          5. Git mutative subcommand ban — write ops must go through
              ``repo_commit`` tools, never ``run_shell``.
         """
         raw_cmd = args.get("cmd", args.get("command", ""))
@@ -798,23 +810,19 @@ class ToolRegistry:
 
         # 2. Light-mode repo-mutation indicators (argv).
         if runtime_mode == "light":
-            if any(ind in cmd_lower for ind in _LIGHT_MUTATION_INDICATORS):
+            if _light_shell_repo_mutation(
+                raw_cmd,
+                repo_dir=pathlib.Path(self._ctx.repo_dir),
+                cwd=str(args.get("cwd") or ""),
+            ):
                 return (
                     "⚠️ LIGHT_MODE_BLOCKED: runtime_mode=light refuses "
-                    "shell commands that look like repo mutations. "
+                    "shell commands that mutate the Ouroboros repository. "
                     "Switch to 'advanced' or 'pro' in Settings → "
                     "Behavior → Runtime Mode for write access."
                 )
 
-        # 3. File-content scan (v5.1.2 iter-3 file-based subprocess
-        # bypass fix). The argv-level checks only see the literal
-        # cmd; a ``python evil.py`` call has dangerous code INSIDE
-        # the file, invisible to the substring filter.
-        block_msg = self._scan_script_files(raw_cmd, runtime_mode, cwd=str(args.get("cwd") or ""))
-        if block_msg:
-            return block_msg
-
-        # 4. Skill payload control-plane sidecar writes. This is a lexical
+        # 3. Skill payload control-plane sidecar writes. This is a lexical
         # defense-in-depth layer for run_shell (the lower-level data_write /
         # file_browser guards do inode-aware checks). Shell commands are free
         # form, so we conservatively block when a write-like verb appears with
@@ -837,7 +845,13 @@ class ToolRegistry:
                 "payload files instead."
             )
 
-        # 5. Protected runtime path writes.
+        # 4. Protected runtime path writes.
+        if _shell_writer_targets_protected(raw_cmd):
+            return (
+                "⚠️ CRITICAL SAFETY_VIOLATION: Shell command would modify "
+                "a protected core/contract/release file. Protected: "
+                + ", ".join(sorted(PROTECTED_RUNTIME_PATHS))
+            )
         for cf in _PROTECTED_RUNTIME_PATHS_LOWER:
             if cf in cmd_path_lower and any(w in cmd_lower for w in _SHELL_WRITE_INDICATORS):
                 return (
@@ -846,162 +860,21 @@ class ToolRegistry:
                     + ", ".join(sorted(PROTECTED_RUNTIME_PATHS))
                 )
 
-        # 6. GitHub repo create/delete/auth.
+        # 5. GitHub repo create/delete/auth.
         if "gh repo create" in cmd_lower or "gh repo delete" in cmd_lower:
             return "⚠️ SAFETY_VIOLATION: Creating/deleting GitHub repositories requires admin approval."
         if "gh auth" in cmd_lower:
             return "⚠️ SAFETY_VIOLATION: Modifying GitHub authentication is not permitted."
 
-        # 7. Git mutative ban via shell.
-        if isinstance(raw_cmd, list):
-            cmd_parts_for_git = [str(x) for x in raw_cmd]
-        else:
-            cmd_parts_for_git = cmd_lower.split()
-        first_word = cmd_parts_for_git[0] if cmd_parts_for_git else ""
-        is_direct_git = (first_word == "git")
-        is_wrapped_git = (first_word in _SHELL_WRAPPERS and "git " in cmd_lower)
-        if is_direct_git:
-            subcmd = _extract_git_subcommand(cmd_parts_for_git)
-            if subcmd and subcmd.lower() not in _GIT_READONLY_SUBCOMMANDS:
-                return (
-                    f"⚠️ GIT_VIA_SHELL_BLOCKED: `git {subcmd}` must go through "
-                    "repo_commit / repo_write_commit tools which enforce pre-commit "
-                    "checks. For read-only git: git_status, git_diff tools, or "
-                    "run_shell with git log/show/diff/status."
-                )
-        if is_wrapped_git:
-            _git_banned = (
-                "git commit", "git push", "git add ", "git add\t",
-                "git init", "git reset", "git rebase", "git merge",
-                "git cherry-pick", "git branch", "git tag", "git remote",
-                "git config", "git stash", "git clean", "git checkout",
-                "git switch",
+        # 6. Direct git mutative ban via shell.
+        subcmd = _extract_run_shell_git_subcommand(raw_cmd)
+        if subcmd and subcmd.lower() not in _GIT_READONLY_SUBCOMMANDS:
+            return (
+                f"⚠️ GIT_VIA_SHELL_BLOCKED: `git {subcmd}` must go through "
+                "repo_commit / repo_write_commit tools which enforce pre-commit "
+                "checks. For read-only git: git_status, git_diff tools, or "
+                "run_shell with git log/show/diff/status."
             )
-            for banned in _git_banned:
-                if banned in cmd_lower:
-                    return (
-                        "⚠️ GIT_VIA_SHELL_BLOCKED: git mutative commands in shell "
-                        "wrappers must go through repo_commit / repo_write_commit tools."
-                    )
-        return None
-
-    def _scan_script_files(self, raw_cmd: Any, runtime_mode: str, cwd: str = "") -> Optional[str]:
-        """v5.1.2 iter-3 file-content scan for ``run_shell``.
-
-        For each interpreter invocation in ``raw_cmd``, find the script
-        file argument, resolve it, and check if it lives inside the
-        agent-writable area (``repo_dir`` or ``drive_root``). If so,
-        read content (bounded by ``_RUN_SHELL_SCAN_BYTES``) and run
-        the same elevation + light-mutation indicator checks against
-        it. Files outside the agent-writable area are skipped — the
-        agent cannot produce them via ``data_write`` / ``repo_write``,
-        so scanning would only create false positives on system
-        helper scripts.
-        """
-        script_files = _extract_script_file_args(raw_cmd)
-        if not script_files:
-            return None
-        try:
-            repo_root_real = pathlib.Path(self._ctx.repo_dir).resolve()
-        except OSError:
-            repo_root_real = None
-        try:
-            drive_root_real = pathlib.Path(self._ctx.drive_root).resolve()
-        except OSError:
-            drive_root_real = None
-        work_dir = pathlib.Path(self._ctx.repo_dir)
-        if cwd and str(cwd).strip() not in ("", ".", "./"):
-            candidate = (pathlib.Path(self._ctx.repo_dir) / str(cwd)).resolve()
-            if candidate.exists() and candidate.is_dir():
-                work_dir = candidate
-        for script_path_str in script_files:
-            try:
-                raw_script_path = pathlib.Path(script_path_str)
-                if not raw_script_path.is_absolute():
-                    raw_script_path = work_dir / raw_script_path
-                script_path = raw_script_path.resolve()
-            except (OSError, ValueError):
-                continue
-            inside_repo = False
-            inside_drive = False
-            if repo_root_real is not None:
-                try:
-                    script_path.relative_to(repo_root_real)
-                    inside_repo = True
-                except ValueError:
-                    pass
-            if drive_root_real is not None:
-                try:
-                    script_path.relative_to(drive_root_real)
-                    inside_drive = True
-                except ValueError:
-                    pass
-            if not (inside_repo or inside_drive):
-                continue
-            try:
-                if not script_path.is_file():
-                    continue
-                if script_path.stat().st_size > _RUN_SHELL_SCAN_BYTES:
-                    continue
-                content = script_path.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-            content_lower = content.lower()
-            if _detect_runtime_mode_elevation(content_lower):
-                return (
-                    f"⚠️ ELEVATION_BLOCKED: script file "
-                    f"{script_path_str!r} (invoked via run_shell) "
-                    "contains code that looks like an "
-                    "OUROBOROS_RUNTIME_MODE elevation attempt "
-                    "(mentions ``save_settings`` together with "
-                    "``OUROBOROS_RUNTIME_MODE``, or "
-                    "``ouroboros.config.save_settings`` directly). "
-                    "Runtime mode is owner-controlled — change it by "
-                    "stopping the agent and editing settings.json "
-                    "directly, then restart."
-                )
-            if _mentions_skill_owner_state(content_lower):
-                return (
-                    f"⚠️ SKILL_STATE_WRITE_BLOCKED: script file "
-                    f"{script_path_str!r} targets skill owner/review state. "
-                    "Use review_skill, toggle_skill/the Skills UI, or the "
-                    "desktop launcher confirmation flow."
-                )
-            if any(name in content_lower for name in (
-                ".clawhub.json",
-                ".ouroboroshub.json",
-                ".self_authored.json",
-                "skill.openclaw.md",
-                ".seed-origin",
-                ".ouroboros_env",
-                "node_modules",
-            )) and any(w in content_lower for w in _SHELL_WRITE_INDICATORS):
-                return (
-                    f"⚠️ SKILL_STATE_WRITE_BLOCKED: script file "
-                    f"{script_path_str!r} targets skill provenance / launcher "
-                    "seed / dependency sidecars (.clawhub.json, .ouroboroshub.json, "
-                    ".self_authored.json, SKILL.openclaw.md, .seed-origin, .ouroboros_env, node_modules). "
-                    "Use marketplace lifecycle flows or edit "
-                    "user-authored payload files instead."
-                )
-            if "state" in content_lower and "skills" in content_lower and _mentions_detached_process(content_lower):
-                return (
-                    f"⚠️ SKILL_STATE_WRITE_BLOCKED: script file "
-                    f"{script_path_str!r} starts detached processes that target "
-                    "skill state directories."
-                )
-            if runtime_mode == "light" and any(
-                ind in content_lower for ind in _LIGHT_MUTATION_INDICATORS
-            ):
-                return (
-                    f"⚠️ LIGHT_MODE_BLOCKED: script file "
-                    f"{script_path_str!r} (invoked via run_shell) "
-                    "contains repo-mutation patterns "
-                    "(``.write_text(``/``.write_bytes(``/git writes/"
-                    "``sed -i``/etc.). Switch to 'advanced' or 'pro' "
-                    "in Settings → Behavior → Runtime Mode for write "
-                    "access."
-                )
         return None
 
     def _snapshot_owner_files(self) -> Dict[pathlib.Path, Optional[str]]:
@@ -1142,7 +1015,7 @@ class ToolRegistry:
                     "payloads and run review_skill only. Shell, browser automation, "
                     "repo mutation, skill execution, extension tools, delegation, "
                     "and enable/disable flows are unavailable. Use the Skills UI "
-                    "after a fresh PASS review."
+                    "after a fresh executable review."
                 )
         if entry is None:
             if ext_tool and callable(ext_tool.get("handler")):

@@ -22,7 +22,12 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from ouroboros.contracts.chat_id_policy import A2A_CHAT_ID_MAX, A2A_CHAT_ID_MIN
 from ouroboros.event_bus import get_global_event_bus
-from ouroboros.skill_loader import find_skill, grant_status_for_skill, load_enabled
+from ouroboros.skill_loader import (
+    find_skill,
+    grant_status_for_skill,
+    load_enabled,
+    review_status_allows_execution,
+)
 from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -119,8 +124,8 @@ class HostServiceContext:
         loaded = find_skill(self.data_dir, skill_name)
         if loaded is None:
             raise HostServiceAuthError(f"skill {skill_name!r} is not installed")
-        if loaded.review.status != "pass" or loaded.review.is_stale_for(loaded.content_hash):
-            raise HostServiceAuthError(f"skill {skill_name!r} does not have a fresh PASS review")
+        if not review_status_allows_execution(loaded.review.status) or loaded.review.is_stale_for(loaded.content_hash):
+            raise HostServiceAuthError(f"skill {skill_name!r} does not have a fresh executable review")
         if not load_enabled(self.data_dir, skill_name):
             raise HostServiceAuthError(f"skill {skill_name!r} is disabled")
         if str(token_payload.get("content_hash") or "") != str(loaded.content_hash or ""):
@@ -133,6 +138,12 @@ class HostServiceContext:
             granted = set(status.get("granted_permissions") or [])
         else:
             raise HostServiceAuthError(f"skill {skill_name!r} is not installed")
+        if permission.startswith("subscribe_event:"):
+            topic = permission.split(":", 1)[1]
+            declared = set(str(item or "").strip() for item in (loaded.manifest.subscribe_events or []))
+            permissions = set(str(item or "").strip() for item in (loaded.manifest.permissions or []))
+            if topic == "skill.lifecycle" and "subscribe_event" in permissions and topic in declared:
+                return
         if permission not in granted:
             raise HostServiceAuthError(f"skill {skill_name!r} lacks grant {permission!r}")
 

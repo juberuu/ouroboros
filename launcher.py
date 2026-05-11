@@ -579,11 +579,35 @@ def _request_runtime_mode_change(mode: str, confirm_fn) -> dict:
     return {"ok": True, "runtime_mode": new_mode, "restart_required": True}
 
 
+def _request_auto_grant_reviewed_skills_change(enabled: bool, confirm_fn) -> dict:
+    settings = _load_settings()
+    old_enabled = str(settings.get("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS") or "false").strip().lower() in {"1", "true", "yes", "on"}
+    new_enabled = bool(enabled)
+    if new_enabled == old_enabled:
+        return {"ok": True, "enabled": new_enabled}
+    if new_enabled:
+        message = (
+            "Enable auto-grant for reviewed skills?\n\n"
+            "After this, a fresh pass/advisory-pass skill review will grant the "
+            "skill's manifest-declared settings keys and host permissions for "
+            "that exact content hash. Only enable this for trusted closed-loop "
+            "skill development."
+        )
+    else:
+        message = "Disable auto-grant for reviewed skills?"
+    if not confirm_fn("Confirm Reviewed Skill Auto-Grant", message):
+        return {"ok": False, "error": "Auto-grant setting change cancelled."}
+    settings["OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS"] = "true" if new_enabled else "false"
+    _save_settings(settings)
+    return {"ok": True, "enabled": new_enabled}
+
+
 def _request_skill_key_grant(skill: str, keys: list, confirm_fn) -> dict:
     from ouroboros.skill_loader import (
         find_skill,
         requested_core_setting_keys,
         requested_skill_permissions,
+        review_status_allows_execution,
         save_skill_grants,
     )
 
@@ -598,8 +622,8 @@ def _request_skill_key_grant(skill: str, keys: list, confirm_fn) -> dict:
         return {"ok": False, "error": f"Skill {skill_name!r} not found"}
     if not (loaded.manifest.is_script() or loaded.manifest.is_extension()):
         return {"ok": False, "error": "Core-key grants are supported for script and extension skills."}
-    if loaded.review.status != "pass" or loaded.review.is_stale_for(loaded.content_hash):
-        return {"ok": False, "error": "Key grants require a fresh PASS review."}
+    if not review_status_allows_execution(loaded.review.status) or loaded.review.is_stale_for(loaded.content_hash):
+        return {"ok": False, "error": "Key grants require a fresh executable review."}
     allowed = requested_core_setting_keys(list(loaded.manifest.env_from_settings or []))
     allowed_permissions = requested_skill_permissions(
         list(getattr(loaded.manifest, "permissions", []) or []),
@@ -955,6 +979,18 @@ def main():
                 )
             except Exception as exc:
                 log.warning("Runtime mode native confirmation failed: %s", exc, exc_info=True)
+                return {"ok": False, "error": f"Native confirmation failed: {exc}"}
+
+        def request_auto_grant_reviewed_skills_change(self, enabled: bool) -> dict:
+            try:
+                return _request_auto_grant_reviewed_skills_change(
+                    bool(enabled),
+                    lambda title, message: bool(
+                        _webview_window and _webview_window.create_confirmation_dialog(title, message)
+                    ),
+                )
+            except Exception as exc:
+                log.warning("Reviewed-skill auto-grant confirmation failed: %s", exc, exc_info=True)
                 return {"ok": False, "error": f"Native confirmation failed: {exc}"}
 
         def request_skill_key_grant(self, skill: str, keys: list) -> dict:

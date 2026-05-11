@@ -135,7 +135,7 @@ TOOL_POLICY: Dict[str, str] = {
     # state directory. Cannot touch the main repo.
     "toggle_skill": POLICY_SKIP,
     # Actually spawns a subprocess from the external skill checkout.
-    # The tool itself enforces PASS review + enabled + non-stale hash;
+    # The tool itself enforces executable review + enabled + non-stale hash;
     # v5.1.2 Frame A: runtime_mode no longer gates execution. We still
     # keep a cheap per-call LLM recheck as defense in depth.
     "skill_exec": POLICY_CHECK,
@@ -184,6 +184,7 @@ SAFE_SHELL_COMMANDS = frozenset([
     "ls", "cat", "head", "tail", "grep", "rg", "find", "wc",
     "git", "pytest", "pwd", "whoami",
     "date", "which", "file", "stat", "diff", "tree",
+    "du", "df",
 ])
 
 _SAFE_PYTHON_MODULE_ALIASES = {

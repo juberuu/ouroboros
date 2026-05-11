@@ -129,6 +129,50 @@ def test_blocking_review_lifecycle_uses_single_progress_card(tmp_path, monkeypat
     assert not any(kwargs.get("task_id") in {"skill_lifecycle_review", "api_skill_review"} for _args, kwargs in sent)
 
 
+def test_review_lifecycle_installs_deps_after_advisory_pass(tmp_path, monkeypatch):
+    _reset_queue()
+    deps_calls = []
+    drive_root = tmp_path / "drive"
+    repo_dir = tmp_path / "repo"
+    skills_root = tmp_path / "skills"
+    drive_root.mkdir()
+    repo_dir.mkdir()
+    skills_root.mkdir()
+    skill_dir = _build_extension(skills_root, "alpha")
+    content_hash = compute_content_hash(skill_dir, manifest_entry="plugin.py")
+    ctx = SimpleNamespace(drive_root=drive_root, repo_dir=repo_dir, messages=[])
+
+    def fake_review(_ctx, skill_name):
+        return SkillReviewOutcome(
+            skill_name=skill_name,
+            status="advisory_pass",
+            content_hash=content_hash,
+            reviewer_models=["fake/reviewer#1", "fake/reviewer#2"],
+            findings=[{"item": "error_handling", "verdict": "FAIL", "severity": "advisory"}],
+            error="",
+        )
+
+    def fake_deps(*_args, **_kwargs):
+        deps_calls.append("alpha")
+        return "installed", ""
+
+    monkeypatch.setattr("supervisor.message_bus.send_with_budget", lambda *a, **kw: None)
+    monkeypatch.setattr("ouroboros.skill_review_runner._reconcile_deps_after_pass_review", fake_deps)
+    monkeypatch.setattr("ouroboros.skill_review_runner._reconcile_extension_payload", lambda *_a, **_k: (None, None))
+
+    payload = run_skill_review_lifecycle_blocking(
+        ctx,
+        "alpha",
+        source="test",
+        review_impl=fake_review,
+        repo_path=str(skills_root),
+    )
+
+    assert payload["status"] == "advisory_pass"
+    assert payload["deps_status"] == "installed"
+    assert deps_calls == ["alpha"]
+
+
 def test_review_result_message_prefers_non_pass_findings_and_marks_omissions():
     long_reason = "x" * 400
     outcome = SkillReviewOutcome(
@@ -230,20 +274,25 @@ def test_self_authored_review_does_not_enable_when_deps_fail(tmp_path, monkeypat
     monkeypatch.setattr("supervisor.message_bus.send_with_budget", lambda *a, **kw: None)
     monkeypatch.setattr("ouroboros.skill_review_runner._reconcile_deps_after_pass_review", lambda *_a, **_k: ("failed", "pip exploded"))
 
-    payload = run_skill_review_lifecycle_blocking(
-        ctx,
-        "alpha",
-        source="test",
-        review_impl=lambda _ctx, _skill: SkillReviewOutcome(
+    def fake_review(_ctx, _skill):
+        outcome = SkillReviewOutcome(
             skill_name="alpha",
             status="pass",
             content_hash=compute_content_hash(skill_dir, manifest_entry="plugin.py"),
             reviewer_models=["reviewer"],
-        ),
+        )
+        outcome.auto_flow = True
+        return outcome
+
+    payload = run_skill_review_lifecycle_blocking(
+        ctx,
+        "alpha",
+        source="test",
+        review_impl=fake_review,
         repo_path=str(drive_root / "skills"),
     )
 
-    assert payload["status"] == "pass"
+    assert payload["status"] == "pending"
     assert payload["deps_status"] == "failed"
     assert "pip exploded" in payload["deps_error"]
     assert load_enabled(drive_root, "alpha") is False

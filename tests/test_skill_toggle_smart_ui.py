@@ -19,12 +19,22 @@ def test_skill_toggle_requires_fresh_pass_before_enable():
     assert "async function toggleSkillEnabled" in source
     assert "review is stale — re-review the skill first" in source
     assert "review is still pending" in source
-    assert "review has not passed yet" in source
-    assert "Run review and wait for a fresh PASS before enabling this skill." in source
+    assert "if (!reviewReady(skill)) return 'review has not produced an executable verdict yet';" in source
+    toggle_lock = source.split("function toggleLockReason", 1)[1].split("function skillNextAction", 1)[0]
+    assert "skill.review_status !== 'pass'" not in toggle_lock
+    assert "Run review and wait for a fresh executable review before enabling this skill." in source
     assert "needs a fresh security review before it can be enabled" not in source
     assert "Review did not pass. Use Repair if the skill needs repair." not in source
     assert "await requestMissingKeyGrants(name, missing);" in source
     assert "await toggleSkillEnabled(name, wantsEnabled);" in source
+
+
+def test_advisory_pass_badge_renders_as_executable_status():
+    source = _read("web/modules/skills.js")
+
+    status_badge = source.split("function statusBadge", 1)[1].split("function reviewReady", 1)[0]
+    assert "['pass', 'advisory_pass'].includes(status)" in status_badge
+    assert "status === 'pass' ? 'ok'" not in status_badge
 
 
 def test_skill_card_primary_actions_and_lock_surfaces_use_shared_modal():

@@ -51,6 +51,10 @@ def _pass_actor(model: str):
         {"item": "event_subscription_minimization", "verdict": "PASS", "severity": "critical", "reason": "n/a"},
         {"item": "companion_process_safety", "verdict": "PASS", "severity": "critical", "reason": "n/a"},
         {"item": "host_token_handling", "verdict": "PASS", "severity": "critical", "reason": "n/a"},
+        {"item": "error_handling", "verdict": "PASS", "severity": "advisory", "reason": "ok"},
+        {"item": "integration_preflight", "verdict": "PASS", "severity": "advisory", "reason": "ok"},
+        {"item": "bug_hunting", "verdict": "PASS", "severity": "advisory", "reason": "ok"},
+        {"item": "completion_notification", "verdict": "PASS", "severity": "advisory", "reason": "n/a"},
     ]
     return {
         "model": model,

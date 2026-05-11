@@ -32,7 +32,9 @@ def _seed_token(
     token: str = "token",
     permissions=None,
     review_status: str = "pass",
+    subscribe_events=None,
 ) -> None:
+    topics = list(subscribe_events or ["chat.outbound"])
     skill_dir = data_dir / "skills" / "external" / skill
     skill_dir.mkdir(parents=True, exist_ok=True)
     (skill_dir / "SKILL.md").write_text(
@@ -43,7 +45,7 @@ version: 0.1
 type: extension
 entry: plugin.py
 permissions: [inject_chat, subscribe_event]
-subscribe_events: [chat.outbound]
+subscribe_events: [{", ".join(topics)}]
 ---
 # Test
 """,
@@ -64,7 +66,7 @@ subscribe_events: [chat.outbound]
         content_hash=content_hash,
         requested_keys=[],
         granted_permissions=list(permissions or []),
-        requested_permissions=["inject_chat", "subscribe_event:chat.outbound"],
+        requested_permissions=["inject_chat", *(f"subscribe_event:{topic}" for topic in topics if topic != "skill.lifecycle")],
     )
     atomic_write_json(
         data_dir / "state" / "skills" / skill / AUTH_TOKEN_FILENAME,
@@ -82,6 +84,14 @@ def test_identity_requires_skill_token(tmp_path: pathlib.Path) -> None:
     client = TestClient(app)
 
     assert client.get("/identity").status_code == 403
+    assert client.get("/identity", headers={"X-Skill-Token": "token"}).status_code == 200
+
+
+def test_identity_accepts_advisory_pass_review(tmp_path: pathlib.Path) -> None:
+    _seed_token(tmp_path, permissions=["inject_chat"], review_status="advisory_pass")
+    app = create_host_service_app(tmp_path, bridge_getter=FakeBridge)
+    client = TestClient(app)
+
     assert client.get("/identity", headers={"X-Skill-Token": "token"}).status_code == 200
 
 
@@ -245,6 +255,16 @@ def test_events_websocket_receives_granted_topic(tmp_path: pathlib.Path) -> None
     assert message["type"] == "event"
     assert message["topic"] == CHAT_OUTBOUND
     assert message["data"]["text"] == "hello"
+
+
+def test_events_websocket_allows_manifest_declared_skill_lifecycle_without_grant(tmp_path: pathlib.Path) -> None:
+    _seed_token(tmp_path, skill="listener", token="token", permissions=[], subscribe_events=["skill.lifecycle"])
+    app = create_host_service_app(tmp_path, bridge_getter=FakeBridge)
+    client = TestClient(app)
+
+    with client.websocket_connect("/events", headers={"X-Skill-Token": "token"}) as ws:
+        ws.send_json({"type": "subscribe", "topic": "skill.lifecycle"})
+        assert ws.receive_json()["type"] == "subscribed"
 
 
 def test_events_websocket_rejects_ungranted_topic(tmp_path: pathlib.Path) -> None:

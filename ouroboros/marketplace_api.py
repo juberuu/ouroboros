@@ -61,6 +61,12 @@ def _reconcile_deps_after_review(drive_root: pathlib.Path, skill_name: str) -> t
     return _reconcile_deps_after_pass_review(drive_root, skill_name)
 
 
+def _review_status_allows_skill_runtime(status: str) -> bool:
+    from ouroboros.skill_loader import review_status_allows_execution
+
+    return review_status_allows_execution(status)
+
+
 from ouroboros.http_api import (
     coerce_bool as _coerce_bool,
     coerce_int as _coerce_int,
@@ -560,7 +566,7 @@ async def api_ouroboroshub_install(request: Request) -> JSONResponse:
                 log_label="OuroborosHub install review lifecycle operation",
             )
             payload.update({"review_status": status, "review_findings": findings, "review_error": error})
-            if status == "pass" and not error:
+            if _review_status_allows_skill_runtime(status) and not error:
                 install_progress.set("Installing dependencies…")
                 deps_status, deps_error = await run_blocking_preserving_cancellation(
                     _reconcile_deps_after_review,
@@ -644,7 +650,7 @@ async def api_ouroboroshub_update(request: Request) -> JSONResponse:
             payload.update({"review_status": status, "review_findings": findings, "review_error": error})
             deps_status = "not_required"
             deps_error = ""
-            if status == "pass" and not error:
+            if _review_status_allows_skill_runtime(status) and not error:
                 update_progress.set("Installing dependencies…")
                 deps_status, deps_error = await run_blocking_preserving_cancellation(
                     _reconcile_deps_after_review,
@@ -656,7 +662,7 @@ async def api_ouroboroshub_update(request: Request) -> JSONResponse:
                 if deps_status == "failed":
                     payload["ok"] = False
                     payload["error"] = deps_error
-            if was_live and status == "pass" and not error and deps_status != "failed":
+            if was_live and _review_status_allows_skill_runtime(status) and not error and deps_status != "failed":
                 try:
                     from ouroboros.config import load_settings
                     from ouroboros.extension_loader import reconcile_extension

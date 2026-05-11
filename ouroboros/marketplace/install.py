@@ -450,7 +450,7 @@ def install_skill(
     auto_specs = list((provenance.get("install_specs") or {}).get("auto") or [])
     if auto_specs:
         deps_status = "pending_review"
-        if review_status == "pass" and not review_error:
+        if review_status in {"pass", "advisory_pass"} and not review_error:
             _progress("Installing dependencies…")
             try:
                 deps_fingerprint = install_isolated_dependencies(
@@ -659,7 +659,10 @@ def update_skill(
         overwrite=True,
         progress_callback=progress_callback,
     )
-    if was_live and (not getattr(result, "ok", False) or getattr(result, "review_status", "") == "pass"):
+    if was_live and (
+        not getattr(result, "ok", False)
+        or getattr(result, "review_status", "") in {"pass", "advisory_pass"}
+    ):
         try:
             from ouroboros.extension_loader import reconcile_extension
             from ouroboros.config import load_settings

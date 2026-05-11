@@ -1,4 +1,4 @@
-# Ouroboros v5.15.0-rc.7 — Architecture & Reference
+# Ouroboros v5.15.0-rc.8 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -64,7 +64,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── review_evidence.py   ← Structured review findings/obligations snapshot for summaries and reflections
       ├── skill_loader.py      ← Skill discovery + durable skill state (v5.8.2: walks data/skills/{native,clawhub,ouroboroshub,external}/ + optional OUROBOROS_SKILLS_REPO_PATH; persists to data/state/skills/<name>/; tags each LoadedSkill with `source` and `.self_authored.json` provenance)
       ├── skill_dependencies.py ← Shared dependency-spec resolution for skill payloads across manifests, sidecars, and provenance
-      ├── skill_review.py      ← Tri-model skill review reusing the repo-review infrastructure against the Skill Review Checklist section of docs/CHECKLISTS.md
+      ├── skill_review.py      ← Skill review pipeline: optional fail-open Claude Code advisory over the skill payload only (repo diff excluded, output treated as inert evidence) followed by the tri-model executable trust gate against the Skill Review Checklist section of docs/CHECKLISTS.md
       ├── extension_loader.py  ← Phase 4 in-process loader for type: extension skills; discovers + imports plugin.py via importlib with a narrow PluginAPIImpl, tracks registrations per-skill for atomic unload
       ├── extension_ui_validation.py ← Host-owned widget/settings render-schema validation shared by extension loader and skill preflight
       ├── extension_isolated_deps.py ← Per-extension bridge that exposes reviewed `.ouroboros_env` Python site-packages to in-process extensions while they are loaded
@@ -111,12 +111,12 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── git_pr.py          ← PR integration tools: fetch_pr_ref, create_integration_branch, cherry_pick_pr_commits, stage_adaptations, stage_pr_merge (non-core, require enable_tools)
       │   ├── github.py          ← GitHub integration: issues (list/get/comment/close) + PR tools: list_github_prs, get_github_pr, comment_on_pr (non-core; github.py is in _FROZEN_TOOL_MODULES so PR inspection/comment tools work in packaged builds)
       │   ├── parallel_review.py ← Parallel triad+scope orchestration and verdict aggregation (extracted from git.py)
-      │   ├── plan_review.py     ← Pre-implementation design review (2–3 distinct parallel full-codebase reviewers, plan_task tool)
+      │   ├── plan_review.py     ← Pre-implementation design review (2–3 parallel full-codebase reviewer slots, duplicate model IDs allowed, plan_task tool)
       │   ├── review.py          ← Triad diff review (>=2 reviewer models in parallel against CHECKLISTS.md; ships with 3, capped at 10)
       │   ├── review_helpers.py  ← Shared review helpers (section loader, file packs, intent, pytest preflight via agent interpreter)
       │   ├── review_revalidation.py ← Reviewed-commit fingerprint revalidation helpers (blocks when staged diff changes after review)
       │   ├── scope_review.py   ← Blocking scope reviewer (configurable, fail-closed)
-      │   ├── skill_exec.py      ← Phase 3 external-skill surface: list_skills, review_skill, toggle_skill, skill_exec (subprocess runner with cwd confinement, env scrubbing, timeout, runtime allowlist python/python3/bash/node/deno/ruby/go; gated by enabled + PASS review + fresh content hash — v5.1.2 Frame A: runtime_mode no longer blocks execution)
+      │   ├── skill_exec.py      ← Phase 3 external-skill surface: list_skills, review_skill, toggle_skill, skill_exec (subprocess runner with cwd confinement, env scrubbing, timeout, runtime allowlist python/python3/bash/node/deno/ruby/go; gated by enabled + fresh executable review + fresh content hash — v5.1.2 Frame A: runtime_mode no longer blocks execution)
       │   ├── skill_publish.py   ← Agent-callable `submit_skill_to_hub` tool: validates a fresh PASS-reviewed local skill, infers OuroborosHub from `OUROBOROS_HUB_CATALOG_URL`, commits payload + catalog update to the user's fork via GitHub GraphQL, and opens a PR without mutating the local Ouroboros repo.
       │   └── skill_preflight.py ← v5.7.0 heal-safe, read-only skill payload preflight validator (manifest parse + Python compile() / node --check / bash -n; no review-state mutation)
       └── platform_layer.py    ← Cross-platform process/path/locking helpers
@@ -128,6 +128,7 @@ build_linux.sh                ← Linux build (PyInstaller → .tar.gz)
 build_windows.ps1             ← Windows build (PyInstaller → .zip)
 scripts/build_repo_bundle.py  ← Builds `repo.bundle` + `repo_bundle_manifest.json` for packaged releases
 scripts/run_external_review.py ← v5.1.2 dev-loop tool: invokes `ouroboros.tools.parallel_review.run_parallel_review` from outside the runtime against `git diff --cached`. Reads `~/Ouroboros/data/settings.json` for `OPENROUTER_API_KEY` / `OUROBOROS_REVIEW_MODELS` / `OUROBOROS_SCOPE_REVIEW_MODEL`, builds a minimal `ToolContext`, prints FULL raw triad+scope output (no truncation). Used to dry-run the same review pipeline `repo_commit` triggers before any actual commit. Output: stdout (and optional `--output PATH`). Not part of the runtime gate; review-exempt dev tool.
+scripts/cleanup_test_pollution.py ← Dry-run-first cleanup utility for local test-pollution artifacts: known test skill state dirs, stale `__extension_imports`, and accidental `MagicMock`-named repo-root files. Use `--apply` only after inspecting planned removals.
 Dockerfile                    ← Docker image (web UI runtime)
 ```
 
@@ -182,7 +183,7 @@ Dockerfile                    ← Docker image (web UI runtime)
 │   │   └── skills/              ← Phase 3 external-skill state plane (sibling of advisory_review.json, not shared)
 │   │       └── <skill_name>/
 │   │           ├── enabled.json ← {"enabled": bool, "updated_at": iso_ts}
-│   │           ├── review.json  ← {"status": "pass|fail|advisory|pending", "content_hash": str, "findings": [...], "reviewer_models": [...], "timestamp": iso_ts, ...}  (Phase 3 ``pending_phase4`` status retired in Phase 4 — legacy files migrate on load)
+│   │           ├── review.json  ← {"status": "pass|advisory_pass|fail|advisory|pending", "content_hash": str, "findings": [...], "reviewer_models": [...], "timestamp": iso_ts, ...}  (Phase 3 ``pending_phase4`` status retired in Phase 4 — legacy files migrate on load)
 │   │           ├── deps.json    ← isolated dependency install fingerprint for skills with reviewed install specs
 │   │           ├── auth_token.json ← content-hash-bound Host Service token for reviewed live extensions
 │   │           └── __extension_imports/<uuid>/skill/  ← Phase 4 staged import tree for type:extension skills (created on load, removed on unload; see §13.1)
@@ -363,7 +364,7 @@ The web UI is a single-page app (`web/index.html` + `web/style.css` + ES modules
 
 Navigation is a left sidebar with 6 pages (Chat, Files, Skills, Widgets, Dashboard, Settings). About lives as a sub-tab inside Settings (v5.7.0+) — there is no top-level About page; the desktop launcher's `#nav-version` span keeps a compact version label visible above the rail's footer. Dashboard is the operational hub for Logs, Evolution, Costs, and Updates; Settings holds Providers / Secrets / Models / Behavior / Integrations / Advanced / About sub-tabs. The Dashboard nav button uses the Lucide `gauge` icon (a half-circle speedometer with needle) — the previous `layout-dashboard` glyph was visually indistinguishable from the `layout-grid` Widgets glyph at 20×20 px. On narrow viewports (`@media (max-width: 640px)`) `#nav-rail` collapses to a horizontal bottom bar — `position: fixed; bottom: 0; flex-direction: row; justify-content: safe center` with `padding-bottom: calc(6px + env(safe-area-inset-bottom, 0px))` for the iOS home-indicator and `#content { padding-left: 0; padding-bottom: calc(62px + env(safe-area-inset-bottom, 0px)) }` to clear the bar. Mobile Settings keeps the horizontal pill strip (no drill-down accordion) — the active pill auto-scrolls into view via `scrollIntoView({ inline: 'center' })`. The Skills page manages external + bundled skill packages — review trigger, key grants, enable/disable, status badges, and live-vs-catalog extension state — and reads from `/api/state` + `/api/extensions`. Each skill card carries a kebab (⋮) menu in its header (right of the toggle) that opens as an anchored non-modal popover via `dialog.show()`; the menu hosts Re-review / Update / Uninstall actions. The Widgets page hosts reviewed extension UI declarations separately so useful widgets do not get buried in long skill lists; inline-card widgets now preserve their current state across SPA tab switches.
 
-v5.7.2 normalizes page-level headers and top tab strips through `web/modules/page_header.js`: Settings, Dashboard, Skills, Widgets, Files, and Chat share the same title/action/tab structure and `app-page-*` / `app-tab-*` CSS rhythm. Chat keeps the `chat-page-header` overlay variant for scroll-under behavior; Settings/Dashboard/Skills tabs are all horizontal pill strips. v5.11.0 extends the same skill-first boundary to authoring: `runtime_mode=light` blocks core/repo mutation, but scoped tools (`str_replace_editor`, `data_write`, `claude_code_edit`) may edit files under `data/skills/{external,clawhub,ouroboroshub}/<skill>/...` outside formal Repair tasks, while native payloads, provenance sidecars, owner state, and `run_shell` write scripts remain blocked. Formal `task_constraint.mode="skill_repair"` still exists as the stricter UI Repair lane with short payload-relative paths and a narrow allowlist.
+v5.7.2 normalizes page-level headers and top tab strips through `web/modules/page_header.js`: Settings, Dashboard, Skills, Widgets, Files, and Chat share the same title/action/tab structure and `app-page-*` / `app-tab-*` CSS rhythm. Chat keeps the `chat-page-header` overlay variant for scroll-under behavior; Settings/Dashboard/Skills tabs are all horizontal pill strips. v5.11.0 extends the same skill-first boundary to authoring: `runtime_mode=light` is a compatibility/self-modification guard, not a full shell sandbox. It blocks core/repo mutation tools, mutative git through `run_shell`, and simple writer commands with explicit repo-local targets, but scoped tools (`str_replace_editor`, `data_write`, `claude_code_edit`) may edit files under `data/skills/{external,clawhub,ouroboroshub}/<skill>/...` outside formal Repair tasks. Native payloads, provenance sidecars, and owner state stay protected. Formal `task_constraint.mode="skill_repair"` still exists as the stricter UI Repair lane with short payload-relative paths and a narrow allowlist.
 
 v5.8.3-rc.1 splits web escaping by context in `web/modules/utils.js`. Use
 `escapeHtmlText()` for text-node HTML and markdown fallbacks, `escapeHtmlAttr()`
@@ -457,12 +458,12 @@ The Dashboard tab is the operational hub. It hosts four full-height sub-tabs:
 - **Scope Review Model**: Single model for the blocking scope reviewer.
   Backed by `OUROBOROS_SCOPE_REVIEW_MODEL` (default `openai/gpt-5.5`).
 - **Provider change classification** (`server_runtime.classify_runtime_provider_change`, v4.40.6): classifies provider state after a settings save. Returns `"direct_normalize"` (an exclusive-direct provider is active → direct-provider autofill ran, warning appropriate), `"reverse_migrate"` (OpenRouter is present, no exclusive-direct provider active → `apply_runtime_provider_defaults` returned without changes, pure housekeeping, no warning), or `"none"` (neither condition). Used by `server.py::api_settings_post` to suppress the misleading "Normalized direct-provider routing" warning when the user adds OpenRouter back. `_MODEL_LANE_KEYS` renamed to `_ALL_MODEL_SLOT_KEYS` for consistency.
-- **Direct-provider review fallback** (formerly "OpenAI-only review fallback"; updated v4.39.0 for `plan_task` quorum): if exactly one of **official OpenAI** or **Anthropic** is configured (no OpenRouter, no legacy OpenAI base URL, no OpenAI-compatible, no Cloud.ru) and the configured review list is invalid or doesn't match the exclusive provider prefix, review falls back to `[OUROBOROS_MODEL, OUROBOROS_MODEL_LIGHT, OUROBOROS_MODEL_LIGHT]` (3 commit-triad slots, 2 unique models) drawn from `_DIRECT_PROVIDER_AUTO_DEFAULTS` (which pairs e.g. `openai::gpt-5.5` + `openai::gpt-5.5-mini` or `anthropic::claude-opus-4-6` + `anthropic::claude-sonnet-4-6`). This shape preserves the commit triad's "three models review the staged diff" contract (DEVELOPMENT.md) while yielding exactly 2 unique reviewers for `plan_task`'s quorum gate. If `main` and `light` happen to equal (user overrode both lanes to the same model), the fallback degrades to legacy `[main] * _DIRECT_PROVIDER_REVIEW_RUNS` — commit triad still works, `plan_task` then emits its quorum-error recovery hint. This replaces the old `[main] * 3` fallback which broke `plan_task` on first-run single-provider setups. Current scope is OpenAI-only and Anthropic-only — the detector (`ouroboros/config.py::_exclusive_direct_remote_provider_env`) early-returns `""` when OpenAI-compatible or Cloud.ru keys are present, so those provider-only setups do not yet receive the fallback. The fallback additionally requires the main slot `OUROBOROS_MODEL` — after `provider_models.migrate_model_value` — to already start with the exclusive provider prefix (`openai::` / `anthropic::`); if the normalized main model does not match the prefix, `get_review_models` leaves the configured reviewer list untouched and does **not** rewrite it to `[main]*3`. This covers the edge case where the Settings `#s-model` free-text input accepts a non-default cross-provider value. The same SSOT (`ouroboros/config.py::get_review_models`) powers both the commit triad and `plan_task`.
+- **Direct-provider review fallback** (formerly "OpenAI-only review fallback"; updated v5.15.0 for duplicate reviewer slots): if exactly one of **official OpenAI** or **Anthropic** is configured (no OpenRouter, no legacy OpenAI base URL, no OpenAI-compatible, no Cloud.ru) and the configured review list is invalid or doesn't match the exclusive provider prefix, review falls back to `[OUROBOROS_MODEL, OUROBOROS_MODEL_LIGHT, OUROBOROS_MODEL_LIGHT]` drawn from `_DIRECT_PROVIDER_AUTO_DEFAULTS` (which pairs e.g. `openai::gpt-5.5` + `openai::gpt-5.5-mini` or `anthropic::claude-opus-4-6` + `anthropic::claude-sonnet-4-6`). If `main` and `light` happen to equal, `[main] * _DIRECT_PROVIDER_REVIEW_RUNS` is still valid: duplicate model IDs are treated as distinct stochastic reviewer slots for both commit triad and `plan_task`. Current scope is OpenAI-only and Anthropic-only — the detector (`ouroboros/config.py::_exclusive_direct_remote_provider_env`) early-returns `""` when OpenAI-compatible or Cloud.ru keys are present, so those provider-only setups do not yet receive the fallback. The fallback additionally requires the main slot `OUROBOROS_MODEL` — after `provider_models.migrate_model_value` — to already start with the exclusive provider prefix (`openai::` / `anthropic::`); if the normalized main model does not match the prefix, `get_review_models` leaves the configured reviewer list untouched. The same SSOT (`ouroboros/config.py::get_review_models`) powers both the commit triad and `plan_task`.
 - **Review Enforcement**: `Advisory` or `Blocking` for pre-commit review behavior. Rendered as a two-button segmented toggle (advisory = amber, blocking = crimson) rather than a dropdown.
   Backed by `OUROBOROS_REVIEW_ENFORCEMENT`. Review always runs in both modes.
 - **Runtime Mode**: `Light` / `Advanced` / `Pro` segmented control backed by `OUROBOROS_RUNTIME_MODE` (default `advanced`). Onboarding can choose the initial boot baseline before the agent starts. After launch, the Settings control is interactive only in desktop builds: `web/modules/settings.js` calls the pywebview launcher bridge `request_runtime_mode_change`, the launcher shows a native confirmation dialog, and the launcher saves the new mode with `allow_elevation=True`; the change is reported as restart-required. Web/Docker sessions can view the current mode but cannot elevate it through `/api/settings`. The normal HTTP save path still omits/drops `OUROBOROS_RUNTIME_MODE`, and `ouroboros/config.py::save_settings` plus the boot-baseline pin, `_data_write` settings.json block, shell filters, and Files API guard remain the self-elevation defenses. `ouroboros/config.py::VALID_RUNTIME_MODES = ("light", "advanced", "pro")` is the SSOT; `normalize_runtime_mode` runs on the read path (`get_runtime_mode`) so unknown values can never drift into `/api/state`.
 - **External Skills Repo**: text input backed by `OUROBOROS_SKILLS_REPO_PATH`. v5 changed the discovery model: the primary location is now the in-data-plane tree `data/skills/{native,clawhub,external}/`, and `OUROBOROS_SKILLS_REPO_PATH` is an OPTIONAL extra discovery root for users who keep skills in their own checkout. The skill loader walks all three buckets + the optional path, tagging each `LoadedSkill` with `source` (`native`/`clawhub`/`external`/`user_repo`); `skill_exec` runs reviewed scripts from those packages; `review_skill`/`toggle_skill`/`list_skills` manage lifecycle, and the Skills page exposes the same direct review/toggle flow plus a Marketplace sub-tab for ClawHub installs. Absolute path or `~`-prefixed; empty means "use only the data plane". Ouroboros never clones or pulls this directory — the user manages it out-of-band. `get_skills_repo_path()` expands `~` at read time; `/api/state` surfaces only a `skills_repo_configured` boolean so the absolute path never leaks to the UI.
-- **ClawHub Marketplace**: always-on Marketplace sub-tab backed by `OUROBOROS_CLAWHUB_REGISTRY_URL` (default `https://clawhub.ai/api/v1`). v5.15.0 removed the `get_clawhub_enabled` / `OUROBOROS_CLAWHUB_ENABLED` legacy compatibility shims entirely. Browse uses `/packages?family=skill`; text search uses `/search?q=&limit=16` (full-index relevance ranking, single-page) and enriches thin hits through a merged `/packages/<slug>` + `/skills/<slug>` detail lookup to recover stats, official badges, license, and homepage metadata. The Official-only checkbox is clickable in both modes: browse forwards `isOfficial=true` to the catalogue, while text search applies it after enrichment because `/search` has no official filter parameter. Registry reads and downloads retry bounded 429 responses with `Retry-After` when present; persistent rate limits surface as a human-readable "try again later" state with a retry affordance instead of a raw HTTP 429. Every install runs through a fixed pipeline — registry resolve -> archive download (50 MB cap, text-only, sensitive-filename + loadable-binary refusal) -> staging extract -> OpenClaw frontmatter translation (writing original `SKILL.md` aside as `SKILL.openclaw.md` for audit) -> atomic land into `data/skills/clawhub/<owner>__<slug>/` -> tri-model `review_skill` auto-trigger -> durable provenance at `data/state/skills/<name>/clawhub.json`. v5.4.0 adds a card-level lifecycle CTA: install auto-runs review, then the card offers Enable only after a fresh PASS review and any required grants; otherwise the same card becomes Fix / Grant / Enable / Open widgets / Disable / Uninstall. Plugins (Node/TS) are filtered at search time and refused at install time; only skill packages are accepted. The registry-host allowlist prevents a settings override from redirecting HTTP traffic, and a custom redirect handler re-validates the host on every 30x hop. Core settings keys (`OPENROUTER_API_KEY` etc.) requested by OpenClaw `requires.env` become per-skill grant requirements and are forwarded only after fresh PASS review plus desktop-launcher owner grant; this is a trust-local model with `_data_write`, Files API, and `run_shell` owner-state defenses rather than an OS-level same-user sandbox.
+- **ClawHub Marketplace**: always-on Marketplace sub-tab backed by `OUROBOROS_CLAWHUB_REGISTRY_URL` (default `https://clawhub.ai/api/v1`). v5.15.0 removed the `get_clawhub_enabled` / `OUROBOROS_CLAWHUB_ENABLED` legacy compatibility shims entirely. Browse uses `/packages?family=skill`; text search uses `/search?q=&limit=16` (full-index relevance ranking, single-page) and enriches thin hits through a merged `/packages/<slug>` + `/skills/<slug>` detail lookup to recover stats, official badges, license, and homepage metadata. The Official-only checkbox is clickable in both modes: browse forwards `isOfficial=true` to the catalogue, while text search applies it after enrichment because `/search` has no official filter parameter. Registry reads and downloads retry bounded 429 responses with `Retry-After` when present; persistent rate limits surface as a human-readable "try again later" state with a retry affordance instead of a raw HTTP 429. Every install runs through a fixed pipeline — registry resolve -> archive download (50 MB cap, text-only, sensitive-filename + loadable-binary refusal) -> staging extract -> OpenClaw frontmatter translation (writing original `SKILL.md` aside as `SKILL.openclaw.md` for audit) -> atomic land into `data/skills/clawhub/<owner>__<slug>/` -> tri-model `review_skill` auto-trigger -> durable provenance at `data/state/skills/<name>/clawhub.json`. v5.4.0 adds a card-level lifecycle CTA: install auto-runs review, then the card offers Enable only after a fresh executable review and any required grants; otherwise the same card becomes Fix / Grant / Enable / Open widgets / Disable / Uninstall. Plugins (Node/TS) are filtered at search time and refused at install time; only skill packages are accepted. The registry-host allowlist prevents a settings override from redirecting HTTP traffic, and a custom redirect handler re-validates the host on every 30x hop. Core settings keys (`OPENROUTER_API_KEY` etc.) requested by OpenClaw `requires.env` become per-skill grant requirements and are forwarded only after fresh executable review plus desktop-launcher owner grant; this is a trust-local model with `_data_write`, Files API, and `run_shell` owner-state defenses rather than an OS-level same-user sandbox.
 - **Advanced tab**: local model runtime, max workers, tool timeout, soft/hard timeout, and reset controls. Total budget and per-task cost cap live in **Dashboard → Costs**.
 - **Local Model Runtime**: source, GGUF filename, port, GPU layers, context length, chat format, start/stop/test buttons, live local-model status, real download progress bar (updates via `download_progress` from `/api/local-model/status`), and an **Install Local Runtime** button (hidden until runtime is missing). The Start button performs a preflight check via `/api/local-model/start` before downloading; on a `runtime_missing` (HTTP 412) response it surfaces the install button and a human-readable hint instead of a raw traceback. After install completes (`runtime_status == "install_ok"`), the start flow resumes automatically if a source was configured. `LOCAL_MODEL_FILENAME` now accepts subfolder paths (`quant/model.gguf`) and split GGUF patterns (`quant/model-00001-of-00003.gguf`); all shards are downloaded automatically and the server is started with the first shard. If the user omits the subfolder prefix (types just the bare filename), `_resolve_hf_path` auto-resolves the full path by querying `list_repo_files` on the HF repo (fail-open on network errors).
 - **GitHub**: Token + Repo (for remote sync).
@@ -570,9 +571,9 @@ authentication. If the password is blank, non-loopback access stays open by desi
 | GET | `/api/extensions/{skill}/module/{entry}` | Phase 5.7: reviewed static widget module source for `kind: "module"` tabs. Only serves a live extension's declared module entry, confines the path to `skill_dir`, returns JavaScript text with `Cache-Control: no-store`. |
 | GET | `/api/extensions/{skill}/settings_section` | Phase 5.7: declarative Settings sections registered via `PluginAPI.register_settings_section`. Returns `{skill, sections[]}` filtered to the skill. |
 | ALL | `/api/extensions/{skill}/{rest:path}` | Phase 5: catch-all dispatcher that forwards to the handler registered via `PluginAPI.register_route`. Honors the registered methods tuple; `405` on method mismatch, `404` on unknown mount. |
-| POST | `/api/skills/{skill}/toggle` | Phase 5: UI-direct enable/disable. Enabling requires a fresh PASS review plus approved grants; disabling remains available to take skills offline. Wraps `save_enabled` plus the `extension_loader.load_extension` / `unload_extension` machinery so the Skills page can flip state without round-tripping through the agent. |
+| POST | `/api/skills/{skill}/toggle` | Phase 5: UI-direct enable/disable. Enabling requires a fresh executable review plus approved grants; disabling remains available to take skills offline. Wraps `save_enabled` plus the `extension_loader.load_extension` / `unload_extension` machinery so the Skills page can flip state without round-tripping through the agent. |
 | GET | `/api/skills/lifecycle-queue` | v5.5: recent global FIFO skill lifecycle jobs (install/update/review/deps/enable/disable/uninstall) for My skills virtual rows, tab badges, and operator feedback. |
-| POST | `/api/skills/{skill}/review` | Phase 5 / v5.7.2: UI-direct tri-model review trigger. Uses the shared `skill_review_runner` lifecycle job path, offloads blocking LLM calls to a worker thread, dedupes active reviews by skill/content hash, reconciles isolated dependencies after PASS, and writes `review_job.json` + `skill_review_*` events. |
+| POST | `/api/skills/{skill}/review` | Phase 5 / v5.7.2: UI-direct skill review trigger. Uses the shared `skill_review_runner` lifecycle job path, offloads blocking LLM calls to a worker thread, dedupes active reviews by skill/content hash, may run a best-effort Claude Code advisory pre-review over the skill payload only (`include_repo_diff=False`, untrusted/inert evidence before the final JSON contract), then runs the tri-model review as the executable trust gate, reconciles isolated dependencies after PASS, and writes `review_job.json` + `skill_review_*` events. |
 | POST | `/api/skills/{skill}/grants` | Sentinel endpoint that returns 403; explicit per-skill core-key grants are owner-only and are written by the desktop launcher bridge after native confirmation. v5.2.2 dual-track: ``type: script`` and ``type: extension`` skills are both eligible (instruction skills are not). |
 | POST | `/api/skills/{skill}/reconcile` | Reload/unload the live extension state after owner key grants or catalogue changes; used by launcher/UI flows to make persisted skill state match runtime registrations. |
 | GET | `/api/migrations` | List native-skill upgrade notices shown on the Skills page. |
@@ -604,7 +605,7 @@ authentication. If the password is blank, non-loopback access stays open by desi
 | POST | `/api/marketplace/ouroboroshub/install` | Queue official skill install from pinned raw GitHub files and auto-review. |
 | POST | `/api/marketplace/ouroboroshub/update/{name}` | Queue official skill update (install with overwrite). |
 | POST | `/api/marketplace/ouroboroshub/uninstall/{name}` | Queue official skill uninstall. |
-| HOST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}` | Separate loopback-only Host Service API for reviewed skill callbacks. This is not mounted on the public web app. Routes: `GET /identity`, `GET /tools/schemas`, `POST /chat/inject`, `POST /chat/allocate-internal`, `WS /events`. Every route requires a content-bound `X-Skill-Token`; companion skills receive an opaque `SkillToken` and must explicitly call `use_in_request()` at request construction sites. |
+| HOST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}` | Separate loopback-only Host Service API for reviewed skill callbacks. This is not mounted on the public web app. Routes: `GET /identity`, `GET /tools/schemas`, `POST /chat/inject`, `POST /chat/allocate-internal`, `WS /events`. Every route requires a content-bound `X-Skill-Token`; companion skills receive an opaque `SkillToken` and must explicitly call `use_in_request()` at request construction sites. `WS /events` supports `chat.outbound`, `chat.typing`, `chat.photo`, and `skill.lifecycle`; `skill.lifecycle` may be subscribed by manifest-declared lifecycle listeners without an extra grant because it carries completion/failure notifications rather than chat/control authority. |
 | POST | `/api/command` | Queue a local command/task payload. Optional `visible_text` broadcasts and logs a short system status (used by skill Repair) while the full payload stays off the visible chat transcript; skill review/dependency lifecycle progress uses the live-card stream separately. |
 | POST | `/api/reset` | Delete all runtime data, restart for fresh onboarding |
 | GET | `/api/git/log` | Recent commits + tags + current branch/sha |
@@ -753,7 +754,7 @@ one canonical set.
 - `repo_read` gives a friendly memory-artifact hint for bare `identity.md` / `scratchpad.md`-style paths only after the repo-root file is actually missing. A real repo file with the same name wins and is read normally.
 - `run_shell` now treats non-zero exits as explicit failed tool outcomes and records exit/signal metadata in the tool trace.
 - `run_shell` recovers `cmd` passed as a string via a three-step cascade: `json.loads` (JSON array strings) → `ast.literal_eval` (Python literal lists) → `shlex.split` (plain shell strings). Malformed JSON/Python-shaped strings are refused before `shlex` so they do not become garbage argv; POSIX `[ ... ]` test commands remain valid shell-string recovery. The `cmd` parameter schema remains `type: array` (intended contract), but the runtime gracefully handles LLM misformatting.
-- `run_shell` detects the specific GNU/BSD `grep "A\|B"` argv-mode trap and returns `SHELL_REGEX_HINT`; explicit regex/string modes (`-E`, `-G`, `-P`, `-F`, including clustered flags like `-rnE`) and valid BRE/fixed-string patterns pass through.
+- `run_shell` detects the specific GNU/BSD `grep "A\|B"` argv-mode trap, rewrites it to portable `grep -E "A|B"`, and prefixes output with `SHELL_REGEX_AUTO_CORRECTED`; explicit regex/string modes (`-E`, `-G`, `-P`, `-F`, including clustered flags like `-rnE`) and valid BRE/fixed-string patterns pass through.
 - `set_tool_timeout` persists `OUROBOROS_TOOL_TIMEOUT_SEC` to `settings.json` and hot-applies it without restart.
 - `/api/claude-code/status` returns app-managed Claude runtime status (SDK version, CLI path/version, app-managed flag, legacy detection, API key readiness, last stderr on failure); `/api/claude-code/install` repairs/updates the app-managed runtime.
 - Desktop onboarding shows Claude runtime status and repair action (the runtime is managed automatically by the app).
@@ -873,7 +874,7 @@ one canonical set.
   catches literal `_UI_RENDER` mistakes (for example `action_route`
   where `route` is required) before review/enable/load.
 - The LLM loop checks final text responses after skill payload edits.
-  If a self-authored skill is not fresh PASS + enabled + grant-ready,
+  If a self-authored skill is not fresh executable review + enabled + grant-ready,
   the loop injects `SKILL_NOT_FINALIZED` and gives the agent another
   round to call `review_skill` instead of declaring the task done.
   v5.8.3-rc.3 re-arms this reminder after any subsequent tool round so
@@ -1188,23 +1189,14 @@ the constitutional guard is that the file itself must remain non-deletable.
 - **Models**: delegated to `ouroboros.config.get_review_models()` — the same SSOT
   that powers `repo_commit`'s triad, so plan_task and commit review stay in
   lockstep. Empty `OUROBOROS_REVIEW_MODELS` uses the shipped `SETTINGS_DEFAULTS`
-  triad (3 distinct OpenRouter models, each voting once).
-  **Quorum requirement (v4.39.0)**: at least **2 distinct reviewer models**
-  after parse/normalize — majority-vote needs independent votes, and the same
-  model voting multiple times produces a fake majority. Single-provider
-  direct-routing setups (OpenAI-only or Anthropic-only) are handled
-  automatically by `server_runtime._normalize_direct_review_models`, which
-  seeds `[main, light, light]` (3 commit-triad slots, 2 unique) so both the
-  commit triad and `plan_task` work out of the box. Users who override both
-  `main` and `light` lanes to the same model, or who configure an explicit
-  list with fewer than 2 unique entries or user-authored duplicates
-  (e.g. `"a,a,b"`), get an explicit `plan_task` `ERROR` pointing at
-  `OUROBOROS_REVIEW_MODELS` with a recovery hint. The pad-to-3 mechanism in
-  `_get_review_models` is retained so upstream callers expecting 3 slots
-  still work, but `_run_plan_review_async` immediately dedupes the padded
-  list (`list(dict.fromkeys(...))`) before launching the parallel reviewers
-  so no model casts more than one vote. Aggregate count therefore reflects
-  2–3 unique reviewers depending on configuration.
+  triad. v5.15.0 treats this list as **2–3 reviewer slots**, not a uniqueness
+  contract: duplicate model IDs are valid and run as independent stochastic
+  review slots. This intentionally supports single-provider setups and users
+  who want the same model sampled multiple times. `_run_plan_review_async`
+  requires at least two configured slots after parse/normalize, but it no
+  longer rejects user-authored duplicates or deduplicates the launch list.
+  Aggregate count therefore reflects 2–3 reviewer slots depending on
+  configuration.
 - **Inputs**: `plan` (description of what to change), `goal` (problem being solved), and
   optional `files_to_touch` (repo-relative paths whose HEAD content is injected for context).
 - **Context per reviewer**: full repo pack (same as scope review — no char cap, binary/sensitive
@@ -1225,43 +1217,11 @@ the constitutional guard is that the file itself must remain non-deletable.
   file/function/symbol when RISK or FAIL; (4) final `AGGREGATE:` line. The `## PROPOSALS`
   section is mandatory — if a reviewer genuinely sees no better approach, they must
   say so explicitly rather than omit the section.
-- **Reviewer quorum validation (v4.39.0)**: `_run_plan_review_async` now
-  rejects reviewer-model lists that cannot support sound majority-vote via
-  two **separate branches** running on two **separate signals** (each
-  regression-guarded independently; keep both branches in sync when
-  changing the contract):
-  1. **User-authored duplicate gate** — runs against the raw
-     `OUROBOROS_REVIEW_MODELS` env string. Rejects lists where the same
-     model appears more than once (e.g. `"a,a,b"`) because the duplicated
-     reviewer would cast two votes and corrupt majority-vote coordination.
-     Exception: when an exclusive direct provider is active AND the raw
-     env equals EXACTLY the shape `direct_provider_review_models_fallback`
-     would emit (`[main, light, light]` or legacy `[main]*N` when light
-     collapses to main), the gate skips because that payload is
-     server-generated (written by `apply_settings_to_env` after
-     `_normalize_direct_review_models` seeds the fallback) and is not a
-     user error. Any *other* duplicate list under the same direct provider
-     — e.g. a user-authored `"anthropic::a,anthropic::a,anthropic::b"` —
-     still fails the gate.
-  2. **Minimum-unique gate** — runs against the resolved
-     `ouroboros.config.get_review_models()` output (post-fallback). Rejects
-     lists with `< 2` distinct models so a one-reviewer vote does not
-     masquerade as a quorum; error message includes a single-provider
-     hint when the intent is clearly `[main]*N` fallback, pointing the
-     user at a workable two-distinct-models-from-same-provider example.
-  Both branches fire BEFORE repo-pack assembly so a misconfigured setup
-  fails fast without expensive I/O. Both return a message naming
-  `OUROBOROS_REVIEW_MODELS` and citing the shipped 3-model example.
-  Regression guard: `tests/test_plan_review_quorum.py` (17 tests: 6
-  quorum-contract cases + 1 gate-fires-before-pack ordering + 2
-  no-duplicate-votes-in-actual-run tests + 4 real-env-var integration
-  tests covering the pad-vs-user-intent split + 3 direct-provider-fallback
-  tests — auto-generated `[main, light, light]` shape passes, explicit
-  user-authored duplicates under direct-provider still fail, raw env with
-  fallback payload does not trip the duplicate gate + 1 OpenRouter
-  user-authored duplicates still rejected).
-- **Aggregate signal — majority-vote (v4.36.2, updated v4.39.0)**: coordination
-  across the 2–3 unique reviewers is now:
+- **Reviewer slot validation (v5.15.0)**: `_run_plan_review_async` rejects lists
+  with fewer than two reviewer slots before repo-pack assembly, but allows
+  duplicate model IDs. Regression guard: `tests/test_plan_review_quorum.py`.
+- **Aggregate signal — majority-vote (v4.36.2, updated v5.15.0)**: coordination
+  across the 2–3 reviewer slots is now:
   - `GREEN` — every reviewer returned a parseable `AGGREGATE: GREEN`.
   - `REVIEW_REQUIRED` — one or more of: (a) exactly one reviewer flagged
     `REVISE_PLAN` (minority dissent); (b) one or more RISK items were raised;
@@ -1693,7 +1653,8 @@ Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent acce
 | OUROBOROS_REVIEW_MODELS | openai/gpt-5.5,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.6 | Comma-separated OpenRouter model IDs for pre-commit review (min 2 for quorum) |
 | OUROBOROS_REVIEW_MODEL_TIMEOUT_SEC | 600 | Env-only override read directly by `ouroboros.tools.review`. Per-reviewer model call timeout for multi-model review; timed-out reviewers become ERROR actors and quorum still requires at least two parseable reviewers. |
 | OUROBOROS_REVIEW_ENFORCEMENT | advisory | Pre-commit review enforcement: `advisory` or `blocking` |
-| OUROBOROS_RUNTIME_MODE | advanced | Three-layer refactor axis: `light`, `advanced`, or `pro`. Orthogonal to `OUROBOROS_REVIEW_ENFORCEMENT`. Clamped via `normalize_runtime_mode` on both save and read paths. v5.1.2 Frame A: `light` blanket-blocks every repo-mutation tool at the `ToolRegistry.execute` gate plus pattern-matched `run_shell` mutation commands AND refuses runtime_mode self-elevation through every channel (`save_settings` chokepoint, `_data_write` settings.json block, `/api/settings` POST drop), but reviewed + enabled skills (script + extension) execute in light. `advanced` can evolve the application layer but blocks protected core/contract/release paths. `pro` may edit those protected surfaces directly, but committing them still requires the normal triad + scope review to pass. The runtime_mode value itself is owner-only — change it by editing `settings.json` directly while the agent is stopped, then restart. |
+| OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS | false | Desktop-owner confirmed setting. When enabled, a fresh pass/advisory-pass skill review grants only the manifest-declared settings keys and host permissions for that exact content hash so closed-loop skill development can run without repeated manual grants. Plain `/api/settings` POST drops this key; desktop uses the launcher confirmation bridge. |
+| OUROBOROS_RUNTIME_MODE | advanced | Three-layer refactor axis: `light`, `advanced`, or `pro`. Orthogonal to `OUROBOROS_REVIEW_ENFORCEMENT`. Clamped via `normalize_runtime_mode` on both save and read paths. `light` is a compatibility/self-modification guard: it blocks repo-mutation tools at the `ToolRegistry.execute` gate, mutative direct git through `run_shell`, and shallow argv writer commands with explicit repo-local targets, while leaving normal shell/Python/Node diagnostics usable. It also refuses runtime_mode self-elevation through the owner chokepoints (`save_settings`, `_data_write` settings.json block, `/api/settings` POST drop). Reviewed + enabled skills (script + extension) execute in light. `advanced` can evolve the application layer but blocks protected core/contract/release paths. `pro` may edit those protected surfaces directly, but committing them still requires the normal triad + scope review to pass. The runtime_mode value itself is owner-only — change it by editing `settings.json` directly while the agent is stopped, then restart. |
 | OUROBOROS_SKILLS_REPO_PATH | "" | Local checkout path for the external skills/extensions repo. Consumed by `ouroboros.skill_loader.discover_skills` (Phase 3); accepts absolute paths or `~`-prefixed paths; `get_skills_repo_path` expands `~` at read time. Ouroboros never clones/pulls this directory. |
 | OUROBOROS_HUB_CATALOG_URL | `https://raw.githubusercontent.com/joi-lab/OuroborosHub/main/catalog.json` | Official static skill catalog. The client fetches only this JSON automatically; selected skill installs download the catalog-listed files and verify sha256. |
 | OUROBOROS_SCOPE_REVIEW_MODEL | openai/gpt-5.5 | Single model for the blocking scope reviewer |
@@ -2255,7 +2216,12 @@ successful ``load_extension`` call for a ``type: extension`` skill. The
 staged copy is bound to that single load: it is removed by the matching
 ``unload_extension`` (and by the guard path inside ``load_extension`` if
 load fails after staging), so the tree under a healthy runtime only ever
-contains the currently-loaded extension's staging directory. The copy is
+contains the currently-loaded extension's staging directory. A crash or a
+test that bypasses ``unload_extension`` can leave orphan staging roots; startup
+``reload_all`` and per-skill reload perform a bounded sweep of only
+``state/skills/<skill>/__extension_imports/*`` before loading so legitimate
+state files such as ``review.json``, ``grants.json``, ``jobs/``, and ``assets/``
+are never touched. The copy is
 fail-closed — an extension whose on-disk tree contains a symlink that
 resolves outside the skill checkout is refused at staging time, so the
 confinement the content-hash path already enforces is not bypassed by
@@ -2321,7 +2287,7 @@ extension module namespace.
    ``tempfile`` + ``os.replace``). When invoked by the lifecycle runner,
    the review path checks the current ``review_job.json`` so a late
    reviewer thread from an interrupted or content-stale job cannot silently
-   write or report a fresh PASS over newer lifecycle state; skipped writes emit
+   write or report a fresh executable verdict over newer lifecycle state; skipped writes emit
    ``skill_review_persist_skipped`` to ``logs/events.jsonl``. Infrastructure-level failures
    — missing skill, ``load_error``, unreadable / oversized / binary
    payload, non-JSON top-level response, transport exception, sub-
@@ -2330,7 +2296,7 @@ extension module namespace.
    persisting anything, so a transient failure cannot overwrite a
    previously-valid verdict.
 3. **Enable**: ``toggle_skill(skill=name, enabled=True)`` flips the
-   ``enabled.json`` bit only when the skill has a fresh PASS review and
+   ``enabled.json`` bit only when the skill has a fresh executable review and
    any requested core-key grants are already approved. Disable remains
    allowed so an owner can always take a live skill offline.
 4. **Execute**: ``skill_exec(skill=name, script=path, args=[...])`` runs
@@ -2524,7 +2490,7 @@ search time and refused at install time.
 | ``ouroboros/marketplace/adapter.py`` | Translates OpenClaw frontmatter (`metadata.openclaw.requires.{env,bins}`, `os`, `install`, `allowed-tools`, ...) into Ouroboros's manifest shape. Normalizes ``install`` specs into auto-isolated vs manual-guidance classes; plugin packages remain refused. Core env keys become explicit grant requirements rather than automatic access. Writes the original manifest aside as ``SKILL.openclaw.md`` for audit. |
 | ``ouroboros/marketplace/install_specs.py`` | Small SSOT for install-spec normalization. Auto kinds are limited to Python wheel-only and npm no-script shapes that can map to a bounded per-skill prefix. Cargo/brew/apt/global Go/download/arbitrary shell stay manual. |
 | ``ouroboros/marketplace/isolated_deps.py`` | Installs reviewed dependency specs under ``<skill>/.ouroboros_env/`` only, records ``fingerprint.json`` in the env and ``deps.json`` in the durable state plane, and exposes PATH augmentation helpers for ``skill_exec``. |
-| ``ouroboros/marketplace/install.py`` | End-to-end ClawHub pipeline: ``info`` -> ``download`` -> ``stage`` -> ``adapt`` -> atomically swap the staged tree into ``data/skills/clawhub/<sanitized>/`` -> auto-trigger ``review_skill`` -> only after fresh PASS install auto-isolated dependencies -> persist provenance. Also exposes ``update_skill`` (re-install at newer version) and ``uninstall_skill``. |
+| ``ouroboros/marketplace/install.py`` | End-to-end ClawHub pipeline: ``info`` -> ``download`` -> ``stage`` -> ``adapt`` -> atomically swap the staged tree into ``data/skills/clawhub/<sanitized>/`` -> auto-trigger ``review_skill`` -> only after a fresh executable review install auto-isolated dependencies -> persist provenance. Also exposes ``update_skill`` (re-install at newer version) and ``uninstall_skill``. |
 | ``ouroboros/marketplace/ouroboroshub.py`` | Read-only static GitHub catalog client. Loads ``catalog.json`` from ``OUROBOROS_HUB_CATALOG_URL``, downloads only the selected skill files from raw GitHub URLs pinned by catalog metadata, verifies every file sha256, and lands into ``data/skills/ouroboroshub/<slug>/`` with ``.ouroboroshub.json`` provenance. |
 | ``ouroboros/marketplace/provenance.py`` | Atomic JSON read/write helper for ``data/state/skills/<name>/clawhub.json``. Schema: ``{schema_version, source, slug, sanitized_name, version, sha256, original_manifest_sha256, translated_manifest_sha256, registry_url, license, primary_env, adapter_warnings, installed_at, updated_at}``. |
 | ``ouroboros/extension_isolated_deps.py`` | Bridges reviewed isolated Python dependencies into the in-process extension loader. It finds ``.ouroboros_env/python/.../site-packages`` dirs, serializes plugin import/handler execution while those dirs are exposed via direct ``sys.path`` additions (no ``site.addsitedir`` / ``.pth`` execution), then purges file-backed and namespace-package modules loaded from those dirs at scope exit. |
@@ -2546,7 +2512,7 @@ search time and refused at install time.
 | ``metadata.openclaw.os`` | ``os`` | ``[darwin, linux]`` -> ``"any"`` if the set is the universe; single platform -> ``"darwin"``/``"linux"``/``"windows"``. ``macos`` aliased to ``darwin``, ``win32`` to ``windows``. |
 | ``metadata.openclaw.requires.env`` | ``env_from_settings`` + provenance grant request | Core keys in ``FORBIDDEN_SKILL_SETTINGS`` become explicit per-skill grant requirements; non-core keys pass through normally. |
 | ``metadata.openclaw.requires.bins`` | runtime detection | Only ``python``/``python3``/``node``/``bash`` are honoured; otherwise the skill becomes ``type: instruction`` with a warning. |
-| ``metadata.openclaw.install`` | isolated deps or manual guidance | Python wheel-only and npm no-script shapes are normalized and stored in provenance; Cargo/global shapes become manual guidance, but are executed only after the translated skill receives a fresh PASS review and only under ``.ouroboros_env``. Global host-mutating installers become manual setup guidance in the translated ``SKILL.md``. |
+| ``metadata.openclaw.install`` | isolated deps or manual guidance | Python wheel-only and npm no-script shapes are normalized and stored in provenance; Cargo/global shapes become manual guidance, but are executed only after the translated skill receives a fresh executable review and only under ``.ouroboros_env``. Global host-mutating installers become manual setup guidance in the translated ``SKILL.md``. |
 | ``metadata.openclaw.always`` | ignored | Marketplace installs always land with ``enabled: false`` regardless of what the publisher wanted. |
 | ``metadata.openclaw.skillKey`` / ``emoji`` / ``requires.config`` / command fields | provenance JSON | Preserved under ``openclaw_compat`` for audit and UI/debugging. ``requires.config`` remains OpenClaw load-time gating metadata, not an Ouroboros permission. |
 | ``allowed-tools`` | ``permissions`` | ``Bash(...)`` -> ``subprocess``; ``Read``/``Write`` -> ``fs``; ``Fetch``/``HTTP``/``Web`` -> ``net``. Non-empty ``requires.env`` also implies ``net``. |
@@ -2577,14 +2543,14 @@ surface (review, runtime mode, sandbox env scrub, byte caps,
   closed; nothing is silently skipped.
 - **Review-before-deps invariant.** Publisher-declared dependencies are
   not installed until the skill payload and normalized install specs
-  have a fresh PASS verdict. Auto-installable specs run only inside
+  have a fresh executable verdict. Auto-installable specs run only inside
   ``.ouroboros_env``; unpinned package names are allowed but their
   resolved fingerprint is recorded in ``deps.json`` and provenance.
   Global-mutation specs become manual setup guidance instead of host
   package-manager calls.
 - **Auto-review** runs the existing tri-model ``review_skill``
   pipeline immediately after install; the new skill is not
-  ``available_for_execution`` until the review verdict is ``pass``.
+  ``available_for_execution`` until the review verdict allows execution.
   If the review pipeline raises (e.g. transport error), the install
   still succeeds but ``review_status`` lands as ``pending`` so the
   operator can re-trigger it from the Skills page.

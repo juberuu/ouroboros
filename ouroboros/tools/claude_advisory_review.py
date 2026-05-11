@@ -557,6 +557,7 @@ def _run_claude_advisory(
     scope: str = "",
     paths: Optional[List[str]] = None,
     drive_root: Optional[pathlib.Path] = None,
+    include_repo_diff: bool = True,
 ) -> tuple:
     """Run the advisory review via Claude Agent SDK (read-only).
 
@@ -571,30 +572,28 @@ def _run_claude_advisory(
     from ouroboros.gateways.claude_code import resolve_claude_code_model
     model = resolve_claude_code_model()
 
-    # Fetch diff and changed-file list exactly once, validate, then pass into prompt builder.
-    diff_text = _get_staged_diff(repo_dir, paths=paths)
-    if diff_text.startswith("⚠️ ADVISORY_ERROR:"):
-        return [], diff_text, "", 0
-
-    changed_files_text = _get_changed_file_list(repo_dir, paths=paths)
-    if changed_files_text.startswith("⚠️ ADVISORY_ERROR:"):
-        return [], changed_files_text, "", 0
-
-    # Parse touched paths from porcelain output to avoid a second git-status call inside
-    # build_touched_file_pack.  Lines are "XY filename" or "(clean — no changed files)".
     try:
-        always_inlined = {"docs/ARCHITECTURE.md"}
-        resolved_paths, touched_pack, omitted_paths = build_advisory_changed_context(
-            repo_dir,
-            changed_files_text=changed_files_text,
-            paths=paths,
-            exclude_paths=always_inlined,
-        )
-
-        preflight_err = _syntax_preflight_staged_py_files(repo_dir, resolved_paths)
-        if preflight_err:
-            log.warning("Advisory skipped — syntax preflight blocked: %s", preflight_err.splitlines()[0])
-            return [], preflight_err, "", 0
+        if include_repo_diff:
+            diff_text = _get_staged_diff(repo_dir, paths=paths)
+            if diff_text.startswith("⚠️ ADVISORY_ERROR:"):
+                return [], diff_text, "", 0
+            changed_files_text = _get_changed_file_list(repo_dir, paths=paths)
+            if changed_files_text.startswith("⚠️ ADVISORY_ERROR:"):
+                return [], changed_files_text, "", 0
+            resolved_paths, touched_pack, omitted_paths = build_advisory_changed_context(
+                repo_dir,
+                changed_files_text=changed_files_text,
+                paths=paths,
+                exclude_paths={"docs/ARCHITECTURE.md"},
+            )
+            preflight_err = _syntax_preflight_staged_py_files(repo_dir, resolved_paths)
+            if preflight_err:
+                log.warning("Advisory skipped — syntax preflight blocked: %s", preflight_err.splitlines()[0])
+                return [], preflight_err, "", 0
+        else:
+            diff_text = "(not included; this advisory review is scoped to the supplied payload pack)"
+            changed_files_text = "(not included; this advisory review is scoped to the supplied payload pack)"
+            resolved_paths, touched_pack, omitted_paths = [], "", []
 
         prompt = _build_advisory_prompt(
             repo_dir,

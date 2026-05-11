@@ -17,7 +17,12 @@ function applyInputValue(id, value) {
 }
 
 function applyCheckboxValue(id, value) {
-    byId(id).checked = value === true || value === 'True';
+    byId(id).checked = isTruthySetting(value);
+}
+
+function isTruthySetting(value) {
+    const normalized = String(value ?? '').trim().toLowerCase();
+    return value === true || ['true', '1', 'yes', 'on'].includes(normalized);
 }
 
 function setStatus(text, tone = 'ok') {
@@ -428,6 +433,18 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         }
     }
 
+    function syncAutoGrantBridgeState() {
+        const hasBridge = Boolean(window.pywebview?.api?.request_auto_grant_reviewed_skills_change);
+        const checkbox = byId('s-auto-grant-reviewed-skills');
+        const label = checkbox?.closest('.local-toggle');
+        if (checkbox) checkbox.disabled = !hasBridge;
+        if (label) {
+            label.title = hasBridge
+                ? 'Requires native confirmation. Applies only after a fresh skill review pass and only to manifest-declared grants for that exact content hash.'
+                : 'Reviewed-skill auto-grant requires the desktop launcher confirmation bridge. Stop Ouroboros and edit settings.json manually outside desktop mode.';
+        }
+    }
+
     function startClaudeCodePolling() {
         if (claudeCodePollStarted) return;
         claudeCodePollStarted = true;
@@ -465,6 +482,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         byId('s-effort-scope-review').value = s.OUROBOROS_EFFORT_SCOPE_REVIEW || 'high';
         byId('s-review-enforcement').value = s.OUROBOROS_REVIEW_ENFORCEMENT || 'advisory';
         byId('s-runtime-mode').value = s.OUROBOROS_RUNTIME_MODE || 'advanced';
+        applyCheckboxValue('s-auto-grant-reviewed-skills', s.OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS);
         applyInputValue('s-skills-repo-path', s.OUROBOROS_SKILLS_REPO_PATH);
         applyInputValue('s-clawhub-registry-url', s.OUROBOROS_CLAWHUB_REGISTRY_URL);
         if (s.OUROBOROS_MAX_WORKERS) byId('s-workers').value = s.OUROBOROS_MAX_WORKERS;
@@ -601,6 +619,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             OUROBOROS_SCOPE_REVIEW_MODEL: byId('s-scope-review-model').value.trim(),
             OUROBOROS_EFFORT_SCOPE_REVIEW: byId('s-effort-scope-review').value,
             OUROBOROS_REVIEW_ENFORCEMENT: byId('s-review-enforcement').value,
+            OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS: byId('s-auto-grant-reviewed-skills')?.checked ? 'true' : 'false',
             // OUROBOROS_RUNTIME_MODE is owner-only: /api/settings still
             // ignores it, while desktop mode changes go through the
             // launcher-native confirmation bridge after normal settings save.
@@ -663,8 +682,29 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         return result;
     }
 
+    async function saveAutoGrantViaNativeBridgeIfNeeded() {
+        const checkbox = byId('s-auto-grant-reviewed-skills');
+        if (!checkbox) return null;
+        const nextEnabled = Boolean(checkbox.checked);
+        const currentEnabled = isTruthySetting(currentSettings?.OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS);
+        if (nextEnabled === currentEnabled) return null;
+        const bridge = window.pywebview?.api?.request_auto_grant_reviewed_skills_change;
+        if (!bridge) {
+            throw new Error(
+                'Reviewed-skill auto-grant changes require the desktop launcher confirmation bridge. '
+                + 'Use the desktop app, or stop Ouroboros and edit settings.json manually.'
+            );
+        }
+        const result = await bridge(nextEnabled);
+        if (!result || result.ok !== true) {
+            throw new Error(result?.error || 'Reviewed-skill auto-grant change was cancelled.');
+        }
+        return result;
+    }
+
     syncSettingsLoadState();
     syncRuntimeModeBridgeState();
+    syncAutoGrantBridgeState();
     reloadSettingsWithFeedback();
 
     if (typeof setBeforePageLeave === 'function') {
@@ -875,12 +915,20 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
             let runtimeModeResult = null;
             let runtimeModeError = '';
+            let autoGrantResult = null;
+            let autoGrantError = '';
             try {
                 runtimeModeResult = await saveRuntimeModeViaNativeBridgeIfNeeded();
             } catch (error) {
                 runtimeModeError = error.message || String(error);
             }
+            try {
+                autoGrantResult = await saveAutoGrantViaNativeBridgeIfNeeded();
+            } catch (error) {
+                autoGrantError = error.message || String(error);
+            }
             await loadSettings();
+            syncAutoGrantBridgeState();
             let statusMsg;
             let statusType = 'ok';
             if (data.no_changes) {
@@ -905,6 +953,13 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             }
             if (runtimeModeError) {
                 statusMsg = `${statusMsg} Runtime mode was not changed: ${runtimeModeError}`;
+                statusType = 'warn';
+            }
+            if (autoGrantResult) {
+                statusMsg = `${statusMsg} Reviewed-skill auto-grant ${autoGrantResult.enabled ? 'enabled' : 'disabled'}.`;
+            }
+            if (autoGrantError) {
+                statusMsg = `${statusMsg} Reviewed-skill auto-grant was not changed: ${autoGrantError}`;
                 statusType = 'warn';
             }
             setStatus(statusMsg, statusType);

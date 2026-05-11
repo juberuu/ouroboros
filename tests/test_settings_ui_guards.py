@@ -69,7 +69,9 @@ class TestSettingsUiGuards(unittest.TestCase):
         self.assertIn('data-settings-tab="advanced"', source)
 
     def test_behavior_tab_exists_and_contains_effort_and_enforcement(self):
-        source = self._read_settings_sources()["settings_ui"]
+        sources = self._read_settings_sources()
+        source = sources["settings_ui"]
+        settings = sources["settings"]
         self.assertIn('data-settings-tab="behavior"', source)
         self.assertIn('data-settings-panel="behavior"', source)
         # Reasoning Effort and Review Enforcement live in Behavior.
@@ -81,6 +83,11 @@ class TestSettingsUiGuards(unittest.TestCase):
         self.assertIn('data-enforcement-group', behavior_section)
         self.assertIn('data-effort-value="advisory"', behavior_section)
         self.assertIn('data-effort-value="blocking"', behavior_section)
+        self.assertIn('id="s-auto-grant-reviewed-skills"', behavior_section)
+        self.assertIn("request_auto_grant_reviewed_skills_change", settings)
+        self.assertIn("Reviewed-skill auto-grant changes require", settings)
+        self.assertIn("function isTruthySetting", settings)
+        self.assertIn("isTruthySetting(currentSettings?.OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS)", settings)
 
     def test_review_models_are_in_models_tab(self):
         source = self._read_settings_sources()["settings_ui"]
@@ -88,6 +95,11 @@ class TestSettingsUiGuards(unittest.TestCase):
         self.assertIn('id="s-review-models"', models_section)
         self.assertIn('id="s-scope-review-model"', models_section)
         self.assertIn('id="s-websearch-model"', models_section)
+
+    def test_review_models_copy_allows_duplicates_with_diversity_note(self):
+        source = self._read_settings_sources()["settings_ui"]
+        self.assertIn("Duplicate model slots are allowed", source)
+        self.assertIn("lower reviewer diversity", source)
 
     def test_legacy_base_url_is_in_providers_not_advanced(self):
         source = self._read_settings_sources()["settings_ui"]
@@ -100,6 +112,11 @@ class TestSettingsUiGuards(unittest.TestCase):
     def test_save_reloads_settings_after_success(self):
         source = self._read_settings_sources()["settings"]
         self.assertIn("await loadSettings();", source)
+
+    def test_checkbox_values_accept_lowercase_true(self):
+        source = self._read_settings_sources()["settings"]
+        self.assertIn("const normalized = String(value ?? '').trim().toLowerCase();", source)
+        self.assertIn("['true', '1', 'yes', 'on'].includes(normalized)", source)
 
     def test_skill_requested_secrets_dedupe_and_exclude_base_keys(self):
         sources = self._read_settings_sources()

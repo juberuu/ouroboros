@@ -326,7 +326,8 @@ planned; a future sandbox project (out-of-process / WASM) is the
 prerequisite for trusting any opaque bytes inside the skill tree.
 
 Skills default to **disabled** and cannot be executed by `skill_exec`
-until review produces a PASS verdict. Skill review output is persisted
+until review produces a fresh executable verdict (`pass`, or
+`advisory_pass` in advisory enforcement mode). Skill review output is persisted
 to `~/Ouroboros/data/state/skills/<name>/review.json` with a content
 hash so an edit to the skill invalidates the previous verdict.
 `review.json`, `enabled.json`, `grants.json`, and marketplace/self-authored
@@ -338,8 +339,11 @@ Self-authored skills carry payload-local `.self_authored.json` and
 owner-state `data/state/skills/<skill>/self_authored.json` provenance,
 but they do not bypass review. As of v5.9.0, `review_skill` routes them
 through the same tri-model skill review as marketplace and user-managed
-skills; no deterministic PASS, key grant, permission grant, or enablement
-is written automatically.
+skills; no deterministic PASS or enablement is written automatically. Key
+and permission grants remain explicit unless the owner has enabled
+`OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS`, in which case a fresh pass/advisory-pass
+review grants only manifest-declared settings keys and host permissions for
+that exact content hash.
 
 The Skills UI Repair affordance is only a task starter: it asks Ouroboros
 to edit payload files and rerun `review_skill`. It must not write
@@ -362,7 +366,7 @@ launcher-seeded skills.
 
 ### Output contract
 
-Reviewers return a JSON array with one entry per item below (12 entries
+Reviewers return a JSON array with one entry per item below (16 entries
 total). Each entry carries `item`, `verdict` (`PASS`/`FAIL`), `severity`
 (`critical`/`advisory`), and `reason`.
 
@@ -374,7 +378,7 @@ total). Each entry carries `item`, `verdict` (`PASS`/`FAIL`), `severity`
 | 2 | permissions_honesty | Do the declared `permissions` match what the scripts actually do? Missing permission declaration for an effect the code performs is a concrete FAIL. Examples: `net` must be declared if any script uses `httpx`/`requests`/`socket`/`urllib`; `fs` must be declared if a script writes outside the skill state dir; `subprocess` must be declared if a script spawns another process. | critical |
 | 3 | no_repo_mutation | Does any script attempt to write to the self-modifying Ouroboros repo (`~/Ouroboros/repo/`)? Import of `repo_write`/`repo_commit`, `git add`/`git commit`, or any path that starts with `OUROBOROS_REPO_DIR` / `~/Ouroboros/repo` is a concrete FAIL. Skills may only propose patches by returning artifact bundles; commits go through the first-party reviewed path. | critical |
 | 4 | path_confinement | Do scripts stay inside the skill directory and the dedicated state dir (`~/Ouroboros/data/state/skills/<name>/`)? Absolute paths, `..` traversal, and writes to arbitrary user home subdirs are concrete FAIL. Reading from outside the skill dir is OK for read-only lookups (e.g. system info), write-path confinement is the strict rule. | critical |
-| 5 | env_allowlist | Is `env_from_settings` a short, justified list of settings keys? Core keys in `FORBIDDEN_SKILL_SETTINGS` (`OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `OPENAI_COMPATIBLE_API_KEY`, `CLOUDRU_FOUNDATION_MODELS_API_KEY`, `ANTHROPIC_API_KEY`, `TELEGRAM_BOT_TOKEN`, `GITHUB_TOKEN`, `OUROBOROS_NETWORK_PASSWORD`) may be declared only when the skill genuinely needs that provider/token for its stated purpose; runtime forwards them only after a fresh PASS review and a content-bound desktop-launcher owner grant. v5.2.2 dual-track grants: both `type: script` skills (forwarded by `_scrub_env`) and `type: extension` skills (forwarded by `PluginAPIImpl.get_settings`) are eligible; `type: instruction` skills cannot receive core keys. Mark unjustified core-key requests or non-forbidden secrets unrelated to the purpose as FAIL. An empty list is the default and always fine. | critical |
+| 5 | env_allowlist | Is `env_from_settings` a short, justified list of settings keys? Core keys in `FORBIDDEN_SKILL_SETTINGS` (`OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `OPENAI_COMPATIBLE_API_KEY`, `CLOUDRU_FOUNDATION_MODELS_API_KEY`, `ANTHROPIC_API_KEY`, `TELEGRAM_BOT_TOKEN`, `GITHUB_TOKEN`, `OUROBOROS_NETWORK_PASSWORD`) may be declared only when the skill genuinely needs that provider/token for its stated purpose; runtime forwards them only after a fresh executable review and a content-bound desktop-launcher owner grant. v5.2.2 dual-track grants: both `type: script` skills (forwarded by `_scrub_env`) and `type: extension` skills (forwarded by `PluginAPIImpl.get_settings`) are eligible; `type: instruction` skills cannot receive core keys. Mark unjustified core-key requests or non-forbidden secrets unrelated to the purpose as FAIL. An empty list is the default and always fine. | critical |
 | 6 | timeout_and_output_discipline | Is `timeout_sec` reasonable for the stated workload (default 60, hard cap 300)? Do scripts print to stdout in chunks that the runtime can cap, rather than streaming unbounded output? Unbounded loops without a `break`/timeout path are a concrete FAIL. | advisory |
 | 7 | extension_namespace_discipline | `type: extension` only: does the extension register its tool/route/ws-handler/ui-tab under the namespace derived from its `name` (e.g. provider-safe tool/ws names like `ext_<len>_<token>_<surface>`, route `/api/extensions/<name>/…`)? Tool and WS short names must be alphanumeric/underscore and at most 24 characters. Namespace collisions with built-in surfaces are a concrete FAIL. If the extension uses `api.send_ws_message`, are emitted event names short/provider-safe and paired with reviewed host-owned widget `subscription` components rather than arbitrary same-origin JavaScript? If the extension declares streaming UI, is it a reviewed extension route consumed by a host-owned `stream` component? If the extension owns background resources (threads, sockets, EventSource clients, subprocesses), does it register cleanup with `api.on_unload(callback)`? If the extension declares a widget render block, is it one of the host-owned schemas (`iframe`, `inline_card`, or declarative v1: forms/actions, markdown/code, JSON/kv/table, tabs/chart, stream/subscription, progress/poll, file/gallery/media, **map/calendar/kanban (v5.7.0)**), with media sourced from extension routes or safe data URLs and no arbitrary same-origin JavaScript? For non-extension skills, verdict PASS with reason "Not applicable — type != extension." | critical |
 | 8 | widget_module_safety | **v5.7.0+. ``kind: "module"`` widgets only.** Does the extension-supplied ``widget.js`` avoid touching ``document.cookie``, ``localStorage``, ``sessionStorage``, ``window.parent`` data, or ``fetch``/``XMLHttpRequest`` URLs OUTSIDE ``/api/extensions/<skill>/``? The host fetches reviewed ``widget.js`` through ``GET /api/extensions/<skill>/module/<entry>``, embeds the source into a sandboxed ``<iframe srcdoc sandbox="allow-scripts">`` with no ``allow-same-origin``, and injects a parent-mediated ``fetch`` bridge that rejects paths outside the owning skill route prefix. Reviewers must still confirm at the source level that the script is NOT trying to escape the sandbox via arbitrary ``postMessage`` protocols, opaque-origin storage probes, or unauthorised cross-origin fetches. Acceptable interactions: ``fetch('/api/extensions/<skill>/...')`` (through the host bridge), ``window.OuroborosWidget.fetch('/api/extensions/<skill>/...')``, and host-supplied data attributes. Mark non-module widgets and non-extension skills PASS with reason "Not applicable". | critical (when kind=module) |
@@ -382,19 +386,21 @@ total). Each entry carries `item`, `verdict` (`PASS`/`FAIL`), `severity`
 | 10 | event_subscription_minimization | Are `subscribe_event` and `subscribe_events` limited to the minimum host event topics required by the skill? `chat.outbound`, `chat.typing`, and `chat.photo` expose owner/agent conversation data and require explicit justification. Wildcards, undeclared topics, or forwarding subscribed chat content to unrelated external services are concrete FAILs. Mark PASS with reason "Not applicable" when `subscribe_event` is not declared. | critical |
 | 11 | companion_process_safety | For `companion_process` / `supervised_task` skills: is every command declared as an argument list (not shell string), using an allowlisted runtime, with no writes outside `skill_dir` / `state_dir`, no unbounded restart loop, and cleanup on unload/panic? Does the process avoid inheriting secrets except through reviewed `env_from_settings` grants? Mark PASS with reason "Not applicable" when no long-lived process/task is declared. | critical |
 | 12 | host_token_handling | If the skill calls the Host Service API, does it use the provided `SkillToken.use_in_request()` only at request construction sites, avoid logging/serializing tokens, and keep all host-service calls on the loopback endpoint? Printing, persisting, exfiltrating, or embedding the token into user-visible output is a concrete FAIL. Mark PASS with reason "Not applicable" when the skill does not access the Host Service API. | critical |
+| 13 | error_handling | Does the skill surface actionable errors instead of swallowing exceptions, returning success on partial failure, or leaving users to inspect raw logs manually? Are retry/backoff paths bounded and purpose-specific? | advisory |
+| 14 | integration_preflight | Does the skill include cheap local preflight checks for the APIs/files/runtimes it depends on before spending provider budget or starting long work? Missing preflight for fragile external integrations is an advisory FAIL. | advisory |
+| 15 | bug_hunting | Are there obvious runtime bugs in reviewed code: wrong filenames, mismatched manifest script names, missing imports, impossible arguments, JSON/schema mismatches, blocking calls in async handlers, or untested happy-path assumptions? Concrete likely breakage is an advisory FAIL even when the security surface is acceptable. | advisory |
+| 16 | completion_notification | For long-running or user-visible work, does the skill emit or document a completion/failure notification path (for example a host event, `events.jsonl` append, or clear stdout marker consumed by Ouroboros)? Mark PASS with reason "Not applicable" for tiny synchronous utilities. | advisory |
 
 ### Severity rules
 
 - Items 1–5 are always critical: a FAIL on any of them aggregates to
-  ``status=fail``, which blocks `skill_exec` (execution requires
-  ``status=pass``).
-- Item 6 is advisory: a FAIL on item 6 alone aggregates to
-  ``status=advisory`` — the verdict is **still not PASS**, so
-  `skill_exec` continues to refuse execution until the author
-  addresses the finding and re-runs review. "Advisory" here means
-  "the finding does NOT escalate to critical"; it does not mean
-  "the skill is still runnable under this verdict". To ship a skill,
-  every item must land PASS.
+  ``status=fail``, which blocks `skill_exec` (execution requires a fresh
+  executable review).
+- Items 6 and 13–16 are advisory. In `OUROBOROS_REVIEW_ENFORCEMENT=blocking`
+  they aggregate to ``status=advisory`` and are not executable until fixed.
+  In `OUROBOROS_REVIEW_ENFORCEMENT=advisory` they aggregate to
+  ``status=advisory_pass``: executable, but the agent must consciously inspect
+  every advisory finding and either fix it or record why it is acceptable.
 - Item 7 is conditionally critical: FAIL only when `type: extension`.
 - Item 8 (`widget_module_safety`) is critical for any `type: extension`
   if the reviewer returns FAIL. Reviewers MUST mark it PASS with reason
@@ -415,7 +421,7 @@ publisher-authored manifest, preserved by the marketplace adapter
 (`ouroboros/marketplace/adapter.py`) before it wrote the translated
 `SKILL.md` that the runtime executes. Reviewers MUST cross-check the
 two manifests as part of items 2 (`permissions_honesty`) and 5
-(`env_allowlist`) without inflating the structured 12-item output:
+(`env_allowlist`) without adding extra JSON checklist entries:
 
 1. **Permissions parity** — confirm the translated `permissions` list
    captures every effect the original `metadata.openclaw.requires.bins`
@@ -446,7 +452,7 @@ two manifests as part of items 2 (`permissions_honesty`) and 5
    (`manifest_schema`) because the skill should not have landed.
    v5.8 generalises the same readiness contract to official and local
    manifests that declare reviewed `install` / `dependencies` metadata:
-   PASS review installs auto specs into `.ouroboros_env`, and enable/load/exec
+   A fresh executable review installs auto specs into `.ouroboros_env`, and enable/load/exec
    paths refuse missing, failed, or stale dependency fingerprints.
 4. **Plugin packages** — `openclaw.plugin.json` in the file pack means
    the publisher shipped a Node/TS plugin. The adapter refuses these,

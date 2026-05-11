@@ -671,6 +671,10 @@ def test_chat_input_dock_has_glass_gradient_without_absolute_positioning():
     assert "messagesDiv.style.paddingBottom" not in chat_js
     assert "--chat-input-reserve" in css
     assert "messagesDiv.style.setProperty('--chat-input-reserve'" in chat_js
+    assert "new ResizeObserver" in chat_js
+    assert "installChatResizeObservers()" in chat_js
+    assert "forceStick: true" in chat_js
+    assert "scrollToBottomAfterLayout();" in chat_js
 
 def test_mobile_chat_uses_flex_composer_layout_and_no_interactive_widget():
     css = _read("web/style.css")

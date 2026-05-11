@@ -14,24 +14,21 @@ on the same plane as other durable state (``state.json``,
 ``advisory_review.json``). The layout:
 
 - ``enabled.json`` — ``{"enabled": bool, "updated_at": iso_ts}``.
-- ``review.json``  — ``{"content_hash": str, "status": "pass"|"fail"|"advisory"|"pending"|"pending_phase4",
+- ``review.json``  — ``{"content_hash": str, "status": "pass"|"advisory_pass"|"fail"|"advisory"|"pending",
   "findings": [...], "reviewer_models": [...], "timestamp": iso_ts,
   "prompt_chars": int, "cost_usd": float, "raw_result": str}``.
-  ``pending_phase4`` is reserved for ``type: extension`` skills (execution
-  deferred until Phase 4); the loader overlays this status on all
-  extension skills regardless of persisted verdict so the Phase 3
-  catalogue cannot mislead operators into thinking an extension is
-  runnable. ``raw_result`` carries the truncated top-level review
-  response for replay/debugging (capped via ``_truncate_raw_result`` in
-  ``ouroboros.skill_review`` with an explicit OMISSION NOTE on overflow).
+  ``pass`` and advisory-mode ``advisory_pass`` are executable verdicts
+  when the content hash is fresh. ``raw_result`` carries the truncated
+  top-level review response for replay/debugging (capped via
+  ``_truncate_raw_result`` in ``ouroboros.skill_review`` with an explicit
+  OMISSION NOTE on overflow).
 
 Neither file is required on disk — missing files mean "defaults". The module
 treats absent state as: ``enabled=False``, ``review.status="pending"``.
 
-Phase 3 scope: ``type: instruction`` and ``type: script`` are surfaced and
-reviewable; ``type: extension`` is parsed but skipped with an explicit
-``pending_phase4`` status so the skill shows up in the catalogue without
-becoming executable.
+``type: instruction``, ``type: script``, and ``type: extension`` are surfaced
+and reviewable. Scripts execute via ``skill_exec``; extensions load through
+``extension_loader`` after the same fresh executable review and grant gates.
 """
 
 from __future__ import annotations
@@ -100,6 +97,7 @@ _SKILL_DIR_CACHE_NAMES = frozenset(
 _REVIEW_STATUS_PASS = "pass"
 _REVIEW_STATUS_FAIL = "fail"
 _REVIEW_STATUS_ADVISORY = "advisory"
+_REVIEW_STATUS_ADVISORY_PASS = "advisory_pass"
 _REVIEW_STATUS_PENDING = "pending"
 _REVIEW_STATUS_DEFERRED_PHASE4 = "pending_phase4"
 
@@ -108,10 +106,15 @@ VALID_REVIEW_STATUSES = frozenset(
         _REVIEW_STATUS_PASS,
         _REVIEW_STATUS_FAIL,
         _REVIEW_STATUS_ADVISORY,
+        _REVIEW_STATUS_ADVISORY_PASS,
         _REVIEW_STATUS_PENDING,
         _REVIEW_STATUS_DEFERRED_PHASE4,
     }
 )
+
+
+def review_status_allows_execution(status: str) -> bool:
+    return str(status or "") in {_REVIEW_STATUS_PASS, _REVIEW_STATUS_ADVISORY_PASS}
 GRANTS_FILENAME = "grants.json"
 SELF_AUTHORED_MARKER_FILENAME = ".self_authored.json"
 
@@ -217,7 +220,7 @@ class LoadedSkill:
             # Only type: script is executable in Phase 3 (instruction =
             # no payload by design; extension = Phase 4).
             return False
-        if self.review.status != _REVIEW_STATUS_PASS:
+        if not review_status_allows_execution(self.review.status):
             return False
         if self.review.is_stale_for(self.content_hash):
             return False
@@ -391,7 +394,7 @@ def _iter_payload_files(
     skill directory can be ``import``/``source``/``read`` by the payload.
     If the hash only covered ``scripts/``/``assets/``, a malicious author
     could stash logic in a top-level ``helper.py`` and it would never
-    invalidate the PASS verdict when edited.
+    invalidate the review verdict when edited.
 
     Accordingly this walker hashes **every regular file under
     ``skill_dir``** with just three exclusions:
@@ -833,7 +836,7 @@ def grant_status_for_skill(drive_root: pathlib.Path, skill: LoadedSkill) -> Dict
     granted_permissions = [perm for perm in requested_permissions if perm in persisted_permissions]
     missing = [key for key in requested if key not in set(granted)]
     missing_permissions = [perm for perm in requested_permissions if perm not in set(granted_permissions)]
-    review_ready = skill.review.status == _REVIEW_STATUS_PASS and not skill.review.is_stale_for(skill.content_hash)
+    review_ready = review_status_allows_execution(skill.review.status) and not skill.review.is_stale_for(skill.content_hash)
     # v5.2.2 dual-track grants: both ``script`` and ``extension`` skills
     # are eligible for owner core-key grants. ``script`` skills get the
     # grant via ``_scrub_env`` for their subprocess; ``extension``
@@ -855,6 +858,40 @@ def grant_status_for_skill(drive_root: pathlib.Path, skill: LoadedSkill) -> Dict
         "content_hash": grants.get("content_hash", ""),
         "updated_at": grants.get("updated_at", ""),
     }
+
+
+def auto_grant_if_enabled(drive_root: pathlib.Path, skill: LoadedSkill) -> bool:
+    """Grant all manifest-requested keys/permissions after a successful review.
+
+    Returns True when grants were persisted. The toggle is intentionally global
+    and opt-in: default installs keep the explicit approval step, while closed
+    loop skill-development sessions can remove the stale-grant interruption.
+    """
+    try:
+        from ouroboros.config import get_auto_grant_enabled
+    except Exception:
+        return False
+    if not get_auto_grant_enabled():
+        return False
+    if not review_status_allows_execution(skill.review.status) or skill.review.is_stale_for(skill.content_hash):
+        return False
+    requested_keys = requested_core_setting_keys(list(skill.manifest.env_from_settings or []))
+    requested_permissions = requested_skill_permissions(
+        list(skill.manifest.permissions or []),
+        list(getattr(skill.manifest, "subscribe_events", []) or []),
+    )
+    if not requested_keys and not requested_permissions:
+        return False
+    save_skill_grants(
+        drive_root,
+        skill.name,
+        requested_keys,
+        content_hash=skill.content_hash,
+        requested_keys=requested_keys,
+        granted_permissions=requested_permissions,
+        requested_permissions=requested_permissions,
+    )
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1343,7 +1380,7 @@ def list_available_for_execution(
     *,
     repo_path: str | None = None,
 ) -> List[LoadedSkill]:
-    """Return only skills that are enabled + have a fresh PASS review."""
+    """Return only skills that are enabled + have a fresh executable review."""
     return [
         s for s in discover_skills(drive_root, repo_path=repo_path)
         if s.available_for_execution and grant_status_for_skill(drive_root, s).get("usable", True)
@@ -1359,10 +1396,9 @@ def summarize_skills(drive_root: pathlib.Path) -> Dict[str, Any]:
     """Return a compact catalogue summary for the Skills UI / /api/state.
 
     v5.1.2 Frame A: ``runtime_mode`` no longer gates skill execution —
-    ``available_for_execution`` and ``static_ready`` converge, and
-    ``runtime_blocked`` is always 0. The fields stay in the schema for
-    backward compatibility (UI, ``/api/state`` consumers) but the
-    ``light`` mode no longer subtracts from ``available``.
+    ``available_for_execution`` and ``static_ready`` converge. Legacy
+    ``runtime_blocked`` fields stay in the schema for older consumers, but
+    runtime mode no longer subtracts from ``available``.
 
     Does not include raw manifest bodies or review findings — callers
     that need the detail should call ``discover_skills`` directly.
@@ -1403,7 +1439,7 @@ def summarize_skills(drive_root: pathlib.Path) -> Dict[str, Any]:
             for s in skills
             if s.review.status in (_REVIEW_STATUS_PENDING, "")
             or (
-                s.review.status == _REVIEW_STATUS_PASS
+                review_status_allows_execution(s.review.status)
                 and s.review.is_stale_for(s.content_hash)
             )
         ),
@@ -1444,6 +1480,7 @@ def summarize_skills(drive_root: pathlib.Path) -> Dict[str, Any]:
 __all__ = [
     "LoadedSkill",
     "SkillReviewState",
+    "auto_grant_if_enabled",
     "VALID_REVIEW_STATUSES",
     "compute_content_hash",
     "discover_skills",
@@ -1457,6 +1494,7 @@ __all__ = [
     "load_skill_grants",
     "load_skill",
     "requested_core_setting_keys",
+    "review_status_allows_execution",
     "save_enabled",
     "save_review_state",
     "save_skill_grants",

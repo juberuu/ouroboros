@@ -343,13 +343,44 @@ def test_revert_commit_blocks_protected_contract_path(tmp_path, monkeypatch):
 
 
 def test_light_mode_blocks_runshell_mutation(tmp_path, monkeypatch):
-    """Phase 6 regression: light mode pattern-matches repo-mutating
-    shell commands. A ``git commit`` invocation under ``run_shell``
-    in light mode must return LIGHT_MODE_BLOCKED."""
+    """Mutative git through shell is blocked even in light mode.
+
+    The dedicated git parser owns this path; the light-mode substring
+    filter is intentionally reserved for path-aware file writes.
+    """
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     reg = _registry(tmp_path)
     result = reg.execute("run_shell", {"cmd": "git commit -m 'x'"})
-    assert "LIGHT_MODE_BLOCKED" in result
+    assert "GIT_VIA_SHELL_BLOCKED" in result
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        ["env", "git", "commit", "-m", "x"],
+        ["/usr/bin/env", "git", "commit", "-m", "x"],
+        ["/usr/bin/env", "-S", "git commit -m x"],
+    ],
+)
+def test_run_shell_blocks_env_wrapped_git_mutation(cmd, tmp_path, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    reg = _registry(tmp_path)
+    result = reg.execute("run_shell", {"cmd": cmd})
+    assert "GIT_VIA_SHELL_BLOCKED" in result
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        ["sh", "-c", "git commit -m x"],
+        ["bash", "-c", "git add README.md && git commit -m x"],
+    ],
+)
+def test_run_shell_blocks_shell_wrapped_git_mutation(cmd, tmp_path, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    reg = _registry(tmp_path)
+    result = reg.execute("run_shell", {"cmd": cmd})
+    assert "GIT_VIA_SHELL_BLOCKED" in result
 
 
 def test_advanced_mode_blocks_runshell_protected_python_writer(tmp_path, monkeypatch):
@@ -459,3 +490,74 @@ def test_light_mode_allows_readonly_runshell(tmp_path, monkeypatch):
     # tmp_path), but the LIGHT_MODE_BLOCKED sentinel must not appear.
     result = reg.execute("run_shell", {"cmd": "git status"})
     assert "LIGHT_MODE_BLOCKED" not in result
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "mkdir /tmp/ouroboros-light-mode-scratch",
+        "touch /tmp/ouroboros-light-mode-scratch-file",
+        "chmod +x /tmp/ouroboros-light-mode-scratch-file",
+        "sed -i 's/foo/bar/' /tmp/ouroboros-light-mode-scratch-file",
+        "chown nobody /tmp/ouroboros-light-mode-scratch-file",
+        "cp README.md /tmp/ouroboros-light-mode-copy-out",
+        "python3 -c \"open('/tmp/ouroboros-light-mode-scratch-file', 'r').read()\"",
+    ],
+)
+def test_light_mode_allows_non_repo_shell_file_operations(cmd, tmp_path, monkeypatch):
+    """Light protects the Ouroboros checkout, not arbitrary scratch paths."""
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    reg = _registry(tmp_path)
+    result = reg.execute("run_shell", {"cmd": cmd})
+    assert "LIGHT_MODE_BLOCKED" not in result, result[:200]
+
+
+def test_advanced_mode_blocks_python_os_remove_protected_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    reg = _registry(tmp_path)
+    result = reg.execute("run_shell", {"cmd": "python3 -c \"import os; os.remove('BIBLE.md')\""})
+    assert "SAFETY_VIOLATION" in result
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "sort -o BIBLE.md BIBLE.md",
+        "uniq BIBLE.md BIBLE.md",
+    ],
+)
+def test_run_shell_blocks_sort_uniq_protected_output_paths(cmd, tmp_path, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    reg = _registry(tmp_path)
+    result = reg.execute("run_shell", {"cmd": cmd})
+    assert "SAFETY_VIOLATION" in result
+    assert "BIBLE.md" in result or "protected" in result.lower()
+
+
+@pytest.mark.parametrize("cmd", ["cat BIBLE.md", "git diff BIBLE.md", "du BIBLE.md"])
+def test_run_shell_allows_readonly_mentions_of_protected_paths(cmd, tmp_path, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    reg = _registry(tmp_path)
+    result = reg.execute("run_shell", {"cmd": cmd})
+    assert "SAFETY_VIOLATION" not in result
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        ["bash", "-c", "printf x > README.md"],
+        ["sh", "-c", "touch README.md"],
+    ],
+)
+def test_light_mode_blocks_simple_shell_c_repo_writer(cmd, tmp_path, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    reg = _registry(tmp_path)
+    result = reg.execute("run_shell", {"cmd": cmd})
+    assert "LIGHT_MODE_BLOCKED" in result
+
+
+def test_light_mode_allows_shell_wrapper_non_repo_writer(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    reg = _registry(tmp_path)
+    result = reg.execute("run_shell", {"cmd": ["bash", "-c", "mkdir /tmp/ouroboros-light-wrapper"]})
+    assert "LIGHT_MODE_BLOCKED" not in result, result[:200]

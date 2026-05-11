@@ -18,10 +18,22 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.utils import (
     utc_now_iso, read_text, estimate_tokens, get_git_info,
+    truncate_review_artifact,
 )
 from ouroboros.memory import Memory
 
 log = logging.getLogger(__name__)
+
+
+def _chat_log_signature_matches(expected: Any, current: Dict[str, Any]) -> bool:
+    if not isinstance(expected, dict) or not current:
+        return False
+    if expected.get("first_line_sha256") != current.get("first_line_sha256"):
+        return False
+    try:
+        return int(current.get("size") or 0) >= int(expected.get("size") or 0)
+    except (TypeError, ValueError):
+        return False
 
 
 def build_user_content(task: Dict[str, Any]) -> Any:
@@ -217,6 +229,14 @@ def build_memory_sections(memory: Memory, partition: str = "all") -> List[str]:
             "## Identity (from `memory/identity.md` — already loaded; "
             "do not re-read via repo_read or data_read)\n\n" + identity_raw
         )
+        world_raw = memory.load_world_profile().strip()
+        if world_raw:
+            world_text = truncate_review_artifact(world_raw, limit=4096)
+            sections.append(
+                "## Environment Profile (from `memory/WORLD.md` — already loaded; "
+                "delete WORLD.md and restart to regenerate if the host environment changes)\n\n"
+                + world_text
+            )
 
     try:
         from ouroboros.consolidator import migrate_dialogue_summary_to_blocks
@@ -299,7 +319,26 @@ def build_recent_sections(memory: Memory, env: Any, task_id: str = "") -> List[s
     """Build recent dialogue and process-memory sections."""
     sections = []
 
-    chat_summary = memory.summarize_chat(memory.read_jsonl_tail("chat.jsonl", 1000))
+    dialogue_meta = memory.load_dialogue_meta()
+    try:
+        consolidated_offset = int(dialogue_meta.get("last_consolidated_offset") or 0)
+    except (TypeError, ValueError):
+        consolidated_offset = 0
+    if consolidated_offset > 0:
+        expected_signature = dialogue_meta.get("chat_log_signature")
+        current_signature = memory.jsonl_generation_signature("chat.jsonl")
+        if not _chat_log_signature_matches(expected_signature, current_signature):
+            log.warning(
+                "Ignoring dialogue consolidation offset %s because chat log generation signature is missing or stale",
+                consolidated_offset,
+            )
+            consolidated_offset = 0
+    chat_entries = memory.read_jsonl_tail_after_offset(
+        "chat.jsonl",
+        consolidated_offset,
+        1000,
+    )
+    chat_summary = memory.summarize_chat(chat_entries)
     if chat_summary:
         sections.append("## Recent chat\n\n" + chat_summary)
 
@@ -722,13 +761,18 @@ def _build_installed_skills_section(env: Any, *, max_lines: int = 100) -> str:
     for skill in summary.get("skills") or []:
         if not isinstance(skill, dict):
             continue
-        if not skill.get("enabled") or skill.get("review_status") != "pass" or skill.get("review_stale"):
+        if (
+            not skill.get("enabled")
+            or skill.get("review_status") not in {"pass", "advisory_pass"}
+            or skill.get("review_stale")
+        ):
             continue
         name = _field(skill.get("name"), 80)
         if not name:
             continue
         kind = _field(skill.get("type") or "skill", 40)
         version = _field(skill.get("version"), 40)
+        review_status = _field(skill.get("review_status"), 40)
         description = _field(skill.get("description"), 260)
         when = _field(skill.get("when_to_use"), 260)
         surfaces = [
@@ -736,7 +780,8 @@ def _build_installed_skills_section(env: Any, *, max_lines: int = 100) -> str:
             for item in (skill.get("tool_surfaces") or [])
             if isinstance(item, dict) and item.get("name")
         ]
-        lines.append(f"- {name} ({kind}{', v' + version if version else ''}): {description or 'No description.'}")
+        meta = f"{kind}{', v' + version if version else ''}{', ' + review_status if review_status else ''}"
+        lines.append(f"- {name} ({meta}): {description or 'No description.'}")
         if when:
             lines.append(f"  Trigger: {when}")
         if surfaces:

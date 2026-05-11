@@ -22,7 +22,7 @@ const SKILLS_TABS = [
  *
  * Lists every discovered skill under ``OUROBOROS_SKILLS_REPO_PATH`` plus
  * the bundled reference set, shows per-skill review status + permissions
- * + runtime-mode eligibility, and exposes the three lifecycle buttons:
+ * + grant/review readiness, and exposes the lifecycle buttons:
  * Review, Toggle enable, Delete (placeholder — Phase 6 wires actual
  * delete). Read-only against ``/api/state`` + ``/api/extensions``.
  */
@@ -66,7 +66,7 @@ function skillsPageTemplate() {
 
 
 function statusBadge(status) {
-    const tone = status === 'pass' ? 'ok'
+    const tone = ['pass', 'advisory_pass'].includes(status) ? 'ok'
         : status === 'fail' ? 'danger'
         : status === 'advisory' ? 'warn'
         : 'muted';
@@ -74,7 +74,7 @@ function statusBadge(status) {
 }
 
 function reviewReady(skill) {
-    return skill.review_status === 'pass' && !skill.review_stale;
+    return ['pass', 'advisory_pass'].includes(skill.review_status) && !skill.review_stale;
 }
 
 function grantReady(skill) {
@@ -98,7 +98,7 @@ function submitHubReady(skill, githubTokenConfigured = false) {
     if (!githubTokenConfigured) {
         return { visible: true, disabled: true, reason: 'Configure GITHUB_TOKEN in Settings -> Secrets' };
     }
-    if (!reviewReady(skill)) {
+    if (skill.review_status !== 'pass' || skill.review_stale) {
         return { visible: true, disabled: true, reason: 'Skill needs a fresh PASS review before submission' };
     }
     return { visible: true, disabled: false, reason: 'Open a PR to OuroborosHub from your GitHub fork' };
@@ -351,14 +351,14 @@ function sortSkillsForDisplay(skills) {
 
 
 function toggleLockReason(skill) {
-    // Enable transitions are locked unless the skill has a fresh PASS review.
+    // Enable transitions are locked unless the skill has a fresh executable review.
     // The server enforces the same gate in ``api_skill_toggle``; this UI guard
     // keeps stale/review/repair work as explicit actions instead of hiding them
     // behind the toggle.
     if (skill.review_status === 'fail') return 'review failed — repair the skill first';
     if (skill.review_stale) return 'review is stale — re-review the skill first';
     if (skill.review_status === 'pending') return 'review is still pending';
-    if (skill.review_status !== 'pass') return 'review has not passed yet';
+    if (!reviewReady(skill)) return 'review has not produced an executable verdict yet';
     if (skill.load_error && !isMissingGrantLoadError(skill)) return 'load error — repair the skill first';
     return '';
 }
@@ -648,14 +648,12 @@ async function fetchSkills() {
         fetch('/api/skills/lifecycle-queue').then(r => r.ok ? r.json() : { events: [] }).catch(() => ({ events: [] })),
     ]);
     // ``/api/state`` does not yet expose a ``summarize_skills`` payload
-    // directly (that land in a later round if needed). For now we
-    // synthesize the per-skill list via the extensions catalogue +
-    // the runtime-mode / skills-repo boolean.
+    // directly (that can land in a later round if needed). For now we
+    // synthesize the per-skill list via the extensions catalogue plus the
+    // skills-repo boolean. Runtime mode no longer gates skill execution.
     const skillsRepoConfigured = Boolean(stateResp.skills_repo_configured);
     const githubTokenConfigured = Boolean(stateResp.github_token_configured);
-    const runtimeMode = stateResp.runtime_mode || 'advanced';
     return {
-        runtimeMode,
         skillsRepoConfigured,
         githubTokenConfigured,
         skills: mergeLifecycleEvents(extResp.skills || [], queueResp.events || []),
@@ -1054,7 +1052,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
                     throw new Error('Repair this skill before enabling it.');
                 }
                 if (!reviewReady(current)) {
-                    throw new Error('Run review and wait for a fresh PASS before enabling this skill.');
+                    throw new Error('Run review and wait for a fresh executable review before enabling this skill.');
                 }
                 if (!grantReady(current)) {
                     const grants = current.grants || {};

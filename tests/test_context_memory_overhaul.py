@@ -19,7 +19,195 @@ def test_progress_limit_50_in_context():
 def test_recent_chat_limit_1000_in_context():
     from ouroboros.context import build_recent_sections
     source = inspect.getsource(build_recent_sections)
-    assert 'read_jsonl_tail("chat.jsonl", 1000)' in source
+    assert 'read_jsonl_tail_after_offset(' in source
+    assert '1000' in source
+
+
+def test_recent_chat_starts_after_consolidated_offset(tmp_path):
+    from ouroboros.context import build_recent_sections
+    from ouroboros.memory import Memory
+
+    logs_dir = tmp_path / "logs"
+    memory_dir = tmp_path / "memory"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    entries = [
+        {"ts": f"2026-03-19T16:{i:02d}:00Z", "direction": "in", "username": "User", "text": f"msg-{i}"}
+        for i in range(5)
+    ]
+    (logs_dir / "chat.jsonl").write_text(
+        "\n".join(json.dumps(entry) for entry in entries) + "\n",
+        encoding="utf-8",
+    )
+    memory = Memory(drive_root=tmp_path)
+    (memory_dir / "dialogue_meta.json").write_text(
+        json.dumps({
+            "last_consolidated_offset": 3,
+            "chat_log_signature": memory.jsonl_generation_signature("chat.jsonl"),
+        }),
+        encoding="utf-8",
+    )
+
+    sections = build_recent_sections(memory, env=None)
+    combined = "\n\n".join(sections)
+
+    assert "msg-0" not in combined
+    assert "msg-1" not in combined
+    assert "msg-2" not in combined
+    assert "msg-3" in combined
+    assert "msg-4" in combined
+
+
+def test_recent_chat_offset_uses_filtered_dialogue_entries(tmp_path):
+    from ouroboros.context import build_recent_sections
+    from ouroboros.memory import Memory
+
+    logs_dir = tmp_path / "logs"
+    memory_dir = tmp_path / "memory"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    entries = [
+        {"chat_id": 1, "direction": "in", "username": "User", "text": "consolidated-0"},
+        {"chat_id": -1, "direction": "in", "username": "Agent", "text": "a2a-noise"},
+        {"chat_id": 1, "direction": "in", "username": "User", "text": "consolidated-1"},
+        {"chat_id": 1, "direction": "in", "username": "User", "text": "fresh"},
+    ]
+    (logs_dir / "chat.jsonl").write_text(
+        "\n".join(json.dumps(entry) for entry in entries) + "\n",
+        encoding="utf-8",
+    )
+    memory = Memory(drive_root=tmp_path)
+    (memory_dir / "dialogue_meta.json").write_text(
+        json.dumps({
+            "last_consolidated_offset": 2,
+            "chat_log_signature": memory.jsonl_generation_signature("chat.jsonl"),
+        }),
+        encoding="utf-8",
+    )
+
+    combined = "\n\n".join(build_recent_sections(memory, env=None))
+
+    assert "consolidated-0" not in combined
+    assert "consolidated-1" not in combined
+    assert "a2a-noise" not in combined
+    assert "fresh" in combined
+
+
+def test_recent_chat_ignores_stale_consolidation_offset_after_rotation(tmp_path):
+    from ouroboros.context import build_recent_sections
+    from ouroboros.memory import Memory
+
+    logs_dir = tmp_path / "logs"
+    memory_dir = tmp_path / "memory"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    old_entries = [
+        {"chat_id": 1, "direction": "in", "username": "User", "text": f"old-{i}"}
+        for i in range(5)
+    ]
+    (logs_dir / "chat.jsonl").write_text(
+        "\n".join(json.dumps(entry) for entry in old_entries) + "\n",
+        encoding="utf-8",
+    )
+    memory = Memory(drive_root=tmp_path)
+    stale_signature = memory.jsonl_generation_signature("chat.jsonl")
+    new_entries = [
+        {"chat_id": 1, "direction": "in", "username": "User", "text": f"new-{i}"}
+        for i in range(6)
+    ]
+    (logs_dir / "chat.jsonl").write_text(
+        "\n".join(json.dumps(entry) for entry in new_entries) + "\n",
+        encoding="utf-8",
+    )
+    (memory_dir / "dialogue_meta.json").write_text(
+        json.dumps({"last_consolidated_offset": 5, "chat_log_signature": stale_signature}),
+        encoding="utf-8",
+    )
+
+    combined = "\n\n".join(build_recent_sections(memory, env=None))
+
+    assert "new-0" in combined
+    assert "new-5" in combined
+
+
+def test_recent_chat_keeps_offset_when_same_log_gets_appended(tmp_path):
+    from ouroboros.context import build_recent_sections
+    from ouroboros.memory import Memory
+
+    logs_dir = tmp_path / "logs"
+    memory_dir = tmp_path / "memory"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    entries = [
+        {"chat_id": 1, "direction": "in", "username": "User", "text": f"consolidated-{i}"}
+        for i in range(3)
+    ]
+    chat_path = logs_dir / "chat.jsonl"
+    chat_path.write_text(
+        "\n".join(json.dumps(entry) for entry in entries) + "\n",
+        encoding="utf-8",
+    )
+    memory = Memory(drive_root=tmp_path)
+    signature = memory.jsonl_generation_signature("chat.jsonl")
+    appended = {"chat_id": 1, "direction": "in", "username": "User", "text": "fresh-after-consolidation"}
+    with chat_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(appended) + "\n")
+    (memory_dir / "dialogue_meta.json").write_text(
+        json.dumps({"last_consolidated_offset": 3, "chat_log_signature": signature}),
+        encoding="utf-8",
+    )
+
+    combined = "\n\n".join(build_recent_sections(memory, env=None))
+
+    assert "consolidated-0" not in combined
+    assert "consolidated-2" not in combined
+    assert "fresh-after-consolidation" in combined
+
+
+def test_world_profile_is_loaded_with_stable_memory(tmp_path):
+    from ouroboros.context import build_memory_sections
+    from ouroboros.memory import Memory
+
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    (memory_dir / "identity.md").write_text("identity body", encoding="utf-8")
+    (memory_dir / "WORLD.md").write_text("OS: testOS\nPython: testPython", encoding="utf-8")
+
+    sections = build_memory_sections(Memory(drive_root=tmp_path), partition="stable")
+    combined = "\n\n".join(sections)
+
+    assert "## Identity" in combined
+    assert "## Environment Profile" in combined
+    assert "OS: testOS" in combined
+
+
+def test_installed_skills_section_includes_advisory_pass(tmp_path, monkeypatch):
+    from ouroboros.context import _build_installed_skills_section
+
+    class FakeEnv:
+        drive_root = tmp_path
+
+    monkeypatch.setattr(
+        "ouroboros.skill_loader.summarize_skills",
+        lambda _root: {
+            "skills": [
+                {
+                    "name": "weather",
+                    "type": "script",
+                    "enabled": True,
+                    "review_status": "advisory_pass",
+                    "review_stale": False,
+                    "description": "Weather helper",
+                }
+            ]
+        },
+    )
+
+    section = _build_installed_skills_section(FakeEnv())
+
+    assert "## Installed Skills" in section
+    assert "weather" in section
+    assert "advisory_pass" in section
 
 
 def test_recent_sections_filter_process_logs_by_task_id(tmp_path):

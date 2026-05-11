@@ -42,6 +42,7 @@ from ouroboros.skill_loader import (
     discover_skills,
     find_skill,
     grant_status_for_skill,
+    review_status_allows_execution,
 )
 
 log = logging.getLogger(__name__)
@@ -534,9 +535,9 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
         if enabled:
             stale = loaded.review.is_stale_for(loaded.content_hash)
             grants = grant_status_for_skill(drive_root, loaded)
-            if loaded.review.status != "pass" or stale:
+            if not review_status_allows_execution(loaded.review.status) or stale:
                 return {
-                    "error": "cannot enable until review status is fresh PASS",
+                    "error": "cannot enable until review status is a fresh executable review",
                     "status_code": 409,
                     "review_status": loaded.review.status,
                     "review_stale": stale,

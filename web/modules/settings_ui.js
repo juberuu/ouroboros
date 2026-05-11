@@ -314,7 +314,7 @@ export function renderSettingsPage() {
                             <div class="form-field">
                                 <label>Pre-commit Review Models</label>
                                 <input id="s-review-models" placeholder="model1,model2,model3">
-                                <div class="settings-inline-note">Comma-separated review models (triad). In OpenAI-only or Anthropic-only direct-provider mode, the list is auto-normalized to [main, light, light] (3 slots, 2 unique) so both the commit triad and plan_task (which requires >=2 distinct models for majority-vote) work out of the box. OpenAI-compatible and Cloud.ru setups are not auto-normalized and must configure the list explicitly.</div>
+                                <div class="settings-inline-note">Comma-separated review models (triad). Duplicate model slots are allowed for same-model sampling, but they lower reviewer diversity. In OpenAI-only or Anthropic-only direct-provider mode, the list is auto-normalized to [main, light, light] (3 slots) so both the commit triad and plan_task work out of the box. OpenAI-compatible and Cloud.ru setups are not auto-normalized and must configure the list explicitly.</div>
                             </div>
                         </div>
                         <div class="form-grid two">
@@ -347,7 +347,7 @@ export function renderSettingsPage() {
 
                     <div class="form-section">
                         <h3>Review Enforcement</h3>
-                        <div class="settings-section-copy"><code>Advisory</code> keeps review visible but non-blocking. <code>Blocking</code> stops commits when critical findings remain unresolved.</div>
+                        <div class="settings-section-copy"><code>Advisory</code> keeps review visible but non-blocking. <code>Blocking</code> stops commits and reviewed-skill activation when critical findings remain unresolved.</div>
                         <div class="settings-effort-card">
                             <label>Enforcement Mode</label>
                             <input id="s-review-enforcement" type="hidden" value="advisory">
@@ -356,6 +356,18 @@ export function renderSettingsPage() {
                                 <button type="button" class="settings-effort-btn" data-effort-value="blocking">Blocking</button>
                             </div>
                         </div>
+                    </div>
+
+                    <div class="form-section">
+                        <h3>Skills</h3>
+                        <div class="settings-section-copy">
+                            Closed-loop skill development can auto-grant the keys and host permissions a skill declares after it passes review for the current content hash.
+                            Leave this off when every skill permission should require a separate human approval.
+                        </div>
+                        <label class="local-toggle" title="Applies only after a skill review pass and only to manifest-declared grants for that exact content hash.">
+                            <input type="checkbox" id="s-auto-grant-reviewed-skills">
+                            Auto-grant reviewed skills' keys and permissions
+                        </label>
                     </div>
 
                     <div class="form-section">

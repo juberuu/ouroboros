@@ -71,6 +71,10 @@ SETTINGS_DEFAULTS = {
     "OUROBOROS_REVIEW_MODELS": "openai/gpt-5.5,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.6",
     # Pre-commit review enforcement: advisory | blocking
     "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
+    # Reviewed-skill grants are manual by default. When enabled, a successful
+    # skill review grants all manifest-requested keys/permissions for that
+    # exact content hash so closed-loop skill development can run unattended.
+    "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "false",
     # Runtime mode: light | advanced | pro.
     # "advanced" preserves the existing self-modifying evolutionary layer and
     # is the safe default for current installs. "pro" is reserved for a
@@ -332,11 +336,9 @@ def get_review_models() -> list[str]:
 
     migrated = [migrate_model_value(provider, model) for model in models]
     if not migrated or len(migrated) < 2 or any(not model.startswith(provider_prefix) for model in migrated):
-        # v4.39.0: mirror `server_runtime._normalize_direct_review_models` —
-        # the quorum-safe fallback shape is `[main, light, light]` (3 slots,
-        # 2 unique) so both commit triad and plan_task work out of the box.
-        # When light is missing or collapses to main (user overrode both
-        # lanes identically), degrade to the legacy `[main] * N` shape.
+        # Mirror `server_runtime._normalize_direct_review_models`: seed three
+        # reviewer slots. Duplicate model IDs are valid stochastic slots, so
+        # this remains quorum-compatible even when main/light collapse.
         return direct_provider_review_models_fallback(provider)
     return migrated
 
@@ -346,6 +348,23 @@ def get_review_enforcement() -> str:
     default_val = str(SETTINGS_DEFAULTS["OUROBOROS_REVIEW_ENFORCEMENT"])
     raw = (os.environ.get("OUROBOROS_REVIEW_ENFORCEMENT", default_val) or default_val).strip().lower()
     return raw if raw in {"advisory", "blocking"} else default_val
+
+
+def get_auto_grant_enabled() -> bool:
+    """Return whether reviewed skills should receive requested grants."""
+    key = "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS"
+    raw = None
+    try:
+        if SETTINGS_PATH.exists():
+            disk = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+            if isinstance(disk, dict) and key in disk:
+                raw = disk.get(key)
+    except Exception:
+        raw = None
+    if raw is None:
+        raw = os.environ.get(key, SETTINGS_DEFAULTS[key])
+    raw = str(raw or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 
 def normalize_runtime_mode(value: Any) -> str:
@@ -759,6 +778,7 @@ def apply_settings_to_env(settings: dict) -> None:
         "OUROBOROS_BG_MAX_ROUNDS", "OUROBOROS_BG_WAKEUP_MIN", "OUROBOROS_BG_WAKEUP_MAX",
         "OUROBOROS_EVO_COST_THRESHOLD", "OUROBOROS_WEBSEARCH_MODEL",
         "OUROBOROS_REVIEW_MODELS", "OUROBOROS_REVIEW_ENFORCEMENT",
+        "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS",
         "OUROBOROS_SCOPE_REVIEW_MODEL",
         # Phase 2 runtime-mode + skills-repo plumbing (no runtime gating yet).
         "OUROBOROS_RUNTIME_MODE", "OUROBOROS_SKILLS_REPO_PATH",

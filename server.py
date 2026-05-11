@@ -69,14 +69,22 @@ if not os.environ.get("OUROBOROS_AGENT_PYTHON"):
 # Logging
 # ---------------------------------------------------------------------------
 _LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-_log_dir = DATA_DIR / "logs"
-_log_dir.mkdir(parents=True, exist_ok=True)
-from logging.handlers import RotatingFileHandler
-_file_handler = RotatingFileHandler(
-    _log_dir / "server.log", maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8",
+_pytest_default_real_data_dir = (
+    "pytest" in sys.modules
+    and not os.environ.get("OUROBOROS_DATA_DIR")
+    and DATA_DIR == pathlib.Path.home() / "Ouroboros" / "data"
 )
-_file_handler.setFormatter(logging.Formatter(_LOG_FORMAT))
-logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT, handlers=[_file_handler, logging.StreamHandler()])
+if _pytest_default_real_data_dir:
+    logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT, handlers=[logging.StreamHandler()])
+else:
+    _log_dir = DATA_DIR / "logs"
+    _log_dir.mkdir(parents=True, exist_ok=True)
+    from logging.handlers import RotatingFileHandler
+    _file_handler = RotatingFileHandler(
+        _log_dir / "server.log", maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8",
+    )
+    _file_handler.setFormatter(logging.Formatter(_LOG_FORMAT))
+    logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT, handlers=[_file_handler, logging.StreamHandler()])
 log = logging.getLogger("server")
 
 # ---------------------------------------------------------------------------
@@ -326,7 +334,7 @@ def _merge_settings_payload(current: Dict[str, Any], body: Dict[str, Any]) -> Di
         # Mode changes happen only through direct ``settings.json`` edits while
         # the agent is stopped, plus restart. The desktop UI uses a
         # launcher-native confirmation bridge instead of this HTTP path.
-        if key == "OUROBOROS_RUNTIME_MODE":
+        if key in {"OUROBOROS_RUNTIME_MODE", "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS"}:
             continue
         if key not in body:
             continue
@@ -1362,11 +1370,23 @@ async def api_settings_post(request: Request) -> JSONResponse:
                 # settings-save time and drift from disk on later
                 # edits).
                 from ouroboros.config import load_settings as _load_settings
-                _reload_extensions(
-                    pathlib.Path(DATA_DIR),
-                    _load_settings,
-                    repo_path=new_path or None,
+                reload_drive_root = pathlib.Path(
+                    request.app.state.drive_root
+                    if hasattr(request.app, "state") and hasattr(request.app.state, "drive_root")
+                    else DATA_DIR
                 )
+                if (
+                    (bool(os.environ.get("PYTEST_CURRENT_TEST")) or "pytest" in sys.modules)
+                    and reload_drive_root == pathlib.Path.home() / "Ouroboros" / "data"
+                    and not os.environ.get("OUROBOROS_DATA_DIR")
+                ):
+                    log.info("Skipping extension reload_all against real DATA_DIR during pytest settings save")
+                else:
+                    _reload_extensions(
+                        reload_drive_root,
+                        _load_settings,
+                        repo_path=new_path or None,
+                    )
         except Exception:
             log.warning("Extension reload after settings change failed", exc_info=True)
 
@@ -1983,16 +2003,30 @@ async def lifespan(app):
     from ouroboros.config import initialize_runtime_mode_baseline
     initialize_runtime_mode_baseline()
     has_local = has_local_routing(settings)
+    lifespan_drive_root = pathlib.Path(
+        app.state.drive_root
+        if hasattr(app, "state") and hasattr(app.state, "drive_root")
+        else DATA_DIR
+    )
+    default_real_data_dir = pathlib.Path.home() / "Ouroboros" / "data"
+    pytest_default_real_data_dir = (
+        (bool(os.environ.get("PYTEST_CURRENT_TEST")) or "pytest" in sys.modules)
+        and lifespan_drive_root == default_real_data_dir
+        and not os.environ.get("OUROBOROS_DATA_DIR")
+    )
 
     # v4.50: seed ``data/skills/native/`` from ``repo/skills/`` on first
     # launch. The launcher already does this for packaged builds; calling
     # it here makes source-mode (``python server.py``) installs land at
     # the same layout so the Skills/Marketplace UI sees a consistent tree.
     try:
-        from ouroboros.launcher_bootstrap import ensure_data_skills_seeded
-        ensure_data_skills_seeded()
-        from ouroboros.skill_migrations import migrate_unseeded_native_skills_to_external
-        migrate_unseeded_native_skills_to_external()
+        if pytest_default_real_data_dir:
+            log.info("Skipping native skills bootstrap against real DATA_DIR during pytest")
+        else:
+            from ouroboros.launcher_bootstrap import ensure_data_skills_seeded
+            ensure_data_skills_seeded()
+            from ouroboros.skill_migrations import migrate_unseeded_native_skills_to_external
+            migrate_unseeded_native_skills_to_external()
     except Exception:
         log.warning("Native skills bootstrap failed", exc_info=True)
 
@@ -2021,8 +2055,8 @@ async def lifespan(app):
         )
 
         init_global_event_bus().set_loop(_event_loop)
-        init_global_supervisor(pathlib.Path(DATA_DIR))
-        host_service_app = create_host_service_app(pathlib.Path(DATA_DIR))
+        init_global_supervisor(lifespan_drive_root)
+        host_service_app = create_host_service_app(lifespan_drive_root)
         host_port = host_service_port()
         host_service_config = uvicorn.Config(
             host_service_app,
@@ -2053,8 +2087,10 @@ async def lifespan(app):
         from ouroboros.extension_loader import set_ws_broadcaster as _set_extension_ws_broadcaster
         _set_extension_ws_broadcaster(broadcast_ws_sync)
         repo_path = get_skills_repo_path()
-        drive_root = pathlib.Path(DATA_DIR)
-        _reload_extensions(drive_root, _load_settings, repo_path=repo_path or None)
+        if pytest_default_real_data_dir:
+            log.info("Skipping extension reload_all against real DATA_DIR during pytest")
+        else:
+            _reload_extensions(lifespan_drive_root, _load_settings, repo_path=repo_path or None)
     except Exception:
         log.warning("Extension reload_all at startup failed", exc_info=True)
 

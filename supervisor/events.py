@@ -618,6 +618,25 @@ def _handle_log_event(evt: Dict[str, Any], ctx: Any) -> None:
             log.debug("Failed to persist %s event to events.jsonl", data.get("type"), exc_info=True)
 
 
+def _handle_skill_lifecycle(evt: Dict[str, Any], ctx: Any) -> None:
+    payload = dict(evt)
+    payload.setdefault("ts", utc_now_iso())
+    try:
+        ctx.append_jsonl(ctx.DRIVE_ROOT / "logs" / "events.jsonl", payload)
+    except Exception:
+        log.debug("Failed to persist skill lifecycle event", exc_info=True)
+    try:
+        ctx.bridge.push_log(payload)
+    except Exception:
+        log.debug("Failed to forward skill lifecycle event to live logs", exc_info=True)
+    try:
+        from ouroboros.event_bus import SKILL_LIFECYCLE, publish_event
+
+        publish_event(SKILL_LIFECYCLE, payload)
+    except Exception:
+        log.debug("Failed to publish skill lifecycle event", exc_info=True)
+
+
 # ---------------------------------------------------------------------------
 # Dispatch table
 # ---------------------------------------------------------------------------
@@ -637,6 +656,8 @@ EVENT_HANDLERS = {
     "toggle_consciousness": _handle_toggle_consciousness,
     "owner_message_injected": _handle_owner_message_injected,
     "log_event": _handle_log_event,
+    "skill_exec_finished": _handle_skill_lifecycle,
+    "skill_exec_failed": _handle_skill_lifecycle,
 }
 
 

@@ -44,11 +44,12 @@ skill's own state directory.
 
 from __future__ import annotations
 
+import pathlib
 from typing import Any, Awaitable, Callable, Dict, List, Protocol, Sequence, runtime_checkable
 
 from ouroboros.skill_token import SkillToken
 
-PLUGIN_API_VERSION = "1.1"
+PLUGIN_API_VERSION = "1.2"
 
 
 # Forbidden / "core" settings keys. Both in-process extensions
@@ -267,7 +268,9 @@ class PluginAPI(Protocol):
 
         The runtime rejects topics not listed in ``subscribe_events`` and all
         subscriptions are removed when the skill unloads. Requires the manifest
-        ``subscribe_event`` permission.
+        ``subscribe_event`` permission. Chat topics require owner grants;
+        ``skill.lifecycle`` is available without an owner grant so reviewed
+        skills can react to skill_exec completion/failure events.
         """
         ...
 
@@ -328,6 +331,16 @@ class PluginAPI(Protocol):
         their durable state so operators can find it in the expected
         place and ``toggle_skill`` / clean-uninstall paths know where
         to look."""
+        ...
+
+    def skill_job_dir(self, job_id: str) -> pathlib.Path:
+        """Return an isolated per-job directory under the skill state tree.
+
+        The runtime sanitizes ``job_id`` and creates
+        ``jobs/<sanitized-id>-<hash>/{assets,output,tmp}`` so generation
+        skills can keep concurrent or repeated jobs from overwriting one
+        another's assets.
+        """
         ...
 
     def get_runtime_info(self) -> Dict[str, Any]:

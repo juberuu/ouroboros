@@ -1,10 +1,9 @@
 """Plan-task reviewer quorum validation (Phase 3.1).
 
-`plan_task` uses majority-vote coordination (REVISE_PLAN at >=2 FAILs). That
-is only sound when there are at least 2 distinct reviewer models and every
-configured model appears at most once. Before v4.39.0, the one-model-padded
-and duplicate-model configurations passed silently — the check added in this
-module makes both cases explicit errors pointing at `OUROBOROS_REVIEW_MODELS`.
+`plan_task` uses reviewer-slot coordination (REVISE_PLAN at >=2 FAILs).
+Operators may deliberately configure the same model in several slots for
+single-provider / same-model sampling; the guard now only requires at least
+two configured slots before expensive prompt assembly.
 """
 
 from __future__ import annotations
@@ -27,8 +26,8 @@ class TestPlanReviewerQuorum(unittest.IsolatedAsyncioTestCase):
     """Cover the three contract cases spelled out in the task:
 
     * 1 model → error
-    * duplicates (e.g. ["a", "a", "b"]) → error
-    * 2+ unique ([a, b, c]) → proceeds past the quorum gate
+    * duplicates (e.g. ["a", "a", "b"]) → proceeds as explicit slots
+    * 2+ slots ([a, b, c] or [a, a, a]) → proceeds past the quorum gate
     """
 
     async def _run_with_models(self, models, env_raw=None):
@@ -53,14 +52,7 @@ class TestPlanReviewerQuorum(unittest.IsolatedAsyncioTestCase):
         with (
             patch.dict(_os.environ, {"OUROBOROS_REVIEW_MODELS": raw_value}, clear=False),
             patch.object(_cfg, "get_review_models", return_value=list(models)),
-            # `_get_review_models` adds the pad-to-3 behaviour the parallel
-            # runner expects; stub it to return the padded mirror so the
-            # downstream path is consistent when the quorum gate passes.
-            patch.object(
-                pr, "_get_review_models",
-                return_value=list(models) + [models[-1]] * (3 - len(models))
-                if models else [],
-            ),
+            patch.object(pr, "_get_review_models", return_value=list(models)),
             # Stub the prompt-building dependencies so we don't need a real
             # repo layout for the quorum check. The quorum gate fires BEFORE
             # the prompt is assembled; the patches here are only defensive
@@ -84,21 +76,16 @@ class TestPlanReviewerQuorum(unittest.IsolatedAsyncioTestCase):
     async def test_single_model_returns_error(self):
         result = await self._run_with_models(["only/one"])
         self.assertTrue(result.startswith("ERROR"))
-        self.assertIn("at least 2 unique reviewer models", result)
+        self.assertIn("at least 2 reviewer slots", result)
         self.assertIn("OUROBOROS_REVIEW_MODELS", result)
 
-    async def test_duplicates_in_list_returns_error(self):
-        """User-authored duplicates in `OUROBOROS_REVIEW_MODELS` (e.g.
-        `"a,a,b"`) must error. The check runs against the raw env var,
-        NOT the resolved `config.get_review_models()` output, so server-
-        generated `[main, light, light]` fallback is not mis-flagged."""
+    async def test_duplicates_in_list_proceed_as_explicit_slots(self):
+        """User-authored duplicates are valid reviewer slots."""
         result = await self._run_with_models(
             ["a", "a", "b"], env_raw="a,a,b",
         )
-        self.assertTrue(result.startswith("ERROR"))
-        self.assertIn("duplicate", result.lower())
-        self.assertIn("['a']", result)  # duplicates list must include "a"
-        self.assertIn("OUROBOROS_REVIEW_MODELS", result)
+        self.assertNotIn("duplicate reviewer models", result)
+        self.assertNotIn("at least 2 reviewer slots", result)
 
     async def test_two_unique_models_no_duplicates_proceeds(self):
         result = await self._run_with_models(["a", "b"])
@@ -118,25 +105,19 @@ class TestPlanReviewerQuorum(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("duplicate reviewer models", result)
 
     async def test_all_same_model_three_times_returns_error(self):
-        """All-identical reviewer list is unsound. When the raw env var
-        reads `"x,x,x"` the duplicate branch fires first (more actionable —
-        points at the duplicated entry). Either branch would be a correct
-        rejection; pin the current behaviour so it stays deterministic."""
+        """All-identical reviewer slots are allowed for same-model sampling."""
         result = await self._run_with_models(
             ["x", "x", "x"], env_raw="x,x,x",
         )
-        self.assertTrue(result.startswith("ERROR"))
-        self.assertIn("duplicate", result.lower())
-        self.assertIn("['x']", result)
+        self.assertNotIn("duplicate reviewer models", result)
+        self.assertNotIn("at least 2 reviewer slots", result)
 
-    async def test_error_message_lists_exact_duplicates_sorted(self):
-        """Regression: the duplicates-list in the error is sorted() so the
-        message is deterministic regardless of input order."""
+    async def test_mixed_duplicates_proceed(self):
+        """Duplicate reviewer slots preserve user intent and ordering."""
         result = await self._run_with_models(
             ["c", "b", "a", "b", "c"], env_raw="c,b,a,b,c",
         )
-        # Both b and c appear more than once → reported in sorted order.
-        self.assertIn("['b', 'c']", result)
+        self.assertNotIn("duplicate reviewer models", result)
 
 
 class TestQuorumGateOrdering(unittest.IsolatedAsyncioTestCase):
@@ -175,17 +156,15 @@ class TestQuorumGateOrdering(unittest.IsolatedAsyncioTestCase):
         )
 
 
-class TestNoDuplicateVotesInActualRun(unittest.IsolatedAsyncioTestCase):
-    """After the quorum gate passes, the parallel run must use UNIQUE reviewers
-    only — the pad-to-3 output from `_get_review_models` would let the same
-    model cast two votes (e.g. `"a,b"` → `[a, b, b]`). The v4.39.0 fix drops
-    those padding duplicates before the parallel run so majority-vote stays
-    sound. Regression guard for Pass-2 review finding.
+class TestDuplicateSlotsInActualRun(unittest.IsolatedAsyncioTestCase):
+    """After the quorum gate passes, the parallel run preserves reviewer slots.
+
+    Duplicate model IDs are intentional for same-model sampling; the runtime
+    must not dedupe them away before launching reviewers.
     """
 
-    async def test_two_unique_config_runs_two_reviewers_not_three(self):
-        """`OUROBOROS_REVIEW_MODELS="a,b"` must invoke `_query_reviewer` exactly
-        twice (once per unique model), not three times."""
+    async def test_two_model_config_runs_two_slots(self):
+        """`OUROBOROS_REVIEW_MODELS="a,b"` invokes exactly those two slots."""
         from ouroboros.tools import plan_review as pr
         from ouroboros import config as _cfg
 
@@ -203,7 +182,7 @@ class TestNoDuplicateVotesInActualRun(unittest.IsolatedAsyncioTestCase):
             patch.object(_cfg, "get_review_models",
                          return_value=["model/a", "model/b"]),
             patch.object(pr, "_get_review_models",
-                         return_value=["model/a", "model/b", "model/b"]),
+                         return_value=["model/a", "model/b"]),
             patch.object(pr, "_load_plan_checklist", return_value="checklist"),
             patch.object(pr, "_load_bible", return_value=""),
             patch.object(pr, "_load_doc", return_value=""),
@@ -217,10 +196,7 @@ class TestNoDuplicateVotesInActualRun(unittest.IsolatedAsyncioTestCase):
         assert "ERROR" not in result or "Plan Review Results" in result, (
             f"Unexpected error path: {result[:300]}"
         )
-        assert call_log == ["model/a", "model/b"], (
-            f"Expected exactly 2 unique reviewer invocations, got {call_log}. "
-            "Padding duplicates must not cause the same model to vote twice."
-        )
+        assert call_log == ["model/a", "model/b"], call_log
 
     async def test_three_unique_config_runs_three_reviewers(self):
         """3 unique configured reviewers → 3 unique invocations (no change)."""
@@ -257,9 +233,9 @@ class TestNoDuplicateVotesInActualRun(unittest.IsolatedAsyncioTestCase):
 
 class TestQuorumWithRealEnvVar(unittest.IsolatedAsyncioTestCase):
     """Integration test that exercises the real `OUROBOROS_REVIEW_MODELS` env-var
-    → `_get_review_models` → padding → quorum-check chain without patching
-    `_get_review_models`. Guards against the v4.39.0 regression where padding
-    made user-authored 2-unique configurations trip the quorum gate."""
+    → `_get_review_models` → quorum-check chain without patching
+    `_get_review_models`. Guards against the duplicate-slot quorum path
+    rejecting valid two-slot configurations."""
 
     async def _run_with_env(self, models_env: str) -> str:
         """Run the full plan-review pipeline with `OUROBOROS_REVIEW_MODELS`
@@ -292,42 +268,34 @@ class TestQuorumWithRealEnvVar(unittest.IsolatedAsyncioTestCase):
             return await pr._run_plan_review_async(ctx, "plan", "goal", [])
 
     async def test_two_unique_env_models_pass_quorum_gate(self):
-        """Regression for v4.39.0 finding: `OUROBOROS_REVIEW_MODELS="a,b"`
-        expands to `[a, b, b]` after padding. The quorum check must see the
-        USER intent (2 unique) rather than the padded reality, and let the
-        review proceed."""
+        """`OUROBOROS_REVIEW_MODELS="a,b"` is a valid two-slot review."""
         result = await self._run_with_env("openrouter/a,openrouter/b")
-        # Must NOT hit the quorum error — user configured 2 unique reviewers.
-        self.assertNotIn("at least 2 unique reviewer models", result,
-            f"2-unique env config was incorrectly rejected: {result[:500]}")
+        # Must NOT hit the quorum error — user configured 2 reviewer slots.
+        self.assertNotIn("at least 2 reviewer slots", result,
+            f"two-slot env config was incorrectly rejected: {result[:500]}")
         self.assertNotIn("duplicate reviewer models", result,
-            f"Padded duplicates tripped the user-duplicates branch: {result[:500]}")
+            f"duplicate-slot branch rejected valid reviewer slots: {result[:500]}")
 
     async def test_three_unique_env_models_pass_quorum_gate(self):
         """Shipped default: 3 distinct OpenRouter models via env must pass."""
         result = await self._run_with_env(
             "openai/gpt-5.5,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.6"
         )
-        self.assertNotIn("at least 2 unique reviewer models", result)
+        self.assertNotIn("at least 2 reviewer slots", result)
         self.assertNotIn("duplicate reviewer models", result)
 
     async def test_single_env_model_returns_error(self):
-        """`OUROBOROS_REVIEW_MODELS="only/one"` → padded to `[only/one]*3`
-        → 1 unique → quorum error. The error message must point at
-        `OUROBOROS_REVIEW_MODELS`, not just the padded list."""
+        """One raw configured slot is still a configuration error."""
         result = await self._run_with_env("only/one")
         self.assertTrue(result.startswith("ERROR"))
-        self.assertIn("at least 2 unique reviewer models", result)
+        self.assertIn("at least 2 reviewer slots", result)
         self.assertIn("OUROBOROS_REVIEW_MODELS", result)
 
-    async def test_user_authored_duplicates_in_env_returns_error(self):
-        """`OUROBOROS_REVIEW_MODELS="a,a,b"` is a user error — the list already
-        has 3 entries (no padding applied), and "a" appears twice. Must
-        trip the duplicates branch with a sorted list of duplicates."""
+    async def test_user_authored_duplicates_in_env_proceed(self):
+        """`OUROBOROS_REVIEW_MODELS="a,a,b"` is explicit same-model sampling."""
         result = await self._run_with_env("dup/x,dup/x,other/y")
-        self.assertTrue(result.startswith("ERROR"))
-        self.assertIn("duplicate reviewer models", result)
-        self.assertIn("dup/x", result)
+        self.assertNotIn("duplicate reviewer models", result)
+        self.assertNotIn("at least 2 reviewer slots", result)
 
 
 class TestDirectProviderFallbackAccepted(unittest.IsolatedAsyncioTestCase):
@@ -390,8 +358,8 @@ class TestDirectProviderFallbackAccepted(unittest.IsolatedAsyncioTestCase):
         ):
             result = await pr._run_plan_review_async(ctx, "plan", "goal", [])
 
-        self.assertNotIn("at least 2 unique reviewer models", result,
-            f"fallback [main, light, light] was rejected as <2 unique: {result[:300]}")
+        self.assertNotIn("at least 2 reviewer slots", result,
+            f"fallback [main, light, light] was rejected as insufficient slots: {result[:300]}")
         self.assertNotIn("duplicate reviewer models", result,
             f"server-generated fallback duplicates tripped the "
             f"user-duplicate branch: {result[:300]}")
@@ -463,13 +431,10 @@ class TestDirectProviderFallbackAccepted(unittest.IsolatedAsyncioTestCase):
             "must not be mis-flagged as user-authored duplicates. "
             f"Got: {result[:400]}",
         )
-        self.assertNotIn("at least 2 unique reviewer models", result)
+        self.assertNotIn("at least 2 reviewer slots", result)
 
-    async def test_openrouter_user_authored_duplicates_still_rejected(self):
-        """When no exclusive direct provider is active (OpenRouter key present),
-        user-authored duplicates in the raw env MUST still be rejected.
-        Guards against the fix to Critical #3 accidentally disabling the
-        original duplicate gate."""
+    async def test_openrouter_user_authored_duplicates_are_slots(self):
+        """OpenRouter duplicate entries are explicit reviewer slots."""
         import os as _os
         from ouroboros.tools import plan_review as pr
         from ouroboros import config as _cfg
@@ -494,20 +459,24 @@ class TestDirectProviderFallbackAccepted(unittest.IsolatedAsyncioTestCase):
             patch.object(pr, "_load_plan_checklist", return_value="checklist"),
             patch.object(pr, "_load_bible", return_value=""),
             patch.object(pr, "_load_doc", return_value=""),
+            patch.object(pr, "build_full_repo_pack", return_value=("pack", [])),
+            patch.object(pr, "build_head_snapshot_section", return_value=""),
+            patch("ouroboros.tools.plan_review.estimate_tokens", return_value=10_000),
+            patch.object(
+                pr,
+                "_query_reviewer",
+                return_value={
+                    "model": "m", "text": "AGGREGATE: GREEN",
+                    "error": None, "tokens_in": 0, "tokens_out": 0,
+                },
+            ),
         ):
             result = await pr._run_plan_review_async(ctx, "plan", "goal", [])
 
-        self.assertTrue(result.startswith("ERROR"))
-        self.assertIn("duplicate reviewer models", result.lower() + result)
+        self.assertNotIn("duplicate reviewer models", result)
 
-    async def test_explicit_duplicates_under_direct_provider_still_rejected(self):
-        """Explicit user-authored duplicates MUST still be rejected even on
-        exclusive direct-provider setups — only the AUTO-GENERATED fallback
-        shape (`[main, light, light]` or legacy `[main] * N`) is exempted.
-        Regression for the final-round Critical #1: the earlier "skip check
-        when direct-provider is active" heuristic was too broad and let
-        genuinely misconfigured lists slip through.
-        """
+    async def test_explicit_duplicates_under_direct_provider_are_slots(self):
+        """Explicit duplicates under direct-provider setups are valid slots."""
         import os as _os
         from ouroboros.tools import plan_review as pr
         from ouroboros import config as _cfg
@@ -537,25 +506,34 @@ class TestDirectProviderFallbackAccepted(unittest.IsolatedAsyncioTestCase):
             "ANTHROPIC_API_KEY": "sk-ant-test",
         }
 
-        with patch.dict(_os.environ, env, clear=False):
-            # get_review_models / _get_review_models do not need to be
-            # patched — the duplicate check fires from the raw env string
-            # before either is consulted. This is exactly the branch we
-            # want to regression-guard.
-            with (
-                patch.object(pr, "_load_plan_checklist", return_value="checklist"),
-                patch.object(pr, "_load_bible", return_value=""),
-                patch.object(pr, "_load_doc", return_value=""),
-            ):
-                result = await pr._run_plan_review_async(ctx, "plan", "goal", [])
+        with (
+            patch.dict(_os.environ, env, clear=False),
+            patch.object(_cfg, "get_review_models",
+                         return_value=["anthropic::claude-test-a",
+                                       "anthropic::claude-test-a",
+                                       "anthropic::claude-test-b"]),
+            patch.object(pr, "_get_review_models",
+                         return_value=["anthropic::claude-test-a",
+                                       "anthropic::claude-test-a",
+                                       "anthropic::claude-test-b"]),
+            patch.object(pr, "_load_plan_checklist", return_value="checklist"),
+            patch.object(pr, "_load_bible", return_value=""),
+            patch.object(pr, "_load_doc", return_value=""),
+            patch.object(pr, "build_full_repo_pack", return_value=("pack", [])),
+            patch.object(pr, "build_head_snapshot_section", return_value=""),
+            patch("ouroboros.tools.plan_review.estimate_tokens", return_value=10_000),
+            patch.object(
+                pr,
+                "_query_reviewer",
+                return_value={
+                    "model": "m", "text": "AGGREGATE: GREEN",
+                    "error": None, "tokens_in": 0, "tokens_out": 0,
+                },
+            ),
+        ):
+            result = await pr._run_plan_review_async(ctx, "plan", "goal", [])
 
-        self.assertTrue(
-            result.startswith("ERROR"),
-            f"User-authored duplicates under direct-provider setup were "
-            f"accepted; expected the duplicate gate to fire. Got: {result[:400]}",
-        )
-        self.assertIn("duplicate reviewer models", result)
-        self.assertIn("anthropic::claude-test-a", result)
+        self.assertNotIn("duplicate reviewer models", result)
 
 
 if __name__ == "__main__":

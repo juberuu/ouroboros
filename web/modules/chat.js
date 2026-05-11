@@ -343,14 +343,16 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         } catch {}
     }
 
-    function isNearBottom(threshold = 96) {
+    const NEAR_BOTTOM_THRESHOLD_PX = 160;
+
+    function isNearBottom(threshold = NEAR_BOTTOM_THRESHOLD_PX) {
         const remaining = messagesDiv.scrollHeight - messagesDiv.scrollTop - messagesDiv.clientHeight;
         return remaining <= threshold;
     }
 
-    function insertMessageNode(node) {
+    function insertMessageNode(node, options = {}) {
         if (!node) return;
-        const shouldStick = isNearBottom();
+        const shouldStick = Boolean(options.forceStick) || isNearBottom();
         if (node.parentNode === messagesDiv) {
             if (shouldStick) messagesDiv.scrollTop = messagesDiv.scrollHeight;
             return;
@@ -1029,7 +1031,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
             ${pendingHtml}
             ${timeHtml}
         `;
-        insertMessageNode(bubble);
+        insertMessageNode(bubble, { forceStick: !!opts.forceStick });
         rememberMessageKey(messageKey);
         if (pending && clientMessageId) pendingUserBubbles.set(clientMessageId, bubble);
         return bubble;
@@ -1349,7 +1351,6 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         // Recall history always uses the raw user text (no prefix pollution on ArrowUp).
         rememberInput(text);
         input.value = '';
-        resizeChatInput({ preserveStickiness: true });
         // Apply planning prefix to wire content only; display text stays clean.
         // Slash commands are always sent verbatim regardless of planMode.
         const wireText = (planMode && !text.startsWith('/')) ? PLAN_PREFIX + text : text;
@@ -1363,7 +1364,10 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
             source: 'web',
             senderSessionId: chatSessionId,
             clientMessageId: result?.clientMessageId || '',
+            forceStick: true,
         });
+        resizeChatInput({ preserveStickiness: false });
+        scrollToBottomAfterLayout();
     }
 
     // Dropdown toggle helpers
@@ -1464,13 +1468,31 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
 
     function updateMessagesPadding(options = {}) {
         const preserveStickiness = options.preserveStickiness !== false;
-        const shouldStick = preserveStickiness && isNearBottom(160);
+        const shouldStick = preserveStickiness && isNearBottom();
         if (inputArea && messagesDiv) {
             const reserve = Math.max(92, Math.ceil(inputArea.offsetHeight || 0) + 16);
             messagesDiv.style.setProperty('--chat-input-reserve', `${reserve}px`);
         }
         if (shouldStick) scrollToBottomAfterLayout();
     }
+
+    function installChatResizeObservers() {
+        if (typeof ResizeObserver !== 'function') return;
+        let queued = false;
+        const schedule = () => {
+            if (queued) return;
+            queued = true;
+            requestAnimationFrame(() => {
+                queued = false;
+                updateMessagesPadding({ preserveStickiness: true });
+            });
+        };
+        const observer = new ResizeObserver(schedule);
+        if (inputArea) observer.observe(inputArea);
+        if (messagesDiv) observer.observe(messagesDiv);
+    }
+
+    installChatResizeObservers();
 
     input.addEventListener('input', () => {
         if (inputHistoryIndex === inputHistory.length) inputDraft = input.value;

@@ -1,4 +1,5 @@
 """Tests for effort, review models, and review enforcement settings."""
+import json
 import os
 from ouroboros.config import (
     SETTINGS_DEFAULTS,
@@ -6,6 +7,7 @@ from ouroboros.config import (
     resolve_effort,
     get_review_models,
     get_review_enforcement,
+    get_auto_grant_enabled,
 )
 
 
@@ -55,6 +57,10 @@ def test_review_models_default_in_config():
 def test_review_enforcement_default_in_config():
     """OUROBOROS_REVIEW_ENFORCEMENT defaults to advisory."""
     assert SETTINGS_DEFAULTS.get("OUROBOROS_REVIEW_ENFORCEMENT") == "advisory"
+
+
+def test_auto_grant_reviewed_skills_default_in_config():
+    assert SETTINGS_DEFAULTS.get("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS") == "false"
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +202,32 @@ def test_get_review_enforcement_invalid_falls_back(monkeypatch):
     assert get_review_enforcement() == "advisory"
 
 
+def test_get_auto_grant_enabled(monkeypatch, tmp_path):
+    from ouroboros import config as cfg
+
+    monkeypatch.setattr(cfg, "SETTINGS_PATH", tmp_path / "missing-settings.json", raising=True)
+    monkeypatch.delenv("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", raising=False)
+    assert cfg.get_auto_grant_enabled() is False
+    monkeypatch.setenv("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", "true")
+    assert cfg.get_auto_grant_enabled() is True
+    monkeypatch.setenv("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", "false")
+    assert cfg.get_auto_grant_enabled() is False
+
+
+def test_get_auto_grant_enabled_prefers_settings_file(monkeypatch, tmp_path):
+    from ouroboros import config as cfg
+
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(
+        json.dumps({"OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "true"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cfg, "SETTINGS_PATH", settings_path, raising=True)
+    monkeypatch.setenv("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", "false")
+
+    assert cfg.get_auto_grant_enabled() is True
+
+
 def test_apply_settings_clears_review_models_restores_default(monkeypatch):
     """Clearing OUROBOROS_REVIEW_MODELS in settings restores the default in env."""
     # Simulate user clearing the field in Settings UI (empty string)
@@ -230,6 +262,7 @@ def test_apply_settings_to_env_includes_effort_keys():
         "OUROBOROS_EFFORT_CONSCIOUSNESS": "none",
         "OUROBOROS_REVIEW_MODELS": "model-a,model-b",
         "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
+        "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "true",
     }
     apply_settings_to_env(settings)
     assert os.environ.get("OUROBOROS_EFFORT_TASK") == "low"
@@ -238,8 +271,10 @@ def test_apply_settings_to_env_includes_effort_keys():
     assert os.environ.get("OUROBOROS_EFFORT_CONSCIOUSNESS") == "none"
     assert os.environ.get("OUROBOROS_REVIEW_MODELS") == "model-a,model-b"
     assert os.environ.get("OUROBOROS_REVIEW_ENFORCEMENT") == "advisory"
+    assert os.environ.get("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS") == "true"
     # cleanup
     for k in ("OUROBOROS_EFFORT_TASK", "OUROBOROS_EFFORT_EVOLUTION",
               "OUROBOROS_EFFORT_REVIEW", "OUROBOROS_EFFORT_CONSCIOUSNESS",
-              "OUROBOROS_REVIEW_MODELS", "OUROBOROS_REVIEW_ENFORCEMENT"):
+              "OUROBOROS_REVIEW_MODELS", "OUROBOROS_REVIEW_ENFORCEMENT",
+              "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS"):
         os.environ.pop(k, None)

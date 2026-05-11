@@ -23,13 +23,24 @@ def _ctx(tmp_path):
     return SimpleNamespace(repo_dir=tmp_path)
 
 
-def test_grep_with_backslash_pipe_returns_hint(tmp_path):
-    """Classic bash idiom ``grep -n "A\\|B" file`` — caught with hint."""
+def test_grep_with_backslash_pipe_auto_corrects(tmp_path, monkeypatch):
+    """Classic bash idiom ``grep -n "A\\|B" file`` runs as grep -E."""
     ctx = _ctx(tmp_path)
+    from subprocess import CompletedProcess
+
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return CompletedProcess(cmd, 0, "match\n", "")
+
+    monkeypatch.setattr("ouroboros.tools.shell._tracked_subprocess_run", fake_run)
+    monkeypatch.setattr("ouroboros.tools.shell.load_settings", lambda: {})
     result = _run_shell(ctx, ["grep", "-n", "A\\|B", "/tmp/x"])
-    assert "SHELL_REGEX_HINT" in result
-    assert "grep -E" in result
-    assert "grep -e" in result
+    assert "SHELL_REGEX_AUTO_CORRECTED" in result
+    assert "SHELL_REGEX_HINT" not in result
+    assert seen["cmd"] == ["grep", "-E", "-n", "A|B", "/tmp/x"]
+    assert "match" in result
 
 
 def test_grep_with_backslash_paren_passes_through(tmp_path, monkeypatch):
@@ -163,8 +174,19 @@ def test_non_grep_command_unaffected(tmp_path, monkeypatch):
     assert "SHELL_REGEX_HINT" not in result
 
 
-def test_grep_with_path_basename_caught(tmp_path):
+def test_grep_with_path_basename_auto_corrected(tmp_path, monkeypatch):
     """Detection should match on the basename even if absolute path used."""
     ctx = _ctx(tmp_path)
+    from subprocess import CompletedProcess
+
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr("ouroboros.tools.shell._tracked_subprocess_run", fake_run)
+    monkeypatch.setattr("ouroboros.tools.shell.load_settings", lambda: {})
     result = _run_shell(ctx, ["/usr/bin/grep", "A\\|B", "/tmp/x"])
-    assert "SHELL_REGEX_HINT" in result
+    assert "SHELL_REGEX_AUTO_CORRECTED" in result
+    assert seen["cmd"] == ["/usr/bin/grep", "-E", "A|B", "/tmp/x"]

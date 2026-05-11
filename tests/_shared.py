@@ -9,8 +9,10 @@ import time.
 from __future__ import annotations
 
 import importlib
+import pathlib
 import sys
 import types
+from unittest.mock import MagicMock
 
 
 def clean_extension_runtime_state() -> None:
@@ -24,7 +26,10 @@ def clean_extension_runtime_state() -> None:
     from ouroboros import extension_loader
 
     with extension_loader._lock:
-        extension_loader._extensions.clear()
+        loaded_names = list(extension_loader._extensions.keys())
+    for name in loaded_names:
+        extension_loader.unload_extension(name)
+    with extension_loader._lock:
         extension_loader._extension_modules.clear()
         extension_loader._load_failures.clear()
         extension_loader._unloading.clear()
@@ -35,6 +40,17 @@ def clean_extension_runtime_state() -> None:
         extension_loader._ui_tabs.clear()
         extension_loader._settings_sections.clear()
         extension_loader.set_ws_broadcaster(None)
+
+
+def _make_safe_mock_ctx(tmp_path: pathlib.Path) -> MagicMock:
+    """Return a MagicMock ctx whose log paths cannot leak into repo root."""
+    logs = pathlib.Path(tmp_path) / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    ctx = MagicMock()
+    ctx.drive_logs.return_value = logs
+    ctx.drive_root = str(tmp_path)
+    ctx.repo_dir = str(tmp_path)
+    return ctx
 
 
 def ensure_claude_agent_sdk_mock() -> None:

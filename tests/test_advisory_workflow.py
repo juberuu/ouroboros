@@ -22,6 +22,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests._shared import _make_safe_mock_ctx
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -746,11 +748,10 @@ def test_build_blocking_history_section_instructions_present(drive_root):
 # 9. _collect_review_findings stores structured findings on ctx
 # ---------------------------------------------------------------------------
 
-def test_collect_review_findings_stores_structured_findings():
+def test_collect_review_findings_stores_structured_findings(tmp_path):
     from ouroboros.tools.review import _collect_review_findings
 
-    ctx = MagicMock()
-    ctx.drive_logs.return_value = pathlib.Path("/tmp/fake_logs")
+    ctx = _make_safe_mock_ctx(tmp_path)
     ctx._last_review_critical_findings = []
 
     model_results = [
@@ -779,11 +780,10 @@ def test_collect_review_findings_stores_structured_findings():
     assert structured[0]["model"] == "model-a"
 
 
-def test_collect_review_findings_advisory_not_in_structured():
+def test_collect_review_findings_advisory_not_in_structured(tmp_path):
     from ouroboros.tools.review import _collect_review_findings
 
-    ctx = MagicMock()
-    ctx.drive_logs.return_value = pathlib.Path("/tmp/fake_logs")
+    ctx = _make_safe_mock_ctx(tmp_path)
     ctx._last_review_critical_findings = []
 
     model_results = [
@@ -819,7 +819,7 @@ def test_review_status_includes_stale_from_edit(tmp_path):
     state.last_stale_from_edit_ts = "2026-04-05T13:00:00+00:00"
     save_state(drive_root, state)
 
-    ctx = MagicMock()
+    ctx = _make_safe_mock_ctx(tmp_path)
     ctx.drive_root = str(drive_root)
     ctx.repo_dir = str(tmp_path)  # required by live hash computation
 
@@ -843,7 +843,7 @@ def test_review_status_surfaces_explicit_stale_reason(tmp_path):
     state.last_stale_reason = "claude_code_edit mutated the worktree; advisory freshness invalidated."
     save_state(drive_root, state)
 
-    ctx = MagicMock()
+    ctx = _make_safe_mock_ctx(tmp_path)
     ctx.drive_root = str(drive_root)
     ctx.repo_dir = str(tmp_path)
 
@@ -863,7 +863,7 @@ def test_review_status_includes_open_obligations(tmp_path, drive_root):
     ]))
     save_state(drive_root, state)
 
-    ctx = MagicMock()
+    ctx = _make_safe_mock_ctx(tmp_path)
     ctx.drive_root = str(drive_root)
     ctx.repo_dir = str(tmp_path)  # required by live hash computation
 
@@ -884,7 +884,7 @@ def test_review_status_next_step_after_edit_staleness(tmp_path, drive_root):
     state.last_stale_from_edit_ts = "2026-04-05T13:00:00+00:00"
     save_state(drive_root, state)
 
-    ctx = MagicMock()
+    ctx = _make_safe_mock_ctx(tmp_path)
     ctx.drive_root = str(drive_root)
     ctx.repo_dir = str(tmp_path)  # required by live hash computation
 
@@ -908,7 +908,7 @@ def test_check_advisory_freshness_shows_obligations_in_error(tmp_path, drive_roo
     ]))
     save_state(drive_root, state)
 
-    ctx = MagicMock()
+    ctx = _make_safe_mock_ctx(tmp_path)
     ctx.drive_root = str(drive_root)
     ctx.repo_dir = str(tmp_path / "repo")
     (tmp_path / "repo").mkdir(exist_ok=True)
@@ -934,7 +934,7 @@ def test_check_advisory_freshness_correct_workflow_in_error(tmp_path):
     from ouroboros.review_state import save_state, AdvisoryReviewState
     save_state(drive_root, AdvisoryReviewState())
 
-    ctx = MagicMock()
+    ctx = _make_safe_mock_ctx(tmp_path)
     ctx.drive_root = str(drive_root)
     ctx.repo_dir = str(tmp_path / "repo")
     (tmp_path / "repo").mkdir(exist_ok=True)
@@ -1344,7 +1344,7 @@ def test_commit_gate_bypass_is_absolute_escape_hatch_with_open_debt(tmp_path):
     ]
     save_state(drive_root, state)
 
-    ctx = MagicMock()
+    ctx = _make_safe_mock_ctx(tmp_path)
     ctx.drive_root = str(drive_root)
     ctx.repo_dir = str(repo_dir)
     ctx.drive_logs.return_value = _pl.Path(drive_root) / "logs"

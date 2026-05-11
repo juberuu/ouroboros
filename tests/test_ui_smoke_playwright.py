@@ -159,6 +159,19 @@ def test_ui_smoke_direct_mode_creates_task_with_mock_provider(direct_server):
                 page.click("#chat-send")
                 page.wait_for_selector(".chat-bubble.assistant", timeout=60_000)
                 assert "OK" in page.locator("#chat-messages").inner_text(timeout=5_000)
+                metrics = page.evaluate(
+                    """() => {
+                        const messages = document.querySelector('#chat-messages');
+                        const remaining = messages.scrollHeight - messages.scrollTop - messages.clientHeight;
+                        return {
+                            scrollTop: messages.scrollTop,
+                            scrollHeight: messages.scrollHeight,
+                            clientHeight: messages.clientHeight,
+                            remaining,
+                        };
+                    }"""
+                )
+                assert metrics["remaining"] <= 4, metrics
             finally:
                 browser.close()
     except PlaywrightError as exc:

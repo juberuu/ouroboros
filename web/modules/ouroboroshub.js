@@ -36,7 +36,7 @@ function lifecycleFor(installed, pending) {
     if (installed) {
         const review = installed.review_status ? `Review ${installed.review_status}` : 'Installed';
         return {
-            tone: installed.review_status === 'pass' && !installed.review_stale ? 'ok' : 'warn',
+            tone: ['pass', 'advisory_pass'].includes(installed.review_status) && !installed.review_stale ? 'ok' : 'warn',
             label: review,
             hint: installed.review_stale ? 'Review is stale; re-review from My skills before enabling.' : '',
             button: 'Installed',

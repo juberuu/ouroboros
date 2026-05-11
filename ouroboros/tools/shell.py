@@ -166,8 +166,8 @@ _ENV_REF_PATTERN = re.compile(r'\$(?:\{[A-Z][A-Z0-9_]*\}|[A-Z][A-Z0-9_]*)')
 # expand the backslash inside double quotes). BSD grep on macOS treats ``\|``
 # as the literal two-character sequence, so the pattern matches nothing. Smaller
 # models that learned ``grep "A\|B"`` from bash scripts hit this when their
-# tool calls go to subprocess directly. Refuse with a teachable error
-# pointing at the correct argv form (``-E "A|B"`` or ``-e "A" -e "B"``).
+# tool calls go to subprocess directly. Auto-correct to the portable
+# extended-regex argv form (``-E "A|B"``) and annotate the output.
 _GREP_TOOLS = frozenset(("grep", "egrep", "fgrep"))
 _GREP_REGEX_MODE_FLAGS = frozenset((
     "-E", "--extended-regexp",
@@ -206,6 +206,27 @@ def _grep_has_explicit_regex_mode(cmd: List[str]) -> bool:
         if arg.startswith("-") and any(flag in arg[1:] for flag in ("E", "P", "F", "G")):
             return True
     return False
+
+
+def _maybe_autocorrect_grep_backslash_pipe(cmd: List[str]) -> tuple[List[str], str]:
+    if not cmd or pathlib.Path(cmd[0]).name.lower() not in _GREP_TOOLS:
+        return cmd, ""
+    if _grep_has_explicit_regex_mode(cmd):
+        return cmd, ""
+    corrected = list(cmd)
+    changed_args: list[str] = []
+    for idx, arg in enumerate(corrected[1:], start=1):
+        if isinstance(arg, str) and _GREP_BACKSLASH_PIPE_PATTERN.search(arg):
+            corrected[idx] = _GREP_BACKSLASH_PIPE_PATTERN.sub("|", arg)
+            changed_args.append(arg)
+    if not changed_args:
+        return cmd, ""
+    corrected.insert(1, "-E")
+    return corrected, (
+        "⚠️ SHELL_REGEX_AUTO_CORRECTED: converted grep backslash-escaped "
+        "alternation (\\|) to extended regex mode (`grep -E`) and rewrote "
+        f"{changed_args!r} to use `|`.\n"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -304,28 +325,7 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
             'Use ["sh", "-c", "your command"] if you need shell builtins.'
         )
 
-    # 2026-05-04: detect bash/GNU grep `\|` alternation in argv when it
-    # has not explicitly selected a regex flavor (see comment above).
-    # Only fires when the user hasn't explicitly chosen a regex flavor —
-    # if they passed -E / -G / -P / -F they know what they're asking for.
-    if cmd and pathlib.Path(cmd[0]).name.lower() in _GREP_TOOLS:
-        if not _grep_has_explicit_regex_mode(cmd):
-            for arg in cmd[1:]:
-                if isinstance(arg, str) and _GREP_BACKSLASH_PIPE_PATTERN.search(arg):
-                    return (
-                        f'⚠️ SHELL_REGEX_HINT: argv contains backslash-escaped '
-                        f'grep alternation (\\|) in arg {arg!r}. '
-                        'GNU grep accepts \\| as a basic-regex extension, '
-                        'but BSD grep on macOS treats it as the literal '
-                        'two-character sequence unless a compatible mode is '
-                        'selected. Fixes:\n'
-                        '  - Extended regex (no escaping): grep -E "A|B" file\n'
-                        '  - Multiple patterns: grep -e "A" -e "B" file\n'
-                        '  - Force basic regex with GNU-style alternation: '
-                        'grep -G "A\\|B" file (only works on GNU grep, not BSD)\n'
-                        '  - Or use code_search for symbolic lookups inside '
-                        'the repo.'
-                    )
+    cmd, autocorrect_note = _maybe_autocorrect_grep_backslash_pipe(cmd)
 
     # Reject shell operators in cmd array (subprocess doesn't interpret them)
     found_ops = _SHELL_OPERATORS.intersection(cmd)
@@ -355,11 +355,11 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
         )
         if res.returncode != 0:
             if _is_search_no_match(res):
-                return (
+                return autocorrect_note + (
                     f"{_describe_returncode(res.returncode)} (no matches)\n"
                     f"{_format_process_output(res.stdout or '', '')}"
                 )
-            return _format_process_failure(
+            return autocorrect_note + _format_process_failure(
                 "⚠️ SHELL_EXIT_ERROR",
                 "command exited",
                 res,
@@ -372,7 +372,7 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
                 mutation_root=repo_root,
                 source_tool="run_shell",
             )
-        return f"exit_code=0\n{_format_process_output(res.stdout or '', res.stderr or '')}"
+        return autocorrect_note + f"exit_code=0\n{_format_process_output(res.stdout or '', res.stderr or '')}"
     except subprocess.TimeoutExpired:
         return (
             f"⚠️ TOOL_TIMEOUT (run_shell): command exceeded {timeout_sec}s. "

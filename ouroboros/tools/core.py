@@ -39,8 +39,8 @@ _SKILL_OWNER_STATE_FILENAMES = frozenset({
 # v5.7.0: provenance / control-plane sidecars that live INSIDE a payload
 # directory (``data/skills/<bucket>/<skill>/``) but are owned by the
 # launcher/marketplace pipeline, not by the skill author. Any tool that
-# accepts arbitrary user-supplied paths (data_write, run_shell file scan,
-# file_browser_api delete/upload, heal-mode write check) consults
+# accepts arbitrary user-supplied paths (data_write, file_browser_api
+# delete/upload, heal-mode write check) consults
 # ``is_skill_control_plane_path`` to refuse writes to these markers.
 # Pre-v5.7.0 these names were only protected in heal mode, leaving normal
 # tool flows free to overwrite provenance.

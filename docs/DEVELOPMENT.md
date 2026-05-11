@@ -229,7 +229,7 @@ Before every commit, verify the following:
 - In repair mode, edit paths are payload-relative: `plugin.py` means the selected `data/skills/{external,clawhub,ouroboroshub}/<skill>/plugin.py`.
 - Use `str_replace_editor` for one exact replacement, `claude_code_edit` for coordinated multi-hunk edits, and `data_write` only for new files or intentional full rewrites.
 - Finish repair with `skill_preflight` and `review_skill`; grants and enablement stay owner-controlled.
-- Repair mode is a stricter UI lane, not the only path for skill authoring. In `runtime_mode=light`, ordinary chat tasks may edit explicit `data/skills/{external,clawhub,ouroboroshub}/<skill>/...` payload paths via `str_replace_editor`, `data_write`, or `claude_code_edit`; core/repo paths, `data/skills/native/*`, `data/state/skills/*`, marketplace/provenance sidecars, and `run_shell` write scripts remain blocked.
+- Repair mode is a stricter UI lane, not the only path for skill authoring. In `runtime_mode=light`, ordinary chat tasks may edit explicit `data/skills/{external,clawhub,ouroboroshub}/<skill>/...` payload paths via `str_replace_editor`, `data_write`, or `claude_code_edit`; core/repo paths, `data/skills/native/*`, `data/state/skills/*`, marketplace/provenance sidecars, and direct `run_shell` writes to repo targets remain blocked.
 - New path checks for skill edits must use `ouroboros.contracts.skill_payload_policy` rather than reimplementing bucket/path traversal logic in each tool.
 
 #### Page Header Layout

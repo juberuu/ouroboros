@@ -82,6 +82,8 @@ def test_submit_hub_hidden_for_native_skills_without_fake_seed_flag():
     assert "skills-submit-hub" in source
     assert "Submit to OuroborosHub" in source
     assert "Open a public GitHub pull request" in source
+    assert "Skill needs a fresh PASS review before submission" in source
+    assert "skill.review_status !== 'pass' || skill.review_stale" in source
 
 
 def test_skills_feedback_uses_fixed_toast_not_page_banner():

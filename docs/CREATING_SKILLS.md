@@ -129,13 +129,13 @@ flowchart LR
 - **Review** runs three reviewer models in parallel against the
   Skill Review Checklist (see [`docs/CHECKLISTS.md`](CHECKLISTS.md)).
   The review pack hashes every runtime-reachable file in the skill
-  directory; any later edit invalidates the PASS verdict. `.self_authored.json`
+  directory; any later edit invalidates the executable verdict. `.self_authored.json`
   is provenance only; self-authored skills use the same tri-model review,
   grant, enable, and extension reload flow as other executable skills.
 - **Isolated deps** (pip / npm / uv / node) install into
   `data/skills/<bucket>/<name>/.ouroboros_env/`. Status is recorded
   in `data/state/skills/<name>/deps.json`.
-- **Enable** flips `enabled.json` after PASS + grants + deps. The
+- **Enable** flips `enabled.json` after a fresh executable review + grants + deps. The
   Skills UI surfaces a toggle; agents can also call `toggle_skill`.
   Self-authored provenance does not change the enablement path.
 - **Execute**: `skill_exec` runs `type: script` skills as
@@ -183,7 +183,7 @@ install:
 
 Bare `dependencies` entries are treated as Python packages. `pip`,
 `pipx`, `uv`, `npm`, and `node` specs are installed only after a fresh
-PASS review and only under the skill's `.ouroboros_env` directory.
+executable review and only under the skill's `.ouroboros_env` directory.
 Global package-manager or arbitrary-download specs remain manual setup
 guidance.
 
@@ -225,7 +225,7 @@ skill and payload root, so repair tools use payload-relative paths:
 Repair mode blocks shell, browser/search, scheduling, skill execution,
 repo commits, extension tools, key grants, and enable/disable flows. Finish
 with `skill_preflight` and `review_skill`; the owner enables or grants access
-after a fresh PASS review.
+after a fresh executable review.
 
 ## Permissions
 
@@ -244,7 +244,7 @@ calls and runtime behaviours:
 | `read_settings` | The skill may call `api.get_settings([...])`. |
 | `supervised_task` | The skill may register an in-process host-supervised async task. |
 | `companion_process` | The skill may register a manifest-declared companion subprocess supervised by the host. |
-| `subscribe_event` | The skill may subscribe to manifest-declared host event topics such as `chat.outbound`. Chat topics require owner permission grants. |
+| `subscribe_event` | The skill may subscribe to manifest-declared host event topics such as `chat.outbound` or `skill.lifecycle`. Chat topics require owner permission grants; `skill.lifecycle` does not. |
 | `inject_chat` | The skill may request Host Service chat injection after an explicit owner permission grant. |
 
 A missing permission causes the matching `register_*` call to raise
@@ -268,6 +268,45 @@ can also call `toggle_skill enabled=true` only after grants are
 approved (the tool returns `SKILL_TOGGLE_ERROR: cannot enable until
 requested key grants are approved`). Self-authored markers are
 provenance only; they do not auto-grant keys or auto-enable skills.
+
+Owners can enable `OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS` in desktop Settings →
+Behavior → Skills; the launcher asks for native confirmation before saving it.
+When enabled, a fresh pass/advisory-pass review grants only the
+manifest-declared keys and host permissions for the current content hash. Editing
+the skill still invalidates those grants.
+
+## Notifying the owner when work completes
+
+Long-running or user-visible skills should make completion and failure visible.
+For `type: script` skills, `skill_exec` appends `skill_exec_finished` or
+`skill_exec_failed` records to `logs/events.jsonl` and publishes them on the
+`skill.lifecycle` event topic with `skill`, `script`, `exit_code`, and `error`
+fields where relevant. Extension skills may declare:
+
+```yaml
+permissions: [subscribe_event]
+subscribe_events: [skill.lifecycle]
+```
+
+`skill.lifecycle` is not a chat-content topic, so it does not require an owner
+permission grant. Skills that perform multi-step external work should still
+print a concise success/failure marker or write structured state under
+`OUROBOROS_SKILL_STATE_DIR` so the agent can decide whether to fix or report.
+
+## Iterative skill development
+
+The recommended closed-loop workflow is:
+
+1. Edit the skill payload under `data/skills/external/<name>/`,
+   `data/skills/clawhub/<name>/`, or `data/skills/ouroboroshub/<name>/`.
+2. Run `skill_preflight(skill="<name>")` for cheap syntax/manifest checks.
+3. Run `review_skill(skill="<name>")` and address every critical finding.
+4. If `OUROBOROS_REVIEW_ENFORCEMENT=advisory`, inspect each advisory finding
+   and either fix it or record why it is accepted for now.
+5. Enable the skill, grant required keys/permissions (or use the auto-grant
+   setting for reviewed closed-loop development), then run `skill_exec`.
+6. Read stdout/stderr and `skill_exec_finished` / `skill_exec_failed` events,
+   fix the payload, and repeat until the skill works.
 
 ## PluginAPI reference
 
@@ -428,8 +467,9 @@ else:
 Reviewers grade your skill on the checklist defined in
 [`docs/CHECKLISTS.md`](CHECKLISTS.md) §"Skill Review Checklist". That file is
 the authoritative SSOT — read it there once and consult it whenever you author
-or repair a skill instead of reading a paraphrase here. All items must reach
-`PASS` for `status=pass`.
+or repair a skill instead of reading a paraphrase here. Critical items must
+reach `PASS`; advisory findings can become `advisory_pass` only in advisory
+enforcement mode.
 
 ## Reference skills
 

@@ -274,19 +274,6 @@ def test_skill_preflight_reports_missing_pluginapi_permissions(tmp_path, monkeyp
     assert {"route", "widget", "read_settings"} <= missing
 
 
-def test_run_shell_script_scan_handles_interpreter_option_values(tmp_path):
-    """Regression for v5.7.0 A2 review: python/node options that consume a
-    following value must not hide the actual script file from run_shell's
-    content scanner."""
-    from ouroboros.tools.registry import _extract_script_file_args
-
-    assert _extract_script_file_args(["python3", "-W", "ignore", "evil.py"]) == ["evil.py"]
-    assert _extract_script_file_args(["python3", "-X", "utf8", "evil.py"]) == ["evil.py"]
-    assert _extract_script_file_args(["node", "--require", "preload.js", "evil.js"]) == ["preload.js", "evil.js"]
-    assert _extract_script_file_args(["node", "--require=preload.js", "-e", "console.log(1)"]) == ["preload.js"]
-    assert _extract_script_file_args(["node", "--import=preload.mjs", "evil.js"]) == ["preload.mjs", "evil.js"]
-
-
 def test_run_shell_blocks_self_authored_marker_writes(tmp_path):
     ctx = _make_ctx(tmp_path)
     registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
@@ -672,6 +659,41 @@ def test_skill_exec_runs_reviewed_skill_successfully(tmp_path, monkeypatch):
     assert stdout["has_home"] is True
     # Secret key must not leak into the subprocess environment.
     assert stdout["openrouter_leaked"] is False
+    events = [
+        json.loads(line)
+        for line in (ctx.drive_root / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert events[-1]["type"] == "skill_exec_finished"
+    assert events[-1]["skill"] == "hello"
+    assert events[-1]["exit_code"] == 0
+
+
+def test_skill_exec_queues_lifecycle_event_for_supervisor(tmp_path, monkeypatch):
+    skills_root = tmp_path / "skills"
+    skill_dir = _build_skill(
+        skills_root,
+        "hello",
+        script_body="print('ok')\n",
+    )
+    ctx = _make_ctx(tmp_path)
+    queued = []
+
+    class _Queue:
+        def put_nowait(self, item):
+            queued.append(item)
+
+    ctx.event_queue = _Queue()
+    _mark_reviewed_and_enabled(ctx.drive_root, skill_dir, "hello")
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+
+    raw = skill_exec_mod._handle_skill_exec(ctx, skill="hello", script="scripts/hello.py")
+
+    assert json.loads(raw)["exit_code"] == 0
+    assert queued[-1]["type"] == "skill_exec_finished"
+    assert queued[-1]["skill"] == "hello"
+    assert queued[-1]["exit_code"] == 0
 
 
 def test_skill_exec_runs_in_light_mode(tmp_path, monkeypatch):
@@ -726,6 +748,23 @@ def test_toggle_skill_persists_enable_state(tmp_path, monkeypatch):
 
     disabled_resp = json.loads(skill_exec_mod._handle_toggle_skill(ctx, skill="alpha", enabled=False))
     assert disabled_resp["enabled"] is False
+
+
+def test_toggle_skill_allows_advisory_pass_review(tmp_path, monkeypatch):
+    skills_root = tmp_path / "skills"
+    skill_dir = _build_skill(skills_root, "alpha")
+    ctx = _make_ctx(tmp_path)
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    save_review_state(
+        ctx.drive_root,
+        "alpha",
+        SkillReviewState(status="advisory_pass", content_hash=compute_content_hash(skill_dir)),
+    )
+
+    enabled_resp = json.loads(skill_exec_mod._handle_toggle_skill(ctx, skill="alpha", enabled=True))
+
+    assert enabled_resp["enabled"] is True
+    assert enabled_resp["review_status"] == "advisory_pass"
 
 
 def test_toggle_skill_blocked_in_heal_context(tmp_path, monkeypatch):
@@ -1058,6 +1097,7 @@ def test_async_review_cancellation_waits_for_review_thread(tmp_path, monkeypatch
                 target="beta",
                 dedupe_key="review:beta:hash",
                 runner=lambda: asyncio.sleep(0, result={"quick": True}),
+                options=lifecycle_queue.LifecycleJobOptions(drive_root=ctx.drive_root),
             )
         )
         await asyncio.sleep(0.05)
@@ -1118,7 +1158,7 @@ def test_toggle_skill_rejects_stale_pass_review(tmp_path, monkeypatch):
 
     resp = skill_exec_mod._handle_toggle_skill(ctx, skill="alpha", enabled=True)
     assert "SKILL_TOGGLE_ERROR" in resp
-    assert "fresh PASS" in resp
+    assert "fresh executable review" in resp
 
 
 def test_skill_exec_rejects_misserialized_args(tmp_path, monkeypatch):
@@ -1235,6 +1275,14 @@ def test_skill_exec_surfaces_nonzero_exit_as_failure(tmp_path, monkeypatch):
     assert "SKILL_EXEC_FAILED" in result
     assert "exit_code" in result
     assert "7" in result
+    events = [
+        json.loads(line)
+        for line in (ctx.drive_root / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert events[-1]["type"] == "skill_exec_failed"
+    assert events[-1]["skill"] == "crashy"
+    assert events[-1]["exit_code"] == 7
 
 
 def test_toggle_skill_loads_and_unloads_extension_plugin(tmp_path, monkeypatch):

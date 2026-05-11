@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import pathlib
+import hashlib
 from collections import Counter
 from typing import Any, Dict, List, Optional
 
@@ -207,6 +208,18 @@ class Memory:
         path = self.drive_root / "memory" / "dialogue_blocks.json"
         return self._load_json_blocks(path)
 
+    def load_dialogue_meta(self) -> Dict[str, Any]:
+        """Load dialogue_meta.json consolidation cursor metadata."""
+        path = self.drive_root / "memory" / "dialogue_meta.json"
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(read_text(path))
+            return data if isinstance(data, dict) else {}
+        except (json.JSONDecodeError, ValueError):
+            log.warning("Corrupt dialogue meta file %s", path)
+            return {}
+
     def _load_json_blocks(self, path: pathlib.Path) -> List[Dict[str, Any]]:
         if not path.exists():
             return []
@@ -232,6 +245,11 @@ class Memory:
         default = self._default_identity()
         write_text(p, default)
         return default
+
+    def load_world_profile(self) -> str:
+        """Load the stable host/environment profile, if present."""
+        p = self.world_path()
+        return read_text(p) if p.exists() else ""
 
     def ensure_files(self) -> None:
         """Create memory files if they don't exist."""
@@ -329,6 +347,78 @@ class Memory:
         except Exception:
             log.warning(f"Failed to read JSONL tail from {log_name}", exc_info=True)
             return []
+
+    def read_jsonl_tail_after_offset(
+        self,
+        log_name: str,
+        offset: int,
+        max_entries: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """Read up to max_entries records after a consolidation entry offset.
+
+        The dialogue consolidator persists the number of non-A2A chat entries
+        it has already summarized. Context should show that prefix through
+        dialogue blocks and keep only the not-yet-consolidated suffix verbatim.
+        If the cursor looks stale after log rotation, fall back to the normal
+        tail so no recent dialogue silently disappears.
+        """
+        path = self.logs_path(log_name)
+        if not path.exists():
+            return []
+        try:
+            lines = path.read_text(encoding="utf-8").strip().split("\n")
+            entries = []
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except Exception:
+                    log.debug(
+                        "Failed to parse JSON line in read_jsonl_tail_after_offset: %s",
+                        line[:100],
+                        exc_info=True,
+                    )
+                    continue
+                if is_a2a_chat_id(entry.get("chat_id")):
+                    continue
+                entries.append(entry)
+            if offset <= 0:
+                return entries[-max_entries:] if max_entries < len(entries) else entries
+            if offset > len(entries):
+                log.warning(
+                    "Dialogue consolidation offset %s exceeds %s filtered entry count %s; using plain tail",
+                    offset,
+                    log_name,
+                    len(entries),
+                )
+                return entries[-max_entries:] if max_entries < len(entries) else entries
+            suffix = entries[offset:]
+            return suffix[-max_entries:] if max_entries < len(suffix) else suffix
+        except Exception:
+            log.warning("Failed to read JSONL tail after offset from %s", log_name, exc_info=True)
+            return []
+
+    def jsonl_generation_signature(self, log_name: str) -> Dict[str, Any]:
+        """Return a small signature for the current JSONL generation."""
+        path = self.logs_path(log_name)
+        if not path.exists():
+            return {}
+        try:
+            stat = path.stat()
+            first = ""
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if line.strip():
+                        first = line.strip()
+                        break
+            return {
+                "first_line_sha256": hashlib.sha256(first.encode("utf-8", errors="replace")).hexdigest(),
+                "size": int(stat.st_size),
+            }
+        except OSError:
+            return {}
 
     # --- Log summarization ---
 

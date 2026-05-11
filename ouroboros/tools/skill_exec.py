@@ -51,11 +51,13 @@ from ouroboros.skill_loader import (
     discover_skills,
     find_skill,
     grant_status_for_skill,
+    review_status_allows_execution,
     save_enabled,
     summarize_skills,
 )
 from ouroboros.skill_review import review_skill as _review_skill_impl
 from ouroboros.tools.registry import ToolContext, ToolEntry
+from ouroboros.utils import append_jsonl, utc_now_iso
 
 # Reuse the panic-integrated tracked-subprocess runner so skills spawned
 # by ``skill_exec`` participate in the same process-group tracking as
@@ -375,6 +377,102 @@ def _cap(data: bytes, limit: int, label: str) -> str:
     )
 
 
+def _emit_skill_lifecycle_event(
+    ctx: ToolContext,
+    *,
+    event_type: str,
+    skill: str,
+    script: str,
+    exit_code: int | None = None,
+    error: str = "",
+) -> None:
+    event = {
+        "type": event_type,
+        "ts": utc_now_iso(),
+        "task_id": getattr(ctx, "task_id", "") or "",
+        "skill": skill,
+        "script": script,
+    }
+    if exit_code is not None:
+        event["exit_code"] = int(exit_code)
+    if error:
+        event["error"] = str(error)
+    event_queue = getattr(ctx, "event_queue", None)
+    if event_queue is not None:
+        try:
+            event_queue.put_nowait(event)
+            return
+        except Exception:
+            log.debug("Could not queue skill lifecycle event", exc_info=True)
+    try:
+        append_jsonl(pathlib.Path(ctx.drive_root) / "logs" / "events.jsonl", event)
+    except Exception:
+        log.debug("Could not append skill lifecycle event", exc_info=True)
+    try:
+        from ouroboros.event_bus import SKILL_LIFECYCLE, publish_event
+
+        publish_event(SKILL_LIFECYCLE, event)
+    except Exception:
+        log.debug("Could not publish skill lifecycle event", exc_info=True)
+
+
+def _render_skill_exec_result(
+    ctx: ToolContext,
+    *,
+    payload: Dict[str, Any],
+    stdout_bytes: bytes,
+    stderr_bytes: bytes,
+    overflowed: bool,
+) -> str:
+    skill_name = str(payload.get("skill") or "")
+    script_rel = str(payload.get("script") or "")
+    returncode = int(payload.get("exit_code") or 0)
+    payload = {
+        **payload,
+        "output_overflow": overflowed,
+        "stdout": _cap(stdout_bytes, _MAX_STDOUT_BYTES, "stdout"),
+        "stderr": _cap(stderr_bytes, _MAX_STDERR_BYTES, "stderr"),
+    }
+    rendered = json.dumps(payload, ensure_ascii=False, indent=2)
+    if overflowed:
+        _emit_skill_lifecycle_event(
+            ctx,
+            event_type="skill_exec_failed",
+            skill=skill_name,
+            script=script_rel,
+            exit_code=int(returncode),
+            error="stdout/stderr byte cap exceeded",
+        )
+        return (
+            f"⚠️ SKILL_EXEC_OVERFLOW: skill {skill_name!r} script "
+            f"{script_rel!r} exceeded stdout/stderr byte caps "
+            f"(stdout<={_MAX_STDOUT_BYTES}B, stderr<={_MAX_STDERR_BYTES}B) "
+            "and was killed.\n\n" + rendered
+        )
+    if returncode != 0:
+        _emit_skill_lifecycle_event(
+            ctx,
+            event_type="skill_exec_failed",
+            skill=skill_name,
+            script=script_rel,
+            exit_code=int(returncode),
+            error=f"exited with code {returncode}",
+        )
+        return (
+            f"⚠️ SKILL_EXEC_FAILED: skill {skill_name!r} script "
+            f"{script_rel!r} exited with code {returncode}.\n\n"
+            + rendered
+        )
+    _emit_skill_lifecycle_event(
+        ctx,
+        event_type="skill_exec_finished",
+        skill=skill_name,
+        script=script_rel,
+        exit_code=0,
+    )
+    return rendered
+
+
 def _resolve_script_path(
     skill_dir: pathlib.Path,
     script_rel: str,
@@ -495,7 +593,7 @@ def _skill_deps_exec_block(drive_root: pathlib.Path, loaded: Any) -> str:
         return (
             f"⚠️ SKILL_EXEC_BLOCKED: skill {loaded.name!r} isolated "
             f"dependencies are not ready (status={deps_status!r}). "
-            "Re-run review_skill so PASS review can reinstall dependencies."
+            "Re-run review_skill so a fresh executable review can reinstall dependencies."
         )
     except Exception:
         log.debug("skill_exec deps readiness probe failed", exc_info=True)
@@ -593,10 +691,10 @@ def _handle_skill_exec(
             f"the last review. Re-run review_skill(skill={skill_name!r}) "
             "before executing."
         )
-    if loaded.review.status != "pass":
+    if not review_status_allows_execution(loaded.review.status):
         return (
             f"⚠️ SKILL_EXEC_BLOCKED: skill {skill_name!r} review status is "
-            f"'{loaded.review.status}', not 'pass'. Run review_skill and "
+            f"'{loaded.review.status}', not executable. Run review_skill and "
             "resolve findings before executing."
         )
     deps_block = _skill_deps_exec_block(drive_root, loaded)
@@ -724,7 +822,7 @@ def _handle_skill_exec(
         return (
             "⚠️ SKILL_EXEC_GRANT_REQUIRED: skill "
             f"{loaded.name!r} requests core settings keys {missing_core}. "
-            "Grant them from the Skills UI after a fresh PASS review before execution."
+            "Grant them from the Skills UI after a fresh executable review before execution."
         )
     env = _scrub_env(
         manifest_env_keys=list(loaded.manifest.env_from_settings or []),
@@ -749,6 +847,13 @@ def _handle_skill_exec(
             stderr_cap=_MAX_STDERR_BYTES,
         )
     except subprocess.TimeoutExpired as exc:
+        _emit_skill_lifecycle_event(
+            ctx,
+            event_type="skill_exec_failed",
+            skill=loaded.name,
+            script=script_rel,
+            error=f"timeout after {timeout}s",
+        )
         return (
             f"⚠️ SKILL_EXEC_TIMEOUT: skill {skill_name!r} script "
             f"{script_rel!r} exceeded {timeout}s limit.\n"
@@ -756,45 +861,43 @@ def _handle_skill_exec(
             f"stderr_partial:\n{_cap(exc.stderr or b'', _MAX_STDERR_BYTES, 'stderr')}"
         )
     except FileNotFoundError:
+        _emit_skill_lifecycle_event(
+            ctx,
+            event_type="skill_exec_failed",
+            skill=loaded.name,
+            script=script_rel,
+            error=f"runtime binary {runtime_binary!r} unavailable",
+        )
         return (
             f"⚠️ SKILL_EXEC_ERROR: runtime binary {runtime_binary!r} is no "
             "longer available."
         )
     except OSError as exc:
+        _emit_skill_lifecycle_event(
+            ctx,
+            event_type="skill_exec_failed",
+            skill=loaded.name,
+            script=script_rel,
+            error=f"OS error running skill: {exc}",
+        )
         return f"⚠️ SKILL_EXEC_ERROR: OS error running skill: {exc}"
 
     # ``overflowed`` means we killed the skill because it exceeded the
-    # per-stream byte cap. The buffers are already bounded by that cap,
-    # so ``_cap()`` below is a no-op safety net that ALSO appends the
-    # human-readable OMISSION NOTE the downstream consumer expects.
-    payload = {
-        "skill": loaded.name,
-        "script": script_rel,
-        "runtime": runtime,
-        "exit_code": int(returncode),
-        "timeout_sec": timeout,
-        "output_overflow": overflowed,
-        "stdout": _cap(stdout_bytes, _MAX_STDOUT_BYTES, "stdout"),
-        "stderr": _cap(stderr_bytes, _MAX_STDERR_BYTES, "stderr"),
-    }
-    rendered = json.dumps(payload, ensure_ascii=False, indent=2)
-    if overflowed:
-        # Process was killed for flooding stdout/stderr — surface a
-        # dedicated sentinel so the model does not confuse it with a
-        # normal successful run.
-        return (
-            f"⚠️ SKILL_EXEC_OVERFLOW: skill {loaded.name!r} script "
-            f"{script_rel!r} exceeded stdout/stderr byte caps "
-            f"(stdout<={_MAX_STDOUT_BYTES}B, stderr<={_MAX_STDERR_BYTES}B) "
-            "and was killed.\n\n" + rendered
-        )
-    if returncode != 0:
-        return (
-            f"⚠️ SKILL_EXEC_FAILED: skill {loaded.name!r} script "
-            f"{script_rel!r} exited with code {returncode}.\n\n"
-            + rendered
-        )
-    return rendered
+    # per-stream byte cap. Delegate rendering + lifecycle events so this
+    # policy-heavy handler stays under the function-size gate.
+    return _render_skill_exec_result(
+        ctx,
+        payload={
+            "skill": loaded.name,
+            "script": script_rel,
+            "runtime": runtime,
+            "exit_code": int(returncode),
+            "timeout_sec": timeout,
+        },
+        stdout_bytes=stdout_bytes,
+        stderr_bytes=stderr_bytes,
+        overflowed=overflowed,
+    )
 
 
 _TRUE_LITERALS = {"true", "yes", "on", "1"}
@@ -862,10 +965,10 @@ def _handle_toggle_skill(
         if coerced:
             stale = loaded.review.is_stale_for(loaded.content_hash)
             grants = grant_status_for_skill(drive_root, loaded)
-            if loaded.review.status != "pass" or stale:
+            if not review_status_allows_execution(loaded.review.status) or stale:
                 return (
                     "⚠️ SKILL_TOGGLE_ERROR: cannot enable until review status is "
-                    f"fresh PASS (status={loaded.review.status!r}, stale={stale}). "
+                    f"a fresh executable review (status={loaded.review.status!r}, stale={stale}). "
                     "Run review_skill first."
                 )
             if not grants.get("all_granted", True):
@@ -967,7 +1070,7 @@ _EXEC_SCHEMA = {
     "name": "skill_exec",
     "description": (
         "Execute a script from an external skill package. The skill must be "
-        "enabled and carry a fresh PASS review verdict. Only type=script "
+        "enabled and carry a fresh executable review verdict. Only type=script "
         "skills execute via this substrate — type=instruction skills are "
         "catalogued + reviewable but have no executable payload by "
         "design; type=extension skills run IN-PROCESS via the Phase 4 "
@@ -1014,7 +1117,7 @@ _TOGGLE_SCHEMA = {
     "description": (
         "Enable or disable a skill. Disabled skills are excluded from "
         "skill_exec regardless of review status. Enabling requires a fresh "
-        "PASS review and any requested core-key grants."
+        "executable review and any requested core-key grants."
     ),
     "parameters": {
         "type": "object",

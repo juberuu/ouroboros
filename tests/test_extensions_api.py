@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import asyncio
 
 import pytest
 
@@ -94,6 +95,90 @@ def _stop_patches(patches):
             p.stop()
         except RuntimeError:
             pass
+
+
+class _FakeUvicornServer:
+    def __init__(self, _config):
+        self.should_exit = False
+
+    async def serve(self):
+        await asyncio.sleep(0)
+
+
+def _patch_lifespan_for_drive_root_test(monkeypatch, srv, settings: dict):
+    monkeypatch.setattr(srv, "load_settings", lambda: dict(settings))
+    monkeypatch.setattr(srv, "save_settings", lambda *_a, **_k: None)
+    monkeypatch.setattr(srv, "apply_runtime_provider_defaults", lambda s: (s, False, []))
+    monkeypatch.setattr(srv, "_apply_settings_to_env", lambda *_a, **_k: None)
+    monkeypatch.setattr(srv, "has_supervisor_provider", lambda *_a, **_k: False)
+    monkeypatch.setattr(srv, "has_local_routing", lambda *_a, **_k: False)
+    monkeypatch.setattr(srv, "_start_supervisor_if_needed", lambda *_a, **_k: None)
+    monkeypatch.setattr(srv.uvicorn, "Server", _FakeUvicornServer)
+    monkeypatch.setattr("ouroboros.launcher_bootstrap.ensure_data_skills_seeded", lambda: None)
+    monkeypatch.setattr("ouroboros.skill_migrations.migrate_unseeded_native_skills_to_external", lambda: None)
+    monkeypatch.setattr("ouroboros.server_auth.get_configured_network_password", lambda: "")
+
+
+def test_testclient_lifespan_reload_all_uses_app_state_drive_root(tmp_path, monkeypatch):
+    from starlette.testclient import TestClient
+    import server as srv
+    from ouroboros import extension_loader
+
+    drive_root = tmp_path / "drive"
+    repo_root = tmp_path / "skills"
+    drive_root.mkdir()
+    repo_root.mkdir()
+    srv.app.app.state.drive_root = drive_root  # type: ignore[attr-defined]
+    srv.app.app.state.repo_dir = tmp_path / "repo"  # type: ignore[attr-defined]
+    _patch_lifespan_for_drive_root_test(
+        monkeypatch,
+        srv,
+        {"OUROBOROS_SKILLS_REPO_PATH": str(repo_root), "OUROBOROS_RUNTIME_MODE": "advanced"},
+    )
+    monkeypatch.setattr("ouroboros.config.get_skills_repo_path", lambda: str(repo_root))
+    calls: list[tuple[pathlib.Path, str | None]] = []
+    monkeypatch.setattr(
+        extension_loader,
+        "reload_all",
+        lambda root, _reader, *, repo_path=None: calls.append((pathlib.Path(root), repo_path)) or {},
+    )
+
+    with TestClient(srv.app):
+        pass
+
+    assert calls == [(drive_root, str(repo_root))]
+
+
+def test_testclient_settings_hot_reload_uses_app_state_drive_root(tmp_path, monkeypatch):
+    from starlette.testclient import TestClient
+    import server as srv
+    from ouroboros import extension_loader
+
+    drive_root = tmp_path / "drive"
+    old_repo = tmp_path / "skills-old"
+    new_repo = tmp_path / "skills-new"
+    drive_root.mkdir()
+    old_repo.mkdir()
+    new_repo.mkdir()
+    srv.app.app.state.drive_root = drive_root  # type: ignore[attr-defined]
+    srv.app.app.state.repo_dir = tmp_path / "repo"  # type: ignore[attr-defined]
+    settings = {"OUROBOROS_SKILLS_REPO_PATH": str(old_repo), "OUROBOROS_RUNTIME_MODE": "advanced"}
+    _patch_lifespan_for_drive_root_test(monkeypatch, srv, settings)
+    monkeypatch.setattr("ouroboros.config.get_skills_repo_path", lambda: str(old_repo))
+    calls: list[tuple[pathlib.Path, str | None]] = []
+    monkeypatch.setattr(
+        extension_loader,
+        "reload_all",
+        lambda root, _reader, *, repo_path=None: calls.append((pathlib.Path(root), repo_path)) or {},
+    )
+
+    with TestClient(srv.app) as client:
+        response = client.post("/api/settings", json={"OUROBOROS_SKILLS_REPO_PATH": str(new_repo)})
+
+    assert response.status_code == 200, response.text
+    assert calls
+    assert all(root == drive_root for root, _repo_path in calls)
+    assert (drive_root, str(new_repo)) in calls
 
 
 @pytest.fixture
@@ -297,6 +382,38 @@ def test_api_skill_toggle_enables_and_loads_extension(tmp_path, monkeypatch):
         assert data["extension_action"] == "extension_unloaded"
         assert broadcasts[-1]["action"] == "extension_unloaded"
         assert "ext_toggle" not in extension_loader.snapshot()["extensions"]
+    finally:
+        _stop_patches(patches)
+
+
+def test_api_skill_toggle_allows_advisory_pass_review(tmp_path, monkeypatch):
+    from ouroboros import extension_loader
+    from ouroboros.skill_loader import SkillReviewState, save_review_state
+    from ouroboros.skill_loader import compute_content_hash
+
+    skills_root = tmp_path / "skills"
+    plugin = (
+        "def register(api):\n"
+        "    api.register_tool('t', lambda ctx: 'ok', description='', schema={})\n"
+    )
+    skill_dir = _write_ext(skills_root, "ext_advisory", permissions=["tool"], plugin=plugin)
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    client, drive_root, patches = _make_client(tmp_path, monkeypatch)
+    try:
+        content_hash = compute_content_hash(skill_dir, manifest_entry="plugin.py")
+        save_review_state(
+            drive_root,
+            "ext_advisory",
+            SkillReviewState(status="advisory_pass", content_hash=content_hash),
+        )
+        resp = client.post("/api/skills/ext_advisory/toggle", json={"enabled": True})
+
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["enabled"] is True
+        assert data["review_status"] == "advisory_pass"
+        assert data["extension_action"] == "extension_loaded"
+        assert "ext_advisory" in extension_loader.snapshot()["extensions"]
     finally:
         _stop_patches(patches)
 

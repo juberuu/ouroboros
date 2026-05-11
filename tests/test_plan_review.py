@@ -119,23 +119,19 @@ class TestPlanReviewModels(unittest.TestCase):
             models = _get_review_models()
         self.assertEqual(len(models), 3)
 
-    def test_pads_to_three_when_one_model_configured(self):
-        """One model configured → pad to exactly 3 by repeating."""
+    def test_preserves_one_model_config_for_quorum_error(self):
+        """One model configured stays one slot; caller returns quorum error."""
         from ouroboros.tools.plan_review import _get_review_models
         with patch.dict(os.environ, {"OUROBOROS_REVIEW_MODELS": "only/one"}, clear=False):
             models = _get_review_models()
-        self.assertEqual(len(models), 3)
-        self.assertTrue(all(m == "only/one" for m in models))
+        self.assertEqual(models, ["only/one"])
 
-    def test_pads_to_three_when_two_models_configured(self):
-        """Two models configured → pad last to reach 3."""
+    def test_preserves_two_model_config(self):
+        """Two configured models are two reviewer slots, not an implicit third."""
         from ouroboros.tools.plan_review import _get_review_models
         with patch.dict(os.environ, {"OUROBOROS_REVIEW_MODELS": "model/a,model/b"}, clear=False):
             models = _get_review_models()
-        self.assertEqual(len(models), 3)
-        self.assertEqual(models[0], "model/a")
-        self.assertEqual(models[1], "model/b")
-        self.assertEqual(models[2], "model/b")  # last model padded
+        self.assertEqual(models, ["model/a", "model/b"])
 
     def test_delegates_to_config_get_review_models_for_direct_provider_fallback(self):
         """plan_task must use the same direct-provider fallback as the commit triad.
@@ -143,11 +139,10 @@ class TestPlanReviewModels(unittest.TestCase):
         Regression guard for v4.33.1 scope review finding
         ``plan_task_review_model_parity`` + v4.39.0 quorum-safe-fallback fix:
         ``config.get_review_models``'s OpenAI-only / Anthropic-only fallback
-        now rewrites the list to ``[main, light, light]`` (3 slots, 2 unique)
+        now rewrites the list to ``[main, light, light]`` (3 slots)
         when the configured reviewers don't match the exclusive direct-
         provider prefix, and ``_get_review_models`` must see that shape
-        unchanged. The shape satisfies both the commit triad's 3-reviewer
-        contract and plan_task's 2-unique-reviewer quorum gate.
+        unchanged. Duplicate model IDs are valid stochastic reviewer slots.
         """
         from ouroboros.tools.plan_review import _get_review_models
         # Simulate Anthropic-only direct setup: only ANTHROPIC key present,
@@ -166,8 +161,7 @@ class TestPlanReviewModels(unittest.TestCase):
         }
         with patch.dict(os.environ, env, clear=False):
             models = _get_review_models()
-        # Expect the Anthropic-only fallback: `[main, light, light]` — 3 slots,
-        # 2 unique, both commit-triad and plan_task quorum-compatible.
+        # Expect the Anthropic-only fallback: `[main, light, light]`.
         self.assertEqual(len(models), 3)
         self.assertEqual(
             models,
@@ -226,13 +220,12 @@ class TestPlanReviewSystemPrompt(unittest.TestCase):
 
     def test_system_prompt_explains_majority_vote_coordination(self):
         """The prompt must explain that REVISE_PLAN requires majority agreement
-        across the configured reviewer count (2 or 3 distinct models per
-        v4.39.0)."""
+        across the configured reviewer slot count (2 or 3 slots)."""
         from ouroboros.tools.plan_review import _build_system_prompt
         prompt = _build_system_prompt("checklist", "", "", "")
         self.assertIn("majority-vote", prompt)
-        self.assertIn("at least 2 distinct reviewers", prompt)
-        self.assertIn("2-3 distinct reviewers", prompt)
+        self.assertIn("at least 2 reviewer slots", prompt)
+        self.assertIn("2-3 reviewer slots", prompt)
 
     def test_system_prompt_preserves_aggregate_contract(self):
         from ouroboros.tools.plan_review import _build_system_prompt

@@ -11,14 +11,14 @@ The adapter NEVER:
 - Auto-forwards a setting key that overlaps with
   :data:`ouroboros.contracts.plugin_api.FORBIDDEN_SKILL_SETTINGS`.
   Core keys may be preserved in ``env_from_settings`` only as explicit
-  per-skill grant requirements; runtime access still requires fresh PASS
+  per-skill grant requirements; runtime access still requires a fresh executable review
   review plus owner approval bound to the current content hash.
 - Normalises ``metadata.openclaw.install`` specs into review-first
   isolated dependency installs where possible; global host mutations
   become manual guidance.
 - Trusts a declared ``always: true`` flag — every adapted skill lands
   with ``enabled: false`` and must be opted into by the operator
-  through the Skills UI / ``toggle_skill`` after a PASS review.
+  through the Skills UI / ``toggle_skill`` after a fresh executable review.
 
 Returns an :class:`AdapterResult` whose ``ok`` field summarises whether
 the staged tree can proceed to the install + review stage. ``blockers``
@@ -631,7 +631,7 @@ def adapt_openclaw_skill(
     if auto_install_specs:
         warnings.append(
             "Skill declares dependency install specs. Ouroboros will land the "
-            "payload disabled, require a fresh PASS review, then install these "
+            "payload disabled, require a fresh executable review, then install these "
             "dependencies only inside the skill's .ouroboros_env directory."
         )
     if manual_install_specs:

@@ -18,9 +18,9 @@ review gate is stricter than for ``type: script``:
   that contract even if review missed the declaration (mirrors the
   ``_FORBIDDEN_ENV_FORWARD_KEYS`` defense-in-depth pattern from Phase 3).
 - The same skill-review tri-model pipeline vets the plugin source.
-  When ``review.status`` is not ``pass`` the loader refuses to import
-  the plugin, so the process never touches the extension's module
-  namespace.
+  When ``review.status`` is not an executable verdict (``pass`` or
+  advisory-mode ``advisory_pass``) the loader refuses to import the plugin,
+  so the process never touches the extension's module namespace.
 
 An extension that is later disabled via ``toggle_skill`` is
 "unregistered" — every tool/route/ws handler it attached gets torn
@@ -76,6 +76,7 @@ from ouroboros.skill_loader import (
     grant_status_for_skill,
     load_skill_grants,
     requested_core_setting_keys,
+    review_status_allows_execution,
     skill_state_dir,
 )
 from ouroboros.skill_token import SkillToken
@@ -947,6 +948,44 @@ def _stage_extension_import_tree(
     return import_root, staged_entry
 
 
+def _sweep_stale_extension_imports(
+    drive_root: pathlib.Path,
+    skill_name: str,
+    *,
+    keep: Sequence[pathlib.Path] = (),
+) -> None:
+    """Remove orphan staged import trees for one skill.
+
+    Bounded cleanup only touches ``state/skills/<skill>/__extension_imports``.
+    It does not delete grants/review/enabled/jobs/assets or payload files.
+    """
+    root = skill_state_dir(drive_root, skill_name) / "__extension_imports"
+    if not root.exists() or not root.is_dir():
+        return
+    keep_resolved = set()
+    for path in keep or ():
+        try:
+            keep_resolved.add(path.resolve(strict=False))
+        except OSError:
+            pass
+    with _lock:
+        bundle = _extensions.get(skill_name)
+        if bundle and bundle.import_root:
+            try:
+                keep_resolved.add(pathlib.Path(bundle.import_root).resolve(strict=False))
+            except OSError:
+                pass
+    for child in list(root.iterdir()):
+        try:
+            resolved = child.resolve(strict=False)
+        except OSError:
+            resolved = child
+        if resolved in keep_resolved:
+            continue
+        if child.is_dir():
+            shutil.rmtree(child, ignore_errors=True)
+
+
 def _extension_runtime_state(
     skill: LoadedSkill,
     *,
@@ -984,7 +1023,7 @@ def _extension_runtime_state(
     elif not skill.enabled:
         desired_live = False
         reason = "disabled"
-    elif skill.review.status != "pass":
+    elif not review_status_allows_execution(skill.review.status):
         desired_live = False
         reason = f"review_{skill.review.status or 'pending'}"
     elif review_stale:
@@ -1188,16 +1227,16 @@ def load_extension(
     Returns ``None`` on success, or an error string suitable for
     surfacing to the operator via the Skills UI on failure. The skill
     must be (a) ``type: extension``, (b) ``enabled=True``, (c) review
-    status ``pass`` with fresh content hash — otherwise the loader
+    status ``pass``/``advisory_pass`` with fresh content hash — otherwise the loader
     refuses silently.
 
-    ``drive_root`` is the Ouroboros data-plane root (the same path the
-    loader / ``find_skill`` are keyed against). When omitted, we fall
-    back to the default user-home ``~/Ouroboros/data`` — but callers
-    that already know the drive root (e.g. ``reload_all``) should pass
-    it explicitly so the extension's state directory lines up with the
-    rest of the durable-state plane.
+    ``drive_root`` is mandatory and must be the same Ouroboros data-plane
+    root used by ``find_skill`` / ``discover_skills``. Silent fallback to
+    ``~/Ouroboros/data`` is forbidden because it pollutes real owner state
+    during tests and alternate-drive runtimes.
     """
+    if drive_root is None:
+        raise TypeError("load_extension requires explicit drive_root")
     if not skill.manifest.is_extension():
         return f"skill {skill.name!r} is not type=extension"
     if skill.load_error:
@@ -1219,9 +1258,9 @@ def load_extension(
     # v5.1.2 Frame A: the previous ``runtime_mode_light`` short-circuit
     # is removed — light no longer blocks extensions. Stale reviews and
     # other gates remain.
-    if runtime_state["reason"] in {"review_stale"} or skill.review.status != "pass" or skill.review.content_hash != current_hash:
+    if runtime_state["reason"] in {"review_stale"} or not review_status_allows_execution(skill.review.status) or skill.review.content_hash != current_hash:
         return (
-            f"skill {skill.name!r} must carry a fresh PASS review "
+            f"skill {skill.name!r} must carry a fresh executable review "
             f"(status={skill.review.status!r}, "
             f"stale={skill.review.content_hash != current_hash})"
         )
@@ -1234,9 +1273,9 @@ def load_extension(
             "file inside the skill directory"
         )
 
-    if drive_root is None:
-        drive_root = pathlib.Path.home() / "Ouroboros" / "data"
+    drive_root = pathlib.Path(drive_root)
     state_dir = skill_state_dir(drive_root, skill.name)
+    _sweep_stale_extension_imports(drive_root, skill.name)
     try:
         from ouroboros.skill_dependencies import auto_install_specs_for_skill
 
@@ -1449,10 +1488,12 @@ def reload_all(
         loaded_names = set(_extensions.keys())
     for gone in loaded_names - skill_names:
         unload_extension(gone)
+        _sweep_stale_extension_imports(drive_root, gone)
     results: Dict[str, Any] = {}
     for skill in skills:
         if not skill.manifest.is_extension():
             continue
+        _sweep_stale_extension_imports(drive_root, skill.name)
         state = reconcile_extension(
             skill.name,
             drive_root,

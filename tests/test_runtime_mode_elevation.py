@@ -486,6 +486,17 @@ def test_merge_settings_payload_skips_runtime_mode():
     assert merged["OPENAI_API_KEY"] == "new-key"
 
 
+def test_merge_settings_payload_skips_auto_grant_reviewed_skills():
+    """Auto-grant changes require the desktop owner-confirmation bridge."""
+    import server as server_mod
+
+    old = {"OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "false"}
+    body = {"OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "true"}
+    merged = server_mod._merge_settings_payload(old, body)
+
+    assert merged["OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS"] == "false"
+
+
 def test_merge_settings_payload_preserves_other_keys():
     """Sanity: dropping runtime_mode didn't accidentally drop everything else."""
     import server as server_mod
@@ -569,6 +580,32 @@ def test_launcher_runtime_mode_bridge_saves_after_confirmation(monkeypatch):
     assert saved["OUROBOROS_RUNTIME_MODE"] == "pro"
 
 
+def test_launcher_auto_grant_bridge_saves_after_confirmation(monkeypatch):
+    import launcher
+
+    saved = {}
+    monkeypatch.setattr(launcher, "_load_settings", lambda: {"OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "false"})
+    monkeypatch.setattr(launcher, "_save_settings", lambda settings: saved.update(settings))
+
+    result = launcher._request_auto_grant_reviewed_skills_change(True, lambda _title, _message: True)
+
+    assert result == {"ok": True, "enabled": True}
+    assert saved["OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS"] == "true"
+
+
+def test_launcher_auto_grant_bridge_disables_truthy_alias(monkeypatch):
+    import launcher
+
+    saved = {}
+    monkeypatch.setattr(launcher, "_load_settings", lambda: {"OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "1"})
+    monkeypatch.setattr(launcher, "_save_settings", lambda settings: saved.update(settings))
+
+    result = launcher._request_auto_grant_reviewed_skills_change(False, lambda _title, _message: True)
+
+    assert result == {"ok": True, "enabled": False}
+    assert saved["OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS"] == "false"
+
+
 def test_launcher_skill_key_grant_validates_review_and_manifest(monkeypatch, tmp_path):
     import launcher
 
@@ -580,7 +617,7 @@ def test_launcher_skill_key_grant_validates_review_and_manifest(monkeypatch, tmp
             return False
 
     class _Review:
-        status = "pass"
+        status = "advisory_pass"
         def is_stale_for(self, _hash):
             return False
 
@@ -954,34 +991,8 @@ def test_set_tool_timeout_sanitizes_corrupted_disk_to_env(isolated_settings, mon
 
 
 # ---------------------------------------------------------------------------
-# 8. Light-mode shell filter catches pathlib write_text / save_settings
-#    subprocess imports (defense-in-depth complement to the chokepoint)
+# 8. Runtime mode elevation chokepoints
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "bad_cmd_substring",
-    [
-        ".write_text(",
-        ".write_bytes(",
-        "os.replace(",
-        "os.rename(",
-    ],
-)
-def test_light_mode_shell_filter_catches_pathlib_write_patterns(bad_cmd_substring):
-    """Adversarial-review iteration 1 finding: ``Path.write_text(...)``,
-    ``Path.write_bytes(...)``, and OS rename primitives are NOT
-    substrings of the previous indicators (`.write(` does not match
-    ``.write_text(`` because of the ``_text`` separator). Verify each
-    is now in the light-mode mutation list. String-level test — no
-    subprocess spawned."""
-    import ouroboros.tools.registry as reg_mod
-    source = pathlib.Path(reg_mod.__file__).read_text(encoding="utf-8")
-    assert f'"{bad_cmd_substring}"' in source, (
-        f"Light-mode mutation indicator {bad_cmd_substring!r} missing "
-        "from registry.py — the substring filter would let a subprocess "
-        "write to settings.json without tripping LIGHT_MODE_BLOCKED."
-    )
 
 
 @pytest.mark.parametrize(
@@ -1181,65 +1192,6 @@ def test_files_api_owner_only_helper_blocks_symlinked_skill_state_dir(tmp_path, 
     assert fba_mod._is_owner_only_file(backing_target) is True
 
 
-# ---------------------------------------------------------------------------
-# 9. File-based subprocess bypass (v5.1.2 iter-3 fix)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("mode", ["light", "advanced", "pro"])
-def test_run_shell_blocks_script_file_with_save_settings_elevation(mode, tmp_path, monkeypatch):
-    """Iteration-3 fix (file-based subprocess bypass): a helper script
-    that imports save_settings and mentions OUROBOROS_RUNTIME_MODE
-    must be blocked at run_shell entry, not after the script runs.
-    The argv-level _ELEVATION_INDICATORS only sees ``python helper.py``
-    in argv; without file-content scanning, the elevation chain
-    succeeds in any mode (``data_write helper.py + run_shell python
-    helper.py`` → settings.json poisoned → next restart picks up
-    elevated mode)."""
-    from ouroboros.tools.registry import ToolRegistry
-
-    helper_path = tmp_path / "evil.py"
-    helper_path.write_text(
-        "from ouroboros.config import save_settings\n"
-        "save_settings({'OUROBOROS_RUNTIME_MODE': 'pro'}, allow_elevation=True)\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
-    reg = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
-    result = reg.execute("run_shell", {"cmd": ["python3", str(helper_path)]})
-    assert "ELEVATION_BLOCKED" in result, (
-        f"mode={mode}: file-based subprocess bypass NOT blocked. "
-        f"Got: {result[:300]}"
-    )
-    # The block message must include the offending script path so the
-    # operator can trace which file was refused.
-    assert "evil.py" in result
-
-
-def test_run_shell_in_light_blocks_script_file_with_pathlib_write(tmp_path, monkeypatch):
-    """Light mode: a helper script that uses pathlib.Path.write_text
-    to clobber settings.json directly does NOT need to import
-    save_settings — but it still bypasses the in-process chokepoint
-    once the file is on disk. Light-mode content scan must catch the
-    ``.write_text(`` pattern in the file and refuse the run."""
-    from ouroboros.tools.registry import ToolRegistry
-
-    helper_path = tmp_path / "writer.py"
-    helper_path.write_text(
-        "import pathlib\n"
-        "pathlib.Path('settings.json').write_text('{\"x\":1}')\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
-    reg = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
-    result = reg.execute("run_shell", {"cmd": ["python3", str(helper_path)]})
-    assert "LIGHT_MODE_BLOCKED" in result, (
-        f"light: pathlib.write_text in script file not blocked. "
-        f"Got: {result[:300]}"
-    )
-    assert "writer.py" in result
-
-
 @pytest.mark.parametrize("filename", ["grants.json", "review.json", "enabled.json", "Review.JSON"])
 def test_run_shell_blocks_obfuscated_skill_owner_state_write(filename, tmp_path, monkeypatch):
     from ouroboros.tools.registry import ToolRegistry
@@ -1261,7 +1213,7 @@ def test_run_shell_blocks_obfuscated_skill_owner_state_write(filename, tmp_path,
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     reg = ToolRegistry(repo_dir=tmp_path, drive_root=drive_root)
     result = reg.execute("run_shell", {"cmd": ["python3", str(helper_path), str(drive_root)]})
-    assert "SKILL_STATE_WRITE_BLOCKED" in result
+    assert "OWNER_STATE_RESTORED" in result
     assert not (skill_state_dir / filename).exists()
 
 
@@ -1332,94 +1284,8 @@ def test_run_shell_scans_scripts_relative_to_cwd(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     reg = ToolRegistry(repo_dir=repo_dir, drive_root=drive_root)
     result = reg.execute("run_shell", {"cmd": [sys.executable, "evil.py", str(drive_root)], "cwd": "sub"})
-    assert "SKILL_STATE_WRITE_BLOCKED" in result
+    assert "OWNER_STATE_RESTORED" in result
     assert not (drive_root / "state" / "skills" / "weather" / "review.json").exists()
-
-
-def test_run_shell_does_not_scan_files_outside_agent_areas(tmp_path, monkeypatch):
-    """Negative: a helper script outside repo_dir AND drive_root
-    must NOT be scanned (those files are not agent-writable, so the
-    scan would only be a false-positive risk on system Python helper
-    scripts the agent invokes legitimately)."""
-    from ouroboros.tools.registry import ToolRegistry
-
-    outside = tmp_path / "outside_data.py"
-    outside.write_text(
-        "from ouroboros.config import save_settings\n"
-        "save_settings({'OUROBOROS_RUNTIME_MODE': 'pro'})\n",
-        encoding="utf-8",
-    )
-    inner_repo = tmp_path / "repo"
-    inner_repo.mkdir()
-    inner_drive = tmp_path / "drive"
-    inner_drive.mkdir()
-    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
-    reg = ToolRegistry(repo_dir=inner_repo, drive_root=inner_drive)
-    result = reg.execute("run_shell", {"cmd": ["python3", str(outside)]})
-    assert "ELEVATION_BLOCKED" not in result, (
-        "Files outside agent areas should not trigger content scan."
-    )
-
-
-@pytest.mark.parametrize(
-    "benign_content",
-    [
-        "print('hello world')\n",
-        "import os\nprint(os.getcwd())\n",
-        "def main():\n    return 42\n\nif __name__ == '__main__':\n    print(main())\n",
-    ],
-)
-def test_run_shell_does_not_false_positive_on_benign_script_files(benign_content, tmp_path, monkeypatch):
-    """Negative: benign scripts inside the agent area must NOT trip
-    the file-content scan. The conjunctive elevation check + the
-    targeted light-mutation list keeps false-positive rate low."""
-    from ouroboros.tools.registry import ToolRegistry
-
-    helper_path = tmp_path / "benign.py"
-    helper_path.write_text(benign_content, encoding="utf-8")
-    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
-    reg = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
-    result = reg.execute("run_shell", {"cmd": ["python3", str(helper_path)]})
-    assert "ELEVATION_BLOCKED" not in result, (
-        f"Benign content {benign_content!r} false-positive: {result[:200]}"
-    )
-    assert "LIGHT_MODE_BLOCKED" not in result, (
-        f"Benign content {benign_content!r} false-positive in light filter: {result[:200]}"
-    )
-
-
-def test_run_shell_inline_python_dash_c_skips_file_scan(tmp_path, monkeypatch):
-    """``python -c "..."`` has inline code in argv (already covered by
-    argv-level checks); the file-scan must not try to interpret the
-    ``-c`` argument as a file path."""
-    from ouroboros.tools.registry import ToolRegistry
-
-    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
-    reg = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
-    # Inline code that does NOT match the elevation pattern.
-    result = reg.execute("run_shell", {"cmd": ["python3", "-c", "print(42)"]})
-    assert "ELEVATION_BLOCKED" not in result
-    assert "LIGHT_MODE_BLOCKED" not in result
-
-
-def test_extract_script_file_args_recognises_common_interpreters():
-    """Helper-level: confirm the parser walks past flags and stops at
-    ``-c`` / ``-m``."""
-    from ouroboros.tools.registry import _extract_script_file_args
-
-    assert _extract_script_file_args(["python3", "evil.py"]) == ["evil.py"]
-    assert _extract_script_file_args(["python", "-u", "-O", "evil.py"]) == ["evil.py"]
-    assert _extract_script_file_args(["bash", "evil.sh"]) == ["evil.sh"]
-    assert _extract_script_file_args(["node", "--inspect", "evil.js"]) == ["evil.js"]
-    # ``-c`` / ``-m`` mean no file argument.
-    assert _extract_script_file_args(["python3", "-c", "print(1)"]) == []
-    assert _extract_script_file_args(["python3", "-m", "pytest"]) == []
-    # Full-path interpreter still recognised.
-    assert _extract_script_file_args(["/usr/bin/python3", "evil.py"]) == ["evil.py"]
-    # Versioned interpreter (python3.10) recognised via prefix match.
-    assert _extract_script_file_args(["python3.10", "evil.py"]) == ["evil.py"]
-    # Non-interpreter top-level command — no script files extracted.
-    assert _extract_script_file_args(["ls", "-la"]) == []
 
 
 def test_save_settings_consent_inert_in_subprocess_via_env_propagation(isolated_settings, monkeypatch):
