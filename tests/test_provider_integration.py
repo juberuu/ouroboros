@@ -62,17 +62,16 @@ def _assert_basic_response(result, expected_provider=None):
 
 # Provider name → (env var name, model id, expected_provider check)
 #
-# anthropic_direct uses ``claude-3-5-haiku-latest`` (the long-stable
-# Anthropic alias) rather than the production default
-# ``anthropic::claude-sonnet-4-6``: this is a routing-only smoke test —
-# proving direct Anthropic auth + request shape — and the production
-# default model alias rotates faster than the CI cadence. v5.15.0-rc.9
-# tagging caught a transient 400 on ``claude-sonnet-4-6`` while the
-# OpenRouter / OpenAI / Cloud.ru routes were healthy.
+# anthropic_direct uses ``claude-3-5-haiku-20241022`` (date-pinned, the
+# long-stable Anthropic Haiku 3.5 release) rather than the production
+# default ``anthropic::claude-sonnet-4-6``. This is a routing smoke
+# (auth + request shape) — the production-default alias rotates faster
+# than the CI cadence, and CI accounts can have model-specific
+# entitlement gates that intermittently 400 newer aliases.
 _PROVIDER_MATRIX = [
     ("openrouter",       "OPENROUTER_API_KEY",                 "anthropic/claude-sonnet-4.6", "openrouter"),
     ("openai_direct",    "OPENAI_API_KEY",                     "openai::gpt-4o-mini",         "openai"),
-    ("anthropic_direct", "ANTHROPIC_API_KEY",                  "anthropic::claude-3-5-haiku-latest", "anthropic"),
+    ("anthropic_direct", "ANTHROPIC_API_KEY",                  "anthropic::claude-3-5-haiku-20241022", "anthropic"),
     ("cloudru",          "CLOUDRU_FOUNDATION_MODELS_API_KEY",  "cloudru::zai-org/GLM-4.7",    "cloudru"),
 ]
 
@@ -84,14 +83,31 @@ _PROVIDER_MATRIX = [
     ids=[entry[0] for entry in _PROVIDER_MATRIX],
 )
 def test_provider_basic_chat(provider_id, env_key, model, expected_provider):
-    """Verify each provider responds to a minimal chat request."""
+    """Verify each provider responds to a minimal chat request.
+
+    Uses explicit ``max_tokens=1024`` rather than the chat() default (16384)
+    because some direct provider model variants cap output below the
+    default and reject the request with HTTP 400. This is a routing smoke;
+    a low token budget is sufficient for "Respond with exactly: OK".
+    """
     if not os.environ.get(env_key):
         pytest.skip(f"{env_key} not set")
     client = _get_llm_client()
-    result = client.chat(
-        messages=[{"role": "user", "content": "Respond with exactly: OK"}],
-        model=model,
-    )
+    try:
+        result = client.chat(
+            messages=[{"role": "user", "content": "Respond with exactly: OK"}],
+            model=model,
+            max_tokens=1024,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Surface API error body for postmortem (CI doesn't capture it
+        # otherwise — `requests.raise_for_status()` drops the response
+        # text). Re-raise after printing.
+        import sys as _sys
+        resp = getattr(exc, "response", None)
+        if resp is not None:
+            print(f"[{provider_id}] HTTP {resp.status_code} body: {resp.text[:500]}", file=_sys.stderr)
+        raise
     _assert_basic_response(result, expected_provider=expected_provider)
 
 
@@ -114,7 +130,7 @@ _COMPETING_KEYS = [
 _ISOLATION_MATRIX = [
     ("openrouter",       "OPENROUTER_API_KEY",                 "anthropic/claude-sonnet-4.6"),
     ("openai_direct",    "OPENAI_API_KEY",                     "openai::gpt-4o-mini"),
-    ("anthropic_direct", "ANTHROPIC_API_KEY",                  "anthropic::claude-3-5-haiku-latest"),
+    ("anthropic_direct", "ANTHROPIC_API_KEY",                  "anthropic::claude-3-5-haiku-20241022"),
     ("cloudru",          "CLOUDRU_FOUNDATION_MODELS_API_KEY",  "cloudru::zai-org/GLM-4.7"),
 ]
 
@@ -133,8 +149,16 @@ def test_provider_isolation(provider_id, env_key, model, monkeypatch):
         if key != env_key:
             monkeypatch.delenv(key, raising=False)
     client = _get_llm_client()
-    result = client.chat(
-        messages=[{"role": "user", "content": "Say hello"}],
-        model=model,
-    )
+    try:
+        result = client.chat(
+            messages=[{"role": "user", "content": "Say hello"}],
+            model=model,
+            max_tokens=1024,
+        )
+    except Exception as exc:  # noqa: BLE001
+        import sys as _sys
+        resp = getattr(exc, "response", None)
+        if resp is not None:
+            print(f"[{provider_id}] HTTP {resp.status_code} body: {resp.text[:500]}", file=_sys.stderr)
+        raise
     _assert_basic_response(result)
