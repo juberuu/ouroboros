@@ -47,6 +47,7 @@ def test_skill_finalization_rearms_after_tool_round(monkeypatch, tmp_path):
         ({"content": "final", "tool_calls": []}, {}),
     ])
     progress = []
+    seen_message_tails = []
 
     class _Tools:
         CODE_TOOLS = set()
@@ -80,7 +81,11 @@ def test_skill_finalization_rearms_after_tool_round(monkeypatch, tmp_path):
 
     monkeypatch.setenv("OUROBOROS_MAX_ROUNDS", "6")
     monkeypatch.setattr(loop_mod, "_skill_finalization_message", lambda *_args, **_kwargs: "SKILL_NOT_FINALIZED")
-    monkeypatch.setattr(loop_mod, "call_llm_with_retry", lambda *args, **kwargs: next(calls))
+    def fake_call(_llm, messages, *_args, **_kwargs):
+        seen_message_tails.append([m.get("role") for m in messages[-3:]])
+        return next(calls)
+
+    monkeypatch.setattr(loop_mod, "call_llm_with_retry", fake_call)
 
     result, _usage, trace = loop_mod.run_llm_loop(
         [{"role": "user", "content": "create skill"}],
@@ -96,3 +101,60 @@ def test_skill_finalization_rearms_after_tool_round(monkeypatch, tmp_path):
     assert result == "final"
     assert progress.count("SKILL_NOT_FINALIZED") == 2
     assert trace["reasoning_notes"].count("SKILL_NOT_FINALIZED") == 2
+    assert any(tail[-2:] == ["assistant", "user"] for tail in seen_message_tails)
+    assert all(tail[-2:] != ["assistant", "system"] for tail in seen_message_tails)
+
+
+def test_skill_finalization_empty_text_does_not_append_empty_assistant(monkeypatch, tmp_path):
+    calls = iter([
+        ({"content": "", "tool_calls": []}, {}),
+        ({"content": "final", "tool_calls": []}, {}),
+    ])
+    seen_message_tails = []
+
+    class _Tools:
+        CODE_TOOLS = set()
+
+        def __init__(self):
+            self._ctx = SimpleNamespace(
+                event_queue=None,
+                task_id="task",
+                messages=[],
+                active_model_override=None,
+                active_use_local_override=None,
+                active_effort_override=None,
+                _skill_finalization_injected=False,
+            )
+
+        def schemas(self):
+            return []
+
+        def override_handler(self, _name, _handler):
+            return None
+
+    class _LLM:
+        def default_model(self):
+            return "test-model"
+
+    def fake_call(_llm, messages, *_args, **_kwargs):
+        seen_message_tails.append([m.get("role") for m in messages[-3:]])
+        return next(calls)
+
+    monkeypatch.setenv("OUROBOROS_MAX_ROUNDS", "3")
+    monkeypatch.setattr(loop_mod, "_skill_finalization_message", lambda *_args, **_kwargs: "SKILL_NOT_FINALIZED")
+    monkeypatch.setattr(loop_mod, "call_llm_with_retry", fake_call)
+
+    result, _usage, _trace = loop_mod.run_llm_loop(
+        [{"role": "user", "content": "create skill"}],
+        _Tools(),
+        _LLM(),
+        tmp_path,
+        lambda _msg: None,
+        queue.Queue(),
+        task_id="task",
+        drive_root=tmp_path,
+    )
+
+    assert result == "final"
+    assert any(tail[-1:] == ["user"] and "assistant" not in tail[-2:] for tail in seen_message_tails)
+    assert all(tail[-2:] != ["user", "user"] for tail in seen_message_tails)

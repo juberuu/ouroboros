@@ -954,11 +954,8 @@ class TestAdvisorySkipTests:
 
     def _make_advisory_ctx(self, tmp_path):
         """Minimal ToolContext-like mock for advisory handler tests."""
-        import unittest.mock as mock
-        fake_ctx = mock.MagicMock()
-        fake_ctx.repo_dir = str(tmp_path)
-        fake_ctx.drive_root = tmp_path
-        fake_ctx.emit_progress_fn = lambda *a, **kw: None
+        from tests._shared import make_safe_mock_ctx
+        fake_ctx = make_safe_mock_ctx(tmp_path, repo_dir=str(tmp_path))
         fake_ctx.task_id = "t-skiptest"
         return fake_ctx
 

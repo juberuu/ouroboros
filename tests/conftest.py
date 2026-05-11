@@ -4,8 +4,33 @@
 # Cross-module helpers that are not pytest fixtures (e.g. SDK mock, extension
 # runtime cleanup) live in ``tests/_shared.py`` instead.
 import asyncio
+import pathlib
 
 import pytest
+
+
+def _mock_pollution_files(root: pathlib.Path) -> set[pathlib.Path]:
+    try:
+        return {p for p in root.iterdir() if p.is_file() and "<MagicMock" in p.name}
+    except OSError:
+        return set()
+
+
+def pytest_sessionstart(session):  # noqa: ARG001
+    repo_root = pathlib.Path(__file__).resolve().parents[1]
+    session.config._ouroboros_initial_mock_pollution = _mock_pollution_files(repo_root)
+
+
+def pytest_sessionfinish(session, exitstatus):  # noqa: ARG001
+    repo_root = pathlib.Path(__file__).resolve().parents[1]
+    initial = getattr(session.config, "_ouroboros_initial_mock_pollution", set())
+    leaked = sorted(_mock_pollution_files(repo_root) - initial)
+    if leaked:
+        paths = ", ".join(str(p.relative_to(repo_root)) for p in leaked[:5])
+        raise pytest.Exit(
+            f"Test pollution: mock-named files leaked into repo root: {paths}",
+            returncode=1,
+        )
 
 
 @pytest.hookimpl(hookwrapper=True)

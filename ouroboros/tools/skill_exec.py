@@ -553,7 +553,12 @@ def _handle_list_skills(ctx: ToolContext, **_kwargs: Any) -> str:
     return json.dumps(summary, ensure_ascii=False, indent=2)
 
 
-def _handle_review_skill(ctx: ToolContext, skill: str = "", **_kwargs: Any) -> str:
+def _handle_review_skill(
+    ctx: ToolContext,
+    skill: str = "",
+    review_rebuttal: str = "",
+    **_kwargs: Any,
+) -> str:
     err = _skill_tool_preflight(ctx)
     if err:
         return err
@@ -562,11 +567,20 @@ def _handle_review_skill(ctx: ToolContext, skill: str = "", **_kwargs: Any) -> s
         return "⚠️ SKILL_REVIEW_ERROR: 'skill' argument is required."
     from ouroboros.skill_review_runner import run_skill_review_lifecycle_blocking
 
+    def _review_with_optional_rebuttal(review_ctx: ToolContext, review_name: str):
+        if str(review_rebuttal or "").strip():
+            return _review_skill_impl(
+                review_ctx,
+                review_name,
+                review_rebuttal=review_rebuttal,
+            )
+        return _review_skill_impl(review_ctx, review_name)
+
     payload = run_skill_review_lifecycle_blocking(
         ctx,
         skill_name,
         source="tool",
-        review_impl=_review_skill_impl,
+        review_impl=_review_with_optional_rebuttal,
     )
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
@@ -598,6 +612,24 @@ def _skill_deps_exec_block(drive_root: pathlib.Path, loaded: Any) -> str:
     except Exception:
         log.debug("skill_exec deps readiness probe failed", exc_info=True)
         return ""
+
+
+def _non_executable_review_message(prefix: str, skill_name: str, status: str, *, stale: bool = False) -> str:
+    if status == "advisory":
+        return (
+            f"⚠️ {prefix}: skill {skill_name!r} review status is 'advisory' "
+            "(non-critical findings under blocking enforcement), so it is not "
+            "executable. Fix the listed advisory findings or switch review "
+            "enforcement to advisory and reload the skill state. Re-running "
+            "review_skill on unchanged code in blocking mode will return the "
+            "same status."
+        )
+    stale_note = f", stale={stale}" if stale else ""
+    return (
+        f"⚠️ {prefix}: skill {skill_name!r} review status is {status!r}{stale_note}, "
+        "not executable. A fresh executable review is required; run review_skill "
+        "and resolve findings before executing."
+    )
 
 
 def _handle_skill_exec(
@@ -692,11 +724,7 @@ def _handle_skill_exec(
             "before executing."
         )
     if not review_status_allows_execution(loaded.review.status):
-        return (
-            f"⚠️ SKILL_EXEC_BLOCKED: skill {skill_name!r} review status is "
-            f"'{loaded.review.status}', not executable. Run review_skill and "
-            "resolve findings before executing."
-        )
+        return _non_executable_review_message("SKILL_EXEC_BLOCKED", skill_name, loaded.review.status)
     deps_block = _skill_deps_exec_block(drive_root, loaded)
     if deps_block:
         return deps_block
@@ -966,10 +994,11 @@ def _handle_toggle_skill(
             stale = loaded.review.is_stale_for(loaded.content_hash)
             grants = grant_status_for_skill(drive_root, loaded)
             if not review_status_allows_execution(loaded.review.status) or stale:
-                return (
-                    "⚠️ SKILL_TOGGLE_ERROR: cannot enable until review status is "
-                    f"a fresh executable review (status={loaded.review.status!r}, stale={stale}). "
-                    "Run review_skill first."
+                return _non_executable_review_message(
+                    "SKILL_TOGGLE_ERROR",
+                    skill_name,
+                    loaded.review.status,
+                    stale=stale,
                 )
             if not grants.get("all_granted", True):
                 missing = ", ".join(grants.get("missing_keys") or [])
@@ -1060,6 +1089,14 @@ _REVIEW_SCHEMA = {
             "skill": {
                 "type": "string",
                 "description": "Skill name (directory name in OUROBOROS_SKILLS_REPO_PATH).",
+            },
+            "review_rebuttal": {
+                "type": "string",
+                "description": (
+                    "Optional rebuttal to prior review findings. Use only when "
+                    "you have code-grounded evidence that a previous finding was "
+                    "a false positive or already addressed."
+                ),
             },
         },
         "required": ["skill"],

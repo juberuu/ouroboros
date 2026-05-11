@@ -24,6 +24,7 @@ from ouroboros.utils import (
 )
 from ouroboros import config as _cfg
 from ouroboros.tools.registry import ToolEntry, ToolContext
+from ouroboros.triad_review import extract_json_array
 
 log = logging.getLogger(__name__)
 
@@ -488,24 +489,7 @@ uncovers new FAILs — return only one JSON array, not two.
 
 def _parse_review_json(raw: str) -> Optional[list]:
     """Best-effort extraction of a JSON array from model output."""
-    text = raw.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-    try:
-        obj = json.loads(text)
-        if isinstance(obj, list):
-            return normalize_reviewer_items(obj)
-    except (json.JSONDecodeError, ValueError):
-        pass
-    start, end = text.find("["), text.rfind("]")
-    if start != -1 and end > start:
-        try:
-            obj = json.loads(text[start:end + 1])
-            if isinstance(obj, list):
-                return normalize_reviewer_items(obj)
-        except (json.JSONDecodeError, ValueError):
-            pass
-    return None
+    return extract_json_array(raw, normalize=True)
 
 
 def _git_show_staged(repo_dir, path: str) -> str:

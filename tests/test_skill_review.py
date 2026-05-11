@@ -21,8 +21,10 @@ from unittest.mock import patch
 import pytest
 
 from ouroboros.skill_loader import (
+    SkillReviewState,
     compute_content_hash,
     load_review_state,
+    save_review_state,
 )
 from ouroboros.skill_review import (
     SkillReviewOutcome,
@@ -484,10 +486,53 @@ def test_review_skill_returns_advisory_pass_in_advisory_mode(tmp_path, monkeypat
     assert outcome.status == "advisory_pass"
 
 
+def test_review_skill_prompt_includes_rebuttal_and_history(tmp_path, monkeypatch):
+    skills_root = _build_skill(tmp_path)
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    ctx = _make_ctx(tmp_path)
+    captured = {}
+    pass_array = _pass_array_for_script_skill()
+    canned = json.dumps({"results": [
+        _make_actor("openai/gpt-5.5", pass_array),
+        _make_actor("openai/gpt-5.5", pass_array),
+    ]})
+
+    def fake_review(_ctx, **kwargs):
+        captured["prompt"] = kwargs["prompt"]
+        return canned
+
+    from ouroboros.skill_review import _append_skill_review_history
+    _append_skill_review_history(
+        ctx.drive_root,
+        "weather",
+        status="advisory",
+        content_hash="old",
+        findings=[{"item": "error_handling", "verdict": "FAIL", "severity": "advisory"}],
+    )
+    monkeypatch.setattr("ouroboros.tools.review._handle_multi_model_review", fake_review)
+
+    outcome = review_skill(ctx, "weather", review_rebuttal="Already fixed in plugin.py.")
+
+    assert outcome.status == "pass"
+    assert "Developer's rebuttal" in captured["prompt"]
+    assert "Already fixed in plugin.py." in captured["prompt"]
+    assert "Previous skill review attempts" in captured["prompt"]
+
+
 def test_review_skill_quorum_failure_on_one_responder(tmp_path, monkeypatch):
     skills_root = _build_skill(tmp_path)
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
     ctx = _make_ctx(tmp_path)
+    prior_hash = compute_content_hash(skills_root / "weather")
+    save_review_state(
+        ctx.drive_root,
+        "weather",
+        SkillReviewState(
+            status="pass",
+            content_hash=prior_hash,
+            findings=_pass_array_for_script_skill(),
+        ),
+    )
     # Only one responder, two ERROR legs.
     canned = json.dumps(
         {
@@ -514,6 +559,12 @@ def test_review_skill_quorum_failure_on_one_responder(tmp_path, monkeypatch):
         outcome = review_skill(ctx, "weather")
     assert outcome.status == "pending"
     assert "quorum" in outcome.error.lower()
+    persisted = load_review_state(ctx.drive_root, "weather")
+    assert persisted.status == "pass"
+    assert persisted.content_hash == prior_hash
+    history = (ctx.drive_root / "state" / "skills" / "weather" / "review_history.jsonl").read_text(encoding="utf-8")
+    assert '"raw_actor_records"' in history
+    assert '"status": "error"' in history
 
 
 def test_review_skill_error_on_non_json_top_level(tmp_path, monkeypatch):

@@ -165,6 +165,8 @@ def append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> bool:
     so the caller can fall back to an in-memory queue or stderr instead
     of pretending the write succeeded.
     """
+    if not isinstance(path, pathlib.Path):
+        raise TypeError(f"append_jsonl: path must be pathlib.Path, got {type(path).__name__}")
     path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(obj, ensure_ascii=False)
     data = (line + "\n").encode("utf-8")

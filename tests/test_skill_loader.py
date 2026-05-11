@@ -335,6 +335,7 @@ def test_review_state_round_trip(tmp_path):
         timestamp="2026-04-21T00:00:00+00:00",
         prompt_chars=1234,
         cost_usd=0.5,
+        raw_actor_records=[{"model_id": "openai/gpt-5.5", "raw_text": "full"}],
     )
     save_review_state(drive_root, "x", state)
     reloaded = load_review_state(drive_root, "x")
@@ -342,6 +343,32 @@ def test_review_state_round_trip(tmp_path):
     assert reloaded.content_hash == "abcd"
     assert reloaded.reviewer_models == ["openai/gpt-5.5"]
     assert reloaded.prompt_chars == 1234
+    assert reloaded.raw_actor_records == [{"model_id": "openai/gpt-5.5", "raw_text": "full"}]
+
+    raw = json.loads((skill_state_dir(drive_root, "x") / "review.json").read_text(encoding="utf-8"))
+    assert "status" not in raw
+
+
+def test_load_review_state_live_aggregates_soft_findings(tmp_path, monkeypatch):
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+    state = SkillReviewState(
+        status="advisory",
+        content_hash="abcd",
+        findings=[{
+            "item": "timeout_and_output_discipline",
+            "verdict": "FAIL",
+            "severity": "advisory",
+            "reason": "soft",
+        }],
+    )
+    save_review_state(drive_root, "x", state)
+
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    assert load_review_state(drive_root, "x", skill_type="script").status == "advisory"
+
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
+    assert load_review_state(drive_root, "x", skill_type="script").status == "advisory_pass"
 
 
 def test_load_review_state_fails_closed_on_invalid_numeric_fields(tmp_path):

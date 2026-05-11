@@ -1,4 +1,4 @@
-# Ouroboros v5.16.0-rc.2 — Architecture & Reference
+# Ouroboros v5.17.0-rc.1 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -55,6 +55,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── deep_self_review.py   ← Deep self-review: full git-tracked pack + memory → 1M-context model
       ├── review.py            ← Code collection, complexity metrics, pre-commit review
       ├── review_state.py      ← Durable advisory pre-review state (advisory_review.json)
+      ├── triad_review.py      ← Shared multi-model review primitives: JSON-array extraction is reused by repo + skill review; per-actor records, quorum/degraded accounting, and model-error events power the skill-review path
       ├── onboarding_wizard.py ← Shared desktop/web onboarding bootstrap + validation
       ├── owner_inject.py      ← Per-task user message mailbox (compat module name)
       ├── launcher_bootstrap.py ← Bundle-to-repo bootstrap and managed sync helpers (used by launcher.py)
@@ -62,9 +63,10 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── runtime_mode_policy.py ← Runtime-mode protected-path policy (safety-critical files, frozen contracts, release/managed invariants) shared by registry, git tools, and Claude gateway guards
       ├── reflection.py        ← Execution reflection and pattern capture
       ├── review_evidence.py   ← Structured review findings/obligations snapshot for summaries and reflections
-      ├── skill_loader.py      ← Skill discovery + durable skill state (v5.8.2: walks data/skills/{native,clawhub,ouroboroshub,external}/ + optional OUROBOROS_SKILLS_REPO_PATH; persists to data/state/skills/<name>/; tags each LoadedSkill with `source` and `.self_authored.json` provenance)
+      ├── skill_loader.py      ← Skill discovery + durable skill state (v5.8.2: walks data/skills/{native,clawhub,ouroboroshub,external}/ + optional OUROBOROS_SKILLS_REPO_PATH; persists to data/state/skills/<name>/; tags each LoadedSkill with `source` and `.self_authored.json` provenance; v5.17 computes review status live from stored findings + current enforcement mode)
       ├── skill_dependencies.py ← Shared dependency-spec resolution for skill payloads across manifests, sidecars, and provenance
-      ├── skill_review.py      ← Skill review pipeline: optional fail-open Claude Code advisory over the skill payload only (repo diff excluded, output treated as inert evidence) followed by the tri-model executable trust gate against the Skill Review Checklist section of docs/CHECKLISTS.md
+      ├── skill_review_status.py ← Skill-review verdict aggregation SSOT (critical/advisory FAILs → pass/advisory_pass/advisory/fail)
+      ├── skill_review.py      ← Skill review pipeline: deterministic preflight + optional fail-open Claude Code advisory over the skill payload only (repo diff excluded, output treated as inert evidence) followed by the tri-model executable trust gate against the Skill Review Checklist section of docs/CHECKLISTS.md; supports rebuttal/history/convergence evidence
       ├── extension_loader.py  ← Phase 4 in-process loader for type: extension skills; discovers + imports plugin.py via importlib with a narrow PluginAPIImpl, tracks registrations per-skill for atomic unload
       ├── extension_ui_validation.py ← Host-owned widget/settings render-schema validation shared by extension loader and skill preflight
       ├── extension_isolated_deps.py ← Per-extension bridge that exposes reviewed `.ouroboros_env` Python site-packages to in-process extensions while they are loaded
@@ -106,6 +108,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── review_synthesis.py ← LLM-based claim synthesis (Phase 1): deduplicates raw multi-reviewer findings into canonical issues before durable obligations are created; called from commit_gate._record_commit_attempt; fail-open (returns original on any error)
       │   ├── ci.py              ← CI trigger and monitoring (GitHub Actions API)
       │   ├── claude_advisory_review.py ← Advisory pre-review tool (read-only Claude Agent SDK)
+      │   ├── recent_tasks.py    ← Read-only context recovery tool exposing recent task_results summaries/traces for LLM-first continuation recovery
       │   ├── commit_gate.py     ← Advisory freshness gate and commit-attempt recording (extracted from git.py); `_record_commit_attempt` runs LLM-based claim synthesis (via `review_synthesis.py`) on blocked attempts before durable obligations are created
       │   ├── git_rollback.py    ← rollback_to_target tool (wraps git_ops.rollback_to_version)
       │   ├── git_pr.py          ← PR integration tools: fetch_pr_ref, create_integration_branch, cherry_pick_pr_commits, stage_adaptations, stage_pr_merge (non-core, require enable_tools)
@@ -183,7 +186,8 @@ Dockerfile                    ← Docker image (web UI runtime)
 │   │   └── skills/              ← Phase 3 external-skill state plane (sibling of advisory_review.json, not shared)
 │   │       └── <skill_name>/
 │   │           ├── enabled.json ← {"enabled": bool, "updated_at": iso_ts}
-│   │           ├── review.json  ← {"status": "pass|advisory_pass|fail|advisory|pending", "content_hash": str, "findings": [...], "reviewer_models": [...], "timestamp": iso_ts, ...}  (Phase 3 ``pending_phase4`` status retired in Phase 4 — legacy files migrate on load)
+│   │           ├── review.json  ← {"content_hash": str, "findings": [...], "reviewer_models": [...], "timestamp": iso_ts, "raw_actor_records": [...], ...}; for full PASS/FAIL finding sets, status is computed live on load from findings + current `OUROBOROS_REVIEW_ENFORCEMENT` (`status` may remain only on legacy/pending infrastructure states)
+│   │           ├── review_history.jsonl ← compact recent skill-review attempts (`status`, `content_hash`, failure signature) used for anti-thrashing/convergence context
 │   │           ├── deps.json    ← isolated dependency install fingerprint for skills with reviewed install specs
 │   │           ├── auth_token.json ← content-hash-bound Host Service token for reviewed live extensions
 │   │           └── __extension_imports/<uuid>/skill/  ← Phase 4 staged import tree for type:extension skills (created on load, removed on unload; see §13.1)
@@ -730,7 +734,12 @@ Single source of truth for all tool classification sets:
 
 `tool_policy.py`, `loop_tool_execution.py`, and `tools/registry.py` import from
 this module so round-one visibility, execution policy, and result handling share
-one canonical set.
+one canonical set. Multi-model review outputs are cognitive artifacts:
+`repo_commit`, `repo_write_commit`, `multi_model_review`, `advisory_pre_review`,
+`review_status`, and `review_skill` must bypass default tool-result truncation.
+`recent_tasks` is a core read-only context-recovery tool with an explicit 80k
+cap so agents can choose to recover previous task results without hardcoded
+continuation phrase heuristics.
 
 ### Tool execution (loop.py)
 
@@ -1972,10 +1981,11 @@ automatically on completion or via `kill_all_tracked_subprocesses()` on panic.
     the codebase. Every structural change (new module, new API endpoint, new data file,
     new UI page) must be reflected here. This is the single source of truth for how
     the system works.
-11. **External skills run only after a tri-model review PASS, and the review
+11. **External skills run only after a fresh executable tri-model review, and the review
     is the primary gate**: skills loaded from `OUROBOROS_SKILLS_REPO_PATH`
     may execute via the dedicated `skill_exec` substrate only when
-    the skill is enabled + the last tri-model review verdict is `pass` +
+    the skill is enabled + the live-computed tri-model review verdict is
+    executable (`pass`, or `advisory_pass` when enforcement is advisory) +
     the stored content hash matches the current skill payload hash
     (including the manifest-declared `entry` file for extensions).
     v5.1.2 Frame A: `OUROBOROS_RUNTIME_MODE` no longer gates skill execution
@@ -1990,10 +2000,13 @@ automatically on completion or via `kill_all_tracked_subprocesses()` on panic.
     interpreter. The Skill Review Checklist items 3 (`no_repo_mutation`),
     4 (`path_confinement`), and 5 (`env_allowlist`) are therefore the
     actual authoritative checks, enforced by the multi-model reviewers
-    before any `skill_exec` invocation. Skill review findings live in
-    `data/state/skills/<name>/review.json` and are deliberately siloed
-    from the repo-review ledger (`data/state/advisory_review.json`) — a
-    sticky skill finding cannot block repo commits and vice versa.
+    before any `skill_exec` invocation. Skill review findings and full
+    per-actor raw records live in `data/state/skills/<name>/review.json`;
+    `skill_review_status.py` computes the current status from those
+    findings and `OUROBOROS_REVIEW_ENFORCEMENT` at load time. Skill state
+    is deliberately siloed from the repo-review ledger
+    (`data/state/advisory_review.json`) — a sticky skill finding cannot
+    block repo commits and vice versa.
 12. **Single-source startup rescue**: a dirty worktree inherited across sessions is
     rescued by exactly one mechanism — `safe_restart(..., "rescue_and_reset")` in
     `_bootstrap_supervisor_repo()`. The rescue path may clean dirty/untracked files
@@ -2189,7 +2202,8 @@ the skill checkout:
 ```
 ~/Ouroboros/data/state/skills/<name>/
 ├── enabled.json             ← {"enabled": bool, "updated_at": iso_ts}
-├── review.json              ← {"status", "content_hash", "findings", …}
+├── review.json              ← {"content_hash", "findings", "reviewer_models", "raw_actor_records", …}; status is live-computed for full finding sets
+├── review_history.jsonl     ← compact review attempts for anti-thrashing/convergence context
 ├── grants.json              ← content-hash-bound owner grants for core settings keys
 ├── clawhub.json             ← marketplace provenance for ClawHub-installed skills
 └── __extension_imports/     ← Phase 4 staged import tree (type: extension skills only)
@@ -2202,6 +2216,8 @@ and `run_shell` post-execution owner-state restore) protect
 `enabled.json`, `review.json`, `grants.json`, and `clawhub.json`; payload
 repair happens under `data/skills/...` and must flow back through
 `review_skill`, Skills UI enablement, and the launcher grant bridge.
+`data_read` may read `review.json` because findings and raw actor records
+are cognitive evidence; write paths still protect it as owner state.
 
 Declared dependencies share one install/readiness contract. ClawHub
 provenance, OuroborosHub sidecars/catalog metadata, and reviewed manifest

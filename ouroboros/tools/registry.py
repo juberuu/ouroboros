@@ -283,7 +283,7 @@ _HEAL_PROTECTED_PAYLOAD_FILENAMES = frozenset({
 })
 
 
-_SKILL_OWNER_STATE_STEMS = ("grants", "review", "enabled", "clawhub", "deps", "self_authored", "auth_token")
+_SKILL_OWNER_STATE_STEMS = ("grants", "review", "review_history", "enabled", "clawhub", "deps", "self_authored", "auth_token")
 _DETACHED_PROCESS_MARKERS = (
     "start_new_session",
     "new_session",
@@ -498,7 +498,7 @@ class ToolRegistry:
     _FROZEN_TOOL_MODULES = [
         "browser", "ci", "claude_advisory_review", "compact_context", "control",
         "core", "evolution_stats", "git", "git_rollback", "github", "health",
-        "knowledge", "memory_tools", "plan_review", "review", "search", "shell",
+        "knowledge", "memory_tools", "plan_review", "recent_tasks", "review", "search", "shell",
         # Phase 3 three-layer refactor: external skill surface
         # (list_skills / review_skill / skill_exec / toggle_skill).
         "skill_exec",
@@ -892,7 +892,7 @@ class ToolRegistry:
         root = pathlib.Path(self._ctx.drive_root) / "state" / "skills"
         if not root.is_dir():
             return out
-        protected_skill_state = {"grants.json", "review.json", "enabled.json", "clawhub.json", "deps.json", "self_authored.json", "auth_token.json"}
+        protected_skill_state = {"grants.json", "review.json", "review_history.jsonl", "enabled.json", "clawhub.json", "deps.json", "self_authored.json", "auth_token.json"}
         for path in root.glob("*/*"):
             if path.name.lower() not in protected_skill_state:
                 continue
@@ -907,7 +907,7 @@ class ToolRegistry:
         root = pathlib.Path(self._ctx.drive_root) / "state" / "skills"
         current = set()
         if root.is_dir():
-            protected_skill_state = {"grants.json", "review.json", "enabled.json", "clawhub.json", "deps.json", "self_authored.json", "auth_token.json"}
+            protected_skill_state = {"grants.json", "review.json", "review_history.jsonl", "enabled.json", "clawhub.json", "deps.json", "self_authored.json", "auth_token.json"}
             current.update(
                 path for path in root.glob("*/*")
                 if path.name.lower() in protected_skill_state

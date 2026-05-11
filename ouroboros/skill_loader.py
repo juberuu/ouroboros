@@ -14,14 +14,16 @@ on the same plane as other durable state (``state.json``,
 ``advisory_review.json``). The layout:
 
 - ``enabled.json`` — ``{"enabled": bool, "updated_at": iso_ts}``.
-- ``review.json``  — ``{"content_hash": str, "status": "pass"|"advisory_pass"|"fail"|"advisory"|"pending",
-  "findings": [...], "reviewer_models": [...], "timestamp": iso_ts,
-  "prompt_chars": int, "cost_usd": float, "raw_result": str}``.
-  ``pass`` and advisory-mode ``advisory_pass`` are executable verdicts
-  when the content hash is fresh. ``raw_result`` carries the truncated
-  top-level review response for replay/debugging (capped via
-  ``_truncate_raw_result`` in ``ouroboros.skill_review`` with an explicit
-  OMISSION NOTE on overflow).
+- ``review.json``  — ``{"content_hash": str, "findings": [...],
+  "reviewer_models": [...], "timestamp": iso_ts, "prompt_chars": int,
+  "cost_usd": float, "raw_result": str, "raw_actor_records": [...]}``.
+  For full PASS/FAIL finding sets, ``status`` is computed live from
+  ``findings`` and the current review enforcement mode; ``status`` remains
+  persisted only for pending/legacy/infrastructure states. ``raw_result``
+  carries the truncated top-level review response for replay/debugging
+  (capped via ``_truncate_raw_result`` in ``ouroboros.skill_review`` with an
+  explicit OMISSION NOTE on overflow), while ``raw_actor_records`` preserves
+  per-reviewer raw text for forensics.
 
 Neither file is required on disk — missing files mean "defaults". The module
 treats absent state as: ``enabled=False``, ``review.status="pending"``.
@@ -48,6 +50,7 @@ from ouroboros.contracts.skill_manifest import (
     parse_skill_manifest_text,
 )
 from ouroboros.contracts.plugin_api import FORBIDDEN_SKILL_SETTINGS
+from ouroboros.skill_review_status import aggregate_skill_review_status
 from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -141,6 +144,7 @@ class SkillReviewState:
     prompt_chars: int = 0
     cost_usd: float = 0.0
     raw_result: str = ""
+    raw_actor_records: List[Dict[str, Any]] = field(default_factory=list)
 
     def is_stale_for(self, current_hash: str) -> bool:
         if not current_hash:
@@ -150,9 +154,7 @@ class SkillReviewState:
         return self.content_hash != current_hash
 
     def to_dict(self) -> Dict[str, Any]:
-        status = self.status if self.status in VALID_REVIEW_STATUSES else _REVIEW_STATUS_PENDING
-        return {
-            "status": status,
+        data = {
             "content_hash": self.content_hash,
             "findings": list(self.findings),
             "reviewer_models": list(self.reviewer_models),
@@ -160,7 +162,16 @@ class SkillReviewState:
             "prompt_chars": int(self.prompt_chars or 0),
             "cost_usd": float(self.cost_usd or 0.0),
             "raw_result": self.raw_result,
+            "raw_actor_records": list(self.raw_actor_records),
         }
+        has_review_verdicts = any(
+            str(f.get("verdict") or "").upper() in {"PASS", "FAIL"}
+            for f in self.findings
+            if isinstance(f, dict)
+        )
+        if self.status == _REVIEW_STATUS_PENDING or not has_review_verdicts:
+            data["status"] = self.status if self.status in VALID_REVIEW_STATUSES else _REVIEW_STATUS_PENDING
+        return data
 
 
 @dataclass
@@ -620,11 +631,17 @@ def save_enabled(drive_root: pathlib.Path, name: str, enabled: bool) -> None:
     )
 
 
-def load_review_state(drive_root: pathlib.Path, name: str) -> SkillReviewState:
+def load_review_state(
+    drive_root: pathlib.Path,
+    name: str,
+    *,
+    skill_type: str = "",
+    is_module_widget: bool = False,
+) -> SkillReviewState:
     data = read_json_dict(skill_state_dir(drive_root, name) / "review.json")
     if not isinstance(data, dict):
         return SkillReviewState()
-    raw_status = str(data.get("status") or _REVIEW_STATUS_PENDING).lower()
+    raw_status = str(data.get("status") or "").lower()
     # Phase 4 retires the ``pending_phase4`` overlay. Any lingering
     # Phase 3 review.json files still carrying that literal status
     # migrate back to plain ``pending`` on load so the summarizer's
@@ -633,11 +650,30 @@ def load_review_state(drive_root: pathlib.Path, name: str) -> SkillReviewState:
     # surfaces verbatim).
     if raw_status == _REVIEW_STATUS_DEFERRED_PHASE4:
         raw_status = _REVIEW_STATUS_PENDING
-    status = raw_status if raw_status in VALID_REVIEW_STATUSES else _REVIEW_STATUS_PENDING
     findings = data.get("findings") if isinstance(data.get("findings"), list) else []
+    clean_findings = [f for f in findings if isinstance(f, dict)]
+    has_review_verdicts = any(
+        str(f.get("verdict") or "").upper() in {"PASS", "FAIL"}
+        for f in clean_findings
+    )
+    if raw_status == _REVIEW_STATUS_PENDING:
+        status = _REVIEW_STATUS_PENDING
+    elif clean_findings and has_review_verdicts:
+        status = aggregate_skill_review_status(
+            clean_findings,
+            skill_type or "script",
+            is_module_widget=is_module_widget,
+        )
+    else:
+        status = raw_status if raw_status in VALID_REVIEW_STATUSES else _REVIEW_STATUS_PENDING
     reviewers = (
         data.get("reviewer_models")
         if isinstance(data.get("reviewer_models"), list)
+        else []
+    )
+    raw_actor_records = (
+        data.get("raw_actor_records")
+        if isinstance(data.get("raw_actor_records"), list)
         else []
     )
     try:
@@ -651,12 +687,13 @@ def load_review_state(drive_root: pathlib.Path, name: str) -> SkillReviewState:
     return SkillReviewState(
         status=status,
         content_hash=str(data.get("content_hash") or ""),
-        findings=[f for f in findings if isinstance(f, dict)],
+        findings=clean_findings,
         reviewer_models=[str(m) for m in reviewers if m],
         timestamp=str(data.get("timestamp") or ""),
         prompt_chars=prompt_chars,
         cost_usd=cost_usd,
         raw_result=str(data.get("raw_result") or ""),
+        raw_actor_records=[r for r in raw_actor_records if isinstance(r, dict)],
     )
 
 
@@ -1004,7 +1041,17 @@ def load_skill(
         content_hash = ""
         load_error = f"payload unreadable: {exc}"
     enabled = load_enabled(drive_root, name)
-    review = load_review_state(drive_root, name)
+    is_module_widget = (
+        manifest.is_extension()
+        and isinstance(manifest.ui_tab, dict)
+        and str(((manifest.ui_tab or {}).get("render") or {}).get("kind") or "") == "module"
+    )
+    review = load_review_state(
+        drive_root,
+        name,
+        skill_type=manifest.type,
+        is_module_widget=is_module_widget,
+    )
 
     # Phase 4 ships the extension loader (``ouroboros.extension_loader``),
     # so ``type: extension`` skills now go through the same review +

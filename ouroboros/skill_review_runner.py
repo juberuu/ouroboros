@@ -410,6 +410,8 @@ def _outcome_payload(
         "extension_action": extension_action,
         "extension_reason": extension_reason,
     }
+    if getattr(outcome, "convergence_hint", ""):
+        payload["convergence_hint"] = outcome.convergence_hint
     if job is not None:
         payload["job_id"] = job.id
         payload["job_status"] = job.status

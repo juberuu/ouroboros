@@ -132,6 +132,10 @@ If a core governance artifact cannot fit in the available context budget:
   operator and the model both know the context is incomplete.
 - A reviewer or agent operating without ARCHITECTURE.md MUST NOT be treated as
   operating with full context — findings may be incomplete.
+- Tools that return multi-model review findings (`repo_commit`, `review_skill`,
+  scope/advisory review helpers) MUST be listed in
+  `UNTRUNCATED_TOOL_RESULTS` or have an explicit per-tool limit; the default
+  15KB transport cap is not acceptable for review verdicts.
 
 ### Invariant: No "only if touched" gate for core artifacts
 

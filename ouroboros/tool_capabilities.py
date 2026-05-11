@@ -39,7 +39,7 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     # schedule_task, wait_for_task, get_task_result are available but not auto-loaded
     # Memory / identity
     "update_scratchpad", "update_identity",
-    "chat_history",
+    "chat_history", "recent_tasks",
     # Knowledge base
     "knowledge_read", "knowledge_write", "knowledge_list",
     # Web
@@ -74,7 +74,7 @@ META_TOOL_NAMES: frozenset[str] = frozenset({
 READ_ONLY_PARALLEL_TOOLS: frozenset[str] = frozenset({
     "repo_read", "repo_list",
     "data_read", "data_list",
-    "code_search",
+    "code_search", "recent_tasks",
     "web_search", "codebase_digest", "chat_history",
 })
 
@@ -97,6 +97,7 @@ UNTRUNCATED_TOOL_RESULTS: frozenset[str] = frozenset({
     "repo_write_commit",
     "multi_model_review",
     "advisory_pre_review",
+    "review_skill",
     "review_status",
 })
 
@@ -113,6 +114,7 @@ UNTRUNCATED_REPO_READ_PATHS: frozenset[str] = frozenset({
 TOOL_RESULT_LIMITS: dict[str, int] = {
     "repo_read": 80_000,
     "data_read": 80_000,
+    "recent_tasks": 80_000,
     "knowledge_read": 80_000,
     "run_shell": 80_000,
     "code_search": 80_000,

@@ -93,10 +93,11 @@ def test_skill_names_touched_by_trace_detects_data_skill_edits():
             {"tool": "data_write", "args": {"path": "skills/external/alpha/plugin.py"}},
             {"tool": "str_replace_editor", "args": {"path": "data/skills/external/beta/SKILL.md"}},
             {"tool": "claude_code_edit", "args": {"cwd": "skills/external/gamma"}},
+            {"tool": "data_write", "args": {"path": "SKILL.md", "bucket": "external", "skill_name": "delta"}},
         ]
     }
 
-    assert _skill_names_touched_by_trace(trace) == ["alpha", "beta", "gamma"]
+    assert _skill_names_touched_by_trace(trace) == ["alpha", "beta", "gamma", "delta"]
 
 
 def test_skill_finalization_message_blocks_unreviewed_self_authored_skill(tmp_path):

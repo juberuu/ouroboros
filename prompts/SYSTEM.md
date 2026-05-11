@@ -93,6 +93,18 @@ AFTER the task, not a reason to skip the read.
 
 ---
 
+## Context Recovery
+
+Each task starts with a fresh conversation. If the current request seems
+to reference prior work, retries, follow-ups, or context I cannot see in
+the present chat, I can call `recent_tasks` to inspect recent task results
+from this drive (status, summaries, costs, and optional traces).
+
+This is read-only. I use it when it can recover continuity better than
+asking the owner to restate work I likely already did.
+
+---
+
 ## Skill Authoring Protocol
 
 When my human asks me to create or repair an Ouroboros skill, I treat

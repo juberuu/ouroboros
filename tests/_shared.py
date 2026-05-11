@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sys
 import types
+from unittest.mock import MagicMock
 
 
 def clean_extension_runtime_state() -> None:
@@ -61,3 +62,20 @@ def ensure_claude_agent_sdk_mock() -> None:
     mock_sdk.ResultMessage = type("ResultMessage", (), {})
     mock_sdk.query = lambda **kw: None
     sys.modules["claude_agent_sdk"] = mock_sdk
+
+
+def make_safe_mock_ctx(tmp_path, *, repo_dir=None):
+    """Return a MagicMock ToolContext whose drive paths resolve to real dirs.
+
+    Several observability paths append to ``ctx.drive_logs() / "events.jsonl"``.
+    A bare MagicMock would stringify into a filename in the repo root.
+    """
+    ctx = MagicMock()
+    ctx.repo_dir = repo_dir if repo_dir is not None else tmp_path
+    ctx.drive_root = tmp_path
+    logs = tmp_path / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    ctx.drive_logs.return_value = logs
+    ctx.emit_progress_fn = lambda *a, **kw: None
+    ctx.task_id = "test-task"
+    return ctx

@@ -70,7 +70,14 @@ function statusBadge(status) {
         : status === 'fail' ? 'danger'
         : status === 'advisory' ? 'warn'
         : 'muted';
-    return `<span class="skills-badge skills-badge-${tone}">${escapeHtml(status)}</span>`;
+    const tooltip = {
+        pass: 'All checklist items pass.',
+        advisory_pass: 'Non-critical findings exist, but advisory enforcement allows execution.',
+        advisory: 'Non-critical findings exist and blocking enforcement prevents execution.',
+        fail: 'Critical review findings prevent execution.',
+        pending: 'Review has not produced a verdict yet.',
+    }[status] || 'Unknown or stale review state.';
+    return `<span class="skills-badge skills-badge-${tone}" title="${escapeHtml(tooltip)}">${escapeHtml(status)}</span>`;
 }
 
 function reviewReady(skill) {
@@ -358,6 +365,7 @@ function toggleLockReason(skill) {
     if (skill.review_status === 'fail') return 'review failed — repair the skill first';
     if (skill.review_stale) return 'review is stale — re-review the skill first';
     if (skill.review_status === 'pending') return 'review is still pending';
+    if (skill.review_status === 'advisory') return 'non-critical review findings block execution in blocking review mode';
     if (!reviewReady(skill)) return 'review has not produced an executable verdict yet';
     if (skill.load_error && !isMissingGrantLoadError(skill)) return 'load error — repair the skill first';
     return '';

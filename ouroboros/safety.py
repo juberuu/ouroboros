@@ -70,6 +70,7 @@ TOOL_POLICY: Dict[str, str] = {
     "git_status": POLICY_SKIP,
     "git_diff": POLICY_SKIP,
     "chat_history": POLICY_SKIP,
+    "recent_tasks": POLICY_SKIP,
     "knowledge_read": POLICY_SKIP,
     "knowledge_list": POLICY_SKIP,
     "web_search": POLICY_SKIP,

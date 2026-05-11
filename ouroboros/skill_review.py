@@ -34,8 +34,10 @@ from ouroboros.skill_loader import (
     review_status_allows_execution,
     save_review_state,
 )
-from ouroboros.tools.review_helpers import load_checklist_section
-from ouroboros.utils import utc_now_iso
+from ouroboros.skill_review_status import CRITICAL_ITEMS, aggregate_skill_review_status
+from ouroboros.tools.review_helpers import build_rebuttal_section, load_checklist_section
+from ouroboros.triad_review import emit_review_model_error_events, extract_json_array, parse_model_review_results
+from ouroboros.utils import append_jsonl, utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -181,22 +183,7 @@ _SKILL_REVIEW_ITEMS = (
     "bug_hunting",
     "completion_notification",
 )
-_CRITICAL_ITEMS = frozenset(
-    {
-        "manifest_schema",
-        "permissions_honesty",
-        "no_repo_mutation",
-        "path_confinement",
-        "env_allowlist",
-        "inject_chat_minimization",
-        "event_subscription_minimization",
-        "companion_process_safety",
-        "host_token_handling",
-        # ``extension_namespace_discipline`` is critical only for
-        # type: extension (checklist) — we surface it to the reviewer
-        # but do not hard-block non-extension skills on its FAIL.
-    }
-)
+_CRITICAL_ITEMS = CRITICAL_ITEMS
 
 
 @dataclass
@@ -211,6 +198,7 @@ class SkillReviewOutcome:
     prompt_chars: int = 0
     cost_usd: float = 0.0
     raw_result: str = ""
+    convergence_hint: str = ""
     error: str = ""
 
 
@@ -340,6 +328,158 @@ def _load_governance_artifact(
 _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
+def _review_history_path(drive_root: pathlib.Path, skill_name: str) -> pathlib.Path:
+    return drive_root / "state" / "skills" / skill_name / "review_history.jsonl"
+
+
+def _finding_signature(findings: List[Dict[str, Any]]) -> List[str]:
+    return sorted({
+        f"{f.get('item')}:{f.get('verdict')}:{f.get('severity')}"
+        for f in findings
+        if isinstance(f, dict) and str(f.get("verdict") or "").upper() == "FAIL"
+    })
+
+
+def _load_skill_review_history(drive_root: pathlib.Path, skill_name: str, limit: int = 3) -> List[Dict[str, Any]]:
+    path = _review_history_path(drive_root, skill_name)
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    out: List[Dict[str, Any]] = []
+    for line in lines[-limit:]:
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            out.append(data)
+    return out
+
+
+def _build_skill_review_history_section(history: List[Dict[str, Any]]) -> str:
+    if not history:
+        return ""
+    lines = ["\n## Previous skill review attempts (anti-thrashing context)\n"]
+    for idx, entry in enumerate(history[-3:], start=1):
+        failures = entry.get("failure_signature") or []
+        rendered = ", ".join(str(item) for item in failures) if failures else "(no FAIL findings)"
+        lines.append(
+            f"- Attempt {idx}: status={entry.get('status', '?')}, "
+            f"content_hash={entry.get('content_hash', '')[:12]}, failures={rendered}"
+        )
+    lines.append(
+        "\nIf the same finding repeats, either fix the underlying issue or use "
+        "review_rebuttal to explain why the finding is a false positive."
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _append_skill_review_history(
+    drive_root: pathlib.Path,
+    skill_name: str,
+    *,
+    status: str,
+    content_hash: str,
+    findings: List[Dict[str, Any]],
+    raw_actor_records: Optional[List[Dict[str, Any]]] = None,
+) -> None:
+    try:
+        payload: Dict[str, Any] = {
+            "ts": utc_now_iso(),
+            "status": status,
+            "content_hash": content_hash,
+            "failure_signature": _finding_signature(findings),
+        }
+        if raw_actor_records:
+            payload["raw_actor_records"] = list(raw_actor_records)
+        append_jsonl(_review_history_path(drive_root, skill_name), payload)
+    except Exception:
+        log.debug("skill review history append failed", exc_info=True)
+
+
+def _convergence_hint(history: List[Dict[str, Any]], findings: List[Dict[str, Any]]) -> str:
+    current = _finding_signature(findings)
+    if not current or len(history) < 2:
+        return ""
+    previous = [entry.get("failure_signature") or [] for entry in history[-2:]]
+    if all(sig == current for sig in previous):
+        return (
+            "Same skill review finding signature appeared across three attempts. "
+            "Fix the repeated issue, provide review_rebuttal if it is a false "
+            "positive, or ask the owner before spending another review round."
+        )
+    return ""
+
+
+def _is_module_widget_skill(skill: Any) -> bool:
+    return (
+        skill.manifest.is_extension()
+        and isinstance(skill.manifest.ui_tab, dict)
+        and str(((skill.manifest.ui_tab or {}).get("render") or {}).get("kind") or "") == "module"
+    )
+
+
+def _run_deterministic_preflight(
+    ctx: Any,
+    drive_root: pathlib.Path,
+    skill: Any,
+    content_hash: str,
+    *,
+    persist: bool,
+) -> Optional[SkillReviewOutcome]:
+    """Run cheap syntax/schema checks before spending tri-model tokens."""
+    preflight_raw = ""
+    try:
+        from ouroboros.tools.skill_preflight import _handle_skill_preflight
+        preflight_raw = _handle_skill_preflight(ctx, skill=skill.name)
+        preflight = json.loads(preflight_raw)
+    except Exception:
+        preflight = {"ok": True}
+    if not isinstance(preflight, dict) or preflight.get("ok", True):
+        return None
+    findings = [{
+        "item": "skill_preflight",
+        "verdict": "FAIL",
+        "severity": "critical",
+        "reason": _truncate_raw_result(json.dumps(preflight, ensure_ascii=False)),
+        "model": "deterministic_preflight",
+    }]
+    outcome = SkillReviewOutcome(
+        skill_name=skill.name,
+        status="fail",
+        findings=findings,
+        reviewer_models=["deterministic_preflight"],
+        content_hash=content_hash,
+        error="deterministic skill_preflight failed before LLM review",
+        raw_result=preflight_raw,
+    )
+    if persist:
+        save_review_state(
+            drive_root,
+            skill.name,
+            SkillReviewState(
+                status=outcome.status,
+                content_hash=content_hash,
+                findings=findings,
+                reviewer_models=outcome.reviewer_models,
+                timestamp=utc_now_iso(),
+                prompt_chars=0,
+                cost_usd=0.0,
+                raw_result=outcome.raw_result,
+                raw_actor_records=[],
+            ),
+        )
+        _append_skill_review_history(
+            drive_root,
+            skill.name,
+            status=outcome.status,
+            content_hash=content_hash,
+            findings=findings,
+        )
+    return outcome
+
+
 def _build_review_prompt(
     skill_name: str,
     skill_dir: pathlib.Path,
@@ -347,6 +487,8 @@ def _build_review_prompt(
     content_hash: str,
     file_pack: str,
     advisory_notes: str = "",
+    review_rebuttal: str = "",
+    review_history_section: str = "",
 ) -> str:
     try:
         checklist_section = load_checklist_section(_SKILL_CHECKLIST_SECTION)
@@ -424,6 +566,8 @@ contradicts the runtime's constitutional commitments.
 
 {file_pack}
 {advisory_section}
+{build_rebuttal_section(review_rebuttal)}
+{review_history_section}
 
 ## Output contract
 
@@ -531,69 +675,12 @@ def _extract_actor_findings(
     A top-level ``actor["verdict"] == "ERROR"`` means the provider
     returned a transport error — we skip those entirely.
     """
-    findings: List[Dict[str, Any]] = []
-    responsive: List[str] = []
-    required_items = set(_SKILL_REVIEW_ITEMS)
-    for idx, actor in enumerate(result_json.get("results") or []):
-        if not isinstance(actor, dict):
-            continue
-        if str(actor.get("verdict") or "").upper() == "ERROR":
-            continue
-        model = str(actor.get("model") or actor.get("request_model") or "").strip()
-        text = str(actor.get("text") or "")
-        if not text.strip():
-            continue
-        parsed_items = _parse_json_array(text)
-        actor_findings: List[Dict[str, Any]] = []
-        covered_items: set[str] = set()
-        for entry in parsed_items:
-            if not isinstance(entry, dict):
-                continue
-            item = str(entry.get("item") or "")
-            verdict = str(entry.get("verdict") or "").upper()
-            if not item or verdict not in ("PASS", "FAIL"):
-                # Ignore entries that do not meet the per-row contract.
-                continue
-            covered_items.add(item)
-            actor_findings.append(
-                {
-                    "item": item,
-                    "verdict": verdict,
-                    "severity": str(entry.get("severity") or "advisory").lower(),
-                    "reason": str(entry.get("reason") or "").strip(),
-                    "model": model,
-                }
-            )
-        # Reject partial responses: reviewer must cover every checklist
-        # item. A response that only covers one item could otherwise pass
-        # the quorum gate with zero observed FAILs on the other items.
-        if not required_items.issubset(covered_items):
-            continue
-        findings.extend(actor_findings)
-        responsive.append(f"{model or 'reviewer'}#{idx + 1}")
-    return findings, responsive
+    parsed = parse_model_review_results(result_json, required_items=_SKILL_REVIEW_ITEMS)
+    return parsed.findings, parsed.responsive_models
 
 
 def _parse_json_array(content: str) -> List[Any]:
-    text = content.strip()
-    if "```" in text:
-        # Strip ``` fences the models sometimes add.
-        parts = text.split("```")
-        for chunk in parts:
-            chunk = chunk.strip()
-            if chunk.startswith("json"):
-                chunk = chunk[4:].strip()
-            if chunk.startswith("["):
-                text = chunk
-                break
-    start = text.find("[")
-    end = text.rfind("]")
-    if start == -1 or end == -1 or end <= start:
-        return []
-    try:
-        parsed = json.loads(text[start : end + 1])
-    except json.JSONDecodeError:
-        return []
+    parsed = extract_json_array(content)
     return parsed if isinstance(parsed, list) else []
 
 
@@ -602,6 +689,7 @@ def _aggregate_status(
     skill_type: str,
     *,
     is_module_widget: bool = False,
+    enforcement: Optional[str] = None,
 ) -> str:
     """Collapse per-reviewer findings into a single status.
 
@@ -619,34 +707,12 @@ def _aggregate_status(
     failure, all actors errored), the caller surfaces that as ``error``;
     this helper is only invoked when we have at least one finding.
     """
-    has_critical_fail = False
-    has_advisory_fail = False
-    is_extension = skill_type == "extension"
-    for finding in findings:
-        verdict = finding.get("verdict") == "FAIL"
-        if not verdict:
-            continue
-        item = finding.get("item")
-        item_is_critical = (
-            item in _CRITICAL_ITEMS
-            or (item == "extension_namespace_discipline" and is_extension)
-            or (item == "widget_module_safety" and is_extension)
-        )
-        if item_is_critical:
-            has_critical_fail = True
-        else:
-            has_advisory_fail = True
-    if has_critical_fail:
-        return "fail"
-    if has_advisory_fail:
-        try:
-            from ouroboros.config import get_review_enforcement
-            if get_review_enforcement() == "advisory":
-                return "advisory_pass"
-        except Exception:
-            pass
-        return "advisory"
-    return "pass"
+    return aggregate_skill_review_status(
+        findings,
+        skill_type,
+        is_module_widget=is_module_widget,
+        enforcement=enforcement,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -659,6 +725,7 @@ def review_skill(
     skill_name: str,
     *,
     persist: bool = True,
+    review_rebuttal: str = "",
 ) -> SkillReviewOutcome:
     """Run tri-model review on one skill and optionally persist the verdict.
 
@@ -721,6 +788,7 @@ def review_skill(
         ensure_ascii=False,
         indent=2,
     )
+    history = _load_skill_review_history(drive_root, skill.name)
     try:
         file_pack = _build_skill_file_pack(
             skill.skill_dir,
@@ -778,6 +846,15 @@ def review_skill(
                 "file before re-running review_skill."
             ),
         )
+    preflight_outcome = _run_deterministic_preflight(
+        ctx,
+        drive_root,
+        skill,
+        content_hash,
+        persist=persist,
+    )
+    if preflight_outcome is not None:
+        return preflight_outcome
     advisory_notes = _run_skill_advisory_pre_review(
         ctx,
         skill_name=skill.name,
@@ -790,6 +867,8 @@ def review_skill(
         content_hash=content_hash,
         file_pack=file_pack,
         advisory_notes=advisory_notes,
+        review_rebuttal=review_rebuttal,
+        review_history_section=_build_skill_review_history_section(history),
     )
 
     models = list(get_review_models())
@@ -835,9 +914,11 @@ def review_skill(
             error=f"review service error: {result_json['error']}",
         )
 
-    findings, responded_models = _extract_actor_findings(result_json)
+    parsed_review = parse_model_review_results(result_json, required_items=_SKILL_REVIEW_ITEMS)
+    emit_review_model_error_events(ctx, parsed_review, source="skill_review", skill_name=skill.name)
+    findings, responded_models = parsed_review.findings, parsed_review.responsive_models
     if len(responded_models) < 2:
-        return SkillReviewOutcome(
+        outcome = SkillReviewOutcome(
             skill_name=skill.name,
             status="pending",
             findings=findings,
@@ -849,16 +930,21 @@ def review_skill(
             ),
             raw_result=_truncate_raw_result(result_json_text),
         )
+        if persist:
+            _append_skill_review_history(
+                drive_root,
+                skill.name,
+                status=outcome.status,
+                content_hash=content_hash,
+                findings=findings,
+                raw_actor_records=[record.to_dict() for record in parsed_review.actor_records],
+            )
+        return outcome
 
-    is_module_widget = (
-        skill.manifest.is_extension()
-        and isinstance(skill.manifest.ui_tab, dict)
-        and str(((skill.manifest.ui_tab or {}).get("render") or {}).get("kind") or "") == "module"
-    )
     status = _aggregate_status(
         findings,
         skill_type=skill.manifest.type,
-        is_module_widget=is_module_widget,
+        is_module_widget=_is_module_widget_skill(skill),
     )
     outcome = SkillReviewOutcome(
         skill_name=skill.name,
@@ -868,6 +954,7 @@ def review_skill(
         content_hash=content_hash,
         prompt_chars=len(prompt),
         raw_result=_truncate_raw_result(result_json_text),
+        convergence_hint=_convergence_hint(history, findings),
     )
 
     if persist:
@@ -898,7 +985,15 @@ def review_skill(
                 prompt_chars=outcome.prompt_chars,
                 cost_usd=outcome.cost_usd,
                 raw_result=outcome.raw_result,
+                raw_actor_records=[record.to_dict() for record in parsed_review.actor_records],
             ),
+        )
+        _append_skill_review_history(
+            drive_root,
+            skill.name,
+            status=outcome.status,
+            content_hash=content_hash,
+            findings=findings,
         )
         if review_status_allows_execution(outcome.status):
             skill.review = SkillReviewState(
@@ -910,6 +1005,7 @@ def review_skill(
                 prompt_chars=outcome.prompt_chars,
                 cost_usd=outcome.cost_usd,
                 raw_result=outcome.raw_result,
+                raw_actor_records=[record.to_dict() for record in parsed_review.actor_records],
             )
             auto_grant_if_enabled(drive_root, skill)
 

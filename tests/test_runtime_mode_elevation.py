@@ -353,7 +353,7 @@ def test_str_replace_blocks_self_authored_marker(tmp_path, monkeypatch):
     assert "self_authored" in marker.read_text(encoding="utf-8")
 
 
-@pytest.mark.parametrize("filename", ["review.json", "enabled.json", "clawhub.json"])
+@pytest.mark.parametrize("filename", ["review.json", "review_history.jsonl", "enabled.json", "clawhub.json"])
 def test_data_write_blocks_skill_trust_state_json(filename, tmp_path, monkeypatch):
     from ouroboros import config as cfg
     from ouroboros.tools.core import _data_write
@@ -370,6 +370,23 @@ def test_data_write_blocks_skill_trust_state_json(filename, tmp_path, monkeypatc
     )
     assert "DATA_WRITE_BLOCKED" in result
     assert not (drive_root / "state" / "skills" / "weather" / filename).exists()
+
+
+def test_data_read_allows_skill_review_json(tmp_path, monkeypatch):
+    from ouroboros import config as cfg
+    from ouroboros.tools.core import _data_read
+
+    drive_root = tmp_path / "data"
+    review_path = drive_root / "state" / "skills" / "weather" / "review.json"
+    review_path.parent.mkdir(parents=True)
+    review_path.write_text(json.dumps({"status": "pass", "findings": []}), encoding="utf-8")
+    monkeypatch.setattr(cfg, "DATA_DIR", drive_root, raising=True)
+
+    ctx = _make_drive_ctx(tmp_path)
+    result = _data_read(ctx, "state/skills/weather/review.json")
+
+    assert "DATA_READ_BLOCKED" not in result
+    assert '"status": "pass"' in result
 
 
 def test_data_write_blocks_skill_grants_case_variants(tmp_path, monkeypatch):
@@ -1159,7 +1176,7 @@ def test_files_api_write_blocks_settings_json(isolated_settings, monkeypatch):
         )
 
 
-@pytest.mark.parametrize("filename", ["grants.json", "review.json", "enabled.json", "clawhub.json"])
+@pytest.mark.parametrize("filename", ["grants.json", "review.json", "review_history.jsonl", "enabled.json", "clawhub.json"])
 def test_files_api_owner_only_helper_blocks_skill_state_case_variants(filename, tmp_path, monkeypatch):
     from ouroboros import config as cfg
     from ouroboros import file_browser_api as fba_mod
@@ -1192,7 +1209,7 @@ def test_files_api_owner_only_helper_blocks_symlinked_skill_state_dir(tmp_path, 
     assert fba_mod._is_owner_only_file(backing_target) is True
 
 
-@pytest.mark.parametrize("filename", ["grants.json", "review.json", "enabled.json", "Review.JSON"])
+@pytest.mark.parametrize("filename", ["grants.json", "review.json", "review_history.jsonl", "enabled.json", "Review.JSON"])
 def test_run_shell_blocks_obfuscated_skill_owner_state_write(filename, tmp_path, monkeypatch):
     from ouroboros.tools.registry import ToolRegistry
 

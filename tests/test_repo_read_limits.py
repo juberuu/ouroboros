@@ -147,6 +147,7 @@ def test_repo_commit_results_never_truncated():
     assert _truncate_tool_result(big, "repo_commit") == big
     assert _truncate_tool_result(big, "repo_write_commit") == big
     assert _truncate_tool_result(big, "multi_model_review") == big
+    assert _truncate_tool_result(big, "review_skill") == big
 
 
 def test_self_check_returns_bool_and_interval_15():

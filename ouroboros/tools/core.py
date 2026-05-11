@@ -29,6 +29,7 @@ _SKILL_OWNER_STATE_FILENAMES = frozenset({
     "enabled.json",
     "grants.json",
     "review.json",
+    "review_history.jsonl",
     "clawhub.json",
     "self_authored.json",
     "auth_token.json",
@@ -339,7 +340,10 @@ def _data_read(ctx: ToolContext, path: str, max_lines: int = 2000, start_line: i
             return f"⚠️ DATA_READ_BLOCKED: {e}"
     else:
         target = ctx.drive_path(norm)
-    if _is_skill_owner_state_target(target, pathlib.Path(ctx.drive_root)):
+    if (
+        _is_skill_owner_state_target(target, pathlib.Path(ctx.drive_root))
+        and target.name.lower() != "review.json"
+    ):
         return "DATA_READ_BLOCKED: skill owner state is not readable through generic data tools."
     try:
         content = read_text(target)

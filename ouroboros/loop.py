@@ -85,6 +85,22 @@ def _provider_failure_hint(accumulated_usage: Dict[str, Any]) -> str:
     return f" Last provider error: {detail}"
 
 
+def _provider_recovery_hint(accumulated_usage: Dict[str, Any]) -> str:
+    """Explain whether retrying later is likely to help."""
+    detail = str(accumulated_usage.get("_last_llm_error") or "").lower()
+    if "prefill" in detail or "conversation must end with a user message" in detail:
+        return (
+            " This looks like a client-side transcript-shape error, not a "
+            "provider outage; retrying the same input will not help."
+        )
+    if "provider returned incomplete response" in detail or "finish_reason=null" in detail:
+        return (
+            " The provider returned incomplete responses repeatedly; this may "
+            "be transient, but it can also indicate malformed client input."
+        )
+    return " If background consciousness is running, it will retry when the provider recovers."
+
+
 def _handle_text_response(
     content: Optional[str],
     llm_trace: Dict[str, Any],
@@ -105,6 +121,12 @@ def _skill_names_touched_by_trace(llm_trace: Dict[str, Any]) -> List[str]:
         if tool not in {"data_write", "claude_code_edit", "str_replace_editor"}:
             continue
         args = call.get("args") if isinstance(call.get("args"), dict) else {}
+        bucket = str(args.get("bucket") or "").strip().lower()
+        skill_name = str(args.get("skill_name") or "").strip()
+        if bucket in {"external", "clawhub", "ouroboroshub"} and skill_name:
+            if skill_name not in names:
+                names.append(skill_name)
+            continue
         candidates = [str(args.get("cwd") or "")] if tool == "claude_code_edit" else [str(args.get("path") or "")]
         for raw in candidates:
             norm = raw.replace("\\", "/").strip().lstrip("/")
@@ -284,6 +306,25 @@ def _extract_plain_text_from_content(content: Any) -> str:
     return str(content) if content is not None else ""
 
 
+def _append_or_merge_user_message(messages: List[Dict[str, Any]], text: str) -> None:
+    """Append a user message without creating consecutive user turns."""
+    if messages and messages[-1].get("role") == "user":
+        prior = messages[-1].get("content")
+        if isinstance(prior, list):
+            messages[-1] = {
+                "role": "user",
+                "content": list(prior) + [{"type": "text", "text": "\n\n---\n\n" + text}],
+            }
+            return
+        prior_text = prior if isinstance(prior, str) else str(prior or "")
+        messages[-1] = {
+            "role": "user",
+            "content": (prior_text.rstrip() + "\n\n---\n\n" + text) if prior_text else text,
+        }
+        return
+    messages.append({"role": "user", "content": text})
+
+
 def _maybe_inject_self_check(
     round_idx: int,
     max_rounds: int,
@@ -361,21 +402,7 @@ def _maybe_inject_self_check(
     # image data and cache markers silently, breaking the implicit message
     # format contract with `ouroboros/context.py::build_user_content` and
     # `ouroboros/llm.py::_anthropic_blocks_from_content`.
-    if messages and messages[-1].get("role") == "user":
-        prior = messages[-1].get("content")
-        if isinstance(prior, list):
-            messages[-1] = {
-                "role": "user",
-                "content": list(prior) + [{"type": "text", "text": "\n\n---\n\n" + reminder}],
-            }
-        else:
-            prior_text = prior if isinstance(prior, str) else str(prior or "")
-            messages[-1] = {
-                "role": "user",
-                "content": (prior_text.rstrip() + "\n\n---\n\n" + reminder) if prior_text else reminder,
-            }
-    else:
-        messages.append({"role": "user", "content": reminder})
+    _append_or_merge_user_message(messages, reminder)
     emit_progress(
         f"Checkpoint {checkpoint_num} at round {round_idx}: "
         f"~{ctx_tokens} tokens, ${task_cost:.2f} spent"
@@ -730,7 +757,7 @@ def run_llm_loop(
                     return (
                         f"⚠️ Failed to get a response from model {active_model}{local_tag} after {max_retries} attempts. "
                         f"No viable fallback model configured.{_provider_failure_hint(accumulated_usage)} "
-                        f"If background consciousness is running, it will retry when the provider recovers."
+                        f"{_provider_recovery_hint(accumulated_usage)}"
                     ), accumulated_usage, llm_trace
 
                 fallback_use_local = os.environ.get("USE_LOCAL_FALLBACK", "").lower() in ("true", "1")
@@ -747,7 +774,7 @@ def run_llm_loop(
                     return (
                         f"⚠️ All models are down. Primary ({active_model}{primary_tag}) and fallback ({fallback_model}{fallback_tag}) "
                         f"both returned no response. Stopping.{_provider_failure_hint(accumulated_usage)} "
-                        f"Background consciousness will attempt recovery when the provider is back."
+                        f"{_provider_recovery_hint(accumulated_usage)}"
                     ), accumulated_usage, llm_trace
 
             tool_calls = msg.get("tool_calls") or []
@@ -756,8 +783,9 @@ def run_llm_loop(
                 finalization_msg = _skill_finalization_message(drive_root, llm_trace) if drive_root is not None else ""
                 if finalization_msg and not getattr(tools._ctx, "_skill_finalization_injected", False):
                     tools._ctx._skill_finalization_injected = True
-                    messages.append({"role": "assistant", "content": content or ""})
-                    messages.append({"role": "system", "content": finalization_msg})
+                    if content and content.strip():
+                        messages.append({"role": "assistant", "content": content})
+                    _append_or_merge_user_message(messages, f"[SYSTEM REMINDER]\n{finalization_msg}")
                     emit_progress(finalization_msg)
                     llm_trace["reasoning_notes"].append(finalization_msg)
                     continue

@@ -22,9 +22,11 @@ from unittest.mock import MagicMock, patch
 # ---------------------------------------------------------------------------
 
 def _make_ctx(tmp_path: pathlib.Path | None = None) -> MagicMock:
+    root = tmp_path or pathlib.Path(".")
     ctx = MagicMock()
-    ctx.repo_dir = tmp_path or pathlib.Path(".")
-    ctx.drive_root = pathlib.Path(".")
+    ctx.repo_dir = root
+    ctx.drive_root = root
+    ctx.drive_logs.return_value = root / "logs"
     ctx.emit_progress_fn = MagicMock()
     return ctx
 
