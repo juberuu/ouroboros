@@ -82,6 +82,34 @@ _PROVIDER_MATRIX = [
     _PROVIDER_MATRIX,
     ids=[entry[0] for entry in _PROVIDER_MATRIX],
 )
+def _skip_on_provider_environmental_error(provider_id: str, exc: BaseException) -> None:
+    """If exc is a known environmental (non-code) provider error, skip the
+    test instead of failing.
+
+    Includes:
+    - ``credit balance is too low`` — Anthropic billing
+    - ``insufficient_quota`` — OpenAI billing
+    - ``rate_limit_exceeded`` / 429 — transient rate limits
+
+    These are CI-environment problems, not regressions in routing code.
+    The full body is still printed to stderr for postmortem.
+    """
+    import sys as _sys
+    resp = getattr(exc, "response", None)
+    body = ""
+    if resp is not None:
+        body = resp.text or ""
+        print(f"[{provider_id}] HTTP {resp.status_code} body: {body[:500]}", file=_sys.stderr)
+    lowered = body.lower()
+    if (
+        "credit balance is too low" in lowered
+        or "insufficient_quota" in lowered
+        or "rate_limit" in lowered
+        or (resp is not None and resp.status_code == 429)
+    ):
+        pytest.skip(f"[{provider_id}] environmental provider error (not a routing regression): {body[:200]}")
+
+
 def test_provider_basic_chat(provider_id, env_key, model, expected_provider):
     """Verify each provider responds to a minimal chat request.
 
@@ -89,6 +117,11 @@ def test_provider_basic_chat(provider_id, env_key, model, expected_provider):
     because some direct provider model variants cap output below the
     default and reject the request with HTTP 400. This is a routing smoke;
     a low token budget is sufficient for "Respond with exactly: OK".
+
+    Known environmental (non-code) provider errors — empty Anthropic
+    credit balance, OpenAI insufficient_quota, 429 rate limits — are
+    surfaced as test skips, not failures (they indicate CI account
+    state, not a regression in this repo).
     """
     if not os.environ.get(env_key):
         pytest.skip(f"{env_key} not set")
@@ -100,13 +133,7 @@ def test_provider_basic_chat(provider_id, env_key, model, expected_provider):
             max_tokens=1024,
         )
     except Exception as exc:  # noqa: BLE001
-        # Surface API error body for postmortem (CI doesn't capture it
-        # otherwise — `requests.raise_for_status()` drops the response
-        # text). Re-raise after printing.
-        import sys as _sys
-        resp = getattr(exc, "response", None)
-        if resp is not None:
-            print(f"[{provider_id}] HTTP {resp.status_code} body: {resp.text[:500]}", file=_sys.stderr)
+        _skip_on_provider_environmental_error(provider_id, exc)
         raise
     _assert_basic_response(result, expected_provider=expected_provider)
 
@@ -142,7 +169,11 @@ _ISOLATION_MATRIX = [
     ids=[entry[0] for entry in _ISOLATION_MATRIX],
 )
 def test_provider_isolation(provider_id, env_key, model, monkeypatch):
-    """Each provider works when it is the only configured provider."""
+    """Each provider works when it is the only configured provider.
+
+    Environmental provider errors (empty credit, quota, rate limits)
+    skip via _skip_on_provider_environmental_error rather than fail.
+    """
     if not os.environ.get(env_key):
         pytest.skip(f"{env_key} not set")
     for key in _COMPETING_KEYS:
@@ -156,9 +187,6 @@ def test_provider_isolation(provider_id, env_key, model, monkeypatch):
             max_tokens=1024,
         )
     except Exception as exc:  # noqa: BLE001
-        import sys as _sys
-        resp = getattr(exc, "response", None)
-        if resp is not None:
-            print(f"[{provider_id}] HTTP {resp.status_code} body: {resp.text[:500]}", file=_sys.stderr)
+        _skip_on_provider_environmental_error(provider_id, exc)
         raise
     _assert_basic_response(result)
