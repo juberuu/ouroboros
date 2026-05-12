@@ -1,4 +1,4 @@
-# Ouroboros v5.17.0-rc.5 — Architecture & Reference
+# Ouroboros v5.18.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -187,6 +187,7 @@ Dockerfile                    ← Docker image (web UI runtime)
 │   │           ├── enabled.json ← {"enabled": bool, "updated_at": iso_ts}
 │   │           ├── review.json  ← {"content_hash": str, "findings": [...], "reviewer_models": [...], "timestamp": iso_ts, "raw_actor_records": [...], ...}; for full PASS/FAIL finding sets, status is computed live on load from findings + current `OUROBOROS_REVIEW_ENFORCEMENT` (`status` may remain only on legacy/pending infrastructure states)
 │   │           ├── review_history.jsonl ← compact recent skill-review attempts (`status`, `content_hash`, failure signature) used for anti-thrashing/convergence context
+│   │           ├── accepted_rebuttals.json ← accepted skill-review rebuttals injected into later review prompts
 │   │           ├── deps.json    ← isolated dependency install fingerprint for skills with reviewed install specs
 │   │           ├── auth_token.json ← content-hash-bound Host Service token for reviewed live extensions
 │   │           └── __extension_imports/<uuid>/skill/  ← Phase 4 staged import tree for type:extension skills (created on load, removed on unload; see §13.1)
@@ -2201,6 +2202,7 @@ the skill checkout:
 ├── enabled.json             ← {"enabled": bool, "updated_at": iso_ts}
 ├── review.json              ← {"content_hash", "findings", "reviewer_models", "raw_actor_records", …}; status is live-computed for full finding sets
 ├── review_history.jsonl     ← compact review attempts for anti-thrashing/convergence context
+├── accepted_rebuttals.json  ← accepted rebuttals that future skill-review prompts treat as anti-thrashing evidence
 ├── grants.json              ← content-hash-bound owner grants for core settings keys
 ├── clawhub.json             ← marketplace provenance for ClawHub-installed skills
 └── __extension_imports/     ← Phase 4 staged import tree (type: extension skills only)
@@ -2210,7 +2212,8 @@ the skill checkout:
 The files above are the skill trust/control plane, not normal agent
 scratch data. Agent-write surfaces (`data_write`, Files API mutations,
 and `run_shell` post-execution owner-state restore) protect
-`enabled.json`, `review.json`, `grants.json`, and `clawhub.json`; payload
+`enabled.json`, `review.json`, `review_history.jsonl`,
+`accepted_rebuttals.json`, `grants.json`, and `clawhub.json`; payload
 repair happens under `data/skills/...` and must flow back through
 `review_skill`, Skills UI enablement, and the launcher grant bridge.
 `data_read` may read `review.json` because findings and raw actor records
@@ -2388,7 +2391,11 @@ extension module namespace.
   snapshot.
 - Skill review protects the external skills checkout. Its state lives
   in ``data/state/skills/<name>/review.json`` and is keyed by the
-  manifest + payload content hash.
+  manifest + payload content hash. Review lifecycle completion also writes
+  a full markdown render of parsed findings and non-responsive raw reviewer
+  outputs to ``logs/chat.jsonl`` as ``direction:"system"``,
+  ``type:"skill_review"`` so the foreground agent can see the expensive
+  review evidence without relying on progress-card summaries.
 
 The two surfaces share the model config (``OUROBOROS_REVIEW_MODELS``)
 and the ``_handle_multi_model_review`` plumbing but are otherwise

@@ -57,6 +57,7 @@ from ouroboros.skill_loader import (
     skill_review_gate,
 )
 from ouroboros.skill_review import review_skill as _review_skill_impl
+from ouroboros.tools.review_helpers import format_prompt_code_block
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import append_jsonl, utc_now_iso
 
@@ -566,6 +567,11 @@ def _handle_review_skill(
     skill_name = str(skill or "").strip()
     if not skill_name:
         return "⚠️ SKILL_REVIEW_ERROR: 'skill' argument is required."
+    from ouroboros.skill_review import (
+        _count_attempts_for_content,
+        _load_accepted_rebuttals,
+        render_skill_review_block,
+    )
     from ouroboros.skill_review_runner import run_skill_review_lifecycle_blocking
 
     def _review_with_optional_rebuttal(review_ctx: ToolContext, review_name: str):
@@ -583,7 +589,24 @@ def _handle_review_skill(
         source="tool",
         review_impl=_review_with_optional_rebuttal,
     )
-    return json.dumps(payload, ensure_ascii=False, indent=2)
+    drive_root = pathlib.Path(getattr(ctx, "drive_root", pathlib.Path.home() / "Ouroboros" / "data"))
+    content_hash = str(payload.get("content_hash") or "")
+    attempt_idx = _count_attempts_for_content(drive_root, skill_name, content_hash) if content_hash else 1
+    if attempt_idx <= 0:
+        attempt_idx = 1
+    accepted_rebuttals = _load_accepted_rebuttals(drive_root, skill_name)
+    markdown = render_skill_review_block(
+        payload,
+        attempt_idx=attempt_idx,
+        accepted_rebuttals=accepted_rebuttals,
+    )
+    raw_json = json.dumps(payload, ensure_ascii=False, indent=2)
+    return (
+        f"{markdown}\n\n"
+        "<details><summary>Raw review payload (JSON)</summary>\n\n"
+        f"{format_prompt_code_block(raw_json, 'json')}\n\n"
+        "</details>"
+    )
 
 
 def _skill_deps_exec_block(drive_root: pathlib.Path, loaded: Any) -> str:

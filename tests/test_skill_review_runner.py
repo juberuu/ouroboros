@@ -313,6 +313,147 @@ def test_self_authored_review_does_not_enable_when_deps_fail(tmp_path, monkeypat
     assert load_enabled(drive_root, "alpha") is False
 
 
+def test_lifecycle_finish_writes_full_markdown_to_chat_jsonl(tmp_path, monkeypatch):
+    """v5.18 Skill Review Feedback Overhaul: the on_finished callback writes a
+    full markdown render of the outcome to ``logs/chat.jsonl`` as
+    ``direction:"system"`` ``type:"skill_review"`` so the foreground agent
+    sees every reviewer's full findings, not just the 180-char headline.
+    """
+    import json
+
+    _reset_queue()
+    drive_root = tmp_path / "drive"
+    repo_dir = tmp_path / "repo"
+    skills_root = tmp_path / "skills"
+    drive_root.mkdir()
+    repo_dir.mkdir()
+    skills_root.mkdir()
+    skill_dir = _build_extension(skills_root, "alpha")
+    content_hash = compute_content_hash(skill_dir, manifest_entry="plugin.py")
+    ctx = SimpleNamespace(drive_root=drive_root, repo_dir=repo_dir, messages=[])
+
+    long_reason = (
+        "ffmpeg invocation in handler.py:42 spawns a subprocess that exits within "
+        "the request scope. Not a long-lived companion process — this finding "
+        "should be advisory at most, see CHECKLISTS.md item 11."
+    )
+    raw_failure = "partial reviewer output that failed JSON parsing"
+
+    def fake_review(_ctx, skill_name):
+        return SkillReviewOutcome(
+            skill_name=skill_name,
+            status="fail",
+            content_hash=content_hash,
+            reviewer_models=["openai/gpt-5.5", "google/gemini-3.1-pro-preview"],
+            findings=[
+                {
+                    "item": "companion_process_safety",
+                    "verdict": "FAIL",
+                    "severity": "critical",
+                    "reason": long_reason,
+                    "model": "openai/gpt-5.5",
+                },
+                {
+                    "item": "companion_process_safety",
+                    "verdict": "PASS",
+                    "severity": "critical",
+                    "reason": "Transient subprocess in handler scope.",
+                    "model": "google/gemini-3.1-pro-preview",
+                },
+            ],
+            raw_actor_records=[{
+                "model_id": "anthropic/claude-opus-4.6",
+                "status": "parse_failure",
+                "raw_text": raw_failure,
+            }],
+            error="",
+        )
+
+    monkeypatch.setattr("supervisor.message_bus.send_with_budget", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "ouroboros.skill_review_runner._reconcile_deps_after_pass_review",
+        lambda *_a, **_k: ("not_required", ""),
+    )
+    monkeypatch.setattr(
+        "ouroboros.skill_review_runner._reconcile_extension_payload",
+        lambda *_a, **_k: ("noop", "review_failed"),
+    )
+
+    run_skill_review_lifecycle_blocking(
+        ctx,
+        "alpha",
+        source="test",
+        review_impl=fake_review,
+        repo_path=str(skills_root),
+    )
+
+    chat_path = drive_root / "logs" / "chat.jsonl"
+    assert chat_path.exists(), "Expected chat.jsonl to be created on lifecycle finish"
+    lines = [line for line in chat_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    skill_rows = [
+        json.loads(line) for line in lines
+        if json.loads(line).get("type") == "skill_review"
+    ]
+    assert len(skill_rows) == 1
+    row = skill_rows[0]
+    assert row["direction"] == "system"
+    assert row["skill"] == "alpha"
+    assert row["status"] == "fail"
+    assert row["attempt"] >= 1
+    # Full markdown — no per-row truncation; the long reason must appear verbatim.
+    assert long_reason in row["text"]
+    assert raw_failure in row["text"]
+    assert "Reviewer: openai/gpt-5.5" in row["text"]
+    assert "Reviewer: google/gemini-3.1-pro-preview" in row["text"]
+
+
+def test_lifecycle_finish_writes_raw_only_review_to_chat_jsonl(tmp_path, monkeypatch):
+    import json
+
+    _reset_queue()
+    drive_root = tmp_path / "drive"
+    repo_dir = tmp_path / "repo"
+    skills_root = tmp_path / "skills"
+    drive_root.mkdir()
+    repo_dir.mkdir()
+    skills_root.mkdir()
+    skill_dir = _build_extension(skills_root, "alpha")
+    content_hash = compute_content_hash(skill_dir, manifest_entry="plugin.py")
+    ctx = SimpleNamespace(drive_root=drive_root, repo_dir=repo_dir, messages=[])
+    raw_text = "raw reviewer text from a parse failure"
+
+    def fake_review(_ctx, skill_name):
+        return SkillReviewOutcome(
+            skill_name=skill_name,
+            status="pending",
+            content_hash=content_hash,
+            reviewer_models=["fake/reviewer"],
+            findings=[],
+            raw_actor_records=[{
+                "model_id": "fake/reviewer",
+                "status": "parse_failure",
+                "raw_text": raw_text,
+            }],
+            error="quorum failure",
+        )
+
+    monkeypatch.setattr("supervisor.message_bus.send_with_budget", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "ouroboros.skill_review_runner._reconcile_extension_payload",
+        lambda *_a, **_k: ("noop", "review_pending"),
+    )
+    run_skill_review_lifecycle_blocking(
+        ctx, "alpha", source="test", review_impl=fake_review, repo_path=str(skills_root),
+    )
+
+    rows = [
+        json.loads(line)
+        for line in (drive_root / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[-1]["type"] == "skill_review"
+    assert raw_text in rows[-1]["text"]
+
+
 def test_self_authored_review_requires_configured_requested_keys(tmp_path, monkeypatch):
     _reset_queue()
     drive_root = tmp_path / "drive"

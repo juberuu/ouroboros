@@ -1001,7 +1001,10 @@ def test_heal_review_does_not_reconcile_live_extension(tmp_path, monkeypatch):
     from ouroboros import extension_loader
     monkeypatch.setattr(extension_loader, "reconcile_extension", lambda *a, **kw: calls.append(a) or {"action": "extension_loaded"})
 
-    result = json.loads(skill_exec_mod._handle_review_skill(ctx, skill="alpha"))
+    from ouroboros.skill_review import extract_review_payload_from_block
+    result = extract_review_payload_from_block(
+        skill_exec_mod._handle_review_skill(ctx, skill="alpha")
+    )
 
     assert calls == []
     assert result["extension_reason"] == "heal_review_only"
@@ -1036,7 +1039,10 @@ def test_review_skill_tool_records_lifecycle_job_state_and_events(tmp_path, monk
         ),
     )
 
-    result = json.loads(skill_exec_mod._handle_review_skill(ctx, skill="alpha"))
+    from ouroboros.skill_review import extract_review_payload_from_block
+    result = extract_review_payload_from_block(
+        skill_exec_mod._handle_review_skill(ctx, skill="alpha")
+    )
 
     assert result["status"] == "pass"
     assert result["deps_status"] == "not_required"
@@ -1462,8 +1468,11 @@ def test_review_skill_reconciles_live_extension_after_review(tmp_path, monkeypat
             error="",
         )
 
+    from ouroboros.skill_review import extract_review_payload_from_block
     with patch.object(skill_exec_mod, "_review_skill_impl", side_effect=_fake_review):
-        result = json.loads(skill_exec_mod._handle_review_skill(ctx, skill="ext_reviewed"))
+        result = extract_review_payload_from_block(
+            skill_exec_mod._handle_review_skill(ctx, skill="ext_reviewed")
+        )
     assert result["extension_action"] == "extension_loaded"
     tool = extension_loader.get_tool(extension_loader.extension_surface_name("ext_reviewed", "t"))
     assert tool is not None

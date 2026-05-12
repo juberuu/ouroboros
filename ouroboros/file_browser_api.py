@@ -39,6 +39,7 @@ _SKILL_OWNER_STATE_FILENAMES = frozenset({
     "grants.json",
     "review.json",
     "review_history.jsonl",
+    "accepted_rebuttals.json",
     "clawhub.json",
     "deps.json",
     "self_authored.json",

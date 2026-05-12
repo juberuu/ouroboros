@@ -55,6 +55,10 @@ def _events_path(drive_root: pathlib.Path) -> pathlib.Path:
     return pathlib.Path(drive_root) / "logs" / "events.jsonl"
 
 
+def _chat_jsonl_path(drive_root: pathlib.Path) -> pathlib.Path:
+    return pathlib.Path(drive_root) / "logs" / "chat.jsonl"
+
+
 def _read_review_job(path: pathlib.Path) -> Dict[str, Any]:
     return read_json_dict(path) or {}
 
@@ -402,6 +406,7 @@ def _outcome_payload(
         "content_hash": outcome.content_hash,
         "reviewer_models": outcome.reviewer_models,
         "findings": outcome.findings,
+        "raw_actor_records": list(getattr(outcome, "raw_actor_records", []) or []),
         "error": outcome.error,
         "review_gate": skill_review_gate(outcome.status),
         "executable_review": skill_review_gate(outcome.status)["executable_review"],
@@ -554,6 +559,54 @@ def _on_finished(
                 "error": error or deps_error,
             },
         )
+
+        # Full review markdown → chat.jsonl as direction:"system", type:"skill_review".
+        # This is the foreground-agent-visible artifact (summarize_chat does not
+        # truncate per row, unlike the lifecycle progress card's 180-char headline).
+        # Pure infrastructure aborts emit only events.jsonl, but reviewer
+        # parse/partial failures still carry raw_actor_records and must be
+        # foreground-visible.
+        has_review_evidence = bool(
+            result is not None and (
+                getattr(result, "findings", None)
+                or getattr(result, "raw_actor_records", None)
+            )
+        )
+        if has_review_evidence:
+            try:
+                from ouroboros.skill_review import (
+                    _count_attempts_for_content,
+                    _load_accepted_rebuttals,
+                    render_skill_review_block,
+                )
+                effective_hash = payload.get("content_hash", "") or content_hash
+                attempt_idx = _count_attempts_for_content(drive_root, skill_name, effective_hash)
+                if attempt_idx <= 0:
+                    attempt_idx = 1
+                accepted_rebuttals = _load_accepted_rebuttals(drive_root, skill_name)
+                markdown = render_skill_review_block(
+                    result,
+                    attempt_idx=attempt_idx,
+                    accepted_rebuttals=accepted_rebuttals,
+                )
+                append_jsonl(
+                    _chat_jsonl_path(drive_root),
+                    {
+                        "ts": now,
+                        "direction": "system",
+                        "type": "skill_review",
+                        "task_id": "",
+                        "skill": skill_name,
+                        "status": review_status or state_status,
+                        "content_hash": effective_hash,
+                        "job_id": job.id,
+                        "attempt": attempt_idx,
+                        "text": markdown,
+                    },
+                )
+            except Exception:
+                # Best-effort: failure to render must not break the lifecycle.
+                pass
 
     return _callback
 

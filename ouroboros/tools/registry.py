@@ -283,7 +283,10 @@ _HEAL_PROTECTED_PAYLOAD_FILENAMES = frozenset({
 })
 
 
-_SKILL_OWNER_STATE_STEMS = ("grants", "review", "review_history", "enabled", "clawhub", "deps", "self_authored", "auth_token")
+_SKILL_OWNER_STATE_STEMS = (
+    "grants", "review", "review_history", "accepted_rebuttals",
+    "enabled", "clawhub", "deps", "self_authored", "auth_token",
+)
 _DETACHED_PROCESS_MARKERS = (
     "start_new_session",
     "new_session",
@@ -892,7 +895,7 @@ class ToolRegistry:
         root = pathlib.Path(self._ctx.drive_root) / "state" / "skills"
         if not root.is_dir():
             return out
-        protected_skill_state = {"grants.json", "review.json", "review_history.jsonl", "enabled.json", "clawhub.json", "deps.json", "self_authored.json", "auth_token.json"}
+        protected_skill_state = {"grants.json", "review.json", "review_history.jsonl", "accepted_rebuttals.json", "enabled.json", "clawhub.json", "deps.json", "self_authored.json", "auth_token.json"}
         for path in root.glob("*/*"):
             if path.name.lower() not in protected_skill_state:
                 continue
@@ -907,7 +910,7 @@ class ToolRegistry:
         root = pathlib.Path(self._ctx.drive_root) / "state" / "skills"
         current = set()
         if root.is_dir():
-            protected_skill_state = {"grants.json", "review.json", "review_history.jsonl", "enabled.json", "clawhub.json", "deps.json", "self_authored.json", "auth_token.json"}
+            protected_skill_state = {"grants.json", "review.json", "review_history.jsonl", "accepted_rebuttals.json", "enabled.json", "clawhub.json", "deps.json", "self_authored.json", "auth_token.json"}
             current.update(
                 path for path in root.glob("*/*")
                 if path.name.lower() in protected_skill_state

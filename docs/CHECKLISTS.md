@@ -385,7 +385,7 @@ total). Each entry carries `item`, `verdict` (`PASS`/`FAIL`), `severity`
 | 8 | widget_module_safety | **v5.7.0+. ``kind: "module"`` widgets only.** Does the extension-supplied ``widget.js`` avoid touching ``document.cookie``, ``localStorage``, ``sessionStorage``, ``window.parent`` data, or ``fetch``/``XMLHttpRequest`` URLs OUTSIDE ``/api/extensions/<skill>/``? The host fetches reviewed ``widget.js`` through ``GET /api/extensions/<skill>/module/<entry>``, embeds the source into a sandboxed ``<iframe srcdoc sandbox="allow-scripts">`` with no ``allow-same-origin``, and injects a parent-mediated ``fetch`` bridge that rejects paths outside the owning skill route prefix. Reviewers must still confirm at the source level that the script is NOT trying to escape the sandbox via arbitrary ``postMessage`` protocols, opaque-origin storage probes, or unauthorised cross-origin fetches. Acceptable interactions: ``fetch('/api/extensions/<skill>/...')`` (through the host bridge), ``window.OuroborosWidget.fetch('/api/extensions/<skill>/...')``, and host-supplied data attributes. Mark non-module widgets and non-extension skills PASS with reason "Not applicable". | critical (when kind=module) |
 | 9 | inject_chat_minimization | Does any use of the `inject_chat` permission have a narrow, user-facing transport purpose? The Host Service enforces token auth, skill-source attribution, slash-command rejection, rate limits, and in-flight limits; reviewers must not claim reserved slash commands would execute when that host guard is present. A skill that accepts external inbound traffic must still show local defense-in-depth: reject owner-like slash-command-shaped input before injection and rate-limit or backpressure traffic before it piles up. Missing local defense-in-depth is a concrete FAIL for network transports; attempting to inject `/panic`, `/restart`, `/review`, `/evolve`, `/bg`, `/status`, or owner-impersonating instructions is always a concrete FAIL. Mark PASS with reason "Not applicable" when `inject_chat` is not declared. | critical |
 | 10 | event_subscription_minimization | Are `subscribe_event` and `subscribe_events` limited to the minimum host event topics required by the skill? `chat.outbound`, `chat.typing`, and `chat.photo` expose owner/agent conversation data and require explicit justification. Wildcards, undeclared topics, or forwarding subscribed chat content to unrelated external services are concrete FAILs. Mark PASS with reason "Not applicable" when `subscribe_event` is not declared. | critical |
-| 11 | companion_process_safety | For `companion_process` / `supervised_task` skills: is every command declared as an argument list (not shell string), using an allowlisted runtime, with no writes outside `skill_dir` / `state_dir`, no unbounded restart loop, and cleanup on unload/panic? Does the process avoid inheriting secrets except through reviewed `env_from_settings` grants? Mark PASS with reason "Not applicable" when no long-lived process/task is declared. | critical |
+| 11 | companion_process_safety | For `companion_process` / `supervised_task` skills: is every command declared as an argument list (not shell string), using an allowlisted runtime, with no writes outside `skill_dir` / `state_dir`, no unbounded restart loop, and cleanup on unload/panic? Does the process avoid inheriting secrets except through reviewed `env_from_settings` grants? Mark PASS with reason "Not applicable" when no long-lived process/task is declared — a transient `subprocess.run`/`subprocess.Popen` invocation of a build tool like `ffmpeg`, `ImageMagick`, or `git` inside a normal request handler is NOT a long-lived companion process and does not trigger this item (its safety belongs under items 4 / 6 / 13). | critical |
 | 12 | host_token_handling | If the skill calls the Host Service API, does it use the provided `SkillToken.use_in_request()` only at request construction sites, avoid logging/serializing tokens, and keep all host-service calls on the loopback endpoint? Printing, persisting, exfiltrating, or embedding the token into user-visible output is a concrete FAIL. Mark PASS with reason "Not applicable" when the skill does not access the Host Service API. | critical |
 | 13 | error_handling | Does the skill surface actionable errors instead of swallowing exceptions, returning success on partial failure, or leaving users to inspect raw logs manually? Are retry/backoff paths bounded and purpose-specific? | advisory |
 | 14 | integration_preflight | Does the skill include cheap local preflight checks for the APIs/files/runtimes it depends on before spending provider budget or starting long work? Missing preflight for fragile external integrations is an advisory FAIL. | advisory |
@@ -419,6 +419,25 @@ total). Each entry carries `item`, `verdict` (`PASS`/`FAIL`), `severity`
 - Items 9–12 are critical only when their corresponding capability is
   declared or used. Reviewers MUST mark them PASS with reason "Not
   applicable" for skills outside that surface.
+
+### Critical threshold rule (applies to ALL items)
+
+Before marking any skill item CRITICAL you MUST be able to answer YES to ALL of:
+1. I can name the **exact file, symbol, function, or manifest field** inside
+   the reviewed skill package that makes this problem live RIGHT NOW.
+2. That artifact actually appears in the file pack or manifest I have been
+   given (not a hypothetical future use the skill *might* grow into).
+3. The fix requires a **change to the skill payload or manifest** — not a
+   follow-up task on the host or a speculative "the author might one day
+   add X" guard.
+
+If you cannot satisfy all three, use **advisory**, not critical.
+
+One root cause = one FAIL entry. Do NOT split one underlying problem into
+multiple FAIL items that all require the same change. If the same finding
+already has a documented accepted rebuttal in the prompt (see "Previously
+accepted rebuttals"), do NOT re-raise it without new evidence — the rebuttal
+section is binding guidance, not background reading.
 
 ### Marketplace-installed skill review (ClawHub provenance)
 
