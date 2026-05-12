@@ -12,7 +12,7 @@ Tests:
 - Blocked review leaves files on disk but unstaged
 - review_rebuttal parameter
 - configure_remote failure surfacing
-- migrate_remote_credentials no-op on clean origin
+- configure_remote wires clean GitHub origin + credential helper
 - Auto-rescue only reports committed when commit actually happened
 - repo_write in CORE_TOOL_NAMES
 - Review history building
@@ -726,34 +726,15 @@ class TestRemoteConfigSurfacing:
         source = server_path.read_text(encoding="utf-8")
         assert '"warnings"' in source
 
-    def test_migrate_credentials_wired_at_startup(self):
-        """migrate_remote_credentials called at startup after configure_remote."""
-        server_path = pathlib.Path(REPO) / "server.py"
-        source = server_path.read_text(encoding="utf-8")
-        assert "migrate_remote_credentials" in source
-
-
-# --- migrate_remote_credentials safety ---
-
-class TestMigrateRemoteCredentials:
-    def test_exists(self):
-        git_ops = _get_git_ops_module()
-        assert hasattr(git_ops, "migrate_remote_credentials")
-        assert callable(git_ops.migrate_remote_credentials)
-
-    def test_uses_configure_remote(self):
-        git_ops = _get_git_ops_module()
-        source = inspect.getsource(git_ops.migrate_remote_credentials)
+    def test_configure_remote_wired_at_startup(self):
+        """setup_remote_if_configured must call configure_remote (no separate migrate step)."""
+        mod = importlib.import_module("ouroboros.server_runtime")
+        source = inspect.getsource(mod.setup_remote_if_configured)
         assert "configure_remote" in source
-
-    def test_noop_on_clean_origin(self):
-        """Clean origin URL (no embedded token) returns True with 'already clean'."""
-        git_ops = _get_git_ops_module()
-        source = inspect.getsource(git_ops.migrate_remote_credentials)
-        assert "already clean" in source.lower() or "Already clean" in source
+        assert "migrate_remote_credentials" not in source
 
 
-# --- ToolContext review state ---
+# --- configure_remote contract ---
 
 class TestToolContextReviewState:
     def test_review_fields_exist(self):

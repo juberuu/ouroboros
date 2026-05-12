@@ -1,4 +1,4 @@
-# Ouroboros v5.17.0-rc.2 — Architecture & Reference
+# Ouroboros v5.17.0-rc.3 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -63,7 +63,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── runtime_mode_policy.py ← Runtime-mode protected-path policy (safety-critical files, frozen contracts, release/managed invariants) shared by registry, git tools, and Claude gateway guards
       ├── reflection.py        ← Execution reflection and pattern capture
       ├── review_evidence.py   ← Structured review findings/obligations snapshot for summaries and reflections
-      ├── skill_loader.py      ← Skill discovery + durable skill state (v5.8.2: walks data/skills/{native,clawhub,ouroboroshub,external}/ + optional OUROBOROS_SKILLS_REPO_PATH; persists to data/state/skills/<name>/; tags each LoadedSkill with `source` and `.self_authored.json` provenance; v5.17 computes review status live from stored findings + current enforcement mode)
+      ├── skill_loader.py      ← Skill discovery + durable skill state (v5.8.2: walks data/skills/{native,clawhub,ouroboroshub,external}/ + optional OUROBOROS_SKILLS_REPO_PATH; persists to data/state/skills/<name>/; tags each LoadedSkill with `source` and `.self_authored.json` provenance; v5.17 computes review status live from stored findings + current enforcement mode; v5.17.x removed runtime topology auto-migration — unmarked payloads under `native/` need manual move to `external/` per README upgrade floor)
       ├── skill_dependencies.py ← Shared dependency-spec resolution for skill payloads across manifests, sidecars, and provenance
       ├── skill_review_status.py ← Skill-review verdict aggregation SSOT (critical/advisory FAILs → pass/advisory_pass/advisory/fail)
       ├── skill_review.py      ← Skill review pipeline: deterministic preflight + optional fail-open Claude Code advisory over the skill payload only (repo diff excluded, output treated as inert evidence) followed by the tri-model executable trust gate against the Skill Review Checklist section of docs/CHECKLISTS.md; supports rebuttal/history/convergence evidence
@@ -77,7 +77,6 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── marketplace_api.py   ← HTTP surface for marketplaces (/api/marketplace/clawhub/* and /api/marketplace/ouroboroshub/*); always-on with registry host allowlists and hash checks
       ├── skill_lifecycle_queue.py ← single FIFO lane for mutating skill lifecycle actions (install/update/review/deps/enable/disable/uninstall) with recent event snapshot for Skills UI, chat live-card progress, dedupe keys, and sync tool wrapper
       ├── skill_review_runner.py ← shared lifecycle-backed skill review runner for API + agent tool paths; writes review_job.json + skill_review_* events and routes all executable skills (including self-authored provenance) through tri-model review
-      ├── skill_migrations.py  ← topology repair migration that relocates user-managed payloads found under data/skills/native/ into data/skills/external/ (the pre-OuroborosHub generation-skill rename was retired in v5.15.0)
       ├── server_auth.py       ← Non-localhost auth gate (OUROBOROS_NETWORK_PASSWORD)
       ├── server_control.py    ← Process-control helpers: restart, panic stop
       ├── server_entrypoint.py ← CLI argument parsing, port-binding helpers
@@ -990,10 +989,10 @@ continuation phrase heuristics.
 - **Auto-push**: best-effort push to origin after successful commit (non-fatal)
 - **Post-push CI status note** (v4.42.4): after a successful push, when `GITHUB_TOKEN` and `GITHUB_REPO` are configured, `_check_ci_status_after_push` queries the GitHub Actions API filtered by `head_sha` of the just-pushed commit and appends a one-line status note to the commit result: `✅ Run passed for this commit` / `⏳ Run not yet registered` (GitHub may take 5–30 s) / `⚠️ CI STATUS: Run FAILED (run #N) → job → failed step + URL`. Filtering by SHA prevents stale results from a prior push being reported. The lookup is non-blocking, fails silently on any exception, and is skipped entirely when push did not succeed.
 - **Credential helper**: `git_ops.configure_remote()` stores credentials in repo-local
-  `.git/credentials`. `migrate_remote_credentials()` migrates legacy token-in-URL origins.
-  Both are wired at startup and on settings save. Saving `GITHUB_TOKEN` + `GITHUB_REPO`
-  in Settings automatically calls `configure_remote()`, so the remote is ready immediately
-  after save — no restart required.
+  `.git/credentials` and sets a clean ``https://github.com/<slug>.git`` origin URL (no token
+  embedded in the remote). Wired at startup and on settings save. Saving `GITHUB_TOKEN` +
+  `GITHUB_REPO` in Settings automatically calls `configure_remote()`, so the remote is ready
+  immediately after save — no restart required.
 
 ### Deterministic preflight checks (`_preflight_check` in `ouroboros/tools/review.py`)
 
@@ -2184,17 +2183,10 @@ walks the data plane plus the optional external checkout, tagging each
 ``LoadedSkill`` with ``source`` (``native`` / ``clawhub`` /
 ``ouroboroshub`` / ``external`` / ``user_repo``).
 
-v5.8 adds a topology repair migration:
-``skill_migrations.migrate_unseeded_native_skills_to_external`` moves any
-``data/skills/native/<skill>/`` directory that lacks the launcher-written
-``.seed-origin`` marker into ``data/skills/external/``. This keeps the
-honesty rule ("unmarked native is user-managed external") aligned with the
-Repair guard, which intentionally only grants payload writes under
-``external``, ``clawhub``, or ``ouroboroshub``. If the external destination
-already exists, the migration lands the moved payload under a unique
-``*_migrated`` identity, rewrites the manifest ``name``, copies non-trust
-state best-effort, and drops stale trust files so the new identity requires a
-fresh review.
+v5.17.x+ no longer runs automatic topology repair for ``data/skills/native/``
+payloads missing ``.seed-origin``; users on that legacy layout must move
+packages to ``external/`` (or reinstall) so discovery/Repair stay consistent
+with the skill payload policy in this document — see README **Upgrade floor**.
 
 Per-skill durable state lives on the Ouroboros data plane, not inside
 the skill checkout:

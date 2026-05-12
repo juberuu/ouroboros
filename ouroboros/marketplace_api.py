@@ -28,6 +28,7 @@ from typing import Any, Dict, Optional
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from ouroboros.http_api import json_error
 from ouroboros.marketplace.adapter import adapt_openclaw_skill
 from ouroboros.marketplace.clawhub import (
     ClawHubClientError,
@@ -84,7 +85,7 @@ def _client_error_response(exc: Exception, *, default_status: int = 502) -> JSON
     else:
         status = 500
     log.warning("marketplace error: %s", exc, exc_info=True)
-    return JSONResponse({"error": str(exc), "code": exc.__class__.__name__}, status_code=status)
+    return json_error(str(exc), status, code=exc.__class__.__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +144,7 @@ async def api_marketplace_search(request: Request) -> JSONResponse:
 async def api_marketplace_info(request: Request) -> JSONResponse:
     slug = (request.path_params.get("slug") or "").strip()
     if not slug:
-        return JSONResponse({"error": "missing slug"}, status_code=400)
+        return json_error("missing slug", 400)
     try:
         summary = await asyncio.to_thread(_registry_info, slug)
     except Exception as exc:
@@ -232,17 +233,17 @@ def _preview_pipeline(slug: str, version: Optional[str]) -> Dict[str, Any]:
 async def api_marketplace_preview(request: Request) -> JSONResponse:
     slug = (request.path_params.get("slug") or "").strip()
     if not slug:
-        return JSONResponse({"error": "missing slug"}, status_code=400)
+        return json_error("missing slug", 400)
     version = (request.query_params.get("version") or "").strip() or None
     try:
         payload = await asyncio.to_thread(_preview_pipeline, slug, version)
     except FetchError as exc:
-        return JSONResponse({"error": f"fetch: {exc}", "code": "FetchError"}, status_code=400)
+        return json_error(f"fetch: {exc}", 400, code="FetchError")
     except ClawHubClientError as exc:
         return _client_error_response(exc)
     except Exception as exc:
         log.exception("marketplace preview failed")
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        return json_error(str(exc), 500)
     return JSONResponse(payload)
 
 
@@ -295,7 +296,7 @@ async def api_marketplace_install(request: Request) -> JSONResponse:
         body = {}
     slug = str(body.get("slug") or "").strip()
     if not slug:
-        return JSONResponse({"error": "missing slug"}, status_code=400)
+        return json_error("missing slug", 400)
     version = str(body.get("version") or "").strip() or None
     auto_review = _coerce_bool(body.get("auto_review"), True)
     overwrite = _coerce_bool(body.get("overwrite"), False)
@@ -339,7 +340,7 @@ async def api_marketplace_install(request: Request) -> JSONResponse:
         )
     except Exception as exc:
         log.exception("marketplace install failed")
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        return json_error(str(exc), 500)
     payload = _serialize_install_result(result)
     return JSONResponse(payload, status_code=200 if result.ok else 400)
 
@@ -348,7 +349,7 @@ async def api_marketplace_update(request: Request) -> JSONResponse:
     sanitized = (request.path_params.get("name") or "").strip()
     err = _validate_path_param_name(sanitized)
     if err:
-        return JSONResponse({"error": err}, status_code=400)
+        return json_error(err, 400)
     try:
         body = await request.json()
     except Exception:
@@ -393,7 +394,7 @@ async def api_marketplace_update(request: Request) -> JSONResponse:
         )
     except Exception as exc:
         log.exception("marketplace update failed")
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        return json_error(str(exc), 500)
     return JSONResponse(_serialize_install_result(result), status_code=200 if result.ok else 400)
 
 
@@ -421,7 +422,7 @@ async def api_marketplace_uninstall(request: Request) -> JSONResponse:
     sanitized = (request.path_params.get("name") or "").strip()
     err = _validate_path_param_name(sanitized)
     if err:
-        return JSONResponse({"error": err}, status_code=400)
+        return json_error(err, 400)
     drive_root = _request_drive_root(request)
     async def _run_uninstall() -> Any:
         return await run_blocking_preserving_cancellation(
@@ -449,7 +450,7 @@ async def api_marketplace_uninstall(request: Request) -> JSONResponse:
         )
     except Exception as exc:
         log.exception("marketplace uninstall failed")
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        return json_error(str(exc), 500)
     return JSONResponse(
         {
             "ok": result.ok,
@@ -516,18 +517,18 @@ async def api_ouroboroshub_catalog(request: Request) -> JSONResponse:
         results = await asyncio.to_thread(ouroboroshub.search, query)
     except Exception as exc:
         log.warning("OuroborosHub catalog failed: %s", exc, exc_info=True)
-        return JSONResponse({"error": str(exc)}, status_code=502)
+        return json_error(str(exc), 502)
     return JSONResponse({"query": query, "count": len(results), "results": [item.to_dict() for item in results]})
 
 
 async def api_ouroboroshub_preview(request: Request) -> JSONResponse:
     slug = str(request.path_params.get("slug") or "").strip()
     if not slug:
-        return JSONResponse({"error": "missing slug"}, status_code=400)
+        return json_error("missing slug", 400)
     try:
         summary = await asyncio.to_thread(ouroboroshub.info, slug)
     except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=404)
+        return json_error(str(exc), 404)
     return JSONResponse({"summary": summary.to_dict(), "files": summary.files})
 
 
@@ -540,7 +541,7 @@ async def api_ouroboroshub_install(request: Request) -> JSONResponse:
         body = {}
     slug = str(body.get("slug") or "").strip()
     if not slug:
-        return JSONResponse({"error": "missing slug"}, status_code=400)
+        return json_error("missing slug", 400)
     overwrite = _coerce_bool(body.get("overwrite"), False)
     auto_review = _coerce_bool(body.get("auto_review"), True)
     drive_root = _request_drive_root(request)
@@ -611,7 +612,7 @@ async def api_ouroboroshub_update(request: Request) -> JSONResponse:
     name = str(request.path_params.get("name") or "").strip()
     err = _validate_path_param_name(name)
     if err:
-        return JSONResponse({"error": err}, status_code=400)
+        return json_error(err, 400)
     drive_root = _request_drive_root(request)
     repo_dir = _request_repo_dir(request)
     update_progress = JobProgressTarget()
@@ -766,7 +767,7 @@ async def api_ouroboroshub_uninstall(request: Request) -> JSONResponse:
     sanitized = str(request.path_params.get("name") or "").strip()
     err = _validate_path_param_name(sanitized)
     if err:
-        return JSONResponse({"error": err}, status_code=400)
+        return json_error(err, 400)
 
     async def _run_uninstall() -> Dict[str, Any]:
         result = await run_blocking_preserving_cancellation(

@@ -52,17 +52,6 @@ _SCOPE_REVIEW_LEGACY_DEFAULTS = frozenset({
     "openai/gpt-" + "5.4-mini",
     "openai::gpt-" + "5.4-mini",
 })
-_RETIRED_MODEL_DEFAULT_REPLACEMENTS = {
-    "anthropic/claude-opus-" + "4.7": "anthropic/claude-opus-4.6",
-    "anthropic::claude-opus-" + "4-7": "anthropic::claude-opus-4-6",
-    "claude-opus-" + "4-7[1m]": "claude-opus-4-6[1m]",
-    "openai/gpt-" + "5.4": "openai/gpt-5.5",
-    "openai::gpt-" + "5.4": "openai::gpt-5.5",
-    "openai/gpt-" + "5.4-pro": "openai/gpt-5.5-pro",
-    "openai::gpt-" + "5.4-pro": "openai::gpt-5.5-pro",
-    "openai/gpt-" + "5.4-mini": "openai/gpt-5.5-mini",
-    "openai::gpt-" + "5.4-mini": "openai::gpt-5.5-mini",
-}
 
 
 def _truthy_setting(value) -> bool:
@@ -79,36 +68,6 @@ def _parse_model_list(value: str) -> list[str]:
 
 def _serialize_model_list(models: list[str]) -> str:
     return ",".join(model.strip() for model in models if str(model or "").strip())
-
-
-def _refresh_retired_model_defaults(settings: dict) -> tuple[dict, list[str]]:
-    normalized = dict(settings)
-    changed: list[str] = []
-    keys = [
-        "OUROBOROS_MODEL",
-        "OUROBOROS_MODEL_CODE",
-        "OUROBOROS_MODEL_LIGHT",
-        "OUROBOROS_MODEL_FALLBACK",
-        "CLAUDE_CODE_MODEL",
-        "OUROBOROS_SCOPE_REVIEW_MODEL",
-    ]
-    for key in keys:
-        value = _setting_text(normalized, key)
-        replacement = _RETIRED_MODEL_DEFAULT_REPLACEMENTS.get(value)
-        if replacement:
-            normalized[key] = replacement
-            changed.append(key)
-    review_value = _setting_text(normalized, "OUROBOROS_REVIEW_MODELS")
-    if review_value:
-        models = [
-            _RETIRED_MODEL_DEFAULT_REPLACEMENTS.get(item, item)
-            for item in _parse_model_list(review_value)
-        ]
-        serialized = _serialize_model_list(models)
-        if serialized != review_value:
-            normalized["OUROBOROS_REVIEW_MODELS"] = serialized
-            changed.append("OUROBOROS_REVIEW_MODELS")
-    return normalized, changed
 
 
 def _provider_prefix(provider: str) -> str:
@@ -241,13 +200,13 @@ def has_supervisor_provider(settings: dict) -> bool:
 
 def apply_runtime_provider_defaults(settings: dict) -> tuple[dict, bool, list[str]]:
     """Auto-fill safe runtime defaults for the agreed provider cases."""
-    normalized, retired_changed = _refresh_retired_model_defaults(settings)
+    normalized = dict(settings)
     provider = _exclusive_direct_remote_provider(normalized)
 
     if not provider:
-        return normalized, bool(retired_changed), retired_changed
+        return normalized, False, []
 
-    changed_keys: list[str] = list(retired_changed)
+    changed_keys: list[str] = []
     provider_defaults = _DIRECT_PROVIDER_AUTO_DEFAULTS[provider]
     for key in _ALL_MODEL_SLOT_KEYS:
         raw_current = _setting_text(normalized, key)
@@ -274,20 +233,16 @@ def apply_runtime_provider_defaults(settings: dict) -> tuple[dict, bool, list[st
 
 
 def setup_remote_if_configured(settings: dict, log) -> None:
-    """Set up GitHub remote and migrate credentials if configured."""
+    """Set up GitHub remote using repo-local credential helper when configured."""
     slug = settings.get("GITHUB_REPO", "")
     token = settings.get("GITHUB_TOKEN", "")
     if not slug or not token:
         return
-    from supervisor.git_ops import configure_remote, migrate_remote_credentials
+    from supervisor.git_ops import configure_remote
 
     remote_ok, remote_msg = configure_remote(slug, token)
     if not remote_ok:
         log.warning("Remote configuration failed on startup: %s", remote_msg)
-        return
-    mig_ok, mig_msg = migrate_remote_credentials()
-    if not mig_ok:
-        log.warning("Credential migration failed on startup: %s", mig_msg)
 
 
 async def ws_heartbeat_loop(

@@ -96,28 +96,8 @@ class Memory:
                 except OSError:
                     pass
 
-    def _migrate_legacy_scratchpad(self) -> None:
-        """One-time migration: seed blocks from existing scratchpad.md if no blocks file exists."""
-        bp = self.scratchpad_blocks_path()
-        if bp.exists():
-            return
-        sp = self.scratchpad_path()
-        if not sp.exists():
-            return
-        content = read_text(sp)
-        if not content.strip():
-            return
-        # Skip migration for default/empty scratchpads
-        if "(empty" in content and "write anything here" in content:
-            return
-        seed = [{"ts": utc_now_iso(), "source": "migration", "content": content}]
-        bp.parent.mkdir(parents=True, exist_ok=True)
-        write_text(bp, json.dumps(seed, ensure_ascii=False, indent=2))
-        log.info("Migrated legacy scratchpad.md (%d chars) to scratchpad_blocks.json", len(content))
-
     def append_scratchpad_block(self, content: str, source: str = "task") -> Dict[str, Any]:
         """Append a block to scratchpad. Returns the new block. File-locked, FIFO rotation."""
-        self._migrate_legacy_scratchpad()
         bp = self.scratchpad_blocks_path()
         bp.parent.mkdir(parents=True, exist_ok=True)
 

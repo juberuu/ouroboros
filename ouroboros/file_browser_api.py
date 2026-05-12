@@ -344,9 +344,9 @@ async def api_files_list(request: Request) -> JSONResponse:
     try:
         root_dir, target, _ = _resolve_target(request, rel_path)
         if not target.exists():
-            return JSONResponse({"error": f"Path not found: {rel_path}"}, status_code=404)
+            return json_error(f"Path not found: {rel_path}", 404)
         if not target.is_dir():
-            return JSONResponse({"error": f"Not a directory: {rel_path}"}, status_code=400)
+            return json_error(f"Not a directory: {rel_path}", 400)
 
         entries: list[dict[str, Any]] = []
         visible_entries = sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
@@ -404,9 +404,9 @@ async def api_files_read(request: Request) -> JSONResponse:
             return json_error("Missing path.", status=400)
         root_dir, target, _ = _resolve_target(request, rel_path)
         if not target.exists():
-            return JSONResponse({"error": f"Path not found: {rel_path}"}, status_code=404)
+            return json_error(f"Path not found: {rel_path}", 404)
         if not target.is_file():
-            return JSONResponse({"error": f"Not a file: {rel_path}"}, status_code=400)
+            return json_error(f"Not a file: {rel_path}", 400)
         if _is_owner_only_file(target):
             return json_error("Owner-only state is not readable from Files.", status=403)
 
@@ -490,9 +490,9 @@ async def api_files_download(request: Request) -> FileResponse | JSONResponse:
             return json_error("Missing path.", status=400)
         _, target, _ = _resolve_target(request, rel_path)
         if not target.exists():
-            return JSONResponse({"error": f"Path not found: {rel_path}"}, status_code=404)
+            return json_error(f"Path not found: {rel_path}", 404)
         if not target.is_file():
-            return JSONResponse({"error": f"Not a file: {rel_path}"}, status_code=400)
+            return json_error(f"Not a file: {rel_path}", 400)
         if _is_owner_only_file(target):
             return json_error("Owner-only state cannot be downloaded.", status=403)
         return FileResponse(str(target), filename=target.name)
@@ -509,9 +509,9 @@ async def api_files_content(request: Request) -> FileResponse | JSONResponse:
             return json_error("Missing path.", status=400)
         _, target, _ = _resolve_target(request, rel_path)
         if not target.exists():
-            return JSONResponse({"error": f"Path not found: {rel_path}"}, status_code=404)
+            return json_error(f"Path not found: {rel_path}", 404)
         if not target.is_file():
-            return JSONResponse({"error": f"Not a file: {rel_path}"}, status_code=400)
+            return json_error(f"Not a file: {rel_path}", 400)
         if _is_owner_only_file(target):
             return json_error("Owner-only state cannot be served.", status=403)
         return FileResponse(str(target), media_type=_guess_media_type(target))
@@ -543,9 +543,9 @@ async def api_files_write(request: Request) -> JSONResponse:
             return _CONTROL_PLANE_FILES_API_ERROR
         if not target.exists():
             if not create:
-                return JSONResponse({"error": f"Path not found: {rel_path}"}, status_code=404)
+                return json_error(f"Path not found: {rel_path}", 404)
             if not target.parent.exists():
-                return JSONResponse({"error": f"Parent directory not found: {target.parent}"}, status_code=404)
+                return json_error(f"Parent directory not found: {target.parent}", 404)
             if not target.parent.is_dir():
                 return json_error("Parent path is not a directory.", status=400)
             tmp_target = target.with_name(f".{target.name}.editing")
@@ -566,7 +566,7 @@ async def api_files_write(request: Request) -> JSONResponse:
             })
 
         if not target.is_file():
-            return JSONResponse({"error": f"Not a file: {rel_path}"}, status_code=400)
+            return json_error(f"Not a file: {rel_path}", 400)
         if target.suffix.lower() in _IMAGE_PREVIEW_EXTENSIONS or not _guess_text_file(target):
             return json_error("Only text files can be edited in the browser.", status=400)
 
@@ -607,9 +607,9 @@ async def api_files_mkdir(request: Request) -> JSONResponse:
         name = _sanitize_upload_filename(str(payload.get("name") or ""))
         root_dir, target_dir, _ = _resolve_target(request, rel_dir)
         if not target_dir.exists():
-            return JSONResponse({"error": f"Path not found: {rel_dir}"}, status_code=404)
+            return json_error(f"Path not found: {rel_dir}", 404)
         if not target_dir.is_dir():
-            return JSONResponse({"error": f"Not a directory: {rel_dir}"}, status_code=400)
+            return json_error(f"Not a directory: {rel_dir}", 400)
 
         destination = target_dir / name
         if _is_owner_only_file(destination):
@@ -617,7 +617,7 @@ async def api_files_mkdir(request: Request) -> JSONResponse:
         if _is_skill_control_plane_api_target(destination):
             return _CONTROL_PLANE_FILES_API_ERROR
         if destination.exists():
-            return JSONResponse({"error": f"Path already exists: {name}"}, status_code=409)
+            return json_error(f"Path already exists: {name}", 409)
         destination.mkdir(parents=False, exist_ok=False)
 
         rel = _relative_path(root_dir, destination)
@@ -653,7 +653,7 @@ async def api_files_delete(request: Request) -> JSONResponse:
         if _contains_skill_control_plane_file(target):
             return _CONTROL_PLANE_FILES_API_ERROR
         if not target.exists():
-            return JSONResponse({"error": f"Path not found: {rel_path}"}, status_code=404)
+            return json_error(f"Path not found: {rel_path}", 404)
 
         rel = _relative_path(root_dir, target)
         if target.is_symlink():
@@ -666,7 +666,7 @@ async def api_files_delete(request: Request) -> JSONResponse:
             shutil.rmtree(target)
             deleted_type = "dir"
         else:
-            return JSONResponse({"error": f"Unsupported path type: {rel_path}"}, status_code=400)
+            return json_error(f"Unsupported path type: {rel_path}", 400)
 
         return JSONResponse({"ok": True, "path": rel, "type": deleted_type})
     except ValueError as exc:
@@ -733,15 +733,15 @@ async def api_files_transfer(request: Request) -> JSONResponse:
         elif _is_skill_control_plane_api_target(destination_check):
             return _CONTROL_PLANE_FILES_API_ERROR
         if not source.exists():
-            return JSONResponse({"error": f"Path not found: {source_rel}"}, status_code=404)
+            return json_error(f"Path not found: {source_rel}", 404)
         if not dest_dir.exists():
-            return JSONResponse({"error": f"Path not found: {dest_rel}"}, status_code=404)
+            return json_error(f"Path not found: {dest_rel}", 404)
         if not dest_dir.is_dir():
-            return JSONResponse({"error": f"Not a directory: {dest_rel}"}, status_code=400)
+            return json_error(f"Not a directory: {dest_rel}", 400)
 
         destination = dest_dir / source.name
         if destination.exists():
-            return JSONResponse({"error": f"Path already exists: {destination.name}"}, status_code=409)
+            return json_error(f"Path already exists: {destination.name}", 409)
         try:
             destination.relative_to(root_dir)
         except ValueError:
@@ -785,9 +785,9 @@ async def api_files_upload(request: Request) -> JSONResponse:
 
         root_dir, target_dir, _ = _resolve_target(request, rel_dir)
         if not target_dir.exists():
-            return JSONResponse({"error": f"Path not found: {rel_dir}"}, status_code=404)
+            return json_error(f"Path not found: {rel_dir}", 404)
         if not target_dir.is_dir():
-            return JSONResponse({"error": f"Not a directory: {rel_dir}"}, status_code=400)
+            return json_error(f"Not a directory: {rel_dir}", 400)
 
         filename = _sanitize_upload_filename(upload.filename or "")
         destination = target_dir / filename
@@ -799,7 +799,7 @@ async def api_files_upload(request: Request) -> JSONResponse:
         if _is_skill_control_plane_api_target(destination):
             return _CONTROL_PLANE_FILES_API_ERROR
         if destination.exists():
-            return JSONResponse({"error": f"File already exists: {filename}"}, status_code=409)
+            return json_error(f"File already exists: {filename}", 409)
 
         tmp_destination = destination.with_name(f".{destination.name}.uploading")
         bytes_written = 0

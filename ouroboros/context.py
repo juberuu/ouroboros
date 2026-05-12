@@ -238,15 +238,6 @@ def build_memory_sections(memory: Memory, partition: str = "all") -> List[str]:
                 + world_text
             )
 
-    try:
-        from ouroboros.consolidator import migrate_dialogue_summary_to_blocks
-        migrate_dialogue_summary_to_blocks(
-            memory.drive_root / "memory" / "dialogue_summary.md",
-            memory.drive_root / "memory" / "dialogue_blocks.json",
-        )
-    except Exception:
-        pass
-
     if include_volatile:
         dialogue_blocks = memory.load_dialogue_blocks()
         if dialogue_blocks:

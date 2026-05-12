@@ -5,6 +5,8 @@ import asyncio
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from ouroboros.http_api import json_error
+
 
 async def api_local_model_start(request: Request) -> JSONResponse:
     try:
@@ -17,13 +19,13 @@ async def api_local_model_start(request: Request) -> JSONResponse:
         chat_format = body.get("chat_format", "").strip()
 
         if not source:
-            return JSONResponse({"error": "source is required"}, status_code=400)
+            return json_error("source is required", 400)
 
         from ouroboros.local_model import get_manager, _get_runtime_hint
         mgr = get_manager()
 
         if mgr.is_running:
-            return JSONResponse({"error": "Local model server is already running"}, status_code=409)
+            return json_error("Local model server is already running", 409)
 
         # Preflight: check llama-cpp-python is installed BEFORE downloading the model.
         # This prevents users from waiting through a large download only to hit an
@@ -31,16 +33,14 @@ async def api_local_model_start(request: Request) -> JSONResponse:
         # Run in a thread to avoid blocking the async event loop (subprocess.run, 15s timeout).
         runtime_ok = await asyncio.to_thread(mgr.check_runtime)
         if not runtime_ok:
-            return JSONResponse(
-                {
-                    "error": "runtime_missing",
-                    "message": (
-                        "llama-cpp-python is not installed. "
-                        "Use the 'Install Local Runtime' button to install it first."
-                    ),
-                    "hint": _get_runtime_hint(),
-                },
-                status_code=412,
+            return json_error(
+                "runtime_missing",
+                412,
+                message=(
+                    "llama-cpp-python is not installed. "
+                    "Use the 'Install Local Runtime' button to install it first."
+                ),
+                hint=_get_runtime_hint(),
             )
 
         # Download can be slow, run in thread to not block the async event loop
@@ -49,7 +49,7 @@ async def api_local_model_start(request: Request) -> JSONResponse:
         mgr.start_server(model_path, port=port, n_gpu_layers=n_gpu_layers, n_ctx=n_ctx, chat_format=chat_format)
         return JSONResponse({"status": "starting", "model_path": model_path})
     except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+        return json_error(str(e), 500)
 
 
 async def api_local_model_stop(request: Request) -> JSONResponse:
@@ -58,7 +58,7 @@ async def api_local_model_stop(request: Request) -> JSONResponse:
         get_manager().stop_server()
         return JSONResponse({"status": "stopped"})
     except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+        return json_error(str(e), 500)
 
 
 async def api_local_model_status(request: Request) -> JSONResponse:
@@ -80,11 +80,11 @@ async def api_local_model_test(request: Request) -> JSONResponse:
         from ouroboros.local_model import get_manager
         mgr = get_manager()
         if not mgr.is_running:
-            return JSONResponse({"error": "Local model server is not running"}, status_code=400)
+            return json_error("Local model server is not running", 400)
         result = mgr.test_tool_calling()
         return JSONResponse(result)
     except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+        return json_error(str(e), 500)
 
 
 async def api_local_model_install_runtime(request: Request) -> JSONResponse:
@@ -108,4 +108,4 @@ async def api_local_model_install_runtime(request: Request) -> JSONResponse:
         mgr.install_runtime()
         return JSONResponse({"status": "installing"})
     except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+        return json_error(str(e), 500)

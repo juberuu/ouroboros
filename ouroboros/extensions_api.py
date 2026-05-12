@@ -29,6 +29,7 @@ from starlette.responses import JSONResponse, Response
 from ouroboros.extension_loader import list_routes, snapshot
 from ouroboros.http_api import (
     coerce_bool,
+    json_error,
     request_drive_root as _request_drive_root,
     request_repo_dir as _request_repo_dir,
 )
@@ -114,7 +115,7 @@ async def api_extensions_index(request: Request) -> JSONResponse:
         return JSONResponse(payload)
     except Exception as exc:
         log.exception("api_extensions_index failure")
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        return json_error(str(exc), 500)
 
 
 def _build_extensions_index(drive_root, repo_path):
@@ -122,9 +123,6 @@ def _build_extensions_index(drive_root, repo_path):
     pure: it is called via ``asyncio.to_thread`` and must not depend on
     request scope."""
     from ouroboros.extension_loader import extension_name_prefix, runtime_state_for_loaded_skill
-    from ouroboros.skill_migrations import migrate_unseeded_native_skills_to_external
-
-    migrate_unseeded_native_skills_to_external(pathlib.Path(drive_root))
 
     live_snapshot = snapshot()
     # Always scan — ``discover_skills`` still returns the bundled
@@ -272,12 +270,12 @@ async def api_extension_manifest(request: Request) -> JSONResponse:
 
     skill_name = str(request.path_params.get("skill") or "").strip()
     if not skill_name:
-        return JSONResponse({"error": "missing skill name"}, status_code=400)
+        return json_error("missing skill name", 400)
     drive_root = _request_drive_root(request)
     repo_path = get_skills_repo_path()
     loaded = await asyncio.to_thread(find_skill, drive_root, skill_name, repo_path=repo_path)
     if loaded is None:
-        return JSONResponse({"error": "skill not found"}, status_code=404)
+        return json_error("skill not found", 404)
     runtime_state = await asyncio.to_thread(
         runtime_state_for_skill_name,
         skill_name,
@@ -332,9 +330,9 @@ async def api_extension_module(request: Request) -> Response:
     skill_name = str(request.path_params.get("skill") or "").strip()
     entry = str(request.path_params.get("entry") or "").strip()
     if not skill_name or not entry:
-        return JSONResponse({"error": "missing skill/module entry"}, status_code=400)
+        return json_error("missing skill/module entry", 400)
     if "/" in entry or "\\" in entry or ".." in entry or entry.startswith("."):
-        return JSONResponse({"error": "invalid module entry"}, status_code=400)
+        return json_error("invalid module entry", 400)
 
     drive_root = _request_drive_root(request)
     repo_path = get_skills_repo_path()
@@ -351,7 +349,7 @@ async def api_extension_module(request: Request) -> Response:
         )
     loaded = await asyncio.to_thread(find_skill, drive_root, skill_name, repo_path=repo_path)
     if loaded is None:
-        return JSONResponse({"error": "skill not found"}, status_code=404)
+        return json_error("skill not found", 404)
     # Authorize against the LIVE registered tab snapshot, not only the
     # manifest's optional ui_tab block. Extensions may register UI tabs from
     # plugin.py via PluginAPI without duplicating the declaration in
@@ -366,18 +364,18 @@ async def api_extension_module(request: Request) -> Response:
         for tab in live.get("ui_tabs", [])
     )
     if not module_declared:
-        return JSONResponse({"error": "module entry is not declared by a live widget tab"}, status_code=404)
+        return json_error("module entry is not declared by a live widget tab", 404)
     target = (loaded.skill_dir / entry).resolve()
     try:
         target.relative_to(loaded.skill_dir.resolve())
     except ValueError:
-        return JSONResponse({"error": "module entry escapes skill directory"}, status_code=400)
+        return json_error("module entry escapes skill directory", 400)
     if not target.is_file():
-        return JSONResponse({"error": "module entry file not found"}, status_code=404)
+        return json_error("module entry file not found", 404)
     try:
         text = await asyncio.to_thread(target.read_text, encoding="utf-8")
     except UnicodeDecodeError:
-        return JSONResponse({"error": "module entry is not UTF-8 text"}, status_code=400)
+        return json_error("module entry is not UTF-8 text", 400)
     return Response(
         text,
         media_type="application/javascript; charset=utf-8",
@@ -394,7 +392,7 @@ async def api_extension_settings_section(request: Request) -> JSONResponse:
     """
     skill_name = str(request.path_params.get("skill") or "").strip()
     if not skill_name:
-        return JSONResponse({"error": "missing skill name"}, status_code=400)
+        return json_error("missing skill name", 400)
     live = snapshot()
     sections = [
         item
@@ -527,21 +525,21 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
 
     skill_name = str(request.path_params.get("skill") or "").strip()
     if not skill_name:
-        return JSONResponse({"error": "missing skill name"}, status_code=400)
+        return json_error("missing skill name", 400)
     try:
         body = await request.json()
     except Exception:
         body = {}
     enabled = _coerce_bool_arg(body.get("enabled"))
     if enabled is None:
-        return JSONResponse({"error": "'enabled' must be a boolean"}, status_code=400)
+        return json_error("'enabled' must be a boolean", 400)
 
     drive_root = _request_drive_root(request)
     repo_path = get_skills_repo_path()
 
     initial = await asyncio.to_thread(find_skill, drive_root, skill_name, repo_path=repo_path)
     if initial is None:
-        return JSONResponse({"error": "skill not found"}, status_code=404)
+        return json_error("skill not found", 404)
     def _run_toggle_sync() -> dict[str, Any]:
         loaded = find_skill(drive_root, skill_name, repo_path=repo_path)
         if loaded is None:
@@ -734,7 +732,7 @@ async def api_skill_review(request: Request) -> JSONResponse:
     """
     skill_name = str(request.path_params.get("skill") or "").strip()
     if not skill_name:
-        return JSONResponse({"error": "missing skill name"}, status_code=400)
+        return json_error("missing skill name", 400)
 
     drive_root = _request_drive_root(request)
     repo_dir = _request_repo_dir(request)
@@ -796,7 +794,7 @@ async def api_skill_reconcile(request: Request) -> JSONResponse:
 
     skill_name = str(request.path_params.get("skill") or "").strip()
     if not skill_name:
-        return JSONResponse({"error": "missing skill name"}, status_code=400)
+        return json_error("missing skill name", 400)
 
     drive_root = _request_drive_root(request)
     repo_path = get_skills_repo_path()

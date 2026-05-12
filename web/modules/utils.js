@@ -97,6 +97,9 @@ export async function fetchJson(url, init) {
     return body;
 }
 
+/** Alias for ``fetchJson`` (plan / docs naming). */
+export const jsonFetch = fetchJson;
+
 /**
  * Broadcast a `ouro:skill-lifecycle` CustomEvent. Subscribers (settings.js,
  * skills.js, etc.) listen for this to refresh derived state without polling.

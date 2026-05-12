@@ -55,13 +55,14 @@ class TestScratchpadBlocks:
         assert "first block" in md
         assert f"{_SCRATCHPAD_MAX_BLOCKS} blocks" in md
 
-    def test_legacy_migration(self, memory):
+    def test_legacy_scratchpad_not_seeded_into_blocks(self, memory):
+        """v5.17.x: legacy scratchpad.md is not auto-imported into blocks."""
         memory.scratchpad_path().write_text("Legacy scratchpad content here", encoding="utf-8")
         memory.append_scratchpad_block("new block")
         blocks = memory.load_scratchpad_blocks()
-        assert len(blocks) == 2
-        assert blocks[0]["source"] == "migration"
-        assert "Legacy scratchpad" in blocks[0]["content"]
+        assert len(blocks) == 1
+        assert blocks[0]["source"] == "task"
+        assert blocks[0]["content"] == "new block"
 
     def test_migration_skips_default(self, memory):
         memory.ensure_files()

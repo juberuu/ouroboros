@@ -1,3 +1,5 @@
+import { fetchJson } from './utils.js';
+
 const pendingBySlug = new Map();
 const listeners = new Set();
 let lifecyclePollTimer = null;
@@ -18,9 +20,10 @@ async function tickLifecyclePoll() {
         return;
     }
     try {
-        const data = await fetch('/api/skills/lifecycle-queue', { cache: 'no-store' })
-            .then((r) => (r.ok ? r.json() : { active: null, events: [] }))
-            .catch(() => ({ active: null, events: [] }));
+        const data = await fetchJson('/api/skills/lifecycle-queue', { cache: 'no-store' }).catch(() => ({
+            active: null,
+            events: [],
+        }));
         const active = data?.active;
         const events = Array.isArray(data?.events) ? data.events : [];
         let hasQueuedOrRunningJob = false;

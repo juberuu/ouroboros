@@ -1386,30 +1386,3 @@ def push_to_remote(branch: Optional[str] = None, push_tags: bool = True) -> Tupl
         else:
             result += " + tags"
     return True, result
-
-
-def migrate_remote_credentials() -> Tuple[bool, str]:
-    """One-shot: if origin has a token embedded in the URL, migrate to credential helper.
-
-    Safe to call repeatedly — if origin is already clean, this is a no-op.
-    Handles both formats: https://TOKEN@github.com/... and https://user:TOKEN@github.com/...
-    """
-    if not _has_remote("origin"):
-        return False, "No remote configured"
-    rc, url, _ = git_capture(["git", "remote", "get-url", "origin"])
-    if rc != 0:
-        return False, "Cannot read origin URL"
-    url = url.strip()
-    m = re.match(r"https://([^@]+)@github\.com/(.+)", url)
-    if not m:
-        return True, "Origin already clean (no embedded token)"
-    userinfo = m.group(1)
-    # Handle user:token format (e.g. x-access-token:ghp_xxx)
-    if ":" in userinfo:
-        token = userinfo.split(":", 1)[1]
-    else:
-        token = userinfo
-    slug = m.group(2).rstrip("/")
-    if slug.endswith(".git"):
-        slug = slug[:-4]
-    return configure_remote(slug, token)

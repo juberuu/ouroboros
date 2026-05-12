@@ -1167,6 +1167,59 @@ def _str_replace_editor(
     return result
 
 
+def _git_commit_success_tail(
+    ctx: ToolContext,
+    commit_message: str,
+    commit_start: float,
+    outcome: dict,
+    skip_tests: bool,
+    test_warning_ref: list,
+) -> tuple[bool, str]:
+    """After ``_run_reviewed_stage_cycle`` returns ``passed``: ``git commit`` + success records.
+
+    Returns ``(True, tag_info)`` on success; ``(False, err_msg)`` if ``git commit`` fails.
+    """
+    pre_fingerprint = outcome.get("pre_fingerprint", {}) or {}
+    post_fingerprint = outcome.get("post_fingerprint", {}) or {}
+    try:
+        run_cmd(["git", "commit", "-m", commit_message], cwd=ctx.repo_dir)
+    except Exception as e:
+        err_msg = f"⚠️ GIT_ERROR (commit): {_sanitize_git_error(str(e))}"
+        _record_commit_attempt(
+            ctx,
+            commit_message,
+            "failed",
+            block_reason="infra_failure",
+            block_details=err_msg,
+            duration_sec=time.time() - commit_start,
+            triad_models=getattr(ctx, "_last_triad_models", []),
+            scope_model=getattr(ctx, "_last_scope_model", ""),
+            triad_raw_results=getattr(ctx, "_last_triad_raw_results", []),
+            scope_raw_result=getattr(ctx, "_last_scope_raw_result", {}),
+            degraded_reasons=list(getattr(ctx, "_review_degraded_reasons", []) or []),
+        )
+        return False, err_msg
+    _record_commit_attempt(
+        ctx,
+        commit_message,
+        "succeeded",
+        duration_sec=time.time() - commit_start,
+        phase="commit",
+        pre_review_fingerprint=pre_fingerprint.get("fingerprint", ""),
+        post_review_fingerprint=post_fingerprint.get("fingerprint", ""),
+        fingerprint_status="matched",
+        triad_models=getattr(ctx, "_last_triad_models", []),
+        scope_model=getattr(ctx, "_last_scope_model", ""),
+        triad_raw_results=getattr(ctx, "_last_triad_raw_results", []),
+        scope_raw_result=getattr(ctx, "_last_scope_raw_result", {}),
+        degraded_reasons=list(getattr(ctx, "_review_degraded_reasons", []) or []),
+    )
+    ctx._scope_review_history = {}  # Clear on success — next commit starts fresh
+    _post_commit_result(ctx, commit_message, skip_tests, test_warning_ref)
+    tag_info = _auto_tag_on_version_bump(ctx.repo_dir, commit_message)
+    return True, tag_info
+
+
 def _repo_write_commit(ctx: ToolContext, path: str, content: str,
                         commit_message: str, skip_tests: bool = False,
                         also_stage: Optional[List[str]] = None) -> str:
@@ -1271,36 +1324,12 @@ def _repo_write_commit(ctx: ToolContext, path: str, content: str,
                     "Run advisory_pre_review, fix issues, then repo_commit."
                 )
             return message
-        pre_fingerprint = outcome.get("pre_fingerprint", {}) or {}
-        post_fingerprint = outcome.get("post_fingerprint", {}) or {}
-
-        try:
-            run_cmd(["git", "commit", "-m", commit_message], cwd=ctx.repo_dir)
-        except Exception as e:
-            err_msg = f"⚠️ GIT_ERROR (commit): {_sanitize_git_error(str(e))}"
-            _record_commit_attempt(ctx, commit_message, "failed",
-                                   block_reason="infra_failure", block_details=err_msg,
-                                   duration_sec=time.time() - _commit_start,
-                                   triad_models=getattr(ctx, "_last_triad_models", []),
-                                   scope_model=getattr(ctx, "_last_scope_model", ""),
-                                   triad_raw_results=getattr(ctx, "_last_triad_raw_results", []),
-                                   scope_raw_result=getattr(ctx, "_last_scope_raw_result", {}),
-                                   degraded_reasons=list(getattr(ctx, "_review_degraded_reasons", []) or []))
-            return err_msg
-        _record_commit_attempt(ctx, commit_message, "succeeded",
-                               duration_sec=time.time() - _commit_start,
-                               phase="commit",
-                               pre_review_fingerprint=pre_fingerprint.get("fingerprint", ""),
-                               post_review_fingerprint=post_fingerprint.get("fingerprint", ""),
-                               fingerprint_status="matched",
-                               triad_models=getattr(ctx, "_last_triad_models", []),
-                               scope_model=getattr(ctx, "_last_scope_model", ""),
-                               triad_raw_results=getattr(ctx, "_last_triad_raw_results", []),
-                               scope_raw_result=getattr(ctx, "_last_scope_raw_result", {}),
-                               degraded_reasons=list(getattr(ctx, "_review_degraded_reasons", []) or []))
-        ctx._scope_review_history = {}  # Clear on success — next commit starts fresh
-        _post_commit_result(ctx, commit_message, skip_tests, test_warning_ref)
-        tag_info = _auto_tag_on_version_bump(ctx.repo_dir, commit_message)
+        ok, tail = _git_commit_success_tail(
+            ctx, commit_message, _commit_start, outcome, skip_tests, test_warning_ref
+        )
+        if not ok:
+            return tail
+        tag_info = tail
     finally:
         _release_git_lock(lock)
     push_status = _auto_push(ctx.repo_dir)
@@ -1414,36 +1443,12 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
         )
         if outcome.get("status") != "passed":
             return str(outcome.get("message", "") or "")
-        pre_fingerprint = outcome.get("pre_fingerprint", {}) or {}
-        post_fingerprint = outcome.get("post_fingerprint", {}) or {}
-
-        try:
-            run_cmd(["git", "commit", "-m", commit_message], cwd=ctx.repo_dir)
-        except Exception as e:
-            err_msg = f"⚠️ GIT_ERROR (commit): {_sanitize_git_error(str(e))}"
-            _record_commit_attempt(ctx, commit_message, "failed",
-                                   block_reason="infra_failure", block_details=err_msg,
-                                   duration_sec=time.time() - _commit_start,
-                                   triad_models=getattr(ctx, "_last_triad_models", []),
-                                   scope_model=getattr(ctx, "_last_scope_model", ""),
-                                   triad_raw_results=getattr(ctx, "_last_triad_raw_results", []),
-                                   scope_raw_result=getattr(ctx, "_last_scope_raw_result", {}),
-                                   degraded_reasons=list(getattr(ctx, "_review_degraded_reasons", []) or []))
-            return err_msg
-        _record_commit_attempt(ctx, commit_message, "succeeded",
-                               duration_sec=time.time() - _commit_start,
-                               phase="commit",
-                               pre_review_fingerprint=pre_fingerprint.get("fingerprint", ""),
-                               post_review_fingerprint=post_fingerprint.get("fingerprint", ""),
-                               fingerprint_status="matched",
-                               triad_models=getattr(ctx, "_last_triad_models", []),
-                               scope_model=getattr(ctx, "_last_scope_model", ""),
-                               triad_raw_results=getattr(ctx, "_last_triad_raw_results", []),
-                               scope_raw_result=getattr(ctx, "_last_scope_raw_result", {}),
-                               degraded_reasons=list(getattr(ctx, "_review_degraded_reasons", []) or []))
-        ctx._scope_review_history = {}  # Clear on success — next commit starts fresh
-        _post_commit_result(ctx, commit_message, skip_tests, test_warning_ref)
-        tag_info = _auto_tag_on_version_bump(ctx.repo_dir, commit_message)
+        ok, tail = _git_commit_success_tail(
+            ctx, commit_message, _commit_start, outcome, skip_tests, test_warning_ref
+        )
+        if not ok:
+            return tail
+        tag_info = tail
     finally:
         _release_git_lock(lock)
     push_status = _auto_push(ctx.repo_dir)

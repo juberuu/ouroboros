@@ -754,11 +754,11 @@ def save_settings(settings: dict, *, allow_elevation: bool = False) -> None:
                 f"{baseline_mode!r} -> {new_mode!r}.{hint}"
             )
         try:
-            tmp = SETTINGS_PATH.with_suffix(".tmp")
-            tmp.write_text(json.dumps(settings, indent=2), encoding="utf-8")
-            os.replace(str(tmp), str(SETTINGS_PATH))
+            from ouroboros.utils import atomic_write_json, write_text
+
+            atomic_write_json(SETTINGS_PATH, settings)
         except OSError:
-            SETTINGS_PATH.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+            write_text(SETTINGS_PATH, json.dumps(settings, ensure_ascii=False, indent=2))
     finally:
         _release_settings_lock(fd)
 

@@ -102,7 +102,8 @@ def test_apply_runtime_provider_defaults_keeps_explicit_official_openai_review_m
     assert normalized["OUROBOROS_REVIEW_MODELS"] == "openai::gpt-5.5,openai::gpt-5.5-mini"
 
 
-def test_apply_runtime_provider_defaults_refreshes_retired_opus_defaults_with_openrouter():
+def test_apply_runtime_provider_defaults_does_not_rewrite_retired_model_ids_when_openrouter_only():
+    """Retired OpenRouter id refresh was removed; settings pass through unchanged."""
     old_openrouter = "anthropic/claude-opus-" + "4.7"
     old_claude_code = "claude-opus-" + "4-7[1m]"
     normalized, changed, changed_keys = apply_runtime_provider_defaults({
@@ -113,15 +114,15 @@ def test_apply_runtime_provider_defaults_refreshes_retired_opus_defaults_with_op
         "CLAUDE_CODE_MODEL": old_claude_code,
     })
 
-    assert changed
-    assert "OUROBOROS_MODEL" in changed_keys
-    assert normalized["OUROBOROS_MODEL"] == "anthropic/claude-opus-4.6"
-    assert normalized["OUROBOROS_MODEL_CODE"] == "anthropic/claude-opus-4.6"
-    assert normalized["OUROBOROS_REVIEW_MODELS"] == "openai/gpt-5.5,anthropic/claude-opus-4.6"
-    assert normalized["CLAUDE_CODE_MODEL"] == "claude-opus-4-6[1m]"
+    assert not changed
+    assert changed_keys == []
+    assert normalized["OUROBOROS_MODEL"] == old_openrouter
+    assert normalized["OUROBOROS_MODEL_CODE"] == old_openrouter
+    assert normalized["OUROBOROS_REVIEW_MODELS"] == f"openai/gpt-5.5,{old_openrouter}"
+    assert normalized["CLAUDE_CODE_MODEL"] == old_claude_code
 
 
-def test_apply_runtime_provider_defaults_refreshes_retired_gpt54_defaults():
+def test_apply_runtime_provider_defaults_does_not_rewrite_retired_gpt54_when_openrouter_only():
     old_main = "openai/gpt-" + "5.4"
     old_pro = "openai/gpt-" + "5.4-pro"
     old_mini = "openai/gpt-" + "5.4-mini"
@@ -131,10 +132,10 @@ def test_apply_runtime_provider_defaults_refreshes_retired_gpt54_defaults():
         "OUROBOROS_SCOPE_REVIEW_MODEL": old_pro,
     })
 
-    assert changed
-    assert "OUROBOROS_REVIEW_MODELS" in changed_keys
-    assert normalized["OUROBOROS_REVIEW_MODELS"] == "openai/gpt-5.5,openai/gpt-5.5-mini"
-    assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] == "openai/gpt-5.5-pro"
+    assert not changed
+    assert changed_keys == []
+    assert normalized["OUROBOROS_REVIEW_MODELS"] == f"{old_main},{old_mini}"
+    assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] == old_pro
 
 
 def test_apply_runtime_provider_defaults_migrates_legacy_scope_model_for_openai_only():

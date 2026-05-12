@@ -11,7 +11,7 @@ Verifies (Phase 4):
 
 Verifies (Phase 5):
 - Auto-push wired into commit functions
-- migrate_remote_credentials exists and is safe
+- configure_remote used on save and startup
 - ARCHITECTURE.md version sync in startup checks
 """
 import importlib
@@ -351,18 +351,20 @@ def test_auto_push_outside_git_lock():
         )
 
 
-# --- Credential migration (Phase 5) ---
+# --- Credential helper (Phase 5) ---
 
-def test_migrate_remote_credentials_exists():
+
+def test_configure_remote_exists():
     git_ops = _get_git_ops_module()
-    assert hasattr(git_ops, "migrate_remote_credentials")
-    assert callable(git_ops.migrate_remote_credentials)
+    assert hasattr(git_ops, "configure_remote")
+    assert callable(git_ops.configure_remote)
 
 
-def test_migrate_remote_credentials_uses_configure_remote():
+def test_configure_remote_sets_clean_github_url():
     git_ops = _get_git_ops_module()
-    source = inspect.getsource(git_ops.migrate_remote_credentials)
-    assert "configure_remote" in source
+    source = inspect.getsource(git_ops.configure_remote)
+    assert "github.com" in source
+    assert "credential" in source.lower()
 
 
 # --- ARCHITECTURE version sync (Phase 5) ---
