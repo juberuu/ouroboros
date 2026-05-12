@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 5.19.0-rc.1](https://img.shields.io/badge/version-5.19.0--rc.1-green.svg)](VERSION)
+[![Version 5.19.0-rc.2](https://img.shields.io/badge/version-5.19.0--rc.2-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -418,6 +418,7 @@ not paraphrase it.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 5.19.0-rc.2 | 2026-05-12 | **rc(build): harden macOS DMG creation after release CI.** Retries transient `hdiutil create` resource-busy failures with cleanup before regenerating the DMG, preserving the v5.19.0-rc.1 skill-review gate overhaul. |
 | 5.19.0-rc.1 | 2026-05-12 | **rc(skills): align skill review gates and collapse review evidence.** Renames skill verdicts to `clean`/`warnings`/`blockers`, separates verdicts from enforcement, unifies skill readiness and owner-message injection, syncs reviewed grants across content hashes, and collapses long skill-review system messages in Chat. |
 | 5.18.0 | 2026-05-12 | **feat(skills): overhaul skill-review feedback visibility and anti-thrashing.** Returns full parsed and degraded reviewer evidence to agents via `review_skill` and `chat.jsonl`, shares retry coaching across repo, scope, and skill review, persists accepted rebuttals as protected owner state, hardens review-evidence fencing, and documents skill-review critical thresholds. |
 | 5.17.0 | 2026-05-12 | **release(skills): stabilize v5 skill review and runtime state.** Consolidates the release-candidate series for shared triad parsing, executable review gates, current provider smoke models, JSON state IO, and restart-marker test alignment. |

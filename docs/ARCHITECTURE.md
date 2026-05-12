@@ -1,4 +1,4 @@
-# Ouroboros v5.19.0-rc.1 — Architecture & Reference
+# Ouroboros v5.19.0-rc.2 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -1738,7 +1738,8 @@ Tag pushes (`v*`) always fire regardless of paths.
 `BUILD_CERTIFICATE_BASE64`, `P12_PASSWORD`, `KEYCHAIN_PASSWORD`, and `APPLE_TEAM_ID` as
 GitHub Actions repository secrets, the build job creates a temporary keychain, imports
 the Developer ID certificate, and runs `bash build.sh` (which then signs the `.app` and
-the `.dmg`); when `APPLE_ID` and `APPLE_APP_SPECIFIC_PASSWORD` are also present,
+creates the `.dmg`; `hdiutil create` is retried after transient resource-busy failures
+with stale volume/helper cleanup); when `APPLE_ID` and `APPLE_APP_SPECIFIC_PASSWORD` are also present,
 `build.sh` additionally runs `xcrun notarytool submit ... --wait` followed by
 `xcrun stapler staple` to staple the notarization ticket to the DMG. A transient
 stapler failure (Apple CDN propagation lag) after a successful notarytool submission

@@ -139,7 +139,21 @@ fi
 
 echo ""
 echo "=== Creating DMG ==="
-hdiutil create -volname Ouroboros -srcfolder "$APP_PATH" -ov -format UDZO "$DMG_PATH"
+rm -f "$DMG_PATH"
+for attempt in 1 2 3; do
+    if hdiutil create -volname Ouroboros -srcfolder "$APP_PATH" -ov -format UDZO "$DMG_PATH"; then
+        break
+    fi
+    if [ "$attempt" -eq 3 ]; then
+        echo "ERROR: hdiutil create failed after $attempt attempts."
+        exit 1
+    fi
+    echo "WARNING: hdiutil create failed (attempt $attempt/3); waiting for disk image helpers to settle."
+    hdiutil detach "/Volumes/Ouroboros" -force >/dev/null 2>&1 || true
+    pkill -f diskimages-helper >/dev/null 2>&1 || true
+    rm -f "$DMG_PATH"
+    sleep 5
+done
 
 if [ "$SIGN_MODE" != "0" ]; then
     codesign -s "$SIGN_IDENTITY" --timestamp "$DMG_PATH"
