@@ -62,16 +62,13 @@ def _assert_basic_response(result, expected_provider=None):
 
 # Provider name → (env var name, model id, expected_provider check)
 #
-# anthropic_direct uses ``claude-3-5-haiku-20241022`` (date-pinned, the
-# long-stable Anthropic Haiku 3.5 release) rather than the production
-# default ``anthropic::claude-sonnet-4-6``. This is a routing smoke
-# (auth + request shape) — the production-default alias rotates faster
-# than the CI cadence, and CI accounts can have model-specific
-# entitlement gates that intermittently 400 newer aliases.
+# anthropic_direct uses the current production direct Anthropic default. This
+# is a routing smoke (auth + request shape); provider billing/quota/rate-limit
+# errors are still treated as environmental below.
 _PROVIDER_MATRIX = [
     ("openrouter",       "OPENROUTER_API_KEY",                 "anthropic/claude-sonnet-4.6", "openrouter"),
     ("openai_direct",    "OPENAI_API_KEY",                     "openai::gpt-4o-mini",         "openai"),
-    ("anthropic_direct", "ANTHROPIC_API_KEY",                  "anthropic::claude-3-5-haiku-20241022", "anthropic"),
+    ("anthropic_direct", "ANTHROPIC_API_KEY",                  "anthropic::claude-sonnet-4-6", "anthropic"),
     ("cloudru",          "CLOUDRU_FOUNDATION_MODELS_API_KEY",  "cloudru::zai-org/GLM-4.7",    "cloudru"),
 ]
 
@@ -157,7 +154,7 @@ _COMPETING_KEYS = [
 _ISOLATION_MATRIX = [
     ("openrouter",       "OPENROUTER_API_KEY",                 "anthropic/claude-sonnet-4.6"),
     ("openai_direct",    "OPENAI_API_KEY",                     "openai::gpt-4o-mini"),
-    ("anthropic_direct", "ANTHROPIC_API_KEY",                  "anthropic::claude-3-5-haiku-20241022"),
+    ("anthropic_direct", "ANTHROPIC_API_KEY",                  "anthropic::claude-sonnet-4-6"),
     ("cloudru",          "CLOUDRU_FOUNDATION_MODELS_API_KEY",  "cloudru::zai-org/GLM-4.7"),
 ]
 
