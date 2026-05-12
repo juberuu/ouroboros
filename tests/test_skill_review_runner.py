@@ -111,7 +111,7 @@ def test_blocking_review_lifecycle_uses_single_progress_card(tmp_path, monkeypat
         repo_path=str(skills_root),
     )
 
-    assert payload["status"] == "pass"
+    assert payload["status"] == "clean"
     assert payload["deps_status"] == "installed"
     assert payload["extension_action"] == "extension_loaded"
     assert reconcile_calls == ["alpha"]
@@ -125,11 +125,11 @@ def test_blocking_review_lifecycle_uses_single_progress_card(tmp_path, monkeypat
     assert any("Running tri-model review" in message for message in progress_messages)
     assert any("Installing dependencies" in message for message in progress_messages)
     assert any("Reloading extension" in message for message in progress_messages)
-    assert any("completed" in message and "Review executable (pass): PASS manifest_schema" in message for message in progress_messages)
+    assert any("completed" in message and "Review executable (clean): PASS manifest_schema" in message for message in progress_messages)
     assert not any(kwargs.get("task_id") in {"skill_lifecycle_review", "api_skill_review"} for _args, kwargs in sent)
 
 
-def test_review_lifecycle_installs_deps_after_advisory_pass(tmp_path, monkeypatch):
+def test_review_lifecycle_installs_deps_after_warnings(tmp_path, monkeypatch):
     _reset_queue()
     deps_calls = []
     drive_root = tmp_path / "drive"
@@ -145,7 +145,7 @@ def test_review_lifecycle_installs_deps_after_advisory_pass(tmp_path, monkeypatc
     def fake_review(_ctx, skill_name):
         return SkillReviewOutcome(
             skill_name=skill_name,
-            status="advisory_pass",
+            status="warnings",
             content_hash=content_hash,
             reviewer_models=["fake/reviewer#1", "fake/reviewer#2"],
             findings=[{"item": "error_handling", "verdict": "FAIL", "severity": "advisory"}],
@@ -168,18 +168,19 @@ def test_review_lifecycle_installs_deps_after_advisory_pass(tmp_path, monkeypatc
         repo_path=str(skills_root),
     )
 
-    assert payload["status"] == "advisory_pass"
+    assert payload["status"] == "warnings"
     assert payload["executable_review"] is True
-    assert payload["review_gate"]["blocking_reason"] == "advisory_findings_allowed_by_advisory_enforcement"
+    assert payload["review_gate"]["blocking_reason"] == "warnings_do_not_block_execution"
     assert payload["deps_status"] == "installed"
     assert deps_calls == ["alpha"]
 
 
-def test_review_result_message_prefers_non_pass_findings_and_marks_omissions():
+def test_review_result_message_prefers_non_pass_findings_and_marks_omissions(monkeypatch):
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     long_reason = "x" * 400
     outcome = SkillReviewOutcome(
         skill_name="alpha",
-        status="fail",
+        status="blockers",
         findings=[
             {"item": "manifest_schema", "verdict": "PASS", "reason": "ok"},
             {"item": "extension_namespace_discipline", "verdict": "FAIL", "reason": long_reason},
@@ -188,22 +189,22 @@ def test_review_result_message_prefers_non_pass_findings_and_marks_omissions():
 
     message = _review_result_message(outcome)
 
-    assert message.startswith("Review blocked: critical findings (fail): FAIL extension_namespace_discipline")
+    assert message.startswith("Review blocked: blocker findings (blockers): FAIL extension_namespace_discipline")
     assert "manifest_schema" not in message
     assert "[omitted " in message
     assert "full findings in Skills page" in message
 
 
-def test_review_result_message_blocks_advisory_status(monkeypatch):
+def test_review_result_message_allows_warnings_status(monkeypatch):
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     outcome = SkillReviewOutcome(
         skill_name="alpha",
-        status="advisory",
+        status="warnings",
         findings=[{"item": "bug_hunting", "verdict": "FAIL", "reason": "soft"}],
     )
 
     assert _review_result_message(outcome).startswith(
-        "Review blocked: advisory findings under blocking enforcement (advisory):"
+        "Review executable with findings (warnings):"
     )
 
 
@@ -263,11 +264,11 @@ def test_self_authored_review_lifecycle_uses_triad(tmp_path, monkeypatch):
         repo_path=str(drive_root / "skills"),
     )
 
-    assert payload["status"] == "pass"
+    assert payload["status"] == "clean"
     assert payload["auto_flow"] is False
     assert load_enabled(drive_root, "alpha") is False
     review = load_review_state(drive_root, "alpha")
-    assert review.status == "pass"
+    assert review.status == "clean"
     assert review.content_hash == content_hash
     assert review.reviewer_models == ["reviewer-a", "reviewer-b", "reviewer-c"]
     grants = load_skill_grants(drive_root, "alpha")
@@ -398,7 +399,7 @@ def test_lifecycle_finish_writes_full_markdown_to_chat_jsonl(tmp_path, monkeypat
     row = skill_rows[0]
     assert row["direction"] == "system"
     assert row["skill"] == "alpha"
-    assert row["status"] == "fail"
+    assert row["status"] == "blockers"
     assert row["attempt"] >= 1
     # Full markdown — no per-row truncation; the long reason must appear verbatim.
     assert long_reason in row["text"]
@@ -482,5 +483,5 @@ def test_self_authored_review_requires_configured_requested_keys(tmp_path, monke
         repo_path=str(drive_root / "skills"),
     )
 
-    assert payload["status"] == "pass"
+    assert payload["status"] == "clean"
     assert load_enabled(drive_root, "alpha") is False

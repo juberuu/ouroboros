@@ -588,7 +588,7 @@ def _request_auto_grant_reviewed_skills_change(enabled: bool, confirm_fn) -> dic
     if new_enabled:
         message = (
             "Enable auto-grant for reviewed skills?\n\n"
-            "After this, a fresh pass/advisory-pass skill review will grant the "
+            "After this, any completed skill review will grant the "
             "skill's manifest-declared settings keys and host permissions for "
             "that exact content hash. Only enable this for trusted closed-loop "
             "skill development."

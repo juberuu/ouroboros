@@ -316,9 +316,9 @@ provenance only; they do not auto-grant keys or auto-enable skills.
 
 Owners can enable `OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS` in desktop Settings →
 Behavior → Skills; the launcher asks for native confirmation before saving it.
-When enabled, a fresh pass/advisory-pass review grants only the
-manifest-declared keys and host permissions for the current content hash. Editing
-the skill still invalidates those grants.
+When enabled, any completed review verdict (`clean`, `warnings`, or `blockers`)
+grants only the manifest-declared keys and host permissions for the current
+content hash. Editing the skill still invalidates those grants.
 
 ## Notifying the owner when work completes
 
@@ -512,9 +512,9 @@ else:
 Reviewers grade your skill on the checklist defined in
 [`docs/CHECKLISTS.md`](CHECKLISTS.md) §"Skill Review Checklist". That file is
 the authoritative SSOT — read it there once and consult it whenever you author
-or repair a skill instead of reading a paraphrase here. Critical items must
-reach `PASS`; advisory findings can become `advisory_pass` only in advisory
-enforcement mode.
+or repair a skill instead of reading a paraphrase here. Review verdicts are
+`clean`, `warnings`, `blockers`, or `pending`; execution is decided by
+`review_gate.executable_review`.
 
 ## Reference skills
 
@@ -542,7 +542,7 @@ from. The normal publishing path is agent-driven:
 
 1. Finish the local skill under `data/skills/<bucket>/<slug>/`.
 2. Run `skill_preflight` and `review_skill`; submission requires a
-   fresh `PASS` review whose stored `content_hash` matches the current
+   fresh `clean` review whose stored `content_hash` matches the current
    payload.
 3. Configure `GITHUB_TOKEN` in Settings → Secrets.
 4. Use the Skills card menu → **Submit to OuroborosHub**, or ask in
@@ -585,7 +585,7 @@ def register(api):
 | Symptom | Likely cause |
 |---------|--------------|
 | `SKILL_EXEC_BLOCKED: review status is 'pending'` | Run `review_skill` for this skill. |
-| `SKILL_TOGGLE_ERROR: dependency fingerprint is stale` | Re-run `review_skill`; the post-PASS deps reconciliation will reinstall. |
+| `SKILL_TOGGLE_ERROR: dependency fingerprint is stale` | Re-run `review_skill`; post-review deps reconciliation will reinstall. |
 | `EXTENSION_NOT_LIVE` on tool dispatch | The skill is disabled or the loader had a load_error — check the Skills UI. |
 | `HEAL_MODE_BLOCKED: ...` | The Repair task tried to call a tool the internal heal-mode allowlist does not permit; finish the Repair flow with `review_skill` and exit. |
 | `PluginAPI.register_*` raises `ExtensionRegistrationError` | The skill is missing the matching permission in its manifest. |

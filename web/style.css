@@ -1069,6 +1069,79 @@ body {
 .chat-bubble.assistant .message { color: rgba(255, 235, 238, 0.96); }
 .chat-bubble.system .message { color: rgba(255, 240, 210, 0.78); }
 
+.chat-bubble.system[data-system-type="skill_review"] {
+    padding: 0;
+    overflow: hidden;
+}
+
+.chat-bubble.system[data-system-type="skill_review"] .sender,
+.chat-bubble.system[data-system-type="skill_review"] .msg-time {
+    margin-left: 14px;
+    margin-right: 14px;
+}
+
+.chat-bubble.system[data-system-type="skill_review"] .sender {
+    margin-top: 10px;
+}
+
+.chat-bubble.system[data-system-type="skill_review"] .message {
+    white-space: normal;
+}
+
+.skill-review-disclosure {
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.skill-review-summary-button {
+    width: 100%;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    padding: 11px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    text-align: left;
+}
+
+.skill-review-summary-button:hover {
+    background: rgba(245, 158, 11, 0.08);
+}
+
+.skill-review-summary-main {
+    color: rgba(255, 244, 220, 0.96);
+    font-weight: 650;
+}
+
+.skill-review-summary-side {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    color: rgba(255, 240, 210, 0.66);
+    font-size: 12px;
+}
+
+.skill-review-meta {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.skill-review-toggle-label {
+    flex-shrink: 0;
+    color: rgba(245, 158, 11, 0.95);
+    font-weight: 650;
+}
+
+.skill-review-full {
+    padding: 0 14px 14px;
+    color: rgba(255, 240, 210, 0.82);
+    white-space: pre-wrap;
+}
+
 .chat-bubble.pending {
     opacity: 0.78;
     border-style: dashed;

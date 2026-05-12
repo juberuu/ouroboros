@@ -145,7 +145,8 @@ def _skill_finalization_message(drive_root: pathlib.Path, llm_trace: Dict[str, A
     if not names:
         return ""
     try:
-        from ouroboros.skill_loader import find_skill, grant_status_for_skill
+        from ouroboros.skill_loader import find_skill
+        from ouroboros.skill_readiness import skill_readiness_for_execution
     except Exception:
         return ""
     blockers: List[str] = []
@@ -154,21 +155,14 @@ def _skill_finalization_message(drive_root: pathlib.Path, llm_trace: Dict[str, A
             skill = find_skill(pathlib.Path(drive_root), name)
             if skill is None or not getattr(skill, "is_self_authored", False):
                 continue
-            stale = skill.review.is_stale_for(skill.content_hash)
-            grants = grant_status_for_skill(pathlib.Path(drive_root), skill)
-            from ouroboros.skill_loader import review_status_allows_execution
-            ready = (
-                review_status_allows_execution(skill.review.status)
-                and not stale
-                and skill.enabled
-                and grants.get("all_granted", True)
-            )
+            readiness = skill_readiness_for_execution(pathlib.Path(drive_root), skill)
+            ready = readiness.ready
         except Exception:
             continue
         if not ready:
             blockers.append(
-                f"{skill.name}: status={skill.review.status!r}, stale={stale}, "
-                f"enabled={skill.enabled}, missing_grants={grants.get('missing_keys', [])}"
+                f"{skill.name}: status={skill.review.status!r}, "
+                f"blockers={readiness.blockers}"
             )
     if not blockers:
         return ""
@@ -215,14 +209,14 @@ def _check_budget_limits(
 
     per_task_limit = float(os.environ.get("OUROBOROS_PER_TASK_COST_USD", "20.0") or 20.0)
     if task_cost >= per_task_limit and round_idx % 10 == 0:
-        messages.append({
-            "role": "user",
-            "content": f"[COST NOTE] Task spent ${task_cost:.3f}, which is at or above the per-task soft threshold of ${per_task_limit:.2f}. Continue only if the expected value still justifies the cost.",
-        })
+        _append_or_merge_user_message(
+            messages,
+            f"[COST NOTE] Task spent ${task_cost:.3f}, which is at or above the per-task soft threshold of ${per_task_limit:.2f}. Continue only if the expected value still justifies the cost.",
+        )
 
     if budget_pct > 0.5:
         finish_reason = f"Task spent ${task_cost:.3f} (>50% of remaining ${budget_remaining_usd:.2f}). Budget exhausted."
-        messages.append({"role": "user", "content": f"[BUDGET LIMIT] {finish_reason} Give your final response now."})
+        _append_or_merge_user_message(messages, f"[BUDGET LIMIT] {finish_reason} Give your final response now.")
         try:
             final_msg, final_cost = _call_llm_with_retry(
                 llm, messages, active_model, None, active_effort,
@@ -236,7 +230,7 @@ def _check_budget_limits(
             log.warning("Failed to get final response after budget limit", exc_info=True)
             return finish_reason, accumulated_usage, llm_trace
     elif budget_pct > 0.3 and round_idx % 10 == 0:
-        messages.append({"role": "user", "content": f"[INFO] Task spent ${task_cost:.3f} of ${budget_remaining_usd:.2f}. Wrap up if possible."})
+        _append_or_merge_user_message(messages, f"[INFO] Task spent ${task_cost:.3f} of ${budget_remaining_usd:.2f}. Wrap up if possible.")
 
     return None
 
@@ -308,8 +302,23 @@ def _extract_plain_text_from_content(content: Any) -> str:
 
 def _append_or_merge_user_message(messages: List[Dict[str, Any]], text: str) -> None:
     """Append a user message without creating consecutive user turns."""
+    _append_or_merge_user_content(messages, text)
+
+
+def _append_or_merge_user_content(messages: List[Dict[str, Any]], content: Any) -> None:
+    """Append user content without flattening multipart blocks."""
     if messages and messages[-1].get("role") == "user":
         prior = messages[-1].get("content")
+        if isinstance(content, list):
+            new_blocks = list(content)
+            if isinstance(prior, list):
+                messages[-1] = {"role": "user", "content": list(prior) + new_blocks}
+                return
+            prior_text = prior if isinstance(prior, str) else str(prior or "")
+            prefix_block = [{"type": "text", "text": prior_text.rstrip() + "\n\n---\n\n"}] if prior_text else []
+            messages[-1] = {"role": "user", "content": prefix_block + new_blocks}
+            return
+        text = str(content or "")
         if isinstance(prior, list):
             messages[-1] = {
                 "role": "user",
@@ -322,7 +331,20 @@ def _append_or_merge_user_message(messages: List[Dict[str, Any]], text: str) -> 
             "content": (prior_text.rstrip() + "\n\n---\n\n" + text) if prior_text else text,
         }
         return
-    messages.append({"role": "user", "content": text})
+    messages.append({"role": "user", "content": content})
+
+
+def _owner_marked_content(content: Any) -> Any:
+    """Mark direct owner injections with the same priority tag as mailbox messages."""
+    prefix = "[Message from my human]: "
+    if isinstance(content, list):
+        blocks = [dict(block) if isinstance(block, dict) else block for block in content]
+        for block in blocks:
+            if isinstance(block, dict) and str(block.get("type") or "") in {"text", "input_text"}:
+                block["text"] = prefix + str(block.get("text") or "")
+                return blocks
+        return [{"type": "text", "text": prefix.rstrip()}] + blocks
+    return prefix + str(content or "")
 
 
 def _maybe_inject_self_check(
@@ -563,9 +585,9 @@ def _drain_incoming_messages(
         try:
             injected = incoming_messages.get_nowait()
             if isinstance(injected, dict):
-                messages.append({"role": "user", "content": build_user_content(injected)})
+                _append_or_merge_user_content(messages, _owner_marked_content(build_user_content(injected)))
             else:
-                messages.append({"role": "user", "content": injected})
+                _append_or_merge_user_message(messages, _owner_marked_content(injected))
         except queue.Empty:
             break
 
@@ -573,10 +595,7 @@ def _drain_incoming_messages(
         from ouroboros.owner_inject import drain_owner_messages
         drive_msgs = drain_owner_messages(drive_root, task_id=task_id, seen_ids=_owner_msg_seen)
         for dmsg in drive_msgs:
-            messages.append({
-                "role": "user",
-                "content": f"[Message from my human]: {dmsg}",
-            })
+            _append_or_merge_user_message(messages, _owner_marked_content(dmsg))
             if event_queue is not None:
                 try:
                     event_queue.put_nowait({
@@ -640,7 +659,7 @@ def run_llm_loop(
 
             if round_idx > MAX_ROUNDS:
                 finish_reason = f"⚠️ Task exceeded MAX_ROUNDS ({MAX_ROUNDS}). Consider decomposing into subtasks via schedule_task."
-                messages.append({"role": "system", "content": f"[ROUND_LIMIT] {finish_reason}"})
+                _append_or_merge_user_message(messages, f"[ROUND_LIMIT] {finish_reason}")
                 try:
                     final_msg, final_cost = call_llm_with_retry(
                         llm, messages, active_model, None, active_effort,

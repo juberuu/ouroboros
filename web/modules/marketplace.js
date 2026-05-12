@@ -100,9 +100,9 @@ function paneTemplate({ includeControls = true } = {}) {
 
 
 function statusBadgeForReview(status) {
-    const tone = ['pass', 'advisory_pass'].includes(status) ? 'ok'
-        : status === 'fail' ? 'danger'
-        : status === 'advisory' ? 'warn'
+    const tone = status === 'clean' ? 'ok'
+        : status === 'warnings' ? 'warn'
+        : status === 'blockers' ? 'danger'
         : 'muted';
     return `<span class="skills-badge skills-badge-${tone}">${escapeHtml(status || 'pending')}</span>`;
 }
@@ -112,7 +112,21 @@ function grantReady(installed) {
 }
 
 function reviewReady(installed) {
-    return ['pass', 'advisory_pass'].includes(installed?.review_status) && !installed?.review_stale;
+    if (installed?.review_gate && typeof installed.review_gate.executable_review === 'boolean') {
+        return installed.review_gate.executable_review && !installed?.review_stale;
+    }
+    return ['clean', 'warnings'].includes(installed?.review_status) && !installed?.review_stale;
+}
+
+function reviewStatusTone(status) {
+    return ['clean', 'warnings'].includes(status) ? 'ok' : 'warn';
+}
+
+function reviewActionTone(status, error = '') {
+    if (error) return 'danger';
+    if (status === 'clean') return 'ok';
+    if (status === 'blockers') return 'danger';
+    return 'warn';
 }
 
 function hasInstalledUiTab(installed) {
@@ -168,12 +182,12 @@ function lifecycleFor(summary, installed, pending) {
             button: 'Repair',
         };
     }
-    if (installed.review_status === 'fail') {
+    if (installed.review_status === 'blockers' && !reviewReady(installed)) {
         const finding = topReviewFinding(installed);
         return {
             tone: 'danger',
-            label: 'Review failed',
-            hint: finding || 'Review failed; ask Ouroboros to repair the skill payload.',
+            label: 'Review blockers',
+            hint: finding || 'Review has blocker findings; ask Ouroboros to repair the skill payload.',
             action: 'fix',
             button: 'Repair',
         };
@@ -908,7 +922,7 @@ export function initMarketplace(pane, controlsHost = null) {
             showStatus(
                 pane,
                 `${slug}: review ${result.status}${result.error ? ` — ${result.error}` : ''}`,
-                result.status === 'pass' ? 'ok' : (result.status === 'fail' || result.error ? 'danger' : 'warn'),
+                reviewActionTone(result.status, result.error),
             );
             emitSkillLifecycle('review', installed.name, result);
             return;
@@ -926,7 +940,7 @@ export function initMarketplace(pane, controlsHost = null) {
                 body: JSON.stringify({}),
             });
             if (!result.ok) throw new Error(result.error || 'update failed');
-            showStatus(pane, `Updated ${slug} — review ${result.review_status}`, ['pass', 'advisory_pass'].includes(result.review_status) ? 'ok' : 'warn');
+            showStatus(pane, `Updated ${slug} — review ${result.review_status}`, reviewStatusTone(result.review_status));
             emitSkillLifecycle('update', installed.name, result);
             return;
         }
@@ -940,14 +954,14 @@ export function initMarketplace(pane, controlsHost = null) {
             if (!result.ok) throw new Error(result.error || 'install failed');
             const installedName = result.sanitized_name;
             const requestedGrants = result.provenance?.requested_key_grants || [];
-            if (['pass', 'advisory_pass'].includes(result.review_status) && installedName && !requestedGrants.length) {
+            if (['clean', 'warnings'].includes(result.review_status) && installedName && !requestedGrants.length) {
                 showStatus(pane, `Installed ${slug}; review passed. Enable it from the card when ready.`, 'ok');
-            } else if (['pass', 'advisory_pass'].includes(result.review_status) && requestedGrants.length) {
+            } else if (['clean', 'warnings'].includes(result.review_status) && requestedGrants.length) {
                 showStatus(pane, `Installed ${slug}; grant required before enabling`, 'warn');
             } else if (result.review_error) {
                 showStatus(pane, `Installed ${slug}; review could not finish: ${result.review_error}`, 'warn');
             } else {
-                showStatus(pane, `Installed ${slug}; review ${result.review_status || 'pending'}`, ['pass', 'advisory_pass'].includes(result.review_status) ? 'ok' : 'warn');
+                showStatus(pane, `Installed ${slug}; review ${result.review_status || 'pending'}`, reviewStatusTone(result.review_status));
             }
             emitSkillLifecycle('install', installedName || slug, result);
         }
@@ -1059,7 +1073,7 @@ export function initMarketplace(pane, controlsHost = null) {
                         'warn',
                     );
                 } else {
-                    showStatus(pane, `Installed ${slug} — review ${result.review_status}`, ['pass', 'advisory_pass'].includes(result.review_status) ? 'ok' : 'warn');
+                    showStatus(pane, `Installed ${slug} — review ${result.review_status}`, reviewStatusTone(result.review_status));
                     emitSkillLifecycle('install', result.sanitized_name || slug, result);
                 }
             } catch (err) {
@@ -1114,7 +1128,7 @@ export function initMarketplace(pane, controlsHost = null) {
                 if (!result.ok) {
                     throw new Error(result.error || 'update failed');
                 } else {
-                    showStatus(pane, `Updated ${slug} — review ${result.review_status}`, ['pass', 'advisory_pass'].includes(result.review_status) ? 'ok' : 'warn');
+                    showStatus(pane, `Updated ${slug} — review ${result.review_status}`, reviewStatusTone(result.review_status));
                     setPending(slug, null);
                     emitSkillLifecycle('update', sanitized, result);
                 }
@@ -1189,7 +1203,7 @@ export function initMarketplace(pane, controlsHost = null) {
                 const backdrop = modalHost.querySelector('[data-mp-modal]');
                 if (backdrop) backdrop.remove();
             } else {
-                showStatus(pane, `Installed ${slug} — review ${result.review_status}`, ['pass', 'advisory_pass'].includes(result.review_status) ? 'ok' : 'warn');
+                showStatus(pane, `Installed ${slug} — review ${result.review_status}`, reviewStatusTone(result.review_status));
                 emitSkillLifecycle('install', result.sanitized_name || slug, result);
                 const backdrop = modalHost.querySelector('[data-mp-modal]');
                 if (backdrop) backdrop.remove();

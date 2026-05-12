@@ -318,35 +318,35 @@ def test_extract_actor_findings_counts_duplicate_models_by_slot():
 # ---------------------------------------------------------------------------
 
 
-def test_aggregate_status_pass_when_all_critical_pass():
+def test_aggregate_status_clean_when_all_critical_pass():
     findings = [
         {"item": "manifest_schema", "verdict": "PASS", "severity": "critical"},
         {"item": "permissions_honesty", "verdict": "PASS", "severity": "critical"},
     ]
-    assert _aggregate_status(findings, skill_type="script") == "pass"
+    assert _aggregate_status(findings, skill_type="script") == "clean"
 
 
-def test_aggregate_status_fail_on_critical_fail():
+def test_aggregate_status_blockers_on_critical_fail():
     findings = [
         {"item": "no_repo_mutation", "verdict": "FAIL", "severity": "critical", "reason": "writes to repo"},
     ]
-    assert _aggregate_status(findings, skill_type="script") == "fail"
+    assert _aggregate_status(findings, skill_type="script") == "blockers"
 
 
-def test_aggregate_status_fail_on_critical_item_even_if_mislabeled(monkeypatch):
+def test_aggregate_status_blockers_on_critical_item_even_if_mislabeled(monkeypatch):
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     findings = [
         {"item": "no_repo_mutation", "verdict": "FAIL", "severity": "advisory", "reason": "writes to repo"},
     ]
-    assert _aggregate_status(findings, skill_type="script") == "fail"
+    assert _aggregate_status(findings, skill_type="script") == "blockers"
 
 
-def test_aggregate_status_advisory_on_soft_fail(monkeypatch):
+def test_aggregate_status_warnings_on_soft_fail(monkeypatch):
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     findings = [
         {"item": "timeout_and_output_discipline", "verdict": "FAIL", "severity": "advisory", "reason": "unbounded loop"},
     ]
-    assert _aggregate_status(findings, skill_type="script") == "advisory"
+    assert _aggregate_status(findings, skill_type="script") == "warnings"
 
 
 def test_aggregate_status_extension_namespace_fail_is_critical_only_for_extension(monkeypatch):
@@ -355,9 +355,9 @@ def test_aggregate_status_extension_namespace_fail_is_critical_only_for_extensio
         {"item": "extension_namespace_discipline", "verdict": "FAIL", "severity": "critical", "reason": "collides with built-in"},
     ]
     # For non-extension skills the extension_namespace_discipline FAIL is not blocking.
-    assert _aggregate_status(findings, skill_type="script") == "advisory"
+    assert _aggregate_status(findings, skill_type="script") == "warnings"
     # For extension skills it IS blocking.
-    assert _aggregate_status(findings, skill_type="extension") == "fail"
+    assert _aggregate_status(findings, skill_type="extension") == "blockers"
 
 
 def test_aggregate_status_widget_module_safety_fail_is_critical_only_for_module_widgets(monkeypatch):
@@ -365,9 +365,9 @@ def test_aggregate_status_widget_module_safety_fail_is_critical_only_for_module_
     findings = [
         {"item": "widget_module_safety", "verdict": "FAIL", "severity": "critical", "reason": "touches localStorage"},
     ]
-    assert _aggregate_status(findings, skill_type="script") == "advisory"
-    assert _aggregate_status(findings, skill_type="extension", is_module_widget=False) == "fail"
-    assert _aggregate_status(findings, skill_type="extension", is_module_widget=True) == "fail"
+    assert _aggregate_status(findings, skill_type="script") == "warnings"
+    assert _aggregate_status(findings, skill_type="extension", is_module_widget=False) == "blockers"
+    assert _aggregate_status(findings, skill_type="extension", is_module_widget=True) == "blockers"
 
 
 # ---------------------------------------------------------------------------
@@ -375,7 +375,7 @@ def test_aggregate_status_widget_module_safety_fail_is_critical_only_for_module_
 # ---------------------------------------------------------------------------
 
 
-def test_review_skill_persists_pass_verdict(tmp_path, monkeypatch):
+def test_review_skill_persists_clean_verdict(tmp_path, monkeypatch):
     skills_root = _build_skill(tmp_path)
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
     ctx = _make_ctx(tmp_path)
@@ -393,14 +393,14 @@ def test_review_skill_persists_pass_verdict(tmp_path, monkeypatch):
         outcome = review_skill(ctx, "weather")
 
     assert isinstance(outcome, SkillReviewOutcome)
-    assert outcome.status == "pass"
+    assert outcome.status == "clean"
     assert outcome.error == ""
     assert outcome.reviewer_models[:2] == [
         "openai/gpt-5.5#1",
         "google/gemini-3.1-pro-preview#2",
     ]
     persisted = load_review_state(ctx.drive_root, "weather")
-    assert persisted.status == "pass"
+    assert persisted.status == "clean"
     assert persisted.content_hash == outcome.content_hash
     # Content hash must actually match the on-disk snapshot so the
     # stale-review gate stays honest.
@@ -408,7 +408,7 @@ def test_review_skill_persists_pass_verdict(tmp_path, monkeypatch):
     assert persisted.content_hash == expected_hash
 
 
-def test_review_skill_auto_grants_after_pass_when_enabled(tmp_path, monkeypatch):
+def test_review_skill_auto_grants_after_clean_when_enabled(tmp_path, monkeypatch):
     from ouroboros.skill_loader import load_skill_grants
 
     skills_root = _build_skill(
@@ -431,7 +431,59 @@ def test_review_skill_auto_grants_after_pass_when_enabled(tmp_path, monkeypatch)
     with _patch_review(canned):
         outcome = review_skill(ctx, "weather")
 
-    assert outcome.status == "pass"
+    assert outcome.status == "clean"
+    grants = load_skill_grants(ctx.drive_root, "weather")
+    assert grants["granted_keys"] == ["OPENROUTER_API_KEY"]
+    assert grants["content_hash"] == outcome.content_hash
+
+
+def test_review_skill_auto_grants_after_completed_blockers_review(tmp_path, monkeypatch):
+    from ouroboros.skill_loader import load_skill_grants
+
+    skills_root = _build_skill(
+        tmp_path,
+        env_from_settings=["OPENROUTER_API_KEY"],
+    )
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    monkeypatch.setenv("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", "true")
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    ctx = _make_ctx(tmp_path)
+    canned = json.dumps(
+        {
+            "results": [
+                _make_actor("openai/gpt-5.5", _fail_array_on_manifest()),
+                _make_actor("google/gemini-3.1-pro-preview", _fail_array_on_manifest()),
+            ]
+        }
+    )
+
+    with _patch_review(canned):
+        outcome = review_skill(ctx, "weather")
+
+    assert outcome.status == "blockers"
+    grants = load_skill_grants(ctx.drive_root, "weather")
+    assert grants["granted_keys"] == ["OPENROUTER_API_KEY"]
+    assert grants["content_hash"] == outcome.content_hash
+
+
+def test_review_skill_auto_grants_after_deterministic_preflight_blocker(tmp_path, monkeypatch):
+    from ouroboros.skill_loader import load_skill_grants
+
+    skills_root = _build_skill(
+        tmp_path,
+        env_from_settings=["OPENROUTER_API_KEY"],
+    )
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    monkeypatch.setenv("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", "true")
+    monkeypatch.setattr(
+        "ouroboros.tools.skill_preflight._handle_skill_preflight",
+        lambda *_args, **_kwargs: json.dumps({"ok": False, "error": "preflight failed"}),
+    )
+    ctx = _make_ctx(tmp_path)
+
+    outcome = review_skill(ctx, "weather")
+
+    assert outcome.status == "blockers"
     grants = load_skill_grants(ctx.drive_root, "weather")
     assert grants["granted_keys"] == ["OPENROUTER_API_KEY"]
     assert grants["content_hash"] == outcome.content_hash
@@ -452,7 +504,7 @@ def test_review_skill_returns_fail_on_critical_finding(tmp_path, monkeypatch):
     )
     with _patch_review(canned):
         outcome = review_skill(ctx, "weather")
-    assert outcome.status == "fail"
+    assert outcome.status == "blockers"
     reasons = {f["reason"] for f in outcome.findings if f["verdict"] == "FAIL"}
     assert any("type does not match payload" in r for r in reasons)
 
@@ -473,10 +525,10 @@ def test_review_skill_returns_advisory_for_soft_only_fail(tmp_path, monkeypatch)
     )
     with _patch_review(canned):
         outcome = review_skill(ctx, "weather")
-    assert outcome.status == "advisory"
+    assert outcome.status == "warnings"
 
 
-def test_review_skill_returns_advisory_pass_in_advisory_mode(tmp_path, monkeypatch):
+def test_review_skill_returns_warnings_in_advisory_mode(tmp_path, monkeypatch):
     skills_root = _build_skill(tmp_path)
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
@@ -491,7 +543,7 @@ def test_review_skill_returns_advisory_pass_in_advisory_mode(tmp_path, monkeypat
     )
     with _patch_review(canned):
         outcome = review_skill(ctx, "weather")
-    assert outcome.status == "advisory_pass"
+    assert outcome.status == "warnings"
 
 
 def test_review_skill_prompt_includes_rebuttal_and_history(tmp_path, monkeypatch):
@@ -513,7 +565,7 @@ def test_review_skill_prompt_includes_rebuttal_and_history(tmp_path, monkeypatch
     _append_skill_review_history(
         ctx.drive_root,
         "weather",
-        status="advisory",
+        status="warnings",
         content_hash="old",
         findings=[{"item": "error_handling", "verdict": "FAIL", "severity": "advisory"}],
     )
@@ -521,7 +573,7 @@ def test_review_skill_prompt_includes_rebuttal_and_history(tmp_path, monkeypatch
 
     outcome = review_skill(ctx, "weather", review_rebuttal="Already fixed in plugin.py.")
 
-    assert outcome.status == "pass"
+    assert outcome.status == "clean"
     assert "Developer's rebuttal" in captured["prompt"]
     assert "Already fixed in plugin.py." in captured["prompt"]
     assert "Previous skill review attempts" in captured["prompt"]
@@ -536,7 +588,7 @@ def test_review_skill_quorum_failure_on_one_responder(tmp_path, monkeypatch):
         ctx.drive_root,
         "weather",
         SkillReviewState(
-            status="pass",
+            status="clean",
             content_hash=prior_hash,
             findings=_pass_array_for_script_skill(),
         ),
@@ -568,7 +620,7 @@ def test_review_skill_quorum_failure_on_one_responder(tmp_path, monkeypatch):
     assert outcome.status == "pending"
     assert "quorum" in outcome.error.lower()
     persisted = load_review_state(ctx.drive_root, "weather")
-    assert persisted.status == "pass"
+    assert persisted.status == "clean"
     assert persisted.content_hash == prior_hash
     history = (ctx.drive_root / "state" / "skills" / "weather" / "review_history.jsonl").read_text(encoding="utf-8")
     assert '"raw_actor_records"' in history
@@ -842,7 +894,7 @@ def test_review_skill_persist_false_does_not_write(tmp_path, monkeypatch):
     )
     with _patch_review(canned):
         outcome = review_skill(ctx, "weather", persist=False)
-    assert outcome.status == "pass"
+    assert outcome.status == "clean"
     persisted = load_review_state(ctx.drive_root, "weather")
     # Default state: nothing written.
     assert persisted.status == "pending"
@@ -859,7 +911,7 @@ def test_skill_review_history_section_renders_concrete_fail_reasons():
 
     history = [
         {
-            "status": "fail",
+            "status": "blockers",
             "content_hash": "abcdef123456",
             "fail_findings": [
                 {
@@ -876,7 +928,7 @@ def test_skill_review_history_section_renders_concrete_fail_reasons():
             ],
         },
         {
-            "status": "fail",
+            "status": "blockers",
             "content_hash": "abcdef123456",
             "fail_findings": [
                 {
@@ -904,7 +956,7 @@ def test_skill_review_history_section_falls_back_to_signature_for_legacy_entries
 
     history = [
         {
-            "status": "advisory",
+            "status": "warnings",
             "content_hash": "old",
             "failure_signature": ["bug_hunting:FAIL:advisory"],
         }
@@ -924,7 +976,7 @@ def test_render_skill_review_block_groups_findings_by_reviewer_verbatim():
     )
     outcome = SkillReviewOutcome(
         skill_name="demo",
-        status="fail",
+        status="blockers",
         content_hash="abc12345",
         reviewer_models=["openai/gpt-5.5", "google/gemini-3.1-pro-preview"],
         findings=[
@@ -957,7 +1009,7 @@ def test_render_skill_review_block_emits_self_verification_at_attempt_two():
 
     outcome = SkillReviewOutcome(
         skill_name="demo",
-        status="fail",
+        status="blockers",
         findings=[
             {
                 "item": "bug_hunting",
@@ -982,7 +1034,7 @@ def test_render_skill_review_block_emits_circuit_breaker_at_attempt_three():
 
     outcome = SkillReviewOutcome(
         skill_name="demo",
-        status="fail",
+        status="blockers",
         findings=[
             {
                 "item": "bug_hunting",
@@ -1005,7 +1057,7 @@ def test_render_skill_review_block_handles_payload_dict_form():
     raw_text = "not json but still expensive reviewer output\n```text\nclose fence"
     payload = {
         "skill": "demo",
-        "status": "advisory",
+        "status": "warnings",
         "content_hash": "deadbeefcafe",
         "reviewer_models": ["openai/gpt-5.5"],
         "findings": [
@@ -1039,7 +1091,7 @@ def test_extract_review_payload_from_block_roundtrip(tmp_path):
 
     payload = {
         "skill": "demo",
-        "status": "pass",
+        "status": "clean",
         "content_hash": "ffff0000",
         "reviewer_models": ["fake/reviewer"],
         "findings": [{"reason": "contains ``` fence"}],
@@ -1149,7 +1201,7 @@ def test_review_skill_records_rebuttal_when_fail_flips_to_pass(tmp_path, monkeyp
     )
     with _patch_review(fail_canned):
         first = review_skill(ctx, "weather")
-    assert first.status == "fail"
+    assert first.status == "blockers"
 
     # Second round: rebuttal accepted, all items PASS.
     pass_canned = json.dumps(
@@ -1164,7 +1216,7 @@ def test_review_skill_records_rebuttal_when_fail_flips_to_pass(tmp_path, monkeyp
         second = review_skill(
             ctx, "weather", review_rebuttal="ffmpeg is transient, not long-lived"
         )
-    assert second.status == "pass"
+    assert second.status == "clean"
 
     from ouroboros.skill_review import _load_accepted_rebuttals
 
@@ -1182,7 +1234,7 @@ def test_rebuttal_persistence_accepts_legacy_failure_signature(tmp_path):
         drive_root,
         "demo",
         history=[{
-            "status": "fail",
+            "status": "blockers",
             "failure_signature": ["companion_process_safety:FAIL:critical"],
         }],
         findings=[{
@@ -1209,13 +1261,13 @@ def test_count_attempts_for_content_filters_by_hash(tmp_path):
     drive_root.mkdir()
     assert _count_attempts_for_content(drive_root, "demo", "hash-a") == 0
     _append_skill_review_history(
-        drive_root, "demo", status="fail", content_hash="hash-a", findings=[],
+        drive_root, "demo", status="blockers", content_hash="hash-a", findings=[],
     )
     _append_skill_review_history(
-        drive_root, "demo", status="fail", content_hash="hash-a", findings=[],
+        drive_root, "demo", status="blockers", content_hash="hash-a", findings=[],
     )
     _append_skill_review_history(
-        drive_root, "demo", status="fail", content_hash="hash-b", findings=[],
+        drive_root, "demo", status="blockers", content_hash="hash-b", findings=[],
     )
     assert _count_attempts_for_content(drive_root, "demo", "hash-a") == 2
     assert _count_attempts_for_content(drive_root, "demo", "hash-b") == 1

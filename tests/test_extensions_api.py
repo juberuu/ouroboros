@@ -389,7 +389,7 @@ def test_api_skill_toggle_enables_and_loads_extension(tmp_path, monkeypatch):
         _stop_patches(patches)
 
 
-def test_api_skill_toggle_allows_advisory_pass_review(tmp_path, monkeypatch):
+def test_api_skill_toggle_allows_warnings_review(tmp_path, monkeypatch):
     from ouroboros import extension_loader
     from ouroboros.skill_loader import SkillReviewState, save_review_state
     from ouroboros.skill_loader import compute_content_hash
@@ -407,21 +407,21 @@ def test_api_skill_toggle_allows_advisory_pass_review(tmp_path, monkeypatch):
         save_review_state(
             drive_root,
             "ext_advisory",
-            SkillReviewState(status="advisory_pass", content_hash=content_hash),
+            SkillReviewState(status="warnings", content_hash=content_hash),
         )
         resp = client.post("/api/skills/ext_advisory/toggle", json={"enabled": True})
 
         assert resp.status_code == 200, resp.text
         data = resp.json()
         assert data["enabled"] is True
-        assert data["review_status"] == "advisory_pass"
+        assert data["review_status"] == "warnings"
         assert data["extension_action"] == "extension_loaded"
         assert "ext_advisory" in extension_loader.snapshot()["extensions"]
     finally:
         _stop_patches(patches)
 
 
-def test_api_skill_toggle_blocks_advisory_pass_under_blocking(tmp_path, monkeypatch):
+def test_api_skill_toggle_allows_warnings_under_blocking(tmp_path, monkeypatch):
     from ouroboros.skill_loader import SkillReviewState, save_review_state, compute_content_hash
 
     skills_root = tmp_path / "skills"
@@ -438,14 +438,14 @@ def test_api_skill_toggle_blocks_advisory_pass_under_blocking(tmp_path, monkeypa
         save_review_state(
             drive_root,
             "ext_blocked",
-            SkillReviewState(status="advisory_pass", content_hash=content_hash),
+            SkillReviewState(status="warnings", content_hash=content_hash),
         )
         resp = client.post("/api/skills/ext_blocked/toggle", json={"enabled": True})
 
-        assert resp.status_code == 409, resp.text
+        assert resp.status_code == 200, resp.text
         data = resp.json()
-        assert data["executable_review"] is False
-        assert data["review_gate"]["blocking_reason"] == "review_requires_revalidation_under_blocking_enforcement"
+        assert data["executable_review"] is True
+        assert data["review_gate"]["blocking_reason"] == "warnings_do_not_block_execution"
     finally:
         _stop_patches(patches)
 
@@ -987,7 +987,7 @@ def test_api_skill_review_offloads_to_thread_and_returns_outcome(tmp_path, monke
             resp = client.post("/api/skills/ext_r/review", json={})
             assert resp.status_code == 200, resp.text
             data = resp.json()
-            assert data["status"] == "pass"
+            assert data["status"] == "clean"
             assert data["skill"] == "ext_r"
     finally:
         _stop_patches(patches)

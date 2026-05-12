@@ -29,6 +29,7 @@ from ouroboros.skill_loader import (
     compute_content_hash,
     find_skill,
 )
+from ouroboros.skill_review_status import STATUS_CLEAN, normalize_skill_review_status
 from ouroboros.contracts.skill_payload_policy import SKILL_PAYLOAD_CONTROL_FILENAMES
 from ouroboros.tools.github import _gh_cmd, github_token_from_env_or_settings
 from ouroboros.tools.registry import ToolContext, ToolEntry
@@ -231,8 +232,8 @@ def _validate_local_skill(ctx: ToolContext, skill: str):
         raise ValueError(f"skill source {loaded.source!r} cannot be submitted to OuroborosHub")
     if loaded.load_error:
         raise ValueError(f"skill has a load error: {loaded.load_error}")
-    if loaded.review.status != "pass":
-        raise ValueError("skill must have a fresh PASS review")
+    if normalize_skill_review_status(loaded.review.status) != STATUS_CLEAN:
+        raise ValueError("skill must have a fresh clean review before publishing")
     current_hash = compute_content_hash(
         loaded.skill_dir,
         manifest_entry=loaded.manifest.entry,
@@ -352,7 +353,7 @@ def _generate_pr_body(
         f"- {mode.title()} `{skill}` v{manifest.version} to OuroborosHub.\n"
         f"- Type: `{manifest.type}`; files: {len(files)}.\n\n"
         f"## What This Skill Does\n{manifest.description or 'See SKILL.md.'}\n\n"
-        f"## Author Checklist\n- Fresh PASS review verified locally.\n- Payload hash matches the reviewed state.\n- No local Ouroboros repo mutation was required.\n"
+        f"## Author Checklist\n- Fresh clean review verified locally.\n- Payload hash matches the reviewed state.\n- No local Ouroboros repo mutation was required.\n"
     )
     if note.strip():
         note_has_secret, _matches = contains_real_secret_value(note)

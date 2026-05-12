@@ -35,6 +35,12 @@ from ouroboros.skill_loader import (
     skill_review_gate,
     skill_state_dir,
 )
+from ouroboros.skill_review_status import (
+    STATUS_BLOCKERS,
+    STATUS_PENDING,
+    STATUS_WARNINGS,
+    normalize_skill_review_status,
+)
 from ouroboros.skill_review import SkillReviewOutcome, review_skill as _default_review_skill
 from ouroboros.utils import append_jsonl, atomic_write_json, read_json_dict, utc_now_iso
 
@@ -400,16 +406,18 @@ def _outcome_payload(
     extension_reason: Any,
     job: LifecycleJob | None = None,
 ) -> Dict[str, Any]:
+    status = normalize_skill_review_status(outcome.status)
+    gate = skill_review_gate(status)
     payload: Dict[str, Any] = {
         "skill": outcome.skill_name,
-        "status": outcome.status,
+        "status": status,
         "content_hash": outcome.content_hash,
         "reviewer_models": outcome.reviewer_models,
         "findings": outcome.findings,
         "raw_actor_records": list(getattr(outcome, "raw_actor_records", []) or []),
         "error": outcome.error,
-        "review_gate": skill_review_gate(outcome.status),
-        "executable_review": skill_review_gate(outcome.status)["executable_review"],
+        "review_gate": gate,
+        "executable_review": gate["executable_review"],
         "auto_flow": bool(getattr(outcome, "auto_flow", False)),
         "auto_granted_keys": list(getattr(outcome, "auto_granted_keys", []) or []),
         "requested_keys": list(getattr(outcome, "requested_keys", []) or []),
@@ -525,7 +533,7 @@ def _on_finished(
                 },
             )
             return
-        review_status = getattr(result, "status", "") if result is not None else ""
+        review_status = normalize_skill_review_status(getattr(result, "status", "") if result is not None else "")
         error = str(exc) if exc is not None else (getattr(result, "error", "") if result is not None else "")
         deps_error = getattr(result, "deps_error", "") if result is not None else ""
         state_status = "failed" if job.status in {"failed", "cancelled"} else "completed"
@@ -601,6 +609,7 @@ def _on_finished(
                         "content_hash": effective_hash,
                         "job_id": job.id,
                         "attempt": attempt_idx,
+                        "format": "markdown",
                         "text": markdown,
                     },
                 )
@@ -657,15 +666,15 @@ def _review_finding_summary(outcome: Any) -> str:
 
 
 def _review_result_message(outcome: Any) -> str:
-    status = str(getattr(outcome, "status", "") or "pending")
+    status = normalize_skill_review_status(str(getattr(outcome, "status", "") or STATUS_PENDING))
     summary = _review_finding_summary(outcome)
     gate = skill_review_gate(status)
     if gate["executable_review"]:
-        prefix = "Review executable with advisory findings" if status == "advisory_pass" else "Review executable"
-    elif status == "advisory":
-        prefix = "Review blocked: advisory findings under blocking enforcement"
-    elif status == "fail":
-        prefix = "Review blocked: critical findings"
+        prefix = "Review executable with findings" if status in {STATUS_WARNINGS, STATUS_BLOCKERS} else "Review executable"
+    elif status == STATUS_WARNINGS:
+        prefix = "Review warnings blocked by current enforcement"
+    elif status == STATUS_BLOCKERS:
+        prefix = "Review blocked: blocker findings"
     else:
         prefix = "Review pending"
     return f"{prefix} ({status}){f': {summary}' if summary else ''}"
@@ -710,7 +719,7 @@ async def run_skill_review_lifecycle(
             setattr(outcome, "deps_status", deps_status)
             setattr(outcome, "deps_error", deps_error)
             if executable_review and getattr(outcome, "auto_flow", False) and deps_status == "failed":
-                outcome.status = "pending"
+                outcome.status = STATUS_PENDING
                 outcome.error = deps_error or "self-authored dependency reconciliation failed"
                 executable_review = False
             if executable_review and getattr(outcome, "auto_flow", False):
@@ -789,7 +798,7 @@ def run_skill_review_lifecycle_blocking(
             setattr(outcome, "deps_status", deps_status)
             setattr(outcome, "deps_error", deps_error)
             if executable_review and getattr(outcome, "auto_flow", False) and deps_status == "failed":
-                outcome.status = "pending"
+                outcome.status = STATUS_PENDING
                 outcome.error = deps_error or "self-authored dependency reconciliation failed"
                 executable_review = False
             if executable_review and getattr(outcome, "auto_flow", False):

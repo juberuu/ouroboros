@@ -340,7 +340,7 @@ def test_review_state_round_trip(tmp_path):
     )
     save_review_state(drive_root, "x", state)
     reloaded = load_review_state(drive_root, "x")
-    assert reloaded.status == "pass"
+    assert reloaded.status == "clean"
     assert reloaded.content_hash == "abcd"
     assert reloaded.reviewer_models == ["openai/gpt-5.5"]
     assert reloaded.prompt_chars == 1234
@@ -366,10 +366,10 @@ def test_load_review_state_live_aggregates_soft_findings(tmp_path, monkeypatch):
     save_review_state(drive_root, "x", state)
 
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
-    assert load_review_state(drive_root, "x", skill_type="script").status == "advisory"
+    assert load_review_state(drive_root, "x", skill_type="script").status == "warnings"
 
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
-    assert load_review_state(drive_root, "x", skill_type="script").status == "advisory_pass"
+    assert load_review_state(drive_root, "x", skill_type="script").status == "warnings"
 
 
 def test_load_review_state_fails_closed_on_invalid_numeric_fields(tmp_path):
@@ -388,7 +388,7 @@ def test_load_review_state_fails_closed_on_invalid_numeric_fields(tmp_path):
         encoding="utf-8",
     )
     reloaded = load_review_state(drive_root, "x")
-    assert reloaded.status == "pass"
+    assert reloaded.status == "clean"
     assert reloaded.prompt_chars == 0
     assert reloaded.cost_usd == 0.0
 
@@ -749,7 +749,7 @@ def test_extension_status_reflects_persisted_verdict_in_phase4(tmp_path):
     reloaded = find_skill(drive_root, "ext2", repo_path=str(repo_root))
     assert reloaded is not None
     # Real verdict surfaces — Phase 4 retired the ``pending_phase4`` overlay.
-    assert reloaded.review.status == "pass"
+    assert reloaded.review.status == "clean"
 
     os.environ["OUROBOROS_SKILLS_REPO_PATH"] = str(repo_root)
     try:
@@ -757,7 +757,7 @@ def test_extension_status_reflects_persisted_verdict_in_phase4(tmp_path):
     finally:
         os.environ.pop("OUROBOROS_SKILLS_REPO_PATH", None)
     statuses = {s["name"]: s["review_status"] for s in summary["skills"]}
-    assert statuses["ext2"] == "pass"
+    assert statuses["ext2"] == "clean"
 
 
 # ---------------------------------------------------------------------------
@@ -778,7 +778,8 @@ def test_summarize_skills_shape_contains_counts_and_flat_list(tmp_path):
     assert summary["count"] == 1
     assert summary["available"] == 0
     assert summary["pending_review"] == 1
-    assert summary["failed_review"] == 0
+    assert summary["blocker_review"] == 0
+    assert summary["warning_review"] == 0
     assert summary["broken"] == 0
     assert [s["name"] for s in summary["skills"]] == ["alpha"]
 
@@ -832,23 +833,26 @@ def test_summarize_skills_reflects_runtime_mode_light(tmp_path, monkeypatch):
 
 
 def test_valid_review_statuses_exported():
+    assert "clean" in VALID_REVIEW_STATUSES
+    assert "warnings" in VALID_REVIEW_STATUSES
+    assert "blockers" in VALID_REVIEW_STATUSES
+    # Legacy persisted names remain accepted for migration.
     assert "pass" in VALID_REVIEW_STATUSES
-    assert "fail" in VALID_REVIEW_STATUSES
     assert "pending" in VALID_REVIEW_STATUSES
     assert "pending_phase4" in VALID_REVIEW_STATUSES
 
 
-def test_skill_review_gate_blocks_advisory_under_blocking(monkeypatch):
+def test_skill_review_gate_allows_warnings_under_blocking(monkeypatch):
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
 
-    gate = skill_review_gate("advisory", stale=False)
+    gate = skill_review_gate("warnings", stale=False)
 
-    assert gate["executable_review"] is False
-    assert gate["blocking_reason"] == "advisory_findings_under_blocking_enforcement"
+    assert gate["executable_review"] is True
+    assert gate["blocking_reason"] == "warnings_do_not_block_execution"
     assert gate["review_enforcement"] == "blocking"
 
 
-def test_skill_review_gate_allows_advisory_pass(monkeypatch):
+def test_skill_review_gate_allows_legacy_advisory_pass(monkeypatch):
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
 
     gate = skill_review_gate("advisory_pass", stale=False)
@@ -861,11 +865,11 @@ def test_skill_review_gate_revalidates_advisory_pass_under_blocking(monkeypatch)
 
     gate = skill_review_gate("advisory_pass", stale=False)
 
-    assert gate["executable_review"] is False
-    assert gate["blocking_reason"] == "review_requires_revalidation_under_blocking_enforcement"
+    assert gate["executable_review"] is True
+    assert gate["blocking_reason"] == "warnings_do_not_block_execution"
 
 
-def test_advisory_pass_not_available_under_blocking(tmp_path, monkeypatch):
+def test_warnings_available_under_blocking(tmp_path, monkeypatch):
     drive_root = tmp_path / "drive"
     drive_root.mkdir()
     repo_root = tmp_path / "skills"
@@ -888,11 +892,11 @@ def test_advisory_pass_not_available_under_blocking(tmp_path, monkeypatch):
 
     summary = summarize_skills(drive_root)
 
-    assert list_available_for_execution(drive_root, repo_path=str(repo_root)) == []
-    assert summary["available"] == 0
-    assert summary["skills"][0]["available_for_execution"] is False
-    assert summary["skills"][0]["static_ready"] is False
-    assert summary["skills"][0]["review_gate"]["blocking_reason"] == "review_requires_revalidation_under_blocking_enforcement"
+    assert len(list_available_for_execution(drive_root, repo_path=str(repo_root))) == 1
+    assert summary["available"] == 1
+    assert summary["skills"][0]["available_for_execution"] is True
+    assert summary["skills"][0]["static_ready"] is True
+    assert summary["skills"][0]["review_gate"]["blocking_reason"] == "warnings_do_not_block_execution"
 
 
 def test_skill_grants_are_content_and_request_bound(tmp_path):

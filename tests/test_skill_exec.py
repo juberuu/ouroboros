@@ -452,15 +452,16 @@ def test_skill_exec_refuses_non_pass_review(tmp_path, monkeypatch):
     save_review_state(
         ctx.drive_root,
         "hello",
-        SkillReviewState(status="fail", content_hash=content_hash),
+        SkillReviewState(status="blockers", content_hash=content_hash),
     )
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     result = skill_exec_mod._handle_skill_exec(
         ctx, skill="hello", script="scripts/hello.py"
     )
     assert "SKILL_EXEC_BLOCKED" in result
-    assert "'fail'" in result
+    assert "'blockers'" in result
 
 
 def test_skill_exec_refuses_stale_review(tmp_path, monkeypatch):
@@ -750,7 +751,7 @@ def test_toggle_skill_persists_enable_state(tmp_path, monkeypatch):
     assert disabled_resp["enabled"] is False
 
 
-def test_toggle_skill_allows_advisory_pass_review(tmp_path, monkeypatch):
+def test_toggle_skill_allows_warnings_review(tmp_path, monkeypatch):
     skills_root = tmp_path / "skills"
     skill_dir = _build_skill(skills_root, "alpha")
     ctx = _make_ctx(tmp_path)
@@ -759,17 +760,17 @@ def test_toggle_skill_allows_advisory_pass_review(tmp_path, monkeypatch):
     save_review_state(
         ctx.drive_root,
         "alpha",
-        SkillReviewState(status="advisory_pass", content_hash=compute_content_hash(skill_dir)),
+        SkillReviewState(status="warnings", content_hash=compute_content_hash(skill_dir)),
     )
 
     enabled_resp = json.loads(skill_exec_mod._handle_toggle_skill(ctx, skill="alpha", enabled=True))
 
     assert enabled_resp["enabled"] is True
-    assert enabled_resp["review_status"] == "advisory_pass"
+    assert enabled_resp["review_status"] == "warnings"
     assert enabled_resp["executable_review"] is True
 
 
-def test_toggle_skill_blocks_advisory_pass_under_blocking(tmp_path, monkeypatch):
+def test_toggle_skill_allows_warnings_under_blocking(tmp_path, monkeypatch):
     skills_root = tmp_path / "skills"
     skill_dir = _build_skill(skills_root, "alpha")
     ctx = _make_ctx(tmp_path)
@@ -778,16 +779,18 @@ def test_toggle_skill_blocks_advisory_pass_under_blocking(tmp_path, monkeypatch)
     save_review_state(
         ctx.drive_root,
         "alpha",
-        SkillReviewState(status="advisory_pass", content_hash=compute_content_hash(skill_dir)),
+        SkillReviewState(status="warnings", content_hash=compute_content_hash(skill_dir)),
     )
 
     resp = skill_exec_mod._handle_toggle_skill(ctx, skill="alpha", enabled=True)
 
-    assert "SKILL_TOGGLE_ERROR" in resp
-    assert "review_requires_revalidation_under_blocking_enforcement" in resp
+    enabled_resp = json.loads(resp)
+    assert enabled_resp["enabled"] is True
+    assert enabled_resp["review_status"] == "warnings"
+    assert enabled_resp["executable_review"] is True
 
 
-def test_skill_exec_blocks_advisory_pass_under_blocking(tmp_path, monkeypatch):
+def test_skill_exec_allows_warnings_under_blocking(tmp_path, monkeypatch):
     skills_root = tmp_path / "skills"
     skill_dir = _build_skill(skills_root, "alpha")
     ctx = _make_ctx(tmp_path)
@@ -797,13 +800,14 @@ def test_skill_exec_blocks_advisory_pass_under_blocking(tmp_path, monkeypatch):
     save_review_state(
         ctx.drive_root,
         "alpha",
-        SkillReviewState(status="advisory_pass", content_hash=compute_content_hash(skill_dir)),
+        SkillReviewState(status="warnings", content_hash=compute_content_hash(skill_dir)),
     )
 
     resp = skill_exec_mod._handle_skill_exec(ctx, skill="alpha", script="hello.py")
 
-    assert "SKILL_EXEC_BLOCKED" in resp
-    assert "review_requires_revalidation_under_blocking_enforcement" in resp
+    payload = json.loads(resp)
+    assert payload["exit_code"] == 0
+    assert "hello from skill" in payload["stdout"]
 
 
 def test_toggle_skill_blocked_in_heal_context(tmp_path, monkeypatch):
@@ -1044,13 +1048,13 @@ def test_review_skill_tool_records_lifecycle_job_state_and_events(tmp_path, monk
         skill_exec_mod._handle_review_skill(ctx, skill="alpha")
     )
 
-    assert result["status"] == "pass"
+    assert result["status"] == "clean"
     assert result["deps_status"] == "not_required"
     review_job = json.loads(
         (ctx.drive_root / "state" / "skills" / "alpha" / "review_job.json").read_text(encoding="utf-8")
     )
     assert review_job["status"] == "completed"
-    assert review_job["review_status"] == "pass"
+    assert review_job["review_status"] == "clean"
     assert review_job["job_id"].startswith("skill-job-")
     lifecycle_event = lifecycle_queue.queue_snapshot()["events"][-1]
     assert lifecycle_event["kind"] == "review"
@@ -1149,7 +1153,7 @@ def test_async_review_cancellation_waits_for_review_thread(tmp_path, monkeypatch
         assert not quick.done()
         release.set()
         result = await asyncio.wait_for(task, timeout=2)
-        assert result["status"] == "pass"
+        assert result["status"] == "clean"
         assert await asyncio.wait_for(quick, timeout=2) == {"quick": True}
         assert lifecycle_queue.queue_snapshot()["active"] is None
 

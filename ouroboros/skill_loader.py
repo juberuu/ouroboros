@@ -18,8 +18,9 @@ on the same plane as other durable state (``state.json``,
   "reviewer_models": [...], "timestamp": iso_ts, "prompt_chars": int,
   "cost_usd": float, "raw_result": str, "raw_actor_records": [...]}``.
   For full PASS/FAIL finding sets, ``status`` is computed live from
-  ``findings`` and the current review enforcement mode; ``status`` remains
-  persisted only for pending/legacy/infrastructure states. ``raw_result``
+  ``findings`` as ``clean`` / ``warnings`` / ``blockers``; enforcement is
+  applied later by ``skill_review_gate``. ``status`` remains persisted only
+  for pending/legacy/infrastructure states. ``raw_result``
   carries the truncated top-level review response for replay/debugging
   (capped via ``_truncate_raw_result`` in ``ouroboros.skill_review`` with an
   explicit OMISSION NOTE on overflow), while ``raw_actor_records`` preserves
@@ -50,7 +51,16 @@ from ouroboros.contracts.skill_manifest import (
     parse_skill_manifest_text,
 )
 from ouroboros.contracts.plugin_api import FORBIDDEN_SKILL_SETTINGS
-from ouroboros.skill_review_status import aggregate_skill_review_status, skill_review_gate
+from ouroboros.skill_review_status import (
+    STATUS_BLOCKERS,
+    STATUS_CLEAN,
+    STATUS_PENDING,
+    STATUS_WARNINGS,
+    VALID_SKILL_REVIEW_STATUSES,
+    aggregate_skill_review_status,
+    normalize_skill_review_status,
+    skill_review_gate,
+)
 from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -97,23 +107,14 @@ _SKILL_DIR_CACHE_NAMES = frozenset(
 # inadvertent edit to stale-invalidate a reviewed skill, and we
 # definitely don't want the reviewer prompt to carry credentials.
 
-_REVIEW_STATUS_PASS = "pass"
-_REVIEW_STATUS_FAIL = "fail"
-_REVIEW_STATUS_ADVISORY = "advisory"
-_REVIEW_STATUS_ADVISORY_PASS = "advisory_pass"
-_REVIEW_STATUS_PENDING = "pending"
+_REVIEW_STATUS_PASS = STATUS_CLEAN
+_REVIEW_STATUS_FAIL = STATUS_BLOCKERS
+_REVIEW_STATUS_ADVISORY = STATUS_WARNINGS
+_REVIEW_STATUS_ADVISORY_PASS = STATUS_WARNINGS
+_REVIEW_STATUS_PENDING = STATUS_PENDING
 _REVIEW_STATUS_DEFERRED_PHASE4 = "pending_phase4"
 
-VALID_REVIEW_STATUSES = frozenset(
-    {
-        _REVIEW_STATUS_PASS,
-        _REVIEW_STATUS_FAIL,
-        _REVIEW_STATUS_ADVISORY,
-        _REVIEW_STATUS_ADVISORY_PASS,
-        _REVIEW_STATUS_PENDING,
-        _REVIEW_STATUS_DEFERRED_PHASE4,
-    }
-)
+VALID_REVIEW_STATUSES = VALID_SKILL_REVIEW_STATUSES
 
 
 def review_status_allows_execution(status: str) -> bool:
@@ -172,7 +173,7 @@ class SkillReviewState:
             if isinstance(f, dict)
         )
         if self.status == _REVIEW_STATUS_PENDING or not has_review_verdicts:
-            data["status"] = self.status if self.status in VALID_REVIEW_STATUSES else _REVIEW_STATUS_PENDING
+            data["status"] = normalize_skill_review_status(self.status)
         return data
 
 
@@ -183,7 +184,7 @@ class LoadedSkill:
     ``available_for_execution`` combines three signals:
 
     - the skill is enabled by the user;
-    - the last review landed with status ``pass``;
+    - the last review produced an executable verdict;
     - the review is not stale against the current content hash.
 
     ``source`` records which discovery root the skill came from
@@ -651,20 +652,21 @@ def load_review_state(
     # surfaces verbatim).
     if raw_status == _REVIEW_STATUS_DEFERRED_PHASE4:
         raw_status = _REVIEW_STATUS_PENDING
+    raw_status = normalize_skill_review_status(raw_status)
     findings = data.get("findings") if isinstance(data.get("findings"), list) else []
     clean_findings = [f for f in findings if isinstance(f, dict)]
     has_review_verdicts = any(
         str(f.get("verdict") or "").upper() in {"PASS", "FAIL"}
         for f in clean_findings
     )
-    if raw_status == _REVIEW_STATUS_PENDING:
-        status = _REVIEW_STATUS_PENDING
-    elif clean_findings and has_review_verdicts:
+    if clean_findings and has_review_verdicts:
         status = aggregate_skill_review_status(
             clean_findings,
             skill_type or "script",
             is_module_widget=is_module_widget,
         )
+    elif raw_status == _REVIEW_STATUS_PENDING:
+        status = _REVIEW_STATUS_PENDING
     else:
         status = raw_status if raw_status in VALID_REVIEW_STATUSES else _REVIEW_STATUS_PENDING
     reviewers = (
@@ -899,7 +901,7 @@ def grant_status_for_skill(drive_root: pathlib.Path, skill: LoadedSkill) -> Dict
 
 
 def auto_grant_if_enabled(drive_root: pathlib.Path, skill: LoadedSkill) -> bool:
-    """Grant all manifest-requested keys/permissions after a successful review.
+    """Grant all manifest-requested keys/permissions after a completed review.
 
     Returns True when grants were persisted. The toggle is intentionally global
     and opt-in: default installs keep the explicit approval step, while closed
@@ -911,7 +913,11 @@ def auto_grant_if_enabled(drive_root: pathlib.Path, skill: LoadedSkill) -> bool:
         return False
     if not get_auto_grant_enabled():
         return False
-    if not review_status_allows_execution(skill.review.status) or skill.review.is_stale_for(skill.content_hash):
+    if skill.load_error:
+        return False
+    if skill.review.is_stale_for(skill.content_hash):
+        return False
+    if normalize_skill_review_status(skill.review.status) == _REVIEW_STATUS_PENDING:
         return False
     requested_keys = requested_core_setting_keys(list(skill.manifest.env_from_settings or []))
     requested_permissions = requested_skill_permissions(
@@ -1491,10 +1497,10 @@ def summarize_skills(drive_root: pathlib.Path) -> Dict[str, Any]:
                 and s.review.is_stale_for(s.content_hash)
             )
         ),
-        "failed_review": sum(
+        "blocker_review": sum(
             1 for s in skills if s.review.status == _REVIEW_STATUS_FAIL
         ),
-        "advisory_review": sum(
+        "warning_review": sum(
             1 for s in skills if s.review.status == _REVIEW_STATUS_ADVISORY
         ),
         "broken": sum(1 for s in skills if s.load_error),

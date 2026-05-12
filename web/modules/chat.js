@@ -296,10 +296,45 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
             return opts.senderLabel || 'You';
         }
         if (role === 'system') {
-            return systemType === 'task_summary' ? '📋 Task Summary' : '📋 System';
+            if (systemType === 'task_summary') return '📋 Task Summary';
+            if (systemType === 'skill_review') return '📋 Skill Review';
+            return '📋 System';
         }
         if (isProgress) return '💬 Thought';
         return 'Ouroboros';
+    }
+
+    function summarizeSkillReviewMessage(text) {
+        const raw = String(text || '');
+        const lines = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+        const headline = lines[0] || 'Skill review';
+        const hashLine = lines.find((line) => line.startsWith('content_hash=')) || '';
+        const reviewersLine = lines.find((line) => line.startsWith('Reviewers:')) || '';
+        const findingsLine = lines.find((line) => /^##\s+Findings/.test(line)) || '';
+        const meta = [hashLine, reviewersLine.replace(/^Reviewers:\s*/, ''), findingsLine.replace(/^##\s*/, '')]
+            .filter(Boolean)
+            .map((line) => escapeHtml(line.length > 140 ? `${line.slice(0, 137)}...` : line))
+            .join(' · ');
+        return {
+            headline: escapeHtml(headline.replace(/^#+\s*/, '')),
+            meta,
+        };
+    }
+
+    function renderSkillReviewDisclosure(text) {
+        const summary = summarizeSkillReviewMessage(text);
+        return `
+            <div class="skill-review-disclosure" data-skill-review-disclosure data-expanded="0">
+                <button type="button" class="skill-review-summary-button" data-skill-review-toggle aria-expanded="false">
+                    <span class="skill-review-summary-main">${summary.headline}</span>
+                    <span class="skill-review-summary-side">
+                        <span class="skill-review-meta">${summary.meta}</span>
+                        <span class="skill-review-toggle-label">Show review</span>
+                    </span>
+                </button>
+                <div class="skill-review-full" data-skill-review-full hidden>${renderMarkdown(text)}</div>
+            </div>
+        `;
     }
 
     function setStatus(kind, text) {
@@ -1021,7 +1056,11 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         if (taskId) bubble.dataset.taskId = taskId;
 
         const sender = getSenderLabel(role, isProgress, systemType, { source, senderLabel, senderSessionId });
-        const rendered = role === 'user' ? escapeHtml(text) : renderMarkdown(text);
+        const rendered = role === 'user'
+            ? escapeHtml(text)
+            : (role === 'system' && systemType === 'skill_review'
+                ? renderSkillReviewDisclosure(text)
+                : renderMarkdown(text));
         const timeFmt = formatMsgTime(ts);
         const timeHtml = timeFmt ? `<div class="msg-time" title="${escapeHtmlAttr(timeFmt.full)}">${escapeHtml(timeFmt.short)}</div>` : '';
         const pendingHtml = pending ? `<div class="msg-pending">Queued until reconnect</div>` : '';
@@ -1031,6 +1070,21 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
             ${pendingHtml}
             ${timeHtml}
         `;
+        const skillReviewToggle = bubble.querySelector('[data-skill-review-toggle]');
+        if (skillReviewToggle) {
+            skillReviewToggle.addEventListener('click', () => {
+                const disclosure = bubble.querySelector('[data-skill-review-disclosure]');
+                const full = bubble.querySelector('[data-skill-review-full]');
+                const label = bubble.querySelector('.skill-review-toggle-label');
+                const expanded = disclosure?.dataset.expanded === '1';
+                if (!disclosure || !full) return;
+                disclosure.dataset.expanded = expanded ? '0' : '1';
+                full.hidden = expanded;
+                skillReviewToggle.setAttribute('aria-expanded', expanded ? 'false' : 'true');
+                if (label) label.textContent = expanded ? 'Show review' : 'Hide review';
+                requestAnimationFrame(() => updateMessagesPadding({ preserveStickiness: true }));
+            });
+        }
         insertMessageNode(bubble, { forceStick: !!opts.forceStick });
         rememberMessageKey(messageKey);
         if (pending && clientMessageId) pendingUserBubbles.set(clientMessageId, bubble);

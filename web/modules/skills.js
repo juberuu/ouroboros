@@ -68,16 +68,17 @@ function skillsPageTemplate() {
 function statusBadge(status, gate = null) {
     const gateExecutable = gate && typeof gate.executable_review === 'boolean'
         ? gate.executable_review
-        : ['pass', 'advisory_pass'].includes(status);
-    const tone = gateExecutable ? 'ok'
-        : status === 'fail' ? 'danger'
-        : status === 'advisory' ? 'warn'
+        : ['clean', 'warnings'].includes(status);
+    const tone = status === 'blockers' ? 'danger'
+        : gateExecutable ? 'ok'
+        : status === 'warnings' ? 'warn'
         : 'muted';
     const tooltip = {
-        pass: 'All checklist items pass.',
-        advisory_pass: 'Non-critical findings exist, but advisory enforcement allows execution.',
-        advisory: 'Non-critical findings exist and blocking enforcement prevents execution.',
-        fail: 'Critical review findings prevent execution.',
+        clean: 'All checklist items pass.',
+        warnings: 'Warning findings exist; they do not block execution.',
+        blockers: gateExecutable
+            ? 'Blocker findings exist, but advisory enforcement allows execution.'
+            : 'Blocker findings prevent execution under blocking enforcement.',
         pending: 'Review has not produced a verdict yet.',
     }[status] || 'Unknown or stale review state.';
     return `<span class="skills-badge skills-badge-${tone}" title="${escapeHtml(tooltip)}">${escapeHtml(status)}</span>`;
@@ -88,11 +89,18 @@ function reviewReady(skill) {
         return skill.review_gate.executable_review;
     }
     if (typeof skill?.executable_review === 'boolean') return skill.executable_review;
-    return ['pass', 'advisory_pass'].includes(skill.review_status) && !skill.review_stale;
+    return ['clean', 'warnings'].includes(skill.review_status) && !skill.review_stale;
 }
 
 function grantReady(skill) {
     return !skill.grants || skill.grants.all_granted !== false;
+}
+
+function reviewToastTone(status, error = '') {
+    if (error) return 'danger';
+    if (status === 'clean') return 'ok';
+    if (status === 'blockers') return 'danger';
+    return 'warn';
 }
 
 function healReady(skill) {
@@ -102,7 +110,7 @@ function healReady(skill) {
     if (!/^skills\/(external|clawhub|ouroboroshub)\//.test(payloadRoot)) return false;
     const missingGrantError = !grantReady(skill) && String(skill.load_error || '').includes('missing owner grants');
     return payloadRoot.startsWith('skills/')
-        && (skill.review_status === 'fail' || (Boolean(skill.load_error) && !missingGrantError));
+        && (skill.review_status === 'blockers' || (Boolean(skill.load_error) && !missingGrantError));
 }
 
 function submitHubReady(skill, githubTokenConfigured = false) {
@@ -112,8 +120,8 @@ function submitHubReady(skill, githubTokenConfigured = false) {
     if (!githubTokenConfigured) {
         return { visible: true, disabled: true, reason: 'Configure GITHUB_TOKEN in Settings -> Secrets' };
     }
-    if (skill.review_status !== 'pass' || skill.review_stale) {
-        return { visible: true, disabled: true, reason: 'Skill needs a fresh PASS review before submission' };
+    if (skill.review_status !== 'clean' || skill.review_stale) {
+        return { visible: true, disabled: true, reason: 'Skill needs a fresh clean review before submission' };
     }
     return { visible: true, disabled: false, reason: 'Open a PR to OuroborosHub from your GitHub fork' };
 }
@@ -372,10 +380,9 @@ function toggleLockReason(skill) {
     if (skill?.review_gate && skill.review_gate.executable_review === false) {
         return skill.review_gate.summary || skill.review_gate.blocking_reason || 'review has not produced an executable verdict yet';
     }
-    if (skill.review_status === 'fail') return 'review failed — repair the skill first';
+    if (skill.review_status === 'blockers' && !reviewReady(skill)) return 'review has blocker findings — repair the skill first';
     if (skill.review_stale) return 'review is stale — re-review the skill first';
     if (skill.review_status === 'pending') return 'review is still pending';
-    if (skill.review_status === 'advisory') return 'non-critical review findings block execution in blocking review mode';
     if (!reviewReady(skill)) return 'review has not produced an executable verdict yet';
     if (skill.load_error && !isMissingGrantLoadError(skill)) return 'load error — repair the skill first';
     return '';
@@ -391,7 +398,7 @@ function skillNextAction(skill, reviewInProgress = false, repairInProgress = fal
     if (skill.lifecycle_virtual && skill.source === 'clawhub' && isRateLimitError(skill.load_error)) {
         return { label: 'Retry install', className: 'skills-retry-install', disabled: false };
     }
-    if ((skill.load_error && !isMissingGrantLoadError(skill)) || skill.review_status === 'fail') {
+    if ((skill.load_error && !isMissingGrantLoadError(skill)) || (skill.review_status === 'blockers' && !reviewReady(skill))) {
         if (healReady(skill)) {
             return { label: 'Repair', className: 'skills-heal', disabled: false };
         }
@@ -413,7 +420,7 @@ function getSkillPrimaryAction(skill, reviewInProgress = false, repairInProgress
     if (repairInProgress) {
         return { action: '', label: 'Repairing...', disabled: true };
     }
-    if ((skill.load_error && !isMissingGrantLoadError(skill)) || skill.review_status === 'fail') {
+    if ((skill.load_error && !isMissingGrantLoadError(skill)) || (skill.review_status === 'blockers' && !reviewReady(skill))) {
         if (healReady(skill)) {
             return { action: 'repair', label: 'Repair', danger: true };
         }
@@ -1038,9 +1045,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
             const errorTail = result.error ? ` — ${result.error}` : '';
             showToast(
                 `${name}: review ${result.status}${findings ? ` (${findings} findings)` : ''}${errorTail}`,
-                result.status === 'pass' ? 'ok'
-                    : (result.error || result.status === 'fail') ? 'danger'
-                    : 'warn'
+                reviewToastTone(result.status, result.error)
             );
             emitSkillLifecycle('review', name, result);
             return result;
@@ -1066,7 +1071,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
             if (wantsEnabled) {
                 let current = (await fetchSkills()).skills.find((skill) => skill.name === name);
                 if (!current) throw new Error('Skill not found in current catalogue.');
-                if (current.review_status === 'fail' || (current.load_error && !isMissingGrantLoadError(current))) {
+                if ((current.review_status === 'blockers' && !reviewReady(current)) || (current.load_error && !isMissingGrantLoadError(current))) {
                     throw new Error('Repair this skill before enabling it.');
                 }
                 if (!reviewReady(current)) {

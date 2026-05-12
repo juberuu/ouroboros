@@ -1,4 +1,4 @@
-# Ouroboros v5.18.0 — Architecture & Reference
+# Ouroboros v5.19.0-rc.1 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -63,9 +63,10 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── runtime_mode_policy.py ← Runtime-mode protected-path policy (safety-critical files, frozen contracts, release/managed invariants) shared by registry, git tools, and Claude gateway guards
       ├── reflection.py        ← Execution reflection and pattern capture
       ├── review_evidence.py   ← Structured review findings/obligations snapshot for summaries and reflections
-      ├── skill_loader.py      ← Skill discovery + durable skill state (v5.8.2: walks data/skills/{native,clawhub,ouroboroshub,external}/ + optional OUROBOROS_SKILLS_REPO_PATH; persists to data/state/skills/<name>/; tags each LoadedSkill with `source` and `.self_authored.json` provenance; v5.17 computes review status live from stored findings + current enforcement mode)
+      ├── skill_loader.py      ← Skill discovery + durable skill state (v5.8.2: walks data/skills/{native,clawhub,ouroboroshub,external}/ + optional OUROBOROS_SKILLS_REPO_PATH; persists to data/state/skills/<name>/; tags each LoadedSkill with `source` and `.self_authored.json` provenance; v5.19 computes review verdicts live from stored findings)
+      ├── skill_readiness.py   ← Central skill readiness helper: combines review gate, stale hash, enablement, and grants into a single finalization/execution verdict
       ├── skill_dependencies.py ← Shared dependency-spec resolution for skill payloads across manifests, sidecars, and provenance
-      ├── skill_review_status.py ← Skill-review verdict aggregation SSOT (critical/advisory FAILs → pass/advisory_pass/advisory/fail)
+      ├── skill_review_status.py ← Skill-review verdict aggregation SSOT (FAILs → clean/warnings/blockers/pending; enforcement maps verdicts to executable_review)
       ├── skill_review.py      ← Skill review pipeline: deterministic preflight + optional fail-open Claude Code advisory over the skill payload only (repo diff excluded, output treated as inert evidence) followed by the tri-model executable trust gate against the Skill Review Checklist section of docs/CHECKLISTS.md; supports rebuttal/history/convergence evidence
       ├── extension_loader.py  ← Phase 4 in-process loader for type: extension skills; discovers + imports plugin.py via importlib with a narrow PluginAPIImpl, tracks registrations per-skill for atomic unload
       ├── extension_ui_validation.py ← Host-owned widget/settings render-schema validation shared by extension loader and skill preflight
@@ -119,7 +120,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── review_revalidation.py ← Reviewed-commit fingerprint revalidation helpers (blocks when staged diff changes after review)
       │   ├── scope_review.py   ← Blocking scope reviewer (configurable, fail-closed)
       │   ├── skill_exec.py      ← Phase 3 external-skill surface: list_skills, review_skill, toggle_skill, skill_exec (subprocess runner with cwd confinement, env scrubbing, timeout, runtime allowlist python/python3/bash/node/deno/ruby/go; gated by enabled + fresh executable review + fresh content hash — v5.1.2 Frame A: runtime_mode no longer blocks execution)
-      │   ├── skill_publish.py   ← Agent-callable `submit_skill_to_hub` tool: validates a fresh PASS-reviewed local skill (sources `external`/`self_authored`/`user_repo`/`ouroboroshub`/`clawhub`; `native` only when no `.seed-origin` marker), infers OuroborosHub from `OUROBOROS_HUB_CATALOG_URL`, commits payload + catalog update to the user's fork via GitHub GraphQL, and opens a PR without mutating the local Ouroboros repo. For marketplace-managed sources the generated PR body is force-prefixed with a `## Provenance` block read from the local sidecar (`.ouroboroshub.json` slug / `.clawhub.json` clawhub_slug); when no sidecar exists the source is reclassified as `external` by skill_loader and submit proceeds without the block.
+      │   ├── skill_publish.py   ← Agent-callable `submit_skill_to_hub` tool: validates a fresh clean-reviewed local skill (sources `external`/`self_authored`/`user_repo`/`ouroboroshub`/`clawhub`; `native` only when no `.seed-origin` marker), infers OuroborosHub from `OUROBOROS_HUB_CATALOG_URL`, commits payload + catalog update to the user's fork via GitHub GraphQL, and opens a PR without mutating the local Ouroboros repo. For marketplace-managed sources the generated PR body is force-prefixed with a `## Provenance` block read from the local sidecar (`.ouroboroshub.json` slug / `.clawhub.json` clawhub_slug); when no sidecar exists the source is reclassified as `external` by skill_loader and submit proceeds without the block.
       │   └── skill_preflight.py ← v5.7.0 heal-safe, read-only skill payload preflight validator (manifest parse + Python compile() / node --check / bash -n; no review-state mutation)
       └── platform_layer.py    ← Cross-platform process/path/locking helpers
 
@@ -185,7 +186,7 @@ Dockerfile                    ← Docker image (web UI runtime)
 │   │   └── skills/              ← Phase 3 external-skill state plane (sibling of advisory_review.json, not shared)
 │   │       └── <skill_name>/
 │   │           ├── enabled.json ← {"enabled": bool, "updated_at": iso_ts}
-│   │           ├── review.json  ← {"content_hash": str, "findings": [...], "reviewer_models": [...], "timestamp": iso_ts, "raw_actor_records": [...], ...}; for full PASS/FAIL finding sets, status is computed live on load from findings + current `OUROBOROS_REVIEW_ENFORCEMENT` (`status` may remain only on legacy/pending infrastructure states)
+│   │           ├── review.json  ← {"content_hash": str, "findings": [...], "reviewer_models": [...], "timestamp": iso_ts, "raw_actor_records": [...], ...}; for full PASS/FAIL finding sets, status is computed live on load as `clean`/`warnings`/`blockers` from findings (`status` may remain only on legacy/pending infrastructure states; enforcement is applied later by `skill_review_gate`)
 │   │           ├── review_history.jsonl ← compact recent skill-review attempts (`status`, `content_hash`, failure signature) used for anti-thrashing/convergence context
 │   │           ├── accepted_rebuttals.json ← accepted skill-review rebuttals injected into later review prompts
 │   │           ├── deps.json    ← isolated dependency install fingerprint for skills with reviewed install specs
@@ -577,7 +578,7 @@ authentication. If the password is blank, non-loopback access stays open by desi
 | ALL | `/api/extensions/{skill}/{rest:path}` | Phase 5: catch-all dispatcher that forwards to the handler registered via `PluginAPI.register_route`. Honors the registered methods tuple; `405` on method mismatch, `404` on unknown mount. |
 | POST | `/api/skills/{skill}/toggle` | Phase 5: UI-direct enable/disable. Enabling requires a fresh executable review plus approved grants; disabling remains available to take skills offline. Wraps `save_enabled` plus the `extension_loader.load_extension` / `unload_extension` machinery so the Skills page can flip state without round-tripping through the agent. |
 | GET | `/api/skills/lifecycle-queue` | v5.5: recent global FIFO skill lifecycle jobs (install/update/review/deps/enable/disable/uninstall) for My skills virtual rows, tab badges, and operator feedback. |
-| POST | `/api/skills/{skill}/review` | Phase 5 / v5.7.2: UI-direct skill review trigger. Uses the shared `skill_review_runner` lifecycle job path, offloads blocking LLM calls to a worker thread, dedupes active reviews by skill/content hash, may run a best-effort Claude Code advisory pre-review over the skill payload only (`include_repo_diff=False`, untrusted/inert evidence before the final JSON contract), then runs the tri-model review as the executable trust gate, reconciles isolated dependencies after executable verdicts, and writes `review_job.json` + `skill_review_*` events. Review responses include `review_gate` and `executable_review`; callers must use those fields rather than inferring readiness from the raw `status` string. |
+| POST | `/api/skills/{skill}/review` | Phase 5 / v5.7.2: UI-direct skill review trigger. Uses the shared `skill_review_runner` lifecycle job path, offloads blocking LLM calls to a worker thread, dedupes active reviews by skill/content hash, may run a best-effort Claude Code advisory pre-review over the skill payload only (`include_repo_diff=False`, untrusted/inert evidence before the final JSON contract), then runs the tri-model review as the executable trust gate, reconciles isolated dependencies after executable verdicts, and writes `review_job.json` + `skill_review_*` events. Review responses include `review_gate` and `executable_review`; callers must use those fields rather than inferring readiness from the raw `status` string. Full review evidence is also written to `chat.jsonl` as `direction=system,type=skill_review`; the Chat UI renders that row collapsed by default with the full markdown available on expansion. |
 | POST | `/api/skills/{skill}/grants` | Sentinel endpoint that returns 403; explicit per-skill core-key grants are owner-only and are written by the desktop launcher bridge after native confirmation. v5.2.2 dual-track: ``type: script`` and ``type: extension`` skills are both eligible (instruction skills are not). |
 | POST | `/api/skills/{skill}/reconcile` | Reload/unload the live extension state after owner key grants or catalogue changes; used by launcher/UI flows to make persisted skill state match runtime registrations. |
 | GET | `/api/migrations` | List native-skill upgrade notices shown on the Skills page. |
@@ -883,7 +884,8 @@ continuation phrase heuristics.
   catches literal `_UI_RENDER` mistakes (for example `action_route`
   where `route` is required) before review/enable/load.
 - The LLM loop checks final text responses after skill payload edits.
-  If a self-authored skill is not fresh executable review + enabled + grant-ready,
+  If a self-authored skill is not fresh executable review + enabled + grant-ready
+  according to `skill_readiness.skill_readiness_for_execution`,
   the loop injects `SKILL_NOT_FINALIZED` and gives the agent another
   round to call `review_skill` instead of declaring the task done.
   v5.8.3-rc.3 re-arms this reminder after any subsequent tool round so
@@ -1666,8 +1668,8 @@ Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent acce
 | OUROBOROS_WEBSEARCH_MODEL | gpt-5.2 | Official OpenAI Responses model for `web_search` when `OPENAI_BASE_URL` is empty |
 | OUROBOROS_REVIEW_MODELS | openai/gpt-5.5,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.6 | Comma-separated OpenRouter model IDs for pre-commit review (min 2 for quorum) |
 | OUROBOROS_REVIEW_MODEL_TIMEOUT_SEC | 600 | Env-only override read directly by `ouroboros.tools.review`. Per-reviewer model call timeout for multi-model review; timed-out reviewers become ERROR actors and quorum still requires at least two parseable reviewers. |
-| OUROBOROS_REVIEW_ENFORCEMENT | advisory | Pre-commit review enforcement: `advisory` or `blocking` |
-| OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS | false | Desktop-owner confirmed setting. When enabled, a fresh pass/advisory-pass skill review grants only the manifest-declared settings keys and host permissions for that exact content hash so closed-loop skill development can run without repeated manual grants. Plain `/api/settings` POST drops this key; desktop uses the launcher confirmation bridge. |
+| OUROBOROS_REVIEW_ENFORCEMENT | advisory | Review enforcement: `blocking` blocks commit critical findings and skill `blockers`; `advisory` downgrades both to warnings by operator choice. Skill `warnings` do not block execution in either mode. |
+| OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS | false | Desktop-owner confirmed setting. When enabled, any completed skill review verdict (`clean`, `warnings`, or `blockers`) grants only the manifest-declared settings keys and host permissions for that exact content hash so closed-loop skill development can run without repeated manual grants. Plain `/api/settings` POST drops this key; desktop uses the launcher confirmation bridge. |
 | OUROBOROS_RUNTIME_MODE | advanced | Three-layer refactor axis: `light`, `advanced`, or `pro`. Orthogonal to `OUROBOROS_REVIEW_ENFORCEMENT`. Clamped via `normalize_runtime_mode` on both save and read paths. `light` is a compatibility/self-modification guard: it blocks repo-mutation tools at the `ToolRegistry.execute` gate, mutative direct git through `run_shell`, and shallow argv writer commands with explicit repo-local targets, while leaving normal shell/Python/Node diagnostics usable. It also refuses runtime_mode self-elevation through the owner chokepoints (`save_settings`, `_data_write` settings.json block, `/api/settings` POST drop). Reviewed + enabled skills (script + extension) execute in light. `advanced` can evolve the application layer but blocks protected core/contract/release paths. `pro` may edit those protected surfaces directly, but committing them still requires the normal triad + scope review to pass. The runtime_mode value itself is owner-only — change it by editing `settings.json` directly while the agent is stopped, then restart. |
 | OUROBOROS_SKILLS_REPO_PATH | "" | Local checkout path for the external skills/extensions repo. Consumed by `ouroboros.skill_loader.discover_skills` (Phase 3); accepts absolute paths or `~`-prefixed paths; `get_skills_repo_path` expands `~` at read time. Ouroboros never clones/pulls this directory. |
 | OUROBOROS_HUB_CATALOG_URL | `https://raw.githubusercontent.com/joi-lab/OuroborosHub/main/catalog.json` | Official static skill catalog. The client fetches only this JSON automatically; selected skill installs download the catalog-listed files and verify sha256. |
@@ -1987,8 +1989,8 @@ automatically on completion or via `kill_all_tracked_subprocesses()` on panic.
 11. **External skills run only after a fresh executable tri-model review, and the review
     is the primary gate**: skills loaded from `OUROBOROS_SKILLS_REPO_PATH`
     may execute via the dedicated `skill_exec` substrate only when
-    the skill is enabled + the live-computed tri-model review verdict is
-    executable (`pass`, or `advisory_pass` when enforcement is advisory) +
+    the skill is enabled + the live-computed tri-model review gate is
+    executable (`clean`/`warnings`, plus `blockers` when enforcement is advisory) +
     the stored content hash matches the current skill payload hash
     (including the manifest-declared `entry` file for extensions).
     v5.1.2 Frame A: `OUROBOROS_RUNTIME_MODE` no longer gates skill execution
@@ -2005,8 +2007,9 @@ automatically on completion or via `kill_all_tracked_subprocesses()` on panic.
     actual authoritative checks, enforced by the multi-model reviewers
     before any `skill_exec` invocation. Skill review findings and full
     per-actor raw records live in `data/state/skills/<name>/review.json`;
-    `skill_review_status.py` computes the current status from those
-    findings and `OUROBOROS_REVIEW_ENFORCEMENT` at load time. Skill state
+    `skill_review_status.py` computes the current verdict from those
+    findings as `clean`/`warnings`/`blockers`; `skill_review_gate`
+    applies `OUROBOROS_REVIEW_ENFORCEMENT` when deciding executability. Skill state
     is deliberately siloed from the repo-review ledger
     (`data/state/advisory_review.json`) — a sticky skill finding cannot
     block repo commits and vice versa.
@@ -2357,7 +2360,9 @@ extension module namespace.
   ``skill_exec`` on an extension returns ``SKILL_EXEC_EXTENSION``
   pointing at that in-process surface).
 - The skill's ``enabled.json`` is ``true``.
-- The skill's last review verdict is ``pass``.
+- The skill's last review gate is executable: ``clean`` and ``warnings``
+  are executable in all review-enforcement modes, while ``blockers`` are
+  executable only when ``OUROBOROS_REVIEW_ENFORCEMENT=advisory``.
 - The stored ``content_hash`` matches the current on-disk hash of the
   manifest + runtime-reachable payload files (a user edit invalidates
   the verdict and blocks execution until a fresh review). The hash is
@@ -2380,7 +2385,7 @@ extension module namespace.
   reviewer never saw. The hash FAILS CLOSED on unreadable files —
   ``compute_content_hash`` raises ``SkillPayloadUnreadable`` rather
   than skipping a file it can't see, so a skill with a
-  temporarily-unreadable payload cannot slip a PASS verdict through
+  temporarily-unreadable payload cannot slip a clean verdict through
   and then execute once permissions change.
 
 ### 13.4 Review surface split (DRY against repo review)
@@ -2415,8 +2420,8 @@ Lifecycle:
 
 1. ``reload_all(drive_root, settings_reader, repo_path)`` scans the
    skills checkout, ignores ``type: instruction`` / ``type: script``
-   skills, and for each extension whose review is PASS + enabled +
-   hash-fresh invokes ``load_extension``.
+   skills, and for each extension whose review gate is executable +
+   enabled + hash-fresh invokes ``load_extension``.
 2. ``load_extension`` resolves the manifest-declared ``entry`` module,
    loads it via ``importlib.util.spec_from_file_location``, stuffs it
    in ``sys.modules`` under ``ouroboros._extensions.<skill>``, and

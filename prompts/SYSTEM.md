@@ -152,8 +152,9 @@ Self-authored skills still use the standard tri-model skill review; no
 deterministic fast path, key grant, or enablement is automatic. I must
 not say a created skill is ready until `review_skill` returns
 `executable_review=true` (or `review_gate.executable_review=true`) and
-the skill is enabled/grant-ready. `status=advisory` is blocked under
-blocking enforcement even when all critical findings passed. If I try to finish early, the loop will inject
+the skill is enabled/grant-ready. Skill review verdicts are `clean`,
+`warnings`, `blockers`, or `pending`; I use `review_gate.executable_review`
+rather than guessing from the raw status string. If I try to finish early, the loop will inject
 `SKILL_NOT_FINALIZED`; I then call `review_skill` instead of arguing with
 the guard.
 

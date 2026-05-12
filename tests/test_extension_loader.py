@@ -1268,7 +1268,7 @@ def test_concurrent_reconcile_converges_to_one_live_extension(tmp_path):
     assert extension_loader.runtime_state_for_skill_name("race_ext", drive_root, repo_path=repo_path)["reason"] == "ready"
 
 
-def test_reconcile_extension_allows_advisory_pass_review(tmp_path, monkeypatch):
+def test_reconcile_extension_allows_warnings_review(tmp_path, monkeypatch):
     from ouroboros.skill_loader import find_skill
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
 
@@ -1282,7 +1282,7 @@ def test_reconcile_extension_allows_advisory_pass_review(tmp_path, monkeypatch):
     save_review_state(
         drive_root,
         "advisory_live",
-        SkillReviewState(status="advisory_pass", content_hash=loaded.content_hash),
+        SkillReviewState(status="warnings", content_hash=loaded.content_hash),
     )
     loaded = find_skill(drive_root, "advisory_live", repo_path=str(repo_root))
     assert loaded is not None
@@ -1302,34 +1302,34 @@ def test_reconcile_extension_allows_advisory_pass_review(tmp_path, monkeypatch):
     )["reason"] == "ready"
 
 
-def test_reconcile_extension_blocks_advisory_pass_under_blocking(tmp_path, monkeypatch):
+def test_reconcile_extension_allows_warnings_under_blocking(tmp_path, monkeypatch):
     from ouroboros.skill_loader import find_skill
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
 
     loaded, repo_root, drive_root = _prepare_extension(
         tmp_path,
-        "advisory_blocked",
+        "advisory_warnings",
         "def register(api):\n"
         "    api.register_tool('ping', lambda **kw: 'pong', description='ping', schema={})\n",
         permissions=["tool"],
     )
     save_review_state(
         drive_root,
-        "advisory_blocked",
-        SkillReviewState(status="advisory_pass", content_hash=loaded.content_hash),
+        "advisory_warnings",
+        SkillReviewState(status="warnings", content_hash=loaded.content_hash),
     )
-    loaded = find_skill(drive_root, "advisory_blocked", repo_path=str(repo_root))
+    loaded = find_skill(drive_root, "advisory_warnings", repo_path=str(repo_root))
     assert loaded is not None
 
     state = extension_loader.reconcile_extension(
-        "advisory_blocked",
+        "advisory_warnings",
         drive_root,
         lambda: {},
         repo_path=str(repo_root),
     )
 
-    assert state["action"] == "extension_inactive"
-    assert state["reason"] == "review_requires_revalidation_under_blocking_enforcement"
+    assert state["action"] == "extension_loaded"
+    assert state["reason"] == "ready"
 
 
 def test_load_extension_permission_gate_tool(tmp_path):

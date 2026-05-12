@@ -32,10 +32,16 @@ from ouroboros.skill_loader import (
     auto_grant_if_enabled,
     compute_content_hash,
     find_skill,
-    review_status_allows_execution,
     save_review_state,
 )
-from ouroboros.skill_review_status import CRITICAL_ITEMS, aggregate_skill_review_status
+from ouroboros.skill_review_status import (
+    CRITICAL_ITEMS,
+    STATUS_BLOCKERS,
+    STATUS_CLEAN,
+    STATUS_PENDING,
+    STATUS_WARNINGS,
+    aggregate_skill_review_status,
+)
 from ouroboros.tools.review_helpers import (
     build_anti_thrashing_rules_section,
     build_rebuttal_section,
@@ -199,7 +205,7 @@ class SkillReviewOutcome:
     """Return payload from ``review_skill``."""
 
     skill_name: str
-    status: str  # "pass" | "fail" | "advisory" | "advisory_pass" | "pending"
+    status: str  # "clean" | "warnings" | "blockers" | "pending"
     findings: List[Dict[str, Any]] = field(default_factory=list)
     reviewer_models: List[str] = field(default_factory=list)
     content_hash: str = ""
@@ -625,11 +631,10 @@ def render_skill_review_block(
 
     lines: List[str] = []
     headline_marker = {
-        "pass": "✅",
-        "advisory_pass": "✅",
-        "advisory": "⚠️",
-        "fail": "❌",
-        "pending": "⏳",
+        STATUS_CLEAN: "✅",
+        STATUS_WARNINGS: "⚠️",
+        STATUS_BLOCKERS: "❌",
+        STATUS_PENDING: "⏳",
     }.get(status, "•")
     lines.append(
         f"{headline_marker} Skill review attempt {attempt_idx}: `{skill_name}` — status={status}"
@@ -775,7 +780,7 @@ def _run_deterministic_preflight(
     }]
     outcome = SkillReviewOutcome(
         skill_name=skill.name,
-        status="fail",
+        status=STATUS_BLOCKERS,
         findings=findings,
         reviewer_models=["deterministic_preflight"],
         content_hash=content_hash,
@@ -783,20 +788,21 @@ def _run_deterministic_preflight(
         raw_result=preflight_raw,
     )
     if persist:
+        review_state = SkillReviewState(
+            status=outcome.status,
+            content_hash=content_hash,
+            findings=findings,
+            reviewer_models=outcome.reviewer_models,
+            timestamp=utc_now_iso(),
+            prompt_chars=0,
+            cost_usd=0.0,
+            raw_result=outcome.raw_result,
+            raw_actor_records=[],
+        )
         save_review_state(
             drive_root,
             skill.name,
-            SkillReviewState(
-                status=outcome.status,
-                content_hash=content_hash,
-                findings=findings,
-                reviewer_models=outcome.reviewer_models,
-                timestamp=utc_now_iso(),
-                prompt_chars=0,
-                cost_usd=0.0,
-                raw_result=outcome.raw_result,
-                raw_actor_records=[],
-            ),
+            review_state,
         )
         _append_skill_review_history(
             drive_root,
@@ -805,6 +811,8 @@ def _run_deterministic_preflight(
             content_hash=content_hash,
             findings=findings,
         )
+        skill.review = review_state
+        auto_grant_if_enabled(drive_root, skill)
     return outcome
 
 
@@ -864,8 +872,9 @@ You are performing a SKILL review, not a repo-commit review.
 
 This review vets a single external skill package that lives OUTSIDE the
 self-modifying Ouroboros repository. The skill cannot execute until it
-produces a fresh executable verdict (`pass` or advisory-mode
-`advisory_pass`) from this review.
+produces a fresh review verdict (`clean`, `warnings`, or `blockers`) from
+this review. Execution then depends on `skill_review_gate` and the current
+review enforcement mode.
 
 ## Skill identity
 - name: {skill_name}
@@ -1081,9 +1090,10 @@ def _aggregate_status(
       PASS/Not applicable for non-module widgets, but modules can be
       registered dynamically from plugin.py so manifest-only detection is
       not enough.)
-      → ``fail``;
-    - any advisory FAIL without a matching critical FAIL → ``advisory``;
-    - otherwise → ``pass``.
+      → ``blockers``;
+    - any warning/advisory FAIL without a matching blocker FAIL
+      → ``warnings``;
+    - otherwise → ``clean``.
 
     If the reviewer pipeline returned zero parseable findings (transport
     failure, all actors errored), the caller surfaces that as ``error``;
@@ -1125,13 +1135,13 @@ def review_skill(
     if skill is None:
         return SkillReviewOutcome(
             skill_name=skill_name,
-            status="pending",
+            status=STATUS_PENDING,
             error=f"Skill {skill_name!r} not found in the external skills checkout",
         )
     if skill.load_error:
         return SkillReviewOutcome(
             skill_name=skill_name,
-            status="pending",
+            status=STATUS_PENDING,
             error=f"Skill manifest could not be parsed: {skill.load_error}",
         )
 
@@ -1145,7 +1155,7 @@ def review_skill(
     except SkillPayloadUnreadable as exc:
         return SkillReviewOutcome(
             skill_name=skill.name,
-            status="pending",
+            status=STATUS_PENDING,
             error=(
                 f"Skill payload {exc.relpath!r} is unreadable "
                 f"({type(exc.err).__name__}: {exc.err}). Review refuses "
@@ -1180,7 +1190,7 @@ def review_skill(
     except _SkillPackTooLarge as exc:
         return SkillReviewOutcome(
             skill_name=skill.name,
-            status="pending",
+            status=STATUS_PENDING,
             content_hash=content_hash,
             error=(
                 f"Skill pack exceeds reviewable cap ({exc.file_count} files "
@@ -1193,7 +1203,7 @@ def review_skill(
     except _SkillFileTooLarge as exc:
         return SkillReviewOutcome(
             skill_name=skill.name,
-            status="pending",
+            status=STATUS_PENDING,
             content_hash=content_hash,
             error=(
                 f"Skill file {exc.relpath!r} is {exc.size_bytes} bytes, over "
@@ -1205,7 +1215,7 @@ def review_skill(
     except _SkillBinaryPayload as exc:
         return SkillReviewOutcome(
             skill_name=skill.name,
-            status="pending",
+            status=STATUS_PENDING,
             content_hash=content_hash,
             error=(
                 f"Skill file {exc.relpath!r} ({exc.size_bytes} bytes) is "
@@ -1219,7 +1229,7 @@ def review_skill(
     except _SkillFileUnreadable as exc:
         return SkillReviewOutcome(
             skill_name=skill.name,
-            status="pending",
+            status=STATUS_PENDING,
             content_hash=content_hash,
             error=(
                 f"Skill file {exc.relpath!r} is unreadable "
@@ -1264,7 +1274,7 @@ def review_skill(
         log.warning("Skill review infrastructure failure for %s", skill.name, exc_info=True)
         return SkillReviewOutcome(
             skill_name=skill.name,
-            status="pending",
+            status=STATUS_PENDING,
             reviewer_models=models,
             content_hash=content_hash,
             error=f"infrastructure failure: {exc}",
@@ -1275,7 +1285,7 @@ def review_skill(
     except json.JSONDecodeError:
         return SkillReviewOutcome(
             skill_name=skill.name,
-            status="pending",
+            status=STATUS_PENDING,
             reviewer_models=models,
             content_hash=content_hash,
             error="review returned non-JSON top-level response",
@@ -1285,7 +1295,7 @@ def review_skill(
     if "error" in result_json:
         return SkillReviewOutcome(
             skill_name=skill.name,
-            status="pending",
+            status=STATUS_PENDING,
             reviewer_models=models,
             content_hash=content_hash,
             error=f"review service error: {result_json['error']}",
@@ -1297,7 +1307,7 @@ def review_skill(
     if len(responded_models) < 2:
         outcome = SkillReviewOutcome(
             skill_name=skill.name,
-            status="pending",
+            status=STATUS_PENDING,
             findings=findings,
             reviewer_models=models,
             content_hash=content_hash,
@@ -1346,7 +1356,7 @@ def review_skill(
                 content_hash,
                 expected_job_id=str(getattr(ctx, "_skill_review_lifecycle_job_id", "") or ""),
             ):
-                outcome.status = "pending"
+                outcome.status = STATUS_PENDING
                 outcome.error = (
                     "review outcome was not persisted because the lifecycle job "
                     "is already terminal or no longer matches this content hash"
@@ -1377,19 +1387,18 @@ def review_skill(
             review_rebuttal=review_rebuttal, content_hash=content_hash,
             responded_models=list(responded_models),
         )
-        if review_status_allows_execution(outcome.status):
-            skill.review = SkillReviewState(
-                status=outcome.status,
-                content_hash=content_hash,
-                findings=findings,
-                reviewer_models=responded_models,
-                timestamp=utc_now_iso(),
-                prompt_chars=outcome.prompt_chars,
-                cost_usd=outcome.cost_usd,
-                raw_result=outcome.raw_result,
-                raw_actor_records=[record.to_dict() for record in parsed_review.actor_records],
-            )
-            auto_grant_if_enabled(drive_root, skill)
+        skill.review = SkillReviewState(
+            status=outcome.status,
+            content_hash=content_hash,
+            findings=findings,
+            reviewer_models=responded_models,
+            timestamp=utc_now_iso(),
+            prompt_chars=outcome.prompt_chars,
+            cost_usd=outcome.cost_usd,
+            raw_result=outcome.raw_result,
+            raw_actor_records=[record.to_dict() for record in parsed_review.actor_records],
+        )
+        auto_grant_if_enabled(drive_root, skill)
 
     return outcome
 

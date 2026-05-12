@@ -217,8 +217,9 @@ def test_chat_inject_rejects_disabled_skill_token(tmp_path: pathlib.Path) -> Non
     assert response.status_code == 403
 
 
-def test_chat_inject_rejects_failed_review_token(tmp_path: pathlib.Path) -> None:
-    _seed_token(tmp_path, skill="failed", token="token", permissions=["inject_chat"], review_status="fail")
+def test_chat_inject_rejects_failed_review_token(tmp_path: pathlib.Path, monkeypatch) -> None:
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    _seed_token(tmp_path, skill="failed", token="token", permissions=["inject_chat"], review_status="blockers")
     app = create_host_service_app(tmp_path, bridge_getter=FakeBridge)
     client = TestClient(app)
 
@@ -231,8 +232,9 @@ def test_chat_inject_rejects_failed_review_token(tmp_path: pathlib.Path) -> None
     assert response.status_code == 403
 
 
-def test_identity_rejects_failed_review_token(tmp_path: pathlib.Path) -> None:
-    _seed_token(tmp_path, skill="failed", token="token", permissions=["inject_chat"], review_status="fail")
+def test_identity_rejects_failed_review_token(tmp_path: pathlib.Path, monkeypatch) -> None:
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    _seed_token(tmp_path, skill="failed", token="token", permissions=["inject_chat"], review_status="blockers")
     app = create_host_service_app(tmp_path, bridge_getter=FakeBridge)
     client = TestClient(app)
 

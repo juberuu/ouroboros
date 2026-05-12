@@ -872,7 +872,7 @@ def test_consolidate_chat_alias_creates_block(tmp_path):
     assert len(blocks) == 1
 
 
-def test_installed_skills_section_includes_advisory_pass(tmp_path, monkeypatch):
+def test_installed_skills_section_includes_warnings_verdict(tmp_path, monkeypatch):
     from ouroboros.context import _build_installed_skills_section
 
     class FakeEnv:
@@ -886,7 +886,8 @@ def test_installed_skills_section_includes_advisory_pass(tmp_path, monkeypatch):
                     "name": "weather",
                     "type": "script",
                     "enabled": True,
-                    "review_status": "advisory_pass",
+                    "review_status": "warnings",
+                    "executable_review": True,
                     "review_stale": False,
                     "description": "Weather helper",
                 }
@@ -898,7 +899,7 @@ def test_installed_skills_section_includes_advisory_pass(tmp_path, monkeypatch):
 
     assert "## Installed Skills" in section
     assert "weather" in section
-    assert "advisory_pass" in section
+    assert "warnings" in section
 
 
 def test_health_invariants_come_first_in_dynamic_context(tmp_path):

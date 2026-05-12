@@ -326,8 +326,7 @@ planned; a future sandbox project (out-of-process / WASM) is the
 prerequisite for trusting any opaque bytes inside the skill tree.
 
 Skills default to **disabled** and cannot be executed by `skill_exec`
-until review produces a fresh executable verdict (`pass`, or
-`advisory_pass` in advisory enforcement mode). Skill review output is persisted
+until review produces a fresh executable verdict. Skill review output is persisted
 to `~/Ouroboros/data/state/skills/<name>/review.json` with a content
 hash so an edit to the skill invalidates the previous verdict.
 `review.json`, `enabled.json`, `grants.json`, and marketplace/self-authored
@@ -341,9 +340,9 @@ but they do not bypass review. As of v5.9.0, `review_skill` routes them
 through the same tri-model skill review as marketplace and user-managed
 skills; no deterministic PASS or enablement is written automatically. Key
 and permission grants remain explicit unless the owner has enabled
-`OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS`, in which case a fresh pass/advisory-pass
-review grants only manifest-declared settings keys and host permissions for
-that exact content hash.
+`OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS`, in which case any completed review
+verdict (`clean`, `warnings`, or `blockers`) grants only manifest-declared
+settings keys and host permissions for that exact content hash.
 
 The Skills UI Repair affordance is only a task starter: it asks Ouroboros
 to edit payload files and rerun `review_skill`. It must not write
@@ -394,21 +393,20 @@ total). Each entry carries `item`, `verdict` (`PASS`/`FAIL`), `severity`
 
 ### Severity rules
 
-- Items 1–5 are always critical: a FAIL on any of them aggregates to
-  ``status=fail``, which blocks `skill_exec` (execution requires a fresh
-  executable review).
-- Items 6 and 13–16 are advisory. In `OUROBOROS_REVIEW_ENFORCEMENT=blocking`
-  they aggregate to ``status=advisory`` and are not executable until fixed.
-  In `OUROBOROS_REVIEW_ENFORCEMENT=advisory` they aggregate to
-  ``status=advisory_pass``: executable, but the agent must consciously inspect
-  every advisory finding and either fix it or record why it is acceptable.
-- Terminology note: "advisory enforcement mode" and "advisory review status"
-  are different axes despite the shared word. Mode controls how non-critical
-  findings are treated; status is the computed verdict shown in the Skills UI.
-  Review state stores the findings and computes status at load time from the
-  current enforcement mode. Agents must use `review_gate.executable_review`
-  / `executable_review`, not the raw status string, when deciding whether
-  the skill is actually runnable.
+- Skill review verdicts are enforcement-independent:
+  - `clean` — no FAIL findings.
+  - `warnings` — one or more advisory FAIL findings, no blocker findings.
+  - `blockers` — one or more critical/blocker FAIL findings.
+  - `pending` — no reliable completed review verdict.
+- Enforcement maps verdicts to execution:
+  - `OUROBOROS_REVIEW_ENFORCEMENT=blocking`: `clean` and `warnings` are
+    executable; `blockers` are not.
+  - `OUROBOROS_REVIEW_ENFORCEMENT=advisory`: `clean`, `warnings`, and
+    `blockers` are executable by operator choice.
+  - `pending` and stale reviews are never executable.
+- Review state stores findings and computes the verdict at load time. Agents
+  and UI callers must use `review_gate.executable_review` / `executable_review`,
+  not the raw status string, when deciding whether the skill is runnable.
 - Item 7 is conditionally critical: FAIL only when `type: extension`.
 - Item 8 (`widget_module_safety`) is critical for any `type: extension`
   if the reviewer returns FAIL. Reviewers MUST mark it PASS with reason

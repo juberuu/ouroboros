@@ -110,7 +110,7 @@ def test_interrupted_review_job_cannot_late_write_pass(tmp_path, monkeypatch):
     assert outcome.status == "pending"
     assert "not persisted" in outcome.error
     persisted = load_review_state(drive_root, "alpha")
-    assert persisted.status == "fail"
+    assert persisted.status == "blockers"
     assert persisted.content_hash == "old-hash"
     events = (drive_root / "logs" / "events.jsonl").read_text(encoding="utf-8")
     assert "skill_review_persist_skipped" in events
@@ -334,7 +334,7 @@ def test_direct_review_ignores_historical_completed_job_hash(tmp_path, monkeypat
 
     outcome = review_skill(ctx, "alpha")
 
-    assert outcome.status == "pass"
+    assert outcome.status == "clean"
     assert load_review_state(drive_root, "alpha").content_hash == content_hash
 
 
@@ -402,7 +402,7 @@ def test_cancellation_during_extension_reconcile_keeps_lifecycle_lane(tmp_path, 
         assert not quick.done()
         release_reconcile.set()
         result = await asyncio.wait_for(task, timeout=2)
-        assert result["status"] == "pass"
+        assert result["status"] == "clean"
         assert await asyncio.wait_for(quick, timeout=2) == {"quick": True}
         assert lifecycle_queue.queue_snapshot()["active"] is None
 
@@ -468,7 +468,7 @@ def test_heartbeat_continues_during_extension_reconcile(tmp_path, monkeypatch):
         assert after != before
         release_reconcile.set()
         result = await asyncio.wait_for(task, timeout=2)
-        assert result["status"] == "pass"
+        assert result["status"] == "clean"
         final = json.loads(job_path.read_text(encoding="utf-8"))
         assert final["status"] == "completed"
 

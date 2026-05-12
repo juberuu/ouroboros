@@ -56,13 +56,13 @@ def test_drain_incoming_messages_preserves_image_payload():
     content = messages[0]["content"]
     assert isinstance(content, list)
     assert content[0]["type"] == "text"
-    assert content[0]["text"] == "photo from telegram"
+    assert content[0]["text"] == "[Message from my human]: photo from telegram"
     assert content[1]["type"] == "image_url"
     assert content[1]["image_url"]["url"] == "data:image/png;base64,aW1hZ2U="
 
 
 # ---------------------------------------------------------------------------
-# Skill finalization gate (self-authored skills must reach pass+enabled
+# Skill finalization gate (self-authored skills must reach ready+enabled
 # before the loop accepts a final text response)
 # ---------------------------------------------------------------------------
 

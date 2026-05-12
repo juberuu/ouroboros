@@ -41,6 +41,7 @@ from ouroboros.marketplace.provenance import (
     read_provenance,
     write_provenance,
 )
+from ouroboros.skill_review_status import skill_review_gate
 
 log = logging.getLogger(__name__)
 
@@ -450,7 +451,7 @@ def install_skill(
     auto_specs = list((provenance.get("install_specs") or {}).get("auto") or [])
     if auto_specs:
         deps_status = "pending_review"
-        if review_status in {"pass", "advisory_pass"} and not review_error:
+        if skill_review_gate(review_status)["executable_review"] and not review_error:
             _progress("Installing dependencies…")
             try:
                 deps_fingerprint = install_isolated_dependencies(
@@ -661,7 +662,7 @@ def update_skill(
     )
     if was_live and (
         not getattr(result, "ok", False)
-        or getattr(result, "review_status", "") in {"pass", "advisory_pass"}
+        or skill_review_gate(getattr(result, "review_status", ""))["executable_review"]
     ):
         try:
             from ouroboros.extension_loader import reconcile_extension

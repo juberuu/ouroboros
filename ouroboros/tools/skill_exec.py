@@ -13,7 +13,7 @@ Design rules (per the Phase 3 plan):
   It never spawns a user-supplied string command; callers pick a script
   name declared by the skill manifest, and the runtime resolves that name
   to the exact on-disk file inside the skill directory.
-- Only skills that are enabled, whose review status is ``pass``, and
+- Only skills that are enabled, whose review gate is executable, and
   whose review is NOT stale against the current content hash can execute.
   ``type: extension`` skills are deferred until Phase 4.
 - The subprocess runs with ``cwd=skill_dir``, a scrubbed environment, a
@@ -57,6 +57,7 @@ from ouroboros.skill_loader import (
     skill_review_gate,
 )
 from ouroboros.skill_review import review_skill as _review_skill_impl
+from ouroboros.skill_review_status import normalize_skill_review_status
 from ouroboros.tools.review_helpers import format_prompt_code_block
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import append_jsonl, utc_now_iso
@@ -640,18 +641,17 @@ def _skill_deps_exec_block(drive_root: pathlib.Path, loaded: Any) -> str:
 
 def _non_executable_review_message(prefix: str, skill_name: str, status: str, *, stale: bool = False) -> str:
     gate = skill_review_gate(status, stale=stale)
-    if gate["blocking_reason"] == "advisory_findings_under_blocking_enforcement":
+    normalized_status = normalize_skill_review_status(status)
+    if gate["blocking_reason"] == "blocker_findings_under_blocking_enforcement":
         return (
-            f"⚠️ {prefix}: skill {skill_name!r} review status is 'advisory' "
-            "(non-critical findings under blocking enforcement), so it is not "
-            "executable. Fix the listed advisory findings or switch review "
-            "enforcement to advisory and reload the skill state. Re-running "
-            "review_skill on unchanged code in blocking mode will return the "
-            "same status."
+            f"⚠️ {prefix}: skill {skill_name!r} review status is 'blockers' "
+            "and review enforcement is blocking, so it is not executable. "
+            "Fix the listed blocker findings or switch review enforcement to "
+            "advisory and reload the skill state."
         )
     stale_note = f", stale={stale}" if stale else ""
     return (
-        f"⚠️ {prefix}: skill {skill_name!r} review status is {status!r}{stale_note}, "
+        f"⚠️ {prefix}: skill {skill_name!r} review status is {normalized_status!r}{stale_note}, "
         f"not executable ({gate['blocking_reason']}). A fresh executable review is required. {gate['summary']}"
     )
 

@@ -760,7 +760,7 @@ def _build_installed_skills_section(env: Any, *, max_lines: int = 100) -> str:
             continue
         if (
             not skill.get("enabled")
-            or skill.get("review_status") not in {"pass", "advisory_pass"}
+            or not bool(skill.get("executable_review"))
             or skill.get("review_stale")
         ):
             continue

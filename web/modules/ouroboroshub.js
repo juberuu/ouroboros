@@ -35,8 +35,11 @@ function lifecycleFor(installed, pending) {
     }
     if (installed) {
         const review = installed.review_status ? `Review ${installed.review_status}` : 'Installed';
+        const executable = installed.review_gate && typeof installed.review_gate.executable_review === 'boolean'
+            ? installed.review_gate.executable_review
+            : ['clean', 'warnings'].includes(installed.review_status);
         return {
-            tone: ['pass', 'advisory_pass'].includes(installed.review_status) && !installed.review_stale ? 'ok' : 'warn',
+            tone: executable && !installed.review_stale ? 'ok' : 'warn',
             label: review,
             hint: installed.review_stale ? 'Review is stale; re-review from My skills before enabling.' : '',
             button: 'Installed',

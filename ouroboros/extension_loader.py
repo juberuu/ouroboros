@@ -18,8 +18,8 @@ review gate is stricter than for ``type: script``:
   that contract even if review missed the declaration (mirrors the
   ``_FORBIDDEN_ENV_FORWARD_KEYS`` defense-in-depth pattern from Phase 3).
 - The same skill-review tri-model pipeline vets the plugin source.
-  When ``review.status`` is not an executable verdict (``pass`` or
-  advisory-mode ``advisory_pass``) the loader refuses to import the plugin,
+  When ``skill_review_gate`` says the review verdict is not executable the
+  loader refuses to import the plugin,
   so the process never touches the extension's module namespace.
 
 An extension that is later disabled via ``toggle_skill`` is
@@ -1227,7 +1227,7 @@ def load_extension(
     Returns ``None`` on success, or an error string suitable for
     surfacing to the operator via the Skills UI on failure. The skill
     must be (a) ``type: extension``, (b) ``enabled=True``, (c) review
-    status ``pass``/``advisory_pass`` with fresh content hash — otherwise the loader
+    executable review verdict with fresh content hash — otherwise the loader
     refuses silently.
 
     ``drive_root`` is mandatory and must be the same Ouroboros data-plane
