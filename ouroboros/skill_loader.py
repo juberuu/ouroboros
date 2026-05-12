@@ -50,7 +50,7 @@ from ouroboros.contracts.skill_manifest import (
     parse_skill_manifest_text,
 )
 from ouroboros.contracts.plugin_api import FORBIDDEN_SKILL_SETTINGS
-from ouroboros.skill_review_status import aggregate_skill_review_status
+from ouroboros.skill_review_status import aggregate_skill_review_status, skill_review_gate
 from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -117,7 +117,9 @@ VALID_REVIEW_STATUSES = frozenset(
 
 
 def review_status_allows_execution(status: str) -> bool:
-    return str(status or "") in {_REVIEW_STATUS_PASS, _REVIEW_STATUS_ADVISORY_PASS}
+    return bool(skill_review_gate(status)["executable_review"])
+
+
 GRANTS_FILENAME = "grants.json"
 SELF_AUTHORED_MARKER_FILENAME = ".self_authored.json"
 
@@ -1507,6 +1509,14 @@ def summarize_skills(drive_root: pathlib.Path) -> Dict[str, Any]:
                 "enabled": s.enabled,
                 "review_status": s.review.status,
                 "review_stale": s.review.is_stale_for(s.content_hash),
+                "review_gate": skill_review_gate(
+                    s.review.status,
+                    stale=s.review.is_stale_for(s.content_hash),
+                ),
+                "executable_review": skill_review_gate(
+                    s.review.status,
+                    stale=s.review.is_stale_for(s.content_hash),
+                )["executable_review"],
                 "available_for_execution": (
                     is_runtime_eligible_for_execution(s)
                     and grant_status_for_skill(drive_root, s).get("usable", True)
@@ -1542,6 +1552,7 @@ __all__ = [
     "load_skill",
     "requested_core_setting_keys",
     "review_status_allows_execution",
+    "skill_review_gate",
     "save_enabled",
     "save_review_state",
     "save_skill_grants",

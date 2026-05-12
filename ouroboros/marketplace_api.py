@@ -463,7 +463,7 @@ async def api_marketplace_uninstall(request: Request) -> JSONResponse:
 async def api_marketplace_installed(request: Request) -> JSONResponse:
     """List ClawHub-installed skills + provenance for the UI."""
     drive_root = _request_drive_root(request)
-    from ouroboros.skill_loader import discover_skills, grant_status_for_skill
+    from ouroboros.skill_loader import discover_skills, grant_status_for_skill, skill_review_gate
     from ouroboros.config import get_skills_repo_path
 
     skills = discover_skills(drive_root, repo_path=get_skills_repo_path())
@@ -486,6 +486,14 @@ async def api_marketplace_installed(request: Request) -> JSONResponse:
                 "version": skill.manifest.version,
                 "review_status": skill.review.status,
                 "review_stale": skill.review.is_stale_for(skill.content_hash),
+                "review_gate": skill_review_gate(
+                    skill.review.status,
+                    stale=skill.review.is_stale_for(skill.content_hash),
+                ),
+                "executable_review": skill_review_gate(
+                    skill.review.status,
+                    stale=skill.review.is_stale_for(skill.content_hash),
+                )["executable_review"],
                 "review_findings": list(skill.review.findings or []),
                 "enabled": skill.enabled,
                 "load_error": skill.load_error,
@@ -717,7 +725,7 @@ async def api_ouroboroshub_update(request: Request) -> JSONResponse:
 async def api_ouroboroshub_installed(request: Request) -> JSONResponse:
     drive_root = _request_drive_root(request)
     from ouroboros.config import get_skills_repo_path
-    from ouroboros.skill_loader import discover_skills, grant_status_for_skill
+    from ouroboros.skill_loader import discover_skills, grant_status_for_skill, skill_review_gate
 
     skills = discover_skills(drive_root, repo_path=get_skills_repo_path())
     out = []
@@ -737,6 +745,14 @@ async def api_ouroboroshub_installed(request: Request) -> JSONResponse:
             "version": skill.manifest.version,
             "review_status": skill.review.status,
             "review_stale": skill.review.is_stale_for(skill.content_hash),
+            "review_gate": skill_review_gate(
+                skill.review.status,
+                stale=skill.review.is_stale_for(skill.content_hash),
+            ),
+            "executable_review": skill_review_gate(
+                skill.review.status,
+                stale=skill.review.is_stale_for(skill.content_hash),
+            )["executable_review"],
             "review_findings": list(skill.review.findings or []),
             "enabled": skill.enabled,
             "load_error": skill.load_error,

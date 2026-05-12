@@ -125,7 +125,7 @@ def test_blocking_review_lifecycle_uses_single_progress_card(tmp_path, monkeypat
     assert any("Running tri-model review" in message for message in progress_messages)
     assert any("Installing dependencies" in message for message in progress_messages)
     assert any("Reloading extension" in message for message in progress_messages)
-    assert any("completed" in message and "Review pass: PASS manifest_schema" in message for message in progress_messages)
+    assert any("completed" in message and "Review executable (pass): PASS manifest_schema" in message for message in progress_messages)
     assert not any(kwargs.get("task_id") in {"skill_lifecycle_review", "api_skill_review"} for _args, kwargs in sent)
 
 
@@ -169,6 +169,8 @@ def test_review_lifecycle_installs_deps_after_advisory_pass(tmp_path, monkeypatc
     )
 
     assert payload["status"] == "advisory_pass"
+    assert payload["executable_review"] is True
+    assert payload["review_gate"]["blocking_reason"] == "advisory_findings_allowed_by_advisory_enforcement"
     assert payload["deps_status"] == "installed"
     assert deps_calls == ["alpha"]
 
@@ -186,10 +188,23 @@ def test_review_result_message_prefers_non_pass_findings_and_marks_omissions():
 
     message = _review_result_message(outcome)
 
-    assert message.startswith("Review fail: FAIL extension_namespace_discipline")
+    assert message.startswith("Review blocked: critical findings (fail): FAIL extension_namespace_discipline")
     assert "manifest_schema" not in message
     assert "[omitted " in message
     assert "full findings in Skills page" in message
+
+
+def test_review_result_message_blocks_advisory_status(monkeypatch):
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    outcome = SkillReviewOutcome(
+        skill_name="alpha",
+        status="advisory",
+        findings=[{"item": "bug_hunting", "verdict": "FAIL", "reason": "soft"}],
+    )
+
+    assert _review_result_message(outcome).startswith(
+        "Review blocked: advisory findings under blocking enforcement (advisory):"
+    )
 
 
 def test_self_authored_review_lifecycle_uses_triad(tmp_path, monkeypatch):

@@ -32,6 +32,7 @@ from ouroboros.skill_loader import (
     save_enabled,
     save_review_state,
     save_skill_grants,
+    skill_review_gate,
     skill_state_dir,
 )
 from ouroboros.skill_review import SkillReviewOutcome, review_skill as _default_review_skill
@@ -402,6 +403,8 @@ def _outcome_payload(
         "reviewer_models": outcome.reviewer_models,
         "findings": outcome.findings,
         "error": outcome.error,
+        "review_gate": skill_review_gate(outcome.status),
+        "executable_review": skill_review_gate(outcome.status)["executable_review"],
         "auto_flow": bool(getattr(outcome, "auto_flow", False)),
         "auto_granted_keys": list(getattr(outcome, "auto_granted_keys", []) or []),
         "requested_keys": list(getattr(outcome, "requested_keys", []) or []),
@@ -563,6 +566,8 @@ def _duplicate_payload(skill_name: str, content_hash: str, duplicate: LifecycleJ
         "reviewer_models": [],
         "findings": [],
         "error": f"review already {duplicate.status} for this skill/content hash",
+        "review_gate": skill_review_gate("pending"),
+        "executable_review": False,
         "deps_status": "not_required",
         "deps_error": "",
         "extension_action": None,
@@ -601,7 +606,16 @@ def _review_finding_summary(outcome: Any) -> str:
 def _review_result_message(outcome: Any) -> str:
     status = str(getattr(outcome, "status", "") or "pending")
     summary = _review_finding_summary(outcome)
-    return f"Review {status}{f': {summary}' if summary else ''}"
+    gate = skill_review_gate(status)
+    if gate["executable_review"]:
+        prefix = "Review executable with advisory findings" if status == "advisory_pass" else "Review executable"
+    elif status == "advisory":
+        prefix = "Review blocked: advisory findings under blocking enforcement"
+    elif status == "fail":
+        prefix = "Review blocked: critical findings"
+    else:
+        prefix = "Review pending"
+    return f"{prefix} ({status}){f': {summary}' if summary else ''}"
 
 
 async def run_skill_review_lifecycle(

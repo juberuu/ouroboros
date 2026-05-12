@@ -76,7 +76,7 @@ from ouroboros.skill_loader import (
     grant_status_for_skill,
     load_skill_grants,
     requested_core_setting_keys,
-    review_status_allows_execution,
+    skill_review_gate,
     skill_state_dir,
 )
 from ouroboros.skill_token import SkillToken
@@ -1012,6 +1012,7 @@ def _extension_runtime_state(
             and load_failure.skill_dir == skill_dir_now
         )
 
+    review_gate = skill_review_gate(skill.review.status, stale=review_stale)
     reason = "ready"
     desired_live = True
     if not skill.manifest.is_extension():
@@ -1023,12 +1024,9 @@ def _extension_runtime_state(
     elif not skill.enabled:
         desired_live = False
         reason = "disabled"
-    elif not review_status_allows_execution(skill.review.status):
+    elif not review_gate["executable_review"]:
         desired_live = False
-        reason = f"review_{skill.review.status or 'pending'}"
-    elif review_stale:
-        desired_live = False
-        reason = "review_stale"
+        reason = review_gate["blocking_reason"]
     # v5.1.2 Frame A: light no longer blocks extensions. Skills (script
     # AND extension) are owner-approved capabilities — light gates only
     # repo self-modification and the runtime_mode escalation ratchet.
@@ -1042,6 +1040,8 @@ def _extension_runtime_state(
         "enabled": skill.enabled,
         "review_status": skill.review.status,
         "review_stale": review_stale,
+        "review_gate": review_gate,
+        "executable_review": review_gate["executable_review"],
         "load_error": skill.load_error or (load_failure.error if matched_failure and load_failure else None),
         "desired_live": desired_live,
         "live_loaded": live_loaded,
@@ -1258,11 +1258,16 @@ def load_extension(
     # v5.1.2 Frame A: the previous ``runtime_mode_light`` short-circuit
     # is removed — light no longer blocks extensions. Stale reviews and
     # other gates remain.
-    if runtime_state["reason"] in {"review_stale"} or not review_status_allows_execution(skill.review.status) or skill.review.content_hash != current_hash:
+    gate = runtime_state.get("review_gate") or skill_review_gate(
+        skill.review.status,
+        stale=skill.review.content_hash != current_hash,
+    )
+    if not gate.get("executable_review", False):
         return (
             f"skill {skill.name!r} must carry a fresh executable review "
             f"(status={skill.review.status!r}, "
-            f"stale={skill.review.content_hash != current_hash})"
+            f"stale={skill.review.content_hash != current_hash}, "
+            f"reason={gate.get('blocking_reason')})"
         )
     if runtime_state["reason"] == "disabled":
         return f"skill {skill.name!r} is disabled"

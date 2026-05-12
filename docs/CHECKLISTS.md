@@ -405,7 +405,9 @@ total). Each entry carries `item`, `verdict` (`PASS`/`FAIL`), `severity`
   are different axes despite the shared word. Mode controls how non-critical
   findings are treated; status is the computed verdict shown in the Skills UI.
   Review state stores the findings and computes status at load time from the
-  current enforcement mode.
+  current enforcement mode. Agents must use `review_gate.executable_review`
+  / `executable_review`, not the raw status string, when deciding whether
+  the skill is actually runnable.
 - Item 7 is conditionally critical: FAIL only when `type: extension`.
 - Item 8 (`widget_module_safety`) is critical for any `type: extension`
   if the reviewer returns FAIL. Reviewers MUST mark it PASS with reason

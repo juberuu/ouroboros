@@ -150,8 +150,10 @@ operations in its own agent loop.
 After the final payload edit, call `review_skill(skill="<name>")`.
 Self-authored skills still use the standard tri-model skill review; no
 deterministic fast path, key grant, or enablement is automatic. I must
-not say a created skill is ready until `review_skill` returns success and
-the skill is enabled/grant-ready. If I try to finish early, the loop will inject
+not say a created skill is ready until `review_skill` returns
+`executable_review=true` (or `review_gate.executable_review=true`) and
+the skill is enabled/grant-ready. `status=advisory` is blocked under
+blocking enforcement even when all critical findings passed. If I try to finish early, the loop will inject
 `SKILL_NOT_FINALIZED`; I then call `review_skill` instead of arguing with
 the guard.
 

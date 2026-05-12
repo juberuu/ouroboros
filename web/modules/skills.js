@@ -65,8 +65,11 @@ function skillsPageTemplate() {
 }
 
 
-function statusBadge(status) {
-    const tone = ['pass', 'advisory_pass'].includes(status) ? 'ok'
+function statusBadge(status, gate = null) {
+    const gateExecutable = gate && typeof gate.executable_review === 'boolean'
+        ? gate.executable_review
+        : ['pass', 'advisory_pass'].includes(status);
+    const tone = gateExecutable ? 'ok'
         : status === 'fail' ? 'danger'
         : status === 'advisory' ? 'warn'
         : 'muted';
@@ -81,6 +84,10 @@ function statusBadge(status) {
 }
 
 function reviewReady(skill) {
+    if (skill?.review_gate && typeof skill.review_gate.executable_review === 'boolean') {
+        return skill.review_gate.executable_review;
+    }
+    if (typeof skill?.executable_review === 'boolean') return skill.executable_review;
     return ['pass', 'advisory_pass'].includes(skill.review_status) && !skill.review_stale;
 }
 
@@ -362,6 +369,9 @@ function toggleLockReason(skill) {
     // The server enforces the same gate in ``api_skill_toggle``; this UI guard
     // keeps stale/review/repair work as explicit actions instead of hiding them
     // behind the toggle.
+    if (skill?.review_gate && skill.review_gate.executable_review === false) {
+        return skill.review_gate.summary || skill.review_gate.blocking_reason || 'review has not produced an executable verdict yet';
+    }
     if (skill.review_status === 'fail') return 'review failed — repair the skill first';
     if (skill.review_stale) return 'review is stale — re-review the skill first';
     if (skill.review_status === 'pending') return 'review is still pending';
@@ -582,7 +592,7 @@ function renderSkillCard(skill, reviewingSkills = new Set(), repairingSkills = n
         </div>
         <div class="skills-detail-row">
             <span class="skills-detail-label">Review</span>
-            ${statusBadge(skill.review_status)}${skill.review_stale ? ' <span class="skills-badge skills-badge-warn">stale</span>' : ''}
+            ${statusBadge(skill.review_status, skill.review_gate)}${skill.review_stale ? ' <span class="skills-badge skills-badge-warn">stale</span>' : ''}
         </div>
         <div class="skills-detail-row">
             <span class="skills-detail-label">Permissions</span>

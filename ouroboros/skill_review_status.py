@@ -60,3 +60,55 @@ def aggregate_skill_review_status(
                 enforcement = "blocking"
         return "advisory_pass" if enforcement == "advisory" else "advisory"
     return "pass"
+
+
+def skill_review_gate(status: str, *, stale: bool = False, enforcement: Optional[str] = None) -> Dict[str, Any]:
+    """Structured, agent-facing explanation of whether a review is executable."""
+    raw_status = str(status or "").strip().lower()
+    if enforcement is None:
+        try:
+            from ouroboros.config import get_review_enforcement
+            enforcement = get_review_enforcement()
+        except Exception:
+            enforcement = "blocking"
+    if raw_status == "pending":
+        executable = False
+        reason = "review_pending"
+        summary = "Review is pending or did not produce an executable verdict."
+    elif stale:
+        executable = False
+        reason = "review_stale"
+        summary = "Review is stale for the current skill content; re-run review_skill."
+    elif raw_status == "pass":
+        executable = True
+        reason = "ready"
+        summary = "Review is executable: status pass."
+    elif raw_status == "advisory_pass":
+        if str(enforcement or "").lower() == "advisory":
+            executable = True
+            reason = "advisory_findings_allowed_by_advisory_enforcement"
+            summary = "Review is executable: advisory findings are allowed by advisory enforcement."
+        else:
+            executable = False
+            reason = "review_requires_revalidation_under_blocking_enforcement"
+            summary = "Review was executable under advisory enforcement, but blocking enforcement now requires re-review or fixes."
+    elif raw_status == "advisory":
+        executable = False
+        reason = "advisory_findings_under_blocking_enforcement"
+        summary = "Review completed but is blocked: advisory findings are not executable under blocking enforcement."
+    elif raw_status == "fail":
+        executable = False
+        reason = "critical_review_fail"
+        summary = "Review is blocked: critical findings must be fixed."
+    else:
+        executable = False
+        reason = "review_missing_or_unknown"
+        summary = "Review status is missing or unknown; run review_skill."
+    return {
+        "status": raw_status or "pending",
+        "stale": bool(stale),
+        "executable_review": bool(executable),
+        "blocking_reason": reason,
+        "review_enforcement": str(enforcement or "blocking"),
+        "summary": summary,
+    }

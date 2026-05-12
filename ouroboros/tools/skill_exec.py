@@ -54,6 +54,7 @@ from ouroboros.skill_loader import (
     review_status_allows_execution,
     save_enabled,
     summarize_skills,
+    skill_review_gate,
 )
 from ouroboros.skill_review import review_skill as _review_skill_impl
 from ouroboros.tools.registry import ToolContext, ToolEntry
@@ -615,7 +616,8 @@ def _skill_deps_exec_block(drive_root: pathlib.Path, loaded: Any) -> str:
 
 
 def _non_executable_review_message(prefix: str, skill_name: str, status: str, *, stale: bool = False) -> str:
-    if status == "advisory":
+    gate = skill_review_gate(status, stale=stale)
+    if gate["blocking_reason"] == "advisory_findings_under_blocking_enforcement":
         return (
             f"⚠️ {prefix}: skill {skill_name!r} review status is 'advisory' "
             "(non-critical findings under blocking enforcement), so it is not "
@@ -627,8 +629,7 @@ def _non_executable_review_message(prefix: str, skill_name: str, status: str, *,
     stale_note = f", stale={stale}" if stale else ""
     return (
         f"⚠️ {prefix}: skill {skill_name!r} review status is {status!r}{stale_note}, "
-        "not executable. A fresh executable review is required; run review_skill "
-        "and resolve findings before executing."
+        f"not executable ({gate['blocking_reason']}). A fresh executable review is required. {gate['summary']}"
     )
 
 
@@ -717,14 +718,16 @@ def _handle_skill_exec(
             f"({exc}). Fix the skill package and re-run review_skill before "
             "executing."
         )
-    if loaded.review.is_stale_for(current_hash):
+    stale = loaded.review.is_stale_for(current_hash)
+    gate = skill_review_gate(loaded.review.status, stale=stale)
+    if stale:
         return (
             f"⚠️ SKILL_EXEC_BLOCKED: skill {skill_name!r} was edited since "
             f"the last review. Re-run review_skill(skill={skill_name!r}) "
             "before executing."
         )
-    if not review_status_allows_execution(loaded.review.status):
-        return _non_executable_review_message("SKILL_EXEC_BLOCKED", skill_name, loaded.review.status)
+    if not gate["executable_review"]:
+        return _non_executable_review_message("SKILL_EXEC_BLOCKED", skill_name, loaded.review.status, stale=stale)
     deps_block = _skill_deps_exec_block(drive_root, loaded)
     if deps_block:
         return deps_block
@@ -992,8 +995,9 @@ def _handle_toggle_skill(
             )
         if coerced:
             stale = loaded.review.is_stale_for(loaded.content_hash)
+            gate = skill_review_gate(loaded.review.status, stale=stale)
             grants = grant_status_for_skill(drive_root, loaded)
-            if not review_status_allows_execution(loaded.review.status) or stale:
+            if not gate["executable_review"]:
                 return _non_executable_review_message(
                     "SKILL_TOGGLE_ERROR",
                     skill_name,
@@ -1047,7 +1051,9 @@ def _handle_toggle_skill(
             if loaded.name in extension_loader.snapshot()["extensions"]:
                 extension_loader.unload_extension(loaded.name)
                 extension_action = "extension_unloaded"
-            return json.dumps({"skill": loaded.name, "enabled": False, "review_status": loaded.review.status, "extension_action": extension_action, "extension_reason": extension_reason, "message": f"Skill {loaded.name!r} was not persisted as disabled because its sanitized identity collides with another skill directory. Rename one of the directories first."}, ensure_ascii=False, indent=2)
+            stale = loaded.review.is_stale_for(loaded.content_hash)
+            gate = skill_review_gate(loaded.review.status, stale=stale)
+            return json.dumps({"skill": loaded.name, "enabled": False, "review_status": loaded.review.status, "review_gate": gate, "executable_review": gate["executable_review"], "extension_action": extension_action, "extension_reason": extension_reason, "message": f"Skill {loaded.name!r} was not persisted as disabled because its sanitized identity collides with another skill directory. Rename one of the directories first."}, ensure_ascii=False, indent=2)
         save_enabled(drive_root, loaded.name, coerced)
         extension_action = None
         extension_reason = "not_extension"
@@ -1057,7 +1063,9 @@ def _handle_toggle_skill(
             live_state = extension_loader.reconcile_extension(loaded.name, drive_root, _load_settings, retry_load_error=True)
             extension_action = live_state.get("action")
             extension_reason = str(live_state.get("reason") or "")
-        return json.dumps({"skill": loaded.name, "enabled": coerced, "review_status": loaded.review.status, "extension_action": extension_action, "extension_reason": extension_reason, "message": f"Skill {loaded.name!r} enabled={coerced}"}, ensure_ascii=False, indent=2)
+        stale = loaded.review.is_stale_for(loaded.content_hash)
+        gate = skill_review_gate(loaded.review.status, stale=stale)
+        return json.dumps({"skill": loaded.name, "enabled": coerced, "review_status": loaded.review.status, "review_gate": gate, "executable_review": gate["executable_review"], "extension_action": extension_action, "extension_reason": extension_reason, "message": f"Skill {loaded.name!r} enabled={coerced}"}, ensure_ascii=False, indent=2)
 
 
 

@@ -755,6 +755,7 @@ def test_toggle_skill_allows_advisory_pass_review(tmp_path, monkeypatch):
     skill_dir = _build_skill(skills_root, "alpha")
     ctx = _make_ctx(tmp_path)
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     save_review_state(
         ctx.drive_root,
         "alpha",
@@ -765,6 +766,44 @@ def test_toggle_skill_allows_advisory_pass_review(tmp_path, monkeypatch):
 
     assert enabled_resp["enabled"] is True
     assert enabled_resp["review_status"] == "advisory_pass"
+    assert enabled_resp["executable_review"] is True
+
+
+def test_toggle_skill_blocks_advisory_pass_under_blocking(tmp_path, monkeypatch):
+    skills_root = tmp_path / "skills"
+    skill_dir = _build_skill(skills_root, "alpha")
+    ctx = _make_ctx(tmp_path)
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    save_review_state(
+        ctx.drive_root,
+        "alpha",
+        SkillReviewState(status="advisory_pass", content_hash=compute_content_hash(skill_dir)),
+    )
+
+    resp = skill_exec_mod._handle_toggle_skill(ctx, skill="alpha", enabled=True)
+
+    assert "SKILL_TOGGLE_ERROR" in resp
+    assert "review_requires_revalidation_under_blocking_enforcement" in resp
+
+
+def test_skill_exec_blocks_advisory_pass_under_blocking(tmp_path, monkeypatch):
+    skills_root = tmp_path / "skills"
+    skill_dir = _build_skill(skills_root, "alpha")
+    ctx = _make_ctx(tmp_path)
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    save_enabled(ctx.drive_root, "alpha", True)
+    save_review_state(
+        ctx.drive_root,
+        "alpha",
+        SkillReviewState(status="advisory_pass", content_hash=compute_content_hash(skill_dir)),
+    )
+
+    resp = skill_exec_mod._handle_skill_exec(ctx, skill="alpha", script="hello.py")
+
+    assert "SKILL_EXEC_BLOCKED" in resp
+    assert "review_requires_revalidation_under_blocking_enforcement" in resp
 
 
 def test_toggle_skill_blocked_in_heal_context(tmp_path, monkeypatch):

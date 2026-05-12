@@ -25,6 +25,7 @@ from ouroboros.skill_loader import (
     load_skill,
     save_enabled,
     save_review_state,
+    skill_review_gate,
     skill_state_dir,
     summarize_skills,
 )
@@ -824,6 +825,8 @@ def test_summarize_skills_reflects_runtime_mode_light(tmp_path, monkeypatch):
     assert light["available"] == 1
     assert light["runtime_blocked"] == 0
     assert light["skills"][0]["available_for_execution"] is True
+    assert light["skills"][0]["review_gate"]["executable_review"] is True
+    assert light["skills"][0]["executable_review"] is True
     assert light["skills"][0]["runtime_blocked_by_mode"] is False
     assert light["skills"][0]["static_ready"] is True
 
@@ -833,6 +836,63 @@ def test_valid_review_statuses_exported():
     assert "fail" in VALID_REVIEW_STATUSES
     assert "pending" in VALID_REVIEW_STATUSES
     assert "pending_phase4" in VALID_REVIEW_STATUSES
+
+
+def test_skill_review_gate_blocks_advisory_under_blocking(monkeypatch):
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+
+    gate = skill_review_gate("advisory", stale=False)
+
+    assert gate["executable_review"] is False
+    assert gate["blocking_reason"] == "advisory_findings_under_blocking_enforcement"
+    assert gate["review_enforcement"] == "blocking"
+
+
+def test_skill_review_gate_allows_advisory_pass(monkeypatch):
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
+
+    gate = skill_review_gate("advisory_pass", stale=False)
+
+    assert gate["executable_review"] is True
+
+
+def test_skill_review_gate_revalidates_advisory_pass_under_blocking(monkeypatch):
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+
+    gate = skill_review_gate("advisory_pass", stale=False)
+
+    assert gate["executable_review"] is False
+    assert gate["blocking_reason"] == "review_requires_revalidation_under_blocking_enforcement"
+
+
+def test_advisory_pass_not_available_under_blocking(tmp_path, monkeypatch):
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+    repo_root = tmp_path / "skills"
+    skill_dir = _write_skill(
+        repo_root,
+        "alpha",
+        manifest=_valid_script_manifest("alpha"),
+        scripts={"fetch.py": "print('ok')\n"},
+    )
+    loaded = find_skill(drive_root, "alpha", repo_path=str(repo_root))
+    assert loaded is not None
+    save_enabled(drive_root, "alpha", True)
+    save_review_state(
+        drive_root,
+        "alpha",
+        SkillReviewState(status="advisory_pass", content_hash=compute_content_hash(skill_dir)),
+    )
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(repo_root))
+
+    summary = summarize_skills(drive_root)
+
+    assert list_available_for_execution(drive_root, repo_path=str(repo_root)) == []
+    assert summary["available"] == 0
+    assert summary["skills"][0]["available_for_execution"] is False
+    assert summary["skills"][0]["static_ready"] is False
+    assert summary["skills"][0]["review_gate"]["blocking_reason"] == "review_requires_revalidation_under_blocking_enforcement"
 
 
 def test_skill_grants_are_content_and_request_bound(tmp_path):

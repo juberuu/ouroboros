@@ -43,6 +43,7 @@ from ouroboros.skill_loader import (
     find_skill,
     grant_status_for_skill,
     review_status_allows_execution,
+    skill_review_gate,
 )
 
 log = logging.getLogger(__name__)
@@ -202,6 +203,14 @@ def _build_extensions_index(drive_root, repo_path):
             "enabled": s.enabled,
             "review_status": s.review.status,
             "review_stale": s.review.is_stale_for(s.content_hash),
+            "review_gate": skill_review_gate(
+                s.review.status,
+                stale=s.review.is_stale_for(s.content_hash),
+            ),
+            "executable_review": skill_review_gate(
+                s.review.status,
+                stale=s.review.is_stale_for(s.content_hash),
+            )["executable_review"],
             "permissions": list(s.manifest.permissions or []),
             "load_error": runtime_states.get(s.name, {}).get("load_error", s.load_error),
             "desired_live": runtime_states.get(s.name, {}).get("desired_live", False),
@@ -294,6 +303,14 @@ async def api_extension_manifest(request: Request) -> JSONResponse:
             "enabled": loaded.enabled,
             "review_status": loaded.review.status,
             "review_stale": loaded.review.is_stale_for(loaded.content_hash),
+            "review_gate": skill_review_gate(
+                loaded.review.status,
+                stale=loaded.review.is_stale_for(loaded.content_hash),
+            ),
+            "executable_review": skill_review_gate(
+                loaded.review.status,
+                stale=loaded.review.is_stale_for(loaded.content_hash),
+            )["executable_review"],
             "content_hash": loaded.content_hash,
             "load_error": load_error,
         }
@@ -535,12 +552,15 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
         if enabled:
             stale = loaded.review.is_stale_for(loaded.content_hash)
             grants = grant_status_for_skill(drive_root, loaded)
-            if not review_status_allows_execution(loaded.review.status) or stale:
+            gate = skill_review_gate(loaded.review.status, stale=stale)
+            if not gate["executable_review"]:
                 return {
                     "error": "cannot enable until review status is a fresh executable review",
                     "status_code": 409,
                     "review_status": loaded.review.status,
                     "review_stale": stale,
+                    "review_gate": gate,
+                    "executable_review": gate["executable_review"],
                     "grants": grants,
                 }
             if not grants.get("all_granted", True):
@@ -549,6 +569,8 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
                     "status_code": 409,
                     "review_status": loaded.review.status,
                     "review_stale": stale,
+                    "review_gate": gate,
+                    "executable_review": gate["executable_review"],
                     "grants": grants,
                 }
             # v5.7.0: mirror the dependency-state enable guard from the
@@ -574,6 +596,8 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
                             "deps_error": deps_state.get("error", ""),
                             "review_status": loaded.review.status,
                             "review_stale": stale,
+                            "review_gate": gate,
+                            "executable_review": gate["executable_review"],
                             "grants": grants,
                         }
                     if actual_hash != expected_hash:
@@ -583,6 +607,8 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
                             "deps_status": "stale",
                             "review_status": loaded.review.status,
                             "review_stale": stale,
+                            "review_gate": gate,
+                            "executable_review": gate["executable_review"],
                             "grants": grants,
                         }
             except Exception:
@@ -620,6 +646,14 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
             "source": loaded.source,
             "review_status": loaded.review.status,
             "review_stale": loaded.review.is_stale_for(loaded.content_hash),
+            "review_gate": skill_review_gate(
+                loaded.review.status,
+                stale=loaded.review.is_stale_for(loaded.content_hash),
+            ),
+            "executable_review": skill_review_gate(
+                loaded.review.status,
+                stale=loaded.review.is_stale_for(loaded.content_hash),
+            )["executable_review"],
             "grants": grant_status_for_skill(drive_root, loaded),
             "action": action,
             "live_reason": live_reason,
@@ -659,6 +693,8 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
             "enabled": enabled,
             "review_status": queued.get("review_status"),
             "review_stale": queued.get("review_stale"),
+            "review_gate": queued.get("review_gate"),
+            "executable_review": queued.get("executable_review"),
             "grants": queued.get("grants", {}),
             "extension_action": queued.get("action"),
             "extension_reason": queued.get("live_reason"),

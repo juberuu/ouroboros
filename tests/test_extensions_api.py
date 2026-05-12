@@ -211,6 +211,8 @@ def test_api_extensions_index_lists_extension_skills(tmp_path, monkeypatch):
         assert "live" in data
         ext_meta = next(s for s in data["skills"] if s["name"] == "ext_a")
         assert ext_meta["live_reason"] == "disabled"
+        assert ext_meta["executable_review"] is False
+        assert ext_meta["review_gate"]["blocking_reason"] == "review_pending"
     finally:
         _stop_patches(patches)
 
@@ -227,6 +229,8 @@ def test_api_extension_manifest_returns_metadata(tmp_path, monkeypatch):
         data = resp.json()
         assert data["name"] == "ext_b"
         assert data["manifest"]["type"] == "extension"
+        assert data["executable_review"] is False
+        assert data["review_gate"]["blocking_reason"] == "review_pending"
     finally:
         _stop_patches(patches)
 
@@ -414,6 +418,35 @@ def test_api_skill_toggle_allows_advisory_pass_review(tmp_path, monkeypatch):
         assert data["review_status"] == "advisory_pass"
         assert data["extension_action"] == "extension_loaded"
         assert "ext_advisory" in extension_loader.snapshot()["extensions"]
+    finally:
+        _stop_patches(patches)
+
+
+def test_api_skill_toggle_blocks_advisory_pass_under_blocking(tmp_path, monkeypatch):
+    from ouroboros.skill_loader import SkillReviewState, save_review_state, compute_content_hash
+
+    skills_root = tmp_path / "skills"
+    plugin = (
+        "def register(api):\n"
+        "    api.register_tool('t', lambda ctx: 'ok', description='', schema={})\n"
+    )
+    skill_dir = _write_ext(skills_root, "ext_blocked", permissions=["tool"], plugin=plugin)
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    client, drive_root, patches = _make_client(tmp_path, monkeypatch)
+    try:
+        content_hash = compute_content_hash(skill_dir, manifest_entry="plugin.py")
+        save_review_state(
+            drive_root,
+            "ext_blocked",
+            SkillReviewState(status="advisory_pass", content_hash=content_hash),
+        )
+        resp = client.post("/api/skills/ext_blocked/toggle", json={"enabled": True})
+
+        assert resp.status_code == 409, resp.text
+        data = resp.json()
+        assert data["executable_review"] is False
+        assert data["review_gate"]["blocking_reason"] == "review_requires_revalidation_under_blocking_enforcement"
     finally:
         _stop_patches(patches)
 
