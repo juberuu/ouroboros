@@ -1,6 +1,7 @@
 import { refreshModelCatalog } from './settings_catalog.js';
 import { bindEffortSegments, syncEffortSegments } from './settings_controls.js';
 import { bindLocalModelControls } from './settings_local_model.js';
+import { applyMcpSettings, collectMcpSettings, initMcpSettings } from './mcp_settings.js';
 import { SECRET_KEYS, bindSecretInputs, bindSettingsTabs, renderSettingsPage } from './settings_ui.js';
 import { showToast } from './toast.js';
 import { escapeHtmlAttr as escapeHtml, formatDualVersion } from './utils.js';
@@ -300,6 +301,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
     let settingsLoaded = false;
     let settingsBaseline = '';
     let settingsDirty = false;
+    initMcpSettings({ onChange: updateSettingsDirtyState });
 
     function anthropicKeyConfigured() {
         const input = byId('s-anthropic');
@@ -500,6 +502,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         applyCheckboxValue('s-local-code', s.USE_LOCAL_CODE);
         applyCheckboxValue('s-local-light', s.USE_LOCAL_LIGHT);
         applyCheckboxValue('s-local-fallback', s.USE_LOCAL_FALLBACK);
+        applyMcpSettings(s);
         resetSecretClearFlags(page);
         syncEffortSegments(page);
         syncRuntimeModeBridgeState();
@@ -642,6 +645,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             OPENAI_BASE_URL: byId('s-openai-base-url').value.trim(),
             OPENAI_COMPATIBLE_BASE_URL: byId('s-openai-compatible-base-url').value.trim(),
             CLOUDRU_FOUNDATION_MODELS_BASE_URL: byId('s-cloudru-base-url').value.trim(),
+            ...collectMcpSettings(),
         };
 
         page.querySelectorAll('[data-secret-setting]').forEach((input) => {

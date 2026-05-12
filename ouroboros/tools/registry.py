@@ -594,7 +594,26 @@ class ToolRegistry:
             extension_schemas = []
 
         if not core_only:
-            return built_in + extension_schemas
+            try:
+                from ouroboros.mcp_client import (
+                    ensure_configured_from_settings as _mcp_ensure_configured,
+                    get_manager as _mcp_get_manager,
+                )
+                _mcp_ensure_configured(refresh=True)
+                mcp_schemas = [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": tool["name"],
+                            "description": tool.get("description", ""),
+                            "parameters": tool.get("schema", {"type": "object", "properties": {}}),
+                        },
+                    }
+                    for tool in _mcp_get_manager().list_tools_for_registry()
+                ]
+            except Exception:
+                mcp_schemas = []
+            return built_in + extension_schemas + mcp_schemas
         # Core tools + meta-tools for discovering/enabling extended tools
         result = []
         for e in self._entries.values():
@@ -602,6 +621,8 @@ class ToolRegistry:
                 result.extend(self._schemas_for_entry(e))
         # Keep live extension tools enumerable in core-mode too so the
         # loop can discover them through the standard registry surface.
+        # MCP tools are intentionally non-core: they point at external
+        # owner-configured services and require explicit enable_tools.
         return result + extension_schemas
 
     def get_schema_by_name(self, name: str) -> Optional[Dict[str, Any]]:
@@ -631,6 +652,27 @@ class ToolRegistry:
                         "parameters": ext_tool.get("schema", {"type": "object", "properties": {}}),
                     },
                 }
+        try:
+            from ouroboros.mcp_client import (
+                ensure_configured_from_settings as _mcp_ensure_configured,
+                get_manager as _mcp_get_manager,
+                is_mcp_tool_name as _mcp_is_name,
+            )
+            _mcp_ensure_configured(refresh=False)
+        except Exception:
+            _mcp_get_manager = None
+            _mcp_is_name = None
+        if _mcp_get_manager and _mcp_is_name and _mcp_is_name(requested):
+            mcp_tool = _mcp_get_manager().get_tool(requested)
+            if mcp_tool:
+                return {
+                    "type": "function",
+                    "function": {
+                        "name": mcp_tool["name"],
+                        "description": mcp_tool.get("description", ""),
+                        "parameters": mcp_tool.get("schema", {"type": "object", "properties": {}}),
+                    },
+                }
         return None
 
     def get_timeout(self, name: str) -> int:
@@ -657,6 +699,21 @@ class ToolRegistry:
                 # does not return first while the inner coroutine is still
                 # being cancelled.
                 return int(ext_tool.get("timeout_sec") or 60) + 3
+        try:
+            from ouroboros.mcp_client import (
+                ensure_configured_from_settings as _mcp_ensure_configured,
+                get_manager as _mcp_get_manager,
+                is_mcp_tool_name as _mcp_is_name,
+            )
+            _mcp_ensure_configured(refresh=False)
+        except Exception:
+            _mcp_get_manager = None
+            _mcp_is_name = None
+        if _mcp_get_manager and _mcp_is_name and _mcp_is_name(name):
+            try:
+                return int(_mcp_get_manager().tool_timeout_sec()) + 3
+            except Exception:
+                return 63
         return 360
 
     def _dispatch_extension_tool(self, name: str, ext_tool: Dict[str, Any], args: Optional[Dict[str, Any]]) -> str:
@@ -758,6 +815,24 @@ class ToolRegistry:
         if _ext_safety_msg:
             return f"{_ext_safety_msg}\n\n---\n{result_str}"
         return result_str
+
+    def _dispatch_mcp_tool(self, name: str, args: Dict[str, Any]) -> str:
+        """Run a provider-safe MCP tool after the normal safety supervisor."""
+        from ouroboros.safety import check_safety as _mcp_check_safety
+        is_safe, safety_msg = _mcp_check_safety(
+            name,
+            args,
+            messages=getattr(self._ctx, "messages", None),
+            ctx=self._ctx,
+        )
+        if not is_safe:
+            return safety_msg
+        try:
+            from ouroboros.mcp_client import call_mcp_tool as _mcp_call
+            result = _mcp_call(name, args or {})
+        except Exception as exc:
+            return f"⚠️ TOOL_ERROR ({name}): {exc}"
+        return f"{safety_msg}\n\n---\n{result}" if safety_msg else result
 
     def _run_shell_safety_check(self, args: Dict[str, Any], runtime_mode: str) -> Optional[str]:
         """Pre-execution safety filter for ``run_shell``.
@@ -956,6 +1031,16 @@ class ToolRegistry:
             except Exception:
                 ext_tool = None
 
+        try:
+            from ouroboros.mcp_client import (
+                ensure_configured_from_settings as _mcp_ensure_configured,
+                is_mcp_tool_name as _mcp_is_name,
+            )
+            _mcp_ensure_configured(refresh=False)
+        except Exception:
+            _mcp_is_name = None
+        is_mcp = bool(_mcp_is_name and _mcp_is_name(name))
+
         # --- Hardcoded Sandbox Protections ---
 
         # Runtime-mode gating:
@@ -1016,14 +1101,16 @@ class ToolRegistry:
                 return "⚠️ HEAL_MODE_BLOCKED: Repair may only review the selected skill."
             if name == "skill_preflight" and str(args.get("skill", "") or "").strip() != heal_skill:
                 return "⚠️ HEAL_MODE_BLOCKED: Repair may only preflight the selected skill."
-            if ext_tool or name not in _HEAL_MODE_ALLOWED_TOOLS:
+            if ext_tool or is_mcp or name not in _HEAL_MODE_ALLOWED_TOOLS:
                 return (
                     "⚠️ HEAL_MODE_BLOCKED: Repair tasks may inspect/edit skill "
                     "payloads and run review_skill only. Shell, browser automation, "
-                    "repo mutation, skill execution, extension tools, delegation, "
-                    "and enable/disable flows are unavailable. Use the Skills UI "
-                    "after a fresh executable review."
+                    "repo mutation, skill execution, extension tools, MCP tools, "
+                    "delegation, and enable/disable flows are unavailable. Use "
+                    "the Skills UI after a fresh executable review."
                 )
+        if is_mcp:
+            return self._dispatch_mcp_tool(name, args)
         if entry is None:
             if ext_tool and callable(ext_tool.get("handler")):
                 return self._dispatch_extension_tool(name, ext_tool, args)

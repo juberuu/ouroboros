@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ouroboros"
-version = "5.19.0rc3"
+version = "5.20.0"
 description = "Self-creating AI agent with constitution, background consciousness, and persistent identity"
 readme = "README.md"
 license = {text = "MIT"}
@@ -37,6 +37,7 @@ dependencies = [
     "websockets",
     "pytest>=7.0",
     "claude-agent-sdk>=0.1.60",
+    "mcp>=1.6,<2.0",
     "PyYAML>=6.0",
     # Declared explicitly so ``ouroboros/contracts/api_v1.py`` can rely on
     # ``typing_extensions.NotRequired`` on Python 3.10 (``typing.NotRequired``

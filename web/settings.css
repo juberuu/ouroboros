@@ -238,6 +238,82 @@
     background-position: right 12px center;
 }
 
+.mcp-servers-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.mcp-server-card {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 14px;
+    border-radius: 16px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.mcp-server-card-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.mcp-server-card-title {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.mcp-server-card-actions,
+.mcp-server-enabled {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.mcp-server-status {
+    width: fit-content;
+    border-radius: 999px;
+    padding: 3px 8px;
+    font-size: 12px;
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.mcp-server-status-ok { color: var(--green); }
+.mcp-server-status-warn { color: var(--amber); }
+.mcp-server-status-danger { color: var(--red); }
+.mcp-server-status-muted { color: var(--text-muted); }
+
+.mcp-tools-disclosure {
+    border-radius: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    padding: 10px 12px;
+}
+
+.mcp-tools-disclosure summary {
+    cursor: pointer;
+    color: var(--text-secondary);
+}
+
+.mcp-tools-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 10px 0 0;
+    padding-left: 18px;
+}
+
+.mcp-tool-desc {
+    display: block;
+    color: var(--text-muted);
+    font-size: 12px;
+    line-height: 1.45;
+}
+
 .settings-inline-note {
     margin-top: 2px;
     color: var(--text-muted);

@@ -517,6 +517,43 @@ Rules for widget changes:
 
 ---
 
+## MCP Client Integration
+
+The base-runtime MCP surface is a **client only** for trusted HTTP/SSE MCP
+servers. It borrows external tools and exposes them through `ToolRegistry`;
+it does not expose Ouroboros as an MCP server.
+
+Rules for MCP changes:
+
+- Keep MCP disabled by default. `MCP_ENABLED`, `MCP_TOOL_TIMEOUT_SEC`, and
+  `MCP_SERVERS` are the only base settings. `MCP_SERVERS` stays in
+  `settings.json` as a list of dicts; do not serialize it into env vars.
+- Support only `streamable_http` and `sse` in the base runtime. Stdio MCP,
+  resources, and prompts are separate architectural changes.
+- All MCP tool names must be produced by
+  `ouroboros.mcp_client.make_tool_name()` and must remain provider-safe
+  (`mcp_<server>__<tool>`, max 64 chars).
+- All URL and header validation lives in `ouroboros/mcp_client.py`.
+  Do not duplicate scheme, metadata-host, link-local, auth-header, or
+  control-character checks in UI/API modules.
+- `auth_token` values flow only through `settings.json` and in-process
+  manager state. `/api/settings` masks them, `/api/settings` POST rehydrates
+  masked values from old settings, and `/api/mcp/status` exposes only
+  `auth_configured`.
+- MCP descriptions and tool results are server-supplied untrusted data.
+  Descriptions must be wrapped before reaching the LLM, UI strings must be
+  escaped, and MCP text must never be treated as policy.
+- MCP tools are non-core. They must require `list_available_tools` /
+  `enable_tools`, be blocked in skill-repair/heal contexts, and run through
+  `safety.check_safety` before dispatch.
+- When changing MCP behavior, update the focused MCP tests:
+  `tests/test_mcp_client.py`, `tests/test_mcp_api.py`,
+  `tests/test_mcp_registry_integration.py`,
+  `tests/test_mcp_settings_roundtrip.py`, and
+  `tests/test_mcp_ui_static.py`.
+
+---
+
 ## Build & CI
 
 ### Pytest marker lanes

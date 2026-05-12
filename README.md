@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 5.19.0-rc.3](https://img.shields.io/badge/version-5.19.0--rc.3-green.svg)](VERSION)
+[![Version 5.20.0](https://img.shields.io/badge/version-5.20.0-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -57,6 +57,7 @@ Most AI agents execute tasks. Ouroboros **creates itself.**
 - **Embedded Version Control** — Contains its own local Git repo. Version controls its own evolution. Optional GitHub sync for remote backup.
 - **Local Model Support** — Run with a local GGUF model via llama-cpp-python (Metal acceleration on Apple Silicon, CPU on Linux/Windows).
 - **Transport Skills** — Optional bridges such as A2A and Telegram live as reviewed OuroborosHub skills instead of base-runtime code.
+- **MCP Client** — Optional base-runtime Model Context Protocol client for trusted HTTP/SSE tool servers. MCP tools are disabled by default, hot-reloadable from Settings → Advanced, exposed as non-core `mcp_<server>__<tool>` tools, and still pass through the normal per-call safety check.
 
 ---
 
@@ -418,12 +419,12 @@ not paraphrase it.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 5.20.0 | 2026-05-13 | **feat(mcp): add HTTP/SSE MCP client integration.** Adds a disabled-by-default base-runtime MCP client for trusted external tool servers, with Settings → Advanced configuration, masked token round-trips, hot-reloadable server refresh, provider-safe `mcp_<server>__<tool>` names, non-core tool opt-in, heal-mode blocking, per-call safety checks, URL/header validation, untrusted-description wrapping, and focused MCP API/registry/UI tests. Based on PR #51 by @kazzand, with MCP-only porting and hardening on the current architecture. |
 | 5.19.0-rc.3 | 2026-05-13 | **rc(tokens): raise default LLM output budgets.** Increases main-loop/chat defaults to 64K, VLM defaults to 32K, and summary/reflection/consolidation budgets to their new documented floors so long review/context artifacts are less likely to truncate task planning. |
 | 5.19.0-rc.2 | 2026-05-12 | **rc(build): harden macOS DMG creation after release CI.** Retries transient `hdiutil create` resource-busy failures with cleanup before regenerating the DMG, preserving the v5.19.0-rc.1 skill-review gate overhaul. |
 | 5.19.0-rc.1 | 2026-05-12 | **rc(skills): align skill review gates and collapse review evidence.** Renames skill verdicts to `clean`/`warnings`/`blockers`, separates verdicts from enforcement, unifies skill readiness and owner-message injection, syncs reviewed grants across content hashes, and collapses long skill-review system messages in Chat. |
 | 5.18.0 | 2026-05-12 | **feat(skills): overhaul skill-review feedback visibility and anti-thrashing.** Returns full parsed and degraded reviewer evidence to agents via `review_skill` and `chat.jsonl`, shares retry coaching across repo, scope, and skill review, persists accepted rebuttals as protected owner state, hardens review-evidence fencing, and documents skill-review critical thresholds. |
-| 5.17.0 | 2026-05-12 | **release(skills): stabilize v5 skill review and runtime state.** Consolidates the release-candidate series for shared triad parsing, executable review gates, current provider smoke models, JSON state IO, and restart-marker test alignment. |
-Older releases are preserved in Git tags and GitHub releases. The 5.2.0 through 5.15.0 rows and former `4.0.0` rows are rolled off to respect the P9 changelog cap; their full bodies remain at their git tags.
+Older releases are preserved in Git tags and GitHub releases. The 5.2.0 through 5.17.0 rows and former `4.0.0` rows are rolled off to respect the P9 changelog cap; their full bodies remain at their git tags.
 
 ---
 

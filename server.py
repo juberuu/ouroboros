@@ -282,6 +282,61 @@ def _looks_masked_secret(value: Any) -> bool:
     return text == "***" or text.endswith("...")
 
 
+def _mask_mcp_servers_payload(servers: Any) -> list:
+    if not isinstance(servers, list):
+        return []
+    try:
+        from ouroboros.mcp_client import canonical_server_id as _mcp_canonical_id
+    except Exception:
+        _mcp_canonical_id = lambda value: str(value or "").strip()  # type: ignore[assignment]
+    out = []
+    for entry in servers:
+        if not isinstance(entry, dict):
+            continue
+        clone = dict(entry)
+        if clone.get("id"):
+            clone["id"] = _mcp_canonical_id(clone.get("id"))
+        token = str(clone.get("auth_token") or "")
+        if token:
+            clone["auth_token"] = _mask_secret_value(token)
+            clone["auth_configured"] = True
+        else:
+            clone["auth_token"] = ""
+            clone["auth_configured"] = False
+        out.append(clone)
+    return out
+
+
+def _rehydrate_mcp_servers_payload(incoming: Any, current: Any) -> list:
+    if not isinstance(incoming, list):
+        return []
+    try:
+        from ouroboros.mcp_client import canonical_server_id as _mcp_canonical_id
+    except Exception:
+        _mcp_canonical_id = lambda value: str(value or "").strip()  # type: ignore[assignment]
+    current_by_id: Dict[str, Dict[str, Any]] = {}
+    if isinstance(current, list):
+        for entry in current:
+            if isinstance(entry, dict):
+                cur_id = _mcp_canonical_id(entry.get("id"))
+                if cur_id:
+                    current_by_id[cur_id] = entry
+    out = []
+    for entry in incoming:
+        if not isinstance(entry, dict):
+            continue
+        clone = dict(entry)
+        clone.pop("auth_configured", None)
+        if clone.get("id"):
+            clone["id"] = _mcp_canonical_id(clone.get("id"))
+        token = str(clone.get("auth_token") or "")
+        if _looks_masked_secret(token):
+            existing = current_by_id.get(_mcp_canonical_id(clone.get("id")))
+            clone["auth_token"] = str((existing or {}).get("auth_token") or "")
+        out.append(clone)
+    return out
+
+
 # Keys that refresh immediately in the running supervisor (no restart, no task boundary).
 _IMMEDIATE_KEYS = frozenset({
     "TOTAL_BUDGET",
@@ -1153,6 +1208,7 @@ async def api_settings_get(request: Request) -> JSONResponse:
     for key in _SECRET_SETTING_KEYS:
         if safe.get(key):
             safe[key] = _mask_secret_value(safe[key])
+    safe["MCP_SERVERS"] = _mask_mcp_servers_payload(safe.get("MCP_SERVERS") or [])
     for key, value in list(safe.items()):
         if key in _SECRET_SETTING_KEYS or key in _SETTINGS_DEFAULTS:
             continue
@@ -1262,6 +1318,12 @@ async def api_settings_post(request: Request) -> JSONResponse:
     try:
         body = await request.json()
         old_settings = load_settings()
+        if "MCP_SERVERS" in body:
+            body = dict(body)
+            body["MCP_SERVERS"] = _rehydrate_mcp_servers_payload(
+                body.get("MCP_SERVERS"),
+                old_settings.get("MCP_SERVERS"),
+            )
         current = _merge_settings_payload(old_settings, body)
         # Phase 2: normalize the new runtime-mode axis on the save path so a
         # typo like ``{"OUROBOROS_RUNTIME_MODE": "turbo"}`` cannot land in
@@ -1351,6 +1413,16 @@ async def api_settings_post(request: Request) -> JSONResponse:
         save_settings(current)
         _apply_settings_to_env(current)
         _start_supervisor_if_needed(current)
+
+        try:
+            from ouroboros.mcp_client import (
+                reconfigure_from_settings as _mcp_reconfigure,
+                refresh_all_background as _mcp_refresh_background,
+            )
+            _mcp_reconfigure(current)
+            _mcp_refresh_background(reason="settings")
+        except Exception:
+            log.warning("MCP reconfigure after settings change failed", exc_info=True)
 
         # Phase 4: when OUROBOROS_SKILLS_REPO_PATH changed, reconcile the
         # extension loader against the new path so stale registrations
@@ -1713,6 +1785,7 @@ from ouroboros.local_model_api import (
     api_local_model_install_runtime,
 )
 from ouroboros.chat_upload_api import api_chat_upload, api_chat_upload_delete
+from ouroboros.mcp_api import api_mcp_refresh, api_mcp_status, api_mcp_test
 
 
 # ---------------------------------------------------------------------------
@@ -1972,6 +2045,9 @@ routes = [
     Route("/api/local-model/status", endpoint=api_local_model_status),
     Route("/api/local-model/test", endpoint=api_local_model_test, methods=["POST"]),
     Route("/api/local-model/install-runtime", endpoint=api_local_model_install_runtime, methods=["POST"]),
+    Route("/api/mcp/status", endpoint=api_mcp_status, methods=["GET"]),
+    Route("/api/mcp/refresh", endpoint=api_mcp_refresh, methods=["POST"]),
+    Route("/api/mcp/test", endpoint=api_mcp_test, methods=["POST"]),
     WebSocketRoute("/ws", endpoint=ws_endpoint),
     Mount("/static", app=NoCacheStaticFiles(directory=str(web_dir)), name="static"),
 ]
@@ -2087,6 +2163,16 @@ async def lifespan(app):
             _reload_extensions(lifespan_drive_root, _load_settings, repo_path=repo_path or None)
     except Exception:
         log.warning("Extension reload_all at startup failed", exc_info=True)
+
+    try:
+        from ouroboros.mcp_client import (
+            reconfigure_from_settings as _mcp_reconfigure_startup,
+            refresh_all_background as _mcp_refresh_background_startup,
+        )
+        _mcp_reconfigure_startup(settings)
+        _mcp_refresh_background_startup(reason="startup")
+    except Exception:
+        log.warning("MCP startup reconfigure failed", exc_info=True)
 
     try:
         yield

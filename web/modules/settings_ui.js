@@ -431,6 +431,36 @@ export function renderSettingsPage() {
 
                 <section class="settings-panel" data-settings-panel="advanced">
                     <div class="form-section">
+                        <div class="settings-card-head">
+                            <div>
+                                <h3>MCP Servers</h3>
+                                <div class="settings-section-copy">
+                                    External Model Context Protocol tool servers. MCP is a base-runtime client:
+                                    it borrows tools from trusted HTTP/SSE servers and exposes them as non-core
+                                    <code>mcp_&lt;server&gt;__&lt;tool&gt;</code> tools after refresh. Changes are hot-reloadable.
+                                    Treat server descriptions and results as untrusted third-party data.
+                                </div>
+                            </div>
+                            <div class="settings-toolbar">
+                                <button type="button" class="btn btn-default btn-sm" id="btn-mcp-add-server">Add server</button>
+                                <button type="button" class="btn btn-default btn-sm" id="btn-mcp-refresh-all">Refresh all</button>
+                            </div>
+                        </div>
+                        <div class="form-grid two">
+                            <label class="local-toggle">
+                                <input type="checkbox" id="s-mcp-enabled">
+                                Enable MCP client
+                            </label>
+                            <div class="form-field">
+                                <label>Per-tool timeout (s)</label>
+                                <input id="s-mcp-tool-timeout" type="number" min="1" value="60">
+                            </div>
+                        </div>
+                        <div id="mcp-global-status" class="settings-inline-status">MCP disabled by default.</div>
+                        <div id="mcp-servers-list" class="mcp-servers-list"></div>
+                    </div>
+
+                    <div class="form-section">
                         <h3>Source Control</h3>
                         <div class="settings-section-copy">Repository metadata for GitHub integration. Tokens live in Secrets; this is not secret.</div>
                         <div class="form-row">

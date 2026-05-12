@@ -88,6 +88,9 @@ SETTINGS_DEFAULTS = {
     "OUROBOROS_SKILLS_REPO_PATH": "",
     "OUROBOROS_CLAWHUB_REGISTRY_URL": "https://clawhub.ai/api/v1",
     "OUROBOROS_HUB_CATALOG_URL": "https://raw.githubusercontent.com/joi-lab/OuroborosHub/main/catalog.json",
+    "MCP_ENABLED": False,
+    "MCP_SERVERS": [],
+    "MCP_TOOL_TIMEOUT_SEC": 60,
     # Scope review: single-model blocking reviewer (runs after triad review)
     "OUROBOROS_SCOPE_REVIEW_MODEL": "openai/gpt-5.5",
     # Reasoning effort per task type: none | low | medium | high
@@ -615,6 +618,20 @@ def _coerce_setting_value(key: str, value):
     # Trim on load so empty-with-spaces truly reads as empty.
     if key == "OUROBOROS_SKILLS_REPO_PATH":
         return str(value or "").strip()
+    if key == "MCP_SERVERS":
+        if isinstance(value, list):
+            return [dict(item) for item in value if isinstance(item, dict)]
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return []
+            try:
+                parsed = json.loads(text)
+            except (TypeError, ValueError):
+                return []
+            if isinstance(parsed, list):
+                return [dict(item) for item in parsed if isinstance(item, dict)]
+        return []
     if isinstance(default, bool):
         if isinstance(value, bool):
             return value
@@ -763,6 +780,35 @@ def save_settings(settings: dict, *, allow_elevation: bool = False) -> None:
         _release_settings_lock(fd)
 
 
+def get_mcp_enabled() -> bool:
+    raw = str(os.environ.get("MCP_ENABLED", "") or "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return bool(load_settings().get("MCP_ENABLED"))
+
+
+def get_mcp_servers() -> list:
+    return list(_coerce_setting_value("MCP_SERVERS", load_settings().get("MCP_SERVERS")))
+
+
+def get_mcp_tool_timeout_sec() -> int:
+    raw = os.environ.get("MCP_TOOL_TIMEOUT_SEC")
+    if raw:
+        try:
+            parsed = int(raw)
+            if parsed > 0:
+                return parsed
+        except (TypeError, ValueError):
+            pass
+    try:
+        parsed = int(load_settings().get("MCP_TOOL_TIMEOUT_SEC") or 0)
+    except (TypeError, ValueError):
+        parsed = 0
+    return parsed if parsed > 0 else int(SETTINGS_DEFAULTS["MCP_TOOL_TIMEOUT_SEC"])
+
+
 def apply_settings_to_env(settings: dict) -> None:
     """Push settings into environment variables for supervisor modules."""
     env_keys = [
@@ -785,6 +831,7 @@ def apply_settings_to_env(settings: dict) -> None:
         "OUROBOROS_HOST_SERVICE_PORT",
         # v4.50+ ClawHub marketplace registry URL.
         "OUROBOROS_CLAWHUB_REGISTRY_URL",
+        "MCP_ENABLED", "MCP_TOOL_TIMEOUT_SEC",
         "OUROBOROS_EFFORT_TASK", "OUROBOROS_EFFORT_EVOLUTION",
         "OUROBOROS_EFFORT_REVIEW", "OUROBOROS_EFFORT_SCOPE_REVIEW",
         "OUROBOROS_EFFORT_CONSCIOUSNESS",
