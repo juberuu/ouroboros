@@ -47,10 +47,10 @@ The **runtime ownership** of an installed skill is also tagged:
 User-authored or manually copied skills belong under
 `data/skills/external/<name>/`. The `native` bucket is reserved for
 launcher-seeded skills that carry a `.seed-origin` marker. If a user
-payload is accidentally left under `native/`, Ouroboros migrates it to
-`external/` so the Repair workflow can edit and re-review it. Generic
-file tools also refuse new writes under unseeded `native/` payloads and
-tell the agent to use `external/` instead.
+payload is accidentally left under `native/`, Ouroboros no longer migrates it
+automatically; move it to `external/` or reinstall it so the Repair workflow can
+edit and re-review it. Generic file tools also refuse new writes under unseeded
+`native/` payloads and tell the agent to use `external/` instead.
 
 ## Manifest schema (`SKILL.md` frontmatter or `skill.json`)
 

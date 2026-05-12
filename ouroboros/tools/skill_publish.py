@@ -32,7 +32,7 @@ from ouroboros.skill_loader import (
 from ouroboros.contracts.skill_payload_policy import SKILL_PAYLOAD_CONTROL_FILENAMES
 from ouroboros.tools.github import _gh_cmd, github_token_from_env_or_settings
 from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.utils import contains_real_secret_value, utc_now_iso
+from ouroboros.utils import contains_real_secret_value, read_json_dict, utc_now_iso
 
 _MAX_PAYLOAD_BYTES = 5 * 1024 * 1024
 _BRANCH_SEGMENT_RE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -183,11 +183,8 @@ def _provenance_hint(skill_dir: pathlib.Path, source: str) -> str:
         slug_key = "clawhub_slug"
     else:
         return ""
-    try:
-        data = json.loads(marker.read_text(encoding="utf-8")) if marker.is_file() else {}
-    except (OSError, json.JSONDecodeError):
-        return ""
-    if not isinstance(data, dict):
+    data = read_json_dict(marker)
+    if data is None:
         return ""
     original = str(data.get(slug_key) or data.get("slug") or "").strip()
     if not original:

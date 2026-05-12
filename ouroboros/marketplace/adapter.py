@@ -44,7 +44,7 @@ from ouroboros.contracts.skill_manifest import (
     parse_skill_manifest_text,
 )
 from ouroboros.marketplace.install_specs import install_specs_hash, normalize_install_specs
-from ouroboros.utils import utc_now_iso
+from ouroboros.utils import atomic_write_json, utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -806,10 +806,7 @@ def adapt_openclaw_skill(
         # Drop a sidecar provenance marker so a quick directory listing
         # makes the source obvious to humans, without depending on the
         # durable state plane.
-        (staging_dir / ".clawhub.json").write_text(
-            json.dumps(provenance, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        atomic_write_json(staging_dir / ".clawhub.json", provenance, trailing_newline=True)
     except OSError as exc:
         blockers.append(f"Failed to persist translated manifest: {exc}")
         return AdapterResult(

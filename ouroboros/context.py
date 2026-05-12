@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.utils import (
     utc_now_iso, read_text, estimate_tokens, get_git_info,
-    truncate_review_artifact,
+    truncate_review_artifact, read_json_dict,
 )
 from ouroboros.memory import Memory
 
@@ -238,27 +238,24 @@ def build_memory_sections(memory: Memory, partition: str = "all") -> List[str]:
                 + world_text
             )
 
-    try:
-        from ouroboros.consolidator import migrate_dialogue_summary_to_blocks
-        migrate_dialogue_summary_to_blocks(
-            memory.drive_root / "memory" / "dialogue_summary.md",
-            memory.drive_root / "memory" / "dialogue_blocks.json",
-        )
-    except Exception:
-        pass
-
     if include_volatile:
         dialogue_blocks = memory.load_dialogue_blocks()
+        summary_path = memory.drive_root / "memory" / "dialogue_summary.md"
+        summary_text = ""
+        if summary_path.exists():
+            summary_text = read_text(summary_path)
         if dialogue_blocks:
             blocks_md = memory.format_blocks_as_markdown(dialogue_blocks)
             if blocks_md.strip():
                 sections.append("## Dialogue History\n\n" + blocks_md)
+            if summary_text.strip():
+                sections.append(
+                    "## Retired legacy dialogue summary (read-only historical fallback)\n\n"
+                    + summary_text
+                )
         else:
-            summary_path = memory.drive_root / "memory" / "dialogue_summary.md"
-            if summary_path.exists():
-                summary_text = read_text(summary_path)
-                if summary_text.strip():
-                    sections.append("## Dialogue Summary\n\n" + summary_text)
+            if summary_text.strip():
+                sections.append("## Dialogue Summary\n\n" + summary_text)
 
     if partition == "all":
         registry_path = memory.drive_root / "memory" / "registry.md"
@@ -578,7 +575,7 @@ def build_health_invariants(env: Any) -> str:
 
     # --- budget drift ---
     try:
-        state_data = json.loads(read_text(env.drive_path("state/state.json")))
+        state_data = read_json_dict(env.drive_path("state/state.json")) or {}
         if state_data.get("budget_drift_alert"):
             checks.append(f"WARNING: BUDGET DRIFT {state_data.get('budget_drift_pct', 0):.1f}% — tracked=${state_data.get('spent_usd', 0):.2f} vs OpenRouter=${state_data.get('openrouter_total_usd', 0):.2f}")
         else:
@@ -630,8 +627,8 @@ def build_health_invariants(env: Any) -> str:
     # Crash rollback — inlined so inspect.getsource sees the literal strings
     try:
         crash_report = env.drive_path("state/crash_report.json")
-        if crash_report.exists():
-            crash_data = json.loads(crash_report.read_text(encoding="utf-8"))
+        crash_data = read_json_dict(crash_report)
+        if crash_data:
             checks.append(
                 f"CRITICAL: RECENT CRASH ROLLBACK — rolled back from "
                 f"{crash_data.get('rolled_back_from', '?')[:12]} to tag "

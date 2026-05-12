@@ -11,7 +11,7 @@ Verifies (Phase 4):
 
 Verifies (Phase 5):
 - Auto-push wired into commit functions
-- migrate_remote_credentials exists and is safe
+- legacy token-in-URL credential migration is retired
 - ARCHITECTURE.md version sync in startup checks
 """
 import importlib
@@ -351,18 +351,19 @@ def test_auto_push_outside_git_lock():
         )
 
 
-# --- Credential migration (Phase 5) ---
+# --- Credential configuration (legacy token-in-URL migration retired) ---
 
-def test_migrate_remote_credentials_exists():
+def test_migrate_remote_credentials_is_retired():
     git_ops = _get_git_ops_module()
-    assert hasattr(git_ops, "migrate_remote_credentials")
-    assert callable(git_ops.migrate_remote_credentials)
+    assert not hasattr(git_ops, "migrate_remote_credentials")
 
 
-def test_migrate_remote_credentials_uses_configure_remote():
+def test_configure_remote_remains_credential_helper_surface():
     git_ops = _get_git_ops_module()
-    source = inspect.getsource(git_ops.migrate_remote_credentials)
-    assert "configure_remote" in source
+    configure_source = inspect.getsource(git_ops.configure_remote)
+    helper_source = inspect.getsource(git_ops._configure_credential_helper)
+    assert "_configure_credential_helper" in configure_source
+    assert ".git/credentials" in helper_source
 
 
 # --- ARCHITECTURE version sync (Phase 5) ---

@@ -115,7 +115,6 @@ def _patch_lifespan_for_drive_root_test(monkeypatch, srv, settings: dict):
     monkeypatch.setattr(srv, "_start_supervisor_if_needed", lambda *_a, **_k: None)
     monkeypatch.setattr(srv.uvicorn, "Server", _FakeUvicornServer)
     monkeypatch.setattr("ouroboros.launcher_bootstrap.ensure_data_skills_seeded", lambda: None)
-    monkeypatch.setattr("ouroboros.skill_migrations.migrate_unseeded_native_skills_to_external", lambda: None)
     monkeypatch.setattr("ouroboros.server_auth.get_configured_network_password", lambda: "")
 
 

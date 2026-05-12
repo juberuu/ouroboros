@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import uuid
@@ -21,7 +20,7 @@ from ouroboros.task_results import (
     write_task_result,
 )
 from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.utils import utc_now_iso, write_text, run_cmd
+from ouroboros.utils import atomic_write_json, utc_now_iso, run_cmd
 
 log = logging.getLogger(__name__)
 
@@ -36,10 +35,10 @@ def _request_restart(ctx: ToolContext, reason: str) -> str:
         sha = run_cmd(["git", "rev-parse", "HEAD"], cwd=ctx.repo_dir)
         branch = run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=ctx.repo_dir)
         verify_path = ctx.drive_path("state") / "pending_restart_verify.json"
-        write_text(verify_path, json.dumps({
+        atomic_write_json(verify_path, {
             "ts": utc_now_iso(), "expected_sha": sha,
             "expected_branch": branch, "reason": reason,
-        }, ensure_ascii=False, indent=2))
+        })
     except Exception:
         log.debug("Failed to read VERSION file or git ref for restart verification", exc_info=True)
         pass
@@ -153,7 +152,12 @@ def _update_scratchpad(ctx: ToolContext, content: str) -> str:
     from ouroboros.memory import Memory
     mem = Memory(drive_root=ctx.drive_root)
     mem.ensure_files()
-    block = mem.append_scratchpad_block(content, source="task")
+    try:
+        block = mem.append_scratchpad_block(content, source="task")
+    except RuntimeError as exc:
+        if "LEGACY_SCRATCHPAD_REQUIRES_MANUAL_UPGRADE" in str(exc):
+            return f"⚠️ {exc}"
+        raise
     return f"OK: scratchpad block appended ({len(content)} chars, ts={block.get('ts', '?')[:16]})"
 
 

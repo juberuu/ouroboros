@@ -1,4 +1,4 @@
-# Ouroboros v5.17.0-rc.2 — Architecture & Reference
+# Ouroboros v5.17.0-rc.3 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -77,7 +77,6 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── marketplace_api.py   ← HTTP surface for marketplaces (/api/marketplace/clawhub/* and /api/marketplace/ouroboroshub/*); always-on with registry host allowlists and hash checks
       ├── skill_lifecycle_queue.py ← single FIFO lane for mutating skill lifecycle actions (install/update/review/deps/enable/disable/uninstall) with recent event snapshot for Skills UI, chat live-card progress, dedupe keys, and sync tool wrapper
       ├── skill_review_runner.py ← shared lifecycle-backed skill review runner for API + agent tool paths; writes review_job.json + skill_review_* events and routes all executable skills (including self-authored provenance) through tri-model review
-      ├── skill_migrations.py  ← topology repair migration that relocates user-managed payloads found under data/skills/native/ into data/skills/external/ (the pre-OuroborosHub generation-skill rename was retired in v5.15.0)
       ├── server_auth.py       ← Non-localhost auth gate (OUROBOROS_NETWORK_PASSWORD)
       ├── server_control.py    ← Process-control helpers: restart, panic stop
       ├── server_entrypoint.py ← CLI argument parsing, port-binding helpers
@@ -196,7 +195,7 @@ Dockerfile                    ← Docker image (web UI runtime)
 │   │   ├── scratchpad.md   ← Working memory (auto-generated from scratchpad_blocks.json)
 │   │   ├── scratchpad_blocks.json ← Append-block scratchpad (FIFO, max 10)
 │   │   ├── dialogue_blocks.json ← Block-wise consolidated chat history
-│   │   ├── dialogue_summary.md ← Legacy dialogue summary (auto-migrated to blocks)
+│   │   ├── dialogue_summary.md ← Retired legacy flat dialogue summary (read-only historical fallback when present; not auto-migrated)
 │   │   ├── dialogue_meta.json  ← Consolidation metadata (offsets, counts)
 │   │   ├── WORLD.md        ← System profile (generated on first run)
 │   │   ├── knowledge/      ← Structured knowledge base files
@@ -896,10 +895,9 @@ continuation phrase heuristics.
   bleed-through into ordinary follow-up conversations.
 - `data/skills/native/<skill>/` remains reserved for launcher-seeded
   packages with `.seed-origin`. Writes to unseeded native payloads are
-  blocked with an actionable message, and `/api/extensions` runs the
-  existing native-to-external migration before building the Skills
-  catalogue so legacy trapped payloads become repairable without a
-  restart.
+  blocked with an actionable message. The old native-to-external repair
+  migration is retired; unsupported pre-v5.17 layouts need a clean
+  reinstall or a manual move into `data/skills/external/`.
 
 ### PR integration tools (tools/git_pr.py + tools/github.py)
 
@@ -990,8 +988,7 @@ continuation phrase heuristics.
 - **Auto-push**: best-effort push to origin after successful commit (non-fatal)
 - **Post-push CI status note** (v4.42.4): after a successful push, when `GITHUB_TOKEN` and `GITHUB_REPO` are configured, `_check_ci_status_after_push` queries the GitHub Actions API filtered by `head_sha` of the just-pushed commit and appends a one-line status note to the commit result: `✅ Run passed for this commit` / `⏳ Run not yet registered` (GitHub may take 5–30 s) / `⚠️ CI STATUS: Run FAILED (run #N) → job → failed step + URL`. Filtering by SHA prevents stale results from a prior push being reported. The lookup is non-blocking, fails silently on any exception, and is skipped entirely when push did not succeed.
 - **Credential helper**: `git_ops.configure_remote()` stores credentials in repo-local
-  `.git/credentials`. `migrate_remote_credentials()` migrates legacy token-in-URL origins.
-  Both are wired at startup and on settings save. Saving `GITHUB_TOKEN` + `GITHUB_REPO`
+  `.git/credentials`. The old token-in-URL origin migration is retired; saving `GITHUB_TOKEN` + `GITHUB_REPO`
   in Settings automatically calls `configure_remote()`, so the remote is ready immediately
   after save — no restart required.
 
@@ -1116,8 +1113,9 @@ the constitutional guard is that the file itself must remain non-deletable.
 - Calls LLM (Gemini Flash) to create summary blocks stored in `dialogue_blocks.json`
 - **Era compression**: when block count exceeds MAX_SUMMARY_BLOCKS (10), oldest blocks
   compressed into single "era summary" (30-40% of original length)
-- **Auto-migration**: legacy `dialogue_summary.md` episodes auto-migrated to blocks
-  on first consolidation run
+- Legacy `dialogue_summary.md` is no longer auto-migrated; supported installs use
+  `dialogue_blocks.json`, while any remaining flat summary is injected as a
+  read-only historical context fallback.
 - First-person narrative format ("I did...", "Anton asked...", "We decided...")
 - Context reads blocks directly from `dialogue_blocks.json` instead of flat markdown
 
@@ -1126,7 +1124,11 @@ the constitutional guard is that the file itself must remain non-deletable.
 - **Block-aware**: operates on `scratchpad_blocks.json` when blocks exist
 - Triggered after each task when total block content exceeds 30,000 chars
 - LLM extracts durable insights into knowledge base topics, compresses oldest blocks
-- Falls back to flat-file mode for pre-migration scratchpads
+- Supported installs use block scratchpads; pre-block flat scratchpads are not auto-migrated.
+  If a non-default flat `scratchpad.md` exists without `scratchpad_blocks.json`,
+  new block appends fail closed with a manual-upgrade warning instead of
+  overwriting the flat file, and auto-consolidation skips the retired flat
+  file rather than compressing it.
 - Writes knowledge files to `memory/knowledge/`, rebuilds `index-full.md`
 - Uses platform-aware file locking to serialize concurrent calls
 - Runs in a daemon thread (same pattern as dialogue consolidation)
@@ -2184,17 +2186,12 @@ walks the data plane plus the optional external checkout, tagging each
 ``LoadedSkill`` with ``source`` (``native`` / ``clawhub`` /
 ``ouroboroshub`` / ``external`` / ``user_repo``).
 
-v5.8 adds a topology repair migration:
-``skill_migrations.migrate_unseeded_native_skills_to_external`` moves any
-``data/skills/native/<skill>/`` directory that lacks the launcher-written
-``.seed-origin`` marker into ``data/skills/external/``. This keeps the
-honesty rule ("unmarked native is user-managed external") aligned with the
-Repair guard, which intentionally only grants payload writes under
-``external``, ``clawhub``, or ``ouroboroshub``. If the external destination
-already exists, the migration lands the moved payload under a unique
-``*_migrated`` identity, rewrites the manifest ``name``, copies non-trust
-state best-effort, and drops stale trust files so the new identity requires a
-fresh review.
+The v5.8 native-to-external topology repair migration was retired in
+v5.17. Supported installs now expect user-managed skills to live directly
+under ``data/skills/external/`` (or ``clawhub`` / ``ouroboroshub`` for
+marketplace installs). Very old layouts with unseeded payloads under
+``data/skills/native/`` should be moved manually or reinstalled cleanly;
+automatic startup and catalogue reads no longer mutate skill topology.
 
 Per-skill durable state lives on the Ouroboros data plane, not inside
 the skill checkout:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import pathlib
 import shutil
@@ -12,7 +11,7 @@ from typing import Any, Dict, List
 
 from ouroboros.marketplace.install_specs import install_specs_hash
 from ouroboros.skill_loader import skill_state_dir
-from ouroboros.utils import read_json_dict, utc_now_iso
+from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
 
 
 ENV_DIRNAME = ".ouroboros_env"
@@ -209,15 +208,9 @@ def install_isolated_dependencies(
         "status": "failed" if failure else "installed",
         "error": failure.get("error", ""),
     }
-    (env_root / FINGERPRINT_FILENAME).write_text(
-        json.dumps(fingerprint, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    atomic_write_json(env_root / FINGERPRINT_FILENAME, fingerprint, trailing_newline=True)
     state_dir = skill_state_dir(drive_root, skill_name)
-    (state_dir / DEPS_STATE_FILENAME).write_text(
-        json.dumps(fingerprint, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    atomic_write_json(state_dir / DEPS_STATE_FILENAME, fingerprint, trailing_newline=True)
     if failure:
         # Re-raise so existing call-sites that rely on the failure
         # surface (install_skill's deps_status="failed") keep behaving

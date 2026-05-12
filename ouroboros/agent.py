@@ -8,7 +8,6 @@ context.py (context building), review.py (code collection/metrics).
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import pathlib
@@ -25,7 +24,7 @@ from ouroboros.utils import (
     append_jsonl,
     emit_log_event,
     get_git_info,
-    read_text,
+    read_json_dict,
     safe_relpath,
     sanitize_task_for_event,
     truncate_for_log,
@@ -199,8 +198,7 @@ class OuroborosAgent:
 
         budget_remaining = None
         try:
-            state_path = self.env.drive_path("state") / "state.json"
-            state_data = json.loads(read_text(state_path))
+            state_data = read_json_dict(self.env.drive_path("state") / "state.json") or {}
             total_budget = float(os.environ.get("TOTAL_BUDGET", "1"))
             spent = float(state_data.get("spent_usd", 0))
             if total_budget > 0:

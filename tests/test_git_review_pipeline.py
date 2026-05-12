@@ -12,7 +12,7 @@ Tests:
 - Blocked review leaves files on disk but unstaged
 - review_rebuttal parameter
 - configure_remote failure surfacing
-- migrate_remote_credentials no-op on clean origin
+- configure_remote credential-helper wiring
 - Auto-rescue only reports committed when commit actually happened
 - repo_write in CORE_TOOL_NAMES
 - Review history building
@@ -726,31 +726,32 @@ class TestRemoteConfigSurfacing:
         source = server_path.read_text(encoding="utf-8")
         assert '"warnings"' in source
 
-    def test_migrate_credentials_wired_at_startup(self):
-        """migrate_remote_credentials called at startup after configure_remote."""
+    def test_remote_credentials_migration_not_wired_at_startup(self):
+        """Legacy token-in-URL migration is no longer run on startup."""
         server_path = pathlib.Path(REPO) / "server.py"
         source = server_path.read_text(encoding="utf-8")
-        assert "migrate_remote_credentials" in source
+        assert "migrate_remote_credentials" not in source
 
 
-# --- migrate_remote_credentials safety ---
+# --- credential helper safety (legacy migration retired) ---
 
-class TestMigrateRemoteCredentials:
-    def test_exists(self):
+class TestRemoteCredentialConfiguration:
+    def test_legacy_migrator_retired(self):
         git_ops = _get_git_ops_module()
-        assert hasattr(git_ops, "migrate_remote_credentials")
-        assert callable(git_ops.migrate_remote_credentials)
+        assert not hasattr(git_ops, "migrate_remote_credentials")
 
-    def test_uses_configure_remote(self):
+    def test_configure_remote_uses_local_credential_helper(self):
         git_ops = _get_git_ops_module()
-        source = inspect.getsource(git_ops.migrate_remote_credentials)
+        configure_source = inspect.getsource(git_ops.configure_remote)
+        helper_source = inspect.getsource(git_ops._configure_credential_helper)
+        assert "_configure_credential_helper" in configure_source
+        assert ".git/credentials" in helper_source
+
+    def test_startup_setup_only_configures_current_settings_token(self):
+        server_runtime = importlib.import_module("ouroboros.server_runtime")
+        source = inspect.getsource(server_runtime.setup_remote_if_configured)
+        assert "migrate_remote_credentials" not in source
         assert "configure_remote" in source
-
-    def test_noop_on_clean_origin(self):
-        """Clean origin URL (no embedded token) returns True with 'already clean'."""
-        git_ops = _get_git_ops_module()
-        source = inspect.getsource(git_ops.migrate_remote_credentials)
-        assert "already clean" in source.lower() or "Already clean" in source
 
 
 # --- ToolContext review state ---

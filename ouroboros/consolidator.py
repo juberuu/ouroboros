@@ -16,12 +16,11 @@ import json
 import logging
 import os
 import pathlib
-import re
 import hashlib
 from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
-from ouroboros.utils import utc_now_iso, read_text, write_text
+from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso, read_text, write_text
 
 from ouroboros.platform_layer import (
     file_lock_exclusive as _lock_ex,
@@ -92,9 +91,6 @@ def consolidate(
         except (OSError, BlockingIOError):
             log.info("Chat block consolidation already running, skipping")
             return None
-
-        summary_path = blocks_path.parent / "dialogue_summary.md"
-        migrate_dialogue_summary_to_blocks(summary_path, blocks_path)
 
         return _run_block_consolidation(
             source_path=chat_path,
@@ -350,53 +346,6 @@ Write as Ouroboros (first person). Aim for 30-40% of original length.
 
 
 # ---------------------------------------------------------------------------
-# Migration from dialogue_summary.md -> blocks
-# ---------------------------------------------------------------------------
-
-def migrate_dialogue_summary_to_blocks(
-    summary_path: pathlib.Path,
-    blocks_path: pathlib.Path,
-) -> None:
-    """One-time migration: parse dialogue_summary.md episodes into block JSON.
-
-    Runs automatically on first chat consolidation. If dialogue_summary.md
-    exists and dialogue_blocks.json does not, parses Episode/Era/Block
-    sections from the markdown and writes them as structured block dicts.
-
-    Safe to call repeatedly — no-ops once blocks file exists.
-    """
-    if not summary_path.exists() or blocks_path.exists():
-        return
-
-    text = read_text(summary_path)
-    if not text.strip():
-        return
-
-    chunks = re.split(r'(?=^### (?:Episode|Era|Block):)', text, flags=re.MULTILINE)
-    chunks = [c for c in chunks if c.strip()]
-
-    blocks: List[Dict[str, Any]] = []
-    for chunk in chunks:
-        chunk = chunk.strip()
-        first_line = chunk.split("\n")[0]
-        match = re.match(r'^### (?:Episode|Era|Block):\s*(.+)', first_line)
-        range_str = match.group(1).strip() if match else "unknown"
-        block_type = "era" if chunk.startswith("### Era:") else "summary"
-        blocks.append({
-            "ts": utc_now_iso(),
-            "type": block_type,
-            "range": range_str,
-            "message_count": 0,
-            "content": chunk,
-        })
-
-    if blocks:
-        _save_blocks(blocks_path, blocks)
-        log.info("Migrated %d episodes/eras from %s -> %s",
-                 len(blocks), summary_path.name, blocks_path.name)
-
-
-# ---------------------------------------------------------------------------
 # Formatting & IO helpers
 # ---------------------------------------------------------------------------
 
@@ -456,17 +405,11 @@ def _save_blocks(path: pathlib.Path, blocks: List[Dict[str, Any]]) -> None:
 # ---------------------------------------------------------------------------
 
 def _load_meta(path: pathlib.Path) -> Dict[str, Any]:
-    if path.exists():
-        try:
-            return json.loads(read_text(path))
-        except (json.JSONDecodeError, ValueError):
-            return {}
-    return {}
+    return read_json_dict(path) or {}
 
 
 def _save_meta(path: pathlib.Path, meta: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    write_text(path, json.dumps(meta, ensure_ascii=False, indent=2))
+    atomic_write_json(path, meta)
 
 
 def _chat_log_signature(path: pathlib.Path) -> Dict[str, Any]:
@@ -573,10 +516,7 @@ def should_consolidate_scratchpad(memory: Any) -> bool:
     try:
         blocks = memory.load_scratchpad_blocks()
         if len(blocks) < 3:
-            sp = memory.scratchpad_path()
-            if not sp.exists():
-                return False
-            return len(sp.read_text(encoding="utf-8")) > SCRATCHPAD_CONSOLIDATION_THRESHOLD
+            return False
         total = sum(len(b.get("content", "")) for b in blocks)
         return total > SCRATCHPAD_CONSOLIDATION_THRESHOLD
     except Exception:
@@ -593,15 +533,14 @@ def consolidate_scratchpad(
 
     Operates on blocks directly — reads from scratchpad_blocks.json,
     compresses the oldest half into a single summary block, writes back,
-    and regenerates scratchpad.md. Falls back to flat-file mode if no
-    blocks exist yet.
+    and regenerates scratchpad.md. Pre-block flat scratchpads are left for
+    manual upgrade rather than rewritten automatically.
     """
     blocks = memory.load_scratchpad_blocks()
 
-    if len(blocks) >= 3:
-        return _consolidate_scratchpad_blocks(memory, blocks, knowledge_dir, llm_client, identity_text)
-
-    return _consolidate_scratchpad_flat(memory.scratchpad_path(), knowledge_dir, llm_client, identity_text)
+    if len(blocks) < 3:
+        return None
+    return _consolidate_scratchpad_blocks(memory, blocks, knowledge_dir, llm_client, identity_text)
 
 
 def _consolidate_scratchpad_blocks(
@@ -702,93 +641,6 @@ Respond with JSON only (no fences):
     except Exception as e:
         log.error("Scratchpad block consolidation failed: %s", e, exc_info=True)
         return None
-
-
-def _consolidate_scratchpad_flat(
-    scratchpad_path: pathlib.Path,
-    knowledge_dir: pathlib.Path,
-    llm_client: Any,
-    identity_text: str = "",
-) -> Optional[Dict[str, Any]]:
-    """Fallback flat-file scratchpad consolidation for pre-migration state."""
-    if not scratchpad_path.exists():
-        return None
-
-    lock_path = scratchpad_path.parent / ".scratchpad_consolidation.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_fd = None
-    try:
-        lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY, 0o644)
-        try:
-            _lock_nb(lock_fd)
-        except (OSError, BlockingIOError):
-            log.info("Scratchpad consolidation already running (lock held), skipping")
-            return None
-    except Exception:
-        log.debug("Failed to acquire scratchpad consolidation lock", exc_info=True)
-
-    try:
-        content = read_text(scratchpad_path)
-        if len(content) <= SCRATCHPAD_CONSOLIDATION_THRESHOLD:
-            return None
-
-        prompt = f"""You are a memory consolidator for Ouroboros, a self-modifying AI agent.
-
-The scratchpad (working memory) has grown to {len(content)} chars.
-Extract durable knowledge and compress what remains.
-
-Rules:
-1. Identify insights, patterns, lessons, and architectural decisions worth
-   preserving long-term. Output them as knowledge_entries with topic + content.
-2. Rewrite the scratchpad keeping ONLY active tasks, unresolved questions,
-   and recent observations. Remove stale/completed items.
-3. Write as Ouroboros (first person). Don't lose signal — keep uncertain items
-   rather than dropping them.
-
-Identity context: {identity_text if identity_text else "(not available)"}
-
-Current scratchpad:
-
-{content}
-
-Respond with JSON only (no fences):
-{{"knowledge_entries": [{{"topic": "name", "content": "text"}}], "compressed_scratchpad": "new scratchpad"}}
-"""
-
-        msg, usage = llm_client.chat(
-            messages=[{"role": "user", "content": prompt}],
-            model=CONSOLIDATION_MODEL,
-            reasoning_effort="low",
-            max_tokens=4096,
-        )
-        raw = (msg.get("content") or "").strip()
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-
-        result = json.loads(raw)
-
-        compressed = result.get("compressed_scratchpad", "")
-        if not compressed or not compressed.strip():
-            log.warning("Scratchpad consolidation returned empty, skipping")
-            return usage
-
-        _write_knowledge_entries(knowledge_dir, result.get("knowledge_entries", []))
-        _rebuild_knowledge_index(knowledge_dir)
-
-        write_text(scratchpad_path, compressed)
-        log.info("Scratchpad consolidated: %d -> %d chars", len(content), len(compressed))
-        return usage
-
-    except Exception as e:
-        log.error("Scratchpad consolidation failed: %s", e, exc_info=True)
-        return None
-    finally:
-        if lock_fd is not None:
-            try:
-                _unlock(lock_fd)
-                os.close(lock_fd)
-            except OSError:
-                pass
 
 
 def _write_knowledge_entries(knowledge_dir: pathlib.Path, entries: List[Dict[str, Any]]) -> None:

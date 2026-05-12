@@ -16,7 +16,7 @@ from collections import Counter
 from typing import Any, Dict, List, Optional
 
 from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
-from ouroboros.utils import utc_now_iso, read_text, write_text, append_jsonl, short
+from ouroboros.utils import utc_now_iso, read_text, write_text, append_jsonl, short, read_json_dict
 
 from ouroboros.platform_layer import (
     file_lock_exclusive as _lock_ex,
@@ -96,30 +96,39 @@ class Memory:
                 except OSError:
                     pass
 
-    def _migrate_legacy_scratchpad(self) -> None:
-        """One-time migration: seed blocks from existing scratchpad.md if no blocks file exists."""
-        bp = self.scratchpad_blocks_path()
-        if bp.exists():
-            return
+    def _has_retired_flat_scratchpad_without_blocks(self) -> bool:
         sp = self.scratchpad_path()
-        if not sp.exists():
-            return
-        content = read_text(sp)
-        if not content.strip():
-            return
-        # Skip migration for default/empty scratchpads
-        if "(empty" in content and "write anything here" in content:
-            return
-        seed = [{"ts": utc_now_iso(), "source": "migration", "content": content}]
-        bp.parent.mkdir(parents=True, exist_ok=True)
-        write_text(bp, json.dumps(seed, ensure_ascii=False, indent=2))
-        log.info("Migrated legacy scratchpad.md (%d chars) to scratchpad_blocks.json", len(content))
+        bp = self.scratchpad_blocks_path()
+        if bp.exists() or not sp.exists():
+            return False
+        try:
+            text = read_text(sp).strip()
+        except Exception:
+            return False
+        if not text:
+            return False
+        return not (
+            text.startswith("# Scratchpad\n\nUpdatedAt:")
+            and "(empty" in text
+        )
 
     def append_scratchpad_block(self, content: str, source: str = "task") -> Dict[str, Any]:
         """Append a block to scratchpad. Returns the new block. File-locked, FIFO rotation."""
-        self._migrate_legacy_scratchpad()
         bp = self.scratchpad_blocks_path()
         bp.parent.mkdir(parents=True, exist_ok=True)
+
+        if self._has_retired_flat_scratchpad_without_blocks():
+            msg = (
+                "LEGACY_SCRATCHPAD_REQUIRES_MANUAL_UPGRADE: "
+                "memory/scratchpad.md exists without scratchpad_blocks.json. "
+                "Move preserved notes manually before appending new scratchpad blocks."
+            )
+            append_jsonl(self.journal_path(), {
+                "ts": utc_now_iso(),
+                "type": "legacy_scratchpad_requires_manual_upgrade",
+                "path": str(self.scratchpad_path()),
+            })
+            raise RuntimeError(msg)
 
         new_block = {"ts": utc_now_iso(), "source": source, "content": content}
 
@@ -211,14 +220,7 @@ class Memory:
     def load_dialogue_meta(self) -> Dict[str, Any]:
         """Load dialogue_meta.json consolidation cursor metadata."""
         path = self.drive_root / "memory" / "dialogue_meta.json"
-        if not path.exists():
-            return {}
-        try:
-            data = json.loads(read_text(path))
-            return data if isinstance(data, dict) else {}
-        except (json.JSONDecodeError, ValueError):
-            log.warning("Corrupt dialogue meta file %s", path)
-            return {}
+        return read_json_dict(path) or {}
 
     def _load_json_blocks(self, path: pathlib.Path) -> List[Dict[str, Any]]:
         if not path.exists():

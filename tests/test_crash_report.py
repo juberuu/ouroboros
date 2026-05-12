@@ -6,8 +6,10 @@ Verifies:
 """
 import importlib
 import inspect
+import json
 import os
 import sys
+import types
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
@@ -47,3 +49,21 @@ def test_crash_event_logged_at_startup():
     assert "crash_rollback_detected" in source, (
         "startup crash-report injection does not log crash_rollback_detected event"
     )
+
+
+def test_invalid_crash_report_logs_corruption_event(tmp_path):
+    """A corrupt crash report must stay visible instead of being treated as absent."""
+    from ouroboros.agent_startup_checks import inject_crash_report
+
+    (tmp_path / "state").mkdir(parents=True)
+    (tmp_path / "logs").mkdir(parents=True)
+    (tmp_path / "state" / "crash_report.json").write_text("{broken", encoding="utf-8")
+    env = types.SimpleNamespace(drive_path=lambda rel: tmp_path / rel)
+
+    inject_crash_report(env)
+
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert events[-1]["type"] == "crash_report_invalid"

@@ -7,7 +7,6 @@ from unittest.mock import MagicMock
 from ouroboros.consolidator import (
     should_consolidate,
     consolidate,
-    migrate_dialogue_summary_to_blocks,
     _load_meta,
     _save_meta,
     _count_lines,
@@ -140,7 +139,7 @@ def test_load_save_blocks(tmp_path):
     assert loaded[0]["content"] == "test"
 
 
-def test_migrate_dialogue_summary(tmp_path):
+def test_dialogue_summary_markdown_no_longer_auto_migrates(tmp_path):
     summary_path = tmp_path / "dialogue_summary.md"
     blocks_path = tmp_path / "dialogue_blocks.json"
 
@@ -150,21 +149,15 @@ def test_migrate_dialogue_summary(tmp_path):
         encoding="utf-8",
     )
 
-    migrate_dialogue_summary_to_blocks(summary_path, blocks_path)
-
-    assert blocks_path.exists()
-    blocks = json.loads(blocks_path.read_text())
-    assert len(blocks) == 2
-    assert blocks[0]["type"] == "summary"
-    assert blocks[1]["type"] == "era"
+    assert summary_path.exists()
+    assert not blocks_path.exists()
 
 
-def test_migrate_skips_if_blocks_exist(tmp_path):
+def test_existing_dialogue_blocks_remain_authoritative(tmp_path):
     summary_path = tmp_path / "dialogue_summary.md"
     blocks_path = tmp_path / "dialogue_blocks.json"
 
     summary_path.write_text("### Episode: test\nContent.", encoding="utf-8")
     blocks_path.write_text("[]", encoding="utf-8")
 
-    migrate_dialogue_summary_to_blocks(summary_path, blocks_path)
     assert json.loads(blocks_path.read_text()) == []

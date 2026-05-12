@@ -360,9 +360,10 @@ Payload data access is scoped to the selected non-native skill under
 `data/skills/ouroboroshub/<skill>/`. Marketplace/official provenance
 sidecars inside those payload roots (`.clawhub.json`, `.ouroboroshub.json`)
 remain control-plane state and are not writable from Repair mode. User-managed
-payloads accidentally left under `data/skills/native/` are migrated into
-`external/`; the Repair guard still does not grant write access to true native
-launcher-seeded skills.
+payloads accidentally left under `data/skills/native/` are blocked with an
+actionable manual-upgrade error; move them to `data/skills/external/` or
+reinstall them. The Repair guard still does not grant write access to true
+native launcher-seeded skills.
 
 ### Output contract
 

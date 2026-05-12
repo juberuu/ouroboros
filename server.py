@@ -1444,15 +1444,11 @@ async def api_settings_post(request: Request) -> JSONResponse:
         _repo_slug = current.get("GITHUB_REPO", "")
         _gh_token = current.get("GITHUB_TOKEN", "")
         if _repo_slug and _gh_token:
-            from supervisor.git_ops import configure_remote, migrate_remote_credentials
+            from supervisor.git_ops import configure_remote
             remote_ok, remote_msg = configure_remote(_repo_slug, _gh_token)
             if not remote_ok:
                 log.warning("Remote configuration failed on settings save: %s", remote_msg)
                 warnings.append(f"Remote config failed: {remote_msg}")
-            else:
-                mig_ok, mig_msg = migrate_remote_credentials()
-                if not mig_ok:
-                    log.warning("Credential migration failed: %s", mig_msg)
         immediate_changed = [k for k in all_changed if k in _IMMEDIATE_KEYS]
         next_task_changed = [
             k for k in all_changed
@@ -2025,8 +2021,6 @@ async def lifespan(app):
         else:
             from ouroboros.launcher_bootstrap import ensure_data_skills_seeded
             ensure_data_skills_seeded()
-            from ouroboros.skill_migrations import migrate_unseeded_native_skills_to_external
-            migrate_unseeded_native_skills_to_external()
     except Exception:
         log.warning("Native skills bootstrap failed", exc_info=True)
 

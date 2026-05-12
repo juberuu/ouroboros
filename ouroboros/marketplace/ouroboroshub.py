@@ -18,7 +18,7 @@ from ouroboros.marketplace.fetcher import FetchError
 from ouroboros.marketplace.install_specs import install_specs_hash
 from ouroboros.skill_dependencies import normalize_declared_dependency_specs
 from ouroboros.skill_loader import _sanitize_skill_name
-from ouroboros.utils import utc_now_iso
+from ouroboros.utils import atomic_write_json, utc_now_iso
 
 
 _MAX_CATALOG_BYTES = 2 * 1024 * 1024
@@ -272,10 +272,7 @@ def install(slug: str, *, overwrite: bool = False) -> HubInstallResult:
                 "raw": raw_install,
                 "specs_hash": install_specs_hash(auto_specs),
             }
-        (staging / ".ouroboroshub.json").write_text(
-            json.dumps(provenance, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        atomic_write_json(staging / ".ouroboroshub.json", provenance, trailing_newline=True)
         _land_atomic(staging, target_dir)
         return HubInstallResult(ok=True, sanitized_name=sanitized, target_dir=target_dir, summary=summary, provenance=provenance)
     except Exception as exc:

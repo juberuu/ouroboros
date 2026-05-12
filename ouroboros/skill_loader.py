@@ -315,11 +315,8 @@ def is_self_authored_skill_dir(
     """Return True when a skill carries the agent-authored provenance marker."""
     skill_dir = pathlib.Path(skill_dir)
     marker = skill_dir / SELF_AUTHORED_MARKER_FILENAME
-    if not marker.is_file():
-        return False
-    try:
-        data = json.loads(marker.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    data = read_json_dict(marker)
+    if data is None:
         return False
     try:
         payload_schema = int(data.get("schema_version") or 0)
@@ -336,8 +333,10 @@ def is_self_authored_skill_dir(
             from ouroboros.config import DATA_DIR
             drive_root = pathlib.Path(DATA_DIR)
         state_marker = pathlib.Path(drive_root) / "state" / "skills" / _sanitize_skill_name(skill_dir.name) / "self_authored.json"
-        state_data = json.loads(state_marker.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        state_data = read_json_dict(state_marker)
+    except OSError:
+        return False
+    if state_data is None:
         return False
     try:
         state_schema = int(state_data.get("schema_version") or 0)

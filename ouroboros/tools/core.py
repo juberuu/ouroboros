@@ -13,7 +13,7 @@ import uuid
 from typing import Any, Dict, List, Tuple
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.utils import read_text, safe_relpath, utc_now_iso
+from ouroboros.utils import atomic_write_json, read_text, safe_relpath, utc_now_iso
 from ouroboros.contracts.task_constraint import normalize_task_constraint, resolve_payload_path
 from ouroboros.contracts.skill_payload_policy import (
     SKILL_PAYLOAD_ALL_BUCKETS,
@@ -549,16 +549,10 @@ def _data_write(
             "created_by_tool": "data_write",
             "initial_content_hash": initial_hash,
         }
-        marker_path.write_text(
-            json.dumps(marker_payload_data, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        atomic_write_json(marker_path, marker_payload_data, trailing_newline=True)
         state_marker = pathlib.Path(ctx.drive_root) / "state" / "skills" / marker_payload[1] / "self_authored.json"
         state_marker.parent.mkdir(parents=True, exist_ok=True)
-        state_marker.write_text(
-            json.dumps(marker_payload_data, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        atomic_write_json(state_marker, marker_payload_data, trailing_newline=True)
     return f"OK: wrote {mode} {path} ({len(content)} chars)"
 
 

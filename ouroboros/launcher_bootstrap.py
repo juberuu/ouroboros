@@ -355,36 +355,6 @@ def sync_existing_repo_from_bundle(context: BootstrapContext) -> None:
     context.log.info("Managed repo sync outcome: %s", outcome)
 
 
-def _migrate_old_settings(context: BootstrapContext) -> None:
-    """Migrate old env-only installs into settings.json on first modern boot."""
-    if context.settings_path.exists():
-        return
-
-    migrated = {}
-    env_keys = [
-        "OPENROUTER_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL",
-        "OPENAI_COMPATIBLE_API_KEY", "OPENAI_COMPATIBLE_BASE_URL",
-        "CLOUDRU_FOUNDATION_MODELS_API_KEY", "CLOUDRU_FOUNDATION_MODELS_BASE_URL",
-        "ANTHROPIC_API_KEY",
-        "OUROBOROS_NETWORK_PASSWORD", "OUROBOROS_FILE_BROWSER_DEFAULT",
-        "OUROBOROS_MODEL", "OUROBOROS_MODEL_CODE", "OUROBOROS_MODEL_LIGHT",
-        "OUROBOROS_MODEL_FALLBACK", "TOTAL_BUDGET", "OUROBOROS_MAX_WORKERS",
-        "OUROBOROS_SOFT_TIMEOUT_SEC", "OUROBOROS_HARD_TIMEOUT_SEC",
-        "GITHUB_TOKEN", "GITHUB_REPO",
-    ]
-    for key in env_keys:
-        val = os.environ.get(key, "")
-        if val:
-            migrated[key] = val
-    if not migrated:
-        return
-    try:
-        context.save_settings(migrated)
-        context.log.info("Migrated %d env settings into %s", len(migrated), context.settings_path)
-    except Exception as exc:
-        context.log.warning("Failed to migrate old settings: %s", exc)
-
-
 def install_deps(context: BootstrapContext) -> None:
     """Install/update Python deps inside the embedded interpreter."""
     try:
@@ -952,7 +922,6 @@ def bootstrap_repo(context: BootstrapContext) -> None:
     except Exception as exc:
         context.log.warning("World profile generation failed: %s", exc)
 
-    _migrate_old_settings(context)
     bootstrap_native_skills(context)
     if outcome != "unchanged":
         install_deps(context)
