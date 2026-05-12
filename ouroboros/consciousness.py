@@ -293,7 +293,7 @@ class BackgroundConsciousness:
                     model=model,
                     tools=tools,
                     reasoning_effort=resolve_effort("consciousness"),
-                    max_tokens=4096,
+                    max_tokens=65536,
                     use_local=_use_local_light,
                 )
                 cost = float(usage.get("cost") or 0)

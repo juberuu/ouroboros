@@ -278,7 +278,7 @@ Create a detailed episodic memory entry from these {message_count} messages.
             model=CONSOLIDATION_MODEL,
             tools=None,
             reasoning_effort="low",
-            max_tokens=4096,
+            max_tokens=16384,
         )
         return response_msg.get("content", ""), usage
     except Exception as e:
@@ -326,7 +326,7 @@ Write as Ouroboros (first person). Aim for 30-40% of original length.
             model=CONSOLIDATION_MODEL,
             tools=None,
             reasoning_effort="low",
-            max_tokens=4096,
+            max_tokens=16384,
         )
         content = msg.get("content", "")
         if not content or not content.strip():
@@ -593,7 +593,7 @@ Respond with JSON only (no fences):
             messages=[{"role": "user", "content": prompt}],
             model=CONSOLIDATION_MODEL,
             reasoning_effort="low",
-            max_tokens=4096,
+            max_tokens=16384,
         )
         raw = (msg.get("content") or "").strip()
         if raw.startswith("```"):

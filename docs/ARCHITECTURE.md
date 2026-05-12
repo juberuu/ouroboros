@@ -1,4 +1,4 @@
-# Ouroboros v5.19.0-rc.2 — Architecture & Reference
+# Ouroboros v5.19.0-rc.3 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -1638,6 +1638,26 @@ Single source of truth for:
   `acquire_pid_lock()`, `release_pid_lock()`
 
 Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent access.
+
+### LLM output token budgets
+
+Ouroboros uses provider-specific names for the same output-token budget:
+OpenRouter/Anthropic-compatible calls send `max_tokens`; direct OpenAI GPT-5
+calls send `max_completion_tokens` through `LLMClient._build_remote_kwargs`.
+Runtime floors:
+
+| Surface | Output-token budget |
+|---------|---------------------|
+| `LLMClient.chat()` / `chat_async()` defaults | 65,536 |
+| Main task loop (`loop_llm_call.MAIN_LOOP_MAX_TOKENS`) | 65,536 |
+| `LLMClient.vision_query()` and VLM tools (`analyze_screenshot`, `vlm_query`) | 32,768 |
+| Review synthesis dedup | 16,384 |
+| Chat block consolidation, era compression, scratchpad consolidation | 16,384 |
+| Execution reflection and pattern-register update | 16,384 |
+| Task summary and chat/history summary tool | 16,384 |
+| Context compaction round summaries | 32,768 |
+| Skill publish PR body generation | 8,192 |
+| Background consciousness loop | 65,536 |
 
 ### Default settings
 

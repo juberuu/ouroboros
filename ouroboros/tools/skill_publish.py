@@ -391,7 +391,7 @@ def _generate_pr_body(
             messages=[{"role": "user", "content": prompt}],
             model=model,
             reasoning_effort="low",
-            max_tokens=1200,
+            max_tokens=8192,
             use_local=os.environ.get("USE_LOCAL_LIGHT", "").lower() in ("true", "1"),
         )
         if usage:

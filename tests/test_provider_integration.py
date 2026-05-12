@@ -110,7 +110,7 @@ def _skip_on_provider_environmental_error(provider_id: str, exc: BaseException) 
 def test_provider_basic_chat(provider_id, env_key, model, expected_provider):
     """Verify each provider responds to a minimal chat request.
 
-    Uses explicit ``max_tokens=1024`` rather than the chat() default (16384)
+    Uses explicit ``max_tokens=1024`` rather than the chat() default (65536)
     because some direct provider model variants cap output below the
     default and reject the request with HTTP 400. This is a routing smoke;
     a low token budget is sufficient for "Respond with exactly: OK".

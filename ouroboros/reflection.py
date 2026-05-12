@@ -293,7 +293,7 @@ def generate_reflection(
             messages=[{"role": "user", "content": prompt}],
             model=light_model,
             reasoning_effort="low",
-            max_tokens=4096,
+            max_tokens=16384,
         )
         raw_reflection_text = (resp_msg.get("content") or "").strip()
 
@@ -447,7 +447,7 @@ def _update_patterns(drive_root: pathlib.Path, entry: Dict[str, Any]) -> None:
         messages=[{"role": "user", "content": prompt}],
         model=light_model,
         reasoning_effort="low",
-        max_tokens=4096,
+        max_tokens=16384,
     )
     # Track cost directly (bypass ctx.pending_events) — pattern update runs
     # outside the main tool-event loop and has no pending_events reference.

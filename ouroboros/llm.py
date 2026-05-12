@@ -518,7 +518,7 @@ class LLMClient:
         model: str,
         tools: Optional[List[Dict[str, Any]]] = None,
         reasoning_effort: str = "medium",
-        max_tokens: int = 16384,
+        max_tokens: int = 65536,
         tool_choice: str = "auto",
         use_local: bool = False,
         temperature: Optional[float] = None,
@@ -550,7 +550,7 @@ class LLMClient:
         model: str,
         tools: Optional[List[Dict[str, Any]]] = None,
         reasoning_effort: str = "medium",
-        max_tokens: int = 16384,
+        max_tokens: int = 65536,
         tool_choice: str = "auto",
         temperature: Optional[float] = None,
         no_proxy: bool = False,
@@ -1479,7 +1479,7 @@ class LLMClient:
         prompt: str,
         images: List[Dict[str, Any]],
         model: str = "anthropic/claude-sonnet-4.6",
-        max_tokens: int = 4096,
+        max_tokens: int = 32768,
         reasoning_effort: str = "none",
     ) -> Tuple[str, Dict[str, Any]]:
         """

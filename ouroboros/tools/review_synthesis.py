@@ -297,12 +297,12 @@ def _call_synthesis_llm(prompt: str, *, ctx: Any = None) -> Optional[str]:
         # LLMClient() has no model/queue constructor args — those go to .chat()
         client = LLMClient()
 
-        # Low reasoning effort, small token budget — cheap dedup call.
+        # Low reasoning effort, bounded but generous token budget for dedup.
         # no_proxy=True is fork-safe (avoids SCDynamicStore in worker processes).
         msg, usage = client.chat(
             messages=[{"role": "user", "content": prompt}],
             model=model,
-            max_tokens=2048,
+            max_tokens=16384,
             reasoning_effort="low",
             no_proxy=True,
         )

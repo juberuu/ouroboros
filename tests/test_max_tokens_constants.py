@@ -21,12 +21,47 @@ def test_scope_review_max_tokens():
     assert _SCOPE_MAX_TOKENS >= 100_000
 
 
-# Removed in v5.15.x: test_reflection_generate_max_tokens, test_consciousness_max_tokens,
-# test_compaction_max_tokens, test_vision_query_default_max_tokens.
-# All four were single-line `"max_tokens=N" in src` literal pins. The real
-# contract — sufficient output budget for the LLM call — is exercised
-# behaviorally by the reflection / consciousness / compaction / vision
-# integration tests that produce non-truncated output.
+def test_llm_client_default_max_tokens():
+    """Main remote chat defaults must leave enough output room for long tool plans."""
+    import inspect
+    from ouroboros.llm import LLMClient
+
+    assert inspect.signature(LLMClient.chat).parameters["max_tokens"].default >= 65_536
+    assert inspect.signature(LLMClient.chat_async).parameters["max_tokens"].default >= 65_536
+
+
+def test_main_loop_explicit_max_tokens():
+    """The task loop must pin the same 64K output budget even if client defaults move."""
+    from ouroboros.loop_llm_call import MAIN_LOOP_MAX_TOKENS
+
+    assert MAIN_LOOP_MAX_TOKENS >= 65_536
+
+
+def test_vision_query_default_max_tokens():
+    """VLM tools inherit the shared vision_query output budget."""
+    import inspect
+    from ouroboros.llm import LLMClient
+
+    assert inspect.signature(LLMClient.vision_query).parameters["max_tokens"].default >= 32_768
+
+
+def test_summary_and_background_token_budgets():
+    """Summary/reflection/background paths must stay above the raised floors."""
+    from pathlib import Path
+
+    expectations = {
+        "ouroboros/tools/review_synthesis.py": "max_tokens=16384",
+        "ouroboros/consolidator.py": "max_tokens=16384",
+        "ouroboros/reflection.py": "max_tokens=16384",
+        "ouroboros/agent_task_pipeline.py": "max_tokens=16384",
+        "ouroboros/tools/core.py": "max_tokens=16384",
+        "ouroboros/context_compaction.py": "max_tokens=32768",
+        "ouroboros/tools/skill_publish.py": "max_tokens=8192",
+        "ouroboros/consciousness.py": "max_tokens=65536",
+    }
+    for path, needle in expectations.items():
+        src = Path(path).read_text(encoding="utf-8").replace(" ", "")
+        assert needle in src, f"{path} must contain {needle}"
 
 
 def test_claude_code_edit_sdk_max_turns():

@@ -22,6 +22,8 @@ from ouroboros.utils import emit_log_event, utc_now_iso, append_jsonl
 
 log = logging.getLogger(__name__)
 
+MAIN_LOOP_MAX_TOKENS = 65_536
+
 
 def _emit_live_log(event_queue: Optional[queue.Queue], payload: Dict[str, Any]) -> None:
     """Thin wrapper around the SSOT helper — keeps the call-site signature stable."""
@@ -78,8 +80,13 @@ def call_llm_with_retry(
                 "reasoning_effort": effort,
                 "use_local": bool(use_local),
             })
-            kwargs = {"messages": messages, "model": model, "reasoning_effort": effort,
-                      "use_local": use_local}
+            kwargs = {
+                "messages": messages,
+                "model": model,
+                "reasoning_effort": effort,
+                "max_tokens": MAIN_LOOP_MAX_TOKENS,
+                "use_local": use_local,
+            }
             if tools:
                 kwargs["tools"] = tools
             resp_msg, usage = llm.chat(**kwargs)
