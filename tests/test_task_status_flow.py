@@ -117,7 +117,11 @@ def test_request_restart_latches_reason_until_task_end(tmp_path, monkeypatch):
 
     monkeypatch.setattr(control_module, "run_cmd", lambda *args, **kwargs: "value")
     written = {}
-    monkeypatch.setattr(control_module, "write_text", lambda path, text: written.setdefault(str(path), text))
+    monkeypatch.setattr(
+        control_module,
+        "atomic_write_json",
+        lambda path, payload: written.setdefault(str(path), payload),
+    )
 
     class _Ctx:
         current_task_type = "task"
