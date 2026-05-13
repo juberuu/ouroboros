@@ -525,11 +525,11 @@ def _check_advisory_freshness(ctx: ToolContext, commit_message: str,
                 "open_debts_count": len(open_debts),
                 "open_obligations": [
                     f"[{o.obligation_id}] {o.item}: {_truncate_review_reason(o.reason, limit=120)}"
-                    for o in open_obs[:5]
+                    for o in open_obs
                 ],
                 "open_debts": [
                     f"[{debt.debt_id}] {debt.category}: {_truncate_review_reason(debt.summary, limit=120)}"
-                    for debt in open_debts[:5]
+                    for debt in open_debts
                 ],
             }
             if append_jsonl(drive_logs / "events.jsonl", event):

@@ -595,6 +595,27 @@ def test_advisory_obligations_acknowledged_under_advisory_enforcement(tmp_path, 
             "reason": "missing tests",
         }],
     ))
+    state.open_obligations = [
+        rs_mod.ObligationItem(
+            obligation_id=f"obl-{idx:04d}",
+            item=f"item_{idx}",
+            severity="critical",
+            reason=f"missing tests {idx}",
+            source_attempt_ts="2026-01-01T00:05:00",
+            source_attempt_msg="blocked commit",
+            repo_key=repo_key,
+        )
+        for idx in range(1, 7)
+    ]
+    state.commit_readiness_debts = [
+        rs_mod.CommitReadinessDebtItem(
+            debt_id=f"crd-{idx:04d}",
+            category=f"category_{idx}",
+            summary=f"readiness debt {idx}",
+            repo_key=repo_key,
+        )
+        for idx in range(1, 7)
+    ]
     assert state.get_open_obligations(repo_key=repo_key)
     assert state.get_open_commit_readiness_debts(repo_key=repo_key)
     rs_mod.save_state(drive_root, state)
@@ -619,10 +640,12 @@ def test_advisory_obligations_acknowledged_under_advisory_enforcement(tmp_path, 
     event = [item for item in events if item.get("type") == "advisory_obligations_acknowledged"][0]
     assert event["snapshot_hash"] == snapshot_hash
     assert event["repo_key"] == repo_key
-    assert event["open_obligations_count"] >= 1
-    assert event["open_debts_count"] >= 1
-    assert event["open_obligations"]
-    assert event["open_debts"]
+    assert event["open_obligations_count"] == 6
+    assert event["open_debts_count"] >= 6
+    assert len(event["open_obligations"]) == event["open_obligations_count"]
+    assert len(event["open_debts"]) == event["open_debts_count"]
+    assert any("obl-0006" in item for item in event["open_obligations"])
+    assert any("crd-0006" in item for item in event["open_debts"])
 
 
 def test_advisory_freshness_is_repo_scoped(tmp_path):
