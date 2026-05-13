@@ -222,6 +222,20 @@ def test_review_result_message_includes_auto_granted_keys(monkeypatch):
     )
 
 
+def test_review_result_message_includes_auto_granted_permissions(monkeypatch):
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    outcome = SkillReviewOutcome(
+        skill_name="alpha",
+        status="pass",
+        findings=[{"item": "manifest_schema", "verdict": "PASS", "reason": "ok"}],
+        auto_granted_permissions=["inject_chat"],
+    )
+
+    assert _review_result_message(outcome).endswith(
+        "| auto-granted: permissions: inject_chat"
+    )
+
+
 def test_self_authored_review_lifecycle_uses_triad(tmp_path, monkeypatch):
     _reset_queue()
     sent = []

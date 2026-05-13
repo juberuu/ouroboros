@@ -681,9 +681,17 @@ def _review_result_message(outcome: Any) -> str:
     else:
         prefix = "Review pending"
     base = f"{prefix} ({status}){f': {summary}' if summary else ''}"
-    auto_granted = list(getattr(outcome, "auto_granted_keys", []) or [])
-    if auto_granted:
-        base = base + f" | auto-granted: {', '.join(auto_granted)}"
+    auto_granted_keys = list(getattr(outcome, "auto_granted_keys", []) or [])
+    auto_granted_permissions = list(getattr(outcome, "auto_granted_permissions", []) or [])
+    if auto_granted_keys or auto_granted_permissions:
+        auto_parts: list[str] = []
+        if auto_granted_keys and not auto_granted_permissions:
+            auto_parts.append(", ".join(auto_granted_keys))
+        elif auto_granted_keys:
+            auto_parts.append(f"keys: {', '.join(auto_granted_keys)}")
+        if auto_granted_permissions:
+            auto_parts.append(f"permissions: {', '.join(auto_granted_permissions)}")
+        base = base + f" | auto-granted: {'; '.join(auto_parts)}"
     return base
 
 
