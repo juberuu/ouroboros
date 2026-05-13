@@ -64,6 +64,15 @@ def test_settings_secrets_are_generic_and_integrations_tab_removed():
     assert "Source Control" in ui
 
 
+def test_settings_scope_review_effort_round_trips():
+    ui = _read("web/modules/settings_ui.js")
+    settings = _read("web/modules/settings.js")
+    assert "s-effort-scope-review" in ui
+    assert "OUROBOROS_EFFORT_SCOPE_REVIEW" in settings
+    assert "byId('s-effort-scope-review').value = s.OUROBOROS_EFFORT_SCOPE_REVIEW" in settings
+    assert "OUROBOROS_EFFORT_SCOPE_REVIEW: byId('s-effort-scope-review').value" in settings
+
+
 def test_skills_and_widgets_use_inner_scroll_regions():
     skills = _read("web/modules/skills.js")
     widgets = _read("web/modules/widgets.js")

@@ -39,12 +39,30 @@ class TestAdvisoryUsageEmit:
     def test_emit_routes_to_pending_events(self):
         fn = self._get_fn()
         ctx = _FakeCtx()
-        fn(ctx, "anthropic/claude-opus-4.6", 1.23, {"prompt_tokens": 100, "completion_tokens": 50})
+        fn(
+            ctx,
+            "anthropic/claude-opus-4.6",
+            1.23,
+            {
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "cache_read_input_tokens": 20,
+                "cache_creation_input_tokens": 10,
+            },
+            session_id="sess-1",
+            prompt_chars=1234,
+        )
         assert len(ctx.pending_events) == 1
         ev = ctx.pending_events[0]
         assert ev["type"] == "llm_usage"
         assert ev["model"] == "anthropic/claude-opus-4.6"
         assert ev["usage"]["cost"] == 1.23
+        assert ev["usage"]["prompt_tokens"] == 100
+        assert ev["usage"]["completion_tokens"] == 50
+        assert ev["usage"]["cached_tokens"] == 20
+        assert ev["usage"]["cache_write_tokens"] == 10
+        assert ev["session_id"] == "sess-1"
+        assert ev["prompt_chars"] == 1234
 
     def test_emit_uses_event_queue_when_available(self):
         fn = self._get_fn()
@@ -442,7 +460,7 @@ class TestAdvisoryCallSiteCostTracking:
         fake_result.success = True
         fake_result.result_text = '[{"item":"bible_compliance","verdict":"PASS","reason":"ok","severity":"critical"}]'
         fake_result.cost_usd = 1.75
-        fake_result.usage = {"prompt_tokens": 400, "completion_tokens": 150}
+        fake_result.usage = {"input_tokens": 400, "output_tokens": 150}
         fake_result.error = None
         fake_result.stderr_tail = ""
         fake_result.session_id = "test-session"

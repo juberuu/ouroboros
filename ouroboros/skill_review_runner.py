@@ -415,6 +415,7 @@ def _outcome_payload(
         "reviewer_models": outcome.reviewer_models,
         "findings": outcome.findings,
         "raw_actor_records": list(getattr(outcome, "raw_actor_records", []) or []),
+        "advisory_result": dict(getattr(outcome, "advisory_result", {}) or {}),
         "error": outcome.error,
         "review_gate": gate,
         "executable_review": gate["executable_review"],

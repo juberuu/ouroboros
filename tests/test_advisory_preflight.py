@@ -171,7 +171,6 @@ class TestPreflightGatesBeforeSDK:
             goal="",
             scope="",
             paths=None,
-            drive_root=None,
         )
 
         assert sdk_called["n"] == 0, "SDK was unexpectedly invoked"
@@ -250,7 +249,6 @@ class TestPreflightGatesBeforeSDK:
             goal="",
             scope="",
             paths=None,
-            drive_root=None,
         )
 
         assert sdk_called["n"] == 1, "SDK should have been invoked for valid .py"

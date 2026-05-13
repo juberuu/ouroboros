@@ -44,6 +44,34 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 # path, so a number bump there does not silently desync from the real gate.
 REVIEW_PROMPT_TOKEN_BUDGET = 850_000
 
+SKILL_HOST_CONTEXT_FILES = (
+    ("docs/CREATING_SKILLS.md", "markdown"),
+    ("ouroboros/contracts/plugin_api.py", "python"),
+    ("ouroboros/extension_ui_validation.py", "python"),
+)
+
+
+def build_skill_host_context(repo_dir: Path | None = None) -> str:
+    """Return minimal host-side skill/widget contract context for reviewers.
+
+    This is deliberately smaller than the full extension loader + widget host.
+    It gives reviewers the practical authoring guide, PluginAPI contract, and
+    declarative widget validator without injecting large implementation files
+    into every skill review.
+    """
+    root = Path(repo_dir) if repo_dir is not None else REPO_ROOT
+    parts = [
+        "## Host skill/widget contract context\n",
+        (
+            "These files are host-side contracts and guidelines used to judge the "
+            "skill payload. They are not part of the reviewed skill package.\n"
+        ),
+    ]
+    for rel_path, language in SKILL_HOST_CONTEXT_FILES:
+        text = load_governance_doc(root, rel_path, on_missing="explicit")
+        parts.append(f"### {rel_path}\n\n{format_prompt_code_block(text, language)}")
+    return "\n\n".join(parts)
+
 
 def load_governance_doc(
     repo_dir: Path,

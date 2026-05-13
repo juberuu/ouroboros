@@ -184,6 +184,7 @@ class AdvisoryRunRecord:
     readiness_warnings: List[str] = field(default_factory=list)
     prompt_chars: int = 0
     model_used: str = ""
+    session_id: str = ""
     duration_sec: float = 0.0
 @dataclass
 class CommitAttemptRecord:
@@ -1229,6 +1230,7 @@ def _record_from_dict(d: Dict[str, Any]) -> AdvisoryRunRecord:
         readiness_warnings=[str(x) for x in (d.get("readiness_warnings") or [])],
         prompt_chars=int(d.get("prompt_chars", 0) or 0),
         model_used=str(d.get("model_used", "")),
+        session_id=str(d.get("session_id", "")),
         duration_sec=float(d.get("duration_sec", 0.0) or 0.0),
     )
 

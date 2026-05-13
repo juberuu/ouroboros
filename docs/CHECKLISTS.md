@@ -389,7 +389,7 @@ total). Each entry carries `item`, `verdict` (`PASS`/`FAIL`), `severity`
 | 12 | host_token_handling | If the skill calls the Host Service API, does it use the provided `SkillToken.use_in_request()` only at request construction sites, avoid logging/serializing tokens, and keep all host-service calls on the loopback endpoint? Printing, persisting, exfiltrating, or embedding the token into user-visible output is a concrete FAIL. Mark PASS with reason "Not applicable" when the skill does not access the Host Service API. | critical |
 | 13 | error_handling | Does the skill surface actionable errors instead of swallowing exceptions, returning success on partial failure, or leaving users to inspect raw logs manually? Are retry/backoff paths bounded and purpose-specific? | advisory |
 | 14 | integration_preflight | Does the skill include cheap local preflight checks for the APIs/files/runtimes it depends on before spending provider budget or starting long work? Missing preflight for fragile external integrations is an advisory FAIL. | advisory |
-| 15 | bug_hunting | Are there obvious runtime bugs in reviewed code: wrong filenames, mismatched manifest script names, missing imports, impossible arguments, JSON/schema mismatches, blocking calls in async handlers, or untested happy-path assumptions? Concrete likely breakage is an advisory FAIL even when the security surface is acceptable. | advisory |
+| 15 | bug_hunting | Are there obvious runtime bugs in reviewed code: wrong filenames, mismatched manifest script names, missing imports, impossible arguments, JSON/schema mismatches, blocking calls in async handlers, or untested happy-path assumptions? For every FAIL, cite the concrete runtime bug and state how you propose to fix it (file/symbol/change), so the author can apply the correction instead of guessing. | critical |
 | 16 | completion_notification | For long-running or user-visible work, does the skill emit or document a completion/failure notification path (for example a host event, `events.jsonl` append, or clear stdout marker consumed by Ouroboros)? Mark PASS with reason "Not applicable" for tiny synchronous utilities. | advisory |
 
 ### Severity rules
@@ -418,6 +418,9 @@ total). Each entry carries `item`, `verdict` (`PASS`/`FAIL`), `severity`
 - Items 9–12 are critical only when their corresponding capability is
   declared or used. Reviewers MUST mark them PASS with reason "Not
   applicable" for skills outside that surface.
+- Item 15 (`bug_hunting`) is critical: concrete likely runtime breakage
+  blocks execution until the skill payload is fixed or the finding is
+  rebutted with evidence.
 
 ### Critical threshold rule (applies to ALL items)
 

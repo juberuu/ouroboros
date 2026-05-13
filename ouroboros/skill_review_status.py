@@ -43,6 +43,7 @@ CRITICAL_ITEMS = frozenset({
     "event_subscription_minimization",
     "companion_process_safety",
     "host_token_handling",
+    "bug_hunting",
 })
 
 

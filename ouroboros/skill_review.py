@@ -46,6 +46,7 @@ from ouroboros.tools.review_helpers import (
     build_anti_thrashing_rules_section,
     build_rebuttal_section,
     build_self_verification_template,
+    build_skill_host_context,
     format_obligation_excerpt,
     format_prompt_code_block,
     load_checklist_section,
@@ -213,6 +214,7 @@ class SkillReviewOutcome:
     cost_usd: float = 0.0
     raw_result: str = ""
     raw_actor_records: List[Dict[str, Any]] = field(default_factory=list)
+    advisory_result: Dict[str, Any] = field(default_factory=dict)
     convergence_hint: str = ""
     error: str = ""
 
@@ -628,6 +630,7 @@ def render_skill_review_block(
     error = str(_field("error") or "")
     convergence = str(_field("convergence_hint") or "")
     raw_actor_records = list(_field("raw_actor_records") or [])
+    advisory_result = _field("advisory_result") or {}
 
     lines: List[str] = []
     headline_marker = {
@@ -643,6 +646,17 @@ def render_skill_review_block(
         lines.append(f"content_hash={content_hash[:12]}")
     if reviewer_models:
         lines.append(f"Reviewers: {', '.join(reviewer_models)}")
+    if isinstance(advisory_result, dict) and advisory_result:
+        advisory_status = str(advisory_result.get("status") or "")
+        advisory_model = str(advisory_result.get("model") or "")
+        advisory_session = str(advisory_result.get("session_id") or "")
+        pieces = [p for p in (advisory_status, advisory_model, advisory_session) if p]
+        lines.append(
+            "Claude advisory: "
+            + (", ".join(pieces) if pieces else "recorded")
+        )
+        if advisory_result.get("error"):
+            lines.append(f"Claude advisory warning: {advisory_result.get('error')}")
     if error:
         lines.append(f"Error: {error}")
     lines.append("")
@@ -857,6 +871,7 @@ def _build_review_prompt(
     architecture_text = _load_governance_artifact(_REPO_ROOT, "docs/ARCHITECTURE.md")
     development_text = _load_governance_artifact(_REPO_ROOT, "docs/DEVELOPMENT.md")
     bible_text = _load_governance_artifact(_REPO_ROOT, "BIBLE.md")
+    skill_host_context = build_skill_host_context(_REPO_ROOT)
     items_json = json.dumps(list(_SKILL_REVIEW_ITEMS))
     advisory_section = ""
     if advisory_notes.strip():
@@ -921,6 +936,8 @@ contradicts the runtime's constitutional commitments.
 
 {bible_text}
 
+{skill_host_context}
+
 ## Skill files (every runtime-reachable file in skill_dir, text-only)
 
 {file_pack}
@@ -949,10 +966,36 @@ Rules:
   "Not applicable — type != extension".
 - Base every critical FAIL on a concrete file/line you can quote from
   the skill pack. Do not invent violations.
+- For every FAIL, include a concrete proposed fix (file/symbol/change)
+  so the skill author knows how to correct it.
 """
 
 
-def _run_skill_advisory_pre_review(ctx: Any, *, skill_name: str, file_pack: str) -> str:
+def _emit_skill_advisory_warning(
+    ctx: Any,
+    *,
+    skill_name: str,
+    status: str,
+    error: str,
+    model: str = "",
+    session_id: str = "",
+) -> None:
+    try:
+        drive_root = pathlib.Path(getattr(ctx, "drive_root", _REPO_ROOT) or _REPO_ROOT)
+        append_jsonl(drive_root / "logs" / "events.jsonl", {
+            "ts": utc_now_iso(),
+            "type": "skill_advisory_pre_review_warning",
+            "skill": skill_name,
+            "status": status,
+            "error": error,
+            "model": model,
+            "session_id": session_id,
+        })
+    except Exception:
+        log.debug("skill advisory warning event failed", exc_info=True)
+
+
+def _run_skill_advisory_pre_review(ctx: Any, *, skill_name: str, file_pack: str) -> Dict[str, Any]:
     """Best-effort Claude Code advisory notes for a skill payload.
 
     This deliberately fails open. The tri-model skill review remains the trust
@@ -962,14 +1005,14 @@ def _run_skill_advisory_pre_review(ctx: Any, *, skill_name: str, file_pack: str)
     try:
         import os
         if not os.environ.get("ANTHROPIC_API_KEY", ""):
-            return ""
+            return {}
         if os.environ.get("PYTEST_CURRENT_TEST"):
-            return ""
+            return {}
         # Reuse the advisory-review module's routing/dependency surface without
         # inventing a second persistent advisory state machine for skills.
         from ouroboros.tools import claude_advisory_review as advisory
         if not hasattr(advisory, "_run_claude_advisory"):
-            return ""
+            return {}
         repo_dir = pathlib.Path(getattr(ctx, "repo_dir", _REPO_ROOT) or _REPO_ROOT)
         drive_root = pathlib.Path(getattr(ctx, "drive_root", repo_dir) or repo_dir)
         items, raw, model_used, _prompt_chars = advisory._run_claude_advisory(
@@ -982,25 +1025,70 @@ def _run_skill_advisory_pre_review(ctx: Any, *, skill_name: str, file_pack: str)
                 "Treat this as advisory only; do not write files."
             ),
             scope=file_pack,
-            drive_root=drive_root,
-            include_repo_diff=False,
+            options={
+                "drive_root": drive_root,
+                "include_repo_diff": False,
+                "review_surface": "skill",
+                "expected_items": list(_SKILL_REVIEW_ITEMS),
+            },
         )
+        meta = dict(getattr(ctx, "_last_claude_advisory_meta", {}) or {})
+        result: Dict[str, Any] = {
+            "status": "completed",
+            "model": model_used or meta.get("model", ""),
+            "session_id": str(meta.get("session_id") or ""),
+            "prompt_chars": int(_prompt_chars or meta.get("prompt_chars") or 0),
+            "items": list(items or []),
+            "raw_result": str(raw or ""),
+            "error": "",
+        }
+        if raw and str(raw).startswith("⚠️ ADVISORY_ERROR:"):
+            result["status"] = "error"
+            result["error"] = str(raw)
+            _emit_skill_advisory_warning(
+                ctx,
+                skill_name=skill_name,
+                status="error",
+                error=str(raw),
+                model=str(result.get("model") or ""),
+                session_id=str(result.get("session_id") or ""),
+            )
+            result["prompt_section"] = (
+                "\n\n## Optional Claude Code Advisory Pre-Review\n\n"
+                "⚠️ Claude Code advisory pre-review failed; tri-model review continues.\n"
+                f"Error: {raw}\n"
+            )
+            return result
         if raw and not str(raw).startswith("⚠️ ADVISORY_ERROR:"):
             from ouroboros.utils import truncate_review_artifact
-            return (
+            result["prompt_section"] = (
                 "\n\n## Optional Claude Code Advisory Pre-Review\n\n"
                 f"Model: {model_used or 'claude-code'}\n\n"
                 + truncate_review_artifact(raw, limit=20_000)
             )
+            return result
         if items:
             from ouroboros.utils import truncate_review_artifact
-            return (
+            result["prompt_section"] = (
                 "\n\n## Optional Claude Code Advisory Pre-Review\n\n"
                 + truncate_review_artifact(json.dumps(items, ensure_ascii=False, indent=2), limit=20_000)
             )
+            return result
     except Exception:
-        log.debug("skill advisory pre-review skipped", exc_info=True)
-    return ""
+        message = "Claude Code advisory pre-review failed; tri-model review continues"
+        log.warning("%s for %s", message, skill_name, exc_info=True)
+        _emit_skill_advisory_warning(
+            ctx, skill_name=skill_name, status="exception", error=message,
+        )
+        return {
+            "status": "error",
+            "error": message,
+            "prompt_section": (
+                "\n\n## Optional Claude Code Advisory Pre-Review\n\n"
+                f"⚠️ {message}.\n"
+            ),
+        }
+    return {"status": "empty", "prompt_section": ""}
 
 
 def _build_review_prompt_for_attempt(
@@ -1013,8 +1101,8 @@ def _build_review_prompt_for_attempt(
     file_pack: str,
     history: List[Dict[str, Any]],
     review_rebuttal: str,
-) -> str:
-    advisory_notes = _run_skill_advisory_pre_review(
+) -> tuple[str, Dict[str, Any]]:
+    advisory_evidence = _run_skill_advisory_pre_review(
         ctx, skill_name=skill.name, file_pack=file_pack,
     )
     accepted_rebuttals = _load_accepted_rebuttals(drive_root, skill.name)
@@ -1029,10 +1117,10 @@ def _build_review_prompt_for_attempt(
         manifest_dump=manifest_dump,
         content_hash=content_hash,
         file_pack=file_pack,
-        advisory_notes=advisory_notes,
+        advisory_notes=str(advisory_evidence.get("prompt_section") or ""),
         review_rebuttal=review_rebuttal,
         review_history_section=review_history_section,
-    )
+    ), advisory_evidence
 
 
 # ---------------------------------------------------------------------------
@@ -1247,7 +1335,7 @@ def review_skill(
     )
     if preflight_outcome is not None:
         return preflight_outcome
-    prompt = _build_review_prompt_for_attempt(
+    prompt, advisory_evidence = _build_review_prompt_for_attempt(
         ctx,
         drive_root,
         skill,
@@ -1317,6 +1405,7 @@ def review_skill(
             ),
             raw_result=_truncate_raw_result(result_json_text),
             raw_actor_records=[record.to_dict() for record in parsed_review.actor_records],
+            advisory_result=advisory_evidence,
         )
         if persist:
             _append_skill_review_history(
@@ -1343,6 +1432,7 @@ def review_skill(
         prompt_chars=len(prompt),
         raw_result=_truncate_raw_result(result_json_text),
         raw_actor_records=[record.to_dict() for record in parsed_review.actor_records],
+        advisory_result=advisory_evidence,
         convergence_hint=_convergence_hint(history, findings),
     )
 
@@ -1375,6 +1465,7 @@ def review_skill(
                 cost_usd=outcome.cost_usd,
                 raw_result=outcome.raw_result,
                 raw_actor_records=[record.to_dict() for record in parsed_review.actor_records],
+                advisory_result=dict(advisory_evidence or {}),
             ),
         )
         _append_skill_review_history(
@@ -1397,6 +1488,7 @@ def review_skill(
             cost_usd=outcome.cost_usd,
             raw_result=outcome.raw_result,
             raw_actor_records=[record.to_dict() for record in parsed_review.actor_records],
+            advisory_result=dict(advisory_evidence or {}),
         )
         auto_grant_if_enabled(drive_root, skill)
 

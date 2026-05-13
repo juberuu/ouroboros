@@ -39,10 +39,11 @@ def test_initial_effort_invalid_falls_back_to_medium(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_effort_defaults_in_config():
-    """All four effort keys have correct defaults in SETTINGS_DEFAULTS."""
+    """All effort keys have correct defaults in SETTINGS_DEFAULTS."""
     assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_TASK") == "medium"
     assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_EVOLUTION") == "high"
     assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_REVIEW") == "medium"
+    assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_SCOPE_REVIEW") == "high"
     assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_CONSCIOUSNESS") == "low"
 
 
@@ -254,11 +255,12 @@ def test_apply_settings_clears_review_enforcement_restores_default(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_apply_settings_to_env_includes_effort_keys():
-    """apply_settings_to_env propagates all four effort keys."""
+    """apply_settings_to_env propagates all effort keys."""
     settings = {
         "OUROBOROS_EFFORT_TASK": "low",
         "OUROBOROS_EFFORT_EVOLUTION": "medium",
         "OUROBOROS_EFFORT_REVIEW": "high",
+        "OUROBOROS_EFFORT_SCOPE_REVIEW": "low",
         "OUROBOROS_EFFORT_CONSCIOUSNESS": "none",
         "OUROBOROS_REVIEW_MODELS": "model-a,model-b",
         "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
@@ -268,13 +270,15 @@ def test_apply_settings_to_env_includes_effort_keys():
     assert os.environ.get("OUROBOROS_EFFORT_TASK") == "low"
     assert os.environ.get("OUROBOROS_EFFORT_EVOLUTION") == "medium"
     assert os.environ.get("OUROBOROS_EFFORT_REVIEW") == "high"
+    assert os.environ.get("OUROBOROS_EFFORT_SCOPE_REVIEW") == "low"
     assert os.environ.get("OUROBOROS_EFFORT_CONSCIOUSNESS") == "none"
     assert os.environ.get("OUROBOROS_REVIEW_MODELS") == "model-a,model-b"
     assert os.environ.get("OUROBOROS_REVIEW_ENFORCEMENT") == "advisory"
     assert os.environ.get("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS") == "true"
     # cleanup
     for k in ("OUROBOROS_EFFORT_TASK", "OUROBOROS_EFFORT_EVOLUTION",
-              "OUROBOROS_EFFORT_REVIEW", "OUROBOROS_EFFORT_CONSCIOUSNESS",
+              "OUROBOROS_EFFORT_REVIEW", "OUROBOROS_EFFORT_SCOPE_REVIEW",
+              "OUROBOROS_EFFORT_CONSCIOUSNESS",
               "OUROBOROS_REVIEW_MODELS", "OUROBOROS_REVIEW_ENFORCEMENT",
               "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS"):
         os.environ.pop(k, None)

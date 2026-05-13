@@ -148,6 +148,7 @@ class SkillReviewState:
     cost_usd: float = 0.0
     raw_result: str = ""
     raw_actor_records: List[Dict[str, Any]] = field(default_factory=list)
+    advisory_result: Dict[str, Any] = field(default_factory=dict)
 
     def is_stale_for(self, current_hash: str) -> bool:
         if not current_hash:
@@ -167,6 +168,8 @@ class SkillReviewState:
             "raw_result": self.raw_result,
             "raw_actor_records": list(self.raw_actor_records),
         }
+        if self.advisory_result:
+            data["advisory_result"] = dict(self.advisory_result)
         has_review_verdicts = any(
             str(f.get("verdict") or "").upper() in {"PASS", "FAIL"}
             for f in self.findings
@@ -679,6 +682,11 @@ def load_review_state(
         if isinstance(data.get("raw_actor_records"), list)
         else []
     )
+    advisory_result = (
+        data.get("advisory_result")
+        if isinstance(data.get("advisory_result"), dict)
+        else {}
+    )
     try:
         prompt_chars = int(data.get("prompt_chars") or 0)
     except (TypeError, ValueError):
@@ -697,6 +705,7 @@ def load_review_state(
         cost_usd=cost_usd,
         raw_result=str(data.get("raw_result") or ""),
         raw_actor_records=[r for r in raw_actor_records if isinstance(r, dict)],
+        advisory_result=dict(advisory_result),
     )
 
 

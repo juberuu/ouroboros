@@ -51,7 +51,7 @@ log = logging.getLogger(__name__)
 # Import SDK eagerly — ImportError surfaces SDK unavailability so callers return an install hint (no CLI fallback)
 from claude_agent_sdk import (  # noqa: E402
     ClaudeAgentOptions, ClaudeSDKClient, HookMatcher,
-    AssistantMessage, ResultMessage, query,
+    AssistantMessage, ResultMessage,
 )
 
 # ---------------------------------------------------------------------------
@@ -133,6 +133,39 @@ class ClaudeCodeResult:
         if self.validation_summary:
             out["validation"] = self.validation_summary
         return json.dumps(out, ensure_ascii=False, indent=2)
+
+
+def _coerce_usage_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _normalize_sdk_usage(usage: Any) -> Dict[str, Any]:
+    """Normalize Claude Agent SDK usage into the app's standard token keys.
+
+    Claude SDK/Anthropic result messages commonly use Anthropic-style names
+    (``input_tokens``, ``output_tokens``, ``cache_read_input_tokens`` and
+    ``cache_creation_input_tokens``). Budget and log consumers expect the
+    OpenAI/OpenRouter-style keys used elsewhere in Ouroboros.
+    """
+    if not isinstance(usage, dict):
+        return {}
+    normalized = dict(usage)
+    normalized["prompt_tokens"] = _coerce_usage_int(
+        usage.get("prompt_tokens", usage.get("input_tokens", 0))
+    )
+    normalized["completion_tokens"] = _coerce_usage_int(
+        usage.get("completion_tokens", usage.get("output_tokens", 0))
+    )
+    normalized["cached_tokens"] = _coerce_usage_int(
+        usage.get("cached_tokens", usage.get("cache_read_input_tokens", 0))
+    )
+    normalized["cache_write_tokens"] = _coerce_usage_int(
+        usage.get("cache_write_tokens", usage.get("cache_creation_input_tokens", 0))
+    )
+    return normalized
 
 
 # ---------------------------------------------------------------------------
@@ -294,8 +327,7 @@ async def _run_edit_async(
                     result.session_id = getattr(message, "session_id", "") or ""
                     result.cost_usd = getattr(message, "total_cost_usd", 0) or 0
                     usage = getattr(message, "usage", None)
-                    if isinstance(usage, dict):
-                        result.usage = usage
+                    result.usage = _normalize_sdk_usage(usage)
                     subtype = getattr(message, "subtype", "")
                     if subtype and subtype != "success":
                         result.success = False
@@ -321,8 +353,9 @@ async def _run_readonly_async(
 ) -> ClaudeCodeResult:
     """Run a read-only SDK query for advisory review.
 
-    Uses the simpler query() function since no hooks are needed —
-    disallowed_tools already blocks mutating operations at the CLI level.
+    Uses ClaudeSDKClient, matching the edit path lifecycle. The older
+    ``query()`` async-generator helper could emit ``aclose(): asynchronous
+    generator is already running`` when the stream was stopped at ResultMessage.
 
     effort: "low" | "medium" | "high" | "max" — controls reasoning depth.
     Default "high" so advisory reviewer thinks as deeply as blocking reviewers.
@@ -364,26 +397,24 @@ async def _run_readonly_async(
     text_parts: List[str] = []
 
     try:
-        async for message in query(prompt=prompt, options=options):
-            if isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if hasattr(block, "text") and block.text:
-                        text_parts.append(block.text)
-            elif isinstance(message, ResultMessage):
-                result.session_id = getattr(message, "session_id", "") or ""
-                result.cost_usd = getattr(message, "total_cost_usd", 0) or 0
-                usage = getattr(message, "usage", None)
-                if isinstance(usage, dict):
-                    result.usage = usage
-                subtype = getattr(message, "subtype", "")
-                if subtype and subtype != "success":
-                    result.success = False
-                    result.error = f"Agent ended with subtype: {subtype}"
-                # Stop iterating — the CLI subprocess exits after ResultMessage.
-                # Continuing the loop causes "Command failed with exit code 1" in
-                # SDK's message reader when it tries to read from the already-closed
-                # subprocess stdout. Break here to avoid the spurious error.
-                break
+        async with ClaudeSDKClient(options=options) as client:
+            await client.query(prompt)
+            async for message in client.receive_response():
+                if isinstance(message, AssistantMessage):
+                    for block in message.content:
+                        if hasattr(block, "text") and block.text:
+                            text_parts.append(block.text)
+                elif isinstance(message, ResultMessage):
+                    result.session_id = getattr(message, "session_id", "") or ""
+                    result.cost_usd = getattr(message, "total_cost_usd", 0) or 0
+                    usage = getattr(message, "usage", None)
+                    result.usage = _normalize_sdk_usage(usage)
+                    subtype = getattr(message, "subtype", "")
+                    if subtype and subtype != "success":
+                        result.success = False
+                        result.error = f"Agent ended with subtype: {subtype}"
+                    # Stop after ResultMessage; the client context owns cleanup.
+                    break
     except Exception as e:
         result.success = False
         result.error = f"{type(e).__name__}: {e}"

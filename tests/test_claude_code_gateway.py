@@ -39,6 +39,7 @@ from ouroboros.gateways.claude_code import (  # noqa: E402
     ClaudeCodeResult,
     make_path_guard,
     make_readonly_guard,
+    _normalize_sdk_usage,
     SAFETY_CRITICAL,
 )
 
@@ -307,12 +308,13 @@ class TestSDKAPISurface:
             "receive_messages() streams indefinitely — use receive_response() instead"
         )
 
-    def test_readonly_path_uses_query_function(self):
-        """v4.8.1 fix: read-only path should use query() not ClaudeSDKClient."""
+    def test_readonly_path_uses_sdk_client_lifecycle(self):
+        """Read-only path must use ClaudeSDKClient, not query()+early generator break."""
         src = self._gateway_source()
-        # _run_readonly_async should iterate with `async for message in query(`
-        assert "async for message in query(" in src, \
-            "Read-only path should use query() function for one-shot requests"
+        assert "async with ClaudeSDKClient(options=options) as client:" in src
+        assert "await client.query(prompt)" in src
+        assert "async for message in client.receive_response():" in src
+        assert "async for message in query(" not in src
 
     def test_max_budget_in_constructor(self):
         """v4.8.1 fix: max_budget_usd should be passed in ClaudeAgentOptions constructor."""
@@ -324,13 +326,11 @@ class TestSDKAPISurface:
         assert "max_budget_usd=budget" in src, \
             "max_budget_usd should be passed as constructor kwarg"
 
-    def test_query_imported_from_sdk(self):
-        """query() must be imported from claude_agent_sdk."""
-        from ouroboros.gateways.claude_code import query as gw_query
-        # The mock installs query on the mock module
-        mock_sdk = sys.modules.get("claude_agent_sdk")
-        assert gw_query is mock_sdk.query, \
-            "Gateway's query should be the SDK's query function"
+    def test_query_helper_not_used_by_gateway(self):
+        """The gateway avoids query() for read-only cleanup correctness."""
+        src = self._gateway_source()
+        assert " query," not in src
+        assert "query(prompt=prompt" not in src
 
 
 # ---------------------------------------------------------------------------
@@ -484,10 +484,26 @@ class TestRunReadonlyEffortParam:
         import asyncio
         from unittest.mock import AsyncMock, MagicMock, patch
 
+        class FakeSDKClient:
+            def __init__(self, options=None):
+                self.options = options
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            async def query(self, prompt):
+                return None
+
+            async def receive_response(self):
+                if False:
+                    yield None
+
         # Patch ClaudeAgentOptions with one that accepts effort
         with patch("ouroboros.gateways.claude_code.ClaudeAgentOptions", FakeOptions), \
-             patch("ouroboros.gateways.claude_code.query") as mock_query:
-            mock_query.return_value = _async_gen([])  # empty stream
+             patch("ouroboros.gateways.claude_code.ClaudeSDKClient", FakeSDKClient):
             asyncio.get_event_loop().run_until_complete(
                 __import__("ouroboros.gateways.claude_code", fromlist=["_run_readonly_async"])
                 ._run_readonly_async("test", cwd="/tmp", effort="high")
@@ -511,9 +527,25 @@ class TestRunReadonlyEffortParam:
         import asyncio
         from unittest.mock import patch
 
+        class FakeSDKClient:
+            def __init__(self, options=None):
+                self.options = options
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            async def query(self, prompt):
+                return None
+
+            async def receive_response(self):
+                if False:
+                    yield None
+
         with patch("ouroboros.gateways.claude_code.ClaudeAgentOptions", FakeOptionsNoEffort), \
-             patch("ouroboros.gateways.claude_code.query") as mock_query:
-            mock_query.return_value = _async_gen([])
+             patch("ouroboros.gateways.claude_code.ClaudeSDKClient", FakeSDKClient):
             # Should not raise — effort silently dropped
             asyncio.get_event_loop().run_until_complete(
                 __import__("ouroboros.gateways.claude_code", fromlist=["_run_readonly_async"])
@@ -521,6 +553,18 @@ class TestRunReadonlyEffortParam:
             )
 
         assert "effort" not in captured, "effort must be omitted when SDK lacks support"
+
+    def test_normalize_sdk_usage_maps_anthropic_keys(self):
+        usage = _normalize_sdk_usage({
+            "input_tokens": 100,
+            "output_tokens": 25,
+            "cache_read_input_tokens": 40,
+            "cache_creation_input_tokens": 12,
+        })
+        assert usage["prompt_tokens"] == 100
+        assert usage["completion_tokens"] == 25
+        assert usage["cached_tokens"] == 40
+        assert usage["cache_write_tokens"] == 12
 
 
 class TestSDKStatusPayload:

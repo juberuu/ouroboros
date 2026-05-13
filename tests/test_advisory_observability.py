@@ -63,6 +63,140 @@ def test_advisory_uses_resolve_claude_code_model_helper():
     assert "resolve_claude_code_model" in source
 
 
+def test_advisory_passes_scope_review_effort_to_claude_code(monkeypatch, tmp_path):
+    adv_mod = _get_advisory_module()
+    from types import SimpleNamespace
+    from ouroboros.gateways.claude_code import ClaudeCodeResult
+    import ouroboros.gateways.claude_code as gw
+
+    captured = {}
+
+    def fake_run_readonly(**kwargs):
+        captured.update(kwargs)
+        return ClaudeCodeResult(
+            success=True,
+            result_text='[{"item":"bible_compliance","verdict":"PASS","reason":"ok","severity":"critical"}]',
+            session_id="sess-effort",
+            cost_usd=0,
+            usage={},
+        )
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("OUROBOROS_EFFORT_SCOPE_REVIEW", "low")
+    monkeypatch.setattr(gw, "run_readonly", fake_run_readonly)
+    monkeypatch.setattr(adv_mod, "_get_staged_diff", lambda *a, **kw: "diff")
+    monkeypatch.setattr(adv_mod, "_get_changed_file_list", lambda *a, **kw: "M file.py")
+    monkeypatch.setattr(adv_mod, "build_advisory_changed_context", lambda *a, **kw: (["file.py"], "pack", []))
+    monkeypatch.setattr(adv_mod, "_build_advisory_prompt", lambda *a, **kw: "prompt")
+    ctx = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, pending_events=[], emit_progress_fn=lambda *_: None)
+
+    adv_mod._run_claude_advisory(tmp_path, "msg", ctx)
+
+    assert captured["effort"] == "low"
+
+
+def test_paid_empty_advisory_result_is_error(monkeypatch, tmp_path):
+    adv_mod = _get_advisory_module()
+    from types import SimpleNamespace
+    from ouroboros.gateways.claude_code import ClaudeCodeResult
+    import ouroboros.gateways.claude_code as gw
+
+    def fake_run_readonly(**kwargs):
+        return ClaudeCodeResult(
+            success=True,
+            result_text="(no output)",
+            session_id="sess-empty",
+            cost_usd=1.23,
+            usage={"prompt_tokens": 100, "completion_tokens": 0},
+        )
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(gw, "run_readonly", fake_run_readonly)
+    monkeypatch.setattr(adv_mod, "_get_staged_diff", lambda *a, **kw: "diff")
+    monkeypatch.setattr(adv_mod, "_get_changed_file_list", lambda *a, **kw: "M file.py")
+    monkeypatch.setattr(adv_mod, "build_advisory_changed_context", lambda *a, **kw: (["file.py"], "pack", []))
+    monkeypatch.setattr(adv_mod, "_build_advisory_prompt", lambda *a, **kw: "prompt")
+    ctx = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, pending_events=[], emit_progress_fn=lambda *_: None)
+
+    items, raw, _model, _chars = adv_mod._run_claude_advisory(tmp_path, "msg", ctx)
+
+    assert items == []
+    assert raw.startswith("⚠️ ADVISORY_ERROR:")
+    assert "paid empty output" in raw
+    assert any(ev.get("type") == "advisory_sdk_suspect_result" for ev in ctx.pending_events)
+
+
+def test_handle_advisory_error_persists_session_id(monkeypatch, tmp_path):
+    adv_mod = _get_advisory_module()
+    from types import SimpleNamespace
+    from ouroboros.review_state import load_state
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(
+        adv_mod,
+        "_advisory_pre_sdk_gate",
+        lambda **kwargs: ([], "M file.py", None),
+    )
+
+    def fake_run(*args, **kwargs):
+        ctx = args[2]
+        ctx._last_claude_advisory_meta = {"session_id": "sess-paid-empty"}
+        return [], "⚠️ ADVISORY_ERROR: paid empty output", "claude-opus", 12345
+
+    monkeypatch.setattr(adv_mod, "_run_claude_advisory", fake_run)
+    ctx = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, pending_events=[], emit_progress_fn=lambda *_: None, task_id="t")
+
+    raw = adv_mod._handle_advisory_pre_review(ctx, commit_message="msg", skip_tests=True)
+    result = json.loads(raw)
+
+    assert result["status"] == "error"
+    assert result["session_id"] == "sess-paid-empty"
+    state = load_state(tmp_path)
+    assert state.advisory_runs
+    run = state.advisory_runs[-1]
+    assert run.status == "error"
+    assert run.session_id == "sess-paid-empty"
+    assert run.prompt_chars == 12345
+
+
+def test_skill_advisory_requires_exact_expected_items(monkeypatch, tmp_path):
+    adv_mod = _get_advisory_module()
+    from types import SimpleNamespace
+    from ouroboros.gateways.claude_code import ClaudeCodeResult
+    import ouroboros.gateways.claude_code as gw
+
+    def fake_run_readonly(**kwargs):
+        return ClaudeCodeResult(
+            success=True,
+            result_text='[{"item":"manifest_schema","verdict":"PASS","reason":"ok","severity":"critical"}]',
+            session_id="sess-partial",
+            cost_usd=0.2,
+            usage={"prompt_tokens": 100, "completion_tokens": 20},
+        )
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(gw, "run_readonly", fake_run_readonly)
+    monkeypatch.setattr(adv_mod, "_build_advisory_prompt", lambda *a, **kw: "prompt")
+    ctx = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, pending_events=[], emit_progress_fn=lambda *_: None)
+
+    items, raw, _model, _chars = adv_mod._run_claude_advisory(
+        tmp_path,
+        "skill advisory",
+        ctx,
+        scope="plugin.py",
+        options={
+            "include_repo_diff": False,
+            "review_surface": "skill",
+            "expected_items": ["manifest_schema", "permissions_honesty"],
+        },
+    )
+
+    assert items == []
+    assert raw.startswith("⚠️ ADVISORY_ERROR:")
+    assert "checklist contract mismatch" in raw
+    assert any(ev.get("type") == "advisory_sdk_suspect_result" for ev in ctx.pending_events)
+
+
 # ---------------------------------------------------------------------------
 # Observability: _format_advisory_error / _get_runtime_diagnostics
 # ---------------------------------------------------------------------------
@@ -395,9 +529,9 @@ def test_budget_gate_skip_becomes_stale_after_edit(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("mode", ["readonly", "edit"])
 def test_run_async_breaks_after_result_message(mode):
-    """Both ``_run_readonly_async`` (SDK query() generator) and
-    ``_run_edit_async`` (ClaudeSDKClient.receive_response) must stop
-    iterating after ResultMessage. Root cause: the SDK generator raises
+    """Both ``_run_readonly_async`` and ``_run_edit_async`` use
+    ClaudeSDKClient.receive_response and must stop
+    iterating after ResultMessage. Root cause: the SDK stream can raise
     when iterated past the ResultMessage because the CLI subprocess has
     exited and the message reader hits a closed pipe.
 
@@ -449,7 +583,6 @@ def test_run_async_breaks_after_result_message(mode):
         def __init__(self, **kwargs):
             pass
 
-    orig_query = gw.query
     orig_AssistantMessage = gw.AssistantMessage
     orig_ResultMessage = gw.ResultMessage
     orig_ClaudeAgentOptions = gw.ClaudeAgentOptions
@@ -462,8 +595,20 @@ def test_run_async_breaks_after_result_message(mode):
         gw.ClaudeAgentOptions = FakeClaudeAgentOptions
         gw.HookMatcher = FakeHookMatcher
 
-        if mode == "readonly":
-            async def fake_query_raises_after_result(prompt, options):
+        class FakeSDKClient:
+            def __init__(self, options=None):
+                self.options = options
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                pass
+
+            async def query(self, prompt):
+                pass
+
+            async def receive_response(self):
                 yield FakeAssistantMessage()
                 yield FakeResultMessage()
                 raise Exception(
@@ -471,7 +616,8 @@ def test_run_async_breaks_after_result_message(mode):
                     "Error output: Check stderr output for details"
                 )
 
-            gw.query = fake_query_raises_after_result
+        gw.ClaudeSDKClient = FakeSDKClient
+        if mode == "readonly":
             result = asyncio.run(gw._run_readonly_async(
                 prompt="test",
                 cwd="/tmp",
@@ -480,28 +626,6 @@ def test_run_async_breaks_after_result_message(mode):
                 effort=None,
             ))
         else:
-            class FakeSDKClient:
-                def __init__(self, options=None):
-                    self.options = options
-
-                async def __aenter__(self):
-                    return self
-
-                async def __aexit__(self, *args):
-                    pass
-
-                async def query(self, prompt):
-                    pass
-
-                async def receive_response(self):
-                    yield FakeAssistantMessage()
-                    yield FakeResultMessage()
-                    raise Exception(
-                        "Command failed with exit code 1 (exit code: 1)\n"
-                        "Error output: Check stderr output for details"
-                    )
-
-            gw.ClaudeSDKClient = FakeSDKClient
             result = asyncio.run(gw._run_edit_async(
                 prompt="test edit",
                 cwd="/tmp",
@@ -509,7 +633,6 @@ def test_run_async_breaks_after_result_message(mode):
                 max_turns=1,
             ))
     finally:
-        gw.query = orig_query
         gw.AssistantMessage = orig_AssistantMessage
         gw.ResultMessage = orig_ResultMessage
         gw.ClaudeAgentOptions = orig_ClaudeAgentOptions

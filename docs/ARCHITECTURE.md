@@ -1,4 +1,4 @@
-# Ouroboros v5.20.0 — Architecture & Reference
+# Ouroboros v5.20.1-rc.1 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -69,7 +69,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── skill_readiness.py   ← Central skill readiness helper: combines review gate, stale hash, enablement, and grants into a single finalization/execution verdict
       ├── skill_dependencies.py ← Shared dependency-spec resolution for skill payloads across manifests, sidecars, and provenance
       ├── skill_review_status.py ← Skill-review verdict aggregation SSOT (FAILs → clean/warnings/blockers/pending; enforcement maps verdicts to executable_review)
-      ├── skill_review.py      ← Skill review pipeline: deterministic preflight + optional fail-open Claude Code advisory over the skill payload only (repo diff excluded, output treated as inert evidence) followed by the tri-model executable trust gate against the Skill Review Checklist section of docs/CHECKLISTS.md; supports rebuttal/history/convergence evidence
+      ├── skill_review.py      ← Skill review pipeline: deterministic preflight + optional fail-open Claude Code advisory over the skill payload only (repo diff excluded, Skill Review Checklist output contract, scope-review effort, raw/session metadata persisted as advisory_result) followed by the tri-model executable trust gate against the Skill Review Checklist section of docs/CHECKLISTS.md plus minimal host skill/widget context (CREATING_SKILLS.md, PluginAPI contract, extension UI validator); supports rebuttal/history/convergence evidence
       ├── extension_loader.py  ← Phase 4 in-process loader for type: extension skills; discovers + imports plugin.py via importlib with a narrow PluginAPIImpl, tracks registrations per-skill for atomic unload
       ├── extension_ui_validation.py ← Host-owned widget/settings render-schema validation shared by extension loader and skill preflight
       ├── extension_isolated_deps.py ← Per-extension bridge that exposes reviewed `.ouroboros_env` Python site-packages to in-process extensions while they are loaded
@@ -104,7 +104,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── schema_versions.py ← Opt-in _schema_version helpers
       │   └── plugin_api.py    ← Phase 4: PluginAPI Protocol + ExtensionRegistrationError + FORBIDDEN_EXTENSION_SETTINGS + VALID_EXTENSION_PERMISSIONS + VALID_EXTENSION_ROUTE_METHODS
       ├── gateways/            ← External API adapters (thin transport, no business logic)
-      │   └── claude_code.py   ← Claude Agent SDK gateway (edit + read-only paths)
+      │   └── claude_code.py   ← Claude Agent SDK gateway (edit + read-only paths via ClaudeSDKClient lifecycle, normalized SDK usage)
       ├── tools/               ← Auto-discovered tool plugins
       │   ├── release_sync.py    ← Release-metadata sync library; used by _preflight_check check 7 for P9 history-limit validation (check_history_limit) and by agents for version-carrier sync (sync_release_metadata)
       │   ├── review_synthesis.py ← LLM-based claim synthesis (Phase 1): deduplicates raw multi-reviewer findings into canonical issues before durable obligations are created; called from commit_gate._record_commit_attempt; fail-open (returns original on any error)
@@ -188,7 +188,7 @@ Dockerfile                    ← Docker image (web UI runtime)
 │   │   └── skills/              ← Phase 3 external-skill state plane (sibling of advisory_review.json, not shared)
 │   │       └── <skill_name>/
 │   │           ├── enabled.json ← {"enabled": bool, "updated_at": iso_ts}
-│   │           ├── review.json  ← {"content_hash": str, "findings": [...], "reviewer_models": [...], "timestamp": iso_ts, "raw_actor_records": [...], ...}; for full PASS/FAIL finding sets, status is computed live on load as `clean`/`warnings`/`blockers` from findings (`status` may remain only on legacy/pending infrastructure states; enforcement is applied later by `skill_review_gate`)
+│   │           ├── review.json  ← {"content_hash": str, "findings": [...], "reviewer_models": [...], "timestamp": iso_ts, "raw_actor_records": [...], "advisory_result": {...}, ...}; `advisory_result` records optional fail-open Claude Code skill-advisory raw/session metadata, while tri-model findings remain authoritative. For full PASS/FAIL finding sets, status is computed live on load as `clean`/`warnings`/`blockers` from findings (`status` may remain only on legacy/pending infrastructure states; enforcement is applied later by `skill_review_gate`)
 │   │           ├── review_history.jsonl ← compact recent skill-review attempts (`status`, `content_hash`, failure signature) used for anti-thrashing/convergence context
 │   │           ├── accepted_rebuttals.json ← accepted skill-review rebuttals injected into later review prompts
 │   │           ├── deps.json    ← isolated dependency install fingerprint for skills with reviewed install specs
@@ -445,7 +445,7 @@ The Dashboard tab is the operational hub. It hosts four full-height sub-tabs:
   Keys are displayed as masked values (e.g., `sk-or-v1...`), can be explicitly cleared, and are only overwritten on save if the user enters a new value (not containing `...`).
 - **Claude Runtime Status**: the Anthropic card shows app-managed Claude runtime status with a `Repair Runtime` action. The card is visible when the user has configured `ANTHROPIC_API_KEY` **or** when the last `/api/claude-code/status` poll stored a non-empty `error` on the runtime card state (`claudeRuntimeHasError` in `web/modules/settings.js::applyClaudeCodeStatus`). Two distinct paths set that `error`: (a) backend `ouroboros/platform_layer.py::resolve_claude_runtime` marks the SDK below the `_CLAUDE_SDK_MIN_VERSION` baseline (the only backend-originated path today — other not-ready conditions such as a missing bundled CLI currently fall through to `status_label() == "no_api_key"` until a key is configured); (b) the browser-side `refreshClaudeCodeStatus` `catch` block synthesizes an error payload for any `/api/claude-code/status` transport failure, non-OK HTTP response, or JSON parse error, so loss of connectivity to the backend also surfaces the card before a key is configured. The Claude runtime (SDK + bundled CLI) powers delegated code editing and advisory review and is managed automatically by the app.
 - **Providers tab**: also contains `Legacy OpenAI Base URL` (backward-compatibility escape hatch for older installs) and `Network Gate` (optional non-localhost password + restart-required `OUROBOROS_SERVER_HOST`) at the bottom. The Network Gate section also shows a read-only LAN hint (via `_meta` from `/api/settings`): loopback-bound instances show a restart instruction, LAN-reachable instances show a clickable URL, and non-loopback binds without `OUROBOROS_NETWORK_PASSWORD` render as a warning with a set-password CTA. Saving a non-loopback host through `/api/settings` is limited to wildcard hosts (`0.0.0.0`, `::`) and requires a non-empty `OUROBOROS_NETWORK_PASSWORD` in the same save; specific LAN IP binds are manual/env-only so the desktop launcher can keep probing loopback reliably. Manual env/settings-before-launch and Docker flows may still bind open by explicit operator choice. Bracketed IPv6 literals (e.g. `[::1]`) are normalized by `_build_network_meta` — brackets are stripped before the `is_loopback_host` classification, and URL construction uniformly re-brackets IPv6 addresses so there is no double-bracketing.
-- **Models tab**: Main, Code, Light, Fallback model routing. Each card has a `Local` toggle to route through the GGUF server configured in Advanced. `Claude Code Model` field selects the Anthropic model for `claude_code_edit` / `advisory_pre_review`.
+- **Models tab**: Main, Code, Light, Fallback model routing. Each card has a `Local` toggle to route through the GGUF server configured in Advanced. `Claude Code Model` field selects the Anthropic model for `claude_code_edit` / `advisory_pre_review`; Claude advisory reasoning effort follows the Behavior → Scope Review effort setting (`OUROBOROS_EFFORT_SCOPE_REVIEW`).
 - **Model catalog**: optional `Refresh Model Catalog` action calls `/api/model-catalog`. The backend uses native async `httpx.AsyncClient` provider calls (no default-threadpool `requests` path); failures are non-fatal and the API response includes provider `stage`/`duration_ms` metadata while the Settings inline warning stays compact (provider names only). The browser refresh uses a 25s `AbortController` timeout and ignores stale refresh completions so older requests cannot wipe newer catalog results.
 - **Model pickers**: searchable provider-aware pickers replace legacy raw dropdowns for remote models. Selecting a model writes it into the field and closes the results panel; typing/focus reopens the filtered list.
 - **Unsaved draft indicator**: Settings does not block SPA navigation and does not show a modal. Edits persist in the DOM while navigating between pages, and a small `Unsaved changes.` footer indicator remains visible until Save or Reload resets the loaded baseline. Masked secrets keep the existing save semantics: untouched masked values are omitted, typed values overwrite, and explicit Clear persists an empty value.
@@ -851,10 +851,12 @@ continuation phrase heuristics.
     (safety-critical files, frozen contracts, and release/managed invariants)
     unless `runtime_mode=pro`; pro-mode protected edits still require the
     normal triad + scope review before commit
-  - **Read-only mode** (`run_readonly`): uses the simpler `query()` function with
-    `allowed_tools=["Read","Grep","Glob"]`,
-    `disallowed_tools=["Bash","Edit","Write","MultiEdit"]` (SDK enforces tool
-    restrictions at the CLI level; no hooks needed)
+  - **Read-only mode** (`run_readonly`): uses the same `ClaudeSDKClient`
+    lifecycle as edit mode (`client.query(prompt)` →
+    `client.receive_response()`), with `allowed_tools=["Read","Grep","Glob"]`
+    and `disallowed_tools=["Bash","Edit","Write","MultiEdit"]`; SDK usage is
+    normalised into `prompt_tokens` / `completion_tokens` / cache fields before
+    advisory budget events are emitted.
 - **Structured result**: `ClaudeCodeResult` dataclass with `success`, `result_text`,
   `session_id`, `cost_usd`, `usage`, `error`, `stderr_tail`. Callers populate
   `changed_files`, `diff_stat`, and `validation_summary` (orchestration lives in tool layer)
@@ -1377,15 +1379,16 @@ errors surface via the same observability path.
   Stores advisory runs plus a typed reviewed-attempt ledger, bounded blocking-attempt history,
   open obligations, stale markers, repo/tool/task identities, and reviewed-diff fingerprints.
   Advisory runs have: `snapshot_hash`, `commit_message`, `status`
-  (fresh / stale / bypassed / skipped / parse_failure / preflight_blocked —
-  the last one added v4.39.0 for syntax-preflight short-circuits; it is
+  (fresh / stale / bypassed / skipped / parse_failure / preflight_blocked / error —
+  `preflight_blocked` was added v4.39.0 for syntax-preflight short-circuits; it is
   explicitly NOT considered fresh by `is_fresh` so `repo_commit` cannot
   proceed until the underlying SyntaxError is fixed and advisory re-runs),
   `items`, `raw_result` (full, no truncation), audit fields,
   `snapshot_paths` (optional list of paths used to compute the scoped hash — `None` = whole repo),
   **forensic fields** `readiness_warnings` (list of warnings from the readiness gate),
   `prompt_chars` (size of the advisory prompt sent to the SDK), `model_used` (resolved Anthropic
-  model name), `duration_sec` (wall-clock time for the SDK call).
+  model name), `session_id` (Claude SDK session id for replay/debug when available),
+  `duration_sec` (wall-clock time for the SDK call).
   Commit attempts additionally carry **forensic fields** `triad_models` (list of configured
   reviewer model IDs; exact count driven by `OUROBOROS_REVIEW_MODELS`, minimum 2, ships with 3,
   capped at `_handle_multi_model_review.MAX_MODELS = 10`) and `scope_model` (model ID configured

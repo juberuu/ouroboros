@@ -41,7 +41,8 @@ def test_skill_advisory_pre_review_scopes_out_repo_diff():
     import ouroboros.skill_review as skill_review
 
     source = inspect.getsource(skill_review._run_skill_advisory_pre_review)
-    assert "include_repo_diff=False" in source
+    assert '"include_repo_diff": False' in source
+    assert '"review_surface": "skill"' in source
     assert "__ouroboros_skill_payload_scope_only__" not in source
     assert "paths=None" not in source
 
@@ -61,7 +62,49 @@ def test_skill_advisory_notes_are_inert_before_output_contract(tmp_path):
     advisory_idx = prompt.index("Optional Claude Code Advisory Pre-Review")
     output_idx = prompt.rindex("## Output contract")
     assert advisory_idx < output_idx
-    assert prompt.rstrip().endswith("the skill pack. Do not invent violations.")
+    assert "For every FAIL, include a concrete proposed fix" in prompt
+
+
+def test_skill_review_prompt_includes_minimal_host_context(tmp_path):
+    import ouroboros.skill_review as skill_review
+
+    prompt = skill_review._build_review_prompt(
+        "demo",
+        tmp_path / "demo",
+        "{}",
+        "hash",
+        "plugin.py\nprint('ok')",
+    )
+
+    assert "docs/CREATING_SKILLS.md" in prompt
+    assert "ouroboros/contracts/plugin_api.py" in prompt
+    assert "ouroboros/extension_ui_validation.py" in prompt
+    assert "### ouroboros/extension_loader.py" not in prompt
+    assert "### web/modules/widgets.js" not in prompt
+
+
+def test_skill_advisory_failure_is_fail_open_but_visible(tmp_path, monkeypatch):
+    import ouroboros.skill_review as skill_review
+    from ouroboros.tools import claude_advisory_review as advisory
+
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("sdk exploded")
+
+    monkeypatch.setattr(advisory, "_run_claude_advisory", boom)
+    ctx = _make_ctx(tmp_path)
+    result = skill_review._run_skill_advisory_pre_review(
+        ctx, skill_name="weather", file_pack="plugin.py\nprint('ok')"
+    )
+
+    assert result["status"] == "error"
+    assert "tri-model review continues" in result["error"]
+    assert "tri-model review continues" in result["prompt_section"]
+    events_path = ctx.drive_root / "logs" / "events.jsonl"
+    assert events_path.exists()
+    assert "skill_advisory_pre_review_warning" in events_path.read_text(encoding="utf-8")
 
 
 _NEW_SKILL_REVIEW_PASS_ITEMS = [
@@ -71,7 +114,7 @@ _NEW_SKILL_REVIEW_PASS_ITEMS = [
     {"item": "host_token_handling", "verdict": "PASS", "severity": "critical", "reason": "Not applicable"},
     {"item": "error_handling", "verdict": "PASS", "severity": "advisory", "reason": "ok"},
     {"item": "integration_preflight", "verdict": "PASS", "severity": "advisory", "reason": "ok"},
-    {"item": "bug_hunting", "verdict": "PASS", "severity": "advisory", "reason": "ok"},
+    {"item": "bug_hunting", "verdict": "PASS", "severity": "critical", "reason": "ok"},
     {"item": "completion_notification", "verdict": "PASS", "severity": "advisory", "reason": "Not applicable"},
 ]
 
@@ -349,6 +392,19 @@ def test_aggregate_status_warnings_on_soft_fail(monkeypatch):
     assert _aggregate_status(findings, skill_type="script") == "warnings"
 
 
+def test_aggregate_status_blockers_on_bug_hunting_fail(monkeypatch):
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    findings = [
+        {
+            "item": "bug_hunting",
+            "verdict": "FAIL",
+            "severity": "critical",
+            "reason": "plugin.py imports a missing module; fix by using the correct relative import",
+        },
+    ]
+    assert _aggregate_status(findings, skill_type="script") == "blockers"
+
+
 def test_aggregate_status_extension_namespace_fail_is_critical_only_for_extension(monkeypatch):
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     findings = [
@@ -580,9 +636,22 @@ def test_review_skill_prompt_includes_rebuttal_and_history(tmp_path, monkeypatch
 
 
 def test_review_skill_quorum_failure_on_one_responder(tmp_path, monkeypatch):
+    import ouroboros.skill_review as skill_review
+
     skills_root = _build_skill(tmp_path)
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
     ctx = _make_ctx(tmp_path)
+    advisory_evidence = {
+        "status": "completed",
+        "model": "claude-opus",
+        "session_id": "sess-skill",
+        "raw_result": "advisory raw",
+    }
+    monkeypatch.setattr(
+        skill_review,
+        "_run_skill_advisory_pre_review",
+        lambda *args, **kwargs: dict(advisory_evidence),
+    )
     prior_hash = compute_content_hash(skills_root / "weather")
     save_review_state(
         ctx.drive_root,
@@ -619,6 +688,7 @@ def test_review_skill_quorum_failure_on_one_responder(tmp_path, monkeypatch):
         outcome = review_skill(ctx, "weather")
     assert outcome.status == "pending"
     assert "quorum" in outcome.error.lower()
+    assert outcome.advisory_result == advisory_evidence
     persisted = load_review_state(ctx.drive_root, "weather")
     assert persisted.status == "clean"
     assert persisted.content_hash == prior_hash
