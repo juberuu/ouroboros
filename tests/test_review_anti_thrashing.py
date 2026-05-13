@@ -201,8 +201,10 @@ def test_advisory_prompt_includes_verdict_authoritative_and_anti_rephrase_rules(
         goal="",
         scope="",
         drive_root=None,
-        diff="--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-old\n+new",
-        changed_files="foo.py",
+        prompt_context={
+            "diff": "--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-old\n+new",
+            "changed_files": "foo.py",
+        },
     )
     assert "VERDICT IS AUTHORITATIVE" in prompt
     assert "DO NOT REPHRASE" in prompt

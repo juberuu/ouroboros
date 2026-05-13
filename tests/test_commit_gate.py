@@ -505,10 +505,11 @@ def test_advisory_freshness_passes_with_fresh_run(tmp_path):
     assert result is None, f"Expected gate to pass but got: {result}"
 
 
-def test_advisory_freshness_blocks_on_open_commit_readiness_debt(tmp_path):
+def test_advisory_freshness_blocks_on_open_commit_readiness_debt(tmp_path, monkeypatch):
     """Fresh advisory is not enough when commit-readiness debt remains open."""
     import subprocess
 
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     git_mod = _get_git_module()
     rs_mod = _get_review_state_module()
 
@@ -550,6 +551,78 @@ def test_advisory_freshness_blocks_on_open_commit_readiness_debt(tmp_path):
     assert result is not None
     assert "ADVISORY_PRE_REVIEW_REQUIRED" in result
     assert "Commit-readiness debt" in result
+
+
+def test_advisory_obligations_acknowledged_under_advisory_enforcement(tmp_path, monkeypatch):
+    """Fresh advisory downgrades obligations/debt under advisory enforcement and audits it."""
+    import subprocess
+
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
+    git_mod = _get_git_module()
+    rs_mod = _get_review_state_module()
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+    (drive_root / "state").mkdir()
+    (drive_root / "logs").mkdir()
+    subprocess.run(["git", "init"], cwd=str(repo_dir), capture_output=True)
+
+    commit_message = "test commit"
+    snapshot_hash = rs_mod.compute_snapshot_hash(repo_dir, commit_message)
+    repo_key = rs_mod.make_repo_key(repo_dir)
+
+    state = rs_mod.AdvisoryReviewState()
+    state.add_run(rs_mod.AdvisoryRunRecord(
+        snapshot_hash=snapshot_hash,
+        commit_message=commit_message,
+        status="fresh",
+        ts="2026-01-01T00:00:00",
+        repo_key=repo_key,
+        readiness_warnings=["Manual verification still required before commit."],
+    ))
+    state.add_blocking_attempt(rs_mod.CommitAttemptRecord(
+        ts="2026-01-01T00:05:00",
+        commit_message="blocked commit",
+        status="blocked",
+        repo_key=repo_key,
+        block_reason="critical_findings",
+        critical_findings=[{
+            "item": "tests_affected",
+            "verdict": "FAIL",
+            "severity": "critical",
+            "reason": "missing tests",
+        }],
+    ))
+    assert state.get_open_obligations(repo_key=repo_key)
+    assert state.get_open_commit_readiness_debts(repo_key=repo_key)
+    rs_mod.save_state(drive_root, state)
+
+    class FakeCtx:
+        pass
+
+    ctx = FakeCtx()
+    ctx.repo_dir = repo_dir
+    ctx.drive_root = drive_root
+    ctx.task_id = "test-task"
+    ctx.drive_logs = lambda: drive_root / "logs"
+
+    result = git_mod._check_advisory_freshness(ctx, commit_message)
+
+    assert result is None
+    events = [
+        json.loads(line)
+        for line in (drive_root / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    event = [item for item in events if item.get("type") == "advisory_obligations_acknowledged"][0]
+    assert event["snapshot_hash"] == snapshot_hash
+    assert event["repo_key"] == repo_key
+    assert event["open_obligations_count"] >= 1
+    assert event["open_debts_count"] >= 1
+    assert event["open_obligations"]
+    assert event["open_debts"]
 
 
 def test_advisory_freshness_is_repo_scoped(tmp_path):

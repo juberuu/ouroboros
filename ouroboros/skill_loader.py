@@ -909,32 +909,44 @@ def grant_status_for_skill(drive_root: pathlib.Path, skill: LoadedSkill) -> Dict
     }
 
 
-def auto_grant_if_enabled(drive_root: pathlib.Path, skill: LoadedSkill) -> bool:
+@dataclass
+class AutoGrantOutcome:
+    granted: bool = False
+    requested_keys: List[str] = field(default_factory=list)
+    granted_keys: List[str] = field(default_factory=list)
+    requested_permissions: List[str] = field(default_factory=list)
+    granted_permissions: List[str] = field(default_factory=list)
+
+
+def auto_grant_if_enabled(drive_root: pathlib.Path, skill: LoadedSkill) -> AutoGrantOutcome:
     """Grant all manifest-requested keys/permissions after a completed review.
 
-    Returns True when grants were persisted. The toggle is intentionally global
-    and opt-in: default installs keep the explicit approval step, while closed
-    loop skill-development sessions can remove the stale-grant interruption.
+    Returns requested/granted details so review surfaces can explain what the
+    auto-grant path observed even when the owner toggle is off.
     """
-    try:
-        from ouroboros.config import get_auto_grant_enabled
-    except Exception:
-        return False
-    if not get_auto_grant_enabled():
-        return False
-    if skill.load_error:
-        return False
-    if skill.review.is_stale_for(skill.content_hash):
-        return False
-    if normalize_skill_review_status(skill.review.status) == _REVIEW_STATUS_PENDING:
-        return False
     requested_keys = requested_core_setting_keys(list(skill.manifest.env_from_settings or []))
     requested_permissions = requested_skill_permissions(
         list(skill.manifest.permissions or []),
         list(getattr(skill.manifest, "subscribe_events", []) or []),
     )
+    outcome = AutoGrantOutcome(
+        requested_keys=requested_keys,
+        requested_permissions=requested_permissions,
+    )
+    try:
+        from ouroboros.config import get_auto_grant_enabled
+    except Exception:
+        return outcome
+    if not get_auto_grant_enabled():
+        return outcome
+    if skill.load_error:
+        return outcome
+    if skill.review.is_stale_for(skill.content_hash):
+        return outcome
+    if normalize_skill_review_status(skill.review.status) == _REVIEW_STATUS_PENDING:
+        return outcome
     if not requested_keys and not requested_permissions:
-        return False
+        return outcome
     save_skill_grants(
         drive_root,
         skill.name,
@@ -944,7 +956,13 @@ def auto_grant_if_enabled(drive_root: pathlib.Path, skill: LoadedSkill) -> bool:
         granted_permissions=requested_permissions,
         requested_permissions=requested_permissions,
     )
-    return True
+    return AutoGrantOutcome(
+        granted=True,
+        requested_keys=requested_keys,
+        granted_keys=list(requested_keys),
+        requested_permissions=requested_permissions,
+        granted_permissions=list(requested_permissions),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1549,6 +1567,7 @@ def summarize_skills(drive_root: pathlib.Path) -> Dict[str, Any]:
 
 
 __all__ = [
+    "AutoGrantOutcome",
     "LoadedSkill",
     "SkillReviewState",
     "auto_grant_if_enabled",

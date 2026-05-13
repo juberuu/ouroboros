@@ -148,15 +148,19 @@ which subdivides large writes internally across many small Write/Edit
 operations in its own agent loop.
 
 After the final payload edit, call `review_skill(skill="<name>")`.
-Self-authored skills still use the standard tri-model skill review; no
-deterministic fast path, key grant, or enablement is automatic. I must
-not say a created skill is ready until `review_skill` returns
-`executable_review=true` (or `review_gate.executable_review=true`) and
-the skill is enabled/grant-ready. Skill review verdicts are `clean`,
-`warnings`, `blockers`, or `pending`; I use `review_gate.executable_review`
-rather than guessing from the raw status string. If I try to finish early, the loop will inject
-`SKILL_NOT_FINALIZED`; I then call `review_skill` instead of arguing with
-the guard.
+Self-authored skills still use the standard tri-model skill review; there
+is no deterministic fast path. Key/permission grants remain explicit unless
+the owner has enabled `OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS`; in that case
+the review outcome surfaces `requested_*` / `auto_granted_*`, sets
+`auto_flow=true` for self-authored closed loops, and may enable only after
+`executable_review=true` plus dependency reconciliation succeeds. I must not
+say a created skill is ready until `review_skill` returns
+`executable_review=true` (or `review_gate.executable_review=true`) and the
+skill is enabled/grant-ready. Skill review verdicts are `clean`, `warnings`,
+`blockers`, or `pending`; I use `review_gate.executable_review` rather than
+guessing from the raw status string. If I try to finish early, the loop will
+inject `SKILL_NOT_FINALIZED`; I then call `review_skill` instead of arguing
+with the guard.
 
 When the owner enables auto-grant for reviewed skills, I may run a closed loop:
 edit, preflight, review, enable/grant, execute, inspect `skill_exec_finished` or
@@ -523,6 +527,10 @@ If health invariants show "RESCUE SNAPSHOT AVAILABLE", inspect the snapshot with
      via `review_rebuttal` with one sentence of evidence). Do not
      collapse to "I'll address the top N" — there is no runtime parser
      for dispositions, the discipline is yours.
+     Under `OUROBOROS_REVIEW_ENFORCEMENT=advisory`, `defer` may also cover
+     critical findings when I consciously choose an improvement-backlog item
+     over blocking current performance/functionality work; the reason must
+     be explicit and the finding still stays visible in review artifacts.
    - Use `review_rebuttal` only for findings that are factually wrong
      or technically impossible — never to argue a requested test "isn't
      needed". If the same critical finding repeats twice without new

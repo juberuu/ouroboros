@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 5.20.1-rc.1](https://img.shields.io/badge/version-5.20.1--rc.1-green.svg)](VERSION)
+[![Version 5.20.1-rc.2](https://img.shields.io/badge/version-5.20.1--rc.2-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -419,13 +419,13 @@ not paraphrase it.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 5.20.1-rc.2 | 2026-05-13 | **rc(review): free advisory and surface skill auto-grant.** Surfaces reviewed-skill auto-grant requests/grants in outcomes, lifecycle payloads, headlines, and chat review blocks; enables self-authored `auto_flow` wiring; and lets fresh advisory runs acknowledge open obligations/debts under advisory enforcement with a durable audit event. |
 | 5.20.1-rc.1 | 2026-05-13 | **rc(review): harden Claude advisory and skill-review observability.** Moves read-only Claude Code advisory onto the `ClaudeSDKClient` lifecycle, normalizes SDK token usage, routes advisory effort through the Scope Review setting, aligns skill advisory prompts with the Skill Review Checklist, persists skill advisory evidence/session metadata, and makes `bug_hunting` a critical skill-review blocker with concrete fix guidance. |
 | 5.20.0 | 2026-05-13 | **feat(mcp): add HTTP/SSE MCP client integration.** Adds a disabled-by-default base-runtime MCP client for trusted external tool servers, with Settings → Advanced configuration, masked token round-trips, hot-reloadable server refresh, provider-safe `mcp_<server>__<tool>` names, non-core tool opt-in, heal-mode blocking, per-call safety checks, URL/header validation, untrusted-description wrapping, and focused MCP API/registry/UI tests. Based on PR #51 by @kazzand, with MCP-only porting and hardening on the current architecture. |
 | 5.19.0-rc.3 | 2026-05-13 | **rc(tokens): raise default LLM output budgets.** Increases main-loop/chat defaults to 64K, VLM defaults to 32K, and summary/reflection/consolidation budgets to their new documented floors so long review/context artifacts are less likely to truncate task planning. |
 | 5.19.0-rc.2 | 2026-05-12 | **rc(build): harden macOS DMG creation after release CI.** Retries transient `hdiutil create` resource-busy failures with cleanup before regenerating the DMG, preserving the v5.19.0-rc.1 skill-review gate overhaul. |
 | 5.19.0-rc.1 | 2026-05-12 | **rc(skills): align skill review gates and collapse review evidence.** Renames skill verdicts to `clean`/`warnings`/`blockers`, separates verdicts from enforcement, unifies skill readiness and owner-message injection, syncs reviewed grants across content hashes, and collapses long skill-review system messages in Chat. |
-| 5.18.0 | 2026-05-12 | **feat(skills): overhaul skill-review feedback visibility and anti-thrashing.** Returns full parsed and degraded reviewer evidence to agents via `review_skill` and `chat.jsonl`, shares retry coaching across repo, scope, and skill review, persists accepted rebuttals as protected owner state, hardens review-evidence fencing, and documents skill-review critical thresholds. |
-Older releases are preserved in Git tags and GitHub releases. The 5.2.0 through 5.17.0 rows and former `4.0.0` rows are rolled off to respect the P9 changelog cap; their full bodies remain at their git tags.
+Older releases are preserved in Git tags and GitHub releases. The 5.2.0 through 5.18.0 rows and former `4.0.0` rows are rolled off to respect the P9 changelog cap; their full bodies remain at their git tags.
 
 ---
 

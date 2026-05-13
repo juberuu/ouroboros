@@ -422,6 +422,8 @@ def _outcome_payload(
         "auto_flow": bool(getattr(outcome, "auto_flow", False)),
         "auto_granted_keys": list(getattr(outcome, "auto_granted_keys", []) or []),
         "requested_keys": list(getattr(outcome, "requested_keys", []) or []),
+        "auto_granted_permissions": list(getattr(outcome, "auto_granted_permissions", []) or []),
+        "requested_permissions": list(getattr(outcome, "requested_permissions", []) or []),
         "deps_status": deps_status,
         "deps_error": deps_error,
         "extension_action": extension_action,
@@ -678,7 +680,11 @@ def _review_result_message(outcome: Any) -> str:
         prefix = "Review blocked: blocker findings"
     else:
         prefix = "Review pending"
-    return f"{prefix} ({status}){f': {summary}' if summary else ''}"
+    base = f"{prefix} ({status}){f': {summary}' if summary else ''}"
+    auto_granted = list(getattr(outcome, "auto_granted_keys", []) or [])
+    if auto_granted:
+        base = base + f" | auto-granted: {', '.join(auto_granted)}"
+    return base
 
 
 async def run_skill_review_lifecycle(

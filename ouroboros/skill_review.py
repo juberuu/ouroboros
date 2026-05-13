@@ -27,6 +27,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from ouroboros.config import get_auto_grant_enabled
 from ouroboros.skill_loader import (
     SkillReviewState,
     auto_grant_if_enabled,
@@ -217,6 +218,20 @@ class SkillReviewOutcome:
     advisory_result: Dict[str, Any] = field(default_factory=dict)
     convergence_hint: str = ""
     error: str = ""
+    auto_flow: bool = False
+    requested_keys: List[str] = field(default_factory=list)
+    auto_granted_keys: List[str] = field(default_factory=list)
+    requested_permissions: List[str] = field(default_factory=list)
+    auto_granted_permissions: List[str] = field(default_factory=list)
+
+
+def _apply_auto_grant_outcome(outcome: SkillReviewOutcome, skill: Any, auto_grant: Any) -> None:
+    outcome.requested_keys = list(getattr(auto_grant, "requested_keys", []) or [])
+    outcome.auto_granted_keys = list(getattr(auto_grant, "granted_keys", []) or [])
+    outcome.requested_permissions = list(getattr(auto_grant, "requested_permissions", []) or [])
+    outcome.auto_granted_permissions = list(getattr(auto_grant, "granted_permissions", []) or [])
+    if bool(getattr(skill, "is_self_authored", False)) and get_auto_grant_enabled():
+        outcome.auto_flow = True
 
 
 # ---------------------------------------------------------------------------
@@ -631,6 +646,8 @@ def render_skill_review_block(
     convergence = str(_field("convergence_hint") or "")
     raw_actor_records = list(_field("raw_actor_records") or [])
     advisory_result = _field("advisory_result") or {}
+    auto_granted_keys = list(_field("auto_granted_keys") or [])
+    auto_granted_permissions = list(_field("auto_granted_permissions") or [])
 
     lines: List[str] = []
     headline_marker = {
@@ -646,6 +663,14 @@ def render_skill_review_block(
         lines.append(f"content_hash={content_hash[:12]}")
     if reviewer_models:
         lines.append(f"Reviewers: {', '.join(reviewer_models)}")
+    if auto_granted_keys or auto_granted_permissions:
+        auto_parts: List[str] = []
+        if auto_granted_keys:
+            auto_parts.append(f"keys: {', '.join(auto_granted_keys)}")
+        if auto_granted_permissions:
+            auto_parts.append(f"permissions: {', '.join(auto_granted_permissions)}")
+        hash_note = f" (content_hash={content_hash[:8]})" if content_hash else ""
+        lines.append(f"Auto-granted: {'; '.join(auto_parts)}{hash_note}")
     if isinstance(advisory_result, dict) and advisory_result:
         advisory_status = str(advisory_result.get("status") or "")
         advisory_model = str(advisory_result.get("model") or "")
@@ -826,7 +851,8 @@ def _run_deterministic_preflight(
             findings=findings,
         )
         skill.review = review_state
-        auto_grant_if_enabled(drive_root, skill)
+        auto_grant = auto_grant_if_enabled(drive_root, skill)
+        _apply_auto_grant_outcome(outcome, skill, auto_grant)
     return outcome
 
 
@@ -1490,7 +1516,8 @@ def review_skill(
             raw_actor_records=[record.to_dict() for record in parsed_review.actor_records],
             advisory_result=dict(advisory_evidence or {}),
         )
-        auto_grant_if_enabled(drive_root, skill)
+        auto_grant = auto_grant_if_enabled(drive_root, skill)
+        _apply_auto_grant_outcome(outcome, skill, auto_grant)
 
     return outcome
 

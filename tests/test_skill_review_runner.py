@@ -208,6 +208,20 @@ def test_review_result_message_allows_warnings_status(monkeypatch):
     )
 
 
+def test_review_result_message_includes_auto_granted_keys(monkeypatch):
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    outcome = SkillReviewOutcome(
+        skill_name="alpha",
+        status="pass",
+        findings=[{"item": "manifest_schema", "verdict": "PASS", "reason": "ok"}],
+        auto_granted_keys=["OPENROUTER_API_KEY"],
+    )
+
+    assert _review_result_message(outcome).endswith(
+        "| auto-granted: OPENROUTER_API_KEY"
+    )
+
+
 def test_self_authored_review_lifecycle_uses_triad(tmp_path, monkeypatch):
     _reset_queue()
     sent = []
@@ -273,6 +287,59 @@ def test_self_authored_review_lifecycle_uses_triad(tmp_path, monkeypatch):
     assert review.reviewer_models == ["reviewer-a", "reviewer-b", "reviewer-c"]
     grants = load_skill_grants(drive_root, "alpha")
     assert grants["granted_keys"] == []
+
+
+def test_review_lifecycle_payload_surfaces_auto_flow_grants(tmp_path, monkeypatch):
+    _reset_queue()
+    drive_root = tmp_path / "drive"
+    repo_dir = tmp_path / "repo"
+    skills_root = drive_root / "skills" / "external"
+    drive_root.mkdir()
+    repo_dir.mkdir()
+    skills_root.mkdir(parents=True)
+    skill_dir = _build_keyed_extension(skills_root, "alpha")
+    _mark_self_authored(skill_dir)
+    content_hash = compute_content_hash(skill_dir, manifest_entry="plugin.py")
+    ctx = SimpleNamespace(drive_root=drive_root, repo_dir=repo_dir, messages=[])
+
+    monkeypatch.setattr("supervisor.message_bus.send_with_budget", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        "ouroboros.skill_review_runner._reconcile_deps_after_pass_review",
+        lambda *_a, **_k: ("not_required", ""),
+    )
+    monkeypatch.setattr(
+        "ouroboros.skill_review_runner._reconcile_extension_payload",
+        lambda *_a, **_k: ("extension_loaded", "ready"),
+    )
+
+    def fake_review(_ctx, _skill_name):
+        return SkillReviewOutcome(
+            skill_name="alpha",
+            status="pass",
+            content_hash=content_hash,
+            reviewer_models=["reviewer"],
+            auto_flow=True,
+            requested_keys=["OPENROUTER_API_KEY"],
+            auto_granted_keys=["OPENROUTER_API_KEY"],
+            requested_permissions=["inject_chat"],
+            auto_granted_permissions=["inject_chat"],
+        )
+
+    payload = run_skill_review_lifecycle_blocking(
+        ctx,
+        "alpha",
+        source="test",
+        review_impl=fake_review,
+        repo_path=str(drive_root / "skills"),
+    )
+
+    assert payload["status"] == "clean"
+    assert payload["auto_flow"] is True
+    assert payload["requested_keys"] == ["OPENROUTER_API_KEY"]
+    assert payload["auto_granted_keys"] == ["OPENROUTER_API_KEY"]
+    assert payload["requested_permissions"] == ["inject_chat"]
+    assert payload["auto_granted_permissions"] == ["inject_chat"]
+    assert load_enabled(drive_root, "alpha") is True
 
 
 def test_self_authored_review_does_not_enable_when_deps_fail(tmp_path, monkeypatch):

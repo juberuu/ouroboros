@@ -439,10 +439,12 @@ def _check_advisory_freshness(ctx: ToolContext, commit_message: str,
         update_state,
         _utc_now,
     )
+    from ouroboros.config import get_review_enforcement
     from ouroboros.utils import append_jsonl
     drive_root = pathlib.Path(ctx.drive_root)
     repo_dir = pathlib.Path(ctx.repo_dir)
     repo_key = make_repo_key(repo_dir)
+    enforcement = get_review_enforcement()
 
     snapshot_hash = compute_snapshot_hash(repo_dir, commit_message, paths=paths)
     state = load_state(drive_root)
@@ -512,6 +514,26 @@ def _check_advisory_freshness(ctx: ToolContext, commit_message: str,
 
     # Advisory is fresh for this snapshot — check if obligations or debt remain.
     if state.is_fresh(snapshot_hash, repo_key=repo_key) and (open_obs or open_debts):
+        if enforcement == "advisory":
+            drive_logs = ctx.drive_logs() if callable(getattr(ctx, "drive_logs", None)) else drive_root / "logs"
+            event = {
+                "ts": _utc_now(),
+                "type": "advisory_obligations_acknowledged",
+                "snapshot_hash": snapshot_hash,
+                "repo_key": repo_key,
+                "open_obligations_count": len(open_obs),
+                "open_debts_count": len(open_debts),
+                "open_obligations": [
+                    f"[{o.obligation_id}] {o.item}: {_truncate_review_reason(o.reason, limit=120)}"
+                    for o in open_obs[:5]
+                ],
+                "open_debts": [
+                    f"[{debt.debt_id}] {debt.category}: {_truncate_review_reason(debt.summary, limit=120)}"
+                    for debt in open_debts[:5]
+                ],
+            }
+            if append_jsonl(drive_logs / "events.jsonl", event):
+                return None
         debt_parts = []
         if open_obs:
             debt_parts.append(f"{len(open_obs)} open obligation(s)")

@@ -331,13 +331,14 @@ class TestCommitGateFreshnessMessages:
         ]
         save_state(drive_root, state)
 
-    def test_fresh_with_open_obligations_shows_all(self):
+    def test_fresh_with_open_obligations_shows_all(self, monkeypatch):
         """fresh advisory + >5 obligations: all obligations appear in warning text."""
         from ouroboros.review_state import (
             AdvisoryReviewState, AdvisoryRunRecord, save_state, compute_snapshot_hash,
         )
         from ouroboros.tools.commit_gate import _check_advisory_freshness
 
+        monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
         _, ctx, repo_dir, drive_root, save_state_fn, _, rs_mod = self._setup()
 
         commit_message = "test commit"

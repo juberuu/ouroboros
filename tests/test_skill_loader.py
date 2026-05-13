@@ -1046,6 +1046,90 @@ def test_grant_status_supports_privileged_permissions(tmp_path):
     assert granted["granted_permissions"] == ["inject_chat", "subscribe_event:chat.outbound"]
 
 
+def test_auto_grant_if_enabled_returns_outcome_with_requested_even_when_off(tmp_path, monkeypatch):
+    import ouroboros.config as config
+    from ouroboros.contracts.skill_manifest import SkillManifest
+    from ouroboros.skill_loader import (
+        LoadedSkill,
+        SkillReviewState,
+        auto_grant_if_enabled,
+        load_skill_grants,
+    )
+
+    monkeypatch.setattr(config, "SETTINGS_PATH", tmp_path / "missing-settings.json")
+    monkeypatch.setenv("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", "false")
+    drive_root = tmp_path / "drive"
+    skill_dir = tmp_path / "skill"
+    drive_root.mkdir()
+    skill_dir.mkdir()
+    skill = LoadedSkill(
+        name="auto",
+        skill_dir=skill_dir,
+        manifest=SkillManifest(
+            name="auto",
+            description="auto grant test",
+            version="0.1",
+            type="extension",
+            env_from_settings=["OPENROUTER_API_KEY"],
+            permissions=["inject_chat"],
+        ),
+        content_hash="hash-a",
+        review=SkillReviewState(status="pass", content_hash="hash-a"),
+    )
+
+    outcome = auto_grant_if_enabled(drive_root, skill)
+
+    assert outcome.granted is False
+    assert outcome.requested_keys == ["OPENROUTER_API_KEY"]
+    assert outcome.requested_permissions == ["inject_chat"]
+    assert outcome.granted_keys == []
+    assert outcome.granted_permissions == []
+    assert load_skill_grants(drive_root, "auto")["granted_keys"] == []
+
+
+def test_auto_grant_if_enabled_marks_granted_when_toggle_on(tmp_path, monkeypatch):
+    import ouroboros.config as config
+    from ouroboros.contracts.skill_manifest import SkillManifest
+    from ouroboros.skill_loader import (
+        LoadedSkill,
+        SkillReviewState,
+        auto_grant_if_enabled,
+        load_skill_grants,
+    )
+
+    monkeypatch.setattr(config, "SETTINGS_PATH", tmp_path / "missing-settings.json")
+    monkeypatch.setenv("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", "true")
+    drive_root = tmp_path / "drive"
+    skill_dir = tmp_path / "skill"
+    drive_root.mkdir()
+    skill_dir.mkdir()
+    skill = LoadedSkill(
+        name="auto",
+        skill_dir=skill_dir,
+        manifest=SkillManifest(
+            name="auto",
+            description="auto grant test",
+            version="0.1",
+            type="extension",
+            env_from_settings=["OPENROUTER_API_KEY"],
+            permissions=["inject_chat"],
+        ),
+        content_hash="hash-a",
+        review=SkillReviewState(status="pass", content_hash="hash-a"),
+    )
+
+    outcome = auto_grant_if_enabled(drive_root, skill)
+
+    assert outcome.granted is True
+    assert outcome.requested_keys == ["OPENROUTER_API_KEY"]
+    assert outcome.granted_keys == ["OPENROUTER_API_KEY"]
+    assert outcome.requested_permissions == ["inject_chat"]
+    assert outcome.granted_permissions == ["inject_chat"]
+    grants = load_skill_grants(drive_root, "auto")
+    assert grants["granted_keys"] == ["OPENROUTER_API_KEY"]
+    assert grants["granted_permissions"] == ["inject_chat"]
+
+
 def test_save_skill_grants_merges_partial_approvals(tmp_path):
     """A subsequent partial-key grant must not silently revoke
     previously-approved keys. The merge is bound to the same

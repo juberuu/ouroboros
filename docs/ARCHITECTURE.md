@@ -1,4 +1,4 @@
-# Ouroboros v5.20.1-rc.1 — Architecture & Reference
+# Ouroboros v5.20.1-rc.2 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -885,9 +885,12 @@ continuation phrase heuristics.
 - `review_skill` is the atomic finalize operation for self-authored
   skills. As of v5.9.0, self-authored payloads go through the same
   tri-model skill review as marketplace/user-managed skills; there is no
-  deterministic PASS fast path and no automatic key/permission grant.
-  This keeps daemon-capable and host-callback-capable skills inside the
-  normal P3 immune system.
+  deterministic PASS fast path. Key/permission grants stay explicit unless
+  the desktop owner enables `OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS`; then
+  `auto_flow` exposes the self-authored closed loop and grants only the
+  manifest-declared keys/permissions for the reviewed content hash. This
+  keeps daemon-capable and host-callback-capable skills inside the normal
+  P3 immune system.
 - `skill_preflight` validates widget render schemas statically via the
   same `_validate_ui_render` contract used by the extension loader. It
   catches literal `_UI_RENDER` mistakes (for example `action_route`
@@ -1698,7 +1701,7 @@ Runtime floors:
 | OUROBOROS_WEBSEARCH_MODEL | gpt-5.2 | Official OpenAI Responses model for `web_search` when `OPENAI_BASE_URL` is empty |
 | OUROBOROS_REVIEW_MODELS | openai/gpt-5.5,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.6 | Comma-separated OpenRouter model IDs for pre-commit review (min 2 for quorum) |
 | OUROBOROS_REVIEW_MODEL_TIMEOUT_SEC | 600 | Env-only override read directly by `ouroboros.tools.review`. Per-reviewer model call timeout for multi-model review; timed-out reviewers become ERROR actors and quorum still requires at least two parseable reviewers. |
-| OUROBOROS_REVIEW_ENFORCEMENT | advisory | Review enforcement: `blocking` blocks commit critical findings and skill `blockers`; `advisory` downgrades both to warnings by operator choice. Skill `warnings` do not block execution in either mode. |
+| OUROBOROS_REVIEW_ENFORCEMENT | advisory | Review enforcement: `blocking` blocks commit critical findings, fresh-advisory open obligations/debts, and skill `blockers`; `advisory` downgrades those to warnings by operator choice. Fresh advisory with open obligations/debts writes `advisory_obligations_acknowledged`; stale advisory still blocks. Skill `warnings` do not block execution in either mode. |
 | OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS | false | Desktop-owner confirmed setting. When enabled, any completed skill review verdict (`clean`, `warnings`, or `blockers`) grants only the manifest-declared settings keys and host permissions for that exact content hash so closed-loop skill development can run without repeated manual grants. Plain `/api/settings` POST drops this key; desktop uses the launcher confirmation bridge. |
 | OUROBOROS_RUNTIME_MODE | advanced | Three-layer refactor axis: `light`, `advanced`, or `pro`. Orthogonal to `OUROBOROS_REVIEW_ENFORCEMENT`. Clamped via `normalize_runtime_mode` on both save and read paths. `light` is a compatibility/self-modification guard: it blocks repo-mutation tools at the `ToolRegistry.execute` gate, mutative direct git through `run_shell`, and shallow argv writer commands with explicit repo-local targets, while leaving normal shell/Python/Node diagnostics usable. It also refuses runtime_mode self-elevation through the owner chokepoints (`save_settings`, `_data_write` settings.json block, `/api/settings` POST drop). Reviewed + enabled skills (script + extension) execute in light. `advanced` can evolve the application layer but blocks protected core/contract/release paths. `pro` may edit those protected surfaces directly, but committing them still requires the normal triad + scope review to pass. The runtime_mode value itself is owner-only — change it by editing `settings.json` directly while the agent is stopped, then restart. |
 | OUROBOROS_SKILLS_REPO_PATH | "" | Local checkout path for the external skills/extensions repo. Consumed by `ouroboros.skill_loader.discover_skills` (Phase 3); accepts absolute paths or `~`-prefixed paths; `get_skills_repo_path` expands `~` at read time. Ouroboros never clones/pulls this directory. |

@@ -31,6 +31,7 @@ from ouroboros.skill_review import (
     _aggregate_status,
     _extract_actor_findings,
     _parse_json_array,
+    render_skill_review_block,
     review_skill,
 )
 from ouroboros.tools.registry import ToolContext
@@ -231,6 +232,20 @@ def _build_skill(
     )
     (skill_dir / "scripts" / "fetch.py").write_text("print('hi')\n", encoding="utf-8")
     return skills_root
+
+
+def _mark_self_authored(skill_dir: pathlib.Path, drive_root: pathlib.Path) -> None:
+    payload = {
+        "schema_version": 1,
+        "origin": "self_authored",
+        "task_id": "task-1",
+        "created_at": "2026-05-13T00:00:00+00:00",
+    }
+    body = json.dumps(payload) + "\n"
+    (skill_dir / ".self_authored.json").write_text(body, encoding="utf-8")
+    state_dir = drive_root / "state" / "skills" / skill_dir.name
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "self_authored.json").write_text(body, encoding="utf-8")
 
 
 def _make_ctx(tmp_path: pathlib.Path) -> ToolContext:
@@ -474,6 +489,7 @@ def test_review_skill_auto_grants_after_clean_when_enabled(tmp_path, monkeypatch
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
     monkeypatch.setenv("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", "true")
     ctx = _make_ctx(tmp_path)
+    _mark_self_authored(skills_root / "weather", ctx.drive_root)
     pass_array = _pass_array_for_script_skill()
     canned = json.dumps(
         {
@@ -488,6 +504,9 @@ def test_review_skill_auto_grants_after_clean_when_enabled(tmp_path, monkeypatch
         outcome = review_skill(ctx, "weather")
 
     assert outcome.status == "clean"
+    assert outcome.auto_flow is True
+    assert outcome.requested_keys == ["OPENROUTER_API_KEY"]
+    assert outcome.auto_granted_keys == ["OPENROUTER_API_KEY"]
     grants = load_skill_grants(ctx.drive_root, "weather")
     assert grants["granted_keys"] == ["OPENROUTER_API_KEY"]
     assert grants["content_hash"] == outcome.content_hash
@@ -517,6 +536,8 @@ def test_review_skill_auto_grants_after_completed_blockers_review(tmp_path, monk
         outcome = review_skill(ctx, "weather")
 
     assert outcome.status == "blockers"
+    assert outcome.requested_keys == ["OPENROUTER_API_KEY"]
+    assert outcome.auto_granted_keys == ["OPENROUTER_API_KEY"]
     grants = load_skill_grants(ctx.drive_root, "weather")
     assert grants["granted_keys"] == ["OPENROUTER_API_KEY"]
     assert grants["content_hash"] == outcome.content_hash
@@ -540,9 +561,26 @@ def test_review_skill_auto_grants_after_deterministic_preflight_blocker(tmp_path
     outcome = review_skill(ctx, "weather")
 
     assert outcome.status == "blockers"
+    assert outcome.requested_keys == ["OPENROUTER_API_KEY"]
+    assert outcome.auto_granted_keys == ["OPENROUTER_API_KEY"]
     grants = load_skill_grants(ctx.drive_root, "weather")
     assert grants["granted_keys"] == ["OPENROUTER_API_KEY"]
     assert grants["content_hash"] == outcome.content_hash
+
+
+def test_render_skill_review_block_shows_auto_granted_keys():
+    outcome = SkillReviewOutcome(
+        skill_name="weather",
+        status="clean",
+        content_hash="abc1234567890",
+        reviewer_models=["reviewer-a"],
+        auto_granted_keys=["OPENROUTER_API_KEY"],
+    )
+
+    rendered = render_skill_review_block(outcome)
+
+    assert "Reviewers: reviewer-a" in rendered
+    assert "Auto-granted: keys: OPENROUTER_API_KEY" in rendered
 
 
 def test_review_skill_returns_fail_on_critical_finding(tmp_path, monkeypatch):
