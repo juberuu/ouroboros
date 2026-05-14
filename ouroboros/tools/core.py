@@ -19,8 +19,10 @@ from ouroboros.contracts.skill_payload_policy import (
     SKILL_PAYLOAD_ALL_BUCKETS,
     SKILL_PAYLOAD_CONTROL_DIRNAMES,
     SKILL_PAYLOAD_CONTROL_FILENAMES,
+    SkillPayloadPathError,
     cross_skill_redirect_error,
-    synthesize_payload_constraint,
+    decide_payload_short_form,
+    resolve_skill_payload_target,
 )
 
 log = logging.getLogger(__name__)
@@ -107,6 +109,13 @@ def _native_payload_without_seed(target: pathlib.Path, data_root: pathlib.Path) 
         return False
     bucket, _skill_name, payload_root = payload
     return bucket == "native" and not (payload_root / ".seed-origin").is_file()
+
+
+def _data_skill_path(path: str, drive_root: pathlib.Path) -> pathlib.Path | None:
+    try:
+        return resolve_skill_payload_target(pathlib.Path(drive_root), path).target_path
+    except SkillPayloadPathError:
+        return None
 
 
 def _looks_like_serialized_tool_result(content: Any) -> bool:
@@ -395,13 +404,16 @@ def _data_write(
     # skill_repair-flavoured TaskConstraint so the existing payload-confined
     # write flow handles the resolution. This is the light-mode short-form
     # path described in DEVELOPMENT.md (Skill Repair Task Constraints).
-    synth = synthesize_payload_constraint(bucket, skill_name)
-    if (bucket or skill_name) and synth is None:
-        return (
-            "⚠️ DATA_WRITE_ERROR: bucket and skill_name must be supplied together; "
-            "bucket must be one of external/clawhub/ouroboroshub (native excluded); "
-            "skill_name must sanitize to a non-empty slug."
-        )
+    short_form = decide_payload_short_form(
+        bucket=bucket,
+        skill_name=skill_name,
+        path_text=path,
+        repo_dir=pathlib.Path(ctx.repo_dir),
+        drive_root=pathlib.Path(ctx.drive_root),
+    )
+    if short_form.error:
+        return f"⚠️ DATA_WRITE_ERROR: {short_form.error}"
+    synth = short_form.constraint
     existing_tc = normalize_task_constraint(getattr(ctx, "task_constraint", None))
     redirect_err = cross_skill_redirect_error(existing_tc, synth)
     if redirect_err:
@@ -413,13 +425,15 @@ def _data_write(
         task_constraint = existing_tc
     else:
         task_constraint = synth or existing_tc
+    write_path = _normalize_data_read_path(ctx, path)
     if task_constraint and task_constraint.mode == "skill_repair" and task_constraint.payload_root:
         try:
             p = resolve_payload_path(pathlib.Path(ctx.drive_root), task_constraint, path)
         except ValueError as e:
             return f"⚠️ DATA_WRITE_ERROR: {e}"
     else:
-        p = ctx.drive_path(path)
+        explicit_skill_target = _data_skill_path(path, pathlib.Path(ctx.drive_root))
+        p = explicit_skill_target if explicit_skill_target is not None else ctx.drive_path(write_path)
     # v5.1.2 elevation ratchet defense-in-depth: settings.json is owner-only.
     # The chokepoint in ``ouroboros.config.save_settings`` already refuses
     # disk-level elevation; blocking ``data_write`` here turns the whole
@@ -440,7 +454,7 @@ def _data_write(
     if task_constraint and task_constraint.mode == "skill_repair" and task_constraint.payload_root:
         lexical_target = pathlib.Path(p).resolve(strict=False)
     else:
-        lexical_target = pathlib.Path(ctx.drive_root).resolve(strict=False) / safe_relpath(path)
+        lexical_target = pathlib.Path(ctx.drive_root).resolve(strict=False) / safe_relpath(write_path)
     suffix = pathlib.PurePosixPath(str(path or "")).suffix.lower()
     if suffix in {".py", ".md", ".json", ".sh"} and _looks_like_serialized_tool_result(content):
         return (
@@ -554,7 +568,10 @@ def _data_write(
         state_marker = pathlib.Path(ctx.drive_root) / "state" / "skills" / marker_payload[1] / "self_authored.json"
         state_marker.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_json(state_marker, marker_payload_data, trailing_newline=True)
-    return f"OK: wrote {mode} {path} ({len(content)} chars)"
+    result = f"OK: wrote {mode} {path} ({len(content)} chars)"
+    if short_form.ignored_reason:
+        result += f"\n⚠️ SKILL_SHORT_FORM_IGNORED: {short_form.ignored_reason}."
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1028,9 +1045,9 @@ def get_tools() -> List[ToolEntry]:
                 "Write a UTF-8 text file to the local data directory. "
                 "Use mode='append' to write a large file in chunks across multiple calls "
                 "(useful when the full content exceeds a single LLM output budget). "
-                "Optional bucket+skill_name args let runtime_mode=light tasks write a short "
-                "relative path under data/skills/<bucket>/<skill_name>/ without an explicit "
-                "task_constraint."
+                "Optional bucket+skill_name args let tasks write a short relative path under "
+                "an existing data/skills/<bucket>/<skill_name>/ payload. Explicit data/repo "
+                "paths keep their own address space and ignore stale short-form args."
             ),
             "parameters": {"type": "object", "properties": {
                 "path": {"type": "string"},
@@ -1039,11 +1056,11 @@ def get_tools() -> List[ToolEntry]:
                 "bucket": {
                     "type": "string",
                     "enum": ["external", "clawhub", "ouroboroshub"],
-                    "description": "Skill payload bucket. Pair with skill_name to use a short relative path under data/skills/<bucket>/<skill_name>/. Requires both args together.",
+                    "description": "Skill payload bucket for short relative payload paths only. Pair with skill_name. Do not supply for explicit repo/data paths.",
                 },
                 "skill_name": {
                     "type": "string",
-                    "description": "Skill slug (sanitized to alnum/_-., ≤64 chars). Requires bucket.",
+                    "description": "Skill slug for short relative payload paths only. Requires bucket.",
                 },
             }, "required": ["path", "content"]},
         }, _data_write),

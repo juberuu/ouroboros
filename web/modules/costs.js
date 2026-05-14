@@ -90,9 +90,10 @@ export function initCosts({ ws, state, mount = null, embedded = false, hostPage 
             tdCost.className = 'cost-cell-right';
             tdCost.textContent = formatUsd2(info.cost);
 
-            const bar = document.createElement('div');
+            const bar = document.createElement('progress');
             bar.className = 'cost-bar';
-            bar.style.width = Math.min(100, pct) + '%';
+            bar.max = 100;
+            bar.value = Math.min(100, pct);
 
             const tdBar = document.createElement('td');
             tdBar.className = 'cost-bar-cell';
@@ -131,7 +132,7 @@ export function initCosts({ ws, state, mount = null, embedded = false, hostPage 
         try {
             const resp = await fetch('/api/settings', { cache: 'no-store' });
             const s = await resp.json().catch(() => ({}));
-            if (s.TOTAL_BUDGET) document.getElementById('s-budget').value = s.TOTAL_BUDGET;
+            if (s.TOTAL_BUDGET != null) document.getElementById('s-budget').value = s.TOTAL_BUDGET;
             if (s.OUROBOROS_PER_TASK_COST_USD != null) document.getElementById('s-per-task-cost').value = s.OUROBOROS_PER_TASK_COST_USD;
         } catch {}
     }

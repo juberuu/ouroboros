@@ -467,7 +467,12 @@ For everything else, prefer the existing declarative components
 (form / action / poll / subscription / stream / table / chart /
 markdown / json / kv / status / tabs / progress / gallery /
 image / audio / video / file / map / calendar / kanban). They
-handle XSS / CSRF / lifecycle automatically.
+handle XSS / CSRF / lifecycle automatically. A top-level
+`subscription` may include `render: [...]` passive display children
+(`progress`, `gallery`, `key_value`, `markdown`, etc.) that render the
+latest WebSocket payload for that subscription. Do not put interactive
+children such as `form`, `action`, `poll`, `stream`, nested
+`subscription`, or `tabs` inside `subscription.render`.
 
 ### Widget composition rules
 

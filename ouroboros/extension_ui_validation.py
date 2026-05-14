@@ -38,6 +38,7 @@ _DECLARATIVE_WIDGET_COMPONENTS = {
     "image",
     "json",
     "kv",
+    "key_value",
     "markdown",
     "poll",
     "progress",
@@ -132,6 +133,24 @@ def validate_ui_render(render: Dict[str, Any]) -> Dict[str, Any]:
                         f"declarative widget component {idx} requires event or message_type"
                     )
                 _assert_ws_message_type(event_name)
+                render_children = component.get("render", [])
+                if render_children is not None and not isinstance(render_children, list):
+                    raise ExtensionRegistrationError(
+                        f"declarative widget component {idx} subscription render must be a list"
+                    )
+                for child_idx, child in enumerate(render_children or []):
+                    child_type = str((child or {}).get("type") or "") if isinstance(child, dict) else ""
+                    if child_type in {"form", "action", "poll", "subscription", "stream", "tabs"}:
+                        raise ExtensionRegistrationError(
+                            f"declarative widget component {idx} subscription child {child_idx} "
+                            f"cannot use interactive type {child_type!r}"
+                        )
+                if render_children:
+                    validate_ui_render({
+                        "kind": "declarative",
+                        "schema_version": schema_version,
+                        "components": render_children,
+                    })
             if component_type == "stream" and not str(component.get("route") or component.get("api_route") or "").strip():
                 raise ExtensionRegistrationError(
                     f"declarative widget component {idx} requires route or api_route"
@@ -195,6 +214,10 @@ def validate_ui_render(render: Dict[str, Any]) -> Dict[str, Any]:
                         raise ExtensionRegistrationError(
                             f"declarative widget component {idx} field {field_idx} requires path"
                         )
+            if component_type == "key_value" and not str(component.get("items_key") or component.get("path") or "").strip():
+                raise ExtensionRegistrationError(
+                    f"declarative widget component {idx} key_value requires items_key or path"
+                )
             if component_type == "table":
                 columns = component.get("columns")
                 if not isinstance(columns, list) or not columns:

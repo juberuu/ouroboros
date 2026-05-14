@@ -143,6 +143,8 @@ def test_widgets_cards_do_not_stretch_to_row_height():
     assert "widgets-card-span-2" in source
     assert "applyMasonry(list)" in source
     assert "function layout(container, config)" in masonry
+    assert "itemResizeObserver" in masonry
+    assert "observeItems()" in masonry
     widgets_block = css.split(".widgets-list {", 1)[1].split("}", 1)[0]
     assert "display: grid" not in widgets_block
     assert "position: relative;" in widgets_block
@@ -174,3 +176,14 @@ def test_widgets_v5_7_0_new_components_render():
     # extension JS is acceptable in any of the new component renderers.
     assert "data-widget-map-config" in source
     assert "widget-kanban-card" in source
+
+
+def test_widgets_render_subscription_children():
+    source = _widgets_js()
+    assert "type === 'subscription'" in source
+    assert "component.render" in source
+    assert "widget-subscription-render" in source
+    assert "value_key" in source
+    assert "items_key" in source
+    assert "route_prefix" in source
+    assert "type === 'key_value'" in source

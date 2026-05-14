@@ -49,6 +49,45 @@ class SkillPayloadTarget:
     control_plane: bool = False
 
 
+@dataclass(frozen=True)
+class PayloadShortFormDecision:
+    """Resolution decision for optional ``bucket`` + ``skill_name`` edit args."""
+
+    constraint: Optional[TaskConstraint] = None
+    error: str = ""
+    ignored_reason: str = ""
+
+
+_OPTIONAL_ARG_SENTINELS = frozenset({
+    "__omit__",
+    "<omit>",
+    "__none__",
+    "<none>",
+    "null",
+    "none",
+    "undefined",
+})
+
+_DATA_ROOT_PREFIXES = frozenset({
+    "archive",
+    "logs",
+    "memory",
+    "skills",
+    "state",
+    "task_results",
+    "uploads",
+})
+
+_DATA_ROOT_FILENAMES = frozenset({
+    "settings.json",
+})
+
+
+def _clean_optional_short_form_arg(value: str) -> str:
+    text = str(value or "").strip()
+    return "" if text.lower() in _OPTIONAL_ARG_SENTINELS else text
+
+
 def _clean_data_rel(raw: str) -> str:
     norm = str(raw or "").replace("\\", "/").strip().lstrip("/")
     if norm.startswith("data/"):
@@ -190,8 +229,9 @@ def synthesize_payload_constraint(
     The semantic match is sufficient — both repair and light-mode short-form
     authoring confine the call to a single skill payload root.
     """
-    b = (bucket or "").strip()
-    s = _sanitize_skill_name(skill_name)
+    b = _clean_optional_short_form_arg(bucket)
+    raw_skill_name = _clean_optional_short_form_arg(skill_name)
+    s = _sanitize_skill_name(raw_skill_name)
     if not b or not s or s == "_unnamed":
         return None
     if b not in SKILL_PAYLOAD_BUCKETS:
@@ -201,6 +241,86 @@ def synthesize_payload_constraint(
         skill_name=s,
         payload_root=f"skills/{b}/{s}",
     )
+
+
+def _explicit_path_kind(path_text: str, *, repo_dir: Path, drive_root: Path) -> str:
+    raw = str(path_text or "").replace("\\", "/").strip()
+    if raw in ("", ".", "./"):
+        return ""
+    drive = Path(drive_root).resolve(strict=False)
+    repo = Path(repo_dir).resolve(strict=False)
+    candidate = Path(raw)
+    if candidate.is_absolute():
+        resolved = candidate.resolve(strict=False)
+        try:
+            resolved.relative_to(repo)
+            return "repo"
+        except ValueError:
+            pass
+        try:
+            rel = resolved.relative_to(drive).as_posix()
+        except ValueError:
+            return ""
+        return "skill" if rel.startswith("skills/") else "data"
+    raw_lstripped = raw.lstrip("/")
+    raw_lstripped_lower = raw_lstripped.lower()
+    if raw_lstripped_lower.startswith("data/"):
+        data_rel = raw_lstripped[len("data/"):]
+        return "skill" if data_rel.lower().startswith("skills/") else "data"
+    rel = _clean_data_rel(raw)
+    rel_lower = rel.lower()
+    if rel_lower.startswith("skills/"):
+        return "skill"
+    parts = PurePosixPath(rel).parts
+    if not parts:
+        return ""
+    first_lower = parts[0].lower()
+    if first_lower in _DATA_ROOT_PREFIXES or first_lower in _DATA_ROOT_FILENAMES:
+        return "data"
+    if (repo / parts[0]).exists():
+        return "repo"
+    return ""
+
+
+def decide_payload_short_form(
+    *,
+    bucket: str,
+    skill_name: str,
+    path_text: str,
+    repo_dir: Path,
+    drive_root: Path,
+) -> PayloadShortFormDecision:
+    """Resolve optional skill short-form args without overriding explicit paths."""
+    clean_bucket = _clean_optional_short_form_arg(bucket)
+    clean_skill_name = _clean_optional_short_form_arg(skill_name)
+    if not clean_bucket and not clean_skill_name:
+        return PayloadShortFormDecision()
+    kind = _explicit_path_kind(path_text, repo_dir=repo_dir, drive_root=drive_root)
+    if kind:
+        return PayloadShortFormDecision(
+            ignored_reason=(
+                f"ignored bucket/skill_name because {path_text!r} is an explicit "
+                f"{kind} path"
+            )
+        )
+    synth = synthesize_payload_constraint(clean_bucket, clean_skill_name)
+    if synth is None:
+        return PayloadShortFormDecision(
+            error=(
+                "bucket and skill_name must be supplied together; bucket must be "
+                "one of external/clawhub/ouroboroshub (native excluded); "
+                "skill_name must sanitize to a non-empty slug."
+            )
+        )
+    payload_root = (Path(drive_root) / synth.payload_root).resolve(strict=False)
+    if not payload_root.is_dir():
+        return PayloadShortFormDecision(
+            error=(
+                f"skill payload not found: {synth.payload_root}. "
+                "Use an existing skill_name, or omit bucket/skill_name for a repo/data edit."
+            )
+        )
+    return PayloadShortFormDecision(constraint=synth)
 
 
 def cross_skill_redirect_error(
@@ -241,6 +361,8 @@ __all__ = [
     "SKILL_PAYLOAD_CONTROL_DIRNAMES",
     "SkillPayloadPathError",
     "SkillPayloadTarget",
+    "PayloadShortFormDecision",
+    "decide_payload_short_form",
     "is_skill_payload_path",
     "resolve_skill_payload_target",
     "synthesize_payload_constraint",

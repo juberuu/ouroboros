@@ -94,18 +94,29 @@ def build_runtime_section(env: Any, task: Dict[str, Any]) -> str:
 
     # --- Runtime context JSON ---
     _is_desktop = bool(os.environ.get("OUROBOROS_DESKTOP_MODE", ""))
+    try:
+        from ouroboros.config import get_runtime_mode
+        runtime_mode = get_runtime_mode()
+    except Exception:
+        runtime_mode = os.environ.get("OUROBOROS_RUNTIME_MODE", "advanced")
     runtime_data = {
         "utc_now": utc_now_iso(),
         "repo_dir": str(env.repo_dir),
         "drive_root": str(env.drive_root),
         "git_head": git_sha,
         "git_branch": git_branch,
+        "runtime_mode": runtime_mode,
         "task": {"id": task.get("id"), "type": task.get("type")},
         "runtime_env": {
             "is_desktop": _is_desktop,
             "platform": sys.platform,
         },
     }
+    if str(runtime_mode).lower() == "light":
+        runtime_data["runtime_mode_rule"] = (
+            "light mode forbids Ouroboros repo mutation; scoped edits under "
+            "data/skills/{external,clawhub,ouroboroshub}/<skill>/ remain allowed"
+        )
     if budget_info:
         runtime_data["budget"] = budget_info
     runtime_ctx = json.dumps(runtime_data, ensure_ascii=False, indent=2)

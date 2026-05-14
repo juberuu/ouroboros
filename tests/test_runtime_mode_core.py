@@ -19,6 +19,7 @@ import ast
 import os
 import pathlib
 import subprocess
+import sys
 
 import pytest
 
@@ -888,6 +889,75 @@ def test_light_mode_allows_shell_wrapper_non_repo_writer(tmp_path, monkeypatch):
     assert "LIGHT_MODE_BLOCKED" not in result, result[:200]
 
 
+def test_light_mode_tripwire_catches_python_repo_writer(tmp_path, monkeypatch):
+    import ouroboros.safety as safety_mod
+
+    repo = _git_repo(tmp_path)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    monkeypatch.setattr(safety_mod, "check_safety", lambda *a, **k: (True, ""))
+    reg = ToolRegistry(repo_dir=repo, drive_root=tmp_path / "drive")
+
+    result = reg.execute(
+        "run_shell",
+        {"cmd": [sys.executable, "-c", "from pathlib import Path; Path('README.md').write_text('hacked\\n')"]},
+    )
+
+    assert "LIGHT_MODE_REPO_WRITE_BLOCKED" in result, result[:300]
+    assert "README.md" in result
+    assert (repo / "README.md").read_text(encoding="utf-8") == "hacked\n"
+
+
+def test_light_mode_tripwire_catches_untracked_repo_file(tmp_path, monkeypatch):
+    import ouroboros.safety as safety_mod
+
+    repo = _git_repo(tmp_path)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    monkeypatch.setattr(safety_mod, "check_safety", lambda *a, **k: (True, ""))
+    reg = ToolRegistry(repo_dir=repo, drive_root=tmp_path / "drive")
+
+    result = reg.execute(
+        "run_shell",
+        {"cmd": [sys.executable, "-c", "from pathlib import Path; Path('new_tool.py').write_text('x\\n')"]},
+    )
+
+    assert "LIGHT_MODE_REPO_WRITE_BLOCKED" in result, result[:300]
+    assert "new_tool.py" in result
+    assert (repo / "new_tool.py").read_text(encoding="utf-8") == "x\n"
+
+
+def test_light_mode_tripwire_runs_after_failed_command(tmp_path, monkeypatch):
+    import ouroboros.safety as safety_mod
+
+    repo = _git_repo(tmp_path)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    monkeypatch.setattr(safety_mod, "check_safety", lambda *a, **k: (True, ""))
+    reg = ToolRegistry(repo_dir=repo, drive_root=tmp_path / "drive")
+
+    result = reg.execute(
+        "run_shell",
+        {"cmd": [sys.executable, "-c", "from pathlib import Path; Path('README.md').write_text('bad\\n'); raise SystemExit(2)"]},
+    )
+
+    assert "LIGHT_MODE_REPO_WRITE_BLOCKED" in result, result[:300]
+    assert "SHELL_EXIT_ERROR" in result
+
+
+def test_advanced_mode_does_not_run_light_tripwire(tmp_path, monkeypatch):
+    import ouroboros.safety as safety_mod
+
+    repo = _git_repo(tmp_path)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    monkeypatch.setattr(safety_mod, "check_safety", lambda *a, **k: (True, ""))
+    reg = ToolRegistry(repo_dir=repo, drive_root=tmp_path / "drive")
+
+    result = reg.execute(
+        "run_shell",
+        {"cmd": [sys.executable, "-c", "from pathlib import Path; Path('README.md').write_text('advanced\\n')"]},
+    )
+
+    assert "LIGHT_MODE_REPO_WRITE_BLOCKED" not in result, result[:300]
+
+
 # ===========================================================================
 # Part: light-mode bucket+skill_name short-form authoring (v5.16.0-rc.1)
 # ===========================================================================
@@ -1167,10 +1237,134 @@ def test_synthesize_payload_constraint_unit():
     # Name that sanitizes away to nothing.
     assert synthesize_payload_constraint("external", "....") is None
     assert synthesize_payload_constraint("external", "/") is None
+    assert synthesize_payload_constraint("external", "__omit__") is None
 
     # Sanitizer normalises odd input but still returns a usable constraint.
     tc = synthesize_payload_constraint("external", "weather/v2")
     assert tc is not None and tc.skill_name == "weather_v2"
+
+
+def test_repo_path_wins_over_stale_bucket_skill_name(tmp_path, monkeypatch):
+    repo = _git_repo(tmp_path)
+    drive = tmp_path / "drive"
+    (drive / "skills" / "external" / "alpha").mkdir(parents=True)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    reg = ToolRegistry(repo_dir=repo, drive_root=drive)
+
+    result = reg.execute(
+        "str_replace_editor",
+        {
+            "path": "README.md",
+            "old_str": "ok",
+            "new_str": "repo-ok",
+            "bucket": "external",
+            "skill_name": "alpha",
+        },
+    )
+
+    assert "Replaced" in result, result[:300]
+    assert "SKILL_SHORT_FORM_IGNORED" in result
+    assert (repo / "README.md").read_text(encoding="utf-8") == "repo-ok\n"
+    assert not (drive / "skills" / "external" / "alpha" / "README.md").exists()
+
+
+def test_data_settings_path_wins_over_stale_bucket_skill_name(tmp_path, monkeypatch):
+    from ouroboros import config as cfg
+
+    drive = tmp_path / "drive"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (drive / "skills" / "external" / "alpha").mkdir(parents=True)
+    (drive / "settings.json").write_text('{"TOTAL_BUDGET": 10}\n', encoding="utf-8")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    monkeypatch.setattr(cfg, "DATA_DIR", drive)
+    monkeypatch.setattr(cfg, "SETTINGS_PATH", drive / "settings.json")
+    reg = ToolRegistry(repo_dir=repo, drive_root=drive)
+
+    result = reg.execute(
+        "data_write",
+        {
+            "path": "settings.json",
+            "content": "{}\n",
+            "bucket": "external",
+            "skill_name": "alpha",
+        },
+    )
+
+    assert "DATA_WRITE_BLOCKED" in result, result[:300]
+    assert not (drive / "skills" / "external" / "alpha" / "settings.json").exists()
+    assert (drive / "settings.json").read_text(encoding="utf-8") == '{"TOTAL_BUDGET": 10}\n'
+
+
+def test_data_settings_case_variant_wins_over_stale_bucket_skill_name(tmp_path, monkeypatch):
+    from ouroboros import config as cfg
+
+    drive = tmp_path / "drive"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (drive / "skills" / "external" / "alpha").mkdir(parents=True)
+    (drive / "settings.json").write_text('{"TOTAL_BUDGET": 10}\n', encoding="utf-8")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    monkeypatch.setattr(cfg, "DATA_DIR", drive)
+    monkeypatch.setattr(cfg, "SETTINGS_PATH", drive / "settings.json")
+    reg = ToolRegistry(repo_dir=repo, drive_root=drive)
+
+    result = reg.execute(
+        "data_write",
+        {
+            "path": "Settings.json",
+            "content": "{}\n",
+            "bucket": "external",
+            "skill_name": "alpha",
+        },
+    )
+
+    assert "DATA_WRITE_BLOCKED" in result, result[:300]
+    assert not (drive / "skills" / "external" / "alpha" / "Settings.json").exists()
+
+
+def test_explicit_data_skills_path_wins_over_stale_bucket_skill_name(tmp_path, monkeypatch):
+    drive = tmp_path / "drive"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    skill = drive / "skills" / "external" / "alpha"
+    skill.mkdir(parents=True)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    reg = ToolRegistry(repo_dir=repo, drive_root=drive)
+
+    result = reg.execute(
+        "data_write",
+        {
+            "path": "data/skills/external/alpha/plugin.py",
+            "content": "VALUE = 1\n",
+            "bucket": "external",
+            "skill_name": "alpha",
+        },
+    )
+
+    assert "DATA_WRITE_ERROR" not in result, result[:300]
+    assert "SKILL_SHORT_FORM_IGNORED" in result
+    assert (skill / "plugin.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert not (drive / "data" / "skills" / "external" / "alpha" / "plugin.py").exists()
+
+
+def test_short_form_requires_existing_payload_root(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    reg = ToolRegistry(repo_dir=tmp_path / "repo", drive_root=tmp_path / "drive")
+    (tmp_path / "repo").mkdir()
+
+    result = reg.execute(
+        "str_replace_editor",
+        {
+            "path": "plugin.py",
+            "old_str": "x",
+            "new_str": "y",
+            "bucket": "external",
+            "skill_name": "ghost",
+        },
+    )
+
+    assert "skill payload not found" in result, result[:300]
 
 
 def test_cross_skill_redirect_error_unit():

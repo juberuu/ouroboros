@@ -113,6 +113,19 @@ function safeMediaSrc(tab, spec, state) {
     return '';
 }
 
+function routePrefixToMediaSpec(routePrefix, value, itemType = 'image') {
+    const text = String(value || '').trim();
+    const prefix = String(routePrefix || '').trim();
+    if (!prefix || !text) return { type: itemType, src: text };
+    const [route, queryKey = 'path'] = prefix.split('?', 2);
+    const key = queryKey.endsWith('=') ? queryKey.slice(0, -1) : queryKey;
+    return {
+        type: itemType,
+        route,
+        query: { [key || 'path']: text },
+    };
+}
+
 function filenameFromWidgetUrl(url, fallback = 'download') {
     try {
         const parsed = new URL(url, window.location.origin);
@@ -186,6 +199,9 @@ function renderDataComponent(tab, component, state, status, componentState = {},
     const type = String(component.type || '');
     const target = component.target || 'result';
     const data = state[target] || {};
+    if (component.condition_key && !getPath(data, component.condition_key, false)) {
+        return '';
+    }
     if (type === 'status') {
         const current = status[target] || 'idle';
         return `<div class="widget-status" data-state="${escapeHtml(current)}">${escapeHtml(component[current] || current)}</div>`;
@@ -198,6 +214,11 @@ function renderDataComponent(tab, component, state, status, componentState = {},
             return `<div class="widget-kv-row"><span>${label}</span><strong>${escapeHtml(value)}</strong></div>`;
         }).join('');
         return `<div class="widget-kv">${rows || '<div class="muted">No data.</div>'}</div>`;
+    }
+    if (type === 'key_value') {
+        const rows = getPath(data, component.items_key || component.path || '', []);
+        if (!Array.isArray(rows) || !rows.length) return '';
+        return `<div class="widget-kv">${rows.map((row) => `<div class="widget-kv-row"><span>${escapeHtml(row?.key || row?.label || '')}</span><strong>${escapeHtml(row?.value ?? '')}</strong></div>`).join('')}</div>`;
     }
     if (type === 'table') {
         const rows = getPath(data, component.path || '', []);
@@ -250,14 +271,22 @@ function renderDataComponent(tab, component, state, status, componentState = {},
         return `<button class="btn btn-default widget-download" type="button" data-widget-download-url="${escapeHtml(src)}" data-widget-download-filename="${filename}">${label}</button>`;
     }
     if (type === 'gallery') {
-        const items = component.items || getPath(data, component.path || '', []);
+        let items = component.items || getPath(data, component.path || component.items_key || '', []);
         if (!Array.isArray(items)) return '<div class="muted">No media items.</div>';
+        if (component.items_key && component.route_prefix) {
+            items = items.map((item) => routePrefixToMediaSpec(
+                component.route_prefix,
+                typeof item === 'object' ? (item.path || item.src || item.url || '') : item,
+                component.item_type || 'image',
+            ));
+        }
         return `<div class="widget-gallery">${items.map((item, idx) => renderDataComponent(tab, { ...item, type: item.type || 'image' }, state, status, componentState, `${componentKey}:gallery:${idx}`)).join('')}</div>`;
     }
     if (type === 'progress') {
-        const value = Number(getPath(data, component.path || 'progress', 0));
+        const value = Number(getPath(data, component.path || component.value_key || 'progress', 0));
         const bounded = Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 0;
-        return `<div class="widget-progress"><progress max="100" value="${bounded}"></progress><span>${bounded}%</span></div>`;
+        const label = component.label_key ? getPath(data, component.label_key, '') : '';
+        return `<div class="widget-progress"><progress max="100" value="${bounded}"></progress><span>${bounded}%${label ? ` · ${escapeHtml(label)}` : ''}</span></div>`;
     }
     // v5.7.0: host-owned ``map`` renderer. Falls back to a flat marker
     // list when Leaflet is not available; when Leaflet is loaded by the
@@ -298,6 +327,18 @@ function renderDataComponent(tab, component, state, status, componentState = {},
             </div>`;
         }).join('');
         return `<div class="widget-kanban" data-widget-kanban-idx="${escapeHtml(componentKey)}" data-widget-kanban-route="${escapeHtml(moveRoute || '')}">${colHtml}</div>`;
+    }
+    if (type === 'subscription') {
+        const children = Array.isArray(component.render) ? component.render : [];
+        if (!children.length) return '';
+        return `<div class="widget-subscription-render">${children.map((child, idx) => {
+            if (!child || typeof child !== 'object') return '';
+            const normalized = {
+                ...child,
+                target: child.target || target,
+            };
+            return renderDataComponent(tab, normalized, state, status, componentState, `${componentKey}:subscription:${idx}`);
+        }).join('')}</div>`;
     }
     return '';
 }
@@ -551,9 +592,6 @@ async function mountDeclarativeWidget(mount, tab, render) {
             }
             if (type === 'poll') {
                 return `<button class="btn btn-default" data-widget-poll="${idx}">${escapeHtml(component.label || 'Start polling')}</button>`;
-            }
-            if (type === 'subscription') {
-                return '';
             }
             return renderDataComponent(tab, component, state, status, componentState, String(idx));
         }).join('');

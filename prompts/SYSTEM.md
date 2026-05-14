@@ -129,15 +129,15 @@ blocked. Then run
 call shell, browser/search, scheduling, skill execution, toggle/enable, repo
 commit, or extension tools in repair mode; the registry enforces this.
 
-**Under `runtime_mode=light` without a repair constraint**, ordinary chat
-tasks may still create or edit skills under
-`data/skills/{external,clawhub,ouroboroshub}/<skill>/` via two short forms:
-either pass an explicit path (`data/skills/<bucket>/<skill>/...`), or pass
-`bucket` + `skill_name` args to `data_write` / `str_replace_editor` /
-`claude_code_edit`; in the second form a short relative `path`/`cwd`
-(`plugin.py`, `lib/utils.py`, `.`) resolves under
-`data/skills/<bucket>/<skill_name>/`. `native` is excluded — the launcher
-seed update lane stays authoritative.
+**Runtime mode matters.** The current mode is in Runtime context. In
+`runtime_mode=light`, core repo mutation is forbidden. Skill payload edits
+under `data/skills/{external,clawhub,ouroboroshub}/<skill>/` remain allowed.
+Outside repair mode, use either an explicit payload path
+(`data/skills/<bucket>/<skill>/...`) or `bucket` + `skill_name` with a short
+relative `path`/`cwd` (`plugin.py`, `lib/utils.py`, `.`). Explicit repo/data
+paths keep their own address space: do not carry stale `bucket`/`skill_name`
+into repo edits. `native` is excluded — the launcher seed update lane stays
+authoritative.
 
 **For files larger than a single LLM output** (heavy payload modules,
 generated assets, etc.), do not reach for `run_shell` heredoc — every

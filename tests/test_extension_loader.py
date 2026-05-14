@@ -919,10 +919,30 @@ def test_register_ui_tab_surfaces_hostable_widget(tmp_path):
     assert snap["ui_tabs"][0]["key"] == "uiwait:weather"
     assert snap["ui_tabs"][0]["ws_prefix"] == extension_loader.extension_name_prefix("uiwait")
     assert snap["ui_tabs"][0]["render"]["kind"] == "declarative"
+    assert snap["ui_tabs"][0]["span"] == 1
+    assert snap["ui_tabs"][0]["grid_span"] == 1
 
     extension_loader.unload_extension("uiwait")
     snap = extension_loader.snapshot()
     assert snap["ui_tabs"] == []
+
+
+def test_register_ui_tab_promotes_render_span_metadata(tmp_path):
+    loaded, _, drive_root = _prepare_extension(
+        tmp_path,
+        "wideui",
+        "def register(api):\n"
+        "    api.register_ui_tab('wide', 'Wide', render={'kind': 'declarative', 'schema_version': 1, 'span': 2, 'components': [{'type': 'markdown', 'text': 'ok'}]})\n",
+        permissions=["widget"],
+    )
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
+    assert err is None, err
+    snap = extension_loader.snapshot()
+    assert snap["ui_tabs"][0]["span"] == 2
+    assert snap["ui_tabs"][0]["grid_span"] == 2
+    assert snap["ui_tabs"][0]["render"]["span"] == 2
+
+    extension_loader.unload_extension("wideui")
 
 
 _UI_TAB_REJECTION_CASES = [
@@ -998,6 +1018,21 @@ def test_register_ui_tab_accepts_subscription_component(tmp_path):
     assert err is None, err
     snap = extension_loader.snapshot()
     assert snap["ui_tabs"][0]["render"]["components"][0]["type"] == "subscription"
+
+
+def test_register_ui_tab_accepts_subscription_render_children(tmp_path):
+    loaded, _, drive_root = _prepare_extension(
+        tmp_path,
+        "subrender",
+        "def register(api):\n"
+        "    api.register_ui_tab('sub', 'Sub', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'subscription', 'event': 'progress', 'target': 'result', 'render': [{'type': 'progress', 'value_key': 'progress_pct', 'label_key': 'message'}, {'type': 'gallery', 'items_key': 'frames', 'item_type': 'image', 'route_prefix': 'asset?path='}, {'type': 'key_value', 'items_key': 'stats'}]}]})\n",
+        permissions=["widget"],
+    )
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
+    assert err is None, err
+    component = extension_loader.snapshot()["ui_tabs"][0]["render"]["components"][0]
+    assert component["type"] == "subscription"
+    assert [item["type"] for item in component["render"]] == ["progress", "gallery", "key_value"]
 
 
 def test_register_ui_tab_accepts_widget_v2_components(tmp_path):

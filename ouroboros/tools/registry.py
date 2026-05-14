@@ -7,6 +7,7 @@ ToolRegistry collects all tools, provides schemas() and execute().
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -36,8 +37,8 @@ from ouroboros.utils import safe_relpath
 from ouroboros.contracts.task_constraint import TaskConstraint, normalize_task_constraint, resolve_payload_path
 from ouroboros.contracts.skill_payload_policy import (
     cross_skill_redirect_error,
+    decide_payload_short_form,
     is_skill_payload_path,
-    synthesize_payload_constraint,
 )
 
 log = logging.getLogger(__name__)
@@ -327,6 +328,83 @@ _GIT_READONLY_SUBCOMMANDS = frozenset([
     "shortlog", "version", "help", "blame",
     "grep", "reflog", "fetch",
 ])
+
+
+def _parse_porcelain_paths(output: str) -> list[str]:
+    paths: list[str] = []
+    for raw_line in str(output or "").splitlines():
+        # Porcelain v1 uses two status columns; a leading space is meaningful
+        # (" M README.md"). Do not strip the left side before slicing.
+        line = raw_line.rstrip()
+        if len(line) < 4:
+            continue
+        path_text = line[3:].strip()
+        if " -> " in path_text:
+            old_path, new_path = path_text.rsplit(" -> ", 1)
+            paths.extend([old_path.strip(), new_path.strip()])
+        else:
+            paths.append(path_text)
+    return sorted({p for p in paths if p})
+
+
+def _light_repo_snapshot(repo_dir: pathlib.Path) -> Optional[Dict[str, Any]]:
+    """Return a deterministic worktree snapshot for light-mode write detection.
+
+    This is a tripwire, not rollback machinery. It intentionally observes the
+    real Ouroboros repo root (``ctx.repo_dir``) so absolute writes are caught
+    even when ``run_shell`` executes from another cwd.
+    """
+    try:
+        repo = pathlib.Path(repo_dir)
+        status = subprocess.run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+            cwd=str(repo), capture_output=True, text=True, timeout=5,
+        )
+        if status.returncode != 0:
+            return None
+        unstaged = subprocess.run(
+            ["git", "diff", "--binary", "--no-ext-diff"],
+            cwd=str(repo), capture_output=True, text=True, timeout=10,
+        )
+        staged = subprocess.run(
+            ["git", "diff", "--cached", "--binary", "--no-ext-diff"],
+            cwd=str(repo), capture_output=True, text=True, timeout=10,
+        )
+        paths = _parse_porcelain_paths(status.stdout)
+        digest = hashlib.sha256()
+        digest.update((status.stdout or "").encode("utf-8", errors="replace"))
+        digest.update((unstaged.stdout if unstaged.returncode == 0 else "").encode("utf-8", errors="replace"))
+        digest.update((staged.stdout if staged.returncode == 0 else "").encode("utf-8", errors="replace"))
+        for rel in paths:
+            try:
+                target = (repo / safe_relpath(rel)).resolve(strict=False)
+                target.relative_to(repo.resolve(strict=False))
+                if target.is_file() and rel in (status.stdout or ""):
+                    stat = target.stat()
+                    digest.update(f"{rel}\0{stat.st_size}\0{stat.st_mtime_ns}".encode("utf-8"))
+            except Exception:
+                continue
+        return {"digest": digest.hexdigest(), "paths": paths}
+    except Exception:
+        return None
+
+
+def _format_light_repo_write_block(before: Dict[str, Any], after: Dict[str, Any], result: str) -> str:
+    before_paths = set(before.get("paths") or [])
+    after_paths = set(after.get("paths") or [])
+    touched = sorted(after_paths | before_paths)
+    listed = ", ".join(touched[:30]) if touched else "(status changed; no paths parsed)"
+    if len(touched) > 30:
+        listed += f", ... (+{len(touched) - 30} more)"
+    return (
+        "⚠️ LIGHT_MODE_REPO_WRITE_BLOCKED: runtime_mode=light detected "
+        "a mutation of the Ouroboros repository after run_shell. "
+        "The command result is blocked and no automatic rollback was attempted "
+        "to avoid overwriting concurrent human edits. "
+        f"Affected/dirty paths: {listed}. Switch to advanced/pro for repo writes.\n\n"
+        "Original command output:\n"
+        f"{result}"
+    )
 
 def _revert_protected_files(repo_dir, *, runtime_mode: str = "advanced") -> list:
     """After claude_code_edit, revert protected files unless pro mode is active."""
@@ -1014,6 +1092,33 @@ class ToolRegistry:
                 pass
         return changed
 
+    def _run_shell_post_checks(
+        self,
+        result: str,
+        *,
+        owner_snapshot: Dict[pathlib.Path, Optional[str]],
+        light_repo_before: Optional[Dict[str, Any]],
+    ) -> str:
+        import time
+
+        restored_owner_state = False
+        for _ in range(4):
+            time.sleep(0.3)
+            restored_owner_state = self._restore_owner_files(owner_snapshot) or restored_owner_state
+        if restored_owner_state:
+            result = (
+                f"{result}\n\n⚠️ OWNER_STATE_RESTORED: run_shell attempted to "
+                "change owner-only settings or skill trust state; protected files were restored."
+            )
+        if light_repo_before is not None:
+            light_repo_after = _light_repo_snapshot(pathlib.Path(self._ctx.repo_dir))
+            if (
+                light_repo_after is not None
+                and light_repo_after.get("digest") != light_repo_before.get("digest")
+            ):
+                result = _format_light_repo_write_block(light_repo_before, light_repo_after, result)
+        return result
+
     def execute(self, name: str, args: Dict[str, Any]) -> str:
         requested_name = str(name or "").strip()
         name = canonical_tool_name(requested_name)
@@ -1138,12 +1243,17 @@ class ToolRegistry:
                 "stage_pr_merge",
             }
         )
-        # bucket+skill_name args (light-mode short-form authoring) synthesize
-        # a skill_repair-flavoured constraint so the gate treats the call as a
-        # payload-confined edit just like an explicit skill_repair task would.
         raw_bucket = str(args.get("bucket", "") or "")
         raw_skill_name = str(args.get("skill_name", "") or "")
-        synth_constraint = synthesize_payload_constraint(raw_bucket, raw_skill_name)
+        short_path_text = str(args.get("cwd") if name == "claude_code_edit" else args.get("path", "") or "")
+        short_form_decision = decide_payload_short_form(
+            bucket=raw_bucket,
+            skill_name=raw_skill_name,
+            path_text=short_path_text or ".",
+            repo_dir=pathlib.Path(self._ctx.repo_dir),
+            drive_root=pathlib.Path(self._ctx.drive_root),
+        )
+        synth_constraint = short_form_decision.constraint
         # Surface a specific partial-args error BEFORE the generic light-mode
         # block, so an agent that supplied only one of {bucket, skill_name}
         # (or chose `native`) sees the actionable wording promised in
@@ -1151,19 +1261,14 @@ class ToolRegistry:
         # LIGHT_MODE_BLOCKED that lists three escape hatches.
         if (
             (raw_bucket or raw_skill_name)
-            and synth_constraint is None
+            and short_form_decision.error
             and name in (
                 "data_write",
                 "str_replace_editor",
                 "claude_code_edit",
             )
         ):
-            return (
-                "⚠️ SKILL_PAYLOAD_ARG_ERROR: bucket and skill_name must be "
-                "supplied together; bucket must be one of "
-                "external/clawhub/ouroboroshub (native excluded); "
-                "skill_name must sanitize to a non-empty slug."
-            )
+            return f"⚠️ SKILL_PAYLOAD_ARG_ERROR: {short_form_decision.error}"
         # Repair-mode confinement is sticky: a real skill_repair task_constraint
         # MUST win over a synthesized one. Otherwise an agent active in heal
         # mode for skill A could redirect a write/edit to skill B by passing
@@ -1266,6 +1371,11 @@ class ToolRegistry:
             return safety_msg
 
         owner_snapshot = self._snapshot_owner_files() if name == "run_shell" else {}
+        light_repo_before = (
+            _light_repo_snapshot(pathlib.Path(self._ctx.repo_dir))
+            if name == "run_shell" and _runtime_mode == "light"
+            else None
+        )
         try:
             result = entry.handler(self._ctx, **args)
         except TypeError as e:
@@ -1273,16 +1383,11 @@ class ToolRegistry:
         except Exception as e:
             return f"⚠️ TOOL_ERROR ({name}): {e}"
         if name == "run_shell":
-            import time
-            restored_owner_state = False
-            for _ in range(4):
-                time.sleep(0.3)
-                restored_owner_state = self._restore_owner_files(owner_snapshot) or restored_owner_state
-            if restored_owner_state:
-                result = (
-                    f"{result}\n\n⚠️ OWNER_STATE_RESTORED: run_shell attempted to "
-                    "change owner-only settings or skill trust state; protected files were restored."
-                )
+            result = self._run_shell_post_checks(
+                result,
+                owner_snapshot=owner_snapshot,
+                light_repo_before=light_repo_before,
+            )
 
         # Revert protected files after claude_code_edit unless pro mode is
         # active; pro-mode commits still require the normal commit review later.

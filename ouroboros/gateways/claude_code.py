@@ -172,9 +172,10 @@ def _normalize_sdk_usage(usage: Any) -> Dict[str, Any]:
 # PreToolUse hook: path safety guard
 # ---------------------------------------------------------------------------
 
-def make_path_guard(cwd: str):
+def make_path_guard(cwd: str, repo_root: str | None = None):
     """Create a PreToolUse hook that blocks writes outside cwd and protected paths."""
     cwd_resolved = pathlib.Path(cwd).resolve()
+    repo_root_resolved = pathlib.Path(repo_root).resolve() if repo_root else None
 
     async def path_guard(input_data: dict, tool_use_id: str, context: Any) -> dict:
         tool_name = input_data.get("tool_name", "")
@@ -210,9 +211,16 @@ def make_path_guard(cwd: str):
                 }
             }
 
-        # Check: protected core/contract/release file?
-        # Use pathlib.as_posix() for cross-platform forward-slash comparison
+        # Check: protected core/contract/release file.  Prefer repo-root
+        # relative paths when available; cwd may be a subdirectory such as
+        # ``repo/ouroboros`` where cwd-relative ``tools/registry.py`` would not
+        # match the protected-path table.
         rel = target.relative_to(cwd_resolved).as_posix()
+        if repo_root_resolved is not None:
+            try:
+                rel = target.relative_to(repo_root_resolved).as_posix()
+            except ValueError:
+                pass
         try:
             from ouroboros.config import DATA_DIR
             from ouroboros.tools.core import is_skill_control_plane_path
@@ -287,12 +295,13 @@ async def _run_edit_async(
     max_turns: int = DEFAULT_CLAUDE_CODE_MAX_TURNS,
     budget: Optional[float] = None,
     system_prompt: Optional[str] = None,
+    repo_root: Optional[str] = None,
 ) -> ClaudeCodeResult:
     """Run an edit-mode SDK query with safety hooks.
 
     Uses ClaudeSDKClient because hooks require the client interface.
     """
-    path_guard = make_path_guard(cwd)
+    path_guard = make_path_guard(cwd, repo_root=repo_root)
     clear_stderr_buffer()
 
     options = ClaudeAgentOptions(
@@ -457,6 +466,7 @@ def run_edit(
     max_turns: int = DEFAULT_CLAUDE_CODE_MAX_TURNS,
     budget: Optional[float] = None,
     system_prompt: Optional[str] = None,
+    repo_root: Optional[str] = None,
 ) -> ClaudeCodeResult:
     """Synchronous entry point for edit-mode SDK.
 
@@ -470,6 +480,7 @@ def run_edit(
         max_turns=max_turns,
         budget=budget,
         system_prompt=system_prompt,
+        repo_root=repo_root,
     ))
 
 

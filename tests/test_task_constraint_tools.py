@@ -144,6 +144,68 @@ def test_claude_code_edit_reverts_normal_skill_sidecars(tmp_path, monkeypatch):
     assert sidecar.read_text(encoding="utf-8") == "original"
 
 
+def test_claude_code_edit_omitted_cwd_ignores_stale_short_form(tmp_path, monkeypatch):
+    from types import ModuleType, SimpleNamespace
+    import sys
+    from ouroboros.tools.shell import _claude_code_edit
+
+    gateway = ModuleType("ouroboros.gateways.claude_code")
+    gateway.resolve_claude_code_model = lambda: "test-model"
+    gateway.DEFAULT_CLAUDE_CODE_MAX_TURNS = 1
+    sys.modules["ouroboros.gateways.claude_code"] = gateway
+
+    repo = tmp_path / "repo"
+    drive = tmp_path / "data"
+    repo.mkdir()
+    (drive / "skills" / "external" / "alpha").mkdir(parents=True)
+    ctx = ToolContext(repo_dir=repo, drive_root=drive)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    captured = {}
+
+    def fake_run_edit(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            success=True,
+            error="",
+            result_text="ok",
+            cost_usd=0.0,
+            usage={},
+            changed_files=[],
+            diff_stat="",
+            validation_summary="",
+            to_tool_output=lambda: "OK",
+        )
+
+    gateway.run_edit = fake_run_edit
+
+    result = _claude_code_edit(
+        ctx,
+        "edit repo",
+        bucket="external",
+        skill_name="alpha",
+    )
+
+    assert "SKILL_SHORT_FORM_IGNORED" in result
+    assert captured["cwd"] == str(repo)
+
+
+def test_claude_code_edit_rejects_non_skill_data_cwd(tmp_path, monkeypatch):
+    from ouroboros.tools.shell import _claude_code_edit
+
+    repo = tmp_path / "repo"
+    drive = tmp_path / "data"
+    repo.mkdir()
+    drive.mkdir()
+    (drive / "settings.json").write_text('{"TOTAL_BUDGET": 10}\n', encoding="utf-8")
+    ctx = ToolContext(repo_dir=repo, drive_root=drive)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    result = _claude_code_edit(ctx, "edit settings", cwd=str(drive))
+
+    assert "CLAUDE_CODE_ERROR" in result
+    assert "non-skill data cwd is not allowed" in result
+
+
 def test_repair_data_write_manifest_does_not_create_self_authored_markers(tmp_path, monkeypatch):
     from ouroboros import config as cfg
     ctx, skill = _ctx(tmp_path)

@@ -6,7 +6,7 @@ import json
 import pathlib
 import tempfile
 
-from ouroboros.context import build_health_invariants
+from ouroboros.context import build_health_invariants, build_runtime_section
 
 
 class TestCacheHitRateInvariant:
@@ -86,6 +86,26 @@ def _make_health_env(tmp_path, events_lines=None):
     event_lines = events_lines or []
     (tmp_path / "logs" / "events.jsonl").write_text("\n".join(event_lines) + ("\n" if event_lines else ""), encoding="utf-8")
     return FakeEnv()
+
+
+def test_runtime_section_includes_light_runtime_mode_rule(tmp_path, monkeypatch):
+    env = _make_health_env(tmp_path)
+    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "light")
+    section = build_runtime_section(env, {"id": "task-1", "type": "task"})
+    payload = json.loads(section.split("\n\n", 1)[1])
+
+    assert payload["runtime_mode"] == "light"
+    assert "forbids Ouroboros repo mutation" in payload["runtime_mode_rule"]
+
+
+def test_runtime_section_omits_light_rule_for_advanced(tmp_path, monkeypatch):
+    env = _make_health_env(tmp_path)
+    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    section = build_runtime_section(env, {"id": "task-1", "type": "task"})
+    payload = json.loads(section.split("\n\n", 1)[1])
+
+    assert payload["runtime_mode"] == "advanced"
+    assert "runtime_mode_rule" not in payload
 
 
 class TestFileSizeBudgetHealthInvariant:

@@ -285,6 +285,16 @@ def _assert_tool_name(name: str) -> str:
     return candidate
 
 
+def _widget_span_from_render(render: Dict[str, Any]) -> int:
+    """Normalize optional UI-card width metadata from a render declaration."""
+    raw = render.get("span", render.get("grid_span", 1))
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 1
+    return 2 if value >= 2 else 1
+
+
 from ouroboros.extension_ui_validation import validate_ui_render as _validate_ui_render
 def _assert_ws_message_type(message_type: str) -> str:
     candidate = str(message_type or "").strip()
@@ -497,6 +507,8 @@ class PluginAPIImpl:
         self._require("widget")
         clean_tab = _assert_tool_name(tab_id)  # same syntax rules
         key = f"{self._skill}:{clean_tab}"
+        validated_render = _validate_ui_render(dict(render or {}))
+        span = _widget_span_from_render(validated_render)
         with _lock:
             self._require_open_locked()
             if key in _ui_tabs:
@@ -509,7 +521,9 @@ class PluginAPIImpl:
                 "title": str(title or clean_tab),
                 "icon": str(icon or "extension"),
                 "ws_prefix": extension_name_prefix(self._skill),
-                "render": _validate_ui_render(dict(render or {})),
+                "render": validated_render,
+                "span": span,
+                "grid_span": span,
                 "ui_host_pending": True,
             }
             _extensions.setdefault(self._skill, _ExtensionRegistrations()).ui_tabs.append(key)

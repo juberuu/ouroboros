@@ -25,8 +25,8 @@ from ouroboros.contracts.task_constraint import normalize_task_constraint
 from ouroboros.contracts.skill_payload_policy import (
     SkillPayloadPathError,
     cross_skill_redirect_error,
+    decide_payload_short_form,
     resolve_skill_payload_target,
-    synthesize_payload_constraint,
 )
 
 log = logging.getLogger(__name__)
@@ -479,13 +479,17 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
 
     work_dir = str(ctx.repo_dir)
     skill_payload_root = None
-    synth = synthesize_payload_constraint(bucket, skill_name)
-    if (bucket or skill_name) and synth is None:
-        return (
-            "⚠️ CLAUDE_CODE_ERROR: bucket and skill_name must be supplied together; "
-            "bucket must be one of external/clawhub/ouroboroshub (native excluded); "
-            "skill_name must sanitize to a non-empty slug."
-        )
+    short_form_path_text = cwd if str(cwd or "").strip() else str(ctx.repo_dir)
+    short_form = decide_payload_short_form(
+        bucket=bucket,
+        skill_name=skill_name,
+        path_text=short_form_path_text,
+        repo_dir=pathlib.Path(ctx.repo_dir),
+        drive_root=pathlib.Path(ctx.drive_root),
+    )
+    if short_form.error:
+        return f"⚠️ CLAUDE_CODE_ERROR: {short_form.error}"
+    synth = short_form.constraint
     existing_tc = normalize_task_constraint(getattr(ctx, "task_constraint", None))
     redirect_err = cross_skill_redirect_error(existing_tc, synth)
     if redirect_err:
@@ -518,12 +522,28 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
             normalized_cwd = raw_cwd.replace("\\", "/").strip().lstrip("/")
             if normalized_cwd.startswith("data/skills/") or normalized_cwd.startswith("skills/"):
                 return f"⚠️ CLAUDE_CODE_ERROR: skill cwd is invalid: {exc}"
+            raw_path = pathlib.Path(raw_cwd)
+            candidate_for_data_check = (
+                raw_path.resolve(strict=False)
+                if raw_path.is_absolute()
+                else (pathlib.Path(ctx.repo_dir) / raw_cwd).resolve(strict=False)
+            )
             try:
-                pathlib.Path(raw_cwd).resolve(strict=False).relative_to(pathlib.Path(ctx.drive_root).resolve(strict=False))
+                candidate_for_data_check.relative_to(pathlib.Path(ctx.repo_dir).resolve(strict=False))
+                candidate_is_repo = True
+            except ValueError:
+                candidate_is_repo = False
+            try:
+                candidate_for_data_check.relative_to(pathlib.Path(ctx.drive_root).resolve(strict=False))
             except ValueError:
                 pass
             else:
-                return f"⚠️ CLAUDE_CODE_ERROR: skill cwd is invalid: {exc}"
+                if not candidate_is_repo:
+                    return (
+                        "⚠️ CLAUDE_CODE_ERROR: non-skill data cwd is not allowed. "
+                        "Use explicit data/skills/<bucket>/<skill>/... for skill payload edits, "
+                        "or omit cwd/use a repo cwd for repo edits."
+                    )
             candidate = (ctx.repo_dir / raw_cwd).resolve()
         if not candidate.exists() or not candidate.is_dir():
             return f"⚠️ CLAUDE_CODE_ERROR: cwd not found or not a directory: {cwd}"
@@ -576,6 +596,7 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
                 max_turns=DEFAULT_CLAUDE_CODE_MAX_TURNS,
                 budget=budget,
                 system_prompt=system_prompt,
+                repo_root=str(ctx.repo_dir),
             )
 
             result.changed_files = _get_changed_files(target_repo_root)
@@ -631,7 +652,10 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
                     source_tool="claude_code_edit",
                 )
 
-            return result.to_tool_output()
+            output = result.to_tool_output()
+            if short_form.ignored_reason:
+                output += f"\n\n⚠️ SKILL_SHORT_FORM_IGNORED: {short_form.ignored_reason}."
+            return output
 
         except ImportError:
             return (
@@ -697,8 +721,9 @@ def get_tools() -> List[ToolEntry]:
                 "many str_replace_editor calls. It also subdivides very large writes across "
                 "many small Write/Edit operations inside its own agent loop, so use it for "
                 "files larger than a single LLM output can produce. Follow with repo_commit. "
-                "Optional bucket+skill_name args let runtime_mode=light tasks anchor cwd "
-                "under data/skills/<bucket>/<skill_name>/ without an explicit task_constraint."
+                "Optional bucket+skill_name args let tasks anchor a short relative cwd under "
+                "an existing data/skills/<bucket>/<skill_name>/ payload. Explicit repo/data "
+                "cwd values keep their own address space and ignore stale short-form args."
             ),
             "parameters": {"type": "object", "properties": {
                 "prompt": {"type": "string"},
@@ -710,11 +735,11 @@ def get_tools() -> List[ToolEntry]:
                 "bucket": {
                     "type": "string",
                     "enum": ["external", "clawhub", "ouroboroshub"],
-                    "description": "Skill payload bucket. Pair with skill_name to resolve cwd under data/skills/<bucket>/<skill_name>/. Requires both args together.",
+                    "description": "Skill payload bucket for short relative payload cwd only. Pair with skill_name. Do not supply for explicit repo/data cwd values.",
                 },
                 "skill_name": {
                     "type": "string",
-                    "description": "Skill slug (sanitized to alnum/_-., ≤64 chars). Requires bucket.",
+                    "description": "Skill slug for short relative payload cwd only. Requires bucket.",
                 },
             }, "required": ["prompt"]},
         }, _claude_code_edit, is_code_tool=True, timeout_sec=1200),

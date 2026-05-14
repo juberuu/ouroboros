@@ -43,8 +43,8 @@ from ouroboros.contracts.task_constraint import normalize_task_constraint, resol
 from ouroboros.contracts.skill_payload_policy import (
     SkillPayloadPathError,
     cross_skill_redirect_error,
+    decide_payload_short_form,
     resolve_skill_payload_target,
-    synthesize_payload_constraint,
 )
 _CONTENT_OMITTED_PREFIX = "<<CONTENT_OMITTED"
 log = logging.getLogger(__name__)
@@ -1055,13 +1055,16 @@ def _str_replace_editor(
             action="edit",
         )
 
-    synth = synthesize_payload_constraint(bucket, skill_name)
-    if (bucket or skill_name) and synth is None:
-        return (
-            "⚠️ STR_REPLACE_ERROR: bucket and skill_name must be supplied together; "
-            "bucket must be one of external/clawhub/ouroboroshub (native excluded); "
-            "skill_name must sanitize to a non-empty slug."
-        )
+    short_form = decide_payload_short_form(
+        bucket=bucket,
+        skill_name=skill_name,
+        path_text=path,
+        repo_dir=pathlib.Path(ctx.repo_dir),
+        drive_root=pathlib.Path(ctx.drive_root),
+    )
+    if short_form.error:
+        return f"⚠️ STR_REPLACE_ERROR: {short_form.error}"
+    synth = short_form.constraint
     existing_tc = normalize_task_constraint(getattr(ctx, "task_constraint", None))
     redirect_err = cross_skill_redirect_error(existing_tc, synth)
     if redirect_err:
@@ -1158,6 +1161,8 @@ def _str_replace_editor(
         f"Context:\n{context_preview}\n\n"
         "File is on disk but NOT committed."
     )
+    if short_form.ignored_reason:
+        result += f"\n⚠️ SKILL_SHORT_FORM_IGNORED: {short_form.ignored_reason}."
     if data_skill_target is None:
         result += "\nRun repo_commit when ready.\n⚠️ Advisory pre-review is now stale — run advisory_pre_review before repo_commit."
     else:
@@ -1719,8 +1724,9 @@ def get_tools() -> List[ToolEntry]:
                 "Safer than repo_write for existing files — reads the file, verifies the match is unique, "
                 "performs the replacement, and shows context. Use for all edits to existing tracked files. "
                 "For new files or intentional full rewrites, use repo_write instead. "
-                "Optional bucket+skill_name args let runtime_mode=light tasks address a short relative "
-                "path under data/skills/<bucket>/<skill_name>/ without an explicit task_constraint."
+                "Optional bucket+skill_name args let tasks address a short relative path under an "
+                "existing data/skills/<bucket>/<skill_name>/ payload. Explicit repo/data paths "
+                "keep their own address space and ignore stale short-form args."
             ),
             "parameters": {"type": "object", "properties": {
                 "path": {"type": "string", "description": "File path relative to repo root"},
@@ -1729,11 +1735,11 @@ def get_tools() -> List[ToolEntry]:
                 "bucket": {
                     "type": "string",
                     "enum": ["external", "clawhub", "ouroboroshub"],
-                    "description": "Skill payload bucket. Pair with skill_name to resolve a short relative path under data/skills/<bucket>/<skill_name>/. Requires both args together.",
+                    "description": "Skill payload bucket for short relative payload paths only. Pair with skill_name. Do not supply for explicit repo/data paths.",
                 },
                 "skill_name": {
                     "type": "string",
-                    "description": "Skill slug (sanitized to alnum/_-., ≤64 chars). Requires bucket.",
+                    "description": "Skill slug for short relative payload paths only. Requires bucket.",
                 },
             }, "required": ["path", "old_str", "new_str"]},
         }, _str_replace_editor, is_code_tool=True),

@@ -32,7 +32,7 @@ VALID_SKILL_REVIEW_STATUSES = frozenset({
 })
 
 
-CRITICAL_ITEMS = frozenset({
+HARD_CRITICAL_ITEMS = frozenset({
     "manifest_schema",
     "skill_preflight",
     "permissions_honesty",
@@ -41,10 +41,27 @@ CRITICAL_ITEMS = frozenset({
     "env_allowlist",
     "inject_chat_minimization",
     "event_subscription_minimization",
-    "companion_process_safety",
     "host_token_handling",
-    "bug_hunting",
 })
+
+SEVERITY_DRIVEN_ITEMS = frozenset({
+    "bug_hunting",
+    "companion_process_safety",
+    "extension_namespace_discipline",
+    "widget_module_safety",
+})
+
+# Backward-compatible export name for older imports.  New aggregation logic
+# distinguishes hard trust-boundary blockers from severity-driven items below.
+CRITICAL_ITEMS = HARD_CRITICAL_ITEMS | SEVERITY_DRIVEN_ITEMS
+
+
+def _severity_blocks(finding: Dict[str, Any]) -> bool:
+    severity = str(finding.get("severity") or "").strip().lower()
+    if severity in {"advisory", "warning", "warn"}:
+        return False
+    # Missing/unknown severity stays conservative for legacy persisted findings.
+    return True
 
 
 def aggregate_skill_review_status(
@@ -63,11 +80,12 @@ def aggregate_skill_review_status(
         if not verdict:
             continue
         item = finding.get("item")
-        item_is_critical = (
-            item in CRITICAL_ITEMS
-            or (item == "extension_namespace_discipline" and is_extension)
-            or (item == "widget_module_safety" and is_extension)
-        )
+        item_is_critical = item in HARD_CRITICAL_ITEMS
+        if item in SEVERITY_DRIVEN_ITEMS:
+            if item in {"extension_namespace_discipline", "widget_module_safety"} and not is_extension:
+                item_is_critical = False
+            else:
+                item_is_critical = _severity_blocks(finding)
         if item_is_critical:
             has_critical_fail = True
         else:

@@ -84,9 +84,27 @@ export function applyMasonry(container, options = {}) {
     const run = () => requestAnimationFrame(() => layout(container, config));
     run();
     if (bound.has(container)) return;
+    const observedItems = new Set();
+    const itemResizeObserver = new ResizeObserver(run);
+    const observeItems = () => {
+        Array.from(observedItems).forEach((item) => {
+            if (container.contains(item)) return;
+            itemResizeObserver.unobserve(item);
+            observedItems.delete(item);
+        });
+        container.querySelectorAll(config.itemSelector).forEach((item) => {
+            if (observedItems.has(item)) return;
+            observedItems.add(item);
+            itemResizeObserver.observe(item);
+        });
+    };
+    observeItems();
     const resizeObserver = new ResizeObserver(run);
     resizeObserver.observe(container);
-    const mutationObserver = new MutationObserver(run);
+    const mutationObserver = new MutationObserver(() => {
+        observeItems();
+        run();
+    });
     mutationObserver.observe(container, { childList: true, subtree: true });
-    bound.set(container, { resizeObserver, mutationObserver });
+    bound.set(container, { resizeObserver, itemResizeObserver, mutationObserver });
 }

@@ -420,6 +420,40 @@ def test_aggregate_status_blockers_on_bug_hunting_fail(monkeypatch):
     assert _aggregate_status(findings, skill_type="script") == "blockers"
 
 
+def test_aggregate_status_warnings_on_advisory_bug_hunting_fail(monkeypatch):
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    findings = [
+        {
+            "item": "bug_hunting",
+            "verdict": "FAIL",
+            "severity": "advisory",
+            "reason": "provider sometimes flakes; improve retry diagnostics later",
+        },
+    ]
+    assert _aggregate_status(findings, skill_type="script") == "warnings"
+
+
+def test_aggregate_status_skill_preflight_stays_hard_critical(monkeypatch):
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    findings = [
+        {"item": "skill_preflight", "verdict": "FAIL", "severity": "advisory", "reason": "syntax error"},
+    ]
+    assert _aggregate_status(findings, skill_type="script") == "blockers"
+
+
+def test_aggregate_status_no_repo_mutation_stays_hard_critical(monkeypatch):
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    findings = [
+        {
+            "item": "no_repo_mutation",
+            "verdict": "FAIL",
+            "severity": "advisory",
+            "reason": "skill writes to ~/Ouroboros/repo",
+        },
+    ]
+    assert _aggregate_status(findings, skill_type="script") == "blockers"
+
+
 def test_aggregate_status_extension_namespace_fail_is_critical_only_for_extension(monkeypatch):
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     findings = [
@@ -431,6 +465,19 @@ def test_aggregate_status_extension_namespace_fail_is_critical_only_for_extensio
     assert _aggregate_status(findings, skill_type="extension") == "blockers"
 
 
+def test_aggregate_status_extension_namespace_advisory_fail_warns(monkeypatch):
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    findings = [
+        {
+            "item": "extension_namespace_discipline",
+            "verdict": "FAIL",
+            "severity": "advisory",
+            "reason": "minor naming cleanup would improve clarity",
+        },
+    ]
+    assert _aggregate_status(findings, skill_type="extension") == "warnings"
+
+
 def test_aggregate_status_widget_module_safety_fail_is_critical_only_for_module_widgets(monkeypatch):
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     findings = [
@@ -439,6 +486,19 @@ def test_aggregate_status_widget_module_safety_fail_is_critical_only_for_module_
     assert _aggregate_status(findings, skill_type="script") == "warnings"
     assert _aggregate_status(findings, skill_type="extension", is_module_widget=False) == "blockers"
     assert _aggregate_status(findings, skill_type="extension", is_module_widget=True) == "blockers"
+
+
+def test_aggregate_status_companion_process_advisory_fail_warns(monkeypatch):
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    findings = [
+        {
+            "item": "companion_process_safety",
+            "verdict": "FAIL",
+            "severity": "advisory",
+            "reason": "transient subprocess would benefit from clearer logging",
+        },
+    ]
+    assert _aggregate_status(findings, skill_type="extension") == "warnings"
 
 
 # ---------------------------------------------------------------------------
