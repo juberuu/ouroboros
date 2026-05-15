@@ -554,6 +554,30 @@ Rules for MCP changes:
 
 ---
 
+## Gateway Boundary Pattern
+
+Browser-facing backend work goes through `ouroboros/gateway/`.
+
+- `gateway/router.py` is the single place that mounts Starlette routes for
+  `/api/*` and `/ws`. Do not add new browser routes directly in `server.py`.
+- `gateway/contracts.py` is the frozen frontend/backend contract. It contains
+  endpoint tokens, WebSocket discriminators, and TypedDict envelope shapes.
+  This file is protected by `runtime_mode_policy.py` and may be edited only in
+  `runtime_mode='pro'`.
+- Domain handlers live in sibling modules: `settings.py`, `control.py`,
+  `files.py`, `models.py`, `extensions.py`, `marketplace.py`, `mcp.py`,
+  `host_service.py`, `history.py`, and `state.py`.
+- Frontend code calls backend APIs through `web/modules/api_client.js`.
+  `web/modules/api_types.js` mirrors core contracts via JSDoc so frontend
+  contributors have a visible surface without TypeScript, codegen, or a build
+  step.
+- Any new browser endpoint must update `gateway/contracts.py`,
+  `gateway/router.py`, `web/modules/api_client.js` when the UI consumes it, and
+  the parity/smoke tests in `tests/test_gateway_parity.py` /
+  `tests/test_gateway_smoke.py`.
+
+---
+
 ## Build & CI
 
 ### Pytest marker lanes

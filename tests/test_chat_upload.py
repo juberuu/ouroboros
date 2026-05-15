@@ -13,7 +13,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    import ouroboros.chat_upload_api as upload_api
+    import ouroboros.gateway.files as upload_api
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
     app = Starlette(routes=[
         Route("/api/chat/upload", endpoint=upload_api.api_chat_upload, methods=["POST"]),

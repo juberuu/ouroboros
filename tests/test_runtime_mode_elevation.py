@@ -8,7 +8,7 @@ owner-only:
 2. ``ouroboros.tools.core._data_write`` refuses writes whose resolved
    absolute path matches ``SETTINGS_PATH`` (handles symlinks /
    case-insensitive filesystems).
-3. ``server.py::_merge_settings_payload`` drops ``OUROBOROS_RUNTIME_MODE``
+3. ``gateway/settings.py::_merge_settings_payload`` drops ``OUROBOROS_RUNTIME_MODE``
    from the API body so a loopback POST cannot raise the agent's
    privilege scope (with belt-and-braces ``api_settings_post`` revert).
 4. ``_set_tool_timeout`` (the live-flip chain that bypasses /api/settings)
@@ -494,7 +494,7 @@ def test_data_write_blocks_settings_via_env_override(tmp_path, monkeypatch):
 
 def test_merge_settings_payload_skips_runtime_mode():
     """``_merge_settings_payload`` is the chokepoint for /api/settings POST."""
-    import server as server_mod
+    from ouroboros.gateway import settings as server_mod
 
     old = {"OUROBOROS_RUNTIME_MODE": "light", "OPENAI_API_KEY": "old-key"}
     body = {"OUROBOROS_RUNTIME_MODE": "pro", "OPENAI_API_KEY": "new-key"}
@@ -507,7 +507,7 @@ def test_merge_settings_payload_skips_runtime_mode():
 
 def test_merge_settings_payload_skips_auto_grant_reviewed_skills():
     """Auto-grant changes require the desktop owner-confirmation bridge."""
-    import server as server_mod
+    from ouroboros.gateway import settings as server_mod
 
     old = {"OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "false"}
     body = {"OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "true"}
@@ -518,7 +518,7 @@ def test_merge_settings_payload_skips_auto_grant_reviewed_skills():
 
 def test_merge_settings_payload_preserves_other_keys():
     """Sanity: dropping runtime_mode didn't accidentally drop everything else."""
-    import server as server_mod
+    from ouroboros.gateway import settings as server_mod
 
     old = {"OUROBOROS_RUNTIME_MODE": "advanced", "TOTAL_BUDGET": "10.0"}
     body = {"TOTAL_BUDGET": "20.0", "OUROBOROS_REVIEW_ENFORCEMENT": "blocking"}
@@ -1152,7 +1152,7 @@ def test_files_api_write_blocks_settings_json(isolated_settings, monkeypatch):
     writes to the owner-only file. String-level test against the source
     so the assertion is hermetic (full HTTP round-trip belongs in a
     Starlette TestClient suite, but the guard helper is the SSOT)."""
-    from ouroboros import file_browser_api as fba_mod
+    from ouroboros.gateway import files as fba_mod
 
     source = pathlib.Path(fba_mod.__file__).read_text(encoding="utf-8")
     # The shared helpers must exist...
@@ -1183,7 +1183,7 @@ def test_files_api_write_blocks_settings_json(isolated_settings, monkeypatch):
 ])
 def test_files_api_owner_only_helper_blocks_skill_state_case_variants(filename, tmp_path, monkeypatch):
     from ouroboros import config as cfg
-    from ouroboros import file_browser_api as fba_mod
+    from ouroboros.gateway import files as fba_mod
 
     data_dir = tmp_path / "data"
     data_dir.mkdir()
@@ -1194,7 +1194,7 @@ def test_files_api_owner_only_helper_blocks_skill_state_case_variants(filename, 
 
 def test_files_api_owner_only_helper_blocks_symlinked_skill_state_dir(tmp_path, monkeypatch):
     from ouroboros import config as cfg
-    from ouroboros import file_browser_api as fba_mod
+    from ouroboros.gateway import files as fba_mod
 
     data_dir = tmp_path / "data"
     link_target = data_dir / "memory" / "linkstate"

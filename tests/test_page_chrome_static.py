@@ -93,7 +93,7 @@ def test_evolution_page_supports_refresh_and_runtime_state():
 
     assert 'id="evo-refresh"' in source
     assert "Runtime Status" in source
-    assert "fetch(`/api/evolution-data${suffix}`" in source
+    assert "apiFetch(`/api/evolution-data${suffix}`" in source
     assert "ws.on('open', () => {" in source
     assert "window.addEventListener('ouro:page-shown'" in source
     assert "document.addEventListener('visibilitychange'" in source
@@ -104,14 +104,16 @@ def test_evolution_page_supports_refresh_and_runtime_state():
 
 def test_server_and_navigation_expose_runtime_refresh_hooks():
     server_source = _read("server.py")
+    state_source = _read("ouroboros/gateway/state.py")
+    control_source = _read("ouroboros/gateway/control.py")
     app_source = _read("web/app.js")
     evo_source = _read("web/modules/evolution.js")
     chat_source = _read("web/modules/chat.js")
 
     assert "def _describe_bg_consciousness_state(requested_enabled: bool) -> dict:" in server_source
-    assert '"evolution_state": evolution_state,' in server_source
-    assert '"bg_consciousness_state": bg_state,' in server_source
-    assert 'request.query_params.get("force")' in server_source
+    assert '"evolution_state": evolution_state,' in state_source
+    assert '"bg_consciousness_state": bg_state,' in state_source
+    assert 'request.query_params.get("force")' in control_source
     assert "window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: name } }));" in app_source
     assert "evo-runtime-detail" in evo_source
     assert "data?.evolution_state?.detail" in chat_source

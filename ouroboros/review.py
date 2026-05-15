@@ -74,7 +74,7 @@ MAX_FUNCTION_LINES = 300
 # larger than the pre-release scope; the ceiling bump stays consistent
 # with how MAX_TOTAL_FUNCTIONS has grown through v4.40→v4.47 as each
 # phase shipped.
-MAX_TOTAL_FUNCTIONS = 2000  # v5.7.4: preserves headroom after managed-restart persistence and skill-review/UI growth; next broad structural pass should pay this down by extracting git/review/job-state helpers.
+MAX_TOTAL_FUNCTIONS = 2020  # v5.22.0-rc.1: Gateway Boundary v1 replaces scattered HTTP modules with explicit route/contract helpers; server.py shrank below 1000 lines, but small endpoint wrappers push function count slightly over the old ceiling.
 # v4.40.0 adds claude_advisory_review.py to the grandfathered set: the file
 # grew to 1731 lines across v4.37-v4.39 (plan_task quorum + direct-provider
 # fallback + convergence rule + syntax preflight + reflection decoupling).

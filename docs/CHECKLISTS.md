@@ -151,6 +151,7 @@ Ouroboros repository.
 | 13 | self_consistency | Does this change affect behavior described in `BIBLE.md`, `prompts/`, `docs/`, or this checklist itself? Check explicitly: (a) version in `ARCHITECTURE.md` header matches `VERSION` file; (b) tool names/descriptions in `prompts/SYSTEM.md` match tools actually exported by `get_tools()`; (c) JSONL log/memory file formats described in `ARCHITECTURE.md` match all readers/writers; (d) any behavioral change reflected in `prompts/CONSCIOUSNESS.md` if it affects background loop behavior; (e) DEVELOPMENT.md rules still accurate after the change. Severity must follow the shared `Critical surface whitelist` below — release metadata, tool schema, module map, behavioural documentation, or safety contracts are critical; commentary/prose/stylistic mismatches are advisory. | critical |
 | 14 | cross_platform | Does the diff use platform-specific APIs (`os.kill`, `os.setsid`, `os.killpg`, `os.getpgid`, `fcntl`, `msvcrt`, `signal.SIGKILL`, `signal.SIGTERM`, `subprocess` with `start_new_session`/`creationflags`, hardcoded `/` or `\\` in filesystem paths) outside of `ouroboros/platform_layer.py`? Does it import Unix-only or Windows-only modules (`fcntl`, `msvcrt`, `winreg`, `resource`) at any level without a platform guard (`sys.platform`/`IS_WINDOWS` check)? | critical |
 | 15 | changelog_accuracy | Do the exact wording, test counts, and minor description details in the README Version History row match what the diff actually does? Wording drift, off-by-one test counts, minor inaccuracies in descriptive prose — these belong here, NOT in `self_consistency` or `changelog_and_badge`. This item exists so reviewers have a dedicated advisory bucket for prose-level changelog imprecision that does not affect release metadata, runtime behavior, or safety contracts. | advisory |
+| 16 | gateway_parity | If the diff changes any browser-facing endpoint, WebSocket message, or frontend API call, are `ouroboros/gateway/contracts.py`, `ouroboros/gateway/router.py`, `web/modules/api_client.js`, `web/modules/api_types.js`, and `tests/test_gateway_parity.py` still aligned? Missing alignment is advisory unless it also breaks a frozen contract, safety guard, release metadata, or runtime behavior. | advisory |
 
 ### Severity rules
 
@@ -158,7 +159,7 @@ Ouroboros repository.
 - Items 6-10, 14 are conditionally critical: FAIL only when the condition applies.
   If the condition does not apply, write verdict PASS with a short reason
   (e.g. "Not applicable — no code logic change").
-- Items 11-12 and 15 are advisory: FAIL produces a warning but does not block.
+- Items 11-12 and 15-16 are advisory: FAIL produces a warning but does not block.
 - Item 13 (self_consistency) is conditionally critical: FAIL only when the
   mismatch falls in the `Critical surface whitelist` below AND a concrete
   stale artifact is named (specific file, line, or symbol). If no whitelisted
@@ -224,13 +225,17 @@ mismatch as **critical**, the mismatch MUST live in one of these categories:
    contract vs. the actual guard in code (e.g. ARCHITECTURE says "panic
    kills all subprocess trees" but the implementation misses process groups).
 6. **Frozen contracts (v1)** — the ABI under `ouroboros/contracts/`
-   (`ToolContextProtocol`, `ToolEntryProtocol`, `api_v1` envelopes,
-   `SkillManifest`, `schema_versions`). Removing a field, renaming a
-   TypedDict key that the runtime already emits, or breaking the
-   `parse_skill_manifest_text` tolerance contract is critical, because
-   external skills/extensions (Phase 3+) are expected to pin against this
-   surface. Non-breaking *additions* are not critical. The regression
-   suite is `tests/test_contracts.py`.
+   (`ToolContextProtocol`, `ToolEntryProtocol`, `SkillManifest`,
+   `schema_versions`) plus the browser gateway contract in
+   `ouroboros/gateway/contracts.py` (canonical HTTP/WS envelope and
+   endpoint index; `ouroboros/contracts/api_v1.py` is compatibility only).
+   Removing a field, renaming a TypedDict key that the runtime already
+   emits, removing an endpoint token that the router still mounts, or
+   breaking the `parse_skill_manifest_text` tolerance contract is critical,
+   because external skills/extensions and the frontend boundary are expected
+   to pin against this surface. Non-breaking *additions* are not critical.
+   The regression suites are `tests/test_contracts.py` and
+   `tests/test_gateway_parity.py`.
 
 **All OTHER mismatches are advisory, not critical.** Including:
 

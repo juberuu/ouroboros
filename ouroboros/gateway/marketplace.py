@@ -67,7 +67,7 @@ def _review_status_allows_skill_runtime(status: str) -> bool:
     return review_status_allows_execution(status)
 
 
-from ouroboros.http_api import (
+from ouroboros.gateway._helpers import (
     coerce_bool as _coerce_bool,
     coerce_int as _coerce_int,
     request_drive_root as _request_drive_root,

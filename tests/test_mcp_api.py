@@ -1,4 +1,4 @@
-"""HTTP surface tests for ouroboros.mcp_api.
+"""HTTP surface tests for ouroboros.gateway.mcp.
 
 Uses a narrow Starlette TestClient app around the real endpoint callables.
 The MCP manager is wired with a fake transport so no live MCP server is
@@ -63,6 +63,7 @@ def _good_server(**overrides) -> dict:
 
 def _make_client(tmp_path, monkeypatch):
     import server as srv
+    from ouroboros.gateway import mcp as mcp_api
 
     drive_root = tmp_path / "drive"
     drive_root.mkdir()
@@ -77,9 +78,9 @@ def _make_client(tmp_path, monkeypatch):
     app = Starlette(routes=[
         Route("/api/settings", endpoint=srv.api_settings_get, methods=["GET"]),
         Route("/api/settings", endpoint=srv.api_settings_post, methods=["POST"]),
-        Route("/api/mcp/status", endpoint=srv.api_mcp_status, methods=["GET"]),
-        Route("/api/mcp/refresh", endpoint=srv.api_mcp_refresh, methods=["POST"]),
-        Route("/api/mcp/test", endpoint=srv.api_mcp_test, methods=["POST"]),
+        Route("/api/mcp/status", endpoint=mcp_api.api_mcp_status, methods=["GET"]),
+        Route("/api/mcp/refresh", endpoint=mcp_api.api_mcp_refresh, methods=["POST"]),
+        Route("/api/mcp/test", endpoint=mcp_api.api_mcp_test, methods=["POST"]),
     ])
     app.state.drive_root = drive_root
     app.state.repo_dir = tmp_path / "repo"
@@ -111,7 +112,7 @@ def test_status_endpoint_returns_redacted_payload(tmp_path, monkeypatch):
         # Patch load_settings used by mcp_api._ensure_configured to avoid
         # touching the real on-disk settings.json (and accidentally
         # clobbering the fake transport's wiring).
-        with patch("ouroboros.mcp_api.load_settings", return_value={
+        with patch("ouroboros.gateway.mcp.load_settings", return_value={
             "MCP_ENABLED": True,
             "MCP_TOOL_TIMEOUT_SEC": 30,
             "MCP_SERVERS": [_good_server()],
@@ -145,7 +146,7 @@ def test_test_endpoint_with_inline_server(tmp_path, monkeypatch):
     })
     client, patches = _make_client(tmp_path, monkeypatch)
     try:
-        with patch("ouroboros.mcp_api.load_settings", return_value={
+        with patch("ouroboros.gateway.mcp.load_settings", return_value={
             "MCP_ENABLED": True,
             "MCP_TOOL_TIMEOUT_SEC": 10,
             "MCP_SERVERS": [],
@@ -187,7 +188,7 @@ def test_test_endpoint_rehydrates_masked_inline_candidate_by_server_id(tmp_path,
     })
     client, patches = _make_client(tmp_path, monkeypatch)
     try:
-        with patch("ouroboros.mcp_api.load_settings", return_value={
+        with patch("ouroboros.gateway.mcp.load_settings", return_value={
             "MCP_ENABLED": True,
             "MCP_TOOL_TIMEOUT_SEC": 10,
             "MCP_SERVERS": [persisted],
@@ -228,7 +229,7 @@ def test_test_endpoint_accepts_friendly_server_id(tmp_path, monkeypatch):
     })
     client, patches = _make_client(tmp_path, monkeypatch)
     try:
-        with patch("ouroboros.mcp_api.load_settings", return_value={
+        with patch("ouroboros.gateway.mcp.load_settings", return_value={
             "MCP_ENABLED": True,
             "MCP_TOOL_TIMEOUT_SEC": 10,
             "MCP_SERVERS": [persisted],
@@ -245,7 +246,7 @@ def test_test_endpoint_accepts_friendly_server_id(tmp_path, monkeypatch):
 def test_test_endpoint_rejects_invalid_url(tmp_path, monkeypatch):
     client, patches = _make_client(tmp_path, monkeypatch)
     try:
-        with patch("ouroboros.mcp_api.load_settings", return_value={
+        with patch("ouroboros.gateway.mcp.load_settings", return_value={
             "MCP_ENABLED": True,
             "MCP_TOOL_TIMEOUT_SEC": 10,
             "MCP_SERVERS": [],
@@ -274,7 +275,7 @@ def test_refresh_endpoint_targets_single_server(tmp_path, monkeypatch):
     })
     client, patches = _make_client(tmp_path, monkeypatch)
     try:
-        with patch("ouroboros.mcp_api.load_settings", return_value={
+        with patch("ouroboros.gateway.mcp.load_settings", return_value={
             "MCP_ENABLED": True,
             "MCP_TOOL_TIMEOUT_SEC": 10,
             "MCP_SERVERS": [_good_server()],

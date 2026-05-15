@@ -1,4 +1,5 @@
 import { escapeHtmlText, formatUsd2 } from './utils.js';
+import { apiFetch } from './api_client.js';
 
 // ``hostPage`` defaults to ``'dashboard'`` (Dashboard sub-tab migration v5.7+);
 // the legacy ``'settings'`` value is no longer passed by ``app.js``.
@@ -177,8 +178,8 @@ export function initEvolution({ ws, state, mount = null, embedded = false, chart
         try {
             const suffix = force ? '?force=1' : '';
             const [stateResp, evoResp] = await Promise.all([
-                fetch('/api/state', { cache: 'no-store' }),
-                fetch(`/api/evolution-data${suffix}`, { cache: 'no-store' }),
+                apiFetch('/api/state', { cache: 'no-store' }),
+                apiFetch(`/api/evolution-data${suffix}`, { cache: 'no-store' }),
             ]);
             if (!stateResp.ok) throw new Error('State API error ' + stateResp.status);
             if (!evoResp.ok) throw new Error('Evolution API error ' + evoResp.status);

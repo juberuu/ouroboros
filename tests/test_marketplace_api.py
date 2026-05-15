@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 
-from ouroboros import marketplace_api
+from ouroboros.gateway import marketplace as marketplace_api
 from ouroboros.marketplace.clawhub import ClawHubSkillSummary
 
 

@@ -3,8 +3,9 @@
 ``safeExternalHrefAttr``, ``renderMarkdownSafe``, ``boundedText``, and
 ``fetchJson`` previously had local copies in ``marketplace.js``,
 ``skills.js``, ``widgets.js``, and ``ouroboroshub.js``. They are now
-exported from ``web/modules/utils.js`` as the single source of truth so
-the URL/markdown sanitization contracts cannot drift between modules.
+owned by ``web/modules/utils.js`` for content helpers and
+``web/modules/api_client.js`` for the gateway JSON-fetch helper, so the
+URL/markdown/API error contracts cannot drift between modules.
 
 These checks are static-text guards: they pin the helpers' presence in
 ``utils.js`` and the absence of duplicate function definitions in the
@@ -27,15 +28,17 @@ def _read(name: str) -> str:
 
 
 def test_utils_exports_shared_helpers():
-    """``utils.js`` is the SSOT for the four helpers consolidated in v5.8.3-rc.5."""
+    """``utils.js`` keeps content helpers and re-exports gateway fetchJson."""
     src = _read("utils.js")
     for sig in (
         "export function safeExternalHrefAttr(",
         "export function renderMarkdownSafe(",
         "export function boundedText(",
-        "export async function fetchJson(",
+        "export { fetchJson } from './api_client.js';",
     ):
         assert sig in src, f"utils.js must export {sig.strip().rstrip('(')}"
+    assert "export async function fetchJson(" not in src
+    assert "export async function fetchJson(" in _read("api_client.js")
 
 
 def test_safe_external_href_attr_blocks_unsafe_schemes():
@@ -95,6 +98,13 @@ def test_ouroboroshub_uses_shared_fetch_json():
     assert "fetchJson" in src
     # Local async fetchJson removed in v5.8.3-rc.5.
     assert "async function fetchJson(" not in src
+
+
+def test_onboarding_wizard_remains_inline_iife_without_imports():
+    """The onboarding wizard is inlined into a classic script, not loaded as an ES module."""
+    src = _read("onboarding_wizard.js")
+    assert src.startswith("(() => {")
+    assert "\nimport " not in src
 
 
 def test_accent_tokens_have_concrete_rgba_values():

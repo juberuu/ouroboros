@@ -130,7 +130,7 @@ def test_server_workers_init_reads_manifest_branches_not_hardcoded_strings():
 
 
 def test_architecture_module_tree_lists_all_live_extension_http_endpoints():
-    """The high-level module map entry for ``ouroboros/extensions_api.py``
+    """The high-level module map entry for ``ouroboros/gateway/extensions.py``
     must list every HTTP path the module actually registers, so the
     architecture map does not contradict the endpoint table later in the
     same document. Specifically the Phase 5 review surface
@@ -138,8 +138,8 @@ def test_architecture_module_tree_lists_all_live_extension_http_endpoints():
     ``server.py`` and must appear in both places."""
     architecture = (REPO / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
 
-    # Module map entry lives on the ``extensions_api.py`` tree line.
-    tree_idx = architecture.find("├── extensions_api.py")
+    # Module map entry lives on the ``gateway/extensions.py`` tree line.
+    tree_idx = architecture.find("├── extensions.py")
     assert tree_idx != -1
     tree_line = architecture[tree_idx : architecture.find("\n", tree_idx)]
     assert "POST /api/skills/<skill>/toggle" in tree_line

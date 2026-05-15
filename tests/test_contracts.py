@@ -262,7 +262,7 @@ def test_chat_outbound_matches_message_bus_sends():
     discriminator + core content keys (``type``, ``role``, ``content``,
     ``ts``); removing one would silently reshape the wire format.
     """
-    from ouroboros.contracts.api_v1 import ChatOutbound
+    from ouroboros.gateway.contracts import ChatOutbound
 
     declared_keys = set(ChatOutbound.__annotations__.keys())
     assert _CHAT_OUTBOUND_REQUIRED <= declared_keys, (
@@ -295,7 +295,7 @@ def test_chat_outbound_matches_message_bus_sends():
 
 def test_photo_outbound_matches_message_bus_sends():
     """PhotoOutbound TypedDict must match every photo envelope emitted."""
-    from ouroboros.contracts.api_v1 import PhotoOutbound
+    from ouroboros.gateway.contracts import PhotoOutbound
 
     declared = set(PhotoOutbound.__annotations__.keys())
     assert _PHOTO_OUTBOUND_REQUIRED <= declared, (
@@ -313,7 +313,7 @@ def test_photo_outbound_matches_message_bus_sends():
 
 def test_typing_outbound_matches_message_bus_sends():
     """TypingOutbound TypedDict must match every typing envelope emitted."""
-    from ouroboros.contracts.api_v1 import TypingOutbound
+    from ouroboros.gateway.contracts import TypingOutbound
 
     declared = set(TypingOutbound.__annotations__.keys())
     assert _TYPING_OUTBOUND_REQUIRED <= declared, (
@@ -331,7 +331,7 @@ def test_typing_outbound_matches_message_bus_sends():
 
 def test_log_outbound_matches_message_bus_sends():
     """LogOutbound TypedDict must match every log envelope emitted."""
-    from ouroboros.contracts.api_v1 import LogOutbound
+    from ouroboros.gateway.contracts import LogOutbound
 
     declared = set(LogOutbound.__annotations__.keys())
     assert _LOG_OUTBOUND_REQUIRED <= declared, (
@@ -376,9 +376,9 @@ def test_state_response_matches_server_payload():
     intentionally outside the frozen contract, so the test whitelists
     ``{"error"}`` only for dicts that contain it (error branch).
     """
-    from ouroboros.contracts.api_v1 import StateResponse
+    from ouroboros.gateway.contracts import StateResponse
 
-    tree = ast.parse((REPO_ROOT / "server.py").read_text(encoding="utf-8"))
+    tree = ast.parse((REPO_ROOT / "ouroboros" / "gateway" / "state.py").read_text(encoding="utf-8"))
     api_state_fn = _find_async_fn(tree, "api_state")
     assert api_state_fn is not None
 
@@ -414,9 +414,9 @@ def test_state_response_matches_server_payload():
 
 def test_health_response_matches_server_payload():
     """HealthResponse declared keys must cover ``/api/health`` return payload."""
-    from ouroboros.contracts.api_v1 import HealthResponse
+    from ouroboros.gateway.contracts import HealthResponse
 
-    tree = ast.parse((REPO_ROOT / "server.py").read_text(encoding="utf-8"))
+    tree = ast.parse((REPO_ROOT / "ouroboros" / "gateway" / "state.py").read_text(encoding="utf-8"))
     api_health_fn = _find_async_fn(tree, "api_health")
     assert api_health_fn is not None
 
@@ -441,9 +441,9 @@ def test_health_response_matches_server_payload():
 
 def test_settings_network_meta_matches_build_network_meta():
     """SettingsNetworkMeta must cover every branch of _build_network_meta."""
-    from ouroboros.contracts.api_v1 import SettingsNetworkMeta
+    from ouroboros.gateway.contracts import SettingsNetworkMeta
 
-    tree = ast.parse((REPO_ROOT / "server.py").read_text(encoding="utf-8"))
+    tree = ast.parse((REPO_ROOT / "ouroboros" / "gateway" / "settings.py").read_text(encoding="utf-8"))
     build_fn = None
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == "_build_network_meta":
@@ -474,16 +474,16 @@ def test_settings_network_meta_matches_build_network_meta():
 
 
 def test_command_inbound_matches_ws_endpoint_dispatch():
-    """CommandInbound must match the keys ``server.ws_endpoint`` reads for commands.
+    """CommandInbound must match the keys ``gateway.ws_endpoint`` reads for commands.
 
     The inbound side uses ``msg.get("type")``, ``msg.get("cmd")`` and (for
     chat) ``msg.get("sender_session_id")`` / ``msg.get("client_message_id")``.
     The frozen CommandInbound contract must therefore include at least
     ``type`` and ``cmd`` and nothing else unsupported by the dispatcher.
     """
-    from ouroboros.contracts.api_v1 import ChatInbound, CommandInbound
+    from ouroboros.gateway.contracts import ChatInbound, CommandInbound
 
-    src = (REPO_ROOT / "server.py").read_text(encoding="utf-8")
+    src = (REPO_ROOT / "ouroboros" / "gateway" / "ws.py").read_text(encoding="utf-8")
     tree = ast.parse(src)
     ws_fn = _find_async_fn(tree, "ws_endpoint")
     assert ws_fn is not None
@@ -798,7 +798,7 @@ def test_state_response_declares_runtime_and_capability_keys():
     here keeps the frozen-surface table in sync with a dedicated guard
     that a grep for new key names will find.
     """
-    from ouroboros.contracts.api_v1 import StateResponse
+    from ouroboros.gateway.contracts import StateResponse
 
     keys = set(StateResponse.__annotations__.keys())
     for required in ("runtime_mode", "skills_repo_configured", "github_token_configured"):

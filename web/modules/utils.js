@@ -2,6 +2,9 @@
  * Utility functions shared across modules.
  */
 
+import { apiFetch } from './api_client.js';
+export { fetchJson } from './api_client.js';
+
 export function escapeHtmlText(text) {
     const div = document.createElement('div');
     div.textContent = text;
@@ -67,34 +70,6 @@ export function safeExternalHrefAttr(value) {
 export function boundedText(value, maxLen = 1200) {
     const text = String(value ?? '');
     return text.length > maxLen ? `${text.slice(0, maxLen)}…[truncated]` : text;
-}
-
-/**
- * Shared JSON fetch wrapper.  Behaviour:
- *
- * - Always parses the response body as JSON.  If the body is not valid
- *   JSON (HTML 502 page from a misbehaving proxy, etc.) it is replaced
- *   with ``{ error: 'non-json response (HTTP <code>)' }`` so callers do
- *   not need a separate try/catch around ``resp.json()``.
- * - On non-2xx responses, throws ``Error`` with ``err.status`` (HTTP
- *   code, useful for 429-aware retry logic) and ``err.body`` (the
- *   parsed JSON payload, useful for surfacing structured error fields).
- */
-export async function fetchJson(url, init) {
-    const resp = await fetch(url, init);
-    let body = null;
-    try {
-        body = await resp.json();
-    } catch {
-        body = { error: `non-json response (HTTP ${resp.status})` };
-    }
-    if (!resp.ok) {
-        const err = new Error(body?.error || `HTTP ${resp.status}`);
-        err.status = resp.status;
-        err.body = body;
-        throw err;
-    }
-    return body;
 }
 
 /**
@@ -271,7 +246,7 @@ export function formatDualVersion(data) {
 
 export async function loadVersion() {
     try {
-        const resp = await fetch('/api/health');
+        const resp = await apiFetch('/api/health');
         const data = await resp.json();
         const { runtimeVersion } = extractVersions(data);
         const navVer = document.getElementById('nav-version');

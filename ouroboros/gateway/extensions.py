@@ -27,7 +27,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from ouroboros.extension_loader import list_routes, snapshot
-from ouroboros.http_api import (
+from ouroboros.gateway._helpers import (
     coerce_bool,
     request_drive_root as _request_drive_root,
     request_repo_dir as _request_repo_dir,

@@ -1,6 +1,7 @@
 import { renderPageHeader } from './page_header.js';
 import { PAGE_ICONS } from './page_icons.js';
 import { applyMasonry } from './masonry.js';
+import { apiFetch } from './api_client.js';
 import {
     escapeHtmlAttr as escapeHtml,
     renderMarkdownSafe,
@@ -23,7 +24,7 @@ function pageTemplate() {
 }
 
 async function fetchExtensions() {
-    const resp = await fetch('/api/extensions', { cache: 'no-store' });
+    const resp = await apiFetch('/api/extensions', { cache: 'no-store' });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
     return data;
@@ -371,7 +372,7 @@ async function callWidgetRoute(tab, spec, values, signal) {
             body: JSON.stringify(values || {}),
             signal,
         };
-    const resp = await fetch(url, init);
+    const resp = await apiFetch(url, init);
     const contentType = resp.headers.get('content-type') || '';
     const data = contentType.includes('application/json')
         ? await resp.json().catch(() => ({}))
@@ -412,7 +413,7 @@ async function mountDeclarativeWidget(mount, tab, render) {
             if (!result?.ok) throw new Error(result?.error || 'desktop download failed');
             return;
         }
-        const resp = await fetch(resolvedUrl.pathname + resolvedUrl.search, { credentials: 'include' });
+        const resp = await apiFetch(resolvedUrl.pathname + resolvedUrl.search, { credentials: 'include' });
         if (!resp.ok) throw new Error(`download failed: HTTP ${resp.status}`);
         const blob = await resp.blob();
         const blobUrl = URL.createObjectURL(blob);
@@ -819,7 +820,7 @@ async function mountTab(card, tab) {
             event.preventDefault();
             const query = (input.value || '').trim();
             result.innerHTML = '<div class="muted">Loading...</div>';
-            const resp = await fetch(`/api/extensions/${encodeURIComponent(tab.skill)}/${apiRoute}?city=${encodeURIComponent(query)}`);
+            const resp = await apiFetch(`/api/extensions/${encodeURIComponent(tab.skill)}/${apiRoute}?city=${encodeURIComponent(query)}`);
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok || data.error) {
                 result.innerHTML = `<div class="skills-load-error">${escapeHtml(data.error || `HTTP ${resp.status}`)}</div>`;
@@ -859,7 +860,7 @@ async function mountTab(card, tab) {
         // access) while preserving the useful extension-route IO surface.
         const entryName = String(render.entry).replace(/[^A-Za-z0-9._-]/g, '');
         const entryUrl = `/api/extensions/${encodeURIComponent(tab.skill)}/module/${encodeURIComponent(entryName)}`;
-        const resp = await fetch(entryUrl, { cache: 'no-store' });
+        const resp = await apiFetch(entryUrl, { cache: 'no-store' });
         const moduleSource = await resp.text();
         if (!resp.ok) {
             mount.innerHTML = `<div class="skills-load-error">module load failed: ${escapeHtml(moduleSource || `HTTP ${resp.status}`)}</div>`;
@@ -928,7 +929,7 @@ async function mountTab(card, tab) {
                 if (parsed.origin !== window.location.origin || !parsed.pathname.startsWith(expectedPrefix)) {
                     throw new Error('module widget fetch outside extension route prefix');
                 }
-                const r = await fetch(parsed.pathname + parsed.search, {
+                const r = await apiFetch(parsed.pathname + parsed.search, {
                     method: String(msg.init?.method || 'GET').toUpperCase(),
                     headers: msg.init?.headers || {},
                     body: msg.init?.body || undefined,

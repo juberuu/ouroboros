@@ -2,6 +2,7 @@ import { escapeHtmlAttr, escapeHtmlText as escapeHtml, formatUsdWhole, renderMar
 import { renderPageHeader } from './page_header.js';
 import { PAGE_ICONS } from './page_icons.js';
 import { showToast } from './toast.js';
+import { apiFetch } from './api_client.js';
 import {
     getLogTaskGroupId,
     isGroupedTaskEvent,
@@ -366,7 +367,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
     async function refreshHeaderControlState(force = false) {
         if (!force && state.activePage !== 'chat') return;
         try {
-            const resp = await fetch('/api/state', { cache: 'no-store' });
+            const resp = await apiFetch('/api/state', { cache: 'no-store' });
             if (!resp.ok) return;
             syncHeaderControlState(await resp.json());
         } catch {}
@@ -1119,7 +1120,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         }
         historySyncPromise = (async () => {
             try {
-                const resp = await fetch('/api/chat/history?limit=1000', { cache: 'no-store' });
+                const resp = await apiFetch('/api/chat/history?limit=1000', { cache: 'no-store' });
                 if (!resp.ok) return false;
                 const data = await resp.json();
                 const messages = Array.isArray(data.messages) ? data.messages : [];
@@ -1382,7 +1383,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
             try {
                 const formData = new FormData();
                 formData.append('file', staged.file);
-                const resp = await fetch('/api/chat/upload', { method: 'POST', body: formData });
+                const resp = await apiFetch('/api/chat/upload', { method: 'POST', body: formData });
                 const data = await resp.json();
                 if (!resp.ok || !data.ok) {
                     showToast('Upload failed: ' + (data.error || resp.statusText), 'error');

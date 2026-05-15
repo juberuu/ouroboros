@@ -97,7 +97,7 @@ def execute_panic_stop(
 
     try:
         import multiprocessing
-        from ouroboros.host_service_api import host_service_port
+        from ouroboros.gateway.host_service import host_service_port
         from ouroboros.platform_layer import force_kill_pid, kill_process_on_port
 
         for child in multiprocessing.active_children():

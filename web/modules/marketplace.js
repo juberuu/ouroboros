@@ -420,8 +420,8 @@ function showStatus(host, message, tone) {
 // Network helpers
 // ---------------------------------------------------------------------------
 //
-// ``fetchJson`` lives in ``utils.js`` (single source of truth shared with
-// ouroboroshub.js). The contract: parsed body always returned; non-2xx
+// ``fetchJson`` is re-exported from ``utils.js`` and owned by
+// ``api_client.js``. The contract: parsed body always returned; non-2xx
 // throws ``Error`` with ``err.status`` (used here for 429 retry handling)
 // and ``err.body``.
 

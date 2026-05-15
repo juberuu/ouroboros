@@ -4,6 +4,7 @@ import { renderPageHeader, renderTabStrip } from './page_header.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { PAGE_ICONS } from './page_icons.js';
 import { showToast } from './toast.js';
+import { apiFetch } from './api_client.js';
 import {
     boundedText,
     escapeHtmlAttr as escapeHtml,
@@ -668,9 +669,9 @@ function renderSkillCard(skill, reviewingSkills = new Set(), repairingSkills = n
 
 async function fetchSkills() {
     const [stateResp, extResp, queueResp] = await Promise.all([
-        fetch('/api/state').then(r => r.ok ? r.json() : {}),
-        fetch('/api/extensions').then(r => r.ok ? r.json() : { skills: [], live: {} }),
-        fetch('/api/skills/lifecycle-queue').then(r => r.ok ? r.json() : { events: [] }).catch(() => ({ events: [] })),
+        apiFetch('/api/state').then(r => r.ok ? r.json() : {}),
+        apiFetch('/api/extensions').then(r => r.ok ? r.json() : { skills: [], live: {} }),
+        apiFetch('/api/skills/lifecycle-queue').then(r => r.ok ? r.json() : { events: [] }).catch(() => ({ events: [] })),
     ]);
     // ``/api/state`` does not yet expose a ``summarize_skills`` payload
     // directly (that can land in a later round if needed). For now we
@@ -771,7 +772,7 @@ async function renderMigrationBanner() {
     if (!host) return;
     let migrations = [];
     try {
-        const resp = await fetch('/api/migrations');
+        const resp = await apiFetch('/api/migrations');
         if (resp.ok) {
             const data = await resp.json();
             migrations = Array.isArray(data.migrations) ? data.migrations : [];
@@ -821,7 +822,7 @@ async function renderMigrationBanner() {
             if (!key) return;
             btn.disabled = true;
             try {
-                await fetch(`/api/migrations/${encodeURIComponent(key)}/dismiss`, {
+                await apiFetch(`/api/migrations/${encodeURIComponent(key)}/dismiss`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({}),
@@ -840,7 +841,7 @@ async function renderMigrationBanner() {
 
 
 async function postWithFeedback(url, body) {
-    const resp = await fetch(url, {
+    const resp = await apiFetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body || {}),

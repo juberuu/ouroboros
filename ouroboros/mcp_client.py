@@ -25,7 +25,7 @@ Design choices
   limit. Slugs are sanitized to alnum/underscore and truncated with a
   short SHA1 suffix when they would overflow.
 * **Secret hygiene**: ``auth_token`` is never returned via the status
-  payload. The HTTP layer in :mod:`ouroboros.mcp_api` reuses the same
+  payload. The HTTP layer in :mod:`ouroboros.gateway.mcp` reuses the same
   masking convention as the rest of ``settings.json`` secrets.
 * **Network safety**: a small deny-list refuses obvious cloud-metadata
   endpoints to harden against SSRF-style abuse from prompt-injected MCP

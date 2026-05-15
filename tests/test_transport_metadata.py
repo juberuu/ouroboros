@@ -1,4 +1,4 @@
-from ouroboros.contracts.api_v1 import TransportMetadata
+from ouroboros.gateway.contracts import TransportMetadata
 from supervisor.message_bus import LocalChatBridge
 
 

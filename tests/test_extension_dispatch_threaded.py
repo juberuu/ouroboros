@@ -32,7 +32,7 @@ def _decode_response(response):
 
 def test_sync_extension_route_handler_runs_on_worker_thread(tmp_path, monkeypatch):
     import ouroboros.extension_loader as extension_loader
-    import ouroboros.extensions_api as extensions_api
+    import ouroboros.gateway.extensions as extensions_api
 
     (tmp_path / "drive").mkdir()
     (tmp_path / "repo").mkdir()
@@ -70,7 +70,7 @@ def test_sync_extension_route_handler_runs_on_worker_thread(tmp_path, monkeypatc
 
 def test_async_extension_route_handler_is_awaited_on_event_loop_thread(tmp_path, monkeypatch):
     import ouroboros.extension_loader as extension_loader
-    import ouroboros.extensions_api as extensions_api
+    import ouroboros.gateway.extensions as extensions_api
 
     (tmp_path / "drive").mkdir()
     (tmp_path / "repo").mkdir()
@@ -109,7 +109,7 @@ def test_async_extension_route_handler_is_awaited_on_event_loop_thread(tmp_path,
 
 def test_extension_manifest_state_scans_run_on_worker_thread(tmp_path, monkeypatch):
     import ouroboros.extension_loader as extension_loader
-    import ouroboros.extensions_api as extensions_api
+    import ouroboros.gateway.extensions as extensions_api
 
     (tmp_path / "drive").mkdir()
     (tmp_path / "repo").mkdir()
@@ -155,7 +155,7 @@ def test_extension_manifest_state_scans_run_on_worker_thread(tmp_path, monkeypat
 
 def test_skill_reconcile_runs_on_worker_thread(tmp_path, monkeypatch):
     import ouroboros.extension_loader as extension_loader
-    import ouroboros.extensions_api as extensions_api
+    import ouroboros.gateway.extensions as extensions_api
 
     (tmp_path / "drive").mkdir()
     (tmp_path / "repo").mkdir()
@@ -175,7 +175,7 @@ def test_skill_reconcile_runs_on_worker_thread(tmp_path, monkeypatch):
 
 
 def test_lifecycle_queue_reconcile_runs_on_worker_thread(tmp_path, monkeypatch):
-    import ouroboros.extensions_api as extensions_api
+    import ouroboros.gateway.extensions as extensions_api
     import ouroboros.skill_review_runner as runner
 
     (tmp_path / "drive").mkdir()

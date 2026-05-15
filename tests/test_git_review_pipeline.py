@@ -714,16 +714,14 @@ class TestAutoPushBehavior:
 
 class TestRemoteConfigSurfacing:
     def test_server_logs_remote_failure(self):
-        """server.py must check the (ok, msg) return from configure_remote."""
-        server_path = pathlib.Path(REPO) / "server.py"
-        source = server_path.read_text(encoding="utf-8")
+        """gateway.settings must check the (ok, msg) return from configure_remote."""
+        source = (pathlib.Path(REPO) / "ouroboros" / "gateway" / "settings.py").read_text(encoding="utf-8")
         assert "remote_ok, remote_msg = configure_remote" in source
         assert "Remote configuration failed" in source
 
     def test_settings_save_returns_warnings(self):
         """api_settings_post must surface remote config failures."""
-        server_path = pathlib.Path(REPO) / "server.py"
-        source = server_path.read_text(encoding="utf-8")
+        source = (pathlib.Path(REPO) / "ouroboros" / "gateway" / "settings.py").read_text(encoding="utf-8")
         assert '"warnings"' in source
 
     def test_remote_credentials_migration_not_wired_at_startup(self):

@@ -375,8 +375,9 @@ Keep the mental map small. The details live in `ARCHITECTURE.md`.
 ### Repository (`~/Ouroboros/repo/`)
 - `BIBLE.md` — Constitution.
 - `prompts/SYSTEM.md` — this prompt.
-- `server.py`, `launcher.py` — runtime shell, desktop launcher, and server entry.
-- `ouroboros/` — core runtime plus provider/server helpers (`agent.py`, `context.py`, `loop.py`, `llm.py`, `server_runtime.py`, `model_catalog_api.py`, `server_history_api.py`, `tools/`).
+- `server.py`, `launcher.py` — process entrypoints; `server.py` mounts the gateway and hosts supervisor lifespan.
+- `ouroboros/` — core runtime plus provider/server helpers (`agent.py`, `context.py`, `loop.py`, `llm.py`, `server_runtime.py`, `gateway/`, `tools/`).
+- `ouroboros/gateway/` — browser-facing HTTP/WS boundary; `gateway/contracts.py` is PRO-frozen.
 - `supervisor/` — routing, workers, queue, state, git ops, and the local message bus.
 - `web/` — SPA assets, settings modules, provider icons, and page-specific CSS.
 - `docs/` — `ARCHITECTURE.md`, `DEVELOPMENT.md`, `CHECKLISTS.md`.

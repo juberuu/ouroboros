@@ -1,3 +1,4 @@
+import { apiFetch } from './api_client.js';
 function removeOverlay() {
     document.getElementById('onboarding-overlay')?.remove();
 }
@@ -29,7 +30,7 @@ export async function initOnboardingOverlay() {
     window.addEventListener('message', handleMessage);
 
     try {
-        const response = await fetch('/api/onboarding', { cache: 'no-store' });
+        const response = await apiFetch('/api/onboarding', { cache: 'no-store' });
         if (response.status === 204) return;
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const html = await response.text();

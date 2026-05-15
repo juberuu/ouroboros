@@ -1,5 +1,6 @@
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { showToast } from './toast.js';
+import { apiFetch } from './api_client.js';
 
 // ``hostPage`` defaults to ``'dashboard'`` (Dashboard sub-tab migration v5.7+);
 // the legacy ``'settings'`` value is no longer passed by ``app.js``.
@@ -129,7 +130,7 @@ export function initUpdates({ mount, hostPage = 'dashboard', hostSubtab = 'updat
         checkBtn.disabled = true;
         setBadge('starting', fetchRemote ? 'Checking...' : 'Loading...');
         try {
-            const resp = await fetch(fetchRemote ? '/api/update/check' : '/api/update/status', {
+            const resp = await apiFetch(fetchRemote ? '/api/update/check' : '/api/update/status', {
                 method: fetchRemote ? 'POST' : 'GET',
                 cache: 'no-store',
             });
@@ -178,7 +179,7 @@ export function initUpdates({ mount, hostPage = 'dashboard', hostSubtab = 'updat
 
     async function loadVersions() {
         try {
-            const resp = await fetch('/api/git/log', { cache: 'no-store' });
+            const resp = await apiFetch('/api/git/log', { cache: 'no-store' });
             if (!resp.ok) throw new Error('Git log API error ' + resp.status);
             const data = await resp.json();
             current.textContent = `Branch: ${data.branch || '?'} @ ${data.sha || '?'}`;
@@ -203,7 +204,7 @@ export function initUpdates({ mount, hostPage = 'dashboard', hostSubtab = 'updat
     async function rollback(target) {
         if (!confirm(`Roll back to ${target}?\n\nA rescue snapshot of the current state will be saved. The server will restart.`)) return;
         try {
-            const resp = await fetch('/api/git/rollback', {
+            const resp = await apiFetch('/api/git/rollback', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ target }),
@@ -234,7 +235,7 @@ export function initUpdates({ mount, hostPage = 'dashboard', hostSubtab = 'updat
         applyBtn.disabled = true;
         applyBtn.textContent = 'Preparing...';
         try {
-            const resp = await fetch('/api/update/apply', {
+            const resp = await apiFetch('/api/update/apply', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ strategy }),
@@ -258,7 +259,7 @@ export function initUpdates({ mount, hostPage = 'dashboard', hostSubtab = 'updat
     page.querySelector('#updates-promote').addEventListener('click', async () => {
         if (!confirm('Promote current ouroboros branch to ouroboros-stable?')) return;
         try {
-            const resp = await fetch('/api/git/promote', { method: 'POST' });
+            const resp = await apiFetch('/api/git/promote', { method: 'POST' });
             const data = await resp.json();
             if (data.status === 'ok') {
                 showToast(data.message, 'success');

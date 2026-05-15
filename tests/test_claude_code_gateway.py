@@ -589,7 +589,7 @@ class TestSDKStatusPayload:
 
         monkeypatch.setattr("ouroboros.platform_layer.resolve_claude_runtime", mock_resolve)
 
-        import server as server_mod
+        from ouroboros.gateway import settings as server_mod
         payload = server_mod._claude_code_status_payload()
 
         assert payload["installed"] is True
@@ -609,7 +609,7 @@ class TestSDKStatusPayload:
 
         monkeypatch.setattr("ouroboros.platform_layer.resolve_claude_runtime", mock_resolve)
 
-        import server as server_mod
+        from ouroboros.gateway import settings as server_mod
         payload = server_mod._claude_code_status_payload()
 
         assert payload["installed"] is False
@@ -634,7 +634,7 @@ class TestSDKStatusPayload:
 
         monkeypatch.setattr("ouroboros.platform_layer.resolve_claude_runtime", mock_resolve)
 
-        import server as server_mod
+        from ouroboros.gateway import settings as server_mod
         payload = server_mod._claude_code_status_payload()
 
         assert payload["installed"] is True
@@ -660,7 +660,7 @@ class TestSDKStatusPayload:
 
         monkeypatch.setattr("ouroboros.platform_layer.resolve_claude_runtime", mock_resolve)
 
-        import server as server_mod
+        from ouroboros.gateway import settings as server_mod
         payload = server_mod._claude_code_status_payload()
 
         assert "cli_path" in payload

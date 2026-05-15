@@ -78,15 +78,15 @@ def test_required_projection_fields_match_between_endpoints(monkeypatch):
     # Cycle 2 GPT critic Finding 1: pre-import the API modules
     # BEFORE any monkeypatch.setattr() so the lazy ``from
     # ouroboros.skill_loader import discover_skills`` line inside
-    # ``ouroboros.extensions_api`` resolves the REAL function and
+    # ``ouroboros.gateway.extensions`` resolves the REAL function and
     # binds it to the module namespace. monkeypatch then captures
     # the real function as oldval and correctly restores it on
     # teardown. Without this pre-import, a previous monkeypatch on
     # ``ouroboros.skill_loader.discover_skills`` would leak into the
     # later monkeypatch's saved oldval, polluting subsequent tests
     # that import these modules in default order.
-    import ouroboros.extensions_api  # noqa: F401
-    import ouroboros.marketplace_api  # noqa: F401
+    import ouroboros.gateway.extensions  # noqa: F401
+    import ouroboros.gateway.marketplace  # noqa: F401
     import ouroboros.marketplace.provenance  # noqa: F401
     # Cycle 3 Gemini follow-up: pre-import ``skill_exec`` too, since
     # it is the one remaining module-level consumer of
@@ -140,16 +140,16 @@ def test_required_projection_fields_match_between_endpoints(monkeypatch):
     # ``ouroboros.skill_loader``, so we patch that single source so
     # both code paths see the same stubbed catalogue.
     monkeypatch.setattr("ouroboros.skill_loader.discover_skills", _stub_discover_skills)
-    monkeypatch.setattr("ouroboros.extensions_api.discover_skills", _stub_discover_skills)
-    monkeypatch.setattr("ouroboros.extensions_api.snapshot", _stub_snapshot)
+    monkeypatch.setattr("ouroboros.gateway.extensions.discover_skills", _stub_discover_skills)
+    monkeypatch.setattr("ouroboros.gateway.extensions.snapshot", _stub_snapshot)
     monkeypatch.setattr(
         "ouroboros.extension_loader.runtime_state_for_skill_name",
         _stub_runtime_state_for_skill_name,
     )
     # ``read_provenance`` is imported eagerly at module load time by
-    # ``ouroboros.marketplace_api`` (so a monkeypatch on the original
+    # ``ouroboros.gateway.marketplace`` (so a monkeypatch on the original
     # module would never reach the marketplace endpoint's local
-    # reference). ``ouroboros.extensions_api`` does a lazy import
+    # reference). ``ouroboros.gateway.extensions`` does a lazy import
     # inside ``api_extensions_index``, so the original-module patch
     # IS sufficient there. Patching both source locations covers both
     # styles.
@@ -158,24 +158,24 @@ def test_required_projection_fields_match_between_endpoints(monkeypatch):
         _stub_read_provenance,
     )
     monkeypatch.setattr(
-        "ouroboros.marketplace_api.read_provenance",
+        "ouroboros.gateway.marketplace.read_provenance",
         _stub_read_provenance,
         raising=False,
     )
 
     # Drive /api/extensions
-    from ouroboros.extensions_api import api_extensions_index
-    from ouroboros.marketplace_api import api_marketplace_installed
+    from ouroboros.gateway.extensions import api_extensions_index
+    from ouroboros.gateway.marketplace import api_marketplace_installed
 
     fake_request = mock.MagicMock()
     fake_request.app.state.drive_root = pathlib.Path("/tmp/notreal_drive")
     fake_request.app.state.repo_dir = pathlib.Path("/tmp/notreal_repo")
     monkeypatch.setattr(
-        "ouroboros.extensions_api._request_drive_root",
+        "ouroboros.gateway.extensions._request_drive_root",
         lambda req: pathlib.Path("/tmp/notreal_drive"),
     )
     monkeypatch.setattr(
-        "ouroboros.marketplace_api._request_drive_root",
+        "ouroboros.gateway.marketplace._request_drive_root",
         lambda req: pathlib.Path("/tmp/notreal_drive"),
     )
     # v5.15.0: marketplace is always-on; the legacy ``get_clawhub_enabled`` /

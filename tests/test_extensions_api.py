@@ -978,7 +978,7 @@ def test_api_skill_review_offloads_to_thread_and_returns_outcome(tmp_path, monke
             error="",
         )
         with patch(
-            "ouroboros.extensions_api._review_skill_impl",
+            "ouroboros.gateway.extensions._review_skill_impl",
             create=True,
             return_value=canned,
         ), patch(
@@ -1024,23 +1024,27 @@ def test_lifecycle_queue_endpoint_marks_stale_review_job_interrupted(tmp_path, m
 
 
 def test_ws_endpoint_dispatches_ext_prefixed_messages():
-    """Phase 5 regression: server.py::ws_endpoint must route
+    """Phase 5 regression: gateway.ws::ws_endpoint must route
     provider-safe extension WS messages through ``extension_loader.list_ws_handlers()``.
     AST-level check — the full runtime round-trip requires a live
     supervisor which is out of scope for this file."""
     import ast
-    src = (pathlib.Path(__file__).resolve().parent.parent / "server.py").read_text(encoding="utf-8")
+    src = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "ouroboros"
+        / "gateway"
+        / "ws.py"
+    ).read_text(encoding="utf-8")
+    assert "parse_extension_surface_name" in src, "gateway WS module has no extension dispatch branch"
+    assert "list_ws_handlers" in src, (
+        "gateway WS module does not look up extension WS handlers via "
+        "``extension_loader.list_ws_handlers``."
+    )
     tree = ast.parse(src)
     for node in ast.walk(tree):
         if isinstance(node, ast.AsyncFunctionDef) and node.name == "ws_endpoint":
-            body = ast.unparse(node)
-            assert "parse_extension_surface_name" in body, "ws_endpoint has no extension dispatch branch"
-            assert "list_ws_handlers" in body, (
-                "ws_endpoint does not look up extension WS handlers via "
-                "``extension_loader.list_ws_handlers``."
-            )
             return
-    assert False, "ws_endpoint not found in server.py"
+    assert False, "ws_endpoint not found in gateway/ws.py"
 
 
 def test_ws_endpoint_reconciles_and_unloads_not_live_extension(tmp_path, monkeypatch):

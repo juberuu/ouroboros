@@ -2,6 +2,7 @@ from types import SimpleNamespace
 import asyncio
 
 import server
+from ouroboros.gateway import control as gateway_control
 
 
 class FakeBridge:
@@ -61,13 +62,13 @@ def test_visible_repair_command_is_deduped(monkeypatch):
         def ui_send(self, text, **kwargs):
             calls.append((text, kwargs))
 
-    monkeypatch.setattr(server, "_RECENT_VISIBLE_COMMANDS", {})
+    monkeypatch.setattr(gateway_control, "_RECENT_VISIBLE_COMMANDS", {})
     monkeypatch.setattr("supervisor.message_bus.get_bridge", lambda: Bridge())
     monkeypatch.setattr("supervisor.message_bus.log_chat", lambda *a, **k: None)
-    monkeypatch.setattr(server, "broadcast_ws_sync", lambda payload: None)
+    monkeypatch.setattr(gateway_control, "broadcast_ws_sync", lambda payload: None)
 
-    first = asyncio.run(server.api_command(Request()))
-    second = asyncio.run(server.api_command(Request()))
+    first = asyncio.run(gateway_control.api_command(Request()))
+    second = asyncio.run(gateway_control.api_command(Request()))
 
     assert first.status_code == 200
     assert second.status_code == 200
@@ -96,13 +97,13 @@ def test_failed_visible_repair_command_does_not_poison_dedupe(monkeypatch):
             calls.append((text, kwargs))
 
     bridges.extend([FailingBridge(), HealthyBridge()])
-    monkeypatch.setattr(server, "_RECENT_VISIBLE_COMMANDS", {})
+    monkeypatch.setattr(gateway_control, "_RECENT_VISIBLE_COMMANDS", {})
     monkeypatch.setattr("supervisor.message_bus.get_bridge", lambda: bridges.pop(0))
     monkeypatch.setattr("supervisor.message_bus.log_chat", lambda *a, **k: None)
-    monkeypatch.setattr(server, "broadcast_ws_sync", lambda payload: None)
+    monkeypatch.setattr(gateway_control, "broadcast_ws_sync", lambda payload: None)
 
-    first = asyncio.run(server.api_command(Request()))
-    second = asyncio.run(server.api_command(Request()))
+    first = asyncio.run(gateway_control.api_command(Request()))
+    second = asyncio.run(gateway_control.api_command(Request()))
 
     assert first.status_code == 400
     assert second.status_code == 200
@@ -126,15 +127,15 @@ def test_visible_repair_command_can_retry_after_short_dedupe_window(monkeypatch)
         def ui_send(self, text, **kwargs):
             calls.append((text, kwargs))
 
-    monkeypatch.setattr(server, "_RECENT_VISIBLE_COMMANDS", {})
-    monkeypatch.setattr(server.time, "monotonic", lambda: now["value"])
+    monkeypatch.setattr(gateway_control, "_RECENT_VISIBLE_COMMANDS", {})
+    monkeypatch.setattr(gateway_control.time, "monotonic", lambda: now["value"])
     monkeypatch.setattr("supervisor.message_bus.get_bridge", lambda: Bridge())
     monkeypatch.setattr("supervisor.message_bus.log_chat", lambda *a, **k: None)
-    monkeypatch.setattr(server, "broadcast_ws_sync", lambda payload: None)
+    monkeypatch.setattr(gateway_control, "broadcast_ws_sync", lambda payload: None)
 
-    first = asyncio.run(server.api_command(Request()))
-    now["value"] += server._VISIBLE_COMMAND_DEDUPE_SEC + 0.1
-    second = asyncio.run(server.api_command(Request()))
+    first = asyncio.run(gateway_control.api_command(Request()))
+    now["value"] += gateway_control._VISIBLE_COMMAND_DEDUPE_SEC + 0.1
+    second = asyncio.run(gateway_control.api_command(Request()))
 
     assert first.status_code == 200
     assert second.status_code == 200

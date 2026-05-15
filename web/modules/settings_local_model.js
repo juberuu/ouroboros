@@ -1,4 +1,5 @@
 import { showToast } from './toast.js';
+import { apiFetch } from './api_client.js';
 
 
 function readLocalModelBody() {
@@ -48,7 +49,7 @@ export function bindLocalModelControls({ state }) {
     async function updateLocalStatus() {
         if (state.activePage !== 'settings') return;
         try {
-            const resp = await fetch('/api/local-model/status', { cache: 'no-store' });
+            const resp = await apiFetch('/api/local-model/status', { cache: 'no-store' });
             const d = await resp.json();
             const el = document.getElementById('local-model-status');
             if (!el) return;
@@ -121,7 +122,7 @@ export function bindLocalModelControls({ state }) {
         setTestResult('');
         setProgressBar(null);
         try {
-            const resp = await fetch('/api/local-model/start', {
+            const resp = await apiFetch('/api/local-model/start', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
@@ -152,7 +153,7 @@ export function bindLocalModelControls({ state }) {
 
     document.getElementById('btn-local-stop').addEventListener('click', async () => {
         try {
-            await fetch('/api/local-model/stop', { method: 'POST' });
+            await apiFetch('/api/local-model/stop', { method: 'POST' });
             setProgressBar(null);
             updateLocalStatus();
         } catch (e) {
@@ -163,7 +164,7 @@ export function bindLocalModelControls({ state }) {
     document.getElementById('btn-local-test').addEventListener('click', async () => {
         setTestResult('Running tests...', 'muted');
         try {
-            const resp = await fetch('/api/local-model/test', { method: 'POST' });
+            const resp = await apiFetch('/api/local-model/test', { method: 'POST' });
             const r = await resp.json();
             if (r.error) {
                 setTestResult('Error: ' + r.error, 'error');
@@ -192,7 +193,7 @@ export function bindLocalModelControls({ state }) {
             const body = readLocalModelBody();
             state._pendingLocalStart = !!body.source;
             try {
-                const resp = await fetch('/api/local-model/install-runtime', { method: 'POST' });
+                const resp = await apiFetch('/api/local-model/install-runtime', { method: 'POST' });
                 const d = await resp.json();
                 if (d.error) {
                     setTestResult('Install request failed: ' + d.error, 'error');

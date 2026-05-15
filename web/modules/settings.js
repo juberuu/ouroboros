@@ -5,6 +5,7 @@ import { applyMcpSettings, collectMcpSettings, initMcpSettings } from './mcp_set
 import { SECRET_KEYS, bindSecretInputs, bindSettingsTabs, renderSettingsPage } from './settings_ui.js';
 import { showToast } from './toast.js';
 import { escapeHtmlAttr as escapeHtml, formatDualVersion } from './utils.js';
+import { apiFetch } from './api_client.js';
 
 let markSettingsDirty = () => {};
 const BASE_SECRET_KEYS = new Set(SECRET_KEYS.map(([key]) => key));
@@ -209,7 +210,7 @@ function renderExtensionSettingsSections(root, sections) {
             try {
                 const cleanRoute = cleanExtensionRoute(route);
                 if (!cleanRoute) throw new Error('invalid extension settings route');
-                const resp = await fetch(`/api/extensions/${encodeURIComponent(skill)}/${cleanRoute}`, {
+                const resp = await apiFetch(`/api/extensions/${encodeURIComponent(skill)}/${cleanRoute}`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(values),
@@ -282,7 +283,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
     // existing #nav-version short label and the in-Settings detailed version
     // string stay consistent. The fetch is best-effort — if it fails the
     // label simply remains empty rather than blocking settings load.
-    fetch('/api/health')
+    apiFetch('/api/health')
         .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
         .then((d) => {
             const verEl = document.getElementById('about-version');
@@ -418,7 +419,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         // surface even without a configured API key. The backend distinguishes
         // "no_api_key" from "error" via the v4.33.1 `status_label` priority fix.
         try {
-            const resp = await fetch('/api/claude-code/status', { cache: 'no-store' });
+            const resp = await apiFetch('/api/claude-code/status', { cache: 'no-store' });
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
             applyClaudeCodeStatus(data);
@@ -534,8 +535,8 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
 
     async function loadSettings() {
         const [settingsResp, extResp] = await Promise.all([
-            fetch('/api/settings', { cache: 'no-store' }),
-            fetch('/api/extensions', { cache: 'no-store' }).catch(() => null),
+            apiFetch('/api/settings', { cache: 'no-store' }),
+            apiFetch('/api/extensions', { cache: 'no-store' }).catch(() => null),
         ]);
         const data = await settingsResp.json().catch(() => ({}));
         const extData = extResp && extResp.ok ? await extResp.json().catch(() => ({})) : {};
@@ -874,7 +875,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             error: '',
         });
         try {
-            const resp = await fetch('/api/claude-code/install', { method: 'POST' });
+            const resp = await apiFetch('/api/claude-code/install', { method: 'POST' });
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
             applyClaudeCodeStatus(data);
@@ -908,7 +909,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         const body = collectBody();
 
         try {
-            const resp = await fetch('/api/settings', {
+            const resp = await apiFetch('/api/settings', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
@@ -973,7 +974,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
     byId('btn-reset').addEventListener('click', async () => {
         if (!confirm('This will delete all runtime data (state, memory, logs, settings) and restart.\nThe repo (agent code) will be preserved.\nYou will need to re-enter your provider settings.\n\nContinue?')) return;
         try {
-            const res = await fetch('/api/reset', { method: 'POST' });
+            const res = await apiFetch('/api/reset', { method: 'POST' });
             const data = await res.json();
             if (data.status === 'ok') alert('Deleted: ' + (data.deleted.join(', ') || 'nothing') + '\nRestarting...');
             else alert('Error: ' + (data.error || 'unknown'));

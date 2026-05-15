@@ -1,4 +1,5 @@
 import { formatUsd2 } from './utils.js';
+import { apiFetch } from './api_client.js';
 
 // ``hostPage`` defaults to ``'dashboard'`` (Dashboard sub-tab migration v5.7+);
 // the legacy ``'settings'`` value is no longer passed by ``app.js``.
@@ -115,7 +116,7 @@ export function initCosts({ ws, state, mount = null, embedded = false, hostPage 
 
     async function loadCosts() {
         try {
-            const resp = await fetch('/api/cost-breakdown');
+            const resp = await apiFetch('/api/cost-breakdown');
             const d = await resp.json();
             document.getElementById('cost-total').textContent = formatUsd2(d.total_cost || 0);
             document.getElementById('cost-calls').textContent = d.total_calls || 0;
@@ -130,7 +131,7 @@ export function initCosts({ ws, state, mount = null, embedded = false, hostPage 
 
     async function loadBudget() {
         try {
-            const resp = await fetch('/api/settings', { cache: 'no-store' });
+            const resp = await apiFetch('/api/settings', { cache: 'no-store' });
             const s = await resp.json().catch(() => ({}));
             if (s.TOTAL_BUDGET != null) document.getElementById('s-budget').value = s.TOTAL_BUDGET;
             if (s.OUROBOROS_PER_TASK_COST_USD != null) document.getElementById('s-per-task-cost').value = s.OUROBOROS_PER_TASK_COST_USD;
@@ -144,7 +145,7 @@ export function initCosts({ ws, state, mount = null, embedded = false, hostPage 
         const budget = parseFloat(document.getElementById('s-budget').value) || 10;
         const perTask = parseFloat(document.getElementById('s-per-task-cost').value) || 20;
         try {
-            const resp = await fetch('/api/settings', {
+            const resp = await apiFetch('/api/settings', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ TOTAL_BUDGET: budget, OUROBOROS_PER_TASK_COST_USD: perTask }),

@@ -1,6 +1,7 @@
 import { renderPageHeader } from './page_header.js';
 import { PAGE_ICONS } from './page_icons.js';
 import { escapeHtmlAttr, escapeHtmlText as escapeHtml } from './utils.js';
+import { apiFetch } from './api_client.js';
 
 function formatFileSize(size) {
     const num = Number(size);
@@ -404,7 +405,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
             params.set('path', path);
         }
         const query = params.toString();
-        const resp = await fetch(`/api/files/list${query ? `?${query}` : ''}`);
+        const resp = await apiFetch(`/api/files/list${query ? `?${query}` : ''}`);
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
 
@@ -432,7 +433,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
         if (!options.skipLeaveCheck && state.selectedPath !== path && !(await canLeaveEditor())) return;
         hideContextMenu();
         const params = new URLSearchParams({ path });
-        const resp = await fetch(`/api/files/read?${params.toString()}`);
+        const resp = await apiFetch(`/api/files/read?${params.toString()}`);
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
 
@@ -506,7 +507,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
             });
             return;
         }
-        const resp = await fetch(url);
+        const resp = await apiFetch(url);
         if (!resp.ok) throw new Error(`download failed: HTTP ${resp.status}`);
         const blob = await resp.blob();
         const blobUrl = URL.createObjectURL(blob);
@@ -531,7 +532,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
         });
         const name = (result?.value || '').trim();
         if (!result?.confirmed || !name) return;
-        const resp = await fetch('/api/files/mkdir', {
+        const resp = await apiFetch('/api/files/mkdir', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -550,7 +551,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
         if (!state.clipboard) return;
         if (!(await canLeaveEditor())) return;
 
-        const resp = await fetch('/api/files/transfer', {
+        const resp = await apiFetch('/api/files/transfer', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -579,7 +580,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
         if (!state.clipboard) return;
         if (!(await canLeaveEditor())) return;
 
-        const resp = await fetch('/api/files/transfer', {
+        const resp = await apiFetch('/api/files/transfer', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -621,7 +622,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
         });
         if (!result?.confirmed) return;
 
-        const resp = await fetch('/api/files/delete', {
+        const resp = await apiFetch('/api/files/delete', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ path: state.selectedPath }),
@@ -655,7 +656,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
                 content: `Uploading ${file.name}...`,
             });
 
-            const resp = await fetch('/api/files/upload', {
+            const resp = await apiFetch('/api/files/upload', {
                 method: 'POST',
                 body: form,
             });
@@ -684,7 +685,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
             ? (state.path && state.path !== '.' ? `${state.path}/${relName}` : relName)
             : state.editorPath;
         if (!savePath) return;
-        const resp = await fetch('/api/files/write', {
+        const resp = await apiFetch('/api/files/write', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({

@@ -1850,7 +1850,12 @@ def test_reload_all_called_on_settings_save():
     changes; otherwise switching repo path leaves stale extensions
     registered from the old path."""
     import ast
-    src = (pathlib.Path(__file__).resolve().parent.parent / "server.py").read_text(encoding="utf-8")
+    src = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "ouroboros"
+        / "gateway"
+        / "settings.py"
+    ).read_text(encoding="utf-8")
     tree = ast.parse(src)
     for node in ast.walk(tree):
         if (
@@ -1868,7 +1873,7 @@ def test_reload_all_called_on_settings_save():
                 "runtime mode changes."
             )
             return
-    assert False, "api_settings_post function not found in server.py"
+    assert False, "api_settings_post function not found in gateway/settings.py"
 
 
 def test_reload_all_called_from_server_startup():

@@ -2,7 +2,7 @@ import pathlib
 
 from starlette.testclient import TestClient
 
-from ouroboros.host_service_api import AUTH_TOKEN_FILENAME, create_host_service_app
+from ouroboros.gateway.host_service import AUTH_TOKEN_FILENAME, create_host_service_app
 from ouroboros.event_bus import CHAT_OUTBOUND, publish_event
 from ouroboros.skill_loader import compute_content_hash, save_enabled, save_review_state, save_skill_grants, SkillReviewState
 from ouroboros.utils import atomic_write_json

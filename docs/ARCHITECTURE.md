@@ -1,4 +1,4 @@
-# Ouroboros v5.21.0 — Architecture & Reference
+# Ouroboros v5.22.0-rc.1 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -30,10 +30,8 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
   └── ouroboros/               ← Agent core (runs inside worker processes)
       ├── config.py            ← SSOT: paths, settings defaults, load/save, PID lock
       ├── agent.py             ← Task orchestrator
-      ├── chat_upload_api.py   ← Chat file attachment upload/delete endpoints
       ├── agent_startup_checks.py ← Startup verification and health checks
       ├── agent_task_pipeline.py  ← Task execution pipeline orchestration
-      ├── host_service_api.py  ← Loopback-only Host Service API for reviewed skill callbacks
       ├── extension_companion.py ← Host-supervised companion processes for transport skills
       ├── event_bus.py         ← Typed in-process event bus for skill subscriptions
       ├── improvement_backlog.py ← Minimal durable advisory backlog helpers + digest formatting
@@ -42,9 +40,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── loop_tool_execution.py ← Tool dispatch and tool-result handling
       ├── pricing.py           ← Model pricing, cost estimation, usage events
       ├── llm.py               ← Multi-provider LLM routing (OpenRouter/OpenAI/compatible/Cloud.ru/Anthropic)
-      ├── model_catalog_api.py ← Optional provider model catalog endpoint
       ├── mcp_client.py        ← HTTP/SSE MCP client manager: parses MCP_SERVERS, validates URLs/auth headers, masks tokens, normalizes external tool names as mcp_<server>__<tool>, refreshes tool lists, and dispatches calls through the guarded Python mcp SDK import
-      ├── mcp_api.py           ← MCP Settings API (GET /api/mcp/status, POST /api/mcp/refresh, POST /api/mcp/test), backed by the same MCPManager singleton the agent registry uses
       ├── safety.py            ← Policy-based LLM safety check
       ├── consciousness.py     ← Background thinking loop (with progress emission)
       ├── consolidator.py      ← Block-wise dialogue consolidation (dialogue_blocks.json)
@@ -52,7 +48,6 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── context.py           ← LLM context builder (public API for consciousness)
       ├── context_compaction.py ← Context trimming and summarization helpers
       ├── local_model.py       ← Local LLM lifecycle (llama-cpp-python)
-      ├── local_model_api.py   ← Local model HTTP endpoints
       ├── local_model_autostart.py ← Local model startup helper
       ├── deep_self_review.py   ← Deep self-review: full git-tracked pack + memory → 1M-context model
       ├── review.py            ← Code collection, complexity metrics, pre-commit review
@@ -73,17 +68,13 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── extension_loader.py  ← Phase 4 in-process loader for type: extension skills; discovers + imports plugin.py via importlib with a narrow PluginAPIImpl, tracks registrations per-skill for atomic unload
       ├── extension_ui_validation.py ← Host-owned widget/settings render-schema validation shared by extension loader and skill preflight
       ├── extension_isolated_deps.py ← Per-extension bridge that exposes reviewed `.ouroboros_env` Python site-packages to in-process extensions while they are loaded
-      ├── extensions_api.py    ← Phase 5 HTTP surface for extensions (GET /api/extensions, GET /api/extensions/<skill>/manifest, ALL /api/extensions/<skill>/<rest:path> catch-all dispatch, POST /api/skills/<skill>/toggle, POST /api/skills/<skill>/review, POST /api/skills/<skill>/grants)
-      ├── http_api.py          ← v5.15.0 SSOT for shared HTTP-API plumbing across extensions/marketplace/file_browser/server: ``request_drive_root`` / ``request_repo_dir`` (pin per-request data + repo roots from ``request.app.state``), ``coerce_bool`` / ``coerce_int`` (defensive HTTP-side input parsing), ``json_error`` (single-shape error envelope). Replaces the duplicated copies that previously lived in each route module so per-route HTTP-API contracts evolve in one place.
       ├── skill_token.py       ← Opaque Host Service API token wrapper used by reviewed skills/companions
       ├── marketplace/         ← ClawHub + OuroborosHub marketplace package (clawhub.py registry client, ouroboroshub.py static GitHub catalog client, fetcher.py staging, adapter.py OpenClaw->Ouroboros translation, install.py orchestration, isolated_deps.py per-skill dependency prefix, provenance.py durable provenance)
-      ├── marketplace_api.py   ← HTTP surface for marketplaces (/api/marketplace/clawhub/* and /api/marketplace/ouroboroshub/*); always-on with registry host allowlists and hash checks
       ├── skill_lifecycle_queue.py ← single FIFO lane for mutating skill lifecycle actions (install/update/review/deps/enable/disable/uninstall) with recent event snapshot for Skills UI, chat live-card progress, dedupe keys, and sync tool wrapper
       ├── skill_review_runner.py ← shared lifecycle-backed skill review runner for API + agent tool paths; writes review_job.json + skill_review_* events and routes all executable skills (including self-authored provenance) through tri-model review
       ├── server_auth.py       ← Non-localhost auth gate (OUROBOROS_NETWORK_PASSWORD)
       ├── server_control.py    ← Process-control helpers: restart, panic stop
       ├── server_entrypoint.py ← CLI argument parsing, port-binding helpers
-      ├── server_history_api.py ← Chat history + cost breakdown endpoints
       ├── server_runtime.py    ← Server startup/onboarding and WebSocket liveness helpers
       ├── server_web.py        ← Static web file helpers (NoCacheStaticFiles, web dir resolver)
       ├── task_continuation.py ← Durable per-task review continuation state across restart/outage
@@ -105,6 +96,21 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   └── plugin_api.py    ← Phase 4: PluginAPI Protocol + ExtensionRegistrationError + FORBIDDEN_EXTENSION_SETTINGS + VALID_EXTENSION_PERMISSIONS + VALID_EXTENSION_ROUTE_METHODS
       ├── gateways/            ← External API adapters (thin transport, no business logic)
       │   └── claude_code.py   ← Claude Agent SDK gateway (edit + read-only paths via ClaudeSDKClient lifecycle, normalized SDK usage)
+      ├── gateway/             ← Gateway Boundary v1: all browser-facing HTTP/WS route ownership and frontend contract SSOT
+      │   ├── contracts.py     ← PRO-frozen HTTP/WS envelope and endpoint index (canonical replacement for the legacy contracts/api_v1.py surface)
+      │   ├── router.py        ← Starlette route collector for /api/* and /ws
+      │   ├── ws.py            ← WebSocket connection manager, extension WS dispatch, browser broadcast helpers
+      │   ├── state.py         ← /api/health and /api/state handlers
+      │   ├── settings.py      ← /api/settings, onboarding, Claude runtime status/repair handlers
+      │   ├── control.py       ← reset, command, git/update, migrations, and evolution-data handlers
+      │   ├── files.py         ← File Browser + chat upload endpoints
+      │   ├── models.py        ← model catalog + local-model lifecycle endpoints
+      │   ├── extensions.py    ← extensions/skills HTTP surface (GET /api/extensions, GET /api/extensions/<skill>/manifest, ALL /api/extensions/<skill>/<rest:path>, POST /api/skills/<skill>/toggle, POST /api/skills/<skill>/review, POST /api/skills/<skill>/grants)
+      │   ├── marketplace.py   ← ClawHub + OuroborosHub HTTP surface
+      │   ├── mcp.py           ← MCP Settings API surface backed by the shared MCPManager
+      │   ├── host_service.py  ← Loopback-only Host Service API for reviewed skill callbacks
+      │   ├── history.py       ← Chat history + cost breakdown endpoint factories
+      │   └── _helpers.py      ← shared HTTP request root helpers, coercion, and JSON error envelope
       ├── tools/               ← Auto-discovered tool plugins
       │   ├── release_sync.py    ← Release-metadata sync library; used by _preflight_check check 7 for P9 history-limit validation (check_history_limit) and by agents for version-carrier sync (sync_release_metadata)
       │   ├── review_synthesis.py ← LLM-based claim synthesis (Phase 1): deduplicates raw multi-reviewer findings into canonical issues before durable obligations are created; called from commit_gate._record_commit_attempt; fail-open (returns original on any error)
@@ -137,6 +143,30 @@ scripts/cleanup_test_pollution.py ← Dry-run-first cleanup utility for local te
 Dockerfile                    ← Docker image (web UI runtime)
 ```
 
+### Gateway Boundary v1
+
+`ouroboros/gateway/` is the single browser-facing boundary between the
+vanilla-JS frontend and the Python runtime. `server.py` owns process startup,
+lifespan, supervisor hosting, and static-file mounting; `gateway/router.py`
+owns every `/api/*` route and `/ws`; domain modules under `gateway/` own the
+actual HTTP handlers. This keeps frontend work pointed at one explicit contract
+surface instead of requiring contributors to understand supervisor, worker,
+marketplace, extension, MCP, local-model, and settings internals at once.
+
+The frozen contract is `ouroboros/gateway/contracts.py`. It carries the HTTP
+endpoint index, WebSocket message discriminators, and TypedDict envelope shapes.
+`runtime_mode='advanced'` may refactor gateway handlers and router plumbing, but
+editing `gateway/contracts.py` is protected as a frozen contract and requires
+`runtime_mode='pro'` plus the normal triad + scope review gate. The legacy
+`ouroboros/contracts/api_v1.py` module remains as a compatibility import only.
+
+Frontend modules call backend routes through `web/modules/api_client.js`, with
+JSDoc mirrors in `web/modules/api_types.js`. `web/package.json` defines the UI
+subpackage boundary without adding npm dependencies, TypeScript, codegen, or a
+build step. `tests/test_gateway_parity.py` checks that the contract endpoint
+index stays aligned with `gateway/router.py` and that the JSDoc mirror stays
+present for the core browser-facing envelopes.
+
 ### Two-process model
 
 1. **launcher.py** — immutable outer shell (tracked in the git repo; bundled as the packaged entry point via PyInstaller). Never self-modifies. Handles:
@@ -156,7 +186,7 @@ Dockerfile                    ← Docker image (web UI runtime)
    - Starlette app with HTTP API + WebSocket
    - Runs supervisor in a background thread
    - Supervisor manages worker pool, task queue, message routing
-   - Local model lifecycle endpoints extracted to `ouroboros/local_model_api.py`
+   - Local model lifecycle endpoints extracted to `ouroboros/gateway/models.py`
 
 ### Data layout (`~/Ouroboros/`)
 
@@ -165,7 +195,7 @@ Dockerfile                    ← Docker image (web UI runtime)
 ├── repo/              ← Agent's self-modifying git repository
 │   ├── server.py      ← The running server (kept in sync via the launcher-managed git clone, NOT copied from the workspace on each launch; see §2)
 │   ├── ouroboros/      ← Agent core package
-│   │   └── local_model_api.py  ← Local model API endpoints (extracted from server.py)
+│   │   └── gateway/models.py  ← Local model API endpoints (extracted from server.py)
 │   ├── supervisor/     ← Supervisor package
 │   ├── web/            ← Web UI files
 │   │   └── modules/    ← ES module pages (chat, logs, evolution, etc.)
@@ -574,7 +604,7 @@ authentication. If the password is blank, non-loopback access stays open by desi
 |--------|------|-------------|
 | GET | `/` | Serves `web/index.html` |
 | GET | `/api/health` | `{status, version, runtime_version, app_version}` |
-| GET | `/api/state` | Dashboard data: uptime, workers, budget, branch, etc. Phase 2 adds `runtime_mode` (current `light \| advanced \| pro`) and `skills_repo_configured` (boolean — never the absolute path). v5.11.0 adds `github_token_configured` (boolean only, never the token value) so the Skills UI can enable Hub submission affordances. Full happy-path shape is pinned by `ouroboros.contracts.api_v1.StateResponse`. |
+| GET | `/api/state` | Dashboard data: uptime, workers, budget, branch, etc. Phase 2 adds `runtime_mode` (current `light \| advanced \| pro`) and `skills_repo_configured` (boolean — never the absolute path). v5.11.0 adds `github_token_configured` (boolean only, never the token value) so the Skills UI can enable Hub submission affordances. Full happy-path shape is pinned by `ouroboros.gateway.contracts.StateResponse`. |
 | GET | `/api/extensions` | Phase 5: catalogue of every discovered skill (bundled + `OUROBOROS_SKILLS_REPO_PATH`) plus `extension_loader.snapshot()` of live registrations. |
 | GET | `/api/extensions/{skill}/manifest` | Phase 5: parsed manifest for one skill (name/type/version/permissions/env_from_settings/ui_tab, plus enabled + review status + content hash). |
 | GET | `/api/extensions/{skill}/module/{entry}` | Phase 5.7: reviewed static widget module source for `kind: "module"` tabs. Only serves a live extension's declared module entry, confines the path to `skill_dir`, returns JavaScript text with `Cache-Control: no-store`. |
@@ -1647,7 +1677,7 @@ Single source of truth for:
   path in `_coerce_setting_value`, and onboarding validation in
   `ouroboros/onboarding_wizard.py::prepare_onboarding_settings`),
   `get_runtime_mode()` / `get_skills_repo_path()` (read-side helpers
-  used by `server.py::api_state`),
+  used by `gateway/state.py::api_state`),
   `acquire_pid_lock()`, `release_pid_lock()`
 
 Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent access.
@@ -2078,7 +2108,7 @@ via `tests/test_contracts.py`.
 |----------|------|-------------|
 | `ToolContextProtocol` — 6-attribute + 3-method minimum every tool handler relies on (attributes: `repo_dir`, `drive_root`, `pending_events`, `emit_progress_fn`, `current_chat_id`, `task_id`; methods: `repo_path`, `drive_path`, `drive_logs`) | `ouroboros/contracts/tool_context.py` | `ouroboros.tools.registry.ToolContext` must satisfy it (duck-typed check + AST field parity) |
 | `ToolEntryProtocol` + `GetToolsProtocol` — the tool-module ABI | `ouroboros/contracts/tool_abi.py` | Every entry returned by `ToolRegistry._entries` must satisfy `ToolEntryProtocol` |
-| `api_v1` WS/HTTP envelopes — inbound: `ChatInbound`, `CommandInbound`; outbound WS: `ChatOutbound`, `PhotoOutbound`, `TypingOutbound`, `LogOutbound`, `ExtensionLifecycleOutbound`; HTTP: `HealthResponse`, `StateResponse` (Phase 2 adds `runtime_mode: str` and `skills_repo_configured: bool`; v5.11.0 adds `github_token_configured: bool`), `EvolutionStateSnapshot`, `SettingsNetworkMeta` | `ouroboros/contracts/api_v1.py` | AST scans of `supervisor/message_bus.py` chat envelopes, `server.py::api_state`, `server.py::api_health`, `server.py::_build_network_meta`, and `server.py::ws_endpoint` inbound dispatch assert no un-declared keys leak out; `tests/test_contracts.py::test_state_response_declares_phase2_runtime_mode_keys` explicitly pins the Phase 2 fields and later additive state keys |
+| `api_v1` WS/HTTP envelopes — inbound: `ChatInbound`, `CommandInbound`; outbound WS: `ChatOutbound`, `PhotoOutbound`, `TypingOutbound`, `LogOutbound`, `ExtensionLifecycleOutbound`; HTTP: `HealthResponse`, `StateResponse` (Phase 2 adds `runtime_mode: str` and `skills_repo_configured: bool`; v5.11.0 adds `github_token_configured: bool`), `EvolutionStateSnapshot`, `SettingsNetworkMeta` | `ouroboros/gateway/contracts.py` | AST scans of `supervisor/message_bus.py` chat envelopes, `gateway/state.py::api_state`, `gateway/state.py::api_health`, `gateway/settings.py::_build_network_meta`, and `gateway/ws.py::ws_endpoint` inbound dispatch assert no un-declared keys leak out; `tests/test_contracts.py::test_state_response_declares_phase2_runtime_mode_keys` explicitly pins the Phase 2 fields and later additive state keys |
 | `chat_id_policy` — SSOT for A2A/synthetic chat-id filtering across message bus, history, memory, and consolidation | `ouroboros/contracts/chat_id_policy.py` | `tests/test_chat_id_policy.py` pins boundaries and human/transport positive ids |
 | `PluginAPI` (Phase 4, v1.2) + `ExtensionRegistrationError` + `FORBIDDEN_EXTENSION_SETTINGS` + `VALID_EXTENSION_PERMISSIONS` + `VALID_EXTENSION_ROUTE_METHODS` — the surface every `type: extension` skill's `plugin.py::register(api)` binds against (`register_tool`, `register_route`, `register_ws_handler`, `register_ui_tab`, `register_settings_section`, `register_supervised_task`, `register_companion_process`, `subscribe_event`, `get_skill_token`, `send_ws_message`, `on_unload`, `log`, `get_settings`, `get_state_dir`, `skill_job_dir`, `get_runtime_info`). `skill_job_dir(job_id)` creates isolated `jobs/<sanitized_id>-<hash>/{assets,output,tmp}` state folders so generation skills do not overwrite their own assets across jobs. `VALID_EXTENSION_PERMISSIONS` includes host-mediated permissions (`companion_process`, `supervised_task`, `subscribe_event`, `inject_chat`) that require review/owner grants as documented in CHECKLISTS.md. | `ouroboros/contracts/plugin_api.py` | `tests/test_contracts.py::test_plugin_api_surface_is_frozen` pins the frozen method set; `tests/test_contracts.py::test_extension_route_methods_contract_matches_server_dispatch` pins the route-methods tuple; `tests/test_extension_loader.py::test_plugin_api_impl_matches_protocol` asserts the concrete `PluginAPIImpl` structurally satisfies the runtime-checkable Protocol |
 | `SkillManifest` — unified `SKILL.md` / `skill.json` format (`type: instruction \| script \| extension`) | `ouroboros/contracts/skill_manifest.py` | `parse_skill_manifest_text()` tolerates missing optional fields; `validate()` returns warnings without raising |
@@ -2558,7 +2588,7 @@ search time and refused at install time.
 | ``ouroboros/marketplace/ouroboroshub.py`` | Read-only static GitHub catalog client. Loads ``catalog.json`` from ``OUROBOROS_HUB_CATALOG_URL``, downloads only the selected skill files from raw GitHub URLs pinned by catalog metadata, verifies every file sha256, and lands into ``data/skills/ouroboroshub/<slug>/`` with ``.ouroboroshub.json`` provenance. |
 | ``ouroboros/marketplace/provenance.py`` | Atomic JSON read/write helper for ``data/state/skills/<name>/clawhub.json``. Schema: ``{schema_version, source, slug, sanitized_name, version, sha256, original_manifest_sha256, translated_manifest_sha256, registry_url, license, primary_env, adapter_warnings, installed_at, updated_at}``. |
 | ``ouroboros/extension_isolated_deps.py`` | Bridges reviewed isolated Python dependencies into the in-process extension loader. It finds ``.ouroboros_env/python/.../site-packages`` dirs, serializes plugin import/handler execution while those dirs are exposed via direct ``sys.path`` additions (no ``site.addsitedir`` / ``.pth`` execution), then purges file-backed and namespace-package modules loaded from those dirs at scope exit. |
-| ``ouroboros/marketplace_api.py`` | Starlette routes wired in ``server.py`` under ``/api/marketplace/clawhub/*`` and ``/api/marketplace/ouroboroshub/*``. Registry and install work dispatch through ``asyncio.to_thread`` to keep the event loop responsive; mutating routes pass through ``skill_lifecycle_queue``. |
+| ``ouroboros/gateway/marketplace.py`` | Starlette routes wired in ``server.py`` under ``/api/marketplace/clawhub/*`` and ``/api/marketplace/ouroboroshub/*``. Registry and install work dispatch through ``asyncio.to_thread`` to keep the event loop responsive; mutating routes pass through ``skill_lifecycle_queue``. |
 | ``ouroboros/skill_lifecycle_queue.py`` | Process-local global FIFO for mutating skill lifecycle operations. Recent job state feeds My skills virtual rows, tab badges, and chat/system summaries. |
 | ``web/modules/lifecycle_card.js`` | Shared marketplace-card pending-state helper. ClawHub and OuroborosHub cards use the same ``marketplace-card.is-working`` pulse, spinner, lifecycle-queue polling, and live hint text for install/review/update work. |
 | ``web/modules/confirm_dialog.js`` | Shared Promise-based confirmation modal used by Skills and marketplace actions instead of ad-hoc native ``confirm()`` calls. |

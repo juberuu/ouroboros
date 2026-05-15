@@ -1,3 +1,4 @@
+import { apiFetch } from './api_client.js';
 /**
  * WebSocket Manager module.
  *
@@ -64,7 +65,7 @@ export class WS {
         this._uiRecoveryTimer = setTimeout(async () => {
             this._uiRecoveryTimer = null;
             try {
-                const resp = await fetch('/api/state', { cache: 'no-store' });
+                const resp = await apiFetch('/api/state', { cache: 'no-store' });
                 if (resp.ok) {
                     this._refreshWindow(reason);
                     return;
@@ -99,7 +100,7 @@ export class WS {
     }
 
     _refreshStateAfterOpen(previouslyConnected) {
-        fetch('/api/state', { cache: 'no-store' }).then(r => r.json()).then(d => {
+        apiFetch('/api/state', { cache: 'no-store' }).then(r => r.json()).then(d => {
             const newSha = d.sha || '';
             if (previouslyConnected && newSha) {
                 if (!this._lastSha || this._lastSha !== newSha) {

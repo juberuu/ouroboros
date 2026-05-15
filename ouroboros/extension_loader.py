@@ -59,7 +59,7 @@ from ouroboros.extension_companion import (
     get_global_supervisor,
     is_server_process,
 )
-from ouroboros.host_service_api import AUTH_TOKEN_FILENAME
+from ouroboros.gateway.host_service import AUTH_TOKEN_FILENAME
 from ouroboros.extension_isolated_deps import (
     _isolated_python_site_dirs,
     async_isolated_site_dirs_scope,
@@ -672,7 +672,7 @@ class PluginAPIImpl:
             base_env[key_text] = str(value)
         token = self.get_skill_token()
         base_env["HOST_SERVICE_TOKEN"] = token.use_in_request()
-        from ouroboros.host_service_api import DEFAULT_HOST_SERVICE_HOST, host_service_port
+        from ouroboros.gateway.host_service import DEFAULT_HOST_SERVICE_HOST, host_service_port
         base_env["HOST_SERVICE_URL"] = f"http://{DEFAULT_HOST_SERVICE_HOST}:{host_service_port()}"
         if self._skill_dir is not None:
             site_dirs = [str(path) for path in _isolated_python_site_dirs(self._skill_dir)]

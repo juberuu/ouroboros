@@ -240,7 +240,7 @@ def test_onboarding_bootstrap_exposes_runtime_mode():
 
 
 def test_api_state_declares_phase2_keys():
-    tree = ast.parse((REPO / "server.py").read_text(encoding="utf-8"))
+    tree = ast.parse((REPO / "ouroboros" / "gateway" / "state.py").read_text(encoding="utf-8"))
     api_state_fn = None
     for node in ast.walk(tree):
         if isinstance(node, ast.AsyncFunctionDef) and node.name == "api_state":
@@ -269,7 +269,7 @@ def test_api_state_declares_phase2_keys():
 
 
 def test_state_response_typeddict_declares_phase2_keys():
-    from ouroboros.contracts.api_v1 import StateResponse
+    from ouroboros.gateway.contracts import StateResponse
 
     keys = set(StateResponse.__annotations__.keys())
     assert "runtime_mode" in keys

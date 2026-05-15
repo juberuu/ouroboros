@@ -19,7 +19,7 @@ def test_server_startup_no_longer_runs_native_topology_migration():
 
 
 def test_extensions_index_no_longer_mutates_skill_topology_on_read():
-    source = (REPO / "ouroboros" / "extensions_api.py").read_text(encoding="utf-8")
+    source = (REPO / "ouroboros" / "gateway" / "extensions.py").read_text(encoding="utf-8")
     assert "skill_migrations" not in source
     assert "migrate_unseeded_native_skills_to_external" not in source
 

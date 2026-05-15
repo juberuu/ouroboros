@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 5.21.0](https://img.shields.io/badge/version-5.21.0-green.svg)](VERSION)
+[![Version 5.22.0-rc.1](https://img.shields.io/badge/version-5.22.0--rc.1-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -419,6 +419,7 @@ not paraphrase it.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 5.22.0-rc.1 | 2026-05-15 | **rc(gateway): introduce Gateway Boundary v1.** Moves the web-facing HTTP/WebSocket contract into a PRO-frozen gateway surface, begins consolidating backend API modules behind a single frontend boundary, adds a thin future CLI entrypoint, and prepares the browser UI for explicit API-client ownership without adding a build step. |
 | 5.21.0 | 2026-05-14 | **feat(safety+widgets): harden unified edit targeting and repair Widgets host flows.** Makes `bucket`/`skill_name` short-form skill edits safe around explicit repo/data paths, adds a light-mode repo mutation tripwire for `run_shell` without auto-rollback, surfaces runtime mode in task context, restores widget span metadata, renders `subscription.render[]` progress/media children for Video/Anime Studio widgets, makes selected skill-review findings severity-driven, and pins budget hot-reload behavior with regression coverage. |
 | 5.20.1-rc.2 | 2026-05-13 | **rc(review): free advisory and surface skill auto-grant.** Surfaces reviewed-skill auto-grant requests/grants in outcomes and lifecycle payloads, shows granted items in headlines and chat review blocks, enables self-authored `auto_flow` wiring, and lets fresh advisory runs acknowledge open obligations/debts under advisory enforcement with a durable audit event. |
 | 5.20.1-rc.1 | 2026-05-13 | **rc(review): harden Claude advisory and skill-review observability.** Moves read-only Claude Code advisory onto the `ClaudeSDKClient` lifecycle, normalizes SDK token usage, routes advisory effort through the Scope Review setting, aligns skill advisory prompts with the Skill Review Checklist, persists skill advisory evidence/session metadata, and makes `bug_hunting` a critical skill-review blocker with concrete fix guidance. |

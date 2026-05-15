@@ -1,3 +1,4 @@
+import { apiFetch } from './api_client.js';
 /**
  * MCP (Model Context Protocol) client UI — manages the multi-server card
  * widget rendered inside Settings → Advanced.
@@ -268,7 +269,7 @@ function bindCardEvents(card) {
                 } else {
                     body = JSON.stringify({ server: serverForTest(server) });
                 }
-                const resp = await fetch('/api/mcp/test', {
+                const resp = await apiFetch('/api/mcp/test', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body,
@@ -301,7 +302,7 @@ function bindCardEvents(card) {
             refreshBtn.disabled = true;
             setMessage('Refreshing tools...', 'muted');
             try {
-                const resp = await fetch('/api/mcp/refresh', {
+                const resp = await apiFetch('/api/mcp/refresh', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ server_id: sid }),
@@ -374,7 +375,7 @@ function renderEnvelopeStatus() {
 
 async function refreshStatus() {
     try {
-        const resp = await fetch('/api/mcp/status', { cache: 'no-store' });
+        const resp = await apiFetch('/api/mcp/status', { cache: 'no-store' });
         if (!resp.ok) return;
         const data = await resp.json();
         mcpStatusEnvelope = data;
@@ -408,7 +409,7 @@ function bindRefreshAllButton() {
         const wasText = btn.textContent;
         btn.textContent = 'Refreshing...';
         try {
-            await fetch('/api/mcp/refresh', {
+            await apiFetch('/api/mcp/refresh', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({}),
