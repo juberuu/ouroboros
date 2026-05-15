@@ -14,6 +14,20 @@ def test_extract_json_array_handles_fences_and_normalizes():
     assert parsed[0]["item"] == "x"
 
 
+def test_extract_json_array_normalizes_obligation_suffix():
+    raw = json.dumps([
+        {
+            "item": "code_quality (obligation obl-0001)",
+            "verdict": "PASS",
+            "severity": "critical",
+            "reason": "fixed",
+        }
+    ])
+    parsed = extract_json_array(raw, normalize=True)
+    assert parsed[0]["item"] == "code_quality"
+    assert parsed[0]["obligation_id"] == "obl-0001"
+
+
 def test_parse_model_review_results_enforces_required_items():
     good = json.dumps([
         {"item": "a", "verdict": "PASS", "severity": "critical", "reason": "ok"},

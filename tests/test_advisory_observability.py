@@ -159,7 +159,49 @@ def test_handle_advisory_error_persists_session_id(monkeypatch, tmp_path):
     assert run.prompt_chars == 12345
 
 
-def test_skill_advisory_requires_exact_expected_items(monkeypatch, tmp_path):
+def test_skill_advisory_duplicate_expected_items_warn_not_error(monkeypatch, tmp_path):
+    adv_mod = _get_advisory_module()
+    from types import SimpleNamespace
+    from ouroboros.gateways.claude_code import ClaudeCodeResult
+    import ouroboros.gateways.claude_code as gw
+
+    def fake_run_readonly(**kwargs):
+        return ClaudeCodeResult(
+            success=True,
+            result_text=json.dumps([
+                {"item": "manifest_schema", "verdict": "PASS", "reason": "ok", "severity": "critical"},
+                {"item": "permissions_honesty", "verdict": "PASS", "reason": "ok", "severity": "critical"},
+                {"item": "permissions_honesty", "verdict": "FAIL", "reason": "second issue", "severity": "critical"},
+            ]),
+            session_id="sess-duplicate",
+            cost_usd=0.2,
+            usage={"prompt_tokens": 100, "completion_tokens": 20},
+        )
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(gw, "run_readonly", fake_run_readonly)
+    monkeypatch.setattr(adv_mod, "_build_advisory_prompt", lambda *a, **kw: "prompt")
+    ctx = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, pending_events=[], emit_progress_fn=lambda *_: None)
+
+    items, raw, _model, _chars = adv_mod._run_claude_advisory(
+        tmp_path,
+        "skill advisory",
+        ctx,
+        scope="plugin.py",
+        options={
+            "include_repo_diff": False,
+            "review_surface": "skill",
+            "expected_items": ["manifest_schema", "permissions_honesty"],
+        },
+    )
+
+    assert len(items) == 3
+    assert not raw.startswith("⚠️ ADVISORY_ERROR:")
+    assert any(ev.get("type") == "advisory_contract_warning" for ev in ctx.pending_events)
+    assert not any(ev.get("type") == "advisory_sdk_suspect_result" for ev in ctx.pending_events)
+
+
+def test_skill_advisory_missing_expected_items_still_errors(monkeypatch, tmp_path):
     adv_mod = _get_advisory_module()
     from types import SimpleNamespace
     from ouroboros.gateways.claude_code import ClaudeCodeResult
@@ -271,8 +313,20 @@ def _make_minimal_git_repo(tmp_path):
     import subprocess
     subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
     (tmp_path / "BIBLE.md").write_text("bible", encoding="utf-8")
+    (tmp_path / "VERSION").write_text("5.99.0-rc.1\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text('[project]\nversion = "5.99.0rc1"\n', encoding="utf-8")
+    (tmp_path / "README.md").write_text(
+        "[![Version 5.99.0-rc.1](https://img.shields.io/badge/version-5.99.0--rc.1-green.svg)](VERSION)\n\n"
+        "## Version History\n\n| Version | Date | Description |\n|---------|------|-------------|\n"
+        "| 5.99.0-rc.1 | 2026-05-16 | test row |\n",
+        encoding="utf-8",
+    )
     (tmp_path / "docs").mkdir(parents=True, exist_ok=True)
     (tmp_path / "docs" / "CHECKLISTS.md").write_text("# Repo Commit Checklist\n", encoding="utf-8")
+    (tmp_path / "docs" / "ARCHITECTURE.md").write_text(
+        "# Ouroboros v5.99.0-rc.1 — Architecture & Reference\n",
+        encoding="utf-8",
+    )
     (tmp_path / "state").mkdir(parents=True, exist_ok=True)
 
 

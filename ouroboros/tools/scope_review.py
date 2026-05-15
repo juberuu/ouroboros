@@ -605,12 +605,12 @@ concrete artifact reference must be marked advisory, not critical.
 
 Output ONLY a valid JSON array.
 
-You MUST produce EXACTLY ONE entry per checklist item from the
-Intent / Scope Review Checklist below. Skipping an item is not allowed —
-a missing entry indicates the item was not actually reviewed.
+You MUST cover every checklist item from the Intent / Scope Review
+Checklist below. Skipping an item is not allowed — a missing entry
+indicates the item was not actually reviewed.
 
 The eight checklist item identifiers you MUST return (exactly these strings
-in the "item" field; one entry each, no duplicates, no substitutions):
+in the "item" field; no substitutions):
 
     1. intent_alignment
     2. forgotten_touchpoints
@@ -632,6 +632,12 @@ Each element must have:
     artifact or code path that you checked. A bare "PASS" or single-word
     reason without justification indicates the item was not actually
     reviewed and will be treated as a reviewer failure.
+
+If one checklist item has multiple distinct concrete problems, return one
+FAIL entry per distinct root cause. Do not compress unrelated bugs into a
+single summary. If an item has no problems, return one PASS entry. Do not
+return duplicate PASS entries, and do not return PASS for an item that also
+has a FAIL — the concrete FAIL is authoritative.
 
 Severity rules:
 - Use "critical" only when you can cite a concrete missing file, symbol, test, prompt, doc, config, or sibling path and explain why the transformation is incomplete or inconsistent.

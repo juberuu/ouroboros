@@ -1,4 +1,4 @@
-# Ouroboros v5.22.0-rc.1 — Architecture & Reference
+# Ouroboros v5.23.0-rc.1 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -64,7 +64,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── skill_readiness.py   ← Central skill readiness helper: combines review gate, stale hash, enablement, and grants into a single finalization/execution verdict
       ├── skill_dependencies.py ← Shared dependency-spec resolution for skill payloads across manifests, sidecars, and provenance
       ├── skill_review_status.py ← Skill-review verdict aggregation SSOT (FAILs → clean/warnings/blockers/pending; hard trust-boundary items block on FAIL, bug_hunting + selected conditional safety items follow severity; enforcement maps verdicts to executable_review)
-      ├── skill_review.py      ← Skill review pipeline: deterministic preflight + optional fail-open Claude Code advisory over the skill payload only (repo diff excluded, Skill Review Checklist output contract, scope-review effort, raw/session metadata persisted as advisory_result) followed by the tri-model executable trust gate against the Skill Review Checklist section of docs/CHECKLISTS.md plus minimal host skill/widget context (CREATING_SKILLS.md, PluginAPI contract, extension UI validator); supports rebuttal/history/convergence evidence
+      ├── skill_review.py      ← Skill review pipeline: deterministic preflight + optional fail-open Claude Code advisory over the skill payload only (repo diff excluded, Skill Review Checklist coverage contract, scope-review effort, raw/session metadata plus parsed_items/contract_warning persisted as advisory_result) followed by the tri-model executable trust gate against the Skill Review Checklist section of docs/CHECKLISTS.md plus minimal host skill/widget context (CREATING_SKILLS.md, PluginAPI contract, extension UI validator); supports rebuttal/history/convergence evidence
       ├── extension_loader.py  ← Phase 4 in-process loader for type: extension skills; discovers + imports plugin.py via importlib with a narrow PluginAPIImpl, tracks registrations per-skill for atomic unload
       ├── extension_ui_validation.py ← Host-owned widget/settings render-schema validation shared by extension loader and skill preflight
       ├── extension_isolated_deps.py ← Per-extension bridge that exposes reviewed `.ouroboros_env` Python site-packages to in-process extensions while they are loaded
@@ -112,7 +112,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── history.py       ← Chat history + cost breakdown endpoint factories
       │   └── _helpers.py      ← shared HTTP request root helpers, coercion, and JSON error envelope
       ├── tools/               ← Auto-discovered tool plugins
-      │   ├── release_sync.py    ← Release-metadata sync library; used by _preflight_check check 7 for P9 history-limit validation (check_history_limit) and by agents for version-carrier sync (sync_release_metadata)
+      │   ├── release_sync.py    ← Release-metadata sync library; advisory_pre_review uses sync_release_metadata before provider spend when VERSION is in scope; _preflight_check uses check_history_limit for P9 row caps; agents can also call it directly for version-carrier sync
       │   ├── review_synthesis.py ← LLM-based claim synthesis (Phase 1): deduplicates raw multi-reviewer findings into canonical issues before durable obligations are created; called from commit_gate._record_commit_attempt; fail-open (returns original on any error)
       │   ├── ci.py              ← CI trigger and monitoring (GitHub Actions API)
       │   ├── claude_advisory_review.py ← Advisory pre-review tool (read-only Claude Agent SDK)
@@ -1332,14 +1332,17 @@ errors surface via the same observability path.
 
 #### Advisory pre-review gate
 
-- **Worktree version-sync preflight**: `_check_worktree_version_sync` runs before the
-  expensive SDK call. Reads VERSION, pyproject.toml, README badge, and ARCHITECTURE.md
-  header from the worktree (not staged index — advisory runs before `git add`). RC versions
-  compare `pyproject.toml` against the PEP 440-canonical form while README/ARCHITECTURE keep
-  the author-facing `VERSION` spelling. If they disagree, a warning is emitted via
-  `emit_progress_fn` and the advisory continues.
-  Non-fatal and non-blocking; the staged-index equivalent in `repo_commit` preflight is
-  the authoritative gate.
+- **Release-metadata preflight and auto-sync**: `_handle_advisory_pre_review` first calls
+  `_auto_sync_release_metadata_if_needed`. When `VERSION` is in scope, the existing
+  `release_sync.sync_release_metadata()` helper synchronizes `pyproject.toml`, the README
+  badge, and the ARCHITECTURE header before snapshot hashing and before any Claude SDK spend;
+  changed carriers are re-staged and an `events.jsonl` `release_metadata_auto_synced` event
+  records the file list. `_release_metadata_preflight` then blocks before the SDK when changed
+  files are present without `VERSION`, when the README changelog row for `VERSION` is missing,
+  when the README Version History exceeds the BIBLE P9 row limits, or when release carriers
+  still disagree after sync. The older `_check_worktree_version_sync` warning remains a
+  best-effort fallback; the deterministic preflight is the authoritative pre-provider-budget
+  gate, while the staged-index `_preflight_check` in `repo_commit` stays as defense-in-depth.
 - **`advisory_pre_review`** tool: runs a read-only Claude Agent SDK review of the current
   worktree BEFORE `repo_commit`. Permitted tools: `Read`, `Grep`, `Glob` only (no Edit/Bash).
   **LLM-first parse fallback** (v4.24.0): when the SDK returns a narrative-style response where
@@ -1616,7 +1619,7 @@ errors surface via the same observability path.
   oversized (>1MB), and directory prefixes `.cursor/`, `.github/`, `.vscode/`, `.idea/`, `assets/`,
   `tests/`. Explicit omission count appended when files are skipped.
 - Checklist items (v4.14.1): 8 items including `cross_module_bugs` (does the change break something in a different module through implicit coupling?) and `implicit_contracts` (are there constants, data format assumptions, or expected signatures relied upon by other modules that this change violates?).
-- **Full 8-item matrix output** (v4.34.0): the scope prompt now requires the reviewer to emit one JSON entry per Intent/Scope checklist item (8 entries total) rather than only FAILs. PASS entries are mandatory and must carry 1–2 sentences of justification naming a concrete artifact or code path that was checked — a bare "PASS" or single-word reason is explicitly called out as a reviewer failure. Rationale: before v4.34.0, scope returned only 1–2 FAILs while triad returned the full 15-item matrix, so scope coverage silently collapsed whenever the reviewer locked onto one concern class. The matrix contract makes skipped items visible and makes shallow PASS reasoning auditable in `scope_raw_result`. `_classify_scope_findings` continues to forward only `verdict == "FAIL"` entries to the commit gate, so the added PASS rows do not change blocking behaviour — they only make the reviewer's actual coverage visible.
+- **Full 8-item coverage output** (v4.34.0, relaxed in v5.23.0-rc.1): the scope prompt now requires the reviewer to cover every Intent/Scope checklist item rather than emit only FAILs. PASS entries are mandatory for clean items and must carry 1–2 sentences of justification naming a concrete artifact or code path that was checked — a bare "PASS" or single-word reason is explicitly called out as a reviewer failure. Multiple FAIL entries for the same item are valid when they describe distinct concrete root causes; duplicate PASS entries and PASS+FAIL for the same item are forbidden. Rationale: before v4.34.0, scope returned only 1–2 FAILs while triad returned the full matrix, so scope coverage silently collapsed whenever the reviewer locked onto one concern class. The coverage contract makes skipped items visible, preserves multiple independent bugs under the same item, and makes shallow PASS reasoning auditable in `scope_raw_result`. `_classify_scope_findings` continues to forward only `verdict == "FAIL"` entries to the commit gate, so PASS rows do not change blocking behaviour — they only make the reviewer's actual coverage visible.
 - **Anti pattern-lock guard** (v4.34.0): the scope prompt now explicitly instructs the reviewer that if the first pass surfaces exactly one FAIL (and all other items are PASS), it must run a deliberate second pass focused on a different concern class before returning. Concrete pairings are listed in the prompt: `intent_alignment` → `forgotten_touchpoints`/`cross_module_bugs`; `forgotten_touchpoints` → `cross_surface_consistency`/`implicit_contracts`; etc. The reviewer updates PASS entries in-place if the second pass uncovers new FAILs and returns a single JSON array. Mirrors the same guard added to triad prompts in v4.34.0 — single-FAIL outputs are the most common pattern-lock failure mode of single-pass review.
 - **Budget gate**: after assembling the full scope-review prompt, token count is estimated via `estimate_tokens` (chars/4 heuristic). If the estimate exceeds `_SCOPE_BUDGET_TOKEN_LIMIT` (850K tokens), scope review is **skipped with a non-blocking warning** rather than crashing or sending an oversized request. The commit is not blocked in this case. Context math: 1M window is shared input+output; chars/4 under-counts by ~15%, so actual input at gate=850K is ≈1M tokens and output max_tokens draws from the same 1M ceiling — the skip path is best-effort.
 - **`_TouchedContextStatus` dataclass** (v4.14.1): structured signal object used by `_build_scope_prompt()` to replace the old magic-string channel. `_compute_touched_status()` produces the touched-file statuses; `_build_scope_prompt()` creates `budget_exceeded` after estimating the assembled prompt. Fields: `status` ("empty"|"omitted"|"budget_exceeded"), `omitted_paths`, `token_count`. Success is represented by `context_status is None`, not a separate `"ok"` status. This prevents filename–sentinel collision (a real file named `__empty__` cannot be misclassified as a control sentinel).

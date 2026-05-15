@@ -682,6 +682,10 @@ def render_skill_review_block(
         )
         if advisory_result.get("error"):
             lines.append(f"Claude advisory warning: {advisory_result.get('error')}")
+        if advisory_result.get("contract_warning"):
+            lines.append(
+                f"Claude advisory contract warning: {advisory_result.get('contract_warning')}"
+            )
     if error:
         lines.append(f"Error: {error}")
     lines.append("")
@@ -761,20 +765,26 @@ def render_skill_review_block(
         for f in findings
     )
     if has_fails:
-        unique_fail_items = []
-        seen = set()
+        fail_items = []
         for f in findings:
             if not isinstance(f, dict):
                 continue
             if str(f.get("verdict") or "").upper() != "FAIL":
                 continue
             item = str(f.get("item") or "?")
-            if item in seen:
-                continue
-            seen.add(item)
-            unique_fail_items.append({"item": item})
+            reason = str(f.get("reason") or "").strip()
+            model = str(f.get("model") or "").strip()
+            display_item = item
+            details = []
+            if model:
+                details.append(f"model={model}")
+            if reason:
+                details.append(reason)
+            if details:
+                display_item = f"{item} — {'; '.join(details)}"
+            fail_items.append({"item": display_item})
         retry_coaching = build_self_verification_template(
-            unique_fail_items,
+            fail_items,
             attempt_idx=attempt_idx,
             tool_name="review_skill",
             context_noun="skill pack",
@@ -973,7 +983,7 @@ contradicts the runtime's constitutional commitments.
 
 ## Output contract
 
-Return ONLY a JSON array with exactly one entry per checklist item.
+Return ONLY a JSON array that covers every checklist item at least once.
 Expected items (in order): {items_json}
 
 Each entry MUST have this shape:
@@ -985,7 +995,12 @@ Each entry MUST have this shape:
 
 Rules:
 
-- Every item must appear exactly once.
+- Every expected item must appear at least once.
+- If an item has no problems, return one PASS entry for that item.
+- If an item has multiple distinct problems, return one FAIL entry per distinct
+  root cause; do not hide additional bugs behind a single summary.
+- Do not return a PASS for an item that also has a FAIL. A concrete FAIL wins.
+- Do not repeat PASS entries for the same item.
 - No prose before or after the JSON array.
 - If the skill's ``type`` is not ``extension``, mark
   ``extension_namespace_discipline`` as PASS with reason
@@ -1065,9 +1080,14 @@ def _run_skill_advisory_pre_review(ctx: Any, *, skill_name: str, file_pack: str)
             "session_id": str(meta.get("session_id") or ""),
             "prompt_chars": int(_prompt_chars or meta.get("prompt_chars") or 0),
             "items": list(items or []),
+            "parsed_items": list(items or []),
             "raw_result": str(raw or ""),
             "error": "",
         }
+        if meta.get("status"):
+            result["status"] = str(meta.get("status") or result["status"])
+        if meta.get("contract_warning"):
+            result["contract_warning"] = str(meta.get("contract_warning") or "")
         if raw and str(raw).startswith("⚠️ ADVISORY_ERROR:"):
             result["status"] = "error"
             result["error"] = str(raw)
@@ -1163,8 +1183,8 @@ def _extract_actor_findings(
     response into ``{"model", "provider", "verdict", "text", ...}`` before
     wrapping them in ``{"results": [...]}``. The ``text`` field holds the
     raw model output, which is expected to be the JSON array described in
-    the skill review output contract (one entry per checklist item,
-    exactly ``len(_SKILL_REVIEW_ITEMS)`` items).
+    the skill review output contract (all ``_SKILL_REVIEW_ITEMS`` covered;
+    multiple FAIL entries for one item may represent distinct root causes).
 
     Returns ``(findings, responsive_models)``:
 

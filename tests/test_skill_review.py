@@ -541,6 +541,7 @@ def test_review_skill_persists_clean_verdict(tmp_path, monkeypatch):
 
 def test_review_skill_auto_grants_after_clean_when_enabled(tmp_path, monkeypatch):
     from ouroboros.skill_loader import load_skill_grants
+    import ouroboros.config as config
 
     skills_root = _build_skill(
         tmp_path,
@@ -548,6 +549,7 @@ def test_review_skill_auto_grants_after_clean_when_enabled(tmp_path, monkeypatch
     )
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
     monkeypatch.setenv("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", "true")
+    monkeypatch.setattr(config, "SETTINGS_PATH", tmp_path / "missing_settings.json")
     ctx = _make_ctx(tmp_path)
     _mark_self_authored(skills_root / "weather", ctx.drive_root)
     pass_array = _pass_array_for_script_skill()
@@ -574,6 +576,7 @@ def test_review_skill_auto_grants_after_clean_when_enabled(tmp_path, monkeypatch
 
 def test_review_skill_auto_grants_after_completed_blockers_review(tmp_path, monkeypatch):
     from ouroboros.skill_loader import load_skill_grants
+    import ouroboros.config as config
 
     skills_root = _build_skill(
         tmp_path,
@@ -582,6 +585,7 @@ def test_review_skill_auto_grants_after_completed_blockers_review(tmp_path, monk
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
     monkeypatch.setenv("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", "true")
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    monkeypatch.setattr(config, "SETTINGS_PATH", tmp_path / "missing_settings.json")
     ctx = _make_ctx(tmp_path)
     canned = json.dumps(
         {
@@ -605,6 +609,7 @@ def test_review_skill_auto_grants_after_completed_blockers_review(tmp_path, monk
 
 def test_review_skill_auto_grants_after_deterministic_preflight_blocker(tmp_path, monkeypatch):
     from ouroboros.skill_loader import load_skill_grants
+    import ouroboros.config as config
 
     skills_root = _build_skill(
         tmp_path,
@@ -612,6 +617,7 @@ def test_review_skill_auto_grants_after_deterministic_preflight_blocker(tmp_path
     )
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
     monkeypatch.setenv("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", "true")
+    monkeypatch.setattr(config, "SETTINGS_PATH", tmp_path / "missing_settings.json")
     monkeypatch.setattr(
         "ouroboros.tools.skill_preflight._handle_skill_preflight",
         lambda *_args, **_kwargs: json.dumps({"ok": False, "error": "preflight failed"}),
@@ -661,6 +667,80 @@ def test_review_skill_returns_fail_on_critical_finding(tmp_path, monkeypatch):
     assert outcome.status == "blockers"
     reasons = {f["reason"] for f in outcome.findings if f["verdict"] == "FAIL"}
     assert any("type does not match payload" in r for r in reasons)
+
+
+def test_review_skill_keeps_distinct_fail_reasons_for_same_item(tmp_path, monkeypatch):
+    skills_root = _build_skill(tmp_path)
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    ctx = _make_ctx(tmp_path)
+    items = [
+        item for item in json.loads(_pass_array_for_script_skill())
+        if item["item"] != "bug_hunting"
+    ]
+    items.extend([
+        {
+            "item": "bug_hunting",
+            "verdict": "FAIL",
+            "severity": "critical",
+            "reason": "plugin.py::run can overflow the retry buffer",
+        },
+        {
+            "item": "bug_hunting",
+            "verdict": "FAIL",
+            "severity": "critical",
+            "reason": "api_client.py::parse_response assumes choices[0]",
+        },
+    ])
+    duplicated_bug_hunting = json.dumps(items)
+    canned = json.dumps(
+        {
+            "results": [
+                _make_actor("openai/gpt-5.5", duplicated_bug_hunting),
+                _make_actor("google/gemini-3.1-pro-preview", duplicated_bug_hunting),
+            ]
+        }
+    )
+    with patch("ouroboros.skill_review._run_skill_advisory_pre_review", return_value={"status": "empty"}):
+        with _patch_review(canned):
+            outcome = review_skill(ctx, "weather")
+    bug_reasons = [
+        f["reason"] for f in outcome.findings
+        if f.get("item") == "bug_hunting" and f.get("verdict") == "FAIL"
+    ]
+    assert outcome.status == "blockers"
+    assert "plugin.py::run can overflow the retry buffer" in bug_reasons
+    assert "api_client.py::parse_response assumes choices[0]" in bug_reasons
+
+
+def test_render_skill_review_block_keeps_same_item_fail_reasons_in_retry_coaching():
+    findings = [
+        {
+            "item": "bug_hunting",
+            "verdict": "FAIL",
+            "severity": "critical",
+            "reason": "plugin.py::run can overflow the retry buffer",
+            "model": "model-a",
+        },
+        {
+            "item": "bug_hunting",
+            "verdict": "FAIL",
+            "severity": "critical",
+            "reason": "api_client.py::parse_response assumes choices[0]",
+            "model": "model-b",
+        },
+    ]
+    rendered = render_skill_review_block(
+        SkillReviewOutcome(
+            skill_name="weather",
+            status="blockers",
+            content_hash="abc",
+            findings=findings,
+            reviewer_models=["model-a", "model-b"],
+        ),
+        attempt_idx=2,
+    )
+    assert "plugin.py::run can overflow the retry buffer" in rendered
+    assert "api_client.py::parse_response assumes choices[0]" in rendered
 
 
 def test_review_skill_returns_advisory_for_soft_only_fail(tmp_path, monkeypatch):

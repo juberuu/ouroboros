@@ -224,6 +224,151 @@ def _get_changed_file_list(
         return f"⚠️ ADVISORY_ERROR: git status error: {exc}"
 
 
+def _parse_status_paths(status_text: str) -> list[str]:
+    """Extract repo-relative paths from porcelain/status-ish output."""
+    out: list[str] = []
+    for raw in str(status_text or "").splitlines():
+        line = raw.rstrip()
+        if not line.strip() or line.lstrip().startswith("("):
+            continue
+        if "\t" in line:
+            path = line.split("\t")[-1].strip()
+        elif len(line) >= 4 and line[2] == " ":
+            # git status --porcelain: "XY path", and our staged-like
+            # format: "X  path". Preserve the leading status columns.
+            path = line[3:].strip()
+        elif len(line) >= 3 and line[0].isalpha() and line[1] == " ":
+            path = line[2:].strip()
+        else:
+            path = line.strip()
+        if " -> " in path:
+            path = path.split(" -> ")[-1].strip()
+        if path:
+            out.append(path)
+    return out
+
+
+def _changed_paths(repo_dir: pathlib.Path, paths: list[str] | None = None) -> list[str]:
+    status_text = _get_changed_file_list(repo_dir, paths=paths)
+    if status_text.startswith("⚠️ ADVISORY_ERROR"):
+        return []
+    return _parse_status_paths(status_text)
+
+
+def _auto_sync_release_metadata_if_needed(
+    ctx: ToolContext,
+    repo_dir: pathlib.Path,
+    drive_root: pathlib.Path,
+    paths: list[str] | None,
+) -> list[str]:
+    """Sync VERSION-derived carriers before computing the advisory snapshot.
+
+    Advisory pre-review is often called on a worktree+paths set rather than a
+    staged diff. If VERSION changed, deterministic carrier sync must happen
+    before the expensive Claude SDK call and before snapshot hashing, otherwise
+    repo_commit can later block on a mismatch that a zero-token check could
+    have fixed.
+    """
+    selected = set(str(p) for p in (paths or []) if str(p).strip())
+    touched = set(_changed_paths(repo_dir))
+    if "VERSION" not in selected and "VERSION" not in touched:
+        return []
+    try:
+        from ouroboros.tools.release_sync import sync_release_metadata
+        changed = list(sync_release_metadata(str(repo_dir)) or [])
+        if changed:
+            subprocess.run(
+                ["git", "add", "--", *changed],
+                cwd=str(repo_dir),
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            append_jsonl(drive_root / "logs" / "events.jsonl", {
+                "ts": utc_now_iso(),
+                "type": "release_metadata_auto_synced",
+                "changed_files": changed,
+                "task_id": str(getattr(ctx, "task_id", "") or ""),
+            })
+        return changed
+    except Exception as exc:
+        log.debug("release metadata auto-sync failed (non-fatal): %s", exc, exc_info=True)
+        return []
+
+
+def _release_metadata_preflight(
+    repo_dir: pathlib.Path,
+    commit_message: str,
+    paths: list[str] | None,
+) -> Optional[str]:
+    """Cheap P9/release checks over the current worktree before advisory SDK."""
+    touched = set(str(p) for p in (paths or []) if str(p).strip()) | set(_changed_paths(repo_dir, paths=paths))
+    version_in_scope = "VERSION" in touched
+    if touched and not version_in_scope:
+        return (
+            "⚠️ PREFLIGHT_BLOCKED: Changed files are present but VERSION is not in scope.\n"
+            "  BIBLE.md P9 requires every commit to bump VERSION and sync release artifacts.\n"
+            "  Stage or include VERSION plus pyproject.toml, README.md, and docs/ARCHITECTURE.md before advisory review.\n"
+            f"  Currently changed/in-scope: {', '.join(sorted(touched)) or '(none)'}"
+        )
+    if not version_in_scope:
+        return None
+    try:
+        from ouroboros.tools.release_sync import (
+            _normalize_pep440,
+            _shields_escape,
+            check_history_limit,
+            extract_architecture_header_version,
+            extract_readme_badge_version,
+            is_release_version,
+        )
+        version_path = repo_dir / "VERSION"
+        readme_path = repo_dir / "README.md"
+        pyproject_path = repo_dir / "pyproject.toml"
+        arch_path = repo_dir / "docs" / "ARCHITECTURE.md"
+        version_str = version_path.read_text(encoding="utf-8").strip()
+        if not is_release_version(version_str):
+            return None
+        desync: list[str] = []
+        if pyproject_path.exists():
+            pyproject_text = pyproject_path.read_text(encoding="utf-8")
+            py_match = re.search(r'^version\s*=\s*["\']([^"\']+)["\']', pyproject_text, re.MULTILINE)
+            expected_pyproject = _normalize_pep440(version_str)
+            if not py_match or py_match.group(1).strip() != expected_pyproject:
+                desync.append(f'pyproject.toml (expected version = "{expected_pyproject}")')
+        if readme_path.exists():
+            readme_text = readme_path.read_text(encoding="utf-8")
+            badge_url_token = f"version-{_shields_escape(version_str)}-green"
+            if extract_readme_badge_version(readme_text) != version_str or badge_url_token not in readme_text:
+                desync.append(f"README.md badge (expected {version_str} / {badge_url_token})")
+            if not re.search(r'\|\s*' + re.escape(version_str) + r'\s*\|', readme_text):
+                return (
+                    f"⚠️ PREFLIGHT_BLOCKED: VERSION is {version_str} but README.md "
+                    "changelog has no table row for this version.\n"
+                    "  Add a changelog entry in the Version History table in README.md before advisory review."
+                )
+            limit_warnings = check_history_limit(readme_text)
+            if limit_warnings:
+                return (
+                    "⚠️ PREFLIGHT_BLOCKED: README.md Version History exceeds BIBLE.md P9 limits.\n"
+                    + "".join(f"  - {w}\n" for w in limit_warnings)
+                    + "  Trim the oldest entry in the over-limit category before advisory review."
+                )
+        if arch_path.exists() and extract_architecture_header_version(arch_path.read_text(encoding="utf-8")) != version_str:
+            desync.append(f"docs/ARCHITECTURE.md header (expected # Ouroboros v{version_str})")
+        if desync:
+            return (
+                f"⚠️ PREFLIGHT_BLOCKED: VERSION file says {version_str} but "
+                "the following worktree files have a different version value:\n"
+                + "".join(f"  - {d}\n" for d in desync)
+                + "Run release metadata sync before advisory review."
+            )
+    except Exception:
+        return None
+    return None
+
+
 def _build_blocking_history_section(drive_root: pathlib.Path, repo_key: str = "") -> str:
     """Build section summarizing unresolved obligations from blocking rounds."""
     try:
@@ -577,10 +722,16 @@ def _llm_extract_advisory_items(raw_text: str, ctx: object) -> list:
         return []
 
 
-def _check_expected_items(items: list, expected_items: Optional[List[str]]) -> str:
-    """Return an error string when a parsed checklist violates an exact item contract."""
+def _check_expected_items(items: list, expected_items: Optional[List[str]]) -> tuple[str, str]:
+    """Return (error, warning) for checklist coverage contract violations.
+
+    Missing expected items and unknown extras are hard errors: the reviewer did
+    not cover the agreed checklist surface. Duplicates and order drift are
+    warnings only because a reviewer may legitimately return multiple FAILs for
+    one item when it found multiple distinct root causes.
+    """
     if not expected_items:
-        return ""
+        return "", ""
     expected = [str(item) for item in expected_items]
     actual = [
         str(item.get("item") or "")
@@ -588,22 +739,28 @@ def _check_expected_items(items: list, expected_items: Optional[List[str]]) -> s
         if isinstance(item, dict)
     ]
     if actual == expected:
-        return ""
+        return "", ""
     missing = [item for item in expected if item not in actual]
     extras = [item for item in actual if item not in expected]
     duplicate_count = len(actual) - len(set(actual))
-    parts = []
+    error_parts = []
+    warning_parts = []
     if missing:
-        parts.append(f"missing={missing}")
+        error_parts.append(f"missing={missing}")
     if extras:
-        parts.append(f"unexpected={extras}")
+        error_parts.append(f"unexpected={extras}")
     if duplicate_count:
-        parts.append(f"duplicates={duplicate_count}")
+        warning_parts.append(f"duplicates={duplicate_count}")
     if len(actual) != len(expected):
-        parts.append(f"count={len(actual)} expected={len(expected)}")
-    if not parts:
-        parts.append("order differs from expected contract")
-    return "Skill advisory checklist contract mismatch: " + "; ".join(parts)
+        target = error_parts if (missing or extras) else warning_parts
+        target.append(f"count={len(actual)} expected={len(expected)}")
+    if not error_parts and not warning_parts:
+        warning_parts.append("order differs from expected contract")
+    prefix = "Skill advisory checklist contract mismatch: "
+    return (
+        (prefix + "; ".join(error_parts)) if error_parts else "",
+        (prefix + "; ".join(warning_parts)) if warning_parts else "",
+    )
 
 
 def _syntax_preflight_staged_py_files(
@@ -876,7 +1033,7 @@ def _run_claude_advisory(
             if items:
                 log.info("Advisory: structural parse failed, LLM fallback extracted %d items", len(items))
 
-        contract_error = _check_expected_items(items, expected_items)
+        contract_error, contract_warning = _check_expected_items(items, expected_items)
         if contract_error:
             err_msg = _format_advisory_error(
                 prefix="SDK returned malformed checklist",
@@ -901,6 +1058,23 @@ def _run_claude_advisory(
             except Exception:
                 pass
             return [], err_msg, model, prompt_chars
+
+        if contract_warning:
+            _emit_advisory_event(ctx, {
+                "type": "advisory_contract_warning",
+                "model": model,
+                "session_id": meta.get("session_id", ""),
+                "prompt_chars": prompt_chars,
+                "cost_usd": float(result.cost_usd or 0),
+                "warning": contract_warning,
+                "review_surface": review_surface,
+            })
+            try:
+                meta["status"] = "completed_with_contract_warning"
+                meta["contract_warning"] = contract_warning
+                setattr(ctx, "_last_claude_advisory_meta", dict(meta))
+            except Exception:
+                pass
 
         return items, raw_text, model, prompt_chars
 
@@ -1430,6 +1604,32 @@ def _advisory_pre_sdk_gate(
             ),
         }, ensure_ascii=False, indent=2)
 
+    release_preflight_err = _release_metadata_preflight(repo_dir, commit_message, paths)
+    if release_preflight_err:
+        ctx.emit_progress_fn(release_preflight_err)
+        _persist_preflight_record(
+            ctx=ctx,
+            snapshot_hash=snapshot_hash,
+            commit_message=commit_message,
+            record={
+                "status": "preflight_blocked",
+                "raw_result": release_preflight_err,
+                "paths": paths,
+                "duration_sec": 0.0,
+                "readiness_warnings": readiness_warnings,
+            },
+        )
+        return readiness_warnings, changed_files, json.dumps({
+            "status": "preflight_blocked",
+            "snapshot_hash": snapshot_hash,
+            "error": release_preflight_err,
+            "readiness_warnings": readiness_warnings,
+            "message": (
+                "Advisory SDK was skipped: deterministic release metadata preflight "
+                "failed before provider budget was spent."
+            ),
+        }, ensure_ascii=False, indent=2)
+
     # Cheap version-sync check — non-fatal warning only.
     version_sync_warning = _check_worktree_version_sync(repo_dir)
     if version_sync_warning:
@@ -1498,6 +1698,10 @@ def _handle_advisory_pre_review(
     """Run an advisory pre-commit review via Claude Agent SDK (read-only)."""
     repo_dir = pathlib.Path(ctx.repo_dir)
     drive_root = pathlib.Path(ctx.drive_root)
+
+    auto_synced_paths = _auto_sync_release_metadata_if_needed(ctx, repo_dir, drive_root, paths)
+    if paths is not None and auto_synced_paths:
+        paths = sorted({str(p) for p in list(paths) + auto_synced_paths if str(p).strip()})
 
     snapshot_hash = compute_snapshot_hash(repo_dir, commit_message, paths=paths)
 

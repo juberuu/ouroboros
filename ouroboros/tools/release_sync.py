@@ -1,7 +1,9 @@
 """release_sync.py — deterministic release-metadata carrier sync helpers.
 
-Standalone library with NO wire-up into advisory or commit pipelines.
-Integration (Commit B) is intentionally deferred.
+Shared release-metadata library used by both agent-facing workflows and
+review gates. ``advisory_pre_review`` uses ``sync_release_metadata`` before
+the Claude SDK call when VERSION is in scope, then runs deterministic P9
+checks so release-carrier mistakes are caught before provider budget is spent.
 
 Scope
 -----

@@ -1172,10 +1172,11 @@ class TestScopePromptMatrixContract:
         return prompt
 
     def test_full_matrix_contract_is_present(self, tmp_path):
-        """Scope prompt must require one entry per checklist item."""
+        """Scope prompt must require coverage for every checklist item."""
         prompt = self._get_scope_prompt(tmp_path)
-        assert "EXACTLY ONE entry per checklist item" in prompt
+        assert "cover every checklist item" in prompt
         assert "Skipping an item is not allowed" in prompt
+        assert "multiple distinct concrete problems" in prompt
 
     def test_pass_justification_is_mandatory(self, tmp_path):
         """PASS entries must require 1-2 sentences of justification.

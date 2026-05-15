@@ -376,9 +376,14 @@ native launcher-seeded skills.
 
 ### Output contract
 
-Reviewers return a JSON array with one entry per item below (16 entries
-total). Each entry carries `item`, `verdict` (`PASS`/`FAIL`), `severity`
-(`critical`/`advisory`), and `reason`.
+Reviewers return a JSON array covering every item below (16 items total).
+Each entry carries `item`, `verdict` (`PASS`/`FAIL`), `severity`
+(`critical`/`advisory`), and `reason`. If one item has multiple distinct
+concrete problems, reviewers may return multiple `FAIL` entries for that
+same item; each distinct root cause must stay visible. If an item has no
+problems, return one `PASS` entry. Do not return duplicate `PASS` entries,
+and do not return `PASS` for an item that also has a `FAIL` — the concrete
+`FAIL` is authoritative.
 
 ### Checklist items
 
@@ -620,10 +625,13 @@ Unlike triad reviewers who see only the diff, the scope reviewer sees the ENTIRE
 Its unique advantage is finding cross-module bugs, broken implicit contracts, and hidden
 regressions that diff-only reviewers cannot see.
 
-**Output contract (v4.34.0):** the scope reviewer returns a JSON array with one entry per
-item below (8 entries total). PASS entries are mandatory and must carry 1–2 sentences of
-justification naming a concrete artifact or code path that was actually checked — a bare
-"PASS" or single-word reason is treated as a reviewer failure. See the
+**Output contract (v4.34.0):** the scope reviewer returns a JSON array that covers every
+item below (8 items total). PASS entries are mandatory for items with no problems and must
+carry 1–2 sentences of justification naming a concrete artifact or code path that was
+actually checked — a bare "PASS" or single-word reason is treated as a reviewer failure.
+Multiple FAIL entries for the same item are valid when they describe distinct concrete
+root causes; do not merge unrelated scope bugs into one summary. Do not emit duplicate
+PASS entries, and do not emit PASS for an item that also has a FAIL. See the
 `Anti pattern-lock guard` section of the scope prompt in `ouroboros/tools/scope_review.py`
 for the second-pass requirement when a single FAIL is surfaced. The commit gate still
 forwards only `verdict == "FAIL"` entries; the PASS rows exist so that coverage and the

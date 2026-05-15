@@ -1,4 +1,4 @@
-from ouroboros.loop_tool_execution import _is_tool_execution_failure
+from ouroboros.loop_tool_execution import _extract_result_metadata, _is_tool_execution_failure
 
 
 def test_review_blocked_is_not_treated_as_tool_failure():
@@ -29,6 +29,21 @@ def test_shell_and_claude_failures_are_treated_as_tool_failures():
         True,
         "⚠️ CLAUDE_CODE_UNAVAILABLE: ANTHROPIC_API_KEY not set.",
     )
+
+
+def test_shell_regex_autocorrect_success_is_not_tool_failure():
+    result = "⚠️ SHELL_REGEX_AUTO_CORRECTED: converted grep backslash-escaped alternation\nexit_code=0\nSTDOUT:\nmatch"
+    assert not _is_tool_execution_failure(True, result)
+    assert _extract_result_metadata("run_shell", result, False)["status"] == "ok_autocorrected"
+
+
+def test_shell_regex_autocorrect_nonzero_still_fails():
+    result = (
+        "⚠️ SHELL_REGEX_AUTO_CORRECTED: converted grep backslash-escaped alternation\n"
+        "⚠️ SHELL_EXIT_ERROR: command exited with exit_code=2.\n\nSTDERR:\nboom"
+    )
+    assert _is_tool_execution_failure(True, result)
+    assert _extract_result_metadata("run_shell", result, True)["status"] == "shell_error"
 
 
 def test_live_tool_log_payload_includes_structured_result_metadata():

@@ -150,6 +150,8 @@ def _is_tool_execution_failure(tool_ok: bool, result: Any) -> bool:
     if not tool_ok:
         return True
     text = str(result or "")
+    if text.startswith("⚠️ SHELL_REGEX_AUTO_CORRECTED") and "⚠️ SHELL_EXIT_ERROR" not in text:
+        return False
     return text.startswith(_FAILURE_PREFIXES)
 
 
@@ -159,6 +161,8 @@ def _extract_result_metadata(fn_name: str, result: Any, is_error: bool) -> Dict[
     status = "error" if is_error else "ok"
     if text.startswith("⚠️ TOOL_TIMEOUT"):
         status = "timeout"
+    elif text.startswith("⚠️ SHELL_REGEX_AUTO_CORRECTED") and "⚠️ SHELL_EXIT_ERROR" not in text:
+        status = "ok_autocorrected"
     elif text.startswith("⚠️ SHELL_EXIT_ERROR"):
         status = "non_zero_exit"
     elif text.startswith("⚠️ SHELL_"):
@@ -183,7 +187,10 @@ def _extract_result_metadata(fn_name: str, result: Any, is_error: bool) -> Dict[
     if signal_match:
         meta["signal"] = signal_match.group(1)
     if fn_name == "run_shell" and not is_error and meta.get("exit_code") == 0:
-        meta["status"] = "ok"
+        if status == "ok_autocorrected":
+            meta["status"] = "ok_autocorrected"
+        else:
+            meta["status"] = "ok"
     return meta
 
 

@@ -958,6 +958,14 @@ class TestAdvisorySkipTests:
         fake_ctx.task_id = "t-skiptest"
         return fake_ctx
 
+    def _release_changed_files(self) -> str:
+        return "\n".join([
+            "M  VERSION",
+            "M  pyproject.toml",
+            "M  README.md",
+            "M  docs/ARCHITECTURE.md",
+        ])
+
     def test_tests_preflight_blocked_when_tests_fail(self, tmp_path, monkeypatch):
         """When tests fail and skip_tests=False, advisory returns
         status='tests_preflight_blocked' without calling the SDK."""
@@ -968,7 +976,8 @@ class TestAdvisorySkipTests:
         monkeypatch.setattr(adv, "check_worktree_readiness", lambda *a, **kw: [])
         monkeypatch.setattr(adv, "_check_worktree_version_sync_shared", lambda *a, **kw: "")
         monkeypatch.setattr(adv, "compute_snapshot_hash", lambda *a, **kw: "hash-skip-test")
-        monkeypatch.setattr(adv, "_get_changed_file_list", lambda *a, **kw: "M  foo.py")
+        monkeypatch.setattr(adv, "_get_changed_file_list", lambda *a, **kw: self._release_changed_files())
+        monkeypatch.setattr(adv, "_release_metadata_preflight", lambda *a, **kw: None)
 
         # Simulate failing tests
         monkeypatch.setattr(adv, "_run_advisory_tests", lambda ctx: "FAILED: 3 failed, 10 passed")
@@ -997,7 +1006,8 @@ class TestAdvisorySkipTests:
         monkeypatch.setattr(adv, "check_worktree_readiness", lambda *a, **kw: [])
         monkeypatch.setattr(adv, "_check_worktree_version_sync_shared", lambda *a, **kw: "")
         monkeypatch.setattr(adv, "compute_snapshot_hash", lambda *a, **kw: "hash-skip-test-2")
-        monkeypatch.setattr(adv, "_get_changed_file_list", lambda *a, **kw: "M  foo.py")
+        monkeypatch.setattr(adv, "_get_changed_file_list", lambda *a, **kw: self._release_changed_files())
+        monkeypatch.setattr(adv, "_release_metadata_preflight", lambda *a, **kw: None)
 
         # Even though tests "fail", skip_tests=True must bypass
         test_called = {"n": 0}
@@ -1028,7 +1038,8 @@ class TestAdvisorySkipTests:
         monkeypatch.setattr(adv, "check_worktree_readiness", lambda *a, **kw: [])
         monkeypatch.setattr(adv, "_check_worktree_version_sync_shared", lambda *a, **kw: "")
         monkeypatch.setattr(adv, "compute_snapshot_hash", lambda *a, **kw: "hash-skip-test-3")
-        monkeypatch.setattr(adv, "_get_changed_file_list", lambda *a, **kw: "M  foo.py")
+        monkeypatch.setattr(adv, "_get_changed_file_list", lambda *a, **kw: self._release_changed_files())
+        monkeypatch.setattr(adv, "_release_metadata_preflight", lambda *a, **kw: None)
 
         monkeypatch.setattr(adv, "_run_advisory_tests", lambda ctx: None)  # tests pass
 
@@ -1084,7 +1095,8 @@ class TestAdvisorySkipTests:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-fake")
         monkeypatch.setattr(adv, "check_worktree_readiness", lambda *a, **kw: [])
         monkeypatch.setattr(adv, "_check_worktree_version_sync_shared", lambda *a, **kw: "")
-        monkeypatch.setattr(adv, "_get_changed_file_list", lambda *a, **kw: "M  foo.py")
+        monkeypatch.setattr(adv, "_get_changed_file_list", lambda *a, **kw: self._release_changed_files())
+        monkeypatch.setattr(adv, "_release_metadata_preflight", lambda *a, **kw: None)
 
         call_count = {"n": 0}
         def _hash(repo_dir, commit_message, paths=None):

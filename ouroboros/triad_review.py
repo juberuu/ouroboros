@@ -90,7 +90,7 @@ def extract_json_array(raw: str, *, normalize: bool = False) -> Optional[List[An
 
 def _normalize_items(items: List[Any]) -> List[Any]:
     try:
-        from ouroboros.review_schema import normalize_reviewer_items
+        from ouroboros.tools.review_helpers import normalize_reviewer_items
         return normalize_reviewer_items(items)
     except Exception:
         return items
