@@ -158,7 +158,7 @@ engineering standards, you MUST:
 Reviewed commits now have an explicit **two-step gate**:
 
 1. **Advisory freshness gate**: finish all edits, then run `advisory_pre_review`.
-   Without a bypass, `repo_commit` / `repo_write_commit` require a fresh matching
+   Without a bypass, `repo_commit` requires a fresh matching
    advisory run, no open obligations from earlier blocked rounds, and no open
    commit-readiness debt. Any edit after advisory makes it stale and requires a
    re-run. When debt remains, `review_status` reports `repo_commit_ready=false`

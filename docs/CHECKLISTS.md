@@ -81,7 +81,7 @@ These tools restore to already-reviewed states by definition.
 ## Pre-Commit Self-Check (Ouroboros, before calling advisory_pre_review)
 
 Run this walkthrough honestly before every `advisory_pre_review` call for a
-`repo_commit` / `repo_write_commit`. The correct sequence is:
+`repo_commit`. The correct sequence is:
 
 ```
 finish ALL edits → Pre-Commit Self-Check → advisory_pre_review → repo_commit
@@ -114,7 +114,7 @@ Rule: read before write. Never reconstruct `VERSION`, `pyproject.toml`
 `version`, or the README badge from memory — one stale reconstruction creates
 a `self_consistency` FAIL that an entire advisory cycle is then spent on.
 
-**After a blocked reviewed commit (`repo_commit` / `repo_write_commit`) — mandatory regrouping before the next attempt:**
+**After a blocked reviewed commit (`repo_commit`) — mandatory regrouping before the next attempt:**
 When a reviewed commit returns critical findings, the reflex is to patch the single
 flagged finding and retry. That pattern reliably produces 5-10 blocked rounds.
 The correct procedure before **every** retry:
@@ -131,8 +131,7 @@ but without it appearing here as a procedural step it stays theoretical rather t
 
 ## Repo Commit Checklist
 
-Used by `repo_commit` and `repo_write_commit` for all changes to the
-Ouroboros repository.
+Used by `repo_commit` for all changes to the Ouroboros repository.
 
 | # | item | what to check | severity when FAIL |
 |---|------|---------------|--------------------|

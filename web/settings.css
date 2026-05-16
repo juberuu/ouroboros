@@ -45,15 +45,24 @@
     max-width: 900px;
 }
 
-.settings-shell .form-section {
-    margin-bottom: 0;
+.settings-shell .form-section,
+.settings-card,
+.settings-provider-card {
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 18px;
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.settings-shell .form-section,
+.settings-card {
     display: flex;
     flex-direction: column;
     gap: 14px;
     padding: 18px;
-    border-radius: 18px;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    background: rgba(255, 255, 255, 0.03);
+}
+
+.settings-shell .form-section {
+    margin-bottom: 0;
 }
 
 .settings-shell .form-section.compact {
@@ -69,16 +78,6 @@
     margin-bottom: 0;
 }
 
-.settings-card {
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
-    padding: 18px;
-    border-radius: 18px;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    background: rgba(255, 255, 255, 0.03);
-}
-
 .settings-card h3 {
     margin: 0;
 }
@@ -91,9 +90,6 @@
 }
 
 .settings-provider-card {
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 18px;
-    background: rgba(255, 255, 255, 0.03);
     overflow: hidden;
 }
 

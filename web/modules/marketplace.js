@@ -23,15 +23,12 @@ import {
     emitSkillLifecycle,
     escapeHtmlAttr as escapeHtml,
     fetchJson,
+    grantReady,
+    isRateLimitError,
     renderMarkdownSafe as renderMarkdownSafeShared,
     renderSkillRepairPrompt,
     safeExternalHrefAttr,
 } from './utils.js';
-
-function isRateLimitError(message) {
-    const text = String(message || '').toLowerCase();
-    return text.includes('rate limit') || text.includes('too many requests') || text.includes('http 429');
-}
 
 function installErrorCopy(message) {
     return isRateLimitError(message)
@@ -105,10 +102,6 @@ function statusBadgeForReview(status) {
         : status === 'blockers' ? 'danger'
         : 'muted';
     return `<span class="skills-badge skills-badge-${tone}">${escapeHtml(status || 'pending')}</span>`;
-}
-
-function grantReady(installed) {
-    return !installed?.grants || installed.grants.all_granted !== false;
 }
 
 function reviewReady(installed) {

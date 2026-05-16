@@ -58,6 +58,8 @@ from ouroboros.tools.review_helpers import (
     _ANTI_THRASHING_RULE_ITEM_NAME,
     _HISTORY_VERIFICATION_ONLY_RULE,
     _run_review_preflight_tests,
+    emit_review_event,
+    emit_review_usage,
 )
 from ouroboros.utils import (
     append_jsonl,
@@ -81,86 +83,10 @@ def _emit_advisory_usage(
     session_id: str = "",
     prompt_chars: int = 0,
 ) -> None:
-    """Emit an llm_usage event so advisory and fallback LLM costs reach the budget.
-
-    Uses the same routing as triad/scope review: event_queue first, pending_events
-    fallback, so costs are tracked regardless of execution context.
-
-    ``provider`` should be "anthropic" for SDK calls (always billed there) and
-    the real routing provider (e.g., "openrouter") for fallback LLM calls that
-    go through the shared LLMClient — otherwise /api/cost-breakdown attribution
-    will be wrong.
-    """
-    try:
-        from ouroboros.pricing import infer_api_key_type, infer_model_category
-        from ouroboros.utils import utc_now_iso as _utc
-        if not isinstance(usage, dict):
-            usage = {}
-        usage = dict(usage)
-        usage["prompt_tokens"] = int(
-            usage.get("prompt_tokens", usage.get("input_tokens", 0)) or 0
-        )
-        usage["completion_tokens"] = int(
-            usage.get("completion_tokens", usage.get("output_tokens", 0)) or 0
-        )
-        usage["cached_tokens"] = int(
-            usage.get("cached_tokens", usage.get("cache_read_input_tokens", 0)) or 0
-        )
-        usage["cache_write_tokens"] = int(
-            usage.get("cache_write_tokens", usage.get("cache_creation_input_tokens", 0)) or 0
-        )
-        event = {
-            "type": "llm_usage",
-            "ts": _utc(),
-            "task_id": getattr(ctx, "task_id", "") or "",
-            "model": model,
-            "api_key_type": infer_api_key_type(model, provider),
-            "model_category": infer_model_category(model),
-            "usage": {
-                "prompt_tokens": usage.get("prompt_tokens", 0),
-                "completion_tokens": usage.get("completion_tokens", 0),
-                "cached_tokens": usage.get("cached_tokens", 0),
-                "cache_write_tokens": usage.get("cache_write_tokens", 0),
-                "cost": cost_usd or usage.get("cost", 0),
-            },
-            "provider": provider,
-            "source": source,
-            "category": "review",
-        }
-        if session_id:
-            event["session_id"] = session_id
-        if prompt_chars:
-            event["prompt_chars"] = int(prompt_chars)
-        eq = getattr(ctx, "event_queue", None)
-        if eq is not None:
-            try:
-                eq.put_nowait(event)
-                return
-            except Exception:
-                pass
-        pending = getattr(ctx, "pending_events", None)
-        if pending is not None:
-            pending.append(event)
-    except Exception:
-        log.debug("_emit_advisory_usage failed (non-critical)", exc_info=True)
-
-
-def _emit_advisory_event(ctx: "ToolContext", event: dict) -> None:
-    """Emit a non-usage advisory diagnostic event without raising."""
-    try:
-        payload = {"ts": utc_now_iso(), **dict(event)}
-        eq = getattr(ctx, "event_queue", None)
-        if eq is not None:
-            try:
-                eq.put_nowait(payload)
-                return
-            except Exception:
-                pass
-        pending = getattr(ctx, "pending_events", None)
-        if pending is not None:
-            pending.append(payload)
-    except Exception:
-        log.debug("_emit_advisory_event failed (non-critical)", exc_info=True)
+    emit_review_usage(
+        ctx, model=model, provider=provider, usage=usage, source=source,
+        cost_usd=cost_usd, session_id=session_id, prompt_chars=prompt_chars,
+    )
 
 
 _ADVISORY_PROMPT_MAX_CHARS = 1_600_000  # ~400K tokens; non-blocking skip when exceeded
@@ -378,7 +304,10 @@ def _build_blocking_history_section(drive_root: pathlib.Path, repo_key: str = ""
 
     return build_blocking_findings_json_section(
         state.get_open_obligations(repo_key=repo_key),
-        state.get_blocking_history(repo_key=repo_key),
+        [
+            attempt for attempt in state.filter_attempts(repo_key=repo_key)
+            if attempt.status == "blocked" or attempt.blocked
+        ],
     )
 
 
@@ -987,7 +916,7 @@ def _run_claude_advisory(
         if result.cost_usd > 0 and not any((
             prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens,
         )):
-            _emit_advisory_event(ctx, {
+            emit_review_event(ctx, {
                 "type": "advisory_sdk_suspect_result",
                 "model": model,
                 "session_id": meta.get("session_id", ""),
@@ -1005,7 +934,7 @@ def _run_claude_advisory(
                 session_id=meta.get("session_id", ""),
                 diag=diag,
             )
-            _emit_advisory_event(ctx, {
+            emit_review_event(ctx, {
                 "type": "advisory_sdk_suspect_result",
                 "model": model,
                 "session_id": meta.get("session_id", ""),
@@ -1042,7 +971,7 @@ def _run_claude_advisory(
                 session_id=meta.get("session_id", ""),
                 diag=diag,
             )
-            _emit_advisory_event(ctx, {
+            emit_review_event(ctx, {
                 "type": "advisory_sdk_suspect_result",
                 "model": model,
                 "session_id": meta.get("session_id", ""),
@@ -1060,7 +989,7 @@ def _run_claude_advisory(
             return [], err_msg, model, prompt_chars
 
         if contract_warning:
-            _emit_advisory_event(ctx, {
+            emit_review_event(ctx, {
                 "type": "advisory_contract_warning",
                 "model": model,
                 "session_id": meta.get("session_id", ""),
@@ -1414,7 +1343,7 @@ def _next_step_guidance(latest: Optional["AdvisoryRunRecord"], state: "AdvisoryR
                 "Complete ALL remaining edits, then run: "
                 "advisory_pre_review(commit_message='...')"
             )
-        if not state.runs:
+        if not state.advisory_runs:
             return "No advisory run yet. Run: advisory_pre_review(commit_message='...')"
         return "Advisory is stale (snapshot changed). Run: advisory_pre_review(commit_message='...')"
 
@@ -2162,7 +2091,7 @@ def _handle_review_status(
 
     # Build commit attempt section
     selected_attempt = filtered_attempts[-1] if filtered_attempts else (
-        None if (repo_filter or tool_filter or task_filter or attempt is not None) else state.last_commit_attempt
+        None if (repo_filter or tool_filter or task_filter or attempt is not None) else state.latest_attempt()
     )
     commit_attempt_data = _selected_attempt_payload(selected_attempt)
 
@@ -2266,7 +2195,7 @@ def _handle_review_status(
         },
         "advisory_runs": runs_data,
         "attempts": attempts_data,
-        "last_commit_attempt": commit_attempt_data,
+        "selected_commit_attempt": commit_attempt_data,
         "open_obligations": obligations_data,
         "open_obligations_count": len(obligations_data),
         "commit_readiness_debts": debts_data,
@@ -2389,7 +2318,7 @@ def get_tools() -> list:
                         },
                         "tool_name": {
                             "type": "string",
-                            "description": "Optional tool-name filter (for example repo_commit or repo_write_commit).",
+                            "description": "Optional tool-name filter (for example repo_commit).",
                         },
                         "task_id": {
                             "type": "string",

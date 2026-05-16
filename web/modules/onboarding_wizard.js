@@ -524,6 +524,19 @@
         return rows;
     }
 
+    function providerKeyField({ id, label, placeholder, value, note }) {
+        return `
+            <div class="field">
+                <div class="field-label-row">
+                    <label for="${id}">${label}</label>
+                    <button class="field-clear" data-clear="${id}" type="button">Clear</button>
+                </div>
+                <input id="${id}" type="password" placeholder="${placeholder}" value="${escapeHtml(value)}">
+                <div class="field-note">${note}</div>
+            </div>
+        `;
+    }
+
     function renderProvidersStep() {
         const selectedProfile = activeProviderProfile();
         const localPreset = trim(state.localPreset);
@@ -552,38 +565,10 @@
                 )}</p>
             </div>
             <div class="field-grid">
-                <div class="field">
-                    <div class="field-label-row">
-                        <label for="openrouter-key">OpenRouter API Key</label>
-                        <button class="field-clear" data-clear="openrouter-key" type="button">Clear</button>
-                    </div>
-                    <input id="openrouter-key" type="password" placeholder="sk-or-v1-..." value="${escapeHtml(state.openrouterKey)}">
-                    <div class="field-note">Optional. Best when you want one router for OpenAI, Anthropic, Google, and more.</div>
-                </div>
-                <div class="field">
-                    <div class="field-label-row">
-                        <label for="openai-key">OpenAI API Key</label>
-                        <button class="field-clear" data-clear="openai-key" type="button">Clear</button>
-                    </div>
-                    <input id="openai-key" type="password" placeholder="sk-..." value="${escapeHtml(state.openaiKey)}">
-                    <div class="field-note">Optional. If this is the only remote key, the next step prefills direct <code>openai::...</code> models.</div>
-                </div>
-                <div class="field">
-                    <div class="field-label-row">
-                        <label for="cloudru-key">Cloud.ru Foundation Models API Key</label>
-                        <button class="field-clear" data-clear="cloudru-key" type="button">Clear</button>
-                    </div>
-                    <input id="cloudru-key" type="password" placeholder="Cloud.ru API key" value="${escapeHtml(state.cloudruKey)}">
-                    <div class="field-note">Optional. If this is the only remote key, the next step prefills direct <code>cloudru::...</code> models.</div>
-                </div>
-                <div class="field">
-                    <div class="field-label-row">
-                        <label for="anthropic-key">Anthropic API Key</label>
-                        <button class="field-clear" data-clear="anthropic-key" type="button">Clear</button>
-                    </div>
-                    <input id="anthropic-key" type="password" placeholder="sk-ant-..." value="${escapeHtml(state.anthropicKey)}">
-                    <div class="field-note">Optional. Saved for direct <code>anthropic::...</code> models and Claude tooling.</div>
-                </div>
+                ${providerKeyField({ id: 'openrouter-key', label: 'OpenRouter API Key', placeholder: 'sk-or-v1-...', value: state.openrouterKey, note: 'Optional. Best when you want one router for OpenAI, Anthropic, Google, and more.' })}
+                ${providerKeyField({ id: 'openai-key', label: 'OpenAI API Key', placeholder: 'sk-...', value: state.openaiKey, note: 'Optional. If this is the only remote key, the next step prefills direct <code>openai::...</code> models.' })}
+                ${providerKeyField({ id: 'cloudru-key', label: 'Cloud.ru Foundation Models API Key', placeholder: 'Cloud.ru API key', value: state.cloudruKey, note: 'Optional. If this is the only remote key, the next step prefills direct <code>cloudru::...</code> models.' })}
+                ${providerKeyField({ id: 'anthropic-key', label: 'Anthropic API Key', placeholder: 'sk-ant-...', value: state.anthropicKey, note: 'Optional. Saved for direct <code>anthropic::...</code> models and Claude tooling.' })}
             </div>
             ${renderClaudeCliControls()}
             <details class="wizard-collapse" ${localSourceOpen ? 'open' : ''}>
@@ -910,9 +895,10 @@
         const localGpuLayers = document.getElementById('local-gpu-layers');
         const localChatFormat = document.getElementById('local-chat-format');
 
-        if (openrouterInput) openrouterInput.addEventListener('input', () => { state.openrouterKey = openrouterInput.value; state.error = ''; syncCurrentStepActionState(); });
-        if (openaiInput) openaiInput.addEventListener('input', () => { state.openaiKey = openaiInput.value; state.error = ''; syncCurrentStepActionState(); });
-        if (cloudruInput) cloudruInput.addEventListener('input', () => { state.cloudruKey = cloudruInput.value; state.error = ''; syncCurrentStepActionState(); });
+        [[openrouterInput, 'openrouterKey'], [openaiInput, 'openaiKey'], [cloudruInput, 'cloudruKey']].forEach(([input, key]) => {
+            if (!input) return;
+            input.addEventListener('input', () => { state[key] = input.value; state.error = ''; syncCurrentStepActionState(); });
+        });
         if (anthropicInput) anthropicInput.addEventListener('input', () => {
             const wasConfigured = hasAnthropicKeyConfigured();
             state.anthropicKey = anthropicInput.value;

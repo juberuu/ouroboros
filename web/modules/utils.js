@@ -84,6 +84,15 @@ export function emitSkillLifecycle(action, name, extra = {}) {
     }));
 }
 
+export function grantReady(entity) {
+    return !entity?.grants || entity.grants.all_granted !== false;
+}
+
+export function isRateLimitError(message) {
+    const text = String(message || '').toLowerCase();
+    return text.includes('rate limit') || text.includes('too many requests') || text.includes('http 429');
+}
+
 /**
  * Render the skill_repair prompt body shared between Skills (My Skills) and
  * Marketplace (ClawHub) call sites. ``intro`` is the per-surface first

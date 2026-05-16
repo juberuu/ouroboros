@@ -539,7 +539,7 @@ def build_review_context(env: Any) -> str:
         open_debts = state.get_open_commit_readiness_debts(repo_key=repo_key)
         if (
             not state.advisory_runs
-            and not state.last_commit_attempt
+            and not state.latest_attempt()
             and not continuations
             and not corrupt
             and not open_obs

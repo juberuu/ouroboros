@@ -1,7 +1,7 @@
 """Parallel review orchestration for the pre-commit pipeline.
 
-Extracted from git.py (P7 Minimalism) so both _repo_commit_push and
-_repo_write_commit can share one implementation without duplication.
+Extracted from git.py (P7 Minimalism) so the commit path can share one
+review orchestration implementation without duplication.
 
 Public API:
   run_parallel_review(ctx, commit_message, *, goal, scope, review_rebuttal)
