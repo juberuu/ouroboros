@@ -616,6 +616,44 @@ class TestHandleReviewStatusNotTruncated:
             f"got {len(loaded.attempts[0].commit_message)}"
         )
 
+    def test_legacy_latest_attempt_order_prefers_newer_last_commit(self):
+        """Legacy state folding must not make an older blocking_history item latest."""
+        import json
+        import tempfile
+        import pathlib
+        from ouroboros.review_state import load_state
+
+        tmp = pathlib.Path(tempfile.mkdtemp())
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        legacy = {
+            "state_version": 2,
+            "last_commit_attempt": {
+                "ts": "2026-05-16T12:00:00+00:00",
+                "commit_message": "newer success",
+                "status": "succeeded",
+                "repo_key": "",
+                "tool_name": "repo_commit",
+                "attempt": 2,
+            },
+            "blocking_history": [{
+                "ts": "2026-05-16T11:00:00+00:00",
+                "commit_message": "older block",
+                "status": "blocked",
+                "blocked": True,
+                "repo_key": "",
+                "tool_name": "repo_commit",
+                "attempt": 1,
+            }],
+        }
+        (state_dir / "advisory_review.json").write_text(
+            json.dumps(legacy), encoding="utf-8"
+        )
+
+        loaded = load_state(tmp)
+        assert loaded.latest_attempt().status == "succeeded"
+        assert loaded.latest_attempt().commit_message == "newer success"
+
     def test_runs_data_all_runs_present_no_list_cap(self):
         """_handle_review_status must return all advisory runs — no [-5:] list cap."""
         import json, tempfile, pathlib

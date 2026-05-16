@@ -1280,6 +1280,7 @@ def _load_state_unlocked(drive_root: pathlib.Path) -> AdvisoryReviewState:
             if _attempt_identity_tuple(item) not in seen:
                 state.attempts.append(item)
                 seen.add(_attempt_identity_tuple(item))
+    state.attempts.sort(key=_attempt_order_key)
 
     state._coalesce_open_obligations()
     state.next_obligation_seq = max(
@@ -1681,6 +1682,21 @@ def _attempt_identity_tuple(attempt: CommitAttemptRecord) -> tuple[str, str, str
         str(attempt.tool_name or _DEFAULT_TOOL_NAME),
         str(attempt.task_id or ""),
         identity_token,
+    )
+
+
+def _attempt_order_key(attempt: CommitAttemptRecord) -> tuple[float, int, str]:
+    ts_value = (
+        str(getattr(attempt, "finished_ts", "") or "")
+        or str(getattr(attempt, "updated_ts", "") or "")
+        or str(getattr(attempt, "started_ts", "") or "")
+        or str(getattr(attempt, "ts", "") or "")
+    )
+    ts_epoch = _parse_iso_ts(ts_value)
+    return (
+        ts_epoch if ts_epoch is not None else 0.0,
+        int(getattr(attempt, "attempt", 0) or 0),
+        ts_value,
     )
 
 
