@@ -27,6 +27,7 @@ import re
 import subprocess
 from typing import List, Optional
 
+from ouroboros.triad_review import extract_json_array
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.review_state import (
     AdvisoryRunRecord,
@@ -71,22 +72,6 @@ from ouroboros.utils import (
 log = logging.getLogger(__name__)
 
 _MAX_DIFF_CHARS_ERROR = 500_000  # Fail loudly above this — split the commit
-
-
-def _emit_advisory_usage(
-    ctx: "ToolContext",
-    model: str,
-    cost_usd: float,
-    usage: dict,
-    source: str = "advisory",
-    provider: str = "anthropic",
-    session_id: str = "",
-    prompt_chars: int = 0,
-) -> None:
-    emit_review_usage(
-        ctx, model=model, provider=provider, usage=usage, source=source,
-        cost_usd=cost_usd, session_id=session_id, prompt_chars=prompt_chars,
-    )
 
 
 _ADVISORY_PROMPT_MAX_CHARS = 1_600_000  # ~400K tokens; non-blocking skip when exceeded
@@ -242,12 +227,9 @@ def _release_metadata_preflight(
         return None
     try:
         from ouroboros.tools.release_sync import (
-            _normalize_pep440,
-            _shields_escape,
             check_history_limit,
-            extract_architecture_header_version,
-            extract_readme_badge_version,
             is_release_version,
+            version_carrier_desyncs,
         )
         version_path = repo_dir / "VERSION"
         readme_path = repo_dir / "README.md"
@@ -256,18 +238,17 @@ def _release_metadata_preflight(
         version_str = version_path.read_text(encoding="utf-8").strip()
         if not is_release_version(version_str):
             return None
-        desync: list[str] = []
-        if pyproject_path.exists():
-            pyproject_text = pyproject_path.read_text(encoding="utf-8")
-            py_match = re.search(r'^version\s*=\s*["\']([^"\']+)["\']', pyproject_text, re.MULTILINE)
-            expected_pyproject = _normalize_pep440(version_str)
-            if not py_match or py_match.group(1).strip() != expected_pyproject:
-                desync.append(f'pyproject.toml (expected version = "{expected_pyproject}")')
-        if readme_path.exists():
-            readme_text = readme_path.read_text(encoding="utf-8")
-            badge_url_token = f"version-{_shields_escape(version_str)}-green"
-            if extract_readme_badge_version(readme_text) != version_str or badge_url_token not in readme_text:
-                desync.append(f"README.md badge (expected {version_str} / {badge_url_token})")
+        pyproject_text = pyproject_path.read_text(encoding="utf-8") if pyproject_path.exists() else ""
+        readme_text = readme_path.read_text(encoding="utf-8") if readme_path.exists() else ""
+        arch_text = arch_path.read_text(encoding="utf-8") if arch_path.exists() else ""
+        desync = version_carrier_desyncs(
+            version_str,
+            pyproject_text=pyproject_text,
+            readme_text=readme_text,
+            arch_text=arch_text,
+            detailed=True,
+        )
+        if readme_text:
             if not re.search(r'\|\s*' + re.escape(version_str) + r'\s*\|', readme_text):
                 return (
                     f"⚠️ PREFLIGHT_BLOCKED: VERSION is {version_str} but README.md "
@@ -281,8 +262,6 @@ def _release_metadata_preflight(
                     + "".join(f"  - {w}\n" for w in limit_warnings)
                     + "  Trim the oldest entry in the over-limit category before advisory review."
                 )
-        if arch_path.exists() and extract_architecture_header_version(arch_path.read_text(encoding="utf-8")) != version_str:
-            desync.append(f"docs/ARCHITECTURE.md header (expected # Ouroboros v{version_str})")
         if desync:
             return (
                 f"⚠️ PREFLIGHT_BLOCKED: VERSION file says {version_str} but "
@@ -614,9 +593,13 @@ def _llm_extract_advisory_items(raw_text: str, ctx: object) -> list:
         if fallback_usage and isinstance(ctx, ToolContext):
             fallback_cost = float((fallback_usage or {}).get("cost", 0) or 0)
             from ouroboros.pricing import infer_provider_from_model as _infer_prov
-            _emit_advisory_usage(
-                ctx, light_model, fallback_cost, fallback_usage,
-                "advisory_fallback", provider=_infer_prov(light_model),
+            emit_review_usage(
+                ctx,
+                model=light_model,
+                cost_usd=fallback_cost,
+                usage=fallback_usage,
+                source="advisory_fallback",
+                provider=_infer_prov(light_model),
             )
 
         content = response.get("content", "")
@@ -899,12 +882,13 @@ def _run_claude_advisory(
 
         # Track SDK cost — advisory calls are real spend that must reach the budget.
         if result.cost_usd > 0:
-            _emit_advisory_usage(
+            emit_review_usage(
                 ctx,
-                model,
-                result.cost_usd,
-                result.usage or {},
-                "advisory_sdk",
+                model=model,
+                cost_usd=result.cost_usd,
+                usage=result.usage or {},
+                source="advisory_sdk",
+                provider="anthropic",
                 session_id=meta.get("session_id", ""),
                 prompt_chars=prompt_chars,
             )
@@ -1026,67 +1010,11 @@ def _run_claude_advisory(
 
 def _parse_advisory_output(stdout: str) -> list:
     """Extract the JSON findings array from Claude CLI output."""
-    # Try direct parse first
-    text = stdout.strip()
-
-    # Unwrap Claude Code JSON envelope: {"result": "...", ...}
-    try:
-        outer = json.loads(text)
-        if isinstance(outer, dict) and "result" in outer:
-            text = str(outer["result"]).strip()
-        elif isinstance(outer, list) and _is_checklist_array(outer):
-            return outer
-    except (json.JSONDecodeError, ValueError):
-        pass
-
-    # Strip markdown fences if present
-    if text.startswith("```"):
-        text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-
-    # Try direct parse of the inner result
-    try:
-        obj = json.loads(text)
-        if isinstance(obj, list) and _is_checklist_array(obj):
-            return obj
-    except (json.JSONDecodeError, ValueError):
-        pass
-
-    # Find embedded JSON array — scan all "]" positions from right to left and
-    # for each try all "[" positions to its left, also right to left.
-    # This correctly handles: stray arrays appearing AFTER the real checklist
-    # (we find the checklist's "]" before the stray one), and code blocks with
-    # brackets appearing BEFORE the checklist (their "[" is left of the
-    # checklist's "[" so the inner-rightmost match wins).
-    # Each candidate must also pass _is_checklist_array validation so that stray
-    # arrays like [1,2,3] or code-snippet arrays are rejected.
-    ends: list[int] = []
-    search_from = 0
-    while True:
-        pos = text.find("]", search_from)
-        if pos == -1:
-            break
-        ends.append(pos)
-        search_from = pos + 1
-
-    for end in reversed(ends):
-        # Collect all "[" positions to the left of this "]"
-        search_from = 0
-        starts: list[int] = []
-        while True:
-            pos = text.find("[", search_from)
-            if pos == -1 or pos > end:
-                break
-            starts.append(pos)
-            search_from = pos + 1
-        for start in reversed(starts):
-            try:
-                obj = json.loads(text[start:end + 1])
-                if isinstance(obj, list) and _is_checklist_array(obj):
-                    return obj
-            except (json.JSONDecodeError, ValueError):
-                continue
-
-    return []
+    return extract_json_array(
+        stdout,
+        unwrap_result=True,
+        validate_fn=_is_checklist_array,
+    ) or []
 
 
 def _is_checklist_array(items: list) -> bool:

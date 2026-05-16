@@ -112,9 +112,6 @@ function card(item, installed) {
             </div>
             <div class="marketplace-card-actions">
                 <div class="marketplace-primary-action">${primary}</div>
-                <div class="marketplace-secondary-actions">
-                    <button class="btn btn-default" data-oh-preview="${escapeHtml(slug)}">Details</button>
-                </div>
             </div>
         </article>
     `;
@@ -176,12 +173,6 @@ export function initOuroborosHub(pane, controlsHost = null) {
     });
     results.addEventListener('click', async (event) => {
         const install = event.target.closest('[data-oh-install]');
-        const preview = event.target.closest('[data-oh-preview]');
-        if (preview) {
-            const slug = preview.dataset.ohPreview;
-            show(`${slug}: official skill details are shown in the catalog card.`, 'muted');
-            return;
-        }
         if (!install) return;
         const slug = install.dataset.ohInstall;
         install.disabled = true;

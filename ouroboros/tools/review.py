@@ -91,7 +91,7 @@ from ouroboros.tools.review_helpers import (
     load_governance_doc,
     build_touched_file_pack,
     build_goal_section,
-    build_rebuttal_section as _shared_build_rebuttal_section,
+    build_rebuttal_section,
     CRITICAL_FINDING_CALIBRATION,
     normalize_reviewer_items,
     build_self_verification_template,
@@ -113,34 +113,7 @@ _CHECKLISTS_PATH = _REPO_ROOT / "docs" / "CHECKLISTS.md"
 
 
 def _load_bible() -> str:
-    """Load ``BIBLE.md`` for the triad reviewer preamble.
-
-    Routes through the SSOT ``review_helpers.load_governance_doc`` so the
-    silent-empty-string fallback (which would have caused triad reviewers
-    to ignore constitutional context without warning, in violation of
-    DEVELOPMENT.md "No silent truncation") is replaced by an explicit
-    ``[⚠️ OMISSION: ...]`` marker. Walks the same candidate roots the
-    older inline implementation tried, in order of priority, so a
-    pytest-style ``Path.cwd()`` invocation still finds the constitution
-    when the repo-relative resolution misses.
-    """
-    for candidate_root in (
-        pathlib.Path(__file__).resolve().parent.parent.parent,
-        pathlib.Path.cwd(),
-        pathlib.Path(os.environ.get("OUROBOROS_REPO_DIR", "")),
-    ):
-        if not str(candidate_root):
-            continue
-        loaded = load_governance_doc(
-            candidate_root, "BIBLE.md", on_missing="silent", fallback="",
-        )
-        if loaded:
-            return loaded
-    return load_governance_doc(
-        pathlib.Path(__file__).resolve().parent.parent.parent,
-        "BIBLE.md",
-        on_missing="explicit",
-    )
+    return load_governance_doc(_REPO_ROOT, "BIBLE.md", on_missing="explicit")
 
 
 # ---------------------------------------------------------------------------
@@ -619,32 +592,21 @@ def _preflight_check(commit_message: str, staged_files: str,
     if version_staged:
         try:
             from ouroboros.tools.release_sync import (
-                _normalize_pep440,
-                _shields_escape,
-                extract_architecture_header_version,
-                extract_readme_badge_version,
                 is_release_version,
+                version_carrier_desyncs,
             )
             version_str = _git_show_staged(repo_dir, "VERSION").strip()
             if is_release_version(version_str):
-                desync = []
                 pyproject_text = _git_show_staged(repo_dir, "pyproject.toml")
-                pyproject_match = re.search(
-                    r'^version\s*=\s*["\']([^"\']+)["\']',
-                    pyproject_text,
-                    re.MULTILINE,
-                )
-                expected_pyproject = _normalize_pep440(version_str)
-                if not pyproject_match or pyproject_match.group(1).strip() != expected_pyproject:
-                    desync.append(f'pyproject.toml (expected version = "{expected_pyproject}")')
                 readme_text = _git_show_staged(repo_dir, "README.md")
-                readme_version = extract_readme_badge_version(readme_text)
-                badge_url_token = f"version-{_shields_escape(version_str)}-green"
-                if readme_version != version_str or badge_url_token not in readme_text:
-                    desync.append(f"README.md badge (expected {version_str} / {badge_url_token})")
                 arch_text = _git_show_staged(repo_dir, "docs/ARCHITECTURE.md")
-                if extract_architecture_header_version(arch_text) != version_str:
-                    desync.append(f"docs/ARCHITECTURE.md header (expected # Ouroboros v{version_str})")
+                desync = version_carrier_desyncs(
+                    version_str,
+                    pyproject_text=pyproject_text,
+                    readme_text=readme_text,
+                    arch_text=arch_text,
+                    detailed=True,
+                )
                 if desync:
                     return (
                         f"⚠️ PREFLIGHT_BLOCKED: VERSION file says {version_str} but "
@@ -778,10 +740,6 @@ def _handle_review_block_or_warning(
     ctx._review_iteration_count = 0
     ctx._review_history = []
     return None
-
-
-def _build_rebuttal_section(review_rebuttal: str) -> str:
-    return _shared_build_rebuttal_section(review_rebuttal)
 
 
 def _load_dev_guide_text(repo_dir: pathlib.Path) -> str:
@@ -998,7 +956,7 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
         if result is not None:
             return result
 
-    rebuttal_section = _build_rebuttal_section(review_rebuttal)
+    rebuttal_section = build_rebuttal_section(review_rebuttal)
 
     try:
         checklist_section = _load_checklist_section()

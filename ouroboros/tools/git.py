@@ -37,7 +37,10 @@ from ouroboros.tools.commit_gate import (
 from ouroboros.tools.review_revalidation import handle_revalidation_failure
 from ouroboros.utils import utc_now_iso, write_text, safe_relpath, run_cmd
 from ouroboros.tools.parallel_review import run_parallel_review as _run_parallel_review, aggregate_review_verdict as _aggregate_review_verdict
-from ouroboros.tools.review_helpers import _run_review_preflight_tests
+from ouroboros.tools.review_helpers import (
+    _run_review_preflight_tests,
+    format_review_history_entry,
+)
 from ouroboros.tools.core import is_skill_control_plane_path
 from ouroboros.contracts.task_constraint import normalize_task_constraint, resolve_payload_path
 from ouroboros.contracts.skill_payload_policy import (
@@ -811,23 +814,6 @@ def _post_commit_result(ctx, commit_message, skip_tests, tw_ref):
         _consecutive_test_failures = 0
 
 
-def _format_review_advisory_entry(entry: Any) -> str:
-    if isinstance(entry, dict):
-        severity = str(entry.get("severity", "advisory") or "advisory").upper()
-        tags = []
-        if entry.get("tag"):
-            tags.append(str(entry.get("tag")))
-        if entry.get("model"):
-            tags.append(f"model={entry.get('model')}")
-        if entry.get("obligation_id"):
-            tags.append(f"obligation={entry.get('obligation_id')}")
-        label = str(entry.get("item") or entry.get("reason") or "?")
-        reason = str(entry.get("reason", "") or "").replace("\n", " ")
-        tag_prefix = " ".join(f"[{tag}]" for tag in tags)
-        return f"[{severity}] {tag_prefix} {label}: {reason}".strip()
-    return str(entry)
-
-
 def _check_ci_status_after_push(repo_dir: pathlib.Path) -> str:
     """Query GitHub Actions for the CI run matching the just-pushed commit SHA.
     Filters by head_sha so stale runs from previous pushes are never reported.
@@ -911,7 +897,7 @@ def _format_commit_result(ctx, commit_message, push_status, test_warning):
         result += test_warning
     if ctx._review_advisory:
         result += "\n\n⚠️ Advisory warnings:\n" + "\n".join(
-            f"  - {_format_review_advisory_entry(w)}" for w in ctx._review_advisory
+            f"  - {format_review_history_entry(w)}" for w in ctx._review_advisory
         )
     return result
 

@@ -1,4 +1,4 @@
-"""Durable review/advisory state with typed attempt ledger and compatibility views.
+"""Durable review/advisory state with typed attempt ledger.
 
 State persists across task boundaries and restarts in
 ``~/Ouroboros/data/state/advisory_review.json``.
@@ -7,9 +7,6 @@ The modern state model is a ledger:
 - ``advisory_runs[]`` — advisory pre-review coverage for snapshots
 - ``attempts[]`` — reviewed mutative attempts with lifecycle/status metadata
 
-Legacy ``runs`` / ``last_commit_attempt`` / ``blocking_history`` fields are
-accepted on load and folded into the canonical ledgers, but are no longer
-persisted as compatibility views.
 - ``open_obligations``
 """
 
@@ -738,16 +735,6 @@ class AdvisoryReviewState:
         return list(observations.values())
 
     def _synthesize_missing_debts_from_observations(self, *, repo_key: str | None = None) -> None:
-        """Append debt records for observations that have no matching durable debt yet.
-
-        Unlike the full `_sync_commit_readiness_debts`, this helper NEVER verifies
-        existing debt and NEVER bumps counters on matching debt. It only fills the
-        legacy-upgrade gap: a schema-v2 state loaded from disk has no
-        `commit_readiness_debts` field, but its attempts/history already imply that
-        debt should exist. Used by `_load_state_unlocked` to give upgraded repos a
-        correct `retry_anchor=commit_readiness_debt` on first read without
-        accidentally sweeping hand-injected or drive-replayed debt.
-        """
         now = _utc_now()
         debts = _commit_readiness_debts_view(self)
         for debt in debts:
@@ -769,8 +756,8 @@ class AdvisoryReviewState:
                 summary=str(item.get("summary", "") or ""),
                 severity=str(item.get("severity", "warning") or "warning"),
                 status="detected",
-                repo_key=str(item.get("repo_key", "") or _LEGACY_CURRENT_REPO_KEY),
-                fingerprint=str(item.get("fingerprint", "") or ""),
+                repo_key=key[0],
+                fingerprint=key[1],
                 title=str(item.get("title", "Commit readiness debt") or "Commit readiness debt"),
                 source=str(item.get("source", "review_state") or "review_state"),
                 source_obligation_ids=[str(x) for x in (item.get("source_obligation_ids") or [])],
@@ -1236,12 +1223,12 @@ def _load_state_unlocked(drive_root: pathlib.Path) -> AdvisoryReviewState:
     legacy_attempts: List[CommitAttemptRecord] = []
     if isinstance(data.get("last_commit_attempt"), dict):
         legacy_attempts.append(_commit_attempt_from_dict(data["last_commit_attempt"]))
-
     legacy_attempts.extend(
         _commit_attempt_from_dict(item)
         for item in (data.get("blocking_history") or [])
         if isinstance(item, dict)
     )
+
     open_obligations = [
         _obligation_from_dict(item)
         for item in (data.get("open_obligations") or [])
@@ -1293,21 +1280,11 @@ def _load_state_unlocked(drive_root: pathlib.Path) -> AdvisoryReviewState:
         int(state.next_commit_readiness_debt_seq or 1),
         _infer_next_prefixed_sequence(state.commit_readiness_debts, "crd-"),
     )
-
-    # Legacy-upgrade safety: a schema-v2 state file has no `commit_readiness_debts`
-    # field, but may already carry repeated `blocking_history` / `open_obligations`
-    # that SHOULD synthesize a debt record. Without this synthesis, `review_status`
-    # and `build_review_context` would report `retry_anchor=null` on first load after
-    # upgrade, even though durable state already proves repeated blockers.
-    #
-    # Use `_synthesize_missing_debts_from_observations` (ADD-only) rather than the
-    # full `_sync_commit_readiness_debts` sweep: load is not the right moment to
-    # verify/close existing durable debt (no fresh blocking/success signal has
-    # happened since the file was persisted), only to fill in legacy gaps.
-    try:
-        state._synthesize_missing_debts_from_observations()
-    except Exception:
-        log.debug("legacy-upgrade debt synthesis failed (non-fatal)", exc_info=True)
+    if not state.commit_readiness_debts and legacy_attempts:
+        try:
+            state._synthesize_missing_debts_from_observations()
+        except Exception:
+            log.debug("legacy-upgrade debt synthesis failed (non-fatal)", exc_info=True)
 
     return state
 

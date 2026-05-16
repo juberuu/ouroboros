@@ -16,9 +16,9 @@ import {
 } from './utils.js';
 
 const SKILLS_TABS = [
-    { value: 'installed', label: 'My skills', pillId: 'skills-tab-pill-installed', pillClass: 'skills-tab-pill' },
-    { value: 'marketplace', label: 'ClawHub', pillId: 'skills-tab-pill-marketplace', pillClass: 'skills-tab-pill' },
-    { value: 'ouroboroshub', label: 'OuroborosHub', pillId: 'skills-tab-pill-ouroboroshub', pillClass: 'skills-tab-pill' },
+    { value: 'installed', label: 'My skills', pillId: 'skills-tab-pill-installed' },
+    { value: 'marketplace', label: 'ClawHub', pillId: 'skills-tab-pill-marketplace' },
+    { value: 'ouroboroshub', label: 'OuroborosHub', pillId: 'skills-tab-pill-ouroboroshub' },
 ];
 
 /**

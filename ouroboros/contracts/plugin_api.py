@@ -174,8 +174,9 @@ class PluginAPI(Protocol):
         on the top-level Widgets page. ``render`` is a declarative
         browser-hosted schema. Supported host-owned shapes are:
         ``{"kind": "iframe", "route": "..."}``,
-        ``{"kind": "inline_card", "api_route": "..."}`` for legacy
-        weather widgets, and ``{"kind": "declarative",
+        ``{"kind": "inline_card", "api_route": "..."}`` as a legacy
+        compatibility shortcut translated by the host to declarative UI,
+        and ``{"kind": "declarative",
         "schema_version": 1, "components": [...]}`` for generic
         forms/actions/markdown/json/table/media render blocks.
         v5.7.0 adds a reviewed sandboxed module exception:

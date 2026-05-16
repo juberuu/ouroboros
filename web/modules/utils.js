@@ -151,8 +151,7 @@ export function renderSkillRepairPrompt(intro, diagnosticsJson) {
  *
  * Options:
  *   ``emptyHtml`` — what to return for empty input (default ``''``).
- *   ``preClass``  — CSS class added to the fallback ``<pre>`` element
- *                   (e.g. ``'marketplace-skillmd'``).
+ *   ``preClass``  — CSS class added to the fallback ``<pre>`` element.
  */
 export function renderMarkdownSafe(rawMd, { emptyHtml = '', preClass = '' } = {}) {
     const text = String(rawMd ?? '');

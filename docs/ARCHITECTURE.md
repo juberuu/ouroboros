@@ -1,4 +1,4 @@
-# Ouroboros v5.24.0-rc.2 — Architecture & Reference
+# Ouroboros v5.25.0-rc.1 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -404,7 +404,7 @@ History sync is intentionally two-pass: progress/system entries are replayed fir
 
 `web/modules/skills.js` lists installed/bundled/user skills, review state, grants, enablement, repair affordances, and lifecycle progress. Marketplace panes (`marketplace.js`, `ouroboroshub.js`) install/update/uninstall skills through backend lifecycle jobs. Widgets are separate so extension UI surfaces are not buried in the skill list.
 
-`web/modules/widgets.js` supports reviewed extension UI declarations: legacy `iframe`/`inline_card`, declarative schemas (forms/actions/jobs/markdown/code/json/key-value/table/tabs/charts/stream/progress/subscription/poll/media/map/calendar/kanban), and sandboxed `kind: module` widgets served from reviewed skill payloads. Module widgets run in opaque `iframe srcdoc sandbox="allow-scripts"` with a parent-mediated fetch bridge restricted to `/api/extensions/<skill>/...`; they never execute in the SPA origin.
+`web/modules/widgets.js` supports reviewed extension UI declarations: sandboxed `iframe`, legacy `inline_card` compatibility translated to declarative UI, declarative schemas (forms/actions/jobs/markdown/code/json/key-value/table/tabs/charts/stream/progress/subscription/poll/media/map/calendar/kanban), and sandboxed `kind: module` widgets served from reviewed skill payloads. Module widgets run in opaque `iframe srcdoc sandbox="allow-scripts"` with a parent-mediated fetch bridge restricted to `/api/extensions/<skill>/...`; they never execute in the SPA origin.
 
 Rationale: useful extension UI should be possible, but the host must own rendering, sandboxing, and route confinement. Skills provide data and declarations; the browser host enforces the trust boundary.
 
@@ -531,7 +531,7 @@ Rationale: runtime mode is a self-modification boundary, not an OS sandbox. It p
 
 `tools/git.py` owns repo writes, staging, commit, rollback/revert/restore, auto-tag, auto-push, and CI-status follow-up. `repo_write` writes without committing; `str_replace_editor` does exact one-occurrence edits; `repo_commit` stages, checks advisory freshness, runs deterministic preflight, runs triad + scope review, revalidates fingerprint, commits, tags, and pushes.
 
-`review_state.py` persists advisory runs, reviewed attempts, obligations, commit-readiness debt, and stale markers. Legacy `runs` / `last_commit_attempt` / `blocking_history` fields are accepted on load but folded into canonical ledgers. `commit_readiness_debts` must remain: it blocks repeated unresolved review friction and anchors retries to root causes.
+`review_state.py` persists advisory runs, reviewed attempts, obligations, commit-readiness debt, and stale markers. `commit_readiness_debts` must remain: it blocks repeated unresolved review friction and anchors retries to root causes.
 
 Rationale: commit review is the immune system's blocking feedback loop. The staged snapshot, advisory coverage, triad evidence, scope evidence, and post-review fingerprint must describe the same diff or the commit is not trustworthy.
 

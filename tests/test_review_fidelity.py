@@ -617,7 +617,7 @@ class TestHandleReviewStatusNotTruncated:
         )
 
     def test_legacy_latest_attempt_order_prefers_newer_last_commit(self):
-        """Legacy state folding must not make an older blocking_history item latest."""
+        """Legacy compatibility load must not make older blocking_history latest."""
         import json
         import tempfile
         import pathlib
