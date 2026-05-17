@@ -1,9 +1,4 @@
-"""
-Ouroboros — Tool registry (SSOT).
-
-Plugin architecture: each module in tools/ exports get_tools().
-ToolRegistry collects all tools, provides schemas() and execute().
-"""
+"""Tool registry SSOT: load tool modules, expose schemas, execute safely."""
 
 from __future__ import annotations
 
@@ -55,13 +50,7 @@ _LIGHT_SHELL_WRITER_COMMANDS = frozenset({
 
 
 def _detect_runtime_mode_elevation(text_lower: str) -> bool:
-    """Return True when ``text_lower`` (a lowercased shell argv string OR
-    a script file's lowercased content) matches the v5.1.2 elevation
-    pattern: BOTH ``save_settings`` AND ``ouroboros_runtime_mode`` are
-    present, OR the dotted attribute path ``ouroboros.config.save_settings``
-    appears verbatim. The conjunctive form keeps the false-positive rate
-    low for legitimate diagnostics (``echo $OUROBOROS_RUNTIME_MODE``,
-    ``grep save_settings ouroboros/config.py``)."""
+    """Detect shell/script attempts to change ``OUROBOROS_RUNTIME_MODE``."""
     has_save = "save_settings" in text_lower
     has_mode_key = "ouroboros_runtime_mode" in text_lower
     has_dotted_path = "ouroboros.config.save_settings" in text_lower
@@ -118,17 +107,11 @@ def _shell_command_string(argv: List[str]) -> str:
 
 
 def _candidate_path_inside(root: pathlib.Path, work_dir: pathlib.Path, path_text: str) -> bool:
-    """Return True when *path_text* resolves inside *root*.
-
-    The light-mode shell filter should guard the Ouroboros checkout, not every
-    scratch/data/tmp path the agent might legitimately use while read-only in
-    the repo. Missing targets are resolved lexically against cwd so writes to
-    not-yet-created repo files are still caught.
-    """
+    """Return whether ``path_text`` resolves inside ``root``."""
     text = str(path_text or "").strip()
     if not text or text in {"-", "--"}:
         return False
-    # Obvious non-path fragments and shell/control tokens.
+    # Skip obvious non-path fragments and shell/control tokens.
     if text.startswith(("-", "$")) or text in {"|", "&&", "||", ";", ">", ">>"}:
         return False
     try:
@@ -199,12 +182,7 @@ def _shell_writer_targets_protected(raw_cmd: Any) -> bool:
 
 
 def _light_shell_repo_mutation(raw_cmd: Any, *, repo_dir: pathlib.Path, cwd: str = "") -> bool:
-    """Return True for simple shell writer commands targeting the repo.
-
-    Light mode is a compatibility/self-modification guard, not a full shell or
-    Python sandbox. Keep this intentionally shallow: normal commands should run,
-    while obvious direct writes to the Ouroboros checkout are refused.
-    """
+    """Detect simple shell writer commands that target the repo in light mode."""
     argv = _shell_argv(raw_cmd)
     if not argv:
         return False
@@ -226,8 +204,7 @@ def _light_shell_repo_mutation(raw_cmd: Any, *, repo_dir: pathlib.Path, cwd: str
     if executable in _LIGHT_SHELL_WRITER_COMMANDS and _writer_targets_repo(argv, repo_dir=repo_dir, cwd=cwd):
         return True
 
-    # Redirection and tee are shell syntax, not command names. Keep the old
-    # broad shape only when a repo-local path is present in the same argv.
+    # Redirection/tee only count when the same argv mentions a repo path.
     if any(ind in cmd_lower for ind in (" > ", " >> ", " | tee ")):
         return _repo_target_mentioned(argv, repo_dir=repo_dir, cwd=cwd)
 
@@ -253,12 +230,7 @@ _HEAL_MODE_ALLOWED_TOOLS = frozenset({
     "list_skills",
     "review_skill",
     "str_replace_editor",
-    # v5.7.0: skill_preflight is a read-only syntax validator
-    # (Python compile() / node --check / bash -n + manifest parse). Heal mode
-    # agents use it to catch silly typos before spending money on a
-    # tri-model ``review_skill`` round. It NEVER mutates review state,
-    # NEVER touches enabled.json / grants.json, and NEVER spawns shell
-    # strings (no run_shell escape).
+    # Read-only payload syntax validator; no review/enabled/grant mutation.
     "skill_preflight",
 })
 
@@ -266,13 +238,7 @@ _HEAL_PROTECTED_PAYLOAD_FILENAMES = frozenset({
     ".clawhub.json",
     ".ouroboroshub.json",
     ".self_authored.json",
-    # v5.7.0: extend heal-mode payload sidecar protection in lockstep with
-    # the central ``is_skill_control_plane_path`` guard in ``tools/core.py``.
-    # Without these the launcher-seeded ``.seed-origin`` markers and the
-    # original OpenClaw-publisher ``SKILL.openclaw.md`` could be silently
-    # rewritten by a heal task — which would either disconnect the skill
-    # from its update lane (.seed-origin) or launder the provenance the
-    # reviewer cross-checks against (SKILL.openclaw.md).
+    # Protect provenance/update-lane markers during heal-mode payload edits.
     "skill.openclaw.md",
     ".seed-origin",
 })
@@ -315,7 +281,7 @@ def _skill_payload_cwd_allowed(cwd_text: str, drive_root: pathlib.Path) -> bool:
     return is_skill_payload_path(drive_root, cwd_text, allow_control_plane=False)
 
 
-# Git via run_shell: only truly read-only subcommands allowed
+# Git via run_shell: only truly read-only subcommands allowed.
 _GIT_READONLY_SUBCOMMANDS = frozenset([
     "status", "diff", "log", "show", "ls-files",
     "describe", "rev-parse", "cat-file",
@@ -327,8 +293,7 @@ _GIT_READONLY_SUBCOMMANDS = frozenset([
 def _parse_porcelain_paths(output: str) -> list[str]:
     paths: list[str] = []
     for raw_line in str(output or "").splitlines():
-        # Porcelain v1 uses two status columns; a leading space is meaningful
-        # (" M README.md"). Do not strip the left side before slicing.
+        # Porcelain v1 has two status columns; keep leading status spaces.
         line = raw_line.rstrip()
         if len(line) < 4:
             continue
@@ -342,12 +307,7 @@ def _parse_porcelain_paths(output: str) -> list[str]:
 
 
 def _light_repo_snapshot(repo_dir: pathlib.Path) -> Optional[Dict[str, Any]]:
-    """Return a deterministic worktree snapshot for light-mode write detection.
-
-    This is a tripwire, not rollback machinery. It intentionally observes the
-    real Ouroboros repo root (``ctx.repo_dir``) so absolute writes are caught
-    even when ``run_shell`` executes from another cwd.
-    """
+    """Worktree tripwire for light-mode shell writes, not rollback machinery."""
     try:
         repo = pathlib.Path(repo_dir)
         status = subprocess.run(
@@ -401,7 +361,7 @@ def _format_light_repo_write_block(before: Dict[str, Any], after: Dict[str, Any]
     )
 
 def _revert_protected_files(repo_dir, *, runtime_mode: str = "advanced") -> list:
-    """After claude_code_edit, revert protected files unless pro mode is active."""
+    """Revert protected files after claude_code_edit unless pro mode is active."""
     if mode_allows_protected_write(runtime_mode):
         return []
     try:
@@ -438,10 +398,7 @@ def _revert_protected_files(repo_dir, *, runtime_mode: str = "advanced") -> list
 
 
 def _extract_git_subcommand(cmd_parts: list) -> str:
-    """Extract the git subcommand from a parsed command list.
-
-    Handles: git status, git -C /path status, git --no-pager log, etc.
-    """
+    """Extract the git subcommand after global git options."""
     if not cmd_parts:
         return ""
     parts = _strip_leading_env_assignments([str(p) for p in cmd_parts])
@@ -476,7 +433,7 @@ def _extract_run_shell_git_subcommand(raw_cmd: Any) -> str:
 
 @dataclass
 class BrowserState:
-    """Per-task browser lifecycle state (Playwright). Isolated from generic ToolContext."""
+    """Per-task Playwright lifecycle state."""
 
     pw_instance: Any = None
     browser: Any = None
@@ -486,7 +443,7 @@ class BrowserState:
 
 @dataclass
 class ToolContext:
-    """Tool execution context — passed from the agent before each task."""
+    """Tool execution context passed from the agent."""
 
     repo_dir: pathlib.Path
     drive_root: pathlib.Path
@@ -498,31 +455,31 @@ class ToolContext:
     last_push_succeeded: bool = False
     emit_progress_fn: Callable[[str], None] = field(default=lambda _: None)
 
-    # LLM-driven model/effort switch (set by switch_model tool, read by loop.py)
+    # LLM-driven model/effort switch.
     active_model_override: Optional[str] = None
     active_effort_override: Optional[str] = None
     active_use_local_override: Optional[bool] = None
 
-    # Per-task browser state
+    # Per-task browser state.
     browser_state: BrowserState = field(default_factory=BrowserState)
 
-    # Budget tracking (set by loop.py for real-time usage events)
+    # Budget tracking for usage events.
     event_queue: Optional[Any] = None
     task_id: Optional[str] = None
 
-    # Conversation messages (set by loop.py so safety checks have context)
+    # Conversation messages for safety checks.
     messages: Optional[List[Dict[str, Any]]] = None
 
-    # Structured per-task constraints, e.g. skill repair payload confinement.
+    # Structured task constraints, e.g. skill repair payload confinement.
     task_constraint: Optional[TaskConstraint] = None
 
-    # Task depth for fork bomb protection
+    # Task depth for fork-bomb protection.
     task_depth: int = 0
 
-    # True when running inside handle_chat_direct (not a queued worker task)
+    # True inside handle_chat_direct, not a queued worker task.
     is_direct_chat: bool = False
 
-    # Pre-commit review state (reset per-commit, carried across review rounds)
+    # Pre-commit review state.
     _review_advisory: List[Any] = field(default_factory=list)
     _review_iteration_count: int = 0
     _review_history: list = field(default_factory=list)
@@ -549,7 +506,7 @@ class ToolContext:
 
 @dataclass
 class ToolEntry:
-    """Single tool descriptor: name, schema, handler, metadata."""
+    """Single tool descriptor."""
 
     name: str
     schema: Dict[str, Any]
@@ -559,11 +516,7 @@ class ToolEntry:
 
 
 class ToolRegistry:
-    """Ouroboros tool registry (SSOT).
-
-    To add a tool: create a module in ouroboros/tools/,
-    export get_tools() -> List[ToolEntry].
-    """
+    """Tool registry; modules export ``get_tools()``."""
 
     def __init__(self, repo_dir: pathlib.Path, drive_root: pathlib.Path):
         self._entries: Dict[str, ToolEntry] = {}
@@ -574,17 +527,16 @@ class ToolRegistry:
         "browser", "ci", "claude_advisory_review", "compact_context", "control",
         "core", "evolution_stats", "git", "git_rollback", "github", "health",
         "knowledge", "memory_tools", "plan_review", "recent_tasks", "review", "search", "shell",
-        # Phase 3 three-layer refactor: external skill surface
-        # (list_skills / review_skill / skill_exec / toggle_skill).
+        # External skill surface.
         "skill_exec",
         "skill_publish",
-        # v5.7.0: skill_preflight — read-only payload validator for heal mode.
+        # Read-only payload validator for heal mode.
         "skill_preflight",
         "tool_discovery", "vision",
     ]
 
     def _load_modules(self) -> None:
-        """Auto-discover tool modules in ouroboros/tools/ that export get_tools()."""
+        """Load frozen or package-discovered tool modules."""
         import importlib
         import logging
         import sys
@@ -613,10 +565,10 @@ class ToolRegistry:
         self._ctx = ctx
 
     def register(self, entry: ToolEntry) -> None:
-        """Register a new tool (for extension by Ouroboros)."""
+        """Register a new tool entry."""
         self._entries[entry.name] = entry
 
-    # --- Contract ---
+    # Contract.
 
     def available_tools(self) -> List[str]:
         return [e.name for e in self._entries.values()]
@@ -633,10 +585,7 @@ class ToolRegistry:
             for entry in self._entries.values()
             for schema in self._schemas_for_entry(entry)
         ]
-        # Include live extension-registered tool schemas so the normal
-        # tool-policy/enable_tools path can surface provider-safe extension
-        # tool entries instead of leaving them manually dispatch-only.
-        # entries instead of leaving them manually dispatch-only.
+        # Include live extension tool schemas in normal tool discovery.
         try:
             from ouroboros.extension_loader import (
                 _tools as _ext_tools,
@@ -680,15 +629,12 @@ class ToolRegistry:
             except Exception:
                 mcp_schemas = []
             return built_in + extension_schemas + mcp_schemas
-        # Core tools + meta-tools for discovering/enabling extended tools
+        # Core tools plus meta-tools for enabling extended tools.
         result = []
         for e in self._entries.values():
             if e.name in CORE_TOOL_NAMES or e.name in ("list_available_tools", "enable_tools"):
                 result.extend(self._schemas_for_entry(e))
-        # Keep live extension tools enumerable in core-mode too so the
-        # loop can discover them through the standard registry surface.
-        # MCP tools are intentionally non-core: they point at external
-        # owner-configured services and require explicit enable_tools.
+        # Extension tools are discoverable in core-mode; MCP stays opt-in.
         return result + extension_schemas
 
     def get_schema_by_name(self, name: str) -> Optional[Dict[str, Any]]:
@@ -744,8 +690,7 @@ class ToolRegistry:
         entry = self._entries.get(str(name or "").strip())
         if entry is not None:
             return entry.timeout_sec
-        # Phase 5: extension-registered tools carry their own timeout_sec
-        # in the loader's tool descriptor.
+        # Extension tools carry timeout_sec in the loader descriptor.
         try:
             from ouroboros.extension_loader import parse_extension_surface_name as _ext_parse_name
         except Exception:
@@ -757,11 +702,7 @@ class ToolRegistry:
             except Exception:
                 ext_tool = None
             if ext_tool:
-                # Extension async handlers enforce their own ``timeout_sec``
-                # via ``asyncio.wait_for`` inside _dispatch_extension_tool.
-                # Give the outer tool executor a small cleanup grace so it
-                # does not return first while the inner coroutine is still
-                # being cancelled.
+                # Add cleanup grace around the inner async wait_for.
                 return int(ext_tool.get("timeout_sec") or 60) + 3
         try:
             from ouroboros.mcp_client import (
@@ -781,19 +722,7 @@ class ToolRegistry:
         return 360
 
     def _dispatch_extension_tool(self, name: str, ext_tool: Dict[str, Any], args: Optional[Dict[str, Any]]) -> str:
-        """Run a provider-safe extension handler with the same safety gates
-        the built-in tool path uses.
-
-        v5.1.2 Frame A: extension dispatch is allowed in ``light`` (skills
-        carry their own independent review + content-hash + sandbox
-        stack); the ``light`` mode block previously here was removed.
-        v5.1.2 iter-2 real triad finding TR1 (gpt-5.5 critical):
-        extension dispatch previously short-circuited to the handler
-        without reaching ``check_safety``, so removing the light-mode
-        gate left extension tools unsupervised in light. Route through
-        the same supervisor the built-in path uses so the per-call
-        safety check applies uniformly.
-        """
+        """Dispatch live extension tools through the same safety gate as built-ins."""
         try:
             from ouroboros.extension_loader import (
                 is_extension_live as _ext_is_live,
@@ -829,19 +758,7 @@ class ToolRegistry:
                 f"⚠️ extension tool {name!r} failed: "
                 f"{type(exc).__name__}: {exc}"
             )
-        # v5.7.0: extension authors writing async handlers used to silently
-        # fail — register_tool typed handlers as ``Callable[..., str]``
-        # but extension authors regularly registered ``async def`` tools.
-        # ``handler(...)`` returns a coroutine object; ``str(coroutine)``
-        # rendered ``<coroutine object … at 0x…>`` and the agent never saw
-        # the real result (and the coroutine warned about never being
-        # awaited). Detect coroutines and run them on a helper thread with
-        # a fresh event loop. We intentionally do NOT use
-        # ``run_coroutine_threadsafe(get_event_loop()).result()`` here:
-        # if ToolRegistry.execute() is ever called from the same thread as
-        # that running loop, blocking on ``future.result()`` deadlocks the
-        # loop. Helper-thread execution is a little heavier but works in
-        # both normal worker-thread dispatch and same-loop test/API calls.
+        # Async extension handlers run on a helper thread to avoid same-loop deadlocks.
         import asyncio as _asyncio
         import inspect as _inspect
         import threading as _threading
@@ -899,26 +816,7 @@ class ToolRegistry:
         return f"{safety_msg}\n\n---\n{result}" if safety_msg else result
 
     def _run_shell_safety_check(self, args: Dict[str, Any], runtime_mode: str) -> Optional[str]:
-        """Pre-execution safety filter for ``run_shell``.
-
-        Returns a block message string when the command should be
-        refused, or ``None`` to let it proceed to the LLM safety
-        supervisor + handler. Extracted from ``execute`` so the
-        method itself stays under the 300-line hard gate; the checks
-        themselves are unchanged.
-
-        Layered checks (in order):
-          1. Argv-level elevation pattern (``save_settings`` AND
-             ``OUROBOROS_RUNTIME_MODE``, or dotted attribute path) —
-             blocks in ALL modes.
-          2. Light-mode shallow argv repo-mutation checks for common
-             writer commands with explicit repo targets.
-          3. Protected runtime path writes (``BIBLE.md`` etc.) outside
-             ``runtime_mode=pro``.
-          4. ``gh repo create/delete/auth`` blanket block.
-          5. Git mutative subcommand ban — write ops must go through
-             ``repo_commit`` tools, never ``run_shell``.
-        """
+        """Pre-execution run_shell filter; returns a block message or ``None``."""
         raw_cmd = args.get("cmd", args.get("command", ""))
         if isinstance(raw_cmd, list):
             cmd_lower = " ".join(str(x) for x in raw_cmd).lower()
@@ -928,7 +826,7 @@ class ToolRegistry:
         while "//" in cmd_path_lower:
             cmd_path_lower = cmd_path_lower.replace("//", "/")
 
-        # 1. Elevation pattern (all modes).
+        # Elevation pattern: blocked in all modes.
         if _detect_runtime_mode_elevation(cmd_lower):
             return (
                 "⚠️ ELEVATION_BLOCKED: shell command pattern looks "
@@ -954,7 +852,7 @@ class ToolRegistry:
                 "lifecycle tools instead."
             )
 
-        # 2. Light-mode repo-mutation indicators (argv).
+        # Light-mode repo-mutation indicators.
         if runtime_mode == "light":
             if _light_shell_repo_mutation(
                 raw_cmd,
@@ -968,11 +866,7 @@ class ToolRegistry:
                     "Behavior → Runtime Mode for write access."
                 )
 
-        # 3. Skill payload control-plane sidecar writes. This is a lexical
-        # defense-in-depth layer for run_shell (the lower-level data_write /
-        # file_browser guards do inode-aware checks). Shell commands are free
-        # form, so we conservatively block when a write-like verb appears with
-        # a protected sidecar path/name.
+        # Lexical defense for skill control-plane sidecar writes via shell.
         if any(name in cmd_path_lower for name in (
             ".clawhub.json",
             ".ouroboroshub.json",
@@ -991,7 +885,7 @@ class ToolRegistry:
                 "payload files instead."
             )
 
-        # 4. Protected runtime path writes.
+        # Protected runtime path writes.
         if _shell_writer_targets_protected(raw_cmd):
             return (
                 "⚠️ CRITICAL SAFETY_VIOLATION: Shell command would modify "
@@ -1006,13 +900,13 @@ class ToolRegistry:
                     + ", ".join(sorted(PROTECTED_RUNTIME_PATHS))
                 )
 
-        # 5. GitHub repo create/delete/auth.
+        # GitHub repo create/delete/auth.
         if "gh repo create" in cmd_lower or "gh repo delete" in cmd_lower:
             return "⚠️ SAFETY_VIOLATION: Creating/deleting GitHub repositories requires admin approval."
         if "gh auth" in cmd_lower:
             return "⚠️ SAFETY_VIOLATION: Modifying GitHub authentication is not permitted."
 
-        # 6. Direct git mutative ban via shell.
+        # Direct git mutative ban via shell.
         subcmd = _extract_run_shell_git_subcommand(raw_cmd)
         if subcmd and subcmd.lower() not in _GIT_READONLY_SUBCOMMANDS:
             return (
@@ -1131,14 +1025,8 @@ class ToolRegistry:
             _mcp_is_name = None
         is_mcp = bool(_mcp_is_name and _mcp_is_name(name))
 
-        # --- Hardcoded Sandbox Protections ---
-
-        # Runtime-mode gating:
-        # - light blocks repo self-modification entirely;
-        # - advanced may evolve the application layer but cannot edit protected
-        #   core/contracts/release surfaces;
-        # - pro may touch those surfaces, but the git commit path must pass the
-        #   normal triad + scope review before the commit lands.
+        # Hardcoded sandbox: light blocks repo mutation; advanced protects
+        # core/contracts/release; pro still relies on commit review.
         try:
             from ouroboros.config import get_runtime_mode as _get_runtime_mode
             _runtime_mode = _get_runtime_mode()
@@ -1216,10 +1104,7 @@ class ToolRegistry:
                 "restore_to_head",
                 "rollback_to_target",
                 "promote_to_stable",
-                # PR integration tools — they check out branches,
-                # cherry-pick, and stage merges. All of them mutate
-                # the local working tree / refs and must not run
-                # when ``runtime_mode=light``.
+                # PR integration tools mutate the local worktree/refs.
                 "fetch_pr_ref",
                 "create_integration_branch",
                 "cherry_pick_pr_commits",
@@ -1238,11 +1123,7 @@ class ToolRegistry:
             drive_root=pathlib.Path(self._ctx.drive_root),
         )
         synth_constraint = short_form_decision.constraint
-        # Surface a specific partial-args error BEFORE the generic light-mode
-        # block, so an agent that supplied only one of {bucket, skill_name}
-        # (or chose `native`) sees the actionable wording promised in
-        # SYSTEM.md / CREATING_SKILLS.md instead of a generic
-        # LIGHT_MODE_BLOCKED that lists three escape hatches.
+        # Prefer specific skill payload arg errors over generic light-mode block.
         if (
             (raw_bucket or raw_skill_name)
             and short_form_decision.error
@@ -1253,12 +1134,7 @@ class ToolRegistry:
             )
         ):
             return f"⚠️ SKILL_PAYLOAD_ARG_ERROR: {short_form_decision.error}"
-        # Repair-mode confinement is sticky: a real skill_repair task_constraint
-        # MUST win over a synthesized one. Otherwise an agent active in heal
-        # mode for skill A could redirect a write/edit to skill B by passing
-        # bucket+skill_name args. Reject the conflict early; same wording
-        # surfaces from every payload-mutating tool so the LLM sees a single
-        # consistent class of error.
+        # Real skill_repair constraints beat synthesized short-form constraints.
         redirect_err = cross_skill_redirect_error(task_constraint, synth_constraint)
         if redirect_err and name in (
             "data_write",
@@ -1266,9 +1142,7 @@ class ToolRegistry:
             "claude_code_edit",
         ):
             return f"⚠️ SKILL_REDIRECT_BLOCKED: {redirect_err}"
-        # Existing skill_repair task_constraint stays authoritative even when a
-        # synth was also produced and the slugs happen to match (matching synth
-        # is redundant; non-matching synth was already blocked above).
+        # Existing skill_repair constraint remains authoritative.
         if task_constraint and task_constraint.mode == "skill_repair":
             effective_constraint = task_constraint
         else:
@@ -1343,7 +1217,7 @@ class ToolRegistry:
             if block_msg:
                 return block_msg
 
-        # --- LLM Safety Supervisor ---
+        # LLM safety supervisor.
         from ouroboros.safety import check_safety
         is_safe, safety_msg = check_safety(
             name,
@@ -1373,8 +1247,7 @@ class ToolRegistry:
                 light_repo_before=light_repo_before,
             )
 
-        # Revert protected files after claude_code_edit unless pro mode is
-        # active; pro-mode commits still require the normal commit review later.
+        # Pro can touch protected files, but commit review still gates landing.
         if name == "claude_code_edit":
             reverted = _revert_protected_files(self._ctx.repo_dir, runtime_mode=_runtime_mode)
             if reverted:

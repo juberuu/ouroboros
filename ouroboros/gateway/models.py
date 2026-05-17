@@ -306,13 +306,6 @@ async def api_model_catalog(_request: Request) -> JSONResponse:
         "errors": errors,
     })
 
-
-# ---------------------------------------------------------------------------
-# Local model lifecycle endpoints
-# ---------------------------------------------------------------------------
-
-"""Local model management API endpoints, extracted from server.py."""
-
 import asyncio
 
 from starlette.requests import Request

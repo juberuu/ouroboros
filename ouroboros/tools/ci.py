@@ -18,13 +18,9 @@ from ouroboros.utils import utc_now_iso, run_cmd
 
 log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 _GITHUB_API = "https://api.github.com"
 _POLL_INTERVAL_SEC = 30
-_MAX_POLL_SEC = 900  # 15 minutes max wait
+_MAX_POLL_SEC = 900  # 15 minutes
 
 
 def _get_github_config() -> Tuple[str, str]:
@@ -41,7 +37,7 @@ def _get_github_config() -> Tuple[str, str]:
 
 def _gh_api(method: str, path: str, token: str, body: Optional[dict] = None,
             timeout: int = 30) -> Tuple[int, dict]:
-    """Call GitHub REST API. Returns (status_code, parsed_json)."""
+    """Call GitHub REST API and return status plus parsed JSON."""
     url = f"{_GITHUB_API}{path}"
     data = json.dumps(body).encode() if body else None
     req = urllib.request.Request(url, data=data, method=method)
@@ -110,11 +106,11 @@ def _poll_workflow_run(token: str, repo: str, branch: str, sha: str,
                        started_after: str, ctx: ToolContext,
                        timeout_sec: int = _MAX_POLL_SEC,
                        workflow_id: Optional[int] = None) -> dict:
-    """Poll for the workflow run result. Returns run info dict."""
+    """Poll until the matching workflow run completes or times out."""
     deadline = time.time() + timeout_sec
     run_id = None
 
-    # Use workflow-specific endpoint if available, otherwise fall back to repo-wide
+    # Prefer workflow-specific endpoint; fall back to repo-wide.
     runs_path = (
         f"/repos/{repo}/actions/workflows/{workflow_id}/runs?branch={branch}&per_page=5&event=workflow_dispatch"
         if workflow_id
@@ -122,7 +118,6 @@ def _poll_workflow_run(token: str, repo: str, branch: str, sha: str,
     )
 
     while time.time() < deadline:
-        # Find the matching run
         status, data = _gh_api("GET", runs_path, token)
         if status == 200:
             for run in data.get("workflow_runs", []):
@@ -140,7 +135,6 @@ def _poll_workflow_run(token: str, repo: str, branch: str, sha: str,
                             "url": run_url,
                             "run_id": run_id,
                         }
-                    # Emit progress
                     _emit_progress(ctx, f"⏳ CI running... status={run_status} (polling every {_POLL_INTERVAL_SEC}s)")
                     break
 
@@ -175,19 +169,12 @@ def _get_failed_jobs(token: str, repo: str, run_id: int) -> List[dict]:
 
 
 class _NoAuthRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Strip Authorization header on cross-domain redirects.
-
-    GitHub's job-logs endpoint returns a 302 to a signed Azure Blob Storage
-    URL.  urllib's default handler forwards the Authorization header to Azure,
-    which rejects it with 403.  This handler drops the header when the redirect
-    target differs from the original domain.
-    """
+    """Strip Authorization when GitHub log downloads redirect to Azure."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
         if new_req is None:
             return None
-        # If redirected to a different host, strip auth
         orig_host = urllib.parse.urlparse(req.full_url).netloc
         new_host = urllib.parse.urlparse(newurl).netloc
         if orig_host != new_host:
@@ -205,7 +192,6 @@ def _get_job_logs(token: str, repo: str, job_id: int) -> str:
         opener = urllib.request.build_opener(_NoAuthRedirectHandler)
         with opener.open(req, timeout=60) as resp:
             raw = resp.read().decode(errors="replace")
-            # Return last 5000 chars (most relevant — test output is at the end)
             if len(raw) > 5000:
                 return f"...[truncated, showing last 5000 chars]\n{raw[-5000:]}"
             return raw
@@ -229,11 +215,6 @@ def _emit_progress(ctx: ToolContext, text: str):
         "ts": utc_now_iso(),
     })
 
-
-# ---------------------------------------------------------------------------
-# Tool handler
-# ---------------------------------------------------------------------------
-
 def _run_ci_tests(ctx: ToolContext, wait: bool = True, timeout_minutes: int = 15) -> str:
     """Push current branch and trigger full CI matrix (3 OS). Optionally wait for results."""
     try:
@@ -248,10 +229,9 @@ def _run_ci_tests(ctx: ToolContext, wait: bool = True, timeout_minutes: int = 15
     if branch == "HEAD":
         return "⚠️ CI_BRANCH_INVALID: detached HEAD state. Check out a branch first (e.g. `git checkout ouroboros`)."
 
-    # Verify origin matches GITHUB_REPO to prevent pushing to unintended remote
+    # Refuse pushes when origin and GITHUB_REPO disagree.
     try:
         origin_url = run_cmd(["git", "remote", "get-url", "origin"], cwd=repo_dir).strip()
-        # Extract owner/repo from https://github.com/owner/repo.git or git@github.com:owner/repo
         m = re.search(r"github\.com[/:](.+)", origin_url)
         if m:
             origin_slug = m.group(1).strip().rstrip("/")
@@ -263,7 +243,6 @@ def _run_ci_tests(ctx: ToolContext, wait: bool = True, timeout_minutes: int = 15
                     f"but GITHUB_REPO is '{repo}'. Fix in Settings or update git remote."
                 )
         elif "github.com" not in origin_url:
-            # Non-GitHub remote — fail closed, don't push to unknown host
             return (
                 f"⚠️ CI_REMOTE_MISMATCH: git origin '{origin_url}' is not a GitHub remote. "
                 f"GITHUB_REPO is '{repo}'. CI dispatch requires GitHub."
@@ -271,13 +250,11 @@ def _run_ci_tests(ctx: ToolContext, wait: bool = True, timeout_minutes: int = 15
     except Exception:
         pass  # No origin configured — push will fail naturally
 
-    # Step 1: Push current branch
     _emit_progress(ctx, f"📤 Pushing {branch} to origin...")
     ok, push_msg = _push_branch(repo_dir, branch)
     if not ok:
         return f"⚠️ CI_PUSH_FAILED: {push_msg}"
 
-    # Step 2: Find workflow
     workflow_id = _find_workflow_id(token, repo)
     if not workflow_id:
         return (
@@ -285,7 +262,6 @@ def _run_ci_tests(ctx: ToolContext, wait: bool = True, timeout_minutes: int = 15
             "Push the workflow file first, then retry."
         )
 
-    # Step 3: Trigger workflow_dispatch (full matrix)
     started_after = utc_now_iso().replace("+00:00", "Z")
     _emit_progress(ctx, f"🚀 Triggering full CI matrix on {branch} ({sha[:8]})...")
     ok, trigger_msg = _trigger_workflow(token, repo, workflow_id, branch)
@@ -298,7 +274,6 @@ def _run_ci_tests(ctx: ToolContext, wait: bool = True, timeout_minutes: int = 15
             f"Check results at: https://github.com/{repo}/actions"
         )
 
-    # Step 4: Poll for results
     _emit_progress(ctx, "⏳ Waiting for CI results (full 3-OS matrix)...")
     timeout_sec = min(max(timeout_minutes, 1), 30) * 60
     result = _poll_workflow_run(token, repo, branch, sha, started_after, ctx, timeout_sec,
@@ -321,7 +296,6 @@ def _run_ci_tests(ctx: ToolContext, wait: bool = True, timeout_minutes: int = 15
             f"Details: {url}"
         )
 
-    # CI failed — get details
     lines = [
         f"❌ CI FAILED (conclusion: {conclusion})",
         f"Branch: {branch} | SHA: {sha[:8]}",
@@ -339,7 +313,6 @@ def _run_ci_tests(ctx: ToolContext, wait: bool = True, timeout_minutes: int = 15
                     lines.append(f"Failed steps: {', '.join(job['failed_steps'])}")
                 lines.append(f"URL: {job['url']}")
 
-                # Download logs using job ID from _get_failed_jobs
                 if job.get("id"):
                     log_text = _get_job_logs(token, repo, job["id"])
                     if log_text:
@@ -348,11 +321,6 @@ def _run_ci_tests(ctx: ToolContext, wait: bool = True, timeout_minutes: int = 15
             lines.append("No failed job details available.")
 
     return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
-# Registration
-# ---------------------------------------------------------------------------
 
 def get_tools() -> List[ToolEntry]:
     return [

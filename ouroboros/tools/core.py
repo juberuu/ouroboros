@@ -1,4 +1,4 @@
-"""File tools: repo_read, repo_list, data_read, data_list, data_write, code_search, codebase_digest."""
+"""File/data tools plus code search and digest helpers."""
 
 from __future__ import annotations
 
@@ -36,20 +36,12 @@ _SKILL_OWNER_STATE_FILENAMES = frozenset({
     "clawhub.json",
     "self_authored.json",
     "auth_token.json",
-    # v5.7.0: isolated dependency install state/fingerprint. If agents can
-    # forge ``deps.json`` to {"status":"installed"} they can bypass the
-    # new dependency enable gate. Treat it as owner/lifecycle state.
+    # Owner/lifecycle state: forged deps.json would bypass dependency gates.
     "deps.json",
 })
 
-# v5.7.0: provenance / control-plane sidecars that live INSIDE a payload
-# directory (``data/skills/<bucket>/<skill>/``) but are owned by the
-# launcher/marketplace pipeline, not by the skill author. Any tool that
-# accepts arbitrary user-supplied paths (data_write, file_browser_api
-# delete/upload, heal-mode write check) consults
-# ``is_skill_control_plane_path`` to refuse writes to these markers.
-# Pre-v5.7.0 these names were only protected in heal mode, leaving normal
-# tool flows free to overwrite provenance.
+# Payload-local provenance sidecars are launcher/marketplace-owned, not
+# skill-author-editable. Generic write/delete/upload paths must block them.
 _SELF_AUTHORED_MARKER = ".self_authored.json"
 
 
@@ -174,22 +166,7 @@ def _is_skill_owner_state_target(target: pathlib.Path, data_root: pathlib.Path) 
 
 
 def is_skill_control_plane_path(target: pathlib.Path, data_root: pathlib.Path) -> bool:
-    """Return True if ``target`` is a skill provenance / control-plane
-    file that must NEVER be edited via generic file-write tooling.
-
-    Two surfaces qualify:
-
-    1. ``data/state/skills/<skill>/{enabled,grants,review,clawhub}.json``
-       (launcher-owned trust state — already covered by
-       ``_is_skill_owner_state_target`` for back-compat callers).
-    2. ``data/skills/<bucket>/<skill>/`` payload sidecars that the
-       launcher / marketplace pipelines own:
-       ``.clawhub.json``, ``.ouroboroshub.json``, ``SKILL.openclaw.md``,
-       ``.seed-origin`` (case-insensitive on the filename).
-
-    Symlinks are resolved so a payload-local symlink like
-    ``notes.txt -> .clawhub.json`` still trips the guard.
-    """
+    """Return True for skill owner/provenance files blocked from generic writes."""
     if _is_skill_owner_state_target(target, data_root):
         return True
 
@@ -199,7 +176,7 @@ def is_skill_control_plane_path(target: pathlib.Path, data_root: pathlib.Path) -
         except (OSError, ValueError):
             return False
         parts = rel.parts
-        # ``skills/<bucket>/<skill>/<filename>`` = 4 parts.
+        # skills/<bucket>/<skill>/<filename> has at least 4 parts.
         if len(parts) < 4:
             return False
         if parts[0].lower() != "skills":
@@ -214,10 +191,7 @@ def is_skill_control_plane_path(target: pathlib.Path, data_root: pathlib.Path) -
     if _matches_payload(target):
         return True
 
-    # Resolve symlinks so a payload-local symlink or benign-looking path
-    # like ``notes.txt -> .clawhub.json`` still trips the guard. Pre-v5.7.0
-    # review found our first implementation checked basename before
-    # resolving, which missed this exact shape.
+    # Resolve symlinks so benign-looking paths to protected sidecars trip the guard.
     try:
         resolved = pathlib.Path(target).resolve(strict=False)
     except OSError:
@@ -225,10 +199,7 @@ def is_skill_control_plane_path(target: pathlib.Path, data_root: pathlib.Path) -
     if _matches_payload(resolved):
         return True
 
-    # Hardlink/inode defense: if ``target`` exists and points to the same
-    # inode as a protected sidecar in the same payload directory, a benign
-    # basename would otherwise bypass the name-based guard. Samefile is
-    # the portable API here (works on APFS/NTFS case-insensitive FS too).
+    # Hardlink/inode defense for benign basenames pointing at protected sidecars.
     try:
         if not pathlib.Path(target).exists():
             return False
@@ -277,14 +248,7 @@ _MEMORY_AT_DRIVE_MEMORY = frozenset({
 
 
 def _repo_read(ctx: ToolContext, path: str, max_lines: int = 2000, start_line: int = 1) -> str:
-    """Read a file from the repo, optionally slicing to a line range.
-
-    When the requested path is a known memory artifact (identity.md,
-    scratchpad.md, etc.) at the repo root level, return a hint rather than
-    letting an opaque ENOENT scroll past. These files live at
-    ``data_root/memory/``; some are already present in context, and all raw
-    memory files should be read through ``data_read`` rather than ``repo_read``.
-    """
+    """Read a repo file; root-level memory names return a data_read hint."""
     try:
         content = read_text(ctx.repo_path(path))
     except FileNotFoundError:
@@ -332,15 +296,7 @@ def _normalize_data_read_path(ctx: ToolContext, path: str) -> str:
 
 
 def _data_read(ctx: ToolContext, path: str, max_lines: int = 2000, start_line: int = 1) -> str:
-    """Read a UTF-8 text file from the drive, optionally slicing lines.
-
-    Paths that include the drive_root prefix (e.g.
-    ``.tmp-data-qwen-coder-next/data/memory/identity.md`` or the absolute
-    ``/Users/.../data/memory/...``) used to silently fail with ENOENT
-    because ``drive_path()`` prepends drive_root again, producing a doubled
-    path. Strip the duplicate prefix when we recognize one so the call works
-    rather than burning a round on a confusing path-doubling error.
-    """
+    """Read a drive text file; duplicate drive_root prefixes are stripped."""
     task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
     norm = _normalize_data_read_path(ctx, path)
     if task_constraint and task_constraint.mode == "skill_repair" and task_constraint.payload_root:
@@ -400,10 +356,7 @@ def _data_write(
     bucket: str = "",
     skill_name: str = "",
 ) -> str:
-    # When the caller supplies bucket+skill_name args, synthesize a
-    # skill_repair-flavoured TaskConstraint so the existing payload-confined
-    # write flow handles the resolution. This is the light-mode short-form
-    # path described in DEVELOPMENT.md (Skill Repair Task Constraints).
+    # bucket+skill_name synthesize a payload-confined skill_repair constraint.
     short_form = decide_payload_short_form(
         bucket=bucket,
         skill_name=skill_name,
@@ -418,9 +371,7 @@ def _data_write(
     redirect_err = cross_skill_redirect_error(existing_tc, synth)
     if redirect_err:
         return f"⚠️ SKILL_REDIRECT_BLOCKED: {redirect_err}"
-    # Real skill_repair task_constraint wins over a synthesized one — repair
-    # confinement is sticky. Cross-skill mismatch is already blocked above; a
-    # matching synth is redundant here.
+    # Real skill_repair confinement wins over synthesized short-form context.
     if existing_tc and existing_tc.mode == "skill_repair":
         task_constraint = existing_tc
     else:
@@ -434,19 +385,9 @@ def _data_write(
     else:
         explicit_skill_target = _data_skill_path(path, pathlib.Path(ctx.drive_root))
         p = explicit_skill_target if explicit_skill_target is not None else ctx.drive_path(write_path)
-    # v5.1.2 elevation ratchet defense-in-depth: settings.json is owner-only.
-    # The chokepoint in ``ouroboros.config.save_settings`` already refuses
-    # disk-level elevation; blocking ``data_write`` here turns the whole
-    # class of attempts into a clear tool-level error.
-    #
-    # The match is inode-aware (``Path.samefile``) so it handles symlinks,
-    # hardlinks, and case-insensitive filesystems (macOS APFS / Windows NTFS
-    # — ``os.path.normcase`` is a no-op on darwin, so a string-equality
-    # compare against the resolved path would let ``data_write("Settings.json",
-    # ...)`` bypass on darwin even though APFS routes both names to the same
-    # inode). For not-yet-existing paths ``samefile`` is unavailable; we
-    # fall back to a parent-resolve + case-insensitive name compare which
-    # covers the same-directory case-variant attack.
+    # Defense-in-depth: settings.json is owner-only. Use inode-aware matching
+    # for symlinks/hardlinks/case-insensitive APFS/NTFS, with a fallback for
+    # not-yet-existing case variants.
     from ouroboros import config as _cfg
     target_path = pathlib.Path(p)
     settings_path = pathlib.Path(_cfg.SETTINGS_PATH)
@@ -492,12 +433,7 @@ def _data_write(
             "the skill payload under data/skills/ and use review_skill, the "
             "Skills UI toggle, or the desktop launcher grant flow."
         )
-    # v5.7.0: extend the control-plane block to payload-side provenance
-    # sidecars (.clawhub.json / .ouroboroshub.json / SKILL.openclaw.md
-    # / .seed-origin) for ALL data_write calls, not just heal mode. The
-    # marketplace adapter and launcher own these markers; rewriting them
-    # via generic tools could launder provenance or detach a launcher-
-    # seeded skill from its update lane.
+    # Block marketplace/launcher sidecars for every data_write path, not only heal mode.
     if is_skill_control_plane_path(lexical_target, data_root) or is_skill_control_plane_path(target_path, data_root):
         return (
             "⚠️ DATA_WRITE_BLOCKED: marketplace provenance and launcher "
@@ -573,11 +509,6 @@ def _data_write(
         result += f"\n⚠️ SKILL_SHORT_FORM_IGNORED: {short_form.ignored_reason}."
     return result
 
-
-# ---------------------------------------------------------------------------
-# Send photo to owner
-# ---------------------------------------------------------------------------
-
 _MAX_PHOTO_FILE_BYTES = 10 * 1024 * 1024  # 10 MB
 
 
@@ -596,11 +527,7 @@ def _detect_image_mime(data: bytes) -> str:
 
 def _send_photo(ctx: ToolContext, file_path: str = "", image_base64: str = "",
                 caption: str = "") -> str:
-    """Send an image to the owner's chat.
-
-    Preferred: file_path — reads a local image file.
-    Legacy:    image_base64 — accepts raw base64 string or __last_screenshot__.
-    """
+    """Queue an owner-chat image from a file or legacy base64 payload."""
     if not ctx.current_chat_id:
         return "⚠️ No active chat — cannot send photo."
 
@@ -641,11 +568,6 @@ def _send_photo(ctx: ToolContext, file_path: str = "", image_base64: str = "",
     })
     return "OK: photo queued for delivery to owner."
 
-
-# ---------------------------------------------------------------------------
-# Code search
-# ---------------------------------------------------------------------------
-
 _SEARCH_SKIP_DIRS = frozenset({
     ".git", "__pycache__", "node_modules", ".venv", "venv",
     ".pytest_cache", ".mypy_cache", ".tox", "build", "dist",
@@ -667,7 +589,7 @@ _MAX_FILE_SIZE_BYTES = 1024 * 1024  # 1 MB — skip huge files
 
 
 def _is_search_skippable(path: pathlib.Path) -> bool:
-    """Return True if the file should be skipped during code search."""
+    """Return True for files excluded from code_search."""
     name = path.name
     for glob_pat in _SEARCH_SKIP_GLOBS:
         if fnmatch.fnmatch(name, glob_pat):
@@ -683,13 +605,7 @@ def _is_search_skippable(path: pathlib.Path) -> bool:
 def _code_search(ctx: ToolContext, query: str, path: str = ".",
                  regex: bool = False, max_results: int = 200,
                  include: str = "") -> str:
-    """Search for a pattern in the repository.
-
-    Literal search by default.  Set regex=True for regular expressions.
-    ``path`` scopes the search to a subdirectory (relative to repo root).
-    ``include`` filters by glob pattern (e.g. "*.py").
-    ``max_results`` caps the number of returned matches (default/max 200).
-    """
+    """Search repo text with optional regex, path, glob, and result cap."""
     if not query:
         return "⚠️ SEARCH_ERROR: query is required."
 
@@ -699,7 +615,6 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
     if not search_root.exists():
         return f"⚠️ SEARCH_ERROR: path not found: {path}"
 
-    # Compile the pattern
     try:
         if regex:
             pattern = re.compile(query)
@@ -713,13 +628,12 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
     truncated = False
 
     for dirpath, dirnames, filenames in os.walk(str(search_root)):
-        # Prune skipped directories in-place
+        # Prune skipped dirs in-place.
         dirnames[:] = [d for d in sorted(dirnames) if d not in _SEARCH_SKIP_DIRS]
 
         for fname in sorted(filenames):
             fp = pathlib.Path(dirpath) / fname
 
-            # Apply include filter
             if include and not fnmatch.fnmatch(fname, include):
                 continue
 
@@ -753,11 +667,6 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
         header += f" — truncated at {max_results} results"
     return header + "\n\n" + "\n".join(matches)
 
-
-# ---------------------------------------------------------------------------
-# Codebase digest
-# ---------------------------------------------------------------------------
-
 _SKIP_DIRS = frozenset({
     ".git", "__pycache__", "node_modules", ".venv", "venv",
     ".pytest_cache", ".mypy_cache", ".tox", "build", "dist",
@@ -765,7 +674,7 @@ _SKIP_DIRS = frozenset({
 
 
 def _extract_python_symbols(file_path: pathlib.Path) -> Tuple[List[str], List[str]]:
-    """Extract class and function names from a Python file using AST."""
+    """Extract Python class/function names with AST."""
     try:
         code = file_path.read_text(encoding="utf-8")
         tree = ast.parse(code, filename=str(file_path))
@@ -783,7 +692,7 @@ def _extract_python_symbols(file_path: pathlib.Path) -> Tuple[List[str], List[st
 
 
 def _codebase_digest(ctx: ToolContext) -> str:
-    """Generate a compact digest of the codebase: files, sizes, classes, functions."""
+    """Generate a compact file/symbol digest for the codebase."""
     repo_dir = ctx.repo_dir
     py_files: List[pathlib.Path] = []
     md_files: List[pathlib.Path] = []
@@ -807,7 +716,6 @@ def _codebase_digest(ctx: ToolContext) -> str:
     total_functions = 0
     sections: List[str] = []
 
-    # Python files
     for pf in py_files:
         try:
             lines = pf.read_text(encoding="utf-8").splitlines()
@@ -832,7 +740,6 @@ def _codebase_digest(ctx: ToolContext) -> str:
             log.debug(f"Failed to process Python file {pf} in codebase_digest", exc_info=True)
             pass
 
-    # Markdown files
     for mf in md_files:
         try:
             line_count = len(mf.read_text(encoding="utf-8").splitlines())
@@ -843,7 +750,6 @@ def _codebase_digest(ctx: ToolContext) -> str:
             log.debug(f"Failed to process markdown file {mf} in codebase_digest", exc_info=True)
             pass
 
-    # Other config files (just names + sizes)
     for of in other_files:
         try:
             line_count = len(of.read_text(encoding="utf-8").splitlines())
@@ -858,21 +764,11 @@ def _codebase_digest(ctx: ToolContext) -> str:
     header = f"Codebase Digest ({total_files} files, {total_lines} lines, {total_functions} functions)"
     return header + "\n" + "\n".join(sections)
 
-
-# ---------------------------------------------------------------------------
-# forward_to_worker — LLM-initiated message routing to worker tasks
-# ---------------------------------------------------------------------------
-
 def _forward_to_worker(ctx: ToolContext, task_id: str, message: str) -> str:
     """Forward a message to a running worker task's mailbox."""
     from ouroboros.owner_inject import write_owner_message
     write_owner_message(ctx.drive_root, message, task_id=task_id, msg_id=uuid.uuid4().hex)
     return f"Message forwarded to task {task_id}"
-
-
-# ---------------------------------------------------------------------------
-# Tool registration
-# ---------------------------------------------------------------------------
 
 def get_tools() -> List[ToolEntry]:
     return [

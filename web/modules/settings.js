@@ -244,12 +244,7 @@ function collectSecretValue(id, body) {
     if (value && !value.includes('...')) body[settingKey] = value;
 }
 
-// Suggestion pills for the model picker.  Should include every default
-// shipped in ``ouroboros/config.py::SETTINGS_DEFAULTS`` for the four
-// model lanes (main / code / light / fallback) so a future config bump
-// does not silently strand the UI on a stale id. Extra direct-provider
-// variants (``openai::gpt-5.5``, etc.) stay as useful pills even when
-// they are not the OpenRouter default.
+// Fallback picker pills mirror config defaults plus useful direct-provider ids.
 const SETTINGS_FALLBACK_MODELS = [
     'anthropic::claude-opus-4-6',
     'anthropic::claude-sonnet-4-6',
@@ -279,10 +274,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
     bindSecretInputs(page);
     bindEffortSegments(page);
     bindLocalModelControls({ state });
-    // Populate the About sub-tab version label from /api/health so the
-    // existing #nav-version short label and the in-Settings detailed version
-    // string stay consistent. The fetch is best-effort — if it fails the
-    // label simply remains empty rather than blocking settings load.
+    // Best-effort About version from /api/health.
     apiFetch('/api/health')
         .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
         .then((d) => {
@@ -293,11 +285,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
     let currentSettings = {};
     let claudeCodePollStarted = false;
     let extensionRefreshPending = false;
-    // v4.33.1 status_label priority fix: even when the user has not configured
-    // ANTHROPIC_API_KEY, we still surface the runtime card when the backend
-    // reports status="error" (e.g. SDK below baseline). Otherwise a version-gate
-    // failure is silently hidden until the user adds a key, which defeats the
-    // whole point of prioritizing error over no_api_key in `status_label`.
+    // Runtime errors must surface even before ANTHROPIC_API_KEY is configured.
     let claudeRuntimeHasError = false;
     let settingsLoaded = false;
     let settingsBaseline = '';
@@ -314,9 +302,6 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
     }
 
     function shouldShowClaudeRuntimeCard() {
-        // Show when the user has configured an Anthropic key, OR when the
-        // backend has reported a concrete runtime error that the user needs
-        // to see and repair (e.g. SDK below baseline, bundled CLI missing).
         return anthropicKeyConfigured() || claudeRuntimeHasError;
     }
 
@@ -394,8 +379,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         const installed = Boolean(payload.installed);
         const busy = Boolean(payload.busy);
         const error = String(payload.error || '').trim();
-        // Track backend error state so `shouldShowClaudeRuntimeCard` can
-        // surface the card even without a configured API key.
+        // Backend error state controls visibility without an API key.
         claudeRuntimeHasError = Boolean(error);
         const message = String(payload.message || '').trim()
             || (ready ? 'Claude runtime ready.' : (installed ? 'Claude runtime available but not ready.' : 'Claude runtime not available.'));
@@ -415,9 +399,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
     }
 
     async function refreshClaudeCodeStatus() {
-        // Always poll the backend — status errors (e.g. SDK below baseline) must
-        // surface even without a configured API key. The backend distinguishes
-        // "no_api_key" from "error" via the v4.33.1 `status_label` priority fix.
+        // Poll even without API key; backend separates no_api_key from errors.
         try {
             const resp = await apiFetch('/api/claude-code/status', { cache: 'no-store' });
             const data = await resp.json().catch(() => ({}));
@@ -451,8 +433,6 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         claudeCodePollStarted = true;
         refreshClaudeCodeStatus();
         setInterval(() => {
-            // Poll unconditionally so a below-baseline SDK stays visible even
-            // after the user clears the Anthropic key.
             refreshClaudeCodeStatus();
         }, 3000);
     }
@@ -556,10 +536,6 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         settingsLoaded = true;
         markSettingsDirty = updateSettingsDirtyState;
     syncSettingsLoadState();
-        // Always start polling so a below-baseline SDK surfaces even before
-        // the user sets ANTHROPIC_API_KEY. `refreshClaudeCodeStatus` is now
-        // unconditional, and `shouldShowClaudeRuntimeCard` uses the runtime
-        // error signal to decide visibility.
         startClaudeCodePolling();
     }
 
@@ -622,9 +598,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             OUROBOROS_EFFORT_SCOPE_REVIEW: byId('s-effort-scope-review').value,
             OUROBOROS_REVIEW_ENFORCEMENT: byId('s-review-enforcement').value,
             OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS: byId('s-auto-grant-reviewed-skills')?.checked ? 'true' : 'false',
-            // OUROBOROS_RUNTIME_MODE is owner-only: /api/settings still
-            // ignores it, while desktop mode changes go through the
-            // launcher-native confirmation bridge after normal settings save.
+            // Runtime mode is owner-only; native bridge applies it after save.
             OUROBOROS_SKILLS_REPO_PATH: byId('s-skills-repo-path').value.trim(),
             OUROBOROS_CLAWHUB_REGISTRY_URL: byId('s-clawhub-registry-url')?.value.trim() || '',
             OUROBOROS_MAX_WORKERS: readInt('s-workers', 5),

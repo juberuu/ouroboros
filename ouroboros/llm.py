@@ -1,9 +1,4 @@
-"""
-Ouroboros — LLM client.
-
-The only module that communicates with LLM APIs (OpenRouter, direct providers, + optional local).
-Contract: chat(), default_model(), available_models(), add_usage().
-"""
+"""LLM client for OpenRouter, direct providers, and optional local inference."""
 
 from __future__ import annotations
 
@@ -146,12 +141,7 @@ def add_usage(total: Dict[str, Any], usage: Dict[str, Any]) -> None:
 
 
 def fetch_openrouter_pricing() -> Dict[str, Tuple[float, float, float]]:
-    """
-    Fetch current pricing from OpenRouter API.
-
-    Returns dict of {model_id: (input_per_1m, cached_per_1m, output_per_1m)}.
-    Returns empty dict on failure.
-    """
+    """Fetch OpenRouter pricing as model_id -> (input, cached, output per 1M)."""
     import logging
     log = logging.getLogger("ouroboros.llm")
 
@@ -169,7 +159,6 @@ def fetch_openrouter_pricing() -> Dict[str, Tuple[float, float, float]]:
         data = resp.json()
         models = data.get("data", [])
 
-        # Prefixes we care about
         prefixes = ("anthropic/", "openai/", "google/", "meta-llama/", "x-ai/", "qwen/")
 
         pricing_dict = {}
@@ -182,21 +171,18 @@ def fetch_openrouter_pricing() -> Dict[str, Tuple[float, float, float]]:
             if not pricing or not pricing.get("prompt"):
                 continue
 
-            # OpenRouter pricing is in dollars per token (raw values)
             raw_prompt = float(pricing.get("prompt", 0))
             raw_completion = float(pricing.get("completion", 0))
             raw_cached_str = pricing.get("input_cache_read")
             raw_cached = float(raw_cached_str) if raw_cached_str else None
 
-            # Convert to per-million tokens
             prompt_price = round(raw_prompt * 1_000_000, 4)
             completion_price = round(raw_completion * 1_000_000, 4)
             if raw_cached is not None:
                 cached_price = round(raw_cached * 1_000_000, 4)
             else:
-                cached_price = round(prompt_price * 0.1, 4)  # fallback: 10% of prompt
+                cached_price = round(prompt_price * 0.1, 4)  # fallback cache discount
 
-            # Sanity check: skip obviously wrong prices
             if prompt_price > 1000 or completion_price > 1000:
                 log.warning(f"Skipping {model_id}: prices seem wrong (prompt={prompt_price}, completion={completion_price})")
                 continue
@@ -214,11 +200,7 @@ def fetch_openrouter_pricing() -> Dict[str, Tuple[float, float, float]]:
 class LLMClient:
     """LLM API wrapper. Routes calls to OpenRouter or a local llama-cpp-python server."""
 
-    # Per-process cache of OpenRouter model capabilities. Populated lazily on
-    # the first request that needs it, then reused for the lifetime of the
-    # process. A missing entry means "unknown" — callers treat that as broad
-    # support and do NOT strip any parameters (zero-regression fallback when
-    # the capabilities endpoint is unreachable or a model isn't listed).
+    # Missing capabilities mean "unknown": keep kwargs instead of stripping them.
     _SUPPORTED_PARAMS_CACHE: Dict[str, set] = {}
     _SUPPORTED_PARAMS_FETCHED: bool = False
 
@@ -241,13 +223,7 @@ class LLMClient:
 
     @classmethod
     def _fetch_openrouter_capabilities(cls) -> None:
-        """Populate _SUPPORTED_PARAMS_CACHE via OpenRouter's /models endpoint.
-
-        Runs at most once per process. On any failure the cache remains empty,
-        which means every ``_get_supported_parameters`` lookup returns ``None``
-        and callers fall back to the pre-v4.33 behavior of not stripping any
-        kwargs.
-        """
+        """Populate _SUPPORTED_PARAMS_CACHE once from OpenRouter /models."""
         cls._SUPPORTED_PARAMS_FETCHED = True
         try:
             import requests
@@ -271,13 +247,7 @@ class LLMClient:
 
     @classmethod
     def _get_supported_parameters(cls, model_id: str) -> Optional[set]:
-        """Return the set of parameter names the given OpenRouter model accepts.
-
-        Returns ``None`` when we don't know — caller should treat this as broad
-        support (no parameter stripping). The first call triggers a one-shot
-        fetch of every model's capabilities; subsequent calls use the in-memory
-        cache populated by that fetch.
-        """
+        """Return supported parameter names, or None when unknown/no stripping."""
         if not cls._SUPPORTED_PARAMS_FETCHED:
             cls._fetch_openrouter_capabilities()
         return cls._SUPPORTED_PARAMS_CACHE.get(model_id)
@@ -492,12 +462,7 @@ class LLMClient:
 
     @staticmethod
     def _strip_cache_control(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Strip cache_control from message content blocks (OpenRouter/Anthropic-only).
-
-        For tool-role messages whose content is a list of blocks, also flattens
-        the content back to a plain string, because OpenAI and compatible providers
-        expect tool content as a string (not an array of blocks).
-        """
+        """Strip OpenRouter-only cache_control and flatten tool content blocks."""
         import copy
         cleaned = copy.deepcopy(messages)
         for msg in cleaned:
@@ -505,7 +470,6 @@ class LLMClient:
             if not isinstance(content, list):
                 continue
             if msg.get("role") == "tool":
-                # Flatten back to plain string for providers that require it
                 msg["content"] = "".join(
                     block.get("text", "") if isinstance(block, dict) else str(block)
                     for block in content
@@ -521,7 +485,7 @@ class LLMClient:
         generation_id: str,
         target: Optional[Dict[str, Any]] = None,
     ) -> Optional[float]:
-        """Fetch cost from OpenRouter Generation API as fallback."""
+        """Fetch cost from OpenRouter Generation API when usage lacks it."""
         active_target = target or self._resolve_remote_target("openrouter::")
         if not active_target.get("supports_generation_cost"):
             return None
@@ -536,7 +500,7 @@ class LLMClient:
                 cost = data.get("total_cost") or data.get("usage", {}).get("cost")
                 if cost is not None:
                     return float(cost)
-            # Generation might not be ready yet — retry once after short delay
+            # Generation cost can lag the chat response; retry once.
             time.sleep(0.5)
             resp = requests.get(url, headers={"Authorization": f"Bearer {api_key}"}, timeout=5)
             if resp.status_code == 200:
@@ -561,17 +525,7 @@ class LLMClient:
         temperature: Optional[float] = None,
         no_proxy: bool = False,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """Single LLM call. Returns: (response_message_dict, usage_dict with cost).
-
-        When use_local=True, routes to the local llama-cpp-python server
-        and strips OpenRouter-specific parameters (reasoning, provider, cache_control).
-
-        When no_proxy=True, the underlying httpx transport is built with
-        trust_env=False and an empty mounts map, bypassing OS-level and
-        env-var proxy detection.  Use this in contexts where the process
-        was forked from a multithreaded parent (e.g. macOS app-bundle
-        workers) to avoid a SIGSEGV in SCDynamicStoreCopyProxiesWithOptions.
-        """
+        """Single LLM call returning (message, usage); no_proxy avoids macOS fork proxy crashes."""
         if use_local:
             return self._chat_local(messages, tools, max_tokens, tool_choice)
 
@@ -592,16 +546,7 @@ class LLMClient:
         temperature: Optional[float] = None,
         no_proxy: bool = False,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """Async remote chat used by review/concurrent callers.
-
-        When no_proxy=True, bypasses OS-level and env-var proxy detection via
-        trust_env=False.  This is required in forked worker processes on macOS
-        to avoid a SIGSEGV in SCDynamicStoreCopyProxiesWithOptions.
-
-        Applies to both the Anthropic path (synchronous requests.Session run in
-        a thread) and the OpenAI-compatible async path (httpx.AsyncClient with
-        trust_env=False and empty mounts).
-        """
+        """Async remote chat; no_proxy keeps forked macOS workers off OS proxy APIs."""
         if tools:
             raise ValueError("chat_async does not support tool calls")
         target = self._resolve_remote_target(model)
@@ -689,7 +634,6 @@ class LLMClient:
         client = self._get_local_client()
 
         clean_messages = self._strip_cache_control(messages)
-        # Flatten multipart content blocks to plain strings (local server doesn't support arrays)
         local_max = min(max_tokens, 2048)
         ctx_len = 0
         try:
@@ -768,29 +712,7 @@ class LLMClient:
 
     @staticmethod
     def _strip_reasoning_wrappers(text: str):
-        """Remove leading reasoning wrapper tags and return (cleaned_text, reasoning_text).
-
-        Strips ``<think>...</think>`` and ``<reasoning>...</reasoning>`` blocks
-        (Qwen3 style) from the **outer envelope** of *text* — i.e. from the
-        portion that precedes the first ``<tool_call>`` block.  This avoids
-        accidentally altering JSON payloads inside ``<tool_call>...</tool_call>``
-        that may themselves contain literal ``<think>`` or ``<reasoning>`` text
-        as argument values.
-
-        Strategy:
-        1. Split *text* at the first ``<tool_call>`` occurrence.
-        2. Strip reasoning wrappers only from the prefix (part before the first
-           ``<tool_call>``).
-        3. Concatenate the stripped prefix with the unchanged tool-call section.
-
-        Returns:
-            (cleaned_text, reasoning_text) where:
-              - cleaned_text is *text* with reasoning wrappers removed from the
-                prefix only, surrounding whitespace stripped.
-              - reasoning_text is the concatenated inner content of all reasoning
-                blocks found in the prefix (stripped), or an empty string when
-                no blocks were found.
-        """
+        """Strip leading think/reasoning wrappers before the first <tool_call> only."""
         # Split at first <tool_call> so we never touch JSON inside tool payloads.
         tool_call_start = re.search(r"<tool_call\b", text, re.IGNORECASE)
         if tool_call_start:
@@ -822,38 +744,18 @@ class LLMClient:
         msg: Dict[str, Any],
         allowed_tool_names: Optional[Set[str]] = None,
     ) -> Dict[str, Any]:
-        """Parse <tool_call> XML tags from content into structured tool_calls.
-
-        Works around llama-cpp-python not parsing Qwen/Hermes-style tool calls
-        (https://github.com/abetlen/llama-cpp-python/issues/1784).
-
-        Qwen3 models with ``enable_thinking=True`` (default) wrap their chain-of-
-        thought in ``<think>...</think>`` before emitting the actual ``<tool_call>``
-        block.  This method strips the reasoning wrapper first, then applies the
-        strict full-match safety guard so responses that contain genuine prose
-        alongside tool call text are still rejected.
-
-        Contract: when tool calls are successfully parsed, ``msg["content"]`` is
-        set to the extracted reasoning text (may be an empty string).  Callers in
-        ``loop.py`` check ``content`` truthiness — non-empty reasoning text will
-        surface as a progress/reasoning note in the UI, which is the intended
-        behaviour for thinking models.
-        """
+        """Parse local <tool_call> XML output after a strict full-match guard."""
         content = str(msg.get("content", "") or "")
         stripped_raw = content.strip()
         if not stripped_raw:
             return msg
 
-        # Phase 1: strip known reasoning wrappers (<think>, <reasoning>).
-        # Only these explicit tag pairs are removed; arbitrary prose is left.
+        # Only explicit reasoning wrappers are removed; arbitrary prose is left.
         stripped, reasoning = LLMClient._strip_reasoning_wrappers(stripped_raw)
         if not stripped:
-            # Content was only reasoning text — nothing actionable.
             return msg
 
-        # Phase 2: Safety guard — only upgrade the response when the remaining
-        # text consists solely of one or more <tool_call> blocks.  Mixed prose
-        # (without a reasoning wrapper) is left as plain text.
+        # Upgrade only pure tool-call output; mixed prose stays plain text.
         full_pattern = re.compile(
             r"^(?:\s*<tool_call>\s*\{.*?\}\s*</tool_call>\s*)+$",
             re.DOTALL,
@@ -904,10 +806,7 @@ class LLMClient:
 
         msg = dict(msg)
         msg["tool_calls"] = tool_calls
-        # Preserve reasoning text in content so loop.py can emit it as a
-        # progress/reasoning note (P1 Continuity).  Empty string when no think
-        # wrapper was present (original behaviour: content was None in that case,
-        # but an empty string is equally falsy for callers that check truthiness).
+        # Preserve reasoning text for loop progress; None/empty remains falsy.
         msg["content"] = reasoning or None
         log.info("Parsed %d local tool call(s) from text output", len(tool_calls))
         return msg
@@ -1064,10 +963,7 @@ class LLMClient:
                 if not tool_use_id:
                     raise ValueError("Anthropic direct tool result is missing tool_call_id.")
                 raw_content = msg.get("content")
-                # Anthropic direct API supports list of content blocks (including
-                # cache_control) as tool_result content, so pass through as-is.
-                # For plain strings, pass them directly. Only JSON-serialize
-                # dicts and other non-string non-list values.
+                # Anthropic accepts list tool_result content; stringify only scalars/dicts.
                 if isinstance(raw_content, list):
                     tool_result_content: Any = raw_content
                 else:
@@ -1274,8 +1170,7 @@ class LLMClient:
         if str(target.get("provider") or "") == "openai" and resolved_model.startswith("gpt-5"):
             token_limit_key = "max_completion_tokens"
         if not target.get("supports_openrouter_extensions"):
-            # Strip cache_control from message content blocks — non-OpenRouter providers
-            # (OpenAI, openai-compatible, Cloud.ru) do not accept this field.
+            # Non-OpenRouter providers do not accept cache_control.
             clean_messages = self._strip_cache_control(messages)
             kwargs: Dict[str, Any] = {
                 "model": resolved_model,
@@ -1314,17 +1209,14 @@ class LLMClient:
         if tools:
             tools_with_cache = self._sanitize_chat_completion_tools(tools)
             if tools_with_cache:
-                last_tool = {**tools_with_cache[-1]}  # copy last tool
+                last_tool = {**tools_with_cache[-1]}
                 last_tool["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
                 tools_with_cache[-1] = last_tool
             kwargs["tools"] = tools_with_cache
             kwargs["tool_choice"] = tool_choice
 
-        # Drop kwargs that this model's OpenRouter providers don't list in
-        # `supported_parameters`. Combined with `provider.require_parameters:
-        # true` (set above for anthropic/), unknown params cause a 404
-        # "No endpoints found that can handle the requested parameters".
-        # Capabilities cache returns None for unknown models → no stripping.
+        # With require_parameters, unsupported params cause OpenRouter 404s.
+        # Unknown capabilities mean no stripping.
         supported = self._get_supported_parameters(resolved_model)
         if supported is not None:
             for sampling_param in ("temperature", "top_p", "top_k"):
@@ -1342,14 +1234,7 @@ class LLMClient:
         target: Dict[str, Any],
         skip_cost_fetch: bool = False,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """Normalise a raw OpenAI-compatible response dict into (message, usage).
-
-        skip_cost_fetch=True suppresses the _fetch_generation_cost() call that
-        uses requests.get() with default proxy / OS lookup.  Set this whenever
-        the call was made inside a forked process (no_proxy=True path) to keep
-        the entire call chain free of SCDynamicStore / CFPreferences access.
-        Cost is still estimated from token counts via the local pricing table.
-        """
+        """Normalize an OpenAI-compatible response; skip_cost_fetch keeps no_proxy pure."""
         usage = resp_dict.get("usage") or {}
         choices = resp_dict.get("choices") or [{}]
         msg = (choices[0] if choices else {}).get("message") or {}
@@ -1358,19 +1243,8 @@ class LLMClient:
             prompt_details = usage.get("prompt_tokens_details") or {}
             if isinstance(prompt_details, dict) and prompt_details.get("cached_tokens"):
                 usage["cached_tokens"] = int(prompt_details["cached_tokens"])
-        # NB: LM Studio MLX does NOT emit ``cached_tokens`` anywhere in its
-        # OpenAI-compatible response (verified 2026-05-02 across
-        # ``/v1/chat/completions``, ``/api/v0/chat/completions``, and
-        # streaming with ``stream_options.include_usage=true``). The MLX
-        # backend's prefix-cache stats are written only to LM Studio's
-        # stderr/log output (e.g. ``[cache_wrapper] Prompt cache: using
-        # 70623/70821 tokens from cache``). For LM Studio targets,
-        # ``cached_tokens=0`` in events.jsonl is therefore the *correct*
-        # API-level reading even when the MLX prefix cache is hitting at
-        # >99%. If we ever need cache-hit telemetry for LM Studio, the
-        # right path is the LM Studio native ``/api/v0/chat/completions``
-        # endpoint which exposes ``stats.time_to_first_token`` —
-        # a strong cache-proxy signal — but that is its own follow-up.
+        # LM Studio MLX exposes prefix-cache hits only in stderr/logs, not
+        # OpenAI-compatible usage; cached_tokens=0 is therefore expected.
 
         if not usage.get("cache_write_tokens"):
             prompt_details_for_write = usage.get("prompt_tokens_details") or {}
@@ -1419,14 +1293,7 @@ class LLMClient:
         temperature: Optional[float] = None,
         no_proxy: bool = False,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """Send a chat request to the resolved remote provider.
-
-        When no_proxy=True a temporary one-shot httpx.Client is built with
-        ``trust_env=False`` and an empty mounts map to bypass macOS fork-safe
-        proxy detection (SCDynamicStoreCopyProxiesWithOptions).  The client is
-        closed in a finally block after the response is received to avoid
-        connection-pool leaks.  This flag does not affect other callers.
-        """
+        """Send remote chat; no_proxy uses a one-shot client and skips OS proxy lookup."""
         if target.get("provider") == "anthropic":
             return self._chat_anthropic(
                 target, messages, tools, reasoning_effort, max_tokens, tool_choice, temperature,
@@ -1440,10 +1307,7 @@ class LLMClient:
                     target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools
                 )
                 resp = _oa_client.chat.completions.create(**kwargs)
-                # Pass no_proxy=True to _normalize_remote_response so the
-                # _fetch_generation_cost fallback (which uses requests.get with
-                # default proxy / OS lookup) is skipped — it would re-introduce
-                # the same SCDynamicStore code path that causes the SIGSEGV.
+                # Skip cost fetch here; it would re-enter OS proxy lookup.
                 return self._normalize_remote_response(resp.model_dump(), target, skip_cost_fetch=True)
             finally:
                 try:
@@ -1466,22 +1330,7 @@ class LLMClient:
         max_tokens: int = 32768,
         reasoning_effort: str = "none",
     ) -> Tuple[str, Dict[str, Any]]:
-        """
-        Send a vision query to an LLM. Lightweight — no tools, no loop.
-
-        Args:
-            prompt: Text instruction for the model
-            images: List of image dicts. Each dict must have either:
-                - {"url": "https://..."} — for URL images
-                - {"base64": "<b64>", "mime": "image/png"} — for base64 images
-            model: VLM-capable model ID
-            max_tokens: Max response tokens
-            reasoning_effort: Effort level
-
-        Returns:
-            (text_response, usage_dict)
-        """
-        # Build multipart content
+        """Run a lightweight vision query; image dicts use url or base64+mime."""
         content: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
         for img in images:
             if "url" in img:

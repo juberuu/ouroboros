@@ -628,20 +628,17 @@
     background: rgba(232, 93, 111, 0.12);
 }
 
-/* Review enforcement toggle: 2 columns, advisory = amber, blocking = crimson */
+/* Review enforcement toggle: 2 columns. */
 [data-enforcement-group].settings-effort-group {
     grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-/* Phase 2 runtime-mode toggle (Light/Advanced/Pro): 3 columns. Without
-   this override the 3 buttons would fall through to the default 4-column
-   layout of .settings-effort-group and leave an empty fourth column. */
+/* Runtime-mode toggle has 3 columns, unlike the default 4-column group. */
 [data-runtime-mode-group].settings-effort-group {
     grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
-/* Generic disabled segmented-button style. Runtime mode is interactive in
-   desktop builds, but other segmented controls may still disable buttons. */
+/* Shared disabled segmented-button style. */
 .settings-effort-btn:disabled {
     cursor: not-allowed;
     opacity: 0.55;
@@ -745,12 +742,7 @@
 }
 
 @media (max-width: 640px) {
-    /* v5.7.0: revert the v5.6.0 drill-down/back-button accordion. On
-       phones the tab strip stays horizontal-scroll pills (the pre-rc.8
-       shape) so all sub-tabs are reachable in one tap, no back-out
-       round-trip. The .settings-mobile-back element stays in the DOM
-       hidden so the JS in bindSettingsTabs (still present for back-
-       compat) does not error if it queries it. */
+    /* Mobile settings keep horizontal tab pills; back element remains hidden compat. */
     .settings-shell {
         padding: 0 10px 10px;
     }

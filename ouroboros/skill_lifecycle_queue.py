@@ -1,10 +1,4 @@
-"""Global lifecycle queue for mutating skill operations.
-
-The Skills, ClawHub, and OuroborosHub surfaces can all trigger long-running
-operations that touch the same skill state plane. This module provides one
-process-local FIFO lane so install/review/dependency/enable operations do not
-race each other through unrelated HTTP handlers.
-"""
+"""Single FIFO lane for mutating skill install/review/dependency/enable work."""
 
 from __future__ import annotations
 
@@ -203,15 +197,7 @@ async def run_lifecycle_job(
     dedupe_key: str = "",
     options: LifecycleJobOptions | None = None,
 ) -> Any:
-    """Run ``runner`` through the global skill lifecycle lane.
-
-    v5.7.0: callers can pass ``progress_target`` (a :class:`JobProgressTarget`
-    box) so they can hand a thread-safe stage-message setter to the worker
-    runner. The setter rewrites this job's ``message`` field while it is
-    the active job, which the Skills/Marketplace UIs poll via
-    ``GET /api/skills/lifecycle-queue``. The setter is best-effort: it
-    no-ops once the job has finished.
-    """
+    """Run runner through the lifecycle lane with optional progress updates."""
 
     global _active
     opts = options or LifecycleJobOptions()
@@ -284,14 +270,7 @@ async def run_blocking_preserving_cancellation(
     log_label: str = "lifecycle work",
     **kwargs: Any,
 ) -> Any:
-    """Run blocking lifecycle work without releasing the lane on caller cancellation.
-
-    Python cannot safely kill a thread already inside file I/O, subprocess
-    cleanup, provider SDK code, or extension import/reconcile logic. If the
-    HTTP client disconnects while such work is running, the lifecycle lane must
-    stay occupied until the worker returns; otherwise a second mutating skill
-    operation can overlap with the first thread's side effects.
-    """
+    """Keep the lifecycle lane held until non-killable thread work returns."""
 
     task = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
     warned = False
@@ -312,10 +291,7 @@ async def run_blocking_preserving_cancellation(
             if current is not None and hasattr(current, "uncancel"):
                 while current.cancelling():  # type: ignore[attr-defined]
                     current.uncancel()  # type: ignore[attr-defined]
-            # Python <=3.10 has no cancellation counter to clear. Once the
-            # CancelledError is caught, the next shield await blocks until the
-            # worker finishes or a fresh cancellation arrives; this is covered
-            # by the cancellation-preservation tests running on Python 3.9.
+            # Python <=3.10: next shield await blocks until worker finishes.
 
 
 def run_lifecycle_job_blocking(
@@ -374,24 +350,7 @@ def run_lifecycle_job_blocking(
 
 
 class JobProgressTarget:
-    """Tiny thread-safe relay so a worker thread can update a lifecycle
-    job's ``message`` without importing this module's globals.
-
-    Use::
-
-        progress = JobProgressTarget()
-        await run_lifecycle_job(
-            ...,
-            runner=...,
-            options=LifecycleJobOptions(progress_target=progress),
-        )
-
-    The runner (or anything it spawns) calls ``progress.set("Downloading…")``
-    from a worker thread; the setter mutates the active job's ``message``
-    so subsequent ``queue_snapshot()`` calls surface live progress to the
-    UI. After the job finishes, ``release()`` flips an internal flag and
-    further ``set()`` calls become no-ops.
-    """
+    """Thread-safe relay for worker progress into the active lifecycle job."""
 
     __slots__ = ("_job", "_done")
 

@@ -1,16 +1,4 @@
-"""
-Ouroboros — Block-wise Dialogue Consolidator.
-
-Block-based episodic memory system. Reads unprocessed entries from
-chat.jsonl in BLOCK_SIZE-message chunks, creates LLM-generated summary
-blocks stored in dialogue_blocks.json.
-
-When summary block count exceeds MAX_SUMMARY_BLOCKS, the oldest blocks
-are compressed into era summaries — like human memory, older events
-become progressively more compressed while recent events keep full detail.
-
-Triggered after each task completion via daemon threads.
-"""
+"""Block-wise dialogue and scratchpad memory consolidation."""
 
 import json
 import logging
@@ -31,9 +19,6 @@ from ouroboros.platform_layer import (
 
 log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
 BLOCK_SIZE = 100                          # Messages per consolidation block
 MAX_SUMMARY_BLOCKS = 10                   # Compress into era when exceeded
 ERA_COMPRESS_COUNT = 4                    # Oldest blocks to compress per era
@@ -41,16 +26,11 @@ CONSOLIDATION_MODEL = "google/gemini-3-flash-preview"
 CONSOLIDATION_REASONING_EFFORT = "medium"
 MAX_SUMMARY_CHARS = 90000                 # Hard cap preserved from old system
 
-
-# ---------------------------------------------------------------------------
-# Block-wise chat consolidation
-# ---------------------------------------------------------------------------
-
 def should_consolidate(
     meta_path: pathlib.Path,
     chat_path: pathlib.Path,
 ) -> bool:
-    """Check if chat.jsonl has BLOCK_SIZE+ new messages since last consolidation."""
+    """Return True when chat.jsonl has enough new messages."""
     if not chat_path.exists():
         return False
     meta = _load_meta(meta_path)
@@ -68,19 +48,7 @@ def consolidate(
     llm_client: Any,
     identity_text: str = "",
 ) -> Optional[Dict[str, Any]]:
-    """
-    Block-wise chat consolidation.
-
-    Reads new messages from chat.jsonl since last_consolidated_offset,
-    groups them into BLOCK_SIZE chunks, calls LLM to create a summary
-    block for each chunk, and appends to dialogue_blocks.json.
-
-    When block count exceeds MAX_SUMMARY_BLOCKS, compresses the oldest
-    ERA_COMPRESS_COUNT blocks into a single era summary.
-
-    Uses fcntl file lock to serialize concurrent consolidation attempts.
-    Returns usage dict or None if nothing to consolidate.
-    """
+    """Consolidate new chat chunks under a file lock; returns usage or None."""
     lock_path = meta_path.parent / ".consolidation.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_fd = None
@@ -106,11 +74,6 @@ def consolidate(
                 os.close(lock_fd)
             except OSError:
                 pass
-
-# ---------------------------------------------------------------------------
-# Core block consolidation logic
-# ---------------------------------------------------------------------------
-
 def _run_block_consolidation(
     source_path: pathlib.Path,
     blocks_path: pathlib.Path,
@@ -118,12 +81,7 @@ def _run_block_consolidation(
     llm_client: Any,
     identity_text: str,
 ) -> Optional[Dict[str, Any]]:
-    """Core consolidation loop.
-
-    Reads new entries since the stored offset, processes them in BLOCK_SIZE
-    chunks, creates summary blocks via LLM, and triggers era compression
-    when the block list grows past MAX_SUMMARY_BLOCKS.
-    """
+    """Process new chat chunks and compress old blocks when needed."""
     meta = _load_meta(meta_path)
     last_offset = meta.get("last_consolidated_offset", 0)
 
@@ -213,11 +171,6 @@ def _run_block_consolidation(
              processed, len(new_blocks), len(all_blocks))
     return total_usage
 
-
-# ---------------------------------------------------------------------------
-# LLM helpers
-# ---------------------------------------------------------------------------
-
 def _create_block_summary(
     llm_client: Any,
     messages_text: str,
@@ -226,10 +179,7 @@ def _create_block_summary(
     identity_text: str,
     message_count: int,
 ) -> Tuple[str, Dict[str, Any]]:
-    """Call LLM to create a detailed block summary from a chunk of messages.
-
-    Returns (summary_text, usage_dict). On failure returns ("", {"cost": 0}).
-    """
+    """Create one summary block; returns empty text on LLM failure."""
     first_date = first_ts[:10]
     first_time = first_ts[11:16]
     last_time = last_ts[11:16]
@@ -273,12 +223,7 @@ def _compress_blocks_to_era(
     llm_client: Any,
     identity_text: str,
 ) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
-    """Compress multiple summary blocks into a single era block.
-
-    Returns (era_block, usage). era_block is None on failure — caller
-    keeps the original blocks unchanged (Bible P1: never silently
-    discard memory).
-    """
+    """Compress blocks into an era; None means keep originals (P1)."""
     start_date = blocks[0].get("range", "unknown")[:10]
     last_range = blocks[-1].get("range", "unknown")
     if " to " in last_range:
@@ -326,13 +271,8 @@ Write as Ouroboros (first person). Aim for 30-40% of original length.
         log.error("Era compression failed: %s", e, exc_info=True)
         return None, {"cost": 0}
 
-
-# ---------------------------------------------------------------------------
-# Formatting & IO helpers
-# ---------------------------------------------------------------------------
-
 def _format_entries_for_block(entries: List[Dict[str, Any]]) -> str:
-    """Format chat entries for the block summary LLM call."""
+    """Format chat entries for block-summary prompting."""
     lines = []
     for e in entries:
         ts_raw = str(e.get("ts", ""))
@@ -353,7 +293,7 @@ def _format_entries_for_block(entries: List[Dict[str, Any]]) -> str:
 
 
 def _load_blocks(path: pathlib.Path) -> List[Dict[str, Any]]:
-    """Load JSON block list from file, return [] if missing or corrupt."""
+    """Load block list, returning [] if missing/corrupt."""
     if not path.exists():
         return []
     try:
@@ -364,7 +304,7 @@ def _load_blocks(path: pathlib.Path) -> List[Dict[str, Any]]:
 
 
 def _save_blocks(path: pathlib.Path, blocks: List[Dict[str, Any]]) -> None:
-    """Write JSON block list to file with cross-platform file lock."""
+    """Write block list under a cross-platform file lock."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = None
     try:
@@ -380,11 +320,6 @@ def _save_blocks(path: pathlib.Path, blocks: List[Dict[str, Any]]) -> None:
                 os.close(fd)
             except OSError:
                 pass
-
-
-# ---------------------------------------------------------------------------
-# Shared helpers
-# ---------------------------------------------------------------------------
 
 def _load_meta(path: pathlib.Path) -> Dict[str, Any]:
     return read_json_dict(path) or {}
@@ -414,7 +349,7 @@ def _chat_log_signature(path: pathlib.Path) -> Dict[str, Any]:
 
 
 def _count_lines(path: pathlib.Path) -> int:
-    """Count non-empty lines in a file efficiently."""
+    """Count non-empty lines."""
     count = 0
     with path.open("r", encoding="utf-8") as f:
         for line in f:
@@ -424,12 +359,7 @@ def _count_lines(path: pathlib.Path) -> int:
 
 
 def _read_chat_entries(path: pathlib.Path) -> List[Dict[str, Any]]:
-    """Read ALL entries from chat.jsonl.
-
-    Filters out entries with A2A virtual chat_id values so they do not
-    pollute the agent's long-term dialogue memory. This guard is in sync with the same filter
-    in memory.py::chat_history and server_history_api.py::api_chat_history.
-    """
+    """Read chat.jsonl entries, excluding A2A virtual chat IDs."""
     if not path.exists():
         return []
     entries = []
@@ -447,18 +377,8 @@ def _read_chat_entries(path: pathlib.Path) -> List[Dict[str, Any]]:
             entries.append(entry)
     return entries
 
-
-# ---------------------------------------------------------------------------
-# Knowledge index rebuild
-# ---------------------------------------------------------------------------
-
 def _rebuild_knowledge_index(knowledge_dir: pathlib.Path) -> None:
-    """Rebuild index-full.md from all .md files in the knowledge directory.
-
-    Always rebuilds — called after scratchpad consolidation and pattern
-    register updates to keep the index current. The tool-layer
-    _update_index_entry (knowledge.py) handles incremental updates.
-    """
+    """Rebuild index-full.md after scratchpad/pattern consolidation."""
     try:
         if not knowledge_dir.exists():
             return
@@ -485,16 +405,11 @@ def _rebuild_knowledge_index(knowledge_dir: pathlib.Path) -> None:
     except Exception:
         log.warning("Failed to rebuild knowledge index", exc_info=True)
 
-
-# ---------------------------------------------------------------------------
-# Scratchpad auto-consolidation (block-aware)
-# ---------------------------------------------------------------------------
-
 SCRATCHPAD_CONSOLIDATION_THRESHOLD = 30000
 
 
 def should_consolidate_scratchpad(memory: Any) -> bool:
-    """Check if scratchpad blocks total content exceeds threshold."""
+    """Return True when scratchpad blocks exceed consolidation threshold."""
     try:
         blocks = memory.load_scratchpad_blocks()
         if len(blocks) < 3:
@@ -511,13 +426,7 @@ def consolidate_scratchpad(
     llm_client: Any,
     identity_text: str = "",
 ) -> Optional[Dict[str, Any]]:
-    """Compress oldest scratchpad blocks and extract durable insights to KB.
-
-    Operates on blocks directly — reads from scratchpad_blocks.json,
-    compresses the oldest half into a single summary block, writes back,
-    and regenerates scratchpad.md. Pre-block flat scratchpads are left for
-    manual upgrade rather than rewritten automatically.
-    """
+    """Compress oldest scratchpad blocks and extract durable KB insights."""
     blocks = memory.load_scratchpad_blocks()
 
     if len(blocks) < 3:

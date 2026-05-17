@@ -1,13 +1,4 @@
-/**
- * Ouroboros ClawHub Marketplace UI (v4.50).
- *
- * Renders inside the ``Marketplace`` sub-tab of the Skills page.
- * Talks to ``/api/marketplace/clawhub/*`` and the existing
- * ``/api/skills/<name>/{toggle,review}`` endpoints. Uses the same
- * design-system primitives (``.btn``, ``.skills-badge``, ``.muted``,
- * ``.field-note``) as the rest of the app so dark/light theme parity
- * is automatic.
- */
+/** ClawHub marketplace UI inside the Skills page. */
 
 import {
     getPending,
@@ -314,21 +305,10 @@ function showStatus(host, message, tone) {
 }
 
 
-// ---------------------------------------------------------------------------
-// Network helpers
-// ---------------------------------------------------------------------------
-//
-// ``fetchJson`` is re-exported from ``utils.js`` and owned by
-// ``api_client.js``. The contract: parsed body always returned; non-2xx
-// throws ``Error`` with ``err.status`` (used here for 429 retry handling)
-// and ``err.body``.
-
-
 async function loadInstalled({ signal: externalSignal } = {}) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 3000);
-    // v5.7.0: link an external (caller-owned) signal so refresh() can cancel
-    // a stale loadInstalled() when a newer refresh starts in parallel.
+    // Link caller signal so refresh() cancels stale installed-lookups too.
     const onExternalAbort = () => controller.abort();
     if (externalSignal) {
         if (externalSignal.aborted) controller.abort();
@@ -378,11 +358,6 @@ async function runSearch(state, { signal } = {}) {
 }
 
 
-// ---------------------------------------------------------------------------
-// Public init
-// ---------------------------------------------------------------------------
-
-
 export function initMarketplace(pane, controlsHost = null) {
     pane.innerHTML = paneTemplate({ includeControls: !controlsHost });
     if (controlsHost) {
@@ -410,11 +385,7 @@ export function initMarketplace(pane, controlsHost = null) {
     const paginationHost = pane.querySelector('#mp-pagination');
 
     let debounceTimer = null;
-    // v5.7.0: search race control. ``activeController`` is the AbortController
-    // for the in-flight request; the next refresh() aborts it before kicking
-    // off a new fetch. ``refreshToken`` is bumped on each refresh; after the
-    // awaits a stale request bails out before touching state/DOM, so a slow
-    // older response cannot overwrite a fresh newer render.
+    // Abort + token guard prevent slow stale searches from overwriting fresh UI.
     let activeController = null;
     let refreshToken = 0;
 
@@ -429,7 +400,6 @@ export function initMarketplace(pane, controlsHost = null) {
         syncControlsForMode();
         const query = String(state.query || '').trim();
         showStatus(pane, query ? `Searching for "${query}"…` : 'Browsing ClawHub…', 'muted');
-        // Cancel any prior in-flight refresh and stake a new token.
         if (activeController) {
             try { activeController.abort(); } catch (_) { /* ignore */ }
         }
@@ -441,8 +411,6 @@ export function initMarketplace(pane, controlsHost = null) {
                 runSearch(state, { signal: myController.signal }),
                 loadInstalled({ signal: myController.signal }),
             ]);
-            // Stale response — a newer refresh started; drop the result so
-            // we never overwrite the fresher state with stale data.
             if (myToken !== refreshToken) return;
             state.results = data.results || [];
             state.installedMap = installedMap;
@@ -473,8 +441,6 @@ export function initMarketplace(pane, controlsHost = null) {
                 showStatus(pane, `${state.results.length} skill${state.results.length === 1 ? '' : 's'} · ${mode}${official} · ${state.registryPath}`, 'muted');
             }
         } catch (err) {
-            // Stale-response abort: silent — a newer refresh is already in
-            // flight (or just rendered) and owns the UI.
             if (err?.name === 'AbortError' || myToken !== refreshToken) return;
             const rawMessage = String(err?.body?.error || err?.message || err || '');
             const firstLine = rawMessage.split('\n').map((line) => line.trim()).filter(Boolean)[0] || 'Marketplace request failed';
@@ -641,9 +607,7 @@ export function initMarketplace(pane, controlsHost = null) {
         scheduleRefresh(false);
     });
     queryInput.addEventListener('keydown', (event) => {
-        // v5.7.0: Enter triggers a search; without this, users instinctively
-        // pressed Enter (no-op) and then clicked Search, which used to
-        // create the typing-debounce + click race the user complained about.
+        // Enter triggers the same immediate search as the button.
         if (event.key === 'Enter') {
             event.preventDefault();
             scheduleRefresh(true);
@@ -656,9 +620,7 @@ export function initMarketplace(pane, controlsHost = null) {
         scheduleRefresh(true);
     });
     searchBtn.addEventListener('click', () => {
-        // v5.7.0: clear cursor history on explicit Search so a user that
-        // paginated through browse mode and then types a query gets a
-        // fresh cursorless first page (matching the input/checkbox flows).
+        // Explicit Search starts from a cursorless first page.
         state.cursor = '';
         state.cursorHistory = [];
         scheduleRefresh(true);
@@ -708,9 +670,7 @@ export function initMarketplace(pane, controlsHost = null) {
             } finally {
                 if (!failedMessage) setPending(slug, null);
                 actionBtn.disabled = false;
-                // v5.7.0: funnel through scheduleRefresh so back-to-back
-                // action completions coalesce into one refresh, sharing
-                // the abort/token guards in refresh().
+                // Coalesce action refreshes through the same abort/token guard.
                 if (!failedMessage) scheduleRefresh(true);
             }
             return;
@@ -725,11 +685,7 @@ export function initMarketplace(pane, controlsHost = null) {
                 updateBtn.disabled = false;
                 return;
             }
-            // Optional: let the operator pick a non-latest target via
-            // a small prompt. The summary already lists every published
-            // version; we offer a freeform prompt seeded with the
-            // registry latest. Empty / cancelled = skip; the install
-            // path treats falsy version as "latest".
+            // Empty version means latest; cancel skips update.
             const summary = state.results.find((s) => s.slug === slug);
             const latest = summary?.latest_version || '';
             const userVersion = window.prompt(
@@ -737,7 +693,6 @@ export function initMarketplace(pane, controlsHost = null) {
                 latest,
             );
             if (userVersion === null) {
-                // operator cancelled
                 updateBtn.disabled = false;
                 return;
             }

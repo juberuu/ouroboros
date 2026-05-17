@@ -46,7 +46,7 @@ _SECRET_SETTING_KEYS = {
 _CUSTOM_SECRET_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,}$")
 
 def _get_lan_ip() -> str:
-    """Return the LAN IP using a UDP socket trick (no packet sent). Returns '' on failure."""
+    """Return LAN IP via UDP socket trick; no packet is sent."""
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("192.0.2.1", 80))  # RFC 5737 TEST-NET-1, no packet sent
@@ -55,7 +55,6 @@ def _get_lan_ip() -> str:
         return ""
 
 
-# IPv4 wildcard hosts that mean "listen on all interfaces"
 _WILDCARD_HOSTS = frozenset({"0.0.0.0", ""})
 
 
@@ -72,10 +71,9 @@ from ouroboros.platform_layer import is_container_env
 
 
 def _build_network_meta(bind_host: str, bind_port: int) -> dict:
-    """Build the _meta dict for /api/settings response."""
+    """Build /api/settings network metadata."""
     from ouroboros.server_auth import get_network_auth_startup_warning, is_loopback_host
-    # Strip surrounding brackets from IPv6 literals (e.g. "[::1]" → "::1") so
-    # is_loopback_host can correctly classify bracketed IPv6 loopback addresses.
+    # Strip IPv6 brackets before loopback classification.
     unbracketed = bind_host[1:-1] if bind_host.startswith("[") and bind_host.endswith("]") else bind_host
     loopback = is_loopback_host(unbracketed)
     if loopback:
@@ -87,26 +85,21 @@ def _build_network_meta(bind_host: str, bind_port: int) -> dict:
             "recommended_url": "",
             "warning": "Server is bound to localhost — not accessible from other devices.",
         }
-    # Non-loopback: determine the advertised IP
     wildcard = _is_wildcard_host(bind_host)
     if wildcard:
         if is_container_env():
-            # Container bridge IPs are typically not reachable from the user's LAN
             lan_ip = ""
         else:
             lan_ip = _get_lan_ip()
     elif bind_host in ("::", "[::]"):
-        # IPv6 wildcard — startup uses AF_INET only (server_entrypoint.py), so we
-        # cannot reliably detect or advertise an IPv6 LAN IP. Degrade gracefully.
+        # AF_INET startup cannot advertise an IPv6 wildcard LAN IP reliably.
         lan_ip = ""
     else:
-        # Specific non-loopback bind address — use it directly (IPv4 or hostname).
-        # Use unbracketed form so URL construction can uniformly re-bracket IPv6.
+        # Use unbracketed form so URL construction can re-bracket IPv6 uniformly.
         lan_ip = unbracketed
 
     auth_warning = get_network_auth_startup_warning(bind_host) or ""
     if lan_ip:
-        # Handle IPv6 addresses (bracket them for URL)
         host_in_url = f"[{lan_ip}]" if ":" in lan_ip else lan_ip
         reachability = "lan_reachable"
         recommended_url = f"http://{host_in_url}:{bind_port}"
@@ -196,7 +189,6 @@ def _rehydrate_mcp_servers_payload(incoming: Any, current: Any) -> list:
     return out
 
 
-# Keys that refresh immediately in the running supervisor (no restart, no task boundary).
 _IMMEDIATE_KEYS = frozenset({
     "TOTAL_BUDGET",
     "OUROBOROS_SOFT_TIMEOUT_SEC",
@@ -206,8 +198,6 @@ _IMMEDIATE_KEYS = frozenset({
     "GITHUB_REPO",
 })
 
-# Keys that require a full process restart when changed.
-# Everything else is hot-reloadable (takes effect on the next task).
 _RESTART_REQUIRED_KEYS = frozenset({
     "OUROBOROS_MAX_WORKERS",
     "OUROBOROS_SERVER_HOST",
@@ -227,11 +217,7 @@ def _classify_settings_changes(
     old: Dict[str, Any],
     new: Dict[str, Any],
 ) -> list:
-    """Return list of changed keys that require a process restart.
-
-    Keys that changed but are NOT in ``_RESTART_REQUIRED_KEYS`` are
-    hot-reloadable — they take effect at the start of the next task.
-    """
+    """Return changed keys requiring process restart; others hot-reload next task."""
     return [
         k for k in _RESTART_REQUIRED_KEYS
         if str(new.get(k, "") or "") != str(old.get(k, "") or "")
@@ -241,13 +227,7 @@ def _classify_settings_changes(
 def _merge_settings_payload(current: Dict[str, Any], body: Dict[str, Any]) -> Dict[str, Any]:
     merged = {k: v for k, v in current.items()}
     for key in _SETTINGS_DEFAULTS:
-        # v5.1.2 elevation ratchet: ``OUROBOROS_RUNTIME_MODE`` is owner-only.
-        # The runtime mode axis controls how far Ouroboros may self-modify;
-        # accepting it from /api/settings POST gives the agent a same-process
-        # path to raise its own privilege scope (loopback POST has no auth).
-        # Mode changes happen only through direct ``settings.json`` edits while
-        # the agent is stopped, plus restart. The desktop UI uses a
-        # launcher-native confirmation bridge instead of this HTTP path.
+        # Runtime mode is owner-only; loopback HTTP settings cannot raise scope.
         if key in {"OUROBOROS_RUNTIME_MODE", "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS"}:
             continue
         if key not in body:
@@ -287,13 +267,7 @@ def _start_supervisor_if_needed_for_request(request: Request, settings: dict) ->
     return bool(callback(settings)) if callable(callback) else False
 
 def _claude_code_status_payload() -> Dict[str, Any]:
-    """Return Claude runtime status using the app-managed runtime contract.
-
-    Replaces the old SDK-only installed/missing check with a richer
-    payload that reports: runtime source, interpreter path, SDK version,
-    CLI path/version, app-managed vs legacy state, API key readiness,
-    and the most recent stderr output on failure.
-    """
+    """Return app-managed Claude runtime status, versions, readiness, and stderr."""
     from ouroboros.platform_layer import resolve_claude_runtime
 
     rt = resolve_claude_runtime()
@@ -345,7 +319,6 @@ async def api_settings_get(request: Request) -> JSONResponse:
             continue
         if _CUSTOM_SECRET_KEY_RE.match(str(key)) and value:
             safe[key] = _mask_secret_value(value)
-    # Inject read-only runtime network metadata for the Settings UI hint
     try:
         port = int(_port_file(request).read_text().strip()) if _port_file(request).exists() else _default_port(request)
     except (ValueError, OSError):
@@ -386,12 +359,7 @@ async def api_claude_code_status(request: Request) -> JSONResponse:
 
 
 async def api_claude_code_install(request: Request) -> JSONResponse:
-    """Repair/update the app-managed Claude runtime.
-
-    Replaces the old "pip install SDK" endpoint. Now operates on the
-    app-managed interpreter (prefers embedded python-standalone) and
-    always reinstalls/upgrades to the pinned baseline version.
-    """
+    """Repair/update Claude runtime using the app-managed interpreter."""
     try:
         import subprocess as _sp
         import sys as _sys
@@ -405,15 +373,7 @@ async def api_claude_code_install(request: Request) -> JSONResponse:
         except Exception:
             pass
 
-        # Single source of truth for the SDK baseline — mirrors the launcher
-        # bootstrap probe so web/onboarding repair installs the same version
-        # that the launcher repair path installs. Imported at call time (rather
-        # than at module load) so the error raises a clean 500 from the install
-        # endpoint instead of breaking server startup; but NO defaulted literal
-        # fallback is kept — that would reintroduce the drift this SSOT was
-        # meant to eliminate (one edit to `_CLAUDE_SDK_BASELINE` and one here
-        # would diverge silently). If the import truly fails, the runtime is
-        # already unusable and the caller should see the error.
+        # Import SDK baseline at call time: one SSOT, clean endpoint error if broken.
         from ouroboros.launcher_bootstrap import _CLAUDE_SDK_BASELINE as sdk_baseline
 
         result = await asyncio.to_thread(
@@ -456,21 +416,13 @@ async def api_settings_post(request: Request) -> JSONResponse:
                 old_settings.get("MCP_SERVERS"),
             )
         current = _merge_settings_payload(old_settings, body)
-        # Phase 2: normalize the new runtime-mode axis on the save path so a
-        # typo like ``{"OUROBOROS_RUNTIME_MODE": "turbo"}`` cannot land in
-        # settings.json. The same normalizer runs on the read side
-        # (``get_runtime_mode``), so /api/settings, /api/state, and the UI
-        # segmented control stay in lockstep.
+        # Normalize runtime mode on save so invalid values cannot land on disk.
         from ouroboros.config import normalize_runtime_mode as _norm_runtime_mode
-        # v5.1.2 elevation ratchet: belt-and-braces. ``_merge_settings_payload``
-        # already skips ``OUROBOROS_RUNTIME_MODE`` so the body cannot influence
-        # it, but if a future contributor adds a side channel we still want
-        # the saved mode to match the on-disk old value, not the request body.
+        # Elevation ratchet: preserve old runtime mode regardless of request body.
         current["OUROBOROS_RUNTIME_MODE"] = _norm_runtime_mode(
             old_settings.get("OUROBOROS_RUNTIME_MODE")
         )
-        # Skills-repo path is opaque text; trim incidental whitespace so the
-        # "configured vs empty" boolean in /api/state stays deterministic.
+        # Trim opaque path text so configured/empty state is deterministic.
         current["OUROBOROS_SKILLS_REPO_PATH"] = str(
             current.get("OUROBOROS_SKILLS_REPO_PATH") or ""
         ).strip()
@@ -534,7 +486,6 @@ async def api_settings_post(request: Request) -> JSONResponse:
                 {"error": "Local-only setups must route at least one model to the local runtime."},
                 status_code=400,
             )
-        # Detect what actually changed before saving.
         all_changed = [
             k for k in current
             if str(current.get(k, "") or "") != str(old_settings.get(k, "") or "")
@@ -555,11 +506,7 @@ async def api_settings_post(request: Request) -> JSONResponse:
         except Exception:
             log.warning("MCP reconfigure after settings change failed", exc_info=True)
 
-        # Phase 4: when OUROBOROS_SKILLS_REPO_PATH changed, reconcile the
-        # extension loader against the new path so stale registrations
-        # from the previous path are torn down and any enabled +
-        # PASS-reviewed extensions at the new path come up live. Hot-
-        # reload pattern mirrors the other "next task" plumbing below.
+        # Skills repo/runtime changes require extension loader reconciliation.
         try:
             from ouroboros.extension_loader import reload_all as _reload_extensions
             new_path = str(current.get("OUROBOROS_SKILLS_REPO_PATH") or "").strip()
@@ -567,11 +514,7 @@ async def api_settings_post(request: Request) -> JSONResponse:
             new_runtime_mode = str(current.get("OUROBOROS_RUNTIME_MODE") or "").strip()
             old_runtime_mode = str(old_settings.get("OUROBOROS_RUNTIME_MODE") or "").strip()
             if new_path != old_path or new_runtime_mode != old_runtime_mode:
-                # Use ``load_settings`` rather than ``lambda: current``
-                # so extensions see fresh settings on subsequent reads
-                # (capturing ``current`` would freeze the snapshot at
-                # settings-save time and drift from disk on later
-                # edits).
+                # Use load_settings so extensions do not capture a stale snapshot.
                 from ouroboros.config import load_settings as _load_settings
                 reload_drive_root = pathlib.Path(
                     request.app.state.drive_root
@@ -593,7 +536,6 @@ async def api_settings_post(request: Request) -> JSONResponse:
         except Exception:
             log.warning("Extension reload after settings change failed", exc_info=True)
 
-        # Hot-reload supervisor globals that can change without restart.
         try:
             from supervisor.state import refresh_budget_from_settings
             refresh_budget_from_settings(current)
@@ -615,8 +557,6 @@ async def api_settings_post(request: Request) -> JSONResponse:
         warnings = []
         if provider_defaults_changed:
             change_kind = classify_runtime_provider_change(old_settings, current)
-            # Reverse migration (OpenRouter added back, :: → /) is silent
-            # housekeeping — the old warning text was misleading in that case.
             if change_kind == "direct_normalize":
                 warnings.append(
                     "Normalized direct-provider routing because OpenRouter is not configured for the active provider."

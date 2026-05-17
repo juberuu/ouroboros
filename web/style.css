@@ -11,12 +11,7 @@
     --accent-light: #f07a86;
     --accent-dim: rgba(201, 53, 69, 0.15);
     --accent-glow: rgba(201, 53, 69, 0.08);
-    /* Numbered fade tokens for the accent — used to retire 50+ hardcoded
-       ``rgba(201, 53, 69, 0.XX)`` literals scattered across the file in
-       v5.8.3-rc.5. Keep tokens as multiples of 0.02 so future tweaks stay
-       expressible without re-introducing literals. The naming uses the
-       integer percentage of the alpha channel for intuitive pairing
-       (``--accent-04`` → ``rgba(..., 0.04)``). */
+    /* Accent alpha tokens; keep future tweaks off hardcoded rgba literals. */
     --accent-04: rgba(201, 53, 69, 0.04);
     --accent-05: rgba(201, 53, 69, 0.05);
     --accent-08: rgba(201, 53, 69, 0.08);
@@ -37,9 +32,7 @@
     --divider: rgba(255, 255, 255, 0.06);
     --radius-xs: 3px;
     --radius-sm: 8px;
-    /* ``--radius-md`` (10 px) is the in-between size used by chips, log
-       repeat counters, and page-fade rules.  Pre-v5.8.3-rc.5 these were
-       hardcoded ``border-radius: 10px`` literals. */
+    /* In-between radius used by chips, counters, and fade rules. */
     --radius-md: 10px;
     --radius: 12px;
     --radius-lg: 16px;
@@ -79,7 +72,6 @@ body {
     position: relative;
 }
 
-/* Matrix rain canvas */
 #matrix-rain {
     position: fixed;
     top: 0;
@@ -91,11 +83,7 @@ body {
     z-index: 0;
 }
 
-/* Navigation Rail — floating overlay.
-   v5.7.0 spacing pass: top padding 12 -> 28 and inter-item gap 4 -> 10 so
-   the rail is no longer "stuck" to the viewport top edge and tiles breathe.
-   These values track the Material 3 / Apple HIG navigation rail norms and
-   are documented in docs/DEVELOPMENT.md "Navigation rail spacing". */
+/* Floating navigation rail. */
 #nav-rail {
     position: fixed;
     left: 0;
@@ -187,7 +175,7 @@ body {
     display: none;
 }
 
-/* Main content — full width with left padding for floating nav */
+/* Main content offsets the floating nav. */
 #content {
     width: 100%;
     display: flex;
@@ -216,7 +204,7 @@ body {
         radial-gradient(circle at 18% 0%, rgba(232, 93, 111, 0.10), transparent 300px);
 }
 
-/* Shared containment for narrow screens and unbroken runtime text. */
+/* Containment for narrow screens and unbroken runtime text. */
 #content,
 #content .page,
 #chat-messages,
@@ -784,10 +772,7 @@ body {
     flex-wrap: wrap;
     row-gap: 10px;
     pointer-events: none;
-    /* Fade fully to transparent at the bottom edge so no hard border
-       shows up between the scrim and the transcript. The previous stop
-       at 0.32 alpha left a visible discontinuity; fading to 0 produces
-       a clean scroll-under effect at every scroll position. */
+    /* Fade to transparent so the transcript scrolls under without a hard edge. */
     background: linear-gradient(
         180deg,
         rgba(13, 11, 15, 0.92) 0%,
@@ -797,8 +782,7 @@ body {
     );
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
-    /* Soft-mask the blur to fall off in lockstep with the gradient,
-       otherwise the glass effect creates its own visible hard edge. */
+    /* Mask blur with the gradient to avoid a glass-edge seam. */
     -webkit-mask-image: linear-gradient(180deg, black 0%, black 70%, transparent 100%);
             mask-image: linear-gradient(180deg, black 0%, black 70%, transparent 100%);
 }
@@ -853,7 +837,6 @@ body {
     background: rgba(239, 68, 68, 0.08);
 }
 
-/* Budget pill in chat header */
 .chat-budget-pill {
     appearance: none;
     display: flex;
@@ -905,7 +888,6 @@ body {
     width: 0;
 }
 
-/* Status badge */
 .status-badge {
     padding: 4px 10px;
     border-radius: var(--radius);
@@ -928,7 +910,6 @@ body {
     50% { opacity: 0.5; }
 }
 
-/* Typing indicator */
 .typing-bubble { opacity: 0.7; }
 .typing-dots {
     display: inline-flex;
@@ -950,7 +931,6 @@ body {
     30% { transform: translateY(-6px); opacity: 1; }
 }
 
-/* Web onboarding overlay */
 .onboarding-overlay {
     position: fixed;
     inset: 0;
@@ -997,7 +977,6 @@ body {
     }
 }
 
-/* Chat page */
 #chat-messages {
     flex: 1;
     min-height: 0;
@@ -1181,7 +1160,7 @@ body {
     text-align: left;
 }
 
-/* Progress (thinking) messages — subdued and smaller than regular bubbles */
+/* Subdued progress messages. */
 .chat-bubble.progress {
     border-left: 2px solid rgba(220, 38, 38, 0.2);
     padding-left: 14px;
@@ -1299,7 +1278,7 @@ body {
     background: var(--accent-10);
 }
 
-/* Active (non-finished) live card: pulse the Working/Thinking phase badge */
+/* Pulse active live-card phase badges. */
 .chat-live-card:not([data-finished="1"]) .chat-live-phase.working,
 .chat-live-card:not([data-finished="1"]) .chat-live-phase.thinking,
 .chat-live-card:not([data-finished="1"]) .chat-live-phase.progress,
@@ -1345,7 +1324,7 @@ body {
     background: rgba(239, 68, 68, 0.10);
 }
 
-/* Inline typing dots inside the live card summary row */
+/* Live-card typing dots. */
 .chat-live-typing {
     display: inline-flex;
     gap: 3px;
@@ -1364,7 +1343,6 @@ body {
 .chat-live-typing span:nth-child(2) { animation-delay: 0.2s; }
 .chat-live-typing span:nth-child(3) { animation-delay: 0.4s; }
 
-/* Hide typing dots when card is finished */
 .chat-live-card[data-finished="1"] .chat-live-typing {
     display: none;
 }
@@ -1565,7 +1543,7 @@ body {
     border-bottom: 1px solid rgba(255,255,255,0.06);
 }
 
-/* Markdown rendering classes — global, used by renderMarkdown in all contexts */
+/* Global markdown rendering classes. */
 .md-h1 {
     font-size: 16px;
     color: var(--text-primary);
@@ -1593,7 +1571,7 @@ body {
     text-decoration: underline;
 }
 
-/* Table overflow wrapper — prevents wide tables from breaking bubble layout */
+/* Prevent wide tables from breaking bubble layout. */
 .md-table-wrap {
     display: block;
     overflow-x: auto;
@@ -1601,23 +1579,17 @@ body {
     max-width: 100%;
 }
 
-/* Nav spacer (replaces inline style="flex:1") */
 .nav-spacer {
     flex: 1;
 }
 
-/* Mobile responsive — narrow screens only; desktop layout unchanged.
-   NOTE: Rules here apply only to selectors whose base definitions appear
-   BEFORE this block. Overrides for selectors defined later live in the
-   second @media (max-width: 640px) block at the END of this file so they
-   reliably win without !important. */
+/* Early mobile overrides; late-defined selectors are handled at file end. */
 @media (max-width: 640px) {
-    /* Prevent iOS zoom on input focus */
+    /* Prevent iOS zoom on input focus. */
     textarea, input[type="text"], input[type="password"], input[type="email"], select {
         font-size: 16px !important;
     }
 
-    /* Compact chat bubbles on small screens */
     .chat-bubble {
         max-width: 92%;
     }
@@ -1633,12 +1605,7 @@ body {
         margin-right: 0;
     }
 
-    /* Nav-rail — convert vertical sidebar to horizontal bottom bar.
-       v5.7.0: ``justify-content: safe center`` centers the row when all
-       buttons fit (~6 buttons × 60px ≈ 360-410px), and falls back to
-       ``flex-start`` when content overflows so leftmost items remain
-       reachable on narrow phones. ``min-width: 60px`` on .nav-btn keeps
-       labels like "Dashboard" from truncating in space-evenly mode. */
+    /* Bottom nav uses safe center so overflow keeps leftmost items reachable. */
     #nav-rail {
         flex-direction: row;
         top: auto;
@@ -1698,15 +1665,7 @@ body {
         padding-bottom: calc(62px + env(safe-area-inset-bottom, 0px));
     }
 
-    /* Chat header — keep the floating-overlay glass treatment on mobile too
-       so the same soft-gradient + masked-blur scroll-under effect holds
-       across viewports. v5.6.x had switched it to ``position: static`` to
-       avoid hiding the first chat message under wrapped action rows, but
-       that introduced a hard "black bar" edge above the transcript. We
-       restore the overlay and instead reduce the row gap so the header
-       stays compact on phones; #chat-messages already reserves
-       ``padding-top: 12px`` and the absolute composer compensates for any
-       wrapping via its own padding. */
+    /* Preserve floating glass header on mobile; compact row gap prevents overlap. */
     .chat-page-header {
         row-gap: 6px;
     }
@@ -1735,13 +1694,7 @@ body {
 }
 
 #chat-input-area {
-    /* Hybrid translucent overlay (v5.7.0). Mirrors the ``.chat-page-header``
-       pattern at the bottom of the chat page: a compact absolute-positioned
-       wrapper with a soft 4-stop gradient that only darkens transcript
-       text as it approaches the composer. The actual frosted blur lives on
-       the input field itself, not this wrapper, so the fade never becomes a
-       tall smeared glass band. ``#chat-messages`` reserves enough bottom
-       padding so the last bubble is reachable above the composer surface. */
+    /* Bottom fade darkens transcript before the frosted input without trapping scroll. */
     display: flex;
     flex-direction: column;
     gap: 4px;
@@ -1774,7 +1727,7 @@ body {
     gap: 6px;
 }
 
-/* Attach button sits INSIDE the textarea on the left */
+/* Attach button sits inside the textarea. */
 .chat-attach-btn {
     position: absolute;
     left: 10px;
@@ -1862,12 +1815,7 @@ body {
     background: rgba(26, 21, 32, 0.55);
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
-    /* The textarea is the focal "glass" element. Its own dense blur
-       (20px) together with a moderately translucent fill (0.55) is what
-       makes message bubbles read THROUGH the input field as a frosted
-       surface. The wrapper's mask-faded blur handles the scroll-under
-       gradient zone above the textarea, so the textarea itself does not
-       need to carry the wrapper's gradient. */
+    /* Textarea is the primary frosted input surface. */
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
     color: var(--text-primary);
     font-size: 15px;
@@ -1881,12 +1829,11 @@ body {
 #chat-input:focus {
     border-color: rgba(232, 93, 111, 0.4);
     background: rgba(26, 21, 32, 0.85);
-    /* Focus ring only — no ambient halo. */
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 0 0 3px var(--accent-10);
 }
 #chat-input::placeholder { color: var(--text-muted); }
 
-/* Send group: positions the Send button + chevron as an absolute unit */
+/* Absolute send button + chevron group. */
 .chat-send-group {
     position: absolute;
     right: 8px;
@@ -1902,7 +1849,7 @@ body {
     opacity: 0.72;
 }
 
-/* --send-color: resolved per send-mode via dataset attribute below */
+/* --send-color resolves from data-send-mode. */
 .chat-send-inline {
     border: none;
     background: transparent;
@@ -1929,7 +1876,7 @@ body {
     opacity: 1;
 }
 
-/* Plan mode overrides — toggled via data-send-mode="plan" on the group */
+/* Plan-mode send color. */
 .chat-send-group[data-send-mode="plan"] .chat-send-inline {
     color: var(--amber);
     opacity: 0.85;
@@ -1943,7 +1890,7 @@ body {
     opacity: 1;
 }
 
-/* Chevron button — always visible for touch-screen accessibility */
+/* Chevron remains visible for touch accessibility. */
 .chat-send-chevron {
     border: none;
     border-left: 1px solid rgba(201, 53, 69, 0.20);
@@ -1973,7 +1920,6 @@ body {
     opacity: 1;
 }
 
-/* Dropdown panel */
 .chat-send-dropdown {
     display: none;
     position: absolute;
@@ -2013,21 +1959,19 @@ body {
     color: var(--accent);
     opacity: 1;
 }
-/* Active-mode marker: the currently selected mode item gets a subtle tint */
+/* Active send-mode tint. */
 .chat-send-dropdown-item[data-mode-active="true"] {
     opacity: 1;
     font-weight: 600;
 }
-/* Plan item tinted amber when it's the active mode */
 #chat-dropdown-plan[data-mode-active="true"] {
     color: var(--amber);
 }
-/* Send item tinted accent when it's the active mode */
 #chat-dropdown-send[data-mode-active="true"] {
     color: var(--accent);
 }
 
-/* Shared UI components (stat cards used by Costs, section titles by Evolution) */
+/* Shared UI components. */
 .stat-card {
     background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.02));
     border-radius: var(--radius);
@@ -2065,7 +2009,6 @@ body {
     margin: 16px 0 12px;
 }
 
-/* Buttons */
 .btn {
     padding: var(--button-padding-y) var(--button-padding-x);
     border-radius: var(--radius-sm);
@@ -2230,7 +2173,6 @@ body {
     padding: 0;
 }
 
-/* Logs */
 .logs-filters {
     display: flex;
     flex-wrap: wrap;
@@ -2473,13 +2415,11 @@ body {
     gap: 6px;
 }
 
-/* Scrollbar */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: rgba(201, 53, 69, 0.2); border-radius: var(--radius-xs); }
 ::-webkit-scrollbar-thumb:hover { background: rgba(201, 53, 69, 0.35); }
 
-/* Reconnecting overlay */
 #reconnect-overlay {
     display: none;
     position: fixed;
@@ -2505,7 +2445,6 @@ body {
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* Cost tables */
 .cost-table {
     width: 100%;
     border-collapse: collapse;
@@ -2528,11 +2467,7 @@ body {
     background: rgba(255,255,255,0.03);
 }
 
-/* ---------------------------------------------------------------------------
- * Settings — LAN reachability hint
- * Rendered by web/modules/settings.js::_renderNetworkHint into the
- * #settings-lan-hint container inside the Network Gate section.
- * --------------------------------------------------------------------------- */
+/* Settings LAN reachability hint. */
 .settings-lan-hint {
     margin-top: 8px;
     padding: 8px 12px;
@@ -2552,7 +2487,6 @@ body {
     min-height: 28px;
 }
 
-/* Evolution Page */
 .evo-refresh-btn {
     min-width: 92px;
 }
@@ -2605,10 +2539,7 @@ body {
     gap: 8px;
 }
 
-/* v5.7.0: when Evolution is embedded in the Dashboard tab strip, the
-   "Refresh" button + status badge that used to live in a duplicate
-   inner ".page-header" relocate into the runtime card head, sitting
-   alongside the existing pills cluster. */
+/* Runtime-card head hosts embedded Evolution controls. */
 .evo-runtime-controls {
     align-items: center;
 }
@@ -2685,7 +2616,6 @@ body {
     }
 }
 
-/* About page */
 .about-body {
     display: flex;
     flex-direction: column;
@@ -2710,7 +2640,6 @@ body {
 .about-links a { color: var(--accent); text-decoration: none; }
 .about-footer { margin-top: auto; padding-top: 32px; color: var(--text-muted); font-size: 12px; }
 
-/* Costs page layout */
 .costs-scroll { overflow-y: auto; flex: 1; padding: 16px 20px; }
 .costs-budget-card {
     background: rgba(26, 21, 32, 0.72);
@@ -2721,8 +2650,7 @@ body {
     margin-bottom: 20px;
 }
 .costs-budget-title { font-size: 15px; font-weight: 600; margin: 0; color: var(--text-primary); }
-/* v5.7.0: budget card head row hosts the title plus (when costs is
-   embedded in the Dashboard tab strip) the relocated Refresh button. */
+/* Budget card head row hosts title plus embedded Refresh. */
 .costs-budget-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
 .costs-budget-refresh { flex: 0 0 auto; }
 .costs-budget-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px 20px; margin-bottom: 16px; }
@@ -2751,7 +2679,6 @@ body {
 .cost-bar::-moz-progress-bar { background: var(--accent); }
 .cost-empty-cell { color: var(--text-muted); text-align: center; }
 
-/* Updates panel */
 .updates-scroll {
     flex: 1;
     min-height: 0;
@@ -2782,9 +2709,7 @@ body {
     flex: 1 1 auto;
 }
 
-/* v5.7.0: actions cluster (status badge + relocated Check-for-updates
-   button) sits to the right of the head row, replacing the duplicate
-   inner page-header that used to host the button. */
+/* Updates actions cluster sits in the head row. */
 .updates-head-actions {
     display: flex;
     align-items: center;
@@ -2807,7 +2732,6 @@ body {
     margin-top: 12px;
 }
 
-/* Dashboard */
 #page-dashboard {
     min-height: 0;
 }
@@ -2821,12 +2745,7 @@ body {
     overflow: hidden;
 }
 
-/* ``.dashboard-tabs`` and ``.dashboard-tab`` previously redeclared the
-   same flex/pill styling already covered by ``.app-tab-strip`` and
-   ``.app-tab`` (lines 662-696). Both class names still ride along with
-   the JS query selectors used by ``dashboard.js`` (so the layout
-   selectors remain stable), but the styling now inherits from the
-   shared ``.app-tab*`` rules — no duplicate CSS declaration. */
+/* Dashboard tabs inherit shared .app-tab* styling. */
 
 .dashboard-panels,
 .dashboard-panel {
@@ -2835,14 +2754,7 @@ body {
     overflow: hidden;
 }
 
-/* v5.7.0 scroll-chain fix: ``.dashboard-panels`` is the parent of every
-   embedded sub-panel. Without ``display: flex; flex-direction: column;``
-   the active panel's ``flex: 1; min-height: 0`` collapses to content
-   height, which kills overflow scrolling for Logs / Updates / Costs
-   (and the 3-column Updates Tags view). Evolution previously bypassed
-   the broken chain via an explicit ``height: calc(var(--vvh) - 120px)``
-   on ``.evolution-container`` — that rule stays as a belt-and-braces.
-   With this single rule the sub-panel's flex chain is intact end-to-end. */
+/* Dashboard panels own the scroll-chain for embedded sub-panels. */
 .dashboard-panels {
     display: flex;
     flex-direction: column;
@@ -2912,7 +2824,6 @@ body {
     flex: 1;
 }
 
-/* Extra-small button variant */
 .btn-xs {
     padding: 2px 8px;
     font-size: 11px;
@@ -2923,9 +2834,7 @@ body {
     color: var(--red);
 }
 
-/* ------------------------------------------------------------------ */
-/* Phase 5: Skills page                                               */
-/* ------------------------------------------------------------------ */
+/* Skills page. */
 #page-skills {
     flex-direction: column;
     min-height: 0;
@@ -3119,9 +3028,7 @@ body {
     background: rgba(245, 158, 11, 0.85);
 }
 
-/* v5.2.3: small inline hint shown right under the toggle when the
- * switch is locked by missing review or grants. Replaces the old
- * full-width "Locked: …" pill that competed with the status chip. */
+/* Inline hint for switches locked by review/grants. */
 .skills-lock-hint {
     font-size: 12px;
     color: #fbbf24;
@@ -3313,8 +3220,7 @@ body {
 }
 
 .skills-card-actions .skills-details > summary {
-    /* Match the visual height of the action buttons so summary lines
-     * up neatly with Review/Update/Uninstall on closed state. */
+    /* Match action-button height so closed summaries align. */
     padding: 6px 4px;
 }
 
@@ -3347,10 +3253,7 @@ body {
 }
 
 .skills-card-menu-dialog {
-    /* Anchored popover (non-modal). position: absolute relative to the
-       wrapper so the menu sits right under the kebab; right: 0 keeps the
-       menu's right edge aligned with the trigger's right edge so it
-       never overflows the card on the right. */
+    /* Anchored non-modal popover aligned to the trigger's right edge. */
     position: absolute;
     top: calc(100% + 6px);
     right: 0;
@@ -3384,11 +3287,7 @@ body {
     color: var(--text-primary);
 }
 
-/* v5.2.3 review-cycle fix: source chip on the card front face for
- * non-built-in skills. Surfaces P1 "Provenance matters" without
- * recreating the old 5-badge cluster: built-in skills carry no chip
- * (absence is the signal); ClawHub/External/User-repo skills get a
- * small inline pill next to the title. */
+/* Source/provenance chip for non-built-in skills. */
 .skills-source-chip {
     display: inline-block;
     margin-left: 6px;
@@ -3560,10 +3459,7 @@ body {
 .marketplace-card.is-working {
     border-color: rgba(245, 158, 11, 0.35);
     background: linear-gradient(135deg, rgba(245, 158, 11, 0.08), rgba(255, 255, 255, 0.02));
-    /* v5.7.0: gentle pulsing background so a long install (download +
-       adapt + review + deps) reads as actively in progress rather than
-       a frozen card. Animation runs only while the card carries the
-       is-working class. */
+    /* Pulse during long install/adapt/review/deps work. */
     animation: marketplace-card-pulse 2.4s ease-in-out infinite;
 }
 
@@ -3573,11 +3469,7 @@ body {
     100% { background: linear-gradient(135deg, rgba(245, 158, 11, 0.06), rgba(255, 255, 255, 0.02)); }
 }
 
-/* v5.7.0: marketplace filter row + Official-only toggle (replaces the
-   awkward inline native <input type="checkbox"> wedged between the search
-   field and the Search button). The toggle visually mirrors the design
-   system's switch surface (track + thumb) but uses a real <input> for
-   keyboard / a11y. */
+/* Marketplace filter row; real input preserves keyboard/a11y. */
 .marketplace-filters {
     display: flex;
     flex-wrap: wrap;
@@ -3760,7 +3652,7 @@ body {
     font-size: 12px;
 }
 
-/* ----- Detail modal ----- */
+/* Detail modal. */
 
 .marketplace-modal-backdrop {
     position: fixed;
@@ -3835,7 +3727,7 @@ body {
 .marketplace-warn-list h4 { color: #f59e0b; }
 .marketplace-warn-list ul { margin: 4px 0 0 0; padding-left: 18px; color: #f59e0b; font-size: 12px; }
 
-/* v5: provenance + adapter-warning rows inside Installed-tab cards. */
+/* Installed-card provenance and adapter warnings. */
 .skills-card-provenance {
     display: flex;
     flex-wrap: wrap;
@@ -3857,9 +3749,7 @@ body {
     padding: 0;
 }
 
-/* ------------------------------------------------------------------ */
-/* Widgets page                                                       */
-/* ------------------------------------------------------------------ */
+/* Widgets page. */
 
 #page-widgets {
     flex-direction: column;
@@ -4009,10 +3899,7 @@ body {
     gap: 10px;
 }
 
-/* v5.7.0: host-owned map / calendar / kanban renderers. Lightweight
-   declarative layouts; Leaflet upgrade for ``.widget-map`` is kept as
-   a follow-up integration so the widget surface ships without a new
-   third-party dependency in this update. */
+/* Host-owned map/calendar/kanban defaults without extra dependencies. */
 .widget-map {
     border: 1px solid rgba(255, 255, 255, 0.06);
     border-radius: var(--radius-sm);
@@ -4102,11 +3989,9 @@ body {
     color: var(--text-primary);
 }
 
-/* Mobile overrides — second block, placed AFTER all base rules so media-query
-   rules reliably win without !important. Kept scoped to <= 640px so desktop
-   is never affected. */
+/* Late mobile overrides; placed after base rules so they win without !important. */
 @media (max-width: 640px) {
-    /* Input area safe-area inset for iOS notch */
+    /* iOS safe-area inset. */
     #chat-input-area {
         padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
     }
@@ -4116,20 +4001,14 @@ body {
         min-width: 0;
     }
 
-    /* Header is back to being a floating overlay on mobile (v5.7.0). The
-       transcript needs to clear the absolute header (taller on phones
-       because action buttons wrap to ~2 rows). Bottom padding clears
-       the absolute composer + safe-area. */
+    /* Transcript clears taller mobile header and absolute composer. */
     #chat-messages {
         padding-top: 80px;
         padding-bottom: calc(var(--chat-input-reserve, 108px) + env(safe-area-inset-bottom, 0px));
         overflow-x: hidden;
     }
 
-    /* Keyboard-open chat layout: make the document itself no taller than the
-       visual viewport, then keep only #chat-messages scrollable. Boundary-aware
-       touch handling in web/app.js prevents message overscroll from chaining
-       back into page / visualViewport movement on iOS and Android browsers. */
+    /* Keyboard-open layout: only #chat-messages scrolls within visual viewport. */
     html.keyboard-open,
     body.keyboard-open {
         position: fixed;
@@ -4196,7 +4075,6 @@ body {
         padding-bottom: 8px;
     }
 
-    /* Logs page — reduce horizontal padding on filters and entries margin. */
     .logs-filters {
         padding: 8px 12px;
     }
@@ -4207,7 +4085,6 @@ body {
         overflow-x: hidden;
     }
 
-    /* Updates page — stack version columns and use taller chart area. */
     .evo-versions-cols {
         flex-direction: column;
         gap: 16px;
@@ -4220,7 +4097,6 @@ body {
         padding: 10px;
     }
 
-    /* Costs page — collapse multi-column grids to single column. */
     .costs-budget-fields {
         grid-template-columns: 1fr;
     }
@@ -4247,7 +4123,6 @@ body {
         flex-wrap: wrap;
     }
 
-    /* Skills page — reduce padding so cards don't get squeezed. */
     #page-skills {
         padding: 12px 12px;
     }
@@ -4272,7 +4147,6 @@ body {
         width: 100%;
     }
 
-    /* Marketplace controls collapse to single column on phone screens. */
     .marketplace-controls {
         flex-direction: column;
         align-items: stretch;

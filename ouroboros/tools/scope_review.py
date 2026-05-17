@@ -1,15 +1,8 @@
-"""Blocking scope reviewer for Ouroboros commit pipeline.
+"""Blocking whole-codebase scope reviewer for the commit pipeline.
 
-Runs IN PARALLEL with the triad diff review. Single-model (configurable via OUROBOROS_SCOPE_REVIEW_MODEL),
-fail-closed: timeout, parse error, API failure, or unreadable touched-file context all block.
-
-Role: full-codebase reviewer with unique advantage — sees the ENTIRE repository,
-not just the diff. Finds cross-module bugs, broken implicit contracts, hidden
-regressions, and forgotten touchpoints that diff-only triad reviewers miss.
-
-The budget gate skips scope review (non-blocking warning) when the assembled
-scope-review prompt exceeds the model's safe input budget, preventing
-context-window errors.
+Runs beside triad review, sees full repo context, and fails closed on model,
+parse, or touched-context errors. Oversized prompts are the explicit
+non-blocking skip path.
 """
 
 from __future__ import annotations
@@ -53,47 +46,24 @@ log = logging.getLogger(__name__)
 _SCOPE_MODEL_DEFAULT = "openai/gpt-5.5"
 _SCOPE_MAX_TOKENS = 100_000  # 100K output tokens
 
-# Budget gate: if the fully assembled scope-review prompt (input) exceeds this
-# token estimate, scope review is skipped with a non-blocking warning instead of
-# crashing or sending an oversized request.
-#
-# Context math: the default reviewer (openai/gpt-5.5) has a 1M context
-# window (GA March 2026) that is SHARED between input and output; other configured
-# reviewers via OUROBOROS_SCOPE_REVIEW_MODEL may have different ceilings.
-# `estimate_tokens` uses chars/4 which under-counts real tokens by ~15%, so at
-# gate=850_000 actual input is ≈1_000_000 tokens. On the default 1M model, output
-# `_SCOPE_MAX_TOKENS` draws from the same 1M window, so near-gate prompts sit
-# close to the API ceiling; the non-blocking skip path is best-effort, not a
-# guarantee — some API-level rejections at 850K are still possible. This is a
-# conscious trade: 850K lets scope-review prompts that previously skipped at
-# ~778K actually run.
+# Budget gate: estimate_tokens under-counts real tokens, so this non-blocking
+# skip limit leaves headroom for 1M-context reviewer models.
 from ouroboros.tools.review_helpers import REVIEW_PROMPT_TOKEN_BUDGET as _REVIEW_BUDGET
 
 _SCOPE_BUDGET_TOKEN_LIMIT = _REVIEW_BUDGET
 
-# Defense-in-depth cap for deleted-file content inlined into the scope prompt.
-# Matches the >1MB guard that `build_head_snapshot_section` applied before
-# v4.33 — the staged diff itself is not size-capped here, but the inline pack
-# has no reason to carry a 10 MB HEAD snapshot.
+# Defense-in-depth cap for deleted-file HEAD content inlined into the prompt.
 _DELETED_INLINE_MAX_BYTES = 1_048_576  # 1 MB
 
 
 @dataclass
 class ScopeReviewResult:
-    """Structured outcome from run_scope_review.
-
-    blocked: True if the commit is blocked.
-    block_message: Human-readable block string (non-empty when blocked=True).
-    critical_findings: List of structured finding dicts (same schema as triad review):
-        {"verdict": "FAIL", "severity": "critical", "item": <real_item_name>,
-         "reason": <str>, "model": "scope_reviewer"}
-    advisory_findings: Advisory (non-blocking) finding dicts.
-    """
+    """Structured outcome from ``run_scope_review``."""
     blocked: bool = False
     block_message: str = ""
     critical_findings: List[dict] = field(default_factory=list)
     advisory_findings: List[dict] = field(default_factory=list)
-    # Canonical per-actor evidence (epistemic integrity)
+    # Canonical per-actor evidence.
     raw_text: str = ""
     model_id: str = ""
     status: str = "responded"  # "responded"|"error"|"parse_failure"|"empty_response"|"budget_exceeded"|"omitted"|"empty"
@@ -105,21 +75,7 @@ class ScopeReviewResult:
 
 @dataclass
 class _TouchedContextStatus:
-    """Structured status for touched-file context collection.
-
-    Using a dataclass avoids magic-string channels where real filenames could
-    accidentally collide with control sentinels (e.g. a file literally named
-    ``__empty__`` or ``__budget_exceeded_N__``).
-
-    status values:
-      "empty"          — no touched files could be read at all (fail-closed)
-      "omitted"        — some touched files are unreadable (fail-closed)
-      "budget_exceeded" — touched files OK but the assembled prompt exceeds token limit
-
-    Success (all files readable, prompt fits budget) is represented by
-    returning None from _compute_touched_status / _build_scope_prompt,
-    not by a separate "ok" status value.
-    """
+    """Touched-context sentinel; ``None`` means context OK."""
     status: str  # "empty" | "omitted" | "budget_exceeded"
     omitted_paths: List[str] = field(default_factory=list)
     token_count: int = 0  # estimated full prompt tokens when budget is exceeded
@@ -168,7 +124,7 @@ def _should_skip_current_touched_context(path: str) -> bool:
 
 
 def _build_review_history_section(history: list, open_obligations: list = None) -> str:
-    """Format previous triad rounds for scope-review prompt context."""
+    """Format previous triad rounds for scope-review context."""
     return _shared_review_history_section(
         history,
         open_obligations,
@@ -179,13 +135,7 @@ def _build_review_history_section(history: list, open_obligations: list = None) 
 
 
 def _parse_staged_name_status(repo_dir: pathlib.Path) -> list:
-    """Parse staged changes with name-status for rename/delete/copy awareness.
-
-    Returns list of (status_char, current_path, head_lookup_path) tuples:
-    - status_char: A=added, M=modified, D=deleted, R=renamed, C=copied
-    - current_path: path in current working tree (new path for renames)
-    - head_lookup_path: path to use for git show HEAD (old path for renames)
-    """
+    """Parse staged changes with rename/delete/copy awareness."""
     try:
         name_status_raw = run_cmd(
             ["git", "diff", "--cached", "--name-status"], cwd=repo_dir
@@ -211,7 +161,7 @@ def _parse_staged_name_status(repo_dir: pathlib.Path) -> list:
         else:
             entries.append(("M", parts[0], parts[0]))
 
-    # Fallback to --name-only if --name-status produced nothing
+    # Fallback to --name-only if --name-status produced nothing.
     if not entries:
         try:
             changed = run_cmd(["git", "diff", "--cached", "--name-only"], cwd=repo_dir)
@@ -226,14 +176,7 @@ def _parse_staged_name_status(repo_dir: pathlib.Path) -> list:
 
 
 def _classify_deleted_for_inline(path: str) -> Optional[str]:
-    """Return a suppression reason for a deleted path, or None to inline its content.
-
-    Mirrors the sensitive / binary filtering that ``build_head_snapshot_section``
-    applied before v4.33 (defense-in-depth — the staged diff itself is not
-    filtered, but our inline pack has no reason to duplicate a secret or a
-    binary blob into the scope prompt). Path-only check; size check happens
-    after ``git show`` in ``_inline_deleted_file_pack``.
-    """
+    """Return a suppression reason for deleted HEAD content, or None to inline."""
     fp = pathlib.Path(path)
     fname_lower = fp.name.lower()
     suffix_lower = fp.suffix.lower()
@@ -249,21 +192,7 @@ def _inline_deleted_file_pack(
     deleted_paths: list,
     repo_dir: pathlib.Path,
 ) -> str:
-    """Append deleted-file blocks to the current-files section with HEAD content.
-
-    Since v4.33.0 scope review no longer emits a separate ``Pre-change
-    snapshots`` section (the staged diff and full repo pack already cover
-    cross-module context). For deleted files we still want the reviewer to
-    see what was removed, so we inline the HEAD version directly with an
-    explicit ``DELETED`` marker.
-
-    Defense-in-depth filtering — sensitive / binary / oversize
-    deletions are replaced with a suppression marker instead of having
-    their HEAD content echoed into the scope prompt. Falls back to an
-    ``HEAD content unavailable`` marker when ``git show`` can't produce the
-    file (e.g. staged-for-delete without ever being committed, or HEAD is
-    corrupt). Never raises.
-    """
+    """Append deleted-file HEAD content or explicit suppression markers."""
     if not deleted_paths:
         return current_files_section
 
@@ -316,14 +245,7 @@ def _compute_touched_status(
     omitted: list,
     current_paths: list,
 ) -> Optional["_TouchedContextStatus"]:
-    """Return a _TouchedContextStatus when touched-file context is incomplete, or None if OK.
-
-    Deletion-only diffs are valid (HEAD snapshot provides context).
-    Blocks only when the current-files section is truly empty with no deletions,
-    or when some readable non-deleted files couldn't be read.
-
-    Returns None when all touched files are accessible (proceed to budget check).
-    """
+    """Return touched-context failure status, or None when context is complete."""
     if not current_files_section.strip() and not deleted_paths:
         return _TouchedContextStatus(status="empty")
     if omitted and current_paths:
@@ -332,13 +254,8 @@ def _compute_touched_status(
 
 
 def _gather_scope_packs(repo_dir: pathlib.Path, all_touched_paths: list) -> str:
-    """Collect the wider repository pack for scope review.
-
-    Raises RuntimeError on git failure (fail-closed).
-    """
-    # The canonical docs are injected explicitly into the prompt below. Exclude
-    # them from the wider pack to avoid duplicating BIBLE / ARCHITECTURE /
-    # CHECKLISTS / DEVELOPMENT while still keeping them in every scope review.
+    """Collect the wider repository pack, failing closed on git errors."""
+    # Canonical docs are injected explicitly; avoid duplicating them in full pack.
     exclude_set = set(all_touched_paths) | set(_CANONICAL_CONTEXT_DOCS)
     try:
         full_pack, _repo_omitted = build_full_repo_pack(repo_dir, exclude_paths=exclude_set)
@@ -358,17 +275,7 @@ def _gather_scope_packs(repo_dir: pathlib.Path, all_touched_paths: list) -> str:
 
 
 def _scope_round_label(entry: dict) -> str:
-    """Derive a round label from a scope history entry.
-
-    Epistemic-integrity rule (v4.32.0): a round that was degraded, omitted,
-    budget-exceeded, or failed to parse MUST NOT be labelled ``PASSED``.
-    Only a genuine responded-no-findings round gets ``PASSED``.
-
-    Label priority:
-      1. ``blocked=True``        → ``BLOCKED``
-      2. status != "responded"   → uppercase status (``BUDGET_EXCEEDED`` etc.)
-      3. otherwise                → ``PASSED``
-    """
+    """Return BLOCKED, degraded status, or PASSED for a scope history round."""
     if entry.get("blocked"):
         return "BLOCKED"
     status = str(entry.get("status") or "responded").strip()
@@ -418,18 +325,7 @@ def _build_scope_prompt(
     scope_review_history: Optional[list] = None,
     drive_root: Optional[pathlib.Path] = None,
 ) -> tuple:
-    """Build the scope review prompt with full context packs.
-
-    Returns (prompt_str_or_None, context_status_or_None) where:
-    - (prompt_str, None) — all OK, ready for LLM call
-    - (None, _TouchedContextStatus(status="empty"))   — no touched files (fail-closed)
-    - (None, _TouchedContextStatus(status="omitted"))  — some files unreadable (fail-closed)
-    - (None, _TouchedContextStatus(status="budget_exceeded", token_count=N)) — assembled prompt too large
-
-    Priority: touched-file omission ALWAYS takes precedence over the budget gate.
-    This ensures fail-closed guarantees for unreadable/binary touched files cannot
-    be silently downgraded to a non-blocking advisory by the budget gate.
-    """
+    """Build the scope prompt or a touched-context/budget status sentinel."""
     try:
         scope_checklist = load_checklist_section("Intent / Scope Review Checklist")
     except Exception:
@@ -440,9 +336,7 @@ def _build_scope_prompt(
     canonical_docs = _load_canonical_context_docs(repo_dir)
     critical_calibration = CRITICAL_FINDING_CALIBRATION  # noqa: F841 — used in f-string below
     rebuttal_section = _shared_build_rebuttal_section(review_rebuttal)
-    # Load open obligations for anti-thrashing hint.
-    # Always load (not gated on review_history): scope may block independently of triad,
-    # so scope obligations should be visible even when triad history is empty.
+    # Scope can block independently of triad, so load obligations even without triad history.
     _open_obs_for_scope = []
     _drive_root = pathlib.Path(drive_root) if drive_root else None
     if _drive_root is not None:
@@ -458,13 +352,7 @@ def _build_scope_prompt(
     )
     scope_history_section = _build_scope_history_section(scope_review_history)
 
-    # Scope-only retry path (v4.39.0): if the same commit has been blocked
-    # repeatedly by scope review while triad passed, `review_history` is
-    # empty but `scope_review_history` grows. The convergence rule is
-    # emitted only from `_build_review_history_section` based on
-    # `review_history`, so scope-only chains would silently skip it.
-    # Inject the rule once here when `scope_review_history >= 2` and
-    # the triad-history section didn't already include it.
+    # Scope-only retry chains need the convergence rule even without triad history.
     if (
         scope_review_history
         and len(scope_review_history) >= 2
@@ -517,11 +405,7 @@ def _build_scope_prompt(
         current_files_section, deleted_paths, omitted, current_context_paths
     )
 
-    # Fail-closed check BEFORE the budget gate: touched-file omission always wins.
-    # If some touched files are unreadable/binary, return immediately with the
-    # structured status so _handle_prompt_signals can block the commit. This prevents
-    # the budget gate from silently downgrading an incomplete-context failure to an
-    # advisory skip.
+    # Touched-file omissions fail closed before the budget skip can apply.
     if touched_status is not None:
         return None, touched_status
 
@@ -752,22 +636,13 @@ def _handle_prompt_signals(
     prompt: Optional[str],
     context_status: Optional["_TouchedContextStatus"],
 ) -> Optional[ScopeReviewResult]:
-    """Translate context status into a ScopeReviewResult, or None to continue.
-
-    Returns a completed ScopeReviewResult if processing should stop (budget
-    exceeded or incomplete context), or None when the LLM call may proceed.
-
-    Uses a structured _TouchedContextStatus instead of magic strings to avoid
-    ambiguous collisions between real filenames and control sentinels.
-    """
+    """Translate touched-context status into an early ScopeReviewResult."""
     if context_status is None:
         return None  # proceed with LLM call
 
     if context_status.status == "budget_exceeded":
         token_count = context_status.token_count
-        # prompt_chars: back-compute from the token estimate used in the budget gate.
-        # estimate_tokens uses chars/4, so chars ≈ token_count * 4.  This is the same
-        # assembled prompt size that triggered the gate — the most useful forensic fact.
+        # Back-compute prompt chars from the budget-gate token estimate.
         _prompt_chars_est = token_count * 4
         log.warning(
             "Scope review skipped: full scope-review prompt (~%d tokens) exceeds budget limit (%d). "
@@ -817,9 +692,7 @@ def _handle_prompt_signals(
             ),
         )
 
-    # Unknown status: fail-closed (block commit) to honour the documented contract.
-    # The module is explicitly fail-closed except for the explicit 'budget_exceeded' skip.
-    # Any unrecognised status is a programming error — block rather than silently proceeding.
+    # Unknown status is a programming error; fail closed.
     log.error(
         "Scope review: unrecognised _TouchedContextStatus.status=%r — blocking commit (fail-closed).",
         context_status.status,
@@ -863,13 +736,7 @@ def run_scope_review(
     review_history: Optional[list] = None,
     scope_review_history: Optional[list] = None,  # prior scope rounds for this commit
 ) -> ScopeReviewResult:
-    """Run the blocking scope review. Returns a ScopeReviewResult.
-
-    result.blocked is True if the commit must not proceed.
-    result.critical_findings contains structured dicts with real checklist item
-    names (not synthetic strings), so callers can pass them directly into
-    obligation tracking without any string parsing.
-    """
+    """Run blocking scope review and return structured findings/evidence."""
     repo_dir = pathlib.Path(ctx.repo_dir)
     scope_model_id = _get_scope_model()
 
@@ -896,11 +763,7 @@ def run_scope_review(
 
     signal_result = _handle_prompt_signals(prompt, context_status)
     if signal_result is not None:
-        # Populate model_id for epistemic traceability. DO NOT overwrite
-        # signal_result.status — _handle_prompt_signals already sets the
-        # canonical status for every early-exit path (budget_exceeded/
-        # empty/omitted/error) and any further assignment here would
-        # silently diverge from that single source of truth.
+        # Keep _handle_prompt_signals as the status SSOT for early exits.
         signal_result.model_id = scope_model_id
         return signal_result
 
@@ -921,8 +784,7 @@ def run_scope_review(
         _emit_usage(ctx, scope_model_id, usage or {})
 
     if not raw_text.strip():
-        # Distinct status: model responded (no transport error) but returned empty text.
-        # "error" would make this path indistinguishable from API/transport failures.
+        # Empty model response is distinct from transport/API error.
         return ScopeReviewResult(
             blocked=True,
             block_message=(
@@ -978,9 +840,7 @@ def run_scope_review(
                 tokens_out=_tokens_out,
                 cost_usd=_cost_usd,
             )
-        # Advisory mode: findings returned but commit not blocked.
-        # (do NOT mutate ctx._review_advisory here; parallel_review.py aggregates
-        #  scope findings on the main thread after both futures complete to avoid races)
+        # Parallel review aggregates advisory findings on the main thread.
 
     return ScopeReviewResult(
         blocked=False,

@@ -1,14 +1,4 @@
-"""Durable review/advisory state with typed attempt ledger.
-
-State persists across task boundaries and restarts in
-``~/Ouroboros/data/state/advisory_review.json``.
-
-The modern state model is a ledger:
-- ``advisory_runs[]`` — advisory pre-review coverage for snapshots
-- ``attempts[]`` — reviewed mutative attempts with lifecycle/status metadata
-
-- ``open_obligations``
-"""
+"""Durable advisory/review ledger persisted in state/advisory_review.json."""
 
 from __future__ import annotations
 
@@ -68,8 +58,7 @@ def _stable_digest(*parts: Any) -> str:
 def _make_obligation_fingerprint(item: Any, reason: Any) -> str:
     canonical_item = _normalize_obligation_item_key(item)
     if canonical_item:
-        # Keep canonical checklist findings distinguishable so multiple
-        # same-item bugs do not collapse into one durable obligation.
+        # Include reason so same checklist item with different bugs does not coalesce.
         return f"finding:{canonical_item}:{_stable_digest(canonical_item, reason)}"
     return f"finding:{_stable_digest(item, reason)}"
 
@@ -130,7 +119,7 @@ def _commit_readiness_debts_view(state: Any) -> List["CommitReadinessDebtItem"]:
 
 @dataclass
 class ObligationItem:
-    """A single unresolved obligation extracted from a blocking commit attempt."""
+    """Unresolved obligation from a blocking commit attempt."""
 
     obligation_id: str
     item: str
@@ -148,7 +137,7 @@ class ObligationItem:
 
 @dataclass
 class CommitReadinessDebtItem:
-    """A durable repo-scoped readiness debt derived from review friction."""
+    """Repo-scoped readiness debt derived from review friction."""
 
     debt_id: str
     category: str
@@ -171,7 +160,7 @@ class CommitReadinessDebtItem:
 
 @dataclass
 class AdvisoryRunRecord:
-    """A single completed advisory pre-review run."""
+    """Completed advisory pre-review run."""
 
     snapshot_hash: str
     commit_message: str
@@ -197,7 +186,7 @@ class AdvisoryRunRecord:
     duration_sec: float = 0.0
 @dataclass
 class CommitAttemptRecord:
-    """Tracks one reviewed mutative tool attempt across its lifecycle."""
+    """Reviewed mutative tool attempt lifecycle record."""
 
     ts: str
     commit_message: str
@@ -232,7 +221,7 @@ class CommitAttemptRecord:
 
 @dataclass
 class AdvisoryReviewState:
-    """Top-level durable state container."""
+    """Top-level durable review state."""
 
     state_version: int = _STATE_SCHEMA_VERSION
     advisory_runs: List[AdvisoryRunRecord] = field(default_factory=list)
@@ -387,7 +376,7 @@ class AdvisoryReviewState:
         reason: str = "",
         stale_repo_key: str = "",
     ) -> int:
-        """Invalidate advisory runs for a repo, with conservative fallback to full stale."""
+        """Invalidate advisory runs for a repo, falling back conservatively."""
         invalidatable = [
             run for run in self.advisory_runs
             if run.status in ("fresh", "bypassed", "skipped")
@@ -414,13 +403,13 @@ class AdvisoryReviewState:
         return len(target_runs)
 
     def add_blocking_attempt(self, attempt: CommitAttemptRecord) -> None:
-        """Backward-compatible alias preserved for existing callers/tests."""
+        """Compatibility alias for existing callers/tests."""
         attempt.status = "blocked"
         attempt.blocked = True
         self.record_attempt(attempt)
 
     def record_attempt(self, attempt: CommitAttemptRecord) -> CommitAttemptRecord:
-        """Upsert one reviewed attempt into the durable ledger and compatibility views."""
+        """Upsert one reviewed attempt into durable state."""
         now = _utc_now()
         attempt.tool_name = str(attempt.tool_name or _DEFAULT_TOOL_NAME)
         attempt.repo_key = str(attempt.repo_key or _LEGACY_CURRENT_REPO_KEY)
@@ -838,7 +827,7 @@ class AdvisoryReviewState:
         return results
 
     def _update_obligations_from_attempt(self, attempt: CommitAttemptRecord) -> List[str]:
-        """Accumulate critical findings as stable obligations with separate fingerprints."""
+        """Accumulate critical findings as stable obligations."""
         if not attempt.critical_findings:
             return []
 
@@ -865,24 +854,8 @@ class AdvisoryReviewState:
             reason = str(f.get("reason", ""))
             severity = str(f.get("severity", "critical"))
             raw_explicit_id = str(f.get("obligation_id", "") or "").strip()
-            # Validate any reviewer-supplied explicit obligation id before
-            # aliasing a new FAIL finding onto an existing durable record.
-            # Threat model: a reviewer/LLM can emit an invented id or reuse an
-            # unrelated existing id, and without this guard the ingestion path
-            # would either mint a non-standard public id or alias the new
-            # finding onto the wrong open obligation — corrupting the debt
-            # layer that depends on `source_obligation_ids`.
-            #
-            # Rules:
-            #   - the id must match the `obl-####` public-id shape,
-            #   - it must already point at an OPEN obligation in this state,
-            #   - the canonical checklist items must be compatible (same
-            #     canonical key, or at least one side is non-canonical such as
-            #     `bug_1` / `risk_*` — in that case we can't prove mismatch, so
-            #     we allow the reviewer's stated root-cause link).
-            # If any rule fails we ignore the explicit id and allocate a fresh
-            # one below, symmetrically with `_resolve_matching_obligations`'s
-            # refusal to honour inconsistent ids on PASS.
+            # Reviewer-supplied ids must match an open compatible obligation;
+            # otherwise a bogus id could corrupt durable debt links.
             explicit_id = ""
             if raw_explicit_id and _looks_like_public_obligation_id(raw_explicit_id):
                 candidate = existing.get(raw_explicit_id)
@@ -1022,8 +995,6 @@ class AdvisoryReviewState:
 
         return expired
 
-
-# --- Serialization ---
 
 def _obligation_from_dict(d: Dict[str, Any]) -> ObligationItem:
     return ObligationItem(
@@ -1195,7 +1166,7 @@ def _load_state_unlocked(drive_root: pathlib.Path) -> AdvisoryReviewState:
 
 
 def load_state(drive_root: pathlib.Path) -> AdvisoryReviewState:
-    """Load review state from disk. Returns empty state on any error."""
+    """Load review state, returning empty state on error."""
     try:
         return _load_state_unlocked(drive_root)
     except Exception as e:
@@ -1226,7 +1197,7 @@ def _save_state_unlocked(drive_root: pathlib.Path, state: AdvisoryReviewState) -
 
 
 def save_state(drive_root: pathlib.Path, state: AdvisoryReviewState) -> None:
-    """Persist review state atomically with a best-effort lock."""
+    """Persist review state atomically under a best-effort lock."""
     lock_path = drive_root / _LOCK_RELPATH
     lock_fd = acquire_review_state_lock(drive_root)
     if lock_fd is None:
@@ -1242,7 +1213,7 @@ def update_state(
     drive_root: pathlib.Path,
     mutator: Callable[[AdvisoryReviewState], Any],
 ) -> Any:
-    """Run a read-modify-write update under an explicit lock/lockfile."""
+    """Run read-modify-write under an explicit lock."""
     lock_fd = acquire_review_state_lock(drive_root)
     if lock_fd is None:
         raise TimeoutError(f"Could not acquire review state lock for {drive_root / _LOCK_RELPATH}")
@@ -1254,8 +1225,6 @@ def update_state(
     finally:
         release_review_state_lock(drive_root, lock_fd)
 
-
-# --- Lock helpers ---
 
 def acquire_review_state_lock(
     drive_root: pathlib.Path,
@@ -1276,8 +1245,6 @@ def release_review_state_lock(drive_root: pathlib.Path, lock_fd: Optional[int]) 
     release_exclusive_file_lock(lock_path, lock_fd)
 
 
-# --- Snapshot hash / repo identity ---
-
 _SNAPSHOT_EXCLUDE_PATHS = frozenset({
     "state/advisory_review.json",
     "state/queue_snapshot.json",
@@ -1285,7 +1252,7 @@ _SNAPSHOT_EXCLUDE_PATHS = frozenset({
 
 
 def discover_repo_root(path: pathlib.Path) -> pathlib.Path:
-    """Return the nearest directory containing `.git`, else the resolved input path."""
+    """Return nearest directory containing .git, else resolved input path."""
     resolved = path.resolve()
     current = resolved if resolved.is_dir() else resolved.parent
     while True:
@@ -1343,10 +1310,8 @@ def compute_snapshot_hash(
     return h.hexdigest()[:32]
 
 
-# --- Advisory staleness from worktree edits ---
-
 def mark_advisory_stale_after_edit(drive_root: pathlib.Path) -> None:
-    """Mark all fresh advisory runs as stale because the worktree was modified."""
+    """Mark fresh advisory runs stale after a worktree edit."""
     try:
         updated = update_state(drive_root, lambda state: _mark_advisory_stale_locked(state))
         if isinstance(updated, AdvisoryReviewState):
@@ -1369,11 +1334,7 @@ def invalidate_advisory_after_mutation(
     changed_paths: Optional[List[str]] = None,
     source_tool: str = "",
 ) -> None:
-    """Invalidate advisory freshness after a successful mutating tool path.
-
-    Repo identity is inferred from the nearest `.git` root of the mutation root / changed
-    paths. If repo resolution is ambiguous, conservatively stale all fresh advisory runs.
-    """
+    """Invalidate advisory freshness after mutation; ambiguous repo scope stales all."""
     try:
         changed_paths = [str(p).strip() for p in (changed_paths or []) if str(p).strip()]
         resolved_repo_keys = _resolve_mutation_repo_keys(mutation_root, changed_paths)
@@ -1396,11 +1357,9 @@ def invalidate_advisory_after_mutation(
         log.debug("invalidate_advisory_after_mutation failed (non-fatal): %s", e)
 
 
-# --- Context injection ---
-
 def format_status_section(state: AdvisoryReviewState,
                           repo_dir: Optional[pathlib.Path] = None) -> str:
-    """Render a compact historical section for LLM context injection."""
+    """Render historical review state for LLM context."""
     repo_key = make_repo_key(repo_dir) if repo_dir is not None else None
     advisory_runs = state.filter_advisory_runs(repo_key=repo_key) if repo_key is not None else list(state.advisory_runs)
     attempts = state.filter_attempts(repo_key=repo_key) if repo_key is not None else list(state.attempts)
@@ -1416,7 +1375,7 @@ def format_status_section(state: AdvisoryReviewState,
         "(Historical — run `review_status` for gate-accurate live freshness)",
     ]
 
-    # No [-3:] cap — include ALL advisory runs so history is preserved.
+    # Include all runs/attempts/findings; review history must not silently truncate.
     for run in advisory_runs:
         status_icon = {
             "fresh": "✅",
@@ -1442,7 +1401,6 @@ def format_status_section(state: AdvisoryReviewState,
         ]
         if findings:
             lines.append(f"   Findings ({len(findings)}):")
-            # No [:N] cap — include ALL findings so advisory receives complete history.
             for item in findings:
                 sev = str(item.get("severity", "advisory")).upper()
                 name = item.get("item", "?")
@@ -1469,7 +1427,6 @@ def format_status_section(state: AdvisoryReviewState,
             for evidence in list(debt.evidence or []):
                 lines.append(f"    evidence={evidence}")
 
-    # No [-3:] cap — include ALL attempts so nothing is silently dropped.
     recent_attempts = attempts
     if recent_attempts:
         lines.append("\n### Recent reviewed attempts")
@@ -1486,7 +1443,6 @@ def format_status_section(state: AdvisoryReviewState,
             if item.degraded_reasons:
                 facts.append(f"degraded={len(item.degraded_reasons)}")
             lines.append(f"- {label}: {', '.join(facts)}")
-            # Compact per-actor triad summary (status only — raw text omitted from context)
             triad_raw = getattr(item, "triad_raw_results", None) or []
             if triad_raw:
                 actor_summaries = [
@@ -1517,21 +1473,18 @@ def format_status_section(state: AdvisoryReviewState,
             lines.append(f"   Duration: {ca.duration_sec:.1f}s")
         if ca.readiness_warnings:
             lines.append(f"   Readiness warnings ({len(ca.readiness_warnings)}):")
-            # No [:N] cap — all warnings shown; review outputs must not truncate.
             for warning in ca.readiness_warnings:
                 lines.append(f"     - {_truncate_review_reason(warning, limit=160)}")
         critical_findings = list(ca.critical_findings or [])
         advisory_findings = list(ca.advisory_findings or [])
         if critical_findings:
             lines.append(f"   Critical findings ({len(critical_findings)}):")
-            # No [:N] cap — all findings preserved for complete carry-over.
             for finding in critical_findings:
                 label = str(finding.get("item") or finding.get("reason") or "?")
                 reason = _truncate_review_reason(finding.get("reason", ""), limit=160)
                 lines.append(f"     - {label}: {reason}")
         elif advisory_findings:
             lines.append(f"   Advisory findings ({len(advisory_findings)}):")
-            # No [:N] cap — all findings preserved.
             for finding in advisory_findings:
                 label = str(finding.get("item") or finding.get("reason") or "?")
                 reason = _truncate_review_reason(finding.get("reason", ""), limit=160)
@@ -1539,7 +1492,6 @@ def format_status_section(state: AdvisoryReviewState,
 
     if open_obs:
         lines.append(f"\n📋 **Open obligations from previous blocking rounds ({len(open_obs)}):**")
-        # No [:N] cap — all obligations shown; advisory must address each one.
         for ob in open_obs:
             reason = _truncate_review_reason(ob.reason)
             source = ob.source_attempt_msg  # full message — no [:60] truncation
@@ -1549,8 +1501,6 @@ def format_status_section(state: AdvisoryReviewState,
 
     return "\n".join(lines)
 
-
-# --- Helpers ---
 
 def _attempt_identity_tuple(attempt: CommitAttemptRecord) -> tuple[str, str, str, str]:
     attempt_number = int(attempt.attempt or 0)

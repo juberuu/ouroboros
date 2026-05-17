@@ -22,27 +22,15 @@ from ouroboros.utils import (
 )
 
 if TYPE_CHECKING:
-    # Avoid runtime import — ouroboros.tools.registry must NOT be imported at
-    # module load time (review_helpers.py deliberately has no dependency on
-    # other tool modules). The ToolContext type is only needed for static
-    # analysis / documentation.
+    # Avoid runtime registry import; this module stays tool-module independent.
     from ouroboros.tools.registry import ToolContext  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
-# Shared best-effort token budget for review-stack prompts (scope review,
-# plan review, deep self-review). ``estimate_tokens`` (chars/4) under-counts
-# real tokens by ~15%, so at gate=850 000 actual input lands at ≈1M tokens —
-# right at the API ceiling on default 1M-context reviewer models. The skip
-# path is non-blocking (warning, not failure); some API-level rejections at
-# this gate are still possible, especially on reviewers configured below the
-# 1M-context floor. Bump together with the corresponding reviewer model
-# routing — keeping it here as the single source of truth means a future
-# move to a larger context window only needs one edit. ``deep_self_review``
-# also references this constant for the message string in its rejection
-# path, so a number bump there does not silently desync from the real gate.
+# Shared review prompt budget. estimate_tokens under-counts real tokens, so the
+# non-blocking skip gate leaves headroom for default 1M-context reviewer models.
 REVIEW_PROMPT_TOKEN_BUDGET = 850_000
 
 SKILL_HOST_CONTEXT_FILES = (
@@ -124,13 +112,7 @@ def emit_review_usage(
 
 
 def build_skill_host_context(repo_dir: Path | None = None) -> str:
-    """Return minimal host-side skill/widget contract context for reviewers.
-
-    This is deliberately smaller than the full extension loader + widget host.
-    It gives reviewers the practical authoring guide, PluginAPI contract, and
-    declarative widget validator without injecting large implementation files
-    into every skill review.
-    """
+    """Return compact host-side skill/widget contract context for reviewers."""
     root = Path(repo_dir) if repo_dir is not None else REPO_ROOT
     parts = [
         "## Host skill/widget contract context\n",
@@ -170,10 +152,10 @@ def load_governance_doc(
     return f"[⚠️ OMISSION: {rel_path} not found at {path}]"
 
 BINARY_EXTENSIONS = frozenset({
-    # Compiled / archive
+    # Compiled/archive
     ".so", ".dylib", ".dll", ".pyc", ".whl", ".egg",
     ".zip", ".tar", ".gz", ".bz2",
-    # Images / icons (expanded to match _FULL_REPO_BINARY_EXTENSIONS)
+    # Images/icons
     ".png", ".jpg", ".jpeg", ".gif", ".ico", ".icns", ".webp", ".bmp", ".tiff", ".svg",
     # Fonts
     ".woff", ".woff2", ".ttf", ".otf", ".eot",
@@ -189,19 +171,15 @@ SKIP_DIRS = frozenset({
 
 _FILE_SIZE_LIMIT = 1_048_576  # 1 MB
 
-# --- Constants for build_full_repo_pack (mirrors deep_self_review.py, DRY) ---
+# build_full_repo_pack constants shared with deep self-review.
 _SENSITIVE_EXTENSIONS = frozenset({
     ".env", ".pem", ".key", ".p12", ".pfx", ".jks", ".keystore",
-    # v4.50: broaden the suffix list covering common credential
-    # vaults / GPG-encrypted blobs / KeePass databases. Reused by
-    # the marketplace fetcher policy gates.
+    # Credential vaults / encrypted blobs.
     ".kdbx", ".gpg", ".asc",
 })
 _SENSITIVE_NAMES = frozenset({
     ".env", ".env.local", ".env.production", ".env.staging",
-    # v4.50: broader env-file coverage for development / test /
-    # example shapes that a publisher could legitimately ship but
-    # which are still credential-shaped.
+    # Env-file variants are credential-shaped even when named for examples/tests.
     ".env.development", ".env.dev", ".env.test", ".env.example",
     "credentials.json", "service-account.json", "secrets.yaml", "secrets.json",
     "secrets.toml", "secrets.ini",
@@ -222,9 +200,7 @@ _FULL_REPO_BINARY_EXTENSIONS = frozenset({
 })
 _FULL_REPO_SKIP_DIR_PREFIXES = (
     ".cursor/", ".github/", ".vscode/", ".idea/", "assets/",
-    # tests/ excluded from full repo pack — ~87 files (~217K tokens, ~31% of budget).
-    # Touched test files are still sent via build_touched_file_pack (touched_file_pack
-    # section), so scope reviewer always sees the changed tests.
+    # Full pack excludes tests; touched tests are still sent separately.
     "tests/",
 )
 _MAX_FULL_REPO_FILE_BYTES = 1_048_576  # 1 MB
@@ -397,25 +373,12 @@ def build_review_history_section(
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
 # Shared anti-thrashing prompt scaffolding (DRY — used by triad, scope, skill
-# reviewers). The per-reviewer "## Previous review rounds" body is still
-# rendered locally because history entry shapes differ (commit history vs.
-# skill history vs. scope snapshot history). The trailing obligations block
-# and the "IMPORTANT RULES" rules suffix are identical across reviewers, so
-# they live here as the single source of truth. ``build_self_verification_template``
-# powers the attempt-2+ retry coaching emitted in critical-block messages.
-# ---------------------------------------------------------------------------
+# reviewers); per-reviewer history bodies stay local because record shapes differ.
 
 
 def build_obligations_block(open_obligations: list | None) -> str:
-    """Render the '## Open obligations from previous blocking rounds' block.
-
-    ``open_obligations`` is a list of records exposing ``obligation_id``,
-    ``item``, ``severity`` and ``reason`` attributes (typed ``ObligationItem``
-    in repo review state, but duck-typed here to keep this helper independent
-    of ``ouroboros.review_state``).
-    """
+    """Render open review obligations from duck-typed obligation records."""
     if not open_obligations:
         return ""
     lines = ["## Open obligations from previous blocking rounds\n"]
@@ -447,13 +410,7 @@ def build_anti_thrashing_rules_section(
     convergence_fires: bool,
     include_item_name_rule: bool = False,
 ) -> str:
-    """Render the trailing '**IMPORTANT RULES FOR THIS REVIEW:**' block.
-
-    ``has_obligations`` toggles the item-name rule for repo-review obligation
-    records. ``include_item_name_rule`` lets non-obligation flows (skill review
-    history) reuse the same rule when prior FAIL items exist but no stable
-    obligation_id exists. ``convergence_fires`` toggles the attempt 3+ rule.
-    """
+    """Render the shared anti-thrashing rules block."""
     lines = ["\n**IMPORTANT RULES FOR THIS REVIEW:**"]
     lines.append(f"1. {_ANTI_THRASHING_RULE_VERDICT}")
     rule_idx = 2
@@ -474,16 +431,7 @@ def build_self_verification_template(
     tool_name: str = "repo_commit",
     context_noun: str = "diff",
 ) -> str:
-    """Return the 'Finding/Status/Evidence/Note' + circuit-breaker block.
-
-    Empty string when ``attempt_idx < 2``. Self-verification template added at
-    attempt 2+. Circuit-breaker hint (BIBLE P2-anchored) appended at 3+.
-
-    ``tool_name`` controls the verb in the hint (``repo_commit`` for triad,
-    ``review_skill`` for skills, etc.). ``context_noun`` controls the wording
-    of "re-read the full <noun>" / "split the <noun>" — "diff" for commits,
-    "skill pack" for skills.
-    """
+    """Return retry self-verification text, with circuit-breaker hint at attempt 3+."""
     if attempt_idx < 2:
         return ""
     finding_lines = "\n".join(
@@ -585,24 +533,14 @@ def build_rebuttal_section(review_rebuttal: str) -> str:
 
 
 def format_obligation_excerpt(reason: str, max_chars: int = 120) -> str:
-    """Format an obligation reason excerpt with sanitization and explicit OMISSION NOTE.
-
-    Sanitizes prior-model reason text before injecting into future reviewer prompts:
-    - Collapses newlines/whitespace to a single line (prevents multi-line prompt injection)
-    - Redacts secret-like values via redact_prompt_secrets
-    - Truncates to max_chars with an explicit ⚠️ OMISSION NOTE (not a silent slice)
-
-    Used by review history section builders to surface obligation context
-    without silent truncation (DEVELOPMENT.md cognitive-artifact rule 2f).
-    """
+    """Sanitize an obligation reason excerpt with explicit omission text."""
     import re as _re
-    # Redact first (on original text with line boundaries intact) so that
-    # line-anchored patterns like API_KEY=secret are still visible to _SECRET_LINE_RE.
+    # Redact before whitespace collapse so line-anchored secret patterns still match.
     try:
         redacted, _ = redact_prompt_secrets(str(reason or ""))
     except Exception:
         redacted = str(reason or "")  # redact is best-effort; never crash the review pipeline
-    # Then collapse newlines/whitespace to a single line (prevents multi-line prompt injection)
+    # Collapse whitespace to prevent multi-line prompt injection.
     sanitized = _re.sub(r"\s+", " ", redacted).strip()
     if len(sanitized) > max_chars:
         return (
@@ -708,15 +646,8 @@ def parse_changed_paths_from_porcelain(changed_files_text: str) -> list[str]:
     return resolved_paths
 
 
-# ---------------------------------------------------------------------------
-# 1. load_checklist_section
-# ---------------------------------------------------------------------------
-
 def load_checklist_section(section_name: str) -> str:
-    """Extract one ``## Header`` section from docs/CHECKLISTS.md.
-
-    Raises ValueError if the section is not found.
-    """
+    """Extract one ``## Header`` section from docs/CHECKLISTS.md."""
     checklist_path = REPO_ROOT / "docs" / "CHECKLISTS.md"
     text = checklist_path.read_text(encoding="utf-8")
 
@@ -727,25 +658,17 @@ def load_checklist_section(section_name: str) -> str:
             f"Section {header!r} not found in {checklist_path}"
         )
 
-    # Find the next ## header or EOF
     next_header = text.find("\n## ", start + len(header))
     if next_header == -1:
         return text[start:]
     return text[start:next_header]
 
 
-# ---------------------------------------------------------------------------
-# 2. build_touched_file_pack
-# ---------------------------------------------------------------------------
-
 def build_touched_file_pack(
     repo_dir: Path,
     paths: list[str] | None = None,
 ) -> tuple[str, list[str]]:
-    """Read full disk content of changed files, formatted as a code pack.
-
-    Returns (formatted_text, omitted_file_paths).
-    """
+    """Read changed files into a prompt code pack plus omission list."""
     if paths is None:
         paths = list_changed_paths_from_git_status(repo_dir)
 
@@ -755,8 +678,7 @@ def build_touched_file_pack(
 
     for rel in paths:
         fp = repo_dir / rel
-        # Security: reject path traversal — symlinks and relative escapes must resolve
-        # to a location inside the repository root.
+        # Reject traversal/symlink escapes outside the repo root.
         try:
             fp_resolved = fp.resolve()
         except OSError:
@@ -774,8 +696,7 @@ def build_touched_file_pack(
             continue
         if not fp.is_file():
             continue
-        # Sensitive-file guard: never inject .env, credentials, keys, etc. into review prompts
-        # Normalize to lowercase so mixed-case variants (.ENV, Credentials.JSON) are caught.
+        # Never inject credential-shaped files into review prompts.
         fname_lower = fp.name.lower()
         if fp.suffix.lower() in _SENSITIVE_EXTENSIONS or fname_lower in _SENSITIVE_NAMES:
             omitted.append(rel)
@@ -814,12 +735,7 @@ def build_advisory_changed_context(
     paths: list[str] | None = None,
     exclude_paths: set[str] | None = None,
 ) -> tuple[list[str], str, list[str]]:
-    """Resolve changed paths and build the touched-file section for advisory prompts.
-
-    Uses ``changed_files_text`` (already-fetched git-status porcelain output) when
-    ``paths`` is not explicitly provided, avoiding a second git-status subprocess call
-    that could race with a concurrent worktree mutation.
-    """
+    """Resolve changed paths and build advisory touched-file context."""
     resolved_paths = (
         list(paths)
         if paths is not None
@@ -841,19 +757,12 @@ def build_blocking_findings_json_section(
     *,
     history_limit: int = 4,
 ) -> str:
-    """Render open obligations and recent blocking findings as fenced JSON.
-
-    All findings and obligations are included without truncation — the caller must
-    not apply slice caps before passing these lists.  ``history_limit`` is kept
-    for backward-compat but is intentionally ignored: ALL blocking attempts are
-    serialised so no finding is silently dropped between pipeline stages.
-    """
+    """Render all obligations and blocking findings as fenced JSON."""
     if not open_obligations and not blocking_history:
         return ""
 
     def _sanitize_text(value: str, limit: int = 0) -> str:
-        """Redact secrets from text. ``limit`` is kept for call-site compat but ignored —
-        no silent truncation (BIBLE P1). Full text is returned after secret redaction."""
+        """Redact secrets; ignore legacy ``limit`` to avoid silent truncation."""
         text, _ = redact_prompt_secrets(str(value or ""))
         return text
 
@@ -869,9 +778,8 @@ def build_blocking_findings_json_section(
         for ob in open_obligations
     ], "recent_blocking_attempts": []}
 
-    # Include ALL blocking attempts — no history_limit cap — so no finding is lost.
+    # Include all blocking attempts and all critical findings.
     for attempt in reversed(list(blocking_history or [])):
-        # Include ALL critical findings per attempt — no [:6] cap.
         critical_findings = [
             {key: _sanitize_text(value) if isinstance(value, str) else value for key, value in finding.items()}
             for finding in list(getattr(attempt, "critical_findings", []) or [])
@@ -896,28 +804,8 @@ def build_blocking_findings_json_section(
     )
 
 
-# ---------------------------------------------------------------------------
-# 3b. _is_probably_binary (content sniffer, mirrors deep_self_review.py)
-# ---------------------------------------------------------------------------
-
 def _is_probably_binary(path: Path) -> bool:
-    """Return True if the file looks like binary content.
-
-    Best-effort heuristic — reads at most _BINARY_SNIFF_BYTES bytes.
-
-    Three checks in order of cheapness:
-    1. NUL byte — reliable indicator of non-text data.
-    2. High ratio (>30%) of ASCII control characters (< 9 or 14-31, excluding
-       common whitespace: tab=9, LF=10, CR=13).  Bytes ≥128 are intentionally
-       excluded so valid UTF-8 text (Cyrillic, CJK, etc.) is never misclassified
-       by the control-char count alone.
-    3. UTF-8 incremental decode failure — catches high-byte blobs (e.g. invalid
-       UTF-8 or Latin-1 binary) with no NUL and few control chars.  Uses an
-       incremental decoder to avoid false positives from valid multi-byte chars
-       split at the 8192-byte sample boundary.
-
-    Returns False on any I/O error.
-    """
+    """Return True if the sampled bytes look binary; false on I/O errors."""
     try:
         with path.open("rb") as fh:
             sample = fh.read(_BINARY_SNIFF_BYTES)
@@ -972,12 +860,7 @@ def iter_repo_pack_entries(
     max_file_bytes: int = _MAX_FULL_REPO_FILE_BYTES,
     include_oversized_placeholder: bool = False,
 ) -> tuple[list[tuple[str, str, str, str]], list[str]]:
-    """Read reviewable tracked files once and return pack entries + omissions.
-
-    Each entry is ``(rel_path, content, language, note)``.  This is the shared
-    file-selection policy for scope review and deep self-review; callers keep
-    their own output formatting so prompt contracts do not drift.
-    """
+    """Return reviewable tracked-file entries and omissions for repo packs."""
     exclude_paths = exclude_paths or set()
     tracked = tracked_paths if tracked_paths is not None else list_git_tracked_paths(repo_dir)
 
@@ -997,10 +880,7 @@ def iter_repo_pack_entries(
 
         fp = repo_dir / rel
 
-        # Security: reject symlinks that resolve outside the repository root.
-        # Git can track symlinks; if the symlink target escapes the repo directory
-        # (e.g. points at /etc/passwd or ~/secrets.env), reading it would exfiltrate
-        # local secrets into external review-model prompts.
+        # Reject tracked symlinks/paths that resolve outside the repo root.
         try:
             fp_resolved = fp.resolve()
             fp_resolved.relative_to(repo_dir_resolved)
@@ -1014,22 +894,22 @@ def iter_repo_pack_entries(
         fname = fp.name.lower()
         fsuffix = fp.suffix.lower()
 
-        # Security: skip sensitive files
+        # Skip sensitive files.
         if fname in _SENSITIVE_NAMES or fsuffix in _SENSITIVE_EXTENSIONS:
             omitted.append(f"{rel} (sensitive)")
             continue
 
-        # Binary/media by extension
+        # Binary/media by extension.
         if fsuffix in _FULL_REPO_BINARY_EXTENSIONS:
             omitted.append(f"{rel} (binary/media)")
             continue
 
-        # Vendored/minified
+        # Vendored/minified.
         if fname in _VENDORED_NAMES or any(fname.endswith(s) for s in _VENDORED_SUFFIXES):
             omitted.append(f"{rel} (vendored/minified)")
             continue
 
-        # Size guard before content sniffer
+        # Size guard before content sniffer.
         try:
             size = fp.stat().st_size
         except OSError:
@@ -1042,7 +922,7 @@ def iter_repo_pack_entries(
                 entries.append((rel, f"[SKIPPED: file too large ({size} bytes)]", "", ""))
             continue
 
-        # Content-based binary sniffer
+        # Content-based binary sniffer.
         if _is_probably_binary(fp):
             omitted.append(f"{rel} (binary content)")
             continue
@@ -1063,30 +943,11 @@ def iter_repo_pack_entries(
     return entries, omitted
 
 
-# ---------------------------------------------------------------------------
-# 3c. build_full_repo_pack (DRY extraction from deep_self_review.py)
-# ---------------------------------------------------------------------------
-
 def build_full_repo_pack(
     repo_dir: Path,
     exclude_paths: set[str] | None = None,
 ) -> tuple[str, list[str]]:
-    """Build a comprehensive repo pack of all tracked text files.
-
-    Applies proper filtering: binary, sensitive, vendored, oversized (>1MB),
-    and directory-prefix exclusions. NO hardcoded char/token cap — if the result
-    is too large, the caller decides what to do.
-
-    Args:
-        repo_dir: Path to the git repository root.
-        exclude_paths: Optional set of relative paths to exclude (e.g. touched files
-            already shown elsewhere).
-
-    Returns:
-        (pack_text, omitted) where pack_text is formatted as
-        ``### rel_path\\n```ext\\ncontent\\n```\\n\\n`` sections,
-        and omitted is a list of skipped relative paths with reasons.
-    """
+    """Build a filtered full-repo text pack; callers handle size limits."""
     entries, omitted = iter_repo_pack_entries(repo_dir, exclude_paths=exclude_paths)
     parts = [
         f"### {rel}\n{note}```{lang}\n{content}\n```\n\n"
@@ -1096,21 +957,11 @@ def build_full_repo_pack(
     return "".join(parts), omitted
 
 
-# ---------------------------------------------------------------------------
-# 4. resolve_intent
-# ---------------------------------------------------------------------------
-
 _COMMIT_SUBJECT_MAX_CHARS = 120
 
 
 def _commit_subject(commit_message: str) -> str:
-    """Return the first line of a commit message, capped at _COMMIT_SUBJECT_MAX_CHARS.
-
-    Stops at the first blank line (``\\n\\n``) or newline. Used when the caller
-    has no explicit goal/scope and the commit message is the only signal: we
-    treat the subject as the intent, and the body as narrative (see
-    ``build_goal_section``).
-    """
+    """Return the capped first line of a commit message."""
     text = commit_message.strip()
     if not text:
         return ""
@@ -1184,23 +1035,11 @@ def build_goal_section(
     return "\n".join(sections)
 
 
-# ---------------------------------------------------------------------------
-# 6. build_scope_section
-# ---------------------------------------------------------------------------
-
 def build_head_snapshot_section(
     repo_dir: Path,
     paths: list[str],
 ) -> str:
-    """Build a section with pre-change (HEAD) content of touched files.
-
-    For each path:
-    - If the file is new (no HEAD version): notes it as new.
-    - If the file was deleted: shows the old content from HEAD.
-    - If the file was modified: shows the old content from HEAD.
-
-    Returns formatted text ready for injection into a scope review prompt.
-    """
+    """Build prompt text with HEAD snapshots of touched files."""
     if not paths:
         return "(no touched files)"
 
@@ -1208,25 +1047,19 @@ def build_head_snapshot_section(
     for rel in paths:
         fp_rel = Path(rel)
         suffix = fp_rel.suffix.lower()
-        # Sensitive-file guard: omit .env, credentials, keys before reading HEAD snapshot
-        # Normalize to lowercase so mixed-case variants (.ENV, Credentials.JSON) are caught.
+        # Omit credential-shaped files before reading HEAD snapshot.
         fname_lower = fp_rel.name.lower()
         if suffix in _SENSITIVE_EXTENSIONS or fname_lower in _SENSITIVE_NAMES:
             parts.append(f"### {rel}\n\n*(HEAD snapshot omitted — sensitive file)*\n")
             continue
-        # Skip by extension for known binary types first (fast path)
+        # Skip known binary extensions before invoking git.
         if suffix in BINARY_EXTENSIONS:
             parts.append(f"### {rel}\n\n*(HEAD snapshot omitted — binary file ({suffix}))*\n")
             continue
         ext = Path(rel).suffix.lstrip(".")
         lang = ext if ext else ""
         try:
-            # Fetch HEAD content as raw bytes only — single subprocess call.
-            # Binary detection and size check run on raw bytes before any decode.
-            # Force LC_ALL=C so git error messages are English regardless of the
-            # operator's locale — the new-file detection below depends on
-            # stable English substrings, and a German/French/etc. locale
-            # otherwise misclassifies new files as "git error".
+            # Force English git stderr so new-file detection is locale-stable.
             _git_env = {**os.environ, "LC_ALL": "C", "LANG": "C", "LANGUAGE": "C"}
             result = subprocess.run(
                 ["git", "show", f"HEAD:{rel}"],
@@ -1237,7 +1070,7 @@ def build_head_snapshot_section(
             )
             if result.returncode == 0 and result.stdout:
                 raw_bytes = result.stdout
-                # Size guard: raw byte count (not decoded character count)
+                # Size guard uses raw bytes, not decoded characters.
                 if len(raw_bytes) > _FILE_SIZE_LIMIT:
                     parts.append(
                         f"### {rel}\n\n*(HEAD snapshot omitted — {len(raw_bytes):,} bytes exceeds "
@@ -1247,13 +1080,12 @@ def build_head_snapshot_section(
                 if _raw_bytes_binary(raw_bytes[:_BINARY_SNIFF_BYTES]):
                     parts.append(f"### {rel}\n\n*(HEAD snapshot omitted — binary content detected)*\n")
                     continue
-                # Decode the full raw content for injection into prompt
+                # Decode only after binary/size checks.
                 content = raw_bytes.decode("utf-8", errors="replace")
                 parts.append(f"### {rel}\n\n```{lang}\n{content}\n```\n")
                 continue
             if result.returncode != 0:
-                # Distinguish "file not in HEAD" (genuinely new file) from real git failures.
-                # result.stderr is bytes (no text=True) — decode for comparison.
+                # Distinguish a new file from a real git failure.
                 raw_stderr = result.stderr or b""
                 stderr_str = (
                     raw_stderr.decode("utf-8", errors="replace")
@@ -1270,7 +1102,7 @@ def build_head_snapshot_section(
                 if is_new_file:
                     parts.append(f"### {rel}\n\n*(File is new — no HEAD snapshot)*\n")
                 else:
-                    # Real git failure — emit explicit error so reviewer knows the snapshot is missing
+                    # Real git failure: tell the reviewer the snapshot is missing.
                     short_err = stderr_str.strip()[:200]
                     parts.append(f"### {rel}\n\n*(HEAD snapshot error — git exited {result.returncode}: {short_err})*\n")
             elif not result.stdout:
@@ -1296,18 +1128,9 @@ def build_scope_section(scope: str = "") -> str:
     )
 
 
-# ---------------------------------------------------------------------------
-# Advisory SDK diagnostic helpers (shared with claude_advisory_review.py)
-# ---------------------------------------------------------------------------
-
 def get_advisory_runtime_diagnostics(model: str, prompt_chars: int,
                                      touched_paths: list) -> dict:
-    """Collect runtime diagnostic context for advisory failure messages.
-
-    Includes sdk_version, cli_version, cli_path, python, model, prompt size,
-    and the list of touched paths.  Never raises — returns partial data on error.
-    Called by _run_claude_advisory before and after SDK invocation.
-    """
+    """Collect best-effort advisory SDK diagnostics; never raises."""
     import sys
 
     diag: dict = {
@@ -1317,14 +1140,14 @@ def get_advisory_runtime_diagnostics(model: str, prompt_chars: int,
         "touched_paths": touched_paths,
         "python": sys.executable,
     }
-    # SDK version
+    # SDK version.
     try:
         import importlib.metadata
         diag["sdk_version"] = importlib.metadata.version("claude-agent-sdk")
     except Exception:
         diag["sdk_version"] = "(unavailable)"
 
-    # CLI version and path via compat resolver
+    # CLI version/path via compat resolver.
     try:
         from ouroboros.platform_layer import resolve_claude_runtime
         rt = resolve_claude_runtime()
@@ -1338,15 +1161,7 @@ def get_advisory_runtime_diagnostics(model: str, prompt_chars: int,
 
 
 def check_worktree_version_sync(repo_dir) -> str:
-    """Worktree version-sync preflight (non-fatal, non-blocking).
-
-    Reads VERSION, pyproject.toml, README badge, and ARCHITECTURE.md header from
-    the worktree (not staged — advisory runs before git add). Returns a warning
-    string when they disagree, empty string when in sync or VERSION is absent.
-
-    Shared between the advisory path and any other caller that needs a
-    worktree-level (pre-git-add) version consistency check.
-    """
+    """Return a non-fatal warning when release version carriers disagree."""
     from pathlib import Path as _Path
     from ouroboros.tools.release_sync import (
         is_release_version,
@@ -1380,18 +1195,12 @@ def check_worktree_readiness(
     repo_dir: "Path",
     paths: "list[str] | None" = None,
 ) -> "list[str]":
-    """Run cheap deterministic checks BEFORE the expensive advisory SDK call.
-
-    Returns a list of warning strings (empty list = ready).
-    Checks: (1) uncommitted changes exist, (2) version-sync,
-    (3) Python files modified without test changes, (4) diff size.
-    Each check is wrapped in try/except — never crashes.
-    """
+    """Run cheap deterministic pre-advisory checks; never crash."""
     from pathlib import Path as _Path
     repo_dir = _Path(repo_dir)
     warnings: list = []
 
-    # 1. Check if there are any uncommitted changes
+    # 1. Uncommitted changes.
     try:
         path_args = (["--"] + list(paths)) if paths else []
         status_result = subprocess.run(
@@ -1409,7 +1218,7 @@ def check_worktree_readiness(
     except Exception:
         pass  # Skip this check on error
 
-    # 2. Version-sync check (delegate to existing helper)
+    # 2. Version-sync.
     try:
         vsync = check_worktree_version_sync(repo_dir)
         if vsync:
@@ -1417,7 +1226,7 @@ def check_worktree_readiness(
     except Exception:
         pass
 
-    # 3. Python files under ouroboros/ or supervisor/ modified without test changes
+    # 3. Core Python changes without test changes.
     try:
         path_args = (["--"] + list(paths)) if paths else []
         status_result2 = subprocess.run(
@@ -1432,11 +1241,7 @@ def check_worktree_readiness(
                 if len(line) < 4:
                     continue
                 fpath = line[3:].strip()
-                # git status --porcelain rename format:
-                #   staged:   "R  old -> new"  (R in byte 0)
-                #   unstaged: " R old -> new"  (R in byte 1)
-                # We must only split on " -> " when at least one status byte
-                # is R or C, NOT for all filenames (real names can contain " -> ").
+                # Split porcelain rename/copy paths only when status bytes say R/C.
                 status_bytes = line[:2]
                 if ("R" in status_bytes or "C" in status_bytes) and " -> " in fpath:
                     fpath = fpath.rsplit(" -> ", 1)[1].strip()
@@ -1453,7 +1258,7 @@ def check_worktree_readiness(
     except Exception:
         pass
 
-    # 4. Diff size check
+    # 4. Diff size.
     try:
         diff_path_args = (["--"] + list(paths)) if paths else []
         staged = subprocess.run(
@@ -1480,25 +1285,7 @@ def _run_review_preflight_tests(
     ctx: "Any",
     timeout: int = 120,
 ) -> Optional[str]:
-    """Run pytest before an expensive review step (advisory SDK or triad+scope).
-
-    Returns a non-None error string when tests fail, None when tests pass (or
-    when the preflight is skipped by env gate / missing tests directory).
-
-    Shared helper used by:
-      * ``claude_advisory_review._run_advisory_tests`` — before the advisory
-        SDK call.
-      * ``git._run_reviewed_stage_cycle`` — before the triad + scope review
-        when advisory was bypassed (``skip_advisory_pre_review=True`` or
-        auto-bypassed with no Anthropic key).
-
-    Respects ``OUROBOROS_PRE_PUSH_TESTS=0`` env gate — same as the post-commit
-    runner in git.py — so a single knob disables all test preflight layers.
-
-    ``ctx`` is a ToolContext (typed as ``Any`` to avoid circular imports —
-    review_helpers deliberately has no runtime dependency on other tool
-    modules).
-    """
+    """Run pytest before expensive review steps unless disabled or unavailable."""
     if os.environ.get("OUROBOROS_PRE_PUSH_TESTS", "1") != "1":
         return None
     repo_dir = getattr(ctx, "repo_dir", None)
@@ -1529,12 +1316,7 @@ def _run_review_preflight_tests(
 
 def format_advisory_sdk_error(prefix: str, result_error: str, stderr_tail: str,
                                session_id: str, diag: dict) -> str:
-    """Format a rich, debuggable advisory error message.
-
-    All diagnostic fields are included so the next `exit 1` can be debugged
-    without guessing.  The format is human-readable and starts with the
-    ⚠️ ADVISORY_ERROR: sentinel so callers can detect it reliably.
-    """
+    """Format advisory SDK diagnostics with the ADVISORY_ERROR sentinel."""
     lines = [
         f"⚠️ ADVISORY_ERROR: {prefix}",
         f"  error          : {result_error}",

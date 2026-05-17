@@ -1,21 +1,5 @@
 import { apiFetch } from './api_client.js';
-/**
- * MCP (Model Context Protocol) client UI — manages the multi-server card
- * widget rendered inside Settings → Advanced.
- *
- * Responsibilities:
- *   - Render the list of configured MCP servers as cards (form fields).
- *   - Add / edit / remove / enable/disable individual entries.
- *   - Read masked auth tokens from /api/settings; keep them masked unless
- *     the user explicitly types a new value (so a Save round-trip doesn't
- *     overwrite the real token with the mask).
- *   - Probe a candidate via POST /api/mcp/test before saving.
- *   - Refresh the discovered tools per server via POST /api/mcp/refresh.
- *   - Show status / tool counts / errors via GET /api/mcp/status.
- *
- * The module is intentionally self-contained: settings.js wires it up
- * with `applyMcpSettings` (load) and `collectMcpSettings` (save).
- */
+/** MCP settings cards; preserves masked auth tokens until the user edits them. */
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 
 const TRANSPORTS = [
@@ -255,12 +239,7 @@ function bindCardEvents(card) {
             testBtn.disabled = true;
             setMessage('Testing connection...', 'muted');
             try {
-                // When the auth_token is still masked AND the server has a
-                // persisted id, send BOTH the edited candidate and server_id.
-                // The backend rehydrates the real token from disk while
-                // still testing the user's current URL/transport/header edits.
-                // Without this, Test either probes without credentials or
-                // ignores the edited candidate and checks stale saved config.
+                // Masked token + server_id lets Test use saved auth with edited URL/transport.
                 const sid = String(server.id || '').trim();
                 const tokenMasked = looksMasked(server.auth_token);
                 let body;
@@ -326,11 +305,7 @@ function bindCardEvents(card) {
 function serverForTest(server) {
     const out = { ...server };
     if (looksMasked(out.auth_token)) {
-        // The backend ``/api/mcp/test`` accepts a ``server_id`` form when
-        // the token is still masked; we prefer the inline form so the
-        // user can tweak URL/transport before persisting. Drop the masked
-        // value so the server treats this as "no auth" rather than
-        // sending the literal mask string as a Bearer token.
+        // Drop literal masks so inline tests never send "***" as Bearer auth.
         out.auth_token = '';
     }
     return out;
@@ -387,7 +362,6 @@ async function refreshStatus() {
         renderEnvelopeStatus();
         renderAll();
     } catch (err) {
-        // Best-effort — don't break the Settings page.
     }
 }
 

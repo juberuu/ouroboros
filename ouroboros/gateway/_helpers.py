@@ -1,10 +1,4 @@
-"""Shared Starlette HTTP-API plumbing used across ``ouroboros`` route modules.
-
-Pre-v5.15 every API module (``extensions_api``, ``marketplace_api``,
-``file_browser_api``, ``server.py``) carried its own private copies of these
-helpers. Centralising them keeps the API modules thin and lets future helpers
-land in one place instead of being copied into N modules.
-"""
+"""Shared Starlette HTTP-API helpers for thin route modules."""
 from __future__ import annotations
 
 import pathlib

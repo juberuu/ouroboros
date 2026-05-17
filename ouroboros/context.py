@@ -1,9 +1,4 @@
-"""
-Ouroboros context builder.
-
-Assembles LLM context from prompts, memory, logs, and runtime state.
-Extracted from agent.py to keep the agent thin and focused.
-"""
+"""Assemble LLM context from prompts, memory, logs, and runtime state."""
 
 from __future__ import annotations
 
@@ -38,28 +33,24 @@ def _chat_log_signature_matches(expected: Any, current: Dict[str, Any]) -> bool:
 
 
 def build_user_content(task: Dict[str, Any]) -> Any:
-    """Build user message content. Supports text + optional image."""
+    """Build text or multimodal user content."""
     text = task.get("text", "")
     image_b64 = task.get("image_base64")
     image_mime = task.get("image_mime", "image/jpeg")
     image_caption = task.get("image_caption", "")
 
     if not image_b64:
-        # Return fallback text if both text and image are empty
         if not text:
             return "(empty message)"
         return text
 
-    # Multipart content with text + image
     parts = []
-    # Combine caption and text for the text part
     combined_text = ""
     if image_caption:
         combined_text = image_caption
     if text and text != image_caption:
         combined_text = (combined_text + "\n" + text).strip() if combined_text else text
 
-    # Always include a text part when there's an image
     if not combined_text:
         combined_text = "Analyze the screenshot"
 
@@ -72,15 +63,13 @@ def build_user_content(task: Dict[str, Any]) -> Any:
 
 
 def build_runtime_section(env: Any, task: Dict[str, Any]) -> str:
-    """Build the runtime context section (utc_now, repo_dir, drive_root, git_head, git_branch, task info, budget info)."""
-    # --- Git context ---
+    """Build runtime metadata exposed to the task model."""
     try:
         git_branch, git_sha = get_git_info(env.repo_dir)
     except Exception:
         log.debug("Failed to get git info for context", exc_info=True)
         git_branch, git_sha = "unknown", "unknown"
 
-    # --- Budget calculation ---
     budget_info = None
     try:
         state_json = safe_read(env.drive_path("state/state.json"), fallback="{}")
@@ -93,7 +82,6 @@ def build_runtime_section(env: Any, task: Dict[str, Any]) -> str:
         log.debug("Failed to calculate budget info for context", exc_info=True)
         pass
 
-    # --- Runtime context JSON ---
     _is_desktop = bool(os.environ.get("OUROBOROS_DESKTOP_MODE", ""))
     try:
         from ouroboros.config import get_runtime_mode
@@ -247,13 +235,7 @@ def _append_file_size_budget_checks(env: Any, checks: List[str]) -> None:
 
 
 def build_memory_sections(memory: Memory, partition: str = "all") -> List[str]:
-    """Build memory sections, optionally partitioned by volatility.
-
-    partition:
-      - "all": scratchpad, identity, dialogue, registry (legacy/default)
-      - "stable": identity only
-      - "volatile": scratchpad and dialogue only (registry digest is injected separately)
-    """
+    """Build all/stable/volatile memory partitions for LLM context."""
     sections = []
 
     include_stable = partition in {"all", "stable"}
@@ -262,10 +244,7 @@ def build_memory_sections(memory: Memory, partition: str = "all") -> List[str]:
     if include_volatile:
         scratchpad_raw = memory.load_scratchpad()
         _warn_if_over_budget("scratchpad", scratchpad_raw)
-        # Annotate the header so the agent knows scratchpad is already in
-        # context — re-reading via repo_read("scratchpad.md") or data_read
-        # wastes rounds. Companion guard: tools/core.py::_repo_read returns
-        # a NOT_FOUND hint when the agent tries it anyway.
+        # Header tells the agent this memory is already loaded; core guards repeat the hint.
         sections.append(
             "## Scratchpad (from `memory/scratchpad.md` — already loaded; "
             "do not re-read via repo_read or data_read)\n\n" + scratchpad_raw
@@ -558,16 +537,12 @@ def _collect_log_analysis_checks(env: Any, checks: List[str]) -> None:
 
 
 def build_health_invariants(env: Any) -> str:
-    """Build health invariants section for LLM-first self-detection.
-
-    Checks crash_report.json for CRASH ROLLBACK, plus version sync,
-    budget drift, memory health, prompt drift, log analysis, and file budgets.
-    """
+    """Build health checks for LLM-first self-detection."""
     import time as _time
 
     checks: List[str] = []
 
-    # --- version sync ---
+    # Keep version carriers synchronized on release builds.
     try:
         from ouroboros.tools.release_sync import (
             _normalize_pep440,
@@ -616,7 +591,6 @@ def build_health_invariants(env: Any) -> str:
     except Exception:
         pass
 
-    # --- budget drift ---
     try:
         state_data = read_json_dict(env.drive_path("state/state.json")) or {}
         if state_data.get("budget_drift_alert"):
@@ -626,7 +600,6 @@ def build_health_invariants(env: Any) -> str:
     except Exception:
         pass
 
-    # --- high-cost tasks ---
     try:
         from supervisor.state import per_task_cost_summary
         costly = [t for t in per_task_cost_summary(5) if t["cost"] > 5.0]
@@ -637,7 +610,6 @@ def build_health_invariants(env: Any) -> str:
     except Exception:
         pass
 
-    # --- identity freshness & size ---
     try:
         identity_path = env.drive_path("memory/identity.md")
         if identity_path.exists():
@@ -655,7 +627,6 @@ def build_health_invariants(env: Any) -> str:
     except Exception:
         pass
 
-    # --- scratchpad ---
     try:
         sp_len = len(read_text(env.drive_path("memory/scratchpad.md")).strip())
         if sp_len < 50:
@@ -667,7 +638,7 @@ def build_health_invariants(env: Any) -> str:
     except Exception:
         pass
 
-    # Crash rollback — inlined so inspect.getsource sees the literal strings
+    # Inlined so inspect.getsource sees the crash rollback strings.
     try:
         crash_report = env.drive_path("state/crash_report.json")
         crash_data = read_json_dict(crash_report)
@@ -726,11 +697,7 @@ def _compute_cache_hit_rate(env: Any) -> Optional[float]:
 
 
 def _build_registry_digest(env: Any) -> str:
-    """Build a compact one-line-per-source digest from memory/registry.md.
-
-    Returns a markdown table capped at 3000 chars, or empty string if
-    the registry doesn't exist.
-    """
+    """Build a compact one-line-per-source memory registry digest."""
     reg_path = env.drive_path("memory/registry.md")
     if not reg_path.exists():
         return ""
@@ -749,7 +716,6 @@ def _build_registry_digest(env: Any) -> str:
             current_id = line[4:].strip()
             fields = {}
         elif current_id and line.startswith("- **"):
-            # Parse "- **Key:** value"
             m = re.match(r'^- \*\*(\w+):\*\*\s*(.*)', line)
             if m:
                 fields[m.group(1).lower()] = m.group(2).strip()
@@ -770,7 +736,6 @@ def _registry_row(source_id: str, fields: dict) -> str:
     path = fields.get("path", "?")
     updated = fields.get("updated", "?")
     gaps = fields.get("gaps", "—")
-    # Keep gaps short
     if len(gaps) > 60:
         gaps = gaps[:57] + f"... [{len(gaps) - 57} chars omitted]"
     return f"| {source_id} | {path} | {updated} | {gaps} |"
@@ -844,10 +809,7 @@ def build_llm_messages(
     review_context_builder: Optional[Any] = None,
     soft_cap_tokens: int = 200_000,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """Build the full LLM message context for a task.
-
-    Returns (messages, cap_info) tuple.
-    """
+    """Build full task messages plus context-size accounting."""
     task_type = str(task.get("type") or "user")
     base_prompt = safe_read(
         env.repo_path("prompts/SYSTEM.md"),

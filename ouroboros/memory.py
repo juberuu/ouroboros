@@ -1,9 +1,4 @@
-"""
-Ouroboros — Memory.
-
-Scratchpad (append-blocks), identity, chat history, dialogue blocks.
-Contract: load scratchpad/identity, chat_history().
-"""
+"""Memory access for scratchpad blocks, identity, dialogue, and logs."""
 
 from __future__ import annotations
 
@@ -30,13 +25,11 @@ _SCRATCHPAD_MAX_BLOCKS = 10
 
 
 class Memory:
-    """Ouroboros memory management: scratchpad, identity, chat history, logs."""
+    """Ouroboros memory facade."""
 
     def __init__(self, drive_root: pathlib.Path, repo_dir: Optional[pathlib.Path] = None):
         self.drive_root = drive_root
         self.repo_dir = repo_dir
-
-    # --- Paths ---
 
     def _memory_path(self, rel: str) -> pathlib.Path:
         return (self.drive_root / "memory" / rel).resolve()
@@ -62,10 +55,8 @@ class Memory:
     def logs_path(self, name: str) -> pathlib.Path:
         return (self.drive_root / "logs" / name).resolve()
 
-    # --- Scratchpad: append-block model ---
-
     def load_scratchpad(self) -> str:
-        """Load the auto-generated scratchpad.md for context injection."""
+        """Load generated scratchpad.md for context."""
         p = self.scratchpad_path()
         if p.exists():
             return read_text(p)
@@ -74,7 +65,7 @@ class Memory:
         return default
 
     def load_scratchpad_blocks(self) -> List[Dict[str, Any]]:
-        """Load raw scratchpad blocks from JSON (file-locked)."""
+        """Load file-locked raw scratchpad blocks."""
         bp = self.scratchpad_blocks_path()
         if not bp.exists():
             return []
@@ -113,7 +104,7 @@ class Memory:
         )
 
     def append_scratchpad_block(self, content: str, source: str = "task") -> Dict[str, Any]:
-        """Append a block to scratchpad. Returns the new block. File-locked, FIFO rotation."""
+        """Append a file-locked scratchpad block with FIFO rotation."""
         bp = self.scratchpad_blocks_path()
         bp.parent.mkdir(parents=True, exist_ok=True)
 
@@ -176,7 +167,6 @@ class Memory:
 
         self.regenerate_scratchpad_md()
 
-        # Write total scratchpad size to journal for evolution metrics interpolation
         try:
             total_chars = sum(len(b.get("content", "")) for b in self.load_scratchpad_blocks())
             append_jsonl(self.journal_path(), {
@@ -190,7 +180,7 @@ class Memory:
         return new_block
 
     def regenerate_scratchpad_md(self) -> None:
-        """Rebuild scratchpad.md from current blocks (newest-first for context)."""
+        """Regenerate scratchpad.md newest-first for context."""
         blocks = self.load_scratchpad_blocks()
         if not blocks:
             write_text(self.scratchpad_path(), self._default_scratchpad())
@@ -207,18 +197,16 @@ class Memory:
         write_text(self.scratchpad_path(), "\n".join(parts))
 
     def save_scratchpad(self, content: str) -> None:
-        """Legacy full-overwrite (used only by migration/bootstrap)."""
+        """Legacy full overwrite for migration/bootstrap."""
         write_text(self.scratchpad_path(), content)
 
-    # --- Dialogue blocks ---
-
     def load_dialogue_blocks(self) -> List[Dict[str, Any]]:
-        """Load dialogue_blocks.json (block-wise chat history)."""
+        """Load block-wise dialogue history."""
         path = self.drive_root / "memory" / "dialogue_blocks.json"
         return self._load_json_blocks(path)
 
     def load_dialogue_meta(self) -> Dict[str, Any]:
-        """Load dialogue_meta.json consolidation cursor metadata."""
+        """Load dialogue consolidation cursor metadata."""
         path = self.drive_root / "memory" / "dialogue_meta.json"
         return read_json_dict(path) or {}
 
@@ -234,7 +222,7 @@ class Memory:
 
     @staticmethod
     def format_blocks_as_markdown(blocks: List[Dict[str, Any]]) -> str:
-        """Format block list into markdown for LLM context."""
+        """Format dialogue blocks as markdown."""
         parts = []
         for b in blocks:
             parts.append(b.get("content", ""))
@@ -249,12 +237,12 @@ class Memory:
         return default
 
     def load_world_profile(self) -> str:
-        """Load the stable host/environment profile, if present."""
+        """Load the stable host/environment profile."""
         p = self.world_path()
         return read_text(p) if p.exists() else ""
 
     def ensure_files(self) -> None:
-        """Create memory files if they don't exist."""
+        """Create missing memory files."""
         if not self.scratchpad_path().exists():
             write_text(self.scratchpad_path(), self._default_scratchpad())
         if not self.identity_path().exists():
@@ -271,10 +259,8 @@ class Memory:
         if not self.identity_journal_path().exists():
             write_text(self.identity_journal_path(), "")
 
-    # --- Chat history ---
-
     def chat_history(self, count: int = 100, offset: int = 0, search: str = "") -> str:
-        """Read from logs/chat.jsonl. count messages, offset from end, filter by search."""
+        """Read human chat history from logs/chat.jsonl."""
         chat_path = self.logs_path("chat.jsonl")
         if not chat_path.exists():
             return "(chat history is empty)"
@@ -292,7 +278,6 @@ class Memory:
                     log.debug(f"Failed to parse JSON line in chat_history: {line[:100]}")
                     continue
 
-            # Filter out A2A synthetic traffic — only human dialogue
             entries = [e for e in entries if not is_a2a_chat_id(e.get("chat_id"))]
 
             if search:
@@ -325,10 +310,8 @@ class Memory:
         except Exception as e:
             return f"(error reading history: {e})"
 
-    # --- JSONL tail reading ---
-
     def read_jsonl_tail(self, log_name: str, max_entries: int = 100) -> List[Dict[str, Any]]:
-        """Read the last max_entries records from a JSONL file."""
+        """Read the tail of a JSONL log."""
         path = self.logs_path(log_name)
         if not path.exists():
             return []
@@ -356,14 +339,7 @@ class Memory:
         offset: int,
         max_entries: int = 100,
     ) -> List[Dict[str, Any]]:
-        """Read up to max_entries records after a consolidation entry offset.
-
-        The dialogue consolidator persists the number of non-A2A chat entries
-        it has already summarized. Context should show that prefix through
-        dialogue blocks and keep only the not-yet-consolidated suffix verbatim.
-        If the cursor looks stale after log rotation, fall back to the normal
-        tail so no recent dialogue silently disappears.
-        """
+        """Read unconsolidated non-A2A log suffix; stale cursor falls back to tail."""
         path = self.logs_path(log_name)
         if not path.exists():
             return []
@@ -422,8 +398,6 @@ class Memory:
         except OSError:
             return {}
 
-    # --- Log summarization ---
-
     def summarize_chat(self, entries: List[Dict[str, Any]]) -> str:
         if not entries:
             return ""
@@ -444,7 +418,7 @@ class Memory:
         return "\n".join(lines)
 
     def summarize_progress(self, entries: List[Dict[str, Any]], limit: int = 15) -> str:
-        """Summarize progress.jsonl entries (Ouroboros's self-talk / progress messages)."""
+        """Summarize progress.jsonl entries."""
         if not entries:
             return ""
         lines = []
@@ -517,8 +491,6 @@ class Memory:
 
     def append_identity_journal(self, entry: Dict[str, Any]) -> None:
         append_jsonl(self.identity_journal_path(), entry)
-
-    # --- Defaults ---
 
     def _default_scratchpad(self) -> str:
         return f"# Scratchpad\n\nUpdatedAt: {utc_now_iso()}\n\n(empty — write anything here)\n"

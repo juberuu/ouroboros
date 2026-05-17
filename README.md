@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 5.25.0-rc.4](https://img.shields.io/badge/version-5.25.0--rc.4-green.svg)](VERSION)
+[![Version 5.25.1-rc.1](https://img.shields.io/badge/version-5.25.1--rc.1-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -419,6 +419,7 @@ not paraphrase it.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 5.25.1-rc.1 | 2026-05-17 | **rc(refactor): shrink scope-review input surface.** Compacts stale/redundant comments and internal docstrings across pack-visible non-test code while preserving safety, review, contract, race, and security rationale; reduces scope-review input without behavior changes. |
 | 5.25.0-rc.4 | 2026-05-17 | **rc(refactor): shrink review and skills UI surfaces.** Consolidates review pack/projection helpers, extracts the installed Skills card renderer, removes retired dialogue and native-skill migration banner/API compatibility surfaces, drops the bundled-skills discovery fallback in favor of the data-plane bootstrap, and documents the migration API retirement as an intentional ABI break for old upgrade banners. |
 | 5.25.0-rc.3 | 2026-05-17 | **rc(docs): restore compact endpoint navigation.** Adds a minimal current route table to `docs/ARCHITECTURE.md` from the gateway, file-browser, static, and Host Service route sources without restoring the old verbose endpoint prose. |
 | 5.25.0-rc.2 | 2026-05-17 | **rc(refactor): remove retired compatibility shims.** Drops legacy advisory-review state folding and the old `inline_card` widget compatibility path now that current state uses the v3 ledger and the bundled weather widget is declarative. |

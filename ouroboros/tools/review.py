@@ -1,11 +1,4 @@
-"""Multi-model review — sends code/text to multiple LLMs for consensus review.
-
-Also contains the unified pre-commit review gate: three models review staged
-diffs against docs/CHECKLISTS.md before any repo_commit. Review always runs
-before commit; enforcement is configurable between blocking and advisory.
-
-BIBLE.md is automatically injected as constitutional context with top priority.
-"""
+"""Multi-model review and unified pre-commit review gate."""
 
 import os
 import json
@@ -105,13 +98,7 @@ from ouroboros.tools.review_helpers import (
 )
 
 
-# Single source of truth: ``review_helpers.REPO_ROOT`` is the canonical
-# repo-root anchor (also used by ``load_checklist_section``). Keep
-# ``_CHECKLISTS_PATH`` as a derived alias for the existing public-ish
-# import path used by ``tests/test_git_review_pipeline.py`` (renamed
-# from test_phase7_pipeline.py in v5.15.x) and the legacy re-exports —
-# this removes the duplicate pathlib walk that previously lived right
-# above this comment.
+# Derived alias; ``review_helpers.REPO_ROOT`` remains the repo-root SSOT.
 _CHECKLISTS_PATH = _REPO_ROOT / "docs" / "CHECKLISTS.md"
 
 
@@ -119,9 +106,7 @@ def _load_bible() -> str:
     return load_governance_doc(_REPO_ROOT, "BIBLE.md", on_missing="explicit")
 
 
-# ---------------------------------------------------------------------------
-# Tool: multi_model_review (agent-callable)
-# ---------------------------------------------------------------------------
+# Tool: multi_model_review.
 
 def get_tools():
     return [
@@ -197,11 +182,7 @@ async def _query_model(llm_client: LLMClient, model: str, messages: list, semaph
         except asyncio.TimeoutError:
             return model, f"Error: Timeout after {_format_timeout_seconds(timeout_sec)}s", None
         except Exception as e:
-            # DEVELOPMENT.md 2(f): review-output / cognitive artifacts MUST
-            # NOT use hardcoded [:N] truncation. Full error text (e.g.
-            # OpenRouter 404 bodies, stack traces) is preserved via the
-            # shared helper; an explicit OMISSION NOTE is appended only
-            # when the payload exceeds 4 KB.
+            # Preserve full review errors; helper adds an omission note if needed.
             error_msg = truncate_review_artifact(str(e), limit=4000)
             return model, f"Error: {error_msg}", None
 
@@ -281,7 +262,7 @@ def _parse_model_response(model: str, result, headers_dict) -> dict:
     try:
         choices = result.get("choices", [])
         if not choices:
-            # Preserve full response body (DEVELOPMENT.md 2(f)) — no bare [:200].
+            # Preserve full response body; no bare hardcoded truncation.
             text = (
                 "(no choices in response: "
                 f"{truncate_review_artifact(json.dumps(result), limit=4000)})"
@@ -302,7 +283,7 @@ def _parse_model_response(model: str, result, headers_dict) -> dict:
                     verdict = "FAIL"
                     break
     except (KeyError, IndexError, TypeError):
-        # Preserve full response body (DEVELOPMENT.md 2(f)) — no bare [:200].
+        # Preserve full response body; no bare hardcoded truncation.
         text = (
             "(unexpected response format: "
             f"{truncate_review_artifact(json.dumps(result), limit=4000)})"
@@ -337,16 +318,10 @@ def _parse_model_response(model: str, result, headers_dict) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Unified pre-commit review gate — used by git.py commit tools
-# ---------------------------------------------------------------------------
+# Unified pre-commit review gate.
 
 def _load_checklist_section() -> str:
-    """Load the Repo Commit Checklist from docs/CHECKLISTS.md (DRY, Bible P7).
-
-    Raises FileNotFoundError or ValueError if missing or malformed — fail-closed.
-    Uses the precise section loader from review_helpers.
-    """
+    """Load Repo Commit Checklist, fail-closed if missing/malformed."""
     try:
         return _load_checklist_section_precise("Repo Commit Checklist")
     except FileNotFoundError:
@@ -416,10 +391,7 @@ def _parse_review_json(raw: str) -> Optional[list]:
 
 
 def _git_show_staged(repo_dir, path: str) -> str:
-    """Return the staged (index) content of *path* via `git show :PATH`.
-
-    Returns empty string on any error (file not staged, git unavailable, etc.).
-    """
+    """Return staged index content via ``git show :PATH`` or ``""``."""
     import subprocess
     try:
         result = subprocess.run(
@@ -436,36 +408,10 @@ def _git_show_staged(repo_dir, path: str) -> str:
 
 def _preflight_check(commit_message: str, staged_files: str,
                      repo_dir) -> Optional[str]:
-    """Deterministic pre-review sanity check — catches common mismatches
-    before calling expensive LLM reviewers.
-
-    Checks (in order):
-      1. VERSION staged but README.md not staged
-      2. Commit message references a version but VERSION file not staged
-      3. Python code in ouroboros/ or supervisor/ changed but no tests/ files staged
-      4. New files added in ouroboros/ or supervisor/ but ARCHITECTURE.md not staged
-      5. VERSION staged: all version carriers (pyproject.toml, README badge,
-         ARCHITECTURE.md header) in the staged index must match VERSION value
-      6. VERSION staged: staged README.md changelog must have a row for the new version
-      7. VERSION staged: staged README.md Version History must not exceed BIBLE.md P9 limits (2 major / 5 minor / 5 patch rows) — delegates to check_history_limit() from release_sync.py
-      8. conftest.py staged: block if it contains test_ functions (should be in test_*.py)
-    """
+    """Fast deterministic review preflight for common incomplete staged diffs."""
     import re
 
-    # Parse the staged_files string. We accept two deterministic formats:
-    #
-    # 1. "name-status"-style (produced by _run_unified_review after conversion):
-    #    "A  path/to/file.py"  (status char + 2 spaces + path)
-    #    "M  path/to/file.py"
-    #
-    # 2. Plain filename (produced as fallback or from unit-test callers):
-    #    "path/to/file.py"
-    #
-    # We detect format 1 by checking that:
-    #   - The line is at least 4 chars
-    #   - Character at index 0 is a letter (git status char: A/M/D/R/C/T/?)
-    #   - Characters at index 1 and 2 are spaces ("  ")
-    # This avoids the filename-with-space ambiguity of the old raw[2]==' ' check.
+    # Accept either name-status lines ("A  path") or plain filenames.
     import string as _string
     raw_lines = staged_files.strip().splitlines()
     file_status: list[tuple[str, str]] = []  # (status_char, filepath)
@@ -473,42 +419,37 @@ def _preflight_check(commit_message: str, staged_files: str,
         raw = raw.strip()
         if not raw:
             continue
-        # Format 1: "X  path" — status char + exactly two spaces
+        # Name-status format: "X  path".
         if (len(raw) >= 4
                 and raw[0] in _string.ascii_uppercase
                 and raw[1:3] == "  "):
             status = raw[0].upper()
             path = raw[3:].strip()
-            # Handle renames: "R  old -> new"
+            # Renames display as "R  old -> new".
             if " -> " in path:
                 path = path.split(" -> ")[-1].strip()
             file_status.append((status, path))
         else:
-            # Format 2: plain filename — treat as modified
+            # Plain filenames are treated as modified.
             file_status.append(("M", raw))
 
-    # staged_set: all paths that appear in the diff (used for existence/coupling checks).
-    # active_staged: exclude Deleted (D) entries — a deleted file cannot satisfy a
-    # "companion file must be present" requirement.
+    # active_staged excludes deletions for companion-file checks.
     staged_set = {path for _, path in file_status}
     active_staged = {path for status, path in file_status if status != "D"}
-    # Treat both Added (A) and Copied (C) as "new" files for preflight check 4.
-    # Renamed (R) files are not new-module additions — the old path disappears.
+    # Added/Copied count as new modules; renames do not.
     new_files = {path for status, path in file_status if status in ("A", "C")}
     msg_lower = commit_message.lower()
 
     has_version_ref = bool(re.search(r'v?\d+\.\d+\.\d+', commit_message)) or "version" in msg_lower
-    # Use active_staged (excludes deleted files) for companion-file presence checks.
-    # staged_set includes all paths (for "currently staged" display and couping checks).
     version_staged = "VERSION" in active_staged
 
     missing = []
 
-    # Check 1: VERSION staged (and not deleted) but README missing
+    # VERSION staged but README missing.
     if version_staged and "README.md" not in active_staged:
         missing.append("README.md (badge + changelog)")
 
-    # Check 2: Version reference in message but VERSION not staged
+    # Commit message references version but VERSION is not staged.
     if has_version_ref and not version_staged:
         if any(f.endswith(('.py', '.md')) and f != 'VERSION' for f in active_staged):
             missing.append("VERSION")
@@ -522,11 +463,7 @@ def _preflight_check(commit_message: str, staged_files: str,
             "then repo_commit to stage and commit everything in one diff."
         )
 
-    # Check 3: Python logic touched (added, modified, or deleted) in ouroboros/ or
-    # supervisor/ but no tests/ files are staged (active, non-deleted).
-    # We include deleted .py files because deleting a module is a behaviour change
-    # that must be reflected in tests (e.g. removing a call site or deleting
-    # a test that covered the deleted module).
+    # Python logic touched without active tests staged.
     _LOGIC_DIRS = ("ouroboros/", "supervisor/")
     logic_changed = any(
         f.startswith(_LOGIC_DIRS) and f.endswith(".py")
@@ -543,8 +480,7 @@ def _preflight_check(commit_message: str, staged_files: str,
             f"  Currently staged: {', '.join(sorted(staged_set)) or '(none)'}"
         )
 
-    # Check 4: New files added/copied in ouroboros/ or supervisor/ but
-    # ARCHITECTURE.md is not in active_staged (must not be deleted).
+    # New logic modules require active ARCHITECTURE.md update.
     new_logic_files = [
         f for f in new_files
         if f.startswith(_LOGIC_DIRS) and f.endswith(".py")
@@ -559,10 +495,7 @@ def _preflight_check(commit_message: str, staged_files: str,
             f"  Currently staged: {', '.join(sorted(staged_set)) or '(none)'}"
         )
 
-    # Check 5: If VERSION is staged (non-deleted), verify that pyproject.toml,
-    # README.md badge, and ARCHITECTURE.md header in the staged index all carry
-    # the same version string. Uses `git show :PATH` to read staged content
-    # rather than the worktree, so partially staged changes are handled correctly.
+    # VERSION changes must keep staged version carriers synchronized.
     if version_staged:
         try:
             from ouroboros.tools.release_sync import (
@@ -592,8 +525,7 @@ def _preflight_check(commit_message: str, staged_files: str,
         except Exception:
             pass  # Non-fatal: LLM reviewers handle version sync
 
-    # Check 6: If VERSION is staged, verify the staged README.md changelog
-    # contains a row for the new version (structural presence check only).
+    # VERSION changes need a staged README changelog row.
     if version_staged:
         try:
             from ouroboros.tools.release_sync import is_release_version
@@ -610,11 +542,7 @@ def _preflight_check(commit_message: str, staged_files: str,
         except Exception:
             pass  # Non-fatal
 
-    # Check 7: If VERSION is staged, verify README.md Version History does not
-    # exceed the P9 limits (2 major / 5 minor / 5 patch rows). Reads from the
-    # staged index via git show so partially staged changes are handled correctly.
-    # Uses check_history_limit() from release_sync.py (the single source of truth
-    # for P9 limits). This is a deterministic fast check — no LLM call needed.
+    # VERSION changes must respect P9 README history limits in staged content.
     if version_staged:
         try:
             readme_staged = _git_show_staged(repo_dir, "README.md")
@@ -633,9 +561,7 @@ def _preflight_check(commit_message: str, staged_files: str,
         except Exception:
             pass  # Non-fatal: LLM reviewers handle P9 limits as advisory fallback
 
-    # Check 8: if any conftest.py in active_staged contains collectable test functions,
-    # block with an explicit message to move them to test_*.py files.
-    # Reads staged content via git show to validate what will actually be committed.
+    # conftest.py must not contain collectable module-level tests.
     conftest_files = [f for f in active_staged if pathlib.Path(f).name == "conftest.py"]
     if conftest_files:
         import ast as _ast
@@ -645,8 +571,7 @@ def _preflight_check(commit_message: str, staged_files: str,
                 if not cf_text:
                     continue
                 tree = _ast.parse(cf_text, filename=cf)
-                # Only scan module-level functions — nested helpers inside fixtures
-                # are not collected by pytest and must not trigger this check.
+                # Nested helpers inside fixtures are not pytest-collected.
                 test_fns = [
                     node.name for node in tree.body
                     if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef))
@@ -717,18 +642,12 @@ def _handle_review_block_or_warning(
 
 
 def _load_dev_guide_text(repo_dir: pathlib.Path) -> str:
-    """Load ``docs/DEVELOPMENT.md`` for the triad reviewer preamble.
-
-    Routes through ``review_helpers.load_governance_doc`` so a missing
-    file produces an explicit ``[⚠️ OMISSION: ...]`` marker instead of an
-    invisible empty string. DEVELOPMENT.md "Core Governance Artifacts"
-    forbids silent omission of the core docs.
-    """
+    """Load DEVELOPMENT.md with explicit omission marker on failure."""
     return load_governance_doc(repo_dir, "docs/DEVELOPMENT.md", on_missing="explicit")
 
 
 def _load_architecture_text(repo_dir: pathlib.Path) -> str:
-    """Load ``docs/ARCHITECTURE.md`` in full — core cognitive artifact, must not be omitted."""
+    """Load ARCHITECTURE.md with explicit omission marker on failure."""
     return load_governance_doc(repo_dir, "docs/ARCHITECTURE.md", on_missing="explicit")
 
 
@@ -850,11 +769,7 @@ def _build_critical_block_message(
 
 
 def _build_preflight_staged(target_repo: str, fallback: str = "") -> str:
-    """Convert git --name-status output to a two-char porcelain-like prefix format.
-
-    Needed so _preflight_check can detect added/deleted/renamed files with the
-    correct status letter. Falls back to the name-only list on any error.
-    """
+    """Convert git name-status to the compact preflight format."""
     try:
         name_status = run_cmd(
             ["git", "diff", "--cached", "--name-status"], cwd=target_repo
@@ -874,7 +789,7 @@ def _build_preflight_staged(target_repo: str, fallback: str = "") -> str:
                     preflight_input_lines.append(f"D  {src_path}")
                     preflight_input_lines.append(f"A  {dst_path}")
                 else:
-                    # Copy: source unchanged, only destination counts as new
+                    # Copy: only destination counts as new.
                     preflight_input_lines.append(f"A  {dst_path}")
             elif len(parts) >= 2:
                 preflight_input_lines.append(f"{status_char}  {parts[1]}")
@@ -890,11 +805,7 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
                         repo_dir=None,
                         goal: str = "",
                         scope: str = "") -> Optional[str]:
-    """Unified pre-commit review: 3 models, structured JSON, consistent severity.
-
-    Returns None if commit may proceed. In blocking mode returns a blocking
-    error string when review rejects the commit.
-    """
+    """Run triad pre-commit review; return a block message or ``None``."""
     target_repo = repo_dir or ctx.repo_dir
     ctx._review_iteration_count += 1
     ctx._last_review_block_reason = ""  # reset per attempt
@@ -950,9 +861,7 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
     dev_guide_text = _load_dev_guide_text(pathlib.Path(ctx.repo_dir))
     architecture_text = _load_architecture_text(pathlib.Path(ctx.repo_dir))
 
-    # Load open obligations to inject into reviewer history (anti-thrashing).
-    # Gate on durable state (not volatile in-memory counter) so obligations
-    # survive process restarts and are injected whenever they exist.
+    # Durable open obligations reduce review thrashing across restarts.
     _open_obs_for_review = []
     try:
         from ouroboros.review_state import load_state, make_repo_key
@@ -965,7 +874,7 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
         ctx._review_history, open_obligations=_open_obs_for_review,
     )
 
-    # Build touched-file pack for full current file context
+    # Build touched-file pack for full current context.
     try:
         touched_paths = [f.strip() for f in changed.strip().splitlines() if f.strip()]
         current_files_section, _omitted = build_touched_file_pack(
@@ -1052,16 +961,12 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
         )
 
     critical_fails, advisory_warns, errored_models, _triad_raw = _collect_review_findings(ctx, model_results)
-    # _triad_raw already stored on ctx._last_triad_raw_results inside _collect_review_findings
-
     models_total = len(model_results)
 
-    # Quorum: at least 2 of N reviewers must produce parseable structured output.
-    # Count only status=="responded" actors — parse_failure and error both represent
-    # unusable evidence and must NOT count toward quorum.
+    # Quorum counts only parseable responded actors, not errors/parse failures.
     triad_raw = getattr(ctx, "_last_triad_raw_results", []) or []
     successful_reviewers = sum(1 for r in triad_raw if r.get("status") == "responded")
-    # Build the non-successful list for display (transport errors + parse failures)
+    # Non-successful actors are shown for transport/parse diagnostics.
     failed_actors = [
         r["model_id"] for r in triad_raw if r.get("status") != "responded"
     ]
@@ -1089,7 +994,7 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
         )
 
     if critical_fails:
-        # Classify: if all critical failures are parse issues, mark as parse_failure
+        # All parse issues get a parse_failure block reason.
         all_parse = all("Could not parse" in f for f in critical_fails)
         ctx._last_review_block_reason = "parse_failure" if all_parse else "critical_findings"
         if blocking_review:
@@ -1108,7 +1013,7 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
         if errored_note:
             _append_review_warning(ctx, errored_note)
 
-    # All clear — reset iteration state
+    # All clear: reset iteration state.
     ctx._review_iteration_count = 0
     ctx._review_history = []
 

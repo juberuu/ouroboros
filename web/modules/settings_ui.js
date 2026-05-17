@@ -9,8 +9,7 @@ const SETTINGS_TABS = [
     { value: 'advanced', label: 'Advanced' },
     { value: 'about', label: 'About' },
 ];
-// Static guard markers: renderTabStrip emits data-settings-tab="behavior"
-// and data-settings-tab="advanced" from SETTINGS_TABS at runtime.
+// Guard markers: renderTabStrip emits behavior/advanced tabs at runtime.
 
 function providerCard({ id, title, icon, hint, body, open = false }) {
     return `
@@ -601,12 +600,7 @@ export function bindSettingsTabs(root, options = {}) {
     const state = options.state || null;
     const onActivate = typeof options.onActivate === 'function' ? options.onActivate : null;
 
-    // v5.7.0: the v5.6.0 drill-down ("settings-subtab-open" + back button)
-    // is gone. On every viewport the tab strip stays as horizontal-scroll
-    // pills (auto-scrolling the active pill into view), and tapping a tab
-    // simply swaps panels in place. The .settings-mobile-back element is
-    // still present in the DOM for back-compat, but is hidden via CSS and
-    // we never bind a handler to it.
+    // All viewports use horizontal tab pills; mobile back remains DOM-only for compat.
     function activate(tabName) {
         root.dataset.activeSettingsTab = tabName;
         let activeButton = null;
@@ -620,8 +614,7 @@ export function bindSettingsTabs(root, options = {}) {
         });
         if (scrollRoot) scrollRoot.scrollTop = 0;
         if (state) state.settingsActiveSubtab = tabName;
-        // Auto-scroll the active pill into the visible part of the strip
-        // on narrow viewports (the strip itself horizontally scrolls).
+        // Keep active pill visible in the horizontal strip.
         if (activeButton && typeof activeButton.scrollIntoView === 'function') {
             activeButton.scrollIntoView({
                 behavior: 'auto',

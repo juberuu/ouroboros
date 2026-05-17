@@ -1,4 +1,4 @@
-# Ouroboros v5.25.0-rc.4 — Architecture & Reference
+# Ouroboros v5.25.1-rc.1 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -1038,4 +1038,3 @@ Rationale: in-process extensions are powerful and therefore stricter than subpro
 ### Generic transport metadata and repair constraints
 
 Transport skills annotate injected chat/photo messages with source/session metadata. Formal repair tasks carry `TaskConstraint(mode="skill_repair")`, and scoped editors enforce payload confinement with short relative paths only under the selected skill.
-

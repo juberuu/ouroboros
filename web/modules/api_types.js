@@ -1,9 +1,4 @@
-/**
- * JSDoc mirror of `ouroboros.gateway.contracts`.
- *
- * This file is intentionally dependency-free: it gives frontend contributors a
- * visible contract surface without adding TypeScript, codegen, or a build step.
- */
+/** Dependency-free JSDoc mirror of `ouroboros.gateway.contracts`. */
 
 /**
  * @typedef {Object} StateResponse

@@ -1,20 +1,8 @@
 """Claude Code advisory pre-review gate.
 
-Runs a read-only Claude Code review of the current worktree BEFORE the unified
-multi-model pre-commit review. Advisory findings are non-blocking by themselves;
-only the *absence* of a fresh matching advisory run blocks repo_commit.
-
-Correct workflow:
-  1. Finish ALL edits first
-  2. advisory_pre_review(commit_message="...")   ← run AFTER all edits are done
-  3. repo_commit(commit_message="...")           ← run IMMEDIATELY after advisory
-
-⚠️ Any edit (repo_write / str_replace_editor) after step 2 automatically marks
-   the advisory as stale — you must re-run advisory_pre_review before repo_commit.
-
-Tool surface:
-  advisory_pre_review   run a fresh advisory review
-  review_status         show advisory history, open obligations, staleness state
+Runs a read-only advisory review before multi-model commit review. Findings are
+non-blocking, but ``repo_commit`` requires a fresh matching advisory snapshot.
+Any edit after advisory makes it stale.
 """
 
 from __future__ import annotations
@@ -176,14 +164,7 @@ def _auto_sync_release_metadata_if_needed(
     drive_root: pathlib.Path,
     paths: list[str] | None,
 ) -> list[str]:
-    """Sync VERSION-derived carriers before computing the advisory snapshot.
-
-    Advisory pre-review is often called on a worktree+paths set rather than a
-    staged diff. If VERSION changed, deterministic carrier sync must happen
-    before the expensive Claude SDK call and before snapshot hashing, otherwise
-    repo_commit can later block on a mismatch that a zero-token check could
-    have fixed.
-    """
+    """Sync VERSION-derived carriers before advisory snapshot hashing."""
     selected = set(str(p) for p in (paths or []) if str(p).strip())
     touched = set(_changed_paths(repo_dir))
     if "VERSION" not in selected and "VERSION" not in touched:
@@ -303,7 +284,7 @@ def _build_advisory_prompt(
     drive_root: Optional[pathlib.Path] = None,
     prompt_context: Optional[dict] = None,
 ) -> str:
-    """Build the read-only advisory review prompt (BIBLE, checklists, dev guide, diff, touched pack)."""
+    """Build the read-only advisory prompt."""
     prompt_context = dict(prompt_context or {})
     diff: Optional[str] = prompt_context.get("diff")
     changed_files: Optional[str] = prompt_context.get("changed_files")
@@ -335,7 +316,7 @@ def _build_advisory_prompt(
         goal_section = build_goal_section(goal, scope, commit_message)
         scope_section = build_scope_section(scope)
 
-    # Build blocking history section if drive_root is available
+    # Include blocking history when durable state is available.
     blocking_history = ""
     if drive_root:
         blocking_history = _build_blocking_history_section(
@@ -517,14 +498,7 @@ _FALLBACK_OMISSION_NOTE = (
 
 
 def _build_fallback_window(raw_text: str) -> str:
-    """Build a head+tail window of raw_text for the LLM extraction fallback.
-
-    The known failure pattern is: Claude writes a long narrative preamble + tool
-    call traces, then places the JSON checklist array NEAR THE END.  A first-N
-    truncation would discard the JSON.  We keep the first _FALLBACK_HEAD_CHARS
-    (for context) and the last _FALLBACK_TAIL_CHARS (where JSON lives), with an
-    explicit omission note for the middle section.
-    """
+    """Build a head+tail raw-output window so tail JSON is retained."""
     total = _FALLBACK_HEAD_CHARS + _FALLBACK_TAIL_CHARS
     if len(raw_text) <= total:
         return raw_text
@@ -534,12 +508,7 @@ def _build_fallback_window(raw_text: str) -> str:
 
 
 def _resolve_fallback_model() -> str:
-    """Resolve the light extraction model for the LLM-first advisory fallback.
-
-    Uses OUROBOROS_MODEL_LIGHT (user-configured light model) if set, otherwise
-    falls back to the system default from config.  Never hardcodes a specific
-    model ID — all model selection is delegated to configuration (P5 LLM-First).
-    """
+    """Resolve the configured light model for advisory extraction fallback."""
     import os as _os
     from ouroboros.config import SETTINGS_DEFAULTS  # type: ignore[attr-defined]
     env_light = (_os.environ.get("OUROBOROS_MODEL_LIGHT") or "").strip()
@@ -547,17 +516,7 @@ def _resolve_fallback_model() -> str:
 
 
 def _llm_extract_advisory_items(raw_text: str, ctx: object) -> list:
-    """LLM-first fallback: extract advisory checklist items from narrative text.
-
-    Called when _parse_advisory_output() returns [] but we have non-empty raw output.
-    Uses the light model via llm.py with no_proxy=True (fork-safe for macOS workers).
-
-    Sends a head+tail window of raw_text so that the JSON array near the end of a
-    long narrative response is always included even when the total text exceeds the
-    combined head+tail budget.
-
-    Returns a list of checklist item dicts, or [] on any failure.
-    """
+    """Extract checklist items from narrative advisory output via light model."""
     try:
         from ouroboros.llm import LLMClient  # type: ignore[attr-defined]
 
@@ -575,8 +534,7 @@ def _llm_extract_advisory_items(raw_text: str, ctx: object) -> list:
             no_proxy=True,
         )
 
-        # Track fallback LLM cost — this is real spend even if it's a cheap call.
-        # Derive provider from the model prefix for correct cost-breakdown attribution.
+        # Track fallback LLM cost; it is real review spend.
         if fallback_usage and isinstance(ctx, ToolContext):
             fallback_cost = float((fallback_usage or {}).get("cost", 0) or 0)
             from ouroboros.pricing import infer_provider_from_model as _infer_prov
@@ -591,7 +549,7 @@ def _llm_extract_advisory_items(raw_text: str, ctx: object) -> list:
 
         content = response.get("content", "")
         if not isinstance(content, str):
-            # Flatten list content blocks
+            # Flatten list content blocks.
             if isinstance(content, list):
                 content = " ".join(
                     str(b.get("text", "")) for b in content if isinstance(b, dict)
@@ -603,8 +561,7 @@ def _llm_extract_advisory_items(raw_text: str, ctx: object) -> list:
         if not _is_checklist_array(items):
             return []
 
-        # Normalise: any FAIL item missing 'severity' gets "critical" so that
-        # _handle_advisory_pre_review() never silently downgrade a blocking finding.
+        # Missing FAIL severity defaults to critical; never silently downgrade.
         normalised = []
         for it in items:
             if not isinstance(it, dict):
@@ -622,13 +579,7 @@ def _llm_extract_advisory_items(raw_text: str, ctx: object) -> list:
 
 
 def _check_expected_items(items: list, expected_items: Optional[List[str]]) -> tuple[str, str]:
-    """Return (error, warning) for checklist coverage contract violations.
-
-    Missing expected items and unknown extras are hard errors: the reviewer did
-    not cover the agreed checklist surface. Duplicates and order drift are
-    warnings only because a reviewer may legitimately return multiple FAILs for
-    one item when it found multiple distinct root causes.
-    """
+    """Return contract error/warning for checklist coverage mismatches."""
     if not expected_items:
         return "", ""
     expected = [str(item) for item in expected_items]
@@ -666,21 +617,7 @@ def _syntax_preflight_staged_py_files(
     repo_dir: pathlib.Path,
     resolved_paths: List[str],
 ) -> Optional[str]:
-    """Compile each staged `.py` file in-process to catch SyntaxErrors before
-    the Claude SDK advisory call.
-
-    Purpose: the SDK call costs ~$1-2 and several minutes; it is wasteful to
-    run it when a staged `.py` file would not even compile. Parsing is done via
-    `compile(source, path, "exec", dont_inherit=True)` — no `__pycache__` is
-    produced and no subprocess is started.
-
-    Returns None when every staged `.py` file compiles cleanly (or none exist).
-    Returns a formatted `PREFLIGHT_BLOCKED` message when one or more fail.
-
-    Non-agent-repo skip: if the target repo does not contain `ouroboros/__init__.py`
-    (i.e. we are not reviewing our own repo), skip the gate. Target Python
-    version can differ from ours and we do not want to block on that.
-    """
+    """Compile staged repo Python files before the expensive advisory SDK call."""
     if not (repo_dir / "ouroboros" / "__init__.py").exists():
         return None
 
@@ -702,12 +639,7 @@ def _syntax_preflight_staged_py_files(
             msg = getattr(exc, "msg", None) or str(exc)
             errors.append(f"{rel}:{line}: {msg}")
         except ValueError as exc:
-            # `compile` raises ValueError (not SyntaxError) when the source
-            # contains null bytes or other non-printable bytes that the
-            # tokenizer rejects before parsing. Treat these the same as a
-            # syntax error so the SDK call is still skipped and the agent
-            # gets an actionable PREFLIGHT_BLOCKED message instead of an
-            # opaque ADVISORY_ERROR.
+            # Null bytes and tokenizer rejects are syntax preflight blockers too.
             errors.append(f"{rel}:?: {exc}")
 
     if not errors:
@@ -730,16 +662,12 @@ def _run_claude_advisory(
     paths: Optional[List[str]] = None,
     options: Optional[dict] = None,
 ) -> tuple:
-    """Run the advisory review via Claude Agent SDK (read-only).
-
-    Returns (items, raw_result, model_used, prompt_chars).
-    raw_result starts with ⚠️ ADVISORY_ERROR: on failure.
-    """
+    """Run read-only advisory review; raw_result starts with ADVISORY_ERROR on failure."""
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         return [], "⚠️ ADVISORY_ERROR: ANTHROPIC_API_KEY not set.", "", 0
 
-    # Resolve model — single source of truth, honours CLAUDE_CODE_MODEL setting
+    # Resolve model through the CLAUDE_CODE_MODEL setting.
     from ouroboros.gateways.claude_code import resolve_claude_code_model
     model = resolve_claude_code_model()
     options = dict(options or {})
@@ -799,7 +727,7 @@ def _run_claude_advisory(
     prompt_chars = len(prompt)
     diag = _get_runtime_diagnostics(model, prompt_chars, resolved_paths)
 
-    # Budget gate: non-blocking skip when prompt too large (mirrors scope review)
+    # Budget gate: non-blocking skip when prompt is too large.
     if prompt_chars > _ADVISORY_PROMPT_MAX_CHARS:
         tokens_approx = max(1, prompt_chars // 4)
         warning = (
@@ -867,7 +795,7 @@ def _run_claude_advisory(
 
         raw_text = str(result.result_text or "")
 
-        # Track SDK cost — advisory calls are real spend that must reach the budget.
+        # Track SDK cost; advisory calls are real spend.
         if result.cost_usd > 0:
             emit_review_usage(
                 ctx,
@@ -924,10 +852,7 @@ def _run_claude_advisory(
 
         items = _parse_advisory_output(raw_text)
 
-        # LLM-first fallback: if structural parse failed but we have raw output,
-        # ask a light model to extract the JSON array from the narrative response.
-        # This handles the "Claude writes findings at the end of a long narrative"
-        # pattern that causes parse_failure on large diffs (confirmed root cause).
+        # If structural parse fails, extract tail JSON from narrative output.
         if not items and raw_text and not raw_text.startswith("⚠️ ADVISORY_ERROR"):
             items = _llm_extract_advisory_items(raw_text, ctx)
             if items:
@@ -1079,16 +1004,10 @@ def _resolve_matching_obligations(
     *,
     repo_key: str | None = None,
 ) -> None:
-    """Resolve open obligations whose checklist item appears in PASS but NOT in FAIL.
-
-    An obligation is only resolved when the advisory emits PASS for that item
-    and does not also emit a contradictory FAIL for the same item.  Conflicting
-    entries (both PASS and FAIL for the same item) leave the obligation open so
-    the agent is forced to re-examine and produce a clean, unambiguous result.
-    """
+    """Resolve obligations only on unambiguous PASS without same-item FAIL."""
     if not items:
         return
-    # Build per-item verdict sets to detect contradictions
+    # Build per-item verdict sets to detect contradictions.
     item_verdicts: dict[str, set[str]] = {}
     obligation_verdicts: dict[str, set[str]] = {}
     for i in items:
@@ -1103,24 +1022,19 @@ def _resolve_matching_obligations(
         normalized_item_name = normalized_item_name.strip().lower()
         if normalized_item_name:
             item_verdicts.setdefault(normalized_item_name, set()).add(verdict)
-        # When the reviewer supplies BOTH an explicit `obligation_id` field and
-        # an `(obligation <id>)` suffix embedded in `item`, they must agree. A
-        # mismatch means the entry is ambiguous — recording both ids would let a
-        # single malformed PASS clear two unrelated obligations (including their
-        # associated commit-readiness debt). Treat such entries as ambiguous and
-        # ignore them for obligation resolution; the item-name fallback still
-        # applies below when it's unambiguous.
+        # Explicit id and suffix id must agree; mismatches are ambiguous and
+        # must not clear unrelated obligations/debt.
         if explicit_obligation_id and suffix_obligation_id:
             if explicit_obligation_id.lower() == suffix_obligation_id.lower():
                 obligation_verdicts.setdefault(explicit_obligation_id, set()).add(verdict)
-            # else: mismatch — skip both ids for this entry
+            # Mismatch: skip both ids for this entry.
             continue
         if explicit_obligation_id:
             obligation_verdicts.setdefault(explicit_obligation_id, set()).add(verdict)
         elif suffix_obligation_id:
             obligation_verdicts.setdefault(suffix_obligation_id, set()).add(verdict)
 
-    # Only PASS items that have no FAIL entry for the same item
+    # Only PASS items with no FAIL entry for the same item.
     unambiguous_pass = {
         item_name
         for item_name, verdicts in item_verdicts.items()
@@ -1134,10 +1048,7 @@ def _resolve_matching_obligations(
 
     open_obs = state.get_open_obligations(repo_key=repo_key)
 
-    # Count open obligations per item so item-name fallback is safe only when
-    # unambiguous (exactly one open obligation for that item).  With per-finding
-    # fingerprint keying, a same-item PASS must not clear a different finding
-    # that was not addressed.
+    # Item-name fallback is safe only with exactly one open obligation per item.
     from collections import Counter as _Counter
     item_open_count = _Counter(o.item.lower() for o in open_obs)
 
@@ -1262,23 +1173,13 @@ def _check_worktree_version_sync(repo_dir: pathlib.Path) -> str:
     return _check_worktree_version_sync_shared(repo_dir)
 
 
-# -- Tool handlers --
-
 def _persist_preflight_record(
     ctx: ToolContext,
     snapshot_hash: str,
     commit_message: str,
     record: dict,
 ) -> None:
-    """Persist a durable AdvisoryRunRecord for any preflight-blocked outcome.
-
-    Shared by syntax-preflight (``preflight_blocked``) and test-preflight
-    (``tests_preflight_blocked``) paths so ``review_status`` and the
-    ``Review Continuity`` context surface the concrete blocker instead of
-    reporting "no advisory run yet" after restarts.
-    Never raises; failures are logged and swallowed (non-fatal).
-    Derives drive_root / repo_key / task_id from ctx to stay under 8 params.
-    """
+    """Persist a durable preflight-blocked advisory record; never raises."""
     try:
         record = dict(record or {})
         drive_root = pathlib.Path(ctx.drive_root)
@@ -1322,22 +1223,12 @@ def _advisory_pre_sdk_gate(
     paths: Optional[List[str]],
     skip_tests: bool,
 ):
-    """Run all cheap guard checks before the expensive Claude SDK advisory call.
-
-    Returns a 3-tuple (readiness_warnings, changed_files, early_exit):
-    - ``readiness_warnings``: list of non-blocking warning strings
-    - ``changed_files``: porcelain git-status string (may be empty or error sentinel)
-    - ``early_exit``: if not None, caller returns this JSON string immediately
-
-    Extracted from ``_handle_advisory_pre_review`` to keep that function under
-    the 300-line method hard gate (DEVELOPMENT.md / smoke test enforcement).
-    repo_key, state, and task_id are derived here to stay under the 8-param limit.
-    """
+    """Run cheap pre-SDK gates and return warnings/status/early JSON exit."""
     repo_key = make_repo_key(repo_dir)
     task_id = str(getattr(ctx, "task_id", "") or "")
     state = load_state(drive_root)
 
-    # Readiness gate FIRST: reject clean worktree before any fresh-run short-circuit.
+    # Readiness gate first: reject clean worktree before fresh-run shortcut.
     readiness_warnings = check_worktree_readiness(repo_dir, paths=paths)
     if readiness_warnings and any("no uncommitted changes" in w.lower() for w in readiness_warnings):
         ctx.emit_progress_fn(f"⚠️ Advisory readiness gate: {'; '.join(readiness_warnings)}")
@@ -1359,7 +1250,7 @@ def _advisory_pre_sdk_gate(
         except Exception:
             pass
 
-    # Fresh-run short-circuit: skip if already covered and no obligations/debt outstanding.
+    # Fresh-run shortcut only when no obligations/debt remain.
     existing = state.find_by_hash(snapshot_hash, repo_key=repo_key)
     open_obligations = state.get_open_obligations(repo_key=repo_key)
     open_debts = state.get_open_commit_readiness_debts(repo_key=repo_key)
@@ -1417,12 +1308,12 @@ def _advisory_pre_sdk_gate(
             ),
         }, ensure_ascii=False, indent=2)
 
-    # Cheap version-sync check — non-fatal warning only.
+    # Version-sync check is a non-fatal warning.
     version_sync_warning = _check_worktree_version_sync(repo_dir)
     if version_sync_warning:
         ctx.emit_progress_fn(f"⚠️ Advisory preflight: {version_sync_warning}")
 
-    # Test preflight gate (A3 — v4.41.0): run pytest before the expensive SDK call.
+    # Test preflight before the expensive SDK call.
     if not skip_tests:
         ctx.emit_progress_fn("Running tests before advisory SDK call...")
         test_err = _run_advisory_tests(ctx)
@@ -1434,8 +1325,7 @@ def _advisory_pre_sdk_gate(
                 f"{test_err}"
             )
             ctx.emit_progress_fn(msg)
-            # Persist a durable non-fresh record so review_status / continuity can
-            # surface the actual blocker instead of "no advisory run yet".
+            # Persist non-fresh blocker so review_status can surface it after restart.
             _persist_preflight_record(
                 ctx=ctx,
                 snapshot_hash=snapshot_hash,
@@ -1460,16 +1350,7 @@ def _advisory_pre_sdk_gate(
 
 
 def _run_advisory_tests(ctx: ToolContext) -> Optional[str]:
-    """Run pytest before the advisory SDK call.
-
-    Thin wrapper around ``review_helpers._run_review_preflight_tests`` — kept
-    as a distinct call site so the existing monkeypatch-based tests that stub
-    ``_run_advisory_tests`` continue to work unchanged, and so the advisory
-    and bypass paths can be traced separately in logs.
-
-    Returns a non-None error string when tests fail, None when tests pass.
-    Respects the shared ``OUROBOROS_PRE_PUSH_TESTS`` env gate.
-    """
+    """Run shared pytest preflight while preserving this monkeypatch seam."""
     return _run_review_preflight_tests(ctx)
 
 
@@ -1492,19 +1373,18 @@ def _handle_advisory_pre_review(
 
     snapshot_hash = compute_snapshot_hash(repo_dir, commit_message, paths=paths)
 
-    # repo_key / task_id / state are needed for bypass recording only;
-    # _advisory_pre_sdk_gate re-derives them internally to stay under 8 params.
+    # Bypass recording state; the pre-SDK gate derives its own under 8 params.
     repo_key = make_repo_key(repo_dir)
     task_id = str(getattr(ctx, "task_id", "") or "")
     state = load_state(drive_root)
 
-    # Auto-bypass if Anthropic key is absent — audit it transparently
+    # Auto-bypass missing Anthropic key with an audit record.
     if not os.environ.get("ANTHROPIC_API_KEY", ""):
         return _record_bypass(ctx, state, snapshot_hash, commit_message,
                                "ANTHROPIC_API_KEY not set — auto-bypassed", task_id, drive_root,
                                snapshot_paths=paths)
 
-    # Handle explicit bypass
+    # Explicit audited bypass.
     if skip_advisory_pre_review:
         return _record_bypass(ctx, state, snapshot_hash, commit_message,
                                "explicit skip_advisory_pre_review=True", task_id, drive_root,
@@ -1537,7 +1417,7 @@ def _handle_advisory_pre_review(
     advisory_meta = dict(getattr(ctx, "_last_claude_advisory_meta", {}) or {})
     advisory_session_id = str(advisory_meta.get("session_id") or "")
 
-    # Handle errors from the CLI
+    # SDK/CLI errors.
     if raw_result.startswith("⚠️ ADVISORY_ERROR"):
         _persist_preflight_record(
             ctx=ctx,
@@ -1566,13 +1446,7 @@ def _handle_advisory_pre_review(
             ),
         }, ensure_ascii=False, indent=2)
 
-    # Handle syntax-preflight short-circuit (v4.38.0 + v4.39.0 persistence).
-    # The SDK was intentionally skipped because a staged `.py` file would not
-    # even compile. Surface this as an explicit `preflight_blocked` status so
-    # it is not misclassified as `parse_failure` (which would hide the actual
-    # syntax error from the agent). Persist a durable AdvisoryRunRecord so
-    # `review_status` and the `Review Continuity` context can surface the
-    # block reason after a restart.
+    # Syntax preflight skipped SDK; persist explicit blocker, not parse_failure.
     if raw_result.startswith("⚠️ PREFLIGHT_BLOCKED"):
         _persist_preflight_record(
             ctx=ctx,
@@ -1597,9 +1471,7 @@ def _handle_advisory_pre_review(
             ),
         }, ensure_ascii=False, indent=2)
 
-    # Budget gate: prompt too large — non-blocking skip (mirrors scope review).
-    # Persist a durable "skipped" run so _check_advisory_freshness treats this
-    # snapshot as having been reviewed (is_fresh returns True for status="skipped").
+    # Prompt too large: persist non-blocking skipped run as fresh for this snapshot.
     if raw_result.startswith("⚠️ ADVISORY_SKIPPED:"):
         snapshot_summary = f"{changed_files.count(chr(10)) + 1} file(s) changed"
         def _mutate_skip(skip_state: AdvisoryReviewState) -> None:
@@ -1631,7 +1503,7 @@ def _handle_advisory_pre_review(
             "readiness_warnings": readiness_warnings,
         }, ensure_ascii=False, indent=2)
 
-    # Classify findings
+    # Classify findings.
     critical_fails = [i for i in items if isinstance(i, dict)
                       and str(i.get("verdict", "")).upper() == "FAIL"
                       and str(i.get("severity", "")).lower() == "critical"]
@@ -1641,8 +1513,7 @@ def _handle_advisory_pre_review(
 
     snapshot_summary = f"{changed_files.count(chr(10)) + 1} file(s) changed"
 
-    # If items is empty but raw_result is non-empty, the advisory ran but failed to parse.
-    # Treat this as a parse_failure to avoid silently treating it as an all-clear.
+    # Non-empty raw output with no items is parse_failure, not all-clear.
     run_status = "fresh" if items else "parse_failure"
     run = AdvisoryRunRecord(
         snapshot_hash=snapshot_hash,
@@ -1664,7 +1535,7 @@ def _handle_advisory_pre_review(
     )
     state.add_run(run)
 
-    # Surface parse failures as explicit errors (not silent all-clears)
+    # Surface parse failures explicitly.
     if run_status == "parse_failure":
         save_state(drive_root, state)
         return json.dumps({
@@ -1680,18 +1551,13 @@ def _handle_advisory_pre_review(
             ),
         }, ensure_ascii=False, indent=2)
 
-    # Always try to resolve open obligations from parseable advisory results.
-    # _resolve_matching_obligations only resolves when PASS is unambiguous (no concurrent FAIL
-    # for the same item), so it is safe to call even when critical_fails is non-empty.
-    # An obligation whose checklist item now passes should be resolved regardless of whether
-    # *other* unrelated items still fail — leaving it open would turn unrelated criticals into
-    # a perpetual hard gate on closed obligations.
+    # Resolve only unambiguous PASSed obligations, even if unrelated findings fail.
     if items:
         _resolve_matching_obligations(state, items, snapshot_hash, repo_key=repo_key)
 
     save_state(drive_root, state)
 
-    # Build human-readable summary
+    # Build human-readable summary.
     findings_summary: List[str] = []
     for item in critical_fails:
         findings_summary.append(f"  CRITICAL [{item.get('item','?')}]: {item.get('reason','')}")
@@ -1728,18 +1594,7 @@ def _handle_review_status(
     attempt: Optional[int] = None,
     include_raw: bool = False,
 ) -> str:
-    """Show recent advisory pre-review run history AND last commit attempt state.
-
-    Includes: advisory run history, staleness from edits, open obligations from
-    blocking rounds, and a concrete next-step recommendation.
-
-    When ``include_raw=True`` the output also contains the full per-actor
-    evidence for the selected commit attempt: ``triad_raw_results`` (per
-    triad model) and ``scope_raw_result`` (from the scope reviewer), with
-    their raw text, parsed items, token counts, and cost. This is a durable
-    read path for epistemic-integrity forensics — no need to open the
-    advisory_review.json state file by hand.
-    """
+    """Show advisory freshness, review debt, guidance, and optional raw evidence."""
     projection = build_review_projection(
         ctx.drive_root,
         repo_dir=getattr(ctx, "repo_dir", ""),
@@ -1764,8 +1619,6 @@ def _handle_review_status(
         indent=2,
     )
 
-
-# -- Tool registration --
 
 def get_tools() -> list:
     return [

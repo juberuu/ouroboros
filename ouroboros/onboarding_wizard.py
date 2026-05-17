@@ -67,16 +67,7 @@ _MODEL_SUGGESTIONS = list(dict.fromkeys([
     "cloudru::zai-org/GLM-4.7",
 ]))
 
-# The onboarding wizard intentionally exposes only the first-run provider
-# surface. Hidden compatibility-only provider knobs must not survive
-# invisibly and change the runtime the user thinks they configured.
-#
-# Settings fields that are user-visible in ``web/modules/settings_ui.js``
-# / ``settings.js`` (``OPENAI_BASE_URL``, ``OPENAI_COMPATIBLE_API_KEY``,
-# ``OPENAI_COMPATIBLE_BASE_URL``, ``CLOUDRU_FOUNDATION_MODELS_BASE_URL``)
-# are intentionally NOT listed here — re-running onboarding must not
-# silently erase a legitimate user-edited value for a knob the wizard
-# itself does not expose.
+# Re-running onboarding must not erase hidden-but-user-visible settings knobs.
 _WIZARD_HIDDEN_PROVIDER_DEFAULTS: dict = {}
 
 
@@ -205,9 +196,7 @@ def _build_bootstrap(settings: dict, host_mode: str) -> dict:
             "anthropicKey": _string(settings.get("ANTHROPIC_API_KEY")),
             "reviewEnforcement": _string(settings.get("OUROBOROS_REVIEW_ENFORCEMENT"))
             or str(SETTINGS_DEFAULTS["OUROBOROS_REVIEW_ENFORCEMENT"]),
-            # Runtime mode + skills-repo path are configured during
-            # onboarding so the first real session already matches the
-            # live runtime/skills UX in Settings.
+            # First session should already match Settings runtime/skills UX.
             "runtimeMode": _string(settings.get("OUROBOROS_RUNTIME_MODE"))
             or str(SETTINGS_DEFAULTS["OUROBOROS_RUNTIME_MODE"]),
             "skillsRepoPath": _string(settings.get("OUROBOROS_SKILLS_REPO_PATH")),
@@ -262,14 +251,7 @@ def prepare_onboarding_settings(data: dict, current_settings: dict) -> Tuple[dic
     local_routing_mode = _string(data.get("LOCAL_ROUTING_MODE")) or "cloud"
     review_enforcement = _string(data.get("OUROBOROS_REVIEW_ENFORCEMENT")) or "advisory"
     raw_runtime_mode = _string(data.get("OUROBOROS_RUNTIME_MODE"))
-    # v5.1.2 iter-2 fix (Opus finding F2-13): if the caller omitted the
-    # key entirely (web onboarding payload no longer sends
-    # OUROBOROS_RUNTIME_MODE; v5.1.2 made the mode owner-only), preserve
-    # the existing on-disk value from ``current_settings`` instead of
-    # silently downgrading a returning user from ``pro``/``light`` to
-    # the SETTINGS_DEFAULTS baseline (``advanced``). Only fall back to
-    # the default when neither the form payload nor the existing
-    # settings carry a value (true first-launch with empty disk).
+    # If payload omits owner-only runtime mode, preserve the existing setting.
     runtime_mode = (
         raw_runtime_mode.lower()
         if raw_runtime_mode
@@ -297,10 +279,7 @@ def prepare_onboarding_settings(data: dict, current_settings: dict) -> Tuple[dic
     if review_enforcement not in {"advisory", "blocking"}:
         return {}, "Choose advisory or blocking review mode."
 
-    # Use the shared SSOT from ``ouroboros.config`` so the onboarding
-    # validation surface cannot drift from the runtime normalizer the
-    # save path uses (``normalize_runtime_mode`` in ``api_settings_post``
-    # + ``_coerce_setting_value``). DEVELOPMENT.md P7 (DRY).
+    # Use config SSOT so onboarding and settings-save validation cannot drift.
     if runtime_mode not in VALID_RUNTIME_MODES:
         return (
             {},

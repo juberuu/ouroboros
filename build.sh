@@ -1,19 +1,7 @@
 #!/bin/bash
 set -e
 
-# Signing identity is resolved at runtime in this priority order:
-#   1. The `SIGN_IDENTITY` env var, when set non-empty (CI runners use a
-#      step earlier in the workflow that extracts the actual CN from the
-#      just-imported keychain and writes it into `$GITHUB_ENV`; local
-#      developers can also export it manually).
-#   2. Auto-detection from `security find-identity -v -p codesigning`,
-#      preferring `Developer ID Application` (suitable for distribution).
-#      This works for forks/multi-developer setups without editing this
-#      file — the previous hardcoded "Developer ID Application: <Name>
-#      (<TeamID>)" default broke any fork whose Apple cert had a different
-#      CN with `codesign: no identity found`.
-#   3. Empty (no identity found) — codesign will then fail downstream
-#      with a clear error.
+# Signing identity: explicit SIGN_IDENTITY, then Developer ID auto-detect, else fail later.
 if [ -z "${SIGN_IDENTITY:-}" ]; then
     SIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
         | grep -E '\"Developer ID Application' \
@@ -47,8 +35,7 @@ echo "--- Installing agent dependencies into python-standalone ---"
 python-standalone/bin/pip3 install -q -r requirements.txt
 
 echo "--- Installing Chromium for browser tools (bundled into python-standalone) ---"
-# macOS bundles only the headless shell; the full Chromium app bundle trips
-# PyInstaller's nested-bundle codesign path on arm64 runners.
+# Full Chromium app bundle breaks nested-bundle codesign on arm64 runners.
 PLAYWRIGHT_BROWSERS_PATH=0 python-standalone/bin/python3 -m playwright install --only-shell chromium
 
 echo "--- Normalizing python-standalone symlinks for PyInstaller ---"
@@ -62,8 +49,7 @@ skipped = 0
 
 
 def _should_skip_symlink(path: pathlib.Path) -> bool:
-    # Keep bundled Playwright browser app/framework trees intact on macOS.
-    # Flattening symlinks inside these nested bundles breaks codesign later.
+    # Preserve Playwright app/framework symlinks; flattening breaks codesign.
     parts = path.parts
     return (
         ".local-browsers" in parts
@@ -159,19 +145,8 @@ if [ "$SIGN_MODE" != "0" ]; then
     codesign -s "$SIGN_IDENTITY" --timestamp "$DMG_PATH"
 fi
 
-# Optional notarization: only fires when codesign already ran AND the three
-# notarytool credentials are present in env. This way unsigned builds skip
-# the whole notarization path, and signed-but-unconfigured builds (no Apple
-# ID configured for notarization) still ship cleanly — they just need
-# right-click → Open on first launch on receiver machines.
-#
-# A single enum tracks the outcome so the final summary cascade can
-# distinguish all four cases without contradiction:
-#   * success         — notarytool submit AND stapler staple both succeeded
-#   * staple_failed   — notarytool submit OK; stapler failed (Gatekeeper
-#                       fetches the ticket online; DMG is genuinely notarized)
-#   * submit_failed   — notarytool submit failed (DMG is signed only)
-#   * unconfigured    — Apple credentials not set (signed-only OR unsigned)
+# Optional notarization only after signing and complete Apple credentials.
+# Outcome enum keeps final summary honest: success/staple_failed/submit_failed/unconfigured.
 NOTARIZE_OUTCOME="unconfigured"
 if [ "$SIGN_MODE" != "0" ] \
         && [ -n "${APPLE_ID:-}" ] \
@@ -179,23 +154,14 @@ if [ "$SIGN_MODE" != "0" ] \
         && [ -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ]; then
     echo ""
     echo "=== Notarizing DMG (Apple ID: $APPLE_ID) ==="
-    # `--wait` blocks until Apple finishes the notarization scan so the
-    # subsequent `xcrun stapler staple` always operates on a finalized ticket.
-    # A submit failure is treated as a soft warning (DMG is signed; release
-    # ships with a clear log line) rather than a hard build abort, so an
-    # Apple-side outage / wrong-credential typo never silently drops the
-    # macOS artifact from the GitHub Release.
+    # Submit failures warn, not abort; signed DMG still ships with clear logs.
     if xcrun notarytool submit "$DMG_PATH" \
             --apple-id "$APPLE_ID" \
             --team-id "$APPLE_TEAM_ID" \
             --password "$APPLE_APP_SPECIFIC_PASSWORD" \
             --wait; then
         echo "--- Stapling notarization ticket ---"
-        # Stapler hits Apple's CDN separately and can fail transiently after
-        # a successful notarytool submission. Treat that as a soft warning
-        # too: the DMG is still signed + notarized, Gatekeeper will fetch
-        # the ticket online on first launch (slower but functional). Without
-        # this guard `set -e` would abort the script.
+        # Stapler can fail after successful notarization; Gatekeeper can fetch online.
         if xcrun stapler staple "$DMG_PATH"; then
             NOTARIZE_OUTCOME="success"
         else
@@ -235,9 +201,7 @@ case "$NOTARIZE_OUTCOME" in
         fi
         ;;
     *)
-        # Defensive default: a future enum value added to NOTARIZE_OUTCOME
-        # without a matching arm would otherwise silently print no summary
-        # line. Surface it loudly so the bug is easy to find.
+        # Surface future enum drift instead of omitting the summary.
         echo "(Unknown notarization outcome: '$NOTARIZE_OUTCOME' — please report; likely a missing case arm in build.sh)"
         ;;
 esac

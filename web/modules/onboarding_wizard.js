@@ -1,13 +1,5 @@
 (() => {
-    // ``escapeHtml`` here is intentionally a verbatim mirror of
-    // ``escapeHtmlAttr`` in ``web/modules/utils.js``. The onboarding
-    // wizard ships as a self-contained IIFE bundle (loaded by both the
-    // pywebview launcher and the server-rendered web overlay), not as
-    // an ES module, so a real ``import`` would force a bootstrap
-    // restructuring beyond the scope of v5.8.3-rc.5. The drift is
-    // pinned by ``tests/test_web_utils_ssot.py::
-    // test_onboarding_escape_mirrors_utils`` so any divergence on a
-    // security boundary fails immediately.
+    // Self-contained IIFE mirror of utils.escapeHtmlAttr; SSOT drift is tested.
     function escapeHtml(value) {
         return String(value ?? '')
             .replace(/&/g, '&amp;')
@@ -958,7 +950,6 @@
                     });
                     const data = await resp.json().catch(() => ({}));
                     if (resp.status === 412 && data.error === 'runtime_missing') {
-                        // llama-cpp-python not installed — show actionable message
                         setLocalTestResult(
                             'Local runtime (llama-cpp-python) is not installed.\n' +
                             'Go to Settings → Advanced → Local Model Runtime\n' +

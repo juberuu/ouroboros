@@ -22,15 +22,7 @@ const SKILLS_TABS = [
     { value: 'ouroboroshub', label: 'OuroborosHub', pillId: 'skills-tab-pill-ouroboroshub' },
 ];
 
-/**
- * Ouroboros Skills UI — Phase 5.
- *
- * Lists every discovered skill under ``OUROBOROS_SKILLS_REPO_PATH`` plus
- * the bundled reference set, shows per-skill review status + permissions
- * + grant/review readiness, and exposes the lifecycle buttons:
- * Review, Toggle enable, Delete (placeholder — Phase 6 wires actual
- * delete). Read-only against ``/api/state`` + ``/api/extensions``.
- */
+/** Installed skills UI: review, grant, enable, repair, update, uninstall. */
 
 function skillsPageTemplate() {
     return `
@@ -109,10 +101,7 @@ async function fetchSkills() {
         apiFetch('/api/extensions').then(r => r.ok ? r.json() : { skills: [], live: {} }),
         apiFetch('/api/skills/lifecycle-queue').then(r => r.ok ? r.json() : { events: [] }).catch(() => ({ events: [] })),
     ]);
-    // ``/api/state`` does not yet expose a ``summarize_skills`` payload
-    // directly (that can land in a later round if needed). For now we
-    // synthesize the per-skill list via the extensions catalogue plus the
-    // skills-repo boolean. Runtime mode no longer gates skill execution.
+    // Per-skill state is synthesized from extensions + lifecycle queue.
     const skillsRepoConfigured = Boolean(stateResp.skills_repo_configured);
     const githubTokenConfigured = Boolean(stateResp.github_token_configured);
     return {
@@ -432,9 +421,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
         }
     }
 
-    // v5.2.3: the skill enable/disable control is an <input type="checkbox">
-    // (a real toggle switch) instead of a <button>. We listen for
-    // ``change`` so keyboard activation works the same as mouse.
+    // Checkbox toggle uses change so keyboard and mouse activation match.
     container.addEventListener('change', async (event) => {
         const target = event.target;
         if (!target || !target.classList || !target.classList.contains('skills-toggle')) {
@@ -463,8 +450,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
             await toggleSkillEnabled(name, wantsEnabled);
             target.setAttribute('aria-checked', wantsEnabled ? 'true' : 'false');
         } catch (err) {
-            // Roll the toggle back to the server-truth state if the
-            // request failed (e.g. 409 because grants are still missing).
+            // Roll back to server-truth state on failed enable/disable.
             target.checked = !wantsEnabled;
             target.setAttribute('aria-checked', (!wantsEnabled).toString());
             showToast(`${name}: ${err.message || err}`, (err.message || '').includes('cancel') ? 'warn' : 'danger');
@@ -489,10 +475,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
             closeSkillMenus(opening ? menu : null);
             if (popover && menu) {
                 menuTrigger.setAttribute('aria-expanded', opening ? 'true' : 'false');
-                // v5.7.0: open as a non-modal anchored popover (popover.show()
-                // not .showModal()) so the menu sits under the trigger and
-                // does not dim the rest of the page. Outside clicks close
-                // the menu via the document-level handler installed below.
+                // Non-modal anchored popover; outside handlers close it.
                 if (opening) popover.show();
                 else popover.close();
             }
@@ -523,8 +506,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
         const target = event.target.closest('button[data-skill]');
         if (!target) return;
         if (target.classList.contains('skills-toggle')) {
-            // Toggle is now a checkbox handled above; ignore stale
-            // legacy button clicks if any sneak through.
+            // Checkbox handler above owns current toggles; ignore legacy buttons.
             return;
         }
         const name = target.dataset.skill;
@@ -552,13 +534,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
                     showToast(`${name}: no requested keys to grant`, 'warn');
                 } else {
                     const result = await requestMissingKeyGrants(name, keys);
-                    // v5.2.2: surface the cross-process reconcile
-                    // outcome so users know whether the just-granted
-                    // key actually reached the live extension. The
-                    // launcher posts to /api/skills/<name>/reconcile
-                    // after writing grants.json; if that call fails
-                    // the grant itself was persisted but the live
-                    // extension still needs a manual disable/enable.
+                    // Grant may persist even if live extension reconcile fails.
                     const reason = result.extension_reason;
                     const action = result.extension_action;
                     const loadError = result.load_error;
@@ -658,9 +634,7 @@ async function renderMarketplacePane() {
     const pane = document.getElementById('skills-pane-marketplace');
     if (!pane) return;
     if (pane.dataset.bootstrapped === 'true') {
-        // Refresh installed-state on tab entry without simulating a
-        // search-button click. The button remains as a manual fallback,
-        // but normal tab navigation should keep cards current by itself.
+        // Tab entry refreshes installed state without simulating Search.
         if (typeof pane._marketplaceRefresh === 'function') {
             pane._marketplaceRefresh();
         }

@@ -415,24 +415,7 @@ _RESPONDED_STATUSES = frozenset({"fresh", "stale"})
 
 
 def _run_to_dict(item: Any) -> Dict[str, Any]:
-    """Serialise an AdvisoryRunRecord with status-aware shape.
-
-    Different statuses carry different evidential weight:
-    - ``responded_clean`` — reviewer ran AND produced zero FAILs (a real PASS)
-    - ``responded_with_findings`` — reviewer ran AND found issues (listed in findings)
-    - ``bypassed`` — advisory gate was explicitly skipped with an audit reason
-    - ``skipped`` — advisory was skipped because there was nothing to review
-    - ``parse_failure`` — reviewer responded but output couldn't be parsed
-    - ``error`` — transport/infrastructure failure
-    - ``stale`` — was fresh but is now outdated (edits after run)
-
-    ``status_summary`` collapses this into a single token so downstream
-    consumers (task reflections, prompt injection) can distinguish
-    responded-clean from skipped without re-deriving it from raw fields.
-    ``raw_result_present`` flags whether the canonical raw text is still on
-    disk (used to decide whether a verbose ``review_status`` call would
-    actually surface anything new).
-    """
+    """Serialise AdvisoryRunRecord with responded/skipped/error status summary."""
     fail_items: List[Dict[str, Any]] = []
     total_items = 0
     for entry in list(getattr(item, "items", []) or []):

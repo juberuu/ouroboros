@@ -1,7 +1,4 @@
-"""Git tools: repo_write, repo_commit, git_status, git_diff,
-pull_from_remote, restore_to_head, revert_commit.
-Advisory pre-review + triad + scope review run before each commit (parallel_review.py).
-"""
+"""Git/write tools with advisory, triad, and scope review commit gates."""
 
 from __future__ import annotations
 
@@ -54,8 +51,7 @@ log = logging.getLogger(__name__)
 
 
 def _normalize_to_posix(path_str: str) -> str:
-    """Normalize to forward-slash POSIX form; replaces backslashes first so
-    Windows-style paths match protected runtime paths on Linux/macOS."""
+    """Normalize paths to POSIX form before protected-path matching."""
     return normalize_repo_path(path_str)
 
 
@@ -135,12 +131,7 @@ def _staged_paths_for_protection(repo_dir: pathlib.Path) -> Optional[list[str]]:
 
 
 def _paths_from_porcelain_line(line: str) -> list[str]:
-    """Return current and source paths from one porcelain v1 status line.
-
-    Rename/copy entries are rendered as ``R  old -> new``. The restore guard
-    needs both sides so a protected source path cannot disappear behind an
-    unprotected destination name.
-    """
+    """Return current/source paths; rename guards need both sides."""
     if not line or len(line) < 4:
         return []
     status = line[:2]
@@ -203,16 +194,7 @@ _DOC_ONLY_EXTENSIONS = (".md", ".txt", ".rst")
 
 
 def _diff_is_doc_only(staged_paths: List[str]) -> bool:
-    """Return True iff every staged path is a documentation file outside ``tests/``.
-
-    Prose docs (.md/.txt/.rst) changes can't break test behaviour, so the
-    preflight test gate is wasteful for them. The maintainer hit a 6-retry
-    loop on a doc-only commit (39 rounds, 3 hours) before this check existed.
-    JSON is intentionally excluded: config/schema/package JSON can affect
-    runtime behaviour and must keep the preflight.
-    Defensive: any staged file under ``tests/`` triggers the full preflight,
-    even if the extension is .md, since test fixtures can be markdown.
-    """
+    """Return True only for docs outside tests; JSON/config keep preflight."""
     if not staged_paths:
         return False
     saw_any = False
@@ -307,13 +289,7 @@ def _run_reviewed_stage_cycle(
     if not status.strip():
         return _failed("⚠️ GIT_NO_CHANGES: nothing to commit.")
 
-    # Advisory scope must match what the commit actually covers — use the FULL
-    # staged index (`git diff --cached --name-only`), not the caller-supplied
-    # `paths` list. Otherwise a narrowed stage scope for one caller could let a
-    # fresh advisory for that single file satisfy the gate even if unrelated
-    # files were staged earlier
-    # in the same lock. The blocking review and `git commit` step always operate
-    # on the full staged index, so advisory must match that scope.
+    # Advisory scope must match the full staged index, not caller-supplied paths.
     try:
         staged_names_raw = run_cmd(
             ["git", "diff", "--cached", "--name-only"],
@@ -376,23 +352,8 @@ def _run_reviewed_stage_cycle(
             "block_reason": "no_advisory",
         }
 
-    # Bypass test preflight gate: when advisory is skipped via
-    # ``skip_advisory_pre_review=True`` OR auto-bypassed because no Anthropic
-    # key is configured, the advisory-side test runner never fires. Without
-    # this gate, broken code could reach the expensive triad + scope review.
-    # Mirror the same pytest preflight here so both bypass paths provide
-    # equivalent coverage.
-    #
-    # Two skip paths layered on top:
-    #   1. ``skip_tests=True`` — explicit caller opt-out. Previously this flag
-    #      was silently ignored when advisory was bypassed (the agent surfaced
-    #      this bug at 16:25:32 after a 39-round commit-loop task).
-    #   2. Doc-only diffs — prose `.md`/`.txt`/`.rst` changes outside
-    #      ``tests/`` can't affect test behaviour, so running the full
-    #      pytest suite is pure overhead. JSON/config files are excluded.
-    #      Disable via
-    #      ``OUROBOROS_PREFLIGHT_DIFF_AWARE=false`` if the heuristic ever
-    #      misfires.
+    # If advisory is bypassed, mirror its pytest preflight unless explicitly
+    # skipped or the diff is docs-only outside tests.
     _advisory_bypassed = skip_advisory_pre_review or not os.environ.get("ANTHROPIC_API_KEY", "")
     _diff_aware = (os.environ.get("OUROBOROS_PREFLIGHT_DIFF_AWARE", "true") or "true").strip().lower() in ("true", "1", "yes")
     _doc_only = _diff_aware and _diff_is_doc_only(classification_paths)
@@ -432,9 +393,7 @@ def _run_reviewed_stage_cycle(
                 "block_reason": "tests_preflight_blocked",
             }
     elif _advisory_bypassed:
-        # Skip path: emit a visible progress note so the operator (and the
-        # events log) records why preflight didn't run. ``reason`` is the most
-        # specific applicable cause.
+        # Emit visible reason when bypass preflight is skipped.
         if skip_tests and _doc_only:
             _skip_reason = "skip_tests + doc_only"
         elif skip_tests:
@@ -793,13 +752,6 @@ def _git_commit_with_tests(ctx: ToolContext) -> Optional[str]:
     return None
 
 
-# Compatibility re-exports for ``ouroboros.tools.review`` symbols that
-# external integrations historically imported from this module were
-# retired in v5.8.3-rc.5; nothing inside the repo depends on them and a
-# repo-wide grep confirms no external import path. Pull from
-# ``ouroboros.tools.review`` directly going forward.
-
-
 def _post_commit_result(ctx, commit_message, skip_tests, tw_ref):
     global _consecutive_test_failures
     if skip_tests:
@@ -815,9 +767,7 @@ def _post_commit_result(ctx, commit_message, skip_tests, tw_ref):
 
 
 def _check_ci_status_after_push(repo_dir: pathlib.Path) -> str:
-    """Query GitHub Actions for the CI run matching the just-pushed commit SHA.
-    Filters by head_sha so stale runs from previous pushes are never reported.
-    Returns a short status string to append to commit output, or "" on any error."""
+    """Return CI status for the just-pushed commit SHA, or empty on error."""
     try:
         import urllib.request
         token = os.environ.get("GITHUB_TOKEN", "").strip()
@@ -835,8 +785,7 @@ def _check_ci_status_after_push(repo_dir: pathlib.Path) -> str:
             "Accept": "application/vnd.github+json",
             "User-Agent": "ouroboros-ci-check",
         }
-        # Filter by head_sha in the API query so GitHub returns only runs for
-        # the just-pushed commit; client-side filter retained as defense-in-depth.
+        # Query and client-filter by head_sha to avoid stale run reports.
         import urllib.parse
         runs_url = (
             f"https://api.github.com/repos/{repo}/actions/runs"
@@ -848,7 +797,7 @@ def _check_ci_status_after_push(repo_dir: pathlib.Path) -> str:
         runs = [r for r in (data.get("workflow_runs") or []) if r.get("head_sha") == local_sha]
         if not runs:
             return "\n\n⏳ CI: Run not yet registered — check GitHub Actions in ~30s."
-        # Prefer runs that are active; fall back to latest completed run for this SHA.
+        # Prefer active runs, else latest completed run for this SHA.
         if runs[0].get("status") in ("in_progress", "queued"):
             return "\n\n⏳ CI: Run in progress — check GitHub Actions for results."
         completed = next((r for r in runs if r.get("status") == "completed"), None)
@@ -882,7 +831,6 @@ def _check_ci_status_after_push(repo_dir: pathlib.Path) -> str:
                 f"  Fix: investigate failing tests, then push a fix commit.\n"
                 f"  URL: {html_url}"
             )
-        # Other terminal conclusions: cancelled, timed_out, startup_failure, etc.
         return (
             f"\n\n⚠️ CI STATUS: Run {conclusion.upper()} for this commit (run #{run_number})\n"
             f"  URL: {html_url}"
@@ -903,7 +851,7 @@ def _format_commit_result(ctx, commit_message, push_status, test_warning):
 
 
 def _check_shrink_guard(ctx: ToolContext, file_path: str, new_content: str, force: bool = False) -> Optional[str]:
-    """Return a warning string if writing new_content would shrink a tracked file by >30%. None if OK."""
+    """Block likely accidental tracked-file truncation unless force=True."""
     if force:
         return None
     try:
@@ -1057,8 +1005,7 @@ def _str_replace_editor(
         return f"⚠️ SKILL_REDIRECT_BLOCKED: {redirect_err}"
 
     data_skill_target = None
-    # Real skill_repair task_constraint wins over a synthesized one — repair
-    # confinement is sticky.
+    # Real skill_repair confinement wins over synthesized short-form context.
     if existing_tc and existing_tc.mode == "skill_repair":
         task_constraint = existing_tc
     else:
@@ -1168,8 +1115,7 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
     """Stage, review, and commit files with unified pre-commit review."""
     ctx.last_push_succeeded = False
     ctx._review_advisory = []
-    # Reset forensic fields at the start of each commit attempt so stale values
-    # from a previous attempt never persist on early-exit paths (e.g. fingerprint_unavailable).
+    # Reset forensic fields so early exits cannot reuse previous attempt data.
     ctx._last_triad_models = []
     ctx._last_scope_model = ""
     ctx._last_triad_raw_results = []
@@ -1209,14 +1155,7 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
         try:
             run_cmd(["git", "checkout", ctx.branch_dev], cwd=ctx.repo_dir)
         except Exception as e:
-            # The original code aborted on ANY checkout failure — including
-            # the common case where the agent is already on ``branch_dev``
-            # with a dirty tree because the dirty files ARE what they're
-            # trying to commit. When checkout fails, check whether we're
-            # already on the right branch. If so, the checkout failure is
-            # incidental (typically a no-op-but-git-complained on a dirty
-            # tree) and we can proceed to staging. Only abort when on a
-            # different branch — where the checkout was actually needed.
+            # Dirty-tree checkout can fail even when already on branch_dev; verify branch/index.
             err_msg = _sanitize_git_error(str(e))
             already_on_target = False
             try:
@@ -1247,7 +1186,7 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
                     "the checkout failure as an incidental dirty-tree no-op.\n"
                     f"{unmerged}"
                 )
-            # else: already on branch_dev with a clean merge index; proceed to stage.
+            # Already on branch_dev with clean merge index; proceed to stage.
         outcome = _run_reviewed_stage_cycle(
             ctx,
             commit_message,

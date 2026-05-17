@@ -1,17 +1,4 @@
-"""Phase 5 HTTP surface for Phase 4 ``type: extension`` skills.
-
-Three endpoints are exposed:
-
-- ``GET  /api/extensions``                       — catalogue snapshot.
-- ``GET  /api/extensions/<skill>/manifest``      — raw manifest JSON.
-- ``ALL  /api/extensions/<skill>/<rest>``        — dispatch to the handler
-                                                   the extension registered via
-                                                   ``PluginAPI.register_route``.
-
-Combined with the Phase 4 ``extension_loader`` the agent/web UI can now
-actually invoke the routes extensions attach, instead of only reading them
-from ``extension_loader.snapshot()``.
-"""
+"""HTTP endpoints for extension catalogue, manifests, modules, and dispatch."""
 
 from __future__ import annotations
 
@@ -50,13 +37,7 @@ log = logging.getLogger(__name__)
 
 
 def _coerce_bool_arg(value: Any) -> bool | None:
-    """Tri-state coercion: returns ``None`` on unparseable input.
-
-    Distinct from :func:`http_api.coerce_bool` which always falls back to a
-    default; here ``None`` lets the caller decide whether absence means
-    "no override" vs "explicit false". Used by ``api_skill_toggle`` /
-    ``api_extension_dispatch``.
-    """
+    """Tri-state bool coercion; ``None`` means unparseable/absent."""
     sentinel = object()
     coerced = coerce_bool(value, default=sentinel)  # type: ignore[arg-type]
     return None if coerced is sentinel else coerced
@@ -80,26 +61,10 @@ def _broadcast_extension_lifecycle(request: Request, skill: str, action: Any, re
 
 
 async def api_extensions_index(request: Request) -> JSONResponse:
-    """GET /api/extensions — catalogue + live registration snapshot.
+    """Return discovered extensions plus live loader snapshot.
 
-    Returns a merged view: ``skills`` is the list of discovered
-    ``type: extension`` skills (directory basename + manifest version
-    + review status + enabled flag); ``live`` is the loader's
-    ``snapshot()`` of in-process registrations. The UI can cross-
-    reference the two to know which extensions are "catalogued but
-    not yet loaded" vs "actively dispatching".
-
-    v5.7.0 perf: the synchronous ``discover_skills`` walk + per-extension
-    ``runtime_state_for_skill_name`` (which used to re-walk the entire
-    skills tree) were stalling the asyncio loop and made the Widgets
-    page show "Loading…" with an empty viewport for many seconds while
-    a parallel review/install job was running. Two fixes:
-
-    1. The whole synchronous body runs on a worker thread via
-       ``asyncio.to_thread`` so the loop stays responsive.
-    2. ``runtime_state_for_loaded_skill`` is a new helper that takes the
-       already-discovered ``LoadedSkill`` and skips the second walk,
-       collapsing 1+K filesystem walks into exactly one.
+    The synchronous body runs in a worker thread and reuses discovered skills
+    to avoid repeated filesystem walks during Widgets/Skills refresh.
     """
     try:
         import asyncio
@@ -118,15 +83,11 @@ async def api_extensions_index(request: Request) -> JSONResponse:
 
 
 def _build_extensions_index(drive_root, repo_path):
-    """Synchronous body of ``GET /api/extensions``. Keep this function
-    pure: it is called via ``asyncio.to_thread`` and must not depend on
-    request scope."""
+    """Threaded, request-scope-free body for ``GET /api/extensions``."""
     from ouroboros.extension_loader import extension_name_prefix, runtime_state_for_loaded_skill
 
     live_snapshot = snapshot()
-    # Always scan the data plane plus optional external checkout. Native
-    # reference skills are copied into data/skills/native by bootstrap; the
-    # live catalogue no longer reads repo/skills directly.
+    # Scan data plane plus optional external checkout; bootstrap copies native refs.
     skills = discover_skills(drive_root, repo_path=repo_path)
     runtime_states = {
         s.name: runtime_state_for_loaded_skill(s, drive_root)
@@ -154,13 +115,7 @@ def _build_extensions_index(drive_root, repo_path):
             if str(name).startswith(prefix)
         ]
 
-    # v5: include marketplace provenance directly on clawhub skills so
-    # the Installed UI can show the registry slug, archive sha256,
-    # homepage / license, adapter warnings, and a "version vs latest"
-    # mismatch hint without making a second round-trip to
-    # ``/api/marketplace/clawhub/installed``. ``read_provenance``
-    # returns ``None`` for any non-clawhub skill (no sidecar present),
-    # so this is a no-op for native / external entries.
+    # Inline ClawHub provenance so Installed UI avoids a second round-trip.
     try:
         from ouroboros.marketplace.provenance import read_provenance
     except Exception:  # pragma: no cover — defensive
@@ -220,11 +175,7 @@ def _build_extensions_index(drive_root, repo_path):
             "review_findings": list(s.review.findings or []),
             "grants": grant_status_for_skill(drive_root, s),
             "is_self_authored": bool(getattr(s, "is_self_authored", False)),
-            # v4.50: surface the discovery source so the Skills tab
-            # can render a clawhub badge + Update/Uninstall buttons
-            # for marketplace-installed skills. Without this the
-            # /api/extensions catalogue would silently mislabel
-            # clawhub skills as "native" (P6 honesty regression).
+            # Keep source explicit so marketplace skills are not mislabeled native.
             "source": s.source,
             "payload_root": payload_root,
             "installed_at": _path_installed_at(s.skill_dir),
@@ -313,14 +264,7 @@ async def api_extension_manifest(request: Request) -> JSONResponse:
 
 
 async def api_extension_module(request: Request) -> Response:
-    """GET /api/extensions/<skill>/module/<entry> — reviewed widget module JS.
-
-    This is deliberately separate from the catch-all extension route
-    dispatcher: ``kind: "module"`` points at a static JS file inside the
-    reviewed skill payload, not an arbitrary route registered by plugin.py.
-    The handler only serves the exact ``ui_tab.render.entry`` declared in the
-    fresh, enabled extension manifest; it never serves arbitrary files.
-    """
+    """Serve reviewed widget module JS only for live registered tab entries."""
     from ouroboros.config import get_skills_repo_path
     from ouroboros.extension_loader import runtime_state_for_skill_name
 
@@ -347,12 +291,7 @@ async def api_extension_module(request: Request) -> Response:
     loaded = await asyncio.to_thread(find_skill, drive_root, skill_name, repo_path=repo_path)
     if loaded is None:
         return JSONResponse({"error": "skill not found"}, status_code=404)
-    # Authorize against the LIVE registered tab snapshot, not only the
-    # manifest's optional ui_tab block. Extensions may register UI tabs from
-    # plugin.py via PluginAPI without duplicating the declaration in
-    # frontmatter; the Widgets page receives that live snapshot and then asks
-    # this endpoint for ``entry``. If we checked only manifest.ui_tab, valid
-    # live PluginAPI tabs would 404.
+    # Authorize against live PluginAPI tab registrations, not only manifest ui_tab.
     live = snapshot()
     module_declared = any(
         str(tab.get("skill") or "") == skill_name
@@ -381,12 +320,7 @@ async def api_extension_module(request: Request) -> Response:
 
 
 async def api_extension_settings_section(request: Request) -> JSONResponse:
-    """GET /api/extensions/<skill>/settings_section — declarative Settings sections.
-
-    Extensions register these via ``PluginAPI.register_settings_section``.
-    The response is a stable list (usually length 0 or 1) so future
-    extensions can publish multiple small sections without adding more routes.
-    """
+    """Return declarative Settings sections registered by one extension."""
     skill_name = str(request.path_params.get("skill") or "").strip()
     if not skill_name:
         return JSONResponse({"error": "missing skill name"}, status_code=400)
@@ -400,13 +334,7 @@ async def api_extension_settings_section(request: Request) -> JSONResponse:
 
 
 async def api_extension_dispatch(request: Request) -> Response:
-    """Catch-all dispatcher for ``/api/extensions/<skill>/<rest>``.
-
-    Looks up the fully-qualified mount point in the extension loader
-    route registry and invokes the handler the extension registered
-    via ``PluginAPI.register_route``. Honors the registered methods
-    tuple.
-    """
+    """Dispatch an extension route after reconciling live loader state."""
     from ouroboros.config import get_skills_repo_path, load_settings
     from ouroboros.extension_loader import reconcile_extension, runtime_state_for_skill_name
 
@@ -509,13 +437,7 @@ async def api_extension_dispatch(request: Request) -> Response:
 
 
 async def api_skill_toggle(request: Request) -> JSONResponse:
-    """POST /api/skills/<skill>/toggle {enabled: bool}.
-
-    Direct UI-facing endpoint so the Skills page can flip the enabled
-    bit + run the extension load/unload path without routing through
-    the agent. Uses the same machinery as ``toggle_skill`` tool but
-    via HTTP.
-    """
+    """Toggle a skill from the UI and run extension load/unload reconciliation."""
     from ouroboros.config import get_skills_repo_path, load_settings
     from ouroboros.skill_loader import find_skill, grant_status_for_skill, save_enabled
     from ouroboros import extension_loader
@@ -568,10 +490,7 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
                     "executable_review": gate["executable_review"],
                     "grants": grants,
                 }
-            # v5.7.0: mirror the dependency-state enable guard from the
-            # ``toggle_skill`` tool. The Skills UI uses this HTTP path, so
-            # without the guard users could enable a skill whose isolated deps
-            # failed or whose deps.json is stale/missing.
+            # Mirror toggle_skill's isolated-dependency enable guard for the UI.
             try:
                 from ouroboros.marketplace.install_specs import install_specs_hash
                 from ouroboros.marketplace.isolated_deps import read_deps_state
@@ -698,13 +617,7 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
 
 
 class _ApiReviewCtx:
-    """Minimal ToolContext-compatible stub for ``api_skill_review``.
-
-    Includes every attribute the downstream review pipeline (``review.py::
-    _emit_usage_event``, ``review_helpers``) reads, not only the bare
-    ``drive_root`` the review itself needs. Missing ``event_queue``
-    previously crashed the usage-event emission path.
-    """
+    """Minimal ToolContext-compatible carrier for HTTP-triggered review."""
 
     def __init__(self, drive_root: pathlib.Path, repo_dir: pathlib.Path) -> None:
         self.drive_root = drive_root
@@ -718,15 +631,7 @@ class _ApiReviewCtx:
 
 
 async def api_skill_review(request: Request) -> JSONResponse:
-    """POST /api/skills/<skill>/review — trigger tri-model skill review.
-
-    Delegated Phase 5 endpoint so the Skills UI can queue a review
-    without routing through the agent command bus. The tri-model
-    pipeline is a multi-second blocking network op — we offload it
-    to a worker thread via ``asyncio.to_thread`` so the Starlette
-    event loop keeps serving other requests / WebSocket traffic while
-    the review runs.
-    """
+    """Queue tri-model skill review from the UI without blocking the event loop."""
     skill_name = str(request.path_params.get("skill") or "").strip()
     if not skill_name:
         return JSONResponse({"error": "missing skill name"}, status_code=400)
@@ -770,22 +675,7 @@ async def api_skill_grants(request: Request) -> JSONResponse:
 
 
 async def api_skill_reconcile(request: Request) -> JSONResponse:
-    """POST /api/skills/<skill>/reconcile — re-run the extension load gate.
-
-    The desktop launcher owns the grant-write path because it is the only
-    surface that can summon the native confirmation dialog. After the
-    launcher persists ``grants.json`` to disk it cannot reach the
-    server's in-process extension registry directly: launcher.py and
-    server.py run as separate OS processes, each with its own copy of
-    ``extension_loader._extensions`` / ``_load_failures``. The launcher
-    therefore POSTs this loopback endpoint after a successful grant so
-    the agent server clears any cached load failure and re-imports the
-    plugin with the fresh ``granted_keys`` set, lifting the user out of
-    the disable/enable workaround that previous releases required.
-
-    Idempotent: any caller (UI refresh, agent, launcher) may invoke
-    this without side effects beyond reconciling the named skill.
-    """
+    """Re-run the extension load gate after launcher-owned grants change."""
     from ouroboros.config import get_skills_repo_path, load_settings
     from ouroboros import extension_loader
 

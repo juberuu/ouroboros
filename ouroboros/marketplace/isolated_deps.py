@@ -165,14 +165,7 @@ def install_isolated_dependencies(
     *,
     timeout_sec: int = _DEFAULT_TIMEOUT_SEC,
 ) -> Dict[str, Any]:
-    """Install normalized dependency specs into ``<skill>/.ouroboros_env``.
-
-    v5.7.0: deps.json carries an explicit ``status`` field (``installed``
-    / ``failed`` / ``pending``) plus the ``specs_hash`` so callers can
-    decide whether the install is still in sync with the current
-    provenance. ``failed`` carries the error message; ``installed``
-    keeps the previous shape (installed list, log tail, fingerprint).
-    """
+    """Install normalized specs and persist deps.json status/specs_hash."""
 
     env_root = isolated_env_dir(skill_dir)
     env_root.mkdir(parents=True, exist_ok=True)
@@ -212,21 +205,13 @@ def install_isolated_dependencies(
     state_dir = skill_state_dir(drive_root, skill_name)
     atomic_write_json(state_dir / DEPS_STATE_FILENAME, fingerprint, trailing_newline=True)
     if failure:
-        # Re-raise so existing call-sites that rely on the failure
-        # surface (install_skill's deps_status="failed") keep behaving
-        # as before. The fingerprint with status=failed is already
-        # written, so durable state survives the exception.
+        # Re-raise after durable failed fingerprint is written.
         raise RuntimeError(failure["error"])
     return fingerprint
 
 
 def read_deps_state(drive_root: pathlib.Path, skill_name: str) -> Dict[str, Any]:
-    """Return the persisted ``deps.json`` for a skill, or an empty dict.
-
-    v5.7.0 helper used by ``toggle_skill`` to refuse enable when the
-    skill's auto specs are not installed (status != ``installed``) or
-    are stale relative to the current provenance.
-    """
+    """Return persisted deps.json so enable can reject failed/stale auto deps."""
     try:
         state_dir = skill_state_dir(drive_root, skill_name)
         path = state_dir / DEPS_STATE_FILENAME

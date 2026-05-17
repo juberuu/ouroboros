@@ -1,31 +1,8 @@
-"""Read-only HTTP client for the ClawHub registry (https://clawhub.ai/api/v1).
+"""Read-only ClawHub registry client for search/info/version/download.
 
-The client wraps four operations the marketplace UI / installer need:
-
-- :func:`search` — keyword + filter search of the skill registry.
-- :func:`info` — resolve the latest version metadata for one skill.
-- :func:`list_versions` — every published version for one slug.
-- :func:`download` — fetch the binary archive bytes for one version.
-
-Defensive design choices that matter for security:
-
-- Hostname allowlist: only ``clawhub.ai`` (or the configured registry
-  URL's host) is contacted. Arbitrary user-supplied URLs cannot
-  redirect requests to a different host even if the registry returns
-  a malformed response.
-- Aggressive timeouts (default 15s) so the UI never blocks on a
-  hung registry call.
-- No authentication. The marketplace surface only exposes anonymous
-  read operations — publish/sync workflows live in the upstream
-  ``clawhub`` CLI which Ouroboros never invokes.
-- Response size cap: the JSON endpoints reject anything > 4 MB and
-  the download endpoint applies the 50 MB cap from
-  :mod:`ouroboros.marketplace.fetcher`. This prevents a malicious
-  registry from filling the runtime with a multi-GB response.
-
-The client is intentionally synchronous (``requests`` /
-``urllib`` style). Marketplace HTTP routes call it from
-``asyncio.to_thread`` so the Starlette event loop stays responsive.
+All requests stay on an allowlisted host, redirects are revalidated, timeouts
+and size caps bound registry abuse, and marketplace routes call this sync client
+from ``asyncio.to_thread``.
 """
 
 from __future__ import annotations
@@ -55,12 +32,7 @@ _SEARCH_ENRICH_TIMEOUT_SEC = 2
 _MAX_RATE_LIMIT_RETRIES = 2
 _MAX_RATE_LIMIT_SLEEP_SEC = 3.0
 
-# Allowed registry hosts. The canonical registry is ``clawhub.ai`` (per
-# the official docs at github.com/openclaw/clawhub). ``clawhub.com``
-# is documented as a legacy alias but Ouroboros does not enforce that
-# it shares ownership with ``clawhub.ai`` — until we have an
-# independent ownership audit (DNS / TLS pin / signed metadata), we
-# refuse it. Localhost remains allowlisted for self-hosted dev mirrors.
+# Allow only audited ClawHub hosts plus localhost dev mirrors; reject legacy aliases.
 _ALLOWED_REGISTRY_HOSTS = frozenset(
     {
         "clawhub.ai",
@@ -93,14 +65,7 @@ class ClawHubClientHostBlocked(ClawHubClientError):
 
 @dataclass
 class ClawHubSkillSummary:
-    """Lightweight per-skill record returned by ``search`` / ``info``.
-
-    Mirrors the schema described in
-    https://github.com/openclaw/clawhub/blob/main/docs/spec.md but is
-    intentionally permissive: any field that the registry omits is
-    rendered as the empty string / 0 / [] so downstream UI code can
-    render the card without conditional branches.
-    """
+    """Permissive per-skill record returned by ``search`` / ``info``."""
 
     slug: str
     display_name: str = ""
@@ -142,13 +107,7 @@ class ClawHubSkillSummary:
 
 
 def _registry_base_url(override: Optional[str] = None) -> str:
-    """Return the resolved registry base URL with trailing slash stripped.
-
-    Defers to :func:`ouroboros.config.get_clawhub_registry_url` when no
-    explicit override is supplied. Hostnames outside the marketplace
-    allowlist raise :class:`ClawHubClientHostBlocked` so a malicious
-    settings override cannot redirect HTTP traffic.
-    """
+    """Resolve the registry base URL and enforce the host allowlist."""
     if override is None or not str(override).strip():
         from ouroboros.config import get_clawhub_registry_url
         url = get_clawhub_registry_url()
@@ -174,13 +133,7 @@ def _registry_base_url(override: Optional[str] = None) -> str:
 
 
 def _build_url(base: str, path: str, query: Optional[Dict[str, Any]] = None) -> str:
-    """Join ``base`` + ``path`` defensively (preserves any base path).
-
-    See https://github.com/openclaw/clawhub/issues/433 — ``new URL(path,
-    base)`` semantics drop the base path when ``path`` starts with ``/``.
-    We strip leading slashes from path and append manually so a
-    subpath-deployed registry still works.
-    """
+    """Join ``base`` + ``path`` without dropping subpath-deployed registries."""
     rel = path.lstrip("/")
     composed = f"{base.rstrip('/')}/{rel}"
     if query:
@@ -189,15 +142,7 @@ def _build_url(base: str, path: str, query: Optional[Dict[str, Any]] = None) -> 
 
 
 class _AllowlistRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Refuse 30x redirects whose target host leaves the marketplace allowlist.
-
-    The default ``urllib.request.urlopen`` opener follows redirects
-    transparently with no host re-validation, which would otherwise
-    let the registry hand us a ``302 Location: https://evil.example.com/...``
-    and exfiltrate / SSRF-pivot the request. Substituting this handler
-    closes that loophole — every hop must independently satisfy
-    :data:`_ALLOWED_REGISTRY_HOSTS`.
-    """
+    """Refuse redirects whose target host leaves the marketplace allowlist."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
         target = urllib.parse.urlparse(newurl).hostname
@@ -245,14 +190,7 @@ def _http_get(
     accept: str = "application/json",
     max_bytes: int = _MAX_JSON_RESPONSE_BYTES,
 ) -> Tuple[bytes, Dict[str, str]]:
-    """Issue a GET, capping the response to ``max_bytes`` bytes.
-
-    Reads the response body in 64 KiB chunks and aborts as soon as the
-    cap is exceeded. Returns ``(body_bytes, headers)``. Raises
-    :class:`ClawHubClientError` on transport / HTTP / oversize errors,
-    or :class:`ClawHubClientHostBlocked` on a redirect target outside
-    :data:`_ALLOWED_REGISTRY_HOSTS`.
-    """
+    """Issue a GET in chunks and abort once ``max_bytes`` is exceeded."""
     last_retry_after: Optional[float] = None
     for attempt in range(_MAX_RATE_LIMIT_RETRIES + 1):
         request = urllib.request.Request(
@@ -316,9 +254,7 @@ def _decode_json(body: bytes, *, url: str) -> Any:
         ) from exc
 
 
-# ---------------------------------------------------------------------------
-# Summary parsing
-# ---------------------------------------------------------------------------
+# Summary parsing.
 
 
 def _coerce_str_list(value: Any) -> List[str]:
@@ -357,15 +293,7 @@ def _coerce_version(value: Any) -> str:
 
 
 def _detect_plugin(raw: Dict[str, Any]) -> bool:
-    """Return True when the registry record looks like a Node plugin.
-
-    OpenClaw plugins announce themselves via either an explicit
-    ``kind: plugin`` discriminator (newer registry shape) or by
-    bundling an ``openclaw.plugin.json`` in the package — the registry
-    indexes that under ``plugin_manifest`` / ``has_plugin`` /
-    ``package_kind == 'plugin'``. We accept any of these as a plugin
-    flag; the marketplace UI hides plugins from search results.
-    """
+    """Return whether the registry record looks like an OpenClaw plugin."""
     kind = str(
         raw.get("kind")
         or raw.get("package_kind")
@@ -382,14 +310,7 @@ def _detect_plugin(raw: Dict[str, Any]) -> bool:
 
 
 def _extract_metadata_openclaw(raw: Dict[str, Any]) -> Dict[str, Any]:
-    """Pull the ``metadata.openclaw`` block out of a parsed record.
-
-    The registry sometimes nests metadata one level deep
-    (``metadata.openclaw``), sometimes uses the legacy ``clawdis`` /
-    ``clawdbot`` aliases, and sometimes flattens fields onto the
-    top-level record. We consult all three and the FIRST non-empty
-    block wins.
-    """
+    """Return the first non-empty OpenClaw metadata alias block."""
     metadata = raw.get("metadata") or {}
     if not isinstance(metadata, dict):
         metadata = {}
@@ -544,9 +465,7 @@ def _summary_from_record(raw: Any) -> ClawHubSkillSummary:
     )
 
 
-# ---------------------------------------------------------------------------
-# Public client surface
-# ---------------------------------------------------------------------------
+# Public client surface.
 
 
 def _merge_enriched_summary(
@@ -710,18 +629,7 @@ def search(
 
 
 def _validate_slug(slug: str) -> str:
-    """Strip + validate a slug before sending it to the registry.
-
-    Slugs reach this function via the HTTP route ``{slug:path}`` which
-    accepts arbitrary path segments including ``..`` traversal. The
-    install pipeline's ``sanitize_clawhub_slug`` already protects the
-    on-disk landing path, but a slug like ``../../etc`` would still be
-    issued as ``GET /api/v1/skills/../../etc`` to the registry — a
-    small SSRF amplifier letting an external HTTP caller probe
-    arbitrary registry paths via the Ouroboros server. We reject ``..``
-    segments and absolute paths up-front so the registry only sees
-    well-formed slug shapes.
-    """
+    """Validate route-provided slugs before they become registry paths."""
     cleaned = (slug or "").strip()
     if not cleaned:
         raise ClawHubClientError("'slug' must be non-empty")
@@ -830,20 +738,10 @@ def download(
     registry_url: Optional[str] = None,
     timeout_sec: int = _DEFAULT_TIMEOUT_SEC * 2,
 ) -> ClawHubArchive:
-    """Download the binary archive for ``slug`` (specific version or latest).
+    """Download an archive and return bytes plus a local sha256 fingerprint.
 
-    The download endpoint is ``GET /download?slug=<skill>&version=<version>``.
-    On success returns the bytes
-    + a sha256 fingerprint computed locally over those bytes.
-
-    Important: the returned ``sha256`` is the fingerprint of WHAT WE
-    RECEIVED, not a registry-side advertised digest. The current
-    ClawHub registry does not expose a separate per-version digest in
-    its ``info`` response, so there is no out-of-band integrity anchor
-    we can cross-check against. The TLS connection to ``clawhub.ai``
-    is the only integrity gate the marketplace enjoys today; the
-    fingerprint here is useful for provenance + change-detection on
-    update flows, NOT as an MITM defense.
+    The sha256 describes what was received, not a registry-advertised digest;
+    TLS is the current integrity anchor.
     """
     import hashlib
     cleaned = _validate_slug(slug)

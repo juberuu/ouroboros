@@ -1,40 +1,7 @@
 #!/usr/bin/env python3
-"""Invoke Ouroboros's actual triad + scope reviewers from outside the runtime.
+"""Dry-run the real triad + scope reviewers against the staged diff.
 
-Use case: developer (or an external orchestrator like an adversarial-review
-loop) wants to dry-run the same multi-model commit-time review pipeline that
-``repo_commit`` would trigger, against a staged diff, before any actual
-commit. Output is the FULL raw response from each reviewer model — no
-truncation, no summarisation — so the operator can read everything the
-gate would see.
-
-This script does NOT commit, does NOT mutate state outside the temporary
-ToolContext fields it owns, and does NOT depend on a live Ouroboros
-server process. It only reads:
-
-- ``~/Ouroboros/data/settings.json`` for OPENROUTER_API_KEY,
-  OUROBOROS_REVIEW_MODELS, OUROBOROS_SCOPE_REVIEW_MODEL, plus model slot
-  defaults (so ``LLMClient`` can route via the same provider lanes).
-- The current ``git diff --cached`` (the staged change set).
-
-Usage:
-    cd ~/Ouroboros/repo
-    git add -A   # stage everything you want reviewed
-    python3 scripts/run_external_review.py \
-        --commit-message "v5.1.2: light skills + elevation ratchet" \
-        --goal "Allow skills in light mode and seal the runtime_mode escalation paths."
-
-Optional flags:
-    --no-color       plain ASCII output (otherwise terse ANSI section headers)
-    --output PATH    also write the full raw output to a file
-
-Note: this script always reviews the staged diff (``git diff --cached``)
-because that is what ``run_parallel_review`` itself reads internally.
-There is no working-tree mode — ``git add`` first.
-
-This script is intentionally minimal — it's a development tool, not part
-of the runtime gate. It prints to stdout in a structure designed for
-direct copy-paste into review-loop summaries.
+Development-only: no commit, no review-state mutation, full raw reviewer output.
 """
 from __future__ import annotations
 
@@ -48,8 +15,6 @@ import time
 from typing import Any, Dict, List
 
 
-# ── Path bootstrap so ``import ouroboros.*`` works outside the package ──────
-
 _REPO_DIR = pathlib.Path(__file__).resolve().parent.parent
 _OUROBOROS_HOME = _REPO_DIR.parent
 _DATA_DIR = _OUROBOROS_HOME / "data"
@@ -60,16 +25,7 @@ if str(_REPO_DIR) not in sys.path:
 
 
 def _load_settings_into_env() -> Dict[str, Any]:
-    """Read settings.json and copy everything string-valued into os.environ.
-
-    The actual Ouroboros runtime does this via
-    ``ouroboros.config.apply_settings_to_env``, but that function has a
-    fixed allowlist; we want a broader copy here so reviewer flows
-    (which hit ``LLMClient`` etc.) see the same provider config the live
-    runtime sees. We do NOT call ``apply_settings_to_env`` because it
-    would also resolve provider defaults and mutate the in-memory
-    settings dict, which is unnecessary for a read-only review.
-    """
+    """Populate env from settings.json without printing secret values."""
     if not _SETTINGS_PATH.exists():
         sys.stderr.write(
             f"[run_external_review] settings.json not found at {_SETTINGS_PATH}\n"
@@ -90,10 +46,7 @@ def _load_settings_into_env() -> Dict[str, Any]:
         os.environ.setdefault(key, str(value))
         pushed.append(key)
 
-    # The official allowlist still wins for the keys it knows about (so
-    # apply_settings_to_env semantics remain authoritative if someone adds
-    # extra processing). We also explicitly call it so e.g.
-    # OUROBOROS_REVIEW_MODELS gets the documented default fallback.
+    # Apply official defaults/normalization after the broad raw env copy.
     try:
         from ouroboros.config import apply_settings_to_env
         apply_settings_to_env(settings)

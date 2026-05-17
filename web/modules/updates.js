@@ -6,10 +6,7 @@ export function initUpdates({ mount, state }) {
     const page = document.createElement('div');
     page.id = 'page-updates';
     page.className = 'settings-embedded-content settings-updates-panel';
-    // v5.7.0: drop the duplicate inner ".page-header" (the outer Dashboard
-    // tab strip already labels the panel). The "Check for updates" button
-    // moves into ".updates-card-head" alongside the status badge so the
-    // refresh-style action sits with the status it refreshes.
+    // Keep the update action beside the status it refreshes.
     page.innerHTML = `
         <div class="updates-scroll">
             <section class="updates-card" id="updates-status-card">

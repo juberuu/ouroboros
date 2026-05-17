@@ -13,10 +13,6 @@ from ouroboros.utils import truncate_review_artifact as _truncate_with_notice
 
 log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 def github_token_from_env_or_settings() -> str:
     """Return configured GitHub token without exposing it to callers."""
     from ouroboros.config import load_settings
@@ -30,15 +26,7 @@ def github_token_from_env_or_settings() -> str:
 
 
 def _gh_env(ctx: ToolContext) -> dict:
-    """Build env for gh CLI: inject GITHUB_TOKEN / GH_TOKEN without gh auth login.
-
-    gh CLI reads GH_TOKEN (or GITHUB_TOKEN) directly from the environment.
-    We pull from (in priority order):
-      1. GITHUB_TOKEN already in os.environ (set by apply_settings_to_env)
-      2. load_settings() — same pattern as ci.py::_get_github_config()
-    This avoids any interactive `gh auth login` and works in packaged mode.
-    ToolContext has no .settings field; load_settings() is the correct path.
-    """
+    """Inject GitHub token env for gh CLI without interactive auth state."""
     env = os.environ.copy()
     token = github_token_from_env_or_settings()
     if token:
@@ -48,11 +36,7 @@ def _gh_env(ctx: ToolContext) -> dict:
 
 
 def _gh_cmd(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Optional[str] = None) -> str:
-    """Run `gh` CLI command and return stdout or error string.
-
-    Token is injected via GH_TOKEN env var (no `gh auth login` required).
-    Works in packaged/frozen mode as long as GITHUB_TOKEN is in settings.
-    """
+    """Run gh CLI with token env and return stdout or a compact error."""
     cmd = ["gh"] + args
     try:
         res = subprocess.run(
@@ -66,7 +50,6 @@ def _gh_cmd(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Op
         )
         if res.returncode != 0:
             err = (res.stderr or "").strip()
-            # Only return first line of stderr, truncated to 200 chars for security
             return f"⚠️ GH_ERROR: {err.split(chr(10))[0][:200]}"
         return res.stdout.strip()
     except FileNotFoundError:
@@ -75,11 +58,6 @@ def _gh_cmd(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Op
         return f"⚠️ GH_TIMEOUT: exceeded {timeout}s."
     except Exception as e:
         return f"⚠️ GH_ERROR: {e}"
-
-
-# ---------------------------------------------------------------------------
-# Tool handlers
-# ---------------------------------------------------------------------------
 
 def _list_issues(ctx: ToolContext, state: str = "open", labels: str = "", limit: int = 20) -> str:
     """List GitHub issues with optional filters."""
@@ -114,7 +92,6 @@ def _list_issues(ctx: ToolContext, state: str = "open", labels: str = "", limit:
         )
         body = (issue.get("body") or "").strip()
         if body:
-            # Show first 200 chars of body
             preview = body[:200] + ("..." if len(body) > 200 else "")
             lines.append(f"  > {preview}")
 
@@ -174,7 +151,7 @@ def _comment_on_issue(ctx: ToolContext, number: int, body: str) -> str:
     if not body or not body.strip():
         return "⚠️ Comment body cannot be empty."
 
-    # Pass body via stdin to prevent argument injection
+    # Body via stdin prevents argument injection.
     args = ["issue", "comment", str(number), "--body-file", "-"]
     raw = _gh_cmd(args, ctx, input_data=body)
     if raw.startswith("⚠️"):
@@ -188,7 +165,6 @@ def _close_issue(ctx: ToolContext, number: int, comment: str = "") -> str:
         return "⚠️ issue number must be positive"
 
     if comment and comment.strip():
-        # Add comment first
         result = _comment_on_issue(ctx, number, comment)
         if result.startswith("⚠️"):
             return result
@@ -198,11 +174,6 @@ def _close_issue(ctx: ToolContext, number: int, comment: str = "") -> str:
     if raw.startswith("⚠️"):
         return raw
     return f"✅ Issue #{number} closed."
-
-
-# ---------------------------------------------------------------------------
-# Pull request tools
-# ---------------------------------------------------------------------------
 
 def _list_prs(ctx: ToolContext, state: str = "open", limit: int = 20) -> str:
     """List GitHub pull requests."""
@@ -242,16 +213,10 @@ def _list_prs(ctx: ToolContext, state: str = "open", limit: int = 20) -> str:
 
 
 def _get_pr(ctx: ToolContext, number: int) -> str:
-    """Get full details of a pull request.
-
-    Returns: metadata, description, commits with original author names/emails,
-    list of changed files, review comments summary, and integration instructions.
-    Use this before fetch_pr_ref to understand what the PR changes.
-    """
+    """Get PR metadata, diff summary, review context, and integration steps."""
     if number <= 0:
         return "⚠️ PR number must be positive."
 
-    # 1. PR metadata + commits
     meta_args = [
         "pr", "view", str(number),
         "--json", "number,title,body,author,headRefName,baseRefName,headRepository,"
@@ -287,7 +252,6 @@ def _get_pr(ctx: ToolContext, number: int) -> str:
     if body:
         lines.append(f"\n**Description:**\n{_truncate_with_notice(body, 2000)}")
 
-    # 2. Commits with original author metadata
     commits = pr.get("commits", [])
     if commits:
         lines.append(
@@ -313,7 +277,6 @@ def _get_pr(ctx: ToolContext, number: int) -> str:
             f"\nSHAs for cherry_pick_pr_commits:\n  {shas_for_pick}"
         )
 
-    # 3. Changed files — via `gh pr diff --name-only`
     diff_names_raw = _gh_cmd(["pr", "diff", str(number), "--name-only"], ctx, timeout=30)
     if not diff_names_raw.startswith("⚠️") and diff_names_raw.strip():
         file_list = diff_names_raw.strip().splitlines()
@@ -323,14 +286,12 @@ def _get_pr(ctx: ToolContext, number: int) -> str:
         if len(file_list) > 50:
             lines.append(f"  ... and {len(file_list) - 50} more")
 
-    # 4. Diff/patch — via `gh pr diff` (truncated)
     diff_raw = _gh_cmd(["pr", "diff", str(number)], ctx, timeout=60)
     if not diff_raw.startswith("⚠️") and diff_raw.strip():
         lines.append(f"\n**Diff (truncated to 8000 chars):**\n```diff")
         lines.append(_truncate_with_notice(diff_raw, 8000))
         lines.append("```")
 
-    # 5. Review comments summary
     reviews = pr.get("reviews", [])
     comments = pr.get("comments", [])
     if reviews or comments:
@@ -365,12 +326,7 @@ def _get_pr(ctx: ToolContext, number: int) -> str:
 
 
 def _comment_on_pr(ctx: ToolContext, number: int, body: str) -> str:
-    """Add a comment to a GitHub pull request.
-
-    Use to: acknowledge receipt, report integration status, request changes,
-    or leave an audit trail after integration.
-    Body is passed via stdin to prevent argument injection.
-    """
+    """Add a PR comment via stdin to avoid argument injection."""
     if number <= 0:
         return "⚠️ PR number must be positive."
     if not (body or "").strip():
@@ -388,19 +344,16 @@ def _create_issue(ctx: ToolContext, title: str, body: str = "", labels: str = ""
     if not title or not title.strip():
         return "⚠️ Issue title cannot be empty."
 
-    # Use --flag=value form to prevent argument injection
+    # --flag=value prevents argument injection.
     args = ["issue", "create", f"--title={title}"]
     if body:
-        # Pass body via stdin to prevent argument injection
         args.append("--body-file=-")
         raw = _gh_cmd(args, ctx, input_data=body)
     else:
         raw = _gh_cmd(args, ctx)
 
     if labels:
-        # For existing issue, add labels separately
         if not raw.startswith("⚠️"):
-            # Extract issue number from URL in raw output
             import re
             match = re.search(r'/issues/(\d+)', raw)
             if match:
@@ -411,11 +364,6 @@ def _create_issue(ctx: ToolContext, title: str, body: str = "", labels: str = ""
     if raw.startswith("⚠️"):
         return raw
     return f"✅ Issue created: {raw}"
-
-
-# ---------------------------------------------------------------------------
-# Tool registration
-# ---------------------------------------------------------------------------
 
 def get_tools() -> List[ToolEntry]:
     return [

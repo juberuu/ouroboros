@@ -1,21 +1,8 @@
-"""Install / update / uninstall orchestration for ClawHub-sourced skills.
+"""Install, update, and uninstall ClawHub skills in the data plane.
 
-Hosts the pipeline that ties the lower-level marketplace primitives
-together:
-
-1. ``info`` — resolve the registry record + sha (read-only).
-2. ``download`` — pull the archive into memory.
-3. ``stage`` — extract + validate the archive into a private staging dir.
-4. ``adapt`` — translate OpenClaw frontmatter into Ouroboros's shape.
-5. ``land`` — atomically swap the staging dir into
-   ``data/skills/clawhub/<sanitized>/``.
-6. ``review`` — run the existing tri-model ``review_skill`` pipeline.
-7. ``provenance`` — persist the audit trail next to the durable skill state.
-
-The pipeline is synchronous and intentionally chunky: each step is
-exposed as its own helper so HTTP routes can break the work across
-``asyncio.to_thread`` boundaries (and the cycle 1/2 self-review path
-can call individual phases independently).
+The synchronous pipeline keeps registry lookup, download, staging, adaptation,
+atomic landing, review, dependency install, and provenance as separate helpers
+so routes can move work across ``asyncio.to_thread`` boundaries.
 """
 
 from __future__ import annotations
@@ -48,7 +35,7 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class InstallResult:
-    """Outcome of :func:`install_skill`."""
+    """Outcome of ``install_skill``."""
 
     ok: bool
     sanitized_name: str
@@ -75,14 +62,7 @@ class UninstallResult:
 
 
 def _clawhub_skills_root(drive_root: pathlib.Path) -> pathlib.Path:
-    """Return ``<drive_root>/skills/clawhub/`` (created on demand).
-
-    Uses the canonical layout helper so the bucket structure stays in
-    sync with the launcher bootstrap. The narrow ``ImportError`` catch
-    only covers older mocked test contexts that stub out the config
-    module; real OS errors (read-only filesystem, permissions) bubble
-    up so the operator sees the root cause.
-    """
+    """Return the ClawHub skills bucket, creating the canonical layout."""
     try:
         from ouroboros.config import ensure_data_skills_dir
         ensure_data_skills_dir(pathlib.Path(drive_root))
@@ -99,14 +79,7 @@ def _land_staged_into_data_plane(
     *,
     overwrite: bool,
 ) -> None:
-    """Atomically swap ``staged.staging_dir`` to ``target_dir``.
-
-    On overwrite we move the existing directory aside to a sibling
-    ``<name>.replaced-<sha>`` first, then rename the new tree, then
-    delete the sibling. This sequence is rename-only on the same FS
-    so the whole swap is durable; on hard crash we land with one of
-    {old/new/both} present and the discovery loop tolerates either.
-    """
+    """Atomically land staged content, preserving the old tree until success."""
     target_dir = pathlib.Path(target_dir)
     if target_dir.exists():
         if not overwrite:
@@ -125,8 +98,7 @@ def _land_staged_into_data_plane(
         try:
             shutil.move(str(staged.staging_dir), str(target_dir))
         except OSError:
-            # Roll back the sibling rename so we don't leave the operator
-            # without their previous skill on a partial failure.
+            # Restore the previous skill if the new move fails.
             try:
                 sibling.rename(target_dir)
             except OSError:
@@ -136,7 +108,6 @@ def _land_staged_into_data_plane(
                     target_dir, sibling,
                 )
             raise
-        # Delete the sibling once the move succeeded.
         shutil.rmtree(sibling, ignore_errors=True)
         return
     target_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -144,16 +115,7 @@ def _land_staged_into_data_plane(
 
 
 class _MarketplaceReviewCtx:
-    """Headless ``ToolContextProtocol``-compatible ctx for auto-review.
-
-    The marketplace install path runs `review_skill` outside an
-    agent task, so there is no live ``ToolContext`` carrier to forward.
-    We mint a minimal one that satisfies the frozen
-    :class:`ouroboros.contracts.tool_context.ToolContextProtocol` so a
-    future review-pipeline edit that adds a new ctx access point
-    (e.g. ``ctx.drive_logs()`` for usage-event JSONL) does not silently
-    break auto-review with an ``AttributeError``.
-    """
+    """Minimal ToolContext-compatible carrier for headless auto-review."""
 
     def __init__(self, drive_root: pathlib.Path, repo_dir: pathlib.Path) -> None:
         self.drive_root: pathlib.Path = pathlib.Path(drive_root)
@@ -182,12 +144,7 @@ def _run_skill_review(
     repo_dir: pathlib.Path,
     skill_name: str,
 ) -> tuple[str, List[Dict[str, Any]], str]:
-    """Run ``review_skill`` synchronously and return ``(status, findings, error)``.
-
-    Defers the import so a missing review pipeline (e.g. unit-test
-    fixtures that stub it out) does not break the install path: in that
-    case we return ``("pending", [], <reason>)``.
-    """
+    """Run ``review_skill``; missing review code leaves install pending."""
     try:
         from ouroboros.skill_review import review_skill as _review_skill_impl
     except ImportError as exc:
@@ -217,21 +174,10 @@ def install_skill(
     overwrite: bool = False,
     progress_callback: Optional[Callable[[str], None]] = None,
 ) -> InstallResult:
-    """End-to-end install of one ClawHub skill into the data plane.
+    """Install one skill; ``overwrite=True`` is required for replacement.
 
-    Returns a populated :class:`InstallResult`. On any failure ``ok``
-    is ``False`` and ``error`` carries an operator-facing summary.
-    Idempotent for re-installs at the same version: ``overwrite=True``
-    is required to replace an existing copy.
-
-    v5.7.0: ``progress_callback`` (optional) receives short human-readable
-    stage labels ("Resolving registry…", "Downloading…", "Adapting
-    manifest…", "Landing into data plane…", "Running security review…",
-    "Installing dependencies…", "Done"). The marketplace HTTP layer
-    bridges these to the active :class:`LifecycleJob`'s ``message`` so
-    the Skills UI surfaces real per-stage progress instead of a static
-    spinner. The callback runs on the worker thread; it must be cheap,
-    must not raise, and must not block on the event loop.
+    ``progress_callback`` receives worker-thread stage labels for the UI and
+    must stay cheap/non-throwing.
     """
 
     def _progress(stage: str) -> None:
@@ -295,20 +241,8 @@ def install_skill(
         )
 
     try:
-        # ``archive.sha256`` here is OUR own digest of the bytes we just
-        # received (see ``clawhub.download`` docstring). Passing it as
-        # ``expected_sha256`` is therefore tautological — it just
-        # asserts the fetcher recomputes the hash without bit-flips
-        # in-process. The real integrity anchor is TLS to clawhub.ai;
-        # we keep the local recomputation as a cheap belt-and-braces
-        # check, not as MITM protection.
-        #
-        # Cycle 2 critic finding (Gemini #3): pin the staging root to
-        # the SAME filesystem as the data-plane target so the eventual
-        # ``shutil.move`` is a true atomic rename rather than a
-        # cross-FS copy+delete. We use a hidden ``.staging`` directory
-        # under the clawhub bucket; the fetcher wraps a UUID-suffixed
-        # subdir for collision-safety.
+        # archive.sha256 is a local recomputation check, not a MITM anchor.
+        # Stage under the target bucket so the final move is same-FS atomic.
         staging_root = _clawhub_skills_root(drive_root) / ".staging"
         staged = _stage_archive(
             archive.content,
@@ -376,21 +310,8 @@ def install_skill(
             adapter=adapter_result,
             error=f"Could not land skill into data plane: {exc}",
         )
-    # ``shutil.move`` consumed the staging directory's contents into
-    # ``target_dir``. We deliberately do NOT reassign
-    # ``staged.staging_dir`` to ``target_dir`` because
-    # ``StagedSkill.cleanup()`` calls ``shutil.rmtree`` on that path
-    # — a follow-up call to ``cleanup()`` after a successful land
-    # would otherwise delete the just-installed skill (cycle 2 critic
-    # finding). The fetcher's UUID-suffixed staging dir is safely
-    # consumed by the move; ``cleanup()`` becomes a no-op because
-    # ``shutil.rmtree`` on a missing path with ``ignore_errors=True``
-    # silently returns.
-
-    # Provenance: persist BEFORE running review so the review can
-    # cross-reference the source-of-truth record. Using
-    # adapter_result.provenance verbatim keeps the OpenClaw <-> Ouroboros
-    # mapping reproducible.
+    # Do not repoint staged.staging_dir to target_dir: cleanup() rmtrees it.
+    # Persist provenance before review so reviewers can cross-check origin.
     from ouroboros.config import get_clawhub_registry_url
     provenance = dict(adapter_result.provenance)
     provenance.update({
@@ -405,16 +326,7 @@ def install_skill(
     except Exception:
         log.warning("Failed to persist provenance for %s", adapter_result.sanitized_name, exc_info=True)
 
-    # v5.7.0: write an explicit ``grants.json`` with ``requested_keys`` and
-    # empty ``granted_keys`` when the freshly-installed skill requests core
-    # keys via ``env_from_settings`` (e.g. ``OPENROUTER_API_KEY``). The
-    # Skills UI already computes the requested set from the manifest
-    # on-the-fly via ``grant_status_for_skill``; persisting this file
-    # at install time means the desktop launcher's owner-grant bridge
-    # has a single canonical state file to update once the operator
-    # approves keys, regardless of whether the skill carries
-    # ``provenance.requires.config``, ``provenance.requested_key_grants``,
-    # or only the manifest's ``env_from_settings`` allowlist.
+    # Seed grants.json for core settings so the owner-grant bridge has one file.
     try:
         from ouroboros.skill_loader import (
             find_skill,
@@ -493,28 +405,10 @@ def uninstall_skill(
     *,
     sanitized_name: str,
 ) -> UninstallResult:
-    """Remove a ClawHub-installed skill + its provenance.
+    """Remove a ClawHub skill payload/provenance while keeping durable state.
 
-    Leaves the durable state plane (``data/state/skills/<name>/``) for
-    the user to inspect EXCEPT for ``clawhub.json`` which we drop
-    explicitly. Other files (``enabled.json``, ``review.json``) get
-    invalidated naturally because ``find_skill`` will no longer return
-    a match — but we deliberately don't delete them in case the
-    operator reinstalls the same slug later.
-
-    Hardened (cycle 2 critic finding) against path traversal: a
-    ``name`` of ``".."`` / ``"."`` / ``"foo/bar"`` would otherwise let
-    a single POST wipe the entire ``data/skills/`` tree. We:
-
-    1. reject any name that does not survive
-       ``_sanitize_skill_name`` round-trip;
-    2. resolve the candidate target and confirm it is contained
-       inside ``<drive_root>/skills/clawhub/``;
-    3. require a ``.clawhub.json`` provenance sidecar inside the
-       target so we cannot delete a folder that was not actually
-       installed by the marketplace pipeline (P6 honesty — the API
-       contract says "uninstall a marketplace skill", not "rm -rf
-       arbitrary directory under data/skills/clawhub/").
+    Path traversal is blocked by sanitize round-trip, root containment, and a
+    required ``.clawhub.json`` sidecar proving marketplace ownership.
     """
     from ouroboros.skill_loader import _sanitize_skill_name
 
@@ -560,11 +454,7 @@ def uninstall_skill(
             error=f"Not found: {target}",
         )
 
-    # Final honesty gate: refuse to remove a directory that the
-    # marketplace pipeline did not install. The adapter writes
-    # ``.clawhub.json`` into every staged tree before land; its
-    # absence means this folder came from somewhere else and the
-    # ``uninstall`` API's contract does not cover it.
+    # Do not remove folders the marketplace pipeline did not install.
     if not (target / ".clawhub.json").is_file():
         return UninstallResult(
             ok=False,
@@ -575,13 +465,7 @@ def uninstall_skill(
             ),
         )
 
-    # v5.7.0: unload any in-process extension instance BEFORE removing the
-    # payload directory. Otherwise the loader's tools/routes/ws_handlers/
-    # ui_tabs registries keep pointing at modules whose source has just
-    # been deleted, and any background threads/timers/EventSource clients
-    # the extension started keep running until the next dispatch tries to
-    # use them and fails. Calling ``unload_extension`` runs registered
-    # ``on_unload`` callbacks first, then drops the registrations.
+    # Unload in-process extensions before deleting their source tree.
     try:
         from ouroboros.extension_loader import unload_extension
         unload_extension(cleaned)
@@ -607,12 +491,7 @@ def update_skill(
     version: Optional[str] = None,
     progress_callback: Optional[Callable[[str], None]] = None,
 ) -> InstallResult:
-    """Reinstall a ClawHub skill at a newer version.
-
-    ``sanitized_name`` is the on-disk identity (``owner__slug``); we
-    consult the persisted provenance to recover the original slug for
-    the registry lookup.
-    """
+    """Reinstall by resolving the original slug from persisted provenance."""
     record = read_provenance(drive_root, sanitized_name)
 
     def _progress(stage: str) -> None:
@@ -639,10 +518,7 @@ def update_skill(
             sanitized_name=sanitized_name,
             error="provenance is missing slug",
         )
-    # v5.7.0: capture the current live state BEFORE the unload+swap.
-    # If the extension was live and enabled, we will reconcile it after
-    # install_skill lands the new payload so the user does not have to
-    # toggle the skill off/on by hand.
+    # Preserve live extension state across unload/swap when possible.
     was_live = False
     try:
         from ouroboros.extension_loader import is_extension_live, unload_extension

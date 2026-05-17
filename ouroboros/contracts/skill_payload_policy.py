@@ -215,20 +215,7 @@ def synthesize_payload_constraint(
     bucket: str,
     skill_name: str,
 ) -> Optional[TaskConstraint]:
-    """Synthesize a ``skill_repair``-flavoured ``TaskConstraint`` for tool
-    handlers that received explicit ``bucket`` + ``skill_name`` args under
-    ``runtime_mode=light``.
-
-    Returns ``None`` for partial / invalid input (only one of the two
-    supplied, ``native`` bucket, or a sanitized name that collapses to the
-    placeholder ``_unnamed``). Callers MUST treat ``None`` as "no short-form
-    payload context; fall back to the regular path-resolution flow" — they
-    must not silently route a short relative path into the drive root.
-
-    Reuses the existing ``skill_repair`` mode: no new mode is introduced.
-    The semantic match is sufficient — both repair and light-mode short-form
-    authoring confine the call to a single skill payload root.
-    """
+    """Build a skill_repair constraint for valid bucket+skill_name short form."""
     b = _clean_optional_short_form_arg(bucket)
     raw_skill_name = _clean_optional_short_form_arg(skill_name)
     s = _sanitize_skill_name(raw_skill_name)
@@ -327,19 +314,7 @@ def cross_skill_redirect_error(
     existing_tc: Optional[TaskConstraint],
     synth_tc: Optional[TaskConstraint],
 ) -> str:
-    """Return a non-empty error message when ``synth_tc`` (built from
-    bucket+skill_name args) would redirect the call to a different skill than
-    the one ``existing_tc`` confines the current task to.
-
-    The repair-mode confinement gate validates ``path``/``cwd`` against the
-    real ``existing_tc`` *but does not know about the new bucket+skill_name
-    args*. Without this guard a heal task constrained to skill A could pass
-    ``bucket=external, skill_name=B`` to a payload-writing tool and have the
-    handler-side synth take precedence, silently writing into B's payload.
-
-    Returns ``""`` (falsy) when there is no conflict — either no existing
-    skill_repair task, or no synth, or both target the same skill.
-    """
+    """Reject bucket+skill_name when it would escape an active skill_repair task."""
     if not (existing_tc and synth_tc):
         return ""
     if existing_tc.mode != "skill_repair":

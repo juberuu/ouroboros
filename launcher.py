@@ -1,17 +1,4 @@
-"""
-Ouroboros Launcher — Immutable process manager.
-
-This file is bundled into the .app via PyInstaller. It never self-modifies.
-All agent logic lives in REPO_DIR and is launched as a subprocess via the
-embedded python-build-standalone interpreter.
-
-Responsibilities:
-  - PID lock (single instance)
-  - Bootstrap REPO_DIR on first run
-  - Start/restart agent subprocess (server.py)
-  - Display pywebview window pointing at the agent's local HTTP server
-  - Handle restart signals (agent exits with code 42)
-"""
+"""Immutable desktop launcher: bootstrap repo, manage server.py, and host UI."""
 
 from __future__ import annotations
 
@@ -75,9 +62,6 @@ CRASH_WINDOW_SEC = 120
 _CREATE_SUSPENDED = getattr(subprocess, "CREATE_SUSPENDED", 0x4) if IS_WINDOWS else 0
 _CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if IS_WINDOWS else 0
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
 _LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 _log_dir = DATA_DIR / "logs"
 _log_dir.mkdir(parents=True, exist_ok=True)
@@ -108,10 +92,6 @@ def _hidden_popen(command, **kwargs):
     """subprocess.Popen() with platform-appropriate hidden-window flags."""
     return subprocess.Popen(command, **merge_hidden_kwargs(kwargs))
 
-
-# ---------------------------------------------------------------------------
-# Embedded Python
-# ---------------------------------------------------------------------------
 def _find_embedded_python() -> str:
     """Locate the embedded python-build-standalone interpreter."""
     if getattr(sys, "frozen", False):
@@ -126,10 +106,6 @@ def _find_embedded_python() -> str:
 
 EMBEDDED_PYTHON = _find_embedded_python()
 
-
-# ---------------------------------------------------------------------------
-# Windows UI runtime
-# ---------------------------------------------------------------------------
 _windows_dll_dir_handles: list = []
 
 
@@ -233,10 +209,6 @@ def _prepare_windows_webview_runtime() -> tuple[bool, str]:
 
     return True, ""
 
-
-# ---------------------------------------------------------------------------
-# Bootstrap
-# ---------------------------------------------------------------------------
 def _bundle_dir() -> pathlib.Path:
     if getattr(sys, "frozen", False):
         return pathlib.Path(sys._MEIPASS)
@@ -252,8 +224,7 @@ def _bootstrap_context() -> BootstrapContext:
         embedded_python=EMBEDDED_PYTHON,
         app_version=APP_VERSION,
         hidden_run=_hidden_run,
-        # Launcher-driven save: owner-process action, allow_elevation=True
-        # so first-launch env migration can set any runtime_mode.
+        # Launcher is owner-process boundary; first-launch migration may set runtime mode.
         save_settings=lambda settings: save_settings(settings, allow_elevation=True),
         log=log,
     )
@@ -274,10 +245,6 @@ def _sync_existing_repo_from_bundle() -> None:
 def _install_deps() -> None:
     _install_deps_impl(_bootstrap_context())
 
-
-# ---------------------------------------------------------------------------
-# Agent process management
-# ---------------------------------------------------------------------------
 _agent_proc: Optional[subprocess.Popen] = None
 _agent_job: Optional[object] = None
 _agent_lock = threading.Lock()
@@ -286,7 +253,7 @@ _webview_window = None
 
 
 def start_agent(port: int = AGENT_SERVER_PORT) -> subprocess.Popen:
-    """Start the agent server.py as a subprocess."""
+    """Start server.py as the managed agent subprocess."""
     global _agent_proc, _agent_job
 
     settings = _load_settings()
@@ -392,7 +359,7 @@ def stop_agent() -> None:
 
 
 def _read_port_file() -> int:
-    """Read the active port from PORT_FILE (written by server.py)."""
+    """Read the active server port from PORT_FILE."""
     try:
         if PORT_FILE.exists():
             return int(PORT_FILE.read_text(encoding="utf-8").strip())
@@ -402,7 +369,7 @@ def _read_port_file() -> int:
 
 
 def _kill_stale_on_port(port: int) -> None:
-    """Kill any process listening on the given port (cleanup from previous runs)."""
+    """Kill any process listening on a runtime port."""
     if IS_WINDOWS:
         kill_process_on_port(port)
         return
@@ -437,13 +404,13 @@ def _host_service_port() -> int:
 
 
 def _kill_stale_runtime_ports(port: int) -> None:
-    """Clear all core runtime listener ports before starting or restarting."""
+    """Clear core runtime listener ports before start/restart."""
     _kill_stale_on_port(port)
     _kill_stale_on_port(_host_service_port())
 
 
 def _wait_for_server(port: int, timeout: float = 30.0) -> bool:
-    """Wait for the agent HTTP server to become responsive."""
+    """Wait for the agent HTTP server to respond."""
     import urllib.request
 
     url = f"http://127.0.0.1:{port}/api/health"
@@ -460,7 +427,7 @@ def _wait_for_server(port: int, timeout: float = 30.0) -> bool:
 
 
 def _poll_port_file(timeout: float = 30.0) -> int:
-    """Poll port file until it's freshly written (mtime within last 10s)."""
+    """Poll until the port file is freshly written."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -475,7 +442,7 @@ def _poll_port_file(timeout: float = 30.0) -> int:
 
 
 def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
-    """Main loop: start agent, monitor, restart on exit code 42 or crash."""
+    """Start/monitor agent; restart on code 42 or bounded crashes."""
     global _agent_proc, _agent_job
     crash_times: list[float] = []
 
@@ -544,20 +511,12 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
         _kill_stale_runtime_ports(port)
         time.sleep(3)
 
-
-# ---------------------------------------------------------------------------
-# Settings and onboarding
-# ---------------------------------------------------------------------------
 def _load_settings() -> dict:
     return load_settings()
 
 
 def _save_settings(settings: dict) -> None:
-    # Launcher is the owner-process boundary: first-run wizard, env-var
-    # migration, and provider-default seeds all flow through here.
-    # ``allow_elevation=True`` lets the owner pick any ``OUROBOROS_RUNTIME_MODE``
-    # at first launch; the agent-callable path (``api_settings_post``,
-    # ``_set_tool_timeout``) keeps the default ``False``.
+    # Owner-process boundary: first-run/env/provider saves may elevate runtime mode.
     save_settings(settings, allow_elevation=True)
 
 
@@ -657,22 +616,7 @@ def _request_skill_key_grant(skill: str, keys: list, confirm_fn) -> dict:
         granted_permissions=requested_permissions,
         requested_permissions=allowed_permissions,
     )
-    # v5.2.2 dual-track grants: extensions need a runtime reconcile so
-    # the just-granted core key reaches ``PluginAPIImpl.get_settings``
-    # without forcing the operator to toggle disable/enable. Scripts
-    # pick up the grant on the next ``skill_exec`` call automatically
-    # via ``_scrub_env`` so they do not need this reload.
-    #
-    # Cross-process boundary: launcher.py and server.py are independent
-    # OS processes. The launcher cannot mutate the server's in-process
-    # ``extension_loader._extensions`` / ``_load_failures`` dicts; an
-    # in-launcher ``reconcile_extension`` call would only mutate dead
-    # state and additionally execute the plugin's ``register(api)``
-    # inside the immutable launcher process, which violates the
-    # launcher contract documented at the top of this file. We POST to
-    # the agent server's loopback ``/api/skills/<skill>/reconcile``
-    # endpoint instead, which clears the server's cached load failure
-    # and re-runs ``load_extension`` in the right address space.
+    # Extension grants must reconcile inside server.py, not the immutable launcher process.
     extension_action = None
     extension_reason = None
     extension_load_error = None
@@ -816,10 +760,6 @@ def _run_first_run_wizard() -> bool:
     webview.start()
     return _wizard_done["ok"]
 
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 def main():
     if IS_WINDOWS:
         ok, reason = _prepare_windows_webview_runtime()
@@ -1055,7 +995,7 @@ def main():
     )
 
     def _kill_orphaned_children() -> None:
-        """Final safety net: kill any processes still on runtime ports."""
+        """Final safety net: kill processes still on runtime ports."""
         _kill_stale_runtime_ports(port)
         _kill_stale_on_port(8766)
         try:

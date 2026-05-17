@@ -1,31 +1,4 @@
-"""Staging-area download + verify helpers for the ClawHub marketplace.
-
-Workflow:
-
-1. :func:`stage` is given an :class:`ouroboros.marketplace.clawhub.ClawHubArchive`
-   plus a target staging directory. It extracts the zip into a fresh
-   temporary subdirectory and verifies size / content-type / file
-   policy invariants before returning a :class:`StagedSkill` handle.
-2. The caller (typically :mod:`ouroboros.marketplace.install`) then
-   passes the handle to :mod:`ouroboros.marketplace.adapter` for
-   frontmatter translation, and finally to ``shutil.move`` to land the
-   staged tree at ``data/skills/clawhub/<owner>__<slug>/``.
-
-Hard policy guards (every single one fails CLOSED — return value
-indicates the reject reason; nothing is silently skipped):
-
-- Total uncompressed size <= 50 MB.
-- File count <= 200 (mirrors registry's ~40 review-pack cap with
-  generous margin for assets/).
-- Per-file extension allowlist: every text-y extension permitted
-  by ClawHub plus the loadable-binary denylist from
-  :mod:`ouroboros.skill_review`.
-- Sensitive filename refuse: ``.env`` / ``credentials.json`` / ``*.pem``
-  etc. (defers to :mod:`ouroboros.tools.review_helpers`).
-- Path traversal refuse: any zip member with ``..`` segments or an
-  absolute path component is treated as malicious and aborts.
-- Symlink refuse: zip members that try to inject symlinks are aborted.
-"""
+"""Fail-closed ClawHub archive staging with size, path, symlink, and file-policy guards."""
 
 from __future__ import annotations
 
@@ -47,9 +20,7 @@ _MAX_TOTAL_BYTES = 50 * 1024 * 1024  # 50 MB total uncompressed
 _MAX_FILE_COUNT = 200
 _MAX_PER_FILE_BYTES = 8 * 1024 * 1024  # 8 MB per individual file
 
-# Allowed text extensions. Mirrors the ClawHub publish allowlist
-# (https://github.com/openclaw/clawhub/blob/main/docs/skill-format.md
-# `TEXT_FILE_EXTENSIONS`) plus a few common safe assets like images.
+# Mirrors ClawHub text allowlist plus inert assets; loadable binaries stay denied.
 _ALLOWED_EXTENSIONS = frozenset(
     {
         ".md", ".markdown", ".txt", ".rst", ".org",
@@ -60,10 +31,7 @@ _ALLOWED_EXTENSIONS = frozenset(
         ".svg", ".csv", ".tsv",
         ".sql", ".graphql", ".gql",
         ".lock", ".license",
-        # Inert media assets — opt-in. Adapter still refuses anything
-        # that could be loaded as code (.so/.dll/.wasm/etc.) regardless.
         ".png", ".jpg", ".jpeg", ".gif", ".webp",
-        # Dotfiles without an extension show up below by basename.
     }
 )
 
@@ -78,18 +46,12 @@ _ALLOWED_BARE_BASENAMES = frozenset(
 
 
 class FetchError(RuntimeError):
-    """Raised on any policy violation during stage-time validation."""
+    """Archive validation failed closed."""
 
 
 @dataclass
 class StagedSkill:
-    """Outcome of a successful :func:`stage` call.
-
-    ``staging_dir`` is the temporary directory the archive was
-    extracted into; the caller is responsible for either moving it to
-    the final destination via :mod:`ouroboros.marketplace.install` or
-    calling :meth:`cleanup` on failure.
-    """
+    """Validated archive staged in a temporary tree the caller must move or clean up."""
 
     slug: str
     version: str
@@ -102,7 +64,7 @@ class StagedSkill:
     has_plugin_manifest: bool = False
 
     def cleanup(self) -> None:
-        """Best-effort removal of the staging tree."""
+        """Best-effort staging-tree removal."""
         try:
             if self.staging_dir.exists():
                 shutil.rmtree(self.staging_dir, ignore_errors=True)
@@ -113,13 +75,7 @@ class StagedSkill:
 
 
 def _is_sensitive(path: pathlib.PurePosixPath) -> bool:
-    """Defer to :mod:`ouroboros.tools.review_helpers` for the deny check.
-
-    Centralising via that module keeps the marketplace honest with the
-    same denylist that the existing skill review pipeline enforces, so
-    a sensitive-shape filename cannot enter the data plane via the
-    marketplace and dodge later review.
-    """
+    """Use the review denylist so marketplace cannot import sensitive filenames."""
     try:
         from ouroboros.tools.review_helpers import (
             _SENSITIVE_EXTENSIONS,
@@ -147,12 +103,7 @@ def _has_review_opaque_dir(path: pathlib.PurePosixPath) -> bool:
 
 
 def _validate_member_path(name: str) -> pathlib.PurePosixPath:
-    """Normalise + reject path-traversal / absolute zip members.
-
-    The zip spec allows arbitrary names; a malicious archive can use
-    ``../etc/passwd`` or ``/etc/passwd`` to land files outside the
-    target directory. We reject any such member up-front.
-    """
+    """Normalize and reject absolute/traversal zip members before extraction."""
     cleaned = name.replace("\\", "/").lstrip("/")
     if not cleaned:
         raise FetchError(f"Archive member has empty path: {name!r}")
@@ -168,18 +119,11 @@ def _validate_member_path(name: str) -> pathlib.PurePosixPath:
 
 
 def _classify_member(member: zipfile.ZipInfo) -> str:
-    """Return ``"file"`` / ``"dir"`` / ``"symlink"`` / ``"other"``.
-
-    Symlinks (``S_IFLNK`` in the high bits of ``external_attr``) are
-    rejected outright — a symlinked zip member that resolves outside
-    the staging dir would let a malicious archive plant arbitrary
-    paths. Directories are recorded but never extracted as data; their
-    sub-files create the directory structure on demand.
-    """
+    """Classify zip member; symlinks are rejected before path writes."""
     is_dir = member.is_dir() or member.filename.endswith("/")
     if is_dir:
         return "dir"
-    # zipfile uses the high 16 bits of external_attr to store unix mode
+    # zipfile stores Unix mode in the high 16 external_attr bits.
     mode = (member.external_attr >> 16) & 0xFFFF
     if mode and (mode & 0xF000) == 0xA000:  # S_IFLNK
         return "symlink"
@@ -204,13 +148,7 @@ def stage(
     expected_sha256: Optional[str] = None,
     staging_root: Optional[pathlib.Path] = None,
 ) -> StagedSkill:
-    """Validate + extract an archive into a private staging directory.
-
-    Returns a :class:`StagedSkill` on success. Raises :class:`FetchError`
-    with a descriptive message on any policy violation; in that case
-    the staging tree (if it was partially created) is cleaned up before
-    the exception propagates.
-    """
+    """Validate and extract into a private staging dir, cleaning up on failure."""
     if not isinstance(archive_bytes, (bytes, bytearray)):
         raise FetchError(f"archive_bytes must be bytes, got {type(archive_bytes).__name__}")
     if not archive_bytes:
@@ -227,11 +165,7 @@ def stage(
         )
 
     if staging_root is None:
-        # Use ``tempfile.mkdtemp`` per call rather than a shared
-        # ``ouroboros_marketplace_staging`` directory so a local
-        # attacker cannot pre-create the staging root with malicious
-        # permissions or as a symlink. ``mkdtemp`` returns a freshly
-        # created mode-0700 directory owned by the calling user.
+        # mkdtemp avoids attacker pre-created shared staging roots/symlinks.
         staging_dir = pathlib.Path(
             tempfile.mkdtemp(
                 prefix=f"ouroboros_marketplace_{slug.replace('/', '__')}_"
@@ -264,12 +198,7 @@ def stage(
                         f"Archive has {len(members)} entries (cap is "
                         f"{_MAX_FILE_COUNT * 2} including directories)"
                     )
-                # Many ClawHub archives wrap content in a top-level
-                # ``<slug>/`` directory. We strip that prefix so the
-                # staging dir mirrors the on-disk skill layout (SKILL.md
-                # at the root, scripts/ as a child, etc.). Detect it
-                # by checking whether every non-empty member shares a
-                # common first path segment.
+                # Strip a common top-level wrapper so SKILL.md lands at root.
                 stripped_prefix = _common_top_prefix(members)
                 for member in members:
                     classification = _classify_member(member)
@@ -316,16 +245,7 @@ def stage(
                     target_path = staging_dir / pathlib.Path(*rel_path.parts)
                     target_path.parent.mkdir(parents=True, exist_ok=True)
                     with zf.open(member, "r") as src:
-                        # v4.50 cycle-2 GPT-critic finding: zip-bomb
-                        # defence — ``member.file_size`` is publisher-
-                        # controlled metadata in the central
-                        # directory; a forged CD with `file_size=100`
-                        # can still decompress to 50 GB. Bound the
-                        # read buffer so the peak working set stays
-                        # under the per-file cap regardless of
-                        # forged metadata. We read cap+1 bytes; if
-                        # we got back the cap+1 we know the actual
-                        # decompressed size exceeds the limit.
+                        # Zip-bomb defense: trust actual cap+1 read, not file_size metadata.
                         data = src.read(_MAX_PER_FILE_BYTES + 1)
                     if len(data) > _MAX_PER_FILE_BYTES:
                         raise FetchError(
@@ -333,10 +253,7 @@ def stage(
                             f"> cap {_MAX_PER_FILE_BYTES} (forged file_size header?)"
                         )
                     if len(data) != member.file_size:
-                        # Compressed archives may legitimately differ
-                        # from declared file_size; recheck the limit
-                        # on the actual bytes too. Above check already
-                        # bounded by the read cap.
+                        # Recheck actual bytes; the read above already bounded memory.
                         if len(data) > _MAX_PER_FILE_BYTES:
                             raise FetchError(
                                 f"Archive member {rel_path} actual size "
@@ -378,7 +295,7 @@ def stage(
 
 
 def _common_top_prefix(members: List[zipfile.ZipInfo]) -> str:
-    """Return a single common top-level directory name, or '' if there is none."""
+    """Return the single common top-level directory, or ''."""
     prefixes: set[str] = set()
     for member in members:
         cleaned = member.filename.replace("\\", "/").lstrip("/")

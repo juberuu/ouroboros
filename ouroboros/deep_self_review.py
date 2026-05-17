@@ -1,9 +1,4 @@
-"""
-Ouroboros — Deep self-review module.
-
-Builds a full review pack (all git-tracked code + memory whitelist) and sends it
-to a 1M-context model for a single-pass deep review against the Constitution.
-"""
+"""Full-pack deep self-review against BIBLE.md using a large-context model."""
 
 from __future__ import annotations
 
@@ -14,7 +9,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 log = logging.getLogger(__name__)
 
-# Filtering and pack iteration — shared with scope review (P7).
+# Pack filtering is shared with scope review.
 from ouroboros.tools.review_helpers import (  # noqa: E402
     _BINARY_SNIFF_BYTES,
     _MAX_FULL_REPO_FILE_BYTES,
@@ -23,8 +18,7 @@ from ouroboros.tools.review_helpers import (  # noqa: E402
 )
 from ouroboros.utils import estimate_tokens  # noqa: E402
 
-# Directory prefixes to skip entirely (relative to repo_dir, using forward slashes).
-# - assets/ : README screenshots and app icons — no agent logic
+# Non-agent visual assets.
 _SKIP_DIR_PREFIXES = (
     "assets/",
 )
@@ -117,11 +111,7 @@ def build_review_pack(
     repo_dir: pathlib.Path,
     drive_root: pathlib.Path,
 ) -> Tuple[str, Dict[str, Any]]:
-    """Build the full review pack from git-tracked files + memory whitelist.
-
-    Returns (pack_text, stats) where stats has keys: file_count, total_chars, skipped.
-    NO chunking, NO silent truncation.
-    """
+    """Build tracked-file + memory whitelist pack with no chunking/truncation."""
     tracked, fatal = _dulwich_tracked_paths(repo_dir)
     if fatal:
         return "", {"file_count": 0, "total_chars": 0, "skipped": fatal}
@@ -147,10 +137,7 @@ def build_review_pack(
 
 
 def is_review_available() -> Tuple[bool, Optional[str]]:
-    """Check if a suitable 1M-context model is available.
-
-    Returns (available, model_id).
-    """
+    """Return whether a suitable large-context review model is configured."""
     if os.environ.get("OPENROUTER_API_KEY"):
         return True, "openai/gpt-5.5-pro"
     if os.environ.get("OPENAI_API_KEY") and not os.environ.get("OPENAI_BASE_URL"):
@@ -166,33 +153,14 @@ def run_deep_self_review(
     event_queue: Any,
     model: str = "",
 ) -> Tuple[str, Dict[str, Any]]:
-    """Execute a deep self-review of the entire project.
+    """Execute full-project deep review; return error text instead of raising.
 
-    Returns (review_text, usage_dict). On any error, returns an error string
-    with empty usage instead of raising.
-
-    macOS fork-safety note
-    ----------------------
-    When the Ouroboros app bundle uses fork() to spawn the inner server.py
-    subprocess, the child process inherits a multithreaded parent state.
-    The first httpx HTTP request triggers macOS proxy detection via
-    SCDynamicStoreCopyProxiesWithOptions() / CFPreferences, which is not
-    fork-safe and causes a SIGSEGV (exit code -11, confirmed in macOS
-    crash reports via the ``"crashed on child side of fork pre-exec"``
-    marker in the ``asi`` field).
-
-    We work around this by asking the shared LLMClient to send this one
-    call with ``trust_env=False`` so httpx never consults env-vars or the
-    OS proxy API.  The flag is passed through
-    ``llm.chat(..., no_proxy=True)`` and handled only in the
-    ``_chat_remote`` path of ``llm.py``.  Regular task LLM calls are
-    unaffected.
+    no_proxy=True avoids macOS fork-safety SIGSEGV by using a one-shot httpx
+    client with trust_env=False in llm.py; regular task calls are unaffected.
     """
     try:
-        # 1. Build pack
         emit_progress("Building review pack (reading all tracked files)...")
         pack_text, stats = build_review_pack(repo_dir, drive_root)
-        # Check for fatal build failure (fail closed)
         if not pack_text and stats.get("skipped"):
             return f"❌ Failed to build review pack: {stats['skipped'][0]}", {}
 
@@ -202,20 +170,8 @@ def run_deep_self_review(
             + (f", {len(stats['skipped'])} skipped" if stats["skipped"] else "")
         )
 
-        # 2. Estimate tokens and check limit
-        # Budget aligned with scope/plan review at 850K input tokens. Uses the
-        # shared estimate_tokens helper (chars/4) so the effective char budget
-        # is identical across scope/plan/deep surfaces. The gate is applied to
-        # the FULL assembled prompt (system + user), matching how scope_review
-        # gates its assembled prompt and plan_review gates system+user. Gating
-        # only on pack_text would understate the real request size.
-        #
-        # Math: the deep-review model (by default `openai/gpt-5.5-pro`, see
-        # `is_review_available`) has a 1M context window that is shared between
-        # input and output. chars/4 under-counts real tokens by ~15%, so actual
-        # input at gate=850K is ≈1M. Output `max_tokens` lives inside the same
-        # window, so near-gate prompts sit close to the API ceiling — the skip
-        # path is best-effort, not a hard guarantee.
+        # Gate full system+pack like scope/plan review; chars/4 undercounts near
+        # the 1M window, so the 850K gate is still only best-effort.
         from ouroboros.tools.review_helpers import REVIEW_PROMPT_TOKEN_BUDGET
         full_prompt_chars = len(_SYSTEM_PROMPT) + len(pack_text)
         estimated_tokens = estimate_tokens(_SYSTEM_PROMPT + pack_text)
@@ -226,7 +182,6 @@ def run_deep_self_review(
                 f"Maximum is ~{REVIEW_PROMPT_TOKEN_BUDGET:,} tokens. Reduce codebase size or split review."
             ), {}
 
-        # 3. Determine model
         if not model:
             available, model = is_review_available()
             if not available:
@@ -234,15 +189,12 @@ def run_deep_self_review(
 
         emit_progress(f"Sending to {model} (~{estimated_tokens:,} tokens). This may take several minutes...")
 
-        # 4. Build messages
         messages = [
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": pack_text},
         ]
 
-        # 5. Call LLM with no_proxy=True to prevent macOS fork-safety SIGSEGV.
-        #    The flag is forwarded to _chat_remote in llm.py which builds a
-        #    one-shot httpx.Client(trust_env=False, mounts={}).
+        # no_proxy prevents macOS fork-safety SIGSEGV in bundled child process.
         response, usage = llm.chat(
             messages=messages,
             model=model,

@@ -36,11 +36,7 @@ function renderShell(host, tabs) {
         return;
     }
     host.innerHTML = tabs.map((tab) => {
-        // v5.2.3: the previous "skill:tab_id" muted label leaked
-        // internal registry keys to end users (e.g. "weather:widget").
-        // Show the skill name as a friendly subtitle only when it
-        // differs from the widget title; otherwise omit it entirely
-        // so the card header stays visually clean.
+        // Avoid leaking internal "skill:tab_id"; show skill only as needed.
         const title = tab.title || tab.tab_id || tab.skill;
         const subtitle = tab.skill && tab.skill !== title
             ? `<span class="widgets-card-source">from ${escapeHtml(tab.skill)}</span>`
@@ -289,11 +285,7 @@ function renderDataComponent(tab, component, state, status, componentState = {},
         const label = component.label_key ? getPath(data, component.label_key, '') : '';
         return `<div class="widget-progress"><progress max="100" value="${bounded}"></progress><span>${bounded}%${label ? ` · ${escapeHtml(label)}` : ''}</span></div>`;
     }
-    // v5.7.0: host-owned ``map`` renderer. Falls back to a flat marker
-    // list when Leaflet is not available; when Leaflet is loaded by the
-    // host (kept off the critical path for now) the markup is upgraded
-    // to a real interactive map. Either way, the widget never exposes
-    // skill-supplied JS to the SPA origin.
+    // Host-owned map renderer; no skill-supplied JS reaches the SPA origin.
     if (type === 'map') {
         const markers = Array.isArray(component.markers) ? component.markers : [];
         const list = markers.length
@@ -803,17 +795,8 @@ async function mountTab(card, tab) {
         return mountDeclarativeWidget(mount, tab, render);
     }
     if (render.kind === 'module' && render.entry) {
-        // v5.7.0: ``kind: "module"`` mounts reviewed JS inside an opaque
-        // sandboxed iframe. We DO NOT load the JS via <script src>, because
-        // a srcdoc iframe without allow-same-origin has an opaque origin and
-        // `script-src 'self'` would not resolve to the parent app origin.
-        // Instead the parent fetches the reviewed static module file from a
-        // dedicated endpoint and embeds the text inline in srcdoc. The iframe
-        // gets a tiny postMessage bridge that overrides fetch(); extension JS
-        // can still call fetch('/api/extensions/<skill>/...'), but the parent
-        // performs the same-origin request and rejects any path outside that
-        // skill route prefix. This keeps the iframe opaque (no cookie/storage
-        // access) while preserving the useful extension-route IO surface.
+        // Reviewed JS runs in an opaque iframe; parent fetch bridge only allows
+        // this skill's extension route prefix, preserving route IO without cookies.
         const entryName = String(render.entry).replace(/[^A-Za-z0-9._-]/g, '');
         const entryUrl = `/api/extensions/${encodeURIComponent(tab.skill)}/module/${encodeURIComponent(entryName)}`;
         const resp = await apiFetch(entryUrl, { cache: 'no-store' });
@@ -950,11 +933,7 @@ export function initWidgets(ctx = {}) {
     let renderGeneration = 0;
     let widgetsVisible = false;
     let widgetsMounted = false;
-    // v5.7.0: cache of the most recent successful payload so revisiting
-    // the Widgets page paints from cache immediately and only the
-    // first-ever render shows "Loading…". The cache is also re-rendered
-    // when a fetch is in flight, so a slow GET /api/extensions never
-    // produces an empty viewport mid-typing in another part of the app.
+    // Last good payload keeps revisits and slow refreshes from blanking the page.
     let lastTabs = null;
     if (ctx.ws && !widgetsWsBridgeBound) {
         widgetsWsBridgeBound = true;
@@ -971,7 +950,6 @@ export function initWidgets(ctx = {}) {
         refreshBtn.classList.add('is-loading');
         disposeMountedWidgets();
         if (lastTabs) {
-            // Optimistic paint from cache while the fresh fetch is in flight.
             renderShell(list, lastTabs);
             applyMasonry(list);
         } else {
@@ -1002,8 +980,7 @@ export function initWidgets(ctx = {}) {
             applyMasonry(list);
         } catch (err) {
             if (!widgetsVisible || generation !== renderGeneration) return;
-            // If we have a cached payload, keep showing it instead of
-            // wiping the page on a transient fetch error.
+            // Preserve cached widgets on transient fetch errors.
             if (!lastTabs) {
                 list.innerHTML = `<div class="skills-load-error">Failed to load widgets: ${escapeHtml(err.message || err)}</div>`;
             }
@@ -1021,10 +998,7 @@ export function initWidgets(ctx = {}) {
         if (event.detail?.page === 'widgets') {
             render();
         } else {
-            // v5.7.0: leaving the Widgets page no longer wipes the cached
-            // markup. ``widgetsVisible = false`` stops in-flight render()
-            // calls from painting; the next ``render()`` re-uses
-            // ``lastTabs`` for an instant repaint.
+            // Hide stops stale paints; next render reuses lastTabs for instant repaint.
             widgetsVisible = false;
             widgetsMounted = false;
             disposeMountedWidgets();

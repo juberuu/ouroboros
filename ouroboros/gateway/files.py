@@ -91,7 +91,7 @@ def _is_skill_owner_state_target(target: pathlib.Path) -> bool:
 
 
 class FileBrowserPayloadTooLarge(ValueError):
-    """Raised when an upload exceeds the configured limit."""
+    """Upload exceeded the configured limit."""
 
 
 def _request_is_local(request: Request) -> bool:
@@ -138,14 +138,7 @@ def _resolve_target(request: Request, rel_path: str) -> tuple[pathlib.Path, path
 
 
 def _is_owner_only_settings_file(target: pathlib.Path) -> bool:
-    """v5.1.2 iter-2 real triad+scope finding SR2: the Files API writes
-    /deletes/transfers/uploads bypass ``ouroboros.tools.core._data_write``
-    and the ``save_settings`` chokepoint, so they could overwrite
-    ``data/settings.json`` directly. Compare via ``Path.samefile`` for
-    inode-aware semantics (handles macOS APFS / Windows NTFS case-folding
-    + symlinks); fall back to a same-parent + case-insensitive name match
-    for not-yet-existing target paths.
-    """
+    """Guard settings.json across direct Files API writes/deletes/uploads."""
     from ouroboros import config as _cfg
     settings_path = pathlib.Path(_cfg.SETTINGS_PATH)
     try:
@@ -208,14 +201,7 @@ def _contains_owner_only_file(target: pathlib.Path) -> bool:
 
 
 def _is_skill_control_plane_api_target(target: pathlib.Path) -> bool:
-    """Return True for skill payload provenance / launcher sidecars.
-
-    File Browser endpoints bypass ``tools/core._data_write`` and touch the
-    filesystem directly, so every mutating route must re-apply the same
-    control-plane guard. This wrapper keeps import/config errors best-effort:
-    unrelated file-browser paths should not brick if config is unavailable
-    during early startup.
-    """
+    """Apply skill control-plane guard to direct Files API mutations."""
     try:
         from ouroboros.config import DATA_DIR
         from ouroboros.tools.core import is_skill_control_plane_path
@@ -228,12 +214,7 @@ def _is_skill_control_plane_api_target(target: pathlib.Path) -> bool:
 
 
 def _contains_skill_control_plane_file(target: pathlib.Path) -> bool:
-    """Recursive version of ``_is_skill_control_plane_api_target``.
-
-    Used for directory delete/transfer so a whole payload directory cannot be
-    removed or copied/moved through the generic file browser while it contains
-    provenance/seed/deps control-plane files.
-    """
+    """Recursive control-plane guard for directory delete/transfer."""
     if _is_skill_control_plane_api_target(target):
         return True
     if not target.is_dir():
@@ -260,9 +241,7 @@ _CONTROL_PLANE_FILES_API_ERROR = JSONResponse(
 )
 
 
-# Standard error response for the Files API guard. Matches the wording
-# of ``tools/core.py::_data_write`` so the operator hears one consistent
-# message regardless of which surface they used.
+# Match tools/core.py guard wording across mutation surfaces.
 _OWNER_ONLY_FILES_API_ERROR = JSONResponse(
     {
         "error": (
@@ -695,10 +674,7 @@ async def api_files_transfer(request: Request) -> JSONResponse:
         _, dest_dir, _ = _resolve_target(request, dest_rel)
         if source == root_dir:
             return json_error("Refusing to move or copy the configured root directory.", status=400)
-        # v5.1.2 iter-2 SR2: refuse if EITHER the source OR the destination
-        # resolves to the owner-only settings.json. Source = "move"
-        # (deletes settings.json from its expected location), destination
-        # = "overwrite settings.json with arbitrary content".
+        # Refuse source or destination owner-only state paths.
         if _contains_owner_only_file(source):
             return _OWNER_ONLY_FILES_API_ERROR
         if _contains_skill_control_plane_file(source):
@@ -792,9 +768,7 @@ async def api_files_upload(request: Request) -> JSONResponse:
 
         filename = _sanitize_upload_filename(upload.filename or "")
         destination = target_dir / filename
-        # v5.1.2 iter-2 SR2: an upload's destination would clobber any
-        # existing file at that name, including settings.json. Refuse
-        # uploads that resolve to the owner-only settings file.
+        # Upload destinations can clobber existing owner-only files.
         if _is_owner_only_file(destination):
             return _OWNER_ONLY_FILES_API_ERROR
         if _is_skill_control_plane_api_target(destination):
@@ -853,11 +827,6 @@ def file_browser_routes() -> list[Route]:
     ]
 
 
-# ---------------------------------------------------------------------------
-# Chat upload endpoints
-# ---------------------------------------------------------------------------
-
-"""Chat file attachment API — upload and delete endpoints for data/uploads/."""
 import mimetypes
 import os
 import pathlib
@@ -880,9 +849,8 @@ def _data_dir() -> pathlib.Path:
 
 
 async def api_chat_upload(request: Request) -> JSONResponse:
-    """Upload a file attachment; saved to data/uploads/ with a unique name."""
-    # Content-Length pre-check (honest clients; helps before multipart parsing).
-    # Wrap conversion — header is client-controlled and may be non-numeric.
+    """Upload a chat attachment to data/uploads/ with a unique name."""
+    # Quick Content-Length reject before multipart parsing.
     try:
         cl = int(request.headers.get("content-length", 0) or 0)
     except (ValueError, TypeError):
@@ -890,8 +858,7 @@ async def api_chat_upload(request: Request) -> JSONResponse:
     if cl > _CHAT_UPLOAD_MAX_BYTES + 4096:
         return JSONResponse({"ok": False, "error": "File exceeds 50 MB limit"}, status_code=413)
 
-    # Inject a byte-counting receive wrapper so python-multipart itself
-    # enforces the size limit before spooling the full body to disk.
+    # Enforce size while Starlette receives multipart bytes.
     _original_receive = request._receive
     _body_bytes = 0
 
@@ -919,16 +886,14 @@ async def api_chat_upload(request: Request) -> JSONResponse:
     raw_name = getattr(upload, "filename", "") or "upload"
     safe_base = os.path.basename(raw_name).replace(" ", "_")[:200] or "upload"
 
-    # Always use a unique stored name — avoids conflicts for repeated uploads
-    # and eliminates 409-orphan blocking. Full UUID hex (32 chars) used to
-    # guarantee uniqueness even under concurrent uploads of same filename.
+    # Unique stored names avoid repeated-upload conflicts.
     unique_name = f"{uuid.uuid4().hex}_{safe_base}"
 
     upload_dir = _data_dir() / "uploads"
     upload_dir.mkdir(parents=True, exist_ok=True)
     dest = upload_dir / unique_name
 
-    # Unique temp file per request for concurrent-safe atomic publish
+    # Per-request temp file keeps publish atomic under concurrent uploads.
     tmp_dest = upload_dir / f".{uuid.uuid4().hex}.uploading"
     bytes_written = 0
     too_large = False
@@ -946,7 +911,7 @@ async def api_chat_upload(request: Request) -> JSONResponse:
         if too_large:
             tmp_dest.unlink(missing_ok=True)
             return JSONResponse({"ok": False, "error": "File exceeds 50 MB limit"}, status_code=413)
-        tmp_dest.replace(dest)  # atomic; unique name guarantees no collision
+        tmp_dest.replace(dest)  # atomic; unique name has no collision
     finally:
         await upload.close()
         if tmp_dest.exists():
@@ -955,8 +920,8 @@ async def api_chat_upload(request: Request) -> JSONResponse:
     mime = mimetypes.guess_type(safe_base)[0] or "application/octet-stream"
     return JSONResponse({
         "ok": True,
-        "filename": unique_name,          # stored name (used for delete)
-        "display_name": safe_base,        # original display name for UI
+        "filename": unique_name,
+        "display_name": safe_base,
         "path": str(dest),
         "size": bytes_written,
         "mime": mime,
@@ -964,7 +929,7 @@ async def api_chat_upload(request: Request) -> JSONResponse:
 
 
 async def api_chat_upload_delete(request: Request) -> JSONResponse:
-    """Delete a previously uploaded chat attachment from data/uploads/."""
+    """Delete a chat attachment from data/uploads/."""
     try:
         body = await request.json()
     except Exception:

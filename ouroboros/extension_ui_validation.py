@@ -48,11 +48,7 @@ _DECLARATIVE_WIDGET_COMPONENTS = {
     "tabs",
     "table",
     "video",
-    # v5.7.0 additions: host-owned declarative components for richer
-    # widget surfaces. None of these add ``kind: "module"`` JS — they
-    # are still pure declarative schemas that the browser renders with
-    # vetted host code (Leaflet for ``map``, host SVG for ``calendar``,
-    # HTML5 drag API for ``kanban``).
+    # Host-owned declarative components; no skill-supplied JS.
     "map",
     "calendar",
     "kanban",
@@ -71,13 +67,7 @@ def validate_ui_render(render: Dict[str, Any]) -> Dict[str, Any]:
             f"expected one of {sorted(_UI_RENDER_KINDS - {''})}"
         )
     if kind == "module":
-        # v5.7.0: ``kind: "module"`` lets a reviewed extension supply its
-        # own widget.js. The host renderer mounts it inside a sandboxed
-        # ``<iframe srcdoc>`` with a strict CSP so the script cannot
-        # touch ``document.cookie`` / ``localStorage`` of the SPA origin
-        # and can only ``fetch`` back into ``/api/extensions/<skill>/``.
-        # The ``widget_module_safety`` review item enforces source-level
-        # discipline; this validator only rejects pathological declarations.
+        # Module widgets rely on iframe+CSP sandboxing; validator rejects path abuse.
         entry = str(clean.get("entry") or "").strip()
         if not entry:
             raise ExtensionRegistrationError(
@@ -261,14 +251,10 @@ def validate_ui_render(render: Dict[str, Any]) -> Dict[str, Any]:
                         raise ExtensionRegistrationError(
                             f"declarative widget component {idx} item {item_idx} requires media source"
                         )
-            # v5.7.0: host-owned schemas for map / calendar / kanban.
-            # All three are declarative-only — no skill-supplied JS, no
-            # cross-origin fetches, the renderer is vetted host code.
+            # Host-owned map/calendar/kanban schemas remain declarative-only.
             if component_type == "map":
                 tiles_url = str(component.get("tiles_url") or "").strip()
-                # Be permissive: ``tiles_url`` is optional (renderer falls
-                # back to OpenStreetMap defaults) but if supplied it must
-                # be https for non-local tiles.
+                # Optional tiles_url must be https unless local.
                 if tiles_url and not (tiles_url.startswith("https://") or tiles_url.startswith("http://localhost") or tiles_url.startswith("http://127.")):
                     raise ExtensionRegistrationError(
                         f"declarative widget component {idx} map tiles_url must be https or local"

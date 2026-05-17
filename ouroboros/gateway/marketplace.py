@@ -1,19 +1,4 @@
-"""HTTP surface for the ClawHub marketplace (v4.50).
-
-Endpoints:
-
-- ``GET  /api/marketplace/clawhub/search?q=&official=&limit=&cursor=``
-- ``GET  /api/marketplace/clawhub/info/{slug}``
-- ``GET  /api/marketplace/clawhub/installed`` — local catalog snapshot
-- ``POST /api/marketplace/clawhub/install``     ``{slug, version?, auto_review?, overwrite?}``
-- ``POST /api/marketplace/clawhub/update/{name}``   ``{version?}``
-- ``POST /api/marketplace/clawhub/uninstall/{name}``
-- ``GET  /api/marketplace/clawhub/preview/{slug}`` — lightweight registry preview
-
-Every mutating endpoint defers the heavy work to ``asyncio.to_thread``
-so the Starlette event loop stays responsive while the registry HTTP
-+ stage + adapter + skill_review pipeline runs.
-"""
+"""HTTP surface for ClawHub/OuroborosHub marketplace routes."""
 
 from __future__ import annotations
 
@@ -80,12 +65,6 @@ def _client_error_response(exc: Exception, *, default_status: int = 502) -> JSON
         status = 500
     log.warning("marketplace error: %s", exc, exc_info=True)
     return JSONResponse({"error": str(exc), "code": exc.__class__.__name__}, status_code=status)
-
-
-# ---------------------------------------------------------------------------
-# Search / info / preview
-# ---------------------------------------------------------------------------
-
 
 async def api_marketplace_search(request: Request) -> JSONResponse:
     qp = request.query_params
@@ -178,12 +157,6 @@ async def api_marketplace_preview(request: Request) -> JSONResponse:
         log.exception("marketplace preview failed")
         return JSONResponse({"error": str(exc)}, status_code=500)
     return JSONResponse(payload)
-
-
-# ---------------------------------------------------------------------------
-# Install / update / uninstall
-# ---------------------------------------------------------------------------
-
 
 def _serialize_install_result(result: Any) -> Dict[str, Any]:
     """Project an :class:`InstallResult` into a JSON-friendly dict."""
@@ -332,15 +305,7 @@ async def api_marketplace_update(request: Request) -> JSONResponse:
 
 
 def _validate_path_param_name(name: str) -> Optional[str]:
-    """Reject names that look like path traversal at the HTTP boundary.
-
-    Cycle 2 critics found that Starlette's ``{name}`` matcher (default
-    regex ``[^/]+``) accepts ``%2e%2e`` (``..``) which then flows into
-    ``shutil.rmtree(parent / "..")`` and wipes the data plane. We
-    refuse the request at the HTTP layer before ANY downstream code
-    runs — the install module re-validates as defence-in-depth.
-    Returns an error string (caller turns into 400) or ``None`` on OK.
-    """
+    """Reject traversal-like names at the HTTP boundary; downstream revalidates."""
     cleaned = (name or "").strip()
     if not cleaned:
         return "missing name"
@@ -441,12 +406,6 @@ async def api_marketplace_installed(request: Request) -> JSONResponse:
     drive_root = _request_drive_root(request)
     out = _installed_skills_for_source(drive_root, "clawhub")
     return JSONResponse({"count": len(out), "skills": out})
-
-
-# ---------------------------------------------------------------------------
-# OuroborosHub static official-skill catalog
-# ---------------------------------------------------------------------------
-
 
 async def api_ouroboroshub_catalog(request: Request) -> JSONResponse:
     query = str(request.query_params.get("q") or request.query_params.get("query") or "").strip()

@@ -1,16 +1,7 @@
-"""HTTP + WebSocket envelope shapes for the Gateway Boundary (v1).
+"""Descriptive HTTP + WebSocket Gateway Boundary contracts (v1).
 
-These ``TypedDict`` definitions document the payloads the web gateway sends
-and accepts. They are descriptive contracts, not runtime validators. Their job
-is to make the frontend/backend surface visible, testable, and frozen unless
-Ouroboros is running in ``runtime_mode='pro'``.
-
-Conventions
------------
-- Default to ``total=True`` (keys listed at the top level are required).
-- Mark genuinely optional keys with ``NotRequired[...]``.
-- Keep ``type`` (the discriminator) always required on every WebSocket
-  envelope so clients can dispatch by it.
+TypedDicts document payloads, not runtime validation. Keep discriminating
+``type`` keys required; mark genuinely optional fields with ``NotRequired``.
 """
 
 from __future__ import annotations
@@ -22,10 +13,6 @@ try:  # Python 3.11+
 except ImportError:  # pragma: no cover - CI supports Python 3.10.
     from typing_extensions import Literal, NotRequired, TypedDict  # type: ignore[assignment]
 
-
-# ---------------------------------------------------------------------------
-# WebSocket - inbound (``web/modules/ws.js`` -> gateway.ws)
-# ---------------------------------------------------------------------------
 
 class ChatInbound(TypedDict):
     """Inbound WS chat message. ``type`` and ``content`` are required."""
@@ -62,10 +49,6 @@ class ExtensionInbound(TypedDict, total=False):
     type: str
     data: Any
 
-
-# ---------------------------------------------------------------------------
-# WebSocket - outbound (supervisor.message_bus / gateway.ws)
-# ---------------------------------------------------------------------------
 
 class TransportMetadata(TypedDict, total=False):
     """Generic external transport provenance for bridge skills."""
@@ -149,10 +132,6 @@ class ExtensionLifecycleOutbound(TypedDict):
     reason: NotRequired[str]
     data: NotRequired[Dict[str, Any]]
 
-
-# ---------------------------------------------------------------------------
-# HTTP responses - core
-# ---------------------------------------------------------------------------
 
 class ErrorResponse(TypedDict):
     error: str
@@ -320,9 +299,7 @@ class ChatHistoryResponse(TypedDict, total=False):
     error: str
 
 
-# Endpoint registries are intentionally descriptive and small. The router owns
-# the executable Starlette Route objects; this table is the human/test-visible
-# contract index.
+# Human/test-visible contract index; routers own executable Route objects.
 HTTP_ENDPOINTS: tuple[str, ...] = (
     "GET /api/health",
     "GET /api/state",

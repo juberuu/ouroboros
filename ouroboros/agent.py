@@ -1,10 +1,4 @@
-"""
-Ouroboros agent core — thin orchestrator.
-
-Delegates to: loop.py (LLM tool loop), tools/ (tool schemas/execution),
-llm.py (LLM calls), memory.py (scratchpad/identity),
-context.py (context building), review.py (code collection/metrics).
-"""
+"""Thin agent orchestrator around context, LLM loop, tools, memory, and review."""
 
 from __future__ import annotations
 
@@ -67,7 +61,7 @@ class Env:
 
 
 class OuroborosAgent:
-    """One agent instance per worker process. Mostly stateless; long-term state lives on Drive."""
+    """Per-worker agent instance; long-term state lives on Drive."""
 
     def __init__(self, env: Env, event_queue: Any = None):
         self.env = env
@@ -217,11 +211,7 @@ class OuroborosAgent:
         return ctx, messages, cap_info
 
     def handle_task(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
-        # Hot-reload settings at the start of every task so that changes saved
-        # via the UI (models, API keys, budget, effort, review config) take
-        # effect on the next task without requiring a full process restart.
-        # Errors are intentionally swallowed — a settings read failure must
-        # not prevent the task from running.
+        # Hot-reload settings so UI changes affect the next task without restart.
         try:
             from ouroboros.config import load_settings, apply_settings_to_env
             apply_settings_to_env(load_settings())
@@ -233,10 +223,7 @@ class OuroborosAgent:
         self._task_started_ts = start_time
         self._last_progress_ts = start_time
         self._pending_events = []
-        # Preserve chat_id=0 verbatim — `int(x or 0) or None` collapsed
-        # legitimate chat_id=0 sessions to None, mixing tasks across sessions
-        # in logs and breaking UI updates. Branch explicitly on the missing
-        # case (None / empty) and pass any int value (including 0) through.
+        # Preserve chat_id=0; it is a real session, not missing.
         _raw_chat = task.get("chat_id")
         if _raw_chat is None or _raw_chat == "":
             self._current_chat_id = None
@@ -269,7 +256,7 @@ class OuroborosAgent:
             initial_effort = resolve_effort(task_type_str)
 
             if task_type_str == "deep_self_review":
-                # Deep self-review: bypass tool loop, direct single LLM call
+                # Deep self-review bypasses the tool loop.
                 try:
                     from ouroboros.deep_self_review import run_deep_self_review, is_review_available
                     self._emit_progress("Starting deep self-review... This may take several minutes.")
@@ -290,7 +277,6 @@ class OuroborosAgent:
                             event_queue=self._event_queue,
                             model=review_model,
                         )
-                    # Emit usage event for budget tracking
                     if usage:
                         self._pending_events.append({
                             "type": "llm_usage",
@@ -300,7 +286,6 @@ class OuroborosAgent:
                             "usage": usage,
                             "category": "deep_self_review",
                         })
-                    # Save to memory
                     try:
                         review_path = pathlib.Path(self.env.drive_root) / "memory" / "deep_review.md"
                         review_path.write_text(text, encoding="utf-8")
