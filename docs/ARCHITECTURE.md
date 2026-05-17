@@ -1,4 +1,4 @@
-# Ouroboros v5.25.0-rc.2 — Architecture & Reference
+# Ouroboros v5.25.0-rc.3 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -422,17 +422,81 @@ Settings has Providers, Secrets, Models, Behavior, Advanced, and About. It handl
 
 If `OUROBOROS_NETWORK_PASSWORD` is configured, non-loopback HTTP/WebSocket access requires authentication; `/api/health` stays public. With no password, non-loopback access remains open by explicit operator choice.
 
-The executable route SSOT is `ouroboros/gateway/router.py`; the human/test-visible contract index is `ouroboros/gateway/contracts.py`. Route families:
+The executable route SSOT is `ouroboros/gateway/router.py`; file-browser routes come from `gateway/files.py::file_browser_routes()`, the contract index is `gateway/contracts.py::HTTP_ENDPOINTS`, and Host Service routes come from `gateway/host_service.py::create_host_service_app`.
 
-- health/state/settings/model catalog: `/api/health`, `/api/state`, `/api/settings`, `/api/model-catalog`
-- control/update/recovery: `/api/command`, `/api/reset`, `/api/git/*`, `/api/update/*`, `/api/evolution-data`
-- chat/history/uploads/costs: `/api/chat/history`, `/api/chat/upload`, `/api/cost-breakdown`
-- file browser: routes returned by `gateway/files.py::file_browser_routes()`
-- skills/extensions/widgets: `/api/extensions*`, `/api/skills/*`, extension dispatch/module/settings endpoints
-- marketplace: `/api/marketplace/clawhub/*`, `/api/marketplace/ouroboroshub/*`
-- local model runtime: `/api/local-model/status|start|stop|test|install-runtime`
-- MCP: `/api/mcp/status|refresh|test`
-- WebSocket: `/ws` for chat/log/task/state/extension broadcasts
+| Method | Path | Handler |
+|---|---|---|
+| GET | `/` | `server.index_page` |
+| GET | `/api/health` | `gateway.state.api_health` |
+| GET | `/api/state` | `gateway.state.api_state` |
+| GET | `/api/extensions` | `gateway.extensions.api_extensions_index` |
+| GET | `/api/extensions/{skill}/manifest` | `gateway.extensions.api_extension_manifest` |
+| GET | `/api/extensions/{skill}/module/{entry}` | `gateway.extensions.api_extension_module` |
+| GET | `/api/extensions/{skill}/settings_section` | `gateway.extensions.api_extension_settings_section` |
+| ANY | `/api/extensions/{skill}/{rest:path}` | `gateway.extensions.api_extension_dispatch` |
+| POST | `/api/skills/{skill}/toggle` | `gateway.extensions.api_skill_toggle` |
+| GET | `/api/skills/lifecycle-queue` | `gateway.extensions.api_skill_lifecycle_queue` |
+| POST | `/api/skills/{skill}/review` | `gateway.extensions.api_skill_review` |
+| POST | `/api/skills/{skill}/grants` | `gateway.extensions.api_skill_grants` |
+| POST | `/api/skills/{skill}/reconcile` | `gateway.extensions.api_skill_reconcile` |
+| GET | `/api/marketplace/clawhub/search` | `gateway.marketplace.api_marketplace_search` |
+| GET | `/api/marketplace/clawhub/installed` | `gateway.marketplace.api_marketplace_installed` |
+| GET | `/api/marketplace/clawhub/info/{slug:path}` | `gateway.marketplace.api_marketplace_info` |
+| GET | `/api/marketplace/clawhub/preview/{slug:path}` | `gateway.marketplace.api_marketplace_preview` |
+| POST | `/api/marketplace/clawhub/install` | `gateway.marketplace.api_marketplace_install` |
+| POST | `/api/marketplace/clawhub/update/{name}` | `gateway.marketplace.api_marketplace_update` |
+| POST | `/api/marketplace/clawhub/uninstall/{name}` | `gateway.marketplace.api_marketplace_uninstall` |
+| GET | `/api/marketplace/ouroboroshub/catalog` | `gateway.marketplace.api_ouroboroshub_catalog` |
+| GET | `/api/marketplace/ouroboroshub/installed` | `gateway.marketplace.api_ouroboroshub_installed` |
+| GET | `/api/marketplace/ouroboroshub/preview/{slug:path}` | `gateway.marketplace.api_ouroboroshub_preview` |
+| POST | `/api/marketplace/ouroboroshub/install` | `gateway.marketplace.api_ouroboroshub_install` |
+| POST | `/api/marketplace/ouroboroshub/update/{name}` | `gateway.marketplace.api_ouroboroshub_update` |
+| POST | `/api/marketplace/ouroboroshub/uninstall/{name}` | `gateway.marketplace.api_ouroboroshub_uninstall` |
+| GET | `/api/migrations` | `gateway.control.api_migrations_list` |
+| POST | `/api/migrations/{key}/dismiss` | `gateway.control.api_migrations_dismiss` |
+| GET | `/api/files/list` | `gateway.files.api_files_list` |
+| GET | `/api/files/read` | `gateway.files.api_files_read` |
+| GET | `/api/files/content` | `gateway.files.api_files_content` |
+| GET | `/api/files/download` | `gateway.files.api_files_download` |
+| POST | `/api/files/upload` | `gateway.files.api_files_upload` |
+| POST | `/api/files/mkdir` | `gateway.files.api_files_mkdir` |
+| POST | `/api/files/write` | `gateway.files.api_files_write` |
+| POST | `/api/files/delete` | `gateway.files.api_files_delete` |
+| POST | `/api/files/transfer` | `gateway.files.api_files_transfer` |
+| GET | `/api/onboarding` | `gateway.settings.api_onboarding` |
+| GET | `/api/claude-code/status` | `gateway.settings.api_claude_code_status` |
+| POST | `/api/claude-code/install` | `gateway.settings.api_claude_code_install` |
+| GET | `/api/settings` | `gateway.settings.api_settings_get` |
+| POST | `/api/settings` | `gateway.settings.api_settings_post` |
+| GET | `/api/model-catalog` | `gateway.models.api_model_catalog` |
+| POST | `/api/command` | `gateway.control.api_command` |
+| POST | `/api/reset` | `gateway.control.api_reset` |
+| GET | `/api/git/log` | `gateway.control.api_git_log` |
+| POST | `/api/git/rollback` | `gateway.control.api_git_rollback` |
+| POST | `/api/git/promote` | `gateway.control.api_git_promote` |
+| GET | `/api/update/status` | `gateway.control.api_update_status` |
+| POST | `/api/update/check` | `gateway.control.api_update_check` |
+| POST | `/api/update/apply` | `gateway.control.api_update_apply` |
+| GET | `/api/cost-breakdown` | `gateway.history.make_cost_breakdown_endpoint` |
+| GET | `/api/evolution-data` | `gateway.control.api_evolution_data` |
+| GET | `/api/chat/history` | `gateway.history.make_chat_history_endpoint` |
+| POST | `/api/chat/upload` | `gateway.files.api_chat_upload` |
+| DELETE | `/api/chat/upload` | `gateway.files.api_chat_upload_delete` |
+| POST | `/api/local-model/start` | `gateway.models.api_local_model_start` |
+| POST | `/api/local-model/stop` | `gateway.models.api_local_model_stop` |
+| GET | `/api/local-model/status` | `gateway.models.api_local_model_status` |
+| POST | `/api/local-model/test` | `gateway.models.api_local_model_test` |
+| POST | `/api/local-model/install-runtime` | `gateway.models.api_local_model_install_runtime` |
+| GET | `/api/mcp/status` | `gateway.mcp.api_mcp_status` |
+| POST | `/api/mcp/refresh` | `gateway.mcp.api_mcp_refresh` |
+| POST | `/api/mcp/test` | `gateway.mcp.api_mcp_test` |
+| WS | `/ws` | `gateway.ws.ws_endpoint` |
+| STATIC | `/static/*` | `server.NoCacheStaticFiles` |
+| GET | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/identity` | `gateway.host_service._api_identity` |
+| GET | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/tools/schemas` | `gateway.host_service._api_tool_schemas` |
+| POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/chat/allocate-internal` | `gateway.host_service._api_allocate_internal` |
+| POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/chat/inject` | `gateway.host_service._api_chat_inject` |
+| WS | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/events` | `gateway.host_service._ws_events` |
 
 Rationale: `server.py` should own process startup/lifespan/static mounting, while `gateway/*` owns browser-facing HTTP/WS contracts. This keeps UI and runtime coupling explicit and testable.
 
