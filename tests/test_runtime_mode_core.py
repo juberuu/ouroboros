@@ -319,16 +319,18 @@ def test_phase4_ui_copy_matches_shipped_runtime():
 
 
 def test_skills_ui_reads_live_extension_state_fields():
-    src = (REPO / "web" / "modules" / "skills.js").read_text(encoding="utf-8")
+    renderer = (REPO / "web" / "modules" / "skill_card_renderer.js").read_text(encoding="utf-8")
+    orchestration = (REPO / "web" / "modules" / "skills.js").read_text(encoding="utf-8")
+    src = renderer + "\n" + orchestration
     assert "live_loaded" in src
-    assert "live_reason" in src
-    assert "review_gate.executable_review" in src
+    assert "review_gate?.executable_review" in src or "review_gate.executable_review" in src
     assert "executable_review" in src
     assert "skill.review_status === 'blockers' && !reviewReady(skill)" in src
     assert "function statusBadge(status, gate = null)" in src
     assert "statusBadge(skill.review_status, skill.review_gate)" in src
-    assert "catalog only" in src
-    assert "ui_tabs_pending" in src
+    assert "Open widgets" in src
+    assert "retry_install" in src
+    assert "Retry install" in src
     assert "result.error" in src
 
 

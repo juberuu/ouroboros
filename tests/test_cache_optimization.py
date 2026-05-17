@@ -48,7 +48,10 @@ def test_build_llm_messages_repartitions_stable_vs_dynamic_sections():
 
     tmpdir = pathlib.Path(tempfile.mkdtemp())
     env, memory = _make_env_and_memory(tmpdir)
-    (tmpdir / "drive" / "memory" / "dialogue_summary.md").write_text("dialogue", encoding="utf-8")
+    (tmpdir / "drive" / "memory" / "dialogue_blocks.json").write_text(
+        '[{"content": "dialogue"}]',
+        encoding="utf-8",
+    )
     (tmpdir / "drive" / "memory" / "registry.md").write_text(
         "### source-a\n- **path:** memory/registry.md\n- **updated:** 2026-04-13T10:00:00+00:00\n- **gaps:** none\n",
         encoding="utf-8",
@@ -156,7 +159,10 @@ def test_build_memory_sections_partition_modes():
 
     tmpdir = pathlib.Path(tempfile.mkdtemp())
     env, memory = _make_env_and_memory(tmpdir)
-    (tmpdir / "drive" / "memory" / "dialogue_summary.md").write_text("dialogue", encoding="utf-8")
+    (tmpdir / "drive" / "memory" / "dialogue_blocks.json").write_text(
+        '[{"content": "dialogue"}]',
+        encoding="utf-8",
+    )
     (tmpdir / "drive" / "memory" / "registry.md").write_text(
         "### source-a\n- **path:** memory/registry.md\n- **updated:** 2026-04-13T10:00:00+00:00\n- **gaps:** none\n",
         encoding="utf-8",

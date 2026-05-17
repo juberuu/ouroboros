@@ -274,7 +274,8 @@ def test_skill_preflight_reports_missing_pluginapi_permissions(tmp_path, monkeyp
     assert {"route", "widget", "read_settings"} <= missing
 
 
-def test_run_shell_blocks_self_authored_marker_writes(tmp_path):
+def test_run_shell_blocks_self_authored_marker_writes(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     ctx = _make_ctx(tmp_path)
     registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
     registry._ctx = ctx
@@ -387,15 +388,23 @@ def test_skill_exec_in_frozen_modules():
 
 
 # ---------------------------------------------------------------------------
-# Preflight: SKILLS_UNAVAILABLE when repo path not configured
+# Preflight: data-plane skills are sufficient without external repo path
 # ---------------------------------------------------------------------------
 
 
-def test_list_skills_warns_when_unconfigured(tmp_path, monkeypatch):
+def test_list_skills_uses_data_plane_without_external_repo(tmp_path, monkeypatch):
     monkeypatch.delenv("OUROBOROS_SKILLS_REPO_PATH", raising=False)
     ctx = _make_ctx(tmp_path)
+    skill_dir = _build_skill(ctx.drive_root / "skills" / "external", "alpha")
+    save_enabled(ctx.drive_root, "alpha", True)
+    save_review_state(ctx.drive_root, "alpha", SkillReviewState(
+        status="clean",
+        content_hash=compute_content_hash(skill_dir),
+        findings=[],
+    ))
     result = skill_exec_mod._handle_list_skills(ctx)
-    assert "SKILLS_UNAVAILABLE" in result
+    assert "alpha" in result
+    assert "SKILLS_UNAVAILABLE" not in result
 
 
 def test_skill_exec_refuses_when_unconfigured(tmp_path, monkeypatch):

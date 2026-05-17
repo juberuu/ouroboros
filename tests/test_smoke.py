@@ -120,7 +120,6 @@ EXPECTED_TOOLS = [
     # Git PR integration (non-core: require enable_tools)
     "fetch_pr_ref", "create_integration_branch",
     "cherry_pick_pr_commits", "stage_adaptations", "stage_pr_merge",
-    "summarize_dialogue",
     # Code search
     "code_search",
     # Task decomposition

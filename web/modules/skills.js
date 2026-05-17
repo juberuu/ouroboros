@@ -5,14 +5,15 @@ import { openConfirmDialog } from './confirm_dialog.js';
 import { PAGE_ICONS } from './page_icons.js';
 import { showToast } from './toast.js';
 import { apiFetch } from './api_client.js';
+import { renderInstalledSkillCard } from './skill_card_renderer.js';
 import {
     boundedText,
     emitSkillLifecycle,
     escapeHtmlAttr as escapeHtml,
     grantReady,
-    isRateLimitError,
     renderSkillRepairPrompt,
-    safeExternalHrefAttr as safeExternalUrl,
+    reviewTone,
+    reviewReady,
 } from './utils.js';
 
 const SKILLS_TABS = [
@@ -53,7 +54,6 @@ function skillsPageTemplate() {
             <div class="skills-search-chrome" id="skills-pane-ouroboroshub-chrome" data-chrome-pane="ouroboroshub" hidden></div>
             <div class="skills-scroll scroll-fade-y">
                 <div class="skills-tab-panel" id="skills-pane-installed" data-pane="installed">
-                <div id="skills-migration-banner" class="skills-migration-banner" hidden></div>
                 <div id="skills-list" class="skills-list"></div>
                 <div id="skills-empty" class="muted" hidden>
                     No skills yet. Browse <b>ClawHub</b> or
@@ -69,267 +69,9 @@ function skillsPageTemplate() {
 }
 
 
-function statusBadge(status, gate = null) {
-    const gateExecutable = gate && typeof gate.executable_review === 'boolean'
-        ? gate.executable_review
-        : ['clean', 'warnings'].includes(status);
-    const tone = status === 'blockers' ? 'danger'
-        : gateExecutable ? 'ok'
-        : status === 'warnings' ? 'warn'
-        : 'muted';
-    const tooltip = {
-        clean: 'All checklist items pass.',
-        warnings: 'Warning findings exist; they do not block execution.',
-        blockers: gateExecutable
-            ? 'Blocker findings exist, but advisory enforcement allows execution.'
-            : 'Blocker findings prevent execution under blocking enforcement.',
-        pending: 'Review has not produced a verdict yet.',
-    }[status] || 'Unknown or stale review state.';
-    return `<span class="skills-badge skills-badge-${tone}" title="${escapeHtml(tooltip)}">${escapeHtml(status)}</span>`;
-}
-
-function reviewReady(skill) {
-    if (skill?.review_gate && typeof skill.review_gate.executable_review === 'boolean') {
-        return skill.review_gate.executable_review;
-    }
-    if (typeof skill?.executable_review === 'boolean') return skill.executable_review;
-    return ['clean', 'warnings'].includes(skill.review_status) && !skill.review_stale;
-}
-
-function reviewToastTone(status, error = '') {
-    if (error) return 'danger';
-    if (status === 'clean') return 'ok';
-    if (status === 'blockers') return 'danger';
-    return 'warn';
-}
-
-function healReady(skill) {
-    const source = (skill.source || 'native').toLowerCase();
-    if (!['clawhub', 'ouroboroshub', 'external'].includes(source)) return false;
-    const payloadRoot = String(skill.payload_root || '');
-    if (!/^skills\/(external|clawhub|ouroboroshub)\//.test(payloadRoot)) return false;
-    const missingGrantError = !grantReady(skill) && String(skill.load_error || '').includes('missing owner grants');
-    return payloadRoot.startsWith('skills/')
-        && (skill.review_status === 'blockers' || (Boolean(skill.load_error) && !missingGrantError));
-}
-
-function submitHubReady(skill, githubTokenConfigured = false) {
-    const source = (skill.source || 'native').toLowerCase();
-    const sourceAllowed = ['external', 'self_authored', 'user_repo', 'ouroboroshub', 'clawhub'].includes(source);
-    if (!sourceAllowed) return { visible: false, disabled: true, reason: '' };
-    if (!githubTokenConfigured) {
-        return { visible: true, disabled: true, reason: 'Configure GITHUB_TOKEN in Settings -> Secrets' };
-    }
-    if (skill.review_status !== 'clean' || skill.review_stale) {
-        return { visible: true, disabled: true, reason: 'Skill needs a fresh clean review before submission' };
-    }
-    return { visible: true, disabled: false, reason: 'Open a PR to OuroborosHub from your GitHub fork' };
-}
-
 function isMissingGrantLoadError(skill) {
     return !grantReady(skill) && String(skill.load_error || '').includes('missing owner grants');
 }
-
-function hasSkillUiTab(skill, live = {}) {
-    const tabs = Array.isArray(live?.ui_tabs) ? live.ui_tabs : [];
-    return tabs.some((tab) => {
-        const owner = tab?.skill || tab?.skill_name || tab?.extension || '';
-        return owner === skill.name;
-    });
-}
-
-// v5.2.3: collapse the previous wall of competing badges
-// (NATIVE / PASS / LIVE / ENABLED / GRANT MISSING / etc.) into a single
-// human-readable status chip per card. The detailed flags stay
-// available under the Details disclosure for advanced operators.
-function skillStatusChip(skill, live = {}) {
-    if (!grantReady(skill)) {
-        return { tone: 'warn', label: 'Needs access grant' };
-    }
-    if (skill.lifecycle_virtual && isRateLimitError(skill.load_error)) {
-        return { tone: 'warn', label: 'Rate limited' };
-    }
-    if (skill.load_error) {
-        return { tone: 'danger', label: 'Failed to load' };
-    }
-    if (!reviewReady(skill)) {
-        return { tone: 'warn', label: 'Needs review' };
-    }
-    if (skill.enabled) {
-        if (skill.type === 'extension') {
-            if (skill.live_loaded && (skill.dispatch_live || hasSkillUiTab(skill, live))) {
-                return { tone: 'ok', label: 'Active' };
-            }
-            if (skill.live_loaded && !skill.dispatch_live && !hasSkillUiTab(skill, live)) {
-                return { tone: 'warn', label: 'Loaded — UI tab pending' };
-            }
-            return { tone: 'warn', label: 'Enabled — not loaded' };
-        }
-        return { tone: 'ok', label: 'Enabled' };
-    }
-    return { tone: 'muted', label: 'Off' };
-}
-
-// v5.2.3 follow-up (review): surface a calm provenance label on the
-// card front face. Built-in skills carry no chip (the absence is the
-// signal). Third-party / external skills get a small muted/warn pill
-// next to the title so operators can tell at a glance who shipped the
-// code without expanding Show details. Mirrors P1 "Provenance matters".
-function skillSourceChip(skill) {
-    const source = (skill.source || 'native').toLowerCase();
-    if (source === 'native') {
-        return '';
-    }
-    const labelMap = {
-        clawhub: { label: 'ClawHub', tone: 'warn' },
-        ouroboroshub: { label: 'OuroborosHub', tone: 'ok' },
-        self_authored: { label: 'Authored', tone: 'ok' },
-        external: { label: 'External', tone: 'muted' },
-        user_repo: { label: 'User repo', tone: 'muted' },
-    };
-    const entry = labelMap[source] || { label: source, tone: 'muted' };
-    return `<span class="skills-source-chip skills-source-${entry.tone}" title="Source: ${escapeHtml(entry.label)}">${escapeHtml(entry.label)}</span>`;
-}
-
-function renderReviewFindings(skill) {
-    const findings = Array.isArray(skill.review_findings) ? skill.review_findings : [];
-    if (!findings.length) return '';
-    const rows = findings.map((finding) => {
-        const item = finding.item || finding.check || finding.title || 'finding';
-        const verdict = finding.verdict || finding.severity || '';
-        const reason = finding.reason || finding.message || JSON.stringify(finding);
-        return `<li><strong>${escapeHtml(verdict)}</strong> ${escapeHtml(item)}: ${escapeHtml(reason)}</li>`;
-    }).join('');
-    return `
-        <details class="skills-review-findings">
-            <summary class="muted">${findings.length} review finding${findings.length === 1 ? '' : 's'}</summary>
-            <ul>${rows}</ul>
-        </details>
-    `;
-}
-
-function renderGrantBlock(skill) {
-    const grants = skill.grants || {};
-    const requested = Array.isArray(grants.requested_keys) ? grants.requested_keys : [];
-    const requestedPermissions = Array.isArray(grants.requested_permissions) ? grants.requested_permissions : [];
-    // v5.2.3: keep the affordance discoverable but quiet the copy.
-    // Skills that do not request any core keys get a single muted
-    // line at the bottom of the Details disclosure instead of a
-    // dedicated section on the front face of the card.
-    if (!requested.length && !requestedPermissions.length) {
-        return '';
-    }
-    const missing = Array.isArray(grants.missing_keys) ? grants.missing_keys : [];
-    const missingPermissions = Array.isArray(grants.missing_permissions) ? grants.missing_permissions : [];
-    const granted = Array.isArray(grants.granted_keys) ? grants.granted_keys : [];
-    const grantedPermissions = Array.isArray(grants.granted_permissions) ? grants.granted_permissions : [];
-    const unsupported = grants.unsupported_for_skill_type === true;
-    const reviewBlocked = !reviewReady(skill);
-
-    const requestedKeysHtml = requested
-        .map((key) => `<code>${escapeHtml(key)}</code>`)
-        .join(' ');
-    const requestedPermsHtml = requestedPermissions
-        .map((key) => `<code>${escapeHtml(key)}</code>`)
-        .join(' ');
-
-    let statusLine;
-    let statusTone;
-    if (unsupported) {
-        statusLine = 'This skill type cannot receive core API keys.';
-        statusTone = 'muted';
-    } else if (!missing.length && !missingPermissions.length) {
-        statusLine = 'Access granted.';
-        statusTone = 'ok';
-    } else if (reviewBlocked) {
-        statusLine = 'Run a security review first, then grant access.';
-        statusTone = 'warn';
-    } else {
-        statusLine = 'This skill needs your permission to use the keys above.';
-        statusTone = 'warn';
-    }
-
-    const grantedRow = granted.length
-        ? `<div class="skills-access-row"><span class="skills-access-label">Granted</span> ${granted.map((k) => `<code>${escapeHtml(k)}</code>`).join(' ')}</div>`
-        : '';
-
-    return `
-        <div class="skills-access skills-access-${statusTone}">
-            <div class="skills-access-row">
-                <span class="skills-access-label">Needs access</span>
-                ${requestedKeysHtml} ${requestedPermsHtml}
-            </div>
-            ${grantedRow}
-            ${grantedPermissions.length ? `<div class="skills-access-row"><span class="skills-access-label">Granted permissions</span> ${grantedPermissions.map((k) => `<code>${escapeHtml(k)}</code>`).join(' ')}</div>` : ''}
-            <div class="skills-access-status">${escapeHtml(statusLine)}</div>
-        </div>
-    `;
-}
-
-
-function extensionLiveBadge(skill) {
-    if (skill.type !== 'extension') return '';
-    const pendingUiTabs = Array.isArray(skill.ui_tabs_pending) ? skill.ui_tabs_pending : [];
-    if (pendingUiTabs.length && !skill.dispatch_live) {
-        return '<span class="skills-badge skills-badge-warn">ui tab pending</span>';
-    }
-    if (skill.live_loaded && skill.dispatch_live) {
-        return '<span class="skills-badge skills-badge-ok">live</span>';
-    }
-    if (skill.live_loaded) {
-        return '<span class="skills-badge skills-badge-muted">loaded</span>';
-    }
-    if (skill.desired_live) {
-        return '<span class="skills-badge skills-badge-warn">catalog only</span>';
-    }
-    return '<span class="skills-badge skills-badge-muted">not live</span>';
-}
-
-
-function extensionLiveNote(skill) {
-    if (skill.type !== 'extension') return '';
-    const pendingUiTabs = Array.isArray(skill.ui_tabs_pending) ? skill.ui_tabs_pending : [];
-    if (pendingUiTabs.length && !skill.dispatch_live) {
-        return '<div class="muted">extension runtime: ui tab declared, but the browser host does not ship extension tabs yet</div>';
-    }
-    const reason = escapeHtml(skill.live_reason || 'catalog_only');
-    const prefix = skill.live_loaded && skill.dispatch_live
-        ? 'extension runtime: live'
-        : (skill.live_loaded ? 'extension runtime: loaded' : 'extension runtime');
-    return `<div class="muted">${prefix}${skill.live_loaded && skill.dispatch_live ? '' : ` (${reason})`}</div>`;
-}
-
-
-function renderProvenanceBlock(prov) {
-    if (!prov || typeof prov !== 'object') return '';
-    const rows = [];
-    if (prov.slug) {
-        rows.push(`<span>slug: <code>${escapeHtml(prov.slug)}</code></span>`);
-    }
-    if (prov.sha256) {
-        rows.push(`<span>sha256: <code>${escapeHtml(String(prov.sha256).slice(0, 12))}…</code></span>`);
-    }
-    if (prov.license) {
-        rows.push(`<span>license: ${escapeHtml(prov.license)}</span>`);
-    }
-    const homepageHref = safeExternalUrl(prov.homepage);
-    if (homepageHref) {
-        rows.push(`<a href="${homepageHref}" target="_blank" rel="noopener noreferrer">homepage</a>`);
-    }
-    if (prov.registry_url) {
-        rows.push(`<span>registry: <code>${escapeHtml(prov.registry_url)}</code></span>`);
-    }
-    const meta = rows.length ? `<div class="skills-card-provenance muted">${rows.join(' · ')}</div>` : '';
-    const warnings = Array.isArray(prov.adapter_warnings) ? prov.adapter_warnings : [];
-    const warningsBlock = warnings.length
-        ? `<details class="skills-card-warnings">
-             <summary class="muted">${warnings.length} adapter warning${warnings.length === 1 ? '' : 's'}</summary>
-             <ul>${warnings.map((msg) => `<li>${escapeHtml(msg)}</li>`).join('')}</ul>
-           </details>`
-        : '';
-    return meta + warningsBlock;
-}
-
 
 function installTimestamp(skill) {
     const raw = skill.installed_at || skill.provenance?.installed_at || skill.provenance?.updated_at || '';
@@ -358,300 +100,6 @@ function sortSkillsForDisplay(skills) {
         if (!a.lifecycle_virtual && b.lifecycle_virtual) return 1;
         return installTimestamp(b) - installTimestamp(a) || String(a.name || '').localeCompare(String(b.name || ''));
     });
-}
-
-
-function toggleLockReason(skill) {
-    // Enable transitions are locked unless the skill has a fresh executable review.
-    // The server enforces the same gate in ``api_skill_toggle``; this UI guard
-    // keeps stale/review/repair work as explicit actions instead of hiding them
-    // behind the toggle.
-    if (skill?.review_gate && skill.review_gate.executable_review === false) {
-        return skill.review_gate.summary || skill.review_gate.blocking_reason || 'review has not produced an executable verdict yet';
-    }
-    if (skill.review_status === 'blockers' && !reviewReady(skill)) return 'review has blocker findings — repair the skill first';
-    if (skill.review_stale) return 'review is stale — re-review the skill first';
-    if (skill.review_status === 'pending') return 'review is still pending';
-    if (!reviewReady(skill)) return 'review has not produced an executable verdict yet';
-    if (skill.load_error && !isMissingGrantLoadError(skill)) return 'load error — repair the skill first';
-    return '';
-}
-
-function skillNextAction(skill, reviewInProgress = false, repairInProgress = false, live = {}) {
-    if (reviewInProgress) {
-        return { label: 'Reviewing...', className: '', disabled: true };
-    }
-    if (repairInProgress) {
-        return { label: 'Repairing...', className: '', disabled: true };
-    }
-    if (skill.lifecycle_virtual && skill.source === 'clawhub' && isRateLimitError(skill.load_error)) {
-        return { label: 'Retry install', className: 'skills-retry-install', disabled: false };
-    }
-    if ((skill.load_error && !isMissingGrantLoadError(skill)) || (skill.review_status === 'blockers' && !reviewReady(skill))) {
-        if (healReady(skill)) {
-            return { label: 'Repair', className: 'skills-heal', disabled: false };
-        }
-        return { label: '', className: '', disabled: true };
-    }
-    if (healReady(skill)) {
-        return { label: 'Repair', className: 'skills-heal', disabled: false };
-    }
-    if (skill.enabled && skill.type === 'extension' && skill.live_loaded && hasSkillUiTab(skill, live)) {
-        return { label: 'Open widgets', className: 'skills-open-widgets', disabled: false };
-    }
-    return { label: '', className: '', disabled: true };
-}
-
-function getSkillPrimaryAction(skill, reviewInProgress = false, repairInProgress = false, live = {}) {
-    if (reviewInProgress) {
-        return { action: '', label: 'Reviewing...', disabled: true };
-    }
-    if (repairInProgress) {
-        return { action: '', label: 'Repairing...', disabled: true };
-    }
-    if ((skill.load_error && !isMissingGrantLoadError(skill)) || (skill.review_status === 'blockers' && !reviewReady(skill))) {
-        if (healReady(skill)) {
-            return { action: 'repair', label: 'Repair', danger: true };
-        }
-        return { action: '', label: '', disabled: true };
-    }
-    if (!reviewReady(skill)) {
-        return {
-            action: skill.review_stale ? 'rereview' : 'review',
-            label: skill.review_stale ? 'Re-review' : 'Review',
-        };
-    }
-    if (skill.is_self_authored && !skill.enabled) {
-        const grants = skill.grants || {};
-        const keys = Array.isArray(grants.missing_keys) ? grants.missing_keys : (grants.requested_keys || []);
-        const permissions = Array.isArray(grants.missing_permissions)
-            ? grants.missing_permissions
-            : (grants.requested_permissions || []);
-        return { action: 'approve_enable', label: 'Approve & enable', keys: [...keys, ...permissions].join(',') };
-    }
-    if (!grantReady(skill)) {
-        const grants = skill.grants || {};
-        const keys = Array.isArray(grants.missing_keys) ? grants.missing_keys : (grants.requested_keys || []);
-        const permissions = Array.isArray(grants.missing_permissions)
-            ? grants.missing_permissions
-            : (grants.requested_permissions || []);
-        return { action: 'grant', label: 'Grant access', keys: [...keys, ...permissions].join(',') };
-    }
-    if (skill.enabled && skill.type === 'extension' && skill.live_loaded && hasSkillUiTab(skill, live)) {
-        return { action: 'open_widgets', label: 'Open widgets' };
-    }
-    return { action: '', label: '' };
-}
-
-function renderSkillCard(skill, reviewingSkills = new Set(), repairingSkills = new Set(), live = {}, options = {}) {
-    const safeName = escapeHtml(skill.name);
-    const description = escapeHtml(skill.description || '');
-    const installedVersion = skill.version || '—';
-    const reviewInProgress = reviewingSkills.has(skill.name);
-    const repairInProgress = repairingSkills.has(skill.name);
-
-    const lockReason = toggleLockReason(skill);
-    const primaryAction = getSkillPrimaryAction(skill, reviewInProgress, repairInProgress, live);
-    const actionAttrs = primaryAction.action
-        ? `data-skill="${safeName}" data-skill-action="${escapeHtml(primaryAction.action)}" role="button" tabindex="0"`
-        : '';
-    // v5.2.2/3: enable transitions are locked by review + grant gates.
-    // Disable transitions stay clickable so an owner can always pull
-    // a misbehaving skill offline even if its review goes stale.
-    const toggleLocked = !skill.enabled && Boolean(lockReason);
-    // v5.2.3 review-cycle fix: use the skill name as the accessible
-    // name and ``role="switch"`` so AT users hear "weather, on, switch"
-    // instead of the awkward "Disable weather, checked, checkbox".
-    const toggleAriaLabel = toggleLocked
-        ? `${skill.name} (locked: ${lockReason})`
-        : skill.name;
-
-    const status = skillStatusChip(skill, live);
-    const statusChip = `<span class="skills-status-chip skills-status-${status.tone} ${primaryAction.action ? 'is-clickable' : ''}" ${actionAttrs}>${escapeHtml(status.label)}</span>`;
-    const sourceChip = skillSourceChip(skill);
-    const installedLabel = installedAgo(skill);
-
-    const toggleActionAttrs = toggleLocked && primaryAction.action
-        ? `data-skill="${safeName}" data-skill-action="${escapeHtml(primaryAction.action)}"`
-        : '';
-    const toggleSwitch = skill.lifecycle_virtual ? '' : `
-        <label class="skills-switch ${toggleLocked ? 'is-locked' : ''}" ${toggleActionAttrs} title="${escapeHtml(toggleLocked ? `Locked: ${lockReason}` : (skill.enabled ? 'Turn skill off' : 'Turn skill on'))}">
-            <input type="checkbox"
-                   class="skills-toggle"
-                   role="switch"
-                   data-skill="${safeName}"
-                   ${skill.enabled ? 'checked' : ''}
-                   ${toggleLocked ? 'disabled' : ''}
-                   aria-checked="${skill.enabled ? 'true' : 'false'}"
-                   aria-label="${escapeHtml(toggleAriaLabel)}">
-            <span class="skills-switch-track" aria-hidden="true">
-                <span class="skills-switch-thumb"></span>
-            </span>
-        </label>
-    `;
-
-    const lockHint = toggleLocked
-        ? `<div class="skills-lock-hint ${primaryAction.action ? 'is-clickable' : ''}" title="${escapeHtml(lockReason)}" ${actionAttrs}>Locked: ${escapeHtml(lockReason)}</div>`
-        : '';
-    const reviewProgress = reviewInProgress
-        ? `
-            <div class="skills-review-progress" role="status" aria-live="polite">
-                <span class="skills-review-spinner" aria-hidden="true"></span>
-                <span>Review in progress</span>
-            </div>
-        `
-        : '';
-    const repairProgress = repairInProgress
-        ? `
-            <div class="skills-review-progress skills-repair-progress" role="status" aria-live="polite">
-                <span class="skills-review-spinner" aria-hidden="true"></span>
-                <span>Repair task is being queued</span>
-            </div>
-        `
-        : '';
-
-    const missingGrantError = isMissingGrantLoadError(skill);
-    const loadError = skill.load_error && !missingGrantError
-        ? `<div class="skills-load-error">${escapeHtml(skill.load_error)}</div>`
-        : '';
-
-    const source = (skill.source || 'native').toLowerCase();
-    const sourceLabel = source === 'clawhub' ? 'ClawHub'
-        : source === 'ouroboroshub' ? 'OuroborosHub'
-        : source === 'self_authored' ? 'Authored'
-        : source === 'native' ? 'Built-in'
-        : source === 'external' ? 'External'
-        : source === 'user_repo' ? 'User repo'
-        : source;
-
-    const isMarketplaceManaged = source === 'clawhub' || source === 'ouroboroshub';
-    const provenance = isMarketplaceManaged ? skill.provenance : null;
-    const updateBtn = isMarketplaceManaged
-        ? `<button type="button" role="menuitem" class="skills-menu-item skills-update" data-skill="${safeName}" data-source="${escapeHtml(source)}">Update</button>`
-        : '';
-    const uninstallBtn = isMarketplaceManaged
-        ? `<button type="button" role="menuitem" class="skills-menu-item skills-uninstall" data-skill="${safeName}" data-source="${escapeHtml(source)}">Uninstall</button>`
-        : '';
-    const healBtn = '';
-    const reviewMenuBtn = !reviewInProgress
-        ? `<button type="button" role="menuitem" class="skills-menu-item skills-review" data-skill="${safeName}">${skill.review_status === 'pending' ? 'Review' : (skill.review_stale ? 'Re-review' : 'Review again')}</button>`
-        : '';
-    const submitHub = submitHubReady(skill, Boolean(options.githubTokenConfigured));
-    const submitHubBtn = submitHub.visible
-        ? `<button type="button" role="menuitem" class="skills-menu-item skills-submit-hub" data-skill="${safeName}" ${submitHub.disabled ? 'disabled' : ''} title="${escapeHtml(submitHub.reason)}">Submit to OuroborosHub</button>`
-        : '';
-    const next = skillNextAction(skill, reviewInProgress, repairInProgress, live);
-    const nextAttrs = [
-        `data-skill="${safeName}"`,
-        next.keys ? `data-keys="${escapeHtml(next.keys)}"` : '',
-        next.enabled ? `data-enabled="${escapeHtml(next.enabled)}"` : '',
-        next.disabled ? 'disabled' : '',
-    ].filter(Boolean).join(' ');
-    const nextButton = next.label ? `
-        <button class="btn btn-primary skills-next-action ${escapeHtml(next.className)}" ${nextAttrs}>
-            ${escapeHtml(next.label)}
-        </button>
-    ` : '';
-    const primaryButton = primaryAction.action ? `
-        <button type="button"
-                class="btn btn-primary skills-primary-action"
-                data-skill="${safeName}"
-                data-skill-action="${escapeHtml(primaryAction.action)}"
-                ${primaryAction.keys ? `data-keys="${escapeHtml(primaryAction.keys)}"` : ''}
-                ${primaryAction.disabled ? 'disabled' : ''}>
-            ${escapeHtml(primaryAction.label)}
-        </button>
-    ` : '';
-
-    // v5.2.3 review-cycle fix: review findings are a primary safety
-    // signal (P3). Promote the disclosure out of "Show details" so a
-    // user with a fail/advisory verdict sees the count one click
-    // away from the front face, not two.
-    const reviewFindings = renderReviewFindings(skill);
-
-    // Detail disclosure — power-user metadata only.
-    const permissions = (skill.permissions || [])
-        .map((p) => `<code>${escapeHtml(p)}</code>`)
-        .join(' ');
-    const provenanceVersion = provenance?.version || '';
-    const versionDrift = (provenanceVersion && provenanceVersion !== installedVersion)
-        ? `<div class="skills-detail-row"><span class="skills-detail-label">Version drift</span> manifest ${escapeHtml(installedVersion)} vs registry ${escapeHtml(provenanceVersion)}</div>`
-        : '';
-    const liveLine = (skill.type === 'extension' && skill.live_loaded && hasSkillUiTab(skill, live))
-        ? `<div class="skills-detail-row"><span class="skills-detail-label">Visual widgets</span> available on the Widgets tab</div>`
-        : '';
-    const provenanceBlock = renderProvenanceBlock(provenance);
-    const detailsBody = `
-        <div class="skills-detail-row">
-            <span class="skills-detail-label">Type</span>
-            <code>${escapeHtml(skill.type || 'skill')}</code> · version ${escapeHtml(installedVersion)} · source ${escapeHtml(sourceLabel)}
-        </div>
-        <div class="skills-detail-row">
-            <span class="skills-detail-label">Review</span>
-            ${statusBadge(skill.review_status, skill.review_gate)}${skill.review_stale ? ' <span class="skills-badge skills-badge-warn">stale</span>' : ''}
-        </div>
-        <div class="skills-detail-row">
-            <span class="skills-detail-label">Permissions</span>
-            ${permissions || '<i class="muted">none</i>'}
-        </div>
-        ${versionDrift}
-        ${liveLine}
-        ${provenanceBlock}
-    `;
-    const details = `
-        <details class="skills-details">
-            <summary>Show details</summary>
-            ${detailsBody}
-        </details>
-    `;
-
-    // v5.7.0 kebab placement: the "more actions" menu (Re-review / Update /
-    // Uninstall) lives in the card HEADER cluster (after the toggle switch),
-    // which is where users hunt for "kebab" affordances per Material 3
-    // / Apple HIG conventions. The popup is a non-modal <dialog> opened
-    // with .show() (not .showModal()) so it appears as an anchored popover
-    // under the trigger instead of as a centered viewport modal that
-    // dimmed the rest of the page.
-    const cardMenu = (updateBtn || uninstallBtn || reviewMenuBtn || submitHubBtn)
-        ? `
-                    <div class="skills-card-menu">
-                        <button type="button" class="skills-card-menu-trigger" aria-label="More actions" aria-haspopup="menu" aria-expanded="false" data-skill-menu-trigger>⋮</button>
-                        <dialog class="skills-card-menu-dialog" role="menu">
-                            ${reviewMenuBtn}
-                            ${submitHubBtn}
-                            ${updateBtn}
-                            ${uninstallBtn}
-                        </dialog>
-                    </div>
-                `
-        : '';
-    return `
-        <article class="skills-card" data-skill="${safeName}" ${reviewInProgress ? 'data-reviewing="1"' : ''} ${repairInProgress ? 'data-repairing="1"' : ''}>
-            <header class="skills-card-head">
-                <div class="skills-card-title">
-                    <h3>${safeName}${sourceChip ? ` ${sourceChip}` : ''}</h3>
-                    ${description ? `<p class="skills-card-desc">${description}</p>` : ''}
-                    ${installedLabel ? `<div class="skills-card-installed muted">${escapeHtml(installedLabel)}</div>` : ''}
-                </div>
-                <div class="skills-card-toggle">
-                    ${statusChip}
-                    ${primaryButton || nextButton}
-                    ${toggleSwitch}
-                    ${cardMenu}
-                </div>
-            </header>
-            ${lockHint}
-            ${reviewProgress}
-            ${repairProgress}
-            ${renderGrantBlock(skill)}
-            ${reviewFindings}
-            ${loadError}
-            <footer class="skills-card-actions">
-                ${healBtn}
-                ${details}
-            </footer>
-        </article>
-    `;
 }
 
 
@@ -739,7 +187,7 @@ async function renderSkillsList(container, emptyEl, reviewingSkills = new Set(),
         return;
     }
     if (emptyEl) emptyEl.hidden = true;
-    container.innerHTML = sortSkillsForDisplay(skills).map((skill) => renderSkillCard(
+    container.innerHTML = sortSkillsForDisplay(skills).map((skill) => renderInstalledSkillCard(
         skill,
         reviewingSkills,
         repairingSkills,
@@ -747,84 +195,6 @@ async function renderSkillsList(container, emptyEl, reviewingSkills = new Set(),
         { githubTokenConfigured },
     )).join('')
         || '<div class="muted">No skills yet. Add one from <b>ClawHub</b> or <b>OuroborosHub</b>.</div>';
-    // v5: surface unread native-skill upgrade migrations so the
-    // operator is told when the launcher silently rewrote an
-    // installed skill (e.g. weather 0.1 script -> 0.2 extension).
-    // Idempotent on re-render — we replace the top banner each pass.
-    renderMigrationBanner();
-}
-
-
-async function renderMigrationBanner() {
-    const host = document.getElementById('skills-migration-banner');
-    if (!host) return;
-    let migrations = [];
-    try {
-        const resp = await apiFetch('/api/migrations');
-        if (resp.ok) {
-            const data = await resp.json();
-            migrations = Array.isArray(data.migrations) ? data.migrations : [];
-        }
-    } catch {
-        // network error — leave the banner empty.
-    }
-    if (!migrations.length) {
-        host.innerHTML = '';
-        host.hidden = true;
-        return;
-    }
-    host.hidden = false;
-    host.innerHTML = migrations.map((m) => {
-        const safeKey = escapeHtml(String(m.key || ''));
-        const skill = escapeHtml(String(m.skill || ''));
-        const oldV = escapeHtml(String(m.old_version || ''));
-        const newV = escapeHtml(String(m.new_version || ''));
-        const summary = escapeHtml(String(m.summary || ''));
-        const ts = escapeHtml(String(m.applied_at || ''));
-        return `
-            <div class="skills-migration-banner-item" data-migration-key="${safeKey}">
-                <div class="skills-migration-banner-text">
-                    <strong>Native skill upgrade:</strong> ${skill} ${oldV ? `(${oldV} → ${newV})` : `(→ ${newV})`}
-                    <span class="muted"> · ${ts}</span>
-                    <div class="muted">${summary}</div>
-                </div>
-                <button class="btn btn-default skills-migration-dismiss" data-key="${safeKey}">Got it</button>
-            </div>
-        `;
-    }).join('');
-    // v5 Cycle 2 Gemini Finding 1 + Opus C2-2: attach the dismiss
-    // listener exactly once per host element. The previous version
-    // used ``{ once: true }`` which removed the listener on the FIRST
-    // click anywhere inside the host — including click on the body
-    // text — so subsequent clicks on the actual "Got it" button (or
-    // a second migration's button) silently no-op'd. We gate the
-    // listener attachment via a dataset flag instead, so each
-    // re-render of the banner does NOT re-register, and ANY click
-    // is delegated to the right button via ``closest()``.
-    if (host.dataset.bannerListenerAttached !== '1') {
-        host.dataset.bannerListenerAttached = '1';
-        host.addEventListener('click', async (event) => {
-            const btn = event.target.closest('.skills-migration-dismiss');
-            if (!btn) return;
-            const key = btn.dataset.key;
-            if (!key) return;
-            btn.disabled = true;
-            try {
-                await apiFetch(`/api/migrations/${encodeURIComponent(key)}/dismiss`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({}),
-                });
-                const item = btn.closest('.skills-migration-banner-item');
-                if (item) item.remove();
-                if (!host.querySelector('.skills-migration-banner-item')) {
-                    host.hidden = true;
-                }
-            } catch {
-                btn.disabled = false;
-            }
-        });
-    }
 }
 
 
@@ -904,6 +274,24 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
         const { skills } = await fetchSkills();
         const skill = (skills || []).find((item) => item.name === name);
         if (!skill) throw new Error('Skill not found in current catalogue.');
+
+        if (action === 'retry_install') {
+            showToast(`${name}: retrying ClawHub install (this may take ~30s)`, 'muted');
+            const result = await postWithFeedback('/api/marketplace/clawhub/install', {
+                slug: name,
+                overwrite: true,
+                auto_review: true,
+            });
+            const tail = result.review_status ? ` — review ${result.review_status}` : '';
+            showToast(
+                result.ok
+                    ? `${name}: install retried${tail}`
+                    : `${name}: install retry failed — ${result.error || 'unknown'}`,
+                result.ok ? 'ok' : 'danger',
+            );
+            if (result.ok) emitSkillLifecycle('retry_install', name, result);
+            return;
+        }
 
         if (action === 'review' || action === 'rereview') {
             const ok = await openConfirmDialog({
@@ -1034,7 +422,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
             const errorTail = result.error ? ` — ${result.error}` : '';
             showToast(
                 `${name}: review ${result.status}${findings ? ` (${findings} findings)` : ''}${errorTail}`,
-                reviewToastTone(result.status, result.error)
+                reviewTone(result.status, result.error)
             );
             emitSkillLifecycle('review', name, result);
             return result;
@@ -1158,18 +546,6 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
             if (target.classList.contains('skills-next-toggle')) {
                 const wantsEnabled = target.dataset.enabled === 'true';
                 await toggleSkillEnabled(name, wantsEnabled);
-            } else if (target.classList.contains('skills-open-widgets')) {
-                document.querySelector('.nav-btn[data-page="widgets"]')?.click();
-            } else if (target.classList.contains('skills-retry-install')) {
-                showToast(`${name}: retrying install from ClawHub`, 'muted');
-                const result = await postWithFeedback('/api/marketplace/clawhub/install', {
-                    slug: name,
-                    auto_review: true,
-                });
-                if (!result.ok) {
-                    throw new Error(result.error || 'install failed');
-                }
-                showToast(`${name}: install queued/retried`, 'ok');
             } else if (target.classList.contains('skills-grant')) {
                 const keys = (target.dataset.keys || '').split(',').map((k) => k.trim()).filter(Boolean);
                 if (!keys.length) {
@@ -1217,13 +593,6 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
                         : `${name}: update failed — ${result.error || 'unknown'}`,
                     result.ok ? 'ok' : 'danger',
                 );
-            } else if (target.classList.contains('skills-heal')) {
-                const { skills } = await fetchSkills();
-                const skill = (skills || []).find((item) => item.name === name);
-                if (!skill) {
-                    throw new Error('Skill not found in current catalogue.');
-                }
-                await triggerSkillAction(name, 'repair');
             } else if (target.classList.contains('skills-submit-hub')) {
                 await triggerSkillAction(name, 'submit_hub');
             } else if (target.classList.contains('skills-uninstall')) {

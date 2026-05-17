@@ -1,4 +1,4 @@
-"""File tools: repo_read, repo_list, data_read, data_list, data_write, code_search, codebase_digest, summarize_dialogue."""
+"""File tools: repo_read, repo_list, data_read, data_list, data_write, code_search, codebase_digest."""
 
 from __future__ import annotations
 
@@ -860,123 +860,6 @@ def _codebase_digest(ctx: ToolContext) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Summarize dialogue
-# ---------------------------------------------------------------------------
-
-def _summarize_dialogue(ctx: ToolContext, last_n: int = 200) -> str:
-    """Summarize dialogue history into key moments, decisions, and user preferences."""
-    from ouroboros.config import get_light_model
-    from ouroboros.llm import LLMClient
-
-    # Read last_n messages from chat.jsonl
-    chat_path = ctx.drive_root / "logs" / "chat.jsonl"
-    if not chat_path.exists():
-        return "⚠️ chat.jsonl not found"
-
-    try:
-        entries = []
-        with chat_path.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    try:
-                        entries.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        log.debug("Failed to parse chat.jsonl line in summarize_dialogue", exc_info=True)
-                        continue
-
-        # Take last N entries
-        entries = entries[-last_n:] if len(entries) > last_n else entries
-
-        if not entries:
-            return "⚠️ No chat entries found"
-
-        # Format entries as text
-        dialogue_text = []
-        for entry in entries:
-            ts = entry.get("ts", "")
-            direction = entry.get("direction", "")
-            role = "User" if direction == "in" else "Ouroboros"
-            text = entry.get("text", "")
-            dialogue_text.append(f"[{ts}] {role}: {text}")
-
-        formatted_dialogue = "\n".join(dialogue_text)
-
-        # Build summarization prompt
-        prompt = f"""Summarize the following dialogue history between the user and Ouroboros.
-
-Extract:
-1. Key decisions made (technical, architectural, strategic)
-2. User preferences and communication style
-3. Important technical choices and their rationale
-4. Recurring themes or patterns
-
-For each key moment, include the timestamp.
-
-Format as markdown with clear sections.
-
-Dialogue history ({len(entries)} messages):
-
-{formatted_dialogue}
-
-Now write a comprehensive summary:"""
-
-        # Call LLM
-        llm = LLMClient()
-        model = get_light_model()
-
-        messages = [
-            {"role": "user", "content": prompt}
-        ]
-
-        _use_local_light = os.environ.get("USE_LOCAL_LIGHT", "").lower() in ("true", "1")
-        response, usage = llm.chat(
-            messages=messages,
-            model=model,
-            max_tokens=16384,
-            use_local=_use_local_light,
-        )
-
-        # Track cost in budget system
-        if usage:
-            usage_event = {
-                "type": "llm_usage",
-                "ts": utc_now_iso(),
-                "task_id": ctx.task_id if ctx.task_id else "",
-                "usage": {
-                    "prompt_tokens": usage.get("prompt_tokens", 0),
-                    "completion_tokens": usage.get("completion_tokens", 0),
-                    "cost": usage.get("cost", 0),
-                },
-                "category": "summarize",
-            }
-            if ctx.event_queue is not None:
-                try:
-                    ctx.event_queue.put_nowait(usage_event)
-                except Exception:
-                    if hasattr(ctx, "pending_events"):
-                        ctx.pending_events.append(usage_event)
-            elif hasattr(ctx, "pending_events"):
-                ctx.pending_events.append(usage_event)
-
-        summary = response.get("content", "")
-        if not summary:
-            return "⚠️ LLM returned empty summary"
-
-        # Write to memory/dialogue_summary.md
-        summary_path = ctx.drive_root / "memory" / "dialogue_summary.md"
-        summary_path.parent.mkdir(parents=True, exist_ok=True)
-        summary_path.write_text(summary, encoding="utf-8")
-
-        cost = float(usage.get("cost", 0))
-        return f"OK: Summarized {len(entries)} messages. Written to memory/dialogue_summary.md. Cost: ${cost:.4f}\n\n{summary[:500]}..."
-
-    except Exception as e:
-        log.warning("Failed to summarize dialogue", exc_info=True)
-        return f"⚠️ Error: {repr(e)}"
-
-
-# ---------------------------------------------------------------------------
 # forward_to_worker — LLM-initiated message routing to worker tasks
 # ---------------------------------------------------------------------------
 
@@ -1100,13 +983,6 @@ def get_tools() -> List[ToolEntry]:
             "description": "Get a compact digest of the entire codebase: files, sizes, classes, functions. One call instead of many repo_read calls.",
             "parameters": {"type": "object", "properties": {}, "required": []},
         }, _codebase_digest),
-        ToolEntry("summarize_dialogue", {
-            "name": "summarize_dialogue",
-            "description": "Summarize dialogue history into key moments, decisions, and user preferences. Writes to memory/dialogue_summary.md.",
-            "parameters": {"type": "object", "properties": {
-                "last_n": {"type": "integer", "description": "Number of recent messages to summarize (default 200)"},
-            }, "required": []},
-        }, _summarize_dialogue),
         ToolEntry("forward_to_worker", {
             "name": "forward_to_worker",
             "description": (

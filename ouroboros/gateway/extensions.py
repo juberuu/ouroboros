@@ -124,11 +124,9 @@ def _build_extensions_index(drive_root, repo_path):
     from ouroboros.extension_loader import extension_name_prefix, runtime_state_for_loaded_skill
 
     live_snapshot = snapshot()
-    # Always scan — ``discover_skills`` still returns the bundled
-    # ``repo/skills/`` reference set even when the user has not
-    # configured ``OUROBOROS_SKILLS_REPO_PATH``. The earlier "only
-    # scan when repo_path is non-empty" check silently dropped
-    # the bundled weather skill on a default install.
+    # Always scan the data plane plus optional external checkout. Native
+    # reference skills are copied into data/skills/native by bootstrap; the
+    # live catalogue no longer reads repo/skills directly.
     skills = discover_skills(drive_root, repo_path=repo_path)
     runtime_states = {
         s.name: runtime_state_for_loaded_skill(s, drive_root)

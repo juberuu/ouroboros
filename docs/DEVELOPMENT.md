@@ -447,8 +447,8 @@ one semantic variant:
 | `.btn-save` | Persist settings or budget changes |
 | `.btn-danger` | Destructive or emergency action |
 
-Size modifiers are `.btn-xs`, `.btn-sm`, `.btn-md`, and `.btn-lg`. Omit a size
-modifier for the default medium size. Do not combine semantic variants (for
+Size modifiers are `.btn-xs` and `.btn-sm`; omit a size modifier for the
+default medium size. Do not combine semantic variants (for
 example, `.btn-default.btn-primary` is invalid), and do not invent one-off
 button schemes in feature modules. Onboarding and modal buttons use the same
 `.btn` variants as the main SPA.

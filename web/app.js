@@ -129,10 +129,10 @@ initChat(ctx);
 initFiles(ctx);
 settingsControls = initSettings(ctx);
 dashboardControls = initDashboard(ctx);
-initLogs({ ...ctx, mount: document.getElementById('dashboard-panel-logs'), embedded: true, hostPage: 'dashboard', hostSubtab: 'logs' });
-initEvolution({ ...ctx, mount: document.getElementById('dashboard-panel-evolution'), embedded: true, hostPage: 'dashboard', hostSubtab: 'evolution', chartOnly: true });
-initUpdates({ ...ctx, mount: document.getElementById('dashboard-panel-updates'), hostPage: 'dashboard', hostSubtab: 'updates' });
-initCosts({ ...ctx, mount: document.getElementById('dashboard-panel-costs'), embedded: true, hostPage: 'dashboard', hostSubtab: 'costs' });
+initLogs({ ...ctx, mount: document.getElementById('dashboard-panel-logs') });
+initEvolution({ ...ctx, mount: document.getElementById('dashboard-panel-evolution') });
+initUpdates({ ...ctx, mount: document.getElementById('dashboard-panel-updates') });
+initCosts({ ...ctx, mount: document.getElementById('dashboard-panel-costs') });
 initSkills(ctx);
 initWidgets(ctx);
 

@@ -2,10 +2,7 @@ import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { showToast } from './toast.js';
 import { apiFetch } from './api_client.js';
 
-// ``hostPage`` defaults to ``'dashboard'`` (Dashboard sub-tab migration v5.7+);
-// the legacy ``'settings'`` value is no longer passed by ``app.js``.
-export function initUpdates({ mount, hostPage = 'dashboard', hostSubtab = 'updates', state = {} }) {
-    const host = mount || document.getElementById('content');
+export function initUpdates({ mount, state }) {
     const page = document.createElement('div');
     page.id = 'page-updates';
     page.className = 'settings-embedded-content settings-updates-panel';
@@ -53,7 +50,7 @@ export function initUpdates({ mount, hostPage = 'dashboard', hostSubtab = 'updat
             </section>
         </div>
     `;
-    host.appendChild(page);
+    mount.appendChild(page);
 
     const checkBtn = page.querySelector('#btn-update-check');
     const applyBtn = page.querySelector('#btn-update-apply');
@@ -271,13 +268,8 @@ export function initUpdates({ mount, hostPage = 'dashboard', hostSubtab = 'updat
         }
     });
 
-    window.addEventListener('ouro:settings-subtab-shown', (event) => {
-        if (event.detail?.tab !== 'updates') return;
-        loadStatus({ fetchRemote: false });
-        loadVersions();
-    });
     window.addEventListener('ouro:dashboard-subtab-shown', (event) => {
-        if (event.detail?.tab !== hostSubtab || state.activePage !== hostPage) return;
+        if (event.detail?.tab !== 'updates' || state.activePage !== 'dashboard') return;
         loadStatus({ fetchRemote: false });
         loadVersions();
     });

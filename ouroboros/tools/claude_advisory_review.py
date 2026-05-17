@@ -50,6 +50,9 @@ from ouroboros.tools.review_helpers import (
     check_worktree_readiness,
     check_worktree_version_sync as _check_worktree_version_sync_shared,
     CRITICAL_FINDING_CALIBRATION,
+    REVIEW_JSON_ARRAY_CONTRACT,
+    REVIEW_SEVERITY_THRESHOLDS,
+    REVIEW_THOROUGHNESS_BLOCK,
     get_advisory_runtime_diagnostics as _get_runtime_diagnostics,
     format_advisory_sdk_error as _format_advisory_error,
     load_governance_doc,
@@ -68,6 +71,7 @@ from ouroboros.utils import (
     truncate_review_artifact as _truncate_review_artifact,
     truncate_review_reason as _truncate_review_reason,
 )
+from ouroboros.review_evidence import build_review_projection, build_review_status_payload
 
 log = logging.getLogger(__name__)
 
@@ -416,38 +420,21 @@ def _build_advisory_prompt(
     prompt = f"""\
 {role_title}
 
-## Your role — NON-NEGOTIABLE REQUIREMENTS
+## Your role — non-negotiable requirements
 {role_requirements}
 
 ## Thoroughness requirements
-- Do NOT stop after finding the first issue. Check EVERY item in the checklist.
-- Report ALL problems you find. If there are 5 bugs, list all 5 — each as a separate entry.
-- Do NOT summarize multiple distinct problems into one finding.
-- For PASS: brief reason is fine. For FAIL: cite the specific file, line/symbol, what is wrong,
-  and provide a CONCRETE fix suggestion so the developer knows exactly what to change.
+{REVIEW_THOROUGHNESS_BLOCK}
 
-## Severity thresholds — treat as blocking reviewers do
-- bible_compliance (item 1): ANY violation of BIBLE.md principles is CRITICAL.
-- security_issues (item 5): ANY path traversal, secret leakage, or unsafe operation is CRITICAL.
-- development_compliance (item 2): naming, entity type rules, module size, no ad-hoc LLM calls,
-  no hardcoded [:N] truncation of cognitive artifacts — all CRITICAL when violated.
-- self_consistency (item 13): if a concrete stale artifact exists (specific file + line), CRITICAL.
-- Narrative/descriptive mismatches (for example README test counts or descriptive "N fixes" summaries)
-  are ADVISORY unless they change release metadata, actual runtime behavior, safety guidance,
-  or instructions a user/reviewer must rely on to use the changed feature correctly.
+## Severity thresholds
+{REVIEW_SEVERITY_THRESHOLDS}
 
 ## Critical finding calibration (shared with triad and scope reviewers)
 
 {critical_calibration}
 
 ## Output format
-Return ONLY a JSON array. Each element:
-{{
-  "item": "<checklist item name>",
-  "verdict": "PASS" | "FAIL",
-  "severity": "critical" | "advisory",
-  "reason": "<for FAIL: file, line/symbol, what is wrong, how to fix>"
-}}
+{REVIEW_JSON_ARRAY_CONTRACT}
 {expected_items_section}
 
 ## CHECKLISTS.md (What to review)
@@ -1058,13 +1045,6 @@ def _record_bypass(ctx: ToolContext, state: "AdvisoryReviewState", snapshot_hash
     repo_key = make_repo_key(pathlib.Path(ctx.repo_dir))
 
     def _mutate(bypass_state: "AdvisoryReviewState") -> None:
-        next_run_attempt = len(
-            bypass_state.filter_advisory_runs(
-                repo_key=repo_key,
-                tool_name="advisory_pre_review",
-                task_id=task_id,
-            )
-        ) + 1
         bypass_state.add_run(AdvisoryRunRecord(
             snapshot_hash=snapshot_hash,
             commit_message=commit_message,
@@ -1076,7 +1056,6 @@ def _record_bypass(ctx: ToolContext, state: "AdvisoryReviewState", snapshot_hash
             repo_key=repo_key,
             tool_name="advisory_pre_review",
             task_id=task_id,
-            attempt=next_run_attempt,
         ))
 
     update_state(drive_root, _mutate)
@@ -1183,88 +1162,49 @@ def _next_step_guidance(latest: Optional["AdvisoryRunRecord"], state: "AdvisoryR
                         stale_from_edit: bool, stale_from_edit_ts: Optional[str],
                         open_obs: list, open_debts: list, effective_is_fresh: bool = False) -> str:
     """Return a concrete next-step string based on current advisory state."""
-    unresolved_parts: list[str] = []
-    if open_obs:
-        unresolved_parts.append(f"{len(open_obs)} open obligation(s)")
-    if open_debts:
-        unresolved_parts.append(f"{len(open_debts)} commit-readiness debt item(s)")
-    unresolved_summary = " and ".join(unresolved_parts)
-    debt_prefix = (
-        f"Start from the {len(open_debts)} commit-readiness debt item(s) surfaced by review_status, "
-        "resolve or rebut each one, and only then continue with new edits. "
-        if open_debts else ""
+    def _debt_hint() -> str:
+        parts = []
+        if open_obs:
+            parts.append(f"{len(open_obs)} open obligation(s) from previous blocking rounds")
+        if open_debts:
+            parts.append(
+                f"{len(open_debts)} commit-readiness debt item(s) surfaced by review_status"
+            )
+        return (" ".join(parts) + ". ") if parts else ""
+
+    regroup = (
+        "After the first blocked review, stop patching one finding at a time: "
+        "re-read the full diff, group obligations by root cause, rewrite the plan, "
+        "finish all remaining edits, then run advisory_pre_review(commit_message='...')."
     )
-    open_obligation_prefix = (
-        f"There are still {len(open_obs)} open obligation(s) from previous blocking rounds. "
-        if open_obs else ""
-    )
+
     if not effective_is_fresh:
-        # preflight_blocked for the exact current snapshot (SDK skipped —
-        # a staged .py file has a SyntaxError). Raise it above parse_failure
-        # in the priority list: the concrete syntax-error location is much
-        # more actionable than the generic "could not parse" message.
-        # tests_preflight_blocked: pytest failed before the SDK call.
-        if latest and latest.status == "tests_preflight_blocked" and not stale_from_edit:
-            tail = (
-                f" There are still {len(open_obs)} open obligation(s) from previous "
-                "blocking rounds — address those in the same edit pass."
-                if open_obs else ""
-            )
-            return (
-                "Last advisory run was blocked by test preflight: pytest failed before "
-                "the Claude SDK call. Fix the failing tests and re-run advisory_pre_review. "
-                "Use advisory_pre_review(skip_tests=True) only for intentional WIP code."
-                + debt_prefix
-                + tail
-            )
-        # preflight_blocked for the exact current snapshot (SDK skipped —
-        # a staged .py file has a SyntaxError). Raise it above parse_failure
-        # in the priority list: the concrete syntax-error location is much
-        # more actionable than the generic "could not parse" message.
-        if latest and latest.status == "preflight_blocked" and not stale_from_edit:
-            tail = (
-                f" There are still {len(open_obs)} open obligation(s) from previous "
-                "blocking rounds — address those in the same edit pass."
-                if open_obs else ""
-            )
-            return (
-                "Last advisory run was blocked by syntax preflight: a staged .py "
-                "file has a SyntaxError. See the file:line:msg in the raw_result. "
-                "Fix the syntax error and re-run advisory_pre_review."
-                + debt_prefix
-                + tail
-            )
-        # parse_failure for the exact current snapshot (advisory ran but output was unparseable)
-        if latest and latest.status == "parse_failure" and not stale_from_edit:
-            if open_obs or open_debts:
-                return (
-                    "Last advisory run produced unparseable output (parse_failure). "
-                    + open_obligation_prefix
-                    + debt_prefix
-                    + "After the first blocked review, stop patching one finding at a time: re-read the full diff, "
-                    + "group obligations by root cause, rewrite the plan, finish all remaining edits, then re-run "
-                    + "advisory_pre_review(commit_message='...'), or bypass: "
-                    + "repo_commit(skip_advisory_pre_review=True) (audited)."
+        status = str(getattr(latest, "status", "") or "")
+        if latest and status in {"tests_preflight_blocked", "preflight_blocked"} and not stale_from_edit:
+            if status == "tests_preflight_blocked":
+                problem = "test preflight: pytest failed before the Claude SDK call"
+                fix = (
+                    "Fix the failing tests and re-run advisory_pre_review. "
+                    "Use advisory_pre_review(skip_tests=True) only for intentional WIP code."
                 )
-            return (
-                "Last advisory run produced unparseable output (parse_failure). "
-                + "Re-run: advisory_pre_review(commit_message='...'), "
-                + "or bypass: repo_commit(skip_advisory_pre_review=True) (audited)."
+            else:
+                problem = "syntax preflight: a staged .py file has a SyntaxError"
+                fix = "See raw_result for file:line:msg, fix it, and re-run advisory_pre_review."
+            return f"Last advisory run was blocked by {problem}. {fix} {_debt_hint()}".strip()
+        if latest and status == "parse_failure" and not stale_from_edit:
+            suffix = (
+                regroup + " Or bypass: repo_commit(skip_advisory_pre_review=True) (audited)."
+                if (open_obs or open_debts)
+                else "Re-run: advisory_pre_review(commit_message='...'), or bypass: repo_commit(skip_advisory_pre_review=True) (audited)."
             )
+            return f"Last advisory run produced unparseable output (parse_failure). {_debt_hint()}{suffix}"
         if open_obs or open_debts:
-            stale_prefix = (
+            prefix = (
                 f"Advisory was invalidated by a worktree edit at {stale_from_edit_ts}. "
                 if stale_from_edit else
                 "Advisory is stale or missing for the current snapshot. "
             )
-            return (
-                stale_prefix
-                + open_obligation_prefix
-                + debt_prefix
-                + "After the first blocked review, stop patching one finding at a time: re-read the full diff, "
-                + "group obligations by root cause, rewrite the plan, finish all remaining edits, then run "
-                + "advisory_pre_review(commit_message='...')."
-            )
+            return prefix + _debt_hint() + regroup
         if stale_from_edit:
             return (
                 f"Advisory was invalidated by a worktree edit at {stale_from_edit_ts}. "
@@ -1278,13 +1218,11 @@ def _next_step_guidance(latest: Optional["AdvisoryRunRecord"], state: "AdvisoryR
     # Advisory is effectively fresh — check obligations and findings
     if open_obs or open_debts:
         return (
-            f"Advisory is current but unresolved review debt remains: {unresolved_summary or 'review debt'}. "
+            f"Advisory is current but unresolved review debt remains. {_debt_hint()}"
             "repo_commit will be blocked until that debt is cleared. "
-            + debt_prefix
-            + "After the first blocked review, stop patching one "
-            + "finding at a time: re-read the full diff, group obligations by root cause, rewrite "
-            + "the plan, then continue. Fix the issues, re-run advisory_pre_review so it marks "
-            + "them PASS, or bypass: repo_commit(skip_advisory_pre_review=True) (audited)."
+            "Re-read the full diff, group obligations by root cause, and rewrite the plan. "
+            "Fix the issues, re-run advisory_pre_review so it marks them PASS, "
+            "or bypass: repo_commit(skip_advisory_pre_review=True) (audited)."
         )
 
     if latest and latest.status == "skipped":
@@ -1348,13 +1286,6 @@ def _persist_preflight_record(
         task_id = str(getattr(ctx, "task_id", "") or "")
 
         def _mutate(pre_state: AdvisoryReviewState) -> None:
-            next_attempt = len(
-                pre_state.filter_advisory_runs(
-                    repo_key=repo_key,
-                    tool_name="advisory_pre_review",
-                    task_id=task_id,
-                )
-            ) + 1
             pre_state.add_run(AdvisoryRunRecord(
                 snapshot_hash=snapshot_hash,
                 commit_message=commit_message,
@@ -1371,7 +1302,6 @@ def _persist_preflight_record(
                 repo_key=repo_key,
                 tool_name="advisory_pre_review",
                 task_id=task_id,
-                attempt=next_attempt,
                 readiness_warnings=list(record.get("readiness_warnings") or []),
                 prompt_chars=int(record.get("prompt_chars") or 0),
                 model_used=str(record.get("model_used") or ""),
@@ -1673,13 +1603,6 @@ def _handle_advisory_pre_review(
     if raw_result.startswith("⚠️ ADVISORY_SKIPPED:"):
         snapshot_summary = f"{changed_files.count(chr(10)) + 1} file(s) changed"
         def _mutate_skip(skip_state: AdvisoryReviewState) -> None:
-            next_run_attempt = len(
-                skip_state.filter_advisory_runs(
-                    repo_key=repo_key,
-                    tool_name="advisory_pre_review",
-                    task_id=task_id,
-                )
-            ) + 1
             skip_state.add_run(AdvisoryRunRecord(
                 snapshot_hash=snapshot_hash,
                 commit_message=commit_message,
@@ -1692,7 +1615,6 @@ def _handle_advisory_pre_review(
                 repo_key=repo_key,
                 tool_name="advisory_pre_review",
                 task_id=task_id,
-                attempt=next_run_attempt,
                 readiness_warnings=readiness_warnings,
                 prompt_chars=prompt_chars,
                 model_used=model_used,
@@ -1734,13 +1656,6 @@ def _handle_advisory_pre_review(
         repo_key=repo_key,
         tool_name="advisory_pre_review",
         task_id=task_id,
-        attempt=len(
-            state.filter_advisory_runs(
-                repo_key=repo_key,
-                tool_name="advisory_pre_review",
-                task_id=task_id,
-            )
-        ) + 1,
         readiness_warnings=readiness_warnings,
         prompt_chars=prompt_chars,
         model_used=model_used,
@@ -1805,103 +1720,6 @@ def _handle_advisory_pre_review(
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
-def _attempt_actor_summary(attempt) -> dict:
-    """Return compact triad_actors / scope_actor fields for a CommitAttemptRecord.
-
-    Surfaces model_id + status only — raw text is never injected into context.
-    """
-    triad_raw = getattr(attempt, "triad_raw_results", None) or []
-    scope_raw = getattr(attempt, "scope_raw_result", None) or {}
-    return {
-        "triad_actors": [
-            {"model_id": r.get("model_id", "?"), "status": r.get("status", "?")}
-            for r in triad_raw
-        ],
-        "scope_actor": (
-            {"model_id": scope_raw.get("model_id", "?"), "status": scope_raw.get("status", "?")}
-            if scope_raw.get("status") else None
-        ),
-    }
-
-
-def _selected_attempt_payload(ca) -> Optional[Dict[str, Any]]:
-    """Serialise a single commit attempt for review_status output.
-
-    Returns ``None`` when there is no selected attempt (e.g. first commit on
-    a fresh repo, or the scoped filter matched nothing).
-    """
-    if ca is None:
-        return None
-    return {
-        "status": ca.status,
-        "commit_message": ca.commit_message,
-        "ts": ca.ts,
-        "duration_sec": round(ca.duration_sec, 1),
-        "block_reason": ca.block_reason or None,
-        "block_details_preview": (
-            _truncate_review_artifact(ca.block_details, limit=300)
-            if ca.block_details else None
-        ),
-        "repo_key": ca.repo_key or None,
-        "tool_name": ca.tool_name or None,
-        "task_id": ca.task_id or None,
-        "attempt": int(ca.attempt or 0) or None,
-        "phase": ca.phase or None,
-        "blocked": bool(ca.blocked),
-        "late_result_pending": bool(ca.late_result_pending),
-        "critical_findings": len(ca.critical_findings or []),
-        "advisory_findings": len(ca.advisory_findings or []),
-        "obligation_ids": list(ca.obligation_ids or []),
-        "readiness_warnings": list(ca.readiness_warnings or []),
-        "pre_review_fingerprint": ca.pre_review_fingerprint[:12] or None,
-        "post_review_fingerprint": ca.post_review_fingerprint[:12] or None,
-        "fingerprint_status": ca.fingerprint_status or None,
-        "degraded_reasons": list(ca.degraded_reasons or []),
-        **_attempt_actor_summary(ca),
-    }
-
-
-def _obligations_payload(open_obs: list) -> list:
-    """Serialise open obligations for review_status output.
-
-    Short reason previews (200-char cap via truncate_review_artifact) keep the
-    status JSON readable without clipping source timestamps or commit message
-    references that downstream tooling needs for durable forensics.
-    """
-    return [
-        {
-            "obligation_id": ob.obligation_id,
-            "fingerprint": getattr(ob, "fingerprint", ""),
-            "item": ob.item,
-            "severity": ob.severity,
-            "reason": _truncate_review_artifact(ob.reason, limit=200),
-            "status": ob.status,
-            "source_ts": ob.source_attempt_ts,
-            "source_commit": ob.source_attempt_msg,
-        }
-        for ob in open_obs
-    ]
-
-
-def _commit_readiness_debts_payload(open_debts: list) -> list:
-    return [
-        {
-            "debt_id": debt.debt_id,
-            "category": debt.category,
-            "title": debt.title,
-            "summary": _truncate_review_artifact(debt.summary, limit=220),
-            "status": debt.status,
-            "severity": debt.severity,
-            "source": debt.source,
-            "repo_key": debt.repo_key or None,
-            "source_obligation_ids": list(debt.source_obligation_ids or []),
-            "evidence": list(debt.evidence or []),
-            "updated_at": debt.updated_at,
-        }
-        for debt in open_debts
-    ]
-
-
 def _handle_review_status(
     ctx: ToolContext,
     repo_key: str = "",
@@ -1922,230 +1740,29 @@ def _handle_review_status(
     read path for epistemic-integrity forensics — no need to open the
     advisory_review.json state file by hand.
     """
-    drive_root = pathlib.Path(ctx.drive_root)
-    state = load_state(drive_root)
-    repo_dir_value = getattr(ctx, "repo_dir", "")
-    repo_dir = (
-        pathlib.Path(repo_dir_value)
-        if isinstance(repo_dir_value, (str, pathlib.Path)) and str(repo_dir_value)
-        else None
-    )
-    repo_filter = repo_key or (make_repo_key(repo_dir) if repo_dir is not None else None)
-    tool_filter = tool_name or None
-    task_filter = task_id or None
-    filtered_runs = state.filter_advisory_runs(
-        repo_key=repo_filter,
-        tool_name=tool_filter,
-        task_id=task_filter,
+    projection = build_review_projection(
+        ctx.drive_root,
+        repo_dir=getattr(ctx, "repo_dir", ""),
+        repo_key=repo_key,
+        tool_name=tool_name,
+        task_id=task_id,
         attempt=attempt,
+        snapshot_hash_fn=compute_snapshot_hash,
     )
-    filtered_attempts = state.filter_attempts(
-        repo_key=repo_filter,
-        tool_name=tool_filter,
-        task_id=task_filter,
-        attempt=attempt,
+    next_step = _next_step_guidance(
+        projection["guidance_run"],
+        projection["state"],
+        projection["stale_from_edit"],
+        projection["stale_from_edit_ts"],
+        projection["open_obligations"],
+        projection["open_debts"],
+        effective_is_fresh=projection["effective_is_fresh"],
     )
-
-    runs_data = []
-    for run in reversed(filtered_runs):  # full history — no [-5:] cap
-        findings = [i for i in (run.items or []) if isinstance(i, dict)
-                    and str(i.get("verdict", "")).upper() == "FAIL"]
-        critical = [i for i in findings if str(i.get("severity", "")).lower() == "critical"]
-        runs_data.append({
-            "snapshot_hash": run.snapshot_hash[:12],
-            "commit_message": run.commit_message,  # full — no [:80] truncation
-            "status": run.status,
-            "ts": run.ts,  # full ts — no [:16] truncation
-            "critical_findings": len(critical),
-            "total_findings": len(findings),
-            "snapshot_summary": run.snapshot_summary,
-            "bypass_reason": run.bypass_reason or None,
-            "repo_key": run.repo_key or None,
-            "tool_name": run.tool_name or None,
-            "task_id": run.task_id or None,
-            "attempt": int(run.attempt or 0) or None,
-        })
-
-    latest = filtered_runs[-1] if filtered_runs else None
-
-    # Compute current snapshot hash using the same paths scope as the latest run
-    # so path-scoped advisories don't appear falsely stale.
-    try:
-        if repo_dir is None:
-            raise ValueError("repo_dir unavailable")
-        latest_paths = latest.snapshot_paths if latest else None
-        current_hash = compute_snapshot_hash(repo_dir, "", paths=latest_paths)
-        hash_mismatch = bool(
-            latest and latest.status in (
-                "fresh", "bypassed", "skipped", "parse_failure",
-                "preflight_blocked", "tests_preflight_blocked",
-            ) and latest.snapshot_hash != current_hash
-        )
-    except Exception:
-        current_hash = None
-        hash_mismatch = False
-
-    # Gate-accurate freshness: look up the run matching the CURRENT hash,
-    # not just `latest` — handles restored snapshots where an older fresh run exists.
-    open_obs = state.get_open_obligations(repo_key=repo_filter)
-    open_debts = state.get_open_commit_readiness_debts(repo_key=repo_filter)
-    matching_run = state.find_by_hash(current_hash, repo_key=repo_filter) if current_hash else None
-    effective_is_fresh = bool(
-        state.is_fresh(current_hash, repo_key=repo_filter) if current_hash else False
+    return json.dumps(
+        build_review_status_payload(projection, next_step=next_step, include_raw=include_raw),
+        ensure_ascii=False,
+        indent=2,
     )
-    # Use matching_run for guidance; fall back to latest for history display
-    guidance_run = matching_run or latest
-
-    # Staleness: either explicit edit-invalidation OR live hash mismatch
-    stale_from_edit = bool(
-        hash_mismatch or (
-            state.last_stale_from_edit_ts
-            and state.last_stale_repo_key in ("", repo_filter)
-        )
-    )
-    stale_from_edit_ts = (
-        state.last_stale_from_edit_ts  # full ts — no [:16] truncation
-        if state.last_stale_from_edit_ts and state.last_stale_repo_key in ("", repo_filter)
-        else ("now (hash mismatch)" if hash_mismatch else None)
-    )
-    stale_reason = (
-        state.last_stale_reason
-        if state.last_stale_repo_key in ("", repo_filter)
-        else ""
-    ) or (
-        "Current snapshot hash no longer matches the latest advisory run."
-        if hash_mismatch else None
-    )
-
-    # Build commit attempt section
-    selected_attempt = filtered_attempts[-1] if filtered_attempts else (
-        None if (repo_filter or tool_filter or task_filter or attempt is not None) else state.latest_attempt()
-    )
-    commit_attempt_data = _selected_attempt_payload(selected_attempt)
-
-    attempts_data = []
-    for entry in reversed(filtered_attempts):  # full history — no [-8:] cap
-        attempts_data.append({
-            "repo_key": entry.repo_key or None,
-            "tool_name": entry.tool_name or None,
-            "task_id": entry.task_id or None,
-            "attempt": int(entry.attempt or 0) or None,
-            "phase": entry.phase or None,
-            "status": entry.status,
-            "blocked": bool(entry.blocked),
-            "late_result_pending": bool(entry.late_result_pending),
-            "critical_findings": len(entry.critical_findings or []),
-            "advisory_findings": len(entry.advisory_findings or []),
-            "obligation_ids": list(entry.obligation_ids or []),
-            "readiness_warnings": list(entry.readiness_warnings or []),
-            "pre_review_fingerprint": entry.pre_review_fingerprint[:12] or None,
-            "post_review_fingerprint": entry.post_review_fingerprint[:12] or None,
-            "fingerprint_status": entry.fingerprint_status or None,
-            "degraded_reasons": list(entry.degraded_reasons or []),
-            **_attempt_actor_summary(entry),
-            "ts": entry.ts,  # full ts — no [:16] truncation
-        })
-
-    # Open obligations (already computed above as open_obs for effective_is_fresh)
-    obligations_data = _obligations_payload(open_obs)
-    debts_data = _commit_readiness_debts_payload(open_debts)
-
-    # Determine readiness and actionable next step (via module-level helper)
-
-    # Build human-readable summary
-    ca = selected_attempt
-    if ca and ca.status in ("blocked", "failed"):
-        reason_map = {
-            "no_advisory": "No fresh advisory pre-review found. Run advisory_pre_review first.",
-            "critical_findings": "Reviewers found critical issues. Fix all issues listed, then re-run advisory.",
-            "review_quorum": "Not enough review models responded. Retry — usually transient.",
-            "parse_failure": "Review models could not produce parseable output. Retry the commit.",
-            "infra_failure": "Infrastructure failure (git lock, git command, or review API). Check block_details.",
-            "scope_blocked": "Scope reviewer blocked the commit. Address scope review findings.",
-            "preflight": "Preflight check failed (missing VERSION/README). Stage all related files.",
-            "revalidation_failed": "The staged diff changed after review. Re-run advisory and review on the final staged diff.",
-            "fingerprint_unavailable": "The staged diff could not be fingerprinted for revalidation. Fix the git diff issue and retry.",
-            "overlap_guard": "Another reviewed attempt is still active. Wait for it to finish or expire before retrying.",
-        }
-        block_action = reason_map.get(
-            ca.block_reason,
-            f"{ca.status}: {ca.block_reason or 'unknown'}. Check block_details."
-        )
-        label = "BLOCKED" if ca.status == "blocked" else "FAILED"
-        if ca.late_result_pending:
-            block_action += " Late result is still pending."
-        status_msg = f"Last commit {label} ({ca.block_reason or 'unclassified'}): {block_action}"
-    else:
-        # Use effective (gate-accurate) status derived from live snapshot, not latest run
-        pass  # status_msg set below after effective_status is computed
-
-    next_step_msg = _next_step_guidance(guidance_run, state, stale_from_edit, stale_from_edit_ts,
-                                         open_obs, open_debts, effective_is_fresh=effective_is_fresh)
-    # Derive primary status fields from current snapshot (gate-accurate), not from latest run.
-    # matching_run is the advisory that matches the live worktree hash (may differ from latest).
-    # If a matching run exists for this hash, use its actual status (including "parse_failure")
-    # rather than collapsing to "stale" — that would hide the real gate-relevant state.
-    # Only fall back to "stale"/"none" when there is NO matching run for the current snapshot.
-    if matching_run:
-        effective_status = matching_run.status
-    elif latest:
-        effective_status = "stale"
-    else:
-        effective_status = "none"
-    effective_hash = (
-        matching_run.snapshot_hash[:12] if matching_run and matching_run.snapshot_hash else None
-    )
-    # status_summary / message MUST be derived from the effective (gate-accurate) state only.
-    # Never show "latest run status" here — that can be from a different snapshot and is
-    # confusing / internally contradictory.  If a blocking commit attempt is recorded we
-    # prepend that context, but the current-snapshot status always closes the sentence.
-    if ca and ca.status in ("blocked", "failed"):
-        # Keep the block-action sentence from above but append the live advisory state so
-        # they remain consistent even when the worktree has changed since the last block.
-        status_msg = f"{status_msg}  |  Current advisory: {effective_status}"
-    else:
-        status_msg = f"Current advisory: {effective_status}"
-    if open_debts:
-        status_msg = f"{status_msg}  |  Commit-readiness debt: {len(open_debts)}"
-
-    retry_anchor = "commit_readiness_debt" if open_debts else None
-    response_body: Dict[str, Any] = {
-        "latest_advisory_status": effective_status,
-        "latest_advisory_hash": effective_hash,
-        "stale_from_edit": stale_from_edit,
-        "stale_from_edit_ts": stale_from_edit_ts,
-        "stale_reason": stale_reason,
-        "filters": {
-            "repo_key": repo_filter,
-            "tool_name": tool_filter,
-            "task_id": task_filter,
-            "attempt": attempt,
-        },
-        "advisory_runs": runs_data,
-        "attempts": attempts_data,
-        "selected_commit_attempt": commit_attempt_data,
-        "open_obligations": obligations_data,
-        "open_obligations_count": len(obligations_data),
-        "commit_readiness_debts": debts_data,
-        "commit_readiness_debts_count": len(debts_data),
-        "repo_commit_ready": bool(effective_is_fresh and not open_obs and not open_debts),
-        "retry_anchor": retry_anchor,
-        "status_summary": status_msg,
-        "message": status_msg,  # backward-compat alias for status_summary
-        "next_step": next_step_msg,
-    }
-    if include_raw and selected_attempt is not None:
-        # Per-actor durable evidence for epistemic-integrity forensics
-        # (see v4.32.0 observability contract in docs/ARCHITECTURE.md).
-        # Default false — verbose payload is opt-in since raw_text can be large.
-        response_body["raw_evidence"] = {
-            "attempt_ts": selected_attempt.ts,
-            "attempt_number": int(selected_attempt.attempt or 0) or None,
-            "tool_name": selected_attempt.tool_name or None,
-            "triad_raw_results": list(selected_attempt.triad_raw_results or []),
-            "scope_raw_result": dict(selected_attempt.scope_raw_result or {}),
-        }
-    return json.dumps(response_body, ensure_ascii=False, indent=2)
 
 
 # -- Tool registration --

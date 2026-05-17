@@ -80,10 +80,11 @@ def test_marketplace_does_not_redeclare_shared_helpers():
 
 def test_skills_does_not_redeclare_shared_helpers():
     src = _read("skills.js")
+    renderer = _read("skill_card_renderer.js")
     assert "boundedText" in src
-    assert "safeExternalHrefAttr as safeExternalUrl" in src
+    assert "safeExternalHrefAttr as safeExternalUrl" in renderer
     assert "function boundedText(" not in src
-    assert "function safeExternalUrl(" not in src
+    assert "function safeExternalUrl(" not in src + renderer
 
 
 def test_widgets_uses_shared_render_markdown():

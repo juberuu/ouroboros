@@ -431,14 +431,7 @@ def _check_overlapping_review_attempt(ctx: ToolContext) -> Optional[str]:
 def _check_advisory_freshness(ctx: ToolContext, commit_message: str,
                               skip_advisory_pre_review: bool = False,
                               paths: Optional[List[str]] = None) -> Optional[str]:
-    from ouroboros.review_state import (
-        AdvisoryRunRecord,
-        compute_snapshot_hash,
-        load_state,
-        make_repo_key,
-        update_state,
-        _utc_now,
-    )
+    from ouroboros.review_state import AdvisoryRunRecord, compute_snapshot_hash, load_state, make_repo_key, update_state, _utc_now
     from ouroboros.config import get_review_enforcement
     from ouroboros.utils import append_jsonl
     drive_root = pathlib.Path(ctx.drive_root)
@@ -480,13 +473,6 @@ def _check_advisory_freshness(ctx: ToolContext, commit_message: str,
             pass
 
         def _mutate(bypass_state):
-            next_run_attempt = len(
-                bypass_state.filter_advisory_runs(
-                    repo_key=repo_key,
-                    tool_name="advisory_pre_review",
-                    task_id=task_id,
-                )
-            ) + 1
             bypass_state.add_run(AdvisoryRunRecord(
                 snapshot_hash=snapshot_hash,
                 commit_message=commit_message,
@@ -498,7 +484,6 @@ def _check_advisory_freshness(ctx: ToolContext, commit_message: str,
                 repo_key=repo_key,
                 tool_name="advisory_pre_review",
                 task_id=task_id,
-                attempt=next_run_attempt,
             ))
 
         update_state(drive_root, _mutate)

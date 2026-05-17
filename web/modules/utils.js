@@ -93,6 +93,86 @@ export function isRateLimitError(message) {
     return text.includes('rate limit') || text.includes('too many requests') || text.includes('http 429');
 }
 
+export function formatCompactNumber(value) {
+    const num = Number(value);
+    if (!Number.isFinite(num) || num <= 0) return '—';
+    if (num >= 1_000_000) return (num / 1_000_000).toFixed(1) + 'M';
+    if (num >= 1_000) return (num / 1_000).toFixed(1) + 'k';
+    return String(num);
+}
+
+export function reviewReady(entity, { requireFresh = false } = {}) {
+    if (entity?.review_gate && typeof entity.review_gate.executable_review === 'boolean') {
+        return entity.review_gate.executable_review && (!requireFresh || !entity.review_stale);
+    }
+    if (typeof entity?.executable_review === 'boolean') {
+        return entity.executable_review && (!requireFresh || !entity.review_stale);
+    }
+    return ['clean', 'warnings'].includes(entity?.review_status) && !entity?.review_stale;
+}
+
+export function reviewTone(status, error = '') {
+    if (error) return 'danger';
+    if (status === 'clean') return 'ok';
+    if (status === 'blockers') return 'danger';
+    return ['warnings', 'pending'].includes(status) ? 'warn' : 'muted';
+}
+
+export function topReviewFinding(entity) {
+    const findings = Array.isArray(entity?.review_findings) ? entity.review_findings : [];
+    if (!findings.length) return '';
+    const first = findings[0] || {};
+    const label = first.item || first.check || first.title || 'finding';
+    const verdict = first.verdict || first.severity || '';
+    const reason = first.reason || first.message || '';
+    return `${verdict ? `${verdict} ` : ''}${label}: ${reason}`.trim();
+}
+
+export function renderHubCard(item, {
+    pending = null,
+    installed = null,
+    lifecycle,
+    primaryHtml = '',
+    secondaryHtml = '',
+    badgesHtml = '',
+    metaHtml = '',
+    official = false,
+} = {}) {
+    const slug = item.slug;
+    const spinner = pending ? '<span class="marketplace-working-spinner" aria-hidden="true"></span>' : '';
+    const lifecycleHint = lifecycle?.hint
+        ? `<div class="marketplace-card-state-hint">${escapeHtmlAttr(lifecycle.hint)}</div>`
+        : '';
+    const status = installed
+        ? `<span class="skills-status-chip skills-status-ok">Installed v${escapeHtmlAttr(installed.version || item.latest_version || '')}</span>`
+        : '';
+    return `
+        <article class="${pending ? 'marketplace-card is-working' : 'marketplace-card'}" data-slug="${escapeHtmlAttr(slug)}">
+            <div class="marketplace-card-head">
+                <div class="marketplace-card-title">
+                    <strong>${escapeHtmlAttr(item.display_name || slug)}</strong>
+                    <span class="muted">${escapeHtmlAttr(slug)} · v${escapeHtmlAttr(item.latest_version || '—')}</span>
+                </div>
+                <div class="marketplace-card-badges">
+                    ${official ? '<span class="skills-badge skills-badge-ok">official</span>' : ''}
+                    ${status}
+                    ${badgesHtml}
+                </div>
+            </div>
+            <div class="marketplace-card-body">${escapeHtmlAttr(item.summary || item.description || '')}</div>
+            <div class="marketplace-card-state marketplace-state-${escapeHtmlAttr(lifecycle?.tone || 'muted')}">
+                <strong>${spinner}${escapeHtmlAttr(lifecycle?.label || '')}</strong>
+                ${lifecycleHint}
+            </div>
+            ${metaHtml ? `<div class="marketplace-card-meta muted">${metaHtml}</div>` : ''}
+            <div class="marketplace-card-actions">
+                <div class="marketplace-primary-action">${primaryHtml}</div>
+                ${secondaryHtml ? `<div class="marketplace-secondary-actions">${secondaryHtml}</div>` : ''}
+            </div>
+        </article>
+    `;
+}
+
 /**
  * Render the skill_repair prompt body shared between Skills (My Skills) and
  * Marketplace (ClawHub) call sites. ``intro`` is the per-surface first

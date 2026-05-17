@@ -145,6 +145,22 @@ def build_knowledge_sections(
     return sections
 
 
+def build_governance_sections(env: Any, *, warn_large: bool = False, warn_label: str = "context") -> List[str]:
+    sections: List[str] = []
+    for rel_path, header, required in (
+        ("BIBLE.md", "## BIBLE.md", False),
+        ("docs/ARCHITECTURE.md", "## ARCHITECTURE.md", True),
+    ):
+        text = safe_read(env.repo_path(rel_path))
+        if text:
+            if warn_large and len(text) > _LARGE_CONTEXT_SECTION_CHARS:
+                log.warning("%s: %s is large (%d chars)", warn_label, rel_path, len(text))
+            sections.append(f"{header}\n\n{text}")
+        elif required:
+            log.warning("%s: %s not found or empty", warn_label, rel_path)
+    return sections
+
+
 _SECTION_BUDGETS = {
     "scratchpad": 90_000,
     "identity": 80_000,
@@ -273,22 +289,16 @@ def build_memory_sections(memory: Memory, partition: str = "all") -> List[str]:
 
     if include_volatile:
         dialogue_blocks = memory.load_dialogue_blocks()
-        summary_path = memory.drive_root / "memory" / "dialogue_summary.md"
-        summary_text = ""
-        if summary_path.exists():
-            summary_text = read_text(summary_path)
         if dialogue_blocks:
             blocks_md = memory.format_blocks_as_markdown(dialogue_blocks)
             if blocks_md.strip():
                 sections.append("## Dialogue History\n\n" + blocks_md)
-            if summary_text.strip():
-                sections.append(
-                    "## Retired legacy dialogue summary (read-only historical fallback)\n\n"
-                    + summary_text
-                )
-        else:
-            if summary_text.strip():
-                sections.append("## Dialogue Summary\n\n" + summary_text)
+        legacy_summary = safe_read(memory.drive_root / "memory" / "dialogue_summary.md").strip()
+        if legacy_summary:
+            sections.append(
+                "## Legacy Dialogue Summary (retired flat format, read-only fallback)\n\n"
+                + legacy_summary
+            )
 
     if partition == "all":
         registry_path = memory.drive_root / "memory" / "registry.md"
@@ -875,11 +885,9 @@ def build_llm_messages(
         if deep_review_path.exists():
             dr_text = deep_review_path.read_text(encoding="utf-8")
             if dr_text.strip():
-                # Cap at 8K chars to avoid bloating context
-                if len(dr_text) > 8000:
-                    dr_text = dr_text[:8000] + "\n\n[... truncated — full report in memory/deep_review.md]"
                 semi_stable_parts.append(
-                    "## Last Deep Self-Review\n\n" + dr_text
+                    "## Last Deep Self-Review\n\n"
+                    + truncate_review_artifact(dr_text, limit=8000)
                 )
     except Exception:
         pass

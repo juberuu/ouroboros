@@ -11,6 +11,7 @@ import {
     emitSkillLifecycle,
     escapeHtmlAttr as escapeHtml,
     fetchJson,
+    renderHubCard,
 } from './utils.js';
 
 
@@ -82,39 +83,10 @@ function card(item, installed) {
     const slug = item.slug;
     const pending = getPending(slug);
     const lifecycle = lifecycleFor(installed, pending);
-    const cardClass = lifecycleCardClassFor(pending);
-    const spinner = lifecycleSpinnerFor(pending);
-    const lifecycleHint = lifecycle.hint
-        ? `<div class="marketplace-card-state-hint">${escapeHtml(lifecycle.hint)}</div>`
-        : '';
-    const status = installed
-        ? `<span class="skills-status-chip skills-status-ok">Installed v${escapeHtml(installed.version || item.latest_version || '')}</span>`
-        : '<span class="skills-status-chip skills-status-muted">Not installed</span>';
-    const primary = (installed && !pending)
+    const primaryHtml = (installed && !pending)
         ? '<button class="btn btn-default" disabled>Installed</button>'
         : `<button class="btn ${pending?.failed ? 'btn-default' : 'btn-primary'}" data-oh-install="${escapeHtml(slug)}" ${lifecycle.disabled ? 'disabled' : ''}>${escapeHtml(lifecycle.button)}</button>`;
-    return `
-        <article class="${cardClass}" data-slug="${escapeHtml(slug)}">
-            <div class="marketplace-card-head">
-                <div class="marketplace-card-title">
-                    <strong>${escapeHtml(item.display_name || slug)}</strong>
-                    <span class="muted">${escapeHtml(slug)} · v${escapeHtml(item.latest_version || '—')}</span>
-                </div>
-                <div class="marketplace-card-badges">
-                    <span class="skills-badge skills-badge-ok">official</span>
-                    ${status}
-                </div>
-            </div>
-            <div class="marketplace-card-body">${escapeHtml(item.summary || item.description || '')}</div>
-            <div class="marketplace-card-state marketplace-state-${lifecycle.tone}">
-                <strong>${spinner}${escapeHtml(lifecycle.label)}</strong>
-                ${lifecycleHint}
-            </div>
-            <div class="marketplace-card-actions">
-                <div class="marketplace-primary-action">${primary}</div>
-            </div>
-        </article>
-    `;
+    return renderHubCard(item, { pending, installed, lifecycle, primaryHtml, official: true });
 }
 
 

@@ -105,6 +105,20 @@ def _repo_scope_matches(
     return (not exact_match_exists) and record_repo_key in ("", _LEGACY_CURRENT_REPO_KEY)
 
 
+def _filter_repo_scope(records: List[Any], repo_key: str | None) -> List[Any]:
+    if repo_key is None:
+        return list(records)
+    exact_match_exists = _repo_scope_exact_match_exists(records, repo_key)
+    return [
+        record for record in records
+        if _repo_scope_matches(
+            str(getattr(record, "repo_key", "") or ""),
+            repo_key,
+            exact_match_exists=exact_match_exists,
+        )
+    ]
+
+
 def _commit_readiness_debts_view(state: Any) -> List["CommitReadinessDebtItem"]:
     debts = getattr(state, "commit_readiness_debts", None)
     if isinstance(debts, list):
@@ -258,17 +272,7 @@ class AdvisoryReviewState:
             item for item in self.attempts
             if item.status == "reviewing" or item.late_result_pending
         ]
-        if repo_key is not None:
-            exact_match_exists = _repo_scope_exact_match_exists(active, repo_key)
-            active = [
-                item for item in active
-                if _repo_scope_matches(
-                    item.repo_key,
-                    repo_key,
-                    exact_match_exists=exact_match_exists,
-                )
-            ]
-        return active
+        return _filter_repo_scope(active, repo_key)
 
     def filter_advisory_runs(
         self,
@@ -278,17 +282,7 @@ class AdvisoryReviewState:
         task_id: str | None = None,
         attempt: int | None = None,
     ) -> List[AdvisoryRunRecord]:
-        results = list(self.advisory_runs)
-        if repo_key is not None:
-            exact_match_exists = _repo_scope_exact_match_exists(results, repo_key)
-            results = [
-                run for run in results
-                if _repo_scope_matches(
-                    run.repo_key,
-                    repo_key,
-                    exact_match_exists=exact_match_exists,
-                )
-            ]
+        results = _filter_repo_scope(self.advisory_runs, repo_key)
         if tool_name is not None:
             results = [run for run in results if run.tool_name == tool_name]
         if task_id is not None:
@@ -305,17 +299,7 @@ class AdvisoryReviewState:
         task_id: str | None = None,
         attempt: int | None = None,
     ) -> List[CommitAttemptRecord]:
-        results = list(self.attempts)
-        if repo_key is not None:
-            exact_match_exists = _repo_scope_exact_match_exists(results, repo_key)
-            results = [
-                item for item in results
-                if _repo_scope_matches(
-                    item.repo_key,
-                    repo_key,
-                    exact_match_exists=exact_match_exists,
-                )
-            ]
+        results = _filter_repo_scope(self.attempts, repo_key)
         if tool_name is not None:
             results = [item for item in results if item.tool_name == tool_name]
         if task_id is not None:
@@ -329,21 +313,29 @@ class AdvisoryReviewState:
         latest = max((int(item.attempt or 0) for item in candidates), default=0)
         return latest + 1
 
+    def next_advisory_attempt_number(
+        self,
+        repo_key: str,
+        task_id: str = "",
+        tool_name: str = _DEFAULT_ADVISORY_TOOL_NAME,
+    ) -> int:
+        candidates = self.filter_advisory_runs(
+            repo_key=repo_key,
+            tool_name=tool_name,
+            task_id=task_id,
+        )
+        latest = max((int(run.attempt or 0) for run in candidates), default=0)
+        return latest + 1
+
     def find_by_hash(
         self,
         snapshot_hash: str,
         repo_key: str | None = None,
     ) -> Optional[AdvisoryRunRecord]:
-        exact_match_exists = _repo_scope_exact_match_exists(self.advisory_runs, repo_key)
-        for run in reversed(self.advisory_runs):
+        for run in reversed(_filter_repo_scope(self.advisory_runs, repo_key)):
             if run.snapshot_hash != snapshot_hash:
                 continue
-            if _repo_scope_matches(
-                run.repo_key,
-                repo_key,
-                exact_match_exists=exact_match_exists,
-            ):
-                return run
+            return run
         return None
 
     def is_fresh(self, snapshot_hash: str, repo_key: str | None = None) -> bool:
@@ -351,6 +343,12 @@ class AdvisoryReviewState:
         return run is not None and run.status in ("fresh", "bypassed", "skipped")
 
     def add_run(self, run: AdvisoryRunRecord) -> None:
+        if not run.attempt:
+            run.attempt = self.next_advisory_attempt_number(
+                str(run.repo_key or _LEGACY_CURRENT_REPO_KEY),
+                str(run.task_id or ""),
+                str(run.tool_name or _DEFAULT_ADVISORY_TOOL_NAME),
+            )
         if not run.created_ts:
             run.created_ts = run.ts or _utc_now()
         if not run.updated_ts:
@@ -801,16 +799,9 @@ class AdvisoryReviewState:
             current.consecutive_observations = int(current.consecutive_observations or 0) + 1
             current.verified_at = ""
 
-        exact_match_exists = _repo_scope_exact_match_exists(debts, repo_key)
-        for debt in debts:
+        for debt in _filter_repo_scope(debts, repo_key):
             debt_key = (debt.repo_key, debt.fingerprint or debt.debt_id)
             if debt_key in observed:
-                continue
-            if not _repo_scope_matches(
-                debt.repo_key,
-                repo_key,
-                exact_match_exists=exact_match_exists,
-            ):
                 continue
             if debt.status in _OPEN_COMMIT_READINESS_DEBT_STATUSES:
                 debt.status = "verified"
@@ -838,17 +829,10 @@ class AdvisoryReviewState:
         repo_key: str | None = None,
     ) -> List[CommitReadinessDebtItem]:
         debts = _commit_readiness_debts_view(self)
-        exact_match_exists = _repo_scope_exact_match_exists(debts, repo_key)
         results: List[CommitReadinessDebtItem] = []
-        for debt in debts:
+        for debt in _filter_repo_scope(debts, repo_key):
             self._hydrate_commit_readiness_debt(debt)
             if debt.status not in _OPEN_COMMIT_READINESS_DEBT_STATUSES:
-                continue
-            if not _repo_scope_matches(
-                debt.repo_key,
-                repo_key,
-                exact_match_exists=exact_match_exists,
-            ):
                 continue
             results.append(debt)
         return results
@@ -953,16 +937,9 @@ class AdvisoryReviewState:
         resolved_by: str = "",
         repo_key: str | None = None,
     ) -> int:
-        exact_match_exists = _repo_scope_exact_match_exists(self.open_obligations, repo_key)
         count = 0
-        for ob in self.open_obligations:
+        for ob in _filter_repo_scope(self.open_obligations, repo_key):
             if ob.obligation_id not in resolved_ids or ob.status != "still_open":
-                continue
-            if not _repo_scope_matches(
-                ob.repo_key,
-                repo_key,
-                exact_match_exists=exact_match_exists,
-            ):
                 continue
             if ob.obligation_id in resolved_ids and ob.status == "still_open":
                 ob.status = "resolved"
@@ -971,15 +948,9 @@ class AdvisoryReviewState:
         return count
 
     def get_open_obligations(self, repo_key: str | None = None) -> List[ObligationItem]:
-        exact_match_exists = _repo_scope_exact_match_exists(self.open_obligations, repo_key)
         return [
-            ob for ob in self.open_obligations
+            ob for ob in _filter_repo_scope(self.open_obligations, repo_key)
             if ob.status == "still_open"
-            and _repo_scope_matches(
-                ob.repo_key,
-                repo_key,
-                exact_match_exists=exact_match_exists,
-            )
         ]
 
     def on_successful_commit(self, repo_key: str | None = None) -> None:
@@ -998,14 +969,9 @@ class AdvisoryReviewState:
                     debt.consecutive_observations = 0
             return
 
-        exact_obligation_match = _repo_scope_exact_match_exists(self.open_obligations, repo_key)
         self.open_obligations = [
             ob for ob in self.open_obligations
-            if not _repo_scope_matches(
-                ob.repo_key,
-                repo_key,
-                exact_match_exists=exact_obligation_match,
-            )
+            if ob not in _filter_repo_scope(self.open_obligations, repo_key)
         ]
         if self.last_stale_repo_key in ("", repo_key):
             self.last_stale_from_edit_ts = ""

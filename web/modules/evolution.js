@@ -1,34 +1,11 @@
 import { escapeHtmlText, formatUsd2 } from './utils.js';
 import { apiFetch } from './api_client.js';
 
-// ``hostPage`` defaults to ``'dashboard'`` (Dashboard sub-tab migration v5.7+);
-// the legacy ``'settings'`` value is no longer passed by ``app.js``.
-export function initEvolution({ ws, state, mount = null, embedded = false, chartOnly = false, hostPage = 'dashboard', hostSubtab = 'evolution' }) {
+export function initEvolution({ ws, state, mount }) {
     const page = document.createElement('div');
     page.id = 'page-evolution';
-    page.className = embedded ? 'settings-embedded-content settings-evolution-panel' : 'page';
-    // v5.7.0: drop the duplicate inner page-header when embedded (Dashboard
-    // pill strip already labels the panel). Move Refresh + status badge
-    // into the runtime card head row alongside the existing pills.
-    const headerBlock = embedded
-        ? ''
-        : `
-        <div class="page-header">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
-            <h2>Evolution</h2>
-            <div class="spacer"></div>
-            <button id="evo-refresh" class="btn btn-default btn-sm evo-refresh-btn" type="button">Refresh</button>
-            <span id="evo-status" class="status-badge">Loading...</span>
-        </div>`;
-    const inlineEvoControls = embedded
-        ? `
-                    <div class="evo-runtime-pills evo-runtime-controls">
-                        <button id="evo-refresh" class="btn btn-default btn-sm evo-refresh-btn" type="button">Refresh</button>
-                        <span id="evo-status" class="status-badge">Loading...</span>
-                    </div>`
-        : '';
+    page.className = 'settings-embedded-content settings-evolution-panel';
     page.innerHTML = `
-        ${headerBlock}
         <div id="evo-chart-content" class="evolution-container">
             <div class="evo-runtime-card">
                 <div class="evo-runtime-head">
@@ -40,7 +17,10 @@ export function initEvolution({ ws, state, mount = null, embedded = false, chart
                         <span id="evo-mode-pill" class="evo-runtime-pill">Evolution</span>
                         <span id="evo-bg-pill" class="evo-runtime-pill">Consciousness</span>
                     </div>
-                    ${inlineEvoControls}
+                    <div class="evo-runtime-pills evo-runtime-controls">
+                        <button id="evo-refresh" class="btn btn-default btn-sm evo-refresh-btn" type="button">Refresh</button>
+                        <span id="evo-status" class="status-badge">Loading...</span>
+                    </div>
                 </div>
                 <div id="evo-runtime-meta" class="evo-runtime-meta"></div>
             </div>
@@ -50,12 +30,10 @@ export function initEvolution({ ws, state, mount = null, embedded = false, chart
             <div id="evo-tags-list" class="evo-tags-list"></div>
         </div>
     `;
-    (mount || document.getElementById('content')).appendChild(page);
+    mount.appendChild(page);
 
     function isEvolutionVisible() {
-        return embedded
-            ? state.activePage === hostPage && state.dashboardActiveSubtab === hostSubtab
-            : state.activePage === 'evolution';
+        return state.activePage === 'dashboard' && state.dashboardActiveSubtab === 'evolution';
     }
 
     // -----------------------------------------------------------------------
@@ -348,15 +326,12 @@ export function initEvolution({ ws, state, mount = null, embedded = false, chart
     });
 
     window.addEventListener('ouro:page-shown', (event) => {
-        if (!embedded && event?.detail?.page === 'evolution') {
+        if (event?.detail?.page === 'dashboard' && state.dashboardActiveSubtab === 'evolution') {
             ensureEvolutionLoaded(false);
         }
     });
-    window.addEventListener('ouro:settings-subtab-shown', (event) => {
-        if (embedded && event?.detail?.tab === 'evolution') ensureEvolutionLoaded(false);
-    });
     window.addEventListener('ouro:dashboard-subtab-shown', (event) => {
-        if (embedded && event?.detail?.tab === 'evolution') ensureEvolutionLoaded(false);
+        if (event?.detail?.tab === 'evolution') ensureEvolutionLoaded(false);
     });
 
     document.addEventListener('visibilitychange', () => {

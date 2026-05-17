@@ -502,70 +502,6 @@ def _read_skill_manifest_version(skill_dir: pathlib.Path) -> str:
     return ""
 
 
-def _record_skill_upgrade_migration(
-    drive_root: pathlib.Path,
-    skill_name: str,
-    old_version: str,
-    new_version: str,
-    log_obj: Any,
-) -> None:
-    """Persist a migration record so the Skills UI can surface a banner.
-
-    A native skill being replaced under the operator's feet (because a
-    new launcher version bumped the seed manifest) silently invalidates
-    the review state and any saved patterns / agent prompts that
-    referenced the old type. We write a JSON record at
-    ``data/state/migrations.json`` — the SPA reads it on mount via
-    ``/api/migrations``, displays a one-shot banner on the Skills tab,
-    and persists dismissal via ``/api/migrations/<key>/dismiss``.
-
-    The format is intentionally append-only: ``{key: record}`` where
-    ``key`` is ``"<new_version>_<skill_name>_upgrade"`` so a future
-    upgrade of the same skill at a still-newer version writes a fresh
-    record instead of mutating the old one.
-    """
-    state_dir = drive_root / "state"
-    target = state_dir / "migrations.json"
-    try:
-        state_dir.mkdir(parents=True, exist_ok=True)
-        existing: dict[str, Any] = {}
-        if target.is_file():
-            try:
-                existing = json.loads(target.read_text(encoding="utf-8")) or {}
-                if not isinstance(existing, dict):
-                    existing = {}
-            except Exception:
-                existing = {}
-        # Use the NEW version in the key so each upgrade gets its own
-        # record. Operators can dismiss old upgrades while still seeing
-        # the next one when a future bump fires.
-        key = f"v{new_version}_{skill_name}_upgrade"
-        from ouroboros.utils import utc_now_iso
-        existing[key] = {
-            "kind": "native_skill_upgrade",
-            "skill": skill_name,
-            "old_version": old_version,
-            "new_version": new_version,
-            "applied_at": utc_now_iso(),
-            "dismissed": False,
-            "summary": (
-                f"Native skill ``{skill_name}`` was upgraded from "
-                f"{old_version} to {new_version} on launch. Re-review "
-                f"may be required before the new version becomes "
-                f"executable. Old skill_exec / extension call shapes "
-                f"may need to be updated in saved patterns."
-            ),
-        }
-        target.write_text(
-            json.dumps(existing, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-    except Exception as exc:  # pragma: no cover - defensive
-        log_obj.warning(
-            "Failed to write migration record for %s: %s", skill_name, exc,
-        )
-
-
 def _reseed_native_skill_in_place(
     seed_skill: pathlib.Path,
     target_skill: pathlib.Path,
@@ -585,13 +521,9 @@ def _reseed_native_skill_in_place(
     skills are launcher-owned and the ``.seed-origin`` marker is the
     explicit signal of that ownership.
 
-    When ``drive_root`` and version metadata are passed, also writes
-    a migration record so the Skills UI can surface a banner about
-    the upgrade. This closes the gap where the operator's
-    `skill_exec(skill="weather", script="fetch.py")` invocations
-    silently broke after the v5 weather skill type-flip; now they
-    see an explicit "weather upgraded — re-review required" notice
-    on the Skills page on first launch after the upgrade.
+    ``drive_root`` and version metadata are accepted for call-site
+    compatibility; native-skill upgrade banners were retired with the
+    legacy migration UI.
     """
     try:
         if target_skill.exists():
@@ -602,10 +534,6 @@ def _reseed_native_skill_in_place(
             f"seeded_from={seed_skill.parent.name}\nupgrade=true\n",
             encoding="utf-8",
         )
-        if drive_root is not None and skill_name and old_version and new_version:
-            _record_skill_upgrade_migration(
-                drive_root, skill_name, old_version, new_version, log_obj,
-            )
         return True
     except OSError as exc:
         log_obj.warning(

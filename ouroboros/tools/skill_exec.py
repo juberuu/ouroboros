@@ -525,25 +525,18 @@ def _skill_tool_preflight(
 ) -> Optional[str]:
     """Return an error string when the skill surface is unavailable.
 
-    The tools work whenever ANY skill is discoverable — that's either
-    the bundled ``repo/skills/`` reference set or the user's configured
-    ``OUROBOROS_SKILLS_REPO_PATH`` checkout. Only when both are empty
-    do we surface the "point at a checkout" hint.
+    The tools work whenever skills are discoverable from the data plane or the
+    user's configured ``OUROBOROS_SKILLS_REPO_PATH`` checkout.
     """
     repo_path = get_skills_repo_path()
     if repo_path:
         return None
-    # No external path — fall back to checking whether the bundled
-    # reference directory is present and non-empty.
-    from ouroboros.skill_loader import _bundled_skills_dir
-    bundled = _bundled_skills_dir()
-    if bundled is not None and any(bundled.iterdir()):
+    if discover_skills(pathlib.Path(getattr(ctx, "drive_root", "")), repo_path=""):
         return None
     return (
         "⚠️ SKILLS_UNAVAILABLE: No skills are discoverable. Point "
         "OUROBOROS_SKILLS_REPO_PATH at a local checkout in Settings → "
-        "Behavior → External Skills Repo, or ensure the bundled "
-        "skills directory ships with the build."
+        "Behavior → External Skills Repo, or install skills into the data plane."
     )
 
 
@@ -562,12 +555,12 @@ def _handle_review_skill(
     review_rebuttal: str = "",
     **_kwargs: Any,
 ) -> str:
-    err = _skill_tool_preflight(ctx)
-    if err:
-        return err
     skill_name = str(skill or "").strip()
     if not skill_name:
         return "⚠️ SKILL_REVIEW_ERROR: 'skill' argument is required."
+    err = _skill_tool_preflight(ctx)
+    if err:
+        return err
     from ouroboros.skill_review import (
         _count_attempts_for_content,
         _load_accepted_rebuttals,
@@ -663,10 +656,6 @@ def _handle_skill_exec(
     args: Optional[List[str]] = None,
     **_kwargs: Any,
 ) -> str:
-    err = _skill_tool_preflight(ctx)
-    if err:
-        return err
-
     # v5.1.2 light reframed: ``light`` blocks repo self-modification but
     # ALLOWS reviewed + enabled skills to execute. Skills already have
     # their own independent safety stack (tri-model review PASS verdict
@@ -682,6 +671,9 @@ def _handle_skill_exec(
     script_rel = str(script or "").strip()
     if not skill_name or not script_rel:
         return "⚠️ SKILL_EXEC_ERROR: both 'skill' and 'script' are required."
+    err = _skill_tool_preflight(ctx)
+    if err:
+        return err
 
     drive_root = pathlib.Path(ctx.drive_root)
     loaded = find_skill(drive_root, skill_name)
@@ -984,9 +976,6 @@ def _handle_toggle_skill(
     enabled: Any = None,
     **_kwargs: Any,
     ) -> str:
-    err = _skill_tool_preflight(ctx)
-    if err:
-        return err
     skill_name = str(skill or "").strip()
     if not skill_name:
         return "⚠️ SKILL_TOGGLE_ERROR: 'skill' argument is required."
@@ -999,6 +988,9 @@ def _handle_toggle_skill(
             f"{sorted(_TRUE_LITERALS | _FALSE_LITERALS)}. "
             f"Got {enabled!r} ({type(enabled).__name__})."
         )
+    err = _skill_tool_preflight(ctx)
+    if err:
+        return err
 
     drive_root = pathlib.Path(ctx.drive_root)
     from ouroboros.skill_lifecycle_queue import skill_lifecycle_file_lock

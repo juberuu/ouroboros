@@ -223,11 +223,7 @@ class LoadedSkill:
         This does NOT consult the ambient ``OUROBOROS_RUNTIME_MODE`` —
         v5.1.2 Frame A: ``skill_exec`` runs reviewed + enabled skills
         regardless of mode (light/advanced/pro). The runtime_mode axis
-        only gates repo self-modification + the elevation ratchet. Use
-        :func:`is_runtime_eligible_for_execution` for the
-        "will this actually run right now" answer (which now equals
-        ``available_for_execution`` since the runtime-mode gate was
-        removed in v5.1.2).
+        only gates repo self-modification + the elevation ratchet.
         """
         if self.load_error:
             return False
@@ -260,21 +256,6 @@ class LoadedSkill:
             if _resolve_script_path(self.skill_dir, relpath) is not None:
                 return True
         return False
-
-
-def is_runtime_eligible_for_execution(skill: "LoadedSkill") -> bool:
-    """True when the skill is statically available for execution.
-
-    v5.1.2 Frame A: ``OUROBOROS_RUNTIME_MODE`` no longer gates skill
-    execution — light, advanced, and pro all let reviewed + enabled
-    skills run. The previous helper short-circuited to False on light;
-    that branch is removed so the Skills UI no longer paints a
-    runtime-blocked badge in light mode. The ``runtime_mode`` axis
-    only controls repo self-modification + the elevation ratchet.
-    """
-    return skill.available_for_execution
-
-
 # ---------------------------------------------------------------------------
 # Disk paths
 # ---------------------------------------------------------------------------
@@ -1109,27 +1090,6 @@ def load_skill(
     )
 
 
-def _bundled_skills_dir() -> Optional[pathlib.Path]:
-    """Return the legacy bundled reference-skills directory (``repo/skills/``).
-
-    Retained for backward compatibility with tests that still ``monkeypatch``
-    this symbol to point at fixture trees. Production discovery no longer
-    consults this path directly: the launcher bootstrap copies the seed
-    one-shot into ``data/skills/native/`` (see ``launcher_bootstrap.bootstrap_native_skills``),
-    and ``discover_skills`` walks the data plane after that.
-
-    Returns ``None`` if the bundled folder is missing (which is fine in
-    a packaged build that strips the reference skills).
-    """
-    from ouroboros.config import REPO_DIR
-
-    candidate = pathlib.Path(REPO_DIR) / "skills"
-    if candidate.is_dir():
-        return candidate
-    fallback = pathlib.Path(__file__).resolve().parents[1] / "skills"
-    return fallback if fallback.is_dir() else None
-
-
 def _resolve_data_skills_dir(
     drive_root: Optional[pathlib.Path] = None,
 ) -> Optional[pathlib.Path]:
@@ -1321,8 +1281,6 @@ def _classify_skill_source(
 def discover_skills(
     drive_root: pathlib.Path,
     repo_path: str | None = None,
-    *,
-    include_bundled: bool = True,
 ) -> List[LoadedSkill]:
     """Scan the data-plane skills tree (and optional external checkouts).
 
@@ -1335,13 +1293,6 @@ def discover_skills(
     2. ``OUROBOROS_SKILLS_REPO_PATH`` — optional extra discovery root
        for users who keep skills in their own git checkout. Skills
        discovered here are tagged ``user_repo``.
-    3. ``include_bundled`` is retained for back-compat with tests that
-       still monkey-patch ``_bundled_skills_dir``: when the data plane
-       has no skills yet AND a bundled directory exists, we fall through
-       to it (read-only, source=``native``). Production callers should
-       rely on the launcher bootstrap to copy the seed into
-       ``data/skills/native/`` exactly once.
-
     Duplicate basenames across roots surface as sanitised-name
     collisions via the existing collision detector — the operator can
     rename the directories before tools can act on the skill.
@@ -1370,13 +1321,6 @@ def discover_skills(
         if data_skills_root is None or user_repo_root != data_skills_root.resolve():
             roots.append(user_repo_root)
 
-    # Back-compat fallback: only fire when the data plane has NEVER
-    # been initialised — i.e. ``data/skills/`` does not exist on disk
-    # at all. Once the bootstrap has run (even to copy zero skills),
-    # the user's explicit emptying of ``data/skills/native/`` must
-    # stick. v4.50 cycle-1 Ouroboros review O2: gating on "no skills
-    # found" instead of "no data plane" silently resurrected deleted
-    # seed skills, violating the "exactly once" docstring promise.
     skills: List[LoadedSkill] = []
     seen_dirs: set[pathlib.Path] = set()
     for root in roots:
@@ -1397,24 +1341,6 @@ def discover_skills(
                 user_repo_root=user_repo_root,
             )
             skills.append(loaded)
-
-    data_plane_initialised = data_skills_root is not None
-    if not skills and include_bundled and not data_plane_initialised:
-        bundled = _bundled_skills_dir()
-        if bundled is not None and bundled.is_dir():
-            for entry in _walk_skill_packages(bundled):
-                try:
-                    resolved = entry.resolve()
-                except OSError:
-                    continue
-                if resolved in seen_dirs:
-                    continue
-                seen_dirs.add(resolved)
-                loaded = load_skill(entry, drive_root)
-                if loaded is None:
-                    continue
-                loaded.source = "native"
-                skills.append(loaded)
 
     # Detect collisions in the sanitised identity. Two distinct
     # directories ("hello world" and "hello_world") must never share
@@ -1474,16 +1400,7 @@ def list_available_for_execution(
 
 
 def summarize_skills(drive_root: pathlib.Path) -> Dict[str, Any]:
-    """Return a compact catalogue summary for the Skills UI / /api/state.
-
-    v5.1.2 Frame A: ``runtime_mode`` no longer gates skill execution —
-    ``available_for_execution`` and ``static_ready`` converge. Legacy
-    ``runtime_blocked`` fields stay in the schema for older consumers, but
-    runtime mode no longer subtracts from ``available``.
-
-    Does not include raw manifest bodies or review findings — callers
-    that need the detail should call ``discover_skills`` directly.
-    """
+    """Return a compact catalogue summary for the Skills UI / /api/state."""
     skills = discover_skills(drive_root)
     tool_surfaces_by_skill: Dict[str, List[Dict[str, str]]] = {}
     try:
@@ -1506,15 +1423,14 @@ def summarize_skills(drive_root: pathlib.Path) -> Dict[str, Any]:
         "runtime_mode": runtime_mode,
         "available": sum(
             1 for s in skills
-            if is_runtime_eligible_for_execution(s)
+            if s.available_for_execution
             and grant_status_for_skill(drive_root, s).get("usable", True)
         ),
         "blocked_by_grants": sum(
             1 for s in skills
-            if is_runtime_eligible_for_execution(s)
+            if s.available_for_execution
             and not grant_status_for_skill(drive_root, s).get("usable", True)
         ),
-        "runtime_blocked": 0,  # v5.1.2: runtime_mode no longer gates skill execution.
         "pending_review": sum(
             1
             for s in skills
@@ -1550,14 +1466,13 @@ def summarize_skills(drive_root: pathlib.Path) -> Dict[str, Any]:
                     stale=s.review.is_stale_for(s.content_hash),
                 )["executable_review"],
                 "available_for_execution": (
-                    is_runtime_eligible_for_execution(s)
+                    s.available_for_execution
                     and grant_status_for_skill(drive_root, s).get("usable", True)
                 ),
                 "runnable_via_skill_exec": s.available_for_execution,
                 "tool_surfaces": tool_surfaces_by_skill.get(s.name, []),
                 "static_ready": s.available_for_execution,
                 "blocked_by_grants": not grant_status_for_skill(drive_root, s).get("usable", True),
-                "runtime_blocked_by_mode": False,  # v5.1.2: never blocked by mode.
                 "load_error": s.load_error,
                 "source": s.source,
             }
@@ -1576,7 +1491,6 @@ __all__ = [
     "discover_skills",
     "find_skill",
     "grant_status_for_skill",
-    "is_runtime_eligible_for_execution",
     "is_self_authored_skill_dir",
     "list_available_for_execution",
     "load_enabled",

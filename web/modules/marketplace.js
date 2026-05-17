@@ -12,8 +12,6 @@
 import {
     getPending,
     getPendingBySlug,
-    lifecycleCardClassFor,
-    lifecycleSpinnerFor,
     setPending,
     startLifecyclePoller,
 } from './lifecycle_card.js';
@@ -23,10 +21,15 @@ import {
     emitSkillLifecycle,
     escapeHtmlAttr as escapeHtml,
     fetchJson,
+    formatCompactNumber,
     grantReady,
     isRateLimitError,
+    renderHubCard,
     renderSkillRepairPrompt,
+    reviewReady,
+    reviewTone,
     safeExternalHrefAttr,
+    topReviewFinding,
 } from './utils.js';
 
 function installErrorCopy(message) {
@@ -36,16 +39,6 @@ function installErrorCopy(message) {
 }
 
 const safeExternalUrl = safeExternalHrefAttr;
-
-
-function formatNumber(value) {
-    const num = Number(value);
-    if (!Number.isFinite(num) || num <= 0) return '—';
-    if (num >= 1_000_000) return (num / 1_000_000).toFixed(1) + 'M';
-    if (num >= 1_000) return (num / 1_000).toFixed(1) + 'k';
-    return String(num);
-}
-
 
 const MARKETPLACE_SEARCH_LIMIT = 16;
 
@@ -88,36 +81,8 @@ function statusBadgeForReview(status) {
     return `<span class="skills-badge skills-badge-${tone}">${escapeHtml(status || 'pending')}</span>`;
 }
 
-function reviewReady(installed) {
-    if (installed?.review_gate && typeof installed.review_gate.executable_review === 'boolean') {
-        return installed.review_gate.executable_review && !installed?.review_stale;
-    }
-    return ['clean', 'warnings'].includes(installed?.review_status) && !installed?.review_stale;
-}
-
-function reviewStatusTone(status) {
-    return ['clean', 'warnings'].includes(status) ? 'ok' : 'warn';
-}
-
-function reviewActionTone(status, error = '') {
-    if (error) return 'danger';
-    if (status === 'clean') return 'ok';
-    if (status === 'blockers') return 'danger';
-    return 'warn';
-}
-
 function hasInstalledUiTab(installed) {
     return installed?.has_ui_tab === true;
-}
-
-function topReviewFinding(installed) {
-    const findings = Array.isArray(installed?.review_findings) ? installed.review_findings : [];
-    if (!findings.length) return '';
-    const first = findings[0] || {};
-    const label = first.item || first.check || first.title || 'finding';
-    const verdict = first.verdict || first.severity || '';
-    const reason = first.reason || first.message || '';
-    return `${verdict ? `${verdict} ` : ''}${label}: ${reason}`.trim();
 }
 
 function lifecycleFor(summary, installed, pending) {
@@ -159,7 +124,7 @@ function lifecycleFor(summary, installed, pending) {
             button: 'Repair',
         };
     }
-    if (installed.review_status === 'blockers' && !reviewReady(installed)) {
+    if (installed.review_status === 'blockers' && !reviewReady(installed, { requireFresh: true })) {
         const finding = topReviewFinding(installed);
         return {
             tone: 'danger',
@@ -169,7 +134,7 @@ function lifecycleFor(summary, installed, pending) {
             button: 'Repair',
         };
     }
-    if (!reviewReady(installed)) {
+    if (!reviewReady(installed, { requireFresh: true })) {
         const finding = topReviewFinding(installed);
         return {
             tone: 'warn',
@@ -259,28 +224,19 @@ function summaryCard(summary, installedMap, isPlugin) {
         && summary.latest_version
         && installedAtVersion
         && summary.latest_version !== installedAtVersion;
-    const downloads = formatNumber(summary.stats?.downloads);
-    const stars = formatNumber(summary.stats?.stars);
+    const downloads = formatCompactNumber(summary.stats?.downloads);
+    const stars = formatCompactNumber(summary.stats?.stars);
     const license = summary.license || 'no-license';
     const homepageHref = safeExternalUrl(summary.homepage);
-    const description = summary.summary || summary.description || '';
-    const officialBadge = summary.badges?.official
-        ? '<span class="skills-badge skills-badge-ok">official</span>'
-        : '';
     const reviewBadge = isInstalled ? statusBadgeForReview(installed.review_status) : '';
     const lifecycle = lifecycleFor(summary, installed, pending);
-    const lifecycleChip = '';
-    const lifecycleHint = lifecycle.hint
-        ? `<div class="marketplace-card-state-hint">${escapeHtml(lifecycle.hint)}</div>`
-        : '';
-    const workingIndicator = lifecycleSpinnerFor(pending);
-    const primaryButton = isPlugin
+    const primaryHtml = isPlugin
         ? `<button class="btn btn-default" disabled title="OpenClaw Node/TypeScript plugins are not installable in Ouroboros. Use a Python port or MCP bridge.">Plugin</button>`
         : `<button class="btn btn-primary marketplace-next-action"
                    data-mp-action="${escapeHtml(lifecycle.action)}"
                    data-slug="${escapeHtml(slug)}"
                    ${lifecycle.disabled || !lifecycle.action ? 'disabled' : ''}>${escapeHtml(lifecycle.button)}</button>`;
-    const secondaryButtons = isPlugin
+    const secondaryHtml = isPlugin
         ? ''
         : isInstalled
             ? `
@@ -289,55 +245,21 @@ function summaryCard(summary, installedMap, isPlugin) {
                 <button class="btn btn-default" data-mp-uninstall="${escapeHtml(slug)}" data-name="${escapeHtml(installed.name || '')}">Uninstall</button>
             `
             : '';
-    const buttons = `
-        <div class="marketplace-primary-action">${primaryButton}</div>
-        <div class="marketplace-secondary-actions">${secondaryButtons}</div>
-    `;
-    const cardClass = lifecycleCardClassFor(pending);
-    const pluginBadge = isPlugin
-        ? '<span class="skills-badge skills-badge-danger">plugin unsupported</span>'
-        : '';
-    const installedBadge = isInstalled
-        ? `<span class="skills-badge skills-badge-ok">installed v${escapeHtml(installedAtVersion || summary.latest_version)}</span>`
-        : '';
-    const updateBadge = updateAvailable
-        ? `<span class="skills-badge skills-badge-warn">update v${escapeHtml(summary.latest_version)}</span>`
-        : '';
-    const buttonsHtml = buttons;
     const badgesHtml = `
-        ${officialBadge}
-        ${pluginBadge}
-        ${installedBadge}
-        ${updateBadge}
+        ${isPlugin
+        ? '<span class="skills-badge skills-badge-danger">plugin unsupported</span>'
+        : ''}
+        ${updateAvailable ? `<span class="skills-badge skills-badge-warn">update v${escapeHtml(summary.latest_version)}</span>` : ''}
         ${reviewBadge}
-        ${lifecycleChip}
     `;
-    return `
-        <div class="${cardClass}" data-slug="${escapeHtml(slug)}">
-            <div class="marketplace-card-head">
-                <div class="marketplace-card-title">
-                    <strong>${escapeHtml(summary.display_name || slug)}</strong>
-                    <span class="muted">${escapeHtml(slug)} · v${escapeHtml(summary.latest_version || '—')}</span>
-                </div>
-                <div class="marketplace-card-badges">
-                    ${badgesHtml}
-                </div>
-            </div>
-            <div class="marketplace-card-body">${escapeHtml(description)}</div>
-            <div class="marketplace-card-state marketplace-state-${lifecycle.tone}">
-                <strong>${workingIndicator}${escapeHtml(lifecycle.label)}</strong>
-                ${lifecycleHint}
-            </div>
-            <div class="marketplace-card-meta muted">
-                <span>downloads: ${downloads}</span>
-                <span>stars: ${stars}</span>
-                <span>license: ${escapeHtml(license)}</span>
-                ${homepageHref ? `<a href="${homepageHref}" target="_blank" rel="noopener noreferrer">homepage</a>` : ''}
-                ${(summary.os || []).length ? `<span>os: ${(summary.os || []).map((o) => escapeHtml(o)).join(', ')}</span>` : ''}
-            </div>
-            <div class="marketplace-card-actions">${buttonsHtml}</div>
-        </div>
+    const metaHtml = `
+        <span>downloads: ${downloads}</span>
+        <span>stars: ${stars}</span>
+        <span>license: ${escapeHtml(license)}</span>
+        ${homepageHref ? `<a href="${homepageHref}" target="_blank" rel="noopener noreferrer">homepage</a>` : ''}
+        ${(summary.os || []).length ? `<span>os: ${(summary.os || []).map((o) => escapeHtml(o)).join(', ')}</span>` : ''}
     `;
+    return renderHubCard(summary, { pending, installed, lifecycle, primaryHtml, secondaryHtml, badgesHtml, metaHtml, official: Boolean(summary.badges?.official) });
 }
 
 
@@ -667,7 +589,7 @@ export function initMarketplace(pane, controlsHost = null) {
             showStatus(
                 pane,
                 `${slug}: review ${result.status}${result.error ? ` — ${result.error}` : ''}`,
-                reviewActionTone(result.status, result.error),
+                reviewTone(result.status, result.error),
             );
             emitSkillLifecycle('review', installed.name, result);
             return;
@@ -685,7 +607,7 @@ export function initMarketplace(pane, controlsHost = null) {
                 body: JSON.stringify({}),
             });
             if (!result.ok) throw new Error(result.error || 'update failed');
-            showStatus(pane, `Updated ${slug} — review ${result.review_status}`, reviewStatusTone(result.review_status));
+            showStatus(pane, `Updated ${slug} — review ${result.review_status}`, reviewTone(result.review_status));
             emitSkillLifecycle('update', installed.name, result);
             return;
         }
@@ -706,7 +628,7 @@ export function initMarketplace(pane, controlsHost = null) {
             } else if (result.review_error) {
                 showStatus(pane, `Installed ${slug}; review could not finish: ${result.review_error}`, 'warn');
             } else {
-                showStatus(pane, `Installed ${slug}; review ${result.review_status || 'pending'}`, reviewStatusTone(result.review_status));
+                showStatus(pane, `Installed ${slug}; review ${result.review_status || 'pending'}`, reviewTone(result.review_status));
             }
             emitSkillLifecycle('install', installedName || slug, result);
         }
@@ -837,7 +759,7 @@ export function initMarketplace(pane, controlsHost = null) {
                 if (!result.ok) {
                     throw new Error(result.error || 'update failed');
                 } else {
-                    showStatus(pane, `Updated ${slug} — review ${result.review_status}`, reviewStatusTone(result.review_status));
+                    showStatus(pane, `Updated ${slug} — review ${result.review_status}`, reviewTone(result.review_status));
                     setPending(slug, null);
                     emitSkillLifecycle('update', sanitized, result);
                 }

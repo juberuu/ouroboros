@@ -1,4 +1,4 @@
-# Ouroboros v5.25.0-rc.3 — Architecture & Reference
+# Ouroboros v5.25.0-rc.4 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -102,7 +102,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── ws.py            ← WebSocket connection manager, extension WS dispatch, browser broadcast helpers
       │   ├── state.py         ← /api/health and /api/state handlers
       │   ├── settings.py      ← /api/settings, onboarding, Claude runtime status/repair handlers
-      │   ├── control.py       ← reset, command, git/update, migrations, and evolution-data handlers
+      │   ├── control.py       ← reset, command, git/update, and evolution-data handlers
       │   ├── files.py         ← File Browser + chat upload endpoints
       │   ├── models.py        ← model catalog + local-model lifecycle endpoints
       │   ├── extensions.py    ← extensions/skills HTTP surface (GET /api/extensions, GET /api/extensions/<skill>/manifest, ALL /api/extensions/<skill>/<rest:path>, POST /api/skills/<skill>/toggle, POST /api/skills/<skill>/review, POST /api/skills/<skill>/grants)
@@ -386,6 +386,7 @@ The left rail has six pages: Chat, Files, Skills, Widgets, Dashboard, Settings. 
 - `web/modules/page_icons.js` is the nav/header icon SSOT.
 - `web/modules/api_client.js` is the frontend API boundary.
 - `web/modules/api_types.js` mirrors browser-facing envelopes with JSDoc.
+- `web/modules/skill_card_renderer.js` renders installed Skills cards from shared lifecycle/review/grant state.
 - `web/modules/toast.js`, `masonry.js`, and CSS tokens in `style.css` keep cards/notifications/layout consistent without a build system.
 
 Rationale: frontend work should not require understanding supervisor, worker, marketplace, extension, MCP, local-model, and settings internals at once. The Gateway Boundary and API client keep browser code pointed at one explicit contract.
@@ -452,8 +453,6 @@ The executable route SSOT is `ouroboros/gateway/router.py`; file-browser routes 
 | POST | `/api/marketplace/ouroboroshub/install` | `gateway.marketplace.api_ouroboroshub_install` |
 | POST | `/api/marketplace/ouroboroshub/update/{name}` | `gateway.marketplace.api_ouroboroshub_update` |
 | POST | `/api/marketplace/ouroboroshub/uninstall/{name}` | `gateway.marketplace.api_ouroboroshub_uninstall` |
-| GET | `/api/migrations` | `gateway.control.api_migrations_list` |
-| POST | `/api/migrations/{key}/dismiss` | `gateway.control.api_migrations_dismiss` |
 | GET | `/api/files/list` | `gateway.files.api_files_list` |
 | GET | `/api/files/read` | `gateway.files.api_files_read` |
 | GET | `/api/files/content` | `gateway.files.api_files_content` |
@@ -958,6 +957,14 @@ Any extension of the ABI MUST:
 
 Removing anything from Section 11.1 is a deliberate ABI break and requires
 a version bump + a migration note in the release row.
+
+### 11.3 Recent ABI Retirements
+
+- `5.25.0-rc.4`: retired the native skill upgrade migration banner API
+  (`GET /api/migrations`, `POST /api/migrations/{key}/dismiss`, and
+  `MigrationsResponse`). The release row is the migration note: old
+  dismissed banner state in `data/state/migrations.json` is intentionally
+  ignored by current runtimes.
 
 ---
 

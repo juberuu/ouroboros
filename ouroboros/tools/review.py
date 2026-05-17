@@ -93,6 +93,9 @@ from ouroboros.tools.review_helpers import (
     build_goal_section,
     build_rebuttal_section,
     CRITICAL_FINDING_CALIBRATION,
+    REPO_ANTI_PATTERN_LOCK_GUARD,
+    REVIEW_JSON_ARRAY_CONTRACT,
+    REVIEW_PREAMBLE,
     normalize_reviewer_items,
     build_self_verification_template,
     build_review_history_section as _build_review_history_section,
@@ -356,55 +359,26 @@ def _load_checklist_section() -> str:
         ) from e
 
 
-_REVIEW_PREAMBLE = (
-    "You are a pre-commit reviewer for Ouroboros, a self-modifying AI agent.\n"
-    "Its Constitution is BIBLE.md. Its engineering handbook is DEVELOPMENT.md.\n"
-)
-
 _REVIEW_PROMPT_TEMPLATE = """\
 {preamble}
 
-## Review instructions — READ CAREFULLY
+## Review instructions
 
-- Read the ENTIRE staged diff carefully, line by line. Do NOT skim.
-- Use BOTH the staged diff AND the full current text of every changed file provided below.
-  Do NOT review from the diff alone — the full file context is essential for correctness.
-- Look for ALL bugs, logic errors, off-by-one mistakes, missing error handling,
-  race conditions, resource leaks, and regressions.
-- Report ALL problems you find — not just the single most critical one.
-  If there are 5 bugs, list all 5.
-- Do NOT stop after finding the first issue.
-  Do NOT summarize multiple distinct problems into one finding.
-  Each distinct problem gets its own entry in the output array.
-- PASS reasons may be brief (one sentence). FAIL reasons must be detailed and actionable:
-  include the file, the line or symbol, what is wrong, and a concrete suggestion for how to fix it.
-- For every FAIL, include a concrete how-to-fix suggestion so the developer knows exactly
-  what change is needed.
+Read the staged diff and full current text of every changed file. Review every
+checklist item, report every distinct current problem, and make every FAIL
+actionable with file/symbol evidence and a concrete fix.
 
 {critical_calibration}
 
-You must produce a JSON array. Each element has:
-- "item"
-- optional "obligation_id" when you are resolving or re-checking a previously surfaced obligation
-- "verdict": "PASS" or "FAIL"
-- "severity": "critical" or "advisory"
-- "reason": for FAIL — specific file/line, what is wrong, how to fix it
+{json_contract}
 
 If an open obligation record above already names an `obligation_id` for this root cause,
 reuse that exact `obligation_id`. Do NOT invent a new id when the same root cause persists.
 
 ## Anti pattern-lock guard
 
-If your first reading surfaces **exactly one FAIL** across all checklist
-items, do a deliberate SECOND pass focused on a DIFFERENT concern class
-before returning. Real diffs with exactly one issue are rarer than diffs
-with several issues on different dimensions; single-FAIL outputs are the
-most common pattern-lock failure mode of single-pass review. For example:
-if your FAIL is `code_quality`, re-examine `tests_affected` and
-`self_consistency`; if `cross_platform`, re-examine `security_issues` and
-`architecture_doc`; if `version_bump`, re-examine `changelog_and_badge`
-and `self_consistency`. Update PASS entries in-place if your second pass
-uncovers new FAILs — return only one JSON array, not two.
+If your first reading surfaces exactly one FAIL, run the shared second pass guard focused on a different concern class:
+{anti_pattern_lock_guard}
 
 {checklist_section}
 
@@ -1011,8 +985,10 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
     goal_section = build_goal_section(goal, scope, commit_message)
 
     prompt = _REVIEW_PROMPT_TEMPLATE.format(
-        preamble=_REVIEW_PREAMBLE,
+        preamble=REVIEW_PREAMBLE,
         critical_calibration=CRITICAL_FINDING_CALIBRATION,
+        json_contract=REVIEW_JSON_ARRAY_CONTRACT,
+        anti_pattern_lock_guard=REPO_ANTI_PATTERN_LOCK_GUARD,
         checklist_section=checklist_section,
         goal_section=goal_section,
         dev_guide_text=dev_guide_text or "(DEVELOPMENT.md not found)",

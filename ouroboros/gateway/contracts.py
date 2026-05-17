@@ -284,10 +284,6 @@ class MarketplaceInstalledResponse(TypedDict, total=False):
     error: str
 
 
-class MigrationsResponse(TypedDict):
-    migrations: list[Dict[str, Any]]
-
-
 class LocalModelStatusResponse(TypedDict, total=False):
     status: str
     running: bool
@@ -377,8 +373,6 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "POST /api/marketplace/ouroboroshub/install",
     "POST /api/marketplace/ouroboroshub/update/{name}",
     "POST /api/marketplace/ouroboroshub/uninstall/{name}",
-    "GET /api/migrations",
-    "POST /api/migrations/{key}/dismiss",
     "GET /api/onboarding",
     "GET /api/claude-code/status",
     "POST /api/claude-code/install",
@@ -431,7 +425,6 @@ __all__ = [
     "SkillLifecycleQueueResponse",
     "MarketplaceSearchResponse",
     "MarketplaceInstalledResponse",
-    "MigrationsResponse",
     "LocalModelStatusResponse",
     "McpStatusResponse",
     "ModelCatalogResponse",

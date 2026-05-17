@@ -43,7 +43,7 @@ from ouroboros.memory import Memory
 from ouroboros.context import (
     build_runtime_section, build_memory_sections,
     build_recent_sections, build_health_invariants,
-    build_knowledge_sections, safe_read,
+    build_knowledge_sections, build_governance_sections, safe_read,
 )
 
 log = logging.getLogger(__name__)
@@ -453,33 +453,7 @@ class BackgroundConsciousness:
 
         parts = [self._load_bg_prompt()]
 
-        # BIBLE.md — full
-        bible_md = safe_read(env.repo_path("BIBLE.md"))
-        if bible_md:
-            parts.append("## BIBLE.md\n\n" + bible_md)
-
-        # Section size warning threshold — defined early so all sections can use it.
-        _BG_SECTION_WARN_CHARS = 200_000  # warn if a single section exceeds ~50K tokens
-
-        # ARCHITECTURE.md — full (core cognitive artifact; must not be omitted)
-        # Per docs/DEVELOPMENT.md Core Governance Artifacts invariant: log a warning
-        # if the file is missing so the operator knows context is incomplete.
-        architecture_md = safe_read(env.repo_path("docs/ARCHITECTURE.md"))
-        if architecture_md:
-            if len(architecture_md) > _BG_SECTION_WARN_CHARS:
-                import logging as _logging
-                _logging.getLogger(__name__).warning(
-                    "consciousness: ARCHITECTURE.md is large (%d chars) — "
-                    "consider restructuring if this consistently causes context overflow",
-                    len(architecture_md),
-                )
-            parts.append("## ARCHITECTURE.md\n\n" + architecture_md)
-        else:
-            import logging as _logging
-            _logging.getLogger(__name__).warning(
-                "consciousness: docs/ARCHITECTURE.md not found or empty — "
-                "background consciousness is operating without architectural context"
-            )
+        parts.extend(build_governance_sections(env, warn_large=True, warn_label="consciousness"))
 
         # Memory sections: scratchpad, identity, dialogue summary (full size)
         parts.extend(build_memory_sections(memory))
@@ -508,9 +482,8 @@ class BackgroundConsciousness:
 
         # Drive state — full content, no clip_text.
         state_json = safe_read(env.drive_path("state/state.json"), fallback="{}")
-        if len(state_json) > _BG_SECTION_WARN_CHARS:
-            import logging as _logging
-            _logging.getLogger(__name__).warning(
+        if len(state_json) > 200_000:
+            log.warning(
                 "consciousness: drive state JSON is large (%d chars)", len(state_json)
             )
         parts.append("## Drive state\n\n" + state_json)
@@ -549,8 +522,7 @@ class BackgroundConsciousness:
         _BG_TOTAL_MAX_CHARS = 1_200_000  # ~300K tokens — fail fast (P1 compliance)
         full_text = "\n\n".join(parts)
         if len(full_text) > _BG_TOTAL_MAX_CHARS:
-            import logging as _logging
-            _logging.getLogger(__name__).warning(
+            log.warning(
                 "consciousness: context too large (%d chars > %d limit) — "
                 "skipping wakeup cycle; groom memory (knowledge, patterns, scratchpad) "
                 "to reduce size",
@@ -562,8 +534,7 @@ class BackgroundConsciousness:
                 "Groom memory to continue."
             )
         if len(full_text) > _BG_TOTAL_WARN_CHARS:
-            import logging as _logging
-            _logging.getLogger(__name__).warning(
+            log.warning(
                 "consciousness: context is large (%d chars) — consider grooming memory",
                 len(full_text),
             )

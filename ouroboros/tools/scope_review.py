@@ -31,6 +31,9 @@ from ouroboros.tools.review_helpers import (
     build_touched_file_pack,
     load_checklist_section,
     CRITICAL_FINDING_CALIBRATION,
+    REPO_ANTI_PATTERN_LOCK_GUARD,
+    REVIEW_JSON_ARRAY_CONTRACT,
+    REVIEW_PREAMBLE,
     BINARY_EXTENSIONS,
     _SENSITIVE_EXTENSIONS,
     _SENSITIVE_NAMES,
@@ -128,12 +131,6 @@ def _get_scope_model() -> str:
         os.environ.get("OUROBOROS_SCOPE_REVIEW_MODEL", "").strip()
         or _SCOPE_MODEL_DEFAULT
     )
-
-_SCOPE_PREAMBLE = (
-    "You are a pre-commit reviewer for Ouroboros, a self-modifying AI agent.\n"
-    "Its Constitution is BIBLE.md. Its engineering handbook is DEVELOPMENT.md.\n"
-)
-
 
 _CANONICAL_CONTEXT_DOCS = (
     "BIBLE.md",
@@ -531,30 +528,13 @@ def _build_scope_prompt(
     repo_pack_section = _gather_scope_packs(repo_dir, all_touched_paths)
 
     prompt = f"""\
-{_SCOPE_PREAMBLE}
+{REVIEW_PREAMBLE}
 
 ## Your role
 
-You are the fourth reviewer — and the most powerful one.
-
-The triad diff reviewers see only the changed files and the diff hunks.
-**You see the ENTIRE codebase.** Use that advantage.
-
-Your primary mission: find problems that diff-only reviewers CANNOT see.
-Specifically:
-- **Cross-module bugs**: does this change break something in a different module
-  through implicit coupling, shared state, or assumed call patterns?
-- **Broken implicit contracts**: are there constants, data format assumptions,
-  expected function signatures, or protocol invariants relied upon by OTHER
-  modules that this change violates without updating those callers?
-- **Hidden regressions**: does a seemingly-unrelated module elsewhere in the
-  repo break because of this change in a non-obvious way?
-- **Forgotten touchpoints**: exact files/symbols that MUST also change but don't —
-  sibling tests, config values, adjacent prompts, parallel flows, doc sections.
-- **Completeness**: does the diff actually accomplish the stated intent end-to-end,
-  or does it only fix one surface while leaving the rest inconsistent?
-
-Diff-only reviewers handle line-by-line correctness. You handle whole-system coherence.
+You are the whole-codebase reviewer. Diff reviewers cover line-level mistakes;
+you cover cross-module contracts, forgotten touchpoints, hidden regressions,
+prompt/doc sync, architecture fit, and end-to-end intent completeness.
 
 ## Your task
 
@@ -582,11 +562,12 @@ in the "item" field; no substitutions):
     7. cross_module_bugs
     8. implicit_contracts
 
-Each element must have:
-- "item" (one of the eight identifiers above — verbatim, case-sensitive)
-- optional "obligation_id" when resolving or re-checking a previously surfaced obligation
-- "verdict": "PASS" or "FAIL"
-- "severity": "critical" or "advisory"
+Each element must follow the shared review JSON contract:
+{REVIEW_JSON_ARRAY_CONTRACT}
+
+Additional scope-review requirements:
+- "item" must be one of the eight identifiers above — verbatim, case-sensitive.
+- optional "obligation_id" when resolving or re-checking a previously surfaced obligation.
 - "reason":
   - For FAIL: concrete artifact (file/symbol/line/contract) + what is wrong + how to fix.
   - For PASS: 1–2 sentences stating WHY this item passes, naming a concrete
@@ -600,35 +581,17 @@ single summary. If an item has no problems, return one PASS entry. Do not
 return duplicate PASS entries, and do not return PASS for an item that also
 has a FAIL — the concrete FAIL is authoritative.
 
-Severity rules:
-- Use "critical" only when you can cite a concrete missing file, symbol, test, prompt, doc, config, or sibling path and explain why the transformation is incomplete or inconsistent.
-- If you cannot point to an exact touchpoint, use "advisory".
-- Scope affects only unchanged legacy code outside the diff. The diff itself is always fully reviewable.
-- For cross-surface / prose-vs-code mismatches apply the `Critical surface whitelist` in `docs/CHECKLISTS.md` — only release metadata, tool schema, module map, behavioural documentation, and safety contracts qualify as critical; commentary and narrative prose mismatches are advisory.
+Severity rules: critical requires a concrete current artifact and a required
+change to this diff; otherwise use advisory. Scope affects only unchanged
+legacy code outside the diff. Apply the `Critical surface whitelist` in
+`docs/CHECKLISTS.md` for prose-vs-code mismatches.
 
 If an open obligation record above already names an `obligation_id` for this root cause,
 reuse that exact `obligation_id`. Do NOT invent a new id for the same root cause.
 
 ## Anti pattern-lock guard
 
-If after your first reading you have found **exactly one FAIL** and all
-other items are PASS, do a deliberate SECOND pass focused on a DIFFERENT
-concern class before returning. Real diffs that have exactly one issue
-are rarer than diffs with several issues on different dimensions;
-single-FAIL outputs are the most common pattern-lock failure mode.
-
-Concrete pairings for the second pass:
-- If your FAIL was in `intent_alignment`, re-examine `forgotten_touchpoints` and `cross_module_bugs`.
-- If your FAIL was in `forgotten_touchpoints`, re-examine `cross_surface_consistency` and `implicit_contracts`.
-- If your FAIL was in `cross_surface_consistency`, re-examine `implicit_contracts` and `regression_surface`.
-- If your FAIL was in `regression_surface`, re-examine `cross_module_bugs` and `architecture_fit`.
-- If your FAIL was in `cross_module_bugs`, re-examine `implicit_contracts` and `forgotten_touchpoints`.
-- If your FAIL was in `implicit_contracts`, re-examine `cross_module_bugs` and `regression_surface`.
-- If your FAIL was in `prompt_doc_sync`, re-examine `cross_surface_consistency` and `architecture_fit`.
-- If your FAIL was in `architecture_fit`, re-examine `implicit_contracts` and `regression_surface`.
-
-Update PASS entries in-place if your second pass uncovers new FAILs.
-Return only one JSON array — not two.
+{REPO_ANTI_PATTERN_LOCK_GUARD}
 
 {critical_calibration}
 

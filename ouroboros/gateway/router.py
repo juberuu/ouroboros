@@ -72,8 +72,6 @@ def collect_routes(
         api_git_log,
         api_git_promote,
         api_git_rollback,
-        api_migrations_dismiss,
-        api_migrations_list,
         api_reset,
         api_update_apply,
         api_update_check,
@@ -136,12 +134,6 @@ def collect_routes(
         Route(
             "/api/marketplace/ouroboroshub/uninstall/{name}",
             endpoint=api_ouroboroshub_uninstall,
-            methods=["POST"],
-        ),
-        Route("/api/migrations", endpoint=api_migrations_list, methods=["GET"]),
-        Route(
-            "/api/migrations/{key}/dismiss",
-            endpoint=api_migrations_dismiss,
             methods=["POST"],
         ),
         *file_browser_routes(),

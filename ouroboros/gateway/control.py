@@ -1,4 +1,4 @@
-"""Control, update, migration, and evolution HTTP endpoints."""
+"""Control, update, and evolution HTTP endpoints."""
 
 from __future__ import annotations
 
@@ -277,61 +277,12 @@ async def api_evolution_data(request: Request) -> JSONResponse:
     })
 
 
-async def api_migrations_list(request: Request) -> JSONResponse:
-    """Return the list of unread upgrade migration records."""
-    target = request_drive_root(request) / "state" / "migrations.json"
-    if not target.is_file():
-        return JSONResponse({"migrations": []})
-    try:
-        data = json.loads(target.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            return JSONResponse({"migrations": []})
-    except Exception:
-        return JSONResponse({"migrations": []})
-    out = []
-    for key, record in data.items():
-        if not isinstance(record, dict):
-            continue
-        if record.get("dismissed"):
-            continue
-        out.append({"key": str(key), **{k: v for k, v in record.items() if k != "dismissed"}})
-    return JSONResponse({"migrations": out})
-
-
-async def api_migrations_dismiss(request: Request) -> JSONResponse:
-    """Mark a migration record as dismissed so the banner stops firing."""
-    key = (request.path_params.get("key") or "").strip()
-    if not key or key in {".", ".."} or "/" in key or "\\" in key or "\x00" in key:
-        return JSONResponse({"error": "invalid migration key"}, status_code=400)
-    target = request_drive_root(request) / "state" / "migrations.json"
-    if not target.is_file():
-        return JSONResponse({"ok": True, "key": key, "note": "no migrations file"})
-    try:
-        data = json.loads(target.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            data = {}
-    except Exception:
-        data = {}
-    record = data.get(key)
-    if isinstance(record, dict):
-        record["dismissed"] = True
-        data[key] = record
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
-    return JSONResponse({"ok": True, "key": key})
-
-
 __all__ = [
     "api_command",
     "api_evolution_data",
     "api_git_log",
     "api_git_promote",
     "api_git_rollback",
-    "api_migrations_dismiss",
-    "api_migrations_list",
     "api_reset",
     "api_update_apply",
     "api_update_check",

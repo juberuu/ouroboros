@@ -269,6 +269,49 @@ When in doubt: use "advisory". Reserve "critical" for clear, concrete,
 repo-local, reachable defects.
 """
 
+REVIEW_PREAMBLE = (
+    "You are a pre-commit reviewer for Ouroboros, a self-modifying AI agent.\n"
+    "Its Constitution is BIBLE.md. Its engineering handbook is DEVELOPMENT.md.\n"
+)
+
+REVIEW_THOROUGHNESS_BLOCK = """\
+- Do NOT stop after finding the first issue. Check EVERY item in the checklist.
+- Report ALL problems you find. If there are 5 bugs, list all 5 — each as a separate entry.
+- Do NOT summarize multiple distinct problems into one finding.
+- For PASS: brief reason is fine. For FAIL: cite the specific file, line/symbol, what is wrong,
+  and provide a CONCRETE fix suggestion so the developer knows exactly what to change.
+"""
+
+REVIEW_JSON_ARRAY_CONTRACT = """\
+Return ONLY a JSON array. Each element:
+{
+  "item": "<checklist item name>",
+  "verdict": "PASS" | "FAIL",
+  "severity": "critical" | "advisory",
+  "reason": "<for FAIL: file, line/symbol, what is wrong, how to fix>"
+}
+"""
+
+REVIEW_SEVERITY_THRESHOLDS = """\
+- Bible, security, concrete runtime bugs, and changed safety contracts are critical.
+- Development, version, tool-schema, gateway-contract, and architecture-map violations are critical when the checklist says they are.
+- Narrative/prose mismatches are advisory unless they affect release metadata, runtime behavior, safety guidance, or user/reviewer instructions.
+- If no exact current artifact proves the issue, mark it advisory.
+"""
+
+REPO_ANTI_PATTERN_LOCK_GUARD = """\
+If your first reading surfaces **exactly one FAIL** across all checklist
+items, do a deliberate SECOND pass focused on a DIFFERENT concern class
+before returning. Real diffs with exactly one issue are rarer than diffs
+with several issues on different dimensions; single-FAIL outputs are the
+most common pattern-lock failure mode of single-pass review. For example:
+if your FAIL is `code_quality`, re-examine `tests_affected` and
+`self_consistency`; if `cross_platform`, re-examine `security_issues` and
+`architecture_doc`; if `version_bump`, re-examine `changelog_and_badge`
+and `self_consistency`. Update PASS entries in-place if your second pass
+uncovers new FAILs — return only one JSON array, not two.
+"""
+
 
 # Anti-thrashing prompt rules — shared across triad, scope, and advisory reviewers.
 _ANTI_THRASHING_RULE_VERDICT = (
@@ -903,33 +946,8 @@ def _raw_bytes_binary(sample: bytes) -> bool:
     return False
 
 
-# ---------------------------------------------------------------------------
-# 3c. build_full_repo_pack (DRY extraction from deep_self_review.py)
-# ---------------------------------------------------------------------------
-
-def build_full_repo_pack(
-    repo_dir: Path,
-    exclude_paths: set[str] | None = None,
-) -> tuple[str, list[str]]:
-    """Build a comprehensive repo pack of all tracked text files.
-
-    Applies proper filtering: binary, sensitive, vendored, oversized (>1MB),
-    and directory-prefix exclusions. NO hardcoded char/token cap — if the result
-    is too large, the caller decides what to do.
-
-    Args:
-        repo_dir: Path to the git repository root.
-        exclude_paths: Optional set of relative paths to exclude (e.g. touched files
-            already shown elsewhere).
-
-    Returns:
-        (pack_text, omitted) where pack_text is formatted as
-        ``### rel_path\\n```ext\\ncontent\\n```\\n\\n`` sections,
-        and omitted is a list of skipped relative paths with reasons.
-    """
-    if exclude_paths is None:
-        exclude_paths = set()
-
+def list_git_tracked_paths(repo_dir: Path) -> list[str]:
+    """Return git-tracked repo paths using the normal subprocess path."""
     result = subprocess.run(
         ["git", "ls-files"],
         cwd=repo_dir,
@@ -942,9 +960,28 @@ def build_full_repo_pack(
         raise RuntimeError(
             f"build_full_repo_pack: git ls-files failed (exit {result.returncode}): {err}"
         )
-    tracked = result.stdout.splitlines()
+    return result.stdout.splitlines()
 
-    parts: list[str] = []
+
+def iter_repo_pack_entries(
+    repo_dir: Path,
+    *,
+    tracked_paths: list[str] | None = None,
+    exclude_paths: set[str] | None = None,
+    skip_dir_prefixes: tuple[str, ...] = _FULL_REPO_SKIP_DIR_PREFIXES,
+    max_file_bytes: int = _MAX_FULL_REPO_FILE_BYTES,
+    include_oversized_placeholder: bool = False,
+) -> tuple[list[tuple[str, str, str, str]], list[str]]:
+    """Read reviewable tracked files once and return pack entries + omissions.
+
+    Each entry is ``(rel_path, content, language, note)``.  This is the shared
+    file-selection policy for scope review and deep self-review; callers keep
+    their own output formatting so prompt contracts do not drift.
+    """
+    exclude_paths = exclude_paths or set()
+    tracked = tracked_paths if tracked_paths is not None else list_git_tracked_paths(repo_dir)
+
+    entries: list[tuple[str, str, str, str]] = []
     omitted: list[str] = []
     repo_dir_resolved = repo_dir.resolve()
 
@@ -954,8 +991,7 @@ def build_full_repo_pack(
 
         rel_norm = rel.replace("\\", "/")
 
-        # Skip excluded directory prefixes
-        if rel_norm.startswith(_FULL_REPO_SKIP_DIR_PREFIXES):
+        if rel_norm.startswith(skip_dir_prefixes):
             omitted.append(f"{rel} (excluded dir)")
             continue
 
@@ -1000,8 +1036,10 @@ def build_full_repo_pack(
             omitted.append(f"{rel} (stat error)")
             continue
 
-        if size > _MAX_FULL_REPO_FILE_BYTES:
-            omitted.append(f"{rel} (>{_MAX_FULL_REPO_FILE_BYTES // 1024}KB)")
+        if size > max_file_bytes:
+            omitted.append(f"{rel} (>{max_file_bytes // 1024}KB)")
+            if include_oversized_placeholder:
+                entries.append((rel, f"[SKIPPED: file too large ({size} bytes)]", "", ""))
             continue
 
         # Content-based binary sniffer
@@ -1020,7 +1058,40 @@ def build_full_repo_pack(
         ext = fp.suffix.lstrip(".")
         lang = ext if ext else ""
         note = "*(secret-like content redacted)*\n" if redacted else ""
-        parts.append(f"### {rel}\n{note}```{lang}\n{content}\n```\n\n")
+        entries.append((rel, content, lang, note))
+
+    return entries, omitted
+
+
+# ---------------------------------------------------------------------------
+# 3c. build_full_repo_pack (DRY extraction from deep_self_review.py)
+# ---------------------------------------------------------------------------
+
+def build_full_repo_pack(
+    repo_dir: Path,
+    exclude_paths: set[str] | None = None,
+) -> tuple[str, list[str]]:
+    """Build a comprehensive repo pack of all tracked text files.
+
+    Applies proper filtering: binary, sensitive, vendored, oversized (>1MB),
+    and directory-prefix exclusions. NO hardcoded char/token cap — if the result
+    is too large, the caller decides what to do.
+
+    Args:
+        repo_dir: Path to the git repository root.
+        exclude_paths: Optional set of relative paths to exclude (e.g. touched files
+            already shown elsewhere).
+
+    Returns:
+        (pack_text, omitted) where pack_text is formatted as
+        ``### rel_path\\n```ext\\ncontent\\n```\\n\\n`` sections,
+        and omitted is a list of skipped relative paths with reasons.
+    """
+    entries, omitted = iter_repo_pack_entries(repo_dir, exclude_paths=exclude_paths)
+    parts = [
+        f"### {rel}\n{note}```{lang}\n{content}\n```\n\n"
+        for rel, content, lang, note in entries
+    ]
 
     return "".join(parts), omitted
 

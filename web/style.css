@@ -1832,13 +1832,6 @@ body {
     max-width: 100%;
 }
 
-.attach-thumb {
-    width: 24px;
-    height: 24px;
-    object-fit: cover;
-    border-radius: var(--radius-xs);
-}
-
 .attach-name {
     overflow: hidden;
     text-overflow: ellipsis;
@@ -2072,41 +2065,6 @@ body {
     margin: 16px 0 12px;
 }
 
-/* Toggle switch */
-.toggle-wrapper {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-
-.toggle {
-    width: 44px;
-    height: 24px;
-    border-radius: var(--radius);
-    background: rgba(255, 255, 255, 0.12);
-    border: none;
-    cursor: pointer;
-    position: relative;
-    transition: background 0.2s;
-}
-
-.toggle.on { background: var(--accent); }
-
-.toggle::after {
-    content: '';
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    background: white;
-    position: absolute;
-    top: 3px;
-    left: 3px;
-    transition: transform 0.2s;
-}
-.toggle.on::after { transform: translateX(20px); }
-
-.toggle-label { font-size: 13px; color: var(--text-secondary); }
-
 /* Buttons */
 .btn {
     padding: var(--button-padding-y) var(--button-padding-x);
@@ -2270,12 +2228,6 @@ body {
     border-radius: 2px;
     border: none;
     padding: 0;
-}
-
-.divider {
-    height: 1px;
-    background: var(--divider);
-    margin: 20px 0;
 }
 
 /* Logs */
@@ -2598,18 +2550,6 @@ body {
     padding: calc(var(--button-padding-y) - 4px) calc(var(--button-padding-x) - 4px);
     font-size: calc(var(--button-font-size) - 1px);
     min-height: 28px;
-}
-
-.btn-md {
-    padding: var(--button-padding-y) var(--button-padding-x);
-    font-size: var(--button-font-size);
-    min-height: var(--button-min-height);
-}
-
-.btn-lg {
-    padding: calc(var(--button-padding-y) + 2px) calc(var(--button-padding-x) + 2px);
-    font-size: calc(var(--button-font-size) + 1px);
-    min-height: 42px;
 }
 
 /* Evolution Page */
@@ -3361,10 +3301,6 @@ body {
     flex-wrap: wrap;
 }
 
-.skills-next-action {
-    min-width: 130px;
-}
-
 .skills-primary-action {
     min-width: 130px;
 }
@@ -3586,21 +3522,6 @@ body {
     outline: none;
     border-color: rgba(250, 250, 250, 0.3);
     background: rgba(255, 255, 255, 0.05);
-}
-
-.marketplace-select,
-.marketplace-input {
-    padding: 6px 10px;
-    border: 1px solid rgba(250, 250, 250, 0.1);
-    background: rgba(255, 255, 255, 0.03);
-    color: inherit;
-    border-radius: 6px;
-    font: inherit;
-    font-size: 13px;
-}
-
-.marketplace-input {
-    flex: 0 1 220px;
 }
 
 .marketplace-checkbox {
@@ -3914,27 +3835,6 @@ body {
 .marketplace-warn-list h4 { color: #f59e0b; }
 .marketplace-warn-list ul { margin: 4px 0 0 0; padding-left: 18px; color: #f59e0b; font-size: 12px; }
 
-.marketplace-modal-meta {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 12px;
-    align-items: center;
-    margin-top: 6px;
-}
-.marketplace-version-pin {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-}
-.marketplace-version-pin select {
-    background: rgba(26, 21, 32, 0.7);
-    color: var(--text-primary);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 4px;
-    padding: 3px 6px;
-    font-size: 12px;
-}
-
 /* v5: provenance + adapter-warning rows inside Installed-tab cards. */
 .skills-card-provenance {
     display: flex;
@@ -3955,35 +3855,6 @@ body {
 .skills-card-warnings ul {
     margin: 6px 0 4px 16px;
     padding: 0;
-}
-
-/* v5: native-skill upgrade migration banner — surfaced on the Skills
-   tab when the launcher's per-skill version-aware resync replaces an
-   installed seeded skill. Operators see the change, can dismiss the
-   banner, and can act on stale skill_exec / extension call shapes. */
-.skills-migration-banner {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    margin: 6px 0;
-}
-.skills-migration-banner-item {
-    display: flex;
-    gap: 12px;
-    align-items: flex-start;
-    justify-content: space-between;
-    padding: 10px 14px;
-    border-radius: var(--radius-sm);
-    border: 1px solid rgba(232, 165, 53, 0.35);
-    background: linear-gradient(135deg, rgba(232, 165, 53, 0.10), rgba(180, 110, 30, 0.06));
-}
-.skills-migration-banner-text {
-    flex: 1;
-    font-size: 13px;
-    line-height: 1.45;
-}
-.skills-migration-banner-text strong {
-    color: var(--text-primary);
 }
 
 /* ------------------------------------------------------------------ */
@@ -4399,11 +4270,6 @@ body {
     .skills-card-toggle {
         justify-content: flex-start;
         width: 100%;
-    }
-
-    .skills-next-action {
-        min-width: 0;
-        flex: 1 1 150px;
     }
 
     /* Marketplace controls collapse to single column on phone screens. */
