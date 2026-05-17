@@ -802,38 +802,6 @@ async function mountTab(card, tab) {
     if (render.kind === 'declarative') {
         return mountDeclarativeWidget(mount, tab, render);
     }
-    if (render.kind === 'inline_card' && render.api_route) {
-        return mountDeclarativeWidget(mount, tab, {
-            kind: 'declarative',
-            schema_version: 1,
-            components: [
-                {
-                    type: 'form',
-                    route: render.api_route,
-                    method: 'GET',
-                    target: 'result',
-                    submit_label: render.submit_label || 'Refresh',
-                    fields: render.fields || [{
-                        name: 'city',
-                        label: 'City',
-                        type: 'text',
-                        default: 'Moscow',
-                        required: true,
-                    }],
-                },
-                { type: 'status', target: 'result', idle: 'Enter a value and press Refresh.', loading: 'Loading...', error: 'Request failed.', success: 'Latest result' },
-                { type: 'kv', target: 'result', fields: render.fields_out || [
-                    { label: 'City', path: 'resolved_to' },
-                    { label: 'Temperature', path: 'temp_c' },
-                    { label: 'Feels like', path: 'feels_like_c' },
-                    { label: 'Condition', path: 'condition' },
-                    { label: 'Humidity', path: 'humidity_pct' },
-                    { label: 'Wind speed', path: 'wind_kph' },
-                    { label: 'Wind direction', path: 'wind_dir' },
-                ] },
-            ],
-        });
-    }
     if (render.kind === 'module' && render.entry) {
         // v5.7.0: ``kind: "module"`` mounts reviewed JS inside an opaque
         // sandboxed iframe. We DO NOT load the JS via <script src>, because

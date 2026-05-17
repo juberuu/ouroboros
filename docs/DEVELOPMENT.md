@@ -477,8 +477,7 @@ and fix any hits.
 
 Extension widgets should prefer host-owned declarative render schemas.
 `web/modules/widgets.js` is the single host for `register_ui_tab`
-declarations: `iframe` remains sandboxed with no relaxed tokens, legacy
-`inline_card` is translated to declarative UI for compatibility, and
+declarations: `iframe` remains sandboxed with no relaxed tokens, and
 `kind: "declarative"` / `schema_version: 1` covers forms, actions, markdown, JSON, key/value
 summaries, tables, progress, files, galleries, image/audio/video media, and
 v5.7.0 map/calendar/kanban components. New common widget capabilities should

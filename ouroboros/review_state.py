@@ -734,42 +734,6 @@ class AdvisoryReviewState:
 
         return list(observations.values())
 
-    def _synthesize_missing_debts_from_observations(self, *, repo_key: str | None = None) -> None:
-        now = _utc_now()
-        debts = _commit_readiness_debts_view(self)
-        for debt in debts:
-            self._hydrate_commit_readiness_debt(debt)
-        existing_keys = {
-            (debt.repo_key, debt.fingerprint or debt.debt_id)
-            for debt in debts
-        }
-        for item in self._build_commit_readiness_debt_observations(repo_key=repo_key):
-            key = (
-                str(item.get("repo_key", "") or _LEGACY_CURRENT_REPO_KEY),
-                str(item.get("fingerprint", "") or ""),
-            )
-            if key in existing_keys:
-                continue
-            debts.append(CommitReadinessDebtItem(
-                debt_id=self._allocate_commit_readiness_debt_id(),
-                category=str(item.get("category", "") or ""),
-                summary=str(item.get("summary", "") or ""),
-                severity=str(item.get("severity", "warning") or "warning"),
-                status="detected",
-                repo_key=key[0],
-                fingerprint=key[1],
-                title=str(item.get("title", "Commit readiness debt") or "Commit readiness debt"),
-                source=str(item.get("source", "review_state") or "review_state"),
-                source_obligation_ids=[str(x) for x in (item.get("source_obligation_ids") or [])],
-                evidence=[str(x) for x in (item.get("evidence") or [])][:5],
-                first_seen_at=now,
-                last_seen_at=now,
-                updated_at=now,
-                occurrence_count=1,
-                consecutive_observations=1,
-            ))
-            existing_keys.add(key)
-
     def _sync_commit_readiness_debts(self, *, repo_key: str | None = None) -> None:
         now = _utc_now()
         debts = _commit_readiness_debts_view(self)
@@ -1209,9 +1173,7 @@ def _load_state_unlocked(drive_root: pathlib.Path) -> AdvisoryReviewState:
     if not isinstance(data, dict):
         return AdvisoryReviewState()
 
-    raw_runs = data.get("advisory_runs")
-    if raw_runs is None:
-        raw_runs = data.get("runs") or []
+    raw_runs = data.get("advisory_runs") or []
     advisory_runs = [_record_from_dict(r) for r in (raw_runs or []) if isinstance(r, dict)]
 
     attempts = [
@@ -1219,15 +1181,6 @@ def _load_state_unlocked(drive_root: pathlib.Path) -> AdvisoryReviewState:
         for item in (data.get("attempts") or [])
         if isinstance(item, dict)
     ]
-
-    legacy_attempts: List[CommitAttemptRecord] = []
-    if isinstance(data.get("last_commit_attempt"), dict):
-        legacy_attempts.append(_commit_attempt_from_dict(data["last_commit_attempt"]))
-    legacy_attempts.extend(
-        _commit_attempt_from_dict(item)
-        for item in (data.get("blocking_history") or [])
-        if isinstance(item, dict)
-    )
 
     open_obligations = [
         _obligation_from_dict(item)
@@ -1259,14 +1212,6 @@ def _load_state_unlocked(drive_root: pathlib.Path) -> AdvisoryReviewState:
         last_stale_repo_key=str(data.get("last_stale_repo_key", "")),
     )
 
-    if not state.attempts:
-        state.attempts = legacy_attempts
-    else:
-        seen = {_attempt_identity_tuple(item) for item in state.attempts}
-        for item in legacy_attempts:
-            if _attempt_identity_tuple(item) not in seen:
-                state.attempts.append(item)
-                seen.add(_attempt_identity_tuple(item))
     state.attempts.sort(key=_attempt_order_key)
 
     state._coalesce_open_obligations()
@@ -1280,12 +1225,6 @@ def _load_state_unlocked(drive_root: pathlib.Path) -> AdvisoryReviewState:
         int(state.next_commit_readiness_debt_seq or 1),
         _infer_next_prefixed_sequence(state.commit_readiness_debts, "crd-"),
     )
-    if not state.commit_readiness_debts and legacy_attempts:
-        try:
-            state._synthesize_missing_debts_from_observations()
-        except Exception:
-            log.debug("legacy-upgrade debt synthesis failed (non-fatal)", exc_info=True)
-
     return state
 
 

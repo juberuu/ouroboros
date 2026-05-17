@@ -161,10 +161,9 @@ def test_widgets_cards_do_not_stretch_to_row_height():
     assert ".widgets-card-span-2" in css
 
 
-def test_widgets_inline_card_compat_translates_to_declarative():
+def test_widgets_inline_card_host_path_removed():
     source = _widgets_js()
-    assert "render.kind === 'inline_card'" in source
-    assert "mountDeclarativeWidget(mount, tab, {" in source
+    assert "render.kind === 'inline_card'" not in source
     assert "skill-widget-weather" not in source
     assert "const saved = widgetSessionState.get(persistenceKey) || {};" in source
 
