@@ -453,6 +453,10 @@ class BackgroundConsciousness:
 
         parts = [self._load_bg_prompt()]
 
+        if not (self._repo_dir / "docs" / "ARCHITECTURE.md").is_file():
+            logging.getLogger(__name__).warning(
+                "consciousness: docs/ARCHITECTURE.md not found or empty"
+            )
         parts.extend(build_governance_sections(env, warn_large=True, warn_label="consciousness"))
 
         # Memory sections: scratchpad, identity, dialogue summary (full size)

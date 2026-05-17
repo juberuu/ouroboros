@@ -54,7 +54,6 @@ def test_summary_and_background_token_budgets():
         "ouroboros/consolidator.py": "max_tokens=16384",
         "ouroboros/reflection.py": "max_tokens=16384",
         "ouroboros/agent_task_pipeline.py": "max_tokens=16384",
-        "ouroboros/tools/core.py": "max_tokens=16384",
         "ouroboros/context_compaction.py": "max_tokens=32768",
         "ouroboros/tools/skill_publish.py": "max_tokens=8192",
         "ouroboros/consciousness.py": "max_tokens=65536",
