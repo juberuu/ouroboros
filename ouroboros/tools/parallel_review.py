@@ -7,7 +7,7 @@ import logging
 from typing import Optional
 
 from ouroboros.utils import run_cmd
-from ouroboros.tools.review_helpers import format_review_history_entry
+from ouroboros.tools.review_helpers import build_scope_actor_record, format_review_history_entry
 from ouroboros.tools.scope_review import run_scope_review, _get_scope_model
 
 log = logging.getLogger(__name__)
@@ -135,21 +135,10 @@ def run_parallel_review(ctx, commit_message, *, goal="", scope="", review_rebutt
         existing[snapshot_key] = updated
         ctx._scope_review_history = existing
         # Canonical scope actor record for durable CommitAttemptRecord persistence.
-        ctx._last_scope_raw_result = {
-            "model_id": getattr(scope_result, "model_id", "") or getattr(ctx, "_last_scope_model", ""),
-            "status": getattr(scope_result, "status", "responded"),
-            "raw_text": getattr(scope_result, "raw_text", ""),
-            "prompt_chars": getattr(scope_result, "prompt_chars", 0),
-            "tokens_in": getattr(scope_result, "tokens_in", 0),
-            "tokens_out": getattr(scope_result, "tokens_out", 0),
-            "cost_usd": getattr(scope_result, "cost_usd", 0.0),
-            # Same field name as triad actor records; scope has one reviewer.
-            "parsed_items": list(
-                (scope_result.critical_findings or []) + (scope_result.advisory_findings or [])
-            ),
-            "critical_findings": list(scope_result.critical_findings or []),
-            "advisory_findings": list(scope_result.advisory_findings or []),
-        }
+        ctx._last_scope_raw_result = build_scope_actor_record(
+            scope_result,
+            fallback_model_id=getattr(ctx, "_last_scope_model", ""),
+        )
     else:
         ctx._last_scope_raw_result = {}
 

@@ -79,31 +79,17 @@ def _min_iso_ts(left: str, right: str) -> str:
     return min(candidates)
 
 
-def _repo_scope_exact_match_exists(records: List[Any], repo_key: str | None) -> bool:
-    return repo_key is not None and any(str(getattr(record, "repo_key", "") or "") == repo_key for record in records)
-def _repo_scope_matches(
-    record_repo_key: str,
-    repo_key: str | None,
-    *,
-    exact_match_exists: bool,
-) -> bool:
-    if repo_key is None:
-        return True
-    if record_repo_key == repo_key:
-        return True
-    return (not exact_match_exists) and record_repo_key in ("", _LEGACY_CURRENT_REPO_KEY)
-
-
 def _filter_repo_scope(records: List[Any], repo_key: str | None) -> List[Any]:
     if repo_key is None:
         return list(records)
-    exact_match_exists = _repo_scope_exact_match_exists(records, repo_key)
+    exact_match_exists = any(str(getattr(record, "repo_key", "") or "") == repo_key for record in records)
     return [
-        record for record in records
-        if _repo_scope_matches(
-            str(getattr(record, "repo_key", "") or ""),
-            repo_key,
-            exact_match_exists=exact_match_exists,
+        record
+        for record in records
+        if (str(getattr(record, "repo_key", "") or "") == repo_key)
+        or (
+            not exact_match_exists
+            and str(getattr(record, "repo_key", "") or "") in ("", _LEGACY_CURRENT_REPO_KEY)
         )
     ]
 
@@ -115,6 +101,59 @@ def _commit_readiness_debts_view(state: Any) -> List["CommitReadinessDebtItem"]:
     debts = list(debts or [])
     setattr(state, "commit_readiness_debts", debts)
     return debts
+
+
+_OBLIGATION_STR_DEFAULTS = {"obligation_id": "", "item": "", "severity": "critical", "reason": "", "source_attempt_ts": "", "source_attempt_msg": "", "status": "still_open", "resolved_by": "", "repo_key": _LEGACY_CURRENT_REPO_KEY}
+_DEBT_STR_DEFAULTS = {"debt_id": "", "category": "", "summary": "", "severity": "warning", "status": "detected", "repo_key": _LEGACY_CURRENT_REPO_KEY, "fingerprint": "", "title": "Commit readiness debt", "source": "review_state", "first_seen_at": "", "last_seen_at": "", "updated_at": "", "verified_at": ""}
+_RUN_STR_DEFAULTS = {"snapshot_hash": "", "commit_message": "", "status": "stale", "snapshot_summary": "", "raw_result": "", "bypass_reason": "", "bypassed_by_task": "", "repo_key": _LEGACY_CURRENT_REPO_KEY, "tool_name": _DEFAULT_ADVISORY_TOOL_NAME, "phase": "advisory", "model_used": "", "session_id": ""}
+_ATTEMPT_STR_DEFAULTS = {"commit_message": "", "snapshot_hash": "", "block_reason": "", "block_details": "", "task_id": "", "repo_key": _LEGACY_CURRENT_REPO_KEY, "tool_name": _DEFAULT_TOOL_NAME, "pre_review_fingerprint": "", "post_review_fingerprint": "", "fingerprint_status": "", "scope_model": ""}
+_ATTEMPT_MERGE_INCOMING_FIRST = ("ts", "commit_message", "status", "snapshot_hash", "block_reason", "block_details", "duration_sec", "task_id", "repo_key", "tool_name", "phase", "pre_review_fingerprint", "post_review_fingerprint", "fingerprint_status", "scope_model")
+_ATTEMPT_MERGE_INCOMING_LISTS = ("critical_findings", "advisory_findings", "obligation_ids", "readiness_warnings")
+_RUN_STATUS_ICONS = {"fresh": "✅", "stale": "⚠️", "bypassed": "⏭️", "skipped": "⏭️", "parse_failure": "🔴"}
+
+
+def _filter_lifecycle_records(
+    records: List[Any],
+    *,
+    repo_key: str | None = None,
+    tool_name: str | None = None,
+    task_id: str | None = None,
+    attempt: int | None = None,
+) -> List[Any]:
+    results = _filter_repo_scope(records, repo_key)
+    return [
+        record
+        for record in results
+        if (tool_name is None or str(getattr(record, "tool_name", "") or "") == tool_name)
+        and (task_id is None or str(getattr(record, "task_id", "") or "") == task_id)
+        and (attempt is None or int(getattr(record, "attempt", 0) or 0) == int(attempt))
+    ]
+
+
+def _allocate_prefixed_id(items: List[Any], attr: str, next_seq: int, prefix: str) -> tuple[str, int]:
+    used = {str(getattr(item, attr, "") or "").strip() for item in items if str(getattr(item, attr, "") or "").strip()}
+    seq = max(1, int(next_seq or 1))
+    while True:
+        candidate = f"{prefix}{seq:04d}"
+        seq += 1
+        if candidate not in used:
+            return candidate, seq
+
+
+def _append_finding_lines(
+    lines: List[str],
+    findings: List[Dict[str, Any]],
+    header: str,
+    *,
+    limit: int | None = None,
+    with_severity: bool = False,
+) -> None:
+    lines.append(f"   {header} ({len(findings)}):")
+    for finding in findings:
+        label = str(finding.get("item", "?") if with_severity else finding.get("item") or finding.get("reason") or "?")
+        reason = _truncate_review_reason(finding.get("reason", ""), limit=limit) if limit else _truncate_review_reason(finding.get("reason", ""))
+        prefix = f"[{str(finding.get('severity', 'advisory')).upper()}] " if with_severity else "- "
+        lines.append(f"     {prefix}{label}: {reason}")
 
 
 @dataclass
@@ -271,14 +310,13 @@ class AdvisoryReviewState:
         task_id: str | None = None,
         attempt: int | None = None,
     ) -> List[AdvisoryRunRecord]:
-        results = _filter_repo_scope(self.advisory_runs, repo_key)
-        if tool_name is not None:
-            results = [run for run in results if run.tool_name == tool_name]
-        if task_id is not None:
-            results = [run for run in results if run.task_id == task_id]
-        if attempt is not None:
-            results = [run for run in results if int(run.attempt or 0) == int(attempt)]
-        return results
+        return _filter_lifecycle_records(
+            self.advisory_runs,
+            repo_key=repo_key,
+            tool_name=tool_name,
+            task_id=task_id,
+            attempt=attempt,
+        )
 
     def filter_attempts(
         self,
@@ -288,14 +326,13 @@ class AdvisoryReviewState:
         task_id: str | None = None,
         attempt: int | None = None,
     ) -> List[CommitAttemptRecord]:
-        results = _filter_repo_scope(self.attempts, repo_key)
-        if tool_name is not None:
-            results = [item for item in results if item.tool_name == tool_name]
-        if task_id is not None:
-            results = [item for item in results if item.task_id == task_id]
-        if attempt is not None:
-            results = [item for item in results if int(item.attempt or 0) == int(attempt)]
-        return results
+        return _filter_lifecycle_records(
+            self.attempts,
+            repo_key=repo_key,
+            tool_name=tool_name,
+            task_id=task_id,
+            attempt=attempt,
+        )
 
     def next_attempt_number(self, repo_key: str, tool_name: str, task_id: str = "") -> int:
         candidates = self.filter_attempts(repo_key=repo_key, tool_name=tool_name, task_id=task_id)
@@ -384,7 +421,6 @@ class AdvisoryReviewState:
         if not invalidatable:
             return 0
 
-        target_runs: List[AdvisoryRunRecord]
         if not repo_key:
             target_runs = invalidatable
         else:
@@ -447,19 +483,14 @@ class AdvisoryReviewState:
         return attempt
 
     def _allocate_obligation_id(self) -> str:
-        used = {
-            str(item.obligation_id or "").strip()
-            for item in self.open_obligations
-            if str(item.obligation_id or "").strip()
-        }
-        next_seq = max(1, int(self.next_obligation_seq or 1))
-        while True:
-            candidate = f"obl-{next_seq:04d}"
-            next_seq += 1
-            if candidate in used:
-                continue
-            self.next_obligation_seq = next_seq
-            return candidate
+        candidate, next_seq = _allocate_prefixed_id(
+            self.open_obligations,
+            "obligation_id",
+            self.next_obligation_seq,
+            "obl-",
+        )
+        self.next_obligation_seq = next_seq
+        return candidate
 
     def _hydrate_obligation(self, obligation: ObligationItem) -> None:
         obligation.repo_key = str(obligation.repo_key or _LEGACY_CURRENT_REPO_KEY)
@@ -539,20 +570,14 @@ class AdvisoryReviewState:
         obligation.updated_ts = seen_ts
 
     def _allocate_commit_readiness_debt_id(self) -> str:
-        debts = _commit_readiness_debts_view(self)
-        used = {
-            str(item.debt_id or "").strip()
-            for item in debts
-            if str(item.debt_id or "").strip()
-        }
-        next_seq = max(1, int(self.next_commit_readiness_debt_seq or 1))
-        while True:
-            candidate = f"crd-{next_seq:04d}"
-            next_seq += 1
-            if candidate in used:
-                continue
-            self.next_commit_readiness_debt_seq = next_seq
-            return candidate
+        candidate, next_seq = _allocate_prefixed_id(
+            _commit_readiness_debts_view(self),
+            "debt_id",
+            self.next_commit_readiness_debt_seq,
+            "crd-",
+        )
+        self.next_commit_readiness_debt_seq = next_seq
+        return candidate
 
     def _hydrate_commit_readiness_debt(self, debt: CommitReadinessDebtItem) -> None:
         debt.repo_key = str(debt.repo_key or _LEGACY_CURRENT_REPO_KEY)
@@ -589,9 +614,8 @@ class AdvisoryReviewState:
             fingerprint = str(observation.get("fingerprint", "") or "").strip()
             if not fingerprint:
                 return
-            existing = observations.get(fingerprint)
-            if existing is None:
-                observations[fingerprint] = observation
+            existing = observations.setdefault(fingerprint, observation)
+            if existing is observation:
                 return
             existing["source_obligation_ids"] = _dedupe_strings(
                 list(existing.get("source_obligation_ids") or [])
@@ -602,15 +626,8 @@ class AdvisoryReviewState:
                 + list(observation.get("evidence") or [])
             )[:5]
 
-        blocked_attempts = [
-            attempt
-            for attempt in self.filter_attempts(repo_key=repo_key)
-            if attempt.status == "blocked" or attempt.blocked
-        ]
-        open_obs = {
-            item.obligation_id: item
-            for item in self.get_open_obligations(repo_key=repo_key)
-        }
+        blocked_attempts = [attempt for attempt in self.filter_attempts(repo_key=repo_key) if attempt.status == "blocked" or attempt.blocked]
+        open_obs = {item.obligation_id: item for item in self.get_open_obligations(repo_key=repo_key)}
         obligation_counts: Dict[str, int] = {}
         for attempt in blocked_attempts:
             for obligation_id in _dedupe_strings(list(attempt.obligation_ids or [])):
@@ -624,7 +641,7 @@ class AdvisoryReviewState:
             item_name = str(getattr(obligation, "item", "") or obligation_id)
             summary = f"{item_name} repeated across {count} blocked reviewed attempts."
             evidence = [f"{obligation_id}: blocked_attempts={count}"]
-            if obligation is not None and getattr(obligation, "reason", ""):
+            if getattr(obligation, "reason", ""):
                 evidence.insert(0, f"{item_name}: {getattr(obligation, 'reason', '')}")
             _remember({
                 "category": "obligation_repeat",
@@ -652,21 +669,13 @@ class AdvisoryReviewState:
                 "evidence": [str(self.last_stale_reason or "worktree mutation invalidated advisory freshness")],
             })
 
-        scoped_attempts = (
-            self.filter_attempts(repo_key=repo_key)
-            if repo_key is not None else list(self.attempts)
-        )
+        scoped_attempts = self.filter_attempts(repo_key=repo_key) if repo_key is not None else list(self.attempts)
         latest_attempt = scoped_attempts[-1] if scoped_attempts else None
         latest_success_ts = ""
         for attempt in reversed(scoped_attempts):
             if str(getattr(attempt, "status", "") or "") != "succeeded":
                 continue
-            latest_success_ts = str(
-                getattr(attempt, "finished_ts", "")
-                or getattr(attempt, "updated_ts", "")
-                or getattr(attempt, "ts", "")
-                or ""
-            )
+            latest_success_ts = str(getattr(attempt, "finished_ts", "") or getattr(attempt, "updated_ts", "") or getattr(attempt, "ts", "") or "")
             break
 
         if (
@@ -692,16 +701,8 @@ class AdvisoryReviewState:
 
         advisory_runs = self.filter_advisory_runs(repo_key=repo_key) if repo_key is not None else list(self.advisory_runs)
         latest_run = advisory_runs[-1] if advisory_runs else None
-        latest_run_ts = str(
-            getattr(latest_run, "updated_ts", "")
-            or getattr(latest_run, "ts", "")
-            or ""
-        ) if latest_run else ""
-        advisory_warnings_resolved = bool(
-            latest_success_ts
-            and latest_run_ts
-            and _max_iso_ts(latest_run_ts, latest_success_ts) == latest_success_ts
-        )
+        latest_run_ts = str(getattr(latest_run, "updated_ts", "") or getattr(latest_run, "ts", "") or "") if latest_run else ""
+        advisory_warnings_resolved = bool(latest_success_ts and latest_run_ts and _max_iso_ts(latest_run_ts, latest_success_ts) == latest_success_ts)
         if latest_run and latest_run.readiness_warnings and not advisory_warnings_resolved:
             for warning in latest_run.readiness_warnings:
                 warning_text = str(warning or "").strip()
@@ -776,12 +777,8 @@ class AdvisoryReviewState:
             current.fingerprint = str(item.get("fingerprint", "") or current.fingerprint)
             current.title = str(item.get("title", "") or current.title)
             current.source = str(item.get("source", "") or current.source)
-            current.source_obligation_ids = _dedupe_strings(
-                list(item.get("source_obligation_ids") or [])
-            )
-            current.evidence = _dedupe_strings(
-                list(item.get("evidence") or [])
-            )[:5]
+            current.source_obligation_ids = _dedupe_strings(list(item.get("source_obligation_ids") or []))
+            current.evidence = _dedupe_strings(list(item.get("evidence") or []))[:5]
             current.last_seen_at = now
             current.updated_at = now
             current.occurrence_count = int(current.occurrence_count or 0) + 1
@@ -798,16 +795,8 @@ class AdvisoryReviewState:
                 debt.updated_at = now
                 debt.consecutive_observations = 0
 
-        open_items = [
-            debt
-            for debt in debts
-            if str(debt.status or "") in _OPEN_COMMIT_READINESS_DEBT_STATUSES
-        ]
-        closed_items = [
-            debt
-            for debt in debts
-            if str(debt.status or "") not in _OPEN_COMMIT_READINESS_DEBT_STATUSES
-        ]
+        open_items = [debt for debt in debts if str(debt.status or "") in _OPEN_COMMIT_READINESS_DEBT_STATUSES]
+        closed_items = [debt for debt in debts if str(debt.status or "") not in _OPEN_COMMIT_READINESS_DEBT_STATUSES]
         open_items.sort(key=lambda debt: str(debt.updated_at or debt.last_seen_at or debt.first_seen_at or ""), reverse=True)
         closed_items.sort(key=lambda debt: str(debt.updated_at or debt.last_seen_at or debt.first_seen_at or ""), reverse=True)
         remaining = max(0, _MAX_COMMIT_READINESS_DEBTS - len(open_items))
@@ -914,10 +903,9 @@ class AdvisoryReviewState:
         for ob in _filter_repo_scope(self.open_obligations, repo_key):
             if ob.obligation_id not in resolved_ids or ob.status != "still_open":
                 continue
-            if ob.obligation_id in resolved_ids and ob.status == "still_open":
-                ob.status = "resolved"
-                ob.resolved_by = resolved_by
-                count += 1
+            ob.status = "resolved"
+            ob.resolved_by = resolved_by
+            count += 1
         return count
 
     def get_open_obligations(self, repo_key: str | None = None) -> List[ObligationItem]:
@@ -998,15 +986,7 @@ class AdvisoryReviewState:
 
 def _obligation_from_dict(d: Dict[str, Any]) -> ObligationItem:
     return ObligationItem(
-        obligation_id=str(d.get("obligation_id", "")),
-        item=str(d.get("item", "")),
-        severity=str(d.get("severity", "critical")),
-        reason=str(d.get("reason", "")),
-        source_attempt_ts=str(d.get("source_attempt_ts", "")),
-        source_attempt_msg=str(d.get("source_attempt_msg", "")),
-        status=str(d.get("status", "still_open")),
-        resolved_by=str(d.get("resolved_by", "")),
-        repo_key=str(d.get("repo_key", _LEGACY_CURRENT_REPO_KEY)),
+        **{key: str(d.get(key, default)) for key, default in _OBLIGATION_STR_DEFAULTS.items()},
         fingerprint=str(d.get("fingerprint", "") or _make_obligation_fingerprint(d.get("item", ""), d.get("reason", ""))),
         created_ts=str(d.get("created_ts", d.get("source_attempt_ts", ""))),
         updated_ts=str(d.get("updated_ts", d.get("source_attempt_ts", ""))),
@@ -1015,21 +995,9 @@ def _obligation_from_dict(d: Dict[str, Any]) -> ObligationItem:
 
 def _commit_readiness_debt_from_dict(d: Dict[str, Any]) -> CommitReadinessDebtItem:
     return CommitReadinessDebtItem(
-        debt_id=str(d.get("debt_id", "")),
-        category=str(d.get("category", "")),
-        summary=str(d.get("summary", "")),
-        severity=str(d.get("severity", "warning")),
-        status=str(d.get("status", "detected")),
-        repo_key=str(d.get("repo_key", _LEGACY_CURRENT_REPO_KEY)),
-        fingerprint=str(d.get("fingerprint", "")),
-        title=str(d.get("title", "Commit readiness debt")),
-        source=str(d.get("source", "review_state")),
+        **{key: str(d.get(key, default)) for key, default in _DEBT_STR_DEFAULTS.items()},
         source_obligation_ids=[str(x) for x in (d.get("source_obligation_ids") or [])],
         evidence=[str(x) for x in (d.get("evidence") or [])],
-        first_seen_at=str(d.get("first_seen_at", "")),
-        last_seen_at=str(d.get("last_seen_at", "")),
-        updated_at=str(d.get("updated_at", "")),
-        verified_at=str(d.get("verified_at", "")),
         occurrence_count=_coerce_int(d.get("occurrence_count", 0)),
         consecutive_observations=_coerce_int(d.get("consecutive_observations", 0)),
     )
@@ -1039,27 +1007,16 @@ def _record_from_dict(d: Dict[str, Any]) -> AdvisoryRunRecord:
     raw_paths = d.get("snapshot_paths")
     ts = str(d.get("ts", ""))
     return AdvisoryRunRecord(
-        snapshot_hash=str(d.get("snapshot_hash", "")),
-        commit_message=str(d.get("commit_message", "")),
-        status=str(d.get("status", "stale")),
+        **{key: str(d.get(key, default)) for key, default in _RUN_STR_DEFAULTS.items()},
         ts=ts,
         items=list(d.get("items") or []),
-        snapshot_summary=str(d.get("snapshot_summary", "")),
-        raw_result=str(d.get("raw_result", "")),
-        bypass_reason=str(d.get("bypass_reason", "")),
-        bypassed_by_task=str(d.get("bypassed_by_task", "")),
         snapshot_paths=list(raw_paths) if isinstance(raw_paths, list) else None,
-        repo_key=str(d.get("repo_key", _LEGACY_CURRENT_REPO_KEY)),
-        tool_name=str(d.get("tool_name", _DEFAULT_ADVISORY_TOOL_NAME)),
         task_id=str(d.get("task_id", d.get("bypassed_by_task", ""))),
         attempt=_coerce_int(d.get("attempt", 0)),
-        phase=str(d.get("phase", "advisory")),
         created_ts=str(d.get("created_ts", ts)),
         updated_ts=str(d.get("updated_ts", ts)),
         readiness_warnings=[str(x) for x in (d.get("readiness_warnings") or [])],
         prompt_chars=int(d.get("prompt_chars", 0) or 0),
-        model_used=str(d.get("model_used", "")),
-        session_id=str(d.get("session_id", "")),
         duration_sec=float(d.get("duration_sec", 0.0) or 0.0),
     )
 
@@ -1068,17 +1025,11 @@ def _commit_attempt_from_dict(d: Dict[str, Any]) -> CommitAttemptRecord:
     ts = str(d.get("ts", ""))
     status = str(d.get("status", "failed"))
     return CommitAttemptRecord(
+        **{key: str(d.get(key, default)) for key, default in _ATTEMPT_STR_DEFAULTS.items()},
         ts=ts,
-        commit_message=str(d.get("commit_message", "")),
         status=status,
-        snapshot_hash=str(d.get("snapshot_hash", "")),
-        block_reason=str(d.get("block_reason", "")),
-        block_details=str(d.get("block_details", "")),
         duration_sec=float(d.get("duration_sec", 0.0)),
-        task_id=str(d.get("task_id", "")),
         critical_findings=list(d.get("critical_findings") or []),
-        repo_key=str(d.get("repo_key", _LEGACY_CURRENT_REPO_KEY)),
-        tool_name=str(d.get("tool_name", _DEFAULT_TOOL_NAME)),
         attempt=_coerce_int(d.get("attempt", 0)),
         phase=str(d.get("phase", _infer_phase(status, str(d.get("block_reason", ""))))),
         blocked=bool(d.get("blocked", status == "blocked")),
@@ -1086,15 +1037,11 @@ def _commit_attempt_from_dict(d: Dict[str, Any]) -> CommitAttemptRecord:
         obligation_ids=[str(x) for x in (d.get("obligation_ids") or [])],
         readiness_warnings=[str(x) for x in (d.get("readiness_warnings") or [])],
         late_result_pending=bool(d.get("late_result_pending", False)),
-        pre_review_fingerprint=str(d.get("pre_review_fingerprint", "")),
-        post_review_fingerprint=str(d.get("post_review_fingerprint", "")),
-        fingerprint_status=str(d.get("fingerprint_status", "")),
         degraded_reasons=[str(x) for x in (d.get("degraded_reasons") or [])],
         started_ts=str(d.get("started_ts", ts)),
         updated_ts=str(d.get("updated_ts", ts)),
         finished_ts=str(d.get("finished_ts", ts if status in ("blocked", "failed", "succeeded") else "")),
         triad_models=[str(x) for x in (d.get("triad_models") or [])],
-        scope_model=str(d.get("scope_model", "")),
         triad_raw_results=list(d.get("triad_raw_results") or []),
         scope_raw_result=dict(d.get("scope_raw_result") or {}),
     )
@@ -1110,24 +1057,12 @@ def _load_state_unlocked(drive_root: pathlib.Path) -> AdvisoryReviewState:
     if not isinstance(data, dict):
         return AdvisoryReviewState()
 
-    raw_runs = data.get("advisory_runs") or []
-    advisory_runs = [_record_from_dict(r) for r in (raw_runs or []) if isinstance(r, dict)]
-
-    attempts = [
-        _commit_attempt_from_dict(item)
-        for item in (data.get("attempts") or [])
-        if isinstance(item, dict)
-    ]
-
-    open_obligations = [
-        _obligation_from_dict(item)
-        for item in (data.get("open_obligations") or [])
-        if isinstance(item, dict)
-    ]
+    advisory_runs = [_record_from_dict(item) for item in (item for item in data.get("advisory_runs", []) if isinstance(item, dict))]
+    attempts = [_commit_attempt_from_dict(item) for item in (item for item in data.get("attempts", []) if isinstance(item, dict))]
+    open_obligations = [_obligation_from_dict(item) for item in (item for item in data.get("open_obligations", []) if isinstance(item, dict))]
     commit_readiness_debts = [
         _commit_readiness_debt_from_dict(item)
-        for item in (data.get("commit_readiness_debts") or [])
-        if isinstance(item, dict)
+        for item in (item for item in data.get("commit_readiness_debts", []) if isinstance(item, dict))
     ]
 
     state = AdvisoryReviewState(
@@ -1299,7 +1234,10 @@ def compute_snapshot_hash(
         try:
             from ouroboros.tools.review_helpers import list_changed_paths_from_git_status
 
-            for relpath in list_changed_paths_from_git_status(repo_dir):
+            for relpath in list_changed_paths_from_git_status(
+                repo_dir,
+                include_sources_for_renames=True,
+            ):
                 _record_digest(relpath)
         except Exception as e:
             log.debug("compute_snapshot_hash: git status failed: %s", e)
@@ -1357,8 +1295,7 @@ def invalidate_advisory_after_mutation(
         log.debug("invalidate_advisory_after_mutation failed (non-fatal): %s", e)
 
 
-def format_status_section(state: AdvisoryReviewState,
-                          repo_dir: Optional[pathlib.Path] = None) -> str:
+def format_status_section(state: AdvisoryReviewState, repo_dir: Optional[pathlib.Path] = None) -> str:
     """Render historical review state for LLM context."""
     repo_key = make_repo_key(repo_dir) if repo_dir is not None else None
     advisory_runs = state.filter_advisory_runs(repo_key=repo_key) if repo_key is not None else list(state.advisory_runs)
@@ -1377,19 +1314,8 @@ def format_status_section(state: AdvisoryReviewState,
 
     # Include all runs/attempts/findings; review history must not silently truncate.
     for run in advisory_runs:
-        status_icon = {
-            "fresh": "✅",
-            "stale": "⚠️",
-            "bypassed": "⏭️",
-            "skipped": "⏭️",
-            "parse_failure": "🔴",
-        }.get(run.status, "❓")
-        ts_display = run.ts  # full timestamp — no [:16] truncation
-        hash_short = run.snapshot_hash[:12]
-        commit_display = run.commit_message  # full message — no [:60] truncation
-
-        lines.append(f"\n{status_icon} **{run.status.upper()}** | hash={hash_short} | {ts_display}")
-        lines.append(f"   Commit: {commit_display}")
+        lines.append(f"\n{_RUN_STATUS_ICONS.get(run.status, '❓')} **{run.status.upper()}** | hash={run.snapshot_hash[:12]} | {run.ts}")
+        lines.append(f"   Commit: {run.commit_message}")
         if run.bypass_reason:
             lines.append(f"   Bypassed: {run.bypass_reason}")
         if run.snapshot_summary:
@@ -1400,12 +1326,7 @@ def format_status_section(state: AdvisoryReviewState,
             if isinstance(item, dict) and str(item.get("verdict", "")).upper() == "FAIL"
         ]
         if findings:
-            lines.append(f"   Findings ({len(findings)}):")
-            for item in findings:
-                sev = str(item.get("severity", "advisory")).upper()
-                name = item.get("item", "?")
-                reason = _truncate_review_reason(item.get("reason", ""))
-                lines.append(f"     [{sev}] {name}: {reason}")
+            _append_finding_lines(lines, findings, "Findings", with_severity=True)
         elif run.status in ("fresh", "bypassed", "skipped", "parse_failure"):
             lines.append("   No findings recorded.")
 
@@ -1427,10 +1348,9 @@ def format_status_section(state: AdvisoryReviewState,
             for evidence in list(debt.evidence or []):
                 lines.append(f"    evidence={evidence}")
 
-    recent_attempts = attempts
-    if recent_attempts:
+    if attempts:
         lines.append("\n### Recent reviewed attempts")
-        for item in recent_attempts:
+        for item in attempts:
             tool = item.tool_name or _DEFAULT_TOOL_NAME
             num = int(item.attempt or 0)
             label = f"{tool}#{num}" if num else tool
@@ -1445,10 +1365,7 @@ def format_status_section(state: AdvisoryReviewState,
             lines.append(f"- {label}: {', '.join(facts)}")
             triad_raw = getattr(item, "triad_raw_results", None) or []
             if triad_raw:
-                actor_summaries = [
-                    f"{r.get('model_id', '?')}={r.get('status', '?')}"
-                    for r in triad_raw
-                ]
+                actor_summaries = (f"{r.get('model_id', '?')}={r.get('status', '?')}" for r in triad_raw)
                 lines.append(f"    triad_actors: {', '.join(actor_summaries)}")
             scope_raw = getattr(item, "scope_raw_result", None) or {}
             if scope_raw and scope_raw.get("status"):
@@ -1457,10 +1374,8 @@ def format_status_section(state: AdvisoryReviewState,
     ca = last_attempt
     if ca and ca.status in ("blocked", "failed"):
         icon = "🚫" if ca.status == "blocked" else "❌"
-        ts_display = ca.ts  # full timestamp — no [:16] truncation
-        commit_display = ca.commit_message  # full message — no [:60] truncation
-        lines.append(f"\n{icon} **Last commit {ca.status.upper()}** | {ts_display}")
-        lines.append(f"   Commit: {commit_display}")
+        lines.append(f"\n{icon} **Last commit {ca.status.upper()}** | {ca.ts}")
+        lines.append(f"   Commit: {ca.commit_message}")
         lines.append(f"   Tool: {ca.tool_name or _DEFAULT_TOOL_NAME}")
         if ca.attempt:
             lines.append(f"   Attempt: {ca.attempt}")
@@ -1478,25 +1393,15 @@ def format_status_section(state: AdvisoryReviewState,
         critical_findings = list(ca.critical_findings or [])
         advisory_findings = list(ca.advisory_findings or [])
         if critical_findings:
-            lines.append(f"   Critical findings ({len(critical_findings)}):")
-            for finding in critical_findings:
-                label = str(finding.get("item") or finding.get("reason") or "?")
-                reason = _truncate_review_reason(finding.get("reason", ""), limit=160)
-                lines.append(f"     - {label}: {reason}")
+            _append_finding_lines(lines, critical_findings, "Critical findings", limit=160)
         elif advisory_findings:
-            lines.append(f"   Advisory findings ({len(advisory_findings)}):")
-            for finding in advisory_findings:
-                label = str(finding.get("item") or finding.get("reason") or "?")
-                reason = _truncate_review_reason(finding.get("reason", ""), limit=160)
-                lines.append(f"     - {label}: {reason}")
+            _append_finding_lines(lines, advisory_findings, "Advisory findings", limit=160)
 
     if open_obs:
         lines.append(f"\n📋 **Open obligations from previous blocking rounds ({len(open_obs)}):**")
         for ob in open_obs:
-            reason = _truncate_review_reason(ob.reason)
-            source = ob.source_attempt_msg  # full message — no [:60] truncation
-            lines.append(f"   [{ob.obligation_id}] [{ob.severity.upper()}] {ob.item}: {reason}")
-            lines.append(f"      Source: {ob.source_attempt_ts} — \"{source}\"")  # full ts — no [:16]
+            lines.append(f"   [{ob.obligation_id}] [{ob.severity.upper()}] {ob.item}: {_truncate_review_reason(ob.reason)}")
+            lines.append(f"      Source: {ob.source_attempt_ts} — \"{ob.source_attempt_msg}\"")
         lines.append("   Advisory MUST verify each obligation is resolved before PASS.")
 
     return "\n".join(lines)
@@ -1562,46 +1467,24 @@ def _normalize_findings(items: List[Any]) -> List[Dict[str, Any]]:
 
 
 def _merge_attempt(existing: CommitAttemptRecord, incoming: CommitAttemptRecord) -> CommitAttemptRecord:
-    merged = CommitAttemptRecord(
-        ts=incoming.ts or existing.ts,
-        commit_message=incoming.commit_message or existing.commit_message,
-        status=incoming.status or existing.status,
-        snapshot_hash=incoming.snapshot_hash or existing.snapshot_hash,
-        block_reason=incoming.block_reason or existing.block_reason,
-        block_details=incoming.block_details or existing.block_details,
-        duration_sec=incoming.duration_sec or existing.duration_sec,
-        task_id=incoming.task_id or existing.task_id,
-        critical_findings=list(incoming.critical_findings),
-        repo_key=incoming.repo_key or existing.repo_key,
-        tool_name=incoming.tool_name or existing.tool_name,
+    data = {
+        name: getattr(incoming, name) or getattr(existing, name)
+        for name in _ATTEMPT_MERGE_INCOMING_FIRST
+    }
+    data.update({name: list(getattr(incoming, name)) for name in _ATTEMPT_MERGE_INCOMING_LISTS})
+    data.update(
         attempt=int(incoming.attempt or existing.attempt or 0),
-        phase=incoming.phase or existing.phase,
         blocked=bool(incoming.blocked or incoming.status == "blocked"),
-        advisory_findings=list(incoming.advisory_findings),
-        obligation_ids=list(incoming.obligation_ids),
-        readiness_warnings=list(incoming.readiness_warnings),
         late_result_pending=bool(incoming.late_result_pending),
-        pre_review_fingerprint=incoming.pre_review_fingerprint or existing.pre_review_fingerprint,
-        post_review_fingerprint=incoming.post_review_fingerprint or existing.post_review_fingerprint,
-        fingerprint_status=incoming.fingerprint_status or existing.fingerprint_status,
         degraded_reasons=list(incoming.degraded_reasons or existing.degraded_reasons),
         started_ts=existing.started_ts or incoming.started_ts or existing.ts,
         updated_ts=incoming.updated_ts or existing.updated_ts or _utc_now(),
         finished_ts=incoming.finished_ts or existing.finished_ts,
         triad_models=list(incoming.triad_models or existing.triad_models),
-        scope_model=incoming.scope_model or existing.scope_model,
-        triad_raw_results=list(
-            getattr(incoming, "triad_raw_results", None)
-            or getattr(existing, "triad_raw_results", None)
-            or []
-        ),
-        scope_raw_result=dict(
-            getattr(incoming, "scope_raw_result", None)
-            or getattr(existing, "scope_raw_result", None)
-            or {}
-        ),
+        triad_raw_results=list(getattr(incoming, "triad_raw_results", None) or getattr(existing, "triad_raw_results", None) or []),
+        scope_raw_result=dict(getattr(incoming, "scope_raw_result", None) or getattr(existing, "scope_raw_result", None) or {}),
     )
-    return merged
+    return CommitAttemptRecord(**data)
 
 
 def _infer_phase(status: str, block_reason: str = "") -> str:

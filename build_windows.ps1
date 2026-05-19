@@ -6,7 +6,6 @@ $ErrorActionPreference = "Stop"
 $Version = (Get-Content VERSION).Trim()
 $ArchiveName = "Ouroboros-${Version}-windows-x64.zip"
 $ManagedSourceBranch = if ($env:OUROBOROS_MANAGED_SOURCE_BRANCH) { $env:OUROBOROS_MANAGED_SOURCE_BRANCH } else { "ouroboros" }
-$ReleaseTag = "v$Version"
 
 Write-Host "=== Building Ouroboros for Windows (v${Version}) ==="
 
@@ -52,18 +51,6 @@ if (Test-Path $LocalBrowsers) {
 }
 
 Write-Host "--- Building embedded managed repo bundle ---"
-git rev-parse -q --verify "refs/tags/$ReleaseTag" | Out-Null
-if ($LASTEXITCODE -ne 0) {
-    throw "Packaging requires git tag $ReleaseTag to exist."
-}
-$tagType = (git cat-file -t "refs/tags/$ReleaseTag" 2>$null).Trim()
-if ($tagType -ne "tag") {
-    throw "Packaging requires annotated git tag $ReleaseTag (got '$tagType'). Recreate with: git tag -a $ReleaseTag -m 'Release $ReleaseTag'"
-}
-$headTags = git tag --points-at HEAD
-if (-not ($headTags | Where-Object { $_ -eq $ReleaseTag })) {
-    throw "Packaging requires HEAD to be tagged with $ReleaseTag."
-}
 python scripts/build_repo_bundle.py --source-branch $ManagedSourceBranch
 
 Write-Host "--- Running PyInstaller ---"

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import pathlib
 import time
 from typing import Any, Dict
@@ -12,7 +11,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from ouroboros import get_version
-from ouroboros.gateway._helpers import request_drive_root, request_repo_dir
+from ouroboros.gateway._helpers import json_error, json_exception, request_drive_root, request_json_or, request_repo_dir
 from ouroboros.gateway.ws import broadcast_ws_sync
 from ouroboros.utils import utc_now_iso
 
@@ -35,6 +34,29 @@ def _runtime_branch_defaults(request: Request) -> tuple[str, str]:
     return "ouroboros", "ouroboros-stable"
 
 
+def _managed_update_payload(*, fetch: bool, include_tags: bool) -> dict[str, Any]:
+    from supervisor.git_ops import compute_managed_update_status, git_capture
+
+    status = compute_managed_update_status(fetch=fetch)
+    latest_version = ""
+    target_ref = status.get("target_ref") or ""
+    if target_ref and status.get("latest_sha"):
+        rc, version_text, _ = git_capture(["git", "show", f"{target_ref}:VERSION"])
+        if rc == 0:
+            latest_version = version_text.strip()
+    official_tags = []
+    if include_tags:
+        from supervisor.git_ops import list_official_update_tags
+
+        official_tags = list_official_update_tags()
+    return {
+        "current_version": get_version(),
+        "latest_version": latest_version,
+        "official_tags": official_tags,
+        **status,
+    }
+
+
 async def api_reset(request: Request) -> JSONResponse:
     """Reset all runtime data (state, memory, logs, settings) but keep repo."""
     import shutil
@@ -54,7 +76,7 @@ async def api_reset(request: Request) -> JSONResponse:
         _request_restart(request)
         return JSONResponse({"status": "ok", "deleted": deleted, "restarting": True})
     except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        return json_exception(exc)
 
 
 async def api_command(request: Request) -> JSONResponse:
@@ -108,7 +130,7 @@ async def api_command(request: Request) -> JSONResponse:
                 )
         return JSONResponse({"status": "ok"})
     except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
+        return json_exception(exc, 400)
 
 
 async def api_git_log(_request: Request) -> JSONResponse:
@@ -127,7 +149,7 @@ async def api_git_log(_request: Request) -> JSONResponse:
             "sha": sha.strip() if rc2 == 0 else "",
         })
     except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        return json_exception(exc)
 
 
 async def api_git_rollback(request: Request) -> JSONResponse:
@@ -136,16 +158,16 @@ async def api_git_rollback(request: Request) -> JSONResponse:
         body = await request.json()
         target = body.get("target", "").strip()
         if not target:
-            return JSONResponse({"error": "missing target"}, status_code=400)
+            return json_error("missing target", 400)
         from supervisor.git_ops import rollback_to_version
 
         ok, msg = rollback_to_version(target, reason="ui_rollback")
         if not ok:
-            return JSONResponse({"error": msg}, status_code=400)
+            return json_error(msg, 400)
         _request_restart(request)
         return JSONResponse({"status": "ok", "message": msg})
     except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        return json_exception(exc)
 
 
 async def api_git_promote(request: Request) -> JSONResponse:
@@ -162,59 +184,28 @@ async def api_git_promote(request: Request) -> JSONResponse:
         )
         return JSONResponse({"status": "ok", "message": f"{branch_stable} updated to match {branch_dev}"})
     except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        return json_exception(exc)
 
 
 async def api_update_status(_request: Request) -> JSONResponse:
     """Return passive managed-update status without fetching."""
     try:
-        from supervisor.git_ops import compute_managed_update_status, git_capture
-
-        status = compute_managed_update_status(fetch=False)
-        latest_version = ""
-        target_ref = status.get("target_ref") or ""
-        if target_ref and status.get("latest_sha"):
-            rc, version_text, _ = git_capture(["git", "show", f"{target_ref}:VERSION"])
-            if rc == 0:
-                latest_version = version_text.strip()
-        return JSONResponse({
-            "current_version": get_version(),
-            "latest_version": latest_version,
-            "official_tags": [],
-            **status,
-        })
+        return JSONResponse(_managed_update_payload(fetch=False, include_tags=False))
     except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        return json_exception(exc)
 
 
 async def api_update_check(_request: Request) -> JSONResponse:
     """Fetch the managed remote and return fresh update status."""
     try:
-        from supervisor.git_ops import compute_managed_update_status, git_capture, list_official_update_tags
-
-        status = compute_managed_update_status(fetch=True)
-        latest_version = ""
-        target_ref = status.get("target_ref") or ""
-        if target_ref and status.get("latest_sha"):
-            rc, version_text, _ = git_capture(["git", "show", f"{target_ref}:VERSION"])
-            if rc == 0:
-                latest_version = version_text.strip()
-        return JSONResponse({
-            "current_version": get_version(),
-            "latest_version": latest_version,
-            "official_tags": list_official_update_tags(),
-            **status,
-        })
+        return JSONResponse(_managed_update_payload(fetch=True, include_tags=True))
     except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        return json_exception(exc)
 
 
 async def api_update_apply(request: Request) -> JSONResponse:
     """Prepare a managed update and restart so safe_restart applies it."""
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
+    body = await request_json_or(request, {}, exceptions=(Exception,))
     try:
         strategy = str(body.get("strategy") or "replace")
         from supervisor.git_ops import BRANCH_DEV, _clear_update_intent, checkout_and_reset, prepare_managed_update
@@ -243,7 +234,7 @@ async def api_update_apply(request: Request) -> JSONResponse:
         _request_restart(request)
         return JSONResponse({"status": "ok", "restarting": True, **payload})
     except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        return json_exception(exc)
 
 
 async def api_evolution_data(request: Request) -> JSONResponse:

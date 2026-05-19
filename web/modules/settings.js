@@ -5,7 +5,7 @@ import { applyMcpSettings, collectMcpSettings, initMcpSettings } from './mcp_set
 import { SECRET_KEYS, bindSecretInputs, bindSettingsTabs, renderSettingsPage } from './settings_ui.js';
 import { showToast } from './toast.js';
 import { escapeHtmlAttr as escapeHtml, formatDualVersion } from './utils.js';
-import { apiFetch } from './api_client.js';
+import { apiClient, apiFetch, cleanExtensionRoute, extensionRoutePath } from './api_client.js';
 
 let markSettingsDirty = () => {};
 const BASE_SECRET_KEYS = new Set(SECRET_KEYS.map(([key]) => key));
@@ -130,14 +130,6 @@ function renderExtensionSettingsSections(root, sections) {
         host.innerHTML = '<div class="muted">No extension settings registered.</div>';
         return;
     }
-    const cleanExtensionRoute = (value) => {
-        const route = String(value || '').trim().replace(/^\/+/, '');
-        const parts = route.split('/').filter(Boolean);
-        if (!route || route.includes('\\') || parts.some((part) => part === '.' || part === '..')) {
-            return '';
-        }
-        return parts.map(encodeURIComponent).join('/');
-    };
     const fieldHtml = (field) => {
         const name = escapeHtml(field.name || '');
         const label = escapeHtml(field.label || field.name || '');
@@ -161,12 +153,12 @@ function renderExtensionSettingsSections(root, sections) {
         }
         if (type === 'form' || type === 'action') {
             const fields = Array.isArray(component.fields) ? component.fields : [];
-            const route = cleanExtensionRoute(component.route || component.api_route || '');
-            if (!route) {
+            const rawRoute = component.route || component.api_route || '';
+            if (!cleanExtensionRoute(rawRoute)) {
                 return '<div class="settings-inline-note">Invalid extension settings route.</div>';
             }
             return `
-                <form class="settings-extension-form" data-extension-settings-form data-skill="${escapeHtml(section.skill || '')}" data-route="${escapeHtml(route)}">
+                <form class="settings-extension-form" data-extension-settings-form data-skill="${escapeHtml(section.skill || '')}" data-route="${escapeHtml(rawRoute)}">
                     <div class="form-grid two">${fields.map(fieldHtml).join('')}</div>
                     <button class="btn btn-primary btn-sm" type="submit">${escapeHtml(component.submit_label || component.label || 'Save')}</button>
                     <div class="settings-inline-status" data-extension-settings-status></div>
@@ -210,7 +202,7 @@ function renderExtensionSettingsSections(root, sections) {
             try {
                 const cleanRoute = cleanExtensionRoute(route);
                 if (!cleanRoute) throw new Error('invalid extension settings route');
-                const resp = await apiFetch(`/api/extensions/${encodeURIComponent(skill)}/${cleanRoute}`, {
+                const resp = await apiFetch(extensionRoutePath(skill, route), {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(values),
@@ -514,16 +506,13 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
     }
 
     async function loadSettings() {
-        const [settingsResp, extResp] = await Promise.all([
-            apiFetch('/api/settings', { cache: 'no-store' }),
-            apiFetch('/api/extensions', { cache: 'no-store' }).catch(() => null),
+        const [data, extData] = await Promise.all([
+            apiClient.settings(),
+            apiClient.extensions().catch(() => ({})),
         ]);
-        const data = await settingsResp.json().catch(() => ({}));
-        const extData = extResp && extResp.ok ? await extResp.json().catch(() => ({})) : {};
         const sections = Array.isArray(extData?.live?.settings_sections)
             ? extData.live.settings_sections
             : [];
-        if (!settingsResp.ok) throw new Error(data.error || `HTTP ${settingsResp.status}`);
         currentSettings = data;
         applySettings(data);
         renderExtensionSettingsSections(page, sections);
@@ -883,13 +872,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         const body = collectBody();
 
         try {
-            const resp = await apiFetch('/api/settings', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body),
-            });
-            const data = await resp.json().catch(() => ({}));
-            if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+            const data = await apiClient.saveSettings(body);
             let runtimeModeResult = null;
             let runtimeModeError = '';
             let autoGrantResult = null;

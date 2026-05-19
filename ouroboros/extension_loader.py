@@ -8,6 +8,7 @@ disable/reload can tear them down and purge modules cleanly.
 
 from __future__ import annotations
 
+import copy
 import importlib
 import importlib.util
 import inspect
@@ -25,38 +26,13 @@ from dataclasses import dataclass, field
 from types import ModuleType
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
-from ouroboros.contracts.plugin_api import (
-    ExtensionRegistrationError,
-    FORBIDDEN_EXTENSION_SETTINGS,
-    VALID_EXTENSION_PERMISSIONS,
-    VALID_EXTENSION_ROUTE_METHODS,
-)
+from ouroboros.contracts.plugin_api import ExtensionRegistrationError, FORBIDDEN_EXTENSION_SETTINGS, VALID_EXTENSION_PERMISSIONS, VALID_EXTENSION_ROUTE_METHODS
 from ouroboros.event_bus import get_global_event_bus
-from ouroboros.extension_companion import (
-    CompanionDescriptor,
-    get_global_supervisor,
-    is_server_process,
-)
+from ouroboros.extension_companion import CompanionDescriptor, get_global_supervisor, is_server_process
+from ouroboros.extension_ui_validation import _assert_ws_message_type, validate_ui_render as _validate_ui_render
 from ouroboros.gateway.host_service import AUTH_TOKEN_FILENAME
-from ouroboros.extension_isolated_deps import (
-    _isolated_python_site_dirs,
-    async_isolated_site_dirs_scope,
-    isolated_site_dirs_scope,
-    is_skill_cache_path,
-)
-from ouroboros.skill_loader import (
-    _SKILL_DIR_CACHE_NAMES,
-    LoadedSkill,
-    SkillPayloadUnreadable,
-    compute_content_hash,
-    discover_skills,
-    find_skill,
-    grant_status_for_skill,
-    load_skill_grants,
-    requested_core_setting_keys,
-    skill_review_gate,
-    skill_state_dir,
-)
+from ouroboros.extension_isolated_deps import _isolated_python_site_dirs, async_isolated_site_dirs_scope, isolated_site_dirs_scope, is_skill_cache_path
+from ouroboros.skill_loader import _SKILL_DIR_CACHE_NAMES, LoadedSkill, SkillPayloadUnreadable, compute_content_hash, discover_skills, find_skill, grant_status_for_skill, requested_core_setting_keys, skill_review_gate, skill_state_dir
 from ouroboros.skill_token import SkillToken
 from ouroboros.tools.skill_exec import _scrub_env
 from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
@@ -84,19 +60,6 @@ class _ExtensionRegistrations:
     content_hash: Optional[str] = None
     skill_dir: Optional[str] = None
     import_root: Optional[str] = None
-
-    def is_empty(self) -> bool:
-        return not (
-            self.tools
-            or self.routes
-            or self.settings_sections
-            or self.ws_handlers
-            or self.ui_tabs
-            or self.unload_callbacks
-            or self.event_subscriptions
-            or self.companion_names
-            or self.supervised_futures
-        )
 
 
 @dataclass
@@ -261,22 +224,6 @@ def _widget_span_from_render(render: Dict[str, Any]) -> int:
     return 2 if value >= 2 else 1
 
 
-from ouroboros.extension_ui_validation import validate_ui_render as _validate_ui_render
-def _assert_ws_message_type(message_type: str) -> str:
-    candidate = str(message_type or "").strip()
-    if not candidate:
-        raise ExtensionRegistrationError("ws message_type must be non-empty")
-    if len(candidate) > _EXTENSION_SHORT_MAX:
-        raise ExtensionRegistrationError(
-            f"ws message_type must be <= {_EXTENSION_SHORT_MAX} characters: {candidate!r}"
-        )
-    if not candidate.replace("_", "").isalnum():
-        raise ExtensionRegistrationError(
-            f"ws message_type must be alnum/underscore only: {candidate!r}"
-        )
-    return candidate
-
-
 def set_ws_broadcaster(broadcaster: Callable[[dict], None] | None) -> None:
     """Install the host WebSocket broadcaster used by PluginAPI.send_ws_message."""
     global _ws_broadcaster
@@ -358,6 +305,20 @@ class PluginAPIImpl:
 
         return _wrapped
 
+    def _register_surface_locked(
+        self,
+        registry: Dict[str, Any],
+        key: str,
+        value: Dict[str, Any],
+        bundle_attr: str,
+        label: str,
+    ) -> None:
+        self._require_open_locked()
+        if key in registry:
+            raise ExtensionRegistrationError(f"{label} {key!r} already registered")
+        registry[key] = value
+        getattr(_extensions.setdefault(self._skill, _ExtensionRegistrations()), bundle_attr).append(key)
+
     # --- registration ---
 
     def register_tool(
@@ -373,20 +334,14 @@ class PluginAPIImpl:
         short = _assert_tool_name(name)
         full = extension_surface_name(self._skill, short)
         with _lock:
-            self._require_open_locked()
-            if full in _tools:
-                raise ExtensionRegistrationError(
-                    f"tool {full!r} already registered"
-                )
-            _tools[full] = {
+            self._register_surface_locked(_tools, full, {
                 "name": full,
                 "handler": self._wrap_runtime_handler(handler),
                 "description": str(description or ""),
                 "schema": dict(schema or {}),
                 "timeout_sec": max(1, int(timeout_sec)),
                 "skill": self._skill,
-            }
-            _extensions.setdefault(self._skill, _ExtensionRegistrations()).tools.append(full)
+            }, "tools", "tool")
 
     def register_route(
         self,
@@ -415,18 +370,12 @@ class PluginAPIImpl:
             )
         mount = f"/api/extensions/{self._skill}/{rel}"
         with _lock:
-            self._require_open_locked()
-            if mount in _routes:
-                raise ExtensionRegistrationError(
-                    f"route {mount!r} already registered"
-                )
-            _routes[mount] = {
+            self._register_surface_locked(_routes, mount, {
                 "path": mount,
                 "handler": self._wrap_runtime_handler(handler),
                 "methods": norm_methods,
                 "skill": self._skill,
-            }
-            _extensions.setdefault(self._skill, _ExtensionRegistrations()).routes.append(mount)
+            }, "routes", "route")
 
     def register_ws_handler(
         self,
@@ -437,17 +386,11 @@ class PluginAPIImpl:
         short = _assert_ws_message_type(message_type)
         full = extension_surface_name(self._skill, short)
         with _lock:
-            self._require_open_locked()
-            if full in _ws_handlers:
-                raise ExtensionRegistrationError(
-                    f"ws handler {full!r} already registered"
-                )
-            _ws_handlers[full] = {
+            self._register_surface_locked(_ws_handlers, full, {
                 "type": full,
                 "handler": self._wrap_runtime_handler(handler),
                 "skill": self._skill,
-            }
-            _extensions.setdefault(self._skill, _ExtensionRegistrations()).ws_handlers.append(full)
+            }, "ws_handlers", "ws handler")
 
     def register_ui_tab(
         self,
@@ -460,15 +403,10 @@ class PluginAPIImpl:
         self._require("widget")
         clean_tab = _assert_tool_name(tab_id)  # same syntax rules
         key = f"{self._skill}:{clean_tab}"
-        validated_render = _validate_ui_render(dict(render or {}))
+        validated_render = _validate_ui_render({} if render is None else render)
         span = _widget_span_from_render(validated_render)
         with _lock:
-            self._require_open_locked()
-            if key in _ui_tabs:
-                raise ExtensionRegistrationError(
-                    f"ui tab {key!r} already registered"
-                )
-            _ui_tabs[key] = {
+            self._register_surface_locked(_ui_tabs, key, {
                 "skill": self._skill,
                 "tab_id": clean_tab,
                 "title": str(title or clean_tab),
@@ -478,8 +416,7 @@ class PluginAPIImpl:
                 "span": span,
                 "grid_span": span,
                 "ui_host_pending": True,
-            }
-            _extensions.setdefault(self._skill, _ExtensionRegistrations()).ui_tabs.append(key)
+            }, "ui_tabs", "ui tab")
 
     def register_settings_section(
         self,
@@ -513,18 +450,12 @@ class PluginAPIImpl:
             "components": components,
         })
         with _lock:
-            self._require_open_locked()
-            if key in _settings_sections:
-                raise ExtensionRegistrationError(
-                    f"settings section {key!r} already registered"
-                )
-            _settings_sections[key] = {
+            self._register_surface_locked(_settings_sections, key, {
                 "skill": self._skill,
                 "section_id": clean_id,
                 "title": str(title or clean_id),
                 "render": validated,
-            }
-            _extensions.setdefault(self._skill, _ExtensionRegistrations()).settings_sections.append(key)
+            }, "settings_sections", "settings section")
 
     def register_supervised_task(
         self,
@@ -988,9 +919,11 @@ def _deps_block_reason(drive_root: pathlib.Path, skill: LoadedSkill) -> str:
         auto_specs = auto_install_specs_for_skill(drive_root, skill)
         if not auto_specs:
             return ""
-        deps_state = read_deps_state(drive_root, skill.name)
+        deps_state = read_deps_state(drive_root, skill.name, skill.skill_dir)
         status = str(deps_state.get("status") or "")
         if status != "installed":
+            if status == "stale":
+                return "deps_stale"
             return "deps_failed" if status == "failed" else "deps_missing"
         if deps_state.get("specs_hash") != install_specs_hash(auto_specs):
             return "deps_stale"
@@ -998,6 +931,14 @@ def _deps_block_reason(drive_root: pathlib.Path, skill: LoadedSkill) -> str:
     except Exception:
         log.debug("extension deps readiness probe failed", exc_info=True)
         return ""
+
+
+def _apply_deps_block(state: Dict[str, Any], drive_root: pathlib.Path, skill: LoadedSkill) -> Dict[str, Any]:
+    if state.get("desired_live"):
+        deps_reason = _deps_block_reason(pathlib.Path(drive_root), skill)
+        if deps_reason:
+            state.update(desired_live=False, reason=deps_reason, load_error=deps_reason)
+    return state
 
 
 def runtime_state_for_skill_name(
@@ -1027,26 +968,13 @@ def runtime_state_for_skill_name(
             "loaded_matches_current": False,
             "reason": "missing",
         }
-    state = _extension_runtime_state(skill)
-    if state.get("desired_live"):
-        deps_reason = _deps_block_reason(pathlib.Path(drive_root), skill)
-        if deps_reason:
-            state["desired_live"] = False
-            state["reason"] = deps_reason
-            state["load_error"] = deps_reason
-    return state
+    return _apply_deps_block(_extension_runtime_state(skill), pathlib.Path(drive_root), skill)
 
 
 def runtime_state_for_loaded_skill(skill: "LoadedSkill", drive_root: pathlib.Path | None = None) -> Dict[str, Any]:
     """Runtime state for an already-discovered skill; avoids repeated FS walks."""
     state = _extension_runtime_state(skill)
-    if drive_root is not None and state.get("desired_live"):
-        deps_reason = _deps_block_reason(pathlib.Path(drive_root), skill)
-        if deps_reason:
-            state["desired_live"] = False
-            state["reason"] = deps_reason
-            state["load_error"] = deps_reason
-    return state
+    return _apply_deps_block(state, pathlib.Path(drive_root), skill) if drive_root is not None else state
 
 
 def is_extension_live(
@@ -1208,25 +1136,7 @@ def load_extension(
             f"skill {skill.name!r} is missing owner grants for "
             f"{', '.join(missing_bits)}. Grant access from the Skills tab."
         )
-    requested_core = requested_core_setting_keys(list(skill.manifest.env_from_settings or []))
-    granted_core: List[str] = []
-    if requested_core:
-        grants_file = load_skill_grants(drive_root, skill.name)
-        grant_hash_ok = str(grants_file.get("content_hash") or "") == str(current_hash or "")
-        grant_request_ok = sorted(grants_file.get("requested_keys") or []) == sorted(requested_core)
-        persisted = (
-            set(grants_file.get("granted_keys") or [])
-            if grant_hash_ok and grant_request_ok
-            else set()
-        )
-        granted_core = [key for key in requested_core if key in persisted]
-        missing_grants = [key for key in requested_core if key not in set(granted_core)]
-        if missing_grants:
-            return (
-                f"skill {skill.name!r} requests core settings keys "
-                f"{requested_core}; missing owner grants for "
-                f"{missing_grants}. Grant access from the Skills tab."
-            )
+    granted_core = list(grant_status.get("granted_keys") or [])
     staged_import_root: Optional[pathlib.Path] = None
     module_key = _module_key(skill.name)
     try:
@@ -1398,11 +1308,15 @@ def snapshot() -> Dict[str, Any]:
             "tools": sorted(_tools.keys()),
             "routes": sorted(_routes.keys()),
             "ws_handlers": sorted(_ws_handlers.keys()),
-            "ui_tabs": [dict(value, key=key) for key, value in sorted(_ui_tabs.items())],
+            "ui_tabs": [
+                dict(copy.deepcopy(value), key=key)
+                for key, value in sorted(_ui_tabs.items())
+            ],
             "ui_tabs_pending": [],
             # Settings sections follow the same host-surfaced shape as UI tabs.
             "settings_sections": [
-                dict(value, key=key) for key, value in sorted(_settings_sections.items())
+                dict(copy.deepcopy(value), key=key)
+                for key, value in sorted(_settings_sections.items())
             ],
         }
 
@@ -1424,15 +1338,7 @@ def list_routes() -> Dict[str, Any]:
 
 
 __all__ = [
-    "PluginAPIImpl",
-    "is_extension_live",
-    "load_extension",
-    "reconcile_extension",
-    "unload_extension",
-    "reload_all",
-    "runtime_state_for_skill_name",
-    "snapshot",
-    "get_tool",
-    "list_ws_handlers",
-    "list_routes",
+    "PluginAPIImpl", "is_extension_live", "load_extension", "reconcile_extension",
+    "unload_extension", "reload_all", "runtime_state_for_skill_name", "snapshot",
+    "get_tool", "list_ws_handlers", "list_routes",
 ]

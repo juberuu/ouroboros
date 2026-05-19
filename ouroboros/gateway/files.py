@@ -21,6 +21,12 @@ from starlette.routing import Route
 from ouroboros.gateway._helpers import json_error
 from ouroboros.server_auth import is_loopback_host
 from ouroboros.utils import safe_relpath
+from ouroboros.contracts.skill_payload_policy import (
+    SKILL_OWNER_STATE_FILENAMES,
+    is_skill_control_plane_path as _policy_is_skill_control_plane_path,
+    is_skill_owner_state_alias,
+    is_skill_owner_state_target as _policy_is_skill_owner_state_target,
+)
 
 _FILE_BROWSER_MAX_DIR_ENTRIES = 500
 _FILE_BROWSER_MAX_READ_BYTES = 256 * 1024
@@ -34,60 +40,14 @@ _TEXT_PREVIEW_EXTENSIONS = {
     ".js", ".css", ".html", ".ts", ".tsx", ".jsx", ".ini", ".cfg",
     ".sh", ".zsh", ".bash", ".ps1", ".env", ".xml", ".csv",
 }
-_SKILL_OWNER_STATE_FILENAMES = frozenset({
-    "enabled.json",
-    "grants.json",
-    "review.json",
-    "review_history.jsonl",
-    "accepted_rebuttals.json",
-    "clawhub.json",
-    "deps.json",
-    "self_authored.json",
-    "auth_token.json",
-})
+_SKILL_OWNER_STATE_FILENAMES = SKILL_OWNER_STATE_FILENAMES
 
 
 def _is_skill_owner_state_target(target: pathlib.Path) -> bool:
-    if target.name.lower() not in _SKILL_OWNER_STATE_FILENAMES:
-        return False
     from ouroboros import config as _cfg
+
     data_root = pathlib.Path(_cfg.DATA_DIR).resolve(strict=False)
-    try:
-        rel = target.relative_to(data_root)
-        parts = rel.parts
-        if (
-            len(parts) == 4
-            and parts[0].lower() == "state"
-            and parts[1].lower() == "skills"
-        ):
-            return True
-    except (OSError, ValueError):
-        pass
-    try:
-        rel = target.resolve(strict=False).relative_to(data_root)
-        parts = rel.parts
-        if (
-            len(parts) == 4
-            and parts[0].lower() == "state"
-            and parts[1].lower() == "skills"
-        ):
-            return True
-    except (OSError, ValueError):
-        pass
-    skills_state_root = data_root / "state" / "skills"
-    if not skills_state_root.is_dir():
-        return False
-    try:
-        target_parent = target.parent.resolve(strict=False)
-    except OSError:
-        return False
-    for skill_state_dir in skills_state_root.iterdir():
-        try:
-            if skill_state_dir.resolve(strict=False) == target_parent:
-                return True
-        except OSError:
-            continue
-    return False
+    return _policy_is_skill_owner_state_target(target, data_root)
 
 
 class FileBrowserPayloadTooLarge(ValueError):
@@ -163,27 +123,7 @@ def _is_owner_only_file(target: pathlib.Path) -> bool:
         return True
     from ouroboros import config as _cfg
     data_root = pathlib.Path(_cfg.DATA_DIR).resolve(strict=False)
-    skills_state_root = pathlib.Path(_cfg.DATA_DIR) / "state" / "skills"
-    if target.exists() and skills_state_root.is_dir():
-        for owner_state_file in skills_state_root.glob("*/*"):
-            if owner_state_file.name.lower() not in _SKILL_OWNER_STATE_FILENAMES:
-                continue
-            try:
-                if owner_state_file.exists() and target.samefile(owner_state_file):
-                    return True
-            except OSError:
-                continue
-    try:
-        rel = target.resolve(strict=False).relative_to(data_root)
-    except (OSError, ValueError):
-        return False
-    parts = rel.parts
-    return (
-        len(parts) == 4
-        and parts[0].lower() == "state"
-        and parts[1].lower() == "skills"
-        and parts[3].lower() in _SKILL_OWNER_STATE_FILENAMES
-    )
+    return is_skill_owner_state_alias(target, data_root)
 
 
 def _contains_owner_only_file(target: pathlib.Path) -> bool:
@@ -204,10 +144,9 @@ def _is_skill_control_plane_api_target(target: pathlib.Path) -> bool:
     """Apply skill control-plane guard to direct Files API mutations."""
     try:
         from ouroboros.config import DATA_DIR
-        from ouroboros.tools.core import is_skill_control_plane_path
 
         data_root = pathlib.Path(DATA_DIR).resolve(strict=False)
-        return is_skill_control_plane_path(pathlib.Path(target), data_root)
+        return _policy_is_skill_control_plane_path(pathlib.Path(target), data_root)
     except Exception:
         log.debug("control-plane guard probe failed in file_browser_api", exc_info=True)
         return False
@@ -319,6 +258,29 @@ def _relative_path(root_dir: pathlib.Path, path: pathlib.Path) -> str:
     return path.relative_to(root_dir).as_posix() or "."
 
 
+def _file_preview_payload(
+    root_dir: pathlib.Path,
+    target: pathlib.Path,
+    rel: str,
+    size: int,
+    extras: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "root_path": str(root_dir),
+        "path": rel,
+        "display_path": _format_path(root_dir, rel),
+        "name": target.name,
+        "size": size,
+        "is_text": False,
+        "is_image": False,
+        "is_pdf": False,
+        "content": "",
+        "truncated": False,
+    }
+    payload.update(extras or {})
+    return payload
+
+
 async def api_files_list(request: Request) -> JSONResponse:
     rel_path = request.query_params.get("path") or "."
     try:
@@ -394,49 +356,26 @@ async def api_files_read(request: Request) -> JSONResponse:
         rel = _relative_path(root_dir, target)
         if target.suffix.lower() in _IMAGE_PREVIEW_EXTENSIONS:
             encoded_rel = quote(rel, safe="/")
-            return JSONResponse({
-                "root_path": str(root_dir),
-                "path": rel,
-                "display_path": _format_path(root_dir, rel),
-                "name": target.name,
-                "size": size,
-                "is_text": False,
-                "is_image": True,
-                "is_pdf": False,
-                "media_type": _guess_media_type(target),
-                "content_url": f"/api/files/content?path={encoded_rel}",
-                "content": "",
-                "truncated": False,
-            })
+            return JSONResponse(_file_preview_payload(
+                root_dir, target, rel, size,
+                {
+                    "is_image": True,
+                    "media_type": _guess_media_type(target),
+                    "content_url": f"/api/files/content?path={encoded_rel}",
+                },
+            ))
         if target.suffix.lower() in _PDF_PREVIEW_EXTENSIONS:
             encoded_rel = quote(rel, safe="/")
-            return JSONResponse({
-                "root_path": str(root_dir),
-                "path": rel,
-                "display_path": _format_path(root_dir, rel),
-                "name": target.name,
-                "size": size,
-                "is_text": False,
-                "is_image": False,
-                "is_pdf": True,
-                "media_type": "application/pdf",
-                "content_url": f"/api/files/content?path={encoded_rel}",
-                "content": "",
-                "truncated": False,
-            })
+            return JSONResponse(_file_preview_payload(
+                root_dir, target, rel, size,
+                {
+                    "is_pdf": True,
+                    "media_type": "application/pdf",
+                    "content_url": f"/api/files/content?path={encoded_rel}",
+                },
+            ))
         if not _guess_text_file(target):
-            return JSONResponse({
-                "root_path": str(root_dir),
-                "path": rel,
-                "display_path": _format_path(root_dir, rel),
-                "name": target.name,
-                "size": size,
-                "is_text": False,
-                "is_image": False,
-                "is_pdf": False,
-                "content": "",
-                "truncated": False,
-            })
+            return JSONResponse(_file_preview_payload(root_dir, target, rel, size))
 
         raw = _read_prefix(target, _FILE_BROWSER_MAX_READ_BYTES + 1)
         truncated = len(raw) > _FILE_BROWSER_MAX_READ_BYTES or size > _FILE_BROWSER_MAX_READ_BYTES
@@ -445,18 +384,10 @@ async def api_files_read(request: Request) -> JSONResponse:
             text = text[:_FILE_BROWSER_MAX_PREVIEW_CHARS]
             truncated = True
 
-        return JSONResponse({
-            "root_path": str(root_dir),
-            "path": rel,
-            "display_path": _format_path(root_dir, rel),
-            "name": target.name,
-            "size": size,
-            "is_text": True,
-            "is_image": False,
-            "is_pdf": False,
-            "content": text,
-            "truncated": truncated,
-        })
+        return JSONResponse(_file_preview_payload(
+            root_dir, target, rel, size,
+            {"is_text": True, "content": text, "truncated": truncated},
+        ))
     except ValueError as exc:
         return json_error(str(exc), status=400)
     except Exception as exc:

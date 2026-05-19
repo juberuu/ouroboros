@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import pathlib
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from ouroboros.utils import truncate_review_artifact
 
@@ -266,37 +266,33 @@ def _review_status_run_to_dict(run: Any) -> Dict[str, Any]:
         item for item in (getattr(run, "items", []) or [])
         if isinstance(item, dict) and str(item.get("verdict", "")).upper() == "FAIL"
     ]
-    return {
+    data = {
         "snapshot_hash": str(getattr(run, "snapshot_hash", ""))[:12],
-        "commit_message": str(getattr(run, "commit_message", "") or ""),
-        "status": str(getattr(run, "status", "") or ""),
-        "ts": str(getattr(run, "ts", "") or ""),
         "critical_findings": sum(1 for item in findings if str(item.get("severity", "")).lower() == "critical"),
         "total_findings": len(findings),
-        "snapshot_summary": str(getattr(run, "snapshot_summary", "") or ""),
-        "bypass_reason": str(getattr(run, "bypass_reason", "") or "") or None,
-        "repo_key": str(getattr(run, "repo_key", "") or "") or None,
-        "tool_name": str(getattr(run, "tool_name", "") or "") or None,
-        "task_id": str(getattr(run, "task_id", "") or "") or None,
         "attempt": int(getattr(run, "attempt", 0) or 0) or None,
     }
+    for key in ("commit_message", "status", "ts", "snapshot_summary"):
+        data[key] = str(getattr(run, key, "") or "")
+    for key in ("bypass_reason", "repo_key", "tool_name", "task_id"):
+        data[key] = str(getattr(run, key, "") or "") or None
+    return data
 
 
 def _review_status_attempt_payload(ca: Any) -> Dict[str, Any] | None:
     if ca is None:
         return None
-    return {
+    data = {
+        key: getattr(ca, key) or None
+        for key in ("block_reason", "repo_key", "tool_name", "task_id", "phase", "fingerprint_status")
+    }
+    data.update({
         "status": ca.status,
         "commit_message": ca.commit_message,
         "ts": ca.ts,
         "duration_sec": round(ca.duration_sec, 1),
-        "block_reason": ca.block_reason or None,
         "block_details_preview": truncate_review_artifact(ca.block_details, limit=300) if ca.block_details else None,
-        "repo_key": ca.repo_key or None,
-        "tool_name": ca.tool_name or None,
-        "task_id": ca.task_id or None,
         "attempt": int(ca.attempt or 0) or None,
-        "phase": ca.phase or None,
         "blocked": bool(ca.blocked),
         "late_result_pending": bool(ca.late_result_pending),
         "critical_findings": len(ca.critical_findings or []),
@@ -305,10 +301,10 @@ def _review_status_attempt_payload(ca: Any) -> Dict[str, Any] | None:
         "readiness_warnings": list(ca.readiness_warnings or []),
         "pre_review_fingerprint": ca.pre_review_fingerprint[:12] or None,
         "post_review_fingerprint": ca.post_review_fingerprint[:12] or None,
-        "fingerprint_status": ca.fingerprint_status or None,
         "degraded_reasons": list(ca.degraded_reasons or []),
         **_review_status_actor_summary(ca),
-    }
+    })
+    return data
 
 
 def _review_status_attempt_to_dict(item: Any) -> Dict[str, Any]:
@@ -335,12 +331,8 @@ def _review_status_actor_summary(attempt: Any) -> Dict[str, Any]:
 
 def _review_status_obligation_to_dict(item: Any) -> Dict[str, Any]:
     return {
-        "obligation_id": item.obligation_id,
-        "fingerprint": getattr(item, "fingerprint", ""),
-        "item": item.item,
-        "severity": item.severity,
+        **{key: getattr(item, key, "") for key in ("obligation_id", "fingerprint", "item", "severity", "status")},
         "reason": truncate_review_artifact(item.reason, limit=200),
-        "status": item.status,
         "source_ts": item.source_attempt_ts,
         "source_commit": item.source_attempt_msg,
     }
@@ -390,25 +382,22 @@ def _review_status_message(projection: Dict[str, Any]) -> str:
 
 
 def _attempt_to_dict(item: Any) -> Dict[str, Any]:
-    return {
-        "ts": str(getattr(item, "ts", "") or ""),
-        "tool_name": str(getattr(item, "tool_name", "") or ""),
+    data = {
+        key: str(getattr(item, key, "") or "")
+        for key in ("ts", "tool_name", "status", "phase", "block_reason", "scope_model")
+    }
+    data.update({
         "attempt": int(getattr(item, "attempt", 0) or 0),
-        "status": str(getattr(item, "status", "") or ""),
-        "phase": str(getattr(item, "phase", "") or ""),
-        "block_reason": str(getattr(item, "block_reason", "") or ""),
         "late_result_pending": bool(getattr(item, "late_result_pending", False)),
+        "duration_sec": float(getattr(item, "duration_sec", 0.0) or 0.0),
         "critical_findings": list(getattr(item, "critical_findings", []) or []),
         "advisory_findings": list(getattr(item, "advisory_findings", []) or []),
-        "readiness_warnings": [str(x) for x in (getattr(item, "readiness_warnings", []) or [])],
-        "obligation_ids": [str(x) for x in (getattr(item, "obligation_ids", []) or [])],
-        "degraded_reasons": [str(x) for x in (getattr(item, "degraded_reasons", []) or [])],
-        "triad_models": [str(x) for x in (getattr(item, "triad_models", []) or [])],
-        "scope_model": str(getattr(item, "scope_model", "") or ""),
-        "duration_sec": float(getattr(item, "duration_sec", 0.0) or 0.0),
         "triad_raw_results": list(getattr(item, "triad_raw_results", []) or []),
         "scope_raw_result": dict(getattr(item, "scope_raw_result", {}) or {}),
-    }
+    })
+    for key in ("readiness_warnings", "obligation_ids", "degraded_reasons", "triad_models"):
+        data[key] = [str(x) for x in (getattr(item, key, []) or [])]
+    return data
 
 
 _RESPONDED_STATUSES = frozenset({"fresh", "stale"})
@@ -416,41 +405,29 @@ _RESPONDED_STATUSES = frozenset({"fresh", "stale"})
 
 def _run_to_dict(item: Any) -> Dict[str, Any]:
     """Serialise AdvisoryRunRecord with responded/skipped/error status summary."""
-    fail_items: List[Dict[str, Any]] = []
-    total_items = 0
-    for entry in list(getattr(item, "items", []) or []):
-        if not isinstance(entry, dict):
-            continue
-        total_items += 1
-        if str(entry.get("verdict", "")).upper() != "FAIL":
-            continue
-        fail_items.append({
+    valid_items = [entry for entry in list(getattr(item, "items", []) or []) if isinstance(entry, dict)]
+    fail_items = [
+        {
             "severity": str(entry.get("severity", "") or "advisory"),
             "item": str(entry.get("item", "") or ""),
             "reason": str(entry.get("reason", "") or ""),
-        })
+        }
+        for entry in valid_items
+        if str(entry.get("verdict", "")).upper() == "FAIL"
+    ]
+    total_items = len(valid_items)
 
     status = str(getattr(item, "status", "") or "")
     bypass_reason = str(getattr(item, "bypass_reason", "") or "")
     raw_result_text = str(getattr(item, "raw_result", "") or "")
 
-    if status == "bypassed":
-        status_summary = "bypassed"
-    elif status == "skipped":
-        status_summary = "skipped"
-    elif status == "parse_failure":
-        status_summary = "parse_failure"
-    elif status == "error":
-        status_summary = "error"
-    elif status in _RESPONDED_STATUSES and fail_items:
-        status_summary = "responded_with_findings"
-    elif status in _RESPONDED_STATUSES and total_items > 0 and not fail_items:
-        status_summary = "responded_clean"
-    elif status in _RESPONDED_STATUSES:
-        # Responded but no items at all — distinct from "clean" (zero FAILs)
-        status_summary = "responded_empty"
-    else:
-        status_summary = status or "unknown"
+    status_summary = status if status in {"bypassed", "skipped", "parse_failure", "error"} else status or "unknown"
+    if status in _RESPONDED_STATUSES:
+        status_summary = (
+            "responded_with_findings" if fail_items
+            else "responded_clean" if total_items > 0
+            else "responded_empty"
+        )
 
     return {
         "ts": str(getattr(item, "ts", "") or ""),
@@ -483,31 +460,24 @@ def _obligation_to_dict(item: Any) -> Dict[str, Any]:
 
 
 def _continuation_to_dict(item: Any) -> Dict[str, Any]:
-    return {
-        "task_id": str(getattr(item, "task_id", "") or ""),
-        "source": str(getattr(item, "source", "") or ""),
-        "stage": str(getattr(item, "stage", "") or ""),
-        "tool_name": str(getattr(item, "tool_name", "") or ""),
+    data = {
+        key: str(getattr(item, key, "") or "")
+        for key in ("task_id", "source", "stage", "tool_name", "block_reason", "updated_ts")
+    }
+    data.update({
         "attempt": int(getattr(item, "attempt", 0) or 0),
-        "block_reason": str(getattr(item, "block_reason", "") or ""),
         "critical_findings": list(getattr(item, "critical_findings", []) or []),
         "advisory_findings": list(getattr(item, "advisory_findings", []) or []),
         "readiness_warnings": [str(x) for x in (getattr(item, "readiness_warnings", []) or [])],
-        "updated_ts": str(getattr(item, "updated_ts", "") or ""),
-    }
+    })
+    return data
 
 
 def _debt_to_dict(item: Any) -> Dict[str, Any]:
-    return {
-        "debt_id": str(getattr(item, "debt_id", "") or ""),
-        "category": str(getattr(item, "category", "") or ""),
-        "title": str(getattr(item, "title", "") or ""),
-        "summary": str(getattr(item, "summary", "") or ""),
-        "status": str(getattr(item, "status", "") or ""),
-        "severity": str(getattr(item, "severity", "") or ""),
-        "source": str(getattr(item, "source", "") or ""),
-        "repo_key": str(getattr(item, "repo_key", "") or ""),
-        "source_obligation_ids": [str(x) for x in (getattr(item, "source_obligation_ids", []) or [])],
-        "evidence": [str(x) for x in (getattr(item, "evidence", []) or [])],
-        "updated_at": str(getattr(item, "updated_at", "") or ""),
+    data = {
+        key: str(getattr(item, key, "") or "")
+        for key in ("debt_id", "category", "title", "summary", "status", "severity", "source", "repo_key", "updated_at")
     }
+    data["source_obligation_ids"] = [str(x) for x in (getattr(item, "source_obligation_ids", []) or [])]
+    data["evidence"] = [str(x) for x in (getattr(item, "evidence", []) or [])]
+    return data

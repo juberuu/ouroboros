@@ -93,6 +93,7 @@ from ouroboros.tools.review_helpers import (
     build_self_verification_template,
     build_review_history_section as _build_review_history_section,
     emit_review_usage,
+    format_name_status_for_preflight,
     format_review_history_entry as _format_review_entry,
     single_line as _single_line,
 )
@@ -774,28 +775,7 @@ def _build_preflight_staged(target_repo: str, fallback: str = "") -> str:
         name_status = run_cmd(
             ["git", "diff", "--cached", "--name-status"], cwd=target_repo
         )
-        preflight_input_lines = []
-        for line in name_status.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split("\t")
-            if not parts:
-                continue
-            status_char = parts[0][0].upper()  # strips similarity % from R100/C100
-            if status_char in ("R", "C") and len(parts) >= 3:
-                src_path, dst_path = parts[1], parts[-1]
-                if status_char == "R":
-                    preflight_input_lines.append(f"D  {src_path}")
-                    preflight_input_lines.append(f"A  {dst_path}")
-                else:
-                    # Copy: only destination counts as new.
-                    preflight_input_lines.append(f"A  {dst_path}")
-            elif len(parts) >= 2:
-                preflight_input_lines.append(f"{status_char}  {parts[1]}")
-            else:
-                preflight_input_lines.append(f"M  {parts[0]}")
-        return "\n".join(preflight_input_lines) if preflight_input_lines else fallback
+        return format_name_status_for_preflight(name_status, fallback=fallback)
     except Exception:
         return fallback  # check 4 may not fire, but checks 1-3 still work
 

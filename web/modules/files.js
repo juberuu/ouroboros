@@ -1,7 +1,7 @@
 import { renderPageHeader } from './page_header.js';
 import { PAGE_ICONS } from './page_icons.js';
 import { escapeHtmlAttr, escapeHtmlText as escapeHtml } from './utils.js';
-import { apiFetch } from './api_client.js';
+import { apiFetch, jsonPost } from './api_client.js';
 
 function formatFileSize(size) {
     const num = Number(size);
@@ -532,65 +532,21 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
         });
         const name = (result?.value || '').trim();
         if (!result?.confirmed || !name) return;
-        const resp = await apiFetch('/api/files/mkdir', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                path: state.path || '.',
-                name,
-            }),
-        });
-        const data = await resp.json();
-        if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+        const data = await jsonPost('/api/files/mkdir', { path: state.path || '.', name });
         state.selectedPath = '';
         state.selectedType = 'dir';
         await loadDirectory(state.path || '.', { skipLeaveCheck: true });
     }
 
-    async function pasteClipboard() {
+    async function pasteClipboard(destinationPath = state.path || '.') {
         if (!state.clipboard) return;
         if (!(await canLeaveEditor())) return;
 
-        const resp = await apiFetch('/api/files/transfer', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                source_path: state.clipboard.path,
-                destination_dir: state.path || '.',
-                mode: state.clipboard.mode,
-            }),
+        const data = await jsonPost('/api/files/transfer', {
+            source_path: state.clipboard.path,
+            destination_dir: destinationPath || '.',
+            mode: state.clipboard.mode,
         });
-        const data = await resp.json();
-        if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
-
-        const pastedMode = state.clipboard.mode;
-        state.clipboard = null;
-        updateClipboardActions();
-        state.selectedPath = data.path || '';
-        state.selectedType = data.type || '';
-        await loadDirectory(state.path || '.', { skipLeaveCheck: true });
-        setPreview({
-            path: data.display_path || state.rootPath || 'Files',
-            meta: `${pastedMode === 'move' ? 'Moved' : 'Copied'} ${data.type || 'item'}`,
-            content: '',
-        });
-    }
-
-    async function pasteClipboardInto(destinationPath) {
-        if (!state.clipboard) return;
-        if (!(await canLeaveEditor())) return;
-
-        const resp = await apiFetch('/api/files/transfer', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                source_path: state.clipboard.path,
-                destination_dir: destinationPath || '.',
-                mode: state.clipboard.mode,
-            }),
-        });
-        const data = await resp.json();
-        if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
 
         const pastedMode = state.clipboard.mode;
         state.clipboard = null;
@@ -622,13 +578,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
         });
         if (!result?.confirmed) return;
 
-        const resp = await apiFetch('/api/files/delete', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ path: state.selectedPath }),
-        });
-        const data = await resp.json();
-        if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+        await jsonPost('/api/files/delete', { path: state.selectedPath });
 
         resetEditorState();
         state.selectedPath = '';
@@ -685,17 +635,11 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
             ? (state.path && state.path !== '.' ? `${state.path}/${relName}` : relName)
             : state.editorPath;
         if (!savePath) return;
-        const resp = await apiFetch('/api/files/write', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                path: savePath,
-                content: state.editorValue,
-                create: state.editorIsNew,
-            }),
+        const data = await jsonPost('/api/files/write', {
+            path: savePath,
+            content: state.editorValue,
+            create: state.editorIsNew,
         });
-        const data = await resp.json();
-        if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
 
         state.selectedPath = data.path || savePath;
         state.selectedType = 'file';
@@ -820,7 +764,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
                 });
             }
         } else if (action === 'paste') {
-            pasteClipboardInto(state.contextDestinationPath).catch(showError);
+            pasteClipboard(state.contextDestinationPath).catch(showError);
         } else if (action === 'delete') {
             deleteSelectedEntry().catch(showError);
         }

@@ -262,10 +262,11 @@ textarea::placeholder {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
-.field-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px;
+.field-grid,
+.wizard-choice-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
 }
 
 .field {
@@ -361,10 +362,11 @@ select:focus {
   box-shadow: 0 0 0 3px rgba(232, 93, 111, 0.12);
 }
 
-.selection-row {
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
+.selection-row,
+.footer-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
 }
 
 .selection-pill {
@@ -419,12 +421,6 @@ select:focus {
   color: var(--muted);
   font-size: 11px;
   font-weight: 600;
-}
-
-.wizard-choice-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px;
 }
 
 .wizard-choice-grid.three {
@@ -548,12 +544,6 @@ select:focus {
   line-height: 1.45;
 }
 
-.footer-actions {
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
 .btn {
   border: 1px solid var(--border);
   border-radius: 14px;
@@ -566,11 +556,6 @@ select:focus {
   transform: translateY(-1px);
 }
 
-.btn-secondary {
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--text);
-}
-
 .btn-primary {
   min-width: 170px;
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
@@ -579,6 +564,7 @@ select:focus {
   font-weight: 700;
 }
 
+.btn-secondary,
 .btn-ghost {
   background: rgba(255, 255, 255, 0.03);
   color: var(--text);

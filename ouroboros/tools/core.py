@@ -17,28 +17,19 @@ from ouroboros.utils import atomic_write_json, read_text, safe_relpath, utc_now_
 from ouroboros.contracts.task_constraint import normalize_task_constraint, resolve_payload_path
 from ouroboros.contracts.skill_payload_policy import (
     SKILL_PAYLOAD_ALL_BUCKETS,
-    SKILL_PAYLOAD_CONTROL_DIRNAMES,
-    SKILL_PAYLOAD_CONTROL_FILENAMES,
+    SKILL_OWNER_STATE_FILENAMES,
     SkillPayloadPathError,
     cross_skill_redirect_error,
     decide_payload_short_form,
+    is_skill_control_plane_path as _policy_is_skill_control_plane_path,
+    is_skill_owner_state_alias,
+    is_skill_owner_state_target as _policy_is_skill_owner_state_target,
     resolve_skill_payload_target,
 )
 
 log = logging.getLogger(__name__)
 
-_SKILL_OWNER_STATE_FILENAMES = frozenset({
-    "enabled.json",
-    "grants.json",
-    "review.json",
-    "review_history.jsonl",
-    "accepted_rebuttals.json",
-    "clawhub.json",
-    "self_authored.json",
-    "auth_token.json",
-    # Owner/lifecycle state: forged deps.json would bypass dependency gates.
-    "deps.json",
-})
+_SKILL_OWNER_STATE_FILENAMES = SKILL_OWNER_STATE_FILENAMES
 
 # Payload-local provenance sidecars are launcher/marketplace-owned, not
 # skill-author-editable. Generic write/delete/upload paths must block them.
@@ -125,100 +116,12 @@ def _looks_like_serialized_tool_result(content: Any) -> bool:
 
 
 def _is_skill_owner_state_target(target: pathlib.Path, data_root: pathlib.Path) -> bool:
-    if target.name.lower() not in _SKILL_OWNER_STATE_FILENAMES:
-        return False
-    try:
-        rel_to_data = target.relative_to(data_root)
-        parts = rel_to_data.parts
-        if (
-            len(parts) == 4
-            and parts[0].lower() == "state"
-            and parts[1].lower() == "skills"
-        ):
-            return True
-    except (OSError, ValueError):
-        pass
-    try:
-        rel_to_data = target.resolve(strict=False).relative_to(data_root)
-        parts = rel_to_data.parts
-        if (
-            len(parts) == 4
-            and parts[0].lower() == "state"
-            and parts[1].lower() == "skills"
-        ):
-            return True
-    except (OSError, ValueError):
-        pass
-    skills_state_root = data_root / "state" / "skills"
-    if not skills_state_root.is_dir():
-        return False
-    try:
-        target_parent = target.parent.resolve(strict=False)
-    except OSError:
-        return False
-    for skill_state_dir in skills_state_root.iterdir():
-        try:
-            if skill_state_dir.resolve(strict=False) == target_parent:
-                return True
-        except OSError:
-            continue
-    return False
+    return _policy_is_skill_owner_state_target(target, data_root)
 
 
 def is_skill_control_plane_path(target: pathlib.Path, data_root: pathlib.Path) -> bool:
     """Return True for skill owner/provenance files blocked from generic writes."""
-    if _is_skill_owner_state_target(target, data_root):
-        return True
-
-    def _matches_payload(candidate: pathlib.Path) -> bool:
-        try:
-            rel = candidate.relative_to(data_root)
-        except (OSError, ValueError):
-            return False
-        parts = rel.parts
-        # skills/<bucket>/<skill>/<filename> has at least 4 parts.
-        if len(parts) < 4:
-            return False
-        if parts[0].lower() != "skills":
-            return False
-        if parts[1].lower() not in SKILL_PAYLOAD_ALL_BUCKETS:
-            return False
-        rel_tail = [part.lower() for part in parts[3:]]
-        if any(part in SKILL_PAYLOAD_CONTROL_DIRNAMES for part in rel_tail):
-            return True
-        return candidate.name.lower() in SKILL_PAYLOAD_CONTROL_FILENAMES
-
-    if _matches_payload(target):
-        return True
-
-    # Resolve symlinks so benign-looking paths to protected sidecars trip the guard.
-    try:
-        resolved = pathlib.Path(target).resolve(strict=False)
-    except OSError:
-        resolved = pathlib.Path(target)
-    if _matches_payload(resolved):
-        return True
-
-    # Hardlink/inode defense for benign basenames pointing at protected sidecars.
-    try:
-        if not pathlib.Path(target).exists():
-            return False
-        rel = pathlib.Path(target).resolve(strict=False).relative_to(data_root)
-        parts = rel.parts
-        if len(parts) < 4 or parts[0].lower() != "skills" or parts[1].lower() not in SKILL_PAYLOAD_ALL_BUCKETS:
-            return False
-        payload_root = data_root / parts[0] / parts[1] / parts[2]
-        for protected in payload_root.iterdir():
-            if protected.name.lower() not in SKILL_PAYLOAD_CONTROL_FILENAMES:
-                continue
-            try:
-                if protected.exists() and pathlib.Path(target).samefile(protected):
-                    return True
-            except OSError:
-                continue
-    except (OSError, ValueError):
-        return False
-    return False
+    return _policy_is_skill_control_plane_path(target, data_root)
 
 
 def _list_dir(root: pathlib.Path, rel: str, max_entries: int = 500) -> List[str]:
@@ -415,17 +318,7 @@ def _data_write(
         or _is_skill_owner_state_target(target_path, data_root)
     )
     if not skill_owner_state_path:
-        skills_state_root = pathlib.Path(_cfg.DATA_DIR) / "state" / "skills"
-        if target_path.exists() and skills_state_root.is_dir():
-            for owner_state_file in skills_state_root.glob("*/*"):
-                if owner_state_file.name.lower() not in _SKILL_OWNER_STATE_FILENAMES:
-                    continue
-                try:
-                    if owner_state_file.exists() and target_path.samefile(owner_state_file):
-                        skill_owner_state_path = True
-                        break
-                except OSError:
-                    continue
+        skill_owner_state_path = is_skill_owner_state_alias(target_path, data_root)
     if skill_owner_state_path:
         return (
             "⚠️ DATA_WRITE_BLOCKED: skill review, enablement, grants, and "

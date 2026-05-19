@@ -11,6 +11,21 @@ const SETTINGS_TABS = [
 ];
 // Guard markers: renderTabStrip emits behavior/advanced tabs at runtime.
 
+const MODEL_CARDS = [
+    ['Main', 'Primary reasoning model.', 's-model', 's-local-main', 'anthropic/claude-opus-4.6'],
+    ['Code', 'Tool-heavy coding model.', 's-model-code', 's-local-code', 'anthropic/claude-opus-4.6'],
+    ['Light', 'Fast summaries and lightweight tasks.', 's-model-light', 's-local-light', 'anthropic/claude-sonnet-4.6'],
+    ['Fallback', 'Resilience and degraded path.', 's-model-fallback', 's-local-fallback', 'anthropic/claude-sonnet-4.6'],
+];
+
+const EFFORT_FIELDS = [
+    ['s-effort-task', 'Task / Chat', 'medium'],
+    ['s-effort-evolution', 'Evolution', 'high'],
+    ['s-effort-review', 'Review', 'medium'],
+    ['s-effort-scope-review', 'Scope Review', 'high'],
+    ['s-effort-consciousness', 'Consciousness', 'low'],
+];
+
 function providerCard({ id, title, icon, hint, body, open = false }) {
     return `
         <details class="settings-provider-card" data-provider-card="${id}" ${open ? 'open' : ''}>
@@ -292,10 +307,7 @@ export function renderSettingsPage() {
                             <span id="settings-model-catalog-status" class="settings-inline-status">Model catalog is optional and failure-tolerant.</span>
                         </div>
                         <div class="settings-model-grid">
-                            ${modelCard({ title: 'Main', copy: 'Primary reasoning model.', inputId: 's-model', toggleId: 's-local-main', defaultValue: 'anthropic/claude-opus-4.6' })}
-                            ${modelCard({ title: 'Code', copy: 'Tool-heavy coding model.', inputId: 's-model-code', toggleId: 's-local-code', defaultValue: 'anthropic/claude-opus-4.6' })}
-                            ${modelCard({ title: 'Light', copy: 'Fast summaries and lightweight tasks.', inputId: 's-model-light', toggleId: 's-local-light', defaultValue: 'anthropic/claude-sonnet-4.6' })}
-                            ${modelCard({ title: 'Fallback', copy: 'Resilience and degraded path.', inputId: 's-model-fallback', toggleId: 's-local-fallback', defaultValue: 'anthropic/claude-sonnet-4.6' })}
+                            ${MODEL_CARDS.map(([title, copy, inputId, toggleId, defaultValue]) => modelCard({ title, copy, inputId, toggleId, defaultValue })).join('')}
                         </div>
                         <div class="form-row">
                             <div class="form-field">
@@ -336,11 +348,7 @@ export function renderSettingsPage() {
                         <h3>Reasoning Effort</h3>
                         <div class="settings-section-copy">Controls how deeply the model thinks per task type. Higher effort = slower but more thorough.</div>
                         <div class="settings-effort-grid">
-                            ${effortField({ id: 's-effort-task', label: 'Task / Chat', defaultValue: 'medium' })}
-                            ${effortField({ id: 's-effort-evolution', label: 'Evolution', defaultValue: 'high' })}
-                            ${effortField({ id: 's-effort-review', label: 'Review', defaultValue: 'medium' })}
-                            ${effortField({ id: 's-effort-scope-review', label: 'Scope Review', defaultValue: 'high' })}
-                            ${effortField({ id: 's-effort-consciousness', label: 'Consciousness', defaultValue: 'low' })}
+                            ${EFFORT_FIELDS.map(([id, label, defaultValue]) => effortField({ id, label, defaultValue })).join('')}
                         </div>
                     </div>
 

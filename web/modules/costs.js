@@ -56,42 +56,34 @@ export function initCosts({ state, mount }) {
     function renderBreakdownTable(tableId, data, totalCost) {
         const tbody = document.querySelector('#' + tableId + ' tbody');
         tbody.innerHTML = '';
+        const cell = (className, text, attrs = {}) => {
+            const td = document.createElement('td');
+            td.className = className;
+            td.textContent = text;
+            Object.entries(attrs).forEach(([key, value]) => td.setAttribute(key, value));
+            return td;
+        };
         for (const [name, info] of Object.entries(data)) {
             const pct = totalCost > 0 ? (info.cost / totalCost * 100) : 0;
             const tr = document.createElement('tr');
-
-            const tdName = document.createElement('td');
-            tdName.className = 'cost-cell-name';
-            tdName.setAttribute('title', name);
-            tdName.textContent = name;
-
-            const tdCalls = document.createElement('td');
-            tdCalls.className = 'cost-cell-right';
-            tdCalls.textContent = info.calls;
-
-            const tdCost = document.createElement('td');
-            tdCost.className = 'cost-cell-right';
-            tdCost.textContent = formatUsd2(info.cost);
-
             const bar = document.createElement('progress');
             bar.className = 'cost-bar';
             bar.max = 100;
             bar.value = Math.min(100, pct);
-
             const tdBar = document.createElement('td');
             tdBar.className = 'cost-bar-cell';
             tdBar.appendChild(bar);
-
-            tr.append(tdName, tdCalls, tdCost, tdBar);
+            tr.append(
+                cell('cost-cell-name', name, { title: name }),
+                cell('cost-cell-right', info.calls),
+                cell('cost-cell-right', formatUsd2(info.cost)),
+                tdBar,
+            );
             tbody.appendChild(tr);
         }
         if (Object.keys(data).length === 0) {
             const tr = document.createElement('tr');
-            const td = document.createElement('td');
-            td.className = 'cost-empty-cell';
-            td.setAttribute('colspan', '4');
-            td.textContent = 'No data';
-            tr.appendChild(td);
+            tr.appendChild(cell('cost-empty-cell', 'No data', { colspan: '4' }));
             tbody.appendChild(tr);
         }
     }

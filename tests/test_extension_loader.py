@@ -114,21 +114,23 @@ def _prepare_extension(
 
 def _mark_isolated_deps_installed(drive_root: pathlib.Path, loaded) -> None:
     from ouroboros.marketplace.install_specs import install_specs_hash
+    from ouroboros.marketplace.isolated_deps import FINGERPRINT_FILENAME, isolated_env_dir
     from ouroboros.skill_dependencies import auto_install_specs_for_skill
     from ouroboros.skill_loader import skill_state_dir
 
     auto_specs = auto_install_specs_for_skill(drive_root, loaded)
     assert auto_specs
+    payload = {
+        "status": "installed",
+        "specs_hash": install_specs_hash(auto_specs),
+        "installed": auto_specs,
+    }
     state_dir = skill_state_dir(drive_root, loaded.name)
     state_dir.mkdir(parents=True, exist_ok=True)
-    (state_dir / "deps.json").write_text(
-        json.dumps({
-            "status": "installed",
-            "specs_hash": install_specs_hash(auto_specs),
-            "installed": auto_specs,
-        }),
-        encoding="utf-8",
-    )
+    (state_dir / "deps.json").write_text(json.dumps(payload), encoding="utf-8")
+    env_dir = isolated_env_dir(loaded.skill_dir)
+    env_dir.mkdir(parents=True, exist_ok=True)
+    (env_dir / FINGERPRINT_FILENAME).write_text(json.dumps(payload), encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -927,6 +929,30 @@ def test_register_ui_tab_surfaces_hostable_widget(tmp_path):
     assert snap["ui_tabs"] == []
 
 
+def test_register_ui_tab_snapshots_nested_render_dicts(tmp_path):
+    loaded, _, drive_root = _prepare_extension(
+        tmp_path,
+        "uicopy",
+        "_RENDER = {'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'markdown', 'text': 'ok'}]}\n"
+        "def register(api):\n"
+        "    api.register_ui_tab('weather', 'Weather', render=_RENDER)\n"
+        "    _RENDER['components'][0]['text'] = 'mutated after registration'\n",
+        permissions=["widget"],
+    )
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
+    assert err is None, err
+
+    snap = extension_loader.snapshot()
+    assert snap["ui_tabs"][0]["render"]["components"][0]["text"] == "ok"
+    snap["ui_tabs"][0]["render"]["components"][0]["text"] = "mutated by caller"
+    assert (
+        extension_loader.snapshot()["ui_tabs"][0]["render"]["components"][0]["text"]
+        == "ok"
+    )
+
+    extension_loader.unload_extension("uicopy")
+
+
 def test_register_ui_tab_promotes_render_span_metadata(tmp_path):
     loaded, _, drive_root = _prepare_extension(
         tmp_path,
@@ -987,6 +1013,13 @@ _UI_TAB_REJECTION_CASES = [
         "def register(api):\n"
         "    api.register_ui_tab('bad', 'Bad', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'gallery', 'items': [None]}]})\n",
         "item 0 must be an object",
+    ),
+    (
+        "non_object_render",
+        "baduirender",
+        "def register(api):\n"
+        "    api.register_ui_tab('bad', 'Bad', render=[])\n",
+        "ui render must be an object",
     ),
 ]
 

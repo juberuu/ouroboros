@@ -158,6 +158,11 @@
         if (next) next.disabled = nextButtonShouldBeDisabled();
     }
 
+    function markStepEdited() {
+        state.error = '';
+        syncCurrentStepActionState();
+    }
+
     function applyPresetSelection(presetId) {
         state.localPreset = presetId;
         state.localSourceOpen = Boolean(presetId);
@@ -839,30 +844,33 @@
     }
 
     function bindClearButtons() {
+        const clearActions = {
+            'openrouter-key': () => { state.openrouterKey = ''; },
+            'openai-key': () => { state.openaiKey = ''; },
+            'cloudru-key': () => { state.cloudruKey = ''; },
+            'anthropic-key': () => { state.anthropicKey = ''; },
+            'local-preset': () => {
+                state.localPreset = '';
+                state.localSource = '';
+                state.localFilename = '';
+                state.localRoutingMode = 'cloud';
+                state.localSourceOpen = false;
+            },
+            'local-source': () => {
+                state.localSource = '';
+                state.localPreset = detectLocalPresetSelection();
+            },
+            'local-filename': () => {
+                state.localFilename = '';
+                state.localPreset = detectLocalPresetSelection();
+            },
+            'local-chat-format': () => { state.localChatFormat = ''; },
+            'skills-repo-path': () => { state.skillsRepoPath = ''; },
+        };
         root.querySelectorAll('[data-clear]').forEach((button) => {
             button.addEventListener('click', () => {
                 const target = button.getAttribute('data-clear');
-                if (target === 'openrouter-key') state.openrouterKey = '';
-                if (target === 'openai-key') state.openaiKey = '';
-                if (target === 'cloudru-key') state.cloudruKey = '';
-                if (target === 'anthropic-key') state.anthropicKey = '';
-                if (target === 'local-preset') {
-                    state.localPreset = '';
-                    state.localSource = '';
-                    state.localFilename = '';
-                    state.localRoutingMode = 'cloud';
-                    state.localSourceOpen = false;
-                }
-                if (target === 'local-source') {
-                    state.localSource = '';
-                    state.localPreset = detectLocalPresetSelection();
-                }
-                if (target === 'local-filename') {
-                    state.localFilename = '';
-                    state.localPreset = detectLocalPresetSelection();
-                }
-                if (target === 'local-chat-format') state.localChatFormat = '';
-                if (target === 'skills-repo-path') state.skillsRepoPath = '';
+                if (clearActions[target]) clearActions[target]();
                 state.error = '';
                 render();
             });
@@ -887,10 +895,16 @@
         const localGpuLayers = document.getElementById('local-gpu-layers');
         const localChatFormat = document.getElementById('local-chat-format');
 
-        [[openrouterInput, 'openrouterKey'], [openaiInput, 'openaiKey'], [cloudruInput, 'cloudruKey']].forEach(([input, key]) => {
+        function bindStateInput(input, key, after = null) {
             if (!input) return;
-            input.addEventListener('input', () => { state[key] = input.value; state.error = ''; syncCurrentStepActionState(); });
-        });
+            input.addEventListener('input', () => {
+                state[key] = input.value;
+                if (after) after(input);
+                markStepEdited();
+            });
+        }
+
+        [[openrouterInput, 'openrouterKey'], [openaiInput, 'openaiKey'], [cloudruInput, 'cloudruKey']].forEach(([input, key]) => bindStateInput(input, key));
         if (anthropicInput) anthropicInput.addEventListener('input', () => {
             const wasConfigured = hasAnthropicKeyConfigured();
             state.anthropicKey = anthropicInput.value;
@@ -899,32 +913,25 @@
                 startClaudeCliStatusPolling();
                 updateClaudeCliStatus();
             }
-            state.error = '';
             syncClaudeCliVisibility();
-            syncCurrentStepActionState();
+            markStepEdited();
         });
         if (localPreset) localPreset.addEventListener('change', () => { applyPresetSelection(localPreset.value); state.error = ''; render(); });
-        if (localSource) localSource.addEventListener('input', () => {
-            state.localSource = localSource.value;
+        bindStateInput(localSource, 'localSource', () => {
             state.localPreset = detectLocalPresetSelection();
             if (localPreset) localPreset.value = state.localPreset || '';
             state.localSourceOpen = true;
             if (trim(state.localSource) && activeProviderProfile() === 'local' && trim(state.localRoutingMode) === 'cloud') {
                 state.localRoutingMode = 'all';
             }
-            state.error = '';
-            syncCurrentStepActionState();
         });
-        if (localFilename) localFilename.addEventListener('input', () => {
-            state.localFilename = localFilename.value;
+        bindStateInput(localFilename, 'localFilename', () => {
             state.localPreset = detectLocalPresetSelection();
             if (localPreset) localPreset.value = state.localPreset || '';
-            state.error = '';
-            syncCurrentStepActionState();
         });
-        if (localContext) localContext.addEventListener('input', () => { state.localContextLength = localContext.value; state.error = ''; syncCurrentStepActionState(); });
-        if (localGpuLayers) localGpuLayers.addEventListener('input', () => { state.localGpuLayers = localGpuLayers.value; state.error = ''; syncCurrentStepActionState(); });
-        if (localChatFormat) localChatFormat.addEventListener('input', () => { state.localChatFormat = localChatFormat.value; state.error = ''; syncCurrentStepActionState(); });
+        bindStateInput(localContext, 'localContextLength');
+        bindStateInput(localGpuLayers, 'localGpuLayers');
+        bindStateInput(localChatFormat, 'localChatFormat');
         root.querySelectorAll('[data-local-mode]').forEach((button) => {
             button.addEventListener('click', () => {
                 state.localRoutingMode = button.getAttribute('data-local-mode');
@@ -1117,20 +1124,15 @@
             });
         });
         const skillsInput = document.getElementById('skills-repo-path');
-        if (skillsInput) {
-            skillsInput.addEventListener('input', () => {
-                state.skillsRepoPath = skillsInput.value;
-                syncCurrentStepActionState();
-            });
-        }
+        if (skillsInput) skillsInput.addEventListener('input', () => { state.skillsRepoPath = skillsInput.value; markStepEdited(); });
         syncCurrentStepActionState();
     }
 
     function bindBudgetStep() {
         const totalBudget = document.getElementById('total-budget');
         const perTaskBudget = document.getElementById('per-task-budget');
-        if (totalBudget) totalBudget.addEventListener('input', () => { state.totalBudget = totalBudget.value; state.error = ''; syncCurrentStepActionState(); });
-        if (perTaskBudget) perTaskBudget.addEventListener('input', () => { state.perTaskCostUsd = perTaskBudget.value; state.error = ''; syncCurrentStepActionState(); });
+        if (totalBudget) totalBudget.addEventListener('input', () => { state.totalBudget = totalBudget.value; markStepEdited(); });
+        if (perTaskBudget) perTaskBudget.addEventListener('input', () => { state.perTaskCostUsd = perTaskBudget.value; markStepEdited(); });
         syncCurrentStepActionState();
     }
 

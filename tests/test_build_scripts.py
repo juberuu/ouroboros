@@ -81,16 +81,17 @@ class TestBuildSh:
         assert pi_pos != -1, "PyInstaller command not found in build.sh"
         assert bundle_pos < pi_pos, "repo bundle generation must happen before PyInstaller in build.sh"
 
-    def test_repo_bundle_requires_real_tag_on_head(self):
+    def test_repo_bundle_delegates_release_tag_validation_to_python_ssot(self):
         src = _read("build.sh")
-        assert 'refs/tags/$RELEASE_TAG' in src
-        assert 'git tag --points-at HEAD' in src
+        assert 'scripts/build_repo_bundle.py' in src
+        assert 'refs/tags/$RELEASE_TAG' not in src
+        assert 'git tag --points-at HEAD' not in src
         assert 'OUROBOROS_RELEASE_TAG="$RELEASE_TAG"' not in src
 
-    def test_repo_bundle_requires_annotated_tag(self):
+    def test_repo_bundle_script_has_no_duplicate_annotated_tag_guard(self):
         src = _read("build.sh")
-        assert 'git cat-file -t "refs/tags/$RELEASE_TAG"' in src
-        assert 'requires annotated git tag' in src
+        assert 'git cat-file -t "refs/tags/$RELEASE_TAG"' not in src
+        assert 'requires annotated git tag' not in src
 
     def test_symlink_normalizer_skips_playwright_browser_bundles(self):
         src = _read("build.sh")
@@ -142,16 +143,17 @@ class TestBuildLinuxSh:
         assert pi_pos != -1
         assert bundle_pos < pi_pos, "repo bundle generation must happen before PyInstaller in build_linux.sh"
 
-    def test_repo_bundle_requires_real_tag_on_head(self):
+    def test_repo_bundle_delegates_release_tag_validation_to_python_ssot(self):
         src = _read("build_linux.sh")
-        assert 'refs/tags/$RELEASE_TAG' in src
-        assert 'git tag --points-at HEAD' in src
+        assert 'scripts/build_repo_bundle.py' in src
+        assert 'refs/tags/$RELEASE_TAG' not in src
+        assert 'git tag --points-at HEAD' not in src
         assert 'OUROBOROS_RELEASE_TAG="$RELEASE_TAG"' not in src
 
-    def test_repo_bundle_requires_annotated_tag(self):
+    def test_repo_bundle_script_has_no_duplicate_annotated_tag_guard(self):
         src = _read("build_linux.sh")
-        assert 'git cat-file -t "refs/tags/$RELEASE_TAG"' in src
-        assert 'requires annotated git tag' in src
+        assert 'git cat-file -t "refs/tags/$RELEASE_TAG"' not in src
+        assert 'requires annotated git tag' not in src
 
 
 # ---------------------------------------------------------------------------
@@ -203,16 +205,17 @@ class TestBuildWindowsPs1:
         assert pi_pos != -1
         assert bundle_pos < pi_pos, "repo bundle generation must happen before PyInstaller in build_windows.ps1"
 
-    def test_repo_bundle_requires_real_tag_on_head(self):
+    def test_repo_bundle_delegates_release_tag_validation_to_python_ssot(self):
         src = _read("build_windows.ps1")
-        assert 'refs/tags/$ReleaseTag' in src
-        assert 'git tag --points-at HEAD' in src
+        assert 'scripts/build_repo_bundle.py' in src
+        assert 'refs/tags/$ReleaseTag' not in src
+        assert 'git tag --points-at HEAD' not in src
         assert '$env:OUROBOROS_RELEASE_TAG' not in src
 
-    def test_repo_bundle_requires_annotated_tag(self):
+    def test_repo_bundle_script_has_no_duplicate_annotated_tag_guard(self):
         src = _read("build_windows.ps1")
-        assert 'git cat-file -t "refs/tags/$ReleaseTag"' in src
-        assert 'annotated git tag' in src
+        assert 'git cat-file -t "refs/tags/$ReleaseTag"' not in src
+        assert 'annotated git tag' not in src
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +301,33 @@ class TestDockerfile:
             f"Found {len(playwright_invocations)} playwright invocation(s) at positions: "
             f"{playwright_invocations}"
         )
+
+
+# ---------------------------------------------------------------------------
+# scripts/build_repo_bundle.py  (release tag SSOT)
+# ---------------------------------------------------------------------------
+
+class TestRepoBundleReleaseTagGuard:
+    """The platform scripts delegate release-tag integrity to the Python
+    bundler so the invariant has one fail-closed implementation."""
+
+    def test_bundler_requires_release_tag_at_head(self):
+        src = _read("scripts/build_repo_bundle.py")
+        assert "def _resolve_release_tag" in src
+        assert '"tag", "--points-at", "HEAD"' in src
+        assert "does not match VERSION" in src
+
+    def test_bundler_requires_annotated_tag(self):
+        src = _read("scripts/build_repo_bundle.py")
+        assert "def _verify_release_tag_in_repo" in src
+        assert '"cat-file", "-t"' in src
+        assert "is not an annotated tag" in src
+
+    def test_bundler_checks_tag_points_at_head_sha(self):
+        src = _read("scripts/build_repo_bundle.py")
+        assert '"rev-parse", "HEAD"' in src
+        assert '"rev-list", "-1"' in src
+        assert "does not point at HEAD" in src
 
 
 # ---------------------------------------------------------------------------

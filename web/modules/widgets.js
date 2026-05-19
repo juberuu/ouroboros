@@ -1,7 +1,13 @@
 import { renderPageHeader } from './page_header.js';
 import { PAGE_ICONS } from './page_icons.js';
 import { applyMasonry } from './masonry.js';
-import { apiFetch } from './api_client.js';
+import {
+    apiClient,
+    apiFetch,
+    cleanExtensionRoute,
+    extensionRoutePath,
+    extensionRoutePrefix,
+} from './api_client.js';
 import {
     escapeHtmlAttr as escapeHtml,
     renderMarkdownSafe,
@@ -21,13 +27,6 @@ function pageTemplate() {
             </div>
         </section>
     `;
-}
-
-async function fetchExtensions() {
-    const resp = await apiFetch('/api/extensions', { cache: 'no-store' });
-    const data = await resp.json().catch(() => ({}));
-    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
-    return data;
 }
 
 function renderShell(host, tabs) {
@@ -55,23 +54,6 @@ function renderShell(host, tabs) {
     }).join('');
 }
 
-function cleanWidgetRoute(value) {
-    const route = String(value || '').trim().replace(/^\/+/, '');
-    const parts = route.split('/').filter(Boolean);
-    if (!route || route.includes('\\') || parts.some((part) => part === '.' || part === '..')) {
-        return '';
-    }
-    return parts.map(encodeURIComponent).join('/');
-}
-
-function extensionRouteUrl(tab, route, params) {
-    const cleanRoute = cleanWidgetRoute(route);
-    if (!cleanRoute) return '';
-    const base = `/api/extensions/${encodeURIComponent(tab.skill)}/${cleanRoute}`;
-    const query = params instanceof URLSearchParams && String(params) ? `?${params}` : '';
-    return base + query;
-}
-
 function getPath(root, path, fallback = '') {
     if (!path) return root ?? fallback;
     let current = root;
@@ -89,7 +71,7 @@ function safeMediaSrc(tab, spec, state) {
         for (const [key, value] of Object.entries(spec.query || {})) {
             params.set(key, String(value ?? ''));
         }
-        return extensionRouteUrl(tab, route, params);
+        return extensionRoutePath(tab.skill, route, params);
     }
     const value = getPath(state[spec.target || 'result'], spec.path || '', spec.src || '');
     const text = String(value || '').trim();
@@ -99,7 +81,7 @@ function safeMediaSrc(tab, spec, state) {
     if (text.startsWith('/api/extensions/')) {
         try {
             const parsed = new URL(text, window.location.origin);
-            const expectedPrefix = `/api/extensions/${encodeURIComponent(tab.skill)}/`;
+            const expectedPrefix = extensionRoutePrefix(tab.skill);
             if (parsed.origin === window.location.origin && parsed.pathname.startsWith(expectedPrefix)) {
                 return parsed.pathname + parsed.search;
             }
@@ -302,7 +284,8 @@ function renderDataComponent(tab, component, state, status, componentState = {},
     if (type === 'kanban') {
         const columns = Array.isArray(component.columns) ? component.columns : [];
         if (!columns.length) return '<div class="muted">Kanban has no columns.</div>';
-        const moveRoute = component.on_move?.route ? cleanWidgetRoute(component.on_move.route) : '';
+        const rawMoveRoute = component.on_move?.route || '';
+        const moveRoute = cleanExtensionRoute(rawMoveRoute) ? rawMoveRoute : '';
         const cardsByCol = new Map();
         for (const col of columns) cardsByCol.set(col.id || col.label, []);
         const cardsList = Array.isArray(component.cards) ? component.cards : (Array.isArray(getPath(data, component.path || '', [])) ? getPath(data, component.path || '', []) : []);
@@ -354,7 +337,7 @@ async function callWidgetRoute(tab, spec, values, signal) {
         params.set(key, String(value ?? ''));
     }
     const noBody = method === 'GET' || method === 'HEAD';
-    const url = extensionRouteUrl(tab, spec.route || spec.api_route, noBody ? params : null);
+    const url = extensionRoutePath(tab.skill, spec.route || spec.api_route, noBody ? params : null);
     if (!url) throw new Error('invalid widget route');
     const init = noBody
         ? { method, signal }
@@ -394,7 +377,7 @@ async function mountDeclarativeWidget(mount, tab, render) {
 
     const downloadWidgetFile = async (url, filename) => {
         const resolvedUrl = new URL(url, window.location.origin);
-        const expectedPrefix = `/api/extensions/${encodeURIComponent(tab.skill)}/`;
+        const expectedPrefix = extensionRoutePrefix(tab.skill);
         if (resolvedUrl.origin !== window.location.origin || !resolvedUrl.pathname.startsWith(expectedPrefix)) {
             throw new Error('download URL is outside this widget extension');
         }
@@ -737,7 +720,7 @@ async function mountDeclarativeWidget(mount, tab, render) {
         });
         components.forEach((component, idx) => {
             if (String(component.type || '') !== 'stream' || eventSources.has(idx)) return;
-            const url = extensionRouteUrl(tab, component.route || component.api_route, new URLSearchParams());
+            const url = extensionRoutePath(tab.skill, component.route || component.api_route, new URLSearchParams());
             if (!url || typeof EventSource === 'undefined') return;
             const target = component.target || 'result';
             const source = new EventSource(url);
@@ -786,9 +769,9 @@ async function mountTab(card, tab) {
     const render = tab.render || {};
     if (!mount) return;
     if (render.kind === 'iframe' && render.route) {
-        const route = cleanWidgetRoute(render.route);
-        if (!route) throw new Error('invalid widget iframe route');
-        mount.innerHTML = `<iframe class="widgets-frame" sandbox="" src="/api/extensions/${encodeURIComponent(tab.skill)}/${route}"></iframe>`;
+        const src = extensionRoutePath(tab.skill, render.route);
+        if (!src) throw new Error('invalid widget iframe route');
+        mount.innerHTML = `<iframe class="widgets-frame" sandbox="" src="${src}"></iframe>`;
         return;
     }
     if (render.kind === 'declarative') {
@@ -798,14 +781,14 @@ async function mountTab(card, tab) {
         // Reviewed JS runs in an opaque iframe; parent fetch bridge only allows
         // this skill's extension route prefix, preserving route IO without cookies.
         const entryName = String(render.entry).replace(/[^A-Za-z0-9._-]/g, '');
-        const entryUrl = `/api/extensions/${encodeURIComponent(tab.skill)}/module/${encodeURIComponent(entryName)}`;
+        const entryUrl = `${extensionRoutePrefix(tab.skill)}module/${encodeURIComponent(entryName)}`;
         const resp = await apiFetch(entryUrl, { cache: 'no-store' });
         const moduleSource = await resp.text();
         if (!resp.ok) {
             mount.innerHTML = `<div class="skills-load-error">module load failed: ${escapeHtml(moduleSource || `HTTP ${resp.status}`)}</div>`;
             return;
         }
-        const expectedPrefix = `/api/extensions/${encodeURIComponent(tab.skill)}/`;
+        const expectedPrefix = extensionRoutePrefix(tab.skill);
         const nonce = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
         const csp = [
             "default-src 'none'",
@@ -956,7 +939,7 @@ export function initWidgets(ctx = {}) {
             list.innerHTML = '<div class="muted">Loading widgets…</div>';
         }
         try {
-            const data = await fetchExtensions();
+            const data = await apiClient.extensions();
             if (!widgetsVisible || generation !== renderGeneration) return;
             const tabs = Array.isArray(data.live?.ui_tabs) ? data.live.ui_tabs : [];
             lastTabs = tabs;

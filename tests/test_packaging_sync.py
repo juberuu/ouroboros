@@ -77,7 +77,9 @@ def test_architecture_doc_describes_build_script_release_tag_check():
     architecture = (REPO / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
 
     assert "Release tag prerequisite" in architecture
-    assert "git tag --points-at HEAD" in architecture
+    assert "scripts/build_repo_bundle.py" in architecture
+    assert "release-tag SSOT" in architecture
+    assert "annotated `v$(cat VERSION)` tag points at `HEAD`" in architecture
 
 
 def test_system_prompt_lists_bible_in_safety_critical_set():

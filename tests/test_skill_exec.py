@@ -819,6 +819,94 @@ def test_skill_exec_allows_warnings_under_blocking(tmp_path, monkeypatch):
     assert "hello from skill" in payload["stdout"]
 
 
+def test_toggle_skill_blocks_stale_dependency_fingerprint(tmp_path, monkeypatch):
+    from ouroboros.marketplace.isolated_deps import (
+        DEPS_STATE_FILENAME,
+        FINGERPRINT_FILENAME,
+        isolated_env_dir,
+    )
+    from ouroboros.skill_loader import skill_state_dir
+
+    skills_root = tmp_path / "skills"
+    manifest = _valid_script_manifest("alpha").replace(
+        "scripts:\n",
+        "install_specs:\n"
+        "  - kind: pip\n"
+        "    package: wheel\n"
+        "scripts:\n",
+    )
+    skill_dir = _build_skill(skills_root, "alpha", manifest=manifest)
+    ctx = _make_ctx(tmp_path)
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    _mark_reviewed(ctx.drive_root, skill_dir, "alpha")
+    stale_state = {"status": "installed", "specs_hash": "old"}
+    state_dir = skill_state_dir(ctx.drive_root, "alpha")
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / DEPS_STATE_FILENAME).write_text(json.dumps(stale_state), encoding="utf-8")
+    env_dir = isolated_env_dir(skill_dir)
+    env_dir.mkdir(parents=True)
+    (env_dir / FINGERPRINT_FILENAME).write_text(json.dumps(stale_state), encoding="utf-8")
+
+    resp = skill_exec_mod._handle_toggle_skill(ctx, skill="alpha", enabled=True)
+
+    assert "dependency fingerprint is stale" in resp
+    assert not (state_dir / "enabled.json").exists()
+
+
+def test_skill_exec_refuses_missing_manifest_permission_grant(tmp_path, monkeypatch):
+    skills_root = tmp_path / "skills"
+    manifest = (
+        "---\n"
+        "name: alpha\n"
+        "description: Permission grant test.\n"
+        "version: 0.1.0\n"
+        "type: script\n"
+        "runtime: python3\n"
+        "permissions: [inject_chat]\n"
+        "scripts:\n"
+        "  - name: hello.py\n"
+        "    description: Print hello.\n"
+        "---\n"
+        "# body\n"
+    )
+    skill_dir = _build_skill(skills_root, "alpha", manifest=manifest)
+    ctx = _make_ctx(tmp_path)
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    _mark_reviewed_and_enabled(ctx.drive_root, skill_dir, "alpha")
+
+    resp = skill_exec_mod._handle_skill_exec(ctx, skill="alpha", script="hello.py")
+
+    assert "SKILL_EXEC_GRANT_REQUIRED" in resp
+    assert "inject_chat" in resp
+
+
+def test_toggle_skill_reports_missing_manifest_permission_grant(tmp_path, monkeypatch):
+    skills_root = tmp_path / "skills"
+    manifest = (
+        "---\n"
+        "name: alpha\n"
+        "description: Permission grant test.\n"
+        "version: 0.1.0\n"
+        "type: script\n"
+        "runtime: python3\n"
+        "permissions: [inject_chat]\n"
+        "scripts:\n"
+        "  - name: hello.py\n"
+        "    description: Print hello.\n"
+        "---\n"
+        "# body\n"
+    )
+    skill_dir = _build_skill(skills_root, "alpha", manifest=manifest)
+    ctx = _make_ctx(tmp_path)
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    _mark_reviewed(ctx.drive_root, skill_dir, "alpha")
+
+    resp = skill_exec_mod._handle_toggle_skill(ctx, skill="alpha", enabled=True)
+
+    assert "SKILL_TOGGLE_ERROR" in resp
+    assert "inject_chat" in resp
+
+
 def test_toggle_skill_blocked_in_heal_context(tmp_path, monkeypatch):
     skills_root = tmp_path / "skills"
     skill_dir = _build_skill(skills_root, "alpha")

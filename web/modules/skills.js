@@ -4,7 +4,7 @@ import { renderPageHeader, renderTabStrip } from './page_header.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { PAGE_ICONS } from './page_icons.js';
 import { showToast } from './toast.js';
-import { apiFetch } from './api_client.js';
+import { apiClient, apiFetch } from './api_client.js';
 import { renderInstalledSkillCard } from './skill_card_renderer.js';
 import {
     boundedText,
@@ -97,9 +97,9 @@ function sortSkillsForDisplay(skills) {
 
 async function fetchSkills() {
     const [stateResp, extResp, queueResp] = await Promise.all([
-        apiFetch('/api/state').then(r => r.ok ? r.json() : {}),
-        apiFetch('/api/extensions').then(r => r.ok ? r.json() : { skills: [], live: {} }),
-        apiFetch('/api/skills/lifecycle-queue').then(r => r.ok ? r.json() : { events: [] }).catch(() => ({ events: [] })),
+        apiClient.state().catch(() => ({})),
+        apiClient.extensions().catch(() => ({ skills: [], live: {} })),
+        apiClient.skillLifecycleQueue().catch(() => ({ events: [] })),
     ]);
     // Per-skill state is synthesized from extensions + lifecycle queue.
     const skillsRepoConfigured = Boolean(stateResp.skills_repo_configured);

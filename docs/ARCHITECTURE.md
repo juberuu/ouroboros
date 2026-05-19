@@ -1,4 +1,4 @@
-# Ouroboros v5.25.1-rc.1 — Architecture & Reference
+# Ouroboros v5.26.0-rc.1 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -762,7 +762,7 @@ Rationale: normal self-modification needs fast feedback, but release tags must p
 ### Build scripts
 
 `build.sh`, `build_linux.sh`, `build_windows.ps1`, and `scripts/build_repo_bundle.py` are release-invariant surfaces. Changes to them must update README install/build notes and architecture rationale in the same commit.
-Release tag prerequisite: platform build scripts verify `git tag --points-at HEAD` includes `v$(cat VERSION)` before producing release artifacts. This catches untagged release builds locally instead of publishing artifacts whose version carriers disagree with git history.
+Release tag prerequisite: platform build scripts delegate repo-bundle creation to `scripts/build_repo_bundle.py`; that Python bundler is the release-tag SSOT and verifies the annotated `v$(cat VERSION)` tag points at `HEAD` before packaged artifacts are produced. This catches untagged release builds locally instead of publishing artifacts whose version carriers disagree with git history.
 
 ### Docker
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import json
 import logging
 import pathlib
 from datetime import datetime, timezone
@@ -16,7 +15,10 @@ from starlette.responses import JSONResponse, Response
 from ouroboros.extension_loader import list_routes, snapshot
 from ouroboros.gateway._helpers import (
     coerce_bool,
+    json_error,
+    json_exception,
     request_drive_root as _request_drive_root,
+    request_json_or,
     request_repo_dir as _request_repo_dir,
 )
 from ouroboros.skill_lifecycle_queue import (
@@ -29,7 +31,6 @@ from ouroboros.skill_loader import (
     discover_skills,
     find_skill,
     grant_status_for_skill,
-    review_status_allows_execution,
     skill_review_gate,
 )
 
@@ -41,6 +42,17 @@ def _coerce_bool_arg(value: Any) -> bool | None:
     sentinel = object()
     coerced = coerce_bool(value, default=sentinel)  # type: ignore[arg-type]
     return None if coerced is sentinel else coerced
+
+
+def _review_fields(loaded: Any, *, stale: bool | None = None, gate: dict[str, Any] | None = None) -> dict[str, Any]:
+    stale = loaded.review.is_stale_for(loaded.content_hash) if stale is None else stale
+    gate = skill_review_gate(loaded.review.status, stale=stale) if gate is None else gate
+    return {
+        "review_status": loaded.review.status,
+        "review_stale": stale,
+        "review_gate": gate,
+        "executable_review": gate["executable_review"],
+    }
 
 
 def _broadcast_extension_lifecycle(request: Request, skill: str, action: Any, reason: Any = "") -> None:
@@ -79,7 +91,7 @@ async def api_extensions_index(request: Request) -> JSONResponse:
         return JSONResponse(payload)
     except Exception as exc:
         log.exception("api_extensions_index failure")
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        return json_exception(exc)
 
 
 def _build_extensions_index(drive_root, repo_path):
@@ -151,16 +163,7 @@ def _build_extensions_index(drive_root, repo_path):
             "version": s.manifest.version,
             "description": s.manifest.description,
             "enabled": s.enabled,
-            "review_status": s.review.status,
-            "review_stale": s.review.is_stale_for(s.content_hash),
-            "review_gate": skill_review_gate(
-                s.review.status,
-                stale=s.review.is_stale_for(s.content_hash),
-            ),
-            "executable_review": skill_review_gate(
-                s.review.status,
-                stale=s.review.is_stale_for(s.content_hash),
-            )["executable_review"],
+            **_review_fields(s),
             "permissions": list(s.manifest.permissions or []),
             "load_error": runtime_states.get(s.name, {}).get("load_error", s.load_error),
             "desired_live": runtime_states.get(s.name, {}).get("desired_live", False),
@@ -218,12 +221,12 @@ async def api_extension_manifest(request: Request) -> JSONResponse:
 
     skill_name = str(request.path_params.get("skill") or "").strip()
     if not skill_name:
-        return JSONResponse({"error": "missing skill name"}, status_code=400)
+        return json_error("missing skill name", 400)
     drive_root = _request_drive_root(request)
     repo_path = get_skills_repo_path()
     loaded = await asyncio.to_thread(find_skill, drive_root, skill_name, repo_path=repo_path)
     if loaded is None:
-        return JSONResponse({"error": "skill not found"}, status_code=404)
+        return json_error("skill not found", 404)
     runtime_state = await asyncio.to_thread(
         runtime_state_for_skill_name,
         skill_name,
@@ -247,16 +250,7 @@ async def api_extension_manifest(request: Request) -> JSONResponse:
                 "ui_tab": loaded.manifest.ui_tab,
             },
             "enabled": loaded.enabled,
-            "review_status": loaded.review.status,
-            "review_stale": loaded.review.is_stale_for(loaded.content_hash),
-            "review_gate": skill_review_gate(
-                loaded.review.status,
-                stale=loaded.review.is_stale_for(loaded.content_hash),
-            ),
-            "executable_review": skill_review_gate(
-                loaded.review.status,
-                stale=loaded.review.is_stale_for(loaded.content_hash),
-            )["executable_review"],
+            **_review_fields(loaded),
             "content_hash": loaded.content_hash,
             "load_error": load_error,
         }
@@ -271,9 +265,9 @@ async def api_extension_module(request: Request) -> Response:
     skill_name = str(request.path_params.get("skill") or "").strip()
     entry = str(request.path_params.get("entry") or "").strip()
     if not skill_name or not entry:
-        return JSONResponse({"error": "missing skill/module entry"}, status_code=400)
+        return json_error("missing skill/module entry", 400)
     if "/" in entry or "\\" in entry or ".." in entry or entry.startswith("."):
-        return JSONResponse({"error": "invalid module entry"}, status_code=400)
+        return json_error("invalid module entry", 400)
 
     drive_root = _request_drive_root(request)
     repo_path = get_skills_repo_path()
@@ -284,13 +278,10 @@ async def api_extension_module(request: Request) -> Response:
         repo_path=repo_path,
     )
     if not state.get("desired_live"):
-        return JSONResponse(
-            {"error": f"extension {skill_name!r} not live: {state.get('reason')}", "state": state},
-            status_code=409,
-        )
+        return json_error(f"extension {skill_name!r} not live: {state.get('reason')}", 409, state=state)
     loaded = await asyncio.to_thread(find_skill, drive_root, skill_name, repo_path=repo_path)
     if loaded is None:
-        return JSONResponse({"error": "skill not found"}, status_code=404)
+        return json_error("skill not found", 404)
     # Authorize against live PluginAPI tab registrations, not only manifest ui_tab.
     live = snapshot()
     module_declared = any(
@@ -300,18 +291,18 @@ async def api_extension_module(request: Request) -> Response:
         for tab in live.get("ui_tabs", [])
     )
     if not module_declared:
-        return JSONResponse({"error": "module entry is not declared by a live widget tab"}, status_code=404)
+        return json_error("module entry is not declared by a live widget tab", 404)
     target = (loaded.skill_dir / entry).resolve()
     try:
         target.relative_to(loaded.skill_dir.resolve())
     except ValueError:
-        return JSONResponse({"error": "module entry escapes skill directory"}, status_code=400)
+        return json_error("module entry escapes skill directory", 400)
     if not target.is_file():
-        return JSONResponse({"error": "module entry file not found"}, status_code=404)
+        return json_error("module entry file not found", 404)
     try:
         text = await asyncio.to_thread(target.read_text, encoding="utf-8")
     except UnicodeDecodeError:
-        return JSONResponse({"error": "module entry is not UTF-8 text"}, status_code=400)
+        return json_error("module entry is not UTF-8 text", 400)
     return Response(
         text,
         media_type="application/javascript; charset=utf-8",
@@ -323,7 +314,7 @@ async def api_extension_settings_section(request: Request) -> JSONResponse:
     """Return declarative Settings sections registered by one extension."""
     skill_name = str(request.path_params.get("skill") or "").strip()
     if not skill_name:
-        return JSONResponse({"error": "missing skill name"}, status_code=400)
+        return json_error("missing skill name", 400)
     live = snapshot()
     sections = [
         item
@@ -361,20 +352,11 @@ async def api_extension_dispatch(request: Request) -> Response:
             )
             spec = list_routes().get(mount)
             if spec is None and state.get("action") == "extension_load_error":
-                return JSONResponse(
-                    {"error": f"extension {skill!r} failed to go live", "state": state},
-                    status_code=409,
-                )
+                return json_error(f"extension {skill!r} failed to go live", 409, state=state)
         elif state.get("reason") != "missing":
-            return JSONResponse(
-                {"error": f"extension {skill!r} not live: {state.get('reason')}", "state": state},
-                status_code=409,
-            )
+            return json_error(f"extension {skill!r} not live: {state.get('reason')}", 409, state=state)
     if spec is None:
-        return JSONResponse(
-            {"error": f"no extension route registered for {mount!r}"},
-            status_code=404,
-        )
+        return json_error(f"no extension route registered for {mount!r}", 404)
     state = await asyncio.to_thread(
         runtime_state_for_skill_name,
         str(spec.get("skill") or skill),
@@ -391,34 +373,20 @@ async def api_extension_dispatch(request: Request) -> Response:
         )
         spec = list_routes().get(mount)
         if state.get("action") == "extension_load_error":
-            return JSONResponse(
-                {"error": f"extension {skill!r} failed to go live", "state": state},
-                status_code=409,
-            )
+            return json_error(f"extension {skill!r} failed to go live", 409, state=state)
     if not state.get("desired_live") or not state.get("live_loaded"):
-        return JSONResponse(
-            {"error": f"extension {skill!r} not live: {state.get('reason')}", "state": state},
-            status_code=409,
-        )
+        return json_error(f"extension {skill!r} not live: {state.get('reason')}", 409, state=state)
     if spec is None:
-        return JSONResponse(
-            {"error": f"no extension route registered for {mount!r}"},
-            status_code=404,
-        )
+        return json_error(f"no extension route registered for {mount!r}", 404)
     method = request.method.upper()
     allowed = {m.upper() for m in spec.get("methods", ("GET",))}
     if "GET" in allowed:
         allowed.add("HEAD")
     if method not in allowed:
-        return JSONResponse(
-            {"error": f"method {method} not allowed; allowed={sorted(allowed)}"},
-            status_code=405,
-        )
+        return json_error(f"method {method} not allowed; allowed={sorted(allowed)}", 405)
     handler = spec.get("handler")
     if not callable(handler):
-        return JSONResponse(
-            {"error": "registered handler is not callable"}, status_code=500
-        )
+        return json_error("registered handler is not callable")
     try:
         if inspect.iscoroutinefunction(handler):
             result = await handler(request)
@@ -428,9 +396,7 @@ async def api_extension_dispatch(request: Request) -> Response:
             result = await result
     except Exception as exc:
         log.exception("extension dispatch failure: %s", mount)
-        return JSONResponse(
-            {"error": f"{type(exc).__name__}: {exc}"}, status_code=500
-        )
+        return json_error(f"{type(exc).__name__}: {exc}")
     if isinstance(result, Response):
         return result
     return JSONResponse(result if result is not None else {})
@@ -444,21 +410,18 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
 
     skill_name = str(request.path_params.get("skill") or "").strip()
     if not skill_name:
-        return JSONResponse({"error": "missing skill name"}, status_code=400)
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
+        return json_error("missing skill name", 400)
+    body = await request_json_or(request, {}, exceptions=(Exception,))
     enabled = _coerce_bool_arg(body.get("enabled"))
     if enabled is None:
-        return JSONResponse({"error": "'enabled' must be a boolean"}, status_code=400)
+        return json_error("'enabled' must be a boolean", 400)
 
     drive_root = _request_drive_root(request)
     repo_path = get_skills_repo_path()
 
     initial = await asyncio.to_thread(find_skill, drive_root, skill_name, repo_path=repo_path)
     if initial is None:
-        return JSONResponse({"error": "skill not found"}, status_code=404)
+        return json_error("skill not found", 404)
     def _run_toggle_sync() -> dict[str, Any]:
         loaded = find_skill(drive_root, skill_name, repo_path=repo_path)
         if loaded is None:
@@ -474,20 +437,14 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
                 return {
                     "error": "cannot enable until review status is a fresh executable review",
                     "status_code": 409,
-                    "review_status": loaded.review.status,
-                    "review_stale": stale,
-                    "review_gate": gate,
-                    "executable_review": gate["executable_review"],
+                    **_review_fields(loaded, stale=stale, gate=gate),
                     "grants": grants,
                 }
             if not grants.get("all_granted", True):
                 return {
                     "error": "cannot enable until requested key grants are approved",
                     "status_code": 409,
-                    "review_status": loaded.review.status,
-                    "review_stale": stale,
-                    "review_gate": gate,
-                    "executable_review": gate["executable_review"],
+                    **_review_fields(loaded, stale=stale, gate=gate),
                     "grants": grants,
                 }
             # Mirror toggle_skill's isolated-dependency enable guard for the UI.
@@ -498,7 +455,7 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
 
                 auto_specs = auto_install_specs_for_skill(drive_root, loaded)
                 if auto_specs:
-                    deps_state = read_deps_state(drive_root, loaded.name)
+                    deps_state = read_deps_state(drive_root, loaded.name, loaded.skill_dir)
                     deps_status = str(deps_state.get("status") or "pending")
                     expected_hash = install_specs_hash(auto_specs)
                     actual_hash = str(deps_state.get("specs_hash") or "")
@@ -508,10 +465,7 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
                             "status_code": 409,
                             "deps_status": deps_status,
                             "deps_error": deps_state.get("error", ""),
-                            "review_status": loaded.review.status,
-                            "review_stale": stale,
-                            "review_gate": gate,
-                            "executable_review": gate["executable_review"],
+                            **_review_fields(loaded, stale=stale, gate=gate),
                             "grants": grants,
                         }
                     if actual_hash != expected_hash:
@@ -519,10 +473,7 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
                             "error": "cannot enable until isolated dependency fingerprint is refreshed",
                             "status_code": 409,
                             "deps_status": "stale",
-                            "review_status": loaded.review.status,
-                            "review_stale": stale,
-                            "review_gate": gate,
-                            "executable_review": gate["executable_review"],
+                            **_review_fields(loaded, stale=stale, gate=gate),
                             "grants": grants,
                         }
             except Exception:
@@ -558,16 +509,7 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
         return {
             "skill": loaded.name,
             "source": loaded.source,
-            "review_status": loaded.review.status,
-            "review_stale": loaded.review.is_stale_for(loaded.content_hash),
-            "review_gate": skill_review_gate(
-                loaded.review.status,
-                stale=loaded.review.is_stale_for(loaded.content_hash),
-            ),
-            "executable_review": skill_review_gate(
-                loaded.review.status,
-                stale=loaded.review.is_stale_for(loaded.content_hash),
-            )["executable_review"],
+            **_review_fields(loaded),
             "grants": grant_status_for_skill(drive_root, loaded),
             "action": action,
             "live_reason": live_reason,
@@ -634,7 +576,7 @@ async def api_skill_review(request: Request) -> JSONResponse:
     """Queue tri-model skill review from the UI without blocking the event loop."""
     skill_name = str(request.path_params.get("skill") or "").strip()
     if not skill_name:
-        return JSONResponse({"error": "missing skill name"}, status_code=400)
+        return json_error("missing skill name", 400)
 
     drive_root = _request_drive_root(request)
     repo_dir = _request_repo_dir(request)
@@ -681,7 +623,7 @@ async def api_skill_reconcile(request: Request) -> JSONResponse:
 
     skill_name = str(request.path_params.get("skill") or "").strip()
     if not skill_name:
-        return JSONResponse({"error": "missing skill name"}, status_code=400)
+        return json_error("missing skill name", 400)
 
     drive_root = _request_drive_root(request)
     repo_path = get_skills_repo_path()

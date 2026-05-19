@@ -165,10 +165,6 @@ BINARY_EXTENSIONS = frozenset({
     ".exe", ".pyo",
 })
 
-SKIP_DIRS = frozenset({
-    "__pycache__", ".git", "node_modules", "assets", "dist", "build",
-})
-
 _FILE_SIZE_LIMIT = 1_048_576  # 1 MB
 
 # build_full_repo_pack constants shared with deep self-review.
@@ -581,8 +577,12 @@ def format_prompt_code_block(content: str, language: str = "") -> str:
     return f"{fence}{lang}\n{content}\n{fence}"
 
 
-def parse_changed_paths_from_porcelain_z(changed_files_raw: bytes | str) -> list[str]:
-    """Extract current paths from `git status --porcelain=v1 -z` output."""
+def parse_changed_paths_from_porcelain_z(
+    changed_files_raw: bytes | str,
+    *,
+    include_sources_for_renames: bool = False,
+) -> list[str]:
+    """Extract paths from `git status --porcelain=v1 -z` output."""
     if not changed_files_raw:
         return []
 
@@ -604,13 +604,18 @@ def parse_changed_paths_from_porcelain_z(changed_files_raw: bytes | str) -> list
         if relpath:
             resolved_paths.append(relpath)
         if "R" in status or "C" in status:
+            source = entries[idx] if idx < len(entries) else b""
             idx += 1
+            if include_sources_for_renames and source:
+                resolved_paths.append(source.decode("utf-8", errors="surrogateescape"))
     return resolved_paths
 
 
 def list_changed_paths_from_git_status(
     repo_dir: Path,
     paths: list[str] | None = None,
+    *,
+    include_sources_for_renames: bool = False,
 ) -> list[str]:
     """Return changed paths using NUL-delimited porcelain output."""
     path_args = (["--"] + list(paths)) if paths else []
@@ -625,25 +630,92 @@ def list_changed_paths_from_git_status(
         raise RuntimeError(
             f"git status --porcelain=v1 -z failed (exit {result.returncode}): {err}"
         )
-    return parse_changed_paths_from_porcelain_z(result.stdout)
+    return parse_changed_paths_from_porcelain_z(
+        result.stdout,
+        include_sources_for_renames=include_sources_for_renames,
+    )
 
 
 def parse_changed_paths_from_porcelain(changed_files_text: str) -> list[str]:
     """Extract path list from `git status --porcelain` text."""
-    resolved_paths: list[str] = []
     if not changed_files_text or changed_files_text.startswith("(clean"):
-        return resolved_paths
+        return []
+    paths: list[str] = []
     for line in changed_files_text.splitlines():
-        if len(line) < 4:
+        paths.extend(
+            paths_from_porcelain_line(line, include_sources_for_renames=False)
+        )
+    return paths
+
+
+def paths_from_porcelain_line(line: str, *, include_sources_for_renames: bool = True) -> list[str]:
+    if not line or len(line) < 4:
+        return []
+    status, entry = line[:2], line[3:].strip()
+    if not entry:
+        return []
+    if ("R" in status or "C" in status) and " -> " in entry:
+        paths = tuple(p.strip() for p in entry.rsplit(" -> ", 1))
+    else:
+        paths = (entry,)
+    if not include_sources_for_renames:
+        paths = paths[-1:]
+    return [path for path in paths if path]
+
+
+def parse_git_name_status(name_status_text: str) -> list[tuple[str, str, str]]:
+    entries: list[tuple[str, str, str]] = []
+    for line in str(name_status_text or "").splitlines():
+        parts = line.strip().split("\t")
+        if not parts or not parts[0]:
             continue
-        status = line[:2]
-        entry = line[3:]
-        if ("R" in status or "C" in status) and " -> " in entry:
-            entry = entry.rsplit(" -> ", 1)[1]
-        entry = entry.strip()
-        if entry:
-            resolved_paths.append(entry)
-    return resolved_paths
+        status_char = parts[0][0].upper()
+        path = parts[1] if len(parts) >= 2 else parts[0]
+        if status_char in ("R", "C") and len(parts) >= 3:
+            entries.append((status_char, parts[-1], parts[1]))
+        else:
+            status = status_char if len(parts) >= 2 else "M"
+            entries.append((status, path, path))
+    return entries
+
+
+def format_name_status_for_preflight(name_status_text: str, *, fallback: str = "") -> str:
+    lines: list[str] = []
+    for status, current_path, source_path in parse_git_name_status(name_status_text):
+        if status == "R":
+            lines.extend([f"D  {source_path}", f"A  {current_path}"])
+        elif status == "C":
+            lines.append(f"A  {current_path}")
+        else:
+            lines.append(f"{status}  {current_path}")
+    return "\n".join(lines) if lines else fallback
+
+
+def paths_from_name_status(name_status_text: str, *, include_sources_for_renames: bool = True) -> list[str]:
+    paths: list[str] = []
+    for status, current_path, source_path in parse_git_name_status(name_status_text):
+        if include_sources_for_renames and status in ("R", "C"):
+            paths.extend([source_path, current_path])
+        else:
+            paths.append(current_path)
+    return [path for path in paths if path]
+
+
+def build_scope_actor_record(scope_result: object, *, fallback_model_id: str = "") -> dict:
+    critical_findings = list(getattr(scope_result, "critical_findings", None) or [])
+    advisory_findings = list(getattr(scope_result, "advisory_findings", None) or [])
+    return {
+        "model_id": getattr(scope_result, "model_id", "") or fallback_model_id,
+        "status": getattr(scope_result, "status", "responded"),
+        "raw_text": getattr(scope_result, "raw_text", ""),
+        "prompt_chars": getattr(scope_result, "prompt_chars", 0),
+        "tokens_in": getattr(scope_result, "tokens_in", 0),
+        "tokens_out": getattr(scope_result, "tokens_out", 0),
+        "cost_usd": getattr(scope_result, "cost_usd", 0.0),
+        "parsed_items": critical_findings + advisory_findings,  # scope has one reviewer; match triad shape.
+        "critical_findings": critical_findings,
+        "advisory_findings": advisory_findings,
+    }
 
 
 def load_checklist_section(section_name: str) -> str:
@@ -1238,13 +1310,13 @@ def check_worktree_readiness(
             has_py_in_core = False
             has_test_change = False
             for line in changed_lines:
-                if len(line) < 4:
+                paths = paths_from_porcelain_line(
+                    line,
+                    include_sources_for_renames=False,
+                )
+                if not paths:
                     continue
-                fpath = line[3:].strip()
-                # Split porcelain rename/copy paths only when status bytes say R/C.
-                status_bytes = line[:2]
-                if ("R" in status_bytes or "C" in status_bytes) and " -> " in fpath:
-                    fpath = fpath.rsplit(" -> ", 1)[1].strip()
+                fpath = paths[0]
                 if fpath.endswith(".py") and (
                     fpath.startswith("ouroboros/") or fpath.startswith("supervisor/")
                 ):

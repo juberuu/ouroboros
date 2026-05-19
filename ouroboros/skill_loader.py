@@ -17,22 +17,9 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from ouroboros.contracts.skill_manifest import (
-    SkillManifest,
-    SkillManifestError,
-    parse_skill_manifest_text,
-)
+from ouroboros.contracts.skill_manifest import SkillManifest, SkillManifestError, parse_skill_manifest_text
 from ouroboros.contracts.plugin_api import FORBIDDEN_SKILL_SETTINGS
-from ouroboros.skill_review_status import (
-    STATUS_BLOCKERS,
-    STATUS_CLEAN,
-    STATUS_PENDING,
-    STATUS_WARNINGS,
-    VALID_SKILL_REVIEW_STATUSES,
-    aggregate_skill_review_status,
-    normalize_skill_review_status,
-    skill_review_gate,
-)
+from ouroboros.skill_review_status import STATUS_BLOCKERS, STATUS_CLEAN, STATUS_PENDING, STATUS_WARNINGS, VALID_SKILL_REVIEW_STATUSES, aggregate_skill_review_status, normalize_skill_review_status, skill_review_gate
 from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -43,20 +30,7 @@ log = logging.getLogger(__name__)
 _MANIFEST_NAMES = ("SKILL.md", "skill.json")
 # Only metadata/cache names are skipped. Non-metadata dotfiles remain hashed
 # and reviewed because a skill subprocess can import/source/read them.
-_SKILL_DIR_CACHE_NAMES = frozenset(
-    {
-        "__pycache__",
-        "node_modules",
-        ".git",
-        ".hg",
-        ".svn",
-        ".idea",
-        ".vscode",
-        ".tox",
-        ".ouroboros_env",
-        ".DS_Store",
-    }
-)
+_SKILL_DIR_CACHE_NAMES = frozenset({"__pycache__", "node_modules", ".git", ".hg", ".svn", ".idea", ".vscode", ".tox", ".ouroboros_env", ".DS_Store"})
 
 # Sensitive files are excluded from review prompts and hashes; their presence
 # in a runtime-reachable skill tree is handled as a hard block below.
@@ -292,6 +266,22 @@ def _manifest_text_for_dir(skill_dir: pathlib.Path) -> Optional[tuple[str, pathl
                 log.warning("Failed to read skill manifest %s", mf, exc_info=True)
                 raise _ManifestUnreadable(mf, exc) from exc
     return None
+
+
+def _broken_skill(skill_dir: pathlib.Path, load_error: str) -> LoadedSkill:
+    name = _sanitize_skill_name(skill_dir.name)
+    return LoadedSkill(
+        name=name,
+        skill_dir=skill_dir,
+        manifest=SkillManifest(
+            name=name,
+            description="",
+            version="",
+            type="instruction",
+        ),
+        content_hash="",
+        load_error=load_error,
+    )
 
 
 def _iter_payload_files(
@@ -598,30 +588,35 @@ def requested_skill_permissions(
     return requested
 
 
+def _unique_text(values: Any, *, upper: bool = False) -> List[str]:
+    out: List[str] = []
+    for raw in values or []:
+        item = str(raw or "").strip()
+        item = item.upper() if upper else item
+        if item and item not in out:
+            out.append(item)
+    return out
+
+
+def _merge_allowed(*value_groups: Any, allowed: set[str], upper: bool = False) -> List[str]:
+    return [
+        item
+        for item in _unique_text(
+            (raw for group in value_groups for raw in (group or [])),
+            upper=upper,
+        )
+        if item in allowed
+    ]
+
+
 def load_skill_grants(drive_root: pathlib.Path, name: str) -> Dict[str, Any]:
     data = read_json_dict(skill_state_dir(drive_root, name) / GRANTS_FILENAME)
     if not isinstance(data, dict):
         return {"granted_keys": [], "granted_permissions": [], "updated_at": ""}
-    keys = []
-    for raw_key in data.get("granted_keys") or []:
-        key = str(raw_key or "").strip().upper()
-        if key and key not in keys:
-            keys.append(key)
-    requested = []
-    for raw_key in data.get("requested_keys") or []:
-        key = str(raw_key or "").strip().upper()
-        if key and key not in requested:
-            requested.append(key)
-    permissions = []
-    for raw_permission in data.get("granted_permissions") or []:
-        permission = str(raw_permission or "").strip()
-        if permission and permission not in permissions:
-            permissions.append(permission)
-    requested_permissions = []
-    for raw_permission in data.get("requested_permissions") or []:
-        permission = str(raw_permission or "").strip()
-        if permission and permission not in requested_permissions:
-            requested_permissions.append(permission)
+    keys = _unique_text(data.get("granted_keys"), upper=True)
+    requested = _unique_text(data.get("requested_keys"), upper=True)
+    permissions = _unique_text(data.get("granted_permissions"))
+    requested_permissions = _unique_text(data.get("requested_permissions"))
     return {
         "granted_keys": keys,
         "requested_keys": requested,
@@ -649,27 +644,18 @@ def save_skill_grants(
         str(existing.get("content_hash") or "") == str(content_hash or "")
         and sorted(existing.get("requested_keys") or []) == sorted(allowed)
     )
-    merged: List[str] = []
-    if persisted_match:
-        for raw_key in existing.get("granted_keys") or []:
-            key = str(raw_key or "").strip().upper()
-            if key and key in allowed and key not in merged:
-                merged.append(key)
-    for raw_key in granted_keys or []:
-        key = str(raw_key or "").strip().upper()
-        if key and key in allowed and key not in merged:
-            merged.append(key)
+    merged = _merge_allowed(
+        existing.get("granted_keys") if persisted_match else [],
+        granted_keys,
+        allowed=allowed,
+        upper=True,
+    )
     allowed_permissions = set(requested_permissions or [])
-    existing_permissions: List[str] = []
-    if persisted_match:
-        for raw_permission in existing.get("granted_permissions") or []:
-            permission = str(raw_permission or "").strip()
-            if permission and permission in allowed_permissions and permission not in existing_permissions:
-                existing_permissions.append(permission)
-    for raw_permission in granted_permissions or []:
-        permission = str(raw_permission or "").strip()
-        if permission and permission in allowed_permissions and permission not in existing_permissions:
-            existing_permissions.append(permission)
+    existing_permissions = _merge_allowed(
+        existing.get("granted_permissions") if persisted_match else [],
+        granted_permissions,
+        allowed=allowed_permissions,
+    )
     atomic_write_json(
         skill_state_dir(drive_root, name) / GRANTS_FILENAME,
         {
@@ -805,19 +791,7 @@ def load_skill(
     try:
         manifest_read = _manifest_text_for_dir(skill_dir)
     except _ManifestUnreadable as exc:
-        broken_name = _sanitize_skill_name(skill_dir.name)
-        return LoadedSkill(
-            name=broken_name,
-            skill_dir=skill_dir,
-            manifest=SkillManifest(
-                name=broken_name,
-                description="",
-                version="",
-                type="instruction",
-            ),
-            content_hash="",
-            load_error=f"manifest unreadable: {exc}",
-        )
+        return _broken_skill(skill_dir, f"manifest unreadable: {exc}")
     if manifest_read is None:
         return None
     manifest_text, manifest_path = manifest_read
@@ -825,19 +799,7 @@ def load_skill(
     try:
         manifest = parse_skill_manifest_text(manifest_text)
     except SkillManifestError as exc:
-        broken_name = _sanitize_skill_name(skill_dir.name)
-        return LoadedSkill(
-            name=broken_name,
-            skill_dir=skill_dir,
-            manifest=SkillManifest(
-                name=broken_name,
-                description="",
-                version="",
-                type="instruction",
-            ),
-            content_hash="",
-            load_error=f"manifest parse error: {exc}",
-        )
+        return _broken_skill(skill_dir, f"manifest parse error: {exc}")
 
     # Runtime/state/tool identity is the directory basename. manifest.name is
     # display metadata and may be localized or renamed.
@@ -1084,10 +1046,13 @@ def list_available_for_execution(
     repo_path: str | None = None,
 ) -> List[LoadedSkill]:
     """Return only skills that are enabled + have a fresh executable review."""
-    return [
-        s for s in discover_skills(drive_root, repo_path=repo_path)
-        if s.available_for_execution and grant_status_for_skill(drive_root, s).get("usable", True)
-    ]
+    from ouroboros.skill_readiness import skill_readiness_for_execution
+
+    out: List[LoadedSkill] = []
+    for skill in discover_skills(drive_root, repo_path=repo_path):
+        if skill.available_for_execution and skill_readiness_for_execution(drive_root, skill).ready:
+            out.append(skill)
+    return out
 
 
 # Status helpers consumed by /api/state and the Skills UI
@@ -1111,92 +1076,64 @@ def summarize_skills(drive_root: pathlib.Path) -> Dict[str, Any]:
     except Exception:
         tool_surfaces_by_skill = {}
     from ouroboros.config import get_runtime_mode
-    runtime_mode = get_runtime_mode()
+    from ouroboros.skill_readiness import skill_readiness_for_execution
+
+    rows: List[Dict[str, Any]] = []
+    available = blocked_by_grants = pending_review = blocker_review = warning_review = broken = 0
+    for s in skills:
+        stale = s.review.is_stale_for(s.content_hash)
+        gate = skill_review_gate(s.review.status, stale=stale)
+        readiness = skill_readiness_for_execution(drive_root, s)
+        grant_status = readiness.grant_status or grant_status_for_skill(drive_root, s)
+        grants_usable = grant_status.get("usable", True)
+        runnable = s.available_for_execution and readiness.ready
+        available += int(runnable)
+        blocked_by_grants += int(s.available_for_execution and not grants_usable)
+        pending_review += int(
+            s.review.status in (_REVIEW_STATUS_PENDING, "")
+            or (review_status_allows_execution(s.review.status) and stale)
+        )
+        blocker_review += int(s.review.status == _REVIEW_STATUS_FAIL)
+        warning_review += int(s.review.status == _REVIEW_STATUS_ADVISORY)
+        broken += int(bool(s.load_error))
+        rows.append({
+            "name": s.name,
+            "description": s.manifest.description,
+            "when_to_use": s.manifest.when_to_use,
+            "type": s.manifest.type,
+            "version": s.manifest.version,
+            "enabled": s.enabled,
+            "review_status": s.review.status,
+            "review_stale": stale,
+            "review_gate": gate,
+            "executable_review": gate["executable_review"],
+            "available_for_execution": runnable,
+            "runnable_via_skill_exec": s.available_for_execution,
+            "tool_surfaces": tool_surfaces_by_skill.get(s.name, []),
+            "static_ready": runnable,
+            "blocked_by_grants": not grants_usable,
+            "load_error": s.load_error,
+            "source": s.source,
+        })
     return {
         "count": len(skills),
-        "runtime_mode": runtime_mode,
-        "available": sum(
-            1 for s in skills
-            if s.available_for_execution
-            and grant_status_for_skill(drive_root, s).get("usable", True)
-        ),
-        "blocked_by_grants": sum(
-            1 for s in skills
-            if s.available_for_execution
-            and not grant_status_for_skill(drive_root, s).get("usable", True)
-        ),
-        "pending_review": sum(
-            1
-            for s in skills
-            if s.review.status in (_REVIEW_STATUS_PENDING, "")
-            or (
-                review_status_allows_execution(s.review.status)
-                and s.review.is_stale_for(s.content_hash)
-            )
-        ),
-        "blocker_review": sum(
-            1 for s in skills if s.review.status == _REVIEW_STATUS_FAIL
-        ),
-        "warning_review": sum(
-            1 for s in skills if s.review.status == _REVIEW_STATUS_ADVISORY
-        ),
-        "broken": sum(1 for s in skills if s.load_error),
-        "skills": [
-            {
-                "name": s.name,
-                "description": s.manifest.description,
-                "when_to_use": s.manifest.when_to_use,
-                "type": s.manifest.type,
-                "version": s.manifest.version,
-                "enabled": s.enabled,
-                "review_status": s.review.status,
-                "review_stale": s.review.is_stale_for(s.content_hash),
-                "review_gate": skill_review_gate(
-                    s.review.status,
-                    stale=s.review.is_stale_for(s.content_hash),
-                ),
-                "executable_review": skill_review_gate(
-                    s.review.status,
-                    stale=s.review.is_stale_for(s.content_hash),
-                )["executable_review"],
-                "available_for_execution": (
-                    s.available_for_execution
-                    and grant_status_for_skill(drive_root, s).get("usable", True)
-                ),
-                "runnable_via_skill_exec": s.available_for_execution,
-                "tool_surfaces": tool_surfaces_by_skill.get(s.name, []),
-                "static_ready": s.available_for_execution,
-                "blocked_by_grants": not grant_status_for_skill(drive_root, s).get("usable", True),
-                "load_error": s.load_error,
-                "source": s.source,
-            }
-            for s in skills
-        ],
+        "runtime_mode": get_runtime_mode(),
+        "available": available,
+        "blocked_by_grants": blocked_by_grants,
+        "pending_review": pending_review,
+        "blocker_review": blocker_review,
+        "warning_review": warning_review,
+        "broken": broken,
+        "skills": rows,
     }
 
 
 __all__ = [
-    "AutoGrantOutcome",
-    "LoadedSkill",
-    "SkillReviewState",
-    "auto_grant_if_enabled",
-    "VALID_REVIEW_STATUSES",
-    "compute_content_hash",
-    "discover_skills",
-    "find_skill",
-    "grant_status_for_skill",
-    "is_self_authored_skill_dir",
-    "list_available_for_execution",
-    "load_enabled",
-    "load_review_state",
-    "load_skill_grants",
-    "load_skill",
-    "requested_core_setting_keys",
-    "review_status_allows_execution",
-    "skill_review_gate",
-    "save_enabled",
-    "save_review_state",
-    "save_skill_grants",
-    "skill_state_dir",
+    "AutoGrantOutcome", "LoadedSkill", "SkillReviewState", "auto_grant_if_enabled",
+    "VALID_REVIEW_STATUSES", "compute_content_hash", "discover_skills", "find_skill",
+    "grant_status_for_skill", "is_self_authored_skill_dir", "list_available_for_execution",
+    "load_enabled", "load_review_state", "load_skill_grants", "load_skill",
+    "requested_core_setting_keys", "review_status_allows_execution", "skill_review_gate",
+    "save_enabled", "save_review_state", "save_skill_grants", "skill_state_dir",
     "summarize_skills",
 ]

@@ -1,5 +1,3 @@
-"""Block-wise dialogue and scratchpad memory consolidation."""
-
 import json
 import logging
 import os
@@ -12,7 +10,6 @@ from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso, read
 
 from ouroboros.platform_layer import (
     file_lock_exclusive as _lock_ex,
-    file_lock_shared as _lock_sh,
     file_lock_exclusive_nb as _lock_nb,
     file_unlock as _unlock,
 )
@@ -24,13 +21,11 @@ MAX_SUMMARY_BLOCKS = 10                   # Compress into era when exceeded
 ERA_COMPRESS_COUNT = 4                    # Oldest blocks to compress per era
 CONSOLIDATION_MODEL = "google/gemini-3-flash-preview"
 CONSOLIDATION_REASONING_EFFORT = "medium"
-MAX_SUMMARY_CHARS = 90000                 # Hard cap preserved from old system
 
 def should_consolidate(
     meta_path: pathlib.Path,
     chat_path: pathlib.Path,
 ) -> bool:
-    """Return True when chat.jsonl has enough new messages."""
     if not chat_path.exists():
         return False
     meta = _load_meta(meta_path)
@@ -48,7 +43,6 @@ def consolidate(
     llm_client: Any,
     identity_text: str = "",
 ) -> Optional[Dict[str, Any]]:
-    """Consolidate new chat chunks under a file lock; returns usage or None."""
     lock_path = meta_path.parent / ".consolidation.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_fd = None
@@ -81,7 +75,6 @@ def _run_block_consolidation(
     llm_client: Any,
     identity_text: str,
 ) -> Optional[Dict[str, Any]]:
-    """Process new chat chunks and compress old blocks when needed."""
     meta = _load_meta(meta_path)
     last_offset = meta.get("last_consolidated_offset", 0)
 
@@ -116,8 +109,8 @@ def _run_block_consolidation(
             message_count=len(chunk),
         )
 
-        for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
-            total_usage[k] += usage.get(k, 0)
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            total_usage[key] += usage.get(key, 0)
         total_usage["cost"] += usage.get("cost", 0)
 
         if content and content.strip():
@@ -156,8 +149,8 @@ def _run_block_consolidation(
         era, era_usage = _compress_blocks_to_era(old_blocks, llm_client, identity_text)
         if era is not None:
             all_blocks = [era] + remaining
-            for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
-                total_usage[k] += era_usage.get(k, 0)
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                total_usage[key] += era_usage.get(key, 0)
             total_usage["cost"] += era_usage.get("cost", 0)
 
     _save_blocks(blocks_path, all_blocks)
@@ -171,6 +164,22 @@ def _run_block_consolidation(
              processed, len(new_blocks), len(all_blocks))
     return total_usage
 
+
+def _call_consolidation_llm(llm_client: Any, prompt: str, label: str) -> Tuple[str, Dict[str, Any]]:
+    try:
+        msg, usage = llm_client.chat(
+            messages=[{"role": "user", "content": prompt}],
+            model=CONSOLIDATION_MODEL,
+            tools=None,
+            reasoning_effort="low",
+            max_tokens=16384,
+        )
+        return msg.get("content", ""), usage
+    except Exception as e:
+        log.error("%s failed: %s", label, e, exc_info=True)
+        return "", {"cost": 0}
+
+
 def _create_block_summary(
     llm_client: Any,
     messages_text: str,
@@ -179,7 +188,6 @@ def _create_block_summary(
     identity_text: str,
     message_count: int,
 ) -> Tuple[str, Dict[str, Any]]:
-    """Create one summary block; returns empty text on LLM failure."""
     first_date = first_ts[:10]
     first_time = first_ts[11:16]
     last_time = last_ts[11:16]
@@ -204,18 +212,7 @@ Create a detailed episodic memory entry from these {message_count} messages.
 {messages_text}
 """
 
-    try:
-        response_msg, usage = llm_client.chat(
-            messages=[{"role": "user", "content": prompt}],
-            model=CONSOLIDATION_MODEL,
-            tools=None,
-            reasoning_effort="low",
-            max_tokens=16384,
-        )
-        return response_msg.get("content", ""), usage
-    except Exception as e:
-        log.error("Block summary LLM call failed: %s", e, exc_info=True)
-        return "", {"cost": 0}
+    return _call_consolidation_llm(llm_client, prompt, "Block summary LLM call")
 
 
 def _compress_blocks_to_era(
@@ -223,7 +220,6 @@ def _compress_blocks_to_era(
     llm_client: Any,
     identity_text: str,
 ) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
-    """Compress blocks into an era; None means keep originals (P1)."""
     start_date = blocks[0].get("range", "unknown")[:10]
     last_range = blocks[-1].get("range", "unknown")
     if " to " in last_range:
@@ -247,32 +243,20 @@ Write as Ouroboros (first person). Aim for 30-40% of original length.
 {combined}
 """
 
-    try:
-        msg, usage = llm_client.chat(
-            messages=[{"role": "user", "content": prompt}],
-            model=CONSOLIDATION_MODEL,
-            tools=None,
-            reasoning_effort="low",
-            max_tokens=16384,
-        )
-        content = msg.get("content", "")
-        if not content or not content.strip():
-            log.warning("Era compression returned empty — keeping original blocks (Bible P1)")
-            return None, usage
-        era = {
-            "ts": utc_now_iso(),
-            "type": "era",
-            "range": f"{start_date} to {end_date}",
-            "message_count": sum(b.get("message_count", 0) for b in blocks),
-            "content": content.strip(),
-        }
-        return era, usage
-    except Exception as e:
-        log.error("Era compression failed: %s", e, exc_info=True)
-        return None, {"cost": 0}
+    content, usage = _call_consolidation_llm(llm_client, prompt, "Era compression")
+    if not content or not content.strip():
+        log.warning("Era compression returned empty — keeping original blocks (Bible P1)")
+        return None, usage
+    era = {
+        "ts": utc_now_iso(),
+        "type": "era",
+        "range": f"{start_date} to {end_date}",
+        "message_count": sum(b.get("message_count", 0) for b in blocks),
+        "content": content.strip(),
+    }
+    return era, usage
 
 def _format_entries_for_block(entries: List[Dict[str, Any]]) -> str:
-    """Format chat entries for block-summary prompting."""
     lines = []
     for e in entries:
         ts_raw = str(e.get("ts", ""))
@@ -293,7 +277,6 @@ def _format_entries_for_block(entries: List[Dict[str, Any]]) -> str:
 
 
 def _load_blocks(path: pathlib.Path) -> List[Dict[str, Any]]:
-    """Load block list, returning [] if missing/corrupt."""
     if not path.exists():
         return []
     try:
@@ -304,7 +287,10 @@ def _load_blocks(path: pathlib.Path) -> List[Dict[str, Any]]:
 
 
 def _save_blocks(path: pathlib.Path, blocks: List[Dict[str, Any]]) -> None:
-    """Write block list under a cross-platform file lock."""
+    _write_locked_json(path, blocks)
+
+
+def _write_locked_json(path: pathlib.Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = None
     try:
@@ -312,7 +298,7 @@ def _save_blocks(path: pathlib.Path, blocks: List[Dict[str, Any]]) -> None:
         _lock_ex(fd)
         os.lseek(fd, 0, os.SEEK_SET)
         os.ftruncate(fd, 0)
-        os.write(fd, json.dumps(blocks, ensure_ascii=False, indent=2).encode("utf-8"))
+        os.write(fd, json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"))
     finally:
         if fd is not None:
             try:
@@ -334,12 +320,8 @@ def _chat_log_signature(path: pathlib.Path) -> Dict[str, Any]:
         return {}
     try:
         stat = path.stat()
-        first = ""
         with path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if line.strip():
-                    first = line.strip()
-                    break
+            first = next((line.strip() for line in handle if line.strip()), "")
         return {
             "first_line_sha256": hashlib.sha256(first.encode("utf-8", errors="replace")).hexdigest(),
             "size": int(stat.st_size),
@@ -349,17 +331,11 @@ def _chat_log_signature(path: pathlib.Path) -> Dict[str, Any]:
 
 
 def _count_lines(path: pathlib.Path) -> int:
-    """Count non-empty lines."""
-    count = 0
     with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            if line.strip():
-                count += 1
-    return count
+        return sum(1 for line in f if line.strip())
 
 
 def _read_chat_entries(path: pathlib.Path) -> List[Dict[str, Any]]:
-    """Read chat.jsonl entries, excluding A2A virtual chat IDs."""
     if not path.exists():
         return []
     entries = []
@@ -372,36 +348,30 @@ def _read_chat_entries(path: pathlib.Path) -> List[Dict[str, Any]]:
                 entry = json.loads(line)
             except (json.JSONDecodeError, ValueError):
                 continue
-            if is_a2a_chat_id(entry.get("chat_id", 1)):
-                continue
-            entries.append(entry)
+            if not is_a2a_chat_id(entry.get("chat_id", 1)):
+                entries.append(entry)
     return entries
 
 def _rebuild_knowledge_index(knowledge_dir: pathlib.Path) -> None:
-    """Rebuild index-full.md after scratchpad/pattern consolidation."""
     try:
         if not knowledge_dir.exists():
             return
-        index_path = knowledge_dir / "index-full.md"
         entries = []
         for md_file in sorted(knowledge_dir.glob("*.md")):
-            if md_file.name.startswith("_"):
-                continue
-            if md_file.name == "index-full.md":
+            if md_file.name.startswith("_") or md_file.name == "index-full.md":
                 continue
             topic = md_file.stem
             first_line = ""
             try:
-                text = md_file.read_text(encoding="utf-8").strip()
-                for line in text.split("\n"):
-                    line = line.strip()
-                    if line and not line.startswith("#"):
-                        first_line = line[:120]
-                        break
+                first_line = next(
+                    (line.strip()[:120] for line in md_file.read_text(encoding="utf-8").splitlines()
+                     if line.strip() and not line.strip().startswith("#")),
+                    "",
+                )
             except Exception:
                 pass
             entries.append(f"- **{topic}**: {first_line}" if first_line else f"- **{topic}**")
-        write_text(index_path, "# Knowledge Base Index\n\n" + "\n".join(entries) + "\n")
+        write_text(knowledge_dir / "index-full.md", "# Knowledge Base Index\n\n" + "\n".join(entries) + "\n")
     except Exception:
         log.warning("Failed to rebuild knowledge index", exc_info=True)
 
@@ -409,13 +379,9 @@ SCRATCHPAD_CONSOLIDATION_THRESHOLD = 30000
 
 
 def should_consolidate_scratchpad(memory: Any) -> bool:
-    """Return True when scratchpad blocks exceed consolidation threshold."""
     try:
         blocks = memory.load_scratchpad_blocks()
-        if len(blocks) < 3:
-            return False
-        total = sum(len(b.get("content", "")) for b in blocks)
-        return total > SCRATCHPAD_CONSOLIDATION_THRESHOLD
+        return len(blocks) >= 3 and sum(len(b.get("content", "")) for b in blocks) > SCRATCHPAD_CONSOLIDATION_THRESHOLD
     except Exception:
         return False
 
@@ -426,7 +392,6 @@ def consolidate_scratchpad(
     llm_client: Any,
     identity_text: str = "",
 ) -> Optional[Dict[str, Any]]:
-    """Compress oldest scratchpad blocks and extract durable KB insights."""
     blocks = memory.load_scratchpad_blocks()
 
     if len(blocks) < 3:
@@ -441,7 +406,6 @@ def _consolidate_scratchpad_blocks(
     llm_client: Any,
     identity_text: str,
 ) -> Optional[Dict[str, Any]]:
-    """Block-aware scratchpad consolidation."""
     total_chars = sum(len(b.get("content", "")) for b in blocks)
     if total_chars <= SCRATCHPAD_CONSOLIDATION_THRESHOLD:
         return None
@@ -507,21 +471,7 @@ Respond with JSON only (no fences):
         }
         new_blocks = [compressed_block] + recent_blocks
 
-        bp = memory.scratchpad_blocks_path()
-        fd = None
-        try:
-            fd = os.open(str(bp), os.O_RDWR | os.O_CREAT, 0o644)
-            _lock_ex(fd)
-            os.lseek(fd, 0, os.SEEK_SET)
-            os.ftruncate(fd, 0)
-            os.write(fd, json.dumps(new_blocks, ensure_ascii=False, indent=2).encode("utf-8"))
-        finally:
-            if fd is not None:
-                try:
-                    _unlock(fd)
-                    os.close(fd)
-                except OSError:
-                    pass
+        _write_locked_json(memory.scratchpad_blocks_path(), new_blocks)
         memory.regenerate_scratchpad_md()
 
         log.info("Scratchpad blocks consolidated: %d blocks (%d chars) -> %d blocks (%d chars)",
@@ -535,7 +485,6 @@ Respond with JSON only (no fences):
 
 
 def _write_knowledge_entries(knowledge_dir: pathlib.Path, entries: List[Dict[str, Any]]) -> None:
-    """Write knowledge entries extracted during consolidation to the KB directory."""
     knowledge_dir.mkdir(parents=True, exist_ok=True)
     for entry in entries:
         topic = entry.get("topic", "").strip()
@@ -547,7 +496,4 @@ def _write_knowledge_entries(knowledge_dir: pathlib.Path, entries: List[Dict[str
             continue
         kb_path = knowledge_dir / f"{safe_topic}.md"
         existing = read_text(kb_path) if kb_path.exists() else ""
-        if existing:
-            write_text(kb_path, existing.rstrip() + "\n\n" + kb_content)
-        else:
-            write_text(kb_path, f"# {topic}\n\n{kb_content}\n")
+        write_text(kb_path, existing.rstrip() + "\n\n" + kb_content if existing else f"# {topic}\n\n{kb_content}\n")

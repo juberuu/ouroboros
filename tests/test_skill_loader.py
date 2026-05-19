@@ -775,6 +775,84 @@ def test_summarize_skills_reflects_runtime_mode_light(tmp_path, monkeypatch):
     assert light["skills"][0]["static_ready"] is True
 
 
+def test_summarize_skills_blocks_missing_isolated_deps(tmp_path, monkeypatch):
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+    repo_root = tmp_path / "skills"
+    manifest = _valid_script_manifest("alpha").replace(
+        "scripts:\n",
+        "install_specs:\n"
+        "  - kind: pip\n"
+        "    package: wheel\n"
+        "scripts:\n",
+    )
+    skill_dir = _write_skill(
+        repo_root,
+        "alpha",
+        manifest=manifest,
+        scripts={"fetch.py": "print('ok')\n"},
+    )
+    loaded = find_skill(drive_root, "alpha", repo_path=str(repo_root))
+    assert loaded is not None
+    save_enabled(drive_root, "alpha", True)
+    save_review_state(
+        drive_root,
+        "alpha",
+        SkillReviewState(status="pass", content_hash=compute_content_hash(skill_dir)),
+    )
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(repo_root))
+
+    summary = summarize_skills(drive_root)
+
+    assert list_available_for_execution(drive_root, repo_path=str(repo_root)) == []
+    assert summary["available"] == 0
+    assert summary["skills"][0]["available_for_execution"] is False
+    assert summary["skills"][0]["static_ready"] is False
+
+
+def test_available_summary_keeps_runtime_and_script_substrate_gate(tmp_path, monkeypatch):
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+    repo_root = tmp_path / "skills"
+    unsupported_runtime = _valid_script_manifest("bad_runtime").replace(
+        "runtime: python3\n",
+        "runtime: perl\n",
+    )
+    missing_script = _valid_script_manifest("missing_script")
+    skill_dirs = {
+        "bad_runtime": _write_skill(
+            repo_root,
+            "bad_runtime",
+            manifest=unsupported_runtime,
+            scripts={"fetch.py": "print('ok')\n"},
+        ),
+        "missing_script": _write_skill(
+            repo_root,
+            "missing_script",
+            manifest=missing_script,
+            scripts={},
+        ),
+    }
+    for name, skill_dir in skill_dirs.items():
+        save_enabled(drive_root, name, True)
+        save_review_state(
+            drive_root,
+            name,
+            SkillReviewState(status="pass", content_hash=compute_content_hash(skill_dir)),
+        )
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(repo_root))
+
+    summary = summarize_skills(drive_root)
+
+    assert list_available_for_execution(drive_root, repo_path=str(repo_root)) == []
+    assert summary["available"] == 0
+    by_name = {row["name"]: row for row in summary["skills"]}
+    assert by_name["bad_runtime"]["available_for_execution"] is False
+    assert by_name["bad_runtime"]["static_ready"] is False
+    assert by_name["missing_script"]["available_for_execution"] is False
+    assert by_name["missing_script"]["static_ready"] is False
+
+
 def test_valid_review_statuses_exported():
     assert "clean" in VALID_REVIEW_STATUSES
     assert "warnings" in VALID_REVIEW_STATUSES

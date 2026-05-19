@@ -37,6 +37,7 @@ from ouroboros.tools.review_helpers import (
     build_review_history_section as _shared_review_history_section,
     emit_review_usage,
     format_review_history_entry,
+    parse_git_name_status,
 )
 from ouroboros.triad_review import extract_json_array
 from ouroboros.utils import run_cmd, utc_now_iso, append_jsonl, estimate_tokens
@@ -143,23 +144,7 @@ def _parse_staged_name_status(repo_dir: pathlib.Path) -> list:
     except Exception:
         name_status_raw = ""
 
-    entries = []
-    for line in name_status_raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        parts = line.split("\t")
-        if not parts:
-            continue
-        status_char = parts[0][0].upper()
-        if status_char in ("R", "C") and len(parts) >= 3:
-            old_path, new_path = parts[1], parts[-1]
-            entries.append((status_char, new_path, old_path))
-        elif len(parts) >= 2:
-            path = parts[1]
-            entries.append((status_char, path, path))
-        else:
-            entries.append(("M", parts[0], parts[0]))
+    entries = parse_git_name_status(name_status_raw)
 
     # Fallback to --name-only if --name-status produced nothing.
     if not entries:

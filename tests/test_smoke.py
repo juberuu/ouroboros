@@ -178,6 +178,17 @@ def test_tool_schemas_valid(registry):
         assert "properties" in params
 
 
+def test_github_create_issue_schema_fields(registry):
+    schema = registry.get_schema_by_name("create_github_issue")["function"]
+    props = schema["parameters"]["properties"]
+    assert schema["parameters"]["required"] == ["title"]
+    assert props["title"]["type"] == "string"
+    assert props["body"]["type"] == "string"
+    assert props["body"]["default"] == ""
+    assert props["labels"]["type"] == "string"
+    assert props["labels"]["default"] == ""
+
+
 def test_tool_execute_basic(registry):
     """Actually execute a simple tool to verify execution works."""
     result = registry.execute("run_shell", {"cmd": ["echo", "hello"]})
@@ -496,7 +507,7 @@ def test_function_count_reasonable():
     """Codebase doesn't have too few or too many functions.
 
     The hard gate value is imported from ouroboros/review.py::MAX_TOTAL_FUNCTIONS
-    (currently 2000 as of v5.7.4) — no hardcoded assertion number here.
+    (currently 2020 as of v5.26.0-rc.1) — no hardcoded assertion number here.
     """
     from ouroboros.review import MAX_TOTAL_FUNCTIONS
 

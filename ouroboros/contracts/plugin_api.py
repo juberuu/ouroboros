@@ -17,42 +17,22 @@ PLUGIN_API_VERSION = "1.2"
 
 
 # Core settings keys require explicit content-hash-bound owner grants.
-FORBIDDEN_SKILL_SETTINGS: frozenset[str] = frozenset(
-    {
-        "OPENROUTER_API_KEY",
-        "OPENAI_API_KEY",
-        "OPENAI_COMPATIBLE_API_KEY",
-        "CLOUDRU_FOUNDATION_MODELS_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "GITHUB_TOKEN",
-        "OUROBOROS_NETWORK_PASSWORD",
-    }
-)
+FORBIDDEN_SKILL_SETTINGS: frozenset[str] = frozenset({
+    "OPENROUTER_API_KEY", "OPENAI_API_KEY", "OPENAI_COMPATIBLE_API_KEY",
+    "CLOUDRU_FOUNDATION_MODELS_API_KEY", "ANTHROPIC_API_KEY", "GITHUB_TOKEN",
+    "OUROBOROS_NETWORK_PASSWORD",
+})
 # Backwards-compatible alias for the extension name.
 FORBIDDEN_EXTENSION_SETTINGS: frozenset[str] = FORBIDDEN_SKILL_SETTINGS
 
 
 # Keep in sync with skill_manifest.VALID_SKILL_PERMISSIONS.
-VALID_EXTENSION_PERMISSIONS: frozenset[str] = frozenset(
-    {
-        "net",
-        "fs",
-        "subprocess",
-        "widget",
-        "ws_handler",
-        "route",
-        "tool",
-        "read_settings",
-        "companion_process",
-        "supervised_task",
-        "subscribe_event",
-        "inject_chat",
-    }
-)
+VALID_EXTENSION_PERMISSIONS: frozenset[str] = frozenset({
+    "net", "fs", "subprocess", "widget", "ws_handler", "route", "tool",
+    "read_settings", "companion_process", "supervised_task", "subscribe_event", "inject_chat",
+})
 
-VALID_EXTENSION_ROUTE_METHODS: frozenset[str] = frozenset(
-    {"GET", "HEAD", "POST", "PUT", "DELETE", "PATCH"}
-)
+VALID_EXTENSION_ROUTE_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "POST", "PUT", "DELETE", "PATCH"})
 
 
 @runtime_checkable
@@ -162,12 +142,7 @@ class PluginAPI(Protocol):
 
     # runtime access
 
-    def log(
-        self,
-        level: str,
-        message: str,
-        **fields: Any,
-    ) -> None:
+    def log(self, level: str, message: str, **fields: Any) -> None:
         """Structured log. ``level`` one of ``debug``/``info``/``warning``/``error``."""
         ...
 
@@ -193,11 +168,7 @@ class ExtensionRegistrationError(Exception):
 
 
 __all__ = [
-    "PluginAPI",
-    "ExtensionRegistrationError",
-    "FORBIDDEN_SKILL_SETTINGS",
-    "FORBIDDEN_EXTENSION_SETTINGS",
-    "PLUGIN_API_VERSION",
-    "VALID_EXTENSION_PERMISSIONS",
+    "PluginAPI", "ExtensionRegistrationError", "FORBIDDEN_SKILL_SETTINGS",
+    "FORBIDDEN_EXTENSION_SETTINGS", "PLUGIN_API_VERSION", "VALID_EXTENSION_PERMISSIONS",
     "VALID_EXTENSION_ROUTE_METHODS",
 ]

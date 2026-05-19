@@ -46,7 +46,6 @@ def _load_settings_into_env() -> Dict[str, Any]:
         os.environ.setdefault(key, str(value))
         pushed.append(key)
 
-    # Apply official defaults/normalization after the broad raw env copy.
     try:
         from ouroboros.config import apply_settings_to_env
         apply_settings_to_env(settings)
@@ -86,25 +85,22 @@ def _ensure_diff_present() -> str:
 
 
 def _build_ctx() -> Any:
-    """Construct a minimal ToolContext sufficient for parallel_review."""
     from ouroboros.tools.registry import ToolContext
 
-    ctx = ToolContext(
-        repo_dir=_REPO_DIR,
-        drive_root=_DATA_DIR,
-    )
-    # Reviewer code reads / writes these per-call forensic fields. Default
-    # them so attribute access is safe on first use.
-    ctx._review_advisory = []
-    ctx._review_iteration_count = 0
-    ctx._review_history = []
-    ctx._scope_review_history = {}
-    ctx._last_scope_model = ""
-    ctx._last_triad_raw_results = []
-    ctx._last_scope_raw_result = {}
-    ctx._last_review_block_reason = ""
-    ctx._last_review_critical_findings = []
-    ctx._current_review_tool_name = "external_review"
+    ctx = ToolContext(repo_dir=_REPO_DIR, drive_root=_DATA_DIR)
+    for name, value in {
+        "_review_advisory": [],
+        "_review_iteration_count": 0,
+        "_review_history": [],
+        "_scope_review_history": {},
+        "_last_scope_model": "",
+        "_last_triad_raw_results": [],
+        "_last_scope_raw_result": {},
+        "_last_review_block_reason": "",
+        "_last_review_critical_findings": [],
+        "_current_review_tool_name": "external_review",
+    }.items():
+        setattr(ctx, name, value)
     return ctx
 
 
@@ -117,42 +113,14 @@ def _print_section(title: str, body: str, *, use_color: bool = True) -> None:
     print(f"\n{bar}\n{head}\n{bar}\n{body}\n")
 
 
-def _format_triad_actor(actor_record: Dict[str, Any]) -> str:
-    """Pretty-print one reviewer's full raw record without any truncation."""
-    parts = [
-        f"model_id     : {actor_record.get('model_id', '?')}",
-        f"status       : {actor_record.get('status', '?')}",
-        f"tokens_in    : {actor_record.get('tokens_in', 0)}",
-        f"tokens_out   : {actor_record.get('tokens_out', 0)}",
-        f"cost_usd     : {actor_record.get('cost_usd', 0.0)}",
-        f"prompt_chars : {actor_record.get('prompt_chars', 0)}",
-        "",
-        "── raw_text (verbatim, no truncation) ──",
-        actor_record.get("raw_text", "<empty>"),
-        "",
-        "── parsed_items ──",
-        json.dumps(actor_record.get("parsed_items", []), indent=2, ensure_ascii=False),
-    ]
-    return "\n".join(parts)
-
-
-def _format_scope(scope_raw: Dict[str, Any]) -> str:
-    parts = [
-        f"model_id     : {scope_raw.get('model_id', '?')}",
-        f"status       : {scope_raw.get('status', '?')}",
-        f"tokens_in    : {scope_raw.get('tokens_in', 0)}",
-        f"tokens_out   : {scope_raw.get('tokens_out', 0)}",
-        f"cost_usd     : {scope_raw.get('cost_usd', 0.0)}",
-        "",
-        "── raw_text (verbatim, no truncation) ──",
-        scope_raw.get("raw_text", "<empty>"),
-        "",
-        "── critical_findings ──",
-        json.dumps(scope_raw.get("critical_findings", []), indent=2, ensure_ascii=False),
-        "",
-        "── advisory_findings ──",
-        json.dumps(scope_raw.get("advisory_findings", []), indent=2, ensure_ascii=False),
-    ]
+def _format_review_record(record: Dict[str, Any], sections: list[tuple[str, str]]) -> str:
+    parts = [f"{key:<13}: {record.get(key, default)}" for key, default in (
+        ("model_id", "?"), ("status", "?"), ("tokens_in", 0),
+        ("tokens_out", 0), ("cost_usd", 0.0), ("prompt_chars", 0),
+    ) if key in record or key != "prompt_chars"]
+    parts += ["", "── raw_text (verbatim, no truncation) ──", record.get("raw_text", "<empty>")]
+    for title, key in sections:
+        parts += ["", f"── {title} ──", json.dumps(record.get(key, []), indent=2, ensure_ascii=False)]
     return "\n".join(parts)
 
 
@@ -222,13 +190,22 @@ def main() -> int:
         _emit("TRIAD REVIEWERS", "<empty — no actor records produced>")
     else:
         for idx, actor in enumerate(triad_raw):
-            _emit(f"TRIAD REVIEWER {idx + 1}/{len(triad_raw)}", _format_triad_actor(actor))
+            _emit(
+                f"TRIAD REVIEWER {idx + 1}/{len(triad_raw)}",
+                _format_review_record(actor, [("parsed_items", "parsed_items")]),
+            )
 
     scope_raw = getattr(ctx, "_last_scope_raw_result", {}) or {}
     if not scope_raw:
         _emit("SCOPE REVIEWER", "<empty — no scope record produced>")
     else:
-        _emit("SCOPE REVIEWER", _format_scope(scope_raw))
+        _emit(
+            "SCOPE REVIEWER",
+            _format_review_record(scope_raw, [
+                ("critical_findings", "critical_findings"),
+                ("advisory_findings", "advisory_findings"),
+            ]),
+        )
 
     if review_err:
         _emit("TRIAD BLOCK MESSAGE (review_err)", review_err)
@@ -250,7 +227,6 @@ def main() -> int:
         except Exception as exc:
             sys.stderr.write(f"[run_external_review] failed to write --output: {exc}\n")
 
-    # Exit code: 0 always — this is a dry-run reporter, not a gate.
     return 0
 
 

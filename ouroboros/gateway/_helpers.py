@@ -1,7 +1,9 @@
 """Shared Starlette HTTP-API helpers for thin route modules."""
 from __future__ import annotations
 
+import json
 import pathlib
+from collections.abc import Iterator
 from typing import Any
 
 from starlette.requests import Request
@@ -51,6 +53,18 @@ def coerce_int(value: Any, default: int = 0) -> int:
         return default
 
 
+async def request_json_or(
+    request: Request,
+    default: Any,
+    *,
+    exceptions: tuple[type[BaseException], ...] = (json.JSONDecodeError, ValueError),
+) -> Any:
+    try:
+        return await request.json()
+    except exceptions:
+        return default
+
+
 def json_error(message: str, status: int = 500, **extra: Any) -> JSONResponse:
     """``JSONResponse({"error": message, **extra}, status_code=status)``."""
     payload: dict[str, Any] = {"error": message}
@@ -58,10 +72,26 @@ def json_error(message: str, status: int = 500, **extra: Any) -> JSONResponse:
     return JSONResponse(payload, status_code=status)
 
 
+def json_exception(exc: BaseException, status: int = 500) -> JSONResponse:
+    return json_error(str(exc), status)
+
+
+def iter_jsonl_objects(path: pathlib.Path) -> Iterator[Any]:
+    if not path.exists():
+        return
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            yield entry
+
+
 __all__ = (
-    "coerce_bool",
-    "coerce_int",
-    "json_error",
-    "request_drive_root",
-    "request_repo_dir",
+    "coerce_bool", "coerce_int", "iter_jsonl_objects", "json_error", "json_exception",
+    "request_json_or", "request_drive_root", "request_repo_dir",
 )

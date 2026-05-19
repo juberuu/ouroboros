@@ -69,7 +69,7 @@ def test_widgets_media_sources_are_constrained_to_extension_routes_or_data_urls(
     source = _widgets_js()
     assert "function safeMediaSrc" in source
     assert "const route = spec.route || spec.api_route || '';" in source
-    assert "extensionRouteUrl(tab, route, params)" in source
+    assert "extensionRoutePath(tab.skill, route, params)" in source
     assert "data:(image\\/" in source
     assert "parsed.pathname.startsWith(expectedPrefix)" in source
     assert "parsed.origin === window.location.origin" in source

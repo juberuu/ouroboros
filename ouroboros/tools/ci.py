@@ -24,7 +24,6 @@ _MAX_POLL_SEC = 900  # 15 minutes
 
 
 def _get_github_config() -> Tuple[str, str]:
-    """Return (token, owner/repo) from settings, or raise ValueError."""
     settings = load_settings()
     token = (settings.get("GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN", "")).strip()
     repo = (settings.get("GITHUB_REPO") or os.environ.get("GITHUB_REPO", "")).strip()
@@ -37,7 +36,6 @@ def _get_github_config() -> Tuple[str, str]:
 
 def _gh_api(method: str, path: str, token: str, body: Optional[dict] = None,
             timeout: int = 30) -> Tuple[int, dict]:
-    """Call GitHub REST API and return status plus parsed JSON."""
     url = f"{_GITHUB_API}{path}"
     data = json.dumps(body).encode() if body else None
     req = urllib.request.Request(url, data=data, method=method)
@@ -62,7 +60,6 @@ def _gh_api(method: str, path: str, token: str, body: Optional[dict] = None,
 
 
 def _push_branch(repo_dir: str, branch: str) -> Tuple[bool, str]:
-    """Push current branch to origin."""
     try:
         result = run_cmd(["git", "push", "-u", "origin", branch], cwd=repo_dir)
         return True, result
@@ -79,7 +76,6 @@ def _get_current_sha(repo_dir: str) -> str:
 
 
 def _find_workflow_id(token: str, repo: str) -> Optional[int]:
-    """Find the ci.yml workflow ID."""
     status, data = _gh_api("GET", f"/repos/{repo}/actions/workflows", token)
     if status != 200:
         return None
@@ -90,7 +86,6 @@ def _find_workflow_id(token: str, repo: str) -> Optional[int]:
 
 
 def _trigger_workflow(token: str, repo: str, workflow_id: int, branch: str) -> Tuple[bool, str]:
-    """Trigger workflow_dispatch."""
     status, data = _gh_api(
         "POST",
         f"/repos/{repo}/actions/workflows/{workflow_id}/dispatches",
@@ -106,11 +101,9 @@ def _poll_workflow_run(token: str, repo: str, branch: str, sha: str,
                        started_after: str, ctx: ToolContext,
                        timeout_sec: int = _MAX_POLL_SEC,
                        workflow_id: Optional[int] = None) -> dict:
-    """Poll until the matching workflow run completes or times out."""
     deadline = time.time() + timeout_sec
     run_id = None
 
-    # Prefer workflow-specific endpoint; fall back to repo-wide.
     runs_path = (
         f"/repos/{repo}/actions/workflows/{workflow_id}/runs?branch={branch}&per_page=5&event=workflow_dispatch"
         if workflow_id
@@ -147,7 +140,6 @@ def _poll_workflow_run(token: str, repo: str, branch: str, sha: str,
 
 
 def _get_failed_jobs(token: str, repo: str, run_id: int) -> List[dict]:
-    """Get failed job details for a run."""
     status, data = _gh_api("GET", f"/repos/{repo}/actions/runs/{run_id}/jobs", token)
     if status != 200:
         return []
@@ -169,8 +161,6 @@ def _get_failed_jobs(token: str, repo: str, run_id: int) -> List[dict]:
 
 
 class _NoAuthRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Strip Authorization when GitHub log downloads redirect to Azure."""
-
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
         if new_req is None:
@@ -183,7 +173,6 @@ class _NoAuthRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 def _get_job_logs(token: str, repo: str, job_id: int) -> str:
-    """Download job logs (returns raw text, truncated)."""
     try:
         url = f"{_GITHUB_API}/repos/{repo}/actions/jobs/{job_id}/logs"
         req = urllib.request.Request(url)
@@ -200,7 +189,6 @@ def _get_job_logs(token: str, repo: str, job_id: int) -> str:
 
 
 def _extract_os(job_name: str) -> str:
-    """Extract OS from job name like 'full-test (ubuntu-latest)'."""
     for os_name in ("ubuntu", "windows", "macos"):
         if os_name in job_name.lower():
             return os_name
@@ -208,7 +196,6 @@ def _extract_os(job_name: str) -> str:
 
 
 def _emit_progress(ctx: ToolContext, text: str):
-    """Emit a progress event to the UI."""
     ctx.pending_events.append({
         "type": "progress",
         "text": text,
@@ -216,7 +203,6 @@ def _emit_progress(ctx: ToolContext, text: str):
     })
 
 def _run_ci_tests(ctx: ToolContext, wait: bool = True, timeout_minutes: int = 15) -> str:
-    """Push current branch and trigger full CI matrix (3 OS). Optionally wait for results."""
     try:
         token, repo = _get_github_config()
     except ValueError as e:
@@ -229,7 +215,6 @@ def _run_ci_tests(ctx: ToolContext, wait: bool = True, timeout_minutes: int = 15
     if branch == "HEAD":
         return "⚠️ CI_BRANCH_INVALID: detached HEAD state. Check out a branch first (e.g. `git checkout ouroboros`)."
 
-    # Refuse pushes when origin and GITHUB_REPO disagree.
     try:
         origin_url = run_cmd(["git", "remote", "get-url", "origin"], cwd=repo_dir).strip()
         m = re.search(r"github\.com[/:](.+)", origin_url)
@@ -323,35 +308,31 @@ def _run_ci_tests(ctx: ToolContext, wait: bool = True, timeout_minutes: int = 15
     return "\n".join(lines)
 
 def get_tools() -> List[ToolEntry]:
-    return [
-        ToolEntry(
-            name="run_ci_tests",
-            schema={
-                "name": "run_ci_tests",
-                "description": (
-                    "Push current branch to GitHub and trigger the full CI matrix "
-                    "(Ubuntu + Windows + macOS tests). Requires GITHUB_TOKEN and GITHUB_REPO "
-                    "in Settings. Use to verify cross-platform compatibility before releases "
-                    "or after platform-sensitive changes. Returns pass/fail with failure logs."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "wait": {
-                            "type": "boolean",
-                            "default": True,
-                            "description": "Wait for CI to complete and return results (default: true). "
-                                           "Set to false to just trigger and return immediately.",
-                        },
-                        "timeout_minutes": {
-                            "type": "integer",
-                            "default": 15,
-                            "description": "Max minutes to wait for CI completion (1-30, default: 15).",
-                        },
-                    },
-                    "required": [],
+    return [ToolEntry(
+        name="run_ci_tests",
+        schema={
+            "name": "run_ci_tests",
+            "description": (
+                "Push current branch to GitHub and trigger the full CI matrix "
+                "(Ubuntu + Windows + macOS tests). Requires GITHUB_TOKEN and GITHUB_REPO "
+                "in Settings. Use to verify cross-platform compatibility before releases "
+                "or after platform-sensitive changes. Returns pass/fail with failure logs."
+            ),
+            "parameters": {"type": "object", "properties": {
+                "wait": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": (
+                        "Wait for CI to complete and return results (default: true). "
+                        "Set to false to just trigger and return immediately."
+                    ),
                 },
-            },
-            handler=_run_ci_tests,
-        ),
-    ]
+                "timeout_minutes": {
+                    "type": "integer",
+                    "default": 15,
+                    "description": "Max minutes to wait for CI completion (1-30, default: 15).",
+                },
+            }, "required": []},
+        },
+        handler=_run_ci_tests,
+    )]

@@ -7,6 +7,7 @@ import {
     startLifecyclePoller,
 } from './lifecycle_card.js';
 import { openConfirmDialog } from './confirm_dialog.js';
+import { jsonPost } from './api_client.js';
 import {
     boundedText,
     emitSkillLifecycle,
@@ -474,11 +475,7 @@ export function initMarketplace(pane, controlsHost = null) {
     });
 
     async function toggleInstalledSkill(installed, enabled) {
-        return fetchJson(`/api/skills/${encodeURIComponent(installed.name)}/toggle`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ enabled }),
-        });
+        return jsonPost(`/api/skills/${encodeURIComponent(installed.name)}/toggle`, { enabled });
     }
 
     async function runLifecycleAction(slug, action) {
@@ -530,15 +527,11 @@ export function initMarketplace(pane, controlsHost = null) {
             });
             if (!ok) return;
             setPending(slug, { label: 'Repair requested', tone: 'warn', message: 'Queueing repair task…' });
-            await fetchJson('/api/command', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    cmd: buildHealPrompt(installed, summary),
-                    task_constraint: { mode: 'skill_repair', skill_name: installed.name || '', payload_root: installed.payload_root || '', allow_enable: false, allow_review: true },
-                    visible_text: `Repair task queued for ${installed.name || slug}. Ouroboros will inspect the skill payload and re-run review.`,
-                    visible_task_id: `skill_repair_${installed.name || slug}`,
-                }),
+            await jsonPost('/api/command', {
+                cmd: buildHealPrompt(installed, summary),
+                task_constraint: { mode: 'skill_repair', skill_name: installed.name || '', payload_root: installed.payload_root || '', allow_enable: false, allow_review: true },
+                visible_text: `Repair task queued for ${installed.name || slug}. Ouroboros will inspect the skill payload and re-run review.`,
+                visible_task_id: `skill_repair_${installed.name || slug}`,
             });
             showStatus(pane, `${slug}: repair task queued`, 'ok');
             emitSkillLifecycle('repair', installed.name || slug);
@@ -547,11 +540,7 @@ export function initMarketplace(pane, controlsHost = null) {
         }
         if (action === 'review' && installed) {
             setPending(slug, { label: 'Reviewing', tone: 'warn', message: 'Running skill review…' });
-            const result = await fetchJson(`/api/skills/${encodeURIComponent(installed.name)}/review`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({}),
-            });
+            const result = await jsonPost(`/api/skills/${encodeURIComponent(installed.name)}/review`);
             showStatus(
                 pane,
                 `${slug}: review ${result.status}${result.error ? ` — ${result.error}` : ''}`,
@@ -567,11 +556,7 @@ export function initMarketplace(pane, controlsHost = null) {
                 message: 'Updating skill…',
                 target: installed.name,
             });
-            const result = await fetchJson(`/api/marketplace/clawhub/update/${encodeURIComponent(installed.name)}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({}),
-            });
+            const result = await jsonPost(`/api/marketplace/clawhub/update/${encodeURIComponent(installed.name)}`);
             if (!result.ok) throw new Error(result.error || 'update failed');
             showStatus(pane, `Updated ${slug} — review ${result.review_status}`, reviewTone(result.review_status));
             emitSkillLifecycle('update', installed.name, result);
@@ -579,11 +564,7 @@ export function initMarketplace(pane, controlsHost = null) {
         }
         if (action === 'install') {
             setPending(slug, { label: 'Installing', tone: 'warn', message: 'Downloading, adapting, and reviewing…' });
-            const result = await fetchJson('/api/marketplace/clawhub/install', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ slug, auto_review: true }),
-            });
+            const result = await jsonPost('/api/marketplace/clawhub/install', { slug, auto_review: true });
             if (!result.ok) throw new Error(result.error || 'install failed');
             const installedName = result.sanitized_name;
             const requestedGrants = result.provenance?.requested_key_grants || [];
@@ -706,11 +687,7 @@ export function initMarketplace(pane, controlsHost = null) {
             });
             try {
                 const body = targetVersion ? { version: targetVersion } : {};
-                const result = await fetchJson(`/api/marketplace/clawhub/update/${encodeURIComponent(sanitized)}`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(body),
-                });
+                const result = await jsonPost(`/api/marketplace/clawhub/update/${encodeURIComponent(sanitized)}`, body);
                 if (!result.ok) {
                     throw new Error(result.error || 'update failed');
                 } else {
@@ -747,11 +724,7 @@ export function initMarketplace(pane, controlsHost = null) {
             if (!ok) return;
             uninstallBtn.disabled = true;
             try {
-                await fetchJson(`/api/marketplace/clawhub/uninstall/${encodeURIComponent(sanitized)}`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({}),
-                });
+                await jsonPost(`/api/marketplace/clawhub/uninstall/${encodeURIComponent(sanitized)}`);
                 showStatus(pane, `Uninstalled ${slug}`, 'ok');
                 emitSkillLifecycle('uninstall', sanitized);
             } catch (err) {

@@ -65,21 +65,16 @@ def _installer_env(env_root: pathlib.Path, *, ecosystem: str = "") -> Dict[str, 
     for path in (tmp_dir, home_dir, cache_dir):
         path.mkdir(parents=True, exist_ok=True)
     env = {key: os.environ[key] for key in _SAFE_ENV_KEYS if key in os.environ}
-    env["HOME"] = str(home_dir)
-    env["USERPROFILE"] = str(home_dir)
-    env["APPDATA"] = str(home_dir / "AppData" / "Roaming")
-    env["LOCALAPPDATA"] = str(home_dir / "AppData" / "Local")
-    env["TMPDIR"] = str(tmp_dir)
-    env["TMP"] = str(tmp_dir)
-    env["TEMP"] = str(tmp_dir)
-    env["PYTHONNOUSERSITE"] = "1"
-    env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
-    env["PIP_CACHE_DIR"] = str(cache_dir / "pip")
-    env["PIP_CONFIG_FILE"] = os.devnull
-    env["npm_config_cache"] = str(cache_dir / "npm")
-    env["npm_config_userconfig"] = str(env_root / "npmrc")
-    env["CARGO_HOME"] = str(env_root / "cargo" / "home")
-    env["CARGO_TARGET_DIR"] = str(env_root / "cargo" / "target")
+    env.update({
+        "HOME": str(home_dir), "USERPROFILE": str(home_dir),
+        "APPDATA": str(home_dir / "AppData" / "Roaming"),
+        "LOCALAPPDATA": str(home_dir / "AppData" / "Local"),
+        "TMPDIR": str(tmp_dir), "TMP": str(tmp_dir), "TEMP": str(tmp_dir),
+        "PYTHONNOUSERSITE": "1", "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+        "PIP_CACHE_DIR": str(cache_dir / "pip"), "PIP_CONFIG_FILE": os.devnull,
+        "npm_config_cache": str(cache_dir / "npm"), "npm_config_userconfig": str(env_root / "npmrc"),
+        "CARGO_HOME": str(env_root / "cargo" / "home"), "CARGO_TARGET_DIR": str(env_root / "cargo" / "target"),
+    })
     return env
 
 
@@ -107,10 +102,7 @@ def _run(cmd: List[str], *, cwd: pathlib.Path, env: Dict[str, str], timeout_sec:
     finally:
         with _subprocess_lock:
             _active_subprocesses.discard(proc)
-    return {
-        "cmd": cmd[:2] + ["..."] if len(cmd) > 2 else list(cmd),
-        "returncode": proc.returncode,
-    }
+    return {"cmd": cmd[:2] + ["..."] if len(cmd) > 2 else list(cmd), "returncode": proc.returncode}
 
 
 def _ensure_python_env(env_root: pathlib.Path, timeout_sec: int) -> pathlib.Path:
@@ -210,11 +202,25 @@ def install_isolated_dependencies(
     return fingerprint
 
 
-def read_deps_state(drive_root: pathlib.Path, skill_name: str) -> Dict[str, Any]:
-    """Return persisted deps.json so enable can reject failed/stale auto deps."""
+def read_deps_state(
+    drive_root: pathlib.Path,
+    skill_name: str,
+    skill_dir: pathlib.Path | None = None,
+) -> Dict[str, Any]:
+    """Return persisted deps.json, optionally verified against the live env."""
     try:
         state_dir = skill_state_dir(drive_root, skill_name)
         path = state_dir / DEPS_STATE_FILENAME
-        return read_json_dict(path) or {}
+        state = read_json_dict(path) or {}
     except Exception:
         return {}
+    if skill_dir is None or str(state.get("status") or "") != "installed":
+        return state
+    fingerprint = read_json_dict(isolated_env_dir(skill_dir) / FINGERPRINT_FILENAME) or {}
+    state_hash = str(state.get("specs_hash") or "")
+    fingerprint_hash = str(fingerprint.get("specs_hash") or "")
+    if str(fingerprint.get("status") or "") != "installed":
+        return {**state, "status": "missing", "error": "isolated environment fingerprint is missing"}
+    if fingerprint_hash != state_hash:
+        return {**state, "status": "stale", "error": "isolated environment fingerprint is stale"}
+    return state

@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
-import logging
 import os
-from pathlib import Path
+import logging
 
 from ouroboros.llm import LLMClient
 from ouroboros.tools.registry import ToolContext, ToolEntry
@@ -21,18 +20,13 @@ from ouroboros.utils import estimate_tokens
 
 log = logging.getLogger(__name__)
 
-# Configuration.
-
 _PLAN_REVIEW_MAX_TOKENS = 65536
 _PLAN_REVIEW_EFFORT = "high"
 
-# Shared review budget gate; provider context windows may still be smaller.
 from ouroboros.tools.review_helpers import REVIEW_PROMPT_TOKEN_BUDGET as _REVIEW_BUDGET
 
 _PLAN_BUDGET_TOKEN_LIMIT = _REVIEW_BUDGET
 
-
-# Tool registration.
 
 def get_tools():
     return [
@@ -41,41 +35,22 @@ def get_tools():
             schema={
                 "name": "plan_task",
                 "description": (
-                    "Run a pre-implementation design review of a proposed plan using 2–3 "
-                    "parallel full-codebase reviewers. Call this BEFORE writing any code for "
-                    "non-trivial tasks (>2 files or >50 lines of changes). Each reviewer sees the "
-                    "entire repository plus your plan description and the files you plan to touch. "
-                    "They will identify forgotten touchpoints, implicit contract violations, simpler "
-                    "alternatives, and Bible/architecture compliance issues — before you've written "
-                    "a single line. Uses the reviewer slots configured in OUROBOROS_REVIEW_MODELS "
-                    "(same slot as the commit triad); duplicate model IDs are allowed and count "
-                    "as separate stochastic slots. Returns structured feedback from every "
-                    "reviewer slot with detailed explanations and alternative approaches. "
-                    "Non-blocking: you decide what to do with the feedback."
+                    "Run a pre-implementation design review of a proposed plan using 2–3 parallel full-codebase "
+                    "reviewers. Call this BEFORE writing any code for non-trivial tasks (>2 files or >50 lines "
+                    "of changes). Each reviewer sees the entire repository plus your plan description and the "
+                    "files you plan to touch. They will identify forgotten touchpoints, implicit contract "
+                    "violations, simpler alternatives, and Bible/architecture compliance issues — before you've "
+                    "written a single line. Uses the reviewer slots configured in OUROBOROS_REVIEW_MODELS (same "
+                    "slot as the commit triad); duplicate model IDs are allowed and count as separate stochastic "
+                    "slots. Returns structured feedback from every reviewer slot with detailed explanations and "
+                    "alternative approaches. Non-blocking: you decide what to do with the feedback."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "plan": {
-                            "type": "string",
-                            "description": (
-                                "Describe what you plan to implement: which files you will change, "
-                                "what the key design decisions are, and what you will NOT change."
-                            ),
-                        },
-                        "goal": {
-                            "type": "string",
-                            "description": "The high-level goal of the task (what problem is being solved).",
-                        },
-                        "files_to_touch": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": (
-                                "Optional list of repo-relative file paths you plan to modify. "
-                                "Their current content (HEAD snapshot) will be injected so reviewers "
-                                "can reason about concrete code, not just abstract plans."
-                            ),
-                        },
+                        "plan": {"type": "string", "description": "Describe what you plan to implement: which files you will change, what the key design decisions are, and what you will NOT change."},
+                        "goal": {"type": "string", "description": "The high-level goal of the task (what problem is being solved)."},
+                        "files_to_touch": {"type": "array", "description": "Optional list of repo-relative file paths you plan to modify. Their current content (HEAD snapshot) will be injected so reviewers can reason about concrete code, not just abstract plans.", "items": {"type": "string"}},
                     },
                     "required": ["plan", "goal"],
                 },
@@ -85,8 +60,6 @@ def get_tools():
         )
     ]
 
-
-# Handler.
 
 def _handle_plan_task(
     ctx: ToolContext,
@@ -119,8 +92,6 @@ def _handle_plan_task(
         return f"ERROR: Plan review failed: {e}"
 
 
-# Async orchestration.
-
 async def _run_plan_review_async(
     ctx: ToolContext,
     plan: str,
@@ -129,7 +100,6 @@ async def _run_plan_review_async(
 ) -> str:
     repo_dir = ctx.repo_dir
 
-    # Duplicate reviewer slots are intentional stochastic samples.
     from ouroboros import config as _cfg
 
     resolved_models = list(_cfg.get_review_models() or [])
@@ -148,17 +118,14 @@ async def _run_plan_review_async(
             "google/gemini-3.1-pro-preview,anthropic/claude-opus-4.6')."
         )
 
-    # Preserve reviewer slots exactly, including duplicates.
     models = _get_review_models()
 
-    # Build prompt components.
     checklist = _load_plan_checklist()
     bible_text = _load_bible(repo_dir)
     dev_md = _load_doc(repo_dir, "docs/DEVELOPMENT.md")
     arch_md = _load_doc(repo_dir, "docs/ARCHITECTURE.md")
     checklists_md = _load_doc(repo_dir, "docs/CHECKLISTS.md")
 
-    # Full repo pack: same broad context class as scope review.
     ctx.emit_progress_fn("📐 plan_task: building full repo pack…")
     canonical_docs = {
         "BIBLE.md",
@@ -167,7 +134,6 @@ async def _run_plan_review_async(
         "docs/CHECKLISTS.md",
     }
     try:
-        # Canonical docs are injected explicitly; avoid duplicate context.
         repo_pack, omitted = build_full_repo_pack(
             repo_dir,
             exclude_paths=set(files_to_touch) | canonical_docs,
@@ -179,13 +145,11 @@ async def _run_plan_review_async(
     if omitted:
         omitted_note = f"\n\n## OMITTED FILES\n" + "\n".join(f"- {p}" for p in omitted)
 
-    # HEAD snapshots for planned-touch files.
     ctx.emit_progress_fn(f"📐 plan_task: reading {len(files_to_touch)} planned-touch file(s)…")
     head_snapshots = ""
     if files_to_touch:
         head_snapshots = build_head_snapshot_section(repo_dir, files_to_touch)
 
-    # Assemble prompt and budget-check it.
     system_prompt = _build_system_prompt(checklist, bible_text, dev_md, arch_md, checklists_md)
     user_content = _build_user_content(plan, goal, files_to_touch, head_snapshots, repo_pack, omitted_note)
 
@@ -202,7 +166,6 @@ async def _run_plan_review_async(
         f"(~{estimated_tokens:,} tokens each)…"
     )
 
-    # Run reviewer slots in parallel.
     llm_client = LLMClient()
     semaphore = asyncio.Semaphore(3)
     tasks = [
@@ -211,14 +174,10 @@ async def _run_plan_review_async(
     ]
     raw_results = await asyncio.gather(*tasks)
 
-    # Per-reviewer costs must reach the same budget ledger as other LLM spend.
     _emit_plan_review_usage(ctx, raw_results)
 
-    # Format output.
     return _format_output(raw_results, models, goal, estimated_tokens)
 
-
-# Single-reviewer query.
 
 def _emit_plan_review_usage(ctx: "ToolContext", raw_results: list) -> None:
     for result in raw_results:
@@ -280,7 +239,6 @@ async def _query_reviewer(
                 "tokens_in": 0, "tokens_out": 0,
             }
         except Exception as e:
-            # Classify common provider failures, especially non-JSON error bodies.
             error_msg = _classify_reviewer_error(e, model)
             return {
                 "model": model, "request_model": model,
@@ -288,8 +246,6 @@ async def _query_reviewer(
                 "tokens_in": 0, "tokens_out": 0,
             }
 
-
-# Output formatting.
 
 def _format_output(raw_results: list, models: list, goal: str, estimated_tokens: int) -> str:
     """Render reviewer responses plus coordinated aggregate verdict."""
@@ -304,7 +260,6 @@ def _format_output(raw_results: list, models: list, goal: str, estimated_tokens:
         "",
     ]
 
-    # DEGRADED covers error/empty/missing-aggregate-line failures.
     per_reviewer: list[str] = []
 
     for i, result in enumerate(raw_results):
@@ -313,47 +268,29 @@ def _format_output(raw_results: list, models: list, goal: str, estimated_tokens:
         lines.append("")
 
         if result.get("error"):
-            lines.append(f"⚠️ **ERROR:** {result['error']}")
-            lines.append("")
+            lines.extend([f"⚠️ **ERROR:** {result['error']}", ""])
             per_reviewer.append("DEGRADED")
             continue
 
         text = result.get("text", "").strip()
         if not text:
-            lines.append("⚠️ **ERROR:** Empty response from reviewer.")
-            lines.append("")
+            lines.extend(["⚠️ **ERROR:** Empty response from reviewer.", ""])
             per_reviewer.append("DEGRADED")
             continue
 
-        lines.append(text)
-        lines.append("")
+        lines.extend([text, ""])
 
         reviewer_signal = _parse_aggregate_signal(text)
-        if not reviewer_signal:
-            # Missing AGGREGATE line is non-substantive failure.
-            per_reviewer.append("DEGRADED")
-        elif reviewer_signal == "REVISE_PLAN":
-            per_reviewer.append("REVISE_PLAN")
-        elif reviewer_signal == "REVIEW_REQUIRED":
-            per_reviewer.append("REVIEW_REQUIRED")
-        else:
-            per_reviewer.append("GREEN")
+        per_reviewer.append(reviewer_signal if reviewer_signal else "DEGRADED")
+        lines.extend(["---", ""])
 
-        lines.append("---")
-        lines.append("")
-
-    # Majority-vote aggregation.
     revise_count = sum(1 for sig in per_reviewer if sig == "REVISE_PLAN")
     review_required_count = sum(1 for sig in per_reviewer if sig == "REVIEW_REQUIRED")
     degraded_count = sum(1 for sig in per_reviewer if sig == "DEGRADED")
     green_count = sum(1 for sig in per_reviewer if sig == "GREEN")
 
-    # No-reviewer case must not look like a clean all-zero pass.
     if not per_reviewer:
-        lines.append("## Aggregate Signal")
-        lines.append("")
-        lines.append("❓ **REVIEW_REQUIRED**")
-        lines.append("")
+        lines.extend(["## Aggregate Signal", "", "❓ **REVIEW_REQUIRED**", ""])
         lines.append("No reviewer responses were collected (empty reviewer list). "
                      "Treat as REVIEW_REQUIRED — re-run plan_task with at least one reviewer configured.")
         return "\n".join(lines)
@@ -365,20 +302,15 @@ def _format_output(raw_results: list, models: list, goal: str, estimated_tokens:
     elif green_count == len(per_reviewer):
         aggregate_signal = "GREEN"
     else:
-        # Unknown bookkeeping state: visible REVIEW_REQUIRED beats silent GREEN.
         aggregate_signal = "REVIEW_REQUIRED"
 
-    # Aggregate signal block.
     signal_emoji = {
         "GREEN": "✅",
         "REVIEW_REQUIRED": "⚠️",
         "REVISE_PLAN": "❌",
     }.get(aggregate_signal, "❓")
 
-    lines.append("## Aggregate Signal")
-    lines.append("")
-    lines.append(f"{signal_emoji} **{aggregate_signal}**")
-    lines.append("")
+    lines.extend(["## Aggregate Signal", "", f"{signal_emoji} **{aggregate_signal}**", ""])
     lines.append(
         f"Per-reviewer signals: REVISE_PLAN={revise_count}, "
         f"REVIEW_REQUIRED={review_required_count}, "
@@ -424,8 +356,6 @@ def _format_output(raw_results: list, models: list, goal: str, estimated_tokens:
     return "\n".join(lines)
 
 
-# Prompt construction.
-
 def _build_system_prompt(
     checklist: str,
     bible_text: str,
@@ -433,120 +363,45 @@ def _build_system_prompt(
     arch_md: str,
     checklists_md: str = "",
 ) -> str:
-    parts = [
-        "You are a senior design reviewer for Ouroboros, a self-creating AI agent.",
-        "Your job is to review a proposed implementation plan BEFORE any code is written.",
-        "You are validating a concrete candidate plan, not brainstorming from zero. If the plan is weak, say exactly why and what boundary or contract was missed.",
-        "You have full access to the entire codebase to find issues that the implementer may have missed.",
-        "",
-        "## Review stance — GENERATIVE, not audit",
-        "",
-        "Your primary job is to CONTRIBUTE ideas the implementer may not see, using full repo access.",
-        "Finding defects in the plan is secondary; proposing concrete alternatives, surfacing existing",
-        "surfaces that already solve the goal, and flagging subtle contract breaks is primary.",
-        "Assume the implementer has already thought through the first-pass design — you are a design",
-        "PARTNER who contributes, not an auditor who rubber-stamps.",
-        "",
-        "## Required output structure (follow exactly)",
-        "",
-        "1. **Your own approach** (1-2 sentences). State what YOU would do with full repo access:",
-        "   the concrete alternative path, the existing file/function you would reuse, or the simpler route.",
-        "   If after real effort you see no better approach, say so explicitly.",
-        "2. **`## PROPOSALS` section** (top 1-2 ideas). Each proposal is one of:",
-        "   - An existing function/module that already solves this (named exactly).",
-        "   - A subtle contract break or shared-state interaction the plan likely missed.",
-        "   - A simpler path with less surface area preserving the goal.",
-        "   - A risk pattern visible from codebase history in your context.",
-        "   - A BIBLE.md alignment issue with a specific principle cited.",
-        "3. **Per-item verdicts**. For each checklist item below:",
-        "   - **verdict**: PASS | RISK | FAIL",
-        "   - **explanation**: 2-5 sentences describing what you found (or why it's fine)",
-        "   - **concrete fix** (if RISK or FAIL): exact file, function, or line to address",
-        "   - **alternative approaches** (if applicable): 1-2 more elegant solutions",
-        "4. **Final line** (exactly one of):",
-        "   - `AGGREGATE: GREEN` — no critical issues, implementer can proceed",
-        "   - `AGGREGATE: REVIEW_REQUIRED` — risks or minor concerns, implementer should consider adjustments",
-        "   - `AGGREGATE: REVISE_PLAN` — critical structural issues, plan must be revised before coding",
-        "",
-        "Be specific. Name exact files, functions, constants, or call sites.",
-        "Vague concerns without a concrete pointer are advisory at most.",
-        "If you see a simpler solution, say so directly — don't just hint.",
-        "",
-        "## Rules (what NOT to flag)",
-        "",
-        "- Do NOT mark RISK on `minimalism` just because you would have done it differently.",
-        "  Flag RISK only when you can name (a) fewer files touched, (b) fewer lines changed,",
-        "  or (c) reuse of a specific existing surface — concrete alternative, not taste.",
-        "- Do NOT penalise missing tests, `VERSION` bumps, `README.md` changelog rows, or",
-        "  `docs/ARCHITECTURE.md` updates — the plan has no code yet. Focus on design correctness",
-        "  and elegance, not commit hygiene. Commit-gate reviewers handle that later.",
-        "",
-        "## Aggregate level — majority-vote coordination across 2-3 reviewer slots",
-        "",
-        "- `AGGREGATE: REVISE_PLAN` should be used ONLY when you are confident the plan has a",
-        "  concrete structural problem that warrants a redesign. The coordinator escalates to final",
-        "  `REVISE_PLAN` only when at least 2 reviewer slots independently flag it — a lone",
-        "  dissenting `REVISE_PLAN` will surface as `REVIEW_REQUIRED` with your dissent noted",
-        "  (with 2-reviewer setups, \"≥2 reviewers\" means both reviewers agreed). This is",
-        "  deliberate: `plan_review` is a coordinative signal, not a block. Use `REVIEW_REQUIRED`",
-        "  for real but non-structural risks; reserve `REVISE_PLAN` for defects worth blocking the",
-        "  plan on.",
-        "",
-        "---",
-        "",
-    ]
+    parts = [(
+        "You are a senior design reviewer for Ouroboros, a self-creating AI agent.\n"
+        "Your job is to review a proposed implementation plan BEFORE any code is written.\n"
+        "You are validating a concrete candidate plan, not brainstorming from zero. If the plan is weak, say exactly why and what boundary or contract was missed.\n"
+        "You have full access to the entire codebase to find issues that the implementer may have missed.\n\n"
+        "## Review stance — GENERATIVE, not audit\n\n"
+        "Your primary job is to CONTRIBUTE ideas the implementer may not see, using full repo access.\n"
+        "Finding defects in the plan is secondary; proposing concrete alternatives, surfacing existing surfaces that already solve the goal, and flagging subtle contract breaks is primary.\n"
+        "Assume the implementer has already thought through the first-pass design — you are a design PARTNER who contributes, not an auditor who rubber-stamps.\n\n"
+        "## Required output structure (follow exactly)\n\n"
+        "1. **Your own approach** (1-2 sentences). State what YOU would do with full repo access: the concrete alternative path, the existing file/function you would reuse, or the simpler route. If after real effort you see no better approach, say so explicitly.\n"
+        "2. **`## PROPOSALS` section** (top 1-2 ideas). Each proposal is one of:\n   - An existing function/module that already solves this (named exactly).\n   - A subtle contract break or shared-state interaction the plan likely missed.\n   - A simpler path with less surface area preserving the goal.\n   - A risk pattern visible from codebase history in your context.\n   - A BIBLE.md alignment issue with a specific principle cited.\n"
+        "3. **Per-item verdicts**. For each checklist item below:\n   - **verdict**: PASS | RISK | FAIL\n   - **explanation**: 2-5 sentences describing what you found (or why it's fine)\n   - **concrete fix** (if RISK or FAIL): exact file, function, or line to address\n   - **alternative approaches** (if applicable): 1-2 more elegant solutions\n"
+        "4. **Final line** (exactly one of):\n   - `AGGREGATE: GREEN` — no critical issues, implementer can proceed\n   - `AGGREGATE: REVIEW_REQUIRED` — risks or minor concerns, implementer should consider adjustments\n   - `AGGREGATE: REVISE_PLAN` — critical structural issues, plan must be revised before coding\n\n"
+        "Be specific. Name exact files, functions, constants, or call sites.\nVague concerns without a concrete pointer are advisory at most.\nIf you see a simpler solution, say so directly — don't just hint.\n\n"
+        "## Rules (what NOT to flag)\n\n"
+        "- Do NOT mark RISK on `minimalism` just because you would have done it differently. Flag RISK only when you can name (a) fewer files touched, (b) fewer lines changed, or (c) reuse of a specific existing surface — concrete alternative, not taste.\n"
+        "- Do NOT penalise missing tests, `VERSION` bumps, `README.md` changelog rows, or `docs/ARCHITECTURE.md` updates — the plan has no code yet. Focus on design correctness and elegance, not commit hygiene. Commit-gate reviewers handle that later.\n\n"
+        "## Aggregate level — majority-vote coordination across 2-3 reviewer slots\n\n"
+        "- `AGGREGATE: REVISE_PLAN` should be used ONLY when you are confident the plan has a concrete structural problem that warrants a redesign. The coordinator escalates to final `REVISE_PLAN` only when at least 2 reviewer slots independently flag it — a lone dissenting `REVISE_PLAN` will surface as `REVIEW_REQUIRED` with your dissent noted (with 2-reviewer setups, \"≥2 reviewers\" means both reviewers agreed). This is deliberate: `plan_review` is a coordinative signal, not a block. Use `REVIEW_REQUIRED` for real but non-structural risks; reserve `REVISE_PLAN` for defects worth blocking the plan on.\n\n---\n"
+    )]
 
     if checklist and not checklists_md:
-        parts += [
-            "## Plan Review Checklist",
-            "",
-            checklist,
-            "",
-            "---",
-            "",
-        ]
+        parts.append(f"## Plan Review Checklist\n\n{checklist}\n\n---\n")
 
-    if bible_text:
-        parts += [
-            "## BIBLE.md (Constitution — highest priority)",
-            "",
-            bible_text,
-            "",
-            "---",
-            "",
-        ]
-
-    if dev_md:
-        parts += [
-            "## DEVELOPMENT.md (Engineering handbook)",
-            "",
-            dev_md,
-            "",
-            "---",
-            "",
-        ]
-
-    if arch_md:
-        parts += [
-            "## ARCHITECTURE.md (Current system structure)",
-            "",
-            arch_md,
-            "",
-            "---",
-            "",
-        ]
+    for title, body in (
+        ("## BIBLE.md (Constitution — highest priority)", bible_text),
+        ("## DEVELOPMENT.md (Engineering handbook)", dev_md),
+        ("## ARCHITECTURE.md (Current system structure)", arch_md),
+    ):
+        if body:
+            parts.append(f"{title}\n\n{body}\n\n---\n")
 
     if checklists_md:
-        parts += [
-            "## CHECKLISTS.md (review contracts and critical thresholds)",
-            "",
-            "Use the `## Plan Review Checklist` section inside this file as the per-item matrix for this plan review.",
-            "",
-            checklists_md,
-            "",
-            "---",
-            "",
-        ]
+        parts.append(
+            "## CHECKLISTS.md (review contracts and critical thresholds)\n\n"
+            "Use the `## Plan Review Checklist` section inside this file as the per-item matrix for this plan review.\n\n"
+            f"{checklists_md}\n\n---\n"
+        )
 
     return "\n".join(parts)
 
@@ -559,44 +414,22 @@ def _build_user_content(
     repo_pack: str,
     omitted_note: str,
 ) -> str:
-    parts = [
-        "## Implementation Plan Under Review",
-        "",
-        f"**Goal:** {goal}",
-        "",
-        "**Proposed Plan:**",
-        plan,
-        "",
-    ]
+    parts = [f"## Implementation Plan Under Review\n\n**Goal:** {goal}\n\n**Proposed Plan:**\n{plan}\n"]
 
     if files_to_touch:
-        parts += [
-            f"**Files planned to touch:** {', '.join(files_to_touch)}",
-            "",
-        ]
+        parts.append(f"**Files planned to touch:** {', '.join(files_to_touch)}\n")
 
     if head_snapshots:
-        parts += [
-            "## Current State of Planned-Touch Files (HEAD)",
-            "",
-            head_snapshots,
-            "",
-        ]
+        parts.append(f"## Current State of Planned-Touch Files (HEAD)\n\n{head_snapshots}\n")
 
     if repo_pack:
-        parts += [
-            "## Full Repository Code (for cross-module analysis)",
-            "",
-            repo_pack,
-        ]
+        parts.append(f"## Full Repository Code (for cross-module analysis)\n\n{repo_pack}")
 
     if omitted_note:
         parts.append(omitted_note)
 
     return "\n".join(parts)
 
-
-# Helpers.
 
 def _classify_reviewer_error(exc: BaseException, model: str) -> str:
     """Return actionable reviewer failure text without swallowing details."""
@@ -673,9 +506,9 @@ def _load_plan_checklist() -> str:
         return ""
 
 
-def _load_bible(repo_dir: Path) -> str:
+def _load_bible(repo_dir) -> str:
     return load_governance_doc(repo_dir, "BIBLE.md", on_missing="explicit")
 
 
-def _load_doc(repo_dir: Path, rel_path: str) -> str:
+def _load_doc(repo_dir, rel_path: str) -> str:
     return load_governance_doc(repo_dir, rel_path, on_missing="explicit")

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Optional
+from contextlib import suppress
 
 from ouroboros.contracts.task_constraint import TaskConstraint, normalize_task_constraint
 from ouroboros.utils import safe_relpath
@@ -33,6 +34,33 @@ SKILL_PAYLOAD_CONTROL_DIRNAMES = frozenset({
     "node_modules",
     "__pycache__",
 })
+
+SKILL_OWNER_STATE_FILENAMES = frozenset({
+    "enabled.json",
+    "grants.json",
+    "review.json",
+    "review_job.json",
+    "review_history.jsonl",
+    "accepted_rebuttals.json",
+    "clawhub.json",
+    "self_authored.json",
+    "auth_token.json",
+    # Owner/lifecycle state: forged deps.json would bypass dependency gates.
+    "deps.json",
+})
+
+SKILL_OWNER_STATE_STEMS = (
+    "grants",
+    "review",
+    "review_job",
+    "review_history",
+    "accepted_rebuttals",
+    "enabled",
+    "clawhub",
+    "deps",
+    "self_authored",
+    "auth_token",
+)
 
 
 class SkillPayloadPathError(ValueError):
@@ -124,6 +152,48 @@ def _rel_from_raw(drive: Path, raw_path: str) -> tuple[str, bool]:
     return _clean_data_rel(raw), False
 
 
+def resolve_constrained_payload_path(
+    drive_root: Path,
+    constraint: TaskConstraint,
+    path_text: str,
+) -> Path:
+    """Resolve a skill_repair path under its constrained payload root.
+
+    This preserves the legacy ``task_constraint.resolve_payload_path``
+    behavior and messages while making the payload-root bucket policy shared.
+    """
+    drive = Path(drive_root).resolve(strict=False)
+    payload_root = safe_relpath(constraint.payload_root)
+    payload_parts = PurePosixPath(payload_root).parts
+    if (
+        len(payload_parts) < 3
+        or payload_parts[0] != "skills"
+        or payload_parts[1] not in SKILL_PAYLOAD_BUCKETS
+    ):
+        raise ValueError(
+            "Repair payload root must be data/skills/{external,clawhub,ouroboroshub}/<skill>"
+        )
+    if constraint.skill_name and payload_parts[2] != constraint.skill_name:
+        raise ValueError("Repair payload root does not match constrained skill name")
+    base = (drive / payload_root).resolve(strict=False)
+    raw = str(path_text or "").replace("\\", "/").strip().lstrip("/")
+    if raw.startswith("data/"):
+        raw = raw[len("data/"):]
+    if raw.startswith("skills/") and raw != payload_root and not raw.startswith(payload_root + "/"):
+        raise ValueError("Path points at a different skill payload")
+    if raw == payload_root:
+        raw = ""
+    elif raw.startswith(payload_root + "/"):
+        raw = raw[len(payload_root) + 1:]
+    rel = safe_relpath(raw or ".")
+    target = (base / rel).resolve(strict=False)
+    try:
+        target.relative_to(base)
+    except ValueError as exc:
+        raise ValueError("Path escapes constrained skill payload") from exc
+    return target
+
+
 def resolve_skill_payload_target(
     drive_root: Path,
     path_text: str,
@@ -209,6 +279,108 @@ def is_skill_payload_path(
     except SkillPayloadPathError:
         return False
     return allow_control_plane or not target.control_plane
+
+
+def is_skill_payload_control_filename(path_text: str) -> bool:
+    name = PurePosixPath(str(path_text or "").replace("\\", "/")).name
+    return name.lower() in SKILL_PAYLOAD_CONTROL_FILENAMES
+
+
+def is_skill_owner_state_target(target: Path, data_root: Path) -> bool:
+    """Return True for skill owner/review state files under data/state/skills."""
+    target_path = Path(target)
+    if target_path.name.lower() not in SKILL_OWNER_STATE_FILENAMES:
+        return False
+    root = Path(data_root).resolve(strict=False)
+    for candidate in (target_path, target_path.resolve(strict=False)):
+        with suppress(OSError, ValueError):
+            parts = candidate.relative_to(root).parts
+            if len(parts) == 4 and parts[0].lower() == "state" and parts[1].lower() == "skills":
+                return True
+    skills_state_root = root / "state" / "skills"
+    if not skills_state_root.is_dir():
+        return False
+    with suppress(OSError):
+        target_parent = target_path.parent.resolve(strict=False)
+        for skill_state_dir in skills_state_root.iterdir():
+            with suppress(OSError):
+                if skill_state_dir.resolve(strict=False) == target_parent:
+                    return True
+    return False
+
+
+def is_skill_owner_state_alias(target: Path, data_root: Path) -> bool:
+    """Return True for hardlinks/aliases to owner state files."""
+    target_path = Path(target)
+    root = Path(data_root).resolve(strict=False)
+    skills_state_root = root / "state" / "skills"
+    if not target_path.exists() or not skills_state_root.is_dir():
+        return False
+    for owner_state_file in skills_state_root.glob("*/*"):
+        try:
+            if owner_state_file.name.lower() in SKILL_OWNER_STATE_FILENAMES and owner_state_file.exists() and target_path.samefile(owner_state_file):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def is_skill_control_plane_path(target: Path, data_root: Path) -> bool:
+    """Return True for skill owner/provenance files blocked from generic writes."""
+    target_path = Path(target)
+    root = Path(data_root).resolve(strict=False)
+    if is_skill_owner_state_target(target_path, root):
+        return True
+
+    payload_candidates = [target_path]
+    with suppress(OSError):
+        payload_candidates.append(target_path.resolve(strict=False))
+    for candidate in payload_candidates:
+        with suppress(OSError, ValueError):
+            parts = candidate.relative_to(root).parts
+            if (
+                len(parts) >= 4
+                and parts[0].lower() == "skills"
+                and parts[1].lower() in SKILL_PAYLOAD_ALL_BUCKETS
+            ):
+                rel_tail = [part.lower() for part in parts[3:]]
+                if (
+                    any(part in SKILL_PAYLOAD_CONTROL_DIRNAMES for part in rel_tail)
+                    or candidate.name.lower() in SKILL_PAYLOAD_CONTROL_FILENAMES
+                ):
+                    return True
+
+    # Hardlink/inode defense for benign basenames pointing at protected sidecars.
+    if not target_path.exists():
+        return False
+    with suppress(OSError, ValueError):
+        parts = target_path.resolve(strict=False).relative_to(root).parts
+        if len(parts) >= 4 and parts[0].lower() == "skills" and parts[1].lower() in SKILL_PAYLOAD_ALL_BUCKETS:
+            payload_root = root / parts[0] / parts[1] / parts[2]
+            for protected in payload_root.iterdir():
+                try:
+                    if protected.name.lower() in SKILL_PAYLOAD_CONTROL_FILENAMES and protected.exists() and protected.samefile(target_path):
+                        return True
+                except OSError:
+                    continue
+    skills_root = root / "skills"
+    if not skills_root.is_dir():
+        return False
+    for bucket in SKILL_PAYLOAD_ALL_BUCKETS:
+        bucket_root = skills_root / bucket
+        if not bucket_root.is_dir():
+            continue
+        for protected in bucket_root.glob("*/*"):
+            try:
+                if (
+                    protected.name.lower() in SKILL_PAYLOAD_CONTROL_FILENAMES
+                    and protected.exists()
+                    and protected.samefile(target_path)
+                ):
+                    return True
+            except OSError:
+                continue
+    return False
 
 
 def synthesize_payload_constraint(
@@ -334,11 +506,18 @@ __all__ = [
     "SKILL_PAYLOAD_ALL_BUCKETS",
     "SKILL_PAYLOAD_CONTROL_FILENAMES",
     "SKILL_PAYLOAD_CONTROL_DIRNAMES",
+    "SKILL_OWNER_STATE_FILENAMES",
+    "SKILL_OWNER_STATE_STEMS",
     "SkillPayloadPathError",
     "SkillPayloadTarget",
     "PayloadShortFormDecision",
     "decide_payload_short_form",
+    "is_skill_control_plane_path",
+    "is_skill_owner_state_alias",
+    "is_skill_owner_state_target",
+    "is_skill_payload_control_filename",
     "is_skill_payload_path",
+    "resolve_constrained_payload_path",
     "resolve_skill_payload_target",
     "synthesize_payload_constraint",
     "cross_skill_redirect_error",

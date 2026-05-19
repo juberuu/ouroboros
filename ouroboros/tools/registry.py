@@ -25,8 +25,13 @@ from ouroboros.tool_capabilities import CORE_TOOL_NAMES
 from ouroboros.utils import safe_relpath
 from ouroboros.contracts.task_constraint import TaskConstraint, normalize_task_constraint, resolve_payload_path
 from ouroboros.contracts.skill_payload_policy import (
+    SKILL_OWNER_STATE_FILENAMES,
+    SKILL_OWNER_STATE_STEMS,
+    SKILL_PAYLOAD_CONTROL_DIRNAMES,
+    SKILL_PAYLOAD_CONTROL_FILENAMES,
     cross_skill_redirect_error,
     decide_payload_short_form,
+    is_skill_payload_control_filename,
     is_skill_payload_path,
 )
 
@@ -234,20 +239,10 @@ _HEAL_MODE_ALLOWED_TOOLS = frozenset({
     "skill_preflight",
 })
 
-_HEAL_PROTECTED_PAYLOAD_FILENAMES = frozenset({
-    ".clawhub.json",
-    ".ouroboroshub.json",
-    ".self_authored.json",
-    # Protect provenance/update-lane markers during heal-mode payload edits.
-    "skill.openclaw.md",
-    ".seed-origin",
-})
+_HEAL_PROTECTED_PAYLOAD_FILENAMES = SKILL_PAYLOAD_CONTROL_FILENAMES
 
 
-_SKILL_OWNER_STATE_STEMS = (
-    "grants", "review", "review_history", "accepted_rebuttals",
-    "enabled", "clawhub", "deps", "self_authored", "auth_token",
-)
+_SKILL_OWNER_STATE_STEMS = SKILL_OWNER_STATE_STEMS
 _DETACHED_PROCESS_MARKERS = (
     "start_new_session",
     "new_session",
@@ -273,8 +268,7 @@ def _mentions_detached_process(text_lower: str) -> bool:
 
 
 def _heal_protected_payload_sidecar(path_text: str) -> bool:
-    name = pathlib.PurePosixPath(str(path_text or "").replace("\\", "/")).name
-    return name.lower() in _HEAL_PROTECTED_PAYLOAD_FILENAMES
+    return is_skill_payload_control_filename(path_text)
 
 
 def _skill_payload_cwd_allowed(cwd_text: str, drive_root: pathlib.Path) -> bool:
@@ -867,15 +861,13 @@ class ToolRegistry:
                 )
 
         # Lexical defense for skill control-plane sidecar writes via shell.
-        if any(name in cmd_path_lower for name in (
-            ".clawhub.json",
-            ".ouroboroshub.json",
-            ".self_authored.json",
-            "skill.openclaw.md",
-            ".seed-origin",
-            ".ouroboros_env",
-            "node_modules",
-        )) and any(w in cmd_lower for w in _SHELL_WRITE_INDICATORS):
+        if any(
+            name in cmd_path_lower
+            for name in (
+                *SKILL_PAYLOAD_CONTROL_FILENAMES,
+                *(SKILL_PAYLOAD_CONTROL_DIRNAMES - {"__pycache__"}),
+            )
+        ) and any(w in cmd_lower for w in _SHELL_WRITE_INDICATORS):
             return (
                 "⚠️ SAFETY_VIOLATION: Shell command would modify a skill "
                 "provenance / launcher seed / dependency marker (.clawhub.json, "
@@ -928,9 +920,8 @@ class ToolRegistry:
         root = pathlib.Path(self._ctx.drive_root) / "state" / "skills"
         if not root.is_dir():
             return out
-        protected_skill_state = {"grants.json", "review.json", "review_history.jsonl", "accepted_rebuttals.json", "enabled.json", "clawhub.json", "deps.json", "self_authored.json", "auth_token.json"}
         for path in root.glob("*/*"):
-            if path.name.lower() not in protected_skill_state:
+            if path.name.lower() not in SKILL_OWNER_STATE_FILENAMES:
                 continue
             try:
                 out[path] = path.read_text(encoding="utf-8")
@@ -943,10 +934,9 @@ class ToolRegistry:
         root = pathlib.Path(self._ctx.drive_root) / "state" / "skills"
         current = set()
         if root.is_dir():
-            protected_skill_state = {"grants.json", "review.json", "review_history.jsonl", "accepted_rebuttals.json", "enabled.json", "clawhub.json", "deps.json", "self_authored.json", "auth_token.json"}
             current.update(
                 path for path in root.glob("*/*")
-                if path.name.lower() in protected_skill_state
+                if path.name.lower() in SKILL_OWNER_STATE_FILENAMES
             )
         settings_path = pathlib.Path(_cfg.SETTINGS_PATH)
         current.add(settings_path)

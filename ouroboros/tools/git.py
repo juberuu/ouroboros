@@ -37,14 +37,14 @@ from ouroboros.tools.parallel_review import run_parallel_review as _run_parallel
 from ouroboros.tools.review_helpers import (
     _run_review_preflight_tests,
     format_review_history_entry,
+    paths_from_name_status,
+    paths_from_porcelain_line as _review_paths_from_porcelain_line,
 )
-from ouroboros.tools.core import is_skill_control_plane_path
+from ouroboros.tools.core import _data_skill_path, is_skill_control_plane_path
 from ouroboros.contracts.task_constraint import normalize_task_constraint, resolve_payload_path
 from ouroboros.contracts.skill_payload_policy import (
-    SkillPayloadPathError,
     cross_skill_redirect_error,
     decide_payload_short_form,
-    resolve_skill_payload_target,
 )
 _CONTENT_OMITTED_PREFIX = "<<CONTENT_OMITTED"
 log = logging.getLogger(__name__)
@@ -60,13 +60,6 @@ def _current_runtime_mode() -> str:
         return get_runtime_mode()
     except Exception:
         return "advanced"
-
-
-def _data_skill_path(path: str, drive_root: pathlib.Path) -> pathlib.Path | None:
-    try:
-        return resolve_skill_payload_target(pathlib.Path(drive_root), path).target_path
-    except SkillPayloadPathError:
-        return None
 
 
 def _protected_paths_block_message(paths, *, runtime_mode: str, action: str) -> str:
@@ -106,42 +99,6 @@ def _fingerprint_staged_diff(repo_dir: pathlib.Path) -> Dict[str, Any]:
         "reason": "",
         "chars": len(diff_text),
     }
-
-
-def _staged_paths_for_protection(repo_dir: pathlib.Path) -> Optional[list[str]]:
-    """Return staged paths including both sides of renames/copies."""
-    try:
-        raw = run_cmd(["git", "diff", "--cached", "--name-status", "-M"], cwd=repo_dir)
-    except Exception:
-        return None
-    paths: list[str] = []
-    for line in raw.splitlines():
-        if not line.strip():
-            continue
-        parts = line.split("\t")
-        status = parts[0]
-        code = status[:1]
-        if code in {"R", "C"} and len(parts) >= 3:
-            paths.extend([parts[1], parts[2]])
-        elif len(parts) >= 2:
-            paths.append(parts[-1])
-        elif parts:
-            paths.append(parts[0])
-    return paths
-
-
-def _paths_from_porcelain_line(line: str) -> list[str]:
-    """Return current/source paths; rename guards need both sides."""
-    if not line or len(line) < 4:
-        return []
-    status = line[:2]
-    entry = line[3:].strip()
-    if not entry:
-        return []
-    if ("R" in status or "C" in status) and " -> " in entry:
-        before, after = entry.rsplit(" -> ", 1)
-        return [before.strip(), after.strip()]
-    return [entry]
 
 
 def _handle_revalidation_failure(*args, **kwargs):
@@ -289,19 +246,32 @@ def _run_reviewed_stage_cycle(
     if not status.strip():
         return _failed("⚠️ GIT_NO_CHANGES: nothing to commit.")
 
-    # Advisory scope must match the full staged index, not caller-supplied paths.
     try:
-        staged_names_raw = run_cmd(
-            ["git", "diff", "--cached", "--name-only"],
-            cwd=ctx.repo_dir,
-        )
+        staged_status_raw = run_cmd(["git", "diff", "--cached", "--name-status", "-M"], cwd=ctx.repo_dir)
+        classification_paths = paths_from_name_status(staged_status_raw)
     except Exception as exc:
-        return _failed(f"⚠️ GIT_ERROR (staged-names): {_sanitize_git_error(str(exc))}")
-    advisory_paths = [
-        line.strip() for line in staged_names_raw.splitlines() if line.strip()
-    ] or None
-    classification_paths = _staged_paths_for_protection(pathlib.Path(ctx.repo_dir))
-    if classification_paths is None:
+        try:
+            staged_names_raw = run_cmd(
+                ["git", "diff", "--cached", "--name-only"],
+                cwd=ctx.repo_dir,
+            )
+        except Exception:
+            return _failed(f"⚠️ GIT_ERROR (staged-status): {_sanitize_git_error(str(exc))}")
+        classification_paths = [
+            line.strip() for line in staged_names_raw.splitlines() if line.strip()
+        ]
+    advisory_paths = classification_paths or None
+    if advisory_paths is None:
+        try:
+            staged_names_raw = run_cmd(
+                ["git", "diff", "--cached", "--name-only"],
+                cwd=ctx.repo_dir,
+            )
+        except Exception as exc:
+            return _failed(f"⚠️ GIT_ERROR (staged-names): {_sanitize_git_error(str(exc))}")
+        advisory_paths = [
+            line.strip() for line in staged_names_raw.splitlines() if line.strip()
+        ] or None
         classification_paths = advisory_paths or []
     protected_staged_paths = protected_paths_in(classification_paths)
     runtime_mode = _current_runtime_mode()
@@ -352,8 +322,6 @@ def _run_reviewed_stage_cycle(
             "block_reason": "no_advisory",
         }
 
-    # If advisory is bypassed, mirror its pytest preflight unless explicitly
-    # skipped or the diff is docs-only outside tests.
     _advisory_bypassed = skip_advisory_pre_review or not os.environ.get("ANTHROPIC_API_KEY", "")
     _diff_aware = (os.environ.get("OUROBOROS_PREFLIGHT_DIFF_AWARE", "true") or "true").strip().lower() in ("true", "1", "yes")
     _doc_only = _diff_aware and _diff_is_doc_only(classification_paths)
@@ -393,7 +361,6 @@ def _run_reviewed_stage_cycle(
                 "block_reason": "tests_preflight_blocked",
             }
     elif _advisory_bypassed:
-        # Emit visible reason when bypass preflight is skipped.
         if skip_tests and _doc_only:
             _skip_reason = "skip_tests + doc_only"
         elif skip_tests:
@@ -785,7 +752,6 @@ def _check_ci_status_after_push(repo_dir: pathlib.Path) -> str:
             "Accept": "application/vnd.github+json",
             "User-Agent": "ouroboros-ci-check",
         }
-        # Query and client-filter by head_sha to avoid stale run reports.
         import urllib.parse
         runs_url = (
             f"https://api.github.com/repos/{repo}/actions/runs"
@@ -797,7 +763,6 @@ def _check_ci_status_after_push(repo_dir: pathlib.Path) -> str:
         runs = [r for r in (data.get("workflow_runs") or []) if r.get("head_sha") == local_sha]
         if not runs:
             return "\n\n⏳ CI: Run not yet registered — check GitHub Actions in ~30s."
-        # Prefer active runs, else latest completed run for this SHA.
         if runs[0].get("status") in ("in_progress", "queued"):
             return "\n\n⏳ CI: Run in progress — check GitHub Actions for results."
         completed = next((r for r in runs if r.get("status") == "completed"), None)
@@ -1005,7 +970,6 @@ def _str_replace_editor(
         return f"⚠️ SKILL_REDIRECT_BLOCKED: {redirect_err}"
 
     data_skill_target = None
-    # Real skill_repair confinement wins over synthesized short-form context.
     if existing_tc and existing_tc.mode == "skill_repair":
         task_constraint = existing_tc
     else:
@@ -1115,7 +1079,6 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
     """Stage, review, and commit files with unified pre-commit review."""
     ctx.last_push_succeeded = False
     ctx._review_advisory = []
-    # Reset forensic fields so early exits cannot reuse previous attempt data.
     ctx._last_triad_models = []
     ctx._last_scope_model = ""
     ctx._last_triad_raw_results = []
@@ -1155,7 +1118,6 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
         try:
             run_cmd(["git", "checkout", ctx.branch_dev], cwd=ctx.repo_dir)
         except Exception as e:
-            # Dirty-tree checkout can fail even when already on branch_dev; verify branch/index.
             err_msg = _sanitize_git_error(str(e))
             already_on_target = False
             try:
@@ -1186,7 +1148,6 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
                     "the checkout failure as an incidental dirty-tree no-op.\n"
                     f"{unmerged}"
                 )
-            # Already on branch_dev with clean merge index; proceed to stage.
         outcome = _run_reviewed_stage_cycle(
             ctx,
             commit_message,
@@ -1334,7 +1295,7 @@ def _restore_to_head(ctx: ToolContext, confirm: bool = False,
     dirty_files = [
         path
         for line in status.splitlines()
-        for path in _paths_from_porcelain_line(line)
+        for path in _review_paths_from_porcelain_line(line)
     ]
     affected_protected = protected_paths_in(dirty_files)
     if paths:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from typing import Any, Dict
 
@@ -11,6 +10,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from ouroboros.config import load_settings
+from ouroboros.gateway._helpers import json_error, request_json_or
 from ouroboros.mcp_client import (
     canonical_server_id,
     get_manager,
@@ -20,10 +20,6 @@ from ouroboros.mcp_client import (
 
 
 log = logging.getLogger(__name__)
-
-
-def _error_response(message: str, *, status_code: int = 500) -> JSONResponse:
-    return JSONResponse({"error": message}, status_code=status_code)
 
 
 def _ensure_configured() -> None:
@@ -42,16 +38,13 @@ async def api_mcp_status(request: Request) -> JSONResponse:
         return JSONResponse(payload)
     except Exception as exc:
         log.exception("api_mcp_status failed")
-        return _error_response(f"{type(exc).__name__}: MCP status failed")
+        return json_error(f"{type(exc).__name__}: MCP status failed")
 
 
 async def api_mcp_refresh(request: Request) -> JSONResponse:
     """POST /api/mcp/refresh — refresh one or all servers."""
     try:
-        try:
-            body: Dict[str, Any] = await request.json()
-        except (json.JSONDecodeError, ValueError):
-            body = {}
+        body: Dict[str, Any] = await request_json_or(request, {})
         server_id = canonical_server_id(body.get("server_id") or "")
         await asyncio.to_thread(_ensure_configured)
         manager = get_manager()
@@ -62,16 +55,13 @@ async def api_mcp_refresh(request: Request) -> JSONResponse:
         return JSONResponse(outcome)
     except Exception as exc:
         log.exception("api_mcp_refresh failed")
-        return _error_response(f"{type(exc).__name__}: MCP refresh failed")
+        return json_error(f"{type(exc).__name__}: MCP refresh failed")
 
 
 async def api_mcp_test(request: Request) -> JSONResponse:
     """Probe unsaved or edited MCP config; rehydrate masked saved auth token."""
     try:
-        try:
-            body: Dict[str, Any] = await request.json()
-        except (json.JSONDecodeError, ValueError):
-            body = {}
+        body: Dict[str, Any] = await request_json_or(request, {})
         await asyncio.to_thread(_ensure_configured)
         manager = get_manager()
         server_id = canonical_server_id(body.get("server_id") or "")
@@ -109,4 +99,4 @@ async def api_mcp_test(request: Request) -> JSONResponse:
         return JSONResponse(outcome)
     except Exception as exc:
         log.exception("api_mcp_test failed")
-        return _error_response(f"{type(exc).__name__}: MCP test failed")
+        return json_error(f"{type(exc).__name__}: MCP test failed")

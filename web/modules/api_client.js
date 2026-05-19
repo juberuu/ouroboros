@@ -8,7 +8,7 @@ export async function apiFetch(url, init = {}) {
     return fetch(url, init);
 }
 
-export async function fetchJson(url, init = {}) {
+export async function fetchJson(url, init = {}, options = {}) {
     const response = await apiFetch(url, init);
     let data = null;
     try {
@@ -16,7 +16,7 @@ export async function fetchJson(url, init = {}) {
     } catch {
         data = { error: `non-json response (HTTP ${response.status})` };
     }
-    if (!response.ok) {
+    if (!response.ok || (options.rejectOkFalse && data && data.ok === false)) {
         const message = (data && (data.error || data.message)) || `HTTP ${response.status}`;
         const error = new Error(message);
         error.status = response.status;
@@ -25,6 +25,34 @@ export async function fetchJson(url, init = {}) {
         throw error;
     }
     return data;
+}
+
+export function jsonPost(url, payload = {}, options = {}) {
+    return fetchJson(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+    }, options);
+}
+
+export function cleanExtensionRoute(value) {
+    const route = String(value || '').trim().replace(/^\/+/, '');
+    const parts = route.split('/').filter(Boolean);
+    if (!route || route.includes('\\') || parts.some((part) => part === '.' || part === '..')) {
+        return '';
+    }
+    return parts.map(encodeURIComponent).join('/');
+}
+
+export function extensionRoutePrefix(skill) {
+    return `/api/extensions/${encodeURIComponent(skill)}/`;
+}
+
+export function extensionRoutePath(skill, route, params = null) {
+    const cleanRoute = cleanExtensionRoute(route);
+    if (!cleanRoute) return '';
+    const query = params instanceof URLSearchParams && String(params) ? `?${params}` : '';
+    return `${extensionRoutePrefix(skill)}${cleanRoute}${query}`;
 }
 
 export const apiClient = {

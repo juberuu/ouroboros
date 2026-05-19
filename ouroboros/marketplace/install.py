@@ -21,8 +21,13 @@ from ouroboros.marketplace.clawhub import (
     download as _registry_download,
     info as _registry_info,
 )
-from ouroboros.marketplace.fetcher import FetchError, StagedSkill, stage as _stage_archive
-from ouroboros.marketplace.isolated_deps import install_isolated_dependencies
+from ouroboros.marketplace.fetcher import (
+    FetchError,
+    StagedSkill,
+    land_staged_tree,
+    stage as _stage_archive,
+)
+from ouroboros.marketplace.isolated_deps import DEPS_STATE_FILENAME, install_isolated_dependencies
 from ouroboros.marketplace.provenance import (
     delete_provenance,
     read_provenance,
@@ -86,32 +91,7 @@ def _land_staged_into_data_plane(
             raise RuntimeError(
                 f"Target {target_dir} already exists — use overwrite=True to replace"
             )
-        sibling = target_dir.with_name(f"{target_dir.name}.replaced-{staged.sha256[:8]}")
-        try:
-            if sibling.exists():
-                shutil.rmtree(sibling, ignore_errors=True)
-            target_dir.rename(sibling)
-        except OSError as exc:
-            raise RuntimeError(
-                f"Failed to move existing skill out of the way: {exc}"
-            ) from exc
-        try:
-            shutil.move(str(staged.staging_dir), str(target_dir))
-        except OSError:
-            # Restore the previous skill if the new move fails.
-            try:
-                sibling.rename(target_dir)
-            except OSError:
-                log.error(
-                    "Catastrophic: failed to land new skill AND to restore "
-                    "old one. Manual recovery may be needed: %s, %s",
-                    target_dir, sibling,
-                )
-            raise
-        shutil.rmtree(sibling, ignore_errors=True)
-        return
-    target_dir.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(staged.staging_dir), str(target_dir))
+    land_staged_tree(staged.staging_dir, target_dir, replacement_suffix=f"replaced-{staged.sha256[:8]}")
 
 
 class _MarketplaceReviewCtx:
@@ -181,64 +161,41 @@ def install_skill(
     """
 
     def _progress(stage: str) -> None:
-        if progress_callback is None:
-            return
-        try:
-            progress_callback(stage)
-        except Exception:
-            log.debug("install_skill progress callback raised", exc_info=True)
+        if progress_callback is not None:
+            try:
+                progress_callback(stage)
+            except Exception:
+                log.debug("install_skill progress callback raised", exc_info=True)
+    fail = lambda error, sanitized_name="", **kwargs: InstallResult(ok=False, sanitized_name=sanitized_name, error=error, **kwargs)
 
     _progress("Resolving registry…")
 
     cleaned_slug = (slug or "").strip()
     if not cleaned_slug:
-        return InstallResult(
-            ok=False,
-            sanitized_name="",
-            error="slug must be non-empty",
-        )
+        return fail("slug must be non-empty")
 
     requested_version = (version or "").strip()
 
     try:
         summary = _registry_info(cleaned_slug)
     except ClawHubClientError as exc:
-        return InstallResult(
-            ok=False,
-            sanitized_name="",
-            error=f"Registry lookup failed: {exc}",
-        )
+        return fail(f"Registry lookup failed: {exc}")
 
     if summary.is_plugin:
-        return InstallResult(
-            ok=False,
-            sanitized_name="",
+        return fail(
+            "Package is an OpenClaw Node/TypeScript plugin and cannot be installed via the Ouroboros marketplace. Skills only.",
             summary=summary,
-            error=(
-                "Package is an OpenClaw Node/TypeScript plugin and cannot be "
-                "installed via the Ouroboros marketplace. Skills only."
-            ),
         )
 
     target_version = requested_version or summary.latest_version
     if not target_version:
-        return InstallResult(
-            ok=False,
-            sanitized_name="",
-            summary=summary,
-            error="Registry returned no version metadata; cannot resolve install target.",
-        )
+        return fail("Registry returned no version metadata; cannot resolve install target.", summary=summary)
 
     _progress(f"Downloading v{target_version}…")
     try:
         archive = _registry_download(cleaned_slug, version=target_version)
     except ClawHubClientError as exc:
-        return InstallResult(
-            ok=False,
-            sanitized_name="",
-            summary=summary,
-            error=f"Download failed: {exc}",
-        )
+        return fail(f"Download failed: {exc}", summary=summary)
 
     try:
         # archive.sha256 is a local recomputation check, not a MITM anchor.
@@ -252,13 +209,7 @@ def install_skill(
             staging_root=staging_root,
         )
     except FetchError as exc:
-        return InstallResult(
-            ok=False,
-            sanitized_name="",
-            summary=summary,
-            archive=archive,
-            error=f"Archive validation failed: {exc}",
-        )
+        return fail(f"Archive validation failed: {exc}", summary=summary, archive=archive)
 
     _progress("Adapting manifest…")
     try:
@@ -272,25 +223,17 @@ def install_skill(
     except Exception as exc:
         staged.cleanup()
         log.exception("adapter raised during install")
-        return InstallResult(
-            ok=False,
-            sanitized_name="",
-            summary=summary,
-            archive=archive,
-            staged=staged,
-            error=f"Adapter raised: {type(exc).__name__}: {exc}",
-        )
+        return fail(f"Adapter raised: {type(exc).__name__}: {exc}", summary=summary, archive=archive, staged=staged)
 
     if not adapter_result.ok:
         staged.cleanup()
-        return InstallResult(
-            ok=False,
+        return fail(
+            "Adapter rejected the package: " + "; ".join(adapter_result.blockers),
             sanitized_name=adapter_result.sanitized_name,
             summary=summary,
             archive=archive,
             staged=staged,
             adapter=adapter_result,
-            error="Adapter rejected the package: " + "; ".join(adapter_result.blockers),
         )
 
     _progress("Landing into data plane…")
@@ -301,14 +244,13 @@ def install_skill(
     except Exception as exc:
         staged.cleanup()
         log.exception("Failed to land staged skill into data plane")
-        return InstallResult(
-            ok=False,
+        return fail(
+            f"Could not land skill into data plane: {exc}",
             sanitized_name=adapter_result.sanitized_name,
             summary=summary,
             archive=archive,
             staged=staged,
             adapter=adapter_result,
-            error=f"Could not land skill into data plane: {exc}",
         )
     # Do not repoint staged.staging_dir to target_dir: cleanup() rmtrees it.
     # Persist provenance before review so reviewers can cross-check origin.
@@ -422,12 +364,9 @@ def uninstall_skill(
         or _sanitize_skill_name(cleaned) != cleaned
     ):
         return UninstallResult(
-            ok=False,
-            sanitized_name=sanitized_name,
-            error=(
-                "invalid sanitized_name — must round-trip through "
-                "_sanitize_skill_name and contain no path separators"
-            ),
+            False,
+            sanitized_name,
+            "invalid sanitized_name — must round-trip through _sanitize_skill_name and contain no path separators",
         )
 
     root = _clawhub_skills_root(drive_root).resolve()
@@ -435,34 +374,19 @@ def uninstall_skill(
     try:
         target.relative_to(root)
     except ValueError:
-        return UninstallResult(
-            ok=False,
-            sanitized_name=sanitized_name,
-            error=f"target escapes clawhub root: {target}",
-        )
+        return UninstallResult(False, sanitized_name, f"target escapes clawhub root: {target}")
     if target == root:
-        return UninstallResult(
-            ok=False,
-            sanitized_name=sanitized_name,
-            error="refusing to delete the clawhub bucket root",
-        )
+        return UninstallResult(False, sanitized_name, "refusing to delete the clawhub bucket root")
 
     if not target.is_dir():
-        return UninstallResult(
-            ok=False,
-            sanitized_name=sanitized_name,
-            error=f"Not found: {target}",
-        )
+        return UninstallResult(False, sanitized_name, f"Not found: {target}")
 
     # Do not remove folders the marketplace pipeline did not install.
     if not (target / ".clawhub.json").is_file():
         return UninstallResult(
-            ok=False,
-            sanitized_name=sanitized_name,
-            error=(
-                f"refusing to remove {cleaned!r}: no .clawhub.json "
-                "sidecar (not a marketplace-installed skill)"
-            ),
+            False,
+            sanitized_name,
+            f"refusing to remove {cleaned!r}: no .clawhub.json sidecar (not a marketplace-installed skill)",
         )
 
     # Unload in-process extensions before deleting their source tree.
@@ -474,13 +398,14 @@ def uninstall_skill(
     try:
         shutil.rmtree(target)
     except OSError as exc:
-        return UninstallResult(
-            ok=False,
-            sanitized_name=sanitized_name,
-            error=f"Failed to remove {target}: {exc}",
-        )
+        return UninstallResult(False, sanitized_name, f"Failed to remove {target}: {exc}")
+    try:
+        from ouroboros.skill_loader import skill_state_dir
+        (skill_state_dir(drive_root, cleaned) / DEPS_STATE_FILENAME).unlink(missing_ok=True)
+    except Exception:
+        log.debug("failed to clear deps state for %s", cleaned, exc_info=True)
     delete_provenance(drive_root, cleaned)
-    return UninstallResult(ok=True, sanitized_name=cleaned)
+    return UninstallResult(True, cleaned)
 
 
 def update_skill(
@@ -495,29 +420,21 @@ def update_skill(
     record = read_provenance(drive_root, sanitized_name)
 
     def _progress(stage: str) -> None:
-        if progress_callback is None:
-            return
-        try:
-            progress_callback(stage)
-        except Exception:
-            log.debug("update_skill progress callback raised", exc_info=True)
+        if progress_callback is not None:
+            try:
+                progress_callback(stage)
+            except Exception:
+                log.debug("update_skill progress callback raised", exc_info=True)
 
     if not record:
         return InstallResult(
-            ok=False,
-            sanitized_name=sanitized_name,
-            error=(
-                f"No clawhub.json provenance for {sanitized_name!r} — "
-                "this skill was not installed via the marketplace."
-            ),
+            False,
+            sanitized_name,
+            error=f"No clawhub.json provenance for {sanitized_name!r} — this skill was not installed via the marketplace.",
         )
     slug = str(record.get("slug") or "").strip()
     if not slug:
-        return InstallResult(
-            ok=False,
-            sanitized_name=sanitized_name,
-            error="provenance is missing slug",
-        )
+        return InstallResult(False, sanitized_name, error="provenance is missing slug")
     # Preserve live extension state across unload/swap when possible.
     was_live = False
     try:

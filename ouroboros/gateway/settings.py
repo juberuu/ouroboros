@@ -21,7 +21,7 @@ from ouroboros.config import (
     load_settings,
     save_settings,
 )
-from ouroboros.gateway._helpers import request_drive_root
+from ouroboros.gateway._helpers import json_error, json_exception, request_drive_root
 from ouroboros.onboarding_wizard import build_onboarding_html
 from ouroboros.platform_layer import is_container_env
 from ouroboros.server_runtime import (
@@ -65,9 +65,6 @@ def _is_wildcard_host(host: str) -> bool:
 def _trust_nonlocal_bind_without_password_enabled() -> bool:
     raw = os.environ.get("OUROBOROS_TRUST_NONLOCAL_BIND_WITHOUT_PASSWORD", "")
     return str(raw or "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-from ouroboros.platform_layer import is_container_env
 
 
 def _build_network_meta(bind_host: str, bind_port: int) -> dict:
@@ -433,28 +430,20 @@ async def api_settings_post(request: Request) -> JSONResponse:
             trust_unauth = _trust_nonlocal_bind_without_password_enabled()
             allowed_saved_hosts = {"", "127.0.0.1", "localhost", "::1", "[::1]", "0.0.0.0", "::", "[::]"}
             if desired_host and desired_host not in allowed_saved_hosts:
-                return JSONResponse(
-                    {
-                        "error": (
-                            "Server Bind Host in Settings supports localhost or wildcard "
-                            "binds only (127.0.0.1 or 0.0.0.0). Specific LAN IP binds "
-                            "are manual/env-only so the desktop launcher can keep using "
-                            "a reliable loopback health check."
-                        )
-                    },
-                    status_code=400,
+                return json_error(
+                    "Server Bind Host in Settings supports localhost or wildcard "
+                    "binds only (127.0.0.1 or 0.0.0.0). Specific LAN IP binds "
+                    "are manual/env-only so the desktop launcher can keep using "
+                    "a reliable loopback health check.",
+                    400,
                 )
             if desired_host and not is_loopback_host(desired_host) and not desired_password and not trust_unauth:
-                return JSONResponse(
-                    {
-                        "error": (
-                            "Setting a non-localhost Server Bind Host through the web UI "
-                            "requires a Network Password in the same save. For manual "
-                            "trusted-lab/Docker setups, stop Ouroboros and edit "
-                            "settings.json or environment variables directly."
-                        )
-                    },
-                    status_code=400,
+                return json_error(
+                    "Setting a non-localhost Server Bind Host through the web UI "
+                    "requires a Network Password in the same save. For manual "
+                    "trusted-lab/Docker setups, stop Ouroboros and edit "
+                    "settings.json or environment variables directly.",
+                    400,
                 )
             current_effective_host = (
                 str(_current_bind_host(request) or "").strip()
@@ -468,24 +457,17 @@ async def api_settings_post(request: Request) -> JSONResponse:
                 and not desired_password
                 and not trust_unauth
             ):
-                return JSONResponse(
-                    {
-                        "error": (
-                            "Cannot clear Network Password while the running server is "
-                            "still bound to a non-localhost interface. First save a "
-                            "loopback Server Bind Host and restart, then clear the password."
-                        )
-                    },
-                    status_code=400,
+                return json_error(
+                    "Cannot clear Network Password while the running server is "
+                    "still bound to a non-localhost interface. First save a "
+                    "loopback Server Bind Host and restart, then clear the password.",
+                    400,
                 )
         except Exception:
             log.warning("Could not validate network bind settings", exc_info=True)
         current, provider_defaults_changed, provider_default_keys = apply_runtime_provider_defaults(current)
         if str(current.get("LOCAL_MODEL_SOURCE", "") or "").strip() and not has_supervisor_provider(current):
-            return JSONResponse(
-                {"error": "Local-only setups must route at least one model to the local runtime."},
-                status_code=400,
-            )
+            return json_error("Local-only setups must route at least one model to the local runtime.", 400)
         all_changed = [
             k for k in current
             if str(current.get(k, "") or "") != str(old_settings.get(k, "") or "")
@@ -611,4 +593,4 @@ async def api_settings_post(request: Request) -> JSONResponse:
             resp["warnings"] = warnings
         return JSONResponse(resp)
     except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=400)
+        return json_exception(e, 400)

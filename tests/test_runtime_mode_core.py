@@ -339,7 +339,7 @@ def test_onboarding_js_exposes_skills_repo_path_input_and_binding():
     assert 'id="skills-repo-path"' in src
     assert 'data-clear="skills-repo-path"' in src
     assert "state.skillsRepoPath = skillsInput.value" in src
-    assert "target === 'skills-repo-path'" in src
+    assert "'skills-repo-path': () => { state.skillsRepoPath = ''; }" in src
 
 
 def test_onboarding_css_has_three_column_variant():

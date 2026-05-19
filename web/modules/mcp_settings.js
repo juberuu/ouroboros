@@ -1,4 +1,4 @@
-import { apiFetch } from './api_client.js';
+import { jsonPost } from './api_client.js';
 /** MCP settings cards; preserves masked auth tokens until the user edits them. */
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 
@@ -36,6 +36,10 @@ function notifyChanged() {
     if (typeof onChangeCallback === 'function') {
         try { onChangeCallback(); } catch (err) { /* swallow */ }
     }
+}
+
+function toolCountLabel(count) {
+    return `${count} tool${count === 1 ? '' : 's'}`;
 }
 
 function renderServerCard(server, index) {
@@ -242,24 +246,11 @@ function bindCardEvents(card) {
                 // Masked token + server_id lets Test use saved auth with edited URL/transport.
                 const sid = String(server.id || '').trim();
                 const tokenMasked = looksMasked(server.auth_token);
-                let body;
-                if (sid && tokenMasked) {
-                    body = JSON.stringify({ server_id: sid, server: { ...server } });
-                } else {
-                    body = JSON.stringify({ server: serverForTest(server) });
-                }
-                const resp = await apiFetch('/api/mcp/test', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body,
-                });
-                const data = await resp.json().catch(() => ({}));
-                if (!resp.ok || data.ok === false) {
-                    setMessage(`Test failed: ${data.error || `HTTP ${resp.status}`}`, 'danger');
-                } else {
-                    const count = Number(data.tool_count || 0);
-                    setMessage(`Test OK — ${count} tool${count === 1 ? '' : 's'} reported.`, 'ok');
-                }
+                const body = sid && tokenMasked
+                    ? { server_id: sid, server: { ...server } }
+                    : { server: serverForTest(server) };
+                const data = await jsonPost('/api/mcp/test', body, { rejectOkFalse: true });
+                setMessage(`Test OK — ${toolCountLabel(Number(data.tool_count || 0))} reported.`, 'ok');
             } catch (err) {
                 setMessage(`Test failed: ${err && err.message ? err.message : err}`, 'danger');
             } finally {
@@ -281,18 +272,9 @@ function bindCardEvents(card) {
             refreshBtn.disabled = true;
             setMessage('Refreshing tools...', 'muted');
             try {
-                const resp = await apiFetch('/api/mcp/refresh', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ server_id: sid }),
-                });
-                const data = await resp.json().catch(() => ({}));
-                if (!resp.ok || data.ok === false) {
-                    setMessage(`Refresh failed: ${data.error || `HTTP ${resp.status}`}`, 'danger');
-                } else {
-                    setMessage(`Refreshed — ${Number(data.tool_count || 0)} tools discovered.`, 'ok');
-                    await refreshStatus();
-                }
+                const data = await jsonPost('/api/mcp/refresh', { server_id: sid }, { rejectOkFalse: true });
+                setMessage(`Refreshed — ${Number(data.tool_count || 0)} tools discovered.`, 'ok');
+                await refreshStatus();
             } catch (err) {
                 setMessage(`Refresh failed: ${err && err.message ? err.message : err}`, 'danger');
             } finally {
@@ -383,11 +365,7 @@ function bindRefreshAllButton() {
         const wasText = btn.textContent;
         btn.textContent = 'Refreshing...';
         try {
-            await apiFetch('/api/mcp/refresh', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({}),
-            });
+            await jsonPost('/api/mcp/refresh', {}, { rejectOkFalse: true });
             await refreshStatus();
         } finally {
             btn.disabled = false;

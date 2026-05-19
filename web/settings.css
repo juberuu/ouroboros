@@ -48,9 +48,9 @@
 .settings-shell .form-section,
 .settings-card,
 .settings-provider-card {
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    border: 1px solid var(--surface-border);
     border-radius: 18px;
-    background: rgba(255, 255, 255, 0.03);
+    background: var(--surface-card);
 }
 
 .settings-shell .form-section,
@@ -138,8 +138,8 @@
 }
 
 .settings-extension-section {
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--surface-border);
+    background: var(--surface-card);
     border-radius: 14px;
     padding: 12px 14px;
 }
@@ -201,12 +201,13 @@
 }
 
 .settings-shell .form-field input,
-.settings-shell .form-field select {
+.settings-shell .form-field select,
+.model-picker input {
     width: 100%;
     min-width: 0;
     padding: 10px 12px;
     border-radius: 12px;
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    border: 1px solid var(--surface-border);
     background: rgba(26, 21, 32, 0.88);
     color: var(--text-primary);
     font-size: 14px;
@@ -216,14 +217,16 @@
 }
 
 .settings-shell .form-field input::placeholder,
-.secret-input::placeholder {
+.secret-input::placeholder,
+.model-picker input::placeholder {
     color: rgba(255, 255, 255, 0.24);
 }
 
 .settings-shell .form-field input:focus,
-.settings-shell .form-field select:focus {
-    border-color: rgba(232, 93, 111, 0.4);
-    box-shadow: 0 0 0 3px rgba(232, 93, 111, 0.10);
+.settings-shell .form-field select:focus,
+.model-picker input:focus {
+    border-color: var(--focus-accent-border);
+    box-shadow: 0 0 0 3px var(--focus-accent-ring);
 }
 
 .settings-shell .form-field select {
@@ -246,8 +249,8 @@
     gap: 14px;
     padding: 14px;
     border-radius: 16px;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--surface-border);
+    background: var(--surface-card);
 }
 
 .mcp-server-card-head {
@@ -473,20 +476,22 @@
     padding: 0 12px;
 }
 
-.settings-model-grid {
+.settings-model-grid,
+.settings-effort-grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 14px;
 }
 
-.settings-model-card {
+.settings-model-card,
+.settings-effort-card {
     display: flex;
     flex-direction: column;
     gap: 12px;
     padding: 16px;
     border-radius: 16px;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    background: rgba(255, 255, 255, 0.025);
+    border: 1px solid var(--surface-border);
+    background: var(--surface-card-soft);
     min-width: 0;
 }
 
@@ -511,29 +516,6 @@
 
 .model-picker {
     position: relative;
-}
-
-.model-picker input {
-    width: 100%;
-    min-width: 0;
-    padding: 10px 12px;
-    border-radius: 12px;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    background: rgba(26, 21, 32, 0.88);
-    color: var(--text-primary);
-    font-size: 14px;
-    font-family: inherit;
-    outline: none;
-    transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
-}
-
-.model-picker input:focus {
-    border-color: rgba(232, 93, 111, 0.4);
-    box-shadow: 0 0 0 3px rgba(232, 93, 111, 0.10);
-}
-
-.model-picker input::placeholder {
-    color: rgba(255, 255, 255, 0.24);
 }
 
 .model-picker-results {
@@ -580,20 +562,8 @@
     font-size: 11px;
 }
 
-.settings-effort-grid {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 14px;
-}
-
 .settings-effort-card {
-    display: flex;
-    flex-direction: column;
     gap: 10px;
-    padding: 16px;
-    border-radius: 16px;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    background: rgba(255, 255, 255, 0.025);
 }
 
 .settings-effort-card label {

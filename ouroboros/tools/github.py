@@ -14,7 +14,6 @@ from ouroboros.utils import truncate_review_artifact as _truncate_with_notice
 log = logging.getLogger(__name__)
 
 def github_token_from_env_or_settings() -> str:
-    """Return configured GitHub token without exposing it to callers."""
     from ouroboros.config import load_settings
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
     if not token:
@@ -26,7 +25,6 @@ def github_token_from_env_or_settings() -> str:
 
 
 def _gh_env(ctx: ToolContext) -> dict:
-    """Inject GitHub token env for gh CLI without interactive auth state."""
     env = os.environ.copy()
     token = github_token_from_env_or_settings()
     if token:
@@ -36,7 +34,6 @@ def _gh_env(ctx: ToolContext) -> dict:
 
 
 def _gh_cmd(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Optional[str] = None) -> str:
-    """Run gh CLI with token env and return stdout or a compact error."""
     cmd = ["gh"] + args
     try:
         res = subprocess.run(
@@ -60,7 +57,6 @@ def _gh_cmd(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Op
         return f"⚠️ GH_ERROR: {e}"
 
 def _list_issues(ctx: ToolContext, state: str = "open", labels: str = "", limit: int = 20) -> str:
-    """List GitHub issues with optional filters."""
     args = [
         "issue", "list",
         "--state", state,
@@ -99,7 +95,6 @@ def _list_issues(ctx: ToolContext, state: str = "open", labels: str = "", limit:
 
 
 def _get_issue(ctx: ToolContext, number: int) -> str:
-    """Get a single issue with full details and comments."""
     if number <= 0:
         return "⚠️ issue number must be positive"
 
@@ -144,14 +139,12 @@ def _get_issue(ctx: ToolContext, number: int) -> str:
 
 
 def _comment_on_issue(ctx: ToolContext, number: int, body: str) -> str:
-    """Add a comment to an issue."""
     if number <= 0:
         return "⚠️ issue number must be positive"
 
     if not body or not body.strip():
         return "⚠️ Comment body cannot be empty."
 
-    # Body via stdin prevents argument injection.
     args = ["issue", "comment", str(number), "--body-file", "-"]
     raw = _gh_cmd(args, ctx, input_data=body)
     if raw.startswith("⚠️"):
@@ -160,7 +153,6 @@ def _comment_on_issue(ctx: ToolContext, number: int, body: str) -> str:
 
 
 def _close_issue(ctx: ToolContext, number: int, comment: str = "") -> str:
-    """Close an issue with optional closing comment."""
     if number <= 0:
         return "⚠️ issue number must be positive"
 
@@ -176,7 +168,6 @@ def _close_issue(ctx: ToolContext, number: int, comment: str = "") -> str:
     return f"✅ Issue #{number} closed."
 
 def _list_prs(ctx: ToolContext, state: str = "open", limit: int = 20) -> str:
-    """List GitHub pull requests."""
     args = [
         "pr", "list",
         "--state", state,
@@ -213,7 +204,6 @@ def _list_prs(ctx: ToolContext, state: str = "open", limit: int = 20) -> str:
 
 
 def _get_pr(ctx: ToolContext, number: int) -> str:
-    """Get PR metadata, diff summary, review context, and integration steps."""
     if number <= 0:
         return "⚠️ PR number must be positive."
 
@@ -310,15 +300,9 @@ def _get_pr(ctx: ToolContext, number: int) -> str:
         f"\n**Integration steps:**\n"
         f"  1. fetch_pr_ref(pr_number={number})\n"
         f"  2. create_integration_branch(pr_number={number})\n"
-        f"  3. cherry_pick_pr_commits(shas=[...])   # SHAs listed above; original author preserved\n"
-        f"     # If all PR commits carry a placeholder identity (e.g. Ouroboros <ouroboros@local.mac>\n"
-        f"     # from a contributor running Ouroboros locally without git config), add override_author:\n"
-        f"     #   cherry_pick_pr_commits(shas=[...], override_author={{'name': 'real-name', 'email': 'id+login@users.noreply.github.com'}})\n"
-        f"     # to attribute commits to the real GitHub identity.\n"
-        f"  4. stage_adaptations()                  # optional: stage Ouroboros adaptation changes\n"
-        f"                                          #   (do NOT repo_commit here — see below)\n"
+        f"  3. cherry_pick_pr_commits(shas=[...])  # SHAs above; use override_author only for placeholder identities\n"
+        f"  4. stage_adaptations()                 # optional; do NOT repo_commit on the integration branch\n"
         f"  5. stage_pr_merge(branch='integrate/pr-{number}') → advisory_pre_review → repo_commit\n"
-        f"     # staged adaptations from step 4 land in the merge commit automatically\n"
         f"  6. comment_on_pr(number={number}, body='Integrated as ...')"
     )
 
@@ -326,7 +310,6 @@ def _get_pr(ctx: ToolContext, number: int) -> str:
 
 
 def _comment_on_pr(ctx: ToolContext, number: int, body: str) -> str:
-    """Add a PR comment via stdin to avoid argument injection."""
     if number <= 0:
         return "⚠️ PR number must be positive."
     if not (body or "").strip():
@@ -340,11 +323,9 @@ def _comment_on_pr(ctx: ToolContext, number: int, body: str) -> str:
 
 
 def _create_issue(ctx: ToolContext, title: str, body: str = "", labels: str = "") -> str:
-    """Create a new GitHub issue."""
     if not title or not title.strip():
         return "⚠️ Issue title cannot be empty."
 
-    # --flag=value prevents argument injection.
     args = ["issue", "create", f"--title={title}"]
     if body:
         args.append("--body-file=-")

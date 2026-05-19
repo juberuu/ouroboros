@@ -1,10 +1,4 @@
-"""Git PR integration tools.
-
-Cherry-picks preserve source author/date while setting a deterministic
-repo-local committer. Adaptations are staged and merged with
-``--no-ff --no-commit`` so the reviewed ``repo_commit`` creates the only final
-commit on ``ouroboros``.
-"""
+"""Git PR integration tools with author-preserving cherry-picks and reviewed merges."""
 
 from __future__ import annotations
 
@@ -26,7 +20,6 @@ _PR_BRANCH_PREFIX = "integrate/pr-"
 
 def _g(args: List[str], cwd: pathlib.Path,
        env: Optional[dict] = None, timeout: int = 60) -> subprocess.CompletedProcess:
-    """Run a git subprocess; returns CompletedProcess (returncode, stdout, stderr)."""
     return subprocess.run(
         ["git"] + args, cwd=str(cwd),
         capture_output=True, text=True, timeout=timeout,
@@ -35,7 +28,6 @@ def _g(args: List[str], cwd: pathlib.Path,
 
 
 def _ouroboros_committer_env(repo_dir: pathlib.Path) -> dict:
-    """Return explicit GIT_COMMITTER_* from repo-local config or defaults."""
     env = os.environ.copy()
     name_r = subprocess.run(
         ["git", "config", "--local", "user.name"], cwd=str(repo_dir),
@@ -47,7 +39,6 @@ def _ouroboros_committer_env(repo_dir: pathlib.Path) -> dict:
     )
     local_name = name_r.stdout.strip() if name_r.returncode == 0 else ""
     local_email = email_r.stdout.strip() if email_r.returncode == 0 else ""
-    # Fallback as a pair to avoid mixed identities and global git leakage.
     if local_name and local_email:
         env["GIT_COMMITTER_NAME"] = local_name
         env["GIT_COMMITTER_EMAIL"] = local_email
@@ -58,7 +49,6 @@ def _ouroboros_committer_env(repo_dir: pathlib.Path) -> dict:
 
 
 def _validate_git_ref_arg(value: str, param_name: str) -> Optional[str]:
-    """Return an error if a ref argument would be parsed as a git option."""
     if value.startswith("-"):
         return (
             f"⚠️ INVALID_ARG: {param_name!r} must not start with '-' "
@@ -67,16 +57,11 @@ def _validate_git_ref_arg(value: str, param_name: str) -> Optional[str]:
     return None
 
 
-# These characters corrupt git's ``--author="Name <email>"`` metadata format.
 _AUTHOR_FORBIDDEN_CHARS = ("\r", "\n", "\t", "<", ">", "\x00")
-
-
-# Commit-SHA-only contract; reject symbolic refs before git can resolve them.
 _SHA_PATTERN = re.compile(r"^[0-9a-f]{7,40}$", re.IGNORECASE)
 
 
 def _validate_override_author(override: Optional[dict]) -> Optional[str]:
-    """Validate override_author; return None or a CHERRY_PICK_ERROR string."""
     if override is None:
         return None
     if not isinstance(override, dict):
@@ -113,7 +98,6 @@ def _validate_override_author(override: Optional[dict]) -> Optional[str]:
 
 
 def _fetch_pr_ref(ctx: ToolContext, pr_number: int, remote: str = "origin") -> str:
-    """Fetch a PR head ref into local ``pr/{n}``, force-updating rebases."""
     if pr_number <= 0:
         return "⚠️ PR_FETCH_ERROR: pr_number must be a positive integer."
     err = _validate_git_ref_arg(remote, "remote")
@@ -122,7 +106,6 @@ def _fetch_pr_ref(ctx: ToolContext, pr_number: int, remote: str = "origin") -> s
 
     repo_dir = pathlib.Path(ctx.repo_dir)
     local_ref = f"pr/{pr_number}"
-    # '+' prefix allows non-fast-forward updates (rebased / force-pushed PRs)
     refspec = f"+refs/pull/{pr_number}/head:{local_ref}"
 
     lock = _acquire_git_lock(ctx)
@@ -164,7 +147,6 @@ def _create_integration_branch(
     pr_number: int,
     base_branch: str = "ouroboros",
 ) -> str:
-    """Create a fresh integration branch for cherry-picks and staged adaptations."""
     if pr_number <= 0:
         return "⚠️ PR_BRANCH_ERROR: pr_number must be a positive integer."
     err = _validate_git_ref_arg(base_branch, "base_branch")
@@ -180,8 +162,6 @@ def _create_integration_branch(
             f"To start fresh: git branch -D {branch_name}"
         )
 
-    # Dirty trees contaminate the integration branch, especially because
-    # stage_adaptations later runs `git add -A`.
     status_r = _g(["status", "--porcelain"], repo_dir)
     if status_r.returncode == 0 and status_r.stdout.strip():
         return (
@@ -233,7 +213,6 @@ def _rollback_failed_amend(
     amend_r: subprocess.CompletedProcess,
     applied: List[str],
 ) -> str:
-    """Rollback the just-created cherry-pick commit after a failed author amend."""
     amend_err = (amend_r.stderr or amend_r.stdout or "").strip()
     _g(["reset", "--hard", "HEAD~1"], repo_dir)
     applied.pop()
@@ -256,11 +235,9 @@ def _validate_sha_list(
     shas: List[str],
     repo_dir: pathlib.Path,
 ) -> object:
-    """Resolve commit SHAs only; reject symbolic refs, tags, trees, and blobs."""
     resolved: List[str] = []
     for sha in shas:
         sha = sha.strip()
-        # Hex-only input rejects symbolic refs before git can dereference them.
         if not _SHA_PATTERN.match(sha):
             return (
                 f"⚠️ CHERRY_PICK_ERROR: '{sha}' is not a commit SHA "
@@ -275,7 +252,6 @@ def _validate_sha_list(
                 f"Verify it was fetched with fetch_pr_ref and is a commit object."
             )
         resolved.append(r.stdout.strip())
-        # Reject tag refs and non-commit objects.
         type_r = _g(["cat-file", "-t", sha], repo_dir)
         if type_r.returncode != 0 or type_r.stdout.strip() != "commit":
             obj_type = type_r.stdout.strip() or "unknown"
@@ -294,7 +270,6 @@ def _amend_author_on_head(
     orig_date: str,
     committer_env: dict,
 ) -> subprocess.CompletedProcess:
-    """Amend HEAD author while preserving source date and committer identity."""
     author_str = f'{override_author["name"]} <{override_author["email"]}>'
     return _g(
         ["commit", "--amend", "--no-edit",
@@ -310,13 +285,6 @@ def _cherry_pick_pr_commits(
     stop_on_conflict: bool = True,
     override_author: Optional[dict] = None,
 ) -> str:
-    """Replay PR commits, preserving authorship unless one override is supplied.
-
-    ``override_author`` amends every applied commit to one identity while keeping
-    the source author date; amend failures rollback the just-created commit.
-    Conflicts either abort cleanly or are explicitly reported as skipped.
-    """
-    # Validate override_author before touching the repo.
     override_error = _validate_override_author(override_author)
     if override_error:
         return override_error
@@ -335,13 +303,11 @@ def _cherry_pick_pr_commits(
             f"Run create_integration_branch first."
         )
 
-    # Validate all SHAs before starting to avoid partial application on typos.
     resolved_or_error = _validate_sha_list(shas, repo_dir)
     if isinstance(resolved_or_error, str):
         return resolved_or_error
     resolved = resolved_or_error
 
-    # Check clean tracked tree.
     if (_g(["diff", "--cached", "--name-only"], repo_dir).stdout.strip()
             or _g(["diff", "--name-only"], repo_dir).stdout.strip()):
         return (
@@ -349,7 +315,6 @@ def _cherry_pick_pr_commits(
             "Commit or restore to HEAD before cherry-picking."
         )
 
-    # Use explicit committer identity for deterministic attribution.
     committer_env = _ouroboros_committer_env(repo_dir)
 
     lock = _acquire_git_lock(ctx)
@@ -358,12 +323,10 @@ def _cherry_pick_pr_commits(
     attribution_lines: List[str] = []
     try:
         for sha in resolved:
-            # Capture source author date before cherry-pick for override amend.
             orig_date = ""
             if override_author is not None:
                 date_r = _g(["log", "-1", "--format=%aI", sha], repo_dir)
                 if date_r.returncode != 0 or not date_r.stdout.strip():
-                    # If history already changed, advisory must be stale.
                     if applied:
                         _invalidate_advisory(
                             ctx, changed_paths=[], mutation_root=repo_dir,
@@ -378,13 +341,11 @@ def _cherry_pick_pr_commits(
                     )
                 orig_date = date_r.stdout.strip()
 
-            # Replay as-is; committer_env supplies deterministic committer.
             result = _g(["cherry-pick", "--no-edit", sha], repo_dir, env=committer_env)
             if result.returncode != 0:
                 err = (result.stderr or result.stdout or "").strip()
                 _g(["cherry-pick", "--abort"], repo_dir)
                 if stop_on_conflict:
-                    # Earlier successful cherry-picks changed repo history.
                     if applied:
                         _invalidate_advisory(
                             ctx, changed_paths=[], mutation_root=repo_dir,
@@ -400,7 +361,6 @@ def _cherry_pick_pr_commits(
 
             applied.append(sha[:12])
 
-            # Override author via amend while preserving captured source date.
             if override_author is not None:
                 amend_r = _amend_author_on_head(
                     repo_dir, override_author, orig_date, committer_env,
@@ -409,7 +369,6 @@ def _cherry_pick_pr_commits(
                     return _rollback_failed_amend(
                         ctx, repo_dir, sha, amend_r, applied,
                     )
-            # Co-authored-by should reference the real source author.
             author_r = _g(["log", "-1", "--format=%an <%ae>", sha], repo_dir)
             if author_r.returncode != 0:
                 continue
@@ -457,9 +416,6 @@ def _cherry_pick_pr_commits(
             f"Resolve manually or re-run with those SHAs omitted."
         )
 
-    # Rebuild author_hint with the path-appropriate lead sentence. The hint is
-    # constructed inside the loop from attribution_lines; we just need to swap
-    # the lead paragraph based on override_author.
     if attribution_lines:
         co_lines = "\n".join(f"Co-authored-by: {a}" for a in attribution_lines)
         author_hint = (
@@ -485,11 +441,6 @@ def _cherry_pick_pr_commits(
 
 
 def _stage_adaptations(ctx: ToolContext) -> str:
-    """Stage adaptation work on an integration branch without committing.
-
-    Call ``stage_pr_merge`` next; running ``repo_commit`` here would checkout
-    ``ouroboros`` and lose the staged integration-branch state.
-    """
     repo_dir = pathlib.Path(ctx.repo_dir)
 
     head_r = _g(["rev-parse", "--abbrev-ref", "HEAD"], repo_dir)
@@ -526,14 +477,12 @@ def _stage_pr_merge(
     ctx: ToolContext,
     branch: str,
 ) -> str:
-    """Stage a no-ff/no-commit merge for finalization by reviewed repo_commit."""
     branch = (branch or "").strip()
     if not branch:
         return "⚠️ PR_MERGE_ERROR: branch parameter is required."
     err = _validate_git_ref_arg(branch, "branch")
     if err:
         return f"⚠️ PR_MERGE_ERROR: {err}"
-    # repo_commit starts on branch_dev, so any other target would lose MERGE_HEAD.
     target_branch = ctx.branch_dev
     if branch == target_branch:
         return (
@@ -546,7 +495,6 @@ def _stage_pr_merge(
     if not _g(["branch", "--list", branch], repo_dir).stdout.strip():
         return f"⚠️ PR_MERGE_ERROR: Branch '{branch}' does not exist."
 
-    # Must snapshot adaptations from the integration branch HEAD.
     head_r = _g(["rev-parse", "--abbrev-ref", "HEAD"], pathlib.Path(ctx.repo_dir))
     current = head_r.stdout.strip() if head_r.returncode == 0 else ""
     if current != branch:
@@ -557,8 +505,6 @@ def _stage_pr_merge(
 
     lock = _acquire_git_lock(ctx)
     try:
-        # Only staged adaptations are allowed; unstaged or untracked files would
-        # be lost or accidentally swept into the final merge commit.
         porcelain = _g(["status", "--porcelain"], repo_dir).stdout or ""
         dirty_lines = [
             ln for ln in porcelain.splitlines()
@@ -572,8 +518,6 @@ def _stage_pr_merge(
                 f"Unclean files:\n{sample}"
             )
 
-        # Carry staged adaptations across checkout via a binary patch, then
-        # re-apply with --index so index and worktree stay consistent.
         adaptation_patch: bytes = b""
         adapt_paths: list = []
         staged_before = _g(["diff", "--cached", "--name-only"], repo_dir).stdout.strip()
@@ -582,7 +526,6 @@ def _stage_pr_merge(
                 ["git", "diff", "--cached", "--binary"],
                 cwd=repo_dir, capture_output=True,
             )
-            # Fail closed before reset so staged changes are preserved.
             if diff_r.returncode != 0:
                 return (
                     f"⚠️ PR_MERGE_ERROR: Failed to capture staged adaptation patch "
@@ -591,11 +534,9 @@ def _stage_pr_merge(
                 )
             adaptation_patch = diff_r.stdout
             adapt_paths = staged_before.splitlines()
-            # Clear both index and worktree so checkout is clean.
             _g(["reset", "--hard", "HEAD"], repo_dir)
 
         def _restore_on_error() -> None:
-            """Restore the repo to integration branch + re-apply saved adaptations."""
             _g(["checkout", branch], repo_dir)
             if adaptation_patch:
                 subprocess.run(
@@ -605,7 +546,6 @@ def _stage_pr_merge(
 
         co = _g(["checkout", target_branch], repo_dir)
         if co.returncode != 0:
-            # Still on integration branch; restore adaptations there.
             if adaptation_patch:
                 subprocess.run(
                     ["git", "apply", "--index", "-"],
@@ -616,7 +556,6 @@ def _stage_pr_merge(
                 f"{_sanitize_git_error((co.stderr or '').strip())}"
             )
 
-        # Target branch must be clean before merge.
         if _g(["diff", "--name-only"], repo_dir).stdout.strip():
             _restore_on_error()
             return (
@@ -627,7 +566,6 @@ def _stage_pr_merge(
         merge = _g(["merge", "--no-ff", "--no-commit", branch], repo_dir)
         if merge.returncode != 0:
             err = (merge.stderr or merge.stdout or "").strip()
-            # Merge conflicts may not leave an abortable merge state.
             _g(["reset", "--hard", "HEAD"], repo_dir)
             _restore_on_error()
             return (
@@ -635,7 +573,6 @@ def _stage_pr_merge(
                 f"{_sanitize_git_error(err[:500])}"
             )
 
-        # Require MERGE_HEAD so repo_commit creates a merge commit, not plain commit.
         merge_head = _g(["rev-parse", "-q", "--verify", "MERGE_HEAD"], repo_dir)
         if merge_head.returncode != 0:
             _restore_on_error()
@@ -644,7 +581,6 @@ def _stage_pr_merge(
                 f"'{target_branch}' (nothing to merge / already up to date)."
             )
 
-        # Re-apply adaptations onto the staged merge for the final commit.
         if adaptation_patch:
             apply_r = subprocess.run(
                 ["git", "apply", "--index", "-"],
@@ -654,7 +590,6 @@ def _stage_pr_merge(
                 apply_err = (apply_r.stderr or apply_r.stdout or b"").decode(
                     "utf-8", errors="replace"
                 ).strip()
-                # Restore integration branch before reporting error.
                 _g(["reset", "--hard", "HEAD"], repo_dir)
                 _restore_on_error()
                 return (
@@ -666,7 +601,6 @@ def _stage_pr_merge(
     finally:
         _release_git_lock(lock)
 
-    # Attribution hint from merged branch
     base_r = _g(["merge-base", target_branch, branch], repo_dir)
     authors = []
     if base_r.returncode == 0:
