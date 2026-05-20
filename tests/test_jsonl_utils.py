@@ -40,7 +40,7 @@ def test_iter_jsonl_objects_tail_keeps_line_boundary_start(tmp_path):
 
     path = tmp_path / "events.jsonl"
     lines = [json.dumps({"i": i}) + "\n" for i in range(3)]
-    path.write_text("".join(lines), encoding="utf-8")
+    path.write_bytes("".join(lines).encode("utf-8"))
 
     tail = len("".join(lines[1:]).encode("utf-8"))
     assert [entry["i"] for entry in iter_jsonl_objects(path, tail_bytes=tail)] == [1, 2]
