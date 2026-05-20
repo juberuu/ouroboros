@@ -551,6 +551,232 @@ def test_isolated_namespace_packages_are_purged_after_import_scope(tmp_path):
     extension_loader.unload_extension("env_namespace")
 
 
+def test_isolated_regular_parent_namespace_child_is_purged_after_import_scope(tmp_path):
+    import sys
+
+    loaded, repo_root, drive_root = _prepare_extension(
+        tmp_path,
+        "env_regular_parent_namespace_child",
+        (
+            "import importlib\n"
+            "importlib.import_module('regular_parent_pkg.data')\n"
+            "def register(api):\n"
+            "    api.register_tool('value', lambda ctx: 'ok', description='value', schema={})\n"
+        ),
+        permissions=["tool"],
+        extra_frontmatter="dependencies:\n  - regular_parent_pkg\n",
+    )
+    skill_dir = repo_root / "env_regular_parent_namespace_child"
+    site_dir = (
+        skill_dir
+        / ".ouroboros_env"
+        / "python"
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+    pkg_dir = site_dir / "regular_parent_pkg"
+    data_dir = pkg_dir / "data"
+    data_dir.mkdir(parents=True)
+    (pkg_dir / "__init__.py").write_text("VALUE = 'regular-parent'\n", encoding="utf-8")
+    (data_dir / "payload.txt").write_text("namespace-child\n", encoding="utf-8")
+    _mark_isolated_deps_installed(drive_root, loaded)
+
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
+
+    assert err is None, err
+    assert "regular_parent_pkg" not in sys.modules
+    assert "regular_parent_pkg.data" not in sys.modules
+    extension_loader.unload_extension("env_regular_parent_namespace_child")
+
+
+def test_isolated_regular_parent_namespace_child_is_purged_after_async_handler(tmp_path):
+    import asyncio
+    import sys
+
+    loaded, repo_root, drive_root = _prepare_extension(
+        tmp_path,
+        "env_async_regular_parent_namespace_child",
+        (
+            "import importlib\n"
+            "async def _value(ctx):\n"
+            "    module = importlib.import_module('async_regular_parent_pkg.data')\n"
+            "    return module.__name__\n"
+            "def register(api):\n"
+            "    api.register_tool('value', _value, description='value', schema={})\n"
+        ),
+        permissions=["tool"],
+        extra_frontmatter="dependencies:\n  - async_regular_parent_pkg\n",
+    )
+    skill_dir = repo_root / "env_async_regular_parent_namespace_child"
+    site_dir = (
+        skill_dir
+        / ".ouroboros_env"
+        / "python"
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+    pkg_dir = site_dir / "async_regular_parent_pkg"
+    data_dir = pkg_dir / "data"
+    data_dir.mkdir(parents=True)
+    (pkg_dir / "__init__.py").write_text("VALUE = 'regular-parent'\n", encoding="utf-8")
+    (data_dir / "payload.txt").write_text("namespace-child\n", encoding="utf-8")
+    _mark_isolated_deps_installed(drive_root, loaded)
+
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
+    assert err is None, err
+    tool = extension_loader.get_tool(
+        extension_loader.extension_surface_name("env_async_regular_parent_namespace_child", "value")
+    )
+    assert tool is not None
+
+    assert asyncio.run(tool["handler"]({})) == "async_regular_parent_pkg.data"
+    assert "async_regular_parent_pkg" not in sys.modules
+    assert "async_regular_parent_pkg.data" not in sys.modules
+    extension_loader.unload_extension("env_async_regular_parent_namespace_child")
+
+
+def test_isolated_site_scope_releases_execution_lock_when_cleanup_fails(tmp_path, monkeypatch):
+    from ouroboros import extension_isolated_deps
+
+    def fail_cleanup(_site_dirs):
+        raise RuntimeError("cleanup failed")
+
+    monkeypatch.setattr(extension_isolated_deps, "release_isolated_site_dirs", fail_cleanup)
+
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        with extension_isolated_deps.isolated_site_dirs_scope(tmp_path, enabled=False):
+            pass
+
+    assert extension_isolated_deps._execution_lock.acquire(blocking=False)
+    extension_isolated_deps._execution_lock.release()
+
+
+def test_async_isolated_site_scope_releases_execution_lock_when_cleanup_fails(tmp_path, monkeypatch):
+    import asyncio
+
+    from ouroboros import extension_isolated_deps
+
+    def fail_cleanup(_site_dirs):
+        raise RuntimeError("cleanup failed")
+
+    monkeypatch.setattr(extension_isolated_deps, "release_isolated_site_dirs", fail_cleanup)
+
+    async def run_scope():
+        async with extension_isolated_deps.async_isolated_site_dirs_scope(tmp_path, enabled=False):
+            pass
+
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        asyncio.run(run_scope())
+
+    assert extension_isolated_deps._execution_lock.acquire(blocking=False)
+    extension_isolated_deps._execution_lock.release()
+
+
+def test_release_isolated_site_dirs_removes_path_when_module_scan_fails(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    from ouroboros import extension_isolated_deps
+
+    skill_dir = tmp_path / "skill"
+    site_dir = (
+        skill_dir
+        / ".ouroboros_env"
+        / "python"
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+    site_dir.mkdir(parents=True)
+    site_str = str(site_dir.resolve())
+
+    injected = extension_isolated_deps.inject_isolated_site_dirs(skill_dir)
+    assert injected == [site_str]
+    assert site_str in sys.path
+    assert extension_isolated_deps._injected_site_dir_refs.get(site_str) == 1
+    module_name = "scan_failure_pkg"
+    module = types.ModuleType(module_name)
+    module.__file__ = str(site_dir / "scan_failure_pkg.py")
+    sys.modules[module_name] = module
+
+    def fail_scan(_site_path):
+        raise RuntimeError("module scan failed")
+
+    monkeypatch.setattr(extension_isolated_deps, "_module_names_under_site_dir", fail_scan)
+
+    with pytest.raises(RuntimeError, match="module scan failed"):
+        extension_isolated_deps.release_isolated_site_dirs(injected)
+
+    assert site_str not in sys.path
+    assert site_str not in extension_isolated_deps._injected_site_dir_refs
+    assert module_name not in sys.modules
+
+
+def test_release_isolated_site_dirs_cleans_remaining_paths_after_one_scan_fails(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    from ouroboros import extension_isolated_deps
+
+    skill_a = tmp_path / "skill_a"
+    skill_b = tmp_path / "skill_b"
+    site_a = (
+        skill_a
+        / ".ouroboros_env"
+        / "python"
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+    site_b = (
+        skill_b
+        / ".ouroboros_env"
+        / "python"
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+    site_a.mkdir(parents=True)
+    site_b.mkdir(parents=True)
+    site_a_str = str(site_a.resolve())
+    site_b_str = str(site_b.resolve())
+    injected = [
+        *extension_isolated_deps.inject_isolated_site_dirs(skill_a),
+        *extension_isolated_deps.inject_isolated_site_dirs(skill_b),
+    ]
+    assert injected == [site_a_str, site_b_str]
+
+    module_a_name = "scan_failure_first_pkg"
+    module_a = types.ModuleType(module_a_name)
+    module_a.__file__ = str(site_a / "scan_failure_first_pkg.py")
+    sys.modules[module_a_name] = module_a
+    module_b_name = "second_site_pkg"
+    module_b = types.ModuleType(module_b_name)
+    module_b.__file__ = str(site_b / "second_site_pkg.py")
+    sys.modules[module_b_name] = module_b
+
+    original_scan = extension_isolated_deps._module_names_under_site_dir
+
+    def fail_first_scan(site_path):
+        if pathlib.Path(site_path).resolve() == site_a.resolve():
+            raise RuntimeError("first scan failed")
+        return original_scan(site_path)
+
+    monkeypatch.setattr(extension_isolated_deps, "_module_names_under_site_dir", fail_first_scan)
+
+    with pytest.raises(RuntimeError, match="first scan failed"):
+        extension_isolated_deps.release_isolated_site_dirs(injected)
+
+    assert site_a_str not in sys.path
+    assert site_b_str not in sys.path
+    assert site_a_str not in extension_isolated_deps._injected_site_dir_refs
+    assert site_b_str not in extension_isolated_deps._injected_site_dir_refs
+    assert module_a_name not in sys.modules
+    assert module_b_name not in sys.modules
+
+
 def test_isolated_python_deps_do_not_leak_during_overlapping_handlers(tmp_path):
     import sys
     import threading

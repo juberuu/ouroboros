@@ -66,18 +66,39 @@ def inject_isolated_site_dirs(skill_dir: pathlib.Path) -> List[str]:
     return injected
 
 
+def _extend_path_candidates(candidates: List[object], value: object) -> None:
+    if value is None:
+        return
+    if isinstance(value, (str, bytes, pathlib.Path)):
+        candidates.append(value)
+        return
+    try:
+        candidates.extend(list(value))  # type: ignore[arg-type]
+        return
+    except Exception:
+        pass
+    # importlib namespace paths recalculate from parent packages during
+    # iteration. If a third-party object is temporarily inconsistent, the
+    # cached path list is still enough for isolated-deps cleanup.
+    cached = getattr(value, "_path", None)
+    if cached is None:
+        return
+    try:
+        candidates.extend(list(cached))
+    except Exception:
+        return
+
+
 def _module_paths(module: ModuleType) -> List[pathlib.Path]:
-    candidates = []
+    candidates: List[object] = []
     module_file = getattr(module, "__file__", None)
     if module_file:
         candidates.append(module_file)
     module_path = getattr(module, "__path__", None)
-    if module_path:
-        candidates.extend(list(module_path))
+    _extend_path_candidates(candidates, module_path)
     spec = getattr(module, "__spec__", None)
     locations = getattr(spec, "submodule_search_locations", None)
-    if locations:
-        candidates.extend(list(locations))
+    _extend_path_candidates(candidates, locations)
     out: List[pathlib.Path] = []
     for value in candidates:
         try:
@@ -87,7 +108,78 @@ def _module_paths(module: ModuleType) -> List[pathlib.Path]:
     return out
 
 
+def _path_is_under(path: pathlib.Path, root: pathlib.Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except Exception:
+        return False
+
+
+def _module_names_under_site_dir_best_effort(site_path: pathlib.Path) -> List[str]:
+    to_drop: set[str] = set()
+    package_prefixes: set[str] = set()
+    modules = list(sys.modules.items())
+    for name, module in modules:
+        if not name or module is None:
+            continue
+        paths = _module_paths(module)
+        if not any(_path_is_under(path, site_path) for path in paths):
+            continue
+        to_drop.add(name)
+        module_path_attr = getattr(module, "__path__", None)
+        module_file = getattr(module, "__file__", None)
+        if module_path_attr is not None and module_file:
+            try:
+                if _path_is_under(pathlib.Path(module_file).resolve(), site_path):
+                    package_prefixes.add(f"{name}.")
+            except Exception:
+                pass
+    if package_prefixes:
+        for name, module in modules:
+            if not name or module is None:
+                continue
+            if any(name.startswith(prefix) for prefix in package_prefixes):
+                to_drop.add(name)
+    return sorted(to_drop, key=lambda value: value.count("."), reverse=True)
+
+
+def _module_names_under_site_dir(site_path: pathlib.Path) -> List[str]:
+    return _module_names_under_site_dir_best_effort(site_path)
+
+
+def _drop_modules_under_site_dir(site_path: pathlib.Path) -> BaseException | None:
+    cleanup_error = None
+    try:
+        module_names = _module_names_under_site_dir(site_path)
+    except BaseException as exc:
+        cleanup_error = exc
+        module_names = _module_names_under_site_dir_best_effort(site_path)
+    for name in module_names:
+        try:
+            sys.modules.pop(name, None)
+        except BaseException as exc:
+            cleanup_error = cleanup_error or exc
+    return cleanup_error
+
+
+def _drop_importer_cache_for_site_dir(site_path: pathlib.Path, site_str: str) -> None:
+    for raw in list(sys.path_importer_cache.keys()):
+        raw_str = str(raw or "")
+        if not raw_str:
+            continue
+        if raw_str == site_str:
+            sys.path_importer_cache.pop(raw, None)
+            continue
+        try:
+            pathlib.Path(raw_str).resolve().relative_to(site_path)
+        except Exception:
+            continue
+        sys.path_importer_cache.pop(raw, None)
+
+
 def release_isolated_site_dirs(site_dirs: Sequence[str]) -> None:
+    first_error = None
     for raw in site_dirs:
         site_str = str(raw or "")
         if not site_str:
@@ -97,19 +189,25 @@ def release_isolated_site_dirs(site_dirs: Sequence[str]) -> None:
             if count > 1:
                 _injected_site_dir_refs[site_str] = count - 1
                 continue
-            _injected_site_dir_refs.pop(site_str, None)
             site_path = pathlib.Path(site_str).resolve()
-            for name, module in list(sys.modules.items()):
-                for module_path in _module_paths(module):
-                    try:
-                        module_path.relative_to(site_path)
-                    except Exception:
-                        continue
-                    sys.modules.pop(name, None)
-                    break
-            while site_str in sys.path:
-                sys.path.remove(site_str)
-            sys.path_importer_cache.pop(site_str, None)
+            cleanup_error = _drop_modules_under_site_dir(site_path)
+            try:
+                while site_str in sys.path:
+                    sys.path.remove(site_str)
+            except BaseException as exc:
+                cleanup_error = cleanup_error or exc
+            try:
+                _drop_importer_cache_for_site_dir(site_path, site_str)
+            except BaseException as exc:
+                cleanup_error = cleanup_error or exc
+            try:
+                importlib.invalidate_caches()
+            except BaseException as exc:
+                cleanup_error = cleanup_error or exc
+            _injected_site_dir_refs.pop(site_str, None)
+            first_error = first_error or cleanup_error
+    if first_error is not None:
+        raise first_error
 
 
 @contextmanager
@@ -121,8 +219,10 @@ def isolated_site_dirs_scope(skill_dir: pathlib.Path, *, enabled: bool) -> Itera
     try:
         yield
     finally:
-        release_isolated_site_dirs(site_dirs)
-        _execution_lock.release()
+        try:
+            release_isolated_site_dirs(site_dirs)
+        finally:
+            _execution_lock.release()
 
 
 @asynccontextmanager
@@ -132,5 +232,7 @@ async def async_isolated_site_dirs_scope(skill_dir: pathlib.Path, *, enabled: bo
     try:
         yield
     finally:
-        release_isolated_site_dirs(site_dirs)
-        _execution_lock.release()
+        try:
+            release_isolated_site_dirs(site_dirs)
+        finally:
+            _execution_lock.release()
