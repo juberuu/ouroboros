@@ -111,4 +111,41 @@
  * @property {Object=} grants
  */
 
-export const GATEWAY_CONTRACT_VERSION = '5.28.0-rc.1';
+/**
+ * @typedef {Object} TaskCreateResponse
+ * @property {boolean} ok
+ * @property {string} task_id
+ * @property {string} status
+ */
+
+/**
+ * @typedef {Object} TaskEvent
+ * @property {number} seq
+ * @property {string=} source
+ * @property {number=} line
+ * @property {string} type
+ * @property {string} task_id
+ * @property {string=} ts
+ * @property {string=} root
+ * @property {Object=} data
+ */
+
+/**
+ * @typedef {Object} TaskListResponse
+ * @property {Object[]} tasks
+ * @property {Object=} queue
+ */
+
+/**
+ * @typedef {Object} TaskCancelResponse
+ * @property {boolean} ok
+ * @property {string} task_id
+ */
+
+/**
+ * @typedef {Object} LogTailResponse
+ * @property {string} name
+ * @property {Object[]} entries
+ */
+
+export const GATEWAY_CONTRACT_VERSION = '5.29.0-rc.1';

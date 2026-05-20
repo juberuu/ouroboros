@@ -141,6 +141,12 @@ def persist_queue_snapshot(reason: str = "") -> None:
                 "text": t.get("text"), "priority": t.get("priority"),
                 "depth": t.get("depth"), "description": t.get("description"),
                 "context": t.get("context"), "parent_task_id": t.get("parent_task_id"),
+                "root_task_id": t.get("root_task_id"), "session_id": t.get("session_id"),
+                "actor_id": t.get("actor_id"), "delegation_role": t.get("delegation_role"),
+                "workspace_root": t.get("workspace_root"), "workspace_mode": t.get("workspace_mode"),
+                "memory_mode": t.get("memory_mode"), "drive_root": t.get("drive_root"),
+                "budget_drive_root": t.get("budget_drive_root"),
+                "metadata": t.get("metadata"),
                 "_attempt": t.get("_attempt"), "review_reason": t.get("review_reason"),
                 "review_source_task_id": t.get("review_source_task_id"),
             },
@@ -204,7 +210,8 @@ def restore_pending_from_snapshot(max_age_sec: int = 900) -> int:
             task = row.get("task") if isinstance(row, dict) else None
             if not isinstance(task, dict):
                 continue
-            if not task.get("id") or not task.get("chat_id"):
+            chat_id = task.get("chat_id")
+            if not task.get("id") or chat_id is None or chat_id == "":
                 continue
             enqueue_task(task)
             restored += 1

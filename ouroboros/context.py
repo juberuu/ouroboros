@@ -76,9 +76,27 @@ def build_runtime_section(env: Any, task: Dict[str, Any]) -> str:
         "git_head": git_sha,
         "git_branch": git_branch,
         "runtime_mode": runtime_mode,
-        "task": {"id": task.get("id"), "type": task.get("type")},
+        "task": {
+            "id": task.get("id"),
+            "type": task.get("type"),
+            "parent_task_id": task.get("parent_task_id"),
+            "root_task_id": task.get("root_task_id"),
+            "session_id": task.get("session_id"),
+            "actor_id": task.get("actor_id"),
+            "delegation_role": task.get("delegation_role"),
+        },
         "runtime_env": {"is_desktop": bool(os.environ.get("OUROBOROS_DESKTOP_MODE", "")), "platform": sys.platform},
     }
+    if str(task.get("workspace_root") or "").strip():
+        runtime_data["active_workspace"] = {
+            "workspace_root": str(task.get("workspace_root") or ""),
+            "workspace_mode": str(task.get("workspace_mode") or ""),
+            "memory_mode": str(task.get("memory_mode") or ""),
+            "rule": (
+                "repo_read/repo_write/repo_list/code_search/run_shell target the active workspace; "
+                "Ouroboros self-review/commit tools are unavailable; final changes are exported as artifacts."
+            ),
+        }
     if str(runtime_mode).lower() == "light":
         runtime_data["runtime_mode_rule"] = (
             "light mode forbids Ouroboros repo mutation; scoped edits under "

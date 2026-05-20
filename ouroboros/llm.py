@@ -480,6 +480,19 @@ class LLMClient:
                         block.pop("cache_control", None)
         return cleaned
 
+    @staticmethod
+    def _strip_openrouter_roundtrip_metadata(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Strip OpenRouter reasoning round-trip fields for providers that reject extra message keys."""
+        import copy
+        cleaned = copy.deepcopy(messages)
+        for msg in cleaned:
+            if msg.get("role") != "assistant":
+                continue
+            msg.pop("reasoning", None)
+            msg.pop("reasoning_details", None)
+            msg.pop("response_id", None)
+        return cleaned
+
     def _fetch_generation_cost(
         self,
         generation_id: str,
@@ -633,7 +646,9 @@ class LLMClient:
         """Send a chat request to the local llama-cpp-python server."""
         client = self._get_local_client()
 
-        clean_messages = self._strip_cache_control(messages)
+        clean_messages = self._strip_openrouter_roundtrip_metadata(
+            self._strip_cache_control(messages)
+        )
         local_max = min(max_tokens, 2048)
         ctx_len = 0
         try:
@@ -1171,7 +1186,9 @@ class LLMClient:
             token_limit_key = "max_completion_tokens"
         if not target.get("supports_openrouter_extensions"):
             # Non-OpenRouter providers do not accept cache_control.
-            clean_messages = self._strip_cache_control(messages)
+            clean_messages = self._strip_openrouter_roundtrip_metadata(
+                self._strip_cache_control(messages)
+            )
             kwargs: Dict[str, Any] = {
                 "model": resolved_model,
                 "messages": clean_messages,
@@ -1188,9 +1205,13 @@ class LLMClient:
             return kwargs
 
         effort = normalize_reasoning_effort(reasoning_effort)
+        return_reasoning = (
+            str(os.environ.get("OUROBOROS_RETURN_REASONING", "true")).strip().lower()
+            not in {"0", "false", "no", "off"}
+        )
 
         extra_body: Dict[str, Any] = {
-            "reasoning": {"effort": effort, "exclude": True},
+            "reasoning": {"effort": effort, "exclude": not return_reasoning},
         }
 
         if resolved_model.startswith("anthropic/"):
@@ -1238,6 +1259,8 @@ class LLMClient:
         usage = resp_dict.get("usage") or {}
         choices = resp_dict.get("choices") or [{}]
         msg = (choices[0] if choices else {}).get("message") or {}
+        if resp_dict.get("id") and "response_id" not in msg:
+            msg["response_id"] = resp_dict["id"]
 
         if not usage.get("cached_tokens"):
             prompt_details = usage.get("prompt_tokens_details") or {}

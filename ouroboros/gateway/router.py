@@ -42,6 +42,7 @@ def collect_routes(
         file_browser_routes,
     )
     from ouroboros.gateway.history import make_chat_history_endpoint, make_cost_breakdown_endpoint
+    from ouroboros.gateway.logs import api_logs_tail
     from ouroboros.gateway.marketplace import (
         api_marketplace_info,
         api_marketplace_install,
@@ -78,6 +79,13 @@ def collect_routes(
         api_update_status,
     )
     from ouroboros.gateway.state import api_health, api_state
+    from ouroboros.gateway.tasks import (
+        api_task_cancel,
+        api_task_events,
+        api_task_get,
+        api_tasks_create,
+        api_tasks_list,
+    )
     from ouroboros.gateway.settings import (
         api_claude_code_install,
         api_claude_code_status,
@@ -151,6 +159,11 @@ def collect_routes(
         Route("/api/owner/runtime-mode", endpoint=api_owner_runtime_mode, methods=["POST"]),
         Route("/api/owner/auto-grant", endpoint=api_owner_auto_grant, methods=["POST"]),
         Route("/api/model-catalog", endpoint=api_model_catalog),
+        Route("/api/tasks", endpoint=api_tasks_create, methods=["POST"]),
+        Route("/api/tasks", endpoint=api_tasks_list, methods=["GET"]),
+        Route("/api/tasks/{task_id}", endpoint=api_task_get, methods=["GET"]),
+        Route("/api/tasks/{task_id}/events", endpoint=api_task_events, methods=["GET"]),
+        Route("/api/tasks/{task_id}/cancel", endpoint=api_task_cancel, methods=["POST"]),
         Route("/api/command", endpoint=api_command, methods=["POST"]),
         Route("/api/reset", endpoint=api_reset, methods=["POST"]),
         Route("/api/git/log", endpoint=api_git_log),
@@ -162,6 +175,7 @@ def collect_routes(
         Route("/api/cost-breakdown", endpoint=make_cost_breakdown_endpoint(data_dir)),
         Route("/api/evolution-data", endpoint=api_evolution_data),
         Route("/api/chat/history", endpoint=make_chat_history_endpoint(data_dir)),
+        Route("/api/logs/{name}", endpoint=api_logs_tail, methods=["GET"]),
         Route("/api/chat/upload", endpoint=api_chat_upload, methods=["POST"]),
         Route("/api/chat/upload", endpoint=api_chat_upload_delete, methods=["DELETE"]),
         Route("/api/local-model/start", endpoint=api_local_model_start, methods=["POST"]),

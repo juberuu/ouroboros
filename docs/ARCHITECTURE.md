@@ -1,4 +1,4 @@
-# Ouroboros v5.28.0 — Architecture & Reference
+# Ouroboros v5.29.0-rc.1 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -48,6 +48,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── memory.py            ← Scratchpad, identity, chat history
       ├── context.py           ← LLM context builder (public API for consciousness)
       ├── context_compaction.py ← Context trimming and summarization helpers
+      ├── headless.py          ← Headless task child-drive isolation, workspace patch artifacts, and memory export helpers
       ├── local_model.py       ← Local LLM lifecycle (llama-cpp-python)
       ├── local_model_autostart.py ← Local model startup helper
       ├── deep_self_review.py   ← Deep self-review: full git-tracked pack + memory → 1M-context model
@@ -102,6 +103,8 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── router.py        ← Starlette route collector for /api/* and /ws
       │   ├── ws.py            ← WebSocket connection manager, extension WS dispatch, browser broadcast helpers
       │   ├── state.py         ← /api/health and /api/state handlers
+      │   ├── tasks.py         ← Headless task create/list/get/cancel/events endpoints over the supervisor queue
+      │   ├── logs.py          ← Read-only runtime log tail endpoint for CLI/headless clients
       │   ├── settings.py      ← /api/settings, /api/owner/*, onboarding, Claude runtime status/repair handlers
       │   ├── control.py       ← reset, command, git/update, and evolution-data handlers
       │   ├── files.py         ← File Browser + chat upload endpoints
@@ -141,6 +144,8 @@ build_windows.ps1             ← Windows build (PyInstaller → .zip)
 scripts/build_repo_bundle.py  ← Builds `repo.bundle` + `repo_bundle_manifest.json` for packaged releases
 scripts/run_external_review.py ← v5.1.2 dev-loop tool: invokes `ouroboros.tools.parallel_review.run_parallel_review` from outside the runtime against `git diff --cached`. Reads `~/Ouroboros/data/settings.json` for `OPENROUTER_API_KEY` / `OUROBOROS_REVIEW_MODELS` / `OUROBOROS_SCOPE_REVIEW_MODEL`, builds a minimal `ToolContext`, prints FULL raw triad+scope output (no truncation). Used to dry-run the same review pipeline `repo_commit` triggers before any actual commit. Output: stdout (and optional `--output PATH`). Not part of the runtime gate; review-exempt dev tool.
 scripts/cleanup_test_pollution.py ← Dry-run-first cleanup utility for local test-pollution artifacts: known test skill state dirs, stale `__extension_imports`, and accidental `MagicMock`-named repo-root files. Use `--apply` only after inspecting planned removals.
+scripts/swebench_cli_agent.py ← Helper that turns local checkout-backed SWE-bench rows into prediction JSONL via the CLI/headless task API.
+scripts/terminal_bench_cli_agent.py ← Minimal Terminal-Bench BaseAgent bridge that delegates task solving through `ouroboros run` when the task workspace is mounted on the gateway host.
 Dockerfile                    ← Docker image (web UI runtime)
 ```
 
@@ -167,6 +172,48 @@ subpackage boundary without adding npm dependencies, TypeScript, codegen, or a
 build step. `tests/test_gateway_parity.py` checks that the contract endpoint
 index stays aligned with `gateway/router.py` and that the JSDoc mirror stays
 present for the core browser-facing envelopes.
+
+### CLI / Headless Boundary
+
+`ouroboros.cli` is the second first-class interface to the same runtime. It is a
+thin HTTP/SSE client over the gateway, not a benchmark-only harness and not a
+parallel scheduler. `POST /api/tasks` creates managed queue tasks, `GET
+/api/tasks/<id>` reads durable results, and `GET /api/tasks/<id>/events`
+replays task-scoped events from the existing logs before following live SSE
+updates. CLI stdout is reserved for final machine-consumable output (or JSONL
+when requested); progress goes to stderr.
+
+External workspace tasks keep `Env.repo_dir` pinned to the Ouroboros repo for
+prompts, BIBLE, architecture/development docs, skills, and review policy.
+`ToolContext` carries an optional `workspace_root`; contextual repo tools resolve
+through `active_repo_dir()` when workspace mode is set. Workspace roots must be
+separate git worktree roots and must not overlap the Ouroboros system repo or
+data drive. Workspace mode uses an explicit allowlist for contextual repo/data,
+search, shell, git status/diff, browser, and log/history tools; self-review,
+runtime control, skill lifecycle, extension/MCP execution, commit/review, and
+delegation tools are hidden and hard-blocked. The target workspace is left dirty
+by design and exported as a patch artifact; Ouroboros does not commit inside
+external repositories, and shell execution reports a hard warning if git refs move.
+The v1 CLI reads patch artifacts from server-local paths, so `--patch` and
+`--patch-out` are intentionally limited to local/same-filesystem gateway use.
+Benchmark helper scripts likewise require clean per-instance local checkouts;
+they do not reset or commit benchmark workspaces.
+
+Workspace mode is a tool-routing and blast-radius guard, not an OS sandbox.
+Like OpenClaw's host workspace mode, absolute host paths are not a hard security
+boundary unless a future Docker/SSH/remote sandbox is added around tool
+execution. Do not grow ad-hoc shell parsing to approximate that sandbox.
+
+Headless memory isolation is implemented as a per-task child drive under
+`data/state/headless_tasks/<task_id>/data`. `forked` mode copies stable memory
+seed files (`identity.md`, `WORLD.md`, `registry.md`, and `knowledge/`) without
+dialogue/task history; `empty` mode starts from a fresh child drive; `shared` is
+reserved for self/local tasks and is rejected for external workspaces. Completed
+external runs produce explicit `workspace.patch` and `memory_export.json` artifacts under
+`data/task_results/artifacts/<task_id>/` and never auto-merge memory back into
+the parent drive. Swarm readiness in v1 is contractual only: task metadata
+normalizes `parent_task_id`, `root_task_id`, `session_id`, `actor_id`, and
+`delegation_role`, but no child-agent scheduler or delegation runtime exists yet.
 
 ### Two-process model
 
@@ -481,6 +528,11 @@ The executable route SSOT is `ouroboros/gateway/router.py`; file-browser routes 
 | POST | `/api/owner/runtime-mode` | `gateway.settings.api_owner_runtime_mode` |
 | POST | `/api/owner/auto-grant` | `gateway.settings.api_owner_auto_grant` |
 | GET | `/api/model-catalog` | `gateway.models.api_model_catalog` |
+| POST | `/api/tasks` | `gateway.tasks.api_tasks_create` |
+| GET | `/api/tasks` | `gateway.tasks.api_tasks_list` |
+| GET | `/api/tasks/{task_id}` | `gateway.tasks.api_task_get` |
+| GET | `/api/tasks/{task_id}/events` | `gateway.tasks.api_task_events` |
+| POST | `/api/tasks/{task_id}/cancel` | `gateway.tasks.api_task_cancel` |
 | POST | `/api/command` | `gateway.control.api_command` |
 | POST | `/api/reset` | `gateway.control.api_reset` |
 | GET | `/api/git/log` | `gateway.control.api_git_log` |
@@ -492,6 +544,7 @@ The executable route SSOT is `ouroboros/gateway/router.py`; file-browser routes 
 | GET | `/api/cost-breakdown` | `gateway.history.make_cost_breakdown_endpoint` |
 | GET | `/api/evolution-data` | `gateway.control.api_evolution_data` |
 | GET | `/api/chat/history` | `gateway.history.make_chat_history_endpoint` |
+| GET | `/api/logs/{name}` | `gateway.logs.api_logs_tail` |
 | POST | `/api/chat/upload` | `gateway.files.api_chat_upload` |
 | DELETE | `/api/chat/upload` | `gateway.files.api_chat_upload_delete` |
 | POST | `/api/local-model/start` | `gateway.models.api_local_model_start` |
@@ -949,7 +1002,7 @@ via `tests/test_contracts.py`.
 
 | Contract | File | Anchored by |
 |----------|------|-------------|
-| `ToolContextProtocol` — 6-attribute + 3-method minimum every tool handler relies on (attributes: `repo_dir`, `drive_root`, `pending_events`, `emit_progress_fn`, `current_chat_id`, `task_id`; methods: `repo_path`, `drive_path`, `drive_logs`) | `ouroboros/contracts/tool_context.py` | `ouroboros.tools.registry.ToolContext` must satisfy it (duck-typed check + AST field parity) |
+| `ToolContextProtocol` — workspace-aware minimum every tool handler relies on (attributes: `repo_dir`, `drive_root`, `pending_events`, `emit_progress_fn`, `current_chat_id`, `task_id`, `workspace_root`, `workspace_mode`; methods: `repo_path`, `drive_path`, `drive_logs`, `active_repo_dir`, `is_workspace_mode`) | `ouroboros/contracts/tool_context.py` | `ouroboros.tools.registry.ToolContext` must satisfy it (duck-typed check + AST field/method parity) |
 | `ToolEntryProtocol` + `GetToolsProtocol` — the tool-module ABI | `ouroboros/contracts/tool_abi.py` | Every entry returned by `ToolRegistry._entries` must satisfy `ToolEntryProtocol` |
 | `api_v1` WS/HTTP envelopes — inbound: `ChatInbound`, `CommandInbound`; outbound WS: `ChatOutbound`, `PhotoOutbound`, `TypingOutbound`, `LogOutbound`, `ExtensionLifecycleOutbound`; HTTP: `HealthResponse`, `StateResponse` (Phase 2 adds `runtime_mode: str` and `skills_repo_configured: bool`; v5.11.0 adds `github_token_configured: bool`), `EvolutionStateSnapshot`, `SettingsNetworkMeta`, `SettingsMeta` (`custom_secret_keys` + setup contract metadata) | `ouroboros/gateway/contracts.py` | AST scans of `supervisor/message_bus.py` chat envelopes, `gateway/state.py::api_state`, `gateway/state.py::api_health`, `gateway/settings.py::_build_network_meta`, and `gateway/ws.py::ws_endpoint` inbound dispatch assert no un-declared keys leak out; `tests/test_contracts.py::test_state_response_declares_phase2_runtime_mode_keys` explicitly pins the Phase 2 fields and later additive state keys |
 | `chat_id_policy` — SSOT for A2A/synthetic chat-id filtering across message bus, history, memory, and consolidation | `ouroboros/contracts/chat_id_policy.py` | `tests/test_chat_id_policy.py` pins boundaries and human/transport positive ids |

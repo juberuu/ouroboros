@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import shlex
 import subprocess
 from dataclasses import dataclass, field
@@ -52,6 +53,37 @@ _LIGHT_SHELL_WRITER_COMMANDS = frozenset({
     "chmod", "chown", "cp", "gunzip", "gzip", "ln", "mkdir", "mv",
     "perl", "rm", "ruby", "sed", "sort", "tar", "touch", "truncate", "uniq", "unzip",
 })
+
+
+def _coerce_real_path(value: Any) -> pathlib.Path | None:
+    if value is None or value.__class__.__module__.startswith("unittest.mock"):
+        return None
+    try:
+        return pathlib.Path(os.fspath(value))
+    except TypeError:
+        return None
+
+
+def active_repo_dir_for(ctx: Any) -> pathlib.Path:
+    """Return the active repo/workspace root for real and lightweight test contexts."""
+    active = getattr(ctx, "active_repo_dir", None)
+    if callable(active):
+        try:
+            candidate = active()
+        except Exception:
+            candidate = None
+        path = _coerce_real_path(candidate)
+        if path is not None:
+            return path
+
+    workspace_root = getattr(ctx, "workspace_root", None)
+    workspace_path = _coerce_real_path(workspace_root)
+    if workspace_path is not None:
+        workspace_mode = str(getattr(ctx, "workspace_mode", "") or "").strip()
+        if workspace_mode and workspace_mode != "self":
+            return workspace_path
+
+    return pathlib.Path(getattr(ctx, "repo_dir"))
 
 
 def _detect_runtime_mode_elevation(text_lower: str) -> bool:
@@ -280,9 +312,31 @@ _GIT_READONLY_SUBCOMMANDS = frozenset([
     "status", "diff", "log", "show", "ls-files",
     "describe", "rev-parse", "cat-file",
     "shortlog", "version", "help", "blame",
-    "grep", "reflog", "fetch",
+    "grep", "reflog",
 ])
 
+_WORKSPACE_ALLOWED_TOOLS = frozenset({
+    "repo_read",
+    "repo_list",
+    "repo_write",
+    "str_replace_editor",
+    "code_search",
+    "codebase_digest",
+    "run_shell",
+    "git_status",
+    "git_diff",
+    "data_read",
+    "data_list",
+    "data_write",
+    "chat_history",
+    "recent_tasks",
+    "web_search",
+    "browse_page",
+    "browser_action",
+    "analyze_screenshot",
+    "list_available_tools",
+    "enable_tools",
+})
 
 def _parse_porcelain_paths(output: str) -> list[str]:
     paths: list[str] = []
@@ -353,6 +407,28 @@ def _format_light_repo_write_block(before: Dict[str, Any], after: Dict[str, Any]
         "Original command output:\n"
         f"{result}"
     )
+
+
+def _git_ref_snapshot(repo_dir: pathlib.Path) -> Optional[Dict[str, str]]:
+    try:
+        repo = pathlib.Path(repo_dir)
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(repo), capture_output=True, text=True, timeout=5,
+        )
+        refs = subprocess.run(
+            ["git", "show-ref", "--head", "--dereference"],
+            cwd=str(repo), capture_output=True, text=True, timeout=5,
+        )
+        if head.returncode != 0 or refs.returncode not in (0, 1):
+            return None
+        digest = hashlib.sha256()
+        digest.update((head.stdout or "").encode("utf-8", errors="replace"))
+        digest.update((refs.stdout or "").encode("utf-8", errors="replace"))
+        return {"head": (head.stdout or "").strip(), "digest": digest.hexdigest()}
+    except Exception:
+        return None
+
 
 def _revert_protected_files(repo_dir, *, runtime_mode: str = "advanced") -> list:
     """Revert protected files after claude_code_edit unless pro mode is active."""
@@ -425,6 +501,64 @@ def _extract_run_shell_git_subcommand(raw_cmd: Any) -> str:
     return ""
 
 
+def _workspace_git_safety_violation(raw_cmd: Any, *, active_root: pathlib.Path, cwd: str = "") -> str:
+    root = pathlib.Path(active_root).resolve(strict=False)
+    base = root
+    if cwd and str(cwd).strip() not in ("", ".", "./"):
+        try:
+            base = (root / safe_relpath(str(cwd))).resolve(strict=False)
+            base.relative_to(root)
+        except Exception:
+            base = root
+    argv = _strip_leading_env_assignments(_unwrap_env_argv(_shell_argv(raw_cmd)))
+    if not argv:
+        return ""
+    first = pathlib.PurePath(argv[0]).name.lower()
+    if first in {"bash", "sh", "zsh"}:
+        inline = _shell_command_string(argv)
+        return _workspace_git_safety_violation(inline, active_root=root, cwd=str(base.relative_to(root)) if inline else "") if inline else ""
+    for idx, token in enumerate(argv):
+        if pathlib.PurePath(str(token)).name.lower() != "git":
+            continue
+        parts = argv[idx:]
+        subcmd = ""
+        j = 1
+        while j < len(parts):
+            part = parts[j]
+            if part in {"-C", "--git-dir", "--work-tree"} and j + 1 < len(parts):
+                try:
+                    target = pathlib.Path(parts[j + 1])
+                    if not target.is_absolute():
+                        target = base / target
+                    target.resolve(strict=False).relative_to(root)
+                except Exception:
+                    return f"git {part} escapes the active workspace"
+                j += 2
+                continue
+            if part.startswith("--git-dir=") or part.startswith("--work-tree="):
+                value = part.split("=", 1)[1]
+                try:
+                    target = pathlib.Path(value)
+                    if not target.is_absolute():
+                        target = base / target
+                    target.resolve(strict=False).relative_to(root)
+                except Exception:
+                    return "git root selector escapes the active workspace"
+                j += 1
+                continue
+            if part == "-c":
+                j += 2
+                continue
+            if part.startswith("-"):
+                j += 1
+                continue
+            subcmd = part
+            break
+        if subcmd and subcmd.lower() not in _GIT_READONLY_SUBCOMMANDS:
+            return f"git {subcmd}"
+    return ""
+
+
 @dataclass
 class BrowserState:
     """Per-task Playwright lifecycle state."""
@@ -442,6 +576,11 @@ class ToolContext:
     repo_dir: pathlib.Path
     drive_root: pathlib.Path
     branch_dev: str = "ouroboros"
+    system_repo_dir: Optional[pathlib.Path] = None
+    workspace_root: Optional[pathlib.Path] = None
+    workspace_mode: str = ""
+    memory_mode: str = ""
+    task_metadata: Dict[str, Any] = field(default_factory=dict)
     pending_events: List[Dict[str, Any]] = field(default_factory=list)
     current_chat_id: Optional[int] = None
     current_task_type: Optional[str] = None
@@ -478,10 +617,19 @@ class ToolContext:
     _review_iteration_count: int = 0
     _review_history: list = field(default_factory=list)
 
+    def active_repo_dir(self) -> pathlib.Path:
+        if self.workspace_root is not None and str(self.workspace_mode or "").strip():
+            return pathlib.Path(self.workspace_root)
+        return pathlib.Path(self.repo_dir)
+
+    def is_workspace_mode(self) -> bool:
+        return self.workspace_root is not None and bool(str(self.workspace_mode or "").strip())
+
     def repo_path(self, rel: str) -> pathlib.Path:
-        resolved = (self.repo_dir / safe_relpath(rel)).resolve()
+        root = self.active_repo_dir()
+        resolved = (root / safe_relpath(rel)).resolve()
         try:
-            resolved.relative_to(self.repo_dir.resolve())
+            resolved.relative_to(root.resolve())
         except ValueError:
             raise ValueError(f"Path escapes repo_dir boundary: {rel}")
         return resolved
@@ -565,7 +713,12 @@ class ToolRegistry:
     # Contract.
 
     def available_tools(self) -> List[str]:
-        return [e.name for e in self._entries.values()]
+        workspace_mode = bool(getattr(self._ctx, "is_workspace_mode", lambda: False)())
+        return [
+            e.name
+            for e in self._entries.values()
+            if not workspace_mode or e.name in _WORKSPACE_ALLOWED_TOOLS
+        ]
 
     def _schema_for_entry(self, entry: ToolEntry) -> Dict[str, Any]:
         return {"type": "function", "function": entry.schema}
@@ -574,9 +727,11 @@ class ToolRegistry:
         return [self._schema_for_entry(entry)]
 
     def schemas(self, core_only: bool = False) -> List[Dict[str, Any]]:
+        workspace_mode = bool(getattr(self._ctx, "is_workspace_mode", lambda: False)())
         built_in = [
             schema
             for entry in self._entries.values()
+            if not workspace_mode or entry.name in _WORKSPACE_ALLOWED_TOOLS
             for schema in self._schemas_for_entry(entry)
         ]
         # Include live extension tool schemas in normal tool discovery.
@@ -599,6 +754,8 @@ class ToolRegistry:
                     for tool in _ext_tools.values()
                     if _ext_is_live(str(tool.get("skill") or ""), pathlib.Path(self._ctx.drive_root))
                 ]
+            if workspace_mode:
+                extension_schemas = []
         except Exception:
             extension_schemas = []
 
@@ -620,12 +777,16 @@ class ToolRegistry:
                     }
                     for tool in _mcp_get_manager().list_tools_for_registry()
                 ]
+                if workspace_mode:
+                    mcp_schemas = []
             except Exception:
                 mcp_schemas = []
             return built_in + extension_schemas + mcp_schemas
         # Core tools plus meta-tools for enabling extended tools.
         result = []
         for e in self._entries.values():
+            if workspace_mode and not e.name in _WORKSPACE_ALLOWED_TOOLS:
+                continue
             if e.name in CORE_TOOL_NAMES or e.name in ("list_available_tools", "enable_tools"):
                 result.extend(self._schemas_for_entry(e))
         # Extension tools are discoverable in core-mode; MCP stays opt-in.
@@ -634,6 +795,9 @@ class ToolRegistry:
     def get_schema_by_name(self, name: str) -> Optional[Dict[str, Any]]:
         """Return the full schema for a specific tool."""
         requested = str(name or "").strip()
+        workspace_mode = bool(getattr(self._ctx, "is_workspace_mode", lambda: False)())
+        if workspace_mode and not requested in _WORKSPACE_ALLOWED_TOOLS:
+            return None
         entry = self._entries.get(requested)
         if entry:
             return self._schema_for_entry(entry)
@@ -647,7 +811,7 @@ class ToolRegistry:
                 ext_tool = _ext_get_tool(name)
             except Exception:
                 ext_tool = None
-            if ext_tool and _ext_is_live(str(ext_tool.get("skill") or ""), pathlib.Path(self._ctx.drive_root)):
+            if ext_tool and not workspace_mode and _ext_is_live(str(ext_tool.get("skill") or ""), pathlib.Path(self._ctx.drive_root)):
                 return {
                     "type": "function",
                     "function": {
@@ -666,7 +830,7 @@ class ToolRegistry:
         except Exception:
             _mcp_get_manager = None
             _mcp_is_name = None
-        if _mcp_get_manager and _mcp_is_name and _mcp_is_name(requested):
+        if not workspace_mode and _mcp_get_manager and _mcp_is_name and _mcp_is_name(requested):
             mcp_tool = _mcp_get_manager().get_tool(requested)
             if mcp_tool:
                 return {
@@ -812,6 +976,7 @@ class ToolRegistry:
     def _run_shell_safety_check(self, args: Dict[str, Any], runtime_mode: str) -> Optional[str]:
         """Pre-execution run_shell filter; returns a block message or ``None``."""
         raw_cmd = args.get("cmd", args.get("command", ""))
+        workspace_mode = bool(getattr(self._ctx, "is_workspace_mode", lambda: False)())
         if isinstance(raw_cmd, list):
             cmd_lower = " ".join(str(x) for x in raw_cmd).lower()
         else:
@@ -819,6 +984,41 @@ class ToolRegistry:
         cmd_path_lower = cmd_lower.replace("\\", "/")
         while "//" in cmd_path_lower:
             cmd_path_lower = cmd_path_lower.replace("//", "/")
+        argv_for_write = _strip_leading_env_assignments(_unwrap_env_argv(_shell_argv(raw_cmd)))
+        writeish = any(w in cmd_lower for w in _SHELL_WRITE_INDICATORS) or (
+            bool(argv_for_write) and pathlib.PurePath(argv_for_write[0]).name.lower() in _LIGHT_SHELL_WRITER_COMMANDS
+        )
+        if workspace_mode and writeish:
+            active_root = active_repo_dir_for(self._ctx).resolve(strict=False)
+            if "../" in cmd_path_lower or cmd_path_lower.startswith(".."):
+                return "⚠️ WORKSPACE_SHELL_BLOCKED: write-like shell commands may not target paths outside the active workspace."
+            protected_roots = [getattr(self._ctx, "system_repo_dir", None) or getattr(self._ctx, "repo_dir", None)]
+            try:
+                from ouroboros.config import DATA_DIR as _PARENT_DATA_DIR
+                protected_roots.append(_PARENT_DATA_DIR)
+            except Exception:
+                pass
+            for root_value in protected_roots:
+                try:
+                    root_path = pathlib.Path(root_value).resolve(strict=False)
+                except Exception:
+                    continue
+                try:
+                    root_path.relative_to(active_root)
+                    continue
+                except Exception:
+                    pass
+                root_text = str(root_path).replace("\\", "/").lower()
+                if root_text and root_text in cmd_path_lower:
+                    return "⚠️ WORKSPACE_SHELL_BLOCKED: write-like shell command mentions Ouroboros system/data paths."
+            for token in _shell_argv(raw_cmd):
+                candidates = [str(token)] if str(token).startswith("/") else []
+                candidates.extend(re.findall(r"/[^\s'\"\\),;\]]+", str(token)))
+                for candidate in candidates:
+                    try:
+                        pathlib.Path(candidate).resolve(strict=False).relative_to(active_root)
+                    except Exception:
+                        return "⚠️ WORKSPACE_SHELL_BLOCKED: write-like shell commands may not target absolute paths outside the active workspace."
 
         # Elevation pattern: blocked in all modes.
         if _detect_runtime_mode_elevation(cmd_lower):
@@ -847,10 +1047,10 @@ class ToolRegistry:
             )
 
         # Light-mode repo-mutation indicators.
-        if runtime_mode == "light":
+        if runtime_mode == "light" and not workspace_mode:
             if _light_shell_repo_mutation(
                 raw_cmd,
-                repo_dir=pathlib.Path(self._ctx.repo_dir),
+                repo_dir=pathlib.Path(self._ctx.active_repo_dir()),
                 cwd=str(args.get("cwd") or ""),
             ):
                 return (
@@ -861,7 +1061,7 @@ class ToolRegistry:
                 )
 
         # Lexical defense for skill control-plane sidecar writes via shell.
-        if any(
+        if not workspace_mode and any(
             name in cmd_path_lower
             for name in (
                 *SKILL_PAYLOAD_CONTROL_FILENAMES,
@@ -878,19 +1078,20 @@ class ToolRegistry:
             )
 
         # Protected runtime path writes.
-        if _shell_writer_targets_protected(raw_cmd):
+        if not workspace_mode and _shell_writer_targets_protected(raw_cmd):
             return (
                 "⚠️ CRITICAL SAFETY_VIOLATION: Shell command would modify "
                 "a protected core/contract/release file. Protected: "
                 + ", ".join(sorted(PROTECTED_RUNTIME_PATHS))
             )
-        for cf in _PROTECTED_RUNTIME_PATHS_LOWER:
-            if cf in cmd_path_lower and any(w in cmd_lower for w in _SHELL_WRITE_INDICATORS):
-                return (
-                    "⚠️ CRITICAL SAFETY_VIOLATION: Shell command would modify "
-                    "a protected core/contract/release file. Protected: "
-                    + ", ".join(sorted(PROTECTED_RUNTIME_PATHS))
-                )
+        if not workspace_mode:
+            for cf in _PROTECTED_RUNTIME_PATHS_LOWER:
+                if cf in cmd_path_lower and any(w in cmd_lower for w in _SHELL_WRITE_INDICATORS):
+                    return (
+                        "⚠️ CRITICAL SAFETY_VIOLATION: Shell command would modify "
+                        "a protected core/contract/release file. Protected: "
+                        + ", ".join(sorted(PROTECTED_RUNTIME_PATHS))
+                    )
 
         # GitHub repo create/delete/auth.
         if "gh repo create" in cmd_lower or "gh repo delete" in cmd_lower:
@@ -899,6 +1100,17 @@ class ToolRegistry:
             return "⚠️ SAFETY_VIOLATION: Modifying GitHub authentication is not permitted."
 
         # Direct git mutative ban via shell.
+        if workspace_mode:
+            git_violation = _workspace_git_safety_violation(
+                raw_cmd,
+                active_root=active_repo_dir_for(self._ctx),
+                cwd=str(args.get("cwd") or ""),
+            )
+            if git_violation:
+                return (
+                    "⚠️ WORKSPACE_GIT_BLOCKED: run_shell may only use read-only git "
+                    f"operations inside the active workspace; blocked {git_violation}."
+                )
         subcmd = _extract_run_shell_git_subcommand(raw_cmd)
         if subcmd and subcmd.lower() not in _GIT_READONLY_SUBCOMMANDS:
             return (
@@ -968,6 +1180,7 @@ class ToolRegistry:
         *,
         owner_snapshot: Dict[pathlib.Path, Optional[str]],
         light_repo_before: Optional[Dict[str, Any]],
+        workspace_refs_before: Optional[Dict[str, str]],
     ) -> str:
         import time
 
@@ -981,12 +1194,25 @@ class ToolRegistry:
                 "change owner-only settings or skill trust state; protected files were restored."
             )
         if light_repo_before is not None:
-            light_repo_after = _light_repo_snapshot(pathlib.Path(self._ctx.repo_dir))
+            light_repo_after = _light_repo_snapshot(active_repo_dir_for(self._ctx))
             if (
                 light_repo_after is not None
                 and light_repo_after.get("digest") != light_repo_before.get("digest")
             ):
                 result = _format_light_repo_write_block(light_repo_before, light_repo_after, result)
+        if workspace_refs_before is not None:
+            workspace_refs_after = _git_ref_snapshot(active_repo_dir_for(self._ctx))
+            if (
+                workspace_refs_after is not None
+                and workspace_refs_after.get("digest") != workspace_refs_before.get("digest")
+            ):
+                result = (
+                    "⚠️ WORKSPACE_GIT_REF_CHANGED: run_shell changed git HEAD or refs "
+                    "inside the external workspace. External workspace runs must leave "
+                    "changes as files/patch artifacts, not commits/tags/resets.\n\n"
+                    "Original command output:\n"
+                    f"{result}"
+                )
         return result
 
     def execute(self, name: str, args: Dict[str, Any]) -> str:
@@ -1014,6 +1240,15 @@ class ToolRegistry:
         except Exception:
             _mcp_is_name = None
         is_mcp = bool(_mcp_is_name and _mcp_is_name(name))
+
+        workspace_mode = bool(getattr(self._ctx, "is_workspace_mode", lambda: False)())
+        if workspace_mode and (is_mcp or ext_tool or not name in _WORKSPACE_ALLOWED_TOOLS):
+            workspace = str(getattr(self._ctx, "workspace_root", "") or "")
+            return (
+                "⚠️ WORKSPACE_MODE_BLOCKED: this task is running against an external "
+                f"workspace ({workspace}). Tool {name!r} is outside the v5.29 "
+                "workspace allowlist. Leave workspace changes as files or a patch artifact."
+            )
 
         # Hardcoded sandbox: light blocks repo mutation; advanced protects
         # core/contracts/release; pro still relies on commit review.
@@ -1165,6 +1400,7 @@ class ToolRegistry:
         if (
             _runtime_mode == "light"
             and name in _REPO_MUTATION_TOOLS
+            and not workspace_mode
             and not light_skill_scoped_claude
             and not light_skill_scoped_str_replace
         ):
@@ -1193,7 +1429,7 @@ class ToolRegistry:
                         protected_write_paths.append(str(f_entry.get("path", "") or ""))
             elif name == "str_replace_editor":
                 protected_write_paths.append(str(args.get("path", "") or ""))
-            protected_matches = protected_paths_in(protected_write_paths)
+            protected_matches = [] if workspace_mode else protected_paths_in(protected_write_paths)
             if protected_matches and not mode_allows_protected_write(_runtime_mode):
                 first = protected_matches[0]
                 return protected_write_block_message(
@@ -1220,8 +1456,13 @@ class ToolRegistry:
 
         owner_snapshot = self._snapshot_owner_files() if name == "run_shell" else {}
         light_repo_before = (
-            _light_repo_snapshot(pathlib.Path(self._ctx.repo_dir))
+            _light_repo_snapshot(active_repo_dir_for(self._ctx))
             if name == "run_shell" and _runtime_mode == "light"
+            else None
+        )
+        workspace_refs_before = (
+            _git_ref_snapshot(active_repo_dir_for(self._ctx))
+            if name == "run_shell" and workspace_mode
             else None
         )
         try:
@@ -1235,6 +1476,7 @@ class ToolRegistry:
                 result,
                 owner_snapshot=owner_snapshot,
                 light_repo_before=light_repo_before,
+                workspace_refs_before=workspace_refs_before,
             )
 
         # Pro can touch protected files, but commit review still gates landing.

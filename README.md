@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 5.28.0](https://img.shields.io/badge/version-5.28.0-green.svg)](VERSION)
+[![Version 5.29.0-rc.1](https://img.shields.io/badge/version-5.29.0--rc.1-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -75,7 +75,8 @@ Most AI agents execute tasks. Ouroboros **creates itself.**
 ```bash
 git clone https://github.com/joi-lab/ouroboros-desktop.git
 cd ouroboros-desktop
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
+python -m pip install -e . --no-deps
 ```
 
 ### Run
@@ -85,6 +86,30 @@ python server.py
 ```
 
 Then open `http://127.0.0.1:8765` in your browser. The setup wizard will guide you through API key configuration.
+
+### CLI / Headless
+
+The `ouroboros` console command is a gateway-backed operator interface. It
+attaches to the local server by default and only starts one when `--start` is
+passed.
+
+```bash
+ouroboros status
+ouroboros run "Summarize current runtime state"
+ouroboros run --workspace /path/to/project --memory-mode forked --patch-out result.patch "Fix the failing test"
+ouroboros tasks list
+ouroboros logs tail progress --task-id <task_id>
+```
+
+External workspace runs keep Ouroboros's own repo as the governance source,
+resolve contextual repo tools against the active workspace, expose only the
+workspace-safe tool allowlist, and export workspace changes as patch artifacts
+instead of committing in the target repo. A workspace must be a separate git
+worktree root; it may not overlap Ouroboros's system repo or data drive.
+`--patch` and `--patch-out` read the artifact from the gateway host filesystem,
+so use them with a local/same-filesystem server.
+Benchmark helpers under `scripts/` expect clean, local, per-instance checkouts;
+they do not reset or commit target repositories.
 
 You can also override the bind address and port:
 
@@ -419,13 +444,13 @@ not paraphrase it.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 5.29.0-rc.1 | 2026-05-20 | **rc(headless): add CLI and external workspace task mode.** Adds gateway-backed task APIs, SSE task event replay, a multi-command CLI, isolated external workspace memory modes, patch artifacts, and tiny benchmark adapter scripts without adding file-manager or public commit/review CLI surfaces. |
 | 5.28.0 | 2026-05-20 | **release(stability): harden skills, owner parity, and relaunch cleanup.** Adds structured skill lifecycle recovery state, web owner endpoints for runtime mode/auto-grant/grants, process-group server cleanup for desktop relaunches, best-effort isolated-deps cleanup, and a 920K review prompt budget. |
 | 5.27.0-rc.1 | 2026-05-19 | **rc(refactor): shrink setup, UI, and JSONL surfaces.** Centralizes the onboarding/settings setup contract, shared UI primitives/helpers, Files modal shell, and JSONL/LLM-usage readers while preserving review gates, public contracts, and runtime behavior. |
 | 5.26.0-rc.1 | 2026-05-19 | **rc(refactor): reduce core code surface safely.** Consolidates repeated gateway, review, skill lifecycle, marketplace, memory/context, release, and web UI code paths while preserving public API shapes, review gates, and runtime contracts. |
 | 5.25.1-rc.1 | 2026-05-17 | **rc(refactor): shrink scope-review input surface.** Compacts stale/redundant comments and internal docstrings across pack-visible non-test code while preserving safety, review, contract, race, and security rationale; reduces scope-review input without behavior changes. |
 | 5.25.0-rc.4 | 2026-05-17 | **rc(refactor): shrink review and skills UI surfaces.** Consolidates review pack/projection helpers, extracts the installed Skills card renderer, removes retired dialogue and native-skill migration banner/API compatibility surfaces, drops the bundled-skills discovery fallback in favor of the data-plane bootstrap, and documents the migration API retirement as an intentional ABI break for old upgrade banners. |
-| 5.25.0-rc.3 | 2026-05-17 | **rc(docs): restore compact endpoint navigation.** Adds a minimal current route table to `docs/ARCHITECTURE.md` from the gateway, file-browser, static, and Host Service route sources without restoring the old verbose endpoint prose. |
-Older releases are preserved in Git tags and GitHub releases. The 5.2.0 through 5.25.0-rc.2 rows and former `4.0.0` rows are rolled off to respect the P9 changelog cap; their full bodies remain at their git tags.
+Older releases are preserved in Git tags and GitHub releases. The 5.2.0 through 5.25.0-rc.3 rows and former `4.0.0` rows are rolled off to respect the P9 changelog cap; their full bodies remain at their git tags.
 
 ---
 

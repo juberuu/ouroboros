@@ -106,6 +106,20 @@ def test_toolcontext_protocol_fields_match_dataclass():
     )
 
 
+def test_toolcontext_protocol_methods_match_dataclass():
+    """Every method in ToolContextProtocol must also exist on ToolContext."""
+    from ouroboros.tools.registry import ToolContext
+
+    source = inspect.getsource(ToolContextProtocol)
+    protocol_method_names = set(
+        re.findall(r"^    def ([a-zA-Z_][a-zA-Z0-9_]*)\(", source, flags=re.MULTILINE)
+    )
+    missing = {name for name in protocol_method_names if not hasattr(ToolContext, name)}
+    assert missing == set(), (
+        f"ToolContextProtocol declares methods not present on ToolContext: {missing}"
+    )
+
+
 def test_toolcontext_path_helpers_resolve_inside_root():
     """repo_path()/drive_path()/drive_logs() must stay inside the declared roots."""
     from ouroboros.tools.registry import ToolContext

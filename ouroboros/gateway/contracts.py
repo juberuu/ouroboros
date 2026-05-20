@@ -329,6 +329,42 @@ class ChatHistoryResponse(TypedDict, total=False):
     error: str
 
 
+class TaskCreateResponse(TypedDict, total=False):
+    ok: bool
+    task_id: str
+    status: str
+    error: str
+
+
+class TaskListResponse(TypedDict, total=False):
+    tasks: list[Dict[str, Any]]
+    queue: Dict[str, Any]
+    error: str
+
+
+class TaskEvent(TypedDict, total=False):
+    seq: int
+    source: str
+    line: int
+    ts: str
+    type: str
+    task_id: str
+    root: str
+    data: Dict[str, Any]
+
+
+class TaskCancelResponse(TypedDict, total=False):
+    ok: bool
+    task_id: str
+    error: str
+
+
+class LogTailResponse(TypedDict, total=False):
+    name: str
+    entries: list[Dict[str, Any]]
+    error: str
+
+
 # Human/test-visible contract index; routers own executable Route objects.
 HTTP_ENDPOINTS: tuple[str, ...] = (
     "GET /api/health",
@@ -338,6 +374,11 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "POST /api/owner/runtime-mode",
     "POST /api/owner/auto-grant",
     "GET /api/model-catalog",
+    "POST /api/tasks",
+    "GET /api/tasks",
+    "GET /api/tasks/{task_id}",
+    "GET /api/tasks/{task_id}/events",
+    "POST /api/tasks/{task_id}/cancel",
     "POST /api/command",
     "POST /api/reset",
     "GET /api/git/log",
@@ -349,6 +390,7 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "GET /api/cost-breakdown",
     "GET /api/evolution-data",
     "GET /api/chat/history",
+    "GET /api/logs/{name}",
     "POST /api/chat/upload",
     "DELETE /api/chat/upload",
     "GET /api/local-model/status",
@@ -443,6 +485,11 @@ __all__ = [
     "ModelCatalogResponse",
     "FileBrowserListResponse",
     "ChatHistoryResponse",
+    "TaskCreateResponse",
+    "TaskListResponse",
+    "TaskEvent",
+    "TaskCancelResponse",
+    "LogTailResponse",
     "HTTP_ENDPOINTS",
     "WS_MESSAGE_TYPES",
 ]

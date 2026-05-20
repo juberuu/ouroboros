@@ -671,7 +671,9 @@ def run_llm_loop(
 
             if getattr(tools._ctx, "_skill_finalization_injected", False):
                 tools._ctx._skill_finalization_injected = False
-            messages.append({"role": "assistant", "content": content or "", "tool_calls": tool_calls})
+            assistant_msg = dict(msg)
+            assistant_msg.setdefault("role", "assistant")
+            messages.append(assistant_msg)
 
             if content and content.strip():
                 emit_progress(content.strip())

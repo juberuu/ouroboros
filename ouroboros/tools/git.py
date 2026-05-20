@@ -24,7 +24,7 @@ from ouroboros.runtime_mode_policy import (
     protected_write_block_message,
 )
 from ouroboros.platform_layer import acquire_exclusive_file_lock, unlink_lockfile
-from ouroboros.tools.registry import ToolContext, ToolEntry
+from ouroboros.tools.registry import ToolContext, ToolEntry, active_repo_dir_for
 from ouroboros.tools.commit_gate import (
     _check_advisory_freshness,
     _check_overlapping_review_attempt,
@@ -825,7 +825,7 @@ def _check_shrink_guard(ctx: ToolContext, file_path: str, new_content: str, forc
             return None
         result = subprocess.run(
             ["git", "ls-files", "--error-unmatch", safe_relpath(file_path)],
-            cwd=str(ctx.repo_dir), capture_output=True, text=True,
+            cwd=str(active_repo_dir_for(ctx)), capture_output=True, text=True,
         )
         if result.returncode != 0:
             return None
@@ -869,7 +869,7 @@ def _repo_write(ctx: ToolContext, path: str = "", content: str = "",
 
     for e in write_list:
         norm = _normalize_to_posix(e["path"])
-        if is_protected_runtime_path(norm) and not mode_allows_protected_write(_current_runtime_mode()):
+        if not ctx.is_workspace_mode() and is_protected_runtime_path(norm) and not mode_allows_protected_write(_current_runtime_mode()):
             return protected_write_block_message(
                 path=norm,
                 runtime_mode=_current_runtime_mode(),
@@ -890,7 +890,7 @@ def _repo_write(ctx: ToolContext, path: str = "", content: str = "",
                 _invalidate_advisory(
                     ctx,
                     changed_paths=written_paths,
-                    mutation_root=pathlib.Path(ctx.repo_dir),
+                    mutation_root=active_repo_dir_for(ctx),
                     source_tool="repo_write",
                 )
             return shrink_warning
@@ -905,7 +905,7 @@ def _repo_write(ctx: ToolContext, path: str = "", content: str = "",
                 _invalidate_advisory(
                     ctx,
                     changed_paths=written_paths,
-                    mutation_root=pathlib.Path(ctx.repo_dir),
+                    mutation_root=active_repo_dir_for(ctx),
                     source_tool="repo_write",
                 )
             already = ", ".join(written) if written else "(none)"
@@ -917,16 +917,22 @@ def _repo_write(ctx: ToolContext, path: str = "", content: str = "",
     _invalidate_advisory(
         ctx,
         changed_paths=written_paths,
-        mutation_root=pathlib.Path(ctx.repo_dir),
+        mutation_root=active_repo_dir_for(ctx),
         source_tool="repo_write",
     )
     summary = ", ".join(written)
-    result = (
-        f"✅ Written {len(written)} file(s): {summary}\n"
-        "Files are on disk but NOT committed. Run repo_commit when ready.\n"
-        "⚠️ Advisory pre-review is now stale — run advisory_pre_review before repo_commit."
-    )
-    protected_written = protected_paths_in(written_paths)
+    if ctx.is_workspace_mode():
+        result = (
+            f"✅ Written {len(written)} file(s): {summary}\n"
+            "Files are on disk in the active workspace. Do not commit; the headless runner will emit a patch artifact."
+        )
+    else:
+        result = (
+            f"✅ Written {len(written)} file(s): {summary}\n"
+            "Files are on disk but NOT committed. Run repo_commit when ready.\n"
+            "⚠️ Advisory pre-review is now stale — run advisory_pre_review before repo_commit."
+        )
+    protected_written = [] if ctx.is_workspace_mode() else protected_paths_in(written_paths)
     if protected_written and mode_allows_protected_write(_current_runtime_mode()):
         result += "\n\n" + core_patch_notice(protected_written)
     return result
@@ -947,34 +953,40 @@ def _str_replace_editor(
         return "⚠️ STR_REPLACE_ERROR: old_str is required (cannot be empty)."
 
     norm = _normalize_to_posix(path)
-    if is_protected_runtime_path(norm) and not mode_allows_protected_write(_current_runtime_mode()):
+    if not ctx.is_workspace_mode() and is_protected_runtime_path(norm) and not mode_allows_protected_write(_current_runtime_mode()):
         return protected_write_block_message(
             path=norm,
             runtime_mode=_current_runtime_mode(),
             action="edit",
         )
 
-    short_form = decide_payload_short_form(
-        bucket=bucket,
-        skill_name=skill_name,
-        path_text=path,
-        repo_dir=pathlib.Path(ctx.repo_dir),
-        drive_root=pathlib.Path(ctx.drive_root),
-    )
-    if short_form.error:
-        return f"⚠️ STR_REPLACE_ERROR: {short_form.error}"
-    synth = short_form.constraint
     existing_tc = normalize_task_constraint(getattr(ctx, "task_constraint", None))
-    redirect_err = cross_skill_redirect_error(existing_tc, synth)
-    if redirect_err:
-        return f"⚠️ SKILL_REDIRECT_BLOCKED: {redirect_err}"
-
     data_skill_target = None
-    if existing_tc and existing_tc.mode == "skill_repair":
-        task_constraint = existing_tc
+    task_constraint = existing_tc
+    short_form = None
+    if ctx.is_workspace_mode():
+        try:
+            target = ctx.repo_path(path)
+        except ValueError as e:
+            return f"⚠️ PATH_ERROR: {e}"
+        invalidation_root = active_repo_dir_for(ctx)
     else:
-        task_constraint = synth or existing_tc
-    if task_constraint and task_constraint.mode == "skill_repair" and task_constraint.payload_root:
+        short_form = decide_payload_short_form(
+            bucket=bucket,
+            skill_name=skill_name,
+            path_text=path,
+            repo_dir=pathlib.Path(ctx.repo_dir),
+            drive_root=pathlib.Path(ctx.drive_root),
+        )
+        if short_form.error:
+            return f"⚠️ STR_REPLACE_ERROR: {short_form.error}"
+        synth = short_form.constraint
+        redirect_err = cross_skill_redirect_error(existing_tc, synth)
+        if redirect_err:
+            return f"⚠️ SKILL_REDIRECT_BLOCKED: {redirect_err}"
+        task_constraint = existing_tc if existing_tc and existing_tc.mode == "skill_repair" else synth or existing_tc
+
+    if not ctx.is_workspace_mode() and task_constraint and task_constraint.mode == "skill_repair" and task_constraint.payload_root:
         try:
             target = resolve_payload_path(pathlib.Path(ctx.drive_root), task_constraint, path)
             data_skill_target = target
@@ -987,7 +999,7 @@ def _str_replace_editor(
                 "control-plane state. Edit user-authored payload files instead."
             )
         invalidation_root = pathlib.Path(ctx.drive_root)
-    else:
+    elif not ctx.is_workspace_mode():
         data_skill_target = _data_skill_path(path, pathlib.Path(ctx.drive_root))
         if data_skill_target is not None:
             if is_skill_control_plane_path(data_skill_target, pathlib.Path(ctx.drive_root).resolve(strict=False)):
@@ -1003,7 +1015,7 @@ def _str_replace_editor(
                 target = ctx.repo_path(path)
             except ValueError as e:
                 return f"⚠️ PATH_ERROR: {e}"
-            invalidation_root = pathlib.Path(ctx.repo_dir)
+            invalidation_root = active_repo_dir_for(ctx)
 
     if not target.exists():
         return f"⚠️ STR_REPLACE_ERROR: file not found: {path}"
@@ -1058,13 +1070,15 @@ def _str_replace_editor(
         f"Context:\n{context_preview}\n\n"
         "File is on disk but NOT committed."
     )
-    if short_form.ignored_reason:
+    if short_form is not None and short_form.ignored_reason:
         result += f"\n⚠️ SKILL_SHORT_FORM_IGNORED: {short_form.ignored_reason}."
-    if data_skill_target is None:
+    if data_skill_target is None and ctx.is_workspace_mode():
+        result += "\nDo not commit; the headless runner will emit a patch artifact."
+    elif data_skill_target is None:
         result += "\nRun repo_commit when ready.\n⚠️ Advisory pre-review is now stale — run advisory_pre_review before repo_commit."
     else:
         result += "\nRun review_skill for this skill before enabling or declaring it ready."
-    if is_protected_runtime_path(norm) and mode_allows_protected_write(_current_runtime_mode()):
+    if not ctx.is_workspace_mode() and is_protected_runtime_path(norm) and mode_allows_protected_write(_current_runtime_mode()):
         result += "\n\n" + core_patch_notice([norm])
     return result
 
@@ -1212,7 +1226,7 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
 
 def _git_status(ctx: ToolContext) -> str:
     try:
-        return run_cmd(["git", "status", "--porcelain"], cwd=ctx.repo_dir)
+        return run_cmd(["git", "status", "--porcelain"], cwd=active_repo_dir_for(ctx))
     except Exception as e:
         return f"⚠️ GIT_ERROR: {_sanitize_git_error(str(e))}"
 
@@ -1222,7 +1236,7 @@ def _git_diff(ctx: ToolContext, staged: bool = False) -> str:
         cmd = ["git", "diff"]
         if staged:
             cmd.append("--staged")
-        return run_cmd(cmd, cwd=ctx.repo_dir)
+        return run_cmd(cmd, cwd=active_repo_dir_for(ctx))
     except Exception as e:
         return f"⚠️ GIT_ERROR: {_sanitize_git_error(str(e))}"
 

@@ -19,8 +19,8 @@ from typing import Any, Dict, List
 from ouroboros.platform_layer import IS_WINDOWS, kill_process_tree, subprocess_new_group_kwargs
 from ouroboros.config import load_settings
 from ouroboros.tools.commit_gate import _invalidate_advisory
-from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.utils import utc_now_iso, run_cmd
+from ouroboros.tools.registry import ToolContext, ToolEntry, active_repo_dir_for
+from ouroboros.utils import safe_relpath, utc_now_iso, run_cmd
 from ouroboros.contracts.task_constraint import normalize_task_constraint
 from ouroboros.contracts.skill_payload_policy import (
     SkillPayloadPathError,
@@ -312,11 +312,21 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
             '(2) For pipes/chaining: ["sh", "-c", "cmd1 && cmd2"]'
         )
 
-    work_dir = ctx.repo_dir
+    active_repo_dir = active_repo_dir_for(ctx)
+    active_root = pathlib.Path(active_repo_dir).resolve(strict=False)
+    work_dir = pathlib.Path(active_root)
     if cwd and cwd.strip() not in ("", ".", "./"):
-        candidate = (ctx.repo_dir / cwd).resolve()
-        if candidate.exists() and candidate.is_dir():
-            work_dir = candidate
+        cwd_text = str(cwd).strip()
+        if bool(getattr(ctx, "is_workspace_mode", lambda: False)()) and pathlib.Path(cwd_text).is_absolute():
+            return "⚠️ SHELL_CWD_BLOCKED: absolute cwd is not allowed in workspace mode."
+        try:
+            candidate = (active_root / safe_relpath(cwd_text)).resolve(strict=False)
+            candidate.relative_to(active_root)
+        except (OSError, ValueError) as exc:
+            return f"⚠️ SHELL_CWD_BLOCKED: cwd escapes active workspace/repo: {exc}"
+        if not candidate.exists() or not candidate.is_dir():
+            return f"⚠️ SHELL_CWD_BLOCKED: cwd is not a directory: {cwd_text}"
+        work_dir = candidate
     repo_root = _resolve_git_root(pathlib.Path(work_dir))
     before_changed = _status_snapshot(repo_root)
 

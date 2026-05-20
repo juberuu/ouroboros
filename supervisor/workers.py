@@ -302,7 +302,12 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str)
             task = in_q.get()
             if task is None or task.get("type") == "shutdown":
                 break
-            events = agent.handle_task(task)
+            task_drive_root = str(task.get("drive_root") or drive_root)
+            if task_drive_root != str(drive_root):
+                task_agent = make_agent(repo_dir=repo_dir, drive_root=task_drive_root, event_queue=out_q)
+                events = task_agent.handle_task(task)
+            else:
+                events = agent.handle_task(task)
             for e in events:
                 e2 = dict(e)
                 e2["worker_id"] = wid
@@ -810,4 +815,3 @@ def ensure_workers_healthy() -> None:
             )
         kill_workers()
         CRASH_TS.clear()
-

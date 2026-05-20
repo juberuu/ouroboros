@@ -12,7 +12,7 @@ import re
 import uuid
 from typing import Any, Dict, List, Tuple
 
-from ouroboros.tools.registry import ToolContext, ToolEntry
+from ouroboros.tools.registry import ToolContext, ToolEntry, active_repo_dir_for
 from ouroboros.utils import atomic_write_json, read_text, safe_relpath, utc_now_iso
 from ouroboros.contracts.task_constraint import normalize_task_constraint, resolve_payload_path
 from ouroboros.contracts.skill_payload_policy import (
@@ -172,7 +172,7 @@ def _repo_read(ctx: ToolContext, path: str, max_lines: int = 2000, start_line: i
 
 
 def _repo_list(ctx: ToolContext, dir: str = ".", max_entries: int = 500) -> str:
-    return json.dumps(_list_dir(ctx.repo_dir, dir, max_entries), ensure_ascii=False, indent=2)
+    return json.dumps(_list_dir(active_repo_dir_for(ctx), dir, max_entries), ensure_ascii=False, indent=2)
 
 
 def _normalize_data_read_path(ctx: ToolContext, path: str) -> str:
@@ -503,7 +503,7 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
         return "⚠️ SEARCH_ERROR: query is required."
 
     max_results = min(max(1, max_results), _MAX_SEARCH_RESULTS)
-    root = ctx.repo_dir
+    root = active_repo_dir_for(ctx)
     search_root = (root / safe_relpath(path)).resolve()
     if not search_root.exists():
         return f"⚠️ SEARCH_ERROR: path not found: {path}"
@@ -586,7 +586,7 @@ def _extract_python_symbols(file_path: pathlib.Path) -> Tuple[List[str], List[st
 
 def _codebase_digest(ctx: ToolContext) -> str:
     """Generate a compact file/symbol digest for the codebase."""
-    repo_dir = ctx.repo_dir
+    repo_dir = active_repo_dir_for(ctx)
     py_files: List[pathlib.Path] = []
     md_files: List[pathlib.Path] = []
     other_files: List[pathlib.Path] = []

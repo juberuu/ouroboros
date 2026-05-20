@@ -13,6 +13,8 @@ class ToolContextProtocol(Protocol):
     # Filesystem roots.
     repo_dir: pathlib.Path
     drive_root: pathlib.Path
+    workspace_root: pathlib.Path | None
+    workspace_mode: str
 
     # Runtime drains pending_events; emit_progress_fn is best-effort.
     pending_events: list
@@ -24,6 +26,8 @@ class ToolContextProtocol(Protocol):
 
     # Boundary-checked path helpers.
     def repo_path(self, rel: str) -> pathlib.Path: ...
+    def active_repo_dir(self) -> pathlib.Path: ...
+    def is_workspace_mode(self) -> bool: ...
     def drive_path(self, rel: str) -> pathlib.Path: ...
     def drive_logs(self) -> pathlib.Path: ...
 

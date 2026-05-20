@@ -187,6 +187,8 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
     task_id = evt.get("task_id")
     task_type = str(evt.get("task_type") or "")
     wid = evt.get("worker_id")
+    meta = ctx.RUNNING.get(str(task_id or ""), {}) if task_id else {}
+    task = meta.get("task") if isinstance(meta, dict) and isinstance(meta.get("task"), dict) else {}
 
     # Persist here so send_message reaches the UI before task_done collapses the card.
     from ouroboros.utils import utc_now_iso, append_jsonl
@@ -231,6 +233,14 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
             )
 
     if task_id:
+        try:
+            from ouroboros.headless import copy_child_task_result, finalize_task_artifacts
+
+            if task:
+                copy_child_task_result(ctx.DRIVE_ROOT, task)
+                finalize_task_artifacts(ctx.DRIVE_ROOT, task)
+        except Exception:
+            log.warning("Failed to finalize headless artifacts for task %s", task_id, exc_info=True)
         ctx.RUNNING.pop(str(task_id), None)
     if wid in ctx.WORKERS and ctx.WORKERS[wid].busy_task_id == task_id:
         ctx.WORKERS[wid].busy_task_id = None
@@ -410,6 +420,10 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
     task_context = str(evt.get("context") or "").strip()
     depth = int(evt.get("depth", 0))
     parent_id = evt.get("parent_task_id")
+    root_task_id = str(evt.get("root_task_id") or parent_id or tid)
+    session_id = str(evt.get("session_id") or "")
+    actor_id = str(evt.get("actor_id") or "ouroboros")
+    delegation_role = str(evt.get("delegation_role") or "child")
 
     if depth > 3:
         log.warning("Rejected task due to depth limit: depth=%d, desc=%s", depth, desc[:100])
@@ -429,6 +443,10 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
                     tid,
                     STATUS_REJECTED_DUPLICATE,
                     parent_task_id=parent_id,
+                    root_task_id=root_task_id,
+                    session_id=session_id,
+                    actor_id=actor_id,
+                    delegation_role=delegation_role,
                     description=desc,
                     context=task_context,
                     duplicate_of=dup_id,
@@ -451,6 +469,17 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
             "description": desc,
             "context": task_context,
             "depth": depth,
+            "root_task_id": root_task_id,
+            "session_id": session_id,
+            "actor_id": actor_id,
+            "delegation_role": delegation_role,
+            "metadata": {
+                "parent_task_id": parent_id,
+                "root_task_id": root_task_id,
+                "session_id": session_id,
+                "actor_id": actor_id,
+                "delegation_role": delegation_role,
+            },
         }
         if parent_id:
             task["parent_task_id"] = parent_id
@@ -461,6 +490,10 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
                 tid,
                 STATUS_SCHEDULED,
                 parent_task_id=parent_id,
+                root_task_id=root_task_id,
+                session_id=session_id,
+                actor_id=actor_id,
+                delegation_role=delegation_role,
                 description=desc,
                 context=task_context,
                 result="Task accepted and scheduled.",

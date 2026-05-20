@@ -111,6 +111,101 @@ def test_build_remote_kwargs_deduplicates_tool_names_for_openrouter():
     assert kwargs["tools"][0]["function"]["description"] == "first"
 
 
+def test_openrouter_reasoning_returned_by_default_and_env_disables(monkeypatch):
+    client = LLMClient()
+    monkeypatch.setattr(client, "_get_supported_parameters", lambda _model_id: None)
+    target = client._resolve_remote_target("anthropic/claude-sonnet-4.6")
+
+    monkeypatch.delenv("OUROBOROS_RETURN_REASONING", raising=False)
+    default_kwargs = client._build_remote_kwargs(
+        target,
+        [{"role": "user", "content": "hi"}],
+        "high",
+        512,
+        "auto",
+        None,
+        None,
+    )
+
+    assert default_kwargs["extra_body"]["reasoning"] == {"effort": "high", "exclude": False}
+
+    monkeypatch.setenv("OUROBOROS_RETURN_REASONING", "false")
+    disabled_kwargs = client._build_remote_kwargs(
+        target,
+        [{"role": "user", "content": "hi"}],
+        "high",
+        512,
+        "auto",
+        None,
+        None,
+    )
+
+    assert disabled_kwargs["extra_body"]["reasoning"] == {"effort": "high", "exclude": True}
+
+
+def test_non_openrouter_payload_strips_reasoning_roundtrip_metadata(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    client = LLMClient()
+    messages = [
+        {"role": "user", "content": "inspect"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "repo_read", "arguments": "{}"}}],
+            "reasoning": "read first",
+            "reasoning_details": [{"type": "reasoning.text", "text": "read first"}],
+            "response_id": "gen-123",
+        },
+    ]
+
+    kwargs = client._build_remote_kwargs(
+        client._resolve_remote_target("openai::gpt-5.2"),
+        messages,
+        "medium",
+        512,
+        "auto",
+        None,
+        None,
+    )
+
+    assistant_msg = kwargs["messages"][1]
+    assert "reasoning" not in assistant_msg
+    assert "reasoning_details" not in assistant_msg
+    assert "response_id" not in assistant_msg
+    assert messages[1]["reasoning_details"] == [{"type": "reasoning.text", "text": "read first"}]
+
+
+def test_openrouter_payload_keeps_reasoning_roundtrip_metadata(monkeypatch):
+    client = LLMClient()
+    monkeypatch.setattr(client, "_get_supported_parameters", lambda _model_id: None)
+    messages = [
+        {"role": "user", "content": "inspect"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "repo_read", "arguments": "{}"}}],
+            "reasoning": "read first",
+            "reasoning_details": [{"type": "reasoning.text", "text": "read first"}],
+            "response_id": "gen-123",
+        },
+    ]
+
+    kwargs = client._build_remote_kwargs(
+        client._resolve_remote_target("anthropic/claude-sonnet-4.6"),
+        messages,
+        "medium",
+        512,
+        "auto",
+        None,
+        None,
+    )
+
+    assistant_msg = kwargs["messages"][1]
+    assert assistant_msg["reasoning"] == "read first"
+    assert assistant_msg["reasoning_details"] == [{"type": "reasoning.text", "text": "read first"}]
+    assert assistant_msg["response_id"] == "gen-123"
+
+
 def test_build_anthropic_tools_deduplicates_tool_names():
     tools = [
         {
@@ -262,6 +357,33 @@ def test_normalize_remote_response_estimates_cost_for_direct_openai(monkeypatch)
     assert usage["cached_tokens"] == 10
     assert usage["cost"] == 0.123456
     assert seen["args"] == ("openai/gpt-5.2", 100, 40, 10, 0)
+
+
+def test_normalize_remote_response_preserves_reasoning_and_response_id():
+    client = LLMClient()
+    target = client._resolve_remote_target("anthropic/claude-sonnet-4.6")
+    message, usage = client._normalize_remote_response(
+        {
+            "id": "gen-123",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "repo_read", "arguments": "{}"}}],
+                    "reasoning": "look up the file",
+                    "reasoning_details": [{"type": "reasoning.text", "text": "look up the file"}],
+                },
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        },
+        target,
+        skip_cost_fetch=True,
+    )
+
+    assert message["response_id"] == "gen-123"
+    assert message["reasoning"] == "look up the file"
+    assert message["reasoning_details"] == [{"type": "reasoning.text", "text": "look up the file"}]
+    assert usage["provider"] == "openrouter"
 
 
 def test_build_anthropic_messages_rejects_tool_result_without_tool_call_id(monkeypatch):

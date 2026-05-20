@@ -507,7 +507,7 @@ def test_function_count_reasonable():
     """Codebase doesn't have too few or too many functions.
 
     The hard gate value is imported from ouroboros/review.py::MAX_TOTAL_FUNCTIONS
-    (currently 2050 as of v5.28.0-rc.1) — no hardcoded assertion number here.
+    (currently 2130 as of v5.29.0-rc.1) — no hardcoded assertion number here.
     """
     from ouroboros.review import MAX_TOTAL_FUNCTIONS
 

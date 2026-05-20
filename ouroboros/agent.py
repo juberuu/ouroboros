@@ -152,14 +152,39 @@ class OuroborosAgent:
             task_type=str(task.get("type") or ""),
         )
 
+        task_metadata = dict(task.get("metadata") or {}) if isinstance(task.get("metadata"), dict) else {}
+        for key in (
+            "parent_task_id",
+            "root_task_id",
+            "session_id",
+            "actor_id",
+            "delegation_role",
+            "workspace_root",
+            "workspace_mode",
+            "memory_mode",
+            "drive_root",
+            "budget_drive_root",
+        ):
+            if task.get(key) not in (None, ""):
+                task_metadata.setdefault(key, task.get(key))
+
         ctx = ToolContext(
             repo_dir=self.env.repo_dir,
             drive_root=self.env.drive_root,
             branch_dev=self.env.branch_dev,
+            system_repo_dir=self.env.repo_dir,
+            workspace_root=pathlib.Path(task["workspace_root"]).resolve(strict=False)
+            if str(task.get("workspace_root") or "").strip()
+            else None,
+            workspace_mode=str(task.get("workspace_mode") or ""),
+            memory_mode=str(task.get("memory_mode") or ""),
+            task_metadata=task_metadata,
             pending_events=self._pending_events,
             current_chat_id=self._current_chat_id,
             current_task_type=self._current_task_type,
             emit_progress_fn=self._emit_progress,
+            event_queue=self._event_queue,
+            task_id=str(task.get("id") or ""),
             task_depth=int(task.get("depth", 0)),
             is_direct_chat=bool(task.get("_is_direct_chat")),
             task_constraint=normalize_task_constraint(task.get("task_constraint")),
@@ -192,7 +217,9 @@ class OuroborosAgent:
 
         budget_remaining = None
         try:
-            state_data = read_json_dict(self.env.drive_path("state") / "state.json") or {}
+            budget_root_text = str(task.get("budget_drive_root") or "").strip()
+            budget_root = pathlib.Path(budget_root_text) if budget_root_text else self.env.drive_root
+            state_data = read_json_dict(budget_root / "state" / "state.json") or {}
             total_budget = float(os.environ.get("TOTAL_BUDGET", "1"))
             spent = float(state_data.get("spent_usd", 0))
             if total_budget > 0:
