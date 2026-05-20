@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import pathlib
@@ -31,6 +32,7 @@ from ouroboros.server_runtime import (
     has_supervisor_provider,
 )
 from ouroboros.settings_setup_contract import build_setup_contract
+from ouroboros.utils import append_jsonl, atomic_write_json, utc_now_iso
 
 log = logging.getLogger(__name__)
 DEFAULT_PORT = int(os.environ.get("OUROBOROS_SERVER_PORT", "8765"))
@@ -264,6 +266,111 @@ def _start_supervisor_if_needed_for_request(request: Request, settings: dict) ->
     callback = getattr(getattr(request.app, "state", None), "start_supervisor_if_needed", None)
     return bool(callback(settings)) if callable(callback) else False
 
+
+def _owner_audit(request: Request, action: str, payload: Dict[str, Any]) -> None:
+    try:
+        drive_root = request_drive_root(request)
+    except Exception:
+        drive_root = pathlib.Path(DATA_DIR)
+    try:
+        client = getattr(request, "client", None)
+        append_jsonl(
+            drive_root / "logs" / "events.jsonl",
+            {
+                "ts": utc_now_iso(),
+                "type": "owner_api_action",
+                "action": str(action or ""),
+                "client_host": str(getattr(client, "host", "") or ""),
+                **{
+                    key: value
+                    for key, value in dict(payload or {}).items()
+                    if "key" not in str(key).lower() and "secret" not in str(key).lower()
+                },
+            },
+        )
+    except Exception:
+        log.debug("Failed to write owner API audit event", exc_info=True)
+
+
+def _owner_write_settings(settings: Dict[str, Any]) -> None:
+    """Write owner-controlled settings without applying the runtime-mode ratchet."""
+    from ouroboros import config as _config
+
+    _config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    fd = _config._acquire_settings_lock()
+    try:
+        atomic_write_json(_config.SETTINGS_PATH, dict(settings), trailing_newline=False)
+    finally:
+        _config._release_settings_lock(fd)
+
+
+def _owner_read_settings_raw() -> Dict[str, Any]:
+    """Read settings for owner endpoints without applying runtime-mode ratchets."""
+    from ouroboros import config as _config
+
+    merged = dict(_SETTINGS_DEFAULTS)
+    try:
+        if _config.SETTINGS_PATH.exists():
+            raw = json.loads(_config.SETTINGS_PATH.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                merged.update(raw)
+    except Exception:
+        log.debug("Failed to read raw owner settings; using defaults", exc_info=True)
+    return merged
+
+
+async def api_owner_runtime_mode(request: Request) -> JSONResponse:
+    """Persist the owner-selected runtime mode for the next boot."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    from ouroboros import config as _config
+
+    raw_mode = str((body or {}).get("mode") or "").strip().lower()
+    if raw_mode not in set(_config.VALID_RUNTIME_MODES):
+        return json_error("'mode' must be one of: light, advanced, pro", 400)
+    old_settings = _owner_read_settings_raw()
+    previous_mode = _config.normalize_runtime_mode(old_settings.get("OUROBOROS_RUNTIME_MODE"))
+    active_mode = _config.get_runtime_mode()
+    next_mode = _config.normalize_runtime_mode(raw_mode)
+    restart_required = active_mode != next_mode
+    current = dict(old_settings)
+    current["OUROBOROS_RUNTIME_MODE"] = next_mode
+    _owner_write_settings(current)
+    _owner_audit(
+        request,
+        "runtime_mode",
+        {
+            "runtime_mode": next_mode,
+            "previous_runtime_mode": previous_mode,
+            "active_runtime_mode": active_mode,
+            "restart_required": restart_required,
+        },
+    )
+    return JSONResponse({
+        "ok": True,
+        "runtime_mode": next_mode,
+        "restart_required": restart_required,
+    })
+
+
+async def api_owner_auto_grant(request: Request) -> JSONResponse:
+    """Persist the owner auto-grant toggle outside generic settings writes."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict) or not isinstance(body.get("enabled"), bool):
+        return json_error("'enabled' must be a boolean", 400)
+    enabled = bool(body.get("enabled"))
+    current = _owner_read_settings_raw()
+    current["OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS"] = "true" if enabled else "false"
+    _owner_write_settings(current)
+    os.environ["OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS"] = current["OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS"]
+    _owner_audit(request, "auto_grant", {"enabled": enabled})
+    return JSONResponse({"ok": True, "enabled": enabled})
+
 def _claude_code_status_payload() -> Dict[str, Any]:
     """Return app-managed Claude runtime status, versions, readiness, and stderr."""
     from ouroboros.platform_layer import resolve_claude_runtime
@@ -408,19 +515,26 @@ async def api_settings_post(request: Request) -> JSONResponse:
     try:
         body = await request.json()
         old_settings = load_settings()
+        from ouroboros.config import get_runtime_mode, normalize_runtime_mode as _norm_runtime_mode
+
+        raw_old_settings = _owner_read_settings_raw()
+        pending_runtime_mode = _norm_runtime_mode(
+            raw_old_settings.get("OUROBOROS_RUNTIME_MODE", old_settings.get("OUROBOROS_RUNTIME_MODE"))
+        )
+        current_runtime_mode = get_runtime_mode()
+        old_effective_settings = dict(old_settings)
+        old_effective_settings["OUROBOROS_RUNTIME_MODE"] = current_runtime_mode
         if "MCP_SERVERS" in body:
             body = dict(body)
             body["MCP_SERVERS"] = _rehydrate_mcp_servers_payload(
                 body.get("MCP_SERVERS"),
                 old_settings.get("MCP_SERVERS"),
             )
-        current = _merge_settings_payload(old_settings, body)
-        # Normalize runtime mode on save so invalid values cannot land on disk.
-        from ouroboros.config import normalize_runtime_mode as _norm_runtime_mode
-        # Elevation ratchet: preserve old runtime mode regardless of request body.
-        current["OUROBOROS_RUNTIME_MODE"] = _norm_runtime_mode(
-            old_settings.get("OUROBOROS_RUNTIME_MODE")
-        )
+        current = _merge_settings_payload(old_effective_settings, body)
+        # Generic settings saves operate on the current boot baseline. A pending
+        # next-boot mode written by /api/owner/runtime-mode is preserved on disk
+        # below, but never hot-applied to this process/env.
+        current["OUROBOROS_RUNTIME_MODE"] = current_runtime_mode
         # Trim opaque path text so configured/empty state is deterministic.
         current["OUROBOROS_SKILLS_REPO_PATH"] = str(
             current.get("OUROBOROS_SKILLS_REPO_PATH") or ""
@@ -472,11 +586,13 @@ async def api_settings_post(request: Request) -> JSONResponse:
             return json_error("Local-only setups must route at least one model to the local runtime.", 400)
         all_changed = [
             k for k in current
-            if str(current.get(k, "") or "") != str(old_settings.get(k, "") or "")
+            if str(current.get(k, "") or "") != str(old_effective_settings.get(k, "") or "")
         ]
-        restart_keys = _classify_settings_changes(old_settings, current)
+        restart_keys = _classify_settings_changes(old_effective_settings, current)
 
-        save_settings(current)
+        settings_to_save = dict(current)
+        settings_to_save["OUROBOROS_RUNTIME_MODE"] = pending_runtime_mode
+        _owner_write_settings(settings_to_save)
         _apply_settings_to_env(current)
         _start_supervisor_if_needed_for_request(request, current)
 
@@ -494,9 +610,9 @@ async def api_settings_post(request: Request) -> JSONResponse:
         try:
             from ouroboros.extension_loader import reload_all as _reload_extensions
             new_path = str(current.get("OUROBOROS_SKILLS_REPO_PATH") or "").strip()
-            old_path = str(old_settings.get("OUROBOROS_SKILLS_REPO_PATH") or "").strip()
+            old_path = str(old_effective_settings.get("OUROBOROS_SKILLS_REPO_PATH") or "").strip()
             new_runtime_mode = str(current.get("OUROBOROS_RUNTIME_MODE") or "").strip()
-            old_runtime_mode = str(old_settings.get("OUROBOROS_RUNTIME_MODE") or "").strip()
+            old_runtime_mode = str(old_effective_settings.get("OUROBOROS_RUNTIME_MODE") or "").strip()
             if new_path != old_path or new_runtime_mode != old_runtime_mode:
                 # Use load_settings so extensions do not capture a stale snapshot.
                 from ouroboros.config import load_settings as _load_settings
@@ -540,7 +656,7 @@ async def api_settings_post(request: Request) -> JSONResponse:
 
         warnings = []
         if provider_defaults_changed:
-            change_kind = classify_runtime_provider_change(old_settings, current)
+            change_kind = classify_runtime_provider_change(old_effective_settings, current)
             if change_kind == "direct_normalize":
                 warnings.append(
                     "Normalized direct-provider routing because OpenRouter is not configured for the active provider."

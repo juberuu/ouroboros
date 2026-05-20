@@ -1151,6 +1151,45 @@ def test_auto_grant_if_enabled_marks_granted_when_toggle_on(tmp_path, monkeypatc
     assert grants["granted_permissions"] == ["inject_chat"]
 
 
+def test_auto_grant_if_enabled_uses_executable_review_gate(tmp_path, monkeypatch):
+    import ouroboros.config as config
+    from ouroboros.contracts.skill_manifest import SkillManifest
+    from ouroboros.skill_loader import (
+        LoadedSkill,
+        SkillReviewState,
+        auto_grant_if_enabled,
+        load_skill_grants,
+    )
+
+    monkeypatch.setattr(config, "SETTINGS_PATH", tmp_path / "missing-settings.json")
+    monkeypatch.setenv("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", "true")
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    drive_root = tmp_path / "drive"
+    skill_dir = tmp_path / "skill"
+    drive_root.mkdir()
+    skill_dir.mkdir()
+    skill = LoadedSkill(
+        name="auto_blocked",
+        skill_dir=skill_dir,
+        manifest=SkillManifest(
+            name="auto_blocked",
+            description="auto grant blocker test",
+            version="0.1",
+            type="extension",
+            env_from_settings=["OPENROUTER_API_KEY"],
+        ),
+        content_hash="hash-a",
+        review=SkillReviewState(status="blockers", content_hash="hash-a"),
+    )
+
+    outcome = auto_grant_if_enabled(drive_root, skill)
+
+    assert outcome.granted is False
+    assert outcome.requested_keys == ["OPENROUTER_API_KEY"]
+    assert outcome.granted_keys == []
+    assert load_skill_grants(drive_root, "auto_blocked")["granted_keys"] == []
+
+
 def test_save_skill_grants_merges_partial_approvals(tmp_path):
     """A subsequent partial-key grant must not silently revoke
     previously-approved keys. The merge is bound to the same

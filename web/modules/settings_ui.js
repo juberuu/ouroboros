@@ -301,7 +301,7 @@ export function renderSettingsPage() {
                             <div class="form-field">
                                 <label>Scope Review Model</label>
                                 <input id="s-scope-review-model" placeholder="openai/gpt-5.5">
-                                <div class="settings-inline-note">Single model for the blocking scope reviewer. Runs in parallel with the triad diff review.</div>
+                                <div class="settings-inline-note">Single model for scope review. Blocking/advisory behavior follows Review Enforcement.</div>
                             </div>
                             <div class="form-field">
                                 <label>Web Search Model</label>
@@ -337,10 +337,10 @@ export function renderSettingsPage() {
                     <div class="form-section">
                         <h3>Skills</h3>
                         <div class="settings-section-copy">
-                            Closed-loop skill development can auto-grant the keys and host permissions a skill declares after it passes review for the current content hash.
+                            Closed-loop skill development can auto-grant the keys and host permissions a skill declares after a fresh executable review for the current content hash.
                             Leave this off when every skill permission should require a separate human approval.
                         </div>
-                        <label class="local-toggle" title="Applies only after a skill review pass and only to manifest-declared grants for that exact content hash.">
+                        <label class="local-toggle" title="Applies only after a fresh executable skill review and only to manifest-declared grants for that exact content hash.">
                             <input type="checkbox" id="s-auto-grant-reviewed-skills">
                             Auto-grant reviewed skills' keys and permissions
                         </label>
@@ -354,7 +354,7 @@ export function renderSettingsPage() {
                             <code>Advanced</code> is the default &mdash; self-modify the evolutionary layer; protected core/contract/release files stay guarded by the shared runtime-mode policy.
                             <code>Pro</code> can edit protected core/contract/release surfaces, but commits still go through the normal triad + scope review gate; Advanced remains limited to the evolutionary layer.
                             <br><strong>Human controlled:</strong> desktop builds ask the launcher for native confirmation before saving a mode change.
-                            Web/Docker sessions can view the current mode but cannot elevate it from this page.
+                            Web/Docker sessions save mode changes through the owner endpoint; the new mode takes effect after restart.
                         </div>
                         <div class="settings-effort-card">
                             <label>Runtime Mode</label>

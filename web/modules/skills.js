@@ -214,22 +214,21 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
         });
     }
 
-    async function requestMissingKeyGrants(name, keys) {
-        const cleanKeys = (keys || []).map((k) => String(k || '').trim()).filter(Boolean);
-        if (!cleanKeys.length) return;
+    async function requestMissingKeyGrants(name, items) {
+        const cleanItems = (items || []).map((k) => String(k || '').trim()).filter(Boolean);
+        if (!cleanItems.length) return;
         const ok = await openConfirmDialog({
             title: `Grant access to ${name}`,
-            body: `Grant access to ${cleanKeys.join(', ')} for ${name}? Required keys are taken from your settings. The desktop launcher will request a second confirmation.`,
+            body: `Grant access to these keys and permissions for ${name}?\n\n${cleanItems.join('\n')}\n\nOnly grant access to reviewed skills you trust.`,
             confirmLabel: 'Grant access',
         });
-        if (!ok) throw new Error('Skill key grant cancelled.');
+        if (!ok) throw new Error('Skill grant cancelled.');
         const bridge = window.pywebview?.api?.request_skill_key_grant;
-        if (!bridge) {
-            throw new Error('Skill key grants require the desktop launcher confirmation bridge.');
-        }
-        const result = await bridge(name, cleanKeys);
+        const result = bridge
+            ? await bridge(name, cleanItems)
+            : await apiClient.skillGrants(name, cleanItems);
         if (!result?.ok) {
-            throw new Error(result?.error || 'Skill key grant was cancelled.');
+            throw new Error(result?.error || 'Skill grant was cancelled.');
         }
         return result;
     }
@@ -281,7 +280,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
             const missing = keys.length ? keys : [...missingKeys, ...missingPermissions];
             const result = await requestMissingKeyGrants(name, missing);
             if (result) {
-                showToast(`${name}: requested key grants saved`, 'ok');
+                showToast(`${name}: requested grants saved`, 'ok');
                 emitSkillLifecycle('grant', name, result);
             }
             return;
@@ -423,7 +422,9 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
                 }
                 if (!grantReady(current)) {
                     const grants = current.grants || {};
-                    const missing = Array.isArray(grants.missing_keys) ? grants.missing_keys : (grants.requested_keys || []);
+                    const missingKeys = Array.isArray(grants.missing_keys) ? grants.missing_keys : (grants.requested_keys || []);
+                    const missingPermissions = Array.isArray(grants.missing_permissions) ? grants.missing_permissions : (grants.requested_permissions || []);
+                    const missing = [...missingKeys, ...missingPermissions];
                     await requestMissingKeyGrants(name, missing);
                 }
             }
@@ -511,7 +512,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
             } else if (target.classList.contains('skills-grant')) {
                 const keys = (target.dataset.keys || '').split(',').map((k) => k.trim()).filter(Boolean);
                 if (!keys.length) {
-                    showToast(`${name}: no requested keys to grant`, 'warn');
+                    showToast(`${name}: no requested keys or permissions to grant`, 'warn');
                 } else {
                     const result = await requestMissingKeyGrants(name, keys);
                     // Grant may persist even if live extension reconcile fails.
@@ -531,7 +532,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
                     } else if (action === 'extension_loaded') {
                         showToast(`${name}: grant saved and extension loaded`, 'ok');
                     } else {
-                        showToast(`${name}: requested key grants saved`, 'ok');
+                        showToast(`${name}: requested grants saved`, 'ok');
                     }
                 }
             } else if (target.classList.contains('skills-update')) {

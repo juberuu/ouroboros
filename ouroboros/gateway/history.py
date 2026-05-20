@@ -11,7 +11,7 @@ from starlette.responses import JSONResponse
 
 from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
 from ouroboros.gateway._helpers import iter_jsonl_objects
-from ouroboros.utils import iter_llm_usage_events, llm_usage_cost
+from ouroboros.utils import iter_llm_usage_events, llm_usage_cost, utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -122,16 +122,45 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
                 text = str(entry.get("content", entry.get("text", "")))
                 if not text:
                     continue
-                combined.append({
+                rec = {
                     "text": text,
                     "role": "assistant",
                     "ts": str(entry.get("ts", "")),
                     "is_progress": True,
                     "markdown": str(entry.get("format", "")).lower() == "markdown",
                     "task_id": str(entry.get("task_id", "")),
-                })
+                }
+                if isinstance(entry.get("lifecycle"), dict):
+                    rec["lifecycle"] = dict(entry.get("lifecycle") or {})
+                combined.append(rec)
         except Exception as exc:
             log.warning("Failed to read progress log: %s", exc)
+
+        try:
+            from ouroboros.skill_lifecycle_queue import queue_snapshot
+
+            active = queue_snapshot().get("active")
+            if isinstance(active, dict) and active.get("status") == "running":
+                label = "stale" if active.get("stale") else "running"
+                detail = active.get("error") or active.get("message") or active.get("status") or ""
+                text = (
+                    f"Skill {active.get('kind') or 'operation'}: `{active.get('target') or 'skill'}`"
+                    f" — {label}{f' — {detail}' if detail else ''}"
+                )
+                lifecycle = dict(active)
+                lifecycle["phase"] = label
+                combined.append({
+                    "text": text,
+                    "role": "assistant",
+                    "ts": utc_now_iso(),
+                    "is_progress": True,
+                    "markdown": False,
+                    "task_id": str(active.get("chat_task_id") or ""),
+                    "lifecycle": lifecycle,
+                    "lifecycle_virtual": True,
+                })
+        except Exception as exc:
+            log.debug("Failed to synthesize active lifecycle history: %s", exc)
 
         combined.sort(key=lambda m: m.get("ts", ""))
         messages = combined[-limit:] if len(combined) > limit else combined

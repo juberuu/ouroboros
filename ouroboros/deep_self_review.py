@@ -171,7 +171,7 @@ def run_deep_self_review(
         )
 
         # Gate full system+pack like scope/plan review; chars/4 undercounts near
-        # the 1M window, so the 850K gate is still only best-effort.
+        # the 1M window, so the prompt budget remains a best-effort guard.
         from ouroboros.tools.review_helpers import REVIEW_PROMPT_TOKEN_BUDGET
         full_prompt_chars = len(_SYSTEM_PROMPT) + len(pack_text)
         estimated_tokens = estimate_tokens(_SYSTEM_PROMPT + pack_text)

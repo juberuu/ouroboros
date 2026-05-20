@@ -645,9 +645,8 @@ def test_isolated_site_scope_releases_execution_lock_when_cleanup_fails(tmp_path
 
     monkeypatch.setattr(extension_isolated_deps, "release_isolated_site_dirs", fail_cleanup)
 
-    with pytest.raises(RuntimeError, match="cleanup failed"):
-        with extension_isolated_deps.isolated_site_dirs_scope(tmp_path, enabled=False):
-            pass
+    with extension_isolated_deps.isolated_site_dirs_scope(tmp_path, enabled=False):
+        pass
 
     assert extension_isolated_deps._execution_lock.acquire(blocking=False)
     extension_isolated_deps._execution_lock.release()
@@ -667,11 +666,71 @@ def test_async_isolated_site_scope_releases_execution_lock_when_cleanup_fails(tm
         async with extension_isolated_deps.async_isolated_site_dirs_scope(tmp_path, enabled=False):
             pass
 
-    with pytest.raises(RuntimeError, match="cleanup failed"):
+    asyncio.run(run_scope())
+
+    assert extension_isolated_deps._execution_lock.acquire(blocking=False)
+    extension_isolated_deps._execution_lock.release()
+
+
+def test_isolated_site_scope_releases_execution_lock_when_inject_fails(tmp_path, monkeypatch):
+    from ouroboros import extension_isolated_deps
+
+    def fail_inject(_skill_dir):
+        raise RuntimeError("inject failed")
+
+    monkeypatch.setattr(extension_isolated_deps, "inject_isolated_site_dirs", fail_inject)
+
+    with pytest.raises(RuntimeError, match="inject failed"):
+        with extension_isolated_deps.isolated_site_dirs_scope(tmp_path, enabled=True):
+            pass
+
+    assert extension_isolated_deps._execution_lock.acquire(blocking=False)
+    extension_isolated_deps._execution_lock.release()
+
+
+def test_async_isolated_site_scope_releases_execution_lock_when_inject_fails(tmp_path, monkeypatch):
+    import asyncio
+
+    from ouroboros import extension_isolated_deps
+
+    def fail_inject(_skill_dir):
+        raise RuntimeError("inject failed")
+
+    monkeypatch.setattr(extension_isolated_deps, "inject_isolated_site_dirs", fail_inject)
+
+    async def run_scope():
+        async with extension_isolated_deps.async_isolated_site_dirs_scope(tmp_path, enabled=True):
+            pass
+
+    with pytest.raises(RuntimeError, match="inject failed"):
         asyncio.run(run_scope())
 
     assert extension_isolated_deps._execution_lock.acquire(blocking=False)
     extension_isolated_deps._execution_lock.release()
+
+
+def test_async_isolated_site_scope_cancel_while_waiting_does_not_wedge_lock(tmp_path):
+    import asyncio
+
+    from ouroboros import extension_isolated_deps
+
+    async def run_scope():
+        async with extension_isolated_deps.async_isolated_site_dirs_scope(tmp_path, enabled=False):
+            return "entered"
+
+    async def main():
+        assert extension_isolated_deps._execution_lock.acquire(blocking=False)
+        task = asyncio.create_task(run_scope())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        extension_isolated_deps._execution_lock.release()
+        await asyncio.sleep(0.05)
+        assert extension_isolated_deps._execution_lock.acquire(blocking=False)
+        extension_isolated_deps._execution_lock.release()
+
+    asyncio.run(main())
 
 
 def test_release_isolated_site_dirs_removes_path_when_module_scan_fails(tmp_path, monkeypatch):
@@ -706,75 +765,72 @@ def test_release_isolated_site_dirs_removes_path_when_module_scan_fails(tmp_path
 
     monkeypatch.setattr(extension_isolated_deps, "_module_names_under_site_dir", fail_scan)
 
-    with pytest.raises(RuntimeError, match="module scan failed"):
-        extension_isolated_deps.release_isolated_site_dirs(injected)
+    extension_isolated_deps.release_isolated_site_dirs(injected)
 
     assert site_str not in sys.path
     assert site_str not in extension_isolated_deps._injected_site_dir_refs
     assert module_name not in sys.modules
 
 
-def test_release_isolated_site_dirs_cleans_remaining_paths_after_one_scan_fails(tmp_path, monkeypatch):
+def test_release_isolated_site_dirs_removes_preexisting_env_parent_path(tmp_path):
     import sys
-    import types
 
     from ouroboros import extension_isolated_deps
 
-    skill_a = tmp_path / "skill_a"
-    skill_b = tmp_path / "skill_b"
-    site_a = (
-        skill_a
-        / ".ouroboros_env"
-        / "python"
+    skill_dir = tmp_path / "skill"
+    env_parent = skill_dir / ".ouroboros_env" / "python"
+    site_dir = (
+        env_parent
         / "lib"
         / f"python{sys.version_info.major}.{sys.version_info.minor}"
         / "site-packages"
     )
-    site_b = (
-        skill_b
-        / ".ouroboros_env"
-        / "python"
-        / "lib"
-        / f"python{sys.version_info.major}.{sys.version_info.minor}"
-        / "site-packages"
-    )
-    site_a.mkdir(parents=True)
-    site_b.mkdir(parents=True)
-    site_a_str = str(site_a.resolve())
-    site_b_str = str(site_b.resolve())
-    injected = [
-        *extension_isolated_deps.inject_isolated_site_dirs(skill_a),
-        *extension_isolated_deps.inject_isolated_site_dirs(skill_b),
-    ]
-    assert injected == [site_a_str, site_b_str]
-
-    module_a_name = "scan_failure_first_pkg"
-    module_a = types.ModuleType(module_a_name)
-    module_a.__file__ = str(site_a / "scan_failure_first_pkg.py")
-    sys.modules[module_a_name] = module_a
-    module_b_name = "second_site_pkg"
-    module_b = types.ModuleType(module_b_name)
-    module_b.__file__ = str(site_b / "second_site_pkg.py")
-    sys.modules[module_b_name] = module_b
-
-    original_scan = extension_isolated_deps._module_names_under_site_dir
-
-    def fail_first_scan(site_path):
-        if pathlib.Path(site_path).resolve() == site_a.resolve():
-            raise RuntimeError("first scan failed")
-        return original_scan(site_path)
-
-    monkeypatch.setattr(extension_isolated_deps, "_module_names_under_site_dir", fail_first_scan)
-
-    with pytest.raises(RuntimeError, match="first scan failed"):
+    site_dir.mkdir(parents=True)
+    env_parent_str = str(env_parent.resolve())
+    site_str = str(site_dir.resolve())
+    sys.path.insert(0, env_parent_str)
+    try:
+        injected = extension_isolated_deps.inject_isolated_site_dirs(skill_dir)
+        assert injected == [site_str]
         extension_isolated_deps.release_isolated_site_dirs(injected)
+        assert env_parent_str not in sys.path
+        assert site_str not in sys.path
+    finally:
+        while env_parent_str in sys.path:
+            sys.path.remove(env_parent_str)
+        while site_str in sys.path:
+            sys.path.remove(site_str)
+        extension_isolated_deps._injected_site_dir_refs.pop(site_str, None)
 
-    assert site_a_str not in sys.path
-    assert site_b_str not in sys.path
-    assert site_a_str not in extension_isolated_deps._injected_site_dir_refs
-    assert site_b_str not in extension_isolated_deps._injected_site_dir_refs
-    assert module_a_name not in sys.modules
-    assert module_b_name not in sys.modules
+
+def test_inject_isolated_site_dirs_tracks_preexisting_env_path(tmp_path):
+    import sys
+
+    from ouroboros import extension_isolated_deps
+
+    skill_dir = tmp_path / "skill"
+    site_dir = (
+        skill_dir
+        / ".ouroboros_env"
+        / "python"
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+    site_dir.mkdir(parents=True)
+    site_str = str(site_dir.resolve())
+    sys.path.insert(0, site_str)
+    try:
+        injected = extension_isolated_deps.inject_isolated_site_dirs(skill_dir)
+        assert injected == [site_str]
+        assert extension_isolated_deps._injected_site_dir_refs.get(site_str) == 1
+        extension_isolated_deps.release_isolated_site_dirs(injected)
+        assert site_str not in sys.path
+        assert site_str not in extension_isolated_deps._injected_site_dir_refs
+    finally:
+        while site_str in sys.path:
+            sys.path.remove(site_str)
+        extension_isolated_deps._injected_site_dir_refs.pop(site_str, None)
 
 
 def test_isolated_python_deps_do_not_leak_during_overlapping_handlers(tmp_path):

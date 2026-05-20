@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import pathlib
 import importlib
+import logging
 import sys
 import threading
 from contextlib import asynccontextmanager, contextmanager
@@ -13,6 +14,8 @@ from typing import Iterator, List, Sequence
 
 from ouroboros.skill_loader import _SKILL_DIR_CACHE_NAMES
 
+
+log = logging.getLogger(__name__)
 
 _lock = threading.RLock()
 _execution_lock = threading.Lock()
@@ -58,6 +61,8 @@ def inject_isolated_site_dirs(skill_dir: pathlib.Path) -> List[str]:
                 injected.append(site_str)
                 continue
             if site_str in sys.path:
+                _injected_site_dir_refs[site_str] = 1
+                injected.append(site_str)
                 continue
             sys.path.insert(0, site_str)
             importlib.invalidate_caches()
@@ -116,6 +121,13 @@ def _path_is_under(path: pathlib.Path, root: pathlib.Path) -> bool:
         return False
 
 
+def _env_root_for_site_dir(site_path: pathlib.Path) -> pathlib.Path | None:
+    for parent in (site_path, *site_path.parents):
+        if parent.name == ".ouroboros_env":
+            return parent
+    return None
+
+
 def _module_names_under_site_dir_best_effort(site_path: pathlib.Path) -> List[str]:
     to_drop: set[str] = set()
     package_prefixes: set[str] = set()
@@ -123,7 +135,11 @@ def _module_names_under_site_dir_best_effort(site_path: pathlib.Path) -> List[st
     for name, module in modules:
         if not name or module is None:
             continue
-        paths = _module_paths(module)
+        try:
+            paths = _module_paths(module)
+        except BaseException as exc:
+            log.debug("isolated deps module path scan skipped %s: %s", name, exc)
+            continue
         if not any(_path_is_under(path, site_path) for path in paths):
             continue
         to_drop.add(name)
@@ -163,7 +179,53 @@ def _drop_modules_under_site_dir(site_path: pathlib.Path) -> BaseException | Non
     return cleanup_error
 
 
+def _path_matches_isolated_scope(path: pathlib.Path, site_path: pathlib.Path, env_root: pathlib.Path | None) -> bool:
+    return _path_is_under(path, site_path) or bool(env_root and _path_is_under(path, env_root))
+
+
+def _remove_sys_path_entries_for_scope(site_path: pathlib.Path, site_str: str) -> BaseException | None:
+    cleanup_error = None
+    env_root = _env_root_for_site_dir(site_path)
+    for raw in list(sys.path):
+        raw_str = str(raw or "")
+        if not raw_str:
+            continue
+        remove = raw_str == site_str
+        if not remove:
+            try:
+                remove = _path_matches_isolated_scope(pathlib.Path(raw_str).resolve(), site_path, env_root)
+            except Exception:
+                remove = False
+        if not remove:
+            continue
+        try:
+            while raw in sys.path:
+                sys.path.remove(raw)
+        except BaseException as exc:
+            cleanup_error = cleanup_error or exc
+    return cleanup_error
+
+
+def _sys_path_leaks_site_dir(site_path: pathlib.Path, site_str: str) -> List[str]:
+    leaks: List[str] = []
+    env_root = _env_root_for_site_dir(site_path)
+    for raw in list(sys.path):
+        raw_str = str(raw or "")
+        if not raw_str:
+            continue
+        if raw_str == site_str:
+            leaks.append(raw_str)
+            continue
+        try:
+            if _path_matches_isolated_scope(pathlib.Path(raw_str).resolve(), site_path, env_root):
+                leaks.append(raw_str)
+        except Exception:
+            continue
+    return leaks
+
+
 def _drop_importer_cache_for_site_dir(site_path: pathlib.Path, site_str: str) -> None:
+    env_root = _env_root_for_site_dir(site_path)
     for raw in list(sys.path_importer_cache.keys()):
         raw_str = str(raw or "")
         if not raw_str:
@@ -172,14 +234,16 @@ def _drop_importer_cache_for_site_dir(site_path: pathlib.Path, site_str: str) ->
             sys.path_importer_cache.pop(raw, None)
             continue
         try:
-            pathlib.Path(raw_str).resolve().relative_to(site_path)
+            if not _path_matches_isolated_scope(pathlib.Path(raw_str).resolve(), site_path, env_root):
+                continue
         except Exception:
             continue
         sys.path_importer_cache.pop(raw, None)
 
 
 def release_isolated_site_dirs(site_dirs: Sequence[str]) -> None:
-    first_error = None
+    anomalies: List[BaseException] = []
+    hard_leaks: List[str] = []
     for raw in site_dirs:
         site_str = str(raw or "")
         if not site_str:
@@ -192,8 +256,8 @@ def release_isolated_site_dirs(site_dirs: Sequence[str]) -> None:
             site_path = pathlib.Path(site_str).resolve()
             cleanup_error = _drop_modules_under_site_dir(site_path)
             try:
-                while site_str in sys.path:
-                    sys.path.remove(site_str)
+                path_cleanup_error = _remove_sys_path_entries_for_scope(site_path, site_str)
+                cleanup_error = cleanup_error or path_cleanup_error
             except BaseException as exc:
                 cleanup_error = cleanup_error or exc
             try:
@@ -205,9 +269,37 @@ def release_isolated_site_dirs(site_dirs: Sequence[str]) -> None:
             except BaseException as exc:
                 cleanup_error = cleanup_error or exc
             _injected_site_dir_refs.pop(site_str, None)
-            first_error = first_error or cleanup_error
-    if first_error is not None:
-        raise first_error
+            if cleanup_error is not None:
+                anomalies.append(cleanup_error)
+            leaks = _sys_path_leaks_site_dir(site_path, site_str)
+            if leaks:
+                hard_leaks.extend(leaks)
+    if hard_leaks:
+        raise RuntimeError(
+            "isolated dependency path leak after release: "
+            + ", ".join(sorted(set(hard_leaks))[:5])
+        )
+    if anomalies:
+        log.warning(
+            "isolated dependency cleanup completed with recoverable anomalies: %s",
+            "; ".join(f"{type(exc).__name__}: {exc}" for exc in anomalies[:3]),
+        )
+
+
+def _release_site_dirs_best_effort(site_dirs: Sequence[str]) -> None:
+    try:
+        release_isolated_site_dirs(site_dirs)
+    except BaseException as exc:
+        if "path leak" in str(exc).lower():
+            raise
+        log.warning("isolated dependency scope cleanup failed after body success: %s", exc)
+
+
+async def _acquire_execution_lock_async() -> None:
+    while True:
+        if _execution_lock.acquire(blocking=False):
+            return
+        await asyncio.sleep(0.01)
 
 
 @contextmanager
@@ -215,24 +307,26 @@ def isolated_site_dirs_scope(skill_dir: pathlib.Path, *, enabled: bool) -> Itera
     """Serialize extension import work and expose this skill's deps only in-scope."""
 
     _execution_lock.acquire()
-    site_dirs = inject_isolated_site_dirs(skill_dir) if enabled else []
+    site_dirs: List[str] = []
     try:
+        site_dirs = inject_isolated_site_dirs(skill_dir) if enabled else []
         yield
     finally:
         try:
-            release_isolated_site_dirs(site_dirs)
+            _release_site_dirs_best_effort(site_dirs)
         finally:
             _execution_lock.release()
 
 
 @asynccontextmanager
 async def async_isolated_site_dirs_scope(skill_dir: pathlib.Path, *, enabled: bool) -> Iterator[None]:
-    await asyncio.to_thread(_execution_lock.acquire)
-    site_dirs = inject_isolated_site_dirs(skill_dir) if enabled else []
+    await _acquire_execution_lock_async()
+    site_dirs: List[str] = []
     try:
+        site_dirs = inject_isolated_site_dirs(skill_dir) if enabled else []
         yield
     finally:
         try:
-            release_isolated_site_dirs(site_dirs)
+            _release_site_dirs_best_effort(site_dirs)
         finally:
             _execution_lock.release()

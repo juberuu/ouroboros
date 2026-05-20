@@ -82,6 +82,8 @@ def collect_routes(
         api_claude_code_install,
         api_claude_code_status,
         api_onboarding,
+        api_owner_auto_grant,
+        api_owner_runtime_mode,
         api_settings_get,
         api_settings_post,
     )
@@ -146,6 +148,8 @@ def collect_routes(
         ),
         Route("/api/settings", endpoint=settings_get, methods=["GET"]),
         Route("/api/settings", endpoint=settings_post, methods=["POST"]),
+        Route("/api/owner/runtime-mode", endpoint=api_owner_runtime_mode, methods=["POST"]),
+        Route("/api/owner/auto-grant", endpoint=api_owner_auto_grant, methods=["POST"]),
         Route("/api/model-catalog", endpoint=api_model_catalog),
         Route("/api/command", endpoint=api_command, methods=["POST"]),
         Route("/api/reset", endpoint=api_reset, methods=["POST"]),

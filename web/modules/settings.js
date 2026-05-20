@@ -345,10 +345,10 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         if (group) {
             group.title = hasBridge
                 ? 'Runtime mode changes require native launcher confirmation and restart.'
-                : 'Runtime mode is view-only here. Use the desktop app or edit settings.json while Ouroboros is stopped.';
+                : 'Runtime mode changes are saved through the owner endpoint and take effect after restart.';
         }
         document.querySelectorAll('[data-runtime-mode-group] [data-effort-value]').forEach((button) => {
-            button.disabled = !hasBridge;
+            button.disabled = false;
         });
     }
 
@@ -430,11 +430,11 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         const hasBridge = Boolean(window.pywebview?.api?.request_auto_grant_reviewed_skills_change);
         const checkbox = byId('s-auto-grant-reviewed-skills');
         const label = checkbox?.closest('.local-toggle');
-        if (checkbox) checkbox.disabled = !hasBridge;
+        if (checkbox) checkbox.disabled = false;
         if (label) {
             label.title = hasBridge
-                ? 'Requires native confirmation. Applies only after a fresh skill review pass and only to manifest-declared grants for that exact content hash.'
-                : 'Reviewed-skill auto-grant requires the desktop launcher confirmation bridge. Stop Ouroboros and edit settings.json manually outside desktop mode.';
+                ? 'Requires native confirmation. Applies only after a fresh executable skill review and only to manifest-declared grants for that exact content hash.'
+                : 'Uses the owner endpoint. Applies only after a fresh executable skill review and only to manifest-declared grants for that exact content hash.';
         }
     }
 
@@ -597,15 +597,15 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
     async function saveRuntimeModeViaNativeBridgeIfNeeded() {
         const nextMode = byId('s-runtime-mode').value || 'advanced';
         const currentMode = currentSettings?.OUROBOROS_RUNTIME_MODE || 'advanced';
-        if (nextMode === currentMode) return null;
         const bridge = window.pywebview?.api?.request_runtime_mode_change;
-        if (!bridge) {
-            throw new Error(
-                'Runtime mode changes require the desktop launcher confirmation bridge. '
-                + 'Use the desktop app, or stop Ouroboros and edit settings.json manually.'
-            );
+        if (nextMode === currentMode) {
+            return bridge ? await bridge(nextMode) : await apiClient.ownerRuntimeMode(nextMode);
         }
-        const result = await bridge(nextMode);
+        const result = bridge
+            ? await bridge(nextMode)
+            : (confirm(`Change Ouroboros runtime mode from ${currentMode} to ${nextMode}? The change takes effect after restart.`)
+                ? await apiClient.ownerRuntimeMode(nextMode)
+                : { ok: false, error: 'Runtime mode change cancelled.' });
         if (!result || result.ok !== true) {
             throw new Error(result?.error || 'Runtime mode change was cancelled.');
         }
@@ -619,13 +619,11 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         const currentEnabled = isTruthySetting(currentSettings?.OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS);
         if (nextEnabled === currentEnabled) return null;
         const bridge = window.pywebview?.api?.request_auto_grant_reviewed_skills_change;
-        if (!bridge) {
-            throw new Error(
-                'Reviewed-skill auto-grant changes require the desktop launcher confirmation bridge. '
-                + 'Use the desktop app, or stop Ouroboros and edit settings.json manually.'
-            );
-        }
-        const result = await bridge(nextEnabled);
+        const result = bridge
+            ? await bridge(nextEnabled)
+            : (confirm(`${nextEnabled ? 'Enable' : 'Disable'} reviewed-skill auto-grant? It only applies after a fresh executable review for the current content hash.`)
+                ? await apiClient.ownerAutoGrant(nextEnabled)
+                : { ok: false, error: 'Reviewed-skill auto-grant change cancelled.' });
         if (!result || result.ok !== true) {
             throw new Error(result?.error || 'Reviewed-skill auto-grant change was cancelled.');
         }

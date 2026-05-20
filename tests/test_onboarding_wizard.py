@@ -267,3 +267,12 @@ def test_web_style_contains_onboarding_overlay_shell():
     assert ".onboarding-overlay {" in style
     assert ".onboarding-frame {" in style
     assert ".onboarding-overlay-backdrop {" in style
+    assert ".onboarding-restart-card {" in style
+
+
+def test_onboarding_overlay_surfaces_restart_required_message():
+    source = (REPO / "web" / "modules" / "onboarding_overlay.js").read_text(encoding="utf-8")
+
+    assert "showRestartRequiredOverlay" in source
+    assert "event.data.restart_required" in source
+    assert "Continue in current mode" in source

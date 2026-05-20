@@ -347,6 +347,33 @@ export function summarizeChatLiveEvent(evt) {
     const progressText = describeText(String(evt.content || evt.text || '').replace(/^💬\s*/, ''), 240);
     const key = (...parts) => [t, groupId, ...parts].join(':');
 
+    if (evt.lifecycle && typeof evt.lifecycle === 'object') {
+        const lifecycle = evt.lifecycle;
+        const status = String(lifecycle.status || '').toLowerCase();
+        const stale = Boolean(lifecycle.stale);
+        const phase = status === 'succeeded' ? 'done'
+            : ['failed', 'cancelled', 'interrupted'].includes(status) ? 'lifecycle_error'
+                : stale ? 'warn'
+                    : 'working';
+        const label = lifecycle.phase || status || 'working';
+        const target = lifecycle.target ? `\`${lifecycle.target}\`` : 'skill';
+        const headline = progressText.preview || `Skill ${lifecycle.kind || 'operation'}: ${target} — ${label}`;
+        const body = stale
+            ? (lifecycle.recovery_hint || 'Lifecycle work is still running; restart may be required.')
+            : (lifecycle.error || lifecycle.message || '');
+        return chatView({
+            phase,
+            headline,
+            body: shortText(body, 220),
+            fullHeadline: progressText.full || headline,
+            fullBody: body,
+            visible: true,
+            promote: true,
+            human: true,
+            dedupeKey: lifecycle.id ? `lifecycle:${lifecycle.id}:${status}:${label}:${stale ? 'stale' : 'fresh'}` : key(status, label),
+        });
+    }
+
     if (evt.is_progress || t === 'send_message') {
         const lifecycleTerminal = String(evt.task_id || '').startsWith('skill_lifecycle_')
             && /\s—\s(completed|failed)\b/i.test(progressText.full);

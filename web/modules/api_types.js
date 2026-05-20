@@ -62,6 +62,7 @@
  * @property {boolean=} markdown
  * @property {boolean=} is_progress
  * @property {string=} task_id
+ * @property {Object=} lifecycle
  * @property {string=} source
  * @property {string=} sender_label
  * @property {string=} sender_session_id
@@ -85,4 +86,29 @@
  * @property {string} mime
  */
 
-export const GATEWAY_CONTRACT_VERSION = '5.27.0-rc.1';
+/**
+ * @typedef {Object} OwnerRuntimeModeResponse
+ * @property {boolean} ok
+ * @property {string} runtime_mode
+ * @property {boolean} restart_required
+ */
+
+/**
+ * @typedef {Object} OwnerAutoGrantResponse
+ * @property {boolean} ok
+ * @property {boolean} enabled
+ */
+
+/**
+ * @typedef {Object} SkillGrantResponse
+ * @property {boolean} ok
+ * @property {string} skill
+ * @property {string[]=} granted_keys
+ * @property {string[]=} granted_permissions
+ * @property {string=} extension_action
+ * @property {string=} extension_reason
+ * @property {string=} load_error
+ * @property {Object=} grants
+ */
+
+export const GATEWAY_CONTRACT_VERSION = '5.28.0-rc.1';

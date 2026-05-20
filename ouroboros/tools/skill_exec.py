@@ -933,7 +933,7 @@ _TOGGLE_SCHEMA = {
     "description": (
         "Enable or disable a skill. Disabled skills are excluded from "
         "skill_exec regardless of review status. Enabling requires a fresh "
-        "executable review and any requested core-key grants."
+        "executable review and any requested key or host-permission grants."
     ),
     "parameters": {
         "type": "object",

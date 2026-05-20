@@ -710,6 +710,16 @@ async def lifespan(app):
     except Exception:
         log.warning("Failed to start Host Service API", exc_info=True)
 
+    try:
+        from ouroboros.skill_review_runner import reconcile_stale_review_jobs
+
+        if pytest_default_real_data_dir:
+            log.info("Skipping stale skill-review reconciliation against real DATA_DIR during pytest")
+        else:
+            reconcile_stale_review_jobs(lifespan_drive_root)
+    except Exception:
+        log.warning("Stale skill-review reconciliation at startup failed", exc_info=True)
+
     # Reload enabled+reviewed extensions across restarts.
     try:
         from ouroboros.config import (

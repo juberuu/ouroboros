@@ -19,6 +19,15 @@ _REPO_DIR = pathlib.Path(__file__).resolve().parent.parent
 _OUROBOROS_HOME = _REPO_DIR.parent
 _DATA_DIR = _OUROBOROS_HOME / "data"
 _SETTINGS_PATH = _DATA_DIR / "settings.json"
+_SECRET_ENV_KEYS = {
+    "GITHUB_TOKEN",
+    "OUROBOROS_NETWORK_PASSWORD",
+    "OPENROUTER_API_KEY",
+    "OPENAI_API_KEY",
+    "OPENAI_COMPATIBLE_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "CLOUDRU_FOUNDATION_MODELS_API_KEY",
+}
 
 if str(_REPO_DIR) not in sys.path:
     sys.path.insert(0, str(_REPO_DIR))
@@ -26,6 +35,11 @@ if str(_REPO_DIR) not in sys.path:
 
 def _load_settings_into_env() -> Dict[str, Any]:
     """Populate env from settings.json without printing secret values."""
+    preexisting_secrets = {
+        key: os.environ.get(key, "")
+        for key in _SECRET_ENV_KEYS
+        if os.environ.get(key)
+    }
     if not _SETTINGS_PATH.exists():
         sys.stderr.write(
             f"[run_external_review] settings.json not found at {_SETTINGS_PATH}\n"
@@ -49,6 +63,9 @@ def _load_settings_into_env() -> Dict[str, Any]:
     try:
         from ouroboros.config import apply_settings_to_env
         apply_settings_to_env(settings)
+        for key, value in preexisting_secrets.items():
+            if not str(settings.get(key) or "").strip():
+                os.environ[key] = value
     except Exception as exc:
         sys.stderr.write(
             f"[run_external_review] apply_settings_to_env failed (continuing with raw env copy): {exc}\n"

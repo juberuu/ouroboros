@@ -227,11 +227,13 @@ class LocalChatBridge:
         ts: Optional[str] = None,
         is_progress: bool = False,
         task_id: str = "",
+        progress_meta: Optional[Dict[str, Any]] = None,
     ) -> Tuple[bool, str]:
         """Send text to UI, A2A subscribers, and host event stream."""
         clean_text = _strip_markdown(text) if not parse_mode else text
         message_ts = ts or utc_now_iso()
         transport = dict(self._chat_transports.get(int(chat_id or 0), {}) or {})
+        meta = dict(progress_meta or {})
         msg = {
             "type": "text",
             "content": clean_text,
@@ -240,6 +242,8 @@ class LocalChatBridge:
             "ts": message_ts,
             "task_id": str(task_id or ""),
         }
+        if meta:
+            msg.update(meta)
         self._outbox.put(msg)
         with self._response_subs_lock:
             subs = [(sid, cb) for sid, (cid, cb) in self._response_subs.items()
@@ -250,7 +254,7 @@ class LocalChatBridge:
             except Exception:
                 log.debug("A2A response callback error for sub %s", sid, exc_info=True)
         if self._broadcast_fn and not is_a2a_chat_id(chat_id):
-            self._broadcast_fn({
+            payload = {
                 "type": "chat",
                 "role": "assistant",
                 "content": clean_text,
@@ -259,9 +263,12 @@ class LocalChatBridge:
                 "ts": message_ts,
                 "task_id": str(task_id or ""),
                 "transport": transport,
-            })
+            }
+            if meta:
+                payload.update(meta)
+            self._broadcast_fn(payload)
         if not is_a2a_chat_id(chat_id):
-            publish_event(CHAT_OUTBOUND, {
+            event = {
                 "chat_id": int(chat_id or 0),
                 "text": clean_text,
                 "markdown": bool(parse_mode),
@@ -269,7 +276,10 @@ class LocalChatBridge:
                 "ts": message_ts,
                 "task_id": str(task_id or ""),
                 "transport": transport,
-            })
+            }
+            if meta:
+                event.update(meta)
+            publish_event(CHAT_OUTBOUND, event)
         return True, "ok"
 
     def send_chat_action(self, chat_id: int, action: str = "typing") -> bool:
@@ -396,6 +406,7 @@ def _send_markdown(
     ts: Optional[str] = None,
     is_progress: bool = False,
     task_id: str = "",
+    progress_meta: Optional[Dict[str, Any]] = None,
 ) -> Tuple[bool, str]:
     """Send markdown text through the bridge."""
     bridge = get_bridge()
@@ -408,6 +419,7 @@ def _send_markdown(
         ts=ts,
         is_progress=is_progress,
         task_id=task_id,
+        progress_meta=progress_meta,
     )
 
 
@@ -478,6 +490,7 @@ def log_chat(
 def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
                      fmt: str = "",
                      is_progress: bool = False, task_id: str = "",
+                     progress_meta: Optional[Dict[str, Any]] = None,
                      ts: Optional[str] = None) -> None:
     st = load_state()
     owner_id = int(st.get("owner_id") or 0)
@@ -485,7 +498,7 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
     msg_ts = ts or utc_now_iso()
 
     if is_progress and DATA_DIR:
-        append_jsonl(DATA_DIR / "logs" / "progress.jsonl", {
+        progress_record = {
             "ts": msg_ts,
             "type": "send_message",
             "task_id": task_id,
@@ -494,7 +507,10 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
             "text": text if log_text is None else log_text,
             "content": _text,
             "format": fmt,
-        })
+        }
+        if progress_meta:
+            progress_record.update(dict(progress_meta))
+        append_jsonl(DATA_DIR / "logs" / "progress.jsonl", progress_record)
     else:
         log_chat(
             "out",
@@ -518,8 +534,16 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
             ts=msg_ts,
             is_progress=is_progress,
             task_id=task_id,
+            progress_meta=progress_meta,
         )
         return
 
     bridge = get_bridge()
-    bridge.send_message(chat_id, full, ts=msg_ts, is_progress=is_progress, task_id=task_id)
+    bridge.send_message(
+        chat_id,
+        full,
+        ts=msg_ts,
+        is_progress=is_progress,
+        task_id=task_id,
+        progress_meta=progress_meta,
+    )

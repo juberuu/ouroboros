@@ -3,7 +3,7 @@ from __future__ import annotations
 import pathlib
 import re
 
-from ouroboros.gateway.contracts import HTTP_ENDPOINTS, WS_MESSAGE_TYPES
+from ouroboros.gateway.contracts import HTTP_ENDPOINTS, SkillLifecycleQueueResponse, WS_MESSAGE_TYPES
 from ouroboros.gateway.router import collect_routes
 
 
@@ -36,3 +36,10 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         assert re.search(rf"@typedef \{{Object\}} {name}\b", text), f"api_types.js missing {name}"
     assert "setup_contract" in text
     assert {"chat", "command", "log", "heartbeat"} <= set(WS_MESSAGE_TYPES)
+
+
+def test_skill_lifecycle_queue_contract_matches_runtime_shape():
+    fields = set(SkillLifecycleQueueResponse.__annotations__)
+
+    assert {"active", "events"} <= fields
+    assert {"queue", "recent_events", "running"}.isdisjoint(fields)

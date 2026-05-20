@@ -68,6 +68,7 @@ class ChatOutbound(TypedDict):
     markdown: NotRequired[bool]
     is_progress: NotRequired[bool]
     task_id: NotRequired[str]
+    lifecycle: NotRequired[Dict[str, Any]]
     source: NotRequired[str]
     sender_label: NotRequired[str]
     sender_session_id: NotRequired[str]
@@ -222,6 +223,29 @@ class SettingsSaveResponse(TypedDict, total=False):
     warnings: list[str]
 
 
+class OwnerRuntimeModeResponse(TypedDict):
+    ok: bool
+    runtime_mode: str
+    restart_required: bool
+
+
+class OwnerAutoGrantResponse(TypedDict):
+    ok: bool
+    enabled: bool
+
+
+class SkillGrantResponse(TypedDict, total=False):
+    ok: bool
+    skill: str
+    granted_keys: list[str]
+    granted_permissions: list[str]
+    extension_action: str
+    extension_reason: str
+    load_error: str
+    grants: Dict[str, Any]
+    error: str
+
+
 class GitLogResponse(TypedDict):
     commits: list[Dict[str, Any]]
     tags: list[str]
@@ -252,9 +276,8 @@ class ExtensionsIndexResponse(TypedDict, total=False):
 
 
 class SkillLifecycleQueueResponse(TypedDict, total=False):
-    queue: list[Dict[str, Any]]
-    recent_events: list[Dict[str, Any]]
-    running: bool
+    active: Dict[str, Any]
+    events: list[Dict[str, Any]]
 
 
 class MarketplaceSearchResponse(TypedDict, total=False):
@@ -312,6 +335,8 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "GET /api/state",
     "GET /api/settings",
     "POST /api/settings",
+    "POST /api/owner/runtime-mode",
+    "POST /api/owner/auto-grant",
     "GET /api/model-catalog",
     "POST /api/command",
     "POST /api/reset",
@@ -403,6 +428,9 @@ __all__ = [
     "SettingsNetworkMeta",
     "SettingsMeta",
     "SettingsSaveResponse",
+    "OwnerRuntimeModeResponse",
+    "OwnerAutoGrantResponse",
+    "SkillGrantResponse",
     "GitLogResponse",
     "EvolutionDataResponse",
     "UploadResponse",

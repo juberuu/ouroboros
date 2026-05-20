@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import pathlib
 import re
 import threading
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Deque, Dict, Optional
 
 from ouroboros.utils import utc_now_iso as _now_iso
@@ -18,6 +20,17 @@ from ouroboros.utils import utc_now_iso as _now_iso
 log = logging.getLogger(__name__)
 
 _MAX_EVENTS = 80
+_STALE_RUNNING_JOB_SEC = int(os.environ.get("OUROBOROS_SKILL_LIFECYCLE_STALE_SEC", "1800"))
+
+
+def _iso_age_seconds(value: str) -> int:
+    try:
+        dt = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return max(0, int((datetime.now(timezone.utc) - dt).total_seconds()))
+    except Exception:
+        return 0
 
 
 @dataclass
@@ -35,6 +48,8 @@ class LifecycleJob:
     finished_at: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
+        age_seconds = _iso_age_seconds(self.started_at or self.queued_at)
+        stale = bool(self.status == "running" and age_seconds >= _STALE_RUNNING_JOB_SEC)
         return {
             "id": self.id,
             "kind": self.kind,
@@ -47,6 +62,14 @@ class LifecycleJob:
             "queued_at": self.queued_at,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
+            "age_seconds": age_seconds,
+            "stale": stale,
+            "stale_reason": "running_too_long" if stale else "",
+            "recovery_hint": (
+                "Lifecycle work is still running in-process. Restart Ouroboros to clear "
+                "a stuck worker after preserving logs."
+                if stale else ""
+            ),
         }
 
 
@@ -100,11 +123,14 @@ def _notify_chat_progress(job: LifecycleJob, phase: str) -> None:
         from supervisor.message_bus import send_with_budget
 
         detail = job.error or job.message or job.status
+        lifecycle = job.to_dict()
+        lifecycle["phase"] = str(phase or "")
         send_with_budget(
             0,
             f"Skill {job.kind}: `{job.target}` — {phase}{f' — {detail}' if detail else ''}",
             is_progress=True,
             task_id=_chat_task_id(job),
+            progress_meta={"lifecycle": lifecycle},
         )
     except Exception:
         return
@@ -182,9 +208,19 @@ async def async_skill_lifecycle_file_lock(drive_root: pathlib.Path):
 
 
 def _notify_chat(job: LifecycleJob) -> None:
-    if job.status not in {"succeeded", "failed"}:
+    if job.status not in {"succeeded", "failed", "cancelled"}:
         return
-    _notify_chat_progress(job, "completed" if job.status == "succeeded" else "failed")
+    phase = {
+        "succeeded": "completed",
+        "cancelled": "cancelled",
+    }.get(job.status, "failed")
+    _notify_chat_progress(job, phase)
+
+
+def _job_snapshot(job: LifecycleJob) -> Dict[str, Any]:
+    payload = job.to_dict()
+    payload["chat_task_id"] = _chat_task_id(job)
+    return payload
 
 
 async def run_lifecycle_job(
@@ -215,6 +251,7 @@ async def run_lifecycle_job(
         opts.progress_target.bind(job)
     result: Any = None
     error_obj: BaseException | None = None
+    terminal_notified = False
     try:
         async with _async_thread_lock(_get_lock()):
             _active = job
@@ -248,19 +285,32 @@ async def run_lifecycle_job(
             finally:
                 job.finished_at = _now_iso()
                 if opts.on_finished is not None:
-                    opts.on_finished(job, result, error_obj)
+                    try:
+                        opts.on_finished(job, result, error_obj)
+                    except BaseException:
+                        log.exception(
+                            "skill lifecycle on_finished hook failed for %s:%s",
+                            job.kind,
+                            job.target,
+                        )
                 _release_dedupe(job)
-                _active = None
+                if _active is job:
+                    _active = None
                 if opts.progress_target is not None:
                     opts.progress_target.release()
                 _notify_chat(job)
+                terminal_notified = True
     except asyncio.CancelledError:
         job.status = "cancelled"
         job.error = job.error or "CancelledError"
         job.finished_at = job.finished_at or _now_iso()
         _release_dedupe(job)
+        if _active is job:
+            _active = None
         if opts.progress_target is not None:
             opts.progress_target.release()
+        if not terminal_notified:
+            _notify_chat(job)
         raise
 
 
@@ -375,6 +425,6 @@ def queue_snapshot() -> Dict[str, Any]:
     """Return a JSON-friendly view of recent lifecycle activity."""
 
     return {
-        "active": _active.to_dict() if _active else None,
-        "events": [job.to_dict() for job in list(_events)],
+        "active": _job_snapshot(_active) if _active else None,
+        "events": [_job_snapshot(job) for job in list(_events)],
     }

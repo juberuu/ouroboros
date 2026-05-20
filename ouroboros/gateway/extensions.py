@@ -31,8 +31,13 @@ from ouroboros.skill_loader import (
     discover_skills,
     find_skill,
     grant_status_for_skill,
+    requested_core_setting_keys,
+    requested_skill_permissions,
+    review_status_allows_execution,
+    save_skill_grants,
     skill_review_gate,
 )
+from ouroboros.utils import append_jsonl, utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -70,6 +75,48 @@ def _broadcast_extension_lifecycle(request: Request, skill: str, action: Any, re
         "action": str(action or ""),
         "reason": str(reason or ""),
     })
+
+
+def _owner_grant_audit(drive_root: pathlib.Path, request: Request, payload: Dict[str, Any]) -> None:
+    try:
+        client = getattr(request, "client", None)
+        append_jsonl(
+            pathlib.Path(drive_root) / "logs" / "events.jsonl",
+            {
+                "ts": utc_now_iso(),
+                "type": "owner_api_action",
+                "action": "skill_grant",
+                "client_host": str(getattr(client, "host", "") or ""),
+                "skill": str(payload.get("skill") or ""),
+                "granted_key_count": int(payload.get("granted_key_count") or 0),
+                "granted_permission_count": int(payload.get("granted_permission_count") or 0),
+                "extension_action": str(payload.get("extension_action") or ""),
+                "extension_reason": str(payload.get("extension_reason") or ""),
+            },
+        )
+    except Exception:
+        log.debug("Failed to write owner grant audit event", exc_info=True)
+
+
+def _grant_items_from_body(body: Dict[str, Any]) -> list[str]:
+    raw = body.get("items")
+    if raw is None:
+        raw = body.get("keys")
+    if raw is None:
+        raw = body.get("granted_keys")
+    if raw is None:
+        return []
+    out: list[str] = []
+    values = raw if isinstance(raw, list) else [raw]
+    for item in values:
+        if isinstance(item, dict):
+            value = item.get("value") or item.get("key") or item.get("permission") or item.get("name")
+        else:
+            value = item
+        text = str(value or "").strip()
+        if text and text not in out:
+            out.append(text)
+    return out
 
 
 async def api_extensions_index(request: Request) -> JSONResponse:
@@ -442,7 +489,7 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
                 }
             if not grants.get("all_granted", True):
                 return {
-                    "error": "cannot enable until requested key grants are approved",
+                    "error": "cannot enable until requested key and permission grants are approved",
                     "status_code": 409,
                     **_review_fields(loaded, stale=stale, gate=gate),
                     "grants": grants,
@@ -528,6 +575,7 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
         message=("Enabling" if enabled else "Disabling") + f" {initial.name}",
         runner=_run_toggle,
         options=LifecycleJobOptions(
+            drive_root=drive_root,
             result_message=lambda item: (
                 item.get("error", "")
                 or (("Enabled" if enabled else "Disabled") + f" {item.get('skill', initial.name)}")
@@ -606,14 +654,136 @@ async def api_skill_lifecycle_queue(request: Request) -> JSONResponse:
 
 
 async def api_skill_grants(request: Request) -> JSONResponse:
-    """Reject direct grant writes; desktop launcher owns this boundary."""
-    return JSONResponse(
+    """Owner grant path for reviewed skill settings keys and host permissions."""
+    from ouroboros import extension_loader
+    from ouroboros.config import get_skills_repo_path, load_settings
+
+    skill_name = str(request.path_params.get("skill") or "").strip()
+    if not skill_name:
+        return json_error("missing skill name", 400)
+    body = await request_json_or(request, {}, exceptions=(Exception,))
+    if not isinstance(body, dict):
+        return json_error("request body must be a JSON object", 400)
+
+    drive_root = _request_drive_root(request)
+    repo_path = get_skills_repo_path()
+
+    def _save_grants_sync() -> dict[str, Any]:
+        loaded = find_skill(drive_root, skill_name, repo_path=repo_path)
+        if loaded is None:
+            return {"error": "skill not found", "status_code": 404}
+        if not (loaded.manifest.is_script() or loaded.manifest.is_extension()):
+            return {
+                "error": "key and permission grants are supported for script and extension skills",
+                "status_code": 400,
+            }
+        stale = loaded.review.is_stale_for(loaded.content_hash)
+        gate = skill_review_gate(loaded.review.status, stale=stale)
+        if not review_status_allows_execution(loaded.review.status) or stale:
+            return {
+                "error": "key and permission grants require a fresh executable review",
+                "status_code": 409,
+                **_review_fields(loaded, stale=stale, gate=gate),
+                "grants": grant_status_for_skill(drive_root, loaded),
+            }
+        allowed_keys = requested_core_setting_keys(list(loaded.manifest.env_from_settings or []))
+        allowed_permissions = requested_skill_permissions(
+            list(getattr(loaded.manifest, "permissions", []) or []),
+            list(getattr(loaded.manifest, "subscribe_events", []) or []),
+        )
+        permission_map = {permission.lower(): permission for permission in allowed_permissions}
+        requested_raw = _grant_items_from_body(body)
+        requested_keys: list[str] = []
+        requested_permissions: list[str] = []
+        rejected: list[str] = []
+        for item in requested_raw:
+            key = item.upper()
+            permission = permission_map.get(item.lower())
+            if key in allowed_keys:
+                if key not in requested_keys:
+                    requested_keys.append(key)
+            elif permission:
+                if permission not in requested_permissions:
+                    requested_permissions.append(permission)
+            else:
+                rejected.append(item)
+        if not requested_raw or rejected or (not requested_keys and not requested_permissions):
+            return {
+                "error": (
+                    "grant items must be requested by the current manifest; "
+                    f"allowed keys={allowed_keys}, permissions={allowed_permissions}"
+                ),
+                "status_code": 400,
+                "allowed_keys": allowed_keys,
+                "allowed_permissions": allowed_permissions,
+                "rejected_items": rejected,
+            }
+        save_skill_grants(
+            drive_root,
+            loaded.name,
+            requested_keys,
+            content_hash=loaded.content_hash,
+            requested_keys=allowed_keys,
+            granted_permissions=requested_permissions,
+            requested_permissions=allowed_permissions,
+        )
+        extension_action = None
+        extension_reason = None
+        extension_load_error = None
+        if loaded.manifest.is_extension():
+            try:
+                state = extension_loader.reconcile_extension(
+                    loaded.name,
+                    drive_root,
+                    load_settings,
+                    repo_path=repo_path,
+                    retry_load_error=True,
+                )
+                extension_action = state.get("action")
+                extension_reason = state.get("reason")
+                extension_load_error = state.get("load_error")
+            except Exception as exc:
+                log.warning(
+                    "Skill grant saved but extension reconcile failed for %s: %s",
+                    loaded.name,
+                    exc,
+                    exc_info=True,
+                )
+                extension_reason = "reconcile_call_failed"
+                extension_load_error = str(exc)
+        refreshed = find_skill(drive_root, loaded.name, repo_path=repo_path) or loaded
+        return {
+            "ok": True,
+            "skill": loaded.name,
+            "granted_keys": requested_keys,
+            "granted_permissions": requested_permissions,
+            "extension_action": extension_action,
+            "extension_reason": extension_reason,
+            "load_error": extension_load_error,
+            "grants": grant_status_for_skill(drive_root, refreshed),
+        }
+
+    result = await asyncio.to_thread(_save_grants_sync)
+    if result.get("error"):
+        return JSONResponse(result, status_code=int(result.get("status_code") or 400))
+    _owner_grant_audit(
+        drive_root,
+        request,
         {
-            "error": "key grants require desktop launcher confirmation",
-            "code": "owner_confirmation_required",
+            "skill": result.get("skill"),
+            "granted_key_count": len(result.get("granted_keys") or []),
+            "granted_permission_count": len(result.get("granted_permissions") or []),
+            "extension_action": result.get("extension_action"),
+            "extension_reason": result.get("extension_reason"),
         },
-        status_code=403,
     )
+    _broadcast_extension_lifecycle(
+        request,
+        str(result.get("skill") or skill_name),
+        result.get("extension_action"),
+        result.get("extension_reason"),
+    )
+    return JSONResponse(result)
 
 
 async def api_skill_reconcile(request: Request) -> JSONResponse:

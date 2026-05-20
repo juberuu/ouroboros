@@ -619,11 +619,9 @@
 
     function renderReviewModeStep() {
         const runtimeMode = trim(state.runtimeMode) || 'advanced';
-        const runtimeModeDisabled = HOST_MODE !== 'desktop';
-        const runtimeModeCopy = runtimeModeDisabled
-            ? 'Runtime mode is owner-controlled in web/Docker onboarding and cannot be saved through /api/settings. Use the desktop launcher or edit settings.json while stopped.'
-            : 'Separate axis from review enforcement. This first-run choice becomes the boot baseline before Ouroboros starts; later elevation requires native launcher confirmation.';
-        const disabledAttr = runtimeModeDisabled ? ' disabled aria-disabled="true"' : '';
+        const runtimeModeCopy = HOST_MODE === 'desktop'
+            ? 'Separate axis from review enforcement. This first-run choice becomes the boot baseline before Ouroboros starts; later elevation requires native launcher confirmation.'
+            : 'Separate axis from review enforcement. Web/Docker onboarding saves this through the owner endpoint; the selected mode becomes active after restart.';
         return `
             <div class="step-header">
                 <div>
@@ -645,7 +643,7 @@
                     <p class="field-note">${escapeHtml(runtimeModeCopy)}</p>
                     <div class="wizard-choice-grid three">
                         ${RUNTIME_MODES.map((mode) => `
-                            <button type="button" class="wizard-choice ${escapeHtml(mode.className || mode.value)} ${runtimeMode === mode.value ? 'active' : ''}" data-runtime-mode="${escapeHtml(mode.value)}"${disabledAttr}>
+                            <button type="button" class="wizard-choice ${escapeHtml(mode.className || mode.value)} ${runtimeMode === mode.value ? 'active' : ''}" data-runtime-mode="${escapeHtml(mode.value)}">
                                 <span class="tone">${escapeHtml(mode.tone)}</span>
                                 <h3>${escapeHtml(mode.label)}</h3>
                                 <p>${escapeHtml(mode.copy)}</p>
@@ -1048,12 +1046,22 @@
 
     async function saveWizardPayload(payload) {
         if (HOST_MODE === 'web') {
+            const runtimeMode = trim(state.runtimeMode) || 'advanced';
             await apiRequest('/api/settings', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload),
             });
-            window.parent?.postMessage({ type: 'ouroboros:onboarding-complete' }, '*');
+            const runtimeResult = await apiRequest('/api/owner/runtime-mode', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mode: runtimeMode }),
+            });
+            window.parent?.postMessage({
+                type: 'ouroboros:onboarding-complete',
+                restart_required: Boolean(runtimeResult?.restart_required),
+                runtime_mode: runtimeResult?.runtime_mode || runtimeMode,
+            }, '*');
             if (!window.parent || window.parent === window) {
                 window.location.replace('/');
             }
@@ -1093,9 +1101,7 @@
                 LOCAL_ROUTING_MODE: trim(state.localSource) ? (trim(state.localRoutingMode) || 'cloud') : 'cloud',
                 ...Object.fromEntries(MODEL_SLOTS.map((slot) => [slot.settingKey, trim(state[slot.stateKey])])),
             };
-        if (HOST_MODE === 'desktop') {
-            payload.OUROBOROS_RUNTIME_MODE = trim(state.runtimeMode) || 'advanced';
-        }
+        payload.OUROBOROS_RUNTIME_MODE = trim(state.runtimeMode) || 'advanced';
         try {
             await saveWizardPayload(payload);
         } catch (error) {

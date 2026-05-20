@@ -26,6 +26,7 @@ from ouroboros.config import (
     acquire_pid_lock,
     apply_settings_to_env as _apply_settings_to_env,
     load_settings,
+    get_runtime_mode,
     normalize_runtime_mode,
     read_version,
     release_pid_lock,
@@ -46,15 +47,26 @@ from ouroboros.platform_layer import (
     assign_pid_to_job,
     close_job,
     create_kill_on_close_job,
+    current_process_group_id,
     embedded_python_candidates,
     force_kill_pid,
     git_install_hint,
+    kill_pid_tree,
+    kill_process_group_id,
     kill_process_on_port,
+    kill_process_tree,
     merge_hidden_kwargs,
     open_path_external,
+    pid_is_alive,
+    process_command,
+    process_group_id,
     resume_process,
+    subprocess_new_group_kwargs,
     terminate_job,
+    terminate_process_group_id,
+    terminate_process_tree,
 )
+from ouroboros.utils import atomic_write_json, utc_now_iso
 from ouroboros.server_runtime import apply_runtime_provider_defaults, has_startup_ready_provider
 
 MAX_CRASH_RESTARTS = 5
@@ -81,6 +93,10 @@ log = logging.getLogger("launcher")
 
 
 APP_VERSION = read_version()
+
+
+def _server_process_record_path() -> pathlib.Path:
+    return pathlib.Path(DATA_DIR) / "state" / "server_process.json"
 
 
 def _hidden_run(command, **kwargs):
@@ -252,6 +268,126 @@ _shutdown_event = threading.Event()
 _webview_window = None
 
 
+def _server_process_identity_matches(record: dict) -> bool:
+    try:
+        pid = int(record.get("pid") or 0)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0 or pid == os.getpid() or not pid_is_alive(pid):
+        return False
+    expected_server = str((REPO_DIR / "server.py").resolve())
+    expected_repo = str(REPO_DIR.resolve())
+    record_server = str(record.get("server_path") or "")
+    record_repo = str(record.get("repo_dir") or "")
+    if record_server and record_server != expected_server:
+        return False
+    if record_repo and record_repo != expected_repo:
+        return False
+    live_pgid = process_group_id(pid)
+    try:
+        recorded_pgid = int(record.get("pgid") or 0)
+    except (TypeError, ValueError):
+        recorded_pgid = 0
+    if not IS_WINDOWS and (recorded_pgid <= 0 or live_pgid <= 0 or recorded_pgid != live_pgid):
+        return False
+    command = process_command(pid)
+    if not command:
+        return False
+    return expected_server in command or ("server.py" in command and expected_repo in command)
+
+
+def _write_server_process_record(proc: subprocess.Popen, *, port: int, server_py: pathlib.Path) -> None:
+    try:
+        record = {
+            "pid": int(proc.pid),
+            "pgid": process_group_id(proc.pid),
+            "server_path": str(server_py.resolve()),
+            "repo_dir": str(REPO_DIR.resolve()),
+            "requested_port": int(port),
+            "port": int(port),
+            "argv": [str(EMBEDDED_PYTHON), str(server_py.resolve())],
+            "created_at": utc_now_iso(),
+        }
+        atomic_write_json(_server_process_record_path(), record, trailing_newline=True)
+    except Exception:
+        log.warning("Failed to write server process record", exc_info=True)
+
+
+def _update_server_process_record_port(pid: int, actual_port: int) -> None:
+    try:
+        record_path = _server_process_record_path()
+        if not record_path.exists():
+            return
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        if not isinstance(record, dict) or int(record.get("pid") or 0) != int(pid):
+            return
+        record["port"] = int(actual_port)
+        if "requested_port" not in record:
+            record["requested_port"] = int(actual_port)
+        record["port_updated_at"] = utc_now_iso()
+        atomic_write_json(record_path, record, trailing_newline=True)
+    except Exception:
+        log.debug("Failed to update server process record port", exc_info=True)
+
+
+def _cleanup_recorded_server_process(reason: str = "preflight") -> None:
+    try:
+        record_path = _server_process_record_path()
+        if not record_path.exists():
+            return
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        if not isinstance(record, dict):
+            record_path.unlink(missing_ok=True)
+            return
+        if not _server_process_identity_matches(record):
+            log.info("Ignoring stale server process record with non-matching identity (%s)", reason)
+            record_path.unlink(missing_ok=True)
+            return
+        pid = int(record.get("pid") or 0)
+        pgid = int(record.get("pgid") or 0)
+        log.info("Cleaning recorded server process pid=%d pgid=%d (%s)", pid, pgid, reason)
+        if not IS_WINDOWS and pgid > 0 and pgid != current_process_group_id():
+            terminate_process_group_id(pgid)
+            time.sleep(0.5)
+            kill_process_group_id(pgid)
+        if pid_is_alive(pid):
+            kill_pid_tree(pid)
+        record_path.unlink(missing_ok=True)
+    except Exception:
+        log.warning("Failed to clean recorded server process (%s)", reason, exc_info=True)
+
+
+def _cleanup_recorded_server_group_for_pid(pid: int, reason: str = "agent_exit") -> None:
+    try:
+        record_path = _server_process_record_path()
+        if not record_path.exists():
+            return
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        if not isinstance(record, dict) or int(record.get("pid") or 0) != int(pid):
+            return
+        pgid = int(record.get("pgid") or 0)
+        live_pgid = process_group_id(int(pid)) if pid_is_alive(int(pid)) else 0
+        if not IS_WINDOWS and live_pgid > 0 and pgid > 0 and pgid != live_pgid:
+            log.info(
+                "Ignoring mismatched recorded server pgid=%d for live pid=%d pgid=%d (%s)",
+                pgid,
+                pid,
+                live_pgid,
+                reason,
+            )
+            pgid = 0
+        if not IS_WINDOWS and pgid > 0 and pgid != current_process_group_id():
+            log.info("Cleaning server process group pgid=%d after pid=%d exit (%s)", pgid, pid, reason)
+            terminate_process_group_id(pgid)
+            time.sleep(0.2)
+            kill_process_group_id(pgid)
+        if pid_is_alive(int(pid)):
+            kill_pid_tree(int(pid))
+        record_path.unlink(missing_ok=True)
+    except Exception:
+        log.warning("Failed to clean recorded server process group (%s)", reason, exc_info=True)
+
+
 def start_agent(port: int = AGENT_SERVER_PORT) -> subprocess.Popen:
     """Start server.py as the managed agent subprocess."""
     global _agent_proc, _agent_job
@@ -284,6 +420,8 @@ def start_agent(port: int = AGENT_SERVER_PORT) -> subprocess.Popen:
             | _CREATE_NEW_PROCESS_GROUP
             | _CREATE_SUSPENDED
         )
+    else:
+        popen_kwargs.update(subprocess_new_group_kwargs())
 
     proc = _hidden_popen([EMBEDDED_PYTHON, str(server_py)], **popen_kwargs)
     _agent_proc = proc
@@ -315,6 +453,8 @@ def start_agent(port: int = AGENT_SERVER_PORT) -> subprocess.Popen:
             return proc
         log.info("Agent pid %d assigned to Windows Job Object", proc.pid)
 
+    _write_server_process_record(proc, port=port, server_py=server_py)
+
     def _stream_output() -> None:
         log_path = DATA_DIR / "logs" / "agent_stdout.log"
         try:
@@ -343,19 +483,26 @@ def stop_agent() -> None:
 
     log.info("Stopping agent (pid=%s)...", proc.pid)
     try:
-        proc.terminate()
+        if IS_WINDOWS:
+            proc.terminate()
+        else:
+            terminate_process_tree(proc)
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
         if IS_WINDOWS and job is not None:
             terminate_job(job)
         else:
-            proc.kill()
-        proc.wait(timeout=5)
+            kill_process_tree(proc)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            log.warning("Agent process did not exit after forced stop (pid=%s)", proc.pid)
     except Exception:
         pass
 
     if IS_WINDOWS and job is not None:
         close_job(job)
+    _cleanup_recorded_server_group_for_pid(proc.pid, "stop_agent")
 
 
 def _read_port_file() -> int:
@@ -446,6 +593,7 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
     global _agent_proc, _agent_job
     crash_times: list[float] = []
 
+    _cleanup_recorded_server_process("startup")
     _kill_stale_runtime_ports(port)
 
     while not _shutdown_event.is_set():
@@ -457,12 +605,14 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
         proc = start_agent(port)
 
         actual_port = _poll_port_file(timeout=30)
+        _update_server_process_record_port(proc.pid, actual_port)
         if not _wait_for_server(actual_port, timeout=45):
             log.warning("Agent server did not become responsive within 45s (port %d)", actual_port)
 
         proc.wait()
         exit_code = proc.returncode
         log.info("Agent exited with code %d", exit_code)
+        _cleanup_recorded_server_group_for_pid(proc.pid, "agent_exit")
 
         with _agent_lock:
             _agent_proc = None
@@ -523,11 +673,14 @@ def _save_settings(settings: dict) -> None:
 def _request_runtime_mode_change(mode: str, confirm_fn) -> dict:
     new_mode = normalize_runtime_mode(mode)
     settings = _load_settings()
-    old_mode = normalize_runtime_mode(settings.get("OUROBOROS_RUNTIME_MODE"))
-    if new_mode == old_mode:
-        return {"ok": True, "runtime_mode": new_mode, "restart_required": False}
+    pending_mode = normalize_runtime_mode(settings.get("OUROBOROS_RUNTIME_MODE"))
+    active_mode = get_runtime_mode()
+    restart_required = new_mode != active_mode
+    if new_mode == pending_mode:
+        return {"ok": True, "runtime_mode": new_mode, "restart_required": restart_required}
     message = (
-        f"Change Ouroboros runtime mode from {old_mode} to {new_mode}?\n\n"
+        f"Change Ouroboros runtime mode from {pending_mode} to {new_mode}?\n\n"
+        f"Current boot is still running in {active_mode} mode. "
         "This is an owner-only operation. The new mode is saved by the "
         "desktop launcher and takes effect after restart."
     )
@@ -535,7 +688,7 @@ def _request_runtime_mode_change(mode: str, confirm_fn) -> dict:
         return {"ok": False, "error": "Runtime mode change cancelled."}
     settings["OUROBOROS_RUNTIME_MODE"] = new_mode
     _save_settings(settings)
-    return {"ok": True, "runtime_mode": new_mode, "restart_required": True}
+    return {"ok": True, "runtime_mode": new_mode, "restart_required": restart_required}
 
 
 def _request_auto_grant_reviewed_skills_change(enabled: bool, confirm_fn) -> dict:
@@ -547,7 +700,7 @@ def _request_auto_grant_reviewed_skills_change(enabled: bool, confirm_fn) -> dic
     if new_enabled:
         message = (
             "Enable auto-grant for reviewed skills?\n\n"
-            "After this, any completed skill review will grant the "
+            "After this, any fresh executable skill review will grant the "
             "skill's manifest-declared settings keys and host permissions for "
             "that exact content hash. Only enable this for trusted closed-loop "
             "skill development."
@@ -580,9 +733,9 @@ def _request_skill_key_grant(skill: str, keys: list, confirm_fn) -> dict:
     if loaded is None:
         return {"ok": False, "error": f"Skill {skill_name!r} not found"}
     if not (loaded.manifest.is_script() or loaded.manifest.is_extension()):
-        return {"ok": False, "error": "Core-key grants are supported for script and extension skills."}
+        return {"ok": False, "error": "Key and permission grants are supported for script and extension skills."}
     if not review_status_allows_execution(loaded.review.status) or loaded.review.is_stale_for(loaded.content_hash):
-        return {"ok": False, "error": "Key grants require a fresh executable review."}
+        return {"ok": False, "error": "Key and permission grants require a fresh executable review."}
     allowed = requested_core_setting_keys(list(loaded.manifest.env_from_settings or []))
     allowed_permissions = requested_skill_permissions(
         list(getattr(loaded.manifest, "permissions", []) or []),
@@ -603,10 +756,10 @@ def _request_skill_key_grant(skill: str, keys: list, confirm_fn) -> dict:
     message = (
         f"Grant skill {loaded.name!r} access to these settings keys / host permissions?\n\n"
         + "\n".join([*requested_keys, *requested_permissions])
-        + "\n\nOnly grant keys to reviewed skills you trust."
+        + "\n\nOnly grant keys and permissions to reviewed skills you trust."
     )
-    if not confirm_fn("Confirm Skill Key Grant", message):
-        return {"ok": False, "error": "Skill key grant cancelled."}
+    if not confirm_fn("Confirm Skill Grant", message):
+        return {"ok": False, "error": "Skill grant cancelled."}
     save_skill_grants(
         DATA_DIR,
         loaded.name,
@@ -996,6 +1149,7 @@ def main():
 
     def _kill_orphaned_children() -> None:
         """Final safety net: kill processes still on runtime ports."""
+        _cleanup_recorded_server_process("window_close")
         _kill_stale_runtime_ports(port)
         _kill_stale_on_port(8766)
         try:

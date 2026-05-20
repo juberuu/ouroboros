@@ -97,7 +97,7 @@ function grantBlock(skill) {
     const missing = [...(grants.missing_keys || []), ...(grants.missing_permissions || [])];
     const granted = [...(grants.granted_keys || []), ...(grants.granted_permissions || [])];
     const tone = grants.unsupported_for_skill_type ? 'muted' : missing.length ? 'warn' : 'ok';
-    const status = grants.unsupported_for_skill_type ? 'This skill type cannot receive core API keys.' : missing.length ? 'This skill needs your permission to use the keys above.' : 'Access granted.';
+    const status = grants.unsupported_for_skill_type ? 'This skill type cannot receive keys or host permissions.' : missing.length ? 'This skill needs your permission to use the keys and permissions above.' : 'Access granted.';
     return `<div class="skills-access skills-access-${tone}">
         <div class="skills-access-row"><span class="skills-access-label">Needs access</span> ${requested.map((k) => `<code>${escapeHtml(k)}</code>`).join(' ')}</div>
         ${granted.length ? `<div class="skills-access-row"><span class="skills-access-label">Granted</span> ${granted.map((k) => `<code>${escapeHtml(k)}</code>`).join(' ')}</div>` : ''}

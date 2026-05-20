@@ -1,8 +1,10 @@
-"""Blocking whole-codebase scope reviewer for the commit pipeline.
+"""Enforcement-aware whole-codebase scope reviewer for the commit pipeline.
 
-Runs beside triad review, sees full repo context, and fails closed on model,
-parse, or touched-context errors. Oversized prompts are the explicit
-non-blocking skip path.
+Runs beside triad review and sees full repo context. Critical findings follow
+``OUROBOROS_REVIEW_ENFORCEMENT``: blocking enforcement blocks, advisory
+enforcement reports them without blocking. Infrastructure failures such as
+model errors, empty output, parse failures, and touched-context errors still
+fail closed; oversized prompts are the explicit non-blocking skip path.
 """
 
 from __future__ import annotations

@@ -882,24 +882,108 @@ def test_api_skill_toggle_rejects_non_boolean_enabled(tmp_path, monkeypatch):
         _stop_patches(patches)
 
 
-def test_api_skill_grants_requires_owner_bridge(tmp_path, monkeypatch):
+def test_api_skill_grants_saves_keys_and_permissions(tmp_path, monkeypatch):
+    from ouroboros.skill_loader import SkillReviewState, compute_content_hash, load_skill_grants, save_review_state
+
     skills_root = tmp_path / "skills"
-    _write_ext(
+    skill_dir = _write_ext(
         skills_root,
         "grant_api",
-        permissions=["tool"],
+        permissions=["tool", "read_settings", "inject_chat"],
         plugin="def register(api):\n    pass\n",
         env_from_settings=["OPENROUTER_API_KEY"],
     )
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
-    client, _drive_root, patches = _make_client(tmp_path, monkeypatch)
+    client, drive_root, patches = _make_client(tmp_path, monkeypatch)
     try:
+        content_hash = compute_content_hash(skill_dir, manifest_entry="plugin.py")
+        save_review_state(
+            drive_root,
+            "grant_api",
+            SkillReviewState(status="pass", content_hash=content_hash),
+        )
         resp = client.post(
             "/api/skills/grant_api/grants",
-            json={"granted_keys": ["OPENROUTER_API_KEY"]},
+            json={"items": ["OPENROUTER_API_KEY", "inject_chat"]},
         )
-        assert resp.status_code == 403
-        assert resp.json()["code"] == "owner_confirmation_required"
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["granted_keys"] == ["OPENROUTER_API_KEY"]
+        assert data["granted_permissions"] == ["inject_chat"]
+        grants = load_skill_grants(drive_root, "grant_api")
+        assert grants["granted_keys"] == ["OPENROUTER_API_KEY"]
+        assert grants["granted_permissions"] == ["inject_chat"]
+        assert data["extension_reason"] in {"disabled", "not_extension", "name_collision", None}
+    finally:
+        _stop_patches(patches)
+
+
+def test_api_skill_grants_soft_fails_extension_reconcile_after_persist(tmp_path, monkeypatch):
+    from ouroboros import extension_loader
+    from ouroboros.skill_loader import SkillReviewState, compute_content_hash, load_skill_grants, save_review_state
+
+    skills_root = tmp_path / "skills"
+    skill_dir = _write_ext(
+        skills_root,
+        "grant_reconcile_soft_fail",
+        permissions=["inject_chat"],
+        plugin="def register(api):\n    pass\n",
+    )
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    client, drive_root, patches = _make_client(tmp_path, monkeypatch)
+    try:
+        content_hash = compute_content_hash(skill_dir, manifest_entry="plugin.py")
+        save_review_state(
+            drive_root,
+            "grant_reconcile_soft_fail",
+            SkillReviewState(status="pass", content_hash=content_hash),
+        )
+
+        def fail_reconcile(*_args, **_kwargs):
+            raise RuntimeError("reconcile exploded")
+
+        monkeypatch.setattr(extension_loader, "reconcile_extension", fail_reconcile)
+        resp = client.post(
+            "/api/skills/grant_reconcile_soft_fail/grants",
+            json={"items": ["inject_chat"]},
+        )
+
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["extension_reason"] == "reconcile_call_failed"
+        assert "reconcile exploded" in data["load_error"]
+        grants = load_skill_grants(drive_root, "grant_reconcile_soft_fail")
+        assert grants["granted_permissions"] == ["inject_chat"]
+    finally:
+        _stop_patches(patches)
+
+
+def test_api_skill_grants_rejects_blocking_blocker_review(tmp_path, monkeypatch):
+    from ouroboros.skill_loader import SkillReviewState, compute_content_hash, save_review_state
+
+    skills_root = tmp_path / "skills"
+    skill_dir = _write_ext(
+        skills_root,
+        "grant_blocked",
+        permissions=["tool", "read_settings"],
+        plugin="def register(api):\n    pass\n",
+        env_from_settings=["OPENROUTER_API_KEY"],
+    )
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    client, drive_root, patches = _make_client(tmp_path, monkeypatch)
+    try:
+        content_hash = compute_content_hash(skill_dir, manifest_entry="plugin.py")
+        save_review_state(
+            drive_root,
+            "grant_blocked",
+            SkillReviewState(status="blockers", content_hash=content_hash),
+        )
+        resp = client.post("/api/skills/grant_blocked/grants", json={"items": ["OPENROUTER_API_KEY"]})
+        assert resp.status_code == 409
+        assert "fresh executable review" in resp.json()["error"]
     finally:
         _stop_patches(patches)
 
@@ -1070,6 +1154,13 @@ def test_lifecycle_queue_endpoint_marks_stale_review_job_interrupted(tmp_path, m
         data = json.loads(job_path.read_text(encoding="utf-8"))
         assert data["status"] == "interrupted"
         assert data["interrupt_reason"] == "owner_process_exited"
+        progress = [
+            json.loads(line)
+            for line in (drive_root / "logs" / "progress.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert progress[-1]["lifecycle"]["status"] == "interrupted"
+        assert progress[-1]["task_id"] == "skill_lifecycle_review_alpha_skill-job-old"
     finally:
         _stop_patches(patches)
 

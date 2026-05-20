@@ -739,6 +739,8 @@ def auto_grant_if_enabled(drive_root: pathlib.Path, skill: LoadedSkill) -> AutoG
         return outcome
     if skill.review.is_stale_for(skill.content_hash):
         return outcome
+    if not review_status_allows_execution(skill.review.status):
+        return outcome
     if normalize_skill_review_status(skill.review.status) == _REVIEW_STATUS_PENDING:
         return outcome
     if not requested_keys and not requested_permissions:

@@ -647,7 +647,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         if (phase === 'working') return 'Working';
         if (phase === 'done') return 'Done';
         if (phase === 'warn') return 'Notice';
-        if (phase === 'error' || phase === 'timeout') return 'Issue';
+        if (phase === 'error' || phase === 'timeout' || phase === 'lifecycle_error') return 'Issue';
         if (!phase) return 'Working';
         return phase.charAt(0).toUpperCase() + phase.slice(1);
     }
@@ -945,6 +945,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
             content: msg?.content || msg?.text || '',
             text: msg?.content || msg?.text || '',
             task_id: taskId,
+            lifecycle: msg?.lifecycle || null,
         });
         if (!summary) return;
         queueTaskLiveUpdate(summary, taskId, normalizeLogTs(msg.ts || new Date().toISOString()), summary.dedupeKey || '');

@@ -138,11 +138,14 @@ function lifecycleFor(summary, installed, pending) {
         };
     }
     if (!grantReady(installed)) {
-        const missing = installed.grants?.missing_keys || [];
+        const missing = [
+            ...(installed.grants?.missing_keys || []),
+            ...(installed.grants?.missing_permissions || []),
+        ];
         return {
             tone: 'warn',
-            label: 'Needs key grant',
-            hint: missing.length ? `Missing: ${missing.join(', ')}` : 'Human key grant required.',
+            label: 'Needs grants',
+            hint: missing.length ? `Missing: ${missing.join(', ')}` : 'Human key and permission grants required.',
             action: 'grant',
             button: 'Grant',
         };
@@ -501,21 +504,23 @@ export function initMarketplace(pane, controlsHost = null) {
             return;
         }
         if (action === 'grant' && installed) {
-            const keys = installed.grants?.missing_keys || installed.grants?.requested_keys || [];
-            if (!keys.length) throw new Error('No grant keys reported for this skill.');
+            const items = [
+                ...(installed.grants?.missing_keys || installed.grants?.requested_keys || []),
+                ...(installed.grants?.missing_permissions || installed.grants?.requested_permissions || []),
+            ];
+            if (!items.length) throw new Error('No grant keys or permissions reported for this skill.');
             const ok = await openConfirmDialog({
                 title: `Grant access to ${installed.name}`,
-                body: `Grant ${installed.name} access to these core settings keys?\n\n${keys.join('\n')}\n\nOnly grant access to reviewed skills you trust.`,
+                body: `Grant ${installed.name} access to these keys and permissions?\n\n${items.join('\n')}\n\nOnly grant access to reviewed skills you trust.`,
                 confirmLabel: 'Grant access',
             });
             if (!ok) return;
             const bridge = window.pywebview?.api?.request_skill_key_grant;
-            if (!bridge) {
-                throw new Error('Skill key grants require the desktop launcher confirmation bridge.');
-            }
             setPending(slug, { label: 'Granting', tone: 'warn', message: 'Waiting for human confirmation…' });
-            const result = await bridge(installed.name, keys);
-            if (!result?.ok) throw new Error(result?.error || 'Skill key grant was cancelled.');
+            const result = bridge
+                ? await bridge(installed.name, items)
+                : await jsonPost(`/api/skills/${encodeURIComponent(installed.name)}/grants`, { items });
+            if (!result?.ok) throw new Error(result?.error || 'Skill grant was cancelled.');
             showStatus(pane, `${slug} grant saved`, 'ok');
             emitSkillLifecycle('grant', installed.name, result);
             return;

@@ -344,6 +344,62 @@ def terminate_process_tree(proc: subprocess.Popen) -> None:
             pass
 
 
+def terminate_process_group_id(pgid: int) -> None:
+    """Gracefully terminate a Unix process group by id."""
+    if IS_WINDOWS:
+        return
+    try:
+        os.killpg(int(pgid), signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError, ValueError):
+        pass
+
+
+def kill_process_group_id(pgid: int) -> None:
+    """Force-kill a Unix process group by id."""
+    if IS_WINDOWS:
+        return
+    try:
+        os.killpg(int(pgid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError, ValueError):
+        pass
+
+
+def process_group_id(pid: int) -> int:
+    """Return the Unix process group id for ``pid`` or 0 when unavailable."""
+    if IS_WINDOWS:
+        return 0
+    try:
+        return int(os.getpgid(int(pid)))
+    except (ProcessLookupError, PermissionError, OSError, ValueError):
+        return 0
+
+
+def current_process_group_id() -> int:
+    """Return the current Unix process group id or 0 when unavailable."""
+    if IS_WINDOWS:
+        return 0
+    try:
+        return int(os.getpgrp())
+    except (PermissionError, OSError, ValueError):
+        return 0
+
+
+def process_command(pid: int) -> str:
+    """Return a best-effort command line for a Unix process."""
+    if IS_WINDOWS:
+        return ""
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(int(pid)), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        return result.stdout.strip()
+    except Exception:
+        return ""
+
+
 def force_kill_pid(pid: int) -> None:
     """Force-kill a single process by PID."""
     if IS_WINDOWS:

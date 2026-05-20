@@ -4,6 +4,7 @@ import contextlib
 import logging
 import os
 import pathlib
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -62,6 +63,10 @@ def _chat_jsonl_path(drive_root: pathlib.Path) -> pathlib.Path:
     return pathlib.Path(drive_root) / "logs" / "chat.jsonl"
 
 
+def _progress_jsonl_path(drive_root: pathlib.Path) -> pathlib.Path:
+    return pathlib.Path(drive_root) / "logs" / "progress.jsonl"
+
+
 def _read_review_job(path: pathlib.Path) -> Dict[str, Any]:
     return read_json_dict(path) or {}
 
@@ -80,6 +85,52 @@ def _iso_age_sec(value: str) -> float:
         return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds())
     except Exception:
         return 0.0
+
+
+def _review_lifecycle_chat_task_id(skill_name: str, job_id: str) -> str:
+    skill_suffix = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(skill_name or "skill")).strip("_")
+    job_suffix = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(job_id or "")).strip("_")
+    return f"skill_lifecycle_review_{skill_suffix or 'skill'}_{job_suffix or 'job'}"
+
+
+def _append_interrupted_review_progress(
+    drive_root: pathlib.Path,
+    skill_name: str,
+    payload: Dict[str, Any],
+    *,
+    ts: str,
+) -> None:
+    reason = str(payload.get("interrupt_reason") or "interrupted")
+    job_id = str(payload.get("job_id") or "")
+    lifecycle = {
+        "id": job_id,
+        "kind": "review",
+        "target": skill_name,
+        "status": "interrupted",
+        "phase": "interrupted",
+        "message": "Review job was interrupted before completion.",
+        "error": reason,
+        "stale": False,
+        "stale_reason": reason,
+        "recovery_hint": "Start a fresh review for this skill before enabling or granting access.",
+    }
+    text = f"Skill review: `{skill_name}` — interrupted — {reason}"
+    append_jsonl(
+        _progress_jsonl_path(drive_root),
+        {
+            "ts": ts,
+            "type": "send_message",
+            "task_id": _review_lifecycle_chat_task_id(skill_name, job_id),
+            "is_progress": True,
+            "direction": "out",
+            "chat_id": 0,
+            "user_id": 0,
+            "text": text,
+            "content": text,
+            "format": "",
+            "lifecycle": lifecycle,
+        },
+    )
 
 
 def mark_stale_review_job_interrupted(
@@ -109,6 +160,7 @@ def mark_stale_review_job_interrupted(
         "content_hash": data.get("content_hash") or current_content_hash,
     }
     atomic_write_json(path, payload, trailing_newline=True)
+    _append_interrupted_review_progress(drive_root, skill_name, payload, ts=now)
     append_jsonl(
         _events_path(drive_root),
         {
