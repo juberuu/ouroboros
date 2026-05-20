@@ -343,6 +343,7 @@ def test_start_agent_unix_uses_process_group_and_writes_server_record(monkeypatc
     monkeypatch.setattr(launcher, "EMBEDDED_PYTHON", sys.executable)
     monkeypatch.setattr(launcher, "_load_settings", lambda: {})
     monkeypatch.setattr(launcher, "_apply_settings_to_env", lambda _settings: None)
+    monkeypatch.setattr(launcher, "subprocess_new_group_kwargs", lambda: {"start_new_session": True})
     monkeypatch.setattr(launcher, "_hidden_popen", fake_popen)
     monkeypatch.setattr(launcher, "process_group_id", lambda _pid: 12345)
 
