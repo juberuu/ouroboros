@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 5.28.0-rc.1](https://img.shields.io/badge/version-5.28.0--rc.1-green.svg)](VERSION)
+[![Version 5.28.0](https://img.shields.io/badge/version-5.28.0-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -419,7 +419,7 @@ not paraphrase it.
 
 | Version | Date | Description |
 |---------|------|-------------|
-| 5.28.0-rc.1 | 2026-05-20 | **rc(stability): harden skills, owner parity, and relaunch cleanup.** Adds structured skill lifecycle recovery state, web owner endpoints for runtime mode/auto-grant/grants, process-group server cleanup for desktop relaunches, best-effort isolated-deps cleanup, and a 920K review prompt budget. |
+| 5.28.0 | 2026-05-20 | **release(stability): harden skills, owner parity, and relaunch cleanup.** Adds structured skill lifecycle recovery state, web owner endpoints for runtime mode/auto-grant/grants, process-group server cleanup for desktop relaunches, best-effort isolated-deps cleanup, and a 920K review prompt budget. |
 | 5.27.0-rc.1 | 2026-05-19 | **rc(refactor): shrink setup, UI, and JSONL surfaces.** Centralizes the onboarding/settings setup contract, shared UI primitives/helpers, Files modal shell, and JSONL/LLM-usage readers while preserving review gates, public contracts, and runtime behavior. |
 | 5.26.0-rc.1 | 2026-05-19 | **rc(refactor): reduce core code surface safely.** Consolidates repeated gateway, review, skill lifecycle, marketplace, memory/context, release, and web UI code paths while preserving public API shapes, review gates, and runtime contracts. |
 | 5.25.1-rc.1 | 2026-05-17 | **rc(refactor): shrink scope-review input surface.** Compacts stale/redundant comments and internal docstrings across pack-visible non-test code while preserving safety, review, contract, race, and security rationale; reduces scope-review input without behavior changes. |
