@@ -11,7 +11,7 @@ import uuid
 from typing import Any, Dict, Optional
 
 from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
-from ouroboros.utils import utc_now_iso
+from ouroboros.utils import append_jsonl, iter_llm_usage_events, llm_usage_cost, utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -69,10 +69,6 @@ def acquire_file_lock(lock_path: pathlib.Path, timeout_sec: float = 4.0,
 
 def release_file_lock(lock_path: pathlib.Path, lock_fd: Optional[int]) -> None:
     release_exclusive_file_lock(lock_path, lock_fd)
-
-
-# Re-export append_jsonl from the utility SSOT.
-from ouroboros.utils import append_jsonl  # noqa: F401
 
 
 def ensure_state_defaults(st: Dict[str, Any]) -> Dict[str, Any]:
@@ -333,34 +329,13 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> None:
 def budget_breakdown(st: Dict[str, Any]) -> Dict[str, float]:
     """Aggregate llm_usage cost by category from events.jsonl."""
     events_path = DRIVE_ROOT / "logs" / "events.jsonl"
-    if not events_path.exists():
-        return {}
-
     breakdown: Dict[str, float] = {}
     try:
-        with events_path.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    event = json.loads(line)
-                    if event.get("type") != "llm_usage":
-                        continue
-
-                    category = event.get("category", "other")
-
-                    cost = 0.0
-                    if "cost" in event:
-                        cost = float(event.get("cost", 0))
-                    elif "usage" in event and isinstance(event["usage"], dict):
-                        cost = float(event["usage"].get("cost", 0))
-
-                    if cost > 0:
-                        breakdown[category] = breakdown.get(category, 0.0) + cost
-
-                except (json.JSONDecodeError, ValueError, TypeError):
-                    continue
+        for event in iter_llm_usage_events(events_path):
+            category = event.get("category", "other")
+            cost = llm_usage_cost(event)
+            if cost > 0:
+                breakdown[category] = breakdown.get(category, 0.0) + cost
     except Exception:
         log.warning("Failed to calculate budget breakdown", exc_info=True)
 
@@ -370,46 +345,21 @@ def budget_breakdown(st: Dict[str, Any]) -> Dict[str, float]:
 def model_breakdown(st: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
     """Aggregate llm_usage cost/calls/tokens by model."""
     events_path = DRIVE_ROOT / "logs" / "events.jsonl"
-    if not events_path.exists():
-        return {}
-
     breakdown: Dict[str, Dict[str, float]] = {}
     try:
-        with events_path.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
+        for event in iter_llm_usage_events(events_path):
+            model = event.get("model") or "unknown"
+            stats = breakdown.setdefault(model, {
+                "cost": 0.0, "calls": 0, "prompt_tokens": 0,
+                "completion_tokens": 0, "cached_tokens": 0,
+            })
+            stats["cost"] += llm_usage_cost(event)
+            stats["calls"] += 1
+            for key in ("prompt_tokens", "completion_tokens", "cached_tokens"):
                 try:
-                    event = json.loads(line)
-                    if event.get("type") != "llm_usage":
-                        continue
-
-                    model = event.get("model") or "unknown"
-                    if not model:
-                        model = "unknown"
-
-                    cost = 0.0
-                    if "cost" in event:
-                        cost = float(event.get("cost", 0))
-                    elif "usage" in event and isinstance(event["usage"], dict):
-                        cost = float(event["usage"].get("cost", 0))
-
-                    prompt_tokens = int(event.get("prompt_tokens", 0) or 0)
-                    completion_tokens = int(event.get("completion_tokens", 0) or 0)
-                    cached_tokens = int(event.get("cached_tokens", 0) or 0)
-
-                    if model not in breakdown:
-                        breakdown[model] = {"cost": 0.0, "calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0}
-
-                    breakdown[model]["cost"] += cost
-                    breakdown[model]["calls"] += 1
-                    breakdown[model]["prompt_tokens"] += prompt_tokens
-                    breakdown[model]["completion_tokens"] += completion_tokens
-                    breakdown[model]["cached_tokens"] += cached_tokens
-
-                except (json.JSONDecodeError, ValueError, TypeError):
-                    continue
+                    stats[key] += int(event.get(key, 0) or 0)
+                except (TypeError, ValueError):
+                    pass
     except Exception:
         log.warning("Failed to calculate model breakdown", exc_info=True)
 
@@ -419,32 +369,16 @@ def model_breakdown(st: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
 def per_task_cost_summary(max_tasks: int = 10, tail_bytes: int = 512_000) -> List[Dict[str, Any]]:
     """Return recent task cost summary from the tail of events.jsonl."""
     events_path = DRIVE_ROOT / "logs" / "events.jsonl"
-    if not events_path.exists():
-        return []
-
     tasks: Dict[str, Dict[str, Any]] = {}
     try:
-        file_size = events_path.stat().st_size
-        with events_path.open("r", encoding="utf-8") as f:
-            if file_size > tail_bytes:
-                f.seek(file_size - tail_bytes)
-                f.readline()
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    event = json.loads(line)
-                    if event.get("type") != "llm_usage":
-                        continue
-                    tid = event.get("task_id") or "unknown"
-                    cost = float(event.get("cost", 0) or 0)
-                    if tid not in tasks:
-                        tasks[tid] = {"task_id": tid, "cost": 0.0, "rounds": 0, "model": event.get("model", "")}
-                    tasks[tid]["cost"] += cost
-                    tasks[tid]["rounds"] += 1
-                except (json.JSONDecodeError, ValueError, TypeError):
-                    continue
+        for event in iter_llm_usage_events(events_path, tail_bytes=tail_bytes):
+            tid = event.get("task_id") or "unknown"
+            task = tasks.setdefault(
+                tid,
+                {"task_id": tid, "cost": 0.0, "rounds": 0, "model": event.get("model", "")},
+            )
+            task["cost"] += llm_usage_cost(event)
+            task["rounds"] += 1
     except Exception:
         log.warning("Failed to calculate per-task cost summary", exc_info=True)
 

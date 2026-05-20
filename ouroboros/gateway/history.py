@@ -11,6 +11,7 @@ from starlette.responses import JSONResponse
 
 from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
 from ouroboros.gateway._helpers import iter_jsonl_objects
+from ouroboros.utils import iter_llm_usage_events, llm_usage_cost
 
 log = logging.getLogger(__name__)
 
@@ -32,10 +33,8 @@ def make_cost_breakdown_endpoint(data_dir: pathlib.Path):
             return d[key]
 
         try:
-            for evt in iter_jsonl_objects(events_path):
-                if evt.get("type") != "llm_usage":
-                    continue
-                cost = float(evt.get("cost") or 0)
+            for evt in iter_llm_usage_events(events_path):
+                cost = llm_usage_cost(evt)
                 model = str(evt.get("model") or "unknown")
                 api_key_type = str(evt.get("api_key_type") or evt.get("provider") or "openrouter")
                 model_cat = str(evt.get("model_category") or "other")

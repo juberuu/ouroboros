@@ -46,14 +46,6 @@
 }
 
 .settings-shell .form-section,
-.settings-card,
-.settings-provider-card {
-    border: 1px solid var(--surface-border);
-    border-radius: 18px;
-    background: var(--surface-card);
-}
-
-.settings-shell .form-section,
 .settings-card {
     display: flex;
     flex-direction: column;
@@ -138,9 +130,6 @@
 }
 
 .settings-extension-section {
-    border: 1px solid var(--surface-border);
-    background: var(--surface-card);
-    border-radius: 14px;
     padding: 12px 14px;
 }
 
@@ -248,9 +237,6 @@
     flex-direction: column;
     gap: 14px;
     padding: 14px;
-    border-radius: 16px;
-    border: 1px solid var(--surface-border);
-    background: var(--surface-card);
 }
 
 .mcp-server-card-head {
@@ -276,7 +262,6 @@
 
 .mcp-server-status {
     width: fit-content;
-    border-radius: 999px;
     padding: 3px 8px;
     font-size: 12px;
     background: rgba(255, 255, 255, 0.06);
@@ -320,12 +305,6 @@
     line-height: 1.55;
 }
 
-.settings-inline-status {
-    color: var(--text-secondary);
-    font-size: 13px;
-    line-height: 1.45;
-}
-
 /* Utility: hide elements that start as hidden and are revealed via JS */
 .local-model-hidden {
     display: none !important;
@@ -351,21 +330,6 @@
 /* Install Local Runtime button */
 .local-model-install-btn {
     margin-top: 10px;
-}
-
-.settings-inline-status[data-tone="ok"],
-.settings-test-result[data-tone="ok"] {
-    color: var(--green);
-}
-
-.settings-inline-status[data-tone="warn"],
-.settings-test-result[data-tone="warn"] {
-    color: var(--amber);
-}
-
-.settings-inline-status[data-tone="error"],
-.settings-test-result[data-tone="error"] {
-    color: var(--red);
 }
 
 .settings-unsaved-indicator {
@@ -462,9 +426,6 @@
     gap: 10px;
     align-items: end;
     padding: 12px;
-    border-radius: var(--radius);
-    border: 1px solid rgba(255, 255, 255, 0.07);
-    background: rgba(255, 255, 255, 0.025);
 }
 
 .settings-custom-secret-row .secret-input-row {
@@ -489,9 +450,6 @@
     flex-direction: column;
     gap: 12px;
     padding: 16px;
-    border-radius: 16px;
-    border: 1px solid var(--surface-border);
-    background: var(--surface-card-soft);
     min-width: 0;
 }
 

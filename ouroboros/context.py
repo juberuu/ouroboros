@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.utils import (
     utc_now_iso, read_text, estimate_tokens, get_git_info,
-    truncate_review_artifact, read_json_dict,
+    truncate_review_artifact, read_json_dict, iter_jsonl_objects,
 )
 from ouroboros.memory import Memory
 
@@ -338,24 +338,7 @@ def build_recent_sections(memory: Memory, env: Any, task_id: str = "") -> List[s
 
 
 def _iter_recent_jsonl(path: pathlib.Path, max_bytes: int = 256_000):
-    if not path.exists():
-        return
-    try:
-        file_size = path.stat().st_size
-        with path.open("r", encoding="utf-8") as f:
-            if file_size > max_bytes:
-                f.seek(file_size - max_bytes)
-                f.readline()
-            for raw in f:
-                raw = raw.strip()
-                if not raw:
-                    continue
-                try:
-                    yield json.loads(raw)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-    except Exception:
-        return
+    yield from iter_jsonl_objects(path, tail_bytes=max_bytes)
 
 
 def _collect_log_analysis_checks(env: Any, checks: List[str]) -> None:

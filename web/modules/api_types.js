@@ -34,6 +34,12 @@
  */
 
 /**
+ * @typedef {Object} SettingsMeta
+ * @property {string[]=} custom_secret_keys
+ * @property {Object=} setup_contract
+ */
+
+/**
  * @typedef {Object} ChatInbound
  * @property {"chat"} type
  * @property {string} content
@@ -79,4 +85,4 @@
  * @property {string} mime
  */
 
-export const GATEWAY_CONTRACT_VERSION = '5.22.0-rc.1';
+export const GATEWAY_CONTRACT_VERSION = '5.27.0-rc.1';

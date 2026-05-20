@@ -6,6 +6,7 @@ import { PAGE_ICONS } from './page_icons.js';
 import { showToast } from './toast.js';
 import { apiClient, apiFetch } from './api_client.js';
 import { renderInstalledSkillCard } from './skill_card_renderer.js';
+import { installedTime } from './ui_helpers.js';
 import {
     boundedText,
     emitSkillLifecycle,
@@ -65,32 +66,11 @@ function isMissingGrantLoadError(skill) {
     return !grantReady(skill) && String(skill.load_error || '').includes('missing owner grants');
 }
 
-function installTimestamp(skill) {
-    const raw = skill.installed_at || skill.provenance?.installed_at || skill.provenance?.updated_at || '';
-    const time = Date.parse(raw);
-    return Number.isFinite(time) ? time : 0;
-}
-
-function installedAgo(skill) {
-    const time = installTimestamp(skill);
-    if (!time) return '';
-    const seconds = Math.max(0, Math.floor((Date.now() - time) / 1000));
-    if (seconds < 90) return 'Just installed';
-    const minutes = Math.floor(seconds / 60);
-    if (minutes < 90) return `${minutes}m ago`;
-    const hours = Math.floor(minutes / 60);
-    if (hours < 48) return `${hours}h ago`;
-    const days = Math.floor(hours / 24);
-    if (days < 45) return `${days}d ago`;
-    const date = new Date(time);
-    return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
-}
-
 function sortSkillsForDisplay(skills) {
     return [...skills].sort((a, b) => {
         if (a.lifecycle_virtual && !b.lifecycle_virtual) return -1;
         if (!a.lifecycle_virtual && b.lifecycle_virtual) return 1;
-        return installTimestamp(b) - installTimestamp(a) || String(a.name || '').localeCompare(String(b.name || ''));
+        return installedTime(b) - installedTime(a) || String(a.name || '').localeCompare(String(b.name || ''));
     });
 }
 

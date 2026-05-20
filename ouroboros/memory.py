@@ -9,7 +9,7 @@ from collections import Counter
 from typing import Any, Dict, List, Optional
 
 from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
-from ouroboros.utils import utc_now_iso, read_text, write_text, append_jsonl, short, read_json_dict
+from ouroboros.utils import append_jsonl, iter_jsonl_objects, read_json_dict, read_text, short, utc_now_iso, write_text
 from ouroboros.platform_layer import (
     file_lock_exclusive as _lock_ex,
     file_lock_shared as _lock_sh,
@@ -260,19 +260,8 @@ class Memory:
         if not path.exists():
             return []
         try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-            if max_entries is not None and max_entries < len(lines):
-                lines = lines[-max_entries:]
             entries = []
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                except Exception:
-                    log.debug("Failed to parse JSON line in %s: %s", log_name, line[:100], exc_info=True)
-                    continue
+            for entry in iter_jsonl_objects(path, max_entries=max_entries):
                 if exclude_a2a and is_a2a_chat_id(entry.get("chat_id")):
                     continue
                 entries.append(entry)

@@ -39,7 +39,7 @@ from ouroboros.tools.review_helpers import (
     load_checklist_section,
 )
 from ouroboros.triad_review import emit_review_model_error_events, extract_json_array, parse_model_review_results
-from ouroboros.utils import append_jsonl, atomic_write_json, utc_now_iso
+from ouroboros.utils import append_jsonl, atomic_write_json, iter_jsonl_objects, utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -389,40 +389,23 @@ def _extract_fail_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, str
 
 
 def _load_skill_review_history(drive_root: pathlib.Path, skill_name: str, limit: int = 3) -> List[Dict[str, Any]]:
-    path = _review_history_path(drive_root, skill_name)
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        return list(iter_jsonl_objects(_review_history_path(drive_root, skill_name), max_entries=limit))
     except OSError:
         return []
-    out: List[Dict[str, Any]] = []
-    for line in lines[-limit:]:
-        try:
-            data = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(data, dict):
-            out.append(data)
-    return out
 
 
 def _count_attempts_for_content(
     drive_root: pathlib.Path, skill_name: str, content_hash: str,
 ) -> int:
     """Count historical attempts that ran against the same ``content_hash``."""
-    path = _review_history_path(drive_root, skill_name)
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        return sum(
+            1 for data in iter_jsonl_objects(_review_history_path(drive_root, skill_name))
+            if str(data.get("content_hash") or "") == content_hash
+        )
     except OSError:
         return 0
-    n = 0
-    for line in lines:
-        try:
-            data = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(data, dict) and str(data.get("content_hash") or "") == content_hash:
-            n += 1
-    return n
 
 
 def _build_skill_review_history_section(

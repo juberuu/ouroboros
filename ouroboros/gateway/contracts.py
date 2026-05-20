@@ -195,7 +195,7 @@ class StateResponse(TypedDict):
 
 
 class SettingsNetworkMeta(TypedDict):
-    """``_meta`` block injected into ``GET /api/settings``."""
+    """Network fields inside the ``GET /api/settings`` ``_meta`` block."""
 
     bind_host: str
     bind_port: int
@@ -203,6 +203,13 @@ class SettingsNetworkMeta(TypedDict):
     reachability: Literal["loopback_only", "lan_reachable", "host_ip_unknown"]
     recommended_url: str
     warning: str
+
+
+class SettingsMeta(SettingsNetworkMeta, total=False):
+    """Complete ``GET /api/settings`` ``_meta`` block."""
+
+    custom_secret_keys: list[str]
+    setup_contract: Dict[str, Any]
 
 
 class SettingsSaveResponse(TypedDict, total=False):
@@ -394,6 +401,7 @@ __all__ = [
     "StateResponse",
     "EvolutionStateSnapshot",
     "SettingsNetworkMeta",
+    "SettingsMeta",
     "SettingsSaveResponse",
     "GitLogResponse",
     "EvolutionDataResponse",

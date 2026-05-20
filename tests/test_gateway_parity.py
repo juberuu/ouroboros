@@ -32,6 +32,7 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         encoding="utf-8"
     )
     assert "GATEWAY_CONTRACT_VERSION" in text
-    for name in ("StateResponse", "HealthResponse", "ChatInbound", "ChatOutbound", "UploadResponse"):
+    for name in ("StateResponse", "HealthResponse", "SettingsMeta", "ChatInbound", "ChatOutbound", "UploadResponse"):
         assert re.search(rf"@typedef \{{Object\}} {name}\b", text), f"api_types.js missing {name}"
+    assert "setup_contract" in text
     assert {"chat", "command", "log", "heartbeat"} <= set(WS_MESSAGE_TYPES)

@@ -2,6 +2,8 @@ import { renderPageHeader } from './page_header.js';
 import { PAGE_ICONS } from './page_icons.js';
 import { escapeHtmlAttr, escapeHtmlText as escapeHtml } from './utils.js';
 import { apiFetch, jsonPost } from './api_client.js';
+import { openConfirmDialog } from './confirm_dialog.js';
+import { downloadViaHostBridge } from './ui_helpers.js';
 
 function formatFileSize(size) {
     const num = Number(size);
@@ -73,18 +75,6 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
                 <button type="button" class="files-context-item" data-action="paste">Paste Here</button>
                 <button type="button" class="files-context-item files-context-item-danger" data-action="delete">Delete</button>
             </div>
-            <div id="files-modal" class="files-modal" hidden>
-                <div class="files-modal-backdrop" data-close="backdrop"></div>
-                <div class="files-modal-card" role="dialog" aria-modal="true" aria-labelledby="files-modal-title">
-                    <div class="files-modal-title" id="files-modal-title"></div>
-                    <div class="files-modal-message" id="files-modal-message"></div>
-                    <input id="files-modal-input" class="files-modal-input" type="text" hidden>
-                    <div class="files-modal-actions">
-                        <button type="button" class="btn btn-default" id="files-modal-cancel">Cancel</button>
-                        <button type="button" class="btn btn-primary" id="files-modal-confirm">OK</button>
-                    </div>
-                </div>
-            </div>
         </div>
     `;
     document.getElementById('content').appendChild(page);
@@ -99,12 +89,6 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
     const contextMenuPositionStyle = document.createElement('style');
     contextMenuPositionStyle.id = 'files-context-menu-position-style';
     page.appendChild(contextMenuPositionStyle);
-    const modalEl = page.querySelector('#files-modal');
-    const modalTitleEl = page.querySelector('#files-modal-title');
-    const modalMessageEl = page.querySelector('#files-modal-message');
-    const modalInputEl = page.querySelector('#files-modal-input');
-    const modalCancelBtn = page.querySelector('#files-modal-cancel');
-    const modalConfirmBtn = page.querySelector('#files-modal-confirm');
     const saveBtn = page.querySelector('#files-save');
     const downloadBtn = page.querySelector('#files-download');
     const openExternalBtn = page.querySelector('#files-open-external');
@@ -132,7 +116,6 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
         editorWritable: false,
         editorIsNew: false,
         editorFilename: '',
-        modalResolve: null,
         clipboard: null,
         contextEntryType: '',
         contextDestinationPath: '.',
@@ -226,29 +209,17 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
         return wrapper;
     }
 
-    function closeModal(result) {
-        modalEl.hidden = true;
-        const resolver = state.modalResolve;
-        state.modalResolve = null;
-        if (resolver) resolver(result);
-    }
-
-    function showModal({ title, message, input = false, initialValue = '', confirmLabel = 'OK', cancelLabel = 'Cancel' }) {
-        modalTitleEl.textContent = title || '';
-        modalMessageEl.textContent = message || '';
-        modalInputEl.hidden = !input;
-        modalInputEl.value = input ? initialValue : '';
-        modalConfirmBtn.textContent = confirmLabel;
-        modalCancelBtn.textContent = cancelLabel;
-        modalEl.hidden = false;
-        if (input) {
-            queueMicrotask(() => modalInputEl.focus());
-        } else {
-            queueMicrotask(() => modalConfirmBtn.focus());
-        }
-        return new Promise((resolve) => {
-            state.modalResolve = resolve;
+    async function showModal({ title, message, input = false, initialValue = '', confirmLabel = 'OK', cancelLabel = 'Cancel' }) {
+        const result = await openConfirmDialog({
+            title,
+            body: message,
+            input,
+            initialValue,
+            confirmLabel,
+            cancelLabel,
+            danger: /delete|discard/i.test(confirmLabel),
         });
+        return typeof result === 'boolean' ? { confirmed: result, value: '' } : result;
     }
 
     async function canLeaveEditor() {
@@ -496,10 +467,8 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
         const params = new URLSearchParams({ path });
         const url = `/api/files/download?${params.toString()}`;
         const filename = filenameFromPath(path);
-        const bridge = window.pywebview?.api?.download_file_to_downloads;
-        if (bridge) {
-            const result = await bridge(url, filename, Boolean(openExternal));
-            if (!result?.ok) throw new Error(result?.error || 'native download failed');
+        const result = await downloadViaHostBridge(url, filename, { openExternal });
+        if (result.native) {
             setPreview({
                 path,
                 meta: openExternal ? 'Opened externally' : 'Downloaded',
@@ -507,18 +476,6 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
             });
             return;
         }
-        const resp = await apiFetch(url);
-        if (!resp.ok) throw new Error(`download failed: HTTP ${resp.status}`);
-        const blob = await resp.blob();
-        const blobUrl = URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        link.href = blobUrl;
-        link.download = filename;
-        link.rel = 'noopener';
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
     }
 
     async function createDirectory() {
@@ -771,32 +728,6 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
         hideContextMenu();
     });
 
-    modalCancelBtn.addEventListener('click', () => {
-        closeModal({ confirmed: false, value: '' });
-    });
-
-    modalConfirmBtn.addEventListener('click', () => {
-        closeModal({ confirmed: true, value: modalInputEl.hidden ? '' : modalInputEl.value });
-    });
-
-    modalEl.addEventListener('click', (event) => {
-        const target = event.target instanceof HTMLElement ? event.target : null;
-        if (target?.dataset.close === 'backdrop') {
-            closeModal({ confirmed: false, value: '' });
-        }
-    });
-
-    modalInputEl.addEventListener('keydown', (event) => {
-        if (event.key === 'Enter') {
-            event.preventDefault();
-            closeModal({ confirmed: true, value: modalInputEl.value });
-        }
-        if (event.key === 'Escape') {
-            event.preventDefault();
-            closeModal({ confirmed: false, value: '' });
-        }
-    });
-
     document.addEventListener('click', () => {
         hideContextMenu();
     });
@@ -828,8 +759,9 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
             active.classList?.contains('files-editor') ||
             active.classList?.contains('files-editor-name') ||
             active.id === 'files-search' ||
-            active.id === 'files-modal-input'
+            active.matches?.('[data-confirm-input]')
         );
+        const dialogOpen = Boolean(document.querySelector('.confirm-dialog-backdrop'));
         if (!page.classList.contains('active')) return;
         if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
             if (!inEditor) return;
@@ -838,7 +770,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
             return;
         }
         if (event.key === 'Delete') {
-            if (inEditor || modalEl.hidden === false) return;
+            if (inEditor || dialogOpen) return;
             event.preventDefault();
             deleteSelectedEntry().catch(showError);
         }

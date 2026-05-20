@@ -56,6 +56,63 @@ function secretField({ id, settingKey, label, placeholder }) {
     `;
 }
 
+function plainField({ id, label, placeholder }) {
+    return `<div class="form-field"><label>${label}</label><input id="${id}" placeholder="${placeholder}"></div>`;
+}
+
+const PROVIDER_CARDS = [
+    {
+        id: 'openrouter', title: 'OpenRouter', icon: '/static/providers/openrouter.ico', hint: 'Default multi-model router', open: true,
+        fields: [{ id: 's-openrouter', settingKey: 'OPENROUTER_API_KEY', label: 'OpenRouter API Key', placeholder: 'sk-or-...' }],
+    },
+    {
+        id: 'openai', title: 'OpenAI', icon: '/static/providers/openai.svg', hint: 'Official OpenAI API',
+        fields: [{ id: 's-openai', settingKey: 'OPENAI_API_KEY', label: 'OpenAI API Key', placeholder: 'sk-...' }],
+        note: 'Use model values like <code>openai::gpt-5.5</code> in the Models tab to route models directly here. If OpenRouter is absent and the shipped defaults are still untouched, Ouroboros auto-remaps them to official OpenAI defaults.',
+    },
+    {
+        id: 'compatible', title: 'OpenAI Compatible', icon: '/static/providers/openai-compatible.svg', hint: 'Custom OpenAI-style endpoint',
+        fields: [
+            { id: 's-openai-compatible-key', settingKey: 'OPENAI_COMPATIBLE_API_KEY', label: 'API Key', placeholder: 'Compatible provider key' },
+            { id: 's-openai-compatible-base-url', label: 'Base URL', placeholder: 'https://provider.example/v1' },
+        ],
+        note: 'Use this card for custom base URLs. Built-in web search only works with the official OpenAI Responses API, so keep <code>OPENAI_BASE_URL</code> empty when you want <code>web_search</code>.',
+    },
+    {
+        id: 'cloudru', title: 'Cloud.ru Foundation Models', icon: '/static/providers/cloudru.svg', hint: 'Cloud.ru OpenAI-compatible runtime',
+        fields: [
+            { id: 's-cloudru-key', settingKey: 'CLOUDRU_FOUNDATION_MODELS_API_KEY', label: 'API Key', placeholder: 'Cloud.ru Foundation Models API key' },
+            { id: 's-cloudru-base-url', label: 'Base URL', placeholder: 'https://foundation-models.api.cloud.ru/v1' },
+        ],
+    },
+    {
+        id: 'anthropic', title: 'Anthropic', icon: '/static/providers/anthropic.png', hint: 'Direct runtime plus Claude tooling',
+        fields: [{ id: 's-anthropic', settingKey: 'ANTHROPIC_API_KEY', label: 'Anthropic API Key', placeholder: 'sk-ant-...' }],
+        note: 'Use model values like <code>anthropic::claude-sonnet-4-6</code> in the Models tab to route models directly through Anthropic. Claude tooling still reuses this key.',
+        extra: `
+            <div class="settings-toolbar" id="settings-claude-code-panel" hidden>
+                <button type="button" class="settings-ghost-btn" id="btn-claude-code-install">Repair Runtime</button>
+                <span id="settings-claude-code-status" class="settings-inline-status">Checking Claude runtime...</span>
+            </div>
+            <div class="settings-inline-note" id="settings-claude-code-copy" hidden>Claude runtime powers delegated code editing and advisory review. It is managed automatically by the app.</div>
+        `,
+    },
+];
+
+function providerSettingsCard(spec) {
+    const fields = (spec.fields || [])
+        .map((field) => field.settingKey ? secretField(field) : plainField(field))
+        .join('');
+    return providerCard({
+        id: spec.id,
+        title: spec.title,
+        icon: spec.icon,
+        hint: spec.hint,
+        open: spec.open,
+        body: `<div class="form-row">${fields}</div>${spec.note ? `<div class="settings-inline-note">${spec.note}</div>` : ''}${spec.extra || ''}`,
+    });
+}
+
 function modelCard({ title, copy, inputId, toggleId, defaultValue }) {
     return `
         <div class="settings-model-card">
@@ -172,95 +229,7 @@ export function renderSettingsPage() {
                         Configure remote providers and the optional network gate. Secret fields now have explicit
                         <code>Clear</code> actions so masked values can be removed intentionally.
                     </div>
-                    ${providerCard({
-                        id: 'openrouter',
-                        title: 'OpenRouter',
-                        icon: '/static/providers/openrouter.ico',
-                        hint: 'Default multi-model router',
-                        open: true,
-                        body: `<div class="form-row">${secretField({
-                            id: 's-openrouter',
-                            settingKey: 'OPENROUTER_API_KEY',
-                            label: 'OpenRouter API Key',
-                            placeholder: 'sk-or-...',
-                        })}</div>`,
-                    })}
-                    ${providerCard({
-                        id: 'openai',
-                        title: 'OpenAI',
-                        icon: '/static/providers/openai.svg',
-                        hint: 'Official OpenAI API',
-                        body: `
-                            <div class="form-row">${secretField({
-                                id: 's-openai',
-                                settingKey: 'OPENAI_API_KEY',
-                                label: 'OpenAI API Key',
-                                placeholder: 'sk-...',
-                            })}</div>
-                            <div class="settings-inline-note">Use model values like <code>openai::gpt-5.5</code> in the Models tab to route models directly here. If OpenRouter is absent and the shipped defaults are still untouched, Ouroboros auto-remaps them to official OpenAI defaults.</div>
-                        `,
-                    })}
-                    ${providerCard({
-                        id: 'compatible',
-                        title: 'OpenAI Compatible',
-                        icon: '/static/providers/openai-compatible.svg',
-                        hint: 'Custom OpenAI-style endpoint',
-                        body: `
-                            <div class="form-row">
-                                ${secretField({
-                                    id: 's-openai-compatible-key',
-                                    settingKey: 'OPENAI_COMPATIBLE_API_KEY',
-                                    label: 'API Key',
-                                    placeholder: 'Compatible provider key',
-                                })}
-                                <div class="form-field">
-                                    <label>Base URL</label>
-                                    <input id="s-openai-compatible-base-url" placeholder="https://provider.example/v1">
-                                </div>
-                            </div>
-                            <div class="settings-inline-note">Use this card for custom base URLs. Built-in web search only works with the official OpenAI Responses API, so keep <code>OPENAI_BASE_URL</code> empty when you want <code>web_search</code>.</div>
-                        `,
-                    })}
-                    ${providerCard({
-                        id: 'cloudru',
-                        title: 'Cloud.ru Foundation Models',
-                        icon: '/static/providers/cloudru.svg',
-                        hint: 'Cloud.ru OpenAI-compatible runtime',
-                        body: `
-                            <div class="form-row">
-                                ${secretField({
-                                    id: 's-cloudru-key',
-                                    settingKey: 'CLOUDRU_FOUNDATION_MODELS_API_KEY',
-                                    label: 'API Key',
-                                    placeholder: 'Cloud.ru Foundation Models API key',
-                                })}
-                                <div class="form-field">
-                                    <label>Base URL</label>
-                                    <input id="s-cloudru-base-url" placeholder="https://foundation-models.api.cloud.ru/v1">
-                                </div>
-                            </div>
-                        `,
-                    })}
-                    ${providerCard({
-                        id: 'anthropic',
-                        title: 'Anthropic',
-                        icon: '/static/providers/anthropic.png',
-                        hint: 'Direct runtime plus Claude tooling',
-                        body: `
-                            <div class="form-row">${secretField({
-                                id: 's-anthropic',
-                                settingKey: 'ANTHROPIC_API_KEY',
-                                label: 'Anthropic API Key',
-                                placeholder: 'sk-ant-...',
-                            })}</div>
-                            <div class="settings-inline-note">Use model values like <code>anthropic::claude-sonnet-4-6</code> in the Models tab to route models directly through Anthropic. Claude tooling still reuses this key.</div>
-                            <div class="settings-toolbar" id="settings-claude-code-panel" hidden>
-                                <button type="button" class="settings-ghost-btn" id="btn-claude-code-install">Repair Runtime</button>
-                                <span id="settings-claude-code-status" class="settings-inline-status">Checking Claude runtime...</span>
-                            </div>
-                            <div class="settings-inline-note" id="settings-claude-code-copy" hidden>Claude runtime powers delegated code editing and advisory review. It is managed automatically by the app.</div>
-                        `,
-                    })}
+                    ${PROVIDER_CARDS.map(providerSettingsCard).join('')}
                     <div class="form-section compact">
                         <h3>Legacy Compatibility</h3>
                         <div class="form-row">

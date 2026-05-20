@@ -5,6 +5,7 @@ import {
     reviewReady,
     safeExternalHrefAttr as safeExternalUrl,
 } from './utils.js';
+import { formatRelativeAge, installedTime, renderToneBadge } from './ui_helpers.js';
 
 function hasSkillUiTab(skill, live = {}) {
     return (live?.ui_tabs || []).some((tab) => (tab?.skill || tab?.skill_name || tab?.extension || '') === skill.name);
@@ -15,7 +16,7 @@ function statusBadge(status, gate = null) {
         ? gate.executable_review
         : ['clean', 'warnings'].includes(status);
     const tone = status === 'blockers' ? 'danger' : executable ? 'ok' : status === 'warnings' ? 'warn' : 'muted';
-    return `<span class="skills-badge skills-badge-${tone}">${escapeHtml(status || 'pending')}</span>`;
+    return renderToneBadge(status || 'pending', tone);
 }
 
 function missingGrantLoadError(skill) {
@@ -80,19 +81,6 @@ function sourceChip(skill) {
     if (!map[source]) return '';
     const [label, tone] = map[source];
     return `<span class="skills-source-chip skills-source-${tone}">${escapeHtml(label)}</span>`;
-}
-
-function installedAgo(skill) {
-    const raw = skill.installed_at || skill.provenance?.installed_at || skill.provenance?.updated_at || '';
-    const time = Date.parse(raw);
-    if (!Number.isFinite(time)) return '';
-    const minutes = Math.floor(Math.max(0, Date.now() - time) / 60000);
-    if (minutes < 2) return 'Just installed';
-    if (minutes < 90) return `${minutes}m ago`;
-    const hours = Math.floor(minutes / 60);
-    if (hours < 48) return `${hours}h ago`;
-    const days = Math.floor(hours / 24);
-    return days < 45 ? `${days}d ago` : new Date(time).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
 function reviewFindings(skill) {
@@ -160,7 +148,7 @@ export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), rep
     </details>`;
     return `<article class="skills-card" data-skill="${safeName}" ${reviewInProgress ? 'data-reviewing="1"' : ''} ${repairInProgress ? 'data-repairing="1"' : ''}>
         <header class="skills-card-head">
-            <div class="skills-card-title"><h3>${safeName}${sourceChip(skill) ? ` ${sourceChip(skill)}` : ''}</h3>${skill.description ? `<p class="skills-card-desc">${escapeHtml(skill.description)}</p>` : ''}${installedAgo(skill) ? `<div class="skills-card-installed muted">${escapeHtml(installedAgo(skill))}</div>` : ''}</div>
+            <div class="skills-card-title"><h3>${safeName}${sourceChip(skill) ? ` ${sourceChip(skill)}` : ''}</h3>${skill.description ? `<p class="skills-card-desc">${escapeHtml(skill.description)}</p>` : ''}${formatRelativeAge(installedTime(skill)) ? `<div class="skills-card-installed muted">${escapeHtml(formatRelativeAge(installedTime(skill)))}</div>` : ''}</div>
             <div class="skills-card-toggle">${statusChip(skill, action, live)}${primary}${toggle}${menu}</div>
         </header>
         ${lockReason ? `<div class="skills-lock-hint ${action.action ? 'is-clickable' : ''}" title="${escapeHtml(lockReason)}" ${actionAttrs}>Locked: ${escapeHtml(lockReason)}</div>` : ''}

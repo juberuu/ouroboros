@@ -35,6 +35,13 @@
     --surface-card: rgba(255, 255, 255, 0.03);
     --surface-card-soft: rgba(255, 255, 255, 0.025);
     --surface-control: rgba(255, 255, 255, 0.04);
+    --ui-card-bg: var(--surface-card);
+    --ui-card-bg-soft: var(--surface-card-soft);
+    --ui-card-border: var(--surface-border);
+    --ui-modal-bg: rgba(18, 20, 26, 0.98);
+    --ui-tone-ok: #22c55e;
+    --ui-tone-warn: #f59e0b;
+    --ui-tone-danger: #ef4444;
     --focus-accent-border: rgba(232, 93, 111, 0.4);
     --focus-accent-ring: rgba(232, 93, 111, 0.10);
     --radius-xs: 3px;
@@ -561,47 +568,6 @@ body {
     color: #fecaca;
 }
 
-.files-modal {
-    position: absolute;
-    inset: 0;
-    z-index: 30;
-}
-
-.files-modal-backdrop {
-    position: absolute;
-    inset: 0;
-    background: rgba(6, 7, 10, 0.66);
-    backdrop-filter: blur(4px);
-}
-
-.files-modal-card {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    width: min(420px, calc(100% - 32px));
-    transform: translate(-50%, -50%);
-    padding: 18px;
-    border-radius: 18px;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    background:
-        linear-gradient(180deg, var(--accent-10), transparent 100px),
-        rgba(18, 20, 26, 0.98);
-    box-shadow: 0 28px 70px rgba(0, 0, 0, 0.45);
-}
-
-.files-modal-title {
-    font-size: 16px;
-    font-weight: 600;
-    color: var(--text-primary);
-}
-
-.files-modal-message {
-    margin-top: 8px;
-    font-size: 13px;
-    line-height: 1.5;
-    color: var(--text-secondary);
-}
-
 .files-modal-input {
     width: 100%;
     margin-top: 14px;
@@ -611,13 +577,6 @@ body {
     background: rgba(255, 255, 255, 0.04);
     color: var(--text-primary);
     font: inherit;
-}
-
-.files-modal-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 10px;
-    margin-top: 16px;
 }
 
 .page-header,
@@ -897,7 +856,6 @@ body {
 
 .status-badge {
     padding: 4px 10px;
-    border-radius: var(--radius);
     font-size: 11px;
     font-weight: 500;
     background: rgba(26, 21, 32, 0.78);
@@ -1950,6 +1908,63 @@ body {
 }
 
 /* Shared UI components. */
+.ui-card,
+:where(.settings-shell .form-section, .settings-card, .settings-provider-card, .settings-extension-section, .mcp-server-card, .settings-model-card, .settings-effort-card, .settings-custom-secret-row, .skills-card, .marketplace-card, .widgets-card, .updates-card, .costs-budget-card) {
+    border: 1px solid var(--ui-card-border);
+    border-radius: var(--radius);
+    background: var(--ui-card-bg);
+}
+
+.ui-card-soft,
+:where(.settings-model-card, .settings-effort-card, .settings-custom-secret-row, .skills-card, .marketplace-card, .widgets-card) {
+    background: var(--ui-card-bg-soft);
+}
+
+.ui-chip,
+:where(.status-badge, .skills-status-chip, .mcp-server-status, .evo-runtime-pill, .evo-runtime-chip) {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border-radius: 999px;
+    white-space: nowrap;
+}
+
+.ui-status,
+:where(.settings-inline-status, .marketplace-status, .wizard-runtime-status) {
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.45;
+}
+
+.ui-status[data-tone="ok"],
+:where(.settings-inline-status[data-tone="ok"], .settings-test-result[data-tone="ok"], .marketplace-status[data-tone="ok"]) { color: var(--ui-tone-ok); }
+.ui-status[data-tone="warn"],
+:where(.settings-inline-status[data-tone="warn"], .settings-test-result[data-tone="warn"], .marketplace-status[data-tone="warn"]) { color: var(--ui-tone-warn); }
+.ui-status[data-tone="danger"],
+.ui-status[data-tone="error"],
+:where(.settings-inline-status[data-tone="error"], .settings-test-result[data-tone="error"], .marketplace-status[data-tone="danger"]) { color: var(--ui-tone-danger); }
+
+.ui-modal-backdrop,
+:where(.marketplace-modal-backdrop) {
+    position: fixed;
+    inset: 0;
+    z-index: 90;
+    display: flex;
+    justify-content: center;
+    overflow-y: auto;
+    background: rgba(0, 0, 0, 0.55);
+}
+
+.ui-modal,
+:where(.marketplace-modal) {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--surface-border);
+    background: var(--ui-modal-bg);
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+
 .stat-card {
     background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.02));
     border-radius: var(--radius);
@@ -2491,11 +2506,7 @@ body {
 
 .evo-runtime-pill,
 .evo-runtime-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
     padding: 6px 10px;
-    border-radius: 999px;
     border: 1px solid rgba(255, 255, 255, 0.08);
     background: rgba(255, 255, 255, 0.04);
     color: var(--text-secondary);
@@ -2569,10 +2580,7 @@ body {
 
 .costs-scroll { overflow-y: auto; flex: 1; padding: 16px 20px; }
 .costs-budget-card {
-    background: rgba(26, 21, 32, 0.72);
     backdrop-filter: blur(12px);
-    border: 1px solid var(--accent-18);
-    border-radius: 18px;
     padding: 20px 24px;
     margin-bottom: 20px;
 }
@@ -2617,10 +2625,7 @@ body {
 }
 
 .updates-card {
-    background: rgba(26, 21, 32, 0.72);
     backdrop-filter: blur(12px);
-    border: 1px solid rgba(201, 53, 69, 0.14);
-    border-radius: 18px;
     padding: 18px;
 }
 
@@ -2794,10 +2799,7 @@ body {
 }
 
 .skills-card {
-    border: 1px solid rgba(250, 250, 250, 0.08);
-    border-radius: var(--radius);
     padding: 16px 18px;
-    background: rgba(255, 255, 255, 0.025);
     display: flex;
     flex-direction: column;
     gap: 12px;
@@ -2846,12 +2848,10 @@ body {
 
 .skills-status-chip {
     padding: 4px 10px;
-    border-radius: 999px;
     font-size: 12px;
     font-weight: 500;
     letter-spacing: 0.01em;
     border: 1px solid transparent;
-    white-space: nowrap;
 }
 
 .skills-status-chip.is-clickable,
@@ -3365,10 +3365,6 @@ body {
     font-size: 12px;
 }
 
-.marketplace-status[data-tone="ok"] { color: #22c55e; }
-.marketplace-status[data-tone="warn"] { color: #f59e0b; }
-.marketplace-status[data-tone="danger"] { color: #ef4444; }
-
 .marketplace-results {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
@@ -3376,10 +3372,7 @@ body {
 }
 
 .marketplace-card {
-    border: 1px solid rgba(250, 250, 250, 0.08);
-    border-radius: var(--radius-lg);
     padding: 14px;
-    background: rgba(255, 255, 255, 0.02);
     display: flex;
     flex-direction: column;
     gap: 10px;
@@ -3584,28 +3577,15 @@ body {
 /* Detail modal. */
 
 .marketplace-modal-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.55);
-    z-index: 90;
-    display: flex;
     align-items: flex-start;
-    justify-content: center;
     padding: 4vh 16px;
-    overflow-y: auto;
 }
 
 .marketplace-modal {
-    background: var(--bg, #0e0e10);
-    border: 1px solid rgba(250, 250, 250, 0.08);
     border-radius: var(--radius-md);
     padding: 16px;
     max-width: 900px;
-    width: 100%;
-    display: flex;
-    flex-direction: column;
     gap: 12px;
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
 }
 
 .confirm-dialog {
@@ -3690,9 +3670,6 @@ body {
     left: 0;
     top: 0;
     transition: transform 0.18s ease;
-    background: rgba(26, 21, 32, 0.72);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 18px;
     padding: 14px;
     backdrop-filter: blur(12px);
 }

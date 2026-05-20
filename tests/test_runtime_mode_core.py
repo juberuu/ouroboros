@@ -23,6 +23,7 @@ import sys
 
 import pytest
 
+from ouroboros.onboarding_wizard import build_onboarding_html
 from ouroboros.runtime_mode_policy import protected_path_category
 from ouroboros.tools.registry import ToolEntry, ToolRegistry
 
@@ -294,28 +295,31 @@ def test_settings_js_reads_and_writes_phase2_keys():
     src = (REPO / "web" / "modules" / "settings.js").read_text(encoding="utf-8")
     assert "OUROBOROS_RUNTIME_MODE" in src
     assert "OUROBOROS_SKILLS_REPO_PATH" in src
-    assert "byId('s-runtime-mode').value = s.OUROBOROS_RUNTIME_MODE" in src
-    assert "byId('s-skills-repo-path').value.trim()" in src
+    assert "['s-runtime-mode', 'OUROBOROS_RUNTIME_MODE', 'advanced']" in src
+    assert "['s-skills-repo-path', 'OUROBOROS_SKILLS_REPO_PATH']" in src
+    assert "fieldValue(id).trim()" in src
 
 
 def test_onboarding_js_has_runtime_mode_selector_and_save_payload():
     src = (REPO / "web" / "modules" / "onboarding_wizard.js").read_text(encoding="utf-8")
+    html = build_onboarding_html({})
     for mode in ("light", "advanced", "pro"):
-        assert f'data-runtime-mode="{mode}"' in src
+        assert f'"value": "{mode}"' in html
+    assert "data-runtime-mode" in src
     assert "OUROBOROS_RUNTIME_MODE" in src
     assert "OUROBOROS_SKILLS_REPO_PATH" in src
 
 
 def test_phase4_ui_copy_matches_shipped_runtime():
     settings_ui = (REPO / "web" / "modules" / "settings_ui.js").read_text(encoding="utf-8")
-    onboarding_js = (REPO / "web" / "modules" / "onboarding_wizard.js").read_text(encoding="utf-8")
+    onboarding_html = build_onboarding_html({})
 
     assert "Phase 2 plumbing only" not in settings_ui
     assert "land in Phase 3" not in settings_ui
     assert "data/skills/" in settings_ui
-    assert "Pick both review enforcement and the initial runtime mode" in onboarding_js
-    assert "normal triad + scope review" in onboarding_js
-    assert "Phase 6+:" not in onboarding_js
+    assert "Pick both review enforcement and the initial runtime mode" in onboarding_html
+    assert "normal triad + scope review" in onboarding_html
+    assert "Phase 6+:" not in onboarding_html
 
 
 def test_skills_ui_reads_live_extension_state_fields():

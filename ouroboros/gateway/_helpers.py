@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import json
 import pathlib
-from collections.abc import Iterator
 from typing import Any
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+
+from ouroboros.utils import iter_jsonl_objects
 
 
 _TRUE_LITERALS = frozenset({"1", "true", "yes", "on"})
@@ -74,21 +75,6 @@ def json_error(message: str, status: int = 500, **extra: Any) -> JSONResponse:
 
 def json_exception(exc: BaseException, status: int = 500) -> JSONResponse:
     return json_error(str(exc), status)
-
-
-def iter_jsonl_objects(path: pathlib.Path) -> Iterator[Any]:
-    if not path.exists():
-        return
-    with path.open(encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except (json.JSONDecodeError, ValueError):
-                continue
-            yield entry
 
 
 __all__ = (

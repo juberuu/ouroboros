@@ -473,6 +473,14 @@ def test_settings_network_meta_matches_build_network_meta():
         )
 
 
+def test_settings_meta_declares_additive_meta_keys():
+    """SettingsMeta must document additive /api/settings _meta keys."""
+    from ouroboros.gateway.contracts import SettingsMeta
+
+    declared = set(SettingsMeta.__annotations__.keys())
+    assert {"custom_secret_keys", "setup_contract"} <= declared
+
+
 def test_command_inbound_matches_ws_endpoint_dispatch():
     """CommandInbound must match the keys ``gateway.ws_endpoint`` reads for commands.
 

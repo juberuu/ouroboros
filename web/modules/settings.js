@@ -9,6 +9,29 @@ import { apiClient, apiFetch, cleanExtensionRoute, extensionRoutePath } from './
 
 let markSettingsDirty = () => {};
 const BASE_SECRET_KEYS = new Set(SECRET_KEYS.map(([key]) => key));
+let setupContract = {};
+
+const INPUT_FIELDS = [
+    ['s-openai-base-url', 'OPENAI_BASE_URL'], ['s-openai-compatible-base-url', 'OPENAI_COMPATIBLE_BASE_URL'], ['s-cloudru-base-url', 'CLOUDRU_FOUNDATION_MODELS_BASE_URL'],
+    ['s-server-host', 'OUROBOROS_SERVER_HOST', '127.0.0.1'], ['s-claude-code-model', 'CLAUDE_CODE_MODEL', 'claude-opus-4-6[1m]'],
+    ['s-review-models', 'OUROBOROS_REVIEW_MODELS'], ['s-scope-review-model', 'OUROBOROS_SCOPE_REVIEW_MODEL'], ['s-skills-repo-path', 'OUROBOROS_SKILLS_REPO_PATH'],
+    ['s-clawhub-registry-url', 'OUROBOROS_CLAWHUB_REGISTRY_URL'], ['s-websearch-model', 'OUROBOROS_WEBSEARCH_MODEL'], ['s-gh-repo', 'GITHUB_REPO'],
+    ['s-local-source', 'LOCAL_MODEL_SOURCE'], ['s-local-filename', 'LOCAL_MODEL_FILENAME'], ['s-local-chat-format', 'LOCAL_MODEL_CHAT_FORMAT'],
+];
+const VALUE_FIELDS = [
+    ['s-effort-task', 'OUROBOROS_EFFORT_TASK', 'medium'], ['s-effort-evolution', 'OUROBOROS_EFFORT_EVOLUTION', 'high'], ['s-effort-review', 'OUROBOROS_EFFORT_REVIEW', 'medium'],
+    ['s-effort-consciousness', 'OUROBOROS_EFFORT_CONSCIOUSNESS', 'low'], ['s-effort-scope-review', 'OUROBOROS_EFFORT_SCOPE_REVIEW', 'high'],
+    ['s-review-enforcement', 'OUROBOROS_REVIEW_ENFORCEMENT', 'advisory'], ['s-runtime-mode', 'OUROBOROS_RUNTIME_MODE', 'advanced'],
+];
+const NUMBER_FIELDS = [
+    ['s-workers', 'OUROBOROS_MAX_WORKERS', 5], ['s-soft-timeout', 'OUROBOROS_SOFT_TIMEOUT_SEC', 600], ['s-hard-timeout', 'OUROBOROS_HARD_TIMEOUT_SEC', 1800],
+    ['s-tool-timeout', 'OUROBOROS_TOOL_TIMEOUT_SEC', 120], ['s-local-port', 'LOCAL_MODEL_PORT', 8766], ['s-local-gpu-layers', 'LOCAL_MODEL_N_GPU_LAYERS', -1, true],
+    ['s-local-ctx', 'LOCAL_MODEL_CONTEXT_LENGTH', 16384],
+];
+
+function setupModelSlots() {
+    return Array.isArray(setupContract.modelSlots) ? setupContract.modelSlots : [];
+}
 
 function byId(id) {
     return document.getElementById(id);
@@ -35,11 +58,6 @@ function setStatus(text, tone = 'ok') {
 
 function readInt(id, fallback) {
     const value = parseInt(byId(id).value, 10);
-    return Number.isNaN(value) ? fallback : value;
-}
-
-function readFloat(id, fallback) {
-    const value = parseFloat(byId(id).value);
     return Number.isNaN(value) ? fallback : value;
 }
 
@@ -430,51 +448,20 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
     }
 
     function applySettings(s) {
-        applyInputValue('s-openrouter', s.OPENROUTER_API_KEY);
-        applyInputValue('s-openai', s.OPENAI_API_KEY);
-        applyInputValue('s-openai-base-url', s.OPENAI_BASE_URL);
-        applyInputValue('s-openai-compatible-key', s.OPENAI_COMPATIBLE_API_KEY);
-        applyInputValue('s-openai-compatible-base-url', s.OPENAI_COMPATIBLE_BASE_URL);
-        applyInputValue('s-cloudru-key', s.CLOUDRU_FOUNDATION_MODELS_API_KEY);
-        applyInputValue('s-cloudru-base-url', s.CLOUDRU_FOUNDATION_MODELS_BASE_URL);
-        applyInputValue('s-anthropic', s.ANTHROPIC_API_KEY);
-        applyInputValue('s-network-password', s.OUROBOROS_NETWORK_PASSWORD);
-        applyInputValue('s-server-host', s.OUROBOROS_SERVER_HOST || '127.0.0.1');
-
-        applyInputValue('s-model', s.OUROBOROS_MODEL);
-        applyInputValue('s-model-code', s.OUROBOROS_MODEL_CODE);
-        applyInputValue('s-model-light', s.OUROBOROS_MODEL_LIGHT);
-        applyInputValue('s-model-fallback', s.OUROBOROS_MODEL_FALLBACK);
-        applyInputValue('s-claude-code-model', s.CLAUDE_CODE_MODEL);
-        byId('s-effort-task').value = s.OUROBOROS_EFFORT_TASK || 'medium';
-        byId('s-effort-evolution').value = s.OUROBOROS_EFFORT_EVOLUTION || 'high';
-        byId('s-effort-review').value = s.OUROBOROS_EFFORT_REVIEW || 'medium';
-        byId('s-effort-consciousness').value = s.OUROBOROS_EFFORT_CONSCIOUSNESS || 'low';
-        applyInputValue('s-review-models', s.OUROBOROS_REVIEW_MODELS);
-        applyInputValue('s-scope-review-model', s.OUROBOROS_SCOPE_REVIEW_MODEL);
-        byId('s-effort-scope-review').value = s.OUROBOROS_EFFORT_SCOPE_REVIEW || 'high';
-        byId('s-review-enforcement').value = s.OUROBOROS_REVIEW_ENFORCEMENT || 'advisory';
-        byId('s-runtime-mode').value = s.OUROBOROS_RUNTIME_MODE || 'advanced';
-        applyCheckboxValue('s-auto-grant-reviewed-skills', s.OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS);
-        applyInputValue('s-skills-repo-path', s.OUROBOROS_SKILLS_REPO_PATH);
-        applyInputValue('s-clawhub-registry-url', s.OUROBOROS_CLAWHUB_REGISTRY_URL);
-        if (s.OUROBOROS_MAX_WORKERS) byId('s-workers').value = s.OUROBOROS_MAX_WORKERS;
-        if (s.OUROBOROS_SOFT_TIMEOUT_SEC) byId('s-soft-timeout').value = s.OUROBOROS_SOFT_TIMEOUT_SEC;
-        if (s.OUROBOROS_HARD_TIMEOUT_SEC) byId('s-hard-timeout').value = s.OUROBOROS_HARD_TIMEOUT_SEC;
-        if (s.OUROBOROS_TOOL_TIMEOUT_SEC) byId('s-tool-timeout').value = s.OUROBOROS_TOOL_TIMEOUT_SEC;
-        applyInputValue('s-websearch-model', s.OUROBOROS_WEBSEARCH_MODEL);
-        applyInputValue('s-gh-repo', s.GITHUB_REPO);
+        setupContract = s?._meta?.setup_contract || setupContract || {};
         applySecretInputs(page, s);
-        applyInputValue('s-local-source', s.LOCAL_MODEL_SOURCE);
-        applyInputValue('s-local-filename', s.LOCAL_MODEL_FILENAME);
-        if (s.LOCAL_MODEL_PORT) byId('s-local-port').value = s.LOCAL_MODEL_PORT;
-        if (s.LOCAL_MODEL_N_GPU_LAYERS !== null && s.LOCAL_MODEL_N_GPU_LAYERS !== undefined) byId('s-local-gpu-layers').value = s.LOCAL_MODEL_N_GPU_LAYERS;
-        if (s.LOCAL_MODEL_CONTEXT_LENGTH) byId('s-local-ctx').value = s.LOCAL_MODEL_CONTEXT_LENGTH;
-        applyInputValue('s-local-chat-format', s.LOCAL_MODEL_CHAT_FORMAT);
-        applyCheckboxValue('s-local-main', s.USE_LOCAL_MAIN);
-        applyCheckboxValue('s-local-code', s.USE_LOCAL_CODE);
-        applyCheckboxValue('s-local-light', s.USE_LOCAL_LIGHT);
-        applyCheckboxValue('s-local-fallback', s.USE_LOCAL_FALLBACK);
+        INPUT_FIELDS.forEach(([id, key, fallback = '']) => applyInputValue(id, fallback && !s[key] ? fallback : s[key]));
+        VALUE_FIELDS.forEach(([id, key, fallback]) => { byId(id).value = s[key] || fallback; });
+        setupModelSlots().forEach((slot) => {
+            applyInputValue(slot.settingsInputId, s[slot.settingKey]);
+            applyCheckboxValue(slot.settingsToggleId, s[`USE_LOCAL_${slot.slot.toUpperCase()}`]);
+        });
+        applyCheckboxValue('s-auto-grant-reviewed-skills', s.OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS);
+        NUMBER_FIELDS.forEach(([id, key, fallback, allowFalsy]) => {
+            const value = s[key];
+            if (allowFalsy ? value !== null && value !== undefined : value) byId(id).value = value;
+            else byId(id).value = fallback;
+        });
         applyMcpSettings(s);
         resetSecretClearFlags(page);
         syncEffortSegments(page);
@@ -524,7 +511,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         renderClaudeCodeUi();
         settingsLoaded = true;
         markSettingsDirty = updateSettingsDirtyState;
-    syncSettingsLoadState();
+        syncSettingsLoadState();
         startClaudeCodePolling();
     }
 
@@ -571,46 +558,23 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
     }
 
     function collectBody() {
+        const fieldValue = (id) => byId(id)?.value || '';
         const body = {
-            OUROBOROS_MODEL: byId('s-model').value,
-            OUROBOROS_MODEL_CODE: byId('s-model-code').value,
-            OUROBOROS_MODEL_LIGHT: byId('s-model-light').value,
-            OUROBOROS_MODEL_FALLBACK: byId('s-model-fallback').value,
-            CLAUDE_CODE_MODEL: byId('s-claude-code-model').value || 'claude-opus-4-6[1m]',
-            OUROBOROS_SERVER_HOST: (byId('s-server-host')?.value || '127.0.0.1').trim() || '127.0.0.1',
-            OUROBOROS_EFFORT_TASK: byId('s-effort-task').value,
-            OUROBOROS_EFFORT_EVOLUTION: byId('s-effort-evolution').value,
-            OUROBOROS_EFFORT_REVIEW: byId('s-effort-review').value,
-            OUROBOROS_EFFORT_CONSCIOUSNESS: byId('s-effort-consciousness').value,
-            OUROBOROS_REVIEW_MODELS: byId('s-review-models').value.trim(),
-            OUROBOROS_SCOPE_REVIEW_MODEL: byId('s-scope-review-model').value.trim(),
-            OUROBOROS_EFFORT_SCOPE_REVIEW: byId('s-effort-scope-review').value,
-            OUROBOROS_REVIEW_ENFORCEMENT: byId('s-review-enforcement').value,
             OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS: byId('s-auto-grant-reviewed-skills')?.checked ? 'true' : 'false',
-            // Runtime mode is owner-only; native bridge applies it after save.
-            OUROBOROS_SKILLS_REPO_PATH: byId('s-skills-repo-path').value.trim(),
-            OUROBOROS_CLAWHUB_REGISTRY_URL: byId('s-clawhub-registry-url')?.value.trim() || '',
-            OUROBOROS_MAX_WORKERS: readInt('s-workers', 5),
-            OUROBOROS_SOFT_TIMEOUT_SEC: readInt('s-soft-timeout', 600),
-            OUROBOROS_HARD_TIMEOUT_SEC: readInt('s-hard-timeout', 1800),
-            OUROBOROS_TOOL_TIMEOUT_SEC: readInt('s-tool-timeout', 120),
-            OUROBOROS_WEBSEARCH_MODEL: byId('s-websearch-model').value.trim(),
-            GITHUB_REPO: byId('s-gh-repo').value,
-            LOCAL_MODEL_SOURCE: byId('s-local-source').value,
-            LOCAL_MODEL_FILENAME: byId('s-local-filename').value,
-            LOCAL_MODEL_PORT: readInt('s-local-port', 8766),
-            LOCAL_MODEL_N_GPU_LAYERS: readInt('s-local-gpu-layers', -1),
-            LOCAL_MODEL_CONTEXT_LENGTH: readInt('s-local-ctx', 16384),
-            LOCAL_MODEL_CHAT_FORMAT: byId('s-local-chat-format').value,
-            USE_LOCAL_MAIN: byId('s-local-main').checked,
-            USE_LOCAL_CODE: byId('s-local-code').checked,
-            USE_LOCAL_LIGHT: byId('s-local-light').checked,
-            USE_LOCAL_FALLBACK: byId('s-local-fallback').checked,
-            OPENAI_BASE_URL: byId('s-openai-base-url').value.trim(),
-            OPENAI_COMPATIBLE_BASE_URL: byId('s-openai-compatible-base-url').value.trim(),
-            CLOUDRU_FOUNDATION_MODELS_BASE_URL: byId('s-cloudru-base-url').value.trim(),
             ...collectMcpSettings(),
         };
+        setupModelSlots().forEach((slot) => {
+            body[slot.settingKey] = fieldValue(slot.settingsInputId);
+            body[`USE_LOCAL_${slot.slot.toUpperCase()}`] = Boolean(byId(slot.settingsToggleId)?.checked);
+        });
+        INPUT_FIELDS.forEach(([id, key, fallback = '']) => {
+            const value = fieldValue(id).trim();
+            body[key] = key === 'OUROBOROS_SERVER_HOST' ? value || fallback : value || (key === 'CLAUDE_CODE_MODEL' ? fallback : '');
+        });
+        VALUE_FIELDS
+            .filter(([, key]) => key !== 'OUROBOROS_RUNTIME_MODE')
+            .forEach(([id, key]) => { body[key] = fieldValue(id); });
+        NUMBER_FIELDS.forEach(([id, key, fallback]) => { body[key] = readInt(id, fallback); });
 
         page.querySelectorAll('[data-secret-setting]').forEach((input) => {
             collectSecretValue(input.id, body);

@@ -8,6 +8,7 @@ import {
 } from './lifecycle_card.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { jsonPost } from './api_client.js';
+import { renderToneBadge } from './ui_helpers.js';
 import {
     boundedText,
     emitSkillLifecycle,
@@ -70,7 +71,7 @@ function statusBadgeForReview(status) {
         : status === 'warnings' ? 'warn'
         : status === 'blockers' ? 'danger'
         : 'muted';
-    return `<span class="skills-badge skills-badge-${tone}">${escapeHtml(status || 'pending')}</span>`;
+    return renderToneBadge(status || 'pending', tone);
 }
 
 function hasInstalledUiTab(installed) {

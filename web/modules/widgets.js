@@ -12,6 +12,7 @@ import {
     escapeHtmlAttr as escapeHtml,
     renderMarkdownSafe,
 } from './utils.js';
+import { downloadViaHostBridge } from './ui_helpers.js';
 
 function pageTemplate() {
     return `
@@ -382,24 +383,7 @@ async function mountDeclarativeWidget(mount, tab, render) {
             throw new Error('download URL is outside this widget extension');
         }
         const safeName = filenameFromWidgetUrl(resolvedUrl.toString(), filename || 'download');
-        const bridge = window.pywebview?.api?.download_file_to_downloads;
-        if (bridge) {
-            const result = await bridge(resolvedUrl.pathname + resolvedUrl.search, safeName, false);
-            if (!result?.ok) throw new Error(result?.error || 'desktop download failed');
-            return;
-        }
-        const resp = await apiFetch(resolvedUrl.pathname + resolvedUrl.search, { credentials: 'include' });
-        if (!resp.ok) throw new Error(`download failed: HTTP ${resp.status}`);
-        const blob = await resp.blob();
-        const blobUrl = URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        link.href = blobUrl;
-        link.download = safeName;
-        link.rel = 'noopener';
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+        await downloadViaHostBridge(resolvedUrl.pathname + resolvedUrl.search, safeName, { fetchOptions: { credentials: 'include' } });
     };
 
     const schedule = (fn, delay) => {

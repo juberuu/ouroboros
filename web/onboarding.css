@@ -5,6 +5,10 @@
   --panel-2: rgba(255, 255, 255, 0.04);
   --panel-3: rgba(255, 255, 255, 0.03);
   --border: rgba(255, 255, 255, 0.10);
+  --ui-card-bg: var(--panel);
+  --ui-card-border: var(--border);
+  --ui-tone-ok: var(--green);
+  --ui-tone-danger: var(--red);
   --border-strong: rgba(232, 93, 111, 0.35);
   --text: #edf2f7;
   --muted: rgba(237, 242, 247, 0.62);
@@ -215,7 +219,7 @@ textarea::placeholder {
 .wizard-runtime-strip {
   border: 1px solid var(--border);
   border-radius: 18px;
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--panel-3);
 }
 
 .panel-card,
@@ -476,11 +480,11 @@ select:focus {
 }
 
 .wizard-runtime-status[data-tone="ok"] {
-  color: #6ee7b7;
+  color: var(--ui-tone-ok);
 }
 
 .wizard-runtime-status[data-tone="error"] {
-  color: #fca5a5;
+  color: var(--ui-tone-danger);
 }
 
 .wizard-test-result {

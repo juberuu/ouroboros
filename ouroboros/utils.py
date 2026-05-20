@@ -12,6 +12,8 @@ import subprocess
 import threading
 import time
 import uuid
+from collections import deque
+from collections.abc import Iterator
 from typing import Any, Callable, Dict, List, Optional
 
 log = logging.getLogger(__name__)
@@ -199,6 +201,62 @@ def append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> bool:
     if not _written:
         log.warning("append_jsonl: all write attempts failed for %s", path)
     return _written
+
+
+def iter_jsonl_objects(
+    path: pathlib.Path,
+    max_entries: Optional[int] = None,
+    tail_bytes: Optional[int] = None,
+    dict_only: bool = True,
+) -> Iterator[Any]:
+    """Yield parseable JSONL entries; max_entries applies to raw tail lines."""
+    path = pathlib.Path(path)
+    if (max_entries is not None and max_entries <= 0) or (tail_bytes is not None and tail_bytes <= 0):
+        return
+    try:
+        with path.open("rb") as handle:
+            if tail_bytes is not None:
+                file_size = path.stat().st_size
+                if file_size > tail_bytes:
+                    start = file_size - tail_bytes
+                    handle.seek(start - 1)
+                    if handle.read(1) != b"\n":
+                        handle.readline()
+            lines = deque(handle, maxlen=max_entries) if max_entries else handle
+            for raw in lines:
+                line = raw.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not dict_only or isinstance(entry, dict):
+                    yield entry
+    except FileNotFoundError:
+        return
+
+
+def iter_llm_usage_events(
+    path: pathlib.Path,
+    *,
+    max_entries: Optional[int] = None,
+    tail_bytes: Optional[int] = None,
+) -> Iterator[Dict[str, Any]]:
+    for event in iter_jsonl_objects(path, max_entries=max_entries, tail_bytes=tail_bytes):
+        if event.get("type") == "llm_usage":
+            yield event
+
+
+def llm_usage_cost(event: Dict[str, Any]) -> float:
+    usage = event.get("usage")
+    value = event.get("cost")
+    if value is None and isinstance(usage, dict):
+        value = usage.get("cost")
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 # ---------------------------------------------------------------------------

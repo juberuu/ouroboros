@@ -30,6 +30,7 @@ from ouroboros.server_runtime import (
     has_startup_ready_provider,
     has_supervisor_provider,
 )
+from ouroboros.settings_setup_contract import build_setup_contract
 
 log = logging.getLogger(__name__)
 DEFAULT_PORT = int(os.environ.get("OUROBOROS_SERVER_PORT", "8765"))
@@ -328,6 +329,7 @@ async def api_settings_get(request: Request) -> JSONResponse:
         and _CUSTOM_SECRET_KEY_RE.match(str(key))
         and settings.get(key)
     )
+    meta["setup_contract"] = build_setup_contract("web")
     safe["_meta"] = meta
     return JSONResponse(safe)
 
