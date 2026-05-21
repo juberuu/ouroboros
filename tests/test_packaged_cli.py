@@ -13,6 +13,7 @@ def _make_bundle_root(tmp_path: pathlib.Path, root: pathlib.Path | None = None) 
     root = root or tmp_path / "Ouroboros"
     (root / "python-standalone" / "bin").mkdir(parents=True)
     (root / "python-standalone" / "bin" / "python3").write_text("#!/bin/sh\n", encoding="utf-8")
+    (root / "python-standalone" / "python.exe").write_text("@echo off\r\n", encoding="utf-8")
     (root / "repo.bundle").write_text("bundle", encoding="utf-8")
     (root / "repo_bundle_manifest.json").write_text("{}", encoding="utf-8")
     (root / "VERSION").write_text("5.29.0-rc.2\n", encoding="utf-8")

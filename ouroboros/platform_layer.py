@@ -111,8 +111,14 @@ def open_path_external(path: pathlib.Path) -> None:
 
 def is_unstable_macos_app_path(path: pathlib.Path) -> bool:
     """Return whether a macOS app path is likely a DMG/AppTranslocation mount."""
-    text = str(path.resolve())
-    return "AppTranslocation" in text or text.startswith("/Volumes/")
+    raw = str(path).replace("\\", "/")
+    resolved = str(path.resolve()).replace("\\", "/")
+    return (
+        "AppTranslocation" in raw
+        or "AppTranslocation" in resolved
+        or raw.startswith("/Volumes/")
+        or resolved.startswith("/Volumes/")
+    )
 
 
 def ensure_windows_user_path(path: pathlib.Path) -> None:
