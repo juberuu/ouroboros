@@ -823,7 +823,7 @@ def build_llm_messages(
                 {
                     "type": "text",
                     "text": static_text,
-                    "cache_control": {"type": "ephemeral", "ttl": "1h"},
+                    "cache_control": {"type": "ephemeral"},
                 },
                 {
                     "type": "text",

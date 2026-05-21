@@ -496,7 +496,12 @@ def load_settings() -> dict:
         settings.update(loaded)
         for key in SETTINGS_DEFAULTS:
             raw_env = os.environ.get(key)
-            if raw_env is None or raw_env == "":
+            if raw_env is None:
+                continue
+            if key == "OUROBOROS_RETURN_REASONING" and raw_env == "":
+                settings[key] = ""
+                continue
+            if raw_env == "":
                 continue
             if key in loaded and settings.get(key) not in {None, ""}:
                 continue
@@ -631,6 +636,9 @@ def apply_settings_to_env(settings: dict) -> None:
     ]
     for k in env_keys:
         val = settings.get(k)
+        if k == "OUROBOROS_RETURN_REASONING" and val == "":
+            os.environ[k] = ""
+            continue
         if val is None or val == "":
             os.environ.pop(k, None)
         else:

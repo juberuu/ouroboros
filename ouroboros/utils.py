@@ -6,6 +6,7 @@ import datetime as _dt
 import hashlib
 import json
 import logging
+import math
 import os
 import pathlib
 import subprocess
@@ -254,9 +255,10 @@ def llm_usage_cost(event: Dict[str, Any]) -> float:
     if value is None and isinstance(usage, dict):
         value = usage.get("cost")
     try:
-        return float(value or 0.0)
+        cost = float(value or 0.0)
     except (TypeError, ValueError):
         return 0.0
+    return cost if math.isfinite(cost) else 0.0
 
 
 # ---------------------------------------------------------------------------

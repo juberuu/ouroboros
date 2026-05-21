@@ -26,10 +26,23 @@ def make_cost_breakdown_endpoint(data_dir: pathlib.Path):
         by_task_category: Dict[str, Dict[str, Any]] = {}
         total_cost = 0.0
         total_calls = 0
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+        total_cached_tokens = 0
+        total_cache_write_tokens = 0
+        prompt_cache_ttls: Dict[str, int] = {}
 
         def _acc(d, key):
             if key not in d:
-                d[key] = {"cost": 0.0, "calls": 0}
+                d[key] = {
+                    "cost": 0.0,
+                    "calls": 0,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "cached_tokens": 0,
+                    "cache_write_tokens": 0,
+                    "prompt_cache_ttls": {},
+                }
             return d[key]
 
         try:
@@ -39,18 +52,44 @@ def make_cost_breakdown_endpoint(data_dir: pathlib.Path):
                 api_key_type = str(evt.get("api_key_type") or evt.get("provider") or "openrouter")
                 model_cat = str(evt.get("model_category") or "other")
                 task_cat = str(evt.get("category") or "task")
+                token_values: Dict[str, int] = {}
+                for field in ("prompt_tokens", "completion_tokens", "cached_tokens", "cache_write_tokens"):
+                    try:
+                        token_values[field] = int(evt.get(field) or 0)
+                    except (TypeError, ValueError):
+                        log.debug("Ignoring malformed %s in llm_usage event", field)
+                        token_values[field] = 0
+                prompt_tokens = token_values["prompt_tokens"]
+                completion_tokens = token_values["completion_tokens"]
+                cached_tokens = token_values["cached_tokens"]
+                cache_write_tokens = token_values["cache_write_tokens"]
+                prompt_cache_ttl = str(evt.get("prompt_cache_ttl") or "").strip()
 
                 total_cost += cost
                 total_calls += 1
+                total_prompt_tokens += prompt_tokens
+                total_completion_tokens += completion_tokens
+                total_cached_tokens += cached_tokens
+                total_cache_write_tokens += cache_write_tokens
+                if prompt_cache_ttl:
+                    prompt_cache_ttls[prompt_cache_ttl] = int(prompt_cache_ttls.get(prompt_cache_ttl, 0)) + 1
 
-                _acc(by_model, model)["cost"] += cost
-                _acc(by_model, model)["calls"] += 1
-                _acc(by_api_key, api_key_type)["cost"] += cost
-                _acc(by_api_key, api_key_type)["calls"] += 1
-                _acc(by_model_category, model_cat)["cost"] += cost
-                _acc(by_model_category, model_cat)["calls"] += 1
-                _acc(by_task_category, task_cat)["cost"] += cost
-                _acc(by_task_category, task_cat)["calls"] += 1
+                for bucket, key in (
+                    (by_model, model),
+                    (by_api_key, api_key_type),
+                    (by_model_category, model_cat),
+                    (by_task_category, task_cat),
+                ):
+                    acc = _acc(bucket, key)
+                    acc["cost"] += cost
+                    acc["calls"] += 1
+                    acc["prompt_tokens"] += prompt_tokens
+                    acc["completion_tokens"] += completion_tokens
+                    acc["cached_tokens"] += cached_tokens
+                    acc["cache_write_tokens"] += cache_write_tokens
+                    if prompt_cache_ttl:
+                        ttl_counts = acc["prompt_cache_ttls"]
+                        ttl_counts[prompt_cache_ttl] = int(ttl_counts.get(prompt_cache_ttl, 0)) + 1
         except Exception:
             pass
 
@@ -60,6 +99,11 @@ def make_cost_breakdown_endpoint(data_dir: pathlib.Path):
         return JSONResponse({
             "total_cost": round(total_cost, 4),
             "total_calls": total_calls,
+            "total_prompt_tokens": total_prompt_tokens,
+            "total_completion_tokens": total_completion_tokens,
+            "total_cached_tokens": total_cached_tokens,
+            "total_cache_write_tokens": total_cache_write_tokens,
+            "prompt_cache_ttls": prompt_cache_ttls,
             "by_model": _sorted(by_model),
             "by_api_key": _sorted(by_api_key),
             "by_model_category": _sorted(by_model_category),

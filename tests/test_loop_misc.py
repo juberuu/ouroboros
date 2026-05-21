@@ -17,6 +17,7 @@ import queue
 import ouroboros.loop as loop_mod
 from ouroboros.loop import (
     _drain_incoming_messages,
+    _maybe_inject_self_check,
     _skill_finalization_message,
     _skill_names_touched_by_trace,
     run_llm_loop,
@@ -61,6 +62,36 @@ def test_drain_incoming_messages_preserves_image_payload():
     assert content[0]["text"] == "[Message from my human]: photo from telegram"
     assert content[1]["type"] == "image_url"
     assert content[1]["image_url"]["url"] == "data:image/png;base64,aW1hZ2U="
+
+
+def test_maybe_inject_self_check_handles_assistant_none_content():
+    messages = [
+        {"role": "user", "content": "inspect"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "repo_read", "arguments": "{}"},
+            }],
+        },
+        {"role": "tool", "tool_call_id": "call-1", "content": "done"},
+    ]
+    progress = []
+
+    injected = _maybe_inject_self_check(
+        15,
+        30,
+        messages,
+        {"cost": 0.0},
+        progress.append,
+    )
+
+    assert injected is True
+    assert messages[-1]["role"] == "user"
+    assert "[CHECKPOINT 1" in messages[-1]["content"]
+    assert progress
 
 
 # ---------------------------------------------------------------------------

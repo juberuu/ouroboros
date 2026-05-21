@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 5.29.0-rc.3](https://img.shields.io/badge/version-5.29.0--rc.3-green.svg)](VERSION)
+[![Version 5.30.0-rc.1](https://img.shields.io/badge/version-5.30.0--rc.1-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -468,12 +468,12 @@ not paraphrase it.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 5.30.0-rc.1 | 2026-05-21 | **rc(llm): preserve OpenRouter reasoning continuity and split prompt-cache capabilities.** Keeps opaque reasoning payloads across tool-call rounds, fixes checkpoint handling for assistant `content: null`, routes cache markers only to supported Anthropic/Gemini surfaces without TTL, and accounts for cache reads/writes in usage telemetry and costs. |
 | 5.29.0-rc.3 | 2026-05-21 | **rc(packaging): make packaged CLI release CI portable.** Keeps the packaged CLI wrapper/installer release and fixes Windows test fixtures for `python-standalone` layout and macOS path detection before publishing artifacts. |
 | 5.29.0-rc.2 | 2026-05-21 | **rc(packaging): add packaged CLI install path.** Ships desktop artifact CLI wrappers and user-local installers, routes packaged `run --start` through the launcher-managed runtime, and documents packaged versus source CLI setup without adding a second runtime. |
 | 5.29.0-rc.1 | 2026-05-20 | **rc(headless): add CLI and external workspace task mode.** Adds gateway-backed task APIs, SSE task event replay, a multi-command CLI, isolated external workspace memory modes, patch artifacts, and tiny benchmark adapter scripts without adding file-manager or public commit/review CLI surfaces. |
 | 5.28.0 | 2026-05-20 | **release(stability): harden skills, owner parity, and relaunch cleanup.** Adds structured skill lifecycle recovery state, web owner endpoints for runtime mode/auto-grant/grants, process-group server cleanup for desktop relaunches, best-effort isolated-deps cleanup, and a 920K review prompt budget. |
-| 5.27.0-rc.1 | 2026-05-19 | **rc(refactor): shrink setup, UI, and JSONL surfaces.** Centralizes the onboarding/settings setup contract, shared UI primitives/helpers, Files modal shell, and JSONL/LLM-usage readers while preserving review gates, public contracts, and runtime behavior. |
-Older releases are preserved in Git tags and GitHub releases. The 5.2.0 through 5.26.0-rc.1 rows and former `4.0.0` rows are rolled off to respect the P9 changelog cap; their full bodies remain at their git tags.
+Older releases are preserved in Git tags and GitHub releases. The 5.2.0 through 5.27.0-rc.1 rows and former `4.0.0` rows are rolled off to respect the P9 changelog cap; their full bodies remain at their git tags.
 
 ---
 

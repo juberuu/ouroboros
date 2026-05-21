@@ -31,7 +31,7 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
     text = (pathlib.Path(__file__).resolve().parent.parent / "web" / "modules" / "api_types.js").read_text(
         encoding="utf-8"
     )
-    assert "GATEWAY_CONTRACT_VERSION = '5.29.0-rc.3'" in text
+    assert "GATEWAY_CONTRACT_VERSION = '5.30.0-rc.1'" in text
     for name in (
         "StateResponse",
         "HealthResponse",

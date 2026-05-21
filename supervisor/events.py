@@ -80,6 +80,11 @@ def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
         or evt.get("cache_write_tokens")
         or 0
     )
+    prompt_cache_ttl = str(
+        usage.get("prompt_cache_ttl")
+        or evt.get("prompt_cache_ttl")
+        or ""
+    )
 
     raw_cost = usage.get("cost")
     if raw_cost is None:
@@ -96,6 +101,7 @@ def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
         "completion_tokens": completion_tokens,
         "cached_tokens": cached_tokens,
         "cache_write_tokens": cache_write_tokens,
+        "prompt_cache_ttl": prompt_cache_ttl,
     }
     ctx.update_budget_from_usage(usage_for_budget)
 
@@ -117,6 +123,7 @@ def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
             "completion_tokens": completion_tokens,
             "cached_tokens": cached_tokens,
             "cache_write_tokens": cache_write_tokens,
+            "prompt_cache_ttl": prompt_cache_ttl,
         })
     except Exception:
         log.warning("Failed to log llm_usage event to events.jsonl", exc_info=True)

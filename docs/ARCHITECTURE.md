@@ -1,4 +1,4 @@
-# Ouroboros v5.29.0-rc.3 — Architecture & Reference
+# Ouroboros v5.30.0-rc.1 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -658,6 +658,8 @@ Rationale: tool classification drift caused subtle bugs; every hardcoded set now
 
 Context compaction policy is deliberately asymmetric. Remote models use emergency-only compaction above ~1.2M chars because the old per-round compactor fired after `keep_recent=50` on every round, destroyed raw tool outputs, fragmented process memory, and collapsed prompt-cache hit rate. Local models compact aggressively after round 6 / >40 messages because small context windows require it. Manual pending compaction is always honored.
 
+Prompt-cache markers are provider-gated in `llm.py`. Anthropic-compatible routes keep message-block cache markers and tool-schema cache markers; OpenRouter Gemini routes keep message-block markers only; other OpenRouter, direct OpenAI/OpenAI-compatible/Cloud.ru, and local routes receive copied payloads with unsupported cache metadata removed. Ouroboros sends only `{"type": "ephemeral"}` and does not send cache TTLs. OpenRouter reasoning round-trip fields (`reasoning`, `reasoning_details`, `response_id`) are preserved only on OpenRouter payloads and stripped from direct/local provider copies so provider-specific continuity does not leak across routes.
+
 Loop checkpoints are plain user-message self-checks by design. A prior structured-reflection mechanism (four-field contract, tools disabled, `effort=xhigh`) produced 0 valid reflections and 37 anomaly records in production: system-role injection was absorbed into the top-level prompt, high effort with no tools invalidated cache every round, and the strict parser rejected natural model output. The minimal checkpoint is intentional; do not reintroduce structured reflection without new evidence.
 
 OpenClaw tool aliases (`tool_aliases.py`) were retired. Skills and prompts should use canonical tool names directly: `web_fetch` → `browse_page`, `exec`/`bash`/`shell`/`run_command` → `run_shell`, `read_file` → `repo_read`, `write_file` → `repo_write`, `edit` → `str_replace_editor`.
@@ -801,6 +803,7 @@ Runtime floors:
 | OUROBOROS_EFFORT_REVIEW | medium | Reasoning effort for review tasks |
 | OUROBOROS_EFFORT_SCOPE_REVIEW | high | Reasoning effort for scope review |
 | OUROBOROS_EFFORT_CONSCIOUSNESS | low | Reasoning effort for background consciousness |
+| OUROBOROS_RETURN_REASONING | true | OpenRouter reasoning continuity switch. Unset means return reasoning payloads by default; false-like values or an explicit empty string opt out. Direct/local routes strip OpenRouter-only reasoning fields on copied payloads. |
 | OUROBOROS_SOFT_TIMEOUT_SEC | 600 | Soft timeout warning (10 min) |
 | OUROBOROS_HARD_TIMEOUT_SEC | 1800 | Hard timeout kill (30 min) |
 | LOCAL_MODEL_SOURCE | "" | HuggingFace repo for local model |

@@ -148,4 +148,4 @@
  * @property {Object[]} entries
  */
 
-export const GATEWAY_CONTRACT_VERSION = '5.29.0-rc.3';
+export const GATEWAY_CONTRACT_VERSION = '5.30.0-rc.1';

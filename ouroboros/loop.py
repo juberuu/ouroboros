@@ -329,9 +329,7 @@ def _maybe_inject_self_check(
         return False
 
     ctx_tokens = sum(
-        estimate_tokens(str(m.get("content", "")))
-        if isinstance(m.get("content"), str)
-        else sum(estimate_tokens(str(b.get("text", ""))) for b in m.get("content", []) if isinstance(b, dict))
+        estimate_tokens(_extract_plain_text_from_content(m.get("content")))
         for m in messages
     )
     task_cost = accumulated_usage.get("cost", 0)
@@ -380,7 +378,7 @@ def seal_task_transcript(
     keep_active: int = 5,
     min_prefix_tokens: int = 2048,
 ) -> None:
-    """Mark one stable old tool-result boundary with Anthropic cache_control."""
+    """Mark one stable old tool-result boundary for provider prompt caching."""
     for msg in messages:
         if msg.get("role") != "tool":
             continue
@@ -616,10 +614,12 @@ def run_llm_loop(
                 _cc = float(_compaction_usage.get("cost") or 0) or estimate_cost(
                     _cm, int(_compaction_usage.get("prompt_tokens") or 0),
                     int(_compaction_usage.get("completion_tokens") or 0),
-                    int(_compaction_usage.get("cached_tokens") or 0))
+                    int(_compaction_usage.get("cached_tokens") or 0),
+                    int(_compaction_usage.get("cache_write_tokens") or 0),
+                    _compaction_usage.get("prompt_cache_ttl"))
                 emit_llm_usage_event(event_queue, task_id, _cm, _compaction_usage, _cc, "compaction")
 
-            # Anthropic cache boundary; other providers strip cache_control in llm.py.
+            # Provider cache boundary; unsupported providers strip cache_control in llm.py.
             seal_task_transcript(messages)
 
             msg, cost = call_llm_with_retry(
