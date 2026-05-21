@@ -38,6 +38,12 @@ echo "--- Building embedded managed repo bundle ---"
 echo "--- Running PyInstaller ---"
 "$PYTHON_CMD" -m PyInstaller Ouroboros.spec --clean --noconfirm
 
+echo "--- Installing packaged CLI wrappers ---"
+mkdir -p dist/Ouroboros/bin
+cp packaging/cli/ouroboros dist/Ouroboros/bin/ouroboros
+cp packaging/cli/install-ouroboros-cli dist/Ouroboros/bin/install-ouroboros-cli
+chmod +x dist/Ouroboros/bin/ouroboros dist/Ouroboros/bin/install-ouroboros-cli
+
 echo ""
 echo "=== Creating archive ==="
 cd dist
@@ -49,3 +55,4 @@ echo "=== Done ==="
 echo "Archive: dist/$ARCHIVE_NAME"
 echo ""
 echo "To run: extract and execute ./Ouroboros/Ouroboros"
+echo "To install CLI: ./Ouroboros/bin/install-ouroboros-cli"

@@ -56,6 +56,11 @@ python scripts/build_repo_bundle.py --source-branch $ManagedSourceBranch
 Write-Host "--- Running PyInstaller ---"
 python -m PyInstaller Ouroboros.spec --clean --noconfirm
 
+Write-Host "--- Installing packaged CLI wrappers ---"
+New-Item -ItemType Directory -Force -Path "dist\Ouroboros\bin" | Out-Null
+Copy-Item "packaging\cli\ouroboros.cmd" "dist\Ouroboros\bin\ouroboros.cmd" -Force
+Copy-Item "packaging\cli\install-ouroboros-cli.cmd" "dist\Ouroboros\bin\install-ouroboros-cli.cmd" -Force
+
 Write-Host "--- Checking Windows archive path lengths ---"
 $TooLong = Get-ChildItem -Path "dist\Ouroboros" -Recurse -Force | Where-Object {
     $_.FullName.Substring((Resolve-Path "dist\Ouroboros").Path.Length).TrimStart('\').Length -gt 200
@@ -74,3 +79,4 @@ Write-Host "=== Done ==="
 Write-Host "Archive: dist\$ArchiveName"
 Write-Host ""
 Write-Host "To run: extract and execute Ouroboros\Ouroboros.exe"
+Write-Host "To install CLI: Ouroboros\bin\install-ouroboros-cli.cmd"

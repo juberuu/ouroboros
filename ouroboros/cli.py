@@ -525,6 +525,8 @@ def _default_base_url() -> str:
 
 
 def _start_local_server(base_url: str) -> None:
+    if os.environ.get("OUROBOROS_PACKAGED_CLI") == "1":
+        raise CLIError("packaged CLI must launch the desktop app for --start, not source server.py")
     parsed = urllib.parse.urlparse(base_url)
     host = parsed.hostname or DEFAULT_HOST
     port = int(parsed.port or DEFAULT_PORT)

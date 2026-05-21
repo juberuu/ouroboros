@@ -350,6 +350,16 @@ def test_cli_has_no_file_or_review_commit_groups():
         parser.parse_args(["skills", "review", "demo"])
 
 
+def test_source_server_start_is_blocked_in_packaged_cli_env(monkeypatch):
+    from ouroboros import cli
+
+    monkeypatch.setenv("OUROBOROS_PACKAGED_CLI", "1")
+    monkeypatch.setattr(cli.subprocess, "Popen", lambda *args, **kwargs: pytest.fail("direct server start"))
+
+    with pytest.raises(cli.CLIError, match="packaged CLI must launch the desktop app"):
+        cli._start_local_server("http://127.0.0.1:8765")
+
+
 def test_cli_run_no_stream_requires_jsonl_without_touching_server(capsys):
     from ouroboros.cli import main
 

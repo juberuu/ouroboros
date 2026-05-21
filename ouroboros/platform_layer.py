@@ -109,6 +109,52 @@ def open_path_external(path: pathlib.Path) -> None:
         subprocess.Popen(["xdg-open", str(target)])
 
 
+def is_unstable_macos_app_path(path: pathlib.Path) -> bool:
+    """Return whether a macOS app path is likely a DMG/AppTranslocation mount."""
+    text = str(path.resolve())
+    return "AppTranslocation" in text or text.startswith("/Volumes/")
+
+
+def ensure_windows_user_path(path: pathlib.Path) -> None:
+    """Add a directory to the current Windows user's PATH and notify shells."""
+    if not IS_WINDOWS:
+        return
+    import winreg  # type: ignore[import-not-found]
+
+    path_text = str(path)
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_READ | winreg.KEY_WRITE) as key:
+        try:
+            current, value_type = winreg.QueryValueEx(key, "Path")
+        except FileNotFoundError:
+            current, value_type = "", winreg.REG_EXPAND_SZ
+        parts = [p for p in str(current).split(";") if p]
+        if any(p.lower() == path_text.lower() for p in parts):
+            return
+        updated = ";".join(parts + [path_text])
+        winreg.SetValueEx(key, "Path", 0, value_type, updated)
+    _broadcast_windows_environment_change()
+
+
+def _broadcast_windows_environment_change() -> None:
+    if not IS_WINDOWS:
+        return
+    try:
+        import ctypes
+
+        result = ctypes.c_ulong()
+        ctypes.windll.user32.SendMessageTimeoutW(
+            0xFFFF,  # HWND_BROADCAST
+            0x001A,  # WM_SETTINGCHANGE
+            0,
+            "Environment",
+            0x0002,  # SMTO_ABORTIFHUNG
+            5000,
+            ctypes.byref(result),
+        )
+    except Exception:
+        pass
+
+
 def _hidden_run(command: list[str], **kwargs):
     if _SUBPROCESS_NO_WINDOW:
         kwargs = dict(kwargs)

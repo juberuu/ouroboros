@@ -16,8 +16,10 @@ MAX_MODULE_LINES = 1600
 TARGET_FUNCTION_LINES = 150
 # Advisory SDK orchestration stays single-flow; split tracked as tech debt.
 MAX_FUNCTION_LINES = 300
-# Ceiling covers safety, review-state, tools/git, skills/extensions, and gateway helpers.
-MAX_TOTAL_FUNCTIONS = 2130  # v5.29 headless CLI/gateway surface keeps thin command handlers explicit.
+# Ceiling covers safety, review-state, tools/git, skills/extensions, gateway
+# helpers, and the v5.29 packaged CLI bridge/installer. The packaging CLI keeps
+# platform and install branches explicit instead of hiding them in shell glue.
+MAX_TOTAL_FUNCTIONS = 2175
 # Grandfathered modules are accepted debt until their surfaces stabilize/split.
 GRANDFATHERED_OVERSIZED_MODULES = {
     "llm.py",

@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 5.29.0-rc.1](https://img.shields.io/badge/version-5.29.0--rc.1-green.svg)](VERSION)
+[![Version 5.29.0-rc.2](https://img.shields.io/badge/version-5.29.0--rc.2-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -27,15 +27,20 @@ Not a coding assistant. A digital being with a constitution, background consciou
 
 | Platform | Download | Instructions |
 |----------|----------|--------------|
-| **macOS** 12+ | [Ouroboros.dmg](https://github.com/joi-lab/ouroboros-desktop/releases/latest) | Open DMG → drag to Applications |
-| **Linux** x86_64 | [Ouroboros-linux.tar.gz](https://github.com/joi-lab/ouroboros-desktop/releases/latest) | Extract → run `./Ouroboros/Ouroboros`. If browser tools fail due to missing system libs, run: `./Ouroboros/python-standalone/bin/python3 -m playwright install-deps chromium` |
-| **Windows** x64 | [Ouroboros-windows.zip](https://github.com/joi-lab/ouroboros-desktop/releases/latest) | Extract → run `Ouroboros\Ouroboros.exe` |
+| **macOS** 12+ | [Ouroboros.dmg](https://github.com/joi-lab/ouroboros-desktop/releases/latest) | Open DMG → drag to Applications → optional CLI: run `Install CLI.command` after the app is in Applications |
+| **Linux** x86_64 | [Ouroboros-linux.tar.gz](https://github.com/joi-lab/ouroboros-desktop/releases/latest) | Extract → run `./Ouroboros/Ouroboros` → optional CLI: `./Ouroboros/bin/install-ouroboros-cli`. If browser tools fail due to missing system libs, run: `./Ouroboros/python-standalone/bin/python3 -m playwright install-deps chromium` |
+| **Windows** x64 | [Ouroboros-windows.zip](https://github.com/joi-lab/ouroboros-desktop/releases/latest) | Extract → run `Ouroboros\Ouroboros.exe` → optional CLI: `Ouroboros\bin\install-ouroboros-cli.cmd` |
 
 <p align="center">
   <img src="assets/setup.png" width="500" alt="Drag Ouroboros.app to install">
 </p>
 
 On first launch, right-click → **Open** (Gatekeeper bypass). The shared desktop/web wizard is now multi-step: add access first, choose visible models second, set review mode third, set budget fourth, and confirm the final summary last. It refuses to continue until at least one runnable remote key or local model source is configured, keeps the model step aligned with whatever key combination you entered, and still auto-remaps untouched default model values to official OpenAI defaults when OpenRouter is absent and OpenAI is the only configured remote runtime. The broader multi-provider setup remains available in **Settings**. Existing supported provider settings skip the wizard automatically.
+
+The packaged CLI installer creates a user-local `ouroboros` command without
+sudo. The packaged command attaches to the desktop app by default; `ouroboros
+run --start "2+2?"` starts the app through the launcher, waits for the gateway,
+and then uses the same headless task API as the web UI.
 
 Upgrade floor: very old pre-block-memory or pre-data-plane skill layouts are no longer auto-migrated. If you are upgrading from an unsupported historical build and see trapped native skills or flat memory files, use a clean reinstall, move user-managed skills into `~/Ouroboros/data/skills/external/` manually before launch, or move old flat scratchpad notes before appending new scratchpad blocks.
 
@@ -75,6 +80,19 @@ Most AI agents execute tasks. Ouroboros **creates itself.**
 ```bash
 git clone https://github.com/joi-lab/ouroboros-desktop.git
 cd ouroboros-desktop
+python3.11 -m venv .venv      # any Python >= 3.10 is OK
+source .venv/bin/activate
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -r requirements.txt
+python -m pip install -e . --no-deps
+```
+
+Windows PowerShell:
+
+```powershell
+py -3.11 -m venv .venv      # any Python >= 3.10 is OK
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip setuptools wheel
 python -m pip install -r requirements.txt
 python -m pip install -e . --no-deps
 ```
@@ -82,7 +100,7 @@ python -m pip install -e . --no-deps
 ### Run
 
 ```bash
-python server.py
+ouroboros server
 ```
 
 Then open `http://127.0.0.1:8765` in your browser. The setup wizard will guide you through API key configuration.
@@ -95,6 +113,7 @@ passed.
 
 ```bash
 ouroboros status
+ouroboros run --start "2+2?"
 ouroboros run "Summarize current runtime state"
 ouroboros run --workspace /path/to/project --memory-mode forked --patch-out result.patch "Fix the failing test"
 ouroboros tasks list
@@ -114,7 +133,8 @@ they do not reset or commit target repositories.
 You can also override the bind address and port:
 
 ```bash
-python server.py --host 127.0.0.1 --port 9000
+ouroboros server --host 127.0.0.1 --port 9000
+ouroboros --url http://127.0.0.1:9000 status
 ```
 
 Available launch arguments:
@@ -261,7 +281,9 @@ bash scripts/download_python_standalone.sh
 OUROBOROS_SIGN=0 bash build.sh
 ```
 
-Output: `dist/Ouroboros-<VERSION>.dmg`
+Output: `dist/Ouroboros-<VERSION>.dmg`, containing `Ouroboros.app` and
+`Install CLI.command`. The app bundle also contains
+`Contents/Resources/bin/ouroboros` and `install-ouroboros-cli`.
 
 `build.sh` packages the macOS app and DMG. By default it signs with the
 configured local Developer ID identity; set `OUROBOROS_SIGN=0` for an unsigned
@@ -305,7 +327,8 @@ bash scripts/download_python_standalone.sh
 bash build_linux.sh
 ```
 
-Output: `dist/Ouroboros-<VERSION>-linux-<arch>.tar.gz`
+Output: `dist/Ouroboros-<VERSION>-linux-<arch>.tar.gz`, containing
+`Ouroboros/bin/ouroboros` and `Ouroboros/bin/install-ouroboros-cli`.
 
 > **Linux native libs:** The Chromium browser binary is bundled, but some hosts need
 > native system libraries. If browser tools fail, install deps via the bundled Python
@@ -321,7 +344,8 @@ powershell -ExecutionPolicy Bypass -File scripts/download_python_standalone.ps1
 powershell -ExecutionPolicy Bypass -File build_windows.ps1
 ```
 
-Output: `dist\Ouroboros-<VERSION>-windows-x64.zip`
+Output: `dist\Ouroboros-<VERSION>-windows-x64.zip`, containing
+`Ouroboros\bin\ouroboros.cmd` and `Ouroboros\bin\install-ouroboros-cli.cmd`.
 
 ---
 
@@ -396,8 +420,8 @@ The web UI file browser is rooted at one configurable directory. Users can brows
 Examples:
 
 ```bash
-OUROBOROS_FILE_BROWSER_DEFAULT=/home/app python server.py
-OUROBOROS_FILE_BROWSER_DEFAULT=/mnt/shared python server.py --port 9000
+OUROBOROS_FILE_BROWSER_DEFAULT=/home/app ouroboros server
+OUROBOROS_FILE_BROWSER_DEFAULT=/mnt/shared ouroboros server --port 9000
 ```
 
 If the variable is not set, Ouroboros uses the current user's home directory. If the configured path does not exist or is not a directory, Ouroboros also falls back to the home directory.
@@ -444,13 +468,13 @@ not paraphrase it.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 5.29.0-rc.2 | 2026-05-21 | **rc(packaging): add packaged CLI install path.** Ships desktop artifact CLI wrappers and user-local installers, routes packaged `run --start` through the launcher-managed runtime, and documents packaged versus source CLI setup without adding a second runtime. |
 | 5.29.0-rc.1 | 2026-05-20 | **rc(headless): add CLI and external workspace task mode.** Adds gateway-backed task APIs, SSE task event replay, a multi-command CLI, isolated external workspace memory modes, patch artifacts, and tiny benchmark adapter scripts without adding file-manager or public commit/review CLI surfaces. |
 | 5.28.0 | 2026-05-20 | **release(stability): harden skills, owner parity, and relaunch cleanup.** Adds structured skill lifecycle recovery state, web owner endpoints for runtime mode/auto-grant/grants, process-group server cleanup for desktop relaunches, best-effort isolated-deps cleanup, and a 920K review prompt budget. |
 | 5.27.0-rc.1 | 2026-05-19 | **rc(refactor): shrink setup, UI, and JSONL surfaces.** Centralizes the onboarding/settings setup contract, shared UI primitives/helpers, Files modal shell, and JSONL/LLM-usage readers while preserving review gates, public contracts, and runtime behavior. |
 | 5.26.0-rc.1 | 2026-05-19 | **rc(refactor): reduce core code surface safely.** Consolidates repeated gateway, review, skill lifecycle, marketplace, memory/context, release, and web UI code paths while preserving public API shapes, review gates, and runtime contracts. |
 | 5.25.1-rc.1 | 2026-05-17 | **rc(refactor): shrink scope-review input surface.** Compacts stale/redundant comments and internal docstrings across pack-visible non-test code while preserving safety, review, contract, race, and security rationale; reduces scope-review input without behavior changes. |
-| 5.25.0-rc.4 | 2026-05-17 | **rc(refactor): shrink review and skills UI surfaces.** Consolidates review pack/projection helpers, extracts the installed Skills card renderer, removes retired dialogue and native-skill migration banner/API compatibility surfaces, drops the bundled-skills discovery fallback in favor of the data-plane bootstrap, and documents the migration API retirement as an intentional ABI break for old upgrade banners. |
-Older releases are preserved in Git tags and GitHub releases. The 5.2.0 through 5.25.0-rc.3 rows and former `4.0.0` rows are rolled off to respect the P9 changelog cap; their full bodies remain at their git tags.
+Older releases are preserved in Git tags and GitHub releases. The 5.2.0 through 5.25.0-rc.4 rows and former `4.0.0` rows are rolled off to respect the P9 changelog cap; their full bodies remain at their git tags.
 
 ---
 

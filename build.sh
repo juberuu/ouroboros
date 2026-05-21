@@ -83,6 +83,13 @@ rm -rf build dist
 echo "--- Running PyInstaller ---"
 python3 -m PyInstaller Ouroboros.spec --clean --noconfirm
 
+echo "--- Installing packaged CLI wrappers ---"
+CLI_BIN_DIR="$APP_PATH/Contents/Resources/bin"
+mkdir -p "$CLI_BIN_DIR"
+cp packaging/cli/ouroboros "$CLI_BIN_DIR/ouroboros"
+cp packaging/cli/install-ouroboros-cli "$CLI_BIN_DIR/install-ouroboros-cli"
+chmod +x "$CLI_BIN_DIR/ouroboros" "$CLI_BIN_DIR/install-ouroboros-cli"
+
 if [ "$SIGN_MODE" != "0" ]; then
     echo ""
     echo "=== Signing Ouroboros.app ==="
@@ -112,8 +119,14 @@ fi
 echo ""
 echo "=== Creating DMG ==="
 rm -f "$DMG_PATH"
+DMG_STAGE_DIR="dist/dmg-stage"
+rm -rf "$DMG_STAGE_DIR"
+mkdir -p "$DMG_STAGE_DIR"
+cp -R "$APP_PATH" "$DMG_STAGE_DIR/Ouroboros.app"
+cp packaging/cli/install-ouroboros-cli-macos.command "$DMG_STAGE_DIR/Install CLI.command"
+chmod +x "$DMG_STAGE_DIR/Install CLI.command"
 for attempt in 1 2 3; do
-    if hdiutil create -volname Ouroboros -srcfolder "$APP_PATH" -ov -format UDZO "$DMG_PATH"; then
+    if hdiutil create -volname Ouroboros -srcfolder "$DMG_STAGE_DIR" -ov -format UDZO "$DMG_PATH"; then
         break
     fi
     if [ "$attempt" -eq 3 ]; then

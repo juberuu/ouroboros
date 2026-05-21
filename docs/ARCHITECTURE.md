@@ -1,4 +1,4 @@
-# Ouroboros v5.29.0-rc.1 — Architecture & Reference
+# Ouroboros v5.29.0-rc.2 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -30,6 +30,9 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
   │
   └── ouroboros/               ← Agent core (runs inside worker processes)
       ├── config.py            ← SSOT: paths, settings defaults, load/save, PID lock
+      ├── cli.py               ← Source/headless CLI over gateway tasks, logs, settings, skills, marketplace, local-model, and MCP wrappers
+      ├── packaged_cli.py      ← Packaged desktop CLI bridge: resolves bundle roots, bootstraps the launcher-managed repo, and delegates to cli.py
+      ├── packaged_cli_install.py ← Packaged CLI installer planning/execution for user-local command shims
       ├── agent.py             ← Task orchestrator
       ├── agent_startup_checks.py ← Startup verification and health checks
       ├── agent_task_pipeline.py  ← Task execution pipeline orchestration
@@ -146,6 +149,7 @@ scripts/run_external_review.py ← v5.1.2 dev-loop tool: invokes `ouroboros.tool
 scripts/cleanup_test_pollution.py ← Dry-run-first cleanup utility for local test-pollution artifacts: known test skill state dirs, stale `__extension_imports`, and accidental `MagicMock`-named repo-root files. Use `--apply` only after inspecting planned removals.
 scripts/swebench_cli_agent.py ← Helper that turns local checkout-backed SWE-bench rows into prediction JSONL via the CLI/headless task API.
 scripts/terminal_bench_cli_agent.py ← Minimal Terminal-Bench BaseAgent bridge that delegates task solving through `ouroboros run` when the task workspace is mounted on the gateway host.
+packaging/cli/                ← Packaged CLI shell/cmd wrappers and user-local installer launchers copied into desktop artifacts
 Dockerfile                    ← Docker image (web UI runtime)
 ```
 
@@ -180,8 +184,18 @@ thin HTTP/SSE client over the gateway, not a benchmark-only harness and not a
 parallel scheduler. `POST /api/tasks` creates managed queue tasks, `GET
 /api/tasks/<id>` reads durable results, and `GET /api/tasks/<id>/events`
 replays task-scoped events from the existing logs before following live SSE
-updates. CLI stdout is reserved for final machine-consumable output (or JSONL
-when requested); progress goes to stderr.
+updates. For task streaming commands such as `run` and `tasks watch`, stdout is
+reserved for final machine-consumable output (or JSONL when requested) while
+progress goes to stderr; status and admin wrappers may print human summaries.
+
+Packaged desktop artifacts ship a tiny `bin/ouroboros` wrapper and installer
+instead of a second PyInstaller runtime. The wrapper runs the bundled
+`python-standalone`, bootstraps the launcher-managed repo from the embedded
+`repo.bundle` when needed, and then delegates to this same `ouroboros.cli`
+module. In packaged mode, `run --start` launches the desktop app/launcher and
+waits for `/api/health` plus `api_state.supervisor_ready`; it must not start
+`server.py` directly through `sys.executable -m`, because that bypasses the
+launcher-owned bootstrap, process record, and managed repo lifecycle.
 
 External workspace tasks keep `Env.repo_dir` pinned to the Ouroboros repo for
 prompts, BIBLE, architecture/development docs, skills, and review policy.
