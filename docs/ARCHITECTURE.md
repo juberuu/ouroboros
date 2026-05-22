@@ -1,4 +1,4 @@
-# Ouroboros v5.30.0-rc.1 — Architecture & Reference
+# Ouroboros v5.31.0-rc.1 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -112,7 +112,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── control.py       ← reset, command, git/update, and evolution-data handlers
       │   ├── files.py         ← File Browser + chat upload endpoints
       │   ├── models.py        ← model catalog + local-model lifecycle endpoints
-      │   ├── extensions.py    ← extensions/skills HTTP surface (GET /api/extensions, GET /api/extensions/<skill>/manifest, ALL /api/extensions/<skill>/<rest:path>, POST /api/skills/<skill>/toggle, POST /api/skills/<skill>/review, POST /api/skills/<skill>/grants)
+      │   ├── extensions.py    ← extensions/skills HTTP surface (GET /api/extensions, GET /api/extensions/<skill>/manifest, ALL /api/extensions/<skill>/<rest:path>, POST /api/skills/<skill>/toggle, POST /api/skills/<skill>/delete, POST /api/skills/<skill>/review, POST /api/skills/<skill>/grants)
       │   ├── marketplace.py   ← ClawHub + OuroborosHub HTTP surface
       │   ├── mcp.py           ← MCP Settings API surface backed by the shared MCPManager
       │   ├── host_service.py  ← Loopback-only Host Service API for reviewed skill callbacks
@@ -508,6 +508,7 @@ The executable route SSOT is `ouroboros/gateway/router.py`; file-browser routes 
 | GET | `/api/extensions/{skill}/settings_section` | `gateway.extensions.api_extension_settings_section` |
 | ANY | `/api/extensions/{skill}/{rest:path}` | `gateway.extensions.api_extension_dispatch` |
 | POST | `/api/skills/{skill}/toggle` | `gateway.extensions.api_skill_toggle` |
+| POST | `/api/skills/{skill}/delete` | `gateway.extensions.api_skill_delete` |
 | GET | `/api/skills/lifecycle-queue` | `gateway.extensions.api_skill_lifecycle_queue` |
 | POST | `/api/skills/{skill}/review` | `gateway.extensions.api_skill_review` |
 | POST | `/api/skills/{skill}/grants` | `gateway.extensions.api_skill_grants` |
@@ -587,6 +588,7 @@ Security/behavioral endpoint contracts not obvious from route names:
 - `POST /api/owner/runtime-mode` persists the next-boot owner runtime mode and returns `restart_required=true`; it does not mutate the current boot baseline or process env.
 - `POST /api/owner/auto-grant` persists the owner auto-grant toggle outside generic `/api/settings`.
 - `POST /api/skills/{skill}/grants` is a dedicated owner grant path for manifest-declared keys and host permissions. It requires a fresh executable review under the current enforcement mode, content-hash-bound grant state, and script/extension skill type; desktop may still use the native bridge first, while web uses this endpoint after UI confirmation.
+- `POST /api/skills/{skill}/delete` is limited to direct `data/skills/external/<name>` payloads. It unloads live extension surfaces, removes the local payload, and removes `data/state/skills/<name>`; marketplace skills keep using their hub-specific uninstall endpoints.
 - `GET /api/update/status` is passive/read-only. It must not fetch, rewrite remotes, or mutate `.git`; explicit update checks/apply flows own network/git mutation.
 
 ## 5. Supervisor Loop
@@ -777,9 +779,9 @@ Runtime floors:
 | OUROBOROS_NETWORK_PASSWORD | "" | Optional. Enables the non-loopback auth gate when set; empty still allows open bind, but startup logs a warning |
 | OUROBOROS_SERVER_HOST | 127.0.0.1 | Server bind host. Use `0.0.0.0` for LAN/Docker access; restart required. |
 | OUROBOROS_TRUST_NONLOCAL_BIND_WITHOUT_PASSWORD | unset | Env-only Docker/Kubernetes escape hatch. When set to `1`, Settings may save ordinary changes while a wildcard/non-localhost bind has no `OUROBOROS_NETWORK_PASSWORD`; use only behind ingress auth, VPN, private networking, or an auth proxy. |
-| OUROBOROS_MODEL | anthropic/claude-opus-4.6 | Main reasoning model |
-| OUROBOROS_MODEL_CODE | anthropic/claude-opus-4.6 | Code editing model |
-| OUROBOROS_MODEL_LIGHT | anthropic/claude-sonnet-4.6 | Fast/cheap model (safety, consciousness) |
+| OUROBOROS_MODEL | google/gemini-3.1-flash-lite | Main reasoning model |
+| OUROBOROS_MODEL_CODE | google/gemini-3.1-flash-lite | Code editing model |
+| OUROBOROS_MODEL_LIGHT | google/gemini-3.1-flash-lite | Fast/cheap model (safety, consciousness) |
 | OUROBOROS_MODEL_FALLBACK | anthropic/claude-sonnet-4.6 | Fallback when primary fails |
 | CLAUDE_CODE_MODEL | claude-opus-4-6[1m] | Anthropic model for Claude Agent SDK tools (`claude_code_edit`, `advisory_pre_review`; values: sonnet, opus, `claude-opus-4-6[1m]`, or full model name; the `[1m]` suffix is a Claude Code selector that requests the 1M-context extended mode) |
 | OUROBOROS_MAX_WORKERS | 5 | Worker process pool size |
@@ -853,6 +855,7 @@ Rationale: normal self-modification needs fast feedback, but release tags must p
 
 `build.sh`, `build_linux.sh`, `build_windows.ps1`, and `scripts/build_repo_bundle.py` are release-invariant surfaces. Changes to them must update README install/build notes and architecture rationale in the same commit.
 Release tag prerequisite: platform build scripts delegate repo-bundle creation to `scripts/build_repo_bundle.py`; that Python bundler is the release-tag SSOT and verifies the annotated `v$(cat VERSION)` tag points at `HEAD` before packaged artifacts are produced. This catches untagged release builds locally instead of publishing artifacts whose version carriers disagree with git history.
+Packaged Python bytecode policy: platform build scripts set `PYTHONDONTWRITEBYTECODE=1`, direct build-time pycache to a temp prefix, and remove `__pycache__` / `.pyc` from final payloads before signing or archiving. Runtime launcher and packaged CLI entrypoints set the same bytecode guard with an external data/cache prefix so normal imports do not write new bytecode inside signed app bundles.
 
 ### Docker
 
@@ -944,9 +947,9 @@ automatically on completion or via `kill_all_tracked_subprocesses()` on panic.
 
 1. **Never delete BIBLE.md. Never physically delete `identity.md` file.**
    (`identity.md` content is intentionally mutable and may be radically rewritten.)
-2. **Release carriers stay in sync**: `VERSION`, the README badge, the ARCHITECTURE header,
-   and the latest release git tag use the same author-facing spelling (for example
-   `4.50.0-rc.2` / `v4.50.0-rc.2`), while `pyproject.toml` stores the PEP 440-canonical form
+2. **Release carriers stay in sync**: `VERSION`, `web/package.json`, the README badge,
+   the ARCHITECTURE header, and the latest release git tag use the same author-facing spelling
+   (for example `4.50.0-rc.2` / `v4.50.0-rc.2`), while `pyproject.toml` stores the PEP 440-canonical form
    (for example `4.50.0rc2`). For packaged builds, `repo_bundle_manifest.json` pins that same
    release via `app_version`, `release_tag`, `source_sha`, and the embedded bundle hash for the
    first launcher-managed bootstrap before normal managed-remote updates resume.

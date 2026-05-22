@@ -44,6 +44,7 @@ MODEL_PRICING_STATIC = {
     "google/gemini-2.5-pro-preview": (1.25, 0.125, 10.0),
     "google/gemini-3.1-pro-preview": (2.0, 0.20, 12.0),
     "google/gemini-3-pro-preview": (2.0, 0.20, 12.0),
+    "google/gemini-3.1-flash-lite": (0.25, 0.025, 1.50),
     "google/gemini-3-flash-preview": (0.15, 0.015, 0.60),
     "x-ai/grok-3-mini": (0.30, 0.03, 0.50),
     "qwen/qwen3.5-plus-02-15": (0.40, 0.04, 2.40),

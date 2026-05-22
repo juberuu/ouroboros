@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 import pathlib
 import re
 import subprocess
@@ -46,34 +47,26 @@ def _has_platform_chromium(local_browsers_dir: pathlib.Path) -> bool:
             if not any(sub.name.startswith(c) for c in candidates):
                 continue
             # Avoid treating partial downloads as usable browser bundles.
-            if _platform_executable_exists(sub):
+            if (
+                (plat == "darwin" and (
+                    (sub / "Chromium.app" / "Contents" / "MacOS" / "Chromium").exists()
+                    or (sub / "chrome-headless-shell").exists()
+                ))
+                or (plat.startswith("win") and (
+                    (sub / "chrome.exe").exists()
+                    or (sub / "chrome-headless-shell.exe").exists()
+                ))
+                or (not plat.startswith(("darwin", "win")) and (
+                    (sub / "chrome").exists()
+                    or (sub / "chrome-headless-shell").exists()
+                ))
+            ):
                 return True
     return False
 
 
-def _platform_executable_exists(platform_dir: pathlib.Path) -> bool:
-    """Check Playwright's expected platform-native browser executable paths."""
-    plat = sys.platform
-    if plat == "darwin":
-        return (
-            (platform_dir / "Chromium.app" / "Contents" / "MacOS" / "Chromium").exists()
-            or (platform_dir / "chrome-headless-shell").exists()
-        )
-    elif plat.startswith("win"):
-        return (
-            (platform_dir / "chrome.exe").exists()
-            or (platform_dir / "chrome-headless-shell.exe").exists()
-        )
-    else:
-        return (
-            (platform_dir / "chrome").exists()
-            or (platform_dir / "chrome-headless-shell").exists()
-        )
-
-
 def _set_playwright_browsers_path_if_bundled() -> None:
     """Use bundled Chromium in packaged builds; respect explicit env override."""
-    import os
     if "PLAYWRIGHT_BROWSERS_PATH" in os.environ:
         return
     try:
@@ -110,7 +103,15 @@ def _ensure_playwright_installed():
     try:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as pw:
-            pw.chromium.executable_path
+            executable_path = pathlib.Path(str(pw.chromium.executable_path))
+        if os.environ.get("PLAYWRIGHT_BROWSERS_PATH") == "0":
+            import playwright as _pw_pkg
+            pkg_root = pathlib.Path(_pw_pkg.__file__).parent
+            local_browsers = pkg_root / "driver" / "package" / ".local-browsers"
+            if not _has_platform_chromium(local_browsers):
+                raise RuntimeError("bundled Playwright Chromium is missing")
+        elif not executable_path.exists():
+            raise RuntimeError(f"Playwright chromium binary not found at {executable_path}")
         log.info("Playwright chromium binary found")
     except Exception:
         if getattr(sys, 'frozen', False):
@@ -123,6 +124,22 @@ def _ensure_playwright_installed():
             subprocess.check_call([sys.executable, "-m", "playwright", "install-deps", "chromium"])
         except Exception as exc:
             log.warning("Playwright system dependency repair failed; continuing with browser download: %s", exc)
+        if os.environ.get("PLAYWRIGHT_BROWSERS_PATH") == "0":
+            try:
+                import playwright as _pw_pkg
+                pkg_root = pathlib.Path(_pw_pkg.__file__).parent
+                local_browsers = pkg_root / "driver" / "package" / ".local-browsers"
+                has_bundled_browser = _has_platform_chromium(local_browsers)
+            except Exception:
+                has_bundled_browser = False
+            if not has_bundled_browser:
+                data_dir = pathlib.Path(
+                    os.environ.get("OUROBOROS_DATA_DIR") or pathlib.Path.home() / "Ouroboros" / "data"
+                )
+                target = data_dir / "playwright-browsers"
+                target.mkdir(parents=True, exist_ok=True)
+                os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(target)
+                log.warning("Bundled Chromium is unavailable; redirecting Playwright browser install to %s", target)
         subprocess.check_call([sys.executable, "-m", "playwright", "install", "chromium"])
 
     _playwright_ready = True

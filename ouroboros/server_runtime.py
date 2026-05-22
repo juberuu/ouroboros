@@ -31,11 +31,20 @@ _DIRECT_PROVIDER_AUTO_DEFAULTS = {
 }
 _DIRECT_PROVIDER_LEGACY_DEFAULTS = {
     "openai": {
-        "OUROBOROS_MODEL_LIGHT": {"openai::gpt-4.1"},
-        "OUROBOROS_MODEL_FALLBACK": {"openai::gpt-4.1"},
+        "OUROBOROS_MODEL": {"anthropic/claude-opus-4.6"},
+        "OUROBOROS_MODEL_CODE": {"anthropic/claude-opus-4.6"},
+        "OUROBOROS_MODEL_LIGHT": {"anthropic/claude-sonnet-4.6"},
+        "OUROBOROS_MODEL_FALLBACK": {"anthropic/claude-sonnet-4.6"},
     },
-    "anthropic": {},
+    "anthropic": {
+        "OUROBOROS_MODEL": {"anthropic/claude-opus-4.6"},
+        "OUROBOROS_MODEL_CODE": {"anthropic/claude-opus-4.6"},
+        "OUROBOROS_MODEL_LIGHT": {"anthropic/claude-sonnet-4.6"},
+        "OUROBOROS_MODEL_FALLBACK": {"anthropic/claude-sonnet-4.6"},
+    },
 }
+_DIRECT_PROVIDER_LEGACY_DEFAULTS["openai"]["OUROBOROS_MODEL_LIGHT"].add("openai::gpt-4.1")
+_DIRECT_PROVIDER_LEGACY_DEFAULTS["openai"]["OUROBOROS_MODEL_FALLBACK"].add("openai::gpt-4.1")
 _ALL_MODEL_SLOT_KEYS = tuple(_DIRECT_PROVIDER_AUTO_DEFAULTS["openai"].keys())
 _SCOPE_REVIEW_LEGACY_DEFAULTS = frozenset({
     "",

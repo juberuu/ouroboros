@@ -148,4 +148,16 @@
  * @property {Object[]} entries
  */
 
-export const GATEWAY_CONTRACT_VERSION = '5.30.0-rc.1';
+/**
+ * @typedef {Object} SkillDeleteResponse
+ * @property {boolean} ok
+ * @property {string} skill
+ * @property {string} source
+ * @property {string} deleted_payload_root
+ * @property {boolean} deleted_state
+ * @property {string} extension_action
+ * @property {string} extension_reason
+ * @property {string=} error
+ */
+
+export const GATEWAY_CONTRACT_VERSION = '5.31.0-rc.1';

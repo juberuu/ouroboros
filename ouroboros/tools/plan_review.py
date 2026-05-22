@@ -114,8 +114,7 @@ async def _run_plan_review_async(
             "ERROR: plan_task requires at least 2 reviewer slots for "
             f"review coordination. Got {len(resolved_models)} "
             f"model(s) from {resolved_models!r}. Fix OUROBOROS_REVIEW_MODELS "
-            "in settings (example: 'openai/gpt-5.5,"
-            "google/gemini-3.1-pro-preview,anthropic/claude-opus-4.6')."
+            f"in settings (example: {_cfg.SETTINGS_DEFAULTS['OUROBOROS_REVIEW_MODELS']!r})."
         )
 
     models = _get_review_models()
@@ -491,7 +490,7 @@ def _get_review_models() -> list[str]:
 
     models = list(_cfg.get_review_models() or [])
     if not models:
-        main = os.environ.get("OUROBOROS_MODEL", "anthropic/claude-opus-4.6")
+        main = os.environ.get("OUROBOROS_MODEL", _cfg.SETTINGS_DEFAULTS["OUROBOROS_MODEL"])
         models = [main]
 
     return models[:3]  # cap at 3

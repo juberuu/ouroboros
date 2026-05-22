@@ -1250,11 +1250,13 @@ def check_worktree_version_sync(repo_dir) -> str:
         if not is_release_version(version_str):
             return ""
         pyproject = repo_dir / "pyproject.toml"
+        web_package = repo_dir / "web" / "package.json"
         readme = repo_dir / "README.md"
         arch = repo_dir / "docs" / "ARCHITECTURE.md"
         desync = version_carrier_desyncs(
             version_str,
             pyproject_text=pyproject.read_text(encoding="utf-8") if pyproject.exists() else "",
+            web_package_text=web_package.read_text(encoding="utf-8") if web_package.exists() else "",
             readme_text=readme.read_text(encoding="utf-8") if readme.exists() else "",
             arch_text=arch.read_text(encoding="utf-8") if arch.exists() else "",
         )

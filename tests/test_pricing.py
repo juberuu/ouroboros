@@ -134,6 +134,7 @@ class TestEstimateCost:
         assert MODEL_PRICING_STATIC["openai/gpt-5.5"] == (1.75, 0.175, 14.0)
         assert MODEL_PRICING_STATIC["openai/gpt-5.5-pro"] == (1.75, 0.175, 14.0)
         assert MODEL_PRICING_STATIC["openai/gpt-5.5-mini"] == (0.75, 0.075, 4.50)
+        assert MODEL_PRICING_STATIC["google/gemini-3.1-flash-lite"] == (0.25, 0.025, 1.50)
 
 
 # --- infer_api_key_type ---

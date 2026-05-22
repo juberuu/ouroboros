@@ -12,9 +12,9 @@ const SETTINGS_TABS = [
 // Guard markers: renderTabStrip emits behavior/advanced tabs at runtime.
 
 const MODEL_CARDS = [
-    ['Main', 'Primary reasoning model.', 's-model', 's-local-main', 'anthropic/claude-opus-4.6'],
-    ['Code', 'Tool-heavy coding model.', 's-model-code', 's-local-code', 'anthropic/claude-opus-4.6'],
-    ['Light', 'Fast summaries and lightweight tasks.', 's-model-light', 's-local-light', 'anthropic/claude-sonnet-4.6'],
+    ['Main', 'Primary reasoning model.', 's-model', 's-local-main', 'google/gemini-3.1-flash-lite'],
+    ['Code', 'Tool-heavy coding model.', 's-model-code', 's-local-code', 'google/gemini-3.1-flash-lite'],
+    ['Light', 'Fast summaries and lightweight tasks.', 's-model-light', 's-local-light', 'google/gemini-3.1-flash-lite'],
     ['Fallback', 'Resilience and degraded path.', 's-model-fallback', 's-local-fallback', 'anthropic/claude-sonnet-4.6'],
 ];
 

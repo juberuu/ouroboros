@@ -246,6 +246,17 @@ class SkillGrantResponse(TypedDict, total=False):
     error: str
 
 
+class SkillDeleteResponse(TypedDict, total=False):
+    ok: bool
+    skill: str
+    source: str
+    deleted_payload_root: str
+    deleted_state: bool
+    extension_action: str
+    extension_reason: str
+    error: str
+
+
 class GitLogResponse(TypedDict):
     commits: list[Dict[str, Any]]
     tags: list[str]
@@ -407,6 +418,7 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "GET /api/extensions/{skill}/settings_section",
     "ANY /api/extensions/{skill}/{rest:path}",
     "POST /api/skills/{skill}/toggle",
+    "POST /api/skills/{skill}/delete",
     "GET /api/skills/lifecycle-queue",
     "POST /api/skills/{skill}/review",
     "POST /api/skills/{skill}/grants",
@@ -473,6 +485,7 @@ __all__ = [
     "OwnerRuntimeModeResponse",
     "OwnerAutoGrantResponse",
     "SkillGrantResponse",
+    "SkillDeleteResponse",
     "GitLogResponse",
     "EvolutionDataResponse",
     "UploadResponse",

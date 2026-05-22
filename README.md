@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 5.30.0-rc.1](https://img.shields.io/badge/version-5.30.0--rc.1-green.svg)](VERSION)
+[![Version 5.31.0-rc.1](https://img.shields.io/badge/version-5.31.0--rc.1-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -273,6 +273,9 @@ git tag -a "v$(tr -d '[:space:]' < VERSION)" -m "Release v$(tr -d '[:space:]' < 
 
 If the tag is missing, the build script fails with a clear error instead
 of producing a bundle tagged with a synthetic/placeholder value.
+Builds also disable Python bytecode writes and remove `__pycache__` / `.pyc`
+files from packaged payloads before signing or archiving so normal launches do
+not mutate signed app resources just by importing modules.
 
 ### macOS (.dmg)
 
@@ -397,9 +400,9 @@ All keys are configured through the **Settings** page in the UI or during the fi
 
 | Slot | Default | Purpose |
 |------|---------|---------|
-| Main | `anthropic/claude-opus-4.6` | Primary reasoning |
-| Code | `anthropic/claude-opus-4.6` | Code editing |
-| Light | `anthropic/claude-sonnet-4.6` | Safety checks, consciousness, fast tasks |
+| Main | `google/gemini-3.1-flash-lite` | Primary reasoning |
+| Code | `google/gemini-3.1-flash-lite` | Code editing |
+| Light | `google/gemini-3.1-flash-lite` | Safety checks, consciousness, fast tasks |
 | Fallback | `anthropic/claude-sonnet-4.6` | When primary model fails |
 | Claude Agent SDK | `claude-opus-4-6[1m]` | Anthropic model for Claude Agent SDK tools (`claude_code_edit`, `advisory_pre_review`); the `[1m]` suffix is a Claude Code selector that requests the 1M-context extended mode |
 | Scope Review | `openai/gpt-5.5` | Single-model scope reviewer; blocking/advisory behavior follows review enforcement |
@@ -468,12 +471,12 @@ not paraphrase it.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 5.31.0-rc.1 | 2026-05-22 | **rc(runtime): update default models and harden local skill/extension packaging paths.** Sets fresh-install Main/Code/Light defaults to Gemini Flash Lite with Sonnet fallback, adds local skill deletion for external payloads, isolates extension startup reload failures per skill, and keeps packaged bytecode caches out of signed bundles. |
 | 5.30.0-rc.1 | 2026-05-21 | **rc(llm): preserve OpenRouter reasoning continuity and split prompt-cache capabilities.** Keeps opaque reasoning payloads across tool-call rounds, fixes checkpoint handling for assistant `content: null`, routes cache markers only to supported Anthropic/Gemini surfaces without TTL, and accounts for cache reads/writes in usage telemetry and costs. |
 | 5.29.0-rc.3 | 2026-05-21 | **rc(packaging): make packaged CLI release CI portable.** Keeps the packaged CLI wrapper/installer release and fixes Windows test fixtures for `python-standalone` layout and macOS path detection before publishing artifacts. |
 | 5.29.0-rc.2 | 2026-05-21 | **rc(packaging): add packaged CLI install path.** Ships desktop artifact CLI wrappers and user-local installers, routes packaged `run --start` through the launcher-managed runtime, and documents packaged versus source CLI setup without adding a second runtime. |
 | 5.29.0-rc.1 | 2026-05-20 | **rc(headless): add CLI and external workspace task mode.** Adds gateway-backed task APIs, SSE task event replay, a multi-command CLI, isolated external workspace memory modes, patch artifacts, and tiny benchmark adapter scripts without adding file-manager or public commit/review CLI surfaces. |
-| 5.28.0 | 2026-05-20 | **release(stability): harden skills, owner parity, and relaunch cleanup.** Adds structured skill lifecycle recovery state, web owner endpoints for runtime mode/auto-grant/grants, process-group server cleanup for desktop relaunches, best-effort isolated-deps cleanup, and a 920K review prompt budget. |
-Older releases are preserved in Git tags and GitHub releases. The 5.2.0 through 5.27.0-rc.1 rows and former `4.0.0` rows are rolled off to respect the P9 changelog cap; their full bodies remain at their git tags.
+Older releases are preserved in Git tags and GitHub releases. The 5.2.0 through 5.28.0 rows and former `4.0.0` rows are rolled off to respect the P9 changelog cap; their full bodies remain at their git tags.
 
 ---
 

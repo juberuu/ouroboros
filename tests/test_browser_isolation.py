@@ -241,6 +241,35 @@ class TestSetPlaywrightBrowsersPathIfBundled:
         bmod._set_playwright_browsers_path_if_bundled()
         assert os.environ.get("PLAYWRIGHT_BROWSERS_PATH") == "0"
 
+    def test_browser_install_uses_data_cache_when_zero_has_no_browser(self, monkeypatch, tmp_path):
+        import os
+        import ouroboros.tools.browser as bmod
+
+        monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "0")
+        monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path / "data"))
+        monkeypatch.setattr(bmod, "_playwright_ready", False)
+        calls = []
+        monkeypatch.setattr(bmod.subprocess, "check_call", lambda cmd: calls.append(cmd))
+        fake_pw = types.SimpleNamespace(__file__=str(tmp_path / "playwright" / "__init__.py"))
+        monkeypatch.setitem(sys.modules, "playwright", fake_pw)
+        fake_sync = types.ModuleType("playwright.sync_api")
+
+        class FakeSyncPlaywright:
+            def __enter__(self):
+                chromium = types.SimpleNamespace(executable_path=str(tmp_path / "missing-chromium"))
+                return types.SimpleNamespace(chromium=chromium)
+
+            def __exit__(self, *_args):
+                return False
+
+        fake_sync.sync_playwright = lambda: FakeSyncPlaywright()
+        monkeypatch.setitem(sys.modules, "playwright.sync_api", fake_sync)
+
+        bmod._ensure_playwright_installed()
+
+        assert os.environ["PLAYWRIGHT_BROWSERS_PATH"] == str(tmp_path / "data" / "playwright-browsers")
+        assert calls[-1][-3:] == ["playwright", "install", "chromium"]
+
 
 class TestCleanupBrowser:
     """cleanup_browser should null out all browser_state references."""
