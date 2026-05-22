@@ -363,7 +363,7 @@ def get_tools() -> List[ToolEntry]:
         }, _cancel_task),
         ToolEntry("request_deep_self_review", {
             "name": "request_deep_self_review",
-            "description": "Request a deep self-review of the entire Ouroboros project. Uses a 1M-context model to review all code, docs, and memory against the Constitution. Results go to chat and memory. Requires OPENROUTER_API_KEY or OPENAI_API_KEY.",
+            "description": "Request an Atlas-backed deep self-review of the entire Ouroboros project. Uses a large-context model with full core memory whitelist and manifest accounting for every tracked repo path against the Constitution. Results go to chat and memory. Requires OPENROUTER_API_KEY or OPENAI_API_KEY.",
             "parameters": {"type": "object", "properties": {
                 "reason": {"type": "string", "description": "Why you want a review (context for the reviewer)"},
             }, "required": ["reason"]},

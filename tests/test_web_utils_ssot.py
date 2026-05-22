@@ -147,7 +147,7 @@ def test_accent_tokens_have_concrete_rgba_values():
     self-reference forms an invalid CSS cycle and the entire crimson
     accent system silently fails to apply at computed-value time).
 
-    Triad reviewers (gpt-5.5, gemini-3.1-pro, claude-opus-4.6) caught
+    Triad reviewers (gpt-5.5, gemini-3.5-flash, claude-opus-4.6) caught
     this exact regression in the first dry-run of v5.8.3-rc.5: a
     file-wide sed swap had also rewritten the :root definitions
     themselves, leaving every ``--accent-04: var(--accent-04);``-style

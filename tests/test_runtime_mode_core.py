@@ -40,9 +40,9 @@ def test_settings_defaults_include_phase2_keys():
 
     assert SETTINGS_DEFAULTS["OUROBOROS_RUNTIME_MODE"] == "advanced"
     assert SETTINGS_DEFAULTS["OUROBOROS_SKILLS_REPO_PATH"] == ""
-    assert SETTINGS_DEFAULTS["OUROBOROS_MODEL"] == "google/gemini-3.1-flash-lite"
-    assert SETTINGS_DEFAULTS["OUROBOROS_MODEL_CODE"] == "google/gemini-3.1-flash-lite"
-    assert SETTINGS_DEFAULTS["OUROBOROS_MODEL_LIGHT"] == "google/gemini-3.1-flash-lite"
+    assert SETTINGS_DEFAULTS["OUROBOROS_MODEL"] == "google/gemini-3.5-flash"
+    assert SETTINGS_DEFAULTS["OUROBOROS_MODEL_CODE"] == "google/gemini-3.5-flash"
+    assert SETTINGS_DEFAULTS["OUROBOROS_MODEL_LIGHT"] == "google/gemini-3.5-flash"
     assert SETTINGS_DEFAULTS["OUROBOROS_MODEL_FALLBACK"] == "anthropic/claude-sonnet-4.6"
 
 

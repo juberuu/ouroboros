@@ -51,8 +51,8 @@ def test_task_summary_keeps_openrouter_model_when_key_present(monkeypatch):
     monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "openai::gpt-5.5-mini")
 
     assert (
-        pipeline._resolve_task_summary_model("google/gemini-3-flash-preview")
-        == "google/gemini-3-flash-preview"
+        pipeline._resolve_task_summary_model("google/gemini-3.5-flash")
+        == "google/gemini-3.5-flash"
     )
 
 

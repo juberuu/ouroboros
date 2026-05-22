@@ -169,7 +169,7 @@ BINARY_EXTENSIONS = frozenset({
 
 _FILE_SIZE_LIMIT = 1_048_576  # 1 MB
 
-# build_full_repo_pack constants shared with deep self-review.
+# File-classification constants shared by legacy pack helpers and generated atlases.
 _SENSITIVE_EXTENSIONS = frozenset({
     ".env", ".pem", ".key", ".p12", ".pfx", ".jks", ".keystore",
     # Credential vaults / encrypted blobs.
@@ -714,6 +714,7 @@ def build_scope_actor_record(scope_result: object, *, fallback_model_id: str = "
         "tokens_in": getattr(scope_result, "tokens_in", 0),
         "tokens_out": getattr(scope_result, "tokens_out", 0),
         "cost_usd": getattr(scope_result, "cost_usd", 0.0),
+        "context_manifest": getattr(scope_result, "context_manifest", {}) or {},
         "parsed_items": critical_findings + advisory_findings,  # scope has one reviewer; match triad shape.
         "critical_findings": critical_findings,
         "advisory_findings": advisory_findings,

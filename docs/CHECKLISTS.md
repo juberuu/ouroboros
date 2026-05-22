@@ -538,11 +538,12 @@ block repo commits and vice versa.
 ## Plan Review Checklist
 
 Used by `plan_task` for pre-implementation design reviews, BEFORE any code is written.
-Reviewers see the entire repository (full repo pack) plus the proposed plan and HEAD
-snapshots of files planned to be touched.
+Reviewers see the proposed plan, HEAD snapshots of files planned to be touched,
+and a Generated Plan Review Atlas that raw-inlines selected protected/central files
+while accounting for every tracked path in its manifest.
 
 **Reviewer role is GENERATIVE, not audit.** The primary job is to contribute
-ideas the implementer may not see, using full repo access. Finding defects in
+ideas the implementer may not see, using broad Atlas-backed repo access. Finding defects in
 the plan is secondary; proposing concrete alternatives, surfacing existing
 surfaces that already solve the goal, and flagging subtle contract breaks the
 implementer missed is primary.
@@ -552,7 +553,7 @@ implementer missed is primary.
 Reviewers must structure their response in this order:
 
 1. **Your own approach** (1-2 sentences). State what YOU would do if this goal
-   came to you with full repo access: the concrete alternative path, the
+   came to you with broad Atlas-backed repo access: the concrete alternative path, the
    existing file/function you would reuse, or the simpler route. If after real
    effort you genuinely see no better approach, say so explicitly.
 2. **`## PROPOSALS` section** (top 1-2 contributions). The highest-value thing
@@ -619,10 +620,11 @@ Reviewers must end with exactly one of `AGGREGATE: GREEN`,
 
 ## Intent / Scope Review Checklist
 
-Used by the full-codebase scope reviewer, which runs IN PARALLEL with the triad diff review.
-Unlike triad reviewers who see only the diff, the scope reviewer sees the ENTIRE repository.
-Its unique advantage is finding cross-module bugs, broken implicit contracts, and hidden
-regressions that diff-only reviewers cannot see.
+Used by the Atlas-backed scope reviewer, which runs IN PARALLEL with the triad diff review.
+Unlike triad reviewers who see only the diff, the scope reviewer sees touched files plus
+a Generated Scope Atlas that accounts for the ENTIRE repository. Its unique advantage
+is finding cross-module bugs, broken implicit contracts, and hidden regressions that
+diff-only reviewers cannot see.
 
 **Output contract (v4.34.0):** the scope reviewer returns a JSON array that covers every
 item below (8 items total). PASS entries are mandatory for items with no problems and must

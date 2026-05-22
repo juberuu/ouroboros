@@ -15,7 +15,7 @@ from ouroboros.provider_models import normalize_anthropic_model_id
 
 log = logging.getLogger(__name__)
 
-DEFAULT_LIGHT_MODEL = "google/gemini-3.1-flash-lite"
+DEFAULT_LIGHT_MODEL = "google/gemini-3.5-flash"
 _FALSE_LIKE_ENV_VALUES = {"", "0", "false", "no", "off"}
 
 
@@ -1508,11 +1508,11 @@ class LLMClient:
 
     def default_model(self) -> str:
         """Return the single default model from env. LLM switches via tool if needed."""
-        return os.environ.get("OUROBOROS_MODEL", "google/gemini-3.1-flash-lite")
+        return os.environ.get("OUROBOROS_MODEL", "google/gemini-3.5-flash")
 
     def available_models(self) -> List[str]:
         """Return list of available models from env (for switch_model tool schema)."""
-        main = os.environ.get("OUROBOROS_MODEL", "google/gemini-3.1-flash-lite")
+        main = os.environ.get("OUROBOROS_MODEL", "google/gemini-3.5-flash")
         code = os.environ.get("OUROBOROS_MODEL_CODE", "")
         light = os.environ.get("OUROBOROS_MODEL_LIGHT", "")
         models = [main]
