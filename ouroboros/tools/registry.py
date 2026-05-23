@@ -8,7 +8,6 @@ import logging
 import os
 import pathlib
 import re
-import shlex
 import subprocess
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
@@ -23,6 +22,15 @@ from ouroboros.runtime_mode_policy import (
     protected_write_block_message,
 )
 from ouroboros.tool_capabilities import CORE_TOOL_NAMES
+from ouroboros.tools.shell_parse import (
+    EMBEDDED_ABSOLUTE_PATH_RE,
+    shell_argv,
+    shell_argv_with_inline,
+    shell_command_string,
+    strip_leading_env_assignments,
+    sudo_noninteractive_violation,
+    unwrap_env_argv,
+)
 from ouroboros.utils import safe_relpath
 from ouroboros.contracts.task_constraint import TaskConstraint, normalize_task_constraint, resolve_payload_path
 from ouroboros.contracts.skill_payload_policy import (
@@ -94,55 +102,6 @@ def _detect_runtime_mode_elevation(text_lower: str) -> bool:
     return (has_save and has_mode_key) or has_dotted_path
 
 
-def _shell_argv(raw_cmd: Any) -> List[str]:
-    if isinstance(raw_cmd, list):
-        return [str(x) for x in raw_cmd if str(x).strip()]
-    try:
-        return [str(x) for x in shlex.split(str(raw_cmd or "")) if str(x).strip()]
-    except ValueError:
-        return [str(x) for x in str(raw_cmd or "").split() if str(x).strip()]
-
-
-def _unwrap_env_argv(argv: List[str]) -> List[str]:
-    if not argv or pathlib.PurePath(argv[0]).name.lower() != "env":
-        return argv
-    idx = 1
-    options_with_arg = {"-u", "--unset", "-C", "--chdir", "--argv0"}
-    while idx < len(argv):
-        token = argv[idx]
-        if token == "--":
-            idx += 1
-            break
-        if token == "-S" and idx + 1 < len(argv):
-            return _shell_argv(argv[idx + 1])
-        if token.startswith("--split-string="):
-            return _shell_argv(token.split("=", 1)[1])
-        if token in options_with_arg:
-            idx += 2; continue
-        if (
-            any(token.startswith(prefix + "=") for prefix in ("--unset", "--chdir", "--argv0"))
-            or token.startswith("-")
-            or ("=" in token and not token.startswith("="))
-        ):
-            idx += 1; continue
-        break
-    return argv[idx:] if idx < len(argv) else []
-
-
-def _strip_leading_env_assignments(argv: List[str]) -> List[str]:
-    idx = 0
-    while idx < len(argv) and "=" in argv[idx] and not argv[idx].startswith("="):
-        idx += 1
-    return argv[idx:]
-
-
-def _shell_command_string(argv: List[str]) -> str:
-    for idx, arg in enumerate(argv[1:], start=1):
-        if arg == "-c" or (arg.startswith("-") and not arg.startswith("--") and "c" in arg[1:]):
-            return argv[idx + 1] if idx + 1 < len(argv) else ""
-    return ""
-
-
 def _candidate_path_inside(root: pathlib.Path, work_dir: pathlib.Path, path_text: str) -> bool:
     """Return whether ``path_text`` resolves inside ``root``."""
     text = str(path_text or "").strip()
@@ -205,12 +164,12 @@ def _writer_targets_repo(argv: List[str], *, repo_dir: pathlib.Path, cwd: str = 
 
 
 def _shell_writer_targets_protected(raw_cmd: Any) -> bool:
-    argv = _strip_leading_env_assignments(_unwrap_env_argv(_shell_argv(raw_cmd)))
+    argv = strip_leading_env_assignments(unwrap_env_argv(shell_argv(raw_cmd)))
     if not argv:
         return False
     executable = pathlib.PurePath(argv[0]).name.lower()
     if executable in {"bash", "sh", "zsh"}:
-        inline = _shell_command_string(argv)
+        inline = shell_command_string(argv)
         return bool(inline and _shell_writer_targets_protected(inline))
     if executable not in _LIGHT_SHELL_WRITER_COMMANDS:
         return False
@@ -220,21 +179,21 @@ def _shell_writer_targets_protected(raw_cmd: Any) -> bool:
 
 def _light_shell_repo_mutation(raw_cmd: Any, *, repo_dir: pathlib.Path, cwd: str = "") -> bool:
     """Detect simple shell writer commands that target the repo in light mode."""
-    argv = _shell_argv(raw_cmd)
+    argv = shell_argv(raw_cmd)
     if not argv:
         return False
     cmd_lower = " ".join(argv).lower()
 
-    unwrapped = _unwrap_env_argv(argv)
+    unwrapped = unwrap_env_argv(argv)
     if unwrapped != argv:
         return _light_shell_repo_mutation(unwrapped, repo_dir=repo_dir, cwd=cwd)
-    argv = _strip_leading_env_assignments(argv)
+    argv = strip_leading_env_assignments(argv)
     if not argv:
         return False
     executable = pathlib.PurePath(argv[0]).name.lower()
 
     if executable in {"bash", "sh", "zsh"}:
-        inline = _shell_command_string(argv)
+        inline = shell_command_string(argv)
         if inline:
             return _light_shell_repo_mutation(inline, repo_dir=repo_dir, cwd=cwd)
 
@@ -282,6 +241,7 @@ _DETACHED_PROCESS_MARKERS = (
     "preexec_fn",
     "nohup",
 )
+EMBEDDED_ABSOLUTE_PATH_RE = re.compile(r"(?<![A-Za-z0-9_.-])/[^\s'\"\\),;\]]+")
 
 
 def _mentions_skill_owner_state(text_lower: str) -> bool:
@@ -471,7 +431,7 @@ def _extract_git_subcommand(cmd_parts: list) -> str:
     """Extract the git subcommand after global git options."""
     if not cmd_parts:
         return ""
-    parts = _strip_leading_env_assignments([str(p) for p in cmd_parts])
+    parts = strip_leading_env_assignments([str(p) for p in cmd_parts])
     if not parts or pathlib.PurePath(parts[0]).name.lower() != "git":
         return ""
     i = 1
@@ -488,14 +448,14 @@ def _extract_git_subcommand(cmd_parts: list) -> str:
 
 
 def _extract_run_shell_git_subcommand(raw_cmd: Any) -> str:
-    parts = _strip_leading_env_assignments(_unwrap_env_argv(_shell_argv(raw_cmd)))
+    parts = strip_leading_env_assignments(unwrap_env_argv(shell_argv(raw_cmd)))
     if not parts:
         return ""
     first = pathlib.PurePath(parts[0]).name.lower()
     if first == "git":
         return _extract_git_subcommand(parts)
     if first in {"bash", "sh", "zsh"}:
-        inline = _shell_command_string(parts)
+        inline = shell_command_string(parts)
         if inline:
             return _extract_run_shell_git_subcommand(inline)
     return ""
@@ -503,29 +463,30 @@ def _extract_run_shell_git_subcommand(raw_cmd: Any) -> str:
 
 def _workspace_git_safety_violation(raw_cmd: Any, *, active_root: pathlib.Path, cwd: str = "") -> str:
     root = pathlib.Path(active_root).resolve(strict=False)
-    base = root
-    if cwd and str(cwd).strip() not in ("", ".", "./"):
-        try:
-            base = (root / safe_relpath(str(cwd))).resolve(strict=False)
-            base.relative_to(root)
-        except Exception:
-            base = root
-    argv = _strip_leading_env_assignments(_unwrap_env_argv(_shell_argv(raw_cmd)))
+    base = _resolve_workspace_shell_cwd(root, cwd)
+    try:
+        base.relative_to(root)
+        base_inside_root = True
+    except Exception:
+        base_inside_root = False
+    argv = strip_leading_env_assignments(unwrap_env_argv(shell_argv(raw_cmd)))
     if not argv:
         return ""
     first = pathlib.PurePath(argv[0]).name.lower()
     if first in {"bash", "sh", "zsh"}:
-        inline = _shell_command_string(argv)
-        return _workspace_git_safety_violation(inline, active_root=root, cwd=str(base.relative_to(root)) if inline else "") if inline else ""
+        inline = shell_command_string(argv)
+        return _workspace_git_safety_violation(inline, active_root=root, cwd=str(base) if inline else "") if inline else ""
     for idx, token in enumerate(argv):
         if pathlib.PurePath(str(token)).name.lower() != "git":
             continue
         parts = argv[idx:]
         subcmd = ""
+        saw_root_selector = False
         j = 1
         while j < len(parts):
             part = parts[j]
             if part in {"-C", "--git-dir", "--work-tree"} and j + 1 < len(parts):
+                saw_root_selector = True
                 try:
                     target = pathlib.Path(parts[j + 1])
                     if not target.is_absolute():
@@ -536,6 +497,7 @@ def _workspace_git_safety_violation(raw_cmd: Any, *, active_root: pathlib.Path, 
                 j += 2
                 continue
             if part.startswith("--git-dir=") or part.startswith("--work-tree="):
+                saw_root_selector = True
                 value = part.split("=", 1)[1]
                 try:
                     target = pathlib.Path(value)
@@ -554,9 +516,19 @@ def _workspace_git_safety_violation(raw_cmd: Any, *, active_root: pathlib.Path, 
                 continue
             subcmd = part
             break
+        if not base_inside_root and not saw_root_selector:
+            return "git cwd escapes the active workspace"
         if subcmd and subcmd.lower() not in _GIT_READONLY_SUBCOMMANDS:
             return f"git {subcmd}"
     return ""
+
+
+def _resolve_workspace_shell_cwd(active_root: pathlib.Path, cwd: str = "") -> pathlib.Path:
+    root = pathlib.Path(active_root).resolve(strict=False)
+    if cwd and str(cwd).strip() not in ("", ".", "./"):
+        raw = pathlib.Path(str(cwd)).expanduser()
+        return raw.resolve(strict=False) if raw.is_absolute() else (root / safe_relpath(str(cwd))).resolve(strict=False)
+    return root
 
 
 @dataclass
@@ -644,6 +616,14 @@ class ToolContext:
 
     def drive_logs(self) -> pathlib.Path:
         return (self.drive_root / "logs").resolve()
+
+    def task_drive_root(self) -> pathlib.Path:
+        if self.is_workspace_mode():
+            for key in ("drive_root", "child_drive_root", "headless_child_drive_root"):
+                text = str(self.task_metadata.get(key) or "").strip()
+                if text:
+                    return pathlib.Path(text).resolve(strict=False)
+        return pathlib.Path(self.drive_root).resolve(strict=False)
 
 
 @dataclass
@@ -977,6 +957,13 @@ class ToolRegistry:
         """Pre-execution run_shell filter; returns a block message or ``None``."""
         raw_cmd = args.get("cmd", args.get("command", ""))
         workspace_mode = bool(getattr(self._ctx, "is_workspace_mode", lambda: False)())
+        argv = strip_leading_env_assignments(unwrap_env_argv(shell_argv(raw_cmd)))
+        if sudo_noninteractive_violation(argv):
+            return (
+                "⚠️ SUDO_INTERACTIVE_BLOCKED: sudo must be noninteractive. "
+                "Use sudo -n for commands that can run without a password; "
+                "if sudo -n fails, report validation/install blocked by environment."
+            )
         if isinstance(raw_cmd, list):
             cmd_lower = " ".join(str(x) for x in raw_cmd).lower()
         else:
@@ -984,13 +971,14 @@ class ToolRegistry:
         cmd_path_lower = cmd_lower.replace("\\", "/")
         while "//" in cmd_path_lower:
             cmd_path_lower = cmd_path_lower.replace("//", "/")
-        argv_for_write = _strip_leading_env_assignments(_unwrap_env_argv(_shell_argv(raw_cmd)))
+        argv_for_write = argv
         writeish = any(w in cmd_lower for w in _SHELL_WRITE_INDICATORS) or (
             bool(argv_for_write) and pathlib.PurePath(argv_for_write[0]).name.lower() in _LIGHT_SHELL_WRITER_COMMANDS
         )
         if workspace_mode and writeish:
             active_root = active_repo_dir_for(self._ctx).resolve(strict=False)
-            if "../" in cmd_path_lower or cmd_path_lower.startswith(".."):
+            pro_workspace_passthrough = str(runtime_mode or "").strip().lower() == "pro"
+            if not pro_workspace_passthrough and ("../" in cmd_path_lower or cmd_path_lower.startswith("..")):
                 return "⚠️ WORKSPACE_SHELL_BLOCKED: write-like shell commands may not target paths outside the active workspace."
             protected_roots = [getattr(self._ctx, "system_repo_dir", None) or getattr(self._ctx, "repo_dir", None)]
             try:
@@ -998,6 +986,9 @@ class ToolRegistry:
                 protected_roots.append(_PARENT_DATA_DIR)
             except Exception:
                 pass
+            meta = getattr(self._ctx, "task_metadata", {}) if isinstance(getattr(self._ctx, "task_metadata", {}), dict) else {}
+            if meta.get("budget_drive_root"):
+                protected_roots.append(meta.get("budget_drive_root"))
             for root_value in protected_roots:
                 try:
                     root_path = pathlib.Path(root_value).resolve(strict=False)
@@ -1011,14 +1002,34 @@ class ToolRegistry:
                 root_text = str(root_path).replace("\\", "/").lower()
                 if root_text and root_text in cmd_path_lower:
                     return "⚠️ WORKSPACE_SHELL_BLOCKED: write-like shell command mentions Ouroboros system/data paths."
-            for token in _shell_argv(raw_cmd):
+            protected_paths = []
+            for root_value in protected_roots:
+                try:
+                    protected_paths.append(pathlib.Path(root_value).resolve(strict=False))
+                except Exception:
+                    continue
+            for token in shell_argv_with_inline(raw_cmd):
                 candidates = [str(token)] if str(token).startswith("/") else []
-                candidates.extend(re.findall(r"/[^\s'\"\\),;\]]+", str(token)))
+                if str(token).startswith(("./", "../")):
+                    candidates.append(str(token))
+                else:
+                    candidates.extend(EMBEDDED_ABSOLUTE_PATH_RE.findall(str(token)))
                 for candidate in candidates:
+                    if candidate == "/dev/null":
+                        continue
+                    candidate_path = pathlib.Path(candidate)
+                    resolved = candidate_path.resolve(strict=False) if candidate_path.is_absolute() else (active_root / candidate_path).resolve(strict=False)
+                    for protected_path in protected_paths:
+                        try:
+                            resolved.relative_to(protected_path)
+                            return "⚠️ WORKSPACE_SHELL_BLOCKED: write-like shell command mentions Ouroboros system/data paths."
+                        except Exception:
+                            pass
                     try:
-                        pathlib.Path(candidate).resolve(strict=False).relative_to(active_root)
+                        resolved.relative_to(active_root)
                     except Exception:
-                        return "⚠️ WORKSPACE_SHELL_BLOCKED: write-like shell commands may not target absolute paths outside the active workspace."
+                        if not pro_workspace_passthrough:
+                            return "⚠️ WORKSPACE_SHELL_BLOCKED: write-like shell commands may not target absolute paths outside the active workspace."
 
         # Elevation pattern: blocked in all modes.
         if _detect_runtime_mode_elevation(cmd_lower):
@@ -1094,9 +1105,10 @@ class ToolRegistry:
                     )
 
         # GitHub repo create/delete/auth.
-        if "gh repo create" in cmd_lower or "gh repo delete" in cmd_lower:
+        cmd_words = re.sub(r"\s+", " ", cmd_lower)
+        if "gh repo create" in cmd_words or "gh repo delete" in cmd_words:
             return "⚠️ SAFETY_VIOLATION: Creating/deleting GitHub repositories requires admin approval."
-        if "gh auth" in cmd_lower:
+        if "gh auth" in cmd_words:
             return "⚠️ SAFETY_VIOLATION: Modifying GitHub authentication is not permitted."
 
         # Direct git mutative ban via shell.

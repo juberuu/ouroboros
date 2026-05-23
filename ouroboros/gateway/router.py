@@ -81,6 +81,7 @@ def collect_routes(
     )
     from ouroboros.gateway.state import api_health, api_state
     from ouroboros.gateway.tasks import (
+        api_task_artifact,
         api_task_cancel,
         api_task_events,
         api_task_get,
@@ -163,6 +164,7 @@ def collect_routes(
         Route("/api/model-catalog", endpoint=api_model_catalog),
         Route("/api/tasks", endpoint=api_tasks_create, methods=["POST"]),
         Route("/api/tasks", endpoint=api_tasks_list, methods=["GET"]),
+        Route("/api/tasks/{task_id}/artifacts/{name}", endpoint=api_task_artifact, methods=["GET"]),
         Route("/api/tasks/{task_id}", endpoint=api_task_get, methods=["GET"]),
         Route("/api/tasks/{task_id}/events", endpoint=api_task_events, methods=["GET"]),
         Route("/api/tasks/{task_id}/cancel", endpoint=api_task_cancel, methods=["POST"]),

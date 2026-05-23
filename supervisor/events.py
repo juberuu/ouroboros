@@ -15,6 +15,7 @@ from ouroboros.task_results import (
     STATUS_COMPLETED,
     STATUS_REJECTED_DUPLICATE,
     STATUS_SCHEDULED,
+    load_task_result,
     write_task_result,
 )
 
@@ -246,7 +247,20 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
             if task:
                 copy_child_task_result(ctx.DRIVE_ROOT, task)
                 finalize_task_artifacts(ctx.DRIVE_ROOT, task)
-        except Exception:
+        except Exception as exc:
+            try:
+                from ouroboros.headless import ARTIFACT_STATUS_FAILED
+                existing = load_task_result(ctx.DRIVE_ROOT, str(task_id)) or {}
+                write_task_result(
+                    ctx.DRIVE_ROOT,
+                    str(task_id),
+                    str(existing.get("status") or "completed"),
+                    artifact_status=ARTIFACT_STATUS_FAILED,
+                    artifact_error=f"{type(exc).__name__}: {exc}",
+                    artifact_finalized_at=utc_now_iso(),
+                )
+            except Exception:
+                pass
             log.warning("Failed to finalize headless artifacts for task %s", task_id, exc_info=True)
         ctx.RUNNING.pop(str(task_id), None)
     if wid in ctx.WORKERS and ctx.WORKERS[wid].busy_task_id == task_id:

@@ -1,4 +1,4 @@
-# Ouroboros v5.32.0-rc.1 — Architecture & Reference
+# Ouroboros v5.33.0-rc.1 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -52,6 +52,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── context.py           ← LLM context builder (public API for consciousness)
       ├── context_compaction.py ← Context trimming and summarization helpers
       ├── headless.py          ← Headless task child-drive isolation, workspace patch artifacts, and memory export helpers
+      ├── workspace_preflight.py ← Read-only external-workspace git/manifest/toolchain snapshot used by gateway task creation
       ├── local_model.py       ← Local LLM lifecycle (llama-cpp-python)
       ├── local_model_autostart.py ← Local model startup helper
       ├── deep_self_review.py   ← Deep self-review: Generated Scope Atlas repository context + full memory whitelist → 1M-context model
@@ -119,6 +120,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── history.py       ← Chat history + cost breakdown endpoint factories
       │   └── _helpers.py      ← shared HTTP request root helpers, coercion, and JSON error envelope
       ├── tools/               ← Auto-discovered tool plugins
+      │   ├── shell_parse.py     ← Shared shell argv/cwd helpers for registry safety checks and run_shell validation
       │   ├── release_sync.py    ← Release-metadata sync library; advisory_pre_review uses sync_release_metadata before provider spend when VERSION is in scope; _preflight_check uses check_history_limit for P9 row caps; agents can also call it directly for version-carrier sync
       │   ├── review_synthesis.py ← LLM-based claim synthesis (Phase 1): deduplicates raw multi-reviewer findings into canonical issues before durable obligations are created; called from commit_gate._record_commit_attempt; fail-open (returns original on any error)
       │   ├── ci.py              ← CI trigger and monitoring (GitHub Actions API)
@@ -183,9 +185,11 @@ present for the core browser-facing envelopes.
 `ouroboros.cli` is the second first-class interface to the same runtime. It is a
 thin HTTP/SSE client over the gateway, not a benchmark-only harness and not a
 parallel scheduler. `POST /api/tasks` creates managed queue tasks, `GET
-/api/tasks/<id>` reads durable results, and `GET /api/tasks/<id>/events`
+/api/tasks/<id>` reads durable results, `GET /api/tasks/<id>/events`
 replays task-scoped events from the existing logs before following live SSE
-updates. For task streaming commands such as `run` and `tasks watch`, stdout is
+updates, and `GET /api/tasks/<id>/artifacts/<name>` serves declared task
+artifacts from the task artifact directory only. For task streaming commands
+such as `run` and `tasks watch`, stdout is
 reserved for final machine-consumable output (or JSONL when requested) while
 progress goes to stderr; status and admin wrappers may print human summaries.
 
@@ -209,8 +213,10 @@ runtime control, skill lifecycle, extension/MCP execution, commit/review, and
 delegation tools are hidden and hard-blocked. The target workspace is left dirty
 by design and exported as a patch artifact; Ouroboros does not commit inside
 external repositories, and shell execution reports a hard warning if git refs move.
-The v1 CLI reads patch artifacts from server-local paths, so `--patch` and
-`--patch-out` are intentionally limited to local/same-filesystem gateway use.
+The CLI downloads patch artifacts through the task artifact endpoint, waits for
+artifact finalization in `--patch` / `--patch-out` mode, and fails nonzero when
+the patch is missing, empty, or failed. `--no-stream` suppresses live progress
+but still waits; `--detach` is the explicit create-and-return mode.
 Benchmark helper scripts likewise require clean per-instance local checkouts;
 they do not reset or commit benchmark workspaces.
 
@@ -218,15 +224,26 @@ Workspace mode is a tool-routing and blast-radius guard, not an OS sandbox.
 Like OpenClaw's host workspace mode, absolute host paths are not a hard security
 boundary unless a future Docker/SSH/remote sandbox is added around tool
 execution. Do not grow ad-hoc shell parsing to approximate that sandbox.
+Project-local dependency installs are ordinary workspace work. In
+`runtime_mode=pro`, system/global dependency installs may be attempted through
+`run_shell` and the safety supervisor when needed by the external workspace;
+sudo must be noninteractive (`sudo -n`) and password-prompting sudo is blocked.
 
 Headless memory isolation is implemented as a per-task child drive under
 `data/state/headless_tasks/<task_id>/data`. `forked` mode copies stable memory
 seed files (`identity.md`, `WORLD.md`, `registry.md`, and `knowledge/`) without
 dialogue/task history; `empty` mode starts from a fresh child drive; `shared` is
-reserved for self/local tasks and is rejected for external workspaces. Completed
-external runs produce explicit `workspace.patch` and `memory_export.json` artifacts under
-`data/task_results/artifacts/<task_id>/` and never auto-merge memory back into
-the parent drive. Swarm readiness in v1 is contractual only: task metadata
+reserved for self/local tasks and is rejected for external workspaces. External
+runs produce explicit artifacts under `data/task_results/artifacts/<task_id>/`:
+`workspace_preflight.json`, `workspace_patch.json`, and `memory_export.json`;
+successful patch finalization also produces `workspace.patch`, while failed
+patch finalization records `artifact_status=failed` and the manifest only.
+`workspace_patch.json` records patch size, sha256, diffstat, included/excluded
+untracked paths, git diagnostics, and artifact errors. The parent result carries `artifact_status`
+(`pending`/`finalizing`/`ready`/`failed`) so headless clients cannot observe a
+terminal workspace result before artifacts are ready or explicitly failed.
+Headless runs never auto-merge memory back into the parent drive. Swarm
+readiness in v1 is contractual only: task metadata
 normalizes `parent_task_id`, `root_task_id`, `session_id`, `actor_id`, and
 `delegation_role`, but no child-agent scheduler or delegation runtime exists yet.
 
@@ -549,6 +566,7 @@ The executable route SSOT is `ouroboros/gateway/router.py`; file-browser routes 
 | GET | `/api/tasks` | `gateway.tasks.api_tasks_list` |
 | GET | `/api/tasks/{task_id}` | `gateway.tasks.api_task_get` |
 | GET | `/api/tasks/{task_id}/events` | `gateway.tasks.api_task_events` |
+| GET | `/api/tasks/{task_id}/artifacts/{name}` | `gateway.tasks.api_task_artifact` |
 | POST | `/api/tasks/{task_id}/cancel` | `gateway.tasks.api_task_cancel` |
 | POST | `/api/command` | `gateway.control.api_command` |
 | POST | `/api/reset` | `gateway.control.api_reset` |

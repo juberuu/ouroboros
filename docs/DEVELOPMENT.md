@@ -95,6 +95,18 @@ Not every layer is required for every operation. Simple cases (e.g., `repo_read`
 - Workspace-mode tasks must use an explicit allowlist, reject system-repo/data
   overlap, require a git worktree root, and return patch artifacts instead of
   committing in the target repository.
+- External workspace completion must be gated on explicit artifact finalization:
+  `workspace.patch` is served through the task artifact endpoint, strict patch
+  CLI modes fail on missing/empty/failed artifacts, and `workspace_patch.json`
+  records diagnostics instead of silently treating patch-builder failures as
+  empty diffs.
+- Workspace preflight belongs in the headless task create flow as read-only
+  facts: compact summary in task metadata/prompt, full
+  `workspace_preflight.json` as an artifact. Do not dump full manifests into
+  the prompt and do not add benchmark-specific instructions.
+- Dependency installation guidance is workspace-scoped: project-local installs
+  are allowed for external tasks, while system/global installs are pro-mode
+  safety-reviewed attempts. `sudo` must be noninteractive (`sudo -n`).
 - Treat workspace mode as routing plus guardrails, not an OS sandbox. If stronger
   isolation becomes required, add a real Docker/SSH/remote tool-execution layer
   instead of expanding shell-command heuristics.
