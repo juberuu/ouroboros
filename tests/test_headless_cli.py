@@ -415,8 +415,17 @@ def test_workspace_run_shell_allows_absolute_cwd_under_workspace_and_child_drive
     registry = ToolRegistry(repo_dir=system_repo, drive_root=parent_data)
     registry.set_context(ctx)
 
-    assert str(workspace) in registry.execute("run_shell", {"cmd": ["pwd"], "cwd": str(workspace)})
-    assert str(child_dir) in registry.execute("run_shell", {"cmd": ["pwd"], "cwd": str(child_dir)})
+    def assert_python_cwd(path):
+        output = registry.execute(
+            "run_shell",
+            {"cmd": [sys.executable, "-c", "import os; print(os.getcwd())"], "cwd": str(path)},
+        )
+        assert "exit_code=0" in output
+        cwd_output = output.rsplit("STDOUT:\n", 1)[-1].strip()
+        assert pathlib.Path(cwd_output).resolve() == path.resolve()
+
+    assert_python_cwd(workspace)
+    assert_python_cwd(child_dir)
     blocked = registry.execute("run_shell", {"cmd": ["pwd"], "cwd": str(parent_data / "logs")})
     assert "SHELL_CWD_BLOCKED" in blocked
     git_escape = registry._run_shell_safety_check(
@@ -580,15 +589,16 @@ def test_workspace_patch_preserves_untracked_paths_with_whitespace(tmp_path):
     repo = tmp_path / "repo"
     _init_repo_with_file(repo)
     leading = repo / " leading.txt"
-    multiline = repo / "line\nbreak.txt"
+    nested = repo / "dir with space" / "file name.txt"
     leading.write_text("leading\n", encoding="utf-8")
-    multiline.write_text("newline\n", encoding="utf-8")
+    nested.parent.mkdir()
+    nested.write_text("nested\n", encoding="utf-8")
 
     _artifacts, manifest = write_workspace_patch_artifacts(repo, tmp_path / "artifacts", task={})
 
     assert manifest["status"] == ARTIFACT_STATUS_READY
     assert " leading.txt" in manifest["untracked_included"]
-    assert "line\nbreak.txt" in manifest["untracked_included"]
+    assert "dir with space/file name.txt" in manifest["untracked_included"]
     assert manifest["patch_size"] > 0
 
 

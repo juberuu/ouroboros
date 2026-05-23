@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 5.33.0-rc.1](https://img.shields.io/badge/version-5.33.0--rc.1-green.svg)](VERSION)
+[![Version 5.33.0-rc.2](https://img.shields.io/badge/version-5.33.0--rc.2-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -473,7 +473,7 @@ not paraphrase it.
 
 | Version | Date | Description |
 |---------|------|-------------|
-| 5.33.0-rc.1 | 2026-05-23 | **rc(cli): harden external workspace patch delivery.** Gates CLI completion on finalized artifacts, serves patches through task artifact endpoints, adds workspace preflight diagnostics, permits pro-mode dependency install attempts through safety review, and records strict patch manifests for headless runs. |
+| 5.33.0-rc.2 | 2026-05-23 | **rc(cli): harden external workspace patch delivery.** Gates CLI completion on finalized artifacts, serves patches through task artifact endpoints, adds workspace preflight diagnostics, permits pro-mode dependency install attempts through safety review, and records strict patch manifests for headless runs. |
 | 5.32.0-rc.1 | 2026-05-22 | **rc(review): add generated scope atlas and Gemini 3.5 Flash defaults.** Bounds scope, plan, and deep-review repository context with a deterministic coverage manifest, keeps core memory full for deep review, updates active Gemini defaults to 3.5 Flash, and preserves raw review evidence for Atlas-backed runs. |
 | 5.31.0-rc.1 | 2026-05-22 | **rc(runtime): update default models and harden local skill/extension packaging paths.** Sets fresh-install Main/Code/Light defaults to Gemini Flash Lite with Sonnet fallback, adds local skill deletion for external payloads, isolates extension startup reload failures per skill, and keeps packaged bytecode caches out of signed bundles. |
 | 5.30.0-rc.1 | 2026-05-21 | **rc(llm): preserve OpenRouter reasoning continuity and split prompt-cache capabilities.** Keeps opaque reasoning payloads across tool-call rounds, fixes checkpoint handling for assistant `content: null`, routes cache markers only to supported Anthropic/Gemini surfaces without TTL, and accounts for cache reads/writes in usage telemetry and costs. |
