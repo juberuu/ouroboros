@@ -804,9 +804,11 @@ async def api_chat_upload(request: Request) -> JSONResponse:
     request._receive = _size_limited_receive
     try:
         form = await request.form()
-    except Exception:
+    except Exception as e:
         request._receive = _original_receive
-        return JSONResponse({"ok": False, "error": "File exceeds 50 MB limit"}, status_code=413)
+        if str(e) == "oversized":
+            return JSONResponse({"ok": False, "error": "File exceeds 50 MB limit"}, status_code=413)
+        return JSONResponse({"ok": False, "error": f"Upload failed: {str(e)}"}, status_code=400)
     finally:
         request._receive = _original_receive
 

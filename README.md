@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 5.33.0-rc.4](https://img.shields.io/badge/version-5.33.0--rc.4-green.svg)](VERSION)
+[![Version 5.33.0-rc.5](https://img.shields.io/badge/version-5.33.0--rc.5-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -473,11 +473,11 @@ not paraphrase it.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 5.33.0-rc.5 | 2026-05-24 | **rc(gateway): prevent masking upload connection/parse faults as size-limit errors.** Refactors the chat upload ASGI stream wrapper to verify if caught exceptions are indeed the 'oversized' signal before returning a 413, returning a 400 with the original traceback for connection cuts and malformed formats. |
 | 5.33.0-rc.4 | 2026-05-24 | **rc(accessibility): attach aria-disabled state to submit buttons.** Adds explicit accessibility annotations to clickable-disabled card options so both visual rendering and assistive device readouts correctly convey blocked submission context. |
 | 5.33.0-rc.3 | 2026-05-24 | **rc(skills): provide explicit toast warnings on disabled hub submissions.** Replaces native button disabled attributes on OuroborosHub card options to catch all clicks, displaying actionable warnings explaining exact review or check conditions rather than silent dropdown closures. |
 | 5.33.0-rc.2 | 2026-05-23 | **rc(cli): harden external workspace patch delivery.** Gates CLI completion on finalized artifacts, serves patches through task artifact endpoints, adds workspace preflight diagnostics, permits pro-mode dependency install attempts through safety review, and records strict patch manifests for headless runs. |
 | 5.32.0-rc.1 | 2026-05-22 | **rc(review): add generated scope atlas and Gemini 3.5 Flash defaults.** Bounds scope, plan, and deep-review repository context with a deterministic coverage manifest, keeps core memory full for deep review, updates active Gemini defaults to 3.5 Flash, and preserves raw review evidence for Atlas-backed runs. |
-| 5.31.0-rc.1 | 2026-05-22 | **rc(runtime): update default models and harden local skill/extension packaging paths.** Sets fresh-install Main/Code/Light defaults to Gemini Flash Lite with Sonnet fallback, adds local skill deletion for external payloads, isolates extension startup reload failures per skill, and keeps packaged bytecode caches out of signed bundles. |
 Older releases are preserved in Git tags and GitHub releases. The 5.2.0 through 5.30.0-rc.1 rows and former `4.0.0` rows are rolled off to respect the P9 changelog cap; their full bodies remain at their git tags.
 
 ---
