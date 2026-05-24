@@ -551,6 +551,10 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
                     result.ok ? 'ok' : 'danger',
                 );
             } else if (target.classList.contains('skills-submit-hub')) {
+                if (target.dataset.submitDisabled === 'true') {
+                    showToast(`${name}: submit disabled — ${target.dataset.submitReason || 'unknown reason'}`, 'warn');
+                    return;
+                }
                 await triggerSkillAction(name, 'submit_hub');
             } else if (target.classList.contains('skills-uninstall')) {
                 const source = target.dataset.source === 'ouroboroshub' ? 'ouroboroshub' : 'clawhub';
