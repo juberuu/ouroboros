@@ -111,6 +111,18 @@ class TestBuildSh:
         assert cleanup_pos != -1 and cleanup_pos < sign_pos
         assert dmg_pos != -1 and wrapper_pos < dmg_pos
 
+    def test_pycache_cleanup_includes_symlink_entries_before_signing(self):
+        src = _read("build.sh")
+        cleanup_lines = [
+            line.strip()
+            for line in src.splitlines()
+            if 'find "$APP_PATH" -name "__pycache__"' in line
+        ]
+        assert cleanup_lines
+        assert all("-type d" not in line for line in cleanup_lines), (
+            "build.sh must remove __pycache__ symlinks as well as directories before codesign"
+        )
+
     def test_macos_dmg_includes_install_cli_command(self):
         src = _read("build.sh")
         assert "dmg-stage" in src

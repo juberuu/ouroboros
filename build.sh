@@ -94,7 +94,8 @@ cp packaging/cli/install-ouroboros-cli "$CLI_BIN_DIR/install-ouroboros-cli"
 chmod +x "$CLI_BIN_DIR/ouroboros" "$CLI_BIN_DIR/install-ouroboros-cli"
 
 echo "--- Removing Python bytecode caches from app bundle ---"
-find "$APP_PATH" -name "__pycache__" -type d -prune -exec rm -rf {} +
+# PyInstaller may duplicate resource trees with symlinks; remove cache dirs and links before signing.
+find "$APP_PATH" -name "__pycache__" -prune -exec rm -rf {} +
 find "$APP_PATH" -name "*.pyc" -type f -delete
 
 if [ "$SIGN_MODE" != "0" ]; then
