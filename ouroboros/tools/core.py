@@ -890,8 +890,33 @@ def _codebase_digest(ctx: ToolContext) -> str:
 def _forward_to_worker(ctx: ToolContext, task_id: str, message: str) -> str:
     """Forward a message to a running worker task's mailbox."""
     from ouroboros.owner_inject import write_owner_message
-    write_owner_message(ctx.drive_root, message, task_id=task_id, msg_id=uuid.uuid4().hex)
-    return f"Message forwarded to task {task_id}"
+    from ouroboros.task_results import STATUS_RUNNING, validate_task_id
+    from ouroboros.task_status import FINAL_STATUSES, load_effective_task_result
+
+    try:
+        tid = validate_task_id(task_id)
+    except ValueError as exc:
+        return f"⚠️ TOOL_ARG_ERROR (forward_to_worker): {exc}"
+    data = load_effective_task_result(pathlib.Path(ctx.drive_root), tid)
+    status = str(data.get("status") or "").lower()
+    if not data:
+        return f"⚠️ TASK_NOT_FOUND: task {tid} is not registered."
+    if status in FINAL_STATUSES:
+        return f"⚠️ TASK_NOT_ACTIVE: task {tid} is already {status}."
+    if status != STATUS_RUNNING:
+        return f"⚠️ TASK_NOT_ACTIVE: task {tid} is {status or 'unknown'}, not running."
+    current_task_id = str(getattr(ctx, "task_id", "") or "").strip()
+    target_parent = str(data.get("parent_task_id") or "").strip()
+    target_root = str(data.get("root_task_id") or "").strip()
+    if not current_task_id:
+        return "⚠️ TASK_FORBIDDEN: forward_to_worker requires an active task context."
+    allowed = target_parent == current_task_id or target_root == current_task_id
+    if not allowed:
+        return f"⚠️ TASK_FORBIDDEN: task {tid} is not a child or descendant of the current task."
+    child_drive = str(data.get("child_drive_root") or data.get("headless_child_drive_root") or data.get("drive_root") or "").strip()
+    mailbox_drive = pathlib.Path(child_drive) if child_drive else pathlib.Path(ctx.drive_root)
+    write_owner_message(mailbox_drive, message, task_id=tid, msg_id=uuid.uuid4().hex)
+    return f"Message forwarded to task {tid}"
 
 def get_tools() -> List[ToolEntry]:
     return [

@@ -41,7 +41,7 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "repo_read", "repo_list", "code_search", "codebase_digest",
     "git_status", "git_diff",
     "data_read", "data_list",
-    "chat_history", "recent_tasks", "get_task_result", "wait_for_task",
+    "chat_history", "recent_tasks", "get_task_result", "wait_for_task", "wait_for_tasks",
     "web_search", "browse_page", "browser_action", "analyze_screenshot",
 })
 
@@ -66,6 +66,7 @@ UNTRUNCATED_TOOL_RESULTS: frozenset[str] = frozenset({
     "review_status",
     "get_task_result",
     "wait_for_task",
+    "wait_for_tasks",
 })
 
 # Cognitive artifacts must not be truncated.

@@ -168,6 +168,7 @@ class TestBackgroundSubagentTools(unittest.TestCase):
         self.assertIn("schedule_task", schema_names)
         self.assertIn("get_task_result", schema_names)
         self.assertIn("wait_for_task", schema_names)
+        self.assertIn("wait_for_tasks", schema_names)
 
         pending_events = []
         result = bc._execute_tool(

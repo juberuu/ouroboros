@@ -147,6 +147,7 @@ def persist_queue_snapshot(reason: str = "") -> None:
                 "actor_id": t.get("actor_id"), "delegation_role": t.get("delegation_role"),
                 "workspace_root": t.get("workspace_root"), "workspace_mode": t.get("workspace_mode"),
                 "memory_mode": t.get("memory_mode"), "drive_root": t.get("drive_root"),
+                "child_drive_root": t.get("child_drive_root"),
                 "budget_drive_root": t.get("budget_drive_root"),
                 "task_constraint": t.get("task_constraint"),
                 "metadata": t.get("metadata"),

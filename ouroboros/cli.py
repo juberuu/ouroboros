@@ -141,6 +141,8 @@ def _run_command(args: argparse.Namespace) -> int:
     prompt = " ".join(args.prompt).strip()
     if not prompt:
         raise CLIError("run requires a prompt")
+    if str(args.delegation_role or "root").strip().lower() != "root":
+        raise CLIError("delegation_role=subagent is only allowed through the internal schedule_task tool")
     client = _client(args, start=args.start)
     attachments = [{"path": str(pathlib.Path(p).expanduser())} for p in args.attach]
     body = {
@@ -149,7 +151,8 @@ def _run_command(args: argparse.Namespace) -> int:
         "workspace_mode": "external" if args.workspace else "",
         "memory_mode": args.memory_mode or ("forked" if args.workspace else "shared"),
         "attachments": attachments,
-        "metadata": {"actor_id": args.actor_id, "delegation_role": args.delegation_role},
+        "actor_id": args.actor_id,
+        "metadata": {"delegation_role": args.delegation_role},
     }
     created = client.request("POST", "/api/tasks", body)
     task_id = str(created.get("task_id") or "")

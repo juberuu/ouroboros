@@ -36,7 +36,8 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
     text = (pathlib.Path(__file__).resolve().parent.parent / "web" / "modules" / "api_types.js").read_text(
         encoding="utf-8"
     )
-    assert "GATEWAY_CONTRACT_VERSION = '6.0.0'" in text
+    version = (pathlib.Path(__file__).resolve().parent.parent / "VERSION").read_text(encoding="utf-8").strip()
+    assert f"GATEWAY_CONTRACT_VERSION = '{version}'" in text
     for name in (
         "StateResponse",
         "HealthResponse",
@@ -54,8 +55,23 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         assert re.search(rf"@typedef \{{Object\}} {name}\b", text), f"api_types.js missing {name}"
     for field in ("source", "line", "root"):
         assert re.search(rf"@property \{{[^}}]+=\}} {field}\b", text), f"TaskEvent missing {field}"
-    for field in ("subagent_event", "subagent_task_id", "root_task_id", "parent_task_id", "delegation_role", "subagent_role"):
+    for field in (
+        "subagent_event",
+        "subagent_task_id",
+        "root_task_id",
+        "parent_task_id",
+        "delegation_role",
+        "subagent_role",
+        "task_event",
+        "status",
+        "result",
+        "trace_summary",
+        "error",
+        "artifact_status",
+    ):
         assert re.search(rf"@property \{{string=\}} {field}\b", text), f"ChatOutbound missing {field}"
+    assert re.search(r"@property \{number=\} cost_usd\b", text), "ChatOutbound missing cost_usd"
+    assert re.search(r"@property \{number=\} chat_id\b", text), "ChatOutbound missing chat_id"
     assert re.search(r"@property \{boolean=\} worker_saturation_warning\b", text), "ChatOutbound missing worker_saturation_warning"
     assert "setup_contract" in text
     assert re.search(r"@property \{string=\} error\b", text), "SkillDeleteResponse missing optional error"

@@ -63,6 +63,7 @@ TOOL_POLICY: Dict[str, str] = {
     "review_status": POLICY_SKIP,
     "get_task_result": POLICY_SKIP,
     "wait_for_task": POLICY_SKIP,
+    "wait_for_tasks": POLICY_SKIP,
     "switch_model": POLICY_SKIP,
 
     # Mutative but separately guarded by sandbox/revert/review gates.

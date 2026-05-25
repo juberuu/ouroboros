@@ -96,6 +96,23 @@ def _handle_text_response(
     return (content or ""), accumulated_usage, llm_trace
 
 
+def _final_text_acknowledges_incomplete_children(content: Any, children: List[Dict[str, Any]]) -> bool:
+    text = str(content or "").lower()
+    if not text.strip():
+        return False
+    incomplete_words = ("incomplete", "pending", "running", "scheduled", "not complete", "still")
+    if not any(word in text for word in incomplete_words):
+        return False
+    for child in children:
+        task_id = str(child.get("task_id") or child.get("id") or "").strip().lower()
+        status = str(child.get("status") or "").strip().lower()
+        if task_id and task_id not in text:
+            return False
+        if status and status not in text:
+            return False
+    return True
+
+
 def _skill_names_touched_by_trace(llm_trace: Dict[str, Any]) -> List[str]:
     names: List[str] = []
     for call in llm_trace.get("tool_calls") or []:
@@ -658,6 +675,40 @@ def run_llm_loop(
             tool_calls = msg.get("tool_calls") or []
             content = msg.get("content")
             if not tool_calls:
+                handoff_msg = ""
+                if drive_root is not None and task_id:
+                    try:
+                        from ouroboros.task_status import FINAL_STATUSES, find_child_tasks, format_handoff_message
+
+                        metadata = getattr(tools._ctx, "task_metadata", {}) if isinstance(getattr(tools._ctx, "task_metadata", {}), dict) else {}
+                        children = find_child_tasks(
+                            drive_root,
+                            parent_task_id=task_id,
+                            root_task_id=str(metadata.get("root_task_id") or task_id),
+                            exclude_task_id=task_id,
+                        )
+                        signature = "|".join(
+                            f"{child.get('task_id') or child.get('id')}:{child.get('status')}:{len(str(child.get('result') or ''))}"
+                            for child in children
+                        )
+                        previous = getattr(tools._ctx, "_subagent_handoff_signature", "")
+                        nonterminal_children = [
+                            child for child in children
+                            if str(child.get("status") or "").strip().lower() not in FINAL_STATUSES
+                        ]
+                        needs_incomplete_ack = bool(nonterminal_children) and not _final_text_acknowledges_incomplete_children(content, nonterminal_children)
+                        if children and signature and (signature != previous or needs_incomplete_ack):
+                            tools._ctx._subagent_handoff_signature = signature
+                            handoff_msg = format_handoff_message(children)
+                    except Exception:
+                        log.debug("Failed to build subagent handoff reminder", exc_info=True)
+                if handoff_msg:
+                    if content and content.strip():
+                        messages.append({"role": "assistant", "content": content})
+                    _append_or_merge_user_message(messages, f"[SYSTEM REMINDER]\n{handoff_msg}")
+                    emit_progress("Subagent handoff status refreshed before final response.")
+                    llm_trace["reasoning_notes"].append("Subagent handoff status refreshed before final response.")
+                    continue
                 finalization_msg = _skill_finalization_message(drive_root, llm_trace) if drive_root is not None else ""
                 if finalization_msg and not getattr(tools._ctx, "_skill_finalization_injected", False):
                     tools._ctx._skill_finalization_injected = True

@@ -545,12 +545,13 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
 
     function createLiveCardRecord(groupId = '') {
         const normalizedGroupId = groupId || `task-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        const timelineId = `chat-live-timeline-${normalizedGroupId.replace(/[^A-Za-z0-9_-]/g, '-')}`;
         const root = document.createElement('div');
         root.className = 'chat-live-card';
         root.dataset.finished = '0';
         root.dataset.expanded = '0';
         root.innerHTML = `
-            <button type="button" class="chat-live-summary-button" data-live-summary-button>
+            <button type="button" class="chat-live-summary-button" data-live-summary-button aria-expanded="false" aria-controls="${escapeHtmlAttr(timelineId)}">
                 <div class="chat-live-summary">
                     <div class="chat-live-summary-main">
                         <span class="chat-live-phase working" data-live-phase>Working</span>
@@ -569,7 +570,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
                 </div>
                 <div class="chat-live-meta" data-live-meta></div>
             </button>
-            <div class="chat-live-timeline" data-live-timeline></div>
+            <div class="chat-live-timeline" data-live-timeline id="${escapeHtmlAttr(timelineId)}"></div>
         `;
         const record = {
             groupId: normalizedGroupId,
@@ -670,7 +671,9 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
 
     function syncLiveCardToggle(record) {
         if (!record?.toggleEl) return;
-        record.toggleEl.textContent = record.root.dataset.expanded === '1' ? 'Hide details' : 'Show details';
+        const expanded = record.root.dataset.expanded === '1';
+        record.toggleEl.textContent = expanded ? 'Hide details' : 'Show details';
+        record.summaryButtonEl?.setAttribute('aria-expanded', expanded ? 'true' : 'false');
     }
 
     const TIMELINE_MAX_HEIGHT = 420;
@@ -712,6 +715,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         const displayHeadline = expanded && item.fullHeadline ? item.fullHeadline : item.headline;
         const displayBody = expanded && item.fullBody ? item.fullBody : item.body;
         const isProgressLine = item.phase === 'working' || item.phase === 'thinking';
+        const bodyId = `chat-live-line-body-${String(record.groupId || 'task').replace(/[^A-Za-z0-9_-]/g, '-')}-${String(item.lineKey || '').replace(/[^A-Za-z0-9_-]/g, '-')}`;
         const headContent = `
             <span class="chat-live-line-title">${isProgressLine ? renderMarkdown(displayHeadline) : escapeHtml(displayHeadline)}</span>
             <span class="chat-live-line-repeat" ${item.count > 1 ? '' : 'hidden'}>${item.count > 1 ? `${item.count}x` : ''}</span>
@@ -724,6 +728,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
                     class="chat-live-line-toggle"
                     data-live-line-toggle="${escapeHtmlAttr(item.lineKey)}"
                     aria-expanded="${expanded ? 'true' : 'false'}"
+                    ${displayBody ? `aria-controls="${escapeHtmlAttr(bodyId)}"` : ''}
                 >
                     <span class="chat-live-line-head">${headContent}</span>
                     <span class="chat-live-line-expand-label">${expanded ? 'Collapse' : 'Expand'}</span>
@@ -737,7 +742,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
                 data-expanded="${expanded ? '1' : '0'}"
             >
                 ${headHtml}
-                ${displayBody ? `<div class="chat-live-line-body">${renderMarkdown(displayBody)}</div>` : ''}
+                ${displayBody ? `<div class="chat-live-line-body" id="${escapeHtmlAttr(bodyId)}">${renderMarkdown(displayBody)}</div>` : ''}
             </div>
         `;
     }
@@ -844,6 +849,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         record.countEl.textContent = `${record.items.length} notes`;
         record.metaEl.innerHTML = [
             nextGroupId === 'bg-consciousness' ? 'Background thinking' : '',
+            ...(Array.isArray(summary.meta) ? summary.meta : []),
             ts ? `Latest ${ts}` : '',
         ].filter(Boolean).map((item) => `<span class="chat-live-meta-text">${escapeHtml(item)}</span>`).join('');
         // Incremental updates; full rebuilds stay limited to toggles.
@@ -945,10 +951,46 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
             content: msg?.content || msg?.text || '',
             text: msg?.content || msg?.text || '',
             task_id: taskId,
+            subagent_event: msg?.subagent_event || '',
+            subagent_task_id: msg?.subagent_task_id || '',
+            root_task_id: msg?.root_task_id || '',
+            parent_task_id: msg?.parent_task_id || '',
+            delegation_role: msg?.delegation_role || '',
+            subagent_role: msg?.subagent_role || '',
+            status: msg?.status || '',
+            cost_usd: msg?.cost_usd || 0,
+            result: msg?.result || '',
+            trace_summary: msg?.trace_summary || '',
+            error: msg?.error || '',
+            artifact_status: msg?.artifact_status || '',
             lifecycle: msg?.lifecycle || null,
         });
         if (!summary) return;
         queueTaskLiveUpdate(summary, taskId, normalizeLogTs(msg.ts || new Date().toISOString()), summary.dedupeKey || '');
+        updateParentCardFromSubagent(msg, msg.ts || new Date().toISOString());
+    }
+
+    function updateParentCardFromSubagent(evt, tsValue) {
+        if (!evt || String(evt.delegation_role || '').toLowerCase() !== 'subagent') return;
+        const parentId = String(evt.parent_task_id || '').trim();
+        const childId = String(evt.subagent_task_id || evt.task_id || '').trim();
+        if (!parentId || !childId || parentId === childId) return;
+        const event = String(evt.subagent_event || 'update').toLowerCase();
+        const role = String(evt.subagent_role || '').trim();
+        const phase = event === 'completed' ? 'progress'
+            : ['failed', 'rejected', 'cancelled', 'interrupted'].includes(event) ? 'warn'
+                : event === 'scheduled' ? 'start'
+                    : 'working';
+        forceTaskCard(parentId);
+        queueTaskLiveUpdate({
+            phase,
+            headline: `Subagent ${childId} ${event}`,
+            body: role ? `role=${role}` : '',
+            visible: true,
+            promote: false,
+            meta: ['parent task', `child=${childId}`, role ? `role=${role}` : ''],
+            dedupeKey: `parent-subagent:${parentId}:${childId}:${event}`,
+        }, parentId, normalizeLogTs(tsValue || new Date().toISOString()), `parent-subagent:${parentId}:${childId}:${event}`);
     }
 
     function updateLiveCardFromLogEvent(evt) {
@@ -972,6 +1014,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         const summary = summarizeChatLiveEvent(evt);
         if (!summary) return;
         queueTaskLiveUpdate(summary, taskId, normalizeLogTs(evt.ts || evt.timestamp), summary.dedupeKey || '');
+        updateParentCardFromSubagent(evt, evt.ts || evt.timestamp || new Date().toISOString());
         if (eventType === 'task_done') {
             const taskState = getTaskUiState(taskId, false);
             revealBufferedCardIfNeeded(taskState);
@@ -1094,6 +1137,12 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
                 // First load/reconnect trusts server history and rebuilds retired cards.
                 // Routine post-completion syncs keep retiredTaskIds to avoid duplicates.
                 if (!historyLoaded || fromReconnect) retiredTaskIds.clear();
+                if (!historyLoaded || fromReconnect) {
+                    for (const record of liveCardRecords.values()) record.root?.remove();
+                    liveCardRecords.clear();
+                    taskUiStates.clear();
+                    activeLiveGroupId = '';
+                }
 
                 // Two passes ensure cards exist before finishLiveCard() marks them done.
 

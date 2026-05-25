@@ -69,12 +69,20 @@
  * @property {string=} parent_task_id
  * @property {string=} delegation_role
  * @property {string=} subagent_role
+ * @property {string=} task_event
+ * @property {string=} status
+ * @property {number=} cost_usd
+ * @property {string=} result
+ * @property {string=} trace_summary
+ * @property {string=} error
+ * @property {string=} artifact_status
  * @property {boolean=} worker_saturation_warning
  * @property {string=} source
  * @property {string=} sender_label
  * @property {string=} sender_session_id
  * @property {string=} client_message_id
  * @property {Object=} transport
+ * @property {number=} chat_id
  */
 
 /**
@@ -167,4 +175,4 @@
  * @property {string=} error
  */
 
-export const GATEWAY_CONTRACT_VERSION = '6.0.0';
+export const GATEWAY_CONTRACT_VERSION = '6.1.0-rc.1';

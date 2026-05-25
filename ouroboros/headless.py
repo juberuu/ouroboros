@@ -12,6 +12,8 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
+from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Any, BinaryIO, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -27,6 +29,7 @@ ARTIFACT_STATUS_READY = "ready"
 ARTIFACT_STATUS_FAILED = "failed"
 
 _FINAL_STATUSES = {"completed", "failed", "cancelled", "rejected_duplicate"}
+DEFAULT_HEADLESS_TASK_RETENTION_DAYS = 7
 _PATCH_EXCLUDE_RULES_VERSION = 1
 _TOP_LEVEL_EXCLUDE_DIRS = {".ouroboros", ".venv", "venv", "env"}
 _ANY_SEGMENT_EXCLUDE_DIRS = {
@@ -108,6 +111,90 @@ def prepare_task_drive(parent_drive_root: pathlib.Path, task_id: str, memory_mod
     if mode == "forked":
         _copy_stable_memory(parent, child)
     return child
+
+
+def headless_task_retention_days() -> int:
+    raw = os.environ.get("OUROBOROS_HEADLESS_TASK_RETENTION_DAYS", "")
+    if not str(raw or "").strip():
+        try:
+            from ouroboros.config import load_settings
+
+            raw = load_settings().get("OUROBOROS_HEADLESS_TASK_RETENTION_DAYS", "")
+        except Exception:
+            raw = ""
+    try:
+        days = int(raw)
+    except (TypeError, ValueError):
+        days = DEFAULT_HEADLESS_TASK_RETENTION_DAYS
+    return max(1, min(365, days))
+
+
+def _timestamp_from_result(result: Dict[str, Any], fallback: float) -> float:
+    for key in ("artifact_finalized_at", "completed_at", "finished_at", "ts"):
+        raw = str(result.get(key) or "").strip()
+        if not raw:
+            continue
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return float(parsed.timestamp())
+        except ValueError:
+            continue
+    return fallback
+
+
+def prune_headless_task_drives(
+    parent_drive_root: pathlib.Path,
+    *,
+    retention_days: Optional[int] = None,
+    now: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Best-effort startup prune for copied-back terminal child drives."""
+
+    parent = pathlib.Path(parent_drive_root)
+    base = parent / HEADLESS_TASKS_DIR
+    days = headless_task_retention_days() if retention_days is None else max(1, int(retention_days))
+    cutoff = float(now if now is not None else time.time()) - days * 86400
+    report: Dict[str, Any] = {"retention_days": days, "scanned": 0, "pruned": [], "skipped": [], "errors": []}
+    if not base.is_dir():
+        return report
+    for task_dir in sorted(base.iterdir()):
+        if not task_dir.is_dir():
+            continue
+        task_id = task_dir.name
+        report["scanned"] += 1
+        try:
+            validate_task_id(task_id)
+            dir_mtime = task_dir.stat().st_mtime
+            result = load_task_result(parent, task_id) or {}
+            status = str(result.get("status") or "").lower()
+            if status not in _FINAL_STATUSES:
+                report["skipped"].append({"task_id": task_id, "reason": "parent_not_terminal", "status": status})
+                continue
+            artifact_status = str(result.get("artifact_status") or "").lower()
+            if artifact_status and artifact_status not in {ARTIFACT_STATUS_READY, ARTIFACT_STATUS_FAILED}:
+                report["skipped"].append({"task_id": task_id, "reason": "artifacts_not_terminal", "artifact_status": artifact_status})
+                continue
+            retention_ts = _timestamp_from_result(result, dir_mtime)
+            if retention_ts > cutoff:
+                report["skipped"].append({"task_id": task_id, "reason": "younger_than_retention"})
+                continue
+            expected_child = str((task_dir / "data").resolve(strict=False))
+            known_child = str(
+                result.get("child_drive_root")
+                or result.get("headless_child_drive_root")
+                or result.get("drive_root")
+                or ""
+            ).strip()
+            if known_child and str(pathlib.Path(known_child).resolve(strict=False)) != expected_child:
+                report["skipped"].append({"task_id": task_id, "reason": "child_drive_mismatch"})
+                continue
+            shutil.rmtree(task_dir)
+            report["pruned"].append({"task_id": task_id, "path": str(task_dir)})
+        except Exception as exc:
+            report["errors"].append({"task_id": task_id, "error": f"{type(exc).__name__}: {exc}"})
+    return report
 
 
 def copy_child_task_result(parent_drive_root: pathlib.Path, task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -730,6 +817,7 @@ __all__ = [
     "copy_child_task_result",
     "finalize_task_artifacts",
     "prepare_task_drive",
+    "prune_headless_task_drives",
     "task_artifacts_dir",
     "task_state_dir",
     "write_workspace_patch_artifacts",

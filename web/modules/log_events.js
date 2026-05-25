@@ -40,12 +40,21 @@ function shortText(text, maxLen = 180) {
 }
 
 function describeText(text, maxLen = 180) {
-    const full = String(text || '').replace(/\s+/g, ' ').trim();
+    const full = String(text || '').trim();
     if (!full) return { preview: '', full: '' };
+    const previewSource = full.replace(/\s+/g, ' ');
     return {
-        preview: full.length > maxLen ? full.slice(0, maxLen - 3) + '...' : full,
+        preview: previewSource.length > maxLen ? previewSource.slice(0, maxLen - 3) + '...' : previewSource,
         full,
     };
+}
+
+function subagentId(evt) {
+    return String(evt.subagent_task_id || evt.task_id || '').trim();
+}
+
+function isSubagentEvent(evt) {
+    return String(evt.delegation_role || '').toLowerCase() === 'subagent' || Boolean(evt.subagent_task_id);
 }
 
 export function formatLogMoney(value) {
@@ -114,6 +123,20 @@ export function summarizeLogEvent(evt) {
     const taskMeta = (...items) => [evt.task_id ? `task=${evt.task_id}` : '', ...items];
 
     if (evt.is_progress || t === 'send_message') {
+        if (isSubagentEvent(evt)) {
+            const sid = subagentId(evt);
+            const event = String(evt.subagent_event || 'update').toLowerCase();
+            const role = String(evt.subagent_role || '').trim();
+            return view(event === 'completed' ? 'done' : event === 'failed' || event === 'rejected' ? 'warn' : 'progress', `Subagent ${sid || 'child'} ${event}`, {
+                body: shortText(String(evt.content || evt.text || '').replace(/^💬\s*/, ''), 240),
+                meta: [
+                    sid ? `task=${sid}` : '',
+                    role ? `role=${role}` : '',
+                    evt.parent_task_id ? `parent=${evt.parent_task_id}` : '',
+                    evt.root_task_id ? `root=${evt.root_task_id}` : '',
+                ],
+            });
+        }
         return view(
             evt.task_id === 'bg-consciousness' ? 'thought' : 'progress',
             shortText(String(evt.content || evt.text || '').replace(/^💬\s*/, ''), 240) || 'Progress update',
@@ -326,6 +349,7 @@ function chatView({
     promote = false,
     human = false,
     dedupeKey = '',
+    meta = [],
 } = {}) {
     const out = {
         phase,
@@ -338,6 +362,7 @@ function chatView({
     };
     if (fullBody) out.fullBody = fullBody;
     if (fullHeadline) out.fullHeadline = fullHeadline;
+    if (Array.isArray(meta) && meta.length) out.meta = meta.filter(Boolean);
     return out;
 }
 
@@ -371,6 +396,46 @@ export function summarizeChatLiveEvent(evt) {
             promote: true,
             human: true,
             dedupeKey: lifecycle.id ? `lifecycle:${lifecycle.id}:${status}:${label}:${stale ? 'stale' : 'fresh'}` : key(status, label),
+        });
+    }
+
+    if ((evt.is_progress || t === 'send_message') && isSubagentEvent(evt)) {
+        const sid = subagentId(evt);
+        const event = String(evt.subagent_event || '').toLowerCase();
+        const role = String(evt.subagent_role || '').trim();
+        const status = String(evt.status || '').trim();
+        const cost = formatLogMoney(evt.cost_usd || evt.cost);
+        const resultText = describeText(evt.result || '', 320);
+        const traceText = describeText(evt.trace_summary || '', 320);
+        const errorText = describeText(evt.error || '', 220);
+        const detailParts = [
+            progressText.full,
+            resultText.full ? `[RESULT]\n${resultText.full}` : '',
+            traceText.full ? `[TRACE]\n${traceText.full}` : '',
+            errorText.full ? `[ERROR]\n${errorText.full}` : '',
+        ].filter(Boolean);
+        const phase = ['completed'].includes(event) ? 'done'
+            : ['failed', 'rejected', 'cancelled', 'interrupted'].includes(event) ? 'lifecycle_error'
+                : event === 'scheduled' ? 'start'
+                    : 'working';
+        const label = event || 'update';
+        return chatView({
+            phase,
+            headline: `Subagent ${sid || 'child'} ${label}`,
+            body: progressText.preview || resultText.preview || errorText.preview || '',
+            fullBody: detailParts.join('\n\n'),
+            visible: true,
+            promote: true,
+            human: true,
+            meta: [
+                'subagent',
+                role ? `role=${role}` : '',
+                status ? `status=${status}` : '',
+                cost ? `cost=${cost}` : '',
+                evt.parent_task_id ? `parent=${evt.parent_task_id}` : '',
+                evt.root_task_id ? `root=${evt.root_task_id}` : '',
+            ],
+            dedupeKey: `subagent:${sid}:${label}:${status}:${progressText.full || resultText.full || errorText.full || ''}`,
         });
     }
 
@@ -517,6 +582,7 @@ export function prettyLogEvent(evt) {
 }
 
 export function getLogTaskGroupId(evt) {
+    if (evt.subagent_task_id) return String(evt.subagent_task_id);
     if (evt.task_id) return String(evt.task_id);
     const task = evt.task;
     if (task && typeof task === 'object' && task.id) return String(task.id);

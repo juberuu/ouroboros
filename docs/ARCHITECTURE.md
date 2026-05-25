@@ -1,4 +1,4 @@
-# Ouroboros v6.0.0 — Architecture & Reference
+# Ouroboros v6.1.0-rc.1 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -86,6 +86,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── server_web.py        ← Static web file helpers (NoCacheStaticFiles, web dir resolver)
       ├── task_continuation.py ← Durable per-task review continuation state across restart/outage
       ├── task_results.py      ← Durable task result/status files (task_results/<id>.json)
+      ├── task_status.py       ← Effective task-status SSOT: child-drive result merge, lineage lookup, bounded waits
       ├── tool_capabilities.py ← SSOT for tool sets (core, parallel-safe, truncation, browser)
       ├── tool_policy.py       ← Tool access policy and gating (imports from tool_capabilities)
       ├── utils.py             ← Shared utilities; v5.8.3-rc.2 SSOT for JSON atomic writes/reads, UTC timestamps, hashes, log sanitization, and subprocess helpers
@@ -232,8 +233,10 @@ sudo must be noninteractive (`sudo -n`) and password-prompting sudo is blocked.
 Headless memory isolation is implemented as a per-task child drive under
 `data/state/headless_tasks/<task_id>/data`. `forked` mode copies stable memory
 seed files (`identity.md`, `WORLD.md`, `registry.md`, and `knowledge/`) without
-dialogue/task history; `empty` mode starts from a fresh child drive; `shared` is
-reserved for self/local tasks and is rejected for external workspaces. External
+dialogue/task history; `empty` mode starts from a fresh child drive; live
+`shared` mode is disabled for subagents and external workspace tasks until a
+sanitized shared-context v2 exists. Ordinary local root tasks may still use the
+parent drive directly when no external workspace isolation is requested. External
 runs produce explicit artifacts under `data/task_results/artifacts/<task_id>/`:
 `workspace_preflight.json`, `workspace_patch.json`, and `memory_export.json`;
 successful patch finalization also produces `workspace.patch`, while failed
@@ -249,7 +252,15 @@ as a child task, and an existing worker executes it. There is no separate
 scheduler, dashboard, endpoint, or settings surface. Child lineage is inferred
 from the active `ToolContext` and persisted as `parent_task_id`, `root_task_id`,
 `session_id`, `actor_id`, `delegation_role`, `role`, `memory_mode`,
-`drive_root`, `budget_drive_root`, and `task_constraint`.
+`drive_root`, `child_drive_root`, `budget_drive_root`, and `task_constraint`.
+`task_status.py` is the effective-status SSOT for gateway and tool reads: a
+child terminal result overrides a stale parent `requested`/`scheduled`/`running`
+result, while authoritative parent terminal failures/cancellations stay
+authoritative. Workspace artifact tasks stay nonterminal while
+`artifact_status` is `pending`/`finalizing`; only `ready`/`failed` artifact
+states make the effective workspace result terminal. `wait_for_task` performs a
+bounded wait (default 180s), and `wait_for_tasks` performs batch waits (default
+600s) with full per-child result, trace, and cost output preserved untruncated.
 
 Live subagents run with deterministic
 `task_constraint.mode="local_readonly_subagent"`. The registry filters their
@@ -261,21 +272,33 @@ is unchanged for normal tasks, but subagents additionally deny known
 secret/control files such as `settings.json`, token/credential/key files, and
 secret-like owner-state paths. Browser tools remain available for remote-page
 inspection, but subagents fail closed instead of auto-installing browser
-dependencies and cannot browse or act on loopback/local or non-HTTP URLs, make
-browser subrequests to loopback/local URLs, or run arbitrary browser JavaScript.
+dependencies and cannot browse or act on non-HTTP(S), loopback, private,
+link-local, reserved, or unresolved hosts. The guard checks literal IPs and DNS
+results before navigation, after redirects, and in route handlers, so hostnames
+resolving to blocked addresses are denied. This is a URL/DNS-layer guard, not a
+connect-time proxy; hostile DNS rebinding would need a future resolver-pinning
+or proxy design if stronger network isolation is required. Subagents also
+cannot run arbitrary browser JavaScript.
 
 `memory_mode=forked` is the default and uses the same child-drive mechanism as
 headless workspaces: copy stable memory seed files only (`identity.md`,
 `WORLD.md`, `registry.md`, `knowledge/`) into
 `data/state/headless_tasks/<task_id>/data`, without dialogue history, scratchpad
 blocks, task history, or auto-merge. `empty` creates a blank child drive.
-`shared` keeps the parent drive and should be used only when shared local state
-is an explicit parent decision. On completion, only the child task result is
-copied back to the parent drive; identity, scratchpad, registry, knowledge,
-dialogue blocks, and `memory_export` are never merged or exported
+`shared` is rejected for live local subagents and external workspace tasks; a
+future sanitized shared mode must be designed separately. On completion, only
+the child task result is copied back to the parent drive; identity, scratchpad,
+registry, knowledge, dialogue blocks, and `memory_export` are never merged or exported
 automatically. v1 subagents are leaf workers: the schema and execute-time gate
 hide and block `schedule_task`, while the supervisor keeps a structural depth
-cap of 2 and a maximum of 3 active child tasks per `root_task_id`.
+cap of 2 and a maximum of 3 active child tasks per `root_task_id`. External
+`/api/tasks` and CLI `run` requests may not forge
+`delegation_role=subagent` or parent/root lineage; only the internal
+`schedule_task` event path can create live subagents. Startup performs a
+best-effort prune of terminal copied
+back child drives under `state/headless_tasks/` after the retention window
+(default 7 days, env/settings override), and skips nonterminal or artifact
+finalization states.
 
 ### Two-process model
 
@@ -411,7 +434,7 @@ Shown when `settings.json` does not contain any supported remote provider key an
   Web onboarding uses `/api/claude-code/status` and `/api/claude-code/install`.
 - The wizard blocks progression if nothing runnable is configured.
 - When OpenRouter is absent and official OpenAI is the only configured remote runtime, untouched default model values are auto-remapped to `openai::gpt-5.5` / `openai::gpt-5.5-mini` so first-run startup does not strand the app on OpenRouter-only defaults.
-- `web_search` uses the official OpenAI Responses API only. It requires `OPENAI_API_KEY` and treats any non-empty `OPENAI_BASE_URL` as an incompatible custom runtime configuration rather than a fallback.
+- `web_search` uses the official OpenAI Responses API only. It requires `OPENAI_API_KEY` and treats any non-empty `OPENAI_BASE_URL` as an incompatible custom runtime configuration rather than a fallback. Results are JSON with `answer` and `sources[]` when citation annotations are available; usage events include task/root/parent/delegation attribution and `source=web_search`.
 - When Cloud.ru is the only configured remote runtime, first-run model defaults use explicit `cloudru::...` IDs from `provider_models.CLOUDRU_DIRECT_DEFAULTS`; OpenAI-compatible remains an explicit model-selection flow from the full Settings page because there is no single safe universal default model ID for arbitrary compatible endpoints.
 - Closing the wizard without saving is non-fatal: the main app still launches and the user can finish configuration in Settings.
 
@@ -514,7 +537,7 @@ Rationale: frontend work should not require understanding supervisor, worker, ma
 
 ### Chat
 
-`web/modules/chat.js` owns the message timeline, input, attachment staging, input recall, budget pill, runtime controls, and live task card. It loads persisted history from `/api/chat/history`, merges echoed local messages by `client_message_id`, and collapses task/progress/tool chatter into expandable cards rather than transcript spam. Mobile keyboard handling lives in `web/app.js` + CSS `keyboard-open` classes so only the message pane scrolls while the visual viewport changes.
+`web/modules/chat.js` owns the message timeline, input, attachment staging, input recall, budget pill, runtime controls, and live task cards. It loads persisted history from `/api/chat/history`, merges echoed local messages by `client_message_id`, and collapses task/progress/tool chatter into expandable cards rather than transcript spam. Subagent progress uses separate child cards keyed by `subagent_task_id`/`task_id`; parent cards receive lineage references (`parent_task_id`, `root_task_id`, child id, role) without duplicating child bubbles on reload/reconnect. Mobile keyboard handling lives in `web/app.js` + CSS `keyboard-open` classes so only the message pane scrolls while the visual viewport changes.
 
 History sync is intentionally two-pass: progress/system entries are replayed first to build live-card timelines, then regular user/assistant messages call `finishLiveCard`. This prevents `taskState.completed` from being set before progress events apply, which previously discarded thinking-bubble/live-card state.
 

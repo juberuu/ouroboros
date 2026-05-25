@@ -123,7 +123,7 @@ EXPECTED_TOOLS = [
     # Code search
     "code_search",
     # Task decomposition
-    "get_task_result", "wait_for_task",
+    "get_task_result", "wait_for_task", "wait_for_tasks",
     "generate_evolution_stats",
     # VLM / Vision
     "analyze_screenshot", "vlm_query",

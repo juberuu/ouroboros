@@ -123,7 +123,7 @@ Derived from P7 (Minimalism): entire codebase fits in one context window.
 - Module hard gate: 1600 lines for non-grandfathered modules in `tests/test_smoke.py`. Grandfathered (`GRANDFATHERED_OVERSIZED_MODULES` in `ouroboros/review.py`): `llm.py`, `claude_advisory_review.py`, `review_state.py`, `server.py`, and temporary v5.7.1 debt `git.py` — split deferred until each surface stabilises, with `git.py` expected to pay down in the next tools pass.
 - Method target: <150 lines. Crossing that line is a decomposition signal, not an automatic failure by itself.
 - Method hard gate: 300 lines in `tests/test_smoke.py`.
-- Codebase-wide function-count hard gate: enforced by `tests/test_smoke.py` against the value defined in `ouroboros/review.py::MAX_TOTAL_FUNCTIONS` (currently 2250; single source of truth — bump the constant when adding a feature with an explicit comment justifying the increase).
+- Codebase-wide function-count hard gate: enforced by `tests/test_smoke.py` against the value defined in `ouroboros/review.py::MAX_TOTAL_FUNCTIONS` (currently 2275; single source of truth — bump the constant when adding a feature with an explicit comment justifying the increase).
 - Function parameters: <8.
 - Net complexity growth per cycle approaches zero.
 - If a feature is not used in the current cycle — it is premature.
@@ -252,7 +252,7 @@ Before every commit, verify the following:
 #### Module Size & Complexity
 - [ ] Module stays near one context window (~1000 lines target; 1600 hard gate unless explicitly grandfathered debt)
 - [ ] No method exceeds the practical target (150 lines) or the hard gate (300 lines)
-- [ ] Total Python function count stays under the current smoke hard gate (currently 2250; consult `ouroboros/review.py::MAX_TOTAL_FUNCTIONS` for the active value; bump with a comment if a feature requires more headroom)
+- [ ] Total Python function count stays under the current smoke hard gate (currently 2275; consult `ouroboros/review.py::MAX_TOTAL_FUNCTIONS` for the active value; bump with a comment if a feature requires more headroom)
 - [ ] No function has more than 8 parameters
 - [ ] No gratuitous abstract layers (Bible P7)
 
@@ -275,19 +275,37 @@ Before every commit, verify the following:
   `role`, `context`, `constraints`, and `memory_mode` are optional. Do not
   reintroduce public `parent_task_id` or `description` arguments; lineage comes
   from `ToolContext`.
+- Live `memory_mode=shared` is disabled. Keep `forked` and `empty` as the only
+  live subagent modes unless a later design adds sanitized shared-context v2.
+- External `/api/tasks` and CLI requests must reject forged
+  `delegation_role=subagent`; only `schedule_task` may create subagents.
 - `task_constraint.mode="local_readonly_subagent"` must be enforced twice:
   schema discovery exposes only the local-readonly allowlist, and registry
   execution rejects forbidden calls even when invoked manually.
+- `task_constraint` boolean parsing must be strict; strings such as `"false"`
+  are false, never truthy through Python's `bool("false")`.
 - Subagent changes must keep writes, commits, review mutation, runtime control,
   tool expansion, skills, MCP/extensions, shell, and further `schedule_task`
   recursion blocked unless a later accepted design explicitly changes the
   permission model.
 - `data_read` and `data_list` secret/control-file denials are subagent-scoped.
+- Browser isolation for local-readonly subagents is DNS fail-closed: block
+  non-HTTP(S), loopback/private/link-local/reserved/unspecified literal IPs,
+  unresolved hostnames, and hostnames resolving to any blocked IP before goto,
+  after redirects, and in route handlers.
+- Effective task status belongs in `ouroboros/task_status.py`. Do not duplicate
+  child-drive result merge or terminal-status logic in gateways/tools; use
+  `load_effective_task_result`, `effective_task_result`, and bounded wait
+  helpers. `wait_for_task` and `wait_for_tasks` results must remain untruncated.
+- `forward_to_worker` may write only to validated running tasks whose lineage
+  belongs to the current task/root, and must route forked/empty child subagents
+  to the child-drive mailbox.
   Do not broaden generic data-tool behavior for normal tasks while fixing
   subagent isolation.
-- Handoff is the full task result. Do not add shared ledgers, automatic memory
-  merges, or new settings/endpoints unless the accepted plan explicitly calls
-  for them.
+- The pre-final handoff reminder is a compact effective-status snapshot. Full
+  untruncated child handoff belongs to `get_task_result`, `wait_for_task`, and
+  `wait_for_tasks`. Do not add shared ledgers, automatic memory merges, or new
+  settings/endpoints unless the accepted plan explicitly calls for them.
 
 #### Page Header Layout
 - Top-level page chrome (`renderPageHeader`, tab strips, primary actions) must sit outside the scrolling content region.

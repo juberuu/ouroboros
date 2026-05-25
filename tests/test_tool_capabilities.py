@@ -281,6 +281,7 @@ def test_wait_for_task_not_in_core():
     """wait_for_task must NOT be in CORE_TOOL_NAMES."""
     from ouroboros.tool_capabilities import CORE_TOOL_NAMES
     assert "wait_for_task" not in CORE_TOOL_NAMES
+    assert "wait_for_tasks" not in CORE_TOOL_NAMES
 
 
 def test_get_task_result_not_in_core():

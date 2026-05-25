@@ -593,6 +593,34 @@ def assign_tasks() -> None:
                     queue.persist_queue_snapshot(reason="evolution_dropped_budget")
                     continue
                 task = PENDING.pop(chosen_idx)
+                if str(task.get("delegation_role") or "") == "subagent" and str(task.get("drive_root") or ""):
+                    try:
+                        from ouroboros.task_results import STATUS_RUNNING, write_task_result
+                        write_task_result(
+                            DRIVE_ROOT,
+                            str(task.get("id") or ""),
+                            STATUS_RUNNING,
+                            parent_task_id=task.get("parent_task_id"),
+                            root_task_id=task.get("root_task_id"),
+                            session_id=task.get("session_id"),
+                            actor_id=task.get("actor_id"),
+                            delegation_role=task.get("delegation_role"),
+                            role=task.get("role"),
+                            description=task.get("description"),
+                            objective=task.get("objective") or task.get("description"),
+                            expected_output=task.get("expected_output"),
+                            constraints=task.get("constraints"),
+                            context=task.get("context"),
+                            memory_mode=task.get("memory_mode"),
+                            drive_root=task.get("drive_root"),
+                            child_drive_root=task.get("child_drive_root") or task.get("drive_root"),
+                            budget_drive_root=task.get("budget_drive_root"),
+                            task_constraint=task.get("task_constraint"),
+                            metadata=task.get("metadata") if isinstance(task.get("metadata"), dict) else {},
+                            result="Subagent assigned to a worker.",
+                        )
+                    except Exception:
+                        log.debug("Failed to mirror running subagent status", exc_info=True)
                 w.busy_task_id = task["id"]
                 w.in_q.put(task)
                 now_ts = time.time()

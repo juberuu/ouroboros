@@ -180,6 +180,7 @@ def test_child_task_handoff_results_never_truncated():
     big = "c" * 90000
     assert _truncate_tool_result(big, "get_task_result") == big
     assert _truncate_tool_result(big, "wait_for_task") == big
+    assert _truncate_tool_result(big, "wait_for_tasks") == big
 
 
 # ---------------------------------------------------------------------------

@@ -456,6 +456,18 @@ def _run_supervisor(settings: dict) -> None:
         spawn_workers(max_workers)
         restored_pending = restore_pending_from_snapshot()
         persist_queue_snapshot(reason="startup")
+        try:
+            from ouroboros.headless import prune_headless_task_drives
+
+            prune_report = prune_headless_task_drives(DATA_DIR)
+            if prune_report.get("pruned") or prune_report.get("errors"):
+                append_jsonl(DATA_DIR / "logs" / "events.jsonl", {
+                    "ts": utc_now_iso(),
+                    "type": "headless_task_drive_prune",
+                    "report": prune_report,
+                })
+        except Exception:
+            log.debug("Headless task drive prune failed", exc_info=True)
 
         if restored_pending > 0:
             st_boot = load_state()

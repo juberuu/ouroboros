@@ -60,6 +60,7 @@ def test_schedule_task_live_emits_strict_contract_and_requested_status(tmp_path)
     assert evt["delegation_role"] == "subagent"
     assert evt["memory_mode"] == "forked"
     assert pathlib.Path(evt["drive_root"]).parts[-3:] == ("headless_tasks", task_id, "data")
+    assert evt["child_drive_root"] == evt["drive_root"]
     assert evt["budget_drive_root"] == str(tmp_path)
     assert evt["task_constraint"]["mode"] == "local_readonly_subagent"
     path = tmp_path / "task_results" / f"{task_id}.json"
@@ -71,6 +72,7 @@ def test_schedule_task_live_emits_strict_contract_and_requested_status(tmp_path)
     assert data["context"] == "Model focus A"
     assert data["chat_id"] == 777
     assert data["memory_mode"] == "forked"
+    assert data["child_drive_root"] == evt["drive_root"]
 
 
 def test_schedule_task_falls_back_to_pending_events_when_live_queue_unavailable(tmp_path, monkeypatch):
@@ -137,12 +139,11 @@ def test_schedule_task_memory_modes_prepare_declared_drive_shape(tmp_path):
     assert event_queue.events[-1]["drive_root"] == str(empty_drive)
     assert not (empty_drive / "memory" / "identity.md").exists()
 
-    _schedule_task(ctx, objective="Shared child", expected_output="Result", memory_mode="shared")
-    assert "drive_root" not in event_queue.events[-1]
-    shared_id = event_queue.events[-1]["task_id"]
-    shared_status = json.loads((tmp_path / "task_results" / f"{shared_id}.json").read_text(encoding="utf-8"))
-    assert shared_status["memory_mode"] == "shared"
-    assert shared_status["drive_root"] == ""
+    before_shared = len(event_queue.events)
+    shared_result = _schedule_task(ctx, objective="Shared child", expected_output="Result", memory_mode="shared")
+    assert "TOOL_ARG_ERROR" in shared_result
+    assert "memory_mode=shared is disabled" in shared_result
+    assert len(event_queue.events) == before_shared
 
 
 def test_schedule_task_rejects_legacy_description_schema(tmp_path):
@@ -210,6 +211,231 @@ def test_get_task_result_returns_full_completed_output(tmp_path):
     assert "[BEGIN_SUBTASK_OUTPUT]" in output
 
 
+def test_get_task_result_uses_child_terminal_over_stale_parent(tmp_path):
+    from ouroboros.task_results import STATUS_COMPLETED, STATUS_SCHEDULED, write_task_result
+    from ouroboros.tools.control import _get_task_result
+
+    child_drive = tmp_path / "state" / "headless_tasks" / "child123" / "data"
+    child_drive.mkdir(parents=True)
+    write_task_result(
+        tmp_path,
+        "child123",
+        STATUS_SCHEDULED,
+        child_drive_root=str(child_drive),
+        result="stale parent handoff",
+    )
+    write_task_result(
+        child_drive,
+        "child123",
+        STATUS_COMPLETED,
+        result="child terminal handoff",
+        cost_usd=0.42,
+        trace_summary="child trace",
+    )
+
+    ctx = SimpleNamespace(drive_root=tmp_path)
+    output = _get_task_result(ctx, "child123")
+
+    assert "child terminal handoff" in output
+    assert "stale parent handoff" not in output
+    assert "[SUBTASK_TRACE]" in output
+
+
+def test_wait_for_tasks_returns_structured_effective_batch(tmp_path):
+    from ouroboros.task_results import STATUS_COMPLETED, STATUS_SCHEDULED, write_task_result
+    from ouroboros.tools.control import _wait_for_tasks
+
+    child_drive = tmp_path / "state" / "headless_tasks" / "childdone" / "data"
+    child_drive.mkdir(parents=True)
+    write_task_result(tmp_path, "parentdone", STATUS_COMPLETED, result="parent finished")
+    write_task_result(tmp_path, "childdone", STATUS_SCHEDULED, child_drive_root=str(child_drive), result="queued")
+    write_task_result(child_drive, "childdone", STATUS_COMPLETED, result="child finished", trace_summary="trace")
+
+    ctx = SimpleNamespace(drive_root=tmp_path)
+    payload = json.loads(_wait_for_tasks(ctx, ["parentdone", "childdone"], timeout_sec=0))
+
+    assert payload["all_terminal"] is True
+    assert payload["timed_out"] is False
+    assert payload["tasks"]["parentdone"]["result"] == "parent finished"
+    assert payload["tasks"]["childdone"]["result"] == "child finished"
+    assert payload["tasks"]["childdone"]["trace_summary"] == "trace"
+
+
+def test_effective_status_keeps_workspace_finalization_nonterminal_without_child_drive(tmp_path):
+    from ouroboros.headless import ARTIFACT_STATUS_FINALIZING
+    from ouroboros.task_results import STATUS_COMPLETED, STATUS_RUNNING, write_task_result
+    from ouroboros.task_status import load_effective_task_result, wait_for_effective_tasks
+
+    write_task_result(
+        tmp_path,
+        "workspace1",
+        STATUS_COMPLETED,
+        workspace_root=str(tmp_path / "workspace"),
+        artifact_status=ARTIFACT_STATUS_FINALIZING,
+        result="worker finished but artifacts are still pending",
+    )
+
+    effective = load_effective_task_result(tmp_path, "workspace1")
+    waited = wait_for_effective_tasks(tmp_path, ["workspace1"], timeout_sec=0)
+
+    assert effective["status"] == STATUS_RUNNING
+    assert effective["child_status"] == STATUS_COMPLETED
+    assert effective["artifact_status"] == ARTIFACT_STATUS_FINALIZING
+    assert waited["all_terminal"] is False
+    assert waited["timed_out"] is True
+
+
+def test_find_child_tasks_does_not_regress_terminal_or_running_from_stale_queue_snapshot(tmp_path):
+    from ouroboros.task_results import STATUS_COMPLETED, STATUS_RUNNING, write_task_result
+    from ouroboros.task_status import find_child_tasks, load_effective_task_result
+
+    write_task_result(
+        tmp_path,
+        "childdone",
+        STATUS_COMPLETED,
+        parent_task_id="parent1",
+        root_task_id="parent1",
+        delegation_role="subagent",
+        result="terminal handoff",
+    )
+    write_task_result(
+        tmp_path,
+        "childrun",
+        STATUS_RUNNING,
+        parent_task_id="parent1",
+        root_task_id="parent1",
+        delegation_role="subagent",
+        result="still working",
+    )
+    snapshot = {
+        "pending": [
+            {"id": "childdone", "task": {"id": "childdone", "parent_task_id": "parent1", "root_task_id": "parent1", "delegation_role": "subagent"}},
+            {"id": "childrun", "task": {"id": "childrun", "parent_task_id": "parent1", "root_task_id": "parent1", "delegation_role": "subagent"}},
+        ],
+        "running": [],
+    }
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "queue_snapshot.json").write_text(json.dumps(snapshot), encoding="utf-8")
+
+    effective_done = load_effective_task_result(tmp_path, "childdone")
+    effective_running = load_effective_task_result(tmp_path, "childrun")
+    children = {row["task_id"]: row for row in find_child_tasks(tmp_path, parent_task_id="parent1", root_task_id="parent1")}
+
+    assert effective_done["status"] == STATUS_COMPLETED
+    assert effective_running["status"] == STATUS_RUNNING
+    assert children["childdone"]["status"] == STATUS_COMPLETED
+    assert children["childrun"]["status"] == STATUS_RUNNING
+
+
+def test_effective_status_preserves_parent_retry_status_over_stale_child_running(tmp_path):
+    from ouroboros.task_results import STATUS_INTERRUPTED, STATUS_RUNNING, STATUS_SCHEDULED, write_task_result
+    from ouroboros.task_status import load_effective_task_result
+
+    child_drive = tmp_path / "state" / "headless_tasks" / "childretry" / "data"
+    child_drive.mkdir(parents=True)
+    write_task_result(
+        tmp_path,
+        "childretry",
+        STATUS_INTERRUPTED,
+        child_drive_root=str(child_drive),
+        parent_task_id="parent1",
+        root_task_id="parent1",
+        delegation_role="subagent",
+        result="parent marked retry",
+        error="worker interrupted",
+        ts="2026-01-01T00:00:02Z",
+    )
+    write_task_result(
+        child_drive,
+        "childretry",
+        STATUS_RUNNING,
+        result="stale child still running",
+        error="",
+        ts="2026-01-01T00:00:01Z",
+    )
+    snapshot = {
+        "pending": [
+            {
+                "id": "childretry",
+                "task": {
+                    "id": "childretry",
+                    "parent_task_id": "parent1",
+                    "root_task_id": "parent1",
+                    "delegation_role": "subagent",
+                },
+            }
+        ],
+        "running": [],
+    }
+    (tmp_path / "state" / "queue_snapshot.json").write_text(json.dumps(snapshot), encoding="utf-8")
+
+    effective = load_effective_task_result(tmp_path, "childretry")
+
+    assert effective["status"] == STATUS_SCHEDULED
+    assert effective["result"] == "parent marked retry"
+    assert effective["error"] == "worker interrupted"
+
+
+def test_find_child_tasks_requires_subagent_role_and_can_exclude_current_task(tmp_path):
+    from ouroboros.task_results import STATUS_COMPLETED, STATUS_RUNNING, write_task_result
+    from ouroboros.task_status import find_child_tasks, format_handoff_message
+
+    write_task_result(
+        tmp_path,
+        "forgedroot",
+        STATUS_COMPLETED,
+        parent_task_id="parent1",
+        root_task_id="parent1",
+        delegation_role="root",
+        result="should not be treated as child",
+    )
+    write_task_result(
+        tmp_path,
+        "child1",
+        STATUS_RUNNING,
+        parent_task_id="parent1",
+        root_task_id="parent1",
+        delegation_role="subagent",
+        role="reviewer",
+        result="x" * 2000,
+        trace_summary="trace" * 500,
+    )
+
+    children = find_child_tasks(tmp_path, parent_task_id="parent1", root_task_id="parent1")
+    excluded = find_child_tasks(tmp_path, parent_task_id="parent1", root_task_id="parent1", exclude_task_id="child1")
+    handoff = format_handoff_message(children)
+
+    assert [row["task_id"] for row in children] == ["child1"]
+    assert excluded == []
+    assert "should not be treated as child" not in handoff
+    assert len(handoff) < 1200
+    assert "Use get_task_result" in handoff
+    assert "result_chars" in handoff
+
+
+def test_wait_for_task_times_out_when_child_is_not_terminal(tmp_path):
+    from ouroboros.task_results import STATUS_RUNNING, write_task_result
+    from ouroboros.tools.control import _wait_for_task
+
+    write_task_result(tmp_path, "stillrunning", STATUS_RUNNING, result="working")
+
+    ctx = SimpleNamespace(drive_root=tmp_path)
+    output = _wait_for_task(ctx, "stillrunning", timeout_sec=0)
+
+    assert "Task wait timed out" in output
+    assert "stillrunning [running]" in output
+
+
+def test_wait_tools_reject_invalid_ids_and_cap_batch(tmp_path):
+    from ouroboros.tools.control import _wait_for_task, _wait_for_tasks
+
+    ctx = SimpleNamespace(drive_root=tmp_path)
+
+    assert "TOOL_ARG_ERROR" in _wait_for_task(ctx, "../settings", timeout_sec=0)
+    assert "TOOL_ARG_ERROR" in _wait_for_tasks(ctx, ["ok123", "../bad"], timeout_sec=0)
+    assert "capped at 50" in _wait_for_tasks(ctx, [f"task{i}" for i in range(51)], timeout_sec=0)
+
+
 def test_wait_for_task_reports_rejected_duplicate(tmp_path):
     from ouroboros.task_results import STATUS_REJECTED_DUPLICATE, write_task_result
     from ouroboros.tools.control import _wait_for_task
@@ -246,7 +472,7 @@ def test_handle_schedule_task_duplicate_writes_rejected_status(tmp_path, monkeyp
             return {"owner_chat_id": 1}
 
         def send_with_budget(self, chat_id, text, **kwargs):
-            sent.append((chat_id, text))
+            sent.append((chat_id, text, kwargs))
 
     ev_module._handle_schedule_task(
         {
@@ -256,6 +482,9 @@ def test_handle_schedule_task_duplicate_writes_rejected_status(tmp_path, monkeyp
             "expected_output": "Duplicate verdict",
             "context": "Model focus B",
             "depth": 1,
+            "memory_mode": "forked",
+            "drive_root": str(tmp_path / "state" / "headless_tasks" / "dup222" / "data"),
+            "child_drive_root": str(tmp_path / "state" / "headless_tasks" / "dup222" / "data"),
         },
         FakeCtx(),
     )
@@ -264,7 +493,11 @@ def test_handle_schedule_task_duplicate_writes_rejected_status(tmp_path, monkeyp
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["status"] == STATUS_REJECTED_DUPLICATE
     assert data["duplicate_of"] == "orig111"
-    assert sent and "Task rejected" in sent[0][1]
+    assert sent and "semantically similar" in sent[0][1]
+    assert sent[0][2]["is_progress"] is True
+    assert sent[0][2]["progress_meta"]["delegation_role"] == "subagent"
+    assert sent[0][2]["progress_meta"]["parent_task_id"] == ""
+    assert sent[0][2]["progress_meta"]["status"] == STATUS_REJECTED_DUPLICATE
 
 
 def test_find_duplicate_task_includes_subagent_handoff_fields(monkeypatch):
@@ -354,6 +587,7 @@ def test_handle_schedule_task_accepts_unique_subagent_with_lineage_and_constrain
             "delegation_role": "subagent",
             "memory_mode": "forked",
             "drive_root": str(tmp_path / "state" / "headless_tasks" / "child123" / "data"),
+            "child_drive_root": str(tmp_path / "state" / "headless_tasks" / "child123" / "data"),
             "budget_drive_root": str(tmp_path),
             "task_constraint": {"mode": "skill_repair", "allow_enable": True, "allow_review": True},
         },
@@ -368,6 +602,7 @@ def test_handle_schedule_task_accepts_unique_subagent_with_lineage_and_constrain
     assert task["session_id"] == "sess123"
     assert task["role"] == "reviewer"
     assert task["memory_mode"] == "forked"
+    assert task["child_drive_root"] == task["drive_root"]
     assert task["task_constraint"]["mode"] == "local_readonly_subagent"
     assert task["task_constraint"]["allow_enable"] is False
     assert task["task_constraint"]["allow_review"] is False
@@ -376,8 +611,53 @@ def test_handle_schedule_task_accepts_unique_subagent_with_lineage_and_constrain
     data = json.loads((tmp_path / "task_results" / "child123.json").read_text(encoding="utf-8"))
     assert data["status"] == STATUS_SCHEDULED
     assert data["expected_output"] == "Findings table"
+    assert data["child_drive_root"] == task["drive_root"]
     assert data["task_constraint"]["mode"] == "local_readonly_subagent"
     assert sent and sent[0][2].get("is_progress") is True
+
+
+def test_handle_schedule_task_rejects_internal_subagent_without_child_drive_contract(tmp_path, monkeypatch):
+    from supervisor import events as ev_module
+    from ouroboros.task_results import STATUS_FAILED
+
+    monkeypatch.setattr(ev_module, "_find_duplicate_task", lambda *args, **kwargs: None)
+    sent = []
+
+    class FakeCtx:
+        DRIVE_ROOT = tmp_path
+        PENDING = []
+        RUNNING = {}
+        WORKERS = {}
+
+        def load_state(self):
+            return {"owner_chat_id": 1}
+
+        def send_with_budget(self, chat_id, text, **kwargs):
+            sent.append((chat_id, text, kwargs))
+
+        def enqueue_task(self, task):
+            raise AssertionError("invalid internal subagent should not enqueue")
+
+    ev_module._handle_schedule_task(
+        {
+            "type": "schedule_task",
+            "task_id": "badchild",
+            "objective": "Inspect invalid event",
+            "expected_output": "Nothing",
+            "depth": 1,
+            "delegation_role": "subagent",
+            "memory_mode": "shared",
+        },
+        FakeCtx(),
+    )
+
+    data = json.loads((tmp_path / "task_results" / "badchild.json").read_text(encoding="utf-8"))
+    assert data["status"] == STATUS_FAILED
+    assert "memory_mode=forked or empty" in data["result"]
+    assert sent and sent[0][2]["progress_meta"]["subagent_event"] == "rejected"
+    assert sent[0][2]["progress_meta"]["delegation_role"] == "subagent"
+    assert sent[0][2]["progress_meta"]["parent_task_id"] == ""
+    assert sent[0][2]["progress_meta"]["status"] == STATUS_FAILED
 
 
 def test_handle_schedule_task_uses_event_chat_id_without_owner(tmp_path, monkeypatch):
@@ -415,6 +695,9 @@ def test_handle_schedule_task_uses_event_chat_id_without_owner(tmp_path, monkeyp
             "depth": 1,
             "chat_id": 44,
             "delegation_role": "subagent",
+            "memory_mode": "forked",
+            "drive_root": str(tmp_path / "state" / "headless_tasks" / "headless1" / "data"),
+            "child_drive_root": str(tmp_path / "state" / "headless_tasks" / "headless1" / "data"),
         },
         FakeCtx(),
     )
@@ -434,6 +717,9 @@ def test_handle_schedule_task_uses_event_chat_id_without_owner(tmp_path, monkeyp
             "expected_output": "Findings",
             "depth": 1,
             "delegation_role": "subagent",
+            "memory_mode": "forked",
+            "drive_root": str(tmp_path / "state" / "headless_tasks" / "headless2" / "data"),
+            "child_drive_root": str(tmp_path / "state" / "headless_tasks" / "headless2" / "data"),
         },
         FakeCtx(),
     )
@@ -473,6 +759,9 @@ def test_handle_schedule_task_depth_rejection_writes_failed_status(tmp_path, mon
             "expected_output": "Nothing",
             "depth": ev_module.MAX_SUBTASK_DEPTH + 1,
             "delegation_role": "subagent",
+            "memory_mode": "forked",
+            "drive_root": str(tmp_path / "state" / "headless_tasks" / "deep1" / "data"),
+            "child_drive_root": str(tmp_path / "state" / "headless_tasks" / "deep1" / "data"),
         },
         FakeCtx(),
     )
@@ -481,6 +770,9 @@ def test_handle_schedule_task_depth_rejection_writes_failed_status(tmp_path, mon
     assert data["status"] == STATUS_FAILED
     assert "depth limit" in data["result"]
     assert sent and "depth limit" in sent[0][1]
+    assert sent[0][2]["is_progress"] is True
+    assert sent[0][2]["progress_meta"]["delegation_role"] == "subagent"
+    assert sent[0][2]["progress_meta"]["status"] == STATUS_FAILED
 
 
 def test_handle_schedule_task_rejects_legacy_subagent_event_schema(tmp_path, monkeypatch):
@@ -523,6 +815,10 @@ def test_handle_schedule_task_rejects_legacy_subagent_event_schema(tmp_path, mon
     assert data["status"] == STATUS_FAILED
     assert "objective and expected_output" in data["result"]
     assert sent and "objective and expected_output" in sent[0][1]
+    assert sent[0][2]["is_progress"] is True
+    assert sent[0][2]["progress_meta"]["delegation_role"] == "subagent"
+    assert sent[0][2]["progress_meta"]["parent_task_id"] == "parent123"
+    assert sent[0][2]["progress_meta"]["status"] == STATUS_FAILED
 
 
 def test_handle_schedule_task_rejects_fourth_active_subagent(tmp_path, monkeypatch):
@@ -556,6 +852,9 @@ def test_handle_schedule_task_rejects_fourth_active_subagent(tmp_path, monkeypat
             "depth": 1,
             "root_task_id": "root123",
             "delegation_role": "subagent",
+            "memory_mode": "forked",
+            "drive_root": str(tmp_path / "state" / "headless_tasks" / "child999" / "data"),
+            "child_drive_root": str(tmp_path / "state" / "headless_tasks" / "child999" / "data"),
         },
         FakeCtx(),
     )
@@ -564,6 +863,9 @@ def test_handle_schedule_task_rejects_fourth_active_subagent(tmp_path, monkeypat
     assert data["status"] == STATUS_FAILED
     assert "active child limit" in data["result"]
     assert sent and "active child limit" in sent[0][1]
+    assert sent[0][2]["is_progress"] is True
+    assert sent[0][2]["progress_meta"]["delegation_role"] == "subagent"
+    assert sent[0][2]["progress_meta"]["status"] == STATUS_FAILED
 
     child_drive = tmp_path / "state" / "headless_tasks" / "childdone" / "data"
     (child_drive / "memory").mkdir(parents=True)
@@ -700,6 +1002,7 @@ def test_queue_snapshot_preserves_subagent_contract_fields(tmp_path, monkeypatch
             "actor_id": "subagent:security",
             "delegation_role": "subagent",
             "memory_mode": "forked",
+            "child_drive_root": str(tmp_path / "state" / "headless_tasks" / "sub1" / "data"),
             "task_constraint": {"mode": "local_readonly_subagent", "allow_enable": False},
         }
     )
@@ -710,6 +1013,7 @@ def test_queue_snapshot_preserves_subagent_contract_fields(tmp_path, monkeypatch
     assert saved["expected_output"] == "Distinct handoff table"
     assert saved["constraints"] == "No writes"
     assert saved["role"] == "security reviewer"
+    assert pathlib.Path(saved["child_drive_root"]).parts[-4:] == ("state", "headless_tasks", "sub1", "data")
     assert saved["task_constraint"]["mode"] == "local_readonly_subagent"
 
     queue_module.PENDING.clear()
@@ -719,7 +1023,59 @@ def test_queue_snapshot_preserves_subagent_contract_fields(tmp_path, monkeypatch
     assert restored["expected_output"] == "Distinct handoff table"
     assert restored["constraints"] == "No writes"
     assert restored["role"] == "security reviewer"
+    assert pathlib.Path(restored["child_drive_root"]).parts[-4:] == ("state", "headless_tasks", "sub1", "data")
     assert restored["task_constraint"]["mode"] == "local_readonly_subagent"
+
+
+def test_assign_tasks_mirrors_running_subagent_status_to_parent_drive(tmp_path, monkeypatch):
+    from ouroboros.task_results import STATUS_RUNNING, load_task_result
+    from supervisor import queue as queue_module
+    from supervisor import state as state_module
+    from supervisor import workers as workers_module
+
+    child_drive = tmp_path / "state" / "headless_tasks" / "childrun" / "data"
+    child_drive.mkdir(parents=True)
+    delivered = []
+
+    class FakeWorkerQueue:
+        def put(self, task):
+            delivered.append(dict(task))
+
+    task = {
+        "id": "childrun",
+        "type": "task",
+        "chat_id": 1,
+        "description": "Inspect handoff",
+        "objective": "Inspect handoff",
+        "expected_output": "Findings",
+        "parent_task_id": "parent123",
+        "root_task_id": "root123",
+        "session_id": "sess123",
+        "actor_id": "subagent:reviewer",
+        "delegation_role": "subagent",
+        "role": "reviewer",
+        "memory_mode": "forked",
+        "drive_root": str(child_drive),
+        "child_drive_root": str(child_drive),
+        "budget_drive_root": str(tmp_path),
+        "task_constraint": {"mode": "local_readonly_subagent", "allow_enable": False},
+        "metadata": {"root_task_id": "root123"},
+    }
+    monkeypatch.setattr(workers_module, "DRIVE_ROOT", tmp_path)
+    monkeypatch.setattr(workers_module, "PENDING", [task])
+    monkeypatch.setattr(workers_module, "RUNNING", {})
+    monkeypatch.setattr(workers_module, "WORKERS", {1: SimpleNamespace(wid=1, busy_task_id=None, in_q=FakeWorkerQueue())})
+    monkeypatch.setattr(workers_module, "load_state", lambda: {})
+    monkeypatch.setattr(state_module, "budget_remaining", lambda _state: 100.0)
+    monkeypatch.setattr(queue_module, "persist_queue_snapshot", lambda reason="": None)
+
+    workers_module.assign_tasks()
+
+    parent_result = load_task_result(tmp_path, "childrun")
+    assert parent_result["status"] == STATUS_RUNNING
+    assert parent_result["child_drive_root"] == str(child_drive)
+    assert parent_result["result"] == "Subagent assigned to a worker."
+    assert delivered and delivered[0]["id"] == "childrun"
 
 
 def test_subagent_hard_timeout_retry_preserves_task_id(tmp_path, monkeypatch):

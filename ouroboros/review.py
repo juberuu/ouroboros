@@ -26,9 +26,11 @@ MAX_FUNCTION_LINES = 300
 # Ceiling covers safety, review-state, tools/git, skills/extensions, gateway
 # helpers, the packaged CLI bridge/installer, the v5.32 generated Atlas
 # compiler/tests, v5.33 external-workspace CLI artifact/preflight contract,
-# and the v6.0 live subagent strict-schema/isolation/browser-guard tests. Keep
-# this tight and lower it again when the headless/subagent helpers settle.
-MAX_TOTAL_FUNCTIONS = 2250
+# and the v6.1 subagent status SSOT/wait/browser-ingress hardening. Keep this
+# tight and lower it again when the headless/subagent helpers settle.
+# v6.1.0-rc.1 subagent hardening adds a small SSOT/status surface plus
+# focused regressions; keep the cap tight while leaving release headroom.
+MAX_TOTAL_FUNCTIONS = 2275
 # Grandfathered modules are accepted debt until their surfaces stabilize/split.
 GRANDFATHERED_OVERSIZED_MODULES = {
     "llm.py",

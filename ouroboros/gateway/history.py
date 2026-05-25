@@ -22,6 +22,12 @@ _PROGRESS_META_FIELDS = (
     "parent_task_id",
     "delegation_role",
     "subagent_role",
+    "status",
+    "cost_usd",
+    "result",
+    "trace_summary",
+    "error",
+    "artifact_status",
     "worker_saturation_warning",
 )
 

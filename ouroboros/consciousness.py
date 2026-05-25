@@ -488,7 +488,7 @@ class BackgroundConsciousness:
         "update_identity", "set_next_wakeup",
         "knowledge_read", "knowledge_write", "knowledge_list",
         "web_search", "repo_read", "repo_list", "data_read", "data_list",
-        "chat_history", "get_task_result", "wait_for_task",
+        "chat_history", "get_task_result", "wait_for_task", "wait_for_tasks",
         "list_github_issues", "get_github_issue",
     })
 
