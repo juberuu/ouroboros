@@ -1,4 +1,4 @@
-# Ouroboros v5.33.0-rc.2 — Architecture & Reference
+# Ouroboros v6.0.0 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -243,9 +243,39 @@ untracked paths, git diagnostics, and artifact errors. The parent result carries
 (`pending`/`finalizing`/`ready`/`failed`) so headless clients cannot observe a
 terminal workspace result before artifacts are ready or explicitly failed.
 Headless runs never auto-merge memory back into the parent drive. Swarm
-readiness in v1 is contractual only: task metadata
-normalizes `parent_task_id`, `root_task_id`, `session_id`, `actor_id`, and
-`delegation_role`, but no child-agent scheduler or delegation runtime exists yet.
+readiness in v1 is implemented as live child tasks over the existing queue:
+`schedule_task` emits a normal `schedule_task` event, the supervisor enqueues it
+as a child task, and an existing worker executes it. There is no separate
+scheduler, dashboard, endpoint, or settings surface. Child lineage is inferred
+from the active `ToolContext` and persisted as `parent_task_id`, `root_task_id`,
+`session_id`, `actor_id`, `delegation_role`, `role`, `memory_mode`,
+`drive_root`, `budget_drive_root`, and `task_constraint`.
+
+Live subagents run with deterministic
+`task_constraint.mode="local_readonly_subagent"`. The registry filters their
+visible tool schemas to repo/data/history reads plus web/browser inspection and
+also blocks forbidden calls at execute time, including local writes, commits,
+review mutation, runtime control, tool expansion, skills, MCP/extensions, shell,
+and further `schedule_task` recursion. Generic `data_read`/`data_list` behavior
+is unchanged for normal tasks, but subagents additionally deny known
+secret/control files such as `settings.json`, token/credential/key files, and
+secret-like owner-state paths. Browser tools remain available for remote-page
+inspection, but subagents fail closed instead of auto-installing browser
+dependencies and cannot browse or act on loopback/local or non-HTTP URLs, make
+browser subrequests to loopback/local URLs, or run arbitrary browser JavaScript.
+
+`memory_mode=forked` is the default and uses the same child-drive mechanism as
+headless workspaces: copy stable memory seed files only (`identity.md`,
+`WORLD.md`, `registry.md`, `knowledge/`) into
+`data/state/headless_tasks/<task_id>/data`, without dialogue history, scratchpad
+blocks, task history, or auto-merge. `empty` creates a blank child drive.
+`shared` keeps the parent drive and should be used only when shared local state
+is an explicit parent decision. On completion, only the child task result is
+copied back to the parent drive; identity, scratchpad, registry, knowledge,
+dialogue blocks, and `memory_export` are never merged or exported
+automatically. v1 subagents are leaf workers: the schema and execute-time gate
+hide and block `schedule_task`, while the supervisor keeps a structural depth
+cap of 2 and a maximum of 3 active child tasks per `root_task_id`.
 
 ### Two-process model
 

@@ -151,11 +151,12 @@ Used by `repo_commit` for all changes to the Ouroboros repository.
 | 14 | cross_platform | Does the diff use platform-specific APIs (`os.kill`, `os.setsid`, `os.killpg`, `os.getpgid`, `fcntl`, `msvcrt`, `signal.SIGKILL`, `signal.SIGTERM`, `subprocess` with `start_new_session`/`creationflags`, hardcoded `/` or `\\` in filesystem paths) outside of `ouroboros/platform_layer.py`? Does it import Unix-only or Windows-only modules (`fcntl`, `msvcrt`, `winreg`, `resource`) at any level without a platform guard (`sys.platform`/`IS_WINDOWS` check)? | critical |
 | 15 | changelog_accuracy | Do the exact wording, test counts, and minor description details in the README Version History row match what the diff actually does? Wording drift, off-by-one test counts, minor inaccuracies in descriptive prose — these belong here, NOT in `self_consistency` or `changelog_and_badge`. This item exists so reviewers have a dedicated advisory bucket for prose-level changelog imprecision that does not affect release metadata, runtime behavior, or safety contracts. | advisory |
 | 16 | gateway_parity | If the diff changes any browser-facing endpoint, WebSocket message, or frontend API call, are `ouroboros/gateway/contracts.py`, `ouroboros/gateway/router.py`, `web/modules/api_client.js`, `web/modules/api_types.js`, and `tests/test_gateway_parity.py` still aligned? Missing alignment is advisory unless it also breaks a frozen contract, safety guard, release metadata, or runtime behavior. | advisory |
+| 17 | subagent_isolation | If the diff changes `schedule_task`, child-task queueing, task constraints, tool discovery/execution, data reads, or memory handoff, does it preserve the accepted live-subagent contract: strict `objective` + `expected_output` schema, inferred lineage, `local_readonly_subagent` schema and execute-time allowlist, subagent-scoped secret/control-file denial for data tools, no grandchildren, no local writes/commits/review/runtime/tool-expansion/skills/MCP/shell, full task-result handoff, and tests for both allowed and blocked paths? | critical |
 
 ### Severity rules
 
 - Items 1-5 are always critical.
-- Items 6-10, 14 are conditionally critical: FAIL only when the condition applies.
+- Items 6-10, 14, and 17 are conditionally critical: FAIL only when the condition applies.
   If the condition does not apply, write verdict PASS with a short reason
   (e.g. "Not applicable — no code logic change").
 - Items 11-12 and 15-16 are advisory: FAIL produces a warning but does not block.

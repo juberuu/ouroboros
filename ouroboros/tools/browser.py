@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import ipaddress
 import logging
 import os
 import pathlib
@@ -11,6 +12,7 @@ import subprocess
 import sys
 import threading
 from typing import Any, Dict, List
+from urllib.parse import urlparse
 
 try:
     from playwright_stealth import Stealth
@@ -19,11 +21,36 @@ except ImportError:
     _HAS_STEALTH = False
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
+from ouroboros.contracts.task_constraint import normalize_task_constraint
+from ouroboros.server_auth import is_loopback_host
+from ouroboros.tool_capabilities import LOCAL_READONLY_SUBAGENT_MODE
 
 log = logging.getLogger(__name__)
 
 _playwright_ready = False
 _MISSING_EXECUTABLE_RE = re.compile(r"Executable doesn't exist at ([^\n]+)")
+
+
+def _is_subagent_blocked_browser_url(url: str) -> bool:
+    parsed = urlparse(str(url or ""))
+    if parsed.scheme not in {"http", "https"}:
+        return True
+    host = (parsed.hostname or "").strip().rstrip(".").lower()
+    if not host:
+        return True
+    if is_loopback_host(host) or host == "localhost":
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return bool(
+        ip.is_loopback
+        or ip.is_private
+        or ip.is_link_local
+        or ip.is_unspecified
+        or ip.is_reserved
+    )
 
 
 def _has_platform_chromium(local_browsers_dir: pathlib.Path) -> bool:
@@ -83,7 +110,7 @@ def _set_playwright_browsers_path_if_bundled() -> None:
 _set_playwright_browsers_path_if_bundled()
 
 
-def _ensure_playwright_installed():
+def _ensure_playwright_installed(*, allow_install: bool = True):
     """Install Playwright and Chromium if not already available."""
     global _playwright_ready
     if _playwright_ready:
@@ -92,6 +119,8 @@ def _ensure_playwright_installed():
     try:
         import playwright  # noqa: F401
     except ImportError:
+        if not allow_install:
+            raise RuntimeError("Browser tools are unavailable in local_readonly_subagent mode because Playwright is not already installed.")
         if getattr(sys, 'frozen', False):
             raise RuntimeError(
                 "Browser tools require Playwright, which is not bundled. "
@@ -114,6 +143,10 @@ def _ensure_playwright_installed():
             raise RuntimeError(f"Playwright chromium binary not found at {executable_path}")
         log.info("Playwright chromium binary found")
     except Exception:
+        if not allow_install:
+            raise RuntimeError(
+                "Browser tools are unavailable in local_readonly_subagent mode because Chromium is not already installed."
+            )
         if getattr(sys, 'frozen', False):
             raise RuntimeError(
                 "Playwright chromium binary not found. "
@@ -172,7 +205,7 @@ def _maybe_alias_playwright_binary(exc: Exception) -> bool:
         return False
 
 
-def _launch_browser_with_fallback(pw_instance: Any) -> Any:
+def _launch_browser_with_fallback(pw_instance: Any, *, allow_cache_write: bool = True) -> Any:
     launch_kwargs = {
         "headless": True,
         "args": [
@@ -186,7 +219,7 @@ def _launch_browser_with_fallback(pw_instance: Any) -> Any:
     try:
         return pw_instance.chromium.launch(**launch_kwargs)
     except Exception as exc:
-        if _maybe_alias_playwright_binary(exc):
+        if allow_cache_write and _maybe_alias_playwright_binary(exc):
             return pw_instance.chromium.launch(**launch_kwargs)
         raise
 
@@ -210,7 +243,9 @@ def _ensure_browser(ctx: ToolContext):
             log.debug("Browser connection check failed", exc_info=True)
         cleanup_browser(ctx)
 
-    _ensure_playwright_installed()
+    task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
+    readonly_subagent = bool(task_constraint and task_constraint.mode == LOCAL_READONLY_SUBAGENT_MODE)
+    _ensure_playwright_installed(allow_install=not readonly_subagent)
 
     if bs.pw_instance is None:
         from playwright.sync_api import sync_playwright
@@ -218,7 +253,7 @@ def _ensure_browser(ctx: ToolContext):
         setattr(bs, "_thread_id", current_thread_id)
         log.info("Created Playwright instance in thread %s", current_thread_id)
 
-    bs.browser = _launch_browser_with_fallback(bs.pw_instance)
+    bs.browser = _launch_browser_with_fallback(bs.pw_instance, allow_cache_write=not readonly_subagent)
     bs.page = bs.browser.new_page(
         viewport={"width": 1920, "height": 1080},
         user_agent=(
@@ -232,6 +267,13 @@ def _ensure_browser(ctx: ToolContext):
         stealth.apply_stealth_sync(bs.page)
 
     bs.page.set_default_timeout(30000)
+    if readonly_subagent:
+        bs.page.route(
+            "**/*",
+            lambda route: route.abort()
+            if _is_subagent_blocked_browser_url(route.request.url)
+            else route.continue_(),
+        )
     return bs.page
 
 
@@ -319,6 +361,12 @@ def _extract_page_output(page: Any, output: str, ctx: ToolContext) -> str:
         data = page.screenshot(type="png", full_page=False)
         b64 = base64.b64encode(data).decode()
         ctx.browser_state.last_screenshot_b64 = b64
+        task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
+        if task_constraint and task_constraint.mode == LOCAL_READONLY_SUBAGENT_MODE:
+            return (
+                f"Screenshot captured ({len(b64)} bytes base64). "
+                "Use analyze_screenshot to inspect it."
+            )
         return (
             f"Screenshot captured ({len(b64)} bytes base64). "
             f"Call send_photo(image_base64='__last_screenshot__') to deliver it to the user."
@@ -337,6 +385,10 @@ def _extract_page_output(page: Any, output: str, ctx: ToolContext) -> str:
 def _browse_page(ctx: ToolContext, url: str, output: str = "text",
                  wait_for: str = "", timeout: int = 30000,
                  viewport: str = "") -> str:
+    task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
+    readonly_subagent = bool(task_constraint and task_constraint.mode == LOCAL_READONLY_SUBAGENT_MODE)
+    if readonly_subagent and _is_subagent_blocked_browser_url(str(url or "")):
+        return "⚠️ BROWSER_LOCAL_READONLY_BLOCKED: subagents cannot browse local, loopback, or non-HTTP URLs."
     try:
         page = _ensure_browser(ctx)
         if viewport:
@@ -344,6 +396,8 @@ def _browse_page(ctx: ToolContext, url: str, output: str = "text",
         page.goto(url, timeout=timeout, wait_until="domcontentloaded")
         if wait_for:
             page.wait_for_selector(wait_for, timeout=timeout)
+        if readonly_subagent and _is_subagent_blocked_browser_url(str(getattr(page, "url", "") or "")):
+            return "⚠️ BROWSER_LOCAL_READONLY_BLOCKED: subagents cannot browse local, loopback, or non-HTTP URLs."
         return _extract_page_output(page, output, ctx)
     except Exception as e:
         if _is_infrastructure_error(ctx):
@@ -355,6 +409,8 @@ def _browse_page(ctx: ToolContext, url: str, output: str = "text",
             page.goto(url, timeout=timeout, wait_until="domcontentloaded")
             if wait_for:
                 page.wait_for_selector(wait_for, timeout=timeout)
+            if readonly_subagent and _is_subagent_blocked_browser_url(str(getattr(page, "url", "") or "")):
+                return "⚠️ BROWSER_LOCAL_READONLY_BLOCKED: subagents cannot browse local, loopback, or non-HTTP URLs."
             return _extract_page_output(page, output, ctx)
         raise
 
@@ -371,40 +427,53 @@ def _apply_viewport(page: Any, viewport: str) -> None:
 
 def _browser_action(ctx: ToolContext, action: str, selector: str = "",
                     value: str = "", timeout: int = 5000) -> str:
+    normalized_action = str(action or "").strip().lower()
+    task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
+    readonly_subagent = bool(task_constraint and task_constraint.mode == LOCAL_READONLY_SUBAGENT_MODE)
+    if readonly_subagent and normalized_action == "evaluate":
+        return "⚠️ BROWSER_LOCAL_READONLY_BLOCKED: subagents cannot run arbitrary browser JavaScript."
+
     def _do_action():
         page = _ensure_browser(ctx)
+        if readonly_subagent and _is_subagent_blocked_browser_url(str(getattr(page, "url", "") or "")):
+            return "⚠️ BROWSER_LOCAL_READONLY_BLOCKED: subagents cannot act on local, loopback, or non-HTTP pages."
 
-        if action == "click":
+        if normalized_action == "click":
             if not selector:
                 return "Error: selector required for click"
             page.click(selector, timeout=timeout)
             page.wait_for_timeout(500)
             return f"Clicked: {selector}"
-        elif action == "fill":
+        elif normalized_action == "fill":
             if not selector:
                 return "Error: selector required for fill"
             page.fill(selector, value, timeout=timeout)
             return f"Filled {selector} with: {value}"
-        elif action == "select":
+        elif normalized_action == "select":
             if not selector:
                 return "Error: selector required for select"
             page.select_option(selector, value, timeout=timeout)
             return f"Selected {value} in {selector}"
-        elif action == "screenshot":
+        elif normalized_action == "screenshot":
             data = page.screenshot(type="png", full_page=False)
             b64 = base64.b64encode(data).decode()
             ctx.browser_state.last_screenshot_b64 = b64
+            if readonly_subagent:
+                return (
+                    f"Screenshot captured ({len(b64)} bytes base64). "
+                    "Use analyze_screenshot to inspect it."
+                )
             return (
                 f"Screenshot captured ({len(b64)} bytes base64). "
                 f"Call send_photo(image_base64='__last_screenshot__') to deliver it to the user."
             )
-        elif action == "evaluate":
+        elif normalized_action == "evaluate":
             if not value:
                 return "Error: value (JS code) required for evaluate"
             result = page.evaluate(value)
             out = str(result)
             return out[:20000] + ("... [truncated]" if len(out) > 20000 else "")
-        elif action == "scroll":
+        elif normalized_action == "scroll":
             direction = value or "down"
             if direction == "down":
                 page.evaluate("window.scrollBy(0, 600)")

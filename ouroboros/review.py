@@ -25,10 +25,10 @@ TARGET_FUNCTION_LINES = 150
 MAX_FUNCTION_LINES = 300
 # Ceiling covers safety, review-state, tools/git, skills/extensions, gateway
 # helpers, the packaged CLI bridge/installer, the v5.32 generated Atlas
-# compiler/tests, and the v5.33 external-workspace CLI artifact/preflight
-# contract plus cycle-1/2 review hardening. Keep this tight and lower it again
-# when the headless helpers settle.
-MAX_TOTAL_FUNCTIONS = 2236
+# compiler/tests, v5.33 external-workspace CLI artifact/preflight contract,
+# and the v6.0 live subagent strict-schema/isolation/browser-guard tests. Keep
+# this tight and lower it again when the headless/subagent helpers settle.
+MAX_TOTAL_FUNCTIONS = 2250
 # Grandfathered modules are accepted debt until their surfaces stabilize/split.
 GRANDFATHERED_OVERSIZED_MODULES = {
     "llm.py",

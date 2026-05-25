@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
@@ -21,7 +22,12 @@ from ouroboros.runtime_mode_policy import (
     protected_paths_in,
     protected_write_block_message,
 )
-from ouroboros.tool_capabilities import CORE_TOOL_NAMES
+from ouroboros.tool_capabilities import (
+    CORE_TOOL_NAMES,
+    LOCAL_READONLY_SUBAGENT_MODE,
+    LOCAL_READONLY_SUBAGENT_TOOL_NAMES,
+    META_TOOL_NAMES,
+)
 from ouroboros.tools.shell_parse import (
     EMBEDDED_ABSOLUTE_PATH_RE,
     shell_argv,
@@ -692,28 +698,60 @@ class ToolRegistry:
 
     # Contract.
 
+    def _is_local_readonly_subagent(self) -> bool:
+        task_constraint = normalize_task_constraint(getattr(self._ctx, "task_constraint", None))
+        return bool(task_constraint and task_constraint.mode == LOCAL_READONLY_SUBAGENT_MODE)
+
+    def initial_tool_names(self) -> frozenset[str]:
+        if self._is_local_readonly_subagent():
+            return LOCAL_READONLY_SUBAGENT_TOOL_NAMES
+        return frozenset(set(CORE_TOOL_NAMES) | set(META_TOOL_NAMES))
+
     def available_tools(self) -> List[str]:
         workspace_mode = bool(getattr(self._ctx, "is_workspace_mode", lambda: False)())
+        local_readonly_subagent = self._is_local_readonly_subagent()
         return [
             e.name
             for e in self._entries.values()
             if not workspace_mode or e.name in _WORKSPACE_ALLOWED_TOOLS
+            if not local_readonly_subagent or e.name in LOCAL_READONLY_SUBAGENT_TOOL_NAMES
         ]
 
     def _schema_for_entry(self, entry: ToolEntry) -> Dict[str, Any]:
-        return {"type": "function", "function": entry.schema}
+        schema = entry.schema
+        if self._is_local_readonly_subagent() and entry.name in {"browse_page", "browser_action"}:
+            schema = copy.deepcopy(entry.schema)
+            if entry.name == "browse_page":
+                schema["description"] = ("Open an external HTTP(S) URL in headless browser. Returns page content as text, html, markdown, or screenshot (base64 PNG). "
+                                         "Local, loopback, private-network, and non-HTTP URLs are blocked for subagents. Use analyze_screenshot to inspect screenshots. "
+                                         "Use viewport to test mobile layouts (e.g. '375x812').")
+            if entry.name == "browser_action":
+                schema["description"] = ("Perform action on current external browser page. Actions: click (selector), fill (selector + value), select (selector + value), "
+                                         "screenshot (base64 PNG), scroll (value: up/down/top/bottom). JavaScript evaluate is unavailable to local-readonly subagents.")
+                props = schema.get("parameters", {}).get("properties", {})
+                action_schema = props.get("action", {})
+                if isinstance(action_schema.get("enum"), list):
+                    action_schema["enum"] = [name for name in action_schema["enum"] if name != "evaluate"]
+                value_schema = props.get("value", {})
+                if isinstance(value_schema, dict):
+                    value_schema["description"] = "Value for fill/select or direction for scroll"
+        return {"type": "function", "function": schema}
 
     def _schemas_for_entry(self, entry: ToolEntry) -> List[Dict[str, Any]]:
         return [self._schema_for_entry(entry)]
 
     def schemas(self, core_only: bool = False) -> List[Dict[str, Any]]:
         workspace_mode = bool(getattr(self._ctx, "is_workspace_mode", lambda: False)())
+        local_readonly_subagent = self._is_local_readonly_subagent()
         built_in = [
             schema
             for entry in self._entries.values()
             if not workspace_mode or entry.name in _WORKSPACE_ALLOWED_TOOLS
+            if not local_readonly_subagent or entry.name in LOCAL_READONLY_SUBAGENT_TOOL_NAMES
             for schema in self._schemas_for_entry(entry)
         ]
+        if local_readonly_subagent:
+            return built_in
         # Include live extension tool schemas in normal tool discovery.
         try:
             from ouroboros.extension_loader import (
@@ -734,7 +772,7 @@ class ToolRegistry:
                     for tool in _ext_tools.values()
                     if _ext_is_live(str(tool.get("skill") or ""), pathlib.Path(self._ctx.drive_root))
                 ]
-            if workspace_mode:
+            if workspace_mode or local_readonly_subagent:
                 extension_schemas = []
         except Exception:
             extension_schemas = []
@@ -757,7 +795,7 @@ class ToolRegistry:
                     }
                     for tool in _mcp_get_manager().list_tools_for_registry()
                 ]
-                if workspace_mode:
+                if workspace_mode or local_readonly_subagent:
                     mcp_schemas = []
             except Exception:
                 mcp_schemas = []
@@ -767,16 +805,25 @@ class ToolRegistry:
         for e in self._entries.values():
             if workspace_mode and not e.name in _WORKSPACE_ALLOWED_TOOLS:
                 continue
-            if e.name in CORE_TOOL_NAMES or e.name in ("list_available_tools", "enable_tools"):
+            if local_readonly_subagent and e.name not in LOCAL_READONLY_SUBAGENT_TOOL_NAMES:
+                continue
+            if (
+                (local_readonly_subagent and e.name in LOCAL_READONLY_SUBAGENT_TOOL_NAMES)
+                or e.name in CORE_TOOL_NAMES
+                or e.name in ("list_available_tools", "enable_tools")
+            ):
                 result.extend(self._schemas_for_entry(e))
         # Extension tools are discoverable in core-mode; MCP stays opt-in.
-        return result + extension_schemas
+        return result + ([] if local_readonly_subagent else extension_schemas)
 
     def get_schema_by_name(self, name: str) -> Optional[Dict[str, Any]]:
         """Return the full schema for a specific tool."""
         requested = str(name or "").strip()
         workspace_mode = bool(getattr(self._ctx, "is_workspace_mode", lambda: False)())
+        local_readonly_subagent = self._is_local_readonly_subagent()
         if workspace_mode and not requested in _WORKSPACE_ALLOWED_TOOLS:
+            return None
+        if local_readonly_subagent and requested not in LOCAL_READONLY_SUBAGENT_TOOL_NAMES:
             return None
         entry = self._entries.get(requested)
         if entry:
@@ -791,7 +838,12 @@ class ToolRegistry:
                 ext_tool = _ext_get_tool(name)
             except Exception:
                 ext_tool = None
-            if ext_tool and not workspace_mode and _ext_is_live(str(ext_tool.get("skill") or ""), pathlib.Path(self._ctx.drive_root)):
+            if (
+                ext_tool
+                and not workspace_mode
+                and not local_readonly_subagent
+                and _ext_is_live(str(ext_tool.get("skill") or ""), pathlib.Path(self._ctx.drive_root))
+            ):
                 return {
                     "type": "function",
                     "function": {
@@ -810,7 +862,7 @@ class ToolRegistry:
         except Exception:
             _mcp_get_manager = None
             _mcp_is_name = None
-        if not workspace_mode and _mcp_get_manager and _mcp_is_name and _mcp_is_name(requested):
+        if not workspace_mode and not local_readonly_subagent and _mcp_get_manager and _mcp_is_name and _mcp_is_name(requested):
             mcp_tool = _mcp_get_manager().get_tool(requested)
             if mcp_tool:
                 return {
@@ -1230,12 +1282,24 @@ class ToolRegistry:
     def execute(self, name: str, args: Dict[str, Any]) -> str:
         name = str(name or "").strip()
         args = dict(args or {})
+        task_constraint = normalize_task_constraint(getattr(self._ctx, "task_constraint", None))
+        local_readonly_subagent = bool(task_constraint and task_constraint.mode == LOCAL_READONLY_SUBAGENT_MODE)
+        if local_readonly_subagent and name not in LOCAL_READONLY_SUBAGENT_TOOL_NAMES:
+            return (
+                "⚠️ LOCAL_READONLY_SUBAGENT_BLOCKED: this subagent may inspect "
+                "local repo/data/history plus web/browser surfaces, but may not "
+                f"call {name!r}. Parent tasks must perform writes, commits, "
+                "review gates, tool expansion, runtime control, skills, MCP, "
+                "extensions, shell, and further delegation."
+            )
         entry = self._entries.get(name)
         ext_tool = None
-        try:
-            from ouroboros.extension_loader import parse_extension_surface_name as _ext_parse_name
-        except Exception:
-            _ext_parse_name = None
+        _ext_parse_name = None
+        if not local_readonly_subagent:
+            try:
+                from ouroboros.extension_loader import parse_extension_surface_name as _ext_parse_name
+            except Exception:
+                _ext_parse_name = None
         if entry is None and _ext_parse_name and _ext_parse_name(name):
             try:
                 from ouroboros.extension_loader import get_tool as _ext_get_tool
@@ -1243,14 +1307,17 @@ class ToolRegistry:
             except Exception:
                 ext_tool = None
 
-        try:
-            from ouroboros.mcp_client import (
-                ensure_configured_from_settings as _mcp_ensure_configured,
-                is_mcp_tool_name as _mcp_is_name,
-            )
-            _mcp_ensure_configured(refresh=False)
-        except Exception:
+        if local_readonly_subagent:
             _mcp_is_name = None
+        else:
+            try:
+                from ouroboros.mcp_client import (
+                    ensure_configured_from_settings as _mcp_ensure_configured,
+                    is_mcp_tool_name as _mcp_is_name,
+                )
+                _mcp_ensure_configured(refresh=False)
+            except Exception:
+                _mcp_is_name = None
         is_mcp = bool(_mcp_is_name and _mcp_is_name(name))
 
         workspace_mode = bool(getattr(self._ctx, "is_workspace_mode", lambda: False)())
@@ -1258,10 +1325,9 @@ class ToolRegistry:
             workspace = str(getattr(self._ctx, "workspace_root", "") or "")
             return (
                 "⚠️ WORKSPACE_MODE_BLOCKED: this task is running against an external "
-                f"workspace ({workspace}). Tool {name!r} is outside the v5.29 "
-                "workspace allowlist. Leave workspace changes as files or a patch artifact."
+                f"workspace ({workspace}). Tool {name!r} is outside the workspace "
+                "allowlist. Leave workspace changes as files or a patch artifact."
             )
-
         # Hardcoded sandbox: light blocks repo mutation; advanced protects
         # core/contracts/release; pro still relies on commit review.
         try:
@@ -1270,7 +1336,6 @@ class ToolRegistry:
         except Exception:
             _runtime_mode = "advanced"
 
-        task_constraint = normalize_task_constraint(getattr(self._ctx, "task_constraint", None))
         heal_no_enable = bool(task_constraint and task_constraint.mode == "skill_repair")
         if heal_no_enable:
             heal_skill = task_constraint.skill_name if task_constraint else ""
