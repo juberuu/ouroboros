@@ -258,6 +258,8 @@ function collectSecretValue(id, body) {
 const SETTINGS_FALLBACK_MODELS = [
     'google/gemini-3.5-flash',
     'anthropic/claude-sonnet-4.6',
+    'anthropic/claude-opus-4.7',
+    'anthropic::claude-opus-4-7',
     'anthropic::claude-opus-4-6',
     'anthropic::claude-sonnet-4-6',
     'openai::gpt-5.5',
@@ -462,6 +464,14 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             if (allowFalsy ? value !== null && value !== undefined : value) byId(id).value = value;
             else byId(id).value = fallback;
         });
+        (Array.isArray(setupContract.budgetFields) ? setupContract.budgetFields : []).forEach((field) => {
+            const id = field.settingsInputId;
+            const input = byId(id);
+            if (!input) return;
+            input.min = field.min || '0.01';
+            input.step = field.step || 'any';
+            input.value = s[field.settingKey] ?? field.default ?? '';
+        });
         applyMcpSettings(s);
         resetSecretClearFlags(page);
         syncEffortSegments(page);
@@ -575,6 +585,17 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             .filter(([, key]) => key !== 'OUROBOROS_RUNTIME_MODE')
             .forEach(([id, key]) => { body[key] = fieldValue(id); });
         NUMBER_FIELDS.forEach(([id, key, fallback]) => { body[key] = readInt(id, fallback); });
+        (Array.isArray(setupContract.budgetFields) ? setupContract.budgetFields : []).forEach((field) => {
+            const id = field.settingsInputId;
+            const input = byId(id);
+            if (!input) return;
+            const raw = String(input.value || '').trim();
+            const parsed = Number(raw);
+            const value = Number.isFinite(parsed) && parsed > 0 ? parsed : raw;
+            if (String(value) !== String(currentSettings?.[field.settingKey] ?? field.default)) {
+                body[field.settingKey] = value;
+            }
+        });
 
         page.querySelectorAll('[data-secret-setting]').forEach((input) => {
             collectSecretValue(input.id, body);
@@ -672,6 +693,11 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
 
     window.addEventListener('ouro:skill-lifecycle', (event) => {
         const action = String(event.detail?.action || 'skills changed');
+        refreshSettingsAfterExtensionChange(action);
+    });
+    window.addEventListener('ouro:settings-updated', (event) => {
+        if (event.detail?.source === 'settings') return;
+        const action = String(event.detail?.reason || 'settings changed');
         refreshSettingsAfterExtensionChange(action);
     });
     if (ws && typeof ws.on === 'function') {
@@ -885,6 +911,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
                 statusType = 'warn';
             }
             setStatus(statusMsg, statusType);
+            window.dispatchEvent(new CustomEvent('ouro:settings-updated', { detail: { reason: 'settings saved', source: 'settings' } }));
         } catch (e) {
             setStatus('Failed to save: ' + e.message, 'warn');
         }

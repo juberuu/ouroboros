@@ -493,7 +493,7 @@ export function renderSettingsPage() {
 
                     <div class="form-section">
                         <h3>Runtime Limits</h3>
-                        <div class="settings-section-copy">Workers control parallel task capacity. Timeout values are safety rails for long or stuck tasks and tools.</div>
+                        <div class="settings-section-copy">Workers control parallel task capacity. Timeout values are safety rails for long or stuck tasks and tools. Budget limits control runtime cost thresholds.</div>
                         <div class="form-grid two">
                             <div class="form-field">
                                 <label>Max Workers</label>
@@ -510,6 +510,14 @@ export function renderSettingsPage() {
                             <div class="form-field">
                                 <label>Tool Timeout (s)</label>
                                 <input id="s-tool-timeout" type="number" value="120">
+                            </div>
+                            <div class="form-field">
+                                <label>Total Budget (USD)</label>
+                                <input id="s-total-budget" type="number" min="0.01" step="any" value="10.0">
+                            </div>
+                            <div class="form-field">
+                                <label>Per-Task Soft Threshold (USD)</label>
+                                <input id="s-settings-per-task-cost" type="number" min="0.01" step="any" value="20.0">
                             </div>
                         </div>
                     </div>

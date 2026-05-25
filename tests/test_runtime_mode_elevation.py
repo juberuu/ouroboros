@@ -69,6 +69,18 @@ def _seed_disk(settings_path: pathlib.Path, payload: dict) -> None:
     settings_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def _clear_safety_provider_env(monkeypatch) -> None:
+    """Keep post-check tests from depending on live safety LLM credentials."""
+    for key in (
+        "OPENROUTER_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_COMPATIBLE_API_KEY",
+        "CLOUDRU_FOUNDATION_MODELS_API_KEY",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+
 # ---------------------------------------------------------------------------
 # 1. save_settings chokepoint
 # ---------------------------------------------------------------------------
@@ -619,7 +631,7 @@ def test_generic_settings_save_preserves_pending_runtime_mode_without_hot_apply(
     assert save_resp.status_code == 200, save_resp.text
     on_disk = json.loads(isolated_settings.read_text(encoding="utf-8"))
     assert on_disk["OUROBOROS_RUNTIME_MODE"] == next_mode
-    assert on_disk["TOTAL_BUDGET"] == "77"
+    assert on_disk["TOTAL_BUDGET"] == 77.0
     assert os.environ["OUROBOROS_RUNTIME_MODE"] == "advanced"
     assert os.environ["OUROBOROS_BOOT_RUNTIME_MODE"] == "advanced"
 
@@ -1381,6 +1393,7 @@ def test_files_api_owner_only_helper_blocks_symlinked_skill_state_dir(tmp_path, 
 def test_run_shell_blocks_obfuscated_skill_owner_state_write(filename, tmp_path, monkeypatch):
     from ouroboros.tools.registry import ToolRegistry
 
+    _clear_safety_provider_env(monkeypatch)
     drive_root = tmp_path / "data"
     skill_state_dir = drive_root / "state" / "skills" / "weather"
     skill_state_dir.mkdir(parents=True)
@@ -1452,6 +1465,7 @@ def test_run_shell_scans_scripts_relative_to_cwd(tmp_path, monkeypatch):
     from ouroboros.tools.registry import ToolRegistry
     import sys
 
+    _clear_safety_provider_env(monkeypatch)
     repo_dir = tmp_path / "repo"
     subdir = repo_dir / "sub"
     subdir.mkdir(parents=True)

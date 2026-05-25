@@ -134,23 +134,23 @@ def test_apply_runtime_provider_defaults_keeps_explicit_official_openai_review_m
     assert normalized["OUROBOROS_REVIEW_MODELS"] == "openai::gpt-5.5,openai::gpt-5.5-mini"
 
 
-def test_apply_runtime_provider_defaults_refreshes_retired_opus_defaults_with_openrouter():
-    old_openrouter = "anthropic/claude-opus-" + "4.7"
-    old_claude_code = "claude-opus-" + "4-7[1m]"
+def test_apply_runtime_provider_defaults_preserves_current_opus47_defaults_with_openrouter():
+    current_openrouter = "anthropic/claude-opus-" + "4.7"
+    current_claude_code = "claude-opus-" + "4-7[1m]"
     normalized, changed, changed_keys = apply_runtime_provider_defaults({
         "OPENROUTER_API_KEY": "sk-or",
-        "OUROBOROS_MODEL": old_openrouter,
-        "OUROBOROS_MODEL_CODE": old_openrouter,
-        "OUROBOROS_REVIEW_MODELS": f"openai/gpt-5.5,{old_openrouter}",
-        "CLAUDE_CODE_MODEL": old_claude_code,
+        "OUROBOROS_MODEL": current_openrouter,
+        "OUROBOROS_MODEL_CODE": current_openrouter,
+        "OUROBOROS_REVIEW_MODELS": f"openai/gpt-5.5,{current_openrouter}",
+        "CLAUDE_CODE_MODEL": current_claude_code,
     })
 
-    assert changed
-    assert "OUROBOROS_MODEL" in changed_keys
-    assert normalized["OUROBOROS_MODEL"] == "anthropic/claude-opus-4.6"
-    assert normalized["OUROBOROS_MODEL_CODE"] == "anthropic/claude-opus-4.6"
-    assert normalized["OUROBOROS_REVIEW_MODELS"] == "openai/gpt-5.5,anthropic/claude-opus-4.6"
-    assert normalized["CLAUDE_CODE_MODEL"] == "claude-opus-4-6[1m]"
+    assert not changed
+    assert changed_keys == []
+    assert normalized["OUROBOROS_MODEL"] == current_openrouter
+    assert normalized["OUROBOROS_MODEL_CODE"] == current_openrouter
+    assert normalized["OUROBOROS_REVIEW_MODELS"] == f"openai/gpt-5.5,{current_openrouter}"
+    assert normalized["CLAUDE_CODE_MODEL"] == current_claude_code
 
 
 def test_apply_runtime_provider_defaults_refreshes_retired_gpt54_defaults():

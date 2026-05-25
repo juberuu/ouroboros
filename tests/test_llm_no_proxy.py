@@ -107,10 +107,7 @@ def test_chat_anthropic_no_proxy_false_uses_requests_post():
         "role": "assistant",
     }
 
-    post_called = []
     session_called = []
-
-    import requests as _requests
 
     class FakeSession:
         def __init__(self):
@@ -119,14 +116,30 @@ def test_chat_anthropic_no_proxy_false_uses_requests_post():
             session_called.append(True)
             return fake_response
 
-    with patch("requests.post", side_effect=lambda *a, **kw: (post_called.append(True), fake_response)[1]), \
+    fake_post = MagicMock(return_value=fake_response)
+
+    with patch("requests.post", side_effect=fake_post), \
          patch("requests.Session", FakeSession):
         client._chat_anthropic(
             target, messages, None, "medium", 1024, "auto", None, no_proxy=False
         )
+        target["resolved_model"] = "claude-opus-4-7"
+        target["usage_model"] = "anthropic/claude-opus-4.7"
+        client._chat_anthropic(
+            target, messages, None, "medium", 1024, "auto", 0.2, no_proxy=False
+        )
 
-    assert len(post_called) == 1, "requests.post should be called for no_proxy=False"
+    direct_target = client._resolve_remote_target("anthropic::claude-opus-4.7")
+
+    assert fake_post.call_count == 2, "requests.post should be called for no_proxy=False"
     assert len(session_called) == 0, "Session should NOT be used for no_proxy=False"
+    captured_payloads = [call.kwargs.get("json") or {} for call in fake_post.call_args_list]
+    assert captured_payloads[1]["model"] == "claude-opus-4-7"
+    assert "temperature" not in captured_payloads[1]
+    assert "thinking" not in captured_payloads[1]
+    assert direct_target["provider"] == "anthropic"
+    assert direct_target["resolved_model"] == "claude-opus-4-7"
+    assert direct_target["usage_model"] == "anthropic/claude-opus-4-7"
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +207,8 @@ def test_chat_async_no_proxy_non_anthropic_uses_httpx_async_client():
     fake_oa_client.chat.completions.create = fake_create
 
     with patch("httpx.AsyncClient", FakeAsyncClient), \
-         patch("openai.AsyncOpenAI", return_value=fake_oa_client):
+         patch("openai.AsyncOpenAI", return_value=fake_oa_client), \
+         patch("requests.get", side_effect=AssertionError("no_proxy must not use requests.get")):
         asyncio.run(
             client.chat_async(messages=messages, model=model, no_proxy=True)
         )

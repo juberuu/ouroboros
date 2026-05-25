@@ -239,13 +239,12 @@
     }
 
     function validateBudgetStep() {
-        const totalBudget = Number(state.totalBudget);
-        const perTaskCostUsd = Number(state.perTaskCostUsd);
-        if (!Number.isFinite(totalBudget) || totalBudget <= 0) {
-            return 'Total budget must be greater than zero.';
-        }
-        if (!Number.isFinite(perTaskCostUsd) || perTaskCostUsd <= 0) {
-            return 'Per-task soft threshold must be greater than zero.';
+        for (const field of BUDGET_FIELDS) {
+            const value = Number(state[field.stateKey]);
+            const min = Number(field.min || 0.01);
+            if (!Number.isFinite(value) || value < min) {
+                return `${field.title || field.label || 'Budget'} must be greater than zero.`;
+            }
         }
         return '';
     }
@@ -676,7 +675,7 @@
                             <h3>${escapeHtml(field.title)}</h3>
                             <div class="field">
                                 <label for="${escapeHtml(field.inputId)}">${escapeHtml(field.label)}</label>
-                                <input id="${escapeHtml(field.inputId)}" type="number" min="1" step="1" value="${escapeHtml(state[field.stateKey])}">
+                                <input id="${escapeHtml(field.inputId)}" type="number" min="${escapeHtml(field.min || '0.01')}" step="${escapeHtml(field.step || 'any')}" value="${escapeHtml(state[field.stateKey])}">
                                 <div class="field-note">${escapeHtml(field.note)}</div>
                             </div>
                         </div>

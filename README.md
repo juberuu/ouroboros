@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 6.1.0-rc.1](https://img.shields.io/badge/version-6.1.0--rc.1-green.svg)](VERSION)
+[![Version 6.2.0-rc.1](https://img.shields.io/badge/version-6.2.0--rc.1-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -31,7 +31,7 @@ Not a coding assistant. A digital being with a constitution, background consciou
 | **Linux** x86_64 | [Ouroboros-linux.tar.gz](https://github.com/joi-lab/ouroboros-desktop/releases/latest) | Extract → run `./Ouroboros/Ouroboros` → optional CLI: `./Ouroboros/bin/install-ouroboros-cli`. If browser tools fail due to missing system libs, run: `./Ouroboros/python-standalone/bin/python3 -m playwright install-deps chromium` |
 | **Windows** x64 | [Ouroboros-windows.zip](https://github.com/joi-lab/ouroboros-desktop/releases/latest) | Extract → run `Ouroboros\Ouroboros.exe` → optional CLI: `Ouroboros\bin\install-ouroboros-cli.cmd` |
 
-Prerelease RC artifacts are published on their tag page, for example [`v6.1.0-rc.1`](https://github.com/joi-lab/ouroboros-desktop/releases/tag/v6.1.0-rc.1); `/releases/latest` intentionally stays on the latest stable release.
+Prerelease RC artifacts are published on their tag page, for example [`v6.2.0-rc.1`](https://github.com/joi-lab/ouroboros-desktop/releases/tag/v6.2.0-rc.1); `/releases/latest` intentionally stays on the latest stable release.
 
 <p align="center">
   <img src="assets/setup.png" width="500" alt="Drag Ouroboros.app to install">
@@ -475,13 +475,13 @@ not paraphrase it.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 6.2.0-rc.1 | 2026-05-25 | **rc(ui/runtime): port multi-attachment chat and budget/model fixes.** Adds bounded multi-file chat staging with partial-upload cleanup, shares budget controls between Settings and Costs with validation, preserves Anthropic Opus 4.7 routing, updates current model pricing fallbacks, and avoids no-op settings reconfiguration side effects. |
 | 6.1.0-rc.1 | 2026-05-25 | **rc(runtime): harden live subagent handoff, isolation, and UI lineage.** Adds effective task-status SSOT, real bounded wait tools including `wait_for_tasks`, forged subagent ingress rejection, strict local-readonly constraints, DNS fail-closed browser isolation, child-drive mailbox routing/retention, web_search source attribution, lineage-aware cost observability, threaded child cards, and focused regressions. |
 | 6.0.0 | 2026-05-25 | **major(runtime): add live local-readonly subagents.** Upgrades `schedule_task` to a strict child-task contract, runs leaf subagents through the existing queue and workers with forked memory by default, enforces schema and execute-time local-readonly isolation, preserves full task-result handoff, and documents the delegation review rules. |
 | 5.33.0-rc.6 | 2026-05-24 | **rc(gateway): prevent masking upload connection/parse faults as size-limit errors.** Introduces a typed ChatUploadPayloadTooLarge exception class to isolate file-size 413 blocks from connection cuts and form-parse faults, returning a standard 400 with original message for ASGI/socket errors. Includes focused test coverage. |
 | 5.33.0-rc.5 | 2026-05-24 | **rc(gateway): prevent masking upload connection/parse faults as size-limit errors.** Refactors the chat upload ASGI stream wrapper to verify if caught exceptions are indeed the 'oversized' signal before returning a 413, returning a 400 with the original error message for connection cuts and malformed formats. |
 | 5.33.0-rc.4 | 2026-05-24 | **rc(accessibility): attach aria-disabled state to submit buttons.** Adds explicit accessibility annotations to clickable-disabled card options so both visual rendering and assistive device readouts correctly convey blocked submission context. |
-| 5.33.0-rc.3 | 2026-05-24 | **rc(skills): provide explicit toast warnings on disabled hub submissions.** Replaces native button disabled attributes on OuroborosHub card options to catch all clicks, displaying actionable warnings explaining exact review or check conditions rather than silent dropdown closures. |
-Older releases are preserved in Git tags and GitHub releases. The 5.2.0 through 5.33.0-rc.2 rows and former `4.0.0` rows are rolled off to respect the P9 changelog cap; their full bodies remain at their git tags.
+Older releases are preserved in Git tags and GitHub releases. The 5.2.0 through 5.33.0-rc.3 rows and former `4.0.0` rows are rolled off to respect the P9 changelog cap; their full bodies remain at their git tags.
 
 ---
 

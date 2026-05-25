@@ -14,6 +14,9 @@ const CHAT_STORAGE_KEY = 'ouro_chat';
 const CHAT_INPUT_HISTORY_KEY = 'ouro_chat_input_history';
 const CHAT_SESSION_ID_KEY = 'ouro_chat_session_id';
 const PLAN_PREFIX = 'Please do multi-model planning (plan_task tool) and web-search before answering or starting this task:\n\n';
+const MAX_PENDING_ATTACHMENTS = 10;
+const MAX_ATTACHMENT_FILE_BYTES = 50 * 1024 * 1024;
+const MAX_PENDING_ATTACHMENT_BYTES = 100 * 1024 * 1024;
 
 function getOrCreateChatSessionId() {
     try {
@@ -81,7 +84,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
                 <button class="chat-attach-btn" id="chat-attach" type="button" title="Attach file">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
                 </button>
-                <input type="file" id="chat-file-input" class="chat-file-input-hidden" accept="*/*">
+                <input type="file" id="chat-file-input" class="chat-file-input-hidden" accept="*/*" multiple>
                 <textarea id="chat-input" placeholder="Message Ouroboros..." rows="1" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
                 <div class="chat-send-group">
                     <button class="chat-send-inline" id="chat-send" title="Send message">Send</button>
@@ -118,37 +121,107 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
     const attachBtn = document.getElementById('chat-attach');
     const fileInput = document.getElementById('chat-file-input');
     const attachmentPreview = document.getElementById('chat-attachment-preview');
-    let pendingAttachment = null;
+    let pendingAttachments = [];
+    let attachmentsUploading = false;
 
-    // Shared paperclip/paste stager; upload still happens only on Send.
-    function stagePendingFile(file) {
-        if (!file) return;
-        pendingAttachment = { file, display_name: file.name };
-        attachmentPreview.classList.add('visible');
-        attachmentPreview.innerHTML = `
-            <span class="attach-badge">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
-                <span class="attach-name">${escapeHtml(file.name)}</span>
-                <button class="attach-remove" type="button" title="Remove">×</button>
-            </span>
-        `;
-        requestAnimationFrame(() => updateMessagesPadding({ preserveStickiness: false }));
-        attachmentPreview.querySelector('.attach-remove').addEventListener('click', () => {
-            pendingAttachment = null;
+    function pendingAttachmentBytes(items = pendingAttachments) {
+        return items.reduce((total, item) => total + Number(item.file?.size || 0), 0);
+    }
+
+    function updateAttachmentPreview() {
+        if (!pendingAttachments.length) {
             attachmentPreview.classList.remove('visible');
             attachmentPreview.innerHTML = '';
             requestAnimationFrame(() => updateMessagesPadding({ preserveStickiness: false }));
+            return;
+        }
+        attachmentPreview.classList.add('visible');
+        attachmentPreview.innerHTML = pendingAttachments.map((item) => `
+            <span class="attach-badge" data-attachment-id="${escapeHtmlAttr(item.id)}">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+                <span class="attach-name" title="${escapeHtmlAttr(item.display_name)}">${escapeHtml(item.display_name)}</span>
+                <button class="attach-remove" type="button" title="Remove" aria-label="Remove attachment ${escapeHtmlAttr(item.display_name)}" data-attachment-remove="${escapeHtmlAttr(item.id)}" ${attachmentsUploading ? 'disabled aria-disabled="true"' : ''}>×</button>
+            </span>
+        `).join('');
+        requestAnimationFrame(() => updateMessagesPadding({ preserveStickiness: false }));
+        attachmentPreview.querySelectorAll('[data-attachment-remove]').forEach((button) => {
+            button.addEventListener('click', () => {
+                if (attachmentsUploading) return;
+                const removeId = button.getAttribute('data-attachment-remove') || '';
+                pendingAttachments = pendingAttachments.filter((item) => item.id !== removeId);
+                updateAttachmentPreview();
+            });
         });
+    }
+
+    // Shared paperclip/paste stager; upload still happens only on Send.
+    function stagePendingFiles(files) {
+        const incoming = Array.from(files || []).filter(Boolean);
+        if (!incoming.length) return;
+        if (attachmentsUploading) {
+            showToast('Wait for the current upload to finish before changing attachments.', 'error');
+            return;
+        }
+        if (pendingAttachments.length + incoming.length > MAX_PENDING_ATTACHMENTS) {
+            showToast(`Attach up to ${MAX_PENDING_ATTACHMENTS} files per message.`, 'error');
+            return;
+        }
+        const oversized = incoming.find((file) => Number(file.size || 0) > MAX_ATTACHMENT_FILE_BYTES);
+        if (oversized) {
+            showToast(`Each attachment must be ${Math.round(MAX_ATTACHMENT_FILE_BYTES / (1024 * 1024))} MB or smaller.`, 'error');
+            return;
+        }
+        const incomingBytes = incoming.reduce((total, file) => total + Number(file.size || 0), 0);
+        if (pendingAttachmentBytes() + incomingBytes > MAX_PENDING_ATTACHMENT_BYTES) {
+            const limitMb = Math.round(MAX_PENDING_ATTACHMENT_BYTES / (1024 * 1024));
+            showToast(`Attachments are limited to ${limitMb} MB total per message.`, 'error');
+            return;
+        }
+        pendingAttachments = pendingAttachments.concat(incoming.map((file) => ({
+            id: (globalThis.crypto && typeof crypto.randomUUID === 'function')
+                ? crypto.randomUUID()
+                : `attachment-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+            file,
+            display_name: file.name || 'upload',
+        })));
+        updateAttachmentPreview();
+    }
+
+    async function cleanupUploadedAttachments(uploaded) {
+        const filenames = uploaded
+            .map((item) => item.filename)
+            .filter(Boolean);
+        if (!filenames.length) return;
+        const results = await Promise.allSettled(filenames.map(async (filename) => {
+            const resp = await apiFetch('/api/chat/upload', {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ filename }),
+            });
+            if (!resp.ok) throw new Error(`DELETE ${filename} failed with HTTP ${resp.status}`);
+        }));
+        const failed = results.filter((result) => result.status === 'rejected');
+        if (failed.length) {
+            console.warn('Failed to clean up uploaded chat attachments after send failure', failed);
+        }
+    }
+
+    function setAttachmentUploadState(uploading) {
+        attachmentsUploading = uploading;
+        attachBtn.disabled = uploading;
+        attachBtn.classList.toggle('uploading', uploading);
+        fileInput.disabled = uploading;
+        input.disabled = uploading;
+        updateAttachmentPreview();
     }
 
     attachBtn.addEventListener('click', () => fileInput.click());
 
     // Local-only staging avoids orphan uploads and fast-send races.
     fileInput.addEventListener('change', () => {
-        const file = fileInput.files[0];
-        if (!file) return;
+        const files = Array.from(fileInput.files || []);
         fileInput.value = '';
-        stagePendingFile(file);
+        stagePendingFiles(files);
     });
 
     // Image paste uses the same stager; only image matches call preventDefault().
@@ -156,21 +229,23 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
     input.addEventListener('paste', (e) => {
         const items = e.clipboardData && e.clipboardData.items;
         if (!items) return;
+        const pastedImages = [];
         for (let i = 0; i < items.length; i += 1) {
             const item = items[i];
             if (item && item.kind === 'file' && typeof item.type === 'string' && item.type.startsWith('image/')) {
                 const blob = item.getAsFile();
                 if (!blob) continue;
-                e.preventDefault();
                 const ext = (item.type.split('/')[1] || 'png').split(';')[0].trim() || 'png';
-                const ts = Date.now();
+                const ts = Date.now() + i;
                 const safeBlob = blob instanceof File
                     ? new File([blob], `clipboard-${ts}.${ext}`, { type: blob.type })
                     : new File([blob], `clipboard-${ts}.${ext}`, { type: item.type });
-                stagePendingFile(safeBlob);
-                return;
+                pastedImages.push(safeBlob);
             }
         }
+        if (!pastedImages.length) return;
+        e.preventDefault();
+        stagePendingFiles(pastedImages);
     });
 
     // Pass 1 builds live cards in memory; pass 2 inserts them in transcript order.
@@ -349,9 +424,12 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         });
         const spent = data?.spent_usd || 0;
         const limit = data?.budget_limit || 10;
+        const budgetLabel = typeof data?.budget_text === 'string'
+            ? data.budget_text
+            : `${formatUsdWhole(spent)} / ${formatUsdWhole(limit)}`;
         const budgetText = document.getElementById('chat-budget-text');
         const budgetFill = document.getElementById('chat-budget-bar-fill');
-        if (budgetText) budgetText.textContent = `${formatUsdWhole(spent)} / ${formatUsdWhole(limit)}`;
+        if (budgetText) budgetText.textContent = budgetLabel;
         if (budgetFill) budgetFill.style.width = `${Math.min(100, (spent / limit) * 100)}%`;
     }
 
@@ -1328,46 +1406,69 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
     async function sendMessage(planMode = false) {
         if (sendBtn.disabled) return;  // guard against Enter re-entry during async upload
         let text = input.value.trim();
-        if (!text && !pendingAttachment) return;
-        if (pendingAttachment) {
+        const hasAttachments = pendingAttachments.length > 0;
+        let uploadedAttachments = [];
+        if (!text && !pendingAttachments.length) return;
+        if (pendingAttachments.length) {
             // Upload immediately before send; offline queueing would orphan files.
             if (ws.ws?.readyState !== WebSocket.OPEN) {
                 showToast('Cannot attach file while offline. Reconnect and try again.', 'error');
                 return;
             }
-            const staged = pendingAttachment;
-            setSendBusy(true, 'Uploading');
+            const staged = [...pendingAttachments];
+            const uploaded = [];
+            setAttachmentUploadState(true);
+            setSendBusy(true, staged.length > 1 ? 'Uploading files' : 'Uploading');
             try {
-                const formData = new FormData();
-                formData.append('file', staged.file);
-                const resp = await apiFetch('/api/chat/upload', { method: 'POST', body: formData });
-                const data = await resp.json();
-                if (!resp.ok || !data.ok) {
-                    showToast('Upload failed: ' + (data.error || resp.statusText), 'error');
-                    return;  // pendingAttachment and preview remain — user can retry
+                for (const stagedItem of staged) {
+                    if (ws.ws?.readyState !== WebSocket.OPEN) throw new Error('Connection closed during upload. Reconnect and try again.');
+                    const formData = new FormData();
+                    formData.append('file', stagedItem.file);
+                    const resp = await apiFetch('/api/chat/upload', { method: 'POST', body: formData });
+                    const data = await resp.json().catch(() => ({}));
+                    if (!resp.ok || !data.ok) {
+                        throw new Error(data.error || resp.statusText);
+                    }
+                    uploaded.push({
+                        filename: data.filename || '',
+                        path: data.path || '',
+                        display_name: data.display_name || stagedItem.display_name,
+                    });
                 }
-                pendingAttachment = null;
-                attachmentPreview.classList.remove('visible');
-                attachmentPreview.innerHTML = '';
-                requestAnimationFrame(() => updateMessagesPadding({ preserveStickiness: false }));
-                text += (text ? '\n\n' : '') + `[Attached file: ${data.display_name || staged.display_name} saved to ${data.path}]`;
+                if (ws.ws?.readyState !== WebSocket.OPEN) throw new Error('Connection closed after upload. Reconnect and try again.');
+                uploadedAttachments = uploaded;
+                const attachmentLines = uploaded
+                    .map((item) => `[Attached file: ${item.display_name} saved to ${item.path}]`)
+                    .join('\n');
+                text += (text ? '\n\n' : '') + attachmentLines;
             } catch (e) {
+                await cleanupUploadedAttachments(uploaded);
                 showToast('Upload error: ' + e.message, 'error');
-                return;  // pendingAttachment and preview remain — user can retry
+                return;  // pending attachments and preview remain so the user can retry
             } finally {
+                setAttachmentUploadState(false);
                 setSendBusy(false);
             }
         }
         if (!text) return;
-        rememberInput(text);
-        input.value = '';
         // Plan prefix is wire-only; slash commands stay literal.
         const wireText = (planMode && !text.startsWith('/')) ? PLAN_PREFIX + text : text;
         const result = ws.send({
             type: 'chat',
             content: wireText,
             sender_session_id: chatSessionId,
-        });
+        }, hasAttachments ? { queue: false } : undefined);
+        if (hasAttachments && result?.status !== 'sent') {
+            await cleanupUploadedAttachments(uploadedAttachments);
+            showToast('Connection lost before send. Reconnect and try again.', 'error');
+            return;
+        }
+        if (hasAttachments) {
+            pendingAttachments = [];
+            updateAttachmentPreview();
+        }
+        rememberInput(text);
+        input.value = '';
         addMessage(text, 'user', false, null, false, {
             pending: result?.status === 'queued',
             source: 'web',
@@ -1691,5 +1792,6 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
     ws.on('close', () => {
         hideTyping();
         setStatus('offline', 'Reconnecting...');
+        syncHeaderControlState({ spent_usd: 0, budget_limit: 10, budget_text: 'Connecting...' });
     });
 }

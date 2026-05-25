@@ -1723,11 +1723,15 @@ body {
 .chat-attachment-preview {
     display: none;
     padding: 4px 8px 2px;
+    max-height: 112px;
+    overflow-y: auto;
 }
 
 .chat-attachment-preview.visible {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
 }
 
 .attach-badge {
@@ -1749,7 +1753,7 @@ body {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    max-width: 200px;
+    max-width: min(220px, 56vw);
 }
 
 .attach-remove {
