@@ -163,7 +163,7 @@ class TestHelperFunctions:
                 "status": "non_zero_exit",
                 "exit_code": -9,
                 "signal": "SIGKILL",
-                "result": "⚠️ SHELL_EXIT_ERROR: command exited with exit_code=-9 (signal=SIGKILL).",
+                "result": "⚠️ SHELL_EXIT_ERROR: command exited with exit_code=-9 (signal=SIGKILL, cwd=/tmp/repo).",
             },
         ]}
         details = _collect_error_details(trace)

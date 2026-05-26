@@ -113,7 +113,7 @@ def test_build_trace_summary_shows_structured_failure_facts():
         "tool_calls": [{
             "tool": "run_shell",
             "args": {"cmd": ["npm", "install", "-g", "@anthropic-ai/claude-code"]},
-            "result": "⚠️ SHELL_EXIT_ERROR: command exited with exit_code=-9 (signal=SIGKILL).",
+            "result": "⚠️ SHELL_EXIT_ERROR: command exited with exit_code=-9 (signal=SIGKILL, cwd=/tmp/repo).",
             "is_error": True,
             "status": "non_zero_exit",
             "exit_code": -9,

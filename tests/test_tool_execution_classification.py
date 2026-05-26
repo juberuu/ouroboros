@@ -19,7 +19,7 @@ def test_executor_failures_are_still_tool_failures():
 def test_shell_and_claude_failures_are_treated_as_tool_failures():
     assert _is_tool_execution_failure(
         True,
-        "⚠️ SHELL_EXIT_ERROR: command exited with exit_code=1.\n\nSTDERR:\nboom",
+        "⚠️ SHELL_EXIT_ERROR: command exited with exit_code=1 (cwd=/tmp/repo).\n\nSTDERR:\nboom",
     )
     assert _is_tool_execution_failure(
         True,

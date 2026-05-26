@@ -380,7 +380,11 @@ def _data_write(ctx: ToolContext, path: str, content: str, mode: str = "overwrit
     else:
         with p.open("a", encoding="utf-8") as f:
             f.write(content)
-    return f"OK: wrote {mode} {path} ({len(content)} chars)"
+    # 2026-05-26 (issue #40): name the root in the OK message so the agent
+    # immediately sees that this file lives under data_root, not under
+    # repo_root — relative ``run_shell`` lookups will not find it.
+    norm_path = str(path).strip().replace("\\", "/").lstrip("./")
+    return f"OK: wrote {mode} data_root/{norm_path} ({len(content)} chars)"
 
 
 # ---------------------------------------------------------------------------

@@ -200,3 +200,156 @@ def test_run_shell_timeout_uses_settings_timeout(tmp_path, monkeypatch):
 
     assert "TOOL_TIMEOUT (run_shell)" in result
     assert "42s" in result
+
+
+# ---------------------------------------------------------------------------
+# Issue #40: filesystem-geometry observability
+# ---------------------------------------------------------------------------
+# run_shell must echo the resolved cwd on every result header so the agent
+# can recover in one round from path-mismatch failures (data_root vs
+# repo_root vs invented /tmp/... paths). The cwd parameter is now strict:
+# absolute and nonexistent values are rejected with SHELL_CWD_ERROR
+# instead of silently routing to repo_dir.
+
+
+class TestRunShellCwdObservability:
+    def test_success_header_echoes_absolute_cwd(self, tmp_path, monkeypatch):
+        """exit_code=0 line must name the resolved working directory."""
+        ctx = SimpleNamespace(repo_dir=tmp_path)
+
+        def fake_run(cmd, **kwargs):
+            return CompletedProcess(cmd, 0, "hello", "")
+
+        monkeypatch.setattr("ouroboros.tools.shell._tracked_subprocess_run", fake_run)
+        monkeypatch.setattr("ouroboros.tools.shell.load_settings", lambda: {})
+        result = _run_shell(ctx, ["echo", "hello"])
+        assert "exit_code=0" in result
+        assert f"cwd={tmp_path.resolve()}" in result
+
+    def test_failure_header_echoes_absolute_cwd(self, tmp_path, monkeypatch):
+        """SHELL_EXIT_ERROR must carry the cwd so a path-mismatch is
+        diagnosable in one round."""
+        ctx = SimpleNamespace(repo_dir=tmp_path)
+
+        def fake_run(cmd, **kwargs):
+            return CompletedProcess(cmd, 3, "", "boom")
+
+        monkeypatch.setattr("ouroboros.tools.shell._tracked_subprocess_run", fake_run)
+        monkeypatch.setattr("ouroboros.tools.shell.load_settings", lambda: {})
+        result = _run_shell(ctx, ["nope"])
+        assert "SHELL_EXIT_ERROR" in result
+        assert "exit_code=3" in result
+        assert f"cwd={tmp_path.resolve()}" in result
+
+    def test_failure_with_signal_combines_signal_and_cwd_in_one_paren(self, tmp_path, monkeypatch):
+        """signal= and cwd= ride in one parenthesised suffix, not two."""
+        ctx = SimpleNamespace(repo_dir=tmp_path)
+
+        def fake_run(cmd, **kwargs):
+            return CompletedProcess(cmd, -9, "", "")
+
+        monkeypatch.setattr("ouroboros.tools.shell._tracked_subprocess_run", fake_run)
+        monkeypatch.setattr("ouroboros.tools.shell.load_settings", lambda: {})
+        result = _run_shell(ctx, ["sleep", "999"])
+        assert "exit_code=-9" in result
+        assert "signal=SIGKILL" in result
+        assert f"cwd={tmp_path.resolve()}" in result
+        # Single paren: signal=...) and cwd=...) MUST NOT appear as
+        # two adjacent parens, the existing exit_code regex consumer
+        # still parses, but the human-readable shape stays compact.
+        assert "(signal=SIGKILL, cwd=" in result
+
+    def test_timeout_header_echoes_cwd(self, tmp_path, monkeypatch):
+        ctx = SimpleNamespace(repo_dir=tmp_path)
+
+        def fake_timeout(cmd, **kwargs):
+            raise __import__("subprocess").TimeoutExpired(cmd=cmd, timeout=kwargs["timeout"])
+
+        monkeypatch.setattr("ouroboros.tools.shell._tracked_subprocess_run", fake_timeout)
+        monkeypatch.setattr("ouroboros.tools.shell.load_settings", lambda: {})
+        result = _run_shell(ctx, ["sleep", "999"])
+        assert "TOOL_TIMEOUT (run_shell)" in result
+        assert f"cwd={tmp_path.resolve()}" in result
+
+    def test_exit_code_regex_still_parses_with_cwd_suffix(self, tmp_path, monkeypatch):
+        """Downstream consumer in loop_tool_execution._EXIT_CODE_RE must
+        keep parsing the exit code from the new ``exit_code=0 (cwd=...)``
+        header. Pins the regex contract from the validation report."""
+        import re
+        ctx = SimpleNamespace(repo_dir=tmp_path)
+
+        def fake_run(cmd, **kwargs):
+            return CompletedProcess(cmd, 0, "ok", "")
+
+        monkeypatch.setattr("ouroboros.tools.shell._tracked_subprocess_run", fake_run)
+        monkeypatch.setattr("ouroboros.tools.shell.load_settings", lambda: {})
+        result = _run_shell(ctx, ["echo", "ok"])
+        from ouroboros.loop_tool_execution import _EXIT_CODE_RE
+        match = _EXIT_CODE_RE.search(result)
+        assert match is not None
+        assert int(match.group(1)) == 0
+
+
+class TestRunShellCwdRejection:
+    def test_absolute_posix_cwd_is_rejected(self, tmp_path):
+        """Absolute POSIX cwd must return SHELL_CWD_ERROR instead of
+        silently falling back to repo_dir (the old behaviour was the root
+        cause of issue #40)."""
+        ctx = SimpleNamespace(repo_dir=tmp_path)
+        result = _run_shell(ctx, ["echo", "x"], cwd="/data/workspace/Ouroboros/tmp")
+        assert "SHELL_CWD_ERROR" in result
+        assert "absolute" in result.lower()
+        # The error must name the repo_root so the agent learns the geometry.
+        assert f"repo_root={tmp_path.resolve()}" in result
+
+    def test_absolute_windows_cwd_is_rejected(self, tmp_path):
+        """Windows-style absolute path is rejected even on POSIX hosts."""
+        ctx = SimpleNamespace(repo_dir=tmp_path)
+        result = _run_shell(ctx, ["echo", "x"], cwd="C:\\Users\\foo")
+        assert "SHELL_CWD_ERROR" in result
+        assert "absolute" in result.lower()
+
+    def test_nonexistent_relative_cwd_is_rejected(self, tmp_path):
+        """The silent fallback to repo_dir is gone; nonexistent relative
+        cwd is now a hard SHELL_CWD_ERROR with the resolved candidate
+        path so the agent can spot a typo immediately."""
+        ctx = SimpleNamespace(repo_dir=tmp_path)
+        result = _run_shell(ctx, ["echo", "x"], cwd="does_not_exist")
+        assert "SHELL_CWD_ERROR" in result
+        assert "does_not_exist" in result
+        assert f"repo_root={tmp_path.resolve()}" in result
+
+    def test_valid_relative_cwd_still_works(self, tmp_path, monkeypatch):
+        """Existing relative-cwd behaviour is preserved: an existing
+        subdir resolves and runs from there."""
+        (tmp_path / "sub").mkdir()
+        ctx = SimpleNamespace(repo_dir=tmp_path)
+
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["cwd"] = kwargs.get("cwd")
+            return CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr("ouroboros.tools.shell._tracked_subprocess_run", fake_run)
+        monkeypatch.setattr("ouroboros.tools.shell.load_settings", lambda: {})
+        result = _run_shell(ctx, ["echo", "x"], cwd="sub")
+        assert "SHELL_CWD_ERROR" not in result
+        assert "exit_code=0" in result
+        assert captured["cwd"] == str((tmp_path / "sub").resolve())
+        assert f"cwd={(tmp_path / 'sub').resolve()}" in result
+
+    def test_empty_and_dot_cwd_still_route_to_repo_root(self, tmp_path, monkeypatch):
+        """Empty / "." / "./" cwd values keep their original meaning:
+        run at the repo root. Regression guard for the no-cwd default."""
+        ctx = SimpleNamespace(repo_dir=tmp_path)
+
+        def fake_run(cmd, **kwargs):
+            return CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr("ouroboros.tools.shell._tracked_subprocess_run", fake_run)
+        monkeypatch.setattr("ouroboros.tools.shell.load_settings", lambda: {})
+        for cwd_val in ("", ".", "./"):
+            result = _run_shell(ctx, ["echo", "x"], cwd=cwd_val)
+            assert "SHELL_CWD_ERROR" not in result
+            assert f"cwd={tmp_path.resolve()}" in result

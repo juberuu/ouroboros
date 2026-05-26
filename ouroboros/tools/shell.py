@@ -91,15 +91,27 @@ def _resolve_effective_timeout(default_timeout_sec: int) -> int:
     return max(int(default_timeout_sec), 1)
 
 
-def _describe_returncode(returncode: int) -> str:
-    """Render a return code with signal details when applicable."""
+def _describe_returncode(returncode: int, cwd: pathlib.Path | None = None) -> str:
+    """Render a return code with signal details and resolved cwd when applicable.
+
+    Issue #40: ``run_shell`` needs to expose its resolved working directory so
+    the agent can immediately see when a path-mismatch (data_root vs repo_root
+    vs invented absolute path) caused a failure. The ``cwd=`` token rides
+    inside the same parenthesised suffix as ``signal=`` to keep the existing
+    ``exit_code=(-?\\d+)`` regex consumer in ``loop_tool_execution`` tolerant.
+    """
+    parts: List[str] = []
     if int(returncode) < 0:
         signal_num = abs(int(returncode))
         try:
             signal_name = signal.Signals(signal_num).name
         except ValueError:
             signal_name = f"SIG{signal_num}"
-        return f"exit_code={returncode} (signal={signal_name})"
+        parts.append(f"signal={signal_name}")
+    if cwd is not None:
+        parts.append(f"cwd={cwd}")
+    if parts:
+        return f"exit_code={returncode} ({', '.join(parts)})"
     return f"exit_code={returncode}"
 
 
@@ -118,11 +130,30 @@ def _format_process_output(stdout: str, stderr: str, *, limit: int = 50_000) -> 
     return rendered
 
 
-def _format_process_failure(prefix: str, action: str, res: CompletedProcess) -> str:
-    """Render a subprocess failure with output context."""
+def _format_process_failure(
+    prefix: str,
+    action: str,
+    res: CompletedProcess,
+    *,
+    cwd: pathlib.Path | None = None,
+) -> str:
+    """Render a subprocess failure with output context and resolved cwd."""
     return (
-        f"{prefix}: {action} with {_describe_returncode(res.returncode)}.\n\n"
+        f"{prefix}: {action} with {_describe_returncode(res.returncode, cwd=cwd)}.\n\n"
         f"{_format_process_output(res.stdout or '', res.stderr or '')}"
+    )
+
+
+def _looks_absolute_cwd(cwd: str) -> bool:
+    """Return True when ``cwd`` looks absolute on either POSIX or Windows.
+
+    Detects both styles regardless of host platform so a Windows-style path
+    sent to a POSIX agent (or vice versa) is rejected with a clear error
+    instead of silently routing to ``repo_dir`` via the old fallback.
+    """
+    return (
+        pathlib.PurePosixPath(cwd).is_absolute()
+        or pathlib.PureWindowsPath(cwd).is_absolute()
     )
 
 
@@ -326,11 +357,35 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
             '(2) For pipes/chaining: ["sh", "-c", "cmd1 && cmd2"]'
         )
 
-    work_dir = ctx.repo_dir
+    # Resolve the working directory.
+    # 2026-05-26 (issue #40): refuse absolute or nonexistent ``cwd`` values
+    # with an explicit ``SHELL_CWD_ERROR`` instead of silently routing to
+    # ``ctx.repo_dir``. The silent fallback was the root cause of the
+    # "wrote file in data_root, ran it via /abs/path, got ENOENT" recovery
+    # loop documented in the issue.
+    repo_root_abs = pathlib.Path(ctx.repo_dir).resolve()
+    work_dir: pathlib.Path = repo_root_abs
     if cwd and cwd.strip() not in ("", ".", "./"):
+        if _looks_absolute_cwd(cwd):
+            return (
+                f'⚠️ SHELL_CWD_ERROR: cwd={cwd!r} is absolute. The cwd '
+                f'parameter must be a path RELATIVE to the repo root '
+                f'(repo_root={repo_root_abs}). Default cwd (omit the '
+                f'parameter) is the repo root. Files written via '
+                f'data_write live under a separate data_root and are NOT '
+                f'visible to relative run_shell lookups; use a fully '
+                f'qualified absolute path inside the command itself when '
+                f'you need to reach them.'
+            )
         candidate = (ctx.repo_dir / cwd).resolve()
-        if candidate.exists() and candidate.is_dir():
-            work_dir = candidate
+        if not candidate.exists() or not candidate.is_dir():
+            return (
+                f'⚠️ SHELL_CWD_ERROR: cwd={cwd!r} did not resolve to an '
+                f'existing directory under repo_root={repo_root_abs} '
+                f'(tried {candidate}). Verify the directory exists with '
+                f'repo_list, or omit cwd to run at the repo root.'
+            )
+        work_dir = candidate
     repo_root = _resolve_git_root(pathlib.Path(work_dir))
     before_changed = _status_snapshot(repo_root)
 
@@ -346,6 +401,7 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
                 "⚠️ SHELL_EXIT_ERROR",
                 "command exited",
                 res,
+                cwd=work_dir,
             )
         after_changed = _status_snapshot(repo_root)
         if after_changed != before_changed:
@@ -355,14 +411,17 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
                 mutation_root=repo_root,
                 source_tool="run_shell",
             )
-        return f"exit_code=0\n{_format_process_output(res.stdout or '', res.stderr or '')}"
+        return (
+            f"{_describe_returncode(0, cwd=work_dir)}\n"
+            f"{_format_process_output(res.stdout or '', res.stderr or '')}"
+        )
     except subprocess.TimeoutExpired:
         return (
-            f"⚠️ TOOL_TIMEOUT (run_shell): command exceeded {timeout_sec}s. "
-            "Subprocess tree was terminated."
+            f"⚠️ TOOL_TIMEOUT (run_shell): command exceeded {timeout_sec}s "
+            f"(cwd={work_dir}). Subprocess tree was terminated."
         )
     except Exception as e:
-        return f"⚠️ SHELL_ERROR: {e}"
+        return f"⚠️ SHELL_ERROR: {e} (cwd={work_dir})"
 
 
 # ---------------------------------------------------------------------------
@@ -560,7 +619,12 @@ def get_tools() -> List[ToolEntry]:
                 "Run a command inside the repo. Returns stdout+stderr. "
                 "cmd MUST be an array of strings, never a single shell-style "
                 "string. Use cwd= for working directory; cd is rejected. "
-                "For pipes/chaining use [\"sh\", \"-c\", \"cmd1 && cmd2\"]."
+                "For pipes/chaining use [\"sh\", \"-c\", \"cmd1 && cmd2\"]. "
+                "Default cwd is the repo root and is echoed in every result "
+                "header as (cwd=<abs path>). Files written via data_write "
+                "live under a separate data_root and are NOT visible to "
+                "relative run_shell lookups; use the absolute data_root "
+                "path inside the command itself when you need to reach them."
             ),
             "parameters": {"type": "object", "properties": {
                 "cmd": {
@@ -576,9 +640,10 @@ def get_tools() -> List[ToolEntry]:
                 "cwd": {
                     "type": "string", "default": "",
                     "description": (
-                        "Working directory relative to the repo root. Use "
-                        "this instead of `cd` (which is a shell builtin "
-                        "and is rejected)."
+                        "Working directory RELATIVE to the repo root. "
+                        "Absolute paths and nonexistent directories are "
+                        "rejected with SHELL_CWD_ERROR. Use this instead "
+                        "of `cd` (which is a shell builtin and is rejected)."
                     ),
                 },
             }, "required": ["cmd"]},

@@ -994,7 +994,11 @@ def _repo_write(ctx: ToolContext, path: str = "", content: str = "",
             target = ctx.repo_path(e["path"])
             target.parent.mkdir(parents=True, exist_ok=True)
             write_text(target, e["content"])
-            written.append(f"{e['path']} ({len(e['content'])} chars)")
+            # 2026-05-26 (issue #40): prefix repo_root/ so the agent reads
+            # the filesystem root explicitly. Pairs with data_write's
+            # data_root/ prefix and run_shell's (cwd=...) echo.
+            norm_e_path = str(e["path"]).strip().replace("\\", "/").lstrip("./")
+            written.append(f"repo_root/{norm_e_path} ({len(e['content'])} chars)")
             written_paths.append(e["path"])
         except Exception as exc:
             if written:

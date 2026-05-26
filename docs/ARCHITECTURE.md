@@ -1912,6 +1912,28 @@ automatically on completion or via `kill_all_tracked_subprocesses()` on panic.
 `run_shell` surfaces timeout-vs-signal distinctions in its result text so
 `exit_code=-9` no longer looks like a silent success in summaries/reflections.
 
+### Filesystem-geometry observability (issue #40, v5.8.x)
+
+The agent operates against three logical roots: `repo_dir` (used by
+`repo_*` tools and as `run_shell`'s default cwd), `drive_root` (used by
+`data_*` tools), and `run_shell`'s subprocess cwd. To make a cross-tool
+path mismatch diagnosable in one round rather than several:
+
+- `run_shell` echoes its resolved working directory in every result
+  header as `(cwd=<absolute path>)`. The token rides inside the same
+  parenthesised suffix as `signal=...` so the existing
+  `exit_code=(-?\d+)` regex consumer in
+  `ouroboros/loop_tool_execution.py` keeps parsing untouched.
+- `run_shell` rejects absolute and nonexistent `cwd` values with
+  `SHELL_CWD_ERROR` instead of silently falling back to `repo_dir`.
+  The error body names `repo_root=<absolute path>` so the agent learns
+  the geometry from the failure.
+- `data_write` OK messages prefix the relative path with `data_root/`,
+  and `repo_write` per-file summary entries prefix with `repo_root/`.
+  Both tokens are already part of the agent-facing vocabulary
+  (`data_root/memory/` appears in the friendly `repo_read` NOT_FOUND
+  hint), so the wording stays consistent across surfaces.
+
 ---
 
 ## 10. Key Invariants
