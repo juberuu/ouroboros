@@ -52,7 +52,7 @@ Rules in this file must not contradict BIBLE.md.
 |-------------|---------|----------------|--------------------------|---------|
 | **Gateway** | Thin adapter to an external API. Wraps third-party SDK/HTTP calls into clean Python functions. | `{Platform}Gateway` | No. Pure I/O — translate calls in, translate responses out. | `BrowserGateway` |
 | **Service** | Orchestrates a domain concern. May use one or more Gateways, manage state, apply business rules. | `{Domain}Service` | Yes. Coordinates, decides, transforms. | — |
-| **Tool** | An LLM-callable function exposed to the agent. Thin wrapper that connects the agent to a Gateway or Service. | `{verb}_{noun}` (snake_case function) | Minimal. Validates input, calls Gateway/Service, formats output. | `repo_read`, `browse_page`, `web_search` |
+| **Tool** | An LLM-callable function exposed to the agent. Thin wrapper that connects the agent to a Gateway or Service. | `{verb}_{noun}` (snake_case function) | Minimal. Validates input, calls Gateway/Service, formats output. | `read_file`, `browse_page`, `web_search` |
 
 ### Gateway Rules (recommended pattern, not enforced)
 
@@ -74,14 +74,14 @@ When a Gateway exists, it should follow these guidelines:
 ```
 LLM Agent
     |  calls
-Tool (repo_read, web_search, browse_page)
+Tool (read_file, web_search, browse_page)
     |  delegates to
 Gateway or direct implementation
     |  calls
 External API / filesystem / subprocess
 ```
 
-Not every layer is required for every operation. Simple cases (e.g., `repo_read`) go Tool → filesystem directly.
+Not every layer is required for every operation. Simple cases (e.g., `read_file`) go Tool → filesystem directly.
 
 ### CLI / Headless Additions
 
@@ -123,7 +123,7 @@ Derived from P7 (Minimalism): entire codebase fits in one context window.
 - Module hard gate: 1600 lines for non-grandfathered modules in `tests/test_smoke.py`. Grandfathered (`GRANDFATHERED_OVERSIZED_MODULES` in `ouroboros/review.py`): `llm.py`, `claude_advisory_review.py`, `review_state.py`, `server.py`, and temporary v5.7.1 debt `git.py` — split deferred until each surface stabilises, with `git.py` expected to pay down in the next tools pass.
 - Method target: <150 lines. Crossing that line is a decomposition signal, not an automatic failure by itself.
 - Method hard gate: 300 lines in `tests/test_smoke.py`.
-- Codebase-wide function-count hard gate: enforced by `tests/test_smoke.py` against the value defined in `ouroboros/review.py::MAX_TOTAL_FUNCTIONS` (currently 2275; single source of truth — bump the constant when adding a feature with an explicit comment justifying the increase).
+- Codebase-wide function-count hard gate: enforced by `tests/test_smoke.py` against the value defined in `ouroboros/review.py::MAX_TOTAL_FUNCTIONS` (single source of truth — bump the constant when adding a feature with an explicit comment justifying the increase).
 - Function parameters: <8.
 - Net complexity growth per cycle approaches zero.
 - If a feature is not used in the current cycle — it is premature.
@@ -163,7 +163,7 @@ If a core governance artifact cannot fit in the available context budget:
   operator and the model both know the context is incomplete.
 - A reviewer or agent operating without ARCHITECTURE.md MUST NOT be treated as
   operating with full context — findings may be incomplete.
-- Tools that return multi-model review findings (`repo_commit`, `review_skill`,
+- Tools that return multi-model review findings (`commit_reviewed`, `skill_review`,
   scope/advisory review helpers) MUST be listed in
   `UNTRUNCATED_TOOL_RESULTS` or have an explicit per-tool limit; the default
   15KB transport cap is not acceptable for review verdicts.
@@ -188,13 +188,13 @@ engineering standards, you MUST:
 
 Reviewed commits now have an explicit **two-step gate**:
 
-1. **Advisory freshness gate**: finish all edits, then run `advisory_pre_review`.
-   Without a bypass, `repo_commit` requires a fresh matching
+1. **Advisory freshness gate**: finish all edits, then run `advisory_review`.
+   Without a bypass, `commit_reviewed` requires a fresh matching
    advisory run, no open obligations from earlier blocked rounds, and no open
    commit-readiness debt. Any edit after advisory makes it stale and requires a
    re-run. When debt remains, `review_status` reports `repo_commit_ready=false`
    plus `retry_anchor=commit_readiness_debt` so the next retry starts from the
-   repeated root cause rather than one obligation at a time. `skip_advisory_pre_review=True`
+   repeated root cause rather than one obligation at a time. `skip_advisory_review=True`
    is an **absolute** escape hatch: it short-circuits the entire commit gate
    after writing an audit entry to `events.jsonl`. Open obligations and open
    commit-readiness debt stay visible in `review_status` (`repo_commit_ready`
@@ -203,13 +203,13 @@ Reviewed commits now have an explicit **two-step gate**:
    to be obsolete; in both cases subsequent `on_successful_commit()` clears
    them automatically.
 2. **Unified pre-commit review**: once advisory is fresh, the reviewed commit path
-   runs two reviewers in parallel on the exact staged snapshot:
-   - **Triad review** (`ouroboros/tools/review.py`): at least 2 reviewer
-     models (as configured in `OUROBOROS_REVIEW_MODELS`; ships with 3, hard
-     cap `_handle_multi_model_review.MAX_MODELS = 10`) review the staged
-     diff against `docs/CHECKLISTS.md`. Quorum requires at least 2 responded
-     actors (`_run_unified_review`).
-   - **Scope review** (`ouroboros/tools/scope_review.py`): one model reviews
+   runs reviewer slots in parallel on the exact staged snapshot:
+   - **Triad review** (`ouroboros/tools/review.py` + `ouroboros/triad_review.py`,
+     orchestrated by `ouroboros/tools/parallel_review.py`): at least 2 reviewer
+     slots (as configured in `OUROBOROS_REVIEW_MODELS`; duplicate model ids
+     are valid independent slots) review the staged diff against
+     `docs/CHECKLISTS.md`.
+   - **Scope review** (`ouroboros/tools/scope_review.py`): one or more scope slots review
      completeness and cross-module consistency with touched context plus a
      generated repository Atlas (`review_context_atlas.compile_review_context_atlas`).
 
@@ -224,10 +224,9 @@ in which case scope review is skipped with a non-blocking advisory warning. `doc
 single source of truth for review items; do not duplicate or fork checklist policy here.
 
 Preferred workflow for non-trivial edits: choose the right edit tool first —
-`str_replace_editor` for one exact replacement, `repo_write` for new files or
-intentional full rewrites, and `claude_code_edit` for anything beyond one exact
-replacement — then `advisory_pre_review`, then `repo_commit` immediately on the
-final diff.
+`edit_text` for one exact replacement and `write_file` for new files or
+intentional full rewrites — then `advisory_review`, then `commit_reviewed`
+immediately on the final diff.
 
 The full pre-commit review checklists live in **`docs/CHECKLISTS.md`** —
 the single source of truth (Bible P7: DRY).
@@ -252,7 +251,7 @@ Before every commit, verify the following:
 #### Module Size & Complexity
 - [ ] Module stays near one context window (~1000 lines target; 1600 hard gate unless explicitly grandfathered debt)
 - [ ] No method exceeds the practical target (150 lines) or the hard gate (300 lines)
-- [ ] Total Python function count stays under the current smoke hard gate (currently 2275; consult `ouroboros/review.py::MAX_TOTAL_FUNCTIONS` for the active value; bump with a comment if a feature requires more headroom)
+- [ ] Total Python function count stays under the current smoke hard gate (consult `ouroboros/review.py::MAX_TOTAL_FUNCTIONS` for the active value; bump with a comment if a feature requires more headroom)
 - [ ] No function has more than 8 parameters
 - [ ] No gratuitous abstract layers (Bible P7)
 
@@ -264,13 +263,13 @@ Before every commit, verify the following:
 #### Skill Repair Task Constraints
 - Skill repair tasks use structured `task_constraint.mode="skill_repair"`, not prompt markers.
 - In repair mode, edit paths are payload-relative: `plugin.py` means the selected `data/skills/{external,clawhub,ouroboroshub}/<skill>/plugin.py`.
-- Use `str_replace_editor` for one exact replacement, `claude_code_edit` for coordinated multi-hunk edits, and `data_write` only for new files or intentional full rewrites.
-- Finish repair with `skill_preflight` and `review_skill`; grants and enablement stay owner-controlled.
-- Repair mode is a stricter UI lane, not the only path for skill authoring. In `runtime_mode=light`, ordinary chat tasks may edit explicit `data/skills/{external,clawhub,ouroboroshub}/<skill>/...` payload paths via `str_replace_editor`, `data_write`, or `claude_code_edit`. As a second short-form, those three tools also accept optional `bucket` + `skill_name` args; when both are supplied (and `bucket` is not `native`), a short relative `path`/`cwd` (e.g. `plugin.py`, `lib/utils.py`, or `.`) resolves under an existing `data/skills/<bucket>/<skill_name>/` via `decide_payload_short_form` / `synthesize_payload_constraint` in `ouroboros.contracts.skill_payload_policy` — the same `skill_repair`-mode resolution is reused, no new task-constraint mode is introduced. Explicit repo/data paths keep their own address space and ignore stale short-form args. Core/repo paths, `data/skills/native/*`, `data/state/skills/*`, marketplace/provenance sidecars, and direct `run_shell` writes to repo targets remain blocked.
+- Use `edit_text` for one exact replacement and `write_file` only for new files or intentional full rewrites with `root=skill_payload`.
+- Finish repair with `skill_preflight` and `skill_review`; grants and enablement stay owner-controlled.
+- Repair mode is a stricter UI lane, not the only path for skill authoring. In `runtime_mode=light`, ordinary chat tasks may edit explicit `data/skills/{external,clawhub,ouroboroshub}/<skill>/...` payloads via `write_file`/`edit_text` with `root=skill_payload`, `bucket`, and `skill_name`. Explicit repo/data paths keep their own address space and ignore stale short-form args. Core/repo paths, `data/skills/native/*`, `data/state/skills/*`, marketplace/provenance sidecars, and direct `run_command` writes to repo targets remain blocked.
 - New path checks for skill edits must use `ouroboros.contracts.skill_payload_policy` rather than reimplementing bucket/path traversal logic in each tool.
 
 #### Live Subagent Task Constraints
-- Live subagents are scheduled only through the existing `schedule_task` tool.
+- Live subagents are scheduled only through the existing `schedule_subagent` tool.
   Its public schema is strict: `objective` and `expected_output` are required;
   `role`, `context`, `constraints`, and `memory_mode` are optional. Do not
   reintroduce public `parent_task_id` or `description` arguments; lineage comes
@@ -278,17 +277,17 @@ Before every commit, verify the following:
 - Live `memory_mode=shared` is disabled. Keep `forked` and `empty` as the only
   live subagent modes unless a later design adds sanitized shared-context v2.
 - External `/api/tasks` and CLI requests must reject forged
-  `delegation_role=subagent`; only `schedule_task` may create subagents.
+  `delegation_role=subagent`; only `schedule_subagent` may create subagents.
 - `task_constraint.mode="local_readonly_subagent"` must be enforced twice:
   schema discovery exposes only the local-readonly allowlist, and registry
   execution rejects forbidden calls even when invoked manually.
 - `task_constraint` boolean parsing must be strict; strings such as `"false"`
   are false, never truthy through Python's `bool("false")`.
 - Subagent changes must keep writes, commits, review mutation, runtime control,
-  tool expansion, skills, MCP/extensions, shell, and further `schedule_task`
+  tool expansion, skills, MCP/extensions, shell, and further `schedule_subagent`
   recursion blocked unless a later accepted design explicitly changes the
   permission model.
-- `data_read` and `data_list` secret/control-file denials are subagent-scoped.
+- `read_file(root=runtime_data)` and `list_files(root=runtime_data)` secret/control-file denials are subagent-scoped.
 - Browser isolation for local-readonly subagents is DNS fail-closed: block
   non-HTTP(S), loopback/private/link-local/reserved/unspecified literal IPs,
   unresolved hostnames, and hostnames resolving to any blocked IP before goto,
@@ -296,15 +295,15 @@ Before every commit, verify the following:
 - Effective task status belongs in `ouroboros/task_status.py`. Do not duplicate
   child-drive result merge or terminal-status logic in gateways/tools; use
   `load_effective_task_result`, `effective_task_result`, and bounded wait
-  helpers. `wait_for_task` and `wait_for_tasks` results must remain untruncated.
+  helpers. `wait_task` and `wait_tasks` results must remain untruncated.
 - `forward_to_worker` may write only to validated running tasks whose lineage
   belongs to the current task/root, and must route forked/empty child subagents
   to the child-drive mailbox.
   Do not broaden generic data-tool behavior for normal tasks while fixing
   subagent isolation.
 - The pre-final handoff reminder is a compact effective-status snapshot. Full
-  untruncated child handoff belongs to `get_task_result`, `wait_for_task`, and
-  `wait_for_tasks`. Do not add shared ledgers, automatic memory merges, or new
+  untruncated child handoff belongs to `get_task_result`, `wait_task`, and
+  `wait_tasks`. Do not add shared ledgers, automatic memory merges, or new
   settings/endpoints unless the accepted plan explicitly calls for them.
 
 #### Page Header Layout

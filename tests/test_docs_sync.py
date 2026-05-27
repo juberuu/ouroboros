@@ -51,4 +51,4 @@ def test_consciousness_prompt_matches_subagent_wait_and_memory_contracts():
     assert "memory_mode=forked|empty" in consciousness
     assert "memory_mode=forked|empty|shared" not in consciousness
     assert "`shared` is disabled" in consciousness
-    assert "wait_for_tasks" in consciousness
+    assert "wait_tasks" in consciousness
