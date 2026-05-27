@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, List, Optional
 import logging
 
 from ouroboros.config import load_settings
+from ouroboros.observability import new_call_id, persist_call
 from ouroboros.tool_capabilities import (
     READ_ONLY_PARALLEL_TOOLS,
     REVIEWED_MUTATIVE_TOOLS,
@@ -57,6 +58,22 @@ def _emit_live_log(tools: ToolRegistry, payload: Dict[str, Any]) -> None:
     )
 
 
+def _tool_correlation(tools: ToolRegistry) -> Dict[str, Any]:
+    ctx = getattr(tools, "_ctx", None)
+    meta = getattr(ctx, "_current_llm_call_meta", {}) if ctx is not None else {}
+    return dict(meta) if isinstance(meta, dict) else {}
+
+
+def _with_correlation(payload: Dict[str, Any], correlation: Dict[str, Any], *, tool_call_id: str = "") -> Dict[str, Any]:
+    out = dict(payload)
+    for key in ("execution_id", "round_id", "llm_call_id"):
+        if correlation.get(key):
+            out[key] = correlation.get(key)
+    if tool_call_id:
+        out["tool_call_id"] = tool_call_id
+    return out
+
+
 def _get_tool_timeout(tools: ToolRegistry, tool_name: str) -> int:
     """Return max(settings/env timeout, per-tool minimum)."""
     settings_val = 0
@@ -88,10 +105,10 @@ def _path_is_cognitive_artifact(tool_name: str, tool_args: Optional[Dict[str, An
 
     normalized = raw_path.replace("\\", "/").lstrip("./")
 
-    if tool_name == "data_read":
+    if tool_name == "read_file" and str((tool_args or {}).get("root") or "active_workspace") == "runtime_data":
         return normalized.startswith("memory/") and "/_backup/" not in normalized
 
-    if tool_name == "repo_read":
+    if tool_name == "read_file":
         return normalized.startswith("prompts/") or normalized in _UNTRUNCATED_REPO_READ_PATHS
 
     return False
@@ -161,7 +178,7 @@ def _extract_result_metadata(fn_name: str, result: Any, is_error: bool) -> Dict[
     signal_match = _SIGNAL_RE.search(text)
     if signal_match:
         meta["signal"] = signal_match.group(1)
-    if fn_name == "run_shell" and not is_error and meta.get("exit_code") == 0:
+    if fn_name == "run_command" and not is_error and meta.get("exit_code") == 0:
         if status == "ok_autocorrected":
             meta["status"] = "ok_autocorrected"
         else:
@@ -184,11 +201,39 @@ def _execute_single_tool(
     fn_name = str(requested_fn_name or "").strip()
     tool_call_id = tc["id"]
     is_code_tool = fn_name in tools.CODE_TOOLS
+    correlation = _tool_correlation(tools)
 
     try:
         args = json.loads(tc["function"]["arguments"] or "{}")
     except (json.JSONDecodeError, ValueError) as e:
         result = f"⚠️ TOOL_ARG_ERROR: Could not parse arguments for '{requested_fn_name}': {e}"
+        trace_ref = {}
+        try:
+            trace_ref = persist_call(
+                pathlib.Path(drive_logs).parent,
+                task_id=task_id,
+                call_id=new_call_id("tool_arg_error"),
+                call_type="tool_call",
+                payload={
+                    "tool": fn_name,
+                    "tool_call_id": tool_call_id,
+                    "parent_call_id": correlation.get("llm_call_id"),
+                    "execution_id": correlation.get("execution_id"),
+                    "round_id": correlation.get("round_id"),
+                    "raw_arguments": tc.get("function", {}).get("arguments"),
+                    "result": result,
+                },
+                manifest={
+                    "execution_id": correlation.get("execution_id"),
+                    "round_id": correlation.get("round_id"),
+                    "parent_call_id": correlation.get("llm_call_id"),
+                    "tool_call_id": tool_call_id,
+                    "tool": fn_name,
+                    "status": "arg_error",
+                },
+            )
+        except Exception:
+            log.debug("Failed to persist tool arg-error observability payload", exc_info=True)
         return {
             "tool_call_id": tool_call_id,
             "fn_name": fn_name,
@@ -197,6 +242,7 @@ def _execute_single_tool(
             "tool_args": {},
             "args_for_log": {},
             "is_code_tool": is_code_tool,
+            "trace_ref": trace_ref,
             "result_meta": _extract_result_metadata(fn_name, result, True),
         }
 
@@ -207,17 +253,49 @@ def _execute_single_tool(
         result = tools.execute(fn_name, args)
     except Exception as e:
         tool_ok = False
-        result = f"⚠️ TOOL_ERROR ({fn_name}): {type(e).__name__}: {e}"
-        append_jsonl(drive_logs / "events.jsonl", {
+        safe_error = sanitize_tool_result_for_log(f"{type(e).__name__}: {e}")
+        result = f"⚠️ TOOL_ERROR ({fn_name}): {safe_error}"
+        append_jsonl(drive_logs / "events.jsonl", _with_correlation({
             "ts": utc_now_iso(), "type": "tool_error", "task_id": task_id,
-            "tool": fn_name, "args": args_for_log, "error": repr(e),
-        })
+            "tool": fn_name, "args": args_for_log, "error": safe_error,
+        }, correlation, tool_call_id=tool_call_id))
 
-    append_jsonl(drive_logs / "tools.jsonl", {
+    trace_ref = {}
+    try:
+        trace_ref = persist_call(
+            pathlib.Path(drive_logs).parent,
+            task_id=task_id,
+            call_id=new_call_id(f"tool_{fn_name}"),
+            call_type="tool_call",
+            payload={
+                "tool": fn_name,
+                "tool_call_id": tool_call_id,
+                "parent_call_id": correlation.get("llm_call_id"),
+                "execution_id": correlation.get("execution_id"),
+                "round_id": correlation.get("round_id"),
+                "args": args,
+                "result": result,
+                "tool_ok": tool_ok,
+            },
+            manifest={
+                "execution_id": correlation.get("execution_id"),
+                "round_id": correlation.get("round_id"),
+                "parent_call_id": correlation.get("llm_call_id"),
+                "tool_call_id": tool_call_id,
+                "tool": fn_name,
+                "status": "ok" if tool_ok else "exception",
+            },
+        )
+    except Exception:
+        log.debug("Failed to persist tool observability payload", exc_info=True)
+
+    append_jsonl(drive_logs / "tools.jsonl", _with_correlation({
         "ts": utc_now_iso(), "type": "tool_call", "tool": fn_name, "task_id": task_id,
         "args": args_for_log,
         "result_preview": sanitize_tool_result_for_log(truncate_for_log(result, 2000)),
-    })
+        "args_ref": (trace_ref.get("manifest_ref") or {}).get("path") if trace_ref else None,
+        "result_ref": trace_ref.get("manifest_ref") if trace_ref else None,
+    }, correlation, tool_call_id=tool_call_id))
 
     is_error = _is_tool_execution_failure(tool_ok, result)
 
@@ -229,6 +307,7 @@ def _execute_single_tool(
         "tool_args": args if isinstance(args, dict) else {},
         "args_for_log": args_for_log,
         "is_code_tool": is_code_tool,
+        "trace_ref": trace_ref,
         "result_meta": _extract_result_metadata(fn_name, result, is_error),
     }
 
@@ -266,12 +345,15 @@ def _make_timeout_result(
     timeout_sec: int,
     task_id: str = "",
     reset_msg: str = "",
+    correlation: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Create and log a timeout result."""
     args_for_log = {}
+    raw_args: Dict[str, Any] = {}
     try:
         args = json.loads(tc["function"]["arguments"] or "{}")
-        args_for_log = sanitize_tool_args_for_log(fn_name, args if isinstance(args, dict) else {})
+        raw_args = args if isinstance(args, dict) else {}
+        args_for_log = sanitize_tool_args_for_log(fn_name, raw_args)
     except Exception:
         pass
 
@@ -280,16 +362,51 @@ def _make_timeout_result(
         f"The tool is still running in background but control is returned to you. "
         f"{reset_msg}Try a different approach or inform the user{' about the issue' if not reset_msg else ''}."
     )
+    trace_ref = {}
+    corr = dict(correlation or {})
+    try:
+        trace_ref = persist_call(
+            pathlib.Path(drive_logs).parent,
+            task_id=task_id,
+            call_id=new_call_id(f"tool_timeout_{fn_name}"),
+            call_type="tool_timeout",
+            payload={
+                "tool": fn_name,
+                "tool_call_id": tool_call_id,
+                "parent_call_id": corr.get("llm_call_id"),
+                "execution_id": corr.get("execution_id"),
+                "round_id": corr.get("round_id"),
+                "timeout_sec": timeout_sec,
+                "args": raw_args,
+                "args_redacted_preview": args_for_log,
+                "result": result,
+            },
+            manifest={
+                "execution_id": corr.get("execution_id"),
+                "round_id": corr.get("round_id"),
+                "parent_call_id": corr.get("llm_call_id"),
+                "tool_call_id": tool_call_id,
+                "tool": fn_name,
+                "status": "timeout",
+                "timeout_sec": timeout_sec,
+            },
+        )
+    except Exception:
+        log.debug("Failed to persist tool timeout observability payload", exc_info=True)
 
-    append_jsonl(drive_logs / "events.jsonl", {
+    append_jsonl(drive_logs / "events.jsonl", _with_correlation({
         "ts": utc_now_iso(), "type": "tool_timeout",
+        "task_id": task_id,
         "tool": fn_name, "args": args_for_log,
         "timeout_sec": timeout_sec,
-    })
-    append_jsonl(drive_logs / "tools.jsonl", {
+        "result_ref": trace_ref.get("manifest_ref") if trace_ref else None,
+    }, corr, tool_call_id=tool_call_id))
+    append_jsonl(drive_logs / "tools.jsonl", _with_correlation({
         "ts": utc_now_iso(), "type": "tool_call", "tool": fn_name,
+        "task_id": task_id,
         "args": args_for_log, "result_preview": result,
-    })
+        "result_ref": trace_ref.get("manifest_ref") if trace_ref else None,
+    }, corr, tool_call_id=tool_call_id))
 
     return {
         "tool_call_id": tool_call_id,
@@ -298,6 +415,7 @@ def _make_timeout_result(
         "is_error": True,
         "args_for_log": args_for_log,
         "is_code_tool": is_code_tool,
+        "trace_ref": trace_ref,
         "result_meta": _extract_result_metadata(fn_name, result, True),
     }
 
@@ -317,6 +435,7 @@ def _execute_with_timeout(
     is_code_tool = fn_name in tools.CODE_TOOLS
     use_stateful = stateful_executor and fn_name in STATEFUL_BROWSER_TOOLS
     started_at = time.perf_counter()
+    correlation = _tool_correlation(tools)
     args_for_log = {}
     try:
         args = json.loads(tc["function"]["arguments"] or "{}")
@@ -324,20 +443,20 @@ def _execute_with_timeout(
             args_for_log = sanitize_tool_args_for_log(fn_name, args)
     except Exception:
         pass
-    _emit_live_log(tools, {
+    _emit_live_log(tools, _with_correlation({
         "type": "tool_call_started",
         "task_id": task_id,
         "tool": fn_name,
         "timeout_sec": timeout_sec,
         "args": args_for_log,
-    })
+    }, correlation, tool_call_id=tool_call_id))
 
     if use_stateful:
         future = stateful_executor.submit(_execute_single_tool, tools, tc, drive_logs, task_id)
         try:
             result = future.result(timeout=timeout_sec)
             result_meta = result.get("result_meta") or {}
-            _emit_live_log(tools, {
+            _emit_live_log(tools, _with_correlation({
                 "type": "tool_call_finished",
                 "task_id": task_id,
                 "tool": fn_name,
@@ -350,23 +469,23 @@ def _execute_with_timeout(
                 "result_preview": sanitize_tool_result_for_log(
                     truncate_for_log(result.get("result", ""), 500)
                 ),
-            })
+            }, correlation, tool_call_id=tool_call_id))
             return result
         except (TimeoutError, concurrent.futures.TimeoutError):
             stateful_executor.reset()
             reset_msg = "Browser state has been reset. "
             timeout_result = _make_timeout_result(
                 fn_name, tool_call_id, is_code_tool, tc, drive_logs,
-                timeout_sec, task_id, reset_msg
+                timeout_sec, task_id, reset_msg, correlation=correlation
             )
-            _emit_live_log(tools, {
+            _emit_live_log(tools, _with_correlation({
                 "type": "tool_call_timeout",
                 "task_id": task_id,
                 "tool": fn_name,
                 "args": args_for_log,
                 "duration_sec": round(time.perf_counter() - started_at, 3),
                 "timeout_sec": timeout_sec,
-            })
+            }, correlation, tool_call_id=tool_call_id))
             return timeout_result
     else:
         executor = ThreadPoolExecutor(max_workers=1)
@@ -375,7 +494,7 @@ def _execute_with_timeout(
             try:
                 result = future.result(timeout=timeout_sec)
                 result_meta = result.get("result_meta") or {}
-                _emit_live_log(tools, {
+                _emit_live_log(tools, _with_correlation({
                     "type": "tool_call_finished",
                     "task_id": task_id,
                     "tool": fn_name,
@@ -388,7 +507,7 @@ def _execute_with_timeout(
                     "result_preview": sanitize_tool_result_for_log(
                         truncate_for_log(result.get("result", ""), 500)
                     ),
-                })
+                }, correlation, tool_call_id=tool_call_id))
                 return result
             except (TimeoutError, concurrent.futures.TimeoutError):
                 is_reviewed_mutative = fn_name in REVIEWED_MUTATIVE_TOOLS
@@ -406,7 +525,7 @@ def _execute_with_timeout(
                             )
                     except Exception:
                         log.debug("Failed to mark reviewed attempt as late_result_pending", exc_info=True)
-                    _emit_live_log(tools, {
+                    _emit_live_log(tools, _with_correlation({
                         "type": "tool_call_late",
                         "task_id": task_id,
                         "tool": fn_name,
@@ -417,13 +536,13 @@ def _execute_with_timeout(
                             f"{timeout_sec}s — still waiting for result "
                             f"(hard ceiling: {_REVIEWED_MUTATIVE_HARD_CEILING}s)"
                         ),
-                    })
+                    }, correlation, tool_call_id=tool_call_id))
                     try:
                         ceiling = max(_REVIEWED_MUTATIVE_HARD_CEILING, timeout_sec + 60)
                         remaining = max(1, ceiling - timeout_sec)
                         result = future.result(timeout=remaining)
                         result_meta = result.get("result_meta") or {}
-                        _emit_live_log(tools, {
+                        _emit_live_log(tools, _with_correlation({
                             "type": "tool_call_finished",
                             "task_id": task_id,
                             "tool": fn_name,
@@ -432,7 +551,7 @@ def _execute_with_timeout(
                             "is_error": bool(result.get("is_error")),
                             "status": result_meta.get("status"),
                             "late": True,
-                        })
+                        }, correlation, tool_call_id=tool_call_id))
                         return result
                     except (TimeoutError, concurrent.futures.TimeoutError):
                         # Hard ceiling records terminal state; late real result may overwrite.
@@ -469,8 +588,9 @@ def _execute_with_timeout(
                                 f"({_REVIEWED_MUTATIVE_HARD_CEILING}s). "
                                 "Check git state manually. "
                             ),
+                            correlation=correlation,
                         )
-                        _emit_live_log(tools, {
+                        _emit_live_log(tools, _with_correlation({
                             "type": "tool_call_timeout",
                             "task_id": task_id,
                             "tool": fn_name,
@@ -478,21 +598,21 @@ def _execute_with_timeout(
                             "duration_sec": round(time.perf_counter() - started_at, 3),
                             "timeout_sec": _REVIEWED_MUTATIVE_HARD_CEILING,
                             "hard_ceiling": True,
-                        })
+                        }, correlation, tool_call_id=tool_call_id))
                         return timeout_result
                 else:
                     timeout_result = _make_timeout_result(
                         fn_name, tool_call_id, is_code_tool, tc, drive_logs,
-                        timeout_sec, task_id, reset_msg=""
+                        timeout_sec, task_id, reset_msg="", correlation=correlation
                     )
-                    _emit_live_log(tools, {
+                    _emit_live_log(tools, _with_correlation({
                         "type": "tool_call_timeout",
                         "task_id": task_id,
                         "tool": fn_name,
                         "args": args_for_log,
                         "duration_sec": round(time.perf_counter() - started_at, 3),
                         "timeout_sec": timeout_sec,
-                    })
+                    }, correlation, tool_call_id=tool_call_id))
                     return timeout_result
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
@@ -545,17 +665,18 @@ def handle_tool_calls(
                     tc = tool_calls[idx]
                     requested_fn_name = tc.get("function", {}).get("name", "unknown")
                     fn_name = str(requested_fn_name or "").strip()
+                    safe_error = sanitize_tool_result_for_log(str(exc))
                     results[idx] = {
                         "tool_call_id": tc.get("id", ""),
                         "fn_name": fn_name,
-                        "result": f"⚠️ TOOL_ERROR: Unexpected error: {exc}",
+                        "result": f"⚠️ TOOL_ERROR: Unexpected error: {safe_error}",
                         "is_error": True,
                         "tool_args": {},
                         "args_for_log": {},
                         "is_code_tool": fn_name in tools.CODE_TOOLS,
                         "result_meta": _extract_result_metadata(
                             fn_name,
-                            f"⚠️ TOOL_ERROR: Unexpected error: {exc}",
+                            f"⚠️ TOOL_ERROR: Unexpected error: {safe_error}",
                             True,
                         ),
                     }
@@ -598,6 +719,7 @@ def process_tool_results(
             "args": _safe_args(exec_result["args_for_log"]),
             "result": truncate_for_log(exec_result["result"], 700),
             "is_error": is_error,
+            "trace_ref": exec_result.get("trace_ref"),
             **(exec_result.get("result_meta") or {}),
         })
 

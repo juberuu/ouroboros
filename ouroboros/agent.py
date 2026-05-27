@@ -332,7 +332,10 @@ class OuroborosAgent:
                             review_model = ""
                     if not review_model:
                         text = "❌ Deep self-review unavailable: no OPENROUTER_API_KEY or OPENAI_API_KEY configured."
-                        usage = {}
+                        usage = {
+                            "result_status": "infra_failed",
+                            "reason_code": "deep_self_review_unavailable",
+                        }
                     else:
                         text, usage = run_deep_self_review(
                             repo_dir=self.env.repo_dir,
@@ -365,7 +368,10 @@ class OuroborosAgent:
                         "traceback": truncate_for_log(tb, 2000),
                     })
                     text = f"⚠️ Deep self-review error: {type(e).__name__}: {e}"
-                    usage = {}
+                    usage = {
+                        "result_status": "infra_failed",
+                        "reason_code": "deep_self_review_error",
+                    }
                     llm_trace = {"reasoning_notes": ["deep_self_review_error"], "tool_calls": []}
             else:
                 try:
@@ -391,6 +397,10 @@ class OuroborosAgent:
                         "traceback": truncate_for_log(tb, 2000),
                     })
                     text = f"⚠️ Error during processing: {type(e).__name__}: {e}"
+                    usage = {
+                        "result_status": "infra_failed",
+                        "reason_code": "task_exception",
+                    }
                     try:
                         from ouroboros.task_results import STATUS_FAILED, write_task_result
                         write_task_result(
@@ -398,6 +408,8 @@ class OuroborosAgent:
                             str(task.get("id") or ""),
                             STATUS_FAILED,
                             result=text,
+                            result_status="infra_failed",
+                            reason_code="task_exception",
                         )
                     except Exception:
                         pass

@@ -1,0 +1,268 @@
+"""Private forensic execution ledger.
+
+The JSONL logs stay UI/API-friendly and compact. Full decision-affecting
+payloads live here as local private gzip blobs plus small call manifests that
+point to those blobs.
+"""
+
+from __future__ import annotations
+
+import gzip
+import hashlib
+import json
+import os
+import pathlib
+import re
+import uuid
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Tuple
+
+from ouroboros.utils import atomic_write_json, utc_now_iso
+
+
+OBSERVABILITY_DIR = "observability"
+SCHEMA_VERSION = 1
+_PRIVATE_FILE_MODE = 0o600
+_PRIVATE_DIR_MODE = 0o700
+
+_SECRET_KEY_RE = re.compile(
+    r"(?i)(api[_-]?key|token|secret|password|passwd|passphrase|authorization|"
+    r"credential|private[_-]?key|client[_-]?secret)"
+)
+_TOKEN_PATTERNS: Tuple[Tuple[str, re.Pattern[str]], ...] = (
+    ("bearer_token", re.compile(r"(?i)\bBearer\s+[A-Za-z0-9_\-./+=]{16,}")),
+    ("openai_key", re.compile(r"\bsk-[A-Za-z0-9_\-]{20,}\b")),
+    ("github_token", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{30,})\b")),
+    ("aws_access_key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("openrouter_key", re.compile(r"\bsk-or-[A-Za-z0-9\-]{20,}\b")),
+    ("openai_project_key", re.compile(r"\bsk-(?:proj|svcacct|admin)-[A-Za-z0-9_\-]{20,}\b")),
+    ("anthropic_key", re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{20,}\b")),
+    ("groq_key", re.compile(r"\bgsk_[A-Za-z0-9]{20,}\b")),
+    ("stripe_key", re.compile(r"\bsk_(?:live|test)_[A-Za-z0-9]{20,}\b")),
+    ("telegram_bot_token", re.compile(r"\b[0-9]{8,}:[A-Za-z0-9_\-]{20,}\b")),
+    ("jwt", re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b")),
+    (
+        "url_credentials",
+        re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)([^/@\s:]+):([^/@\s]+)@"),
+    ),
+)
+_SECRET_LITERAL_RE = re.compile(
+    r"""(?im)(?P<prefix>(?:^|[\s,{])["']?[A-Za-z_][A-Za-z0-9_-]*(?:token|secret|password|passwd|passphrase|api[_-]?key|authorization|credential)[A-Za-z0-9_-]*["']?\s*[:=]\s*["']?)(?P<value>[^"'\s,}]{12,})(?P<suffix>["']?)"""
+)
+
+
+@dataclass
+class RedactionRecord:
+    """One redaction fact for a projection, never the original secret."""
+
+    path: str
+    rule: str
+
+
+@dataclass
+class RedactionResult:
+    """Redacted value plus a manifest of the redaction rules that fired."""
+
+    value: Any
+    records: List[RedactionRecord] = field(default_factory=list)
+
+    def manifest(self) -> Dict[str, Any]:
+        return {
+            "redacted": bool(self.records),
+            "count": len(self.records),
+            "rules": [
+                {"path": item.path, "rule": item.rule}
+                for item in self.records
+            ],
+        }
+
+
+def new_execution_id() -> str:
+    return f"exec_{uuid.uuid4().hex}"
+
+
+def new_call_id(prefix: str) -> str:
+    safe = re.sub(r"[^a-zA-Z0-9_]+", "_", str(prefix or "call")).strip("_").lower()
+    safe = safe or "call"
+    return f"{safe}_{uuid.uuid4().hex}"
+
+
+def _observability_root(drive_root: pathlib.Path) -> pathlib.Path:
+    base = pathlib.Path(drive_root)
+    if not base.is_absolute():
+        raise ValueError("observability drive_root must be an absolute path")
+    root = base / OBSERVABILITY_DIR
+    root.mkdir(parents=True, exist_ok=True)
+    _chmod_private_dir(root)
+    return root
+
+
+def _chmod_private_dir(path: pathlib.Path) -> None:
+    try:
+        os.chmod(path, _PRIVATE_DIR_MODE)
+    except OSError:
+        pass
+
+
+def _chmod_private(path: pathlib.Path) -> None:
+    try:
+        os.chmod(path, _PRIVATE_FILE_MODE)
+    except OSError:
+        pass
+
+
+def _json_bytes(payload: Any) -> bytes:
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+
+
+def write_blob(drive_root: pathlib.Path, payload: Any, *, kind: str = "json") -> Dict[str, Any]:
+    """Persist a full private payload as a content-addressed gzip blob."""
+
+    raw = _json_bytes(payload) if kind == "json" else str(payload).encode("utf-8", errors="replace")
+    digest = hashlib.sha256(raw).hexdigest()
+    path = _observability_root(pathlib.Path(drive_root)) / "blobs" / f"{digest}.{kind}.gz"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _chmod_private_dir(path.parent)
+    if not path.exists():
+        tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}")
+        try:
+            with gzip.open(tmp, "wb") as fh:
+                fh.write(raw)
+            _chmod_private(tmp)
+            os.replace(tmp, path)
+            _chmod_private(path)
+        except Exception:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise
+    else:
+        _chmod_private(path)
+    return {
+        "sha256": digest,
+        "path": str(path),
+        "kind": kind,
+        "encoding": "gzip",
+        "size": len(raw),
+        "compressed_size": path.stat().st_size if path.exists() else 0,
+    }
+
+
+def write_call_manifest(
+    drive_root: pathlib.Path,
+    *,
+    task_id: str,
+    call_id: str,
+    manifest: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Write the small per-call manifest with refs into the private ledger."""
+
+    safe_task = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(task_id or "unknown")).strip("_") or "unknown"
+    safe_call = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(call_id or new_call_id("call"))).strip("_")
+    path = _observability_root(pathlib.Path(drive_root)) / "calls" / safe_task / f"{safe_call}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _chmod_private_dir(path.parent.parent)
+    _chmod_private_dir(path.parent)
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "created_at": utc_now_iso(),
+        "task_id": str(task_id or ""),
+        "call_id": safe_call,
+        **dict(manifest or {}),
+    }
+    atomic_write_json(path, payload, trailing_newline=True)
+    _chmod_private(path)
+    try:
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        digest = hashlib.sha256(_json_bytes(payload)).hexdigest()
+    return {
+        "path": str(path),
+        "call_id": safe_call,
+        "sha256": digest,
+    }
+
+
+def _redact_text(text: str, records: List[RedactionRecord], path: str) -> str:
+    out = text
+    for rule, pattern in _TOKEN_PATTERNS:
+        if rule == "url_credentials":
+            def _url_repl(match: re.Match[str]) -> str:
+                records.append(RedactionRecord(path=path, rule=rule))
+                return f"{match.group(1)}***REDACTED***:***REDACTED***@"
+
+            out = pattern.sub(_url_repl, out)
+            continue
+        def _repl(match: re.Match[str], _rule: str = rule) -> str:
+            records.append(RedactionRecord(path=path, rule=_rule))
+            return "***REDACTED***"
+
+        out = pattern.sub(_repl, out)
+    def _literal_repl(match: re.Match[str]) -> str:
+        records.append(RedactionRecord(path=path, rule="secret_literal_assignment"))
+        return f"{match.group('prefix')}***REDACTED***{match.group('suffix')}"
+
+    out = _SECRET_LITERAL_RE.sub(_literal_repl, out)
+    return out
+
+
+def _redact_any(value: Any, records: List[RedactionRecord], path: str) -> Any:
+    if isinstance(value, dict):
+        out: Dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            item_path = f"{path}.{key_text}" if path else key_text
+            if _SECRET_KEY_RE.search(key_text):
+                if item not in (None, "", False):
+                    records.append(RedactionRecord(path=item_path, rule="secret_key_name"))
+                out[key_text] = "***REDACTED***" if item not in (None, "", False) else item
+            else:
+                out[key_text] = _redact_any(item, records, item_path)
+        return out
+    if isinstance(value, list):
+        return [_redact_any(item, records, f"{path}[{idx}]") for idx, item in enumerate(value)]
+    if isinstance(value, tuple):
+        return [_redact_any(item, records, f"{path}[{idx}]") for idx, item in enumerate(value)]
+    if isinstance(value, str):
+        return _redact_text(value, records, path)
+    return value
+
+
+def redact_projection(value: Any) -> RedactionResult:
+    records: List[RedactionRecord] = []
+    return RedactionResult(_redact_any(value, records, "$"), records)
+
+
+def persist_call(
+    drive_root: pathlib.Path,
+    *,
+    task_id: str,
+    call_id: str,
+    call_type: str,
+    payload: Dict[str, Any],
+    manifest: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Persist a full payload and return refs plus a redacted projection."""
+
+    full_ref = write_blob(drive_root, payload, kind="json")
+    redacted = redact_projection(payload)
+    projection_ref = write_blob(drive_root, redacted.value, kind="json")
+    manifest_ref = write_call_manifest(
+        drive_root,
+        task_id=task_id,
+        call_id=call_id,
+        manifest={
+            "call_type": call_type,
+            "full_payload_ref": full_ref,
+            "redacted_projection_ref": projection_ref,
+            "redaction": redacted.manifest(),
+            **dict(manifest or {}),
+        },
+    )
+    return {
+        "call_id": call_id,
+        "redacted_projection_ref": projection_ref,
+        "manifest_ref": manifest_ref,
+        "redaction": redacted.manifest(),
+    }

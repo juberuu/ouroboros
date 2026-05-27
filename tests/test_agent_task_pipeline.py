@@ -31,7 +31,7 @@ def test_task_summary_prefers_direct_model_when_openrouter_missing(tmp_path, mon
         llm=FakeLlm(),
         task={"id": "task-123", "type": "task", "text": "Reply with exactly OK."},
         usage={"rounds": 3, "cost": 0.01},
-        llm_trace={"tool_calls": [{"tool": "repo_read", "args": {}}], "reasoning_notes": []},
+        llm_trace={"tool_calls": [{"tool": "read_file", "args": {}}], "reasoning_notes": []},
         drive_logs=drive_logs,
     )
 
@@ -131,7 +131,7 @@ def test_emit_task_results_queues_restart_after_final_events(tmp_path, monkeypat
 def test_build_trace_summary_shows_structured_failure_facts():
     trace = {
         "tool_calls": [{
-            "tool": "run_shell",
+            "tool": "run_command",
             "args": {"cmd": ["npm", "install", "-g", "@anthropic-ai/claude-code"]},
             "result": "⚠️ SHELL_EXIT_ERROR: command exited with exit_code=-9 (signal=SIGKILL).",
             "is_error": True,
@@ -169,7 +169,7 @@ def test_task_summary_prompt_includes_review_evidence(tmp_path, monkeypatch):
         llm=FakeLlm(),
         task={"id": "task-review", "type": "task", "text": "Fix commit flow"},
         usage={"rounds": 4, "cost": 0.02},
-        llm_trace={"tool_calls": [{"tool": "repo_commit", "args": {}}], "reasoning_notes": []},
+        llm_trace={"tool_calls": [{"tool": "commit_reviewed", "args": {}}], "reasoning_notes": []},
         drive_logs=drive_logs,
         review_evidence={
             "has_evidence": True,
@@ -300,7 +300,7 @@ def test_collect_review_evidence_keeps_recent_attempts_task_scoped(tmp_path):
         commit_message="other task attempt",
         status="blocked",
         repo_key=make_repo_key(repo_dir),
-        tool_name="repo_commit",
+        tool_name="commit_reviewed",
         task_id="task-other",
         attempt=1,
         block_reason="critical_findings",
@@ -366,7 +366,7 @@ def test_run_reflection_returns_entry_when_generated(tmp_path):
         FakeLlm(),
         {"id": "task-reflect", "type": "task", "text": "Fix it"},
         {"rounds": 2, "cost": 0.01},
-        {"tool_calls": [{"tool": "repo_commit", "is_error": False, "result": "⚠️ REVIEW_BLOCKED"}]},
+        {"tool_calls": [{"tool": "commit_reviewed", "is_error": False, "result": "⚠️ REVIEW_BLOCKED"}]},
         {"recent_attempts": [], "open_obligations": [{"item": "tests_affected", "reason": "Fix the failing test before commit"}]},
     )
 
@@ -412,7 +412,7 @@ def test_collect_review_evidence_scopes_open_obligations_to_repo(tmp_path):
         commit_message="repo b blocked",
         status="blocked",
         repo_key=repo_b_key,
-        tool_name="repo_commit",
+        tool_name="commit_reviewed",
         task_id="task-b",
         attempt=1,
         block_reason="critical_findings",
@@ -454,7 +454,7 @@ def test_collect_review_evidence_includes_commit_readiness_debt(tmp_path):
             commit_message=f"blocked {idx}",
             status="blocked",
             repo_key=repo_key,
-            tool_name="repo_commit",
+            tool_name="commit_reviewed",
             task_id=f"task-{idx}",
             attempt=idx,
             block_reason="critical_findings",

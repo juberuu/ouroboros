@@ -212,6 +212,19 @@ def copy_child_task_result(parent_drive_root: pathlib.Path, task: Dict[str, Any]
         for key, value in child_result.items()
         if key not in {"task_id", "status"}
     }
+    if isinstance(payload.get("artifacts"), list):
+        payload["artifacts"] = _copy_child_artifacts_to_parent(
+            parent_drive_root,
+            task_id,
+            child_drive,
+            [item for item in payload.get("artifacts") or [] if isinstance(item, dict)],
+        )
+        try:
+            from ouroboros.outcomes import artifact_bundle_from_result
+
+            payload["artifact_bundle"] = artifact_bundle_from_result(payload)
+        except Exception:
+            payload.pop("artifact_bundle", None)
     payload.setdefault("headless_child_drive_root", str(child_drive))
     child_status = str(child_result.get("status") or "completed")
     if _workspace_root_from_task(task) is not None and child_status in _FINAL_STATUSES:
@@ -225,6 +238,47 @@ def copy_child_task_result(parent_drive_root: pathlib.Path, task: Dict[str, Any]
         child_status,
         **payload,
     )
+
+
+def _copy_child_artifacts_to_parent(
+    parent_drive_root: pathlib.Path,
+    task_id: str,
+    child_drive: pathlib.Path,
+    artifacts: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Rebase child-drive artifact files into the parent task artifact store."""
+
+    parent_dir = task_artifacts_dir(parent_drive_root, task_id)
+    rebased: List[Dict[str, Any]] = []
+    for artifact in artifacts:
+        item = dict(artifact)
+        raw_path = str(item.get("path") or "").strip()
+        if not raw_path:
+            rebased.append(item)
+            continue
+        src = pathlib.Path(raw_path)
+        if not src.is_absolute():
+            src = (child_drive / raw_path).resolve(strict=False)
+        try:
+            src.resolve(strict=False).relative_to(parent_dir.resolve(strict=False))
+            rebased.append(item)
+            continue
+        except ValueError:
+            pass
+        if not src.is_file():
+            rebased.append(item)
+            continue
+        dest = parent_dir / src.name
+        if dest.exists() and dest.resolve(strict=False) != src.resolve(strict=False):
+            dest = parent_dir / f"{src.stem}_{sha256(str(src).encode('utf-8')).hexdigest()[:8]}{src.suffix}"
+        shutil.copy2(src, dest)
+        data = dest.read_bytes()
+        item["path"] = str(dest)
+        item["name"] = str(item.get("name") or dest.name)
+        item["size"] = len(data)
+        item["sha256"] = sha256(data).hexdigest()
+        rebased.append(item)
+    return rebased
 
 
 def finalize_task_artifacts(parent_drive_root: pathlib.Path, task: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -309,6 +363,25 @@ def finalize_task_artifacts(parent_drive_root: pathlib.Path, task: Dict[str, Any
         }
         if artifact_error:
             fields["artifact_error"] = artifact_error
+        provisional = {
+            **existing,
+            **fields,
+            "artifacts": merged,
+            "artifact_status": fields.get("artifact_status", existing.get("artifact_status")),
+        }
+        try:
+            from ouroboros.outcomes import artifact_bundle_from_result, refresh_verification_ledger_artifacts
+
+            artifact_bundle = artifact_bundle_from_result(provisional)
+            fields["artifact_bundle"] = artifact_bundle
+            refreshed_ledger = refresh_verification_ledger_artifacts(
+                existing.get("verification_ledger"),
+                artifact_bundle,
+            )
+            if refreshed_ledger is not None:
+                fields["verification_ledger"] = refreshed_ledger
+        except Exception:
+            pass
         write_task_result(
             parent_drive_root,
             task_id,

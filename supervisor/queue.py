@@ -330,11 +330,13 @@ def enforce_task_timeouts() -> None:
         if worker_id in workers.WORKERS:
             w = workers.WORKERS[worker_id]
             try:
-                if w.proc.is_alive():
+                if w.proc.pid:
+                    from ouroboros.platform_layer import kill_pid_tree
+                    kill_pid_tree(w.proc.pid)
+                elif w.proc.is_alive():
                     w.proc.terminate()
                 w.proc.join(timeout=5)
                 if w.proc.is_alive() and w.proc.pid:
-                    from ouroboros.platform_layer import kill_pid_tree
                     kill_pid_tree(w.proc.pid)
                     w.proc.join(timeout=2)
             except Exception:
@@ -342,18 +344,44 @@ def enforce_task_timeouts() -> None:
             workers.respawn_worker(worker_id)
 
         will_retry = attempt <= QUEUE_MAX_RETRIES and isinstance(task, dict)
+        retry_task_id = ""
+        if will_retry:
+            retry_task_id = task_id if str(task.get("delegation_role") or "") == "subagent" else uuid.uuid4().hex[:8]
         try:
-            from ouroboros.task_results import STATUS_FAILED, STATUS_INTERRUPTED, write_task_result
+            from ouroboros.task_results import STATUS_FAILED, STATUS_INTERRUPTED, STATUS_SCHEDULED, write_task_result
             write_task_result(
                 DRIVE_ROOT,
                 task_id,
                 STATUS_INTERRUPTED if will_retry else STATUS_FAILED,
+                result_status="infra_failed",
+                reason_code="hard_timeout_retry" if will_retry else "hard_timeout",
+                superseded_by=retry_task_id if retry_task_id and retry_task_id != task_id else "",
+                retry_task_id=retry_task_id if retry_task_id else "",
                 result=(
                     f"Task killed by hard timeout after {int(runtime_sec)}s. Retrying."
                     if will_retry
                     else f"Task killed by hard timeout after {int(runtime_sec)}s."
                 ),
             )
+            if will_retry and retry_task_id and retry_task_id != task_id:
+                write_task_result(
+                    DRIVE_ROOT,
+                    retry_task_id,
+                    STATUS_SCHEDULED,
+                    result_status="pending",
+                    reason_code="hard_timeout_retry_scheduled",
+                    supersedes_task_id=task_id,
+                    original_task_id=task_id,
+                    result="Retry scheduled after hard timeout.",
+                    parent_task_id=task.get("parent_task_id"),
+                    root_task_id=task.get("root_task_id") or task_id,
+                    description=task.get("description"),
+                    context=task.get("context"),
+                    workspace_root=task.get("workspace_root"),
+                    workspace_mode=task.get("workspace_mode"),
+                    memory_mode=task.get("memory_mode"),
+                    metadata=task.get("metadata") if isinstance(task.get("metadata"), dict) else {},
+                )
         except Exception:
             pass
 
@@ -362,10 +390,7 @@ def enforce_task_timeouts() -> None:
         if will_retry:
             retried = dict(task)
             retried["original_task_id"] = task_id
-            if str(task.get("delegation_role") or "") != "subagent":
-                retried["id"] = uuid.uuid4().hex[:8]
-            else:
-                retried["id"] = task_id
+            retried["id"] = retry_task_id or task_id
             retried["_attempt"] = attempt + 1
             retried["timeout_retry_from"] = task_id
             retried["timeout_retry_at"] = utc_now_iso()

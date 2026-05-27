@@ -41,6 +41,7 @@ def test_apply_runtime_provider_defaults_autofills_official_openai_models():
         "OUROBOROS_MODEL_FALLBACK",
         "OUROBOROS_REVIEW_MODELS",
         "OUROBOROS_SCOPE_REVIEW_MODEL",
+        "OUROBOROS_SCOPE_REVIEW_MODELS",
     }
     assert normalized["OUROBOROS_MODEL"] == "openai::gpt-5.5"
     assert normalized["OUROBOROS_MODEL_CODE"] == "openai::gpt-5.5"
@@ -74,7 +75,7 @@ def test_apply_runtime_provider_defaults_autofills_official_openai_models():
         "openai::gpt-5.5,openai::gpt-5.5-mini,openai::gpt-5.5-mini"
     )
     assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] == "openai::gpt-5.5"
-    assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] == "openai::gpt-5.5"
+    assert normalized["OUROBOROS_SCOPE_REVIEW_MODELS"] == "openai::gpt-5.5"
 
     payload = dict(SETTINGS_DEFAULTS)
     payload["OPENAI_API_KEY"] = "sk-openai"
@@ -106,6 +107,7 @@ def test_apply_runtime_provider_defaults_migrates_saved_openai_values():
         "OUROBOROS_MODEL_FALLBACK",
         "OUROBOROS_REVIEW_MODELS",
         "OUROBOROS_SCOPE_REVIEW_MODEL",
+        "OUROBOROS_SCOPE_REVIEW_MODELS",
     }
     assert normalized["OUROBOROS_MODEL"] == "openai::gpt-5.5"
     assert normalized["OUROBOROS_MODEL_CODE"] == "openai::gpt-5.5"
@@ -127,11 +129,29 @@ def test_apply_runtime_provider_defaults_keeps_explicit_official_openai_review_m
         "OUROBOROS_MODEL_FALLBACK": "openai::gpt-5.5-mini",
         "OUROBOROS_REVIEW_MODELS": "openai::gpt-5.5,openai::gpt-5.5-mini",
         "OUROBOROS_SCOPE_REVIEW_MODEL": "openai::gpt-5.5",  # already in direct format
+        "OUROBOROS_SCOPE_REVIEW_MODELS": "openai::gpt-5.5",  # already in direct format
     })
 
     assert not changed
     assert changed_keys == []
     assert normalized["OUROBOROS_REVIEW_MODELS"] == "openai::gpt-5.5,openai::gpt-5.5-mini"
+
+
+def test_apply_runtime_provider_defaults_preserves_duplicate_scope_slots_for_openai():
+    normalized, changed, changed_keys = apply_runtime_provider_defaults({
+        "OPENAI_API_KEY": "sk-openai",
+        "OUROBOROS_MODEL": "openai::gpt-5.5",
+        "OUROBOROS_MODEL_CODE": "openai::gpt-5.5",
+        "OUROBOROS_MODEL_LIGHT": "openai::gpt-5.5-mini",
+        "OUROBOROS_MODEL_FALLBACK": "openai::gpt-5.5-mini",
+        "OUROBOROS_REVIEW_MODELS": "openai::gpt-5.5,openai::gpt-5.5,openai::gpt-5.5",
+        "OUROBOROS_SCOPE_REVIEW_MODEL": "openai::gpt-5.5",
+        "OUROBOROS_SCOPE_REVIEW_MODELS": "openai::gpt-5.5,openai::gpt-5.5,openai::gpt-5.5",
+    })
+
+    assert not changed
+    assert changed_keys == []
+    assert normalized["OUROBOROS_SCOPE_REVIEW_MODELS"] == "openai::gpt-5.5,openai::gpt-5.5,openai::gpt-5.5"
 
 
 def test_apply_runtime_provider_defaults_preserves_current_opus47_defaults_with_openrouter():
@@ -161,12 +181,15 @@ def test_apply_runtime_provider_defaults_refreshes_retired_gpt54_defaults():
         "OPENROUTER_API_KEY": "sk-or",
         "OUROBOROS_REVIEW_MODELS": f"{old_main},{old_mini}",
         "OUROBOROS_SCOPE_REVIEW_MODEL": old_pro,
+        "OUROBOROS_SCOPE_REVIEW_MODELS": f"{old_pro},{old_mini}",
     })
 
     assert changed
     assert "OUROBOROS_REVIEW_MODELS" in changed_keys
+    assert "OUROBOROS_SCOPE_REVIEW_MODELS" in changed_keys
     assert normalized["OUROBOROS_REVIEW_MODELS"] == "openai/gpt-5.5,openai/gpt-5.5-mini"
     assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] == "openai/gpt-5.5-pro"
+    assert normalized["OUROBOROS_SCOPE_REVIEW_MODELS"] == "openai/gpt-5.5-pro,openai/gpt-5.5-mini"
 
 
 def test_apply_runtime_provider_defaults_migrates_legacy_scope_model_for_openai_only():
@@ -181,9 +204,10 @@ def test_apply_runtime_provider_defaults_migrates_legacy_scope_model_for_openai_
             "OUROBOROS_MODEL_CODE": "openai::gpt-5.5",
             "OUROBOROS_MODEL_LIGHT": "openai::gpt-5.5-mini",
             "OUROBOROS_MODEL_FALLBACK": "openai::gpt-5.5-mini",
-            "OUROBOROS_REVIEW_MODELS": "openai::gpt-5.5,openai::gpt-5.5-mini",
-            "OUROBOROS_SCOPE_REVIEW_MODEL": legacy_scope_model,
-        })
+        "OUROBOROS_REVIEW_MODELS": "openai::gpt-5.5,openai::gpt-5.5-mini",
+        "OUROBOROS_SCOPE_REVIEW_MODEL": legacy_scope_model,
+        "OUROBOROS_SCOPE_REVIEW_MODELS": "openai::gpt-5.5",
+    })
 
         assert changed is should_change
         assert changed_keys == (["OUROBOROS_SCOPE_REVIEW_MODEL"] if should_change else [])
@@ -210,6 +234,7 @@ def test_apply_runtime_provider_defaults_normalizes_anthropic_only_setup():
         "OUROBOROS_MODEL_FALLBACK",
         "OUROBOROS_REVIEW_MODELS",
         "OUROBOROS_SCOPE_REVIEW_MODEL",
+        "OUROBOROS_SCOPE_REVIEW_MODELS",
     }
     assert normalized["OUROBOROS_MODEL"] == "anthropic::claude-opus-4-6"
     assert normalized["OUROBOROS_MODEL_CODE"] == "anthropic::claude-opus-4-6"
@@ -222,6 +247,7 @@ def test_apply_runtime_provider_defaults_normalizes_anthropic_only_setup():
         "anthropic::claude-sonnet-4-6"
     )
     assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] == "anthropic::claude-opus-4-6"
+    assert normalized["OUROBOROS_SCOPE_REVIEW_MODELS"] == "anthropic::claude-opus-4-6"
 
     normalized, changed, changed_keys = apply_runtime_provider_defaults({
         "ANTHROPIC_API_KEY": "sk-ant",
@@ -267,6 +293,7 @@ def test_apply_runtime_provider_defaults_normalizes_anthropic_only_setup_with_sh
         "OUROBOROS_MODEL_FALLBACK",
         "OUROBOROS_REVIEW_MODELS",
         "OUROBOROS_SCOPE_REVIEW_MODEL",
+        "OUROBOROS_SCOPE_REVIEW_MODELS",
     }
     assert normalized["OUROBOROS_MODEL"] == "anthropic::claude-opus-4-6"
     assert normalized["OUROBOROS_MODEL_CODE"] == "anthropic::claude-opus-4-6"
@@ -279,6 +306,7 @@ def test_apply_runtime_provider_defaults_normalizes_anthropic_only_setup_with_sh
         "anthropic::claude-sonnet-4-6"
     )
     assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] == "anthropic::claude-opus-4-6"
+    assert normalized["OUROBOROS_SCOPE_REVIEW_MODELS"] == "anthropic::claude-opus-4-6"
 
 
 def test_apply_runtime_provider_defaults_skips_non_official_or_custom_configs():

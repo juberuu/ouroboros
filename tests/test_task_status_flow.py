@@ -476,7 +476,7 @@ def test_handle_schedule_task_duplicate_writes_rejected_status(tmp_path, monkeyp
 
     ev_module._handle_schedule_task(
         {
-            "type": "schedule_task",
+            "type": "schedule_subagent",
             "task_id": "dup222",
             "objective": "Do the thing",
             "expected_output": "Duplicate verdict",
@@ -572,7 +572,7 @@ def test_handle_schedule_task_accepts_unique_subagent_with_lineage_and_constrain
 
     ev_module._handle_schedule_task(
         {
-            "type": "schedule_task",
+            "type": "schedule_subagent",
             "task_id": "child123",
             "objective": "Inspect scheduling",
             "expected_output": "Findings table",
@@ -640,7 +640,7 @@ def test_handle_schedule_task_rejects_internal_subagent_without_child_drive_cont
 
     ev_module._handle_schedule_task(
         {
-            "type": "schedule_task",
+            "type": "schedule_subagent",
             "task_id": "badchild",
             "objective": "Inspect invalid event",
             "expected_output": "Nothing",
@@ -688,7 +688,7 @@ def test_handle_schedule_task_uses_event_chat_id_without_owner(tmp_path, monkeyp
 
     ev_module._handle_schedule_task(
         {
-            "type": "schedule_task",
+            "type": "schedule_subagent",
             "task_id": "headless1",
             "objective": "Inspect no-owner path",
             "expected_output": "Findings",
@@ -711,7 +711,7 @@ def test_handle_schedule_task_uses_event_chat_id_without_owner(tmp_path, monkeyp
 
     ev_module._handle_schedule_task(
         {
-            "type": "schedule_task",
+            "type": "schedule_subagent",
             "task_id": "headless2",
             "objective": "Inspect missing chat target",
             "expected_output": "Findings",
@@ -753,7 +753,7 @@ def test_handle_schedule_task_depth_rejection_writes_failed_status(tmp_path, mon
 
     ev_module._handle_schedule_task(
         {
-            "type": "schedule_task",
+            "type": "schedule_subagent",
             "task_id": "deep1",
             "objective": "Too deep",
             "expected_output": "Nothing",
@@ -800,7 +800,7 @@ def test_handle_schedule_task_rejects_legacy_subagent_event_schema(tmp_path, mon
 
     ev_module._handle_schedule_task(
         {
-            "type": "schedule_task",
+            "type": "schedule_subagent",
             "task_id": "legacy123",
             "description": "Old child form",
             "context": "old reference",
@@ -845,7 +845,7 @@ def test_handle_schedule_task_rejects_fourth_active_subagent(tmp_path, monkeypat
 
     ev_module._handle_schedule_task(
         {
-            "type": "schedule_task",
+            "type": "schedule_subagent",
             "task_id": "child999",
             "objective": "Too many",
             "expected_output": "Nothing",

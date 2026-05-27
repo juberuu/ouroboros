@@ -125,7 +125,7 @@ def load_effective_task_result(drive_root: pathlib.Path, task_id: str) -> Dict[s
     return effective_task_result(drive_root, load_task_result(drive_root, tid) or {})
 
 
-def effective_task_result(drive_root: pathlib.Path, result: Dict[str, Any]) -> Dict[str, Any]:
+def effective_task_result(drive_root: pathlib.Path, result: Dict[str, Any], *, _seen: frozenset[str] = frozenset()) -> Dict[str, Any]:
     """Merge parent result, child-drive result, and active queue state."""
 
     if not result:
@@ -133,6 +133,29 @@ def effective_task_result(drive_root: pathlib.Path, result: Dict[str, Any]) -> D
     task_id = str(result.get("task_id") or result.get("id") or "").strip()
     if not task_id:
         return dict(result)
+    retry_id = str(result.get("superseded_by") or result.get("retry_task_id") or "").strip()
+    if retry_id and retry_id != task_id and retry_id not in _seen:
+        retry_result = load_task_result(drive_root, retry_id) or {}
+        if retry_result:
+            effective_retry = effective_task_result(
+                pathlib.Path(drive_root),
+                retry_result,
+                _seen=frozenset(set(_seen) | {task_id}),
+            )
+            if effective_retry:
+                merged_retry = dict(effective_retry)
+                lineage = list(merged_retry.get("retry_lineage") or [])
+                lineage.insert(0, {
+                    "task_id": task_id,
+                    "status": result.get("status"),
+                    "result_status": result.get("result_status"),
+                    "reason_code": result.get("reason_code"),
+                    "retry_task_id": retry_id,
+                })
+                merged_retry["retry_lineage"] = lineage
+                merged_retry.setdefault("original_task_id", task_id)
+                merged_retry.setdefault("supersedes_task_id", task_id)
+                return merged_retry
 
     merged = dict(result)
     child_result: Dict[str, Any] = {}
@@ -330,7 +353,7 @@ def format_handoff_message(children: List[Dict[str, Any]]) -> str:
             "trace_available": trace_info["available"],
             "trace_chars": trace_info["chars"],
             "trace_preview": trace_info["preview"],
-            "full_output": "Use get_task_result, wait_for_task, or wait_for_tasks for the full untruncated child output.",
+            "full_output": "Use get_task_result, wait_task, or wait_tasks for the full untruncated child output.",
         })
     return (
         "[SUBAGENT_HANDOFF_STATUS]\n"

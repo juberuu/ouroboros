@@ -263,7 +263,7 @@ def test_chat_remote_passes_no_proxy_to_anthropic():
 # Test: plan_review._query_reviewer calls chat_async with no_proxy=True
 # ---------------------------------------------------------------------------
 
-def test_plan_review_query_reviewer_uses_no_proxy():
+def test_plan_review_query_reviewer_uses_no_proxy(tmp_path):
     """_query_reviewer in plan_review.py must call chat_async with no_proxy=True."""
     from ouroboros.tools import plan_review
 
@@ -280,9 +280,11 @@ def test_plan_review_query_reviewer_uses_no_proxy():
 
     import asyncio
     import asyncio as _asyncio
+    fake_ctx = type("FakeCtx", (), {"drive_root": tmp_path, "task_id": "test-plan-review"})()
 
     result = _asyncio.run(
         plan_review._query_reviewer(
+            fake_ctx,
             FakeLLMClient(),
             "openai/gpt-5.5",
             "system prompt",

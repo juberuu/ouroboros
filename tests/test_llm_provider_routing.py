@@ -165,7 +165,7 @@ def test_non_openrouter_payload_strips_reasoning_roundtrip_metadata(monkeypatch)
         {
             "role": "assistant",
             "content": None,
-            "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "repo_read", "arguments": "{}"}}],
+            "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}],
             "reasoning": "read first",
             "reasoning_details": [{"type": "reasoning.text", "text": "read first"}],
             "response_id": "gen-123",
@@ -197,7 +197,7 @@ def test_openrouter_payload_keeps_reasoning_roundtrip_metadata(monkeypatch):
         {
             "role": "assistant",
             "content": None,
-            "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "repo_read", "arguments": "{}"}}],
+            "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}],
             "reasoning": "read first",
             "reasoning_details": [{"type": "reasoning.text", "text": "read first"}],
             "response_id": "gen-123",
@@ -528,7 +528,7 @@ def test_normalize_remote_response_preserves_reasoning_and_response_id():
                 "message": {
                     "role": "assistant",
                     "content": None,
-                    "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "repo_read", "arguments": "{}"}}],
+                    "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}],
                     "reasoning": "look up the file",
                     "reasoning_details": [{"type": "reasoning.text", "text": "look up the file"}],
                 },

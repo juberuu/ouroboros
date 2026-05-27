@@ -374,7 +374,7 @@ class TestAdvisoryReviewStatusInContext:
             commit_message="blocked commit",
             status="blocked",
             repo_key=repo_key,
-            tool_name="repo_commit",
+            tool_name="commit_reviewed",
             task_id="task-old",
             attempt=1,
             critical_findings=[{
@@ -394,7 +394,7 @@ class TestAdvisoryReviewStatusInContext:
                 source="blocked_review",
                 stage="blocking_review",
                 repo_key=repo_key,
-                tool_name="repo_commit",
+                tool_name="commit_reviewed",
                 attempt=1,
                 block_reason="critical_findings",
                 critical_findings=[{
@@ -469,7 +469,7 @@ class TestAdvisoryReviewStatusInContext:
             commit_message="repo b blocked",
             status="blocked",
             repo_key=repo_b_key,
-            tool_name="repo_commit",
+            tool_name="commit_reviewed",
             task_id="task-b",
             attempt=1,
             block_reason="critical_findings",

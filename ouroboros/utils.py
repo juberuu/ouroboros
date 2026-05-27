@@ -548,14 +548,29 @@ def sanitize_tool_args_for_log(
 ) -> Dict[str, Any]:
     """Sanitize tool arguments for logging: redact secrets, truncate large fields."""
 
+    def _redact_public_string(value: str) -> tuple[str, bool]:
+        try:
+            from ouroboros.observability import redact_projection
+
+            redacted = redact_projection(value)
+            return str(redacted.value), bool(redacted.records)
+        except Exception:
+            log.debug("Failed to run observability redactor for tool args", exc_info=True)
+            return sanitize_tool_result_for_log(value), sanitize_tool_result_for_log(value) != value
+
     def _sanitize_value(key: str, value: Any, depth: int) -> Any:
         if depth > 3:
             return {"_depth_limit": True}
         if key.lower() in _SECRET_KEYS:
             return "*** REDACTED ***"
-        if isinstance(value, str) and len(value) > threshold:
-            return f"<TRUNCATED:{key}:{len(value)}ch:sha={sha256_text(value)[:12]}>"
         if isinstance(value, str):
+            redacted, did_redact = _redact_public_string(value)
+            if did_redact:
+                if len(redacted) > threshold:
+                    return f"<REDACTED_TRUNCATED:{key}:{len(redacted)}ch>"
+                return redacted
+            if len(value) > threshold:
+                return f"<TRUNCATED:{key}:{len(value)}ch:sha={sha256_text(value)[:12]}>"
             return value
         if isinstance(value, dict):
             return {k: _sanitize_value(k, v, depth + 1) for k, v in value.items()}

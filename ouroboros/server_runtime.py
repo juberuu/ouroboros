@@ -127,6 +127,16 @@ def _refresh_retired_model_defaults(settings: dict) -> tuple[dict, list[str]]:
         if serialized != review_value:
             normalized["OUROBOROS_REVIEW_MODELS"] = serialized
             changed.append("OUROBOROS_REVIEW_MODELS")
+    scope_review_value = _setting_text(normalized, "OUROBOROS_SCOPE_REVIEW_MODELS")
+    if scope_review_value:
+        models = [
+            _RETIRED_MODEL_DEFAULT_REPLACEMENTS.get(item, item)
+            for item in _parse_model_list(scope_review_value)
+        ]
+        serialized = _serialize_model_list(models)
+        if serialized != scope_review_value:
+            normalized["OUROBOROS_SCOPE_REVIEW_MODELS"] = serialized
+            changed.append("OUROBOROS_SCOPE_REVIEW_MODELS")
     return normalized, _unique_changed_keys(changed)
 
 
@@ -193,6 +203,21 @@ def _normalize_direct_scope_review_model(settings: dict, provider: str) -> str:
     if current.startswith(provider_prefix) and current_raw:
         return current
     return current or auto_value
+
+
+def _normalize_direct_scope_review_models(settings: dict, provider: str) -> str:
+    raw = _setting_text(settings, "OUROBOROS_SCOPE_REVIEW_MODELS")
+    models = _parse_model_list(raw)
+    if not models:
+        singular = _normalize_direct_scope_review_model(settings, provider)
+        return _serialize_model_list([singular] if singular else [])
+    migrated = [migrate_model_value(provider, model) for model in models]
+    provider_prefix = _provider_prefix(provider)
+    if raw == _setting_text(SETTINGS_DEFAULTS, "OUROBOROS_SCOPE_REVIEW_MODELS"):
+        return _serialize_model_list([_normalize_direct_scope_review_model(settings, provider)])
+    if all(model.startswith(provider_prefix) for model in migrated):
+        return _serialize_model_list(migrated)
+    return _serialize_model_list([_normalize_direct_scope_review_model(settings, provider)])
 
 
 def classify_runtime_provider_change(before: dict, after: dict) -> str:
@@ -288,6 +313,11 @@ def apply_runtime_provider_defaults(settings: dict) -> tuple[dict, bool, list[st
     if scope_review_model != _setting_text(normalized, "OUROBOROS_SCOPE_REVIEW_MODEL"):
         normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] = scope_review_model
         changed_keys.append("OUROBOROS_SCOPE_REVIEW_MODEL")
+
+    scope_review_models = _normalize_direct_scope_review_models(normalized, provider)
+    if scope_review_models != _setting_text(normalized, "OUROBOROS_SCOPE_REVIEW_MODELS"):
+        normalized["OUROBOROS_SCOPE_REVIEW_MODELS"] = scope_review_models
+        changed_keys.append("OUROBOROS_SCOPE_REVIEW_MODELS")
 
     changed_keys = _unique_changed_keys(changed_keys)
     return normalized, bool(changed_keys), changed_keys

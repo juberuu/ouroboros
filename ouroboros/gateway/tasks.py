@@ -120,7 +120,7 @@ async def api_tasks_create(request: Request) -> JSONResponse:
 
     raw_metadata = dict(body.get("metadata") or {}) if isinstance(body.get("metadata"), dict) else {}
     if _external_subagent_label(body, raw_metadata):
-        return json_error("delegation_role=subagent is only allowed through the internal schedule_task tool", 400)
+        return json_error("delegation_role=subagent is only allowed through the internal schedule_subagent tool", 400)
     if str(body.get("parent_task_id") or "").strip() or str(body.get("root_task_id") or "").strip():
         return json_error("parent_task_id and root_task_id are internal lineage fields; external tasks must start as roots", 400)
     metadata = {str(k): v for k, v in raw_metadata.items() if str(k) not in _RESERVED_METADATA_KEYS}
@@ -527,7 +527,7 @@ def _compose_task_text(
             f"workspace_root: {workspace_root}\n"
             f"workspace_mode: {workspace_mode or 'external'}\n"
             f"memory_mode: {memory_mode}\n"
-            "Use repo_read, repo_write, repo_list, code_search, git_status, git_diff, and run_shell against this target workspace, not the Ouroboros system repo.\n"
+            "Use read_file, write_file, list_files, search_code, vcs_status, vcs_diff, and run_command against this target workspace, not the Ouroboros system repo.\n"
             f"{render_workspace_preflight_summary(workspace_preflight)}\n"
             "Before editing, account for target-repo docs or root-level instructions if present.\n"
             "Project-local dependency installs are allowed in external workspace tasks; system/global installs are for runtime_mode=pro only and must be noninteractive.\n"

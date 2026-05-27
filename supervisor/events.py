@@ -335,17 +335,25 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
 
     # Persist here so send_message reaches the UI before task_done collapses the card.
     from ouroboros.utils import utc_now_iso, append_jsonl
+    task_done_event = {
+        "ts": evt.get("ts", utc_now_iso()),
+        "type": "task_done",
+        "task_id": task_id,
+        "task_type": task_type,
+        "result_status": evt.get("result_status"),
+        "reason_code": evt.get("reason_code"),
+        "artifact_status": evt.get("artifact_status"),
+        "cost_usd": float(evt.get("cost_usd") or 0),
+        "total_rounds": int(evt.get("total_rounds") or 0),
+        "prompt_tokens": int(evt.get("prompt_tokens") or 0),
+        "completion_tokens": int(evt.get("completion_tokens") or 0),
+    }
+    if isinstance(evt.get("artifact_bundle"), dict):
+        task_done_event["artifact_bundle"] = evt.get("artifact_bundle")
+    if isinstance(evt.get("review_status"), dict):
+        task_done_event["review_status"] = evt.get("review_status")
     try:
-        append_jsonl(ctx.DRIVE_ROOT / "logs" / "events.jsonl", {
-            "ts": evt.get("ts", utc_now_iso()),
-            "type": "task_done",
-            "task_id": task_id,
-            "task_type": task_type,
-            "cost_usd": float(evt.get("cost_usd") or 0),
-            "total_rounds": int(evt.get("total_rounds") or 0),
-            "prompt_tokens": int(evt.get("prompt_tokens") or 0),
-            "completion_tokens": int(evt.get("completion_tokens") or 0),
-        })
+        append_jsonl(ctx.DRIVE_ROOT / "logs" / "events.jsonl", task_done_event)
     except Exception:
         log.warning("Failed to log task_done to events.jsonl", exc_info=True)
 
@@ -392,14 +400,21 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
         except Exception as exc:
             try:
                 from ouroboros.headless import ARTIFACT_STATUS_FAILED
+                from ouroboros.outcomes import artifact_bundle_from_result
+
                 existing = load_task_result(ctx.DRIVE_ROOT, str(task_id)) or {}
+                fields = {
+                    "artifact_status": ARTIFACT_STATUS_FAILED,
+                    "artifact_error": f"{type(exc).__name__}: {exc}",
+                    "artifact_finalized_at": utc_now_iso(),
+                }
+                provisional = {**existing, **fields}
+                fields["artifact_bundle"] = artifact_bundle_from_result(provisional)
                 write_task_result(
                     ctx.DRIVE_ROOT,
                     str(task_id),
                     str(existing.get("status") or "completed"),
-                    artifact_status=ARTIFACT_STATUS_FAILED,
-                    artifact_error=f"{type(exc).__name__}: {exc}",
-                    artifact_finalized_at=utc_now_iso(),
+                    **fields,
                 )
             except Exception:
                 pass
@@ -447,16 +462,7 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
         ctx.WORKERS[wid].busy_task_id = None
     ctx.persist_queue_snapshot(reason="task_done")
     try:
-        ctx.bridge.push_log({
-            "ts": evt.get("ts", utc_now_iso()),
-            "type": "task_done",
-            "task_id": task_id,
-            "task_type": task_type,
-            "cost_usd": evt.get("cost_usd"),
-            "total_rounds": evt.get("total_rounds"),
-            "prompt_tokens": evt.get("prompt_tokens"),
-            "completion_tokens": evt.get("completion_tokens"),
-        })
+        ctx.bridge.push_log(task_done_event)
     except Exception:
         log.debug("Failed to forward task_done to live logs", exc_info=True)
 
@@ -469,7 +475,9 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
             write_task_result(
                 ctx.DRIVE_ROOT,
                 str(task_id or ""),
-                STATUS_COMPLETED,
+                STATUS_FAILED,
+                result_status="infra_failed",
+                reason_code="missing_task_result",
                 result="",
                 cost_usd=float(evt.get("cost_usd", 0)),
                 ts=evt.get("ts", ""),
@@ -487,6 +495,8 @@ def _handle_task_metrics(evt: Dict[str, Any], ctx: Any) -> None:
         "duration_sec": round(float(evt.get("duration_sec") or 0.0), 3),
         "tool_calls": int(evt.get("tool_calls") or 0),
         "tool_errors": int(evt.get("tool_errors") or 0),
+        "result_status": str(evt.get("result_status") or ""),
+        "reason_code": str(evt.get("reason_code") or ""),
     }
     ctx.append_jsonl(ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl", payload)
     try:
@@ -690,8 +700,8 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
         "task_constraint": task_constraint,
     }
     if delegation_role == "subagent" and (not str(evt.get("objective") or "").strip() or not expected_output):
-        detail = "Subagent rejected: schedule_task requires objective and expected_output."
-        log.warning("Rejected subagent due to strict schedule_task schema violation: task_id=%s", tid)
+        detail = "Subagent rejected: schedule_subagent requires objective and expected_output."
+        log.warning("Rejected subagent due to strict schedule_subagent schema violation: task_id=%s", tid)
         try:
             write_task_result(
                 ctx.DRIVE_ROOT,
@@ -708,7 +718,7 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
 
     if delegation_role == "subagent" and (memory_mode not in VALID_SUBAGENT_MEMORY_MODES or not child_drive_root):
         detail = (
-            "Subagent rejected: internal schedule_task events must use memory_mode=forked or empty "
+            "Subagent rejected: internal schedule_subagent events must use memory_mode=forked or empty "
             "and include a child_drive_root."
         )
         log.warning("Rejected subagent due to invalid child-drive contract: task_id=%s memory_mode=%s child_drive_root=%s", tid, memory_mode, child_drive_root)
@@ -916,7 +926,7 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
             task_id=tid,
             progress_meta=progress_meta,
         )
-        ctx.persist_queue_snapshot(reason="schedule_task_event")
+        ctx.persist_queue_snapshot(reason="schedule_subagent_event")
 
 
 def _handle_cancel_task(evt: Dict[str, Any], ctx: Any) -> None:
@@ -1057,6 +1067,7 @@ EVENT_HANDLERS = {
     "deep_self_review_request": _handle_deep_self_review_request,
     "promote_to_stable": _handle_promote_to_stable,
     "schedule_task": _handle_schedule_task,
+    "schedule_subagent": _handle_schedule_task,
     "cancel_task": _handle_cancel_task,
     "send_photo": _handle_send_photo,
     "toggle_evolution": _handle_toggle_evolution,

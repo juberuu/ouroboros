@@ -198,7 +198,7 @@ def test_task_api_rejects_forged_subagent_without_child_drive_side_effect(tmp_pa
 
     assert top_level.status_code == 400
     assert metadata.status_code == 400
-    assert "internal schedule_task" in top_level.json()["error"]
+    assert "internal schedule_subagent" in top_level.json()["error"]
     assert not (data / "state" / "headless_tasks" / "forged1").exists()
     assert not (data / "state" / "headless_tasks" / "forged2").exists()
 
@@ -546,14 +546,14 @@ def test_workspace_context_routes_repo_tools_and_blocks_self_commit(tmp_path):
     assert "workspace" in _repo_read(ctx, "README.md")
     registry = ToolRegistry(repo_dir=system_repo, drive_root=data)
     registry.set_context(ctx)
-    assert "WORKSPACE_MODE_BLOCKED" in registry.execute("repo_commit", {"commit_message": "nope"})
-    assert registry.get_schema_by_name("repo_commit") is None
+    assert "WORKSPACE_MODE_BLOCKED" in registry.execute("commit_reviewed", {"commit_message": "nope"})
+    assert registry.get_schema_by_name("commit_reviewed") is None
     assert registry.get_schema_by_name("request_restart") is None
     assert "WORKSPACE_MODE_BLOCKED" in registry.execute("request_restart", {"reason": "nope"})
-    assert "Written" in registry.execute("repo_write", {"path": "BIBLE.md", "content": "external edit"})
+    assert "Written" in registry.execute("write_file", {"path": "BIBLE.md", "content": "external edit"})
     assert (workspace / "BIBLE.md").read_text(encoding="utf-8") == "external edit"
     replaced = registry.execute(
-        "str_replace_editor",
+        "edit_text",
         {"path": "README.md", "old_str": "workspace", "new_str": "workspace edited"},
     )
     assert "Replaced" in replaced
@@ -576,17 +576,17 @@ def test_workspace_run_shell_blocks_escaping_cwd(tmp_path):
     registry = ToolRegistry(repo_dir=system_repo, drive_root=data)
     registry.set_context(ctx)
 
-    result = registry.execute("run_shell", {"cmd": ["pwd"], "cwd": str(outside)})
+    result = registry.execute("run_command", {"cmd": ["pwd"], "cwd": str(outside)})
 
     assert "SHELL_CWD_BLOCKED" in result
-    git_escape = registry.execute("run_shell", {"cmd": ["git", "-C", str(system_repo), "status"]})
+    git_escape = registry.execute("run_command", {"cmd": ["git", "-C", str(system_repo), "status"]})
     assert "WORKSPACE_GIT_BLOCKED" in git_escape
-    git_chain = registry.execute("run_shell", {"cmd": ["sh", "-c", "true && git commit -m nope"]})
+    git_chain = registry.execute("run_command", {"cmd": ["sh", "-c", "true && git commit -m nope"]})
     assert "WORKSPACE_GIT_BLOCKED" in git_chain
-    outside_write = registry.execute("run_shell", {"cmd": ["touch", str(system_repo / "README.md")]})
+    outside_write = registry.execute("run_command", {"cmd": ["touch", str(system_repo / "README.md")]})
     assert "WORKSPACE_SHELL_BLOCKED" in outside_write
     embedded_outside_write = registry.execute(
-        "run_shell",
+        "run_command",
         {"cmd": ["python", "-c", "open('/tmp/ouroboros-outside.txt','w').write('x')"]},
     )
     assert "WORKSPACE_SHELL_BLOCKED" in embedded_outside_write
@@ -612,7 +612,7 @@ def test_workspace_run_shell_allows_absolute_cwd_under_workspace_and_child_drive
 
     def assert_python_cwd(path):
         output = registry.execute(
-            "run_shell",
+            "run_command",
             {"cmd": [sys.executable, "-c", "import os; print(os.getcwd())"], "cwd": str(path)},
         )
         assert "exit_code=0" in output
@@ -621,7 +621,7 @@ def test_workspace_run_shell_allows_absolute_cwd_under_workspace_and_child_drive
 
     assert_python_cwd(workspace)
     assert_python_cwd(child_dir)
-    blocked = registry.execute("run_shell", {"cmd": ["pwd"], "cwd": str(parent_data / "logs")})
+    blocked = registry.execute("run_command", {"cmd": ["pwd"], "cwd": str(parent_data / "logs")})
     assert "SHELL_CWD_BLOCKED" in blocked
     git_escape = registry._run_shell_safety_check(
         {"cmd": ["git", "-C", "../other-repo", "status"], "cwd": str(child_dir)},
@@ -1062,7 +1062,7 @@ def test_cli_run_rejects_forged_subagent_role_before_request(monkeypatch):
     monkeypatch.setattr(cli, "_client", lambda *args, **kwargs: pytest.fail("client should not be created"))
 
     args = SimpleNamespace(prompt=["hello"], delegation_role="subagent")
-    with pytest.raises(cli.CLIError, match="internal schedule_task"):
+    with pytest.raises(cli.CLIError, match="internal schedule_subagent"):
         cli._run_command(args)
 
 
@@ -1153,6 +1153,31 @@ def test_swebench_helper_records_cli_timeout_with_continue(tmp_path, monkeypatch
     assert '"timeout": true' in errors
     assert (logs_dir / "inst1" / "ouroboros.stdout").read_text(encoding="utf-8") == "partial-out"
     assert (logs_dir / "inst1" / "ouroboros.stderr").read_text(encoding="utf-8") == "partial-err"
+
+
+def test_terminal_bench_helper_refuses_dirty_git_workspace(tmp_path):
+    script_path = pathlib.Path(__file__).resolve().parent.parent / "scripts" / "terminal_bench_cli_agent.py"
+    spec = importlib.util.spec_from_file_location("terminal_bench_cli_agent_test", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    workspace = tmp_path / "workspace"
+    _init_repo_with_file(workspace)
+    (workspace / "tracked.txt").write_text("dirty\n", encoding="utf-8")
+    logs_dir = tmp_path / "logs"
+
+    agent = module.OuroborosTerminalBenchAgent(
+        workspace_root=str(workspace),
+        cli=f"{sys.executable} -c 'raise SystemExit(99)'",
+    )
+    result = agent.perform_task("fix", SimpleNamespace(), logging_dir=logs_dir)
+
+    if isinstance(result, dict):
+        assert result["success"] is False
+        assert "dirty_git_workspace" in result["output"]
+    summary = json.loads((logs_dir / "ouroboros-agent-result.json").read_text(encoding="utf-8"))
+    assert summary["failure_mode"] == "dirty_git_workspace"
 
 
 def test_queue_restore_accepts_headless_chat_zero(tmp_path, monkeypatch):

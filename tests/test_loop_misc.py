@@ -73,7 +73,7 @@ def test_maybe_inject_self_check_handles_assistant_none_content():
             "tool_calls": [{
                 "id": "call-1",
                 "type": "function",
-                "function": {"name": "repo_read", "arguments": "{}"},
+                "function": {"name": "read_file", "arguments": "{}"},
             }],
         },
         {"role": "tool", "tool_call_id": "call-1", "content": "done"},
@@ -123,10 +123,10 @@ def _write_self_authored_skill(drive_root, name: str = "alpha"):
 def test_skill_names_touched_by_trace_detects_data_skill_edits():
     trace = {
         "tool_calls": [
-            {"tool": "data_write", "args": {"path": "skills/external/alpha/plugin.py"}},
-            {"tool": "str_replace_editor", "args": {"path": "data/skills/external/beta/SKILL.md"}},
+            {"tool": "write_file", "args": {"path": "skills/external/alpha/plugin.py"}},
+            {"tool": "edit_text", "args": {"path": "data/skills/external/beta/SKILL.md"}},
             {"tool": "claude_code_edit", "args": {"cwd": "skills/external/gamma"}},
-            {"tool": "data_write", "args": {"path": "SKILL.md", "bucket": "external", "skill_name": "delta"}},
+            {"tool": "write_file", "args": {"path": "SKILL.md", "bucket": "external", "skill_name": "delta"}},
         ]
     }
 
@@ -137,7 +137,7 @@ def test_skill_finalization_message_blocks_unreviewed_self_authored_skill(tmp_pa
     drive_root = tmp_path / "drive"
     drive_root.mkdir()
     _write_self_authored_skill(drive_root)
-    trace = {"tool_calls": [{"tool": "data_write", "args": {"path": "skills/external/alpha/SKILL.md"}}]}
+    trace = {"tool_calls": [{"tool": "write_file", "args": {"path": "skills/external/alpha/SKILL.md"}}]}
 
     message = _skill_finalization_message(drive_root, trace)
 
@@ -152,7 +152,7 @@ def test_skill_finalization_message_allows_ready_self_authored_skill(tmp_path):
     content_hash = compute_content_hash(skill_dir)
     save_review_state(drive_root, "alpha", SkillReviewState(status="pass", content_hash=content_hash))
     save_enabled(drive_root, "alpha", True)
-    trace = {"tool_calls": [{"tool": "data_write", "args": {"path": "skills/external/alpha/SKILL.md"}}]}
+    trace = {"tool_calls": [{"tool": "write_file", "args": {"path": "skills/external/alpha/SKILL.md"}}]}
 
     assert _skill_finalization_message(drive_root, trace) == ""
 
@@ -167,7 +167,7 @@ def test_run_llm_loop_preserves_assistant_tool_call_metadata(tmp_path, monkeypat
         "tool_calls": [{
             "id": "call-1",
             "type": "function",
-            "function": {"name": "repo_read", "arguments": "{}"},
+            "function": {"name": "read_file", "arguments": "{}"},
         }],
         "reasoning": "I need the file first.",
         "reasoning_details": [{"type": "reasoning.text", "text": "I need the file first."}],
