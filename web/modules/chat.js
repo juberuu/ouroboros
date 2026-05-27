@@ -999,10 +999,15 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
             return;
         }
         const record = liveCardRecords.get(taskId);
-        const doneHeadline = (record && record.lastHumanHeadline) || 'Done';
+        const resultStatus = msg?.result_status ? String(msg.result_status) : '';
+        const reasonCode = msg?.reason_code ? String(msg.reason_code) : '';
+        const failedResult = ['failed', 'infra_failed'].includes(resultStatus);
+        const doneHeadline = failedResult && reasonCode
+            ? `Done: ${reasonCode}`
+            : ((record && record.lastHumanHeadline) || 'Done');
         applyLiveCardState(
             {
-                phase: 'done',
+                phase: failedResult ? 'error' : 'done',
                 headline: doneHeadline,
                 visible: false,
                 human: false,

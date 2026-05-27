@@ -35,6 +35,8 @@ class ReviewActorRecord:
             "tokens_in": self.tokens_in,
             "tokens_out": self.tokens_out,
             "cost_usd": self.cost_usd,
+            "slot": self.slot,
+            "slot_id": f"slot_{self.slot}" if self.slot else "",
         }
 
 
@@ -88,51 +90,53 @@ def extract_json_array(
 ) -> Optional[List[Any]]:
     """Best-effort extraction of a JSON array from model output."""
     text = str(raw or "").strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    candidates = [text]
     if "```" in text:
         for chunk in text.split("```"):
             chunk = chunk.strip()
             if chunk.startswith("json"):
                 chunk = chunk[4:].strip()
-            if chunk.startswith("["):
-                text = chunk
-                break
-    try:
-        obj = json.loads(text)
-        if unwrap_result and isinstance(obj, dict) and "result" in obj:
-            text = str(obj["result"]).strip()
-            obj = json.loads(text)
-        if isinstance(obj, list):
-            return _accepted_json_array(obj, normalize=normalize, validate_fn=validate_fn)
-    except (json.JSONDecodeError, ValueError):
-        pass
-    ends: List[int] = []
-    search_from = 0
-    while True:
-        pos = text.find("]", search_from)
-        if pos == -1:
-            break
-        ends.append(pos)
-        search_from = pos + 1
-    for end in reversed(ends):
-        starts: List[int] = []
+            if chunk:
+                candidates.append(chunk)
+
+    for candidate in candidates:
+        try:
+            obj = json.loads(candidate)
+            if unwrap_result and isinstance(obj, dict) and "result" in obj:
+                candidate = str(obj["result"]).strip()
+                obj = json.loads(candidate)
+            if isinstance(obj, list):
+                return _accepted_json_array(obj, normalize=normalize, validate_fn=validate_fn)
+        except (json.JSONDecodeError, ValueError):
+            pass
+        except TypeError:
+            pass
+        ends: List[int] = []
         search_from = 0
         while True:
-            pos = text.find("[", search_from)
-            if pos == -1 or pos > end:
+            pos = candidate.find("]", search_from)
+            if pos == -1:
                 break
-            starts.append(pos)
+            ends.append(pos)
             search_from = pos + 1
-        for start in reversed(starts):
-            try:
-                obj = json.loads(text[start:end + 1])
-                if isinstance(obj, list):
-                    accepted = _accepted_json_array(obj, normalize=normalize, validate_fn=validate_fn)
-                    if accepted is not None:
-                        return accepted
-            except (json.JSONDecodeError, ValueError):
-                continue
+        for end in reversed(ends):
+            starts: List[int] = []
+            search_from = 0
+            while True:
+                pos = candidate.find("[", search_from)
+                if pos == -1 or pos > end:
+                    break
+                starts.append(pos)
+                search_from = pos + 1
+            for start in reversed(starts):
+                try:
+                    obj = json.loads(candidate[start:end + 1])
+                    if isinstance(obj, list):
+                        accepted = _accepted_json_array(obj, normalize=normalize, validate_fn=validate_fn)
+                        if accepted is not None:
+                            return accepted
+                except (json.JSONDecodeError, ValueError):
+                    continue
     return None
 
 

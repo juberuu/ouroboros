@@ -28,9 +28,9 @@ MAX_FUNCTION_LINES = 300
 # compiler/tests, v5.33 external-workspace CLI artifact/preflight contract,
 # and the v6.1 subagent status SSOT/wait/browser-ingress hardening. Keep this
 # tight and lower it again when the headless/subagent helpers settle.
-# v6.1.0-rc.1 subagent hardening adds a small SSOT/status surface plus
-# focused regressions; keep the cap tight while leaving release headroom.
-MAX_TOTAL_FUNCTIONS = 2275
+# v6.3.0-rc.1 adds observability/outcome/review-substrate/service surfaces;
+# keep the cap tight while the new substrate settles, then ratchet it down.
+MAX_TOTAL_FUNCTIONS = 2400
 # Grandfathered modules are accepted debt until their surfaces stabilize/split.
 GRANDFATHERED_OVERSIZED_MODULES = {
     "llm.py",

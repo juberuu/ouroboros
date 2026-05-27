@@ -6,6 +6,7 @@ import asyncio
 import concurrent.futures
 import os
 import logging
+import pathlib
 
 from ouroboros.llm import LLMClient
 from ouroboros.tools.registry import ToolContext, ToolEntry
@@ -155,6 +156,7 @@ async def _run_plan_review_async(
                 hard_total_tokens=_PLAN_BUDGET_TOKEN_LIMIT,
                 include_tests=False,
                 title="Generated Plan Review Atlas",
+                drive_root=pathlib.Path(ctx.drive_root),
             )
         )
     except Exception as e:
@@ -189,7 +191,7 @@ async def _run_plan_review_async(
     llm_client = LLMClient()
     semaphore = asyncio.Semaphore(3)
     tasks = [
-        _query_reviewer(llm_client, model, system_prompt, user_content, semaphore)
+        _query_reviewer(ctx, llm_client, model, system_prompt, user_content, semaphore)
         for model in models
     ]
     raw_results = await asyncio.gather(*tasks)
@@ -219,13 +221,31 @@ def _emit_plan_review_usage(ctx: "ToolContext", raw_results: list) -> None:
 
 
 async def _query_reviewer(
+    ctx: ToolContext,
     llm_client: LLMClient,
     model: str,
     system_prompt: str,
     user_content: str,
-    semaphore: asyncio.Semaphore,
+    semaphore: asyncio.Semaphore | None = None,
 ) -> dict:
+    semaphore = semaphore or asyncio.Semaphore(1)
     async with semaphore:
+        prompt_ref = {}
+        response_ref = {}
+        call_id = ""
+        try:
+            from ouroboros.observability import new_call_id, persist_call
+            call_id = new_call_id("plan_review")
+            prompt_ref = persist_call(
+                ctx.drive_root,
+                task_id=str(getattr(ctx, "task_id", "") or "plan_review"),
+                call_id=f"{call_id}_prompt",
+                call_type="plan_review_prompt",
+                payload={"model": model, "system_prompt": system_prompt, "user_content": user_content},
+                manifest={"surface": "plan_review", "model": model},
+            )
+        except Exception:
+            prompt_ref = {}
         try:
             msg, usage = await llm_client.chat_async(
                 messages=[
@@ -243,11 +263,24 @@ async def _query_reviewer(
             prompt_tokens = (usage or {}).get("prompt_tokens", 0)
             completion_tokens = (usage or {}).get("completion_tokens", 0)
             cost = float((usage or {}).get("cost", 0) or 0)
+            try:
+                response_ref = persist_call(
+                    ctx.drive_root,
+                    task_id=str(getattr(ctx, "task_id", "") or "plan_review"),
+                    call_id=f"{call_id or 'plan_review'}_response",
+                    call_type="plan_review_response",
+                    payload={"model": model, "message": msg, "usage": usage},
+                    manifest={"surface": "plan_review", "model": model},
+                )
+            except Exception:
+                response_ref = {}
             return {
                 "model": resolved_model,
                 "request_model": model,
                 "text": content,
                 "error": None,
+                "prompt_ref": prompt_ref,
+                "response_ref": response_ref,
                 "tokens_in": prompt_tokens,
                 "tokens_out": completion_tokens,
                 "cost": cost,

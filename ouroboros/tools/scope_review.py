@@ -107,10 +107,15 @@ class _TouchedContextStatus:
 
 def _get_scope_model() -> str:
     """Return the configured scope review model (env → settings default)."""
-    return (
-        os.environ.get("OUROBOROS_SCOPE_REVIEW_MODEL", "").strip()
-        or _SCOPE_MODEL_DEFAULT
-    )
+    try:
+        from ouroboros.config import get_scope_review_models
+
+        models = get_scope_review_models()
+        if models:
+            return models[0]
+    except Exception:
+        pass
+    return os.environ.get("OUROBOROS_SCOPE_REVIEW_MODEL", "").strip() or _SCOPE_MODEL_DEFAULT
 
 _CANONICAL_CONTEXT_DOCS = (
     "BIBLE.md",
@@ -265,6 +270,7 @@ def _gather_scope_packs(
     repo_dir: pathlib.Path,
     all_touched_paths: list,
     fixed_prompt_tokens: int = 0,
+    drive_root: Optional[pathlib.Path] = None,
 ) -> str:
     """Collect the bounded wider repository atlas, failing closed on git errors."""
     # Canonical docs and touched files are injected explicitly; avoid duplicating them.
@@ -280,6 +286,7 @@ def _gather_scope_packs(
                 hard_total_tokens=_SCOPE_BUDGET_TOKEN_LIMIT,
                 include_tests=False,
                 title="Generated Scope Atlas",
+                drive_root=drive_root,
             )
         )
         _SCOPE_CONTEXT_MANIFEST.set(atlas.manifest)
@@ -536,10 +543,14 @@ section — the staged diff below already shows every `-` line.
 """
     fixed_prompt_tokens = estimate_tokens(prompt)
     try:
+        import inspect
+        gather_kwargs = {"fixed_prompt_tokens": fixed_prompt_tokens}
+        if "drive_root" in inspect.signature(_gather_scope_packs).parameters:
+            gather_kwargs["drive_root"] = drive_root
         repo_pack_section = _gather_scope_packs(
             repo_dir,
             all_touched_paths,
-            fixed_prompt_tokens=fixed_prompt_tokens,
+            **gather_kwargs,
         )
     except _ScopeAtlasBudgetExceeded as exc:
         return None, _TouchedContextStatus(
@@ -596,6 +607,7 @@ def _log_scope_result(
     critical_count: int,
     advisory_count: int,
     prompt_chars: int = 0,
+    model_id: str = "",
 ) -> None:
     """Append a scope_review_complete event to events.jsonl.
 
@@ -608,7 +620,7 @@ def _log_scope_result(
         append_jsonl(ctx.drive_logs() / "events.jsonl", {
             "ts": utc_now_iso(), "type": "scope_review_complete",
             "task_id": getattr(ctx, "task_id", "") or "",
-            "model": _get_scope_model(),
+            "model": model_id or _get_scope_model(),
             "critical_count": critical_count,
             "advisory_count": advisory_count,
             "prompt_tokens": prompt_tokens,
@@ -619,13 +631,27 @@ def _log_scope_result(
         pass
 
 
-def _call_scope_llm(prompt: str) -> tuple:
+def _scope_drive_root(ctx: ToolContext | None = None) -> pathlib.Path:
+    if ctx is not None:
+        try:
+            return pathlib.Path(ctx.drive_root)
+        except Exception:
+            pass
+    try:
+        from ouroboros.config import DATA_DIR
+
+        return pathlib.Path(DATA_DIR)
+    except Exception:
+        return pathlib.Path("../data").resolve(strict=False)
+
+
+def _call_scope_llm(prompt: str, scope_model: str | None = None, ctx: ToolContext | None = None) -> tuple:
     """Execute the scope review LLM call synchronously.
 
     Returns (raw_text, usage, error_msg) — error_msg is non-empty on failure.
     """
     from ouroboros.config import resolve_effort as _resolve_effort
-    scope_model = _get_scope_model()
+    scope_model = scope_model or _get_scope_model()
     scope_effort = _resolve_effort("scope_review")
     messages = [
         {"role": "system", "content": prompt},
@@ -640,9 +666,15 @@ def _call_scope_llm(prompt: str) -> tuple:
             asyncio.get_running_loop()
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                from ouroboros.llm_observability import chat_async_observed
+
                 msg, usage = pool.submit(
                     asyncio.run,
-                    llm.chat_async(
+                    chat_async_observed(
+                        llm,
+                        drive_root=_scope_drive_root(ctx),
+                        task_id=str(getattr(ctx, "task_id", "") or "scope_review") if ctx is not None else "scope_review",
+                        call_type="scope_review",
                         messages=messages,
                         model=scope_model,
                         reasoning_effort=scope_effort,
@@ -652,8 +684,14 @@ def _call_scope_llm(prompt: str) -> tuple:
                     ),
                 ).result(timeout=180)
         except RuntimeError:
+            from ouroboros.llm_observability import chat_async_observed
+
             msg, usage = asyncio.run(
-                llm.chat_async(
+                chat_async_observed(
+                    llm,
+                    drive_root=_scope_drive_root(ctx),
+                    task_id=str(getattr(ctx, "task_id", "") or "scope_review") if ctx is not None else "scope_review",
+                    call_type="scope_review",
                     messages=messages,
                     model=scope_model,
                     reasoning_effort=scope_effort,
@@ -775,10 +813,11 @@ def run_scope_review(
     review_rebuttal: str = "",
     review_history: Optional[list] = None,
     scope_review_history: Optional[list] = None,  # prior scope rounds for this commit
+    scope_model: Optional[str] = None,
 ) -> ScopeReviewResult:
     """Run blocking scope review and return structured findings/evidence."""
     repo_dir = pathlib.Path(ctx.repo_dir)
-    scope_model_id = _get_scope_model()
+    scope_model_id = scope_model or _get_scope_model()
 
     try:
         prompt, context_status = _build_scope_prompt(
@@ -810,7 +849,7 @@ def run_scope_review(
         return signal_result
 
     _prompt_chars = len(prompt)  # type: ignore[arg-type]
-    raw_text, usage, llm_error = _call_scope_llm(prompt)  # type: ignore[arg-type]
+    raw_text, usage, llm_error = _call_scope_llm(prompt, scope_model=scope_model_id, ctx=ctx)  # type: ignore[arg-type]
     _tokens_in = int((usage or {}).get("prompt_tokens", 0) or 0)
     _tokens_out = int((usage or {}).get("completion_tokens", 0) or 0)
     _cost_usd = float((usage or {}).get("cost", 0.0) or 0.0)
@@ -867,6 +906,7 @@ def run_scope_review(
         len(critical_findings),
         len(advisory_findings),
         prompt_chars=_prompt_chars,
+        model_id=scope_model_id,
     )
 
     if critical_findings:

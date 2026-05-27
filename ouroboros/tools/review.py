@@ -107,36 +107,57 @@ def _load_bible() -> str:
     return load_governance_doc(_REPO_ROOT, "BIBLE.md", on_missing="explicit")
 
 
-# Tool: multi_model_review.
+# Tool: task_acceptance_review.
 
 def get_tools():
     return [
         ToolEntry(
-            name="multi_model_review",
+            name="task_acceptance_review",
             schema={
-                "name": "multi_model_review",
+                "name": "task_acceptance_review",
                 "description": (
-                    "Send code or text to multiple LLM models for review/consensus. "
-                    "Each model reviews independently. Returns structured verdicts. "
-                    "Choose diverse models yourself. Budget is tracked automatically. "
-                    "BIBLE.md (Constitution) is automatically included as top-priority context."
+                    "Run independent reviewer slots over a task-result claim and evidence packet. "
+                    "Verdicts are advisory; if findings are valid, continue fixing or reject them with evidence."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "content": {"type": "string", "description": "The code or text to review"},
-                        "prompt": {"type": "string", "description": "Review instructions — what to check for."},
-                        "models": {
-                            "type": "array", "items": {"type": "string"},
-                            "description": "OpenRouter model identifiers (e.g. 3 diverse models)",
-                        },
+                        "claim": {"type": "string", "description": "Final claim or task result the agent intends to release."},
+                        "goal": {"type": "string", "description": "Original task goal."},
+                        "evidence": {"type": "object", "description": "Relevant tool trace, artifacts, tests, and observed facts."},
+                        "checklist": {"type": "string", "default": "", "description": "Optional acceptance checklist."},
                     },
-                    "required": ["content", "prompt", "models"],
+                    "required": ["claim", "goal"],
                 },
             },
-            handler=_handle_multi_model_review,
+            handler=_handle_task_acceptance_review,
+            timeout_sec=900,
         )
     ]
+
+
+def _handle_task_acceptance_review(
+    ctx: ToolContext,
+    claim: str = "",
+    goal: str = "",
+    evidence: Optional[dict] = None,
+    checklist: str = "",
+) -> str:
+    from ouroboros.config import resolve_effort
+    from ouroboros.review_substrate import ReviewRequest, run_review_request, reviewer_slots
+
+    request = ReviewRequest(
+        surface="task_acceptance",
+        goal=goal,
+        subject=claim,
+        evidence=evidence or {},
+        checklist=checklist,
+        policy={"verdict_is_advisory": True, "raw_output_must_be_preserved": True},
+        task_id=str(getattr(ctx, "task_id", "") or ""),
+    )
+    slots = reviewer_slots(effort=resolve_effort("review"), role_hint="task acceptance")
+    result = run_review_request(request, slots=slots, drive_root=pathlib.Path(ctx.drive_root), usage_ctx=ctx)
+    return json.dumps(result.__dict__, ensure_ascii=False, indent=2, default=str)
 
 
 def _handle_multi_model_review(ctx: ToolContext, content: str = "",
@@ -160,12 +181,38 @@ def _handle_multi_model_review(ctx: ToolContext, content: str = "",
         return json.dumps({"error": f"Review failed: {e}"}, ensure_ascii=False)
 
 
-async def _query_model(llm_client: LLMClient, model: str, messages: list, semaphore):
+def _review_drive_root(ctx: Optional[ToolContext]) -> pathlib.Path:
+    if ctx is not None:
+        try:
+            return pathlib.Path(ctx.drive_root)
+        except Exception:
+            pass
+    try:
+        from ouroboros.config import DATA_DIR
+
+        return pathlib.Path(DATA_DIR)
+    except Exception:
+        return pathlib.Path("../data").resolve(strict=False)
+
+
+async def _query_model(
+    llm_client: LLMClient,
+    model: str,
+    messages: list,
+    semaphore,
+    ctx: Optional[ToolContext] = None,
+):
     async with semaphore:
         timeout_sec = _review_model_timeout_sec()
         try:
+            from ouroboros.llm_observability import chat_async_observed
+
             msg, usage = await asyncio.wait_for(
-                llm_client.chat_async(
+                chat_async_observed(
+                    llm_client,
+                    drive_root=_review_drive_root(ctx),
+                    task_id=str(getattr(ctx, "task_id", "") or "multi_model_review") if ctx is not None else "multi_model_review",
+                    call_type="multi_model_review",
                     messages=messages,
                     model=model,
                     reasoning_effort="medium",
@@ -222,7 +269,7 @@ async def _multi_model_review_async(content: str, prompt: str,
 
     semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
     llm_client = LLMClient()
-    tasks = [_query_model(llm_client, m, messages, semaphore) for m in models]
+    tasks = [_query_model(llm_client, m, messages, semaphore, ctx) for m in models]
     results = await asyncio.gather(*tasks)
 
     review_results = []
@@ -463,8 +510,8 @@ def _preflight_check(commit_message: str, staged_files: str,
             f"⚠️ PREFLIGHT_BLOCKED: Staged diff is incomplete — fix before review.\n"
             f"  Missing from staged: {', '.join(missing)}\n"
             f"  Currently staged: {', '.join(sorted(staged_set)) or '(none)'}\n\n"
-            "Stage all related files together. Use repo_write for all files first,\n"
-            "then repo_commit to stage and commit everything in one diff."
+            "Stage all related files together. Use write_file for all files first,\n"
+            "then commit_reviewed to stage and commit everything in one diff."
         )
 
     # Python logic touched without active tests staged.
@@ -752,7 +799,7 @@ def _build_critical_block_message(
     retry_coaching = build_self_verification_template(
         self_verify_findings,
         attempt_idx=ctx._review_iteration_count,
-        tool_name="repo_commit",
+        tool_name="commit_reviewed",
         context_noun="diff",
     )
 

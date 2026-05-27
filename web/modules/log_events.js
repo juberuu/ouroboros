@@ -111,6 +111,20 @@ function describeStartupChecks(checks) {
     return shortText(parts.join(' | '), 240);
 }
 
+function taskDoneFailure(evt) {
+    const resultStatus = String(evt.result_status || '').toLowerCase();
+    const artifactStatus = String(evt.artifact_bundle?.status || evt.artifact_status || '').toLowerCase();
+    return ['failed', 'infra_failed'].includes(resultStatus) || artifactStatus === 'failed';
+}
+
+function taskDoneLabel(evt) {
+    const reasonCode = evt.reason_code ? String(evt.reason_code) : '';
+    if (taskDoneFailure(evt)) {
+        return reasonCode ? `Failed: ${reasonCode}` : `Failed ${evt.task_type || 'task'}`;
+    }
+    return `Finished ${evt.task_type || 'task'}`;
+}
+
 export function summarizeLogEvent(evt) {
     const t = evt.type || evt.event || 'unknown';
     const view = (phase, headline, { body = '', meta = [], typeLabel = t } = {}) => ({
@@ -256,6 +270,8 @@ export function summarizeLogEvent(evt) {
         return view('metrics', 'Task metrics', {
             meta: taskMeta(
                 evt.task_type || '',
+                evt.result_status || '',
+                evt.reason_code || '',
                 formatLogDuration(evt.duration_sec),
                 evt.tool_calls != null ? `${evt.tool_calls} tools` : '',
                 evt.tool_errors ? `${evt.tool_errors} errors` : '',
@@ -265,8 +281,14 @@ export function summarizeLogEvent(evt) {
     }
 
     if (t === 'task_done') {
-        return view('done', `Finished ${evt.task_type || 'task'}`, {
+        const resultStatus = evt.result_status ? String(evt.result_status) : '';
+        const reasonCode = evt.reason_code ? String(evt.reason_code) : '';
+        const artifactStatus = evt.artifact_bundle?.status || evt.artifact_status || '';
+        return view(taskDoneFailure(evt) ? 'error' : 'done', taskDoneLabel(evt), {
             meta: taskMeta(
+                resultStatus,
+                reasonCode,
+                artifactStatus ? `artifacts ${artifactStatus}` : '',
                 formatLogMoney(evt.cost_usd || evt.cost),
                 evt.total_rounds ? `${evt.total_rounds} rounds` : '',
                 formatLogTokens(evt),
@@ -546,7 +568,14 @@ export function summarizeChatLiveEvent(evt) {
     }
 
     if (t === 'task_done') {
-        return chatView({ phase: 'done', headline: 'Done', visible: true, promote: true, dedupeKey: key() });
+        const failed = taskDoneFailure(evt);
+        return chatView({
+            phase: failed ? 'error' : 'done',
+            headline: failed ? taskDoneLabel(evt) : 'Done',
+            visible: true,
+            promote: true,
+            dedupeKey: key(evt.result_status || '', evt.reason_code || ''),
+        });
     }
 
     if (t.includes('error') || t.includes('crash') || t.includes('fail')) {

@@ -14,18 +14,18 @@ let setupContract = {};
 const INPUT_FIELDS = [
     ['s-openai-base-url', 'OPENAI_BASE_URL'], ['s-openai-compatible-base-url', 'OPENAI_COMPATIBLE_BASE_URL'], ['s-cloudru-base-url', 'CLOUDRU_FOUNDATION_MODELS_BASE_URL'],
     ['s-server-host', 'OUROBOROS_SERVER_HOST', '127.0.0.1'], ['s-claude-code-model', 'CLAUDE_CODE_MODEL', 'claude-opus-4-6[1m]'],
-    ['s-review-models', 'OUROBOROS_REVIEW_MODELS'], ['s-scope-review-model', 'OUROBOROS_SCOPE_REVIEW_MODEL'], ['s-skills-repo-path', 'OUROBOROS_SKILLS_REPO_PATH'],
+    ['s-review-models', 'OUROBOROS_REVIEW_MODELS'], ['s-scope-review-models', 'OUROBOROS_SCOPE_REVIEW_MODELS'], ['s-skills-repo-path', 'OUROBOROS_SKILLS_REPO_PATH'],
     ['s-clawhub-registry-url', 'OUROBOROS_CLAWHUB_REGISTRY_URL'], ['s-websearch-model', 'OUROBOROS_WEBSEARCH_MODEL'], ['s-gh-repo', 'GITHUB_REPO'],
     ['s-local-source', 'LOCAL_MODEL_SOURCE'], ['s-local-filename', 'LOCAL_MODEL_FILENAME'], ['s-local-chat-format', 'LOCAL_MODEL_CHAT_FORMAT'],
 ];
 const VALUE_FIELDS = [
     ['s-effort-task', 'OUROBOROS_EFFORT_TASK', 'medium'], ['s-effort-evolution', 'OUROBOROS_EFFORT_EVOLUTION', 'high'], ['s-effort-review', 'OUROBOROS_EFFORT_REVIEW', 'medium'],
     ['s-effort-consciousness', 'OUROBOROS_EFFORT_CONSCIOUSNESS', 'low'], ['s-effort-scope-review', 'OUROBOROS_EFFORT_SCOPE_REVIEW', 'high'],
-    ['s-review-enforcement', 'OUROBOROS_REVIEW_ENFORCEMENT', 'advisory'], ['s-runtime-mode', 'OUROBOROS_RUNTIME_MODE', 'advanced'],
+    ['s-review-enforcement', 'OUROBOROS_REVIEW_ENFORCEMENT', 'advisory'], ['s-task-review-mode', 'OUROBOROS_TASK_REVIEW_MODE', 'auto'], ['s-runtime-mode', 'OUROBOROS_RUNTIME_MODE', 'advanced'],
 ];
 const NUMBER_FIELDS = [
     ['s-workers', 'OUROBOROS_MAX_WORKERS', 5], ['s-soft-timeout', 'OUROBOROS_SOFT_TIMEOUT_SEC', 600], ['s-hard-timeout', 'OUROBOROS_HARD_TIMEOUT_SEC', 1800],
-    ['s-tool-timeout', 'OUROBOROS_TOOL_TIMEOUT_SEC', 120], ['s-local-port', 'LOCAL_MODEL_PORT', 8766], ['s-local-gpu-layers', 'LOCAL_MODEL_N_GPU_LAYERS', -1, true],
+    ['s-tool-timeout', 'OUROBOROS_TOOL_TIMEOUT_SEC', 600], ['s-local-port', 'LOCAL_MODEL_PORT', 8766], ['s-local-gpu-layers', 'LOCAL_MODEL_N_GPU_LAYERS', -1, true],
     ['s-local-ctx', 'LOCAL_MODEL_CONTEXT_LENGTH', 16384],
 ];
 

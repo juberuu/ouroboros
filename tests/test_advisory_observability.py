@@ -428,7 +428,7 @@ def test_next_step_guidance_for_skipped_advisory():
     assert "skip" in msg.lower() or "budget" in msg.lower(), (
         "skipped advisory must produce a distinct message, not the generic fresh-pass message"
     )
-    assert "repo_commit" in msg, "message should still indicate commit can proceed"
+    assert "commit_reviewed" in msg, "message should still indicate commit can proceed"
 
 
 def test_next_step_guidance_requires_reaudit_when_obligations_remain():

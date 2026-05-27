@@ -76,6 +76,10 @@
  * @property {string=} trace_summary
  * @property {string=} error
  * @property {string=} artifact_status
+ * @property {Object=} artifact_bundle
+ * @property {string=} result_status
+ * @property {string=} reason_code
+ * @property {Object=} review_status
  * @property {boolean=} worker_saturation_warning
  * @property {string=} source
  * @property {string=} sender_label
@@ -175,4 +179,4 @@
  * @property {string=} error
  */
 
-export const GATEWAY_CONTRACT_VERSION = '6.2.0-rc.1';
+export const GATEWAY_CONTRACT_VERSION = '6.3.0-rc.1';

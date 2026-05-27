@@ -426,7 +426,7 @@ def build_self_verification_template(
     findings: list,
     *,
     attempt_idx: int,
-    tool_name: str = "repo_commit",
+    tool_name: str = "commit_reviewed",
     context_noun: str = "diff",
 ) -> str:
     """Return retry self-verification text, with circuit-breaker hint at attempt 3+."""
@@ -703,10 +703,12 @@ def paths_from_name_status(name_status_text: str, *, include_sources_for_renames
     return [path for path in paths if path]
 
 
-def build_scope_actor_record(scope_result: object, *, fallback_model_id: str = "") -> dict:
+def build_scope_actor_record(scope_result: object, *, fallback_model_id: str = "", slot_id: str = "") -> dict:
     critical_findings = list(getattr(scope_result, "critical_findings", None) or [])
     advisory_findings = list(getattr(scope_result, "advisory_findings", None) or [])
     return {
+        "slot": slot_id,
+        "slot_id": slot_id,
         "model_id": getattr(scope_result, "model_id", "") or fallback_model_id,
         "status": getattr(scope_result, "status", "responded"),
         "raw_text": getattr(scope_result, "raw_text", ""),

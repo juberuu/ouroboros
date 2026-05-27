@@ -78,8 +78,10 @@ SETTINGS_DEFAULTS = {
     "MCP_ENABLED": False,
     "MCP_SERVERS": [],
     "MCP_TOOL_TIMEOUT_SEC": 60,
-    # Scope review: single-model reviewer; enforcement follows OUROBOROS_REVIEW_ENFORCEMENT.
+    # Scope review: one or more reviewer slots; enforcement follows OUROBOROS_REVIEW_ENFORCEMENT.
+    "OUROBOROS_SCOPE_REVIEW_MODELS": "openai/gpt-5.5",
     "OUROBOROS_SCOPE_REVIEW_MODEL": "openai/gpt-5.5",
+    "OUROBOROS_TASK_REVIEW_MODE": "auto",
     # Reasoning effort per task type: none | low | medium | high
     "OUROBOROS_EFFORT_TASK": "medium",
     "OUROBOROS_EFFORT_EVOLUTION": "high",
@@ -261,6 +263,38 @@ def get_review_enforcement() -> str:
     return raw if raw in {"advisory", "blocking"} else default_val
 
 
+def get_scope_review_models() -> list[str]:
+    """Return configured scope reviewer slots, preserving duplicate model IDs."""
+    default_str = str(SETTINGS_DEFAULTS["OUROBOROS_SCOPE_REVIEW_MODELS"])
+    raw = os.environ.get("OUROBOROS_SCOPE_REVIEW_MODELS", "") or ""
+    if not raw.strip():
+        raw = os.environ.get("OUROBOROS_SCOPE_REVIEW_MODEL", default_str) or default_str
+    models = _parse_model_list(raw)
+    singular = str(os.environ.get("OUROBOROS_SCOPE_REVIEW_MODEL", SETTINGS_DEFAULTS["OUROBOROS_SCOPE_REVIEW_MODEL"]) or "").strip()
+    if not models and singular:
+        models = [singular]
+    if not models:
+        models = _parse_model_list(default_str)
+    provider = _exclusive_direct_remote_provider_env()
+    if not provider:
+        return models
+    migrated = [migrate_model_value(provider, model) for model in models]
+    provider_prefix = f"{provider}::"
+    if migrated and all(model.startswith(provider_prefix) for model in migrated):
+        return migrated
+    migrated_singular = migrate_model_value(provider, singular or SETTINGS_DEFAULTS["OUROBOROS_SCOPE_REVIEW_MODEL"])
+    if migrated_singular.startswith(provider_prefix):
+        return [migrated_singular]
+    fallback = direct_provider_review_models_fallback(provider)
+    return fallback[:1] if fallback else migrated
+
+
+def get_task_review_mode() -> str:
+    default_val = str(SETTINGS_DEFAULTS["OUROBOROS_TASK_REVIEW_MODE"])
+    raw = (os.environ.get("OUROBOROS_TASK_REVIEW_MODE", default_val) or default_val).strip().lower()
+    return raw if raw in {"off", "auto", "required"} else default_val
+
+
 def get_auto_grant_enabled() -> bool:
     """Return whether reviewed skills should receive requested grants."""
     key = "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS"
@@ -288,9 +322,12 @@ def normalize_runtime_mode(value: Any) -> str:
 def get_runtime_mode() -> str:
     """Return the configured runtime mode (light / advanced / pro)."""
     default_val = str(SETTINGS_DEFAULTS["OUROBOROS_RUNTIME_MODE"])
-    return normalize_runtime_mode(
-        os.environ.get("OUROBOROS_RUNTIME_MODE", default_val) or default_val
-    )
+    if _BOOT_RUNTIME_MODE is not None:
+        return normalize_runtime_mode(_BOOT_RUNTIME_MODE)
+    inherited = _resolve_baseline_from_env()
+    if inherited is not None:
+        return normalize_runtime_mode(inherited)
+    return normalize_runtime_mode(os.environ.get("OUROBOROS_RUNTIME_MODE", default_val) or default_val)
 
 
 def get_skills_repo_path() -> str:
@@ -617,7 +654,8 @@ def apply_settings_to_env(settings: dict) -> None:
         "OUROBOROS_EVO_COST_THRESHOLD", "OUROBOROS_WEBSEARCH_MODEL",
         "OUROBOROS_REVIEW_MODELS", "OUROBOROS_REVIEW_ENFORCEMENT",
         "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS",
-        "OUROBOROS_SCOPE_REVIEW_MODEL",
+        "OUROBOROS_SCOPE_REVIEW_MODELS", "OUROBOROS_SCOPE_REVIEW_MODEL",
+        "OUROBOROS_TASK_REVIEW_MODE",
         # Runtime-mode and skills-repo plumbing.
         "OUROBOROS_RUNTIME_MODE", "OUROBOROS_SKILLS_REPO_PATH",
         "OUROBOROS_HOST_SERVICE_PORT",
@@ -647,6 +685,10 @@ def apply_settings_to_env(settings: dict) -> None:
         os.environ["OUROBOROS_REVIEW_MODELS"] = str(SETTINGS_DEFAULTS["OUROBOROS_REVIEW_MODELS"])
     if not os.environ.get("OUROBOROS_REVIEW_ENFORCEMENT"):
         os.environ["OUROBOROS_REVIEW_ENFORCEMENT"] = str(SETTINGS_DEFAULTS["OUROBOROS_REVIEW_ENFORCEMENT"])
+    if not os.environ.get("OUROBOROS_SCOPE_REVIEW_MODELS") and not os.environ.get("OUROBOROS_SCOPE_REVIEW_MODEL"):
+        os.environ["OUROBOROS_SCOPE_REVIEW_MODELS"] = str(SETTINGS_DEFAULTS["OUROBOROS_SCOPE_REVIEW_MODELS"])
+    if not os.environ.get("OUROBOROS_TASK_REVIEW_MODE"):
+        os.environ["OUROBOROS_TASK_REVIEW_MODE"] = str(SETTINGS_DEFAULTS["OUROBOROS_TASK_REVIEW_MODE"])
 
 
 # PID lock: platform_layer uses OS-released locks on Unix and Windows.

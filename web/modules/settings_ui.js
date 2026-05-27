@@ -282,26 +282,26 @@ export function renderSettingsPage() {
                             <div class="form-field">
                                 <label>Claude Code Model</label>
                                 <input id="s-claude-code-model" value="claude-opus-4-6[1m]" placeholder="sonnet, opus, claude-opus-4-6[1m], or full name">
-                                <div class="settings-inline-note">Anthropic model for <code>claude_code_edit</code> and <code>advisory_pre_review</code> tools. Requires Anthropic key in Providers.</div>
+                                <div class="settings-inline-note">Anthropic model for delegated review/edit integrations. Requires Anthropic key in Providers.</div>
                             </div>
                         </div>
                     </div>
 
                     <div class="form-section">
                         <h3>Review Models</h3>
-                        <div class="settings-section-copy">Models used by the pre-commit review gate. Runs automatically on every <code>repo_commit</code>.</div>
+                        <div class="settings-section-copy">Reviewer slots used by plan, task acceptance, and commit review surfaces.</div>
                         <div class="form-row">
                             <div class="form-field">
-                                <label>Pre-commit Review Models</label>
+                                <label>Review Slots</label>
                                 <input id="s-review-models" placeholder="model1,model2,model3">
-                                <div class="settings-inline-note">Comma-separated review models (triad). Duplicate model slots are allowed for same-model sampling, but they lower reviewer diversity. In OpenAI-only or Anthropic-only direct-provider mode, the list is auto-normalized to [main, light, light] (3 slots) so both the commit triad and plan_task work out of the box. OpenAI-compatible and Cloud.ru setups are not auto-normalized and must configure the list explicitly.</div>
+                                <div class="settings-inline-note">Comma-separated reviewer slots. Duplicate model IDs are valid independent slots for same-model sampling.</div>
                             </div>
                         </div>
                         <div class="form-grid two">
                             <div class="form-field">
-                                <label>Scope Review Model</label>
-                                <input id="s-scope-review-model" placeholder="openai/gpt-5.5">
-                                <div class="settings-inline-note">Single model for scope review. Blocking/advisory behavior follows Review Enforcement.</div>
+                                <label>Scope Review Slots</label>
+                                <input id="s-scope-review-models" placeholder="openai/gpt-5.5">
+                                <div class="settings-inline-note">Comma-separated scope reviewer slots. Empty falls back to the legacy single scope model setting.</div>
                             </div>
                             <div class="form-field">
                                 <label>Web Search Model</label>
@@ -330,6 +330,20 @@ export function renderSettingsPage() {
                             <div class="settings-effort-group" data-effort-group data-enforcement-group data-effort-target="s-review-enforcement">
                                 <button type="button" class="settings-effort-btn" data-effort-value="advisory">Advisory</button>
                                 <button type="button" class="settings-effort-btn" data-effort-value="blocking">Blocking</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="form-section">
+                        <h3>Task Result Review</h3>
+                        <div class="settings-section-copy">Controls advisory reviewer slots before eligible task results are released.</div>
+                        <div class="settings-effort-card">
+                            <label>Task Result Review</label>
+                            <input id="s-task-review-mode" type="hidden" value="auto">
+                            <div class="settings-effort-group" data-effort-group data-enforcement-group data-effort-target="s-task-review-mode">
+                                <button type="button" class="settings-effort-btn" data-effort-value="off">Off</button>
+                                <button type="button" class="settings-effort-btn" data-effort-value="auto">Auto</button>
+                                <button type="button" class="settings-effort-btn" data-effort-value="required">Required</button>
                             </div>
                         </div>
                     </div>
@@ -509,7 +523,7 @@ export function renderSettingsPage() {
                             </div>
                             <div class="form-field">
                                 <label>Tool Timeout (s)</label>
-                                <input id="s-tool-timeout" type="number" value="120">
+                                <input id="s-tool-timeout" type="number" value="600">
                             </div>
                             <div class="form-field">
                                 <label>Total Budget (USD)</label>
