@@ -1,8 +1,14 @@
 import gzip
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 
-from ouroboros.observability import persist_call, posix_private_modes_supported, redact_projection
+from ouroboros.observability import (
+    persist_call,
+    posix_private_modes_supported,
+    redact_projection,
+    write_blob,
+)
 from ouroboros.outcomes import (
     RESULT_FAILED,
     RESULT_INFRA_FAILED,
@@ -78,6 +84,16 @@ def test_persist_call_writes_private_full_and_redacted_refs(tmp_path):
     assert manifest["redaction"]["redacted"] is True
     assert manifest["full_payload_ref"]["sha256"]
     assert refs["manifest_ref"]["sha256"] == __import__("hashlib").sha256(manifest_path.read_bytes()).hexdigest()
+
+
+def test_write_blob_accepts_concurrent_same_payload_publish(tmp_path):
+    payload = {"message": "same reviewer response", "usage": {"prompt_tokens": 1}}
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        refs = list(pool.map(lambda _: write_blob(tmp_path, payload), range(16)))
+
+    assert len({ref["sha256"] for ref in refs}) == 1
+    assert all(os.path.exists(ref["path"]) for ref in refs)
 
 
 def test_loop_outcome_distinguishes_success_empty_and_provider_failure():

@@ -138,11 +138,21 @@ def write_blob(drive_root: pathlib.Path, payload: Any, *, kind: str = "json") ->
             os.replace(tmp, path)
             _chmod_private(path)
         except Exception:
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
-            raise
+            if path.exists():
+                # Concurrent reviewers can legitimately publish the same
+                # content-addressed blob. On Windows the losing os.replace may
+                # raise while the winning blob is already durable.
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+                _chmod_private(path)
+            else:
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+                raise
     else:
         _chmod_private(path)
     return {
