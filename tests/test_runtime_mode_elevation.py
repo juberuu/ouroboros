@@ -1201,7 +1201,7 @@ def test_set_tool_timeout_sanitizes_corrupted_disk_to_env(isolated_settings, mon
 def test_elevation_indicators_block_attack_patterns_in_all_modes(blocked_cmd, tmp_path, monkeypatch):
     """Iteration-2 fix (real triad finding T1, iter-2 multi-critic F2-6):
     the elevation indicators block actual attack patterns — runs
-    ``ToolRegistry.execute("run_shell", ...)`` end-to-end in each
+    ``ToolRegistry.execute("run_command", ...)`` end-to-end in each
     runtime mode and asserts ``ELEVATION_BLOCKED`` is returned. The
     earlier string-level test only verified substring presence; this
     covers the dispatch wiring."""
@@ -1210,7 +1210,7 @@ def test_elevation_indicators_block_attack_patterns_in_all_modes(blocked_cmd, tm
     for mode in ("light", "advanced", "pro"):
         monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
         reg = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
-        result = reg.execute("run_shell", {"cmd": blocked_cmd})
+        result = reg.execute("run_command", {"cmd": blocked_cmd})
         assert "ELEVATION_BLOCKED" in result, (
             f"mode={mode!r} cmd={blocked_cmd!r}: "
             f"got {result[:200]!r}"
@@ -1239,7 +1239,7 @@ def test_elevation_indicators_do_not_false_positive(diagnostic_cmd, tmp_path, mo
 
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     reg = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
-    result = reg.execute("run_shell", {"cmd": diagnostic_cmd})
+    result = reg.execute("run_command", {"cmd": diagnostic_cmd})
     assert "ELEVATION_BLOCKED" not in result, (
         f"Diagnostic cmd {diagnostic_cmd!r} was wrongly blocked as "
         "elevation attempt. The conjunctive check should let this pass."
@@ -1410,7 +1410,7 @@ def test_run_shell_blocks_obfuscated_skill_owner_state_write(filename, tmp_path,
     )
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     reg = ToolRegistry(repo_dir=tmp_path, drive_root=drive_root)
-    result = reg.execute("run_shell", {"cmd": ["python3", str(helper_path), str(drive_root)]})
+    result = reg.execute("run_command", {"cmd": ["python3", str(helper_path), str(drive_root)]})
     assert "OWNER_STATE_RESTORED" in result
     assert not (skill_state_dir / filename).exists()
 
@@ -1438,7 +1438,7 @@ def test_run_shell_blocks_delayed_skill_owner_state_writer(tmp_path, monkeypatch
     )
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     reg = ToolRegistry(repo_dir=tmp_path, drive_root=drive_root)
-    result = reg.execute("run_shell", {"cmd": [sys.executable, "-c", parent_code, str(drive_root), child_code]})
+    result = reg.execute("run_command", {"cmd": [sys.executable, "-c", parent_code, str(drive_root), child_code]})
     assert "SKILL_STATE_WRITE_BLOCKED" in result
     time.sleep(1.4)
     assert not (skill_state_dir / "review.json").exists()
@@ -1457,7 +1457,7 @@ def test_run_shell_blocks_detached_skill_state_command(tmp_path, monkeypatch):
     )
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     reg = ToolRegistry(repo_dir=tmp_path, drive_root=drive_root)
-    result = reg.execute("run_shell", {"cmd": [sys.executable, "-c", code]})
+    result = reg.execute("run_command", {"cmd": [sys.executable, "-c", code]})
     assert "SKILL_STATE_WRITE_BLOCKED" in result
 
 
@@ -1482,7 +1482,7 @@ def test_run_shell_scans_scripts_relative_to_cwd(tmp_path, monkeypatch):
     )
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     reg = ToolRegistry(repo_dir=repo_dir, drive_root=drive_root)
-    result = reg.execute("run_shell", {"cmd": [sys.executable, "evil.py", str(drive_root)], "cwd": "sub"})
+    result = reg.execute("run_command", {"cmd": [sys.executable, "evil.py", str(drive_root)], "cwd": "sub"})
     assert "OWNER_STATE_RESTORED" in result
     assert not (drive_root / "state" / "skills" / "weather" / "review.json").exists()
 

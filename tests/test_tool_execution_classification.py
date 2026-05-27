@@ -34,7 +34,7 @@ def test_shell_and_claude_failures_are_treated_as_tool_failures():
 def test_shell_regex_autocorrect_success_is_not_tool_failure():
     result = "⚠️ SHELL_REGEX_AUTO_CORRECTED: converted grep backslash-escaped alternation\nexit_code=0\nSTDOUT:\nmatch"
     assert not _is_tool_execution_failure(True, result)
-    assert _extract_result_metadata("run_shell", result, False)["status"] == "ok_autocorrected"
+    assert _extract_result_metadata("run_command", result, False)["status"] == "ok_autocorrected"
 
 
 def test_shell_regex_autocorrect_nonzero_still_fails():
@@ -43,7 +43,7 @@ def test_shell_regex_autocorrect_nonzero_still_fails():
         "⚠️ SHELL_EXIT_ERROR: command exited with exit_code=2.\n\nSTDERR:\nboom"
     )
     assert _is_tool_execution_failure(True, result)
-    assert _extract_result_metadata("run_shell", result, True)["status"] == "shell_error"
+    assert _extract_result_metadata("run_command", result, True)["status"] == "shell_error"
 
 
 def test_live_tool_log_payload_includes_structured_result_metadata():

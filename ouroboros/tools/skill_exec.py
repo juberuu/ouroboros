@@ -438,7 +438,7 @@ def _skill_deps_exec_block(drive_root: pathlib.Path, loaded: Any) -> str:
     return (
         f"⚠️ SKILL_EXEC_BLOCKED: skill {loaded.name!r} isolated "
         f"dependencies are not ready (status={deps_status!r}). "
-        "Re-run review_skill so a fresh executable review can reinstall dependencies."
+        "Re-run skill_review so a fresh executable review can reinstall dependencies."
     )
 
 
@@ -540,7 +540,7 @@ def _handle_skill_exec(
     except SkillPayloadUnreadable as exc:
         return (
             f"⚠️ SKILL_EXEC_ERROR: skill {skill_name!r} payload became unreadable "
-            f"({exc}). Fix the skill package and re-run review_skill before "
+            f"({exc}). Fix the skill package and re-run skill_review before "
             "executing."
         )
     stale = loaded.review.is_stale_for(current_hash)
@@ -548,7 +548,7 @@ def _handle_skill_exec(
     if stale:
         return (
             f"⚠️ SKILL_EXEC_BLOCKED: skill {skill_name!r} was edited since "
-            f"the last review. Re-run review_skill(skill={skill_name!r}) "
+            f"the last review. Re-run skill_review(skill={skill_name!r}) "
             "before executing."
         )
     if not gate["executable_review"]:
@@ -611,7 +611,7 @@ def _handle_skill_exec(
             "script for this skill. Only names listed under the manifest's "
             "``scripts:`` array can execute via skill_exec (assets/* and "
             "SKILL.md body are reviewed content but not executable payload). "
-            "Add the script to the manifest and re-run review_skill."
+            "Add the script to the manifest and re-run skill_review."
         )
 
     cmd = [runtime_binary, str(script_path)]
@@ -812,13 +812,13 @@ def _handle_toggle_skill(
                 return (
                     f"⚠️ SKILL_TOGGLE_ERROR: skill {loaded.name!r} declares "
                     f"isolated dependencies (status={deps_status!r}). "
-                    "Re-run review_skill (PASS triggers a deps re-install) before enabling."
+                    "Re-run skill_review (PASS triggers a deps re-install) before enabling."
                 )
             if deps_reason == "fingerprint":
                 return (
                     f"⚠️ SKILL_TOGGLE_ERROR: skill {loaded.name!r} dependency "
                     "fingerprint is stale (provenance changed since last install). "
-                    "Re-run review_skill before enabling."
+                    "Re-run skill_review before enabling."
                 )
         if not coerced and collision_load_error:
             extension_action = None
@@ -854,10 +854,10 @@ _LIST_SCHEMA = {
 }
 
 _REVIEW_SCHEMA = {
-    "name": "review_skill",
+    "name": "skill_review",
     "description": (
-        "Run tri-model skill review on one external skill package using the "
-        "same review infrastructure as repo commits but scored against the "
+        "Run reviewer-slot skill review on one external skill package using the "
+        "shared reviewer-slot configuration and scored against the "
         "Skill Review Checklist section in docs/CHECKLISTS.md. Persists the "
         "verdict to data/state/skills/<name>/review.json with a content "
         "hash so a later edit invalidates the review automatically."
@@ -962,8 +962,8 @@ def get_tools() -> List[ToolEntry]:
             timeout_sec=30,
         ),
         ToolEntry(
-            name="review_skill",
-            schema=_REVIEW_SCHEMA,
+            name="skill_review",
+            schema={**_REVIEW_SCHEMA, "name": "skill_review"},
             handler=_handle_review_skill,
             is_code_tool=False,
             timeout_sec=_SKILL_REVIEW_TOOL_TIMEOUT_SEC,

@@ -415,7 +415,7 @@ _PREFLIGHT_SCHEMA = {
         "(or just the ones in `paths` if provided), plus a manifest "
         "parse and static widget render-schema validation. Cheap and offline (no LLM, no review.json mutation, "
         "no review status change). Heal-mode agents use this before "
-        "calling review_skill so silly syntax errors are caught "
+        "calling skill_review so silly syntax errors are caught "
         "without spending tri-model review tokens. Argv-only "
         "subprocess invocation, cwd=skill_dir, scrubbed env, 30s "
         "per-file cap, panic-tracked process group."

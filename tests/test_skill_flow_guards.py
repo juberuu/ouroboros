@@ -58,7 +58,7 @@ def test_normalize_task_constraint_strict_bool_and_local_readonly_canonicalizati
 def test_long_tool_args_log_as_placeholder_not_content_object():
     args = {"path": "skills/external/demo/plugin.py", "content": "x" * 4000}
 
-    sanitized = sanitize_tool_args_for_log("data_write", args, threshold=100)
+    sanitized = sanitize_tool_args_for_log("write_file", args, threshold=100)
 
     assert isinstance(sanitized["content"], str)
     assert sanitized["content"].startswith("<TRUNCATED:content:")

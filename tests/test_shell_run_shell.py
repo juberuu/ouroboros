@@ -139,7 +139,7 @@ class TestShellArgContract:
 
     def test_refusal_message_points_at_correct_usage(self, tmp_path):
         result = _run_shell(_ctx(tmp_path), '["git", "log",')
-        assert 'run_shell(cmd=["git"' in result
+        assert 'run_command(cmd=["git"' in result
 
     def test_list_cmd_is_accepted(self):
         src = inspect.getsource(_run_shell)
@@ -181,7 +181,7 @@ def test_run_shell_timeout_uses_settings_timeout(tmp_path, monkeypatch):
     monkeypatch.setattr("ouroboros.tools.shell._tracked_subprocess_run", fake_timeout)
     result = _run_shell(_ctx(tmp_path), ["sleep", "999"])
 
-    assert "TOOL_TIMEOUT (run_shell)" in result
+    assert "TOOL_TIMEOUT (run_command)" in result
     assert "42s" in result
 
 

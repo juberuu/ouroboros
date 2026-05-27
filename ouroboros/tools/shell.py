@@ -1,4 +1,4 @@
-"""Shell tools: run_shell, claude_code_edit."""
+"""Process tools: run_command and run_script."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import signal
 import subprocess
 import sys
 import threading
+import uuid
 from subprocess import Popen, CompletedProcess
 from typing import Any, Dict, List
 
@@ -253,11 +254,11 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
                     'but failed to parse cleanly (likely an escape or quote-mismatch '
                     'issue). Pass cmd as an actual array, not a stringified array.\n\n'
                     'Correct usage:\n'
-                    '  run_shell(cmd=["git", "log", "--oneline", "-10"])\n\n'
+                    '  run_command(cmd=["git", "log", "--oneline", "-10"])\n\n'
                     'Wrong usage (the failure that brought you here):\n'
-                    '  run_shell(cmd=\'["git", "log", "--oneline", "-10"]\')\n\n'
-                    'For reading files, prefer `repo_read` / `data_read`.\n'
-                    'For searching code, prefer `code_search`.'
+                    '  run_command(cmd=\'["git", "log", "--oneline", "-10"]\')\n\n'
+                    'For reading files, prefer `read_file`.\n'
+                    'For searching code, prefer `search_code`.'
                 )
             try:
                 parts = shlex.split(cmd)
@@ -271,12 +272,12 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
             return (
                 '⚠️ SHELL_ARG_ERROR: `cmd` must be a JSON array of strings, not a plain string.\n\n'
                 'Correct usage:\n'
-                '  run_shell(cmd=["grep", "-r", "pattern", "path/"])\n'
-                '  run_shell(cmd=["python", "-c", "print(1+1)"])\n\n'
+                '  run_command(cmd=["grep", "-r", "pattern", "path/"])\n'
+                '  run_command(cmd=["python", "-c", "print(1+1)"])\n\n'
                 'Wrong usage:\n'
-                '  run_shell(cmd="grep -r pattern path/")\n\n'
-                'For reading files, prefer `repo_read` / `data_read`.\n'
-                'For searching code, prefer `code_search`.'
+                '  run_command(cmd="grep -r pattern path/")\n\n'
+                'For reading files, prefer `read_file`.\n'
+                'For searching code, prefer `search_code`.'
             )
 
     if not isinstance(cmd, list):
@@ -290,7 +291,7 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
             if match:
                 return (
                     f'⚠️ SHELL_ENV_ERROR: Found literal env reference "{match.group(0)}" in cmd array. '
-                    "run_shell executes argv directly, so shell variables are not expanded. "
+                    "run_command executes argv directly, so shell variables are not expanded. "
                     'Use ["sh", "-c", "..."] if you intentionally need shell expansion, '
                     "or read the environment variable inside the called program."
                 )
@@ -300,7 +301,7 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
             return (
                 '⚠️ SHELL_CMD_ERROR: "cd" is a shell builtin, not an executable. '
                 'Use the "cwd" parameter instead: '
-                'run_shell(cmd=["git", "log"], cwd="/target/dir")'
+                'run_command(cmd=["git", "log"], cwd="/target/dir")'
             )
         return (
             f'⚠️ SHELL_CMD_ERROR: "{cmd[0]}" is a shell builtin and cannot '
@@ -316,7 +317,7 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
         return (
             f'⚠️ SHELL_CMD_ERROR: Shell operator "{op}" found in cmd array. '
             'Subprocess does not interpret shell syntax. '
-            'Options: (1) Split into separate run_shell calls. '
+            'Options: (1) Split into separate run_command calls. '
             '(2) For pipes/chaining: ["sh", "-c", "cmd1 && cmd2"]'
         )
 
@@ -367,12 +368,12 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
                 ctx,
                 changed_paths=after_changed or before_changed,
                 mutation_root=repo_root,
-                source_tool="run_shell",
+                source_tool="run_command",
             )
         return autocorrect_note + f"exit_code=0\n{_format_process_output(res.stdout or '', res.stderr or '')}"
     except subprocess.TimeoutExpired:
         return (
-            f"⚠️ TOOL_TIMEOUT (run_shell): command exceeded {timeout_sec}s. "
+            f"⚠️ TOOL_TIMEOUT (run_command): command exceeded {timeout_sec}s. "
             "Subprocess tree was terminated."
         )
     except Exception as e:
@@ -659,12 +660,44 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
             _release_git_lock(lock)
 
 
+def _run_script(
+    ctx: ToolContext,
+    script: str,
+    interpreter: str = "python3",
+    args: List[str] | None = None,
+    cwd: str = "",
+) -> str:
+    """Write a task-scoped temporary script and run it as a foreground command."""
+    interp = str(interpreter or "python3").strip()
+    allowed = {"python", "python3", "bash", "sh", "node", "ruby"}
+    if pathlib.PurePath(interp).name not in allowed:
+        return f"⚠️ RUN_SCRIPT_BLOCKED: interpreter must be one of {sorted(allowed)}."
+    body = str(script or "")
+    if not body.strip():
+        return "⚠️ TOOL_ARG_ERROR (run_script): script is required."
+    try:
+        root = pathlib.Path(ctx.task_drive_root()) / "tmp_scripts"
+    except Exception:
+        root = pathlib.Path(ctx.drive_root) / "tmp_scripts"
+    root.mkdir(parents=True, exist_ok=True)
+    suffix = ".py" if "python" in pathlib.PurePath(interp).name else ".sh"
+    script_path = root / f"script_{uuid.uuid4().hex}{suffix}"
+    script_path.write_text(body, encoding="utf-8")
+    try:
+        os.chmod(script_path, 0o600)
+    except OSError:
+        pass
+    argv = [interp, str(script_path), *[str(item) for item in (args or [])]]
+    result = _run_shell(ctx, argv, cwd=cwd)
+    return f"# script_path={script_path}\n{result}"
+
+
 def get_tools() -> List[ToolEntry]:
     return [
-        ToolEntry("run_shell", {
-            "name": "run_shell",
+        ToolEntry("run_command", {
+            "name": "run_command",
             "description": (
-                "Run a command inside the repo. Returns stdout+stderr. "
+                "Run a foreground bounded command inside the active workspace/repo. Returns stdout+stderr. "
                 "cmd MUST be an array of strings, never a single shell-style "
                 "string. Use cwd= for working directory; cd is rejected. "
                 "For pipes/chaining use [\"sh\", \"-c\", \"cmd1 && cmd2\"]."
@@ -692,36 +725,17 @@ def get_tools() -> List[ToolEntry]:
                 },
             }, "required": ["cmd"]},
         }, _run_shell, is_code_tool=True, timeout_sec=_RUN_SHELL_DEFAULT_TIMEOUT_SEC),
-        ToolEntry("claude_code_edit", {
-            "name": "claude_code_edit",
+        ToolEntry("run_script", {
+            "name": "run_script",
             "description": (
-                "Delegate code edits to Claude Code (via Agent SDK with safety guards). "
-                "Prefer this for anything beyond one exact replacement: large single-file "
-                "edits, repeated coordinated edits, multi-hunk work, multi-file changes, "
-                "renames/signature changes, or uncertain scope. Prefer it over chaining "
-                "many str_replace_editor calls. It also subdivides very large writes across "
-                "many small Write/Edit operations inside its own agent loop, so use it for "
-                "files larger than a single LLM output can produce. Follow with repo_commit. "
-                "Optional bucket+skill_name args let tasks anchor a short relative cwd under "
-                "an existing data/skills/<bucket>/<skill_name>/ payload. Explicit repo/data "
-                "cwd values keep their own address space and ignore stale short-form args."
+                "Run a short task-scoped temporary script with a declared interpreter. "
+                "Use for multi-line diagnostics or harness helpers; generated script files live under the task drive."
             ),
             "parameters": {"type": "object", "properties": {
-                "prompt": {"type": "string"},
+                "script": {"type": "string"},
+                "interpreter": {"type": "string", "enum": ["python", "python3", "bash", "sh", "node", "ruby"], "default": "python3"},
+                "args": {"type": "array", "items": {"type": "string"}, "default": []},
                 "cwd": {"type": "string", "default": ""},
-                "budget": {"type": "number",
-                           "description": "Max USD for this Claude Code call. Default: 5.0"},
-                "validate": {"type": "boolean", "default": False,
-                             "description": "Run post-edit validation (tests). Returns summary in result."},
-                "bucket": {
-                    "type": "string",
-                    "enum": ["external", "clawhub", "ouroboroshub"],
-                    "description": "Skill payload bucket for short relative payload cwd only. Pair with skill_name. Do not supply for explicit repo/data cwd values.",
-                },
-                "skill_name": {
-                    "type": "string",
-                    "description": "Skill slug for short relative payload cwd only. Requires bucket.",
-                },
-            }, "required": ["prompt"]},
-        }, _claude_code_edit, is_code_tool=True, timeout_sec=1200),
+            }, "required": ["script"]},
+        }, _run_script, is_code_tool=True, timeout_sec=_RUN_SHELL_DEFAULT_TIMEOUT_SEC),
     ]

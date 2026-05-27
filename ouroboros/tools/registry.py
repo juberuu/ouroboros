@@ -14,7 +14,6 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 from ouroboros.runtime_mode_policy import (
-    FROZEN_CONTRACT_PATH_PREFIXES,
     PROTECTED_RUNTIME_PATHS,
     core_patch_notice,
     is_protected_runtime_path,
@@ -37,6 +36,14 @@ from ouroboros.tools.shell_parse import (
     sudo_noninteractive_violation,
     unwrap_env_argv,
 )
+from ouroboros.tools.shell_guards import (
+    LIGHT_SHELL_WRITER_COMMANDS,
+    PROTECTED_RUNTIME_PATHS_LOWER,
+    SHELL_WRITE_INDICATORS,
+    light_shell_repo_mutation,
+    shell_writer_targets_protected,
+)
+from ouroboros.tools.legacy_aliases import constraint_bucket_skill
 from ouroboros.utils import safe_relpath
 from ouroboros.contracts.task_constraint import TaskConstraint, normalize_task_constraint, resolve_payload_path
 from ouroboros.contracts.skill_payload_policy import (
@@ -48,26 +55,10 @@ from ouroboros.contracts.skill_payload_policy import (
     decide_payload_short_form,
     is_skill_payload_control_filename,
     is_skill_payload_path,
+    resolve_skill_payload_target,
 )
 
 log = logging.getLogger(__name__)
-
-_PROTECTED_RUNTIME_PATHS_LOWER = frozenset(
-    p.lower() for p in PROTECTED_RUNTIME_PATHS
-) | frozenset(prefix.lower() for prefix in FROZEN_CONTRACT_PATH_PREFIXES)
-
-_SHELL_WRITE_INDICATORS = (
-    "rm ", "rm\t", ">", "sed -i", "tee ", "truncate",
-    "mv ", "cp ", "chmod ", "chown ", "unlink ", "delete", "trash",
-    "rsync ", "write_text", "open(", ".write(", ".writelines(",
-    "os.remove(", "os.unlink(", "os.mkdir(", "os.makedirs(", "sort -o",
-)
-
-_LIGHT_SHELL_WRITER_COMMANDS = frozenset({
-    "chmod", "chown", "cp", "gunzip", "gzip", "ln", "mkdir", "mv",
-    "perl", "rm", "ruby", "sed", "sort", "tar", "touch", "truncate", "uniq", "unzip",
-})
-
 
 def _coerce_real_path(value: Any) -> pathlib.Path | None:
     if value is None or value.__class__.__module__.startswith("unittest.mock"):
@@ -108,112 +99,6 @@ def _detect_runtime_mode_elevation(text_lower: str) -> bool:
     return (has_save and has_mode_key) or has_dotted_path
 
 
-def _candidate_path_inside(root: pathlib.Path, work_dir: pathlib.Path, path_text: str) -> bool:
-    """Return whether ``path_text`` resolves inside ``root``."""
-    text = str(path_text or "").strip()
-    if not text or text in {"-", "--"}:
-        return False
-    # Skip obvious non-path fragments and shell/control tokens.
-    if text.startswith(("-", "$")) or text in {"|", "&&", "||", ";", ">", ">>"}:
-        return False
-    try:
-        root_resolved = pathlib.Path(root).resolve()
-        base = pathlib.Path(text)
-        if not base.is_absolute():
-            base = work_dir / base
-        candidate = base.expanduser().resolve(strict=False)
-        candidate.relative_to(root_resolved)
-        return True
-    except (OSError, ValueError):
-        return False
-
-
-def _repo_target_mentioned(argv: List[str], *, repo_dir: pathlib.Path, cwd: str = "") -> bool:
-    work_dir = pathlib.Path(repo_dir)
-    if cwd and str(cwd).strip() not in ("", ".", "./"):
-        try:
-            candidate = (pathlib.Path(repo_dir) / str(cwd)).resolve(strict=False)
-            work_dir = candidate
-        except OSError:
-            pass
-    return any(
-        _candidate_path_inside(pathlib.Path(repo_dir), work_dir, token)
-        for token in argv[1:]
-    )
-
-
-def _writer_target_tokens(argv: List[str]) -> List[str]:
-    if not argv:
-        return []
-    cmd = pathlib.PurePath(argv[0]).name.lower()
-    operands = [arg for arg in argv[1:] if arg and not arg.startswith("-")]
-    if cmd == "cp":
-        return operands[-1:] if len(operands) >= 2 else []
-    if cmd in {"chmod", "chown"}:
-        return operands[1:] if len(operands) >= 2 else []
-    if cmd == "sed":
-        return operands[1:] if len(operands) >= 2 else operands
-    if cmd == "sort":
-        for idx, arg in enumerate(argv[1:], start=1):
-            if arg == "-o" and idx + 1 < len(argv):
-                return [argv[idx + 1]]
-            if arg.startswith("--output="):
-                return [arg.split("=", 1)[1]]
-        return []
-    if cmd == "uniq":
-        return operands[1:2] if len(operands) >= 2 else []
-    return operands
-
-
-def _writer_targets_repo(argv: List[str], *, repo_dir: pathlib.Path, cwd: str = "") -> bool:
-    return _repo_target_mentioned([argv[0], *_writer_target_tokens(argv)], repo_dir=repo_dir, cwd=cwd)
-
-
-def _shell_writer_targets_protected(raw_cmd: Any) -> bool:
-    argv = strip_leading_env_assignments(unwrap_env_argv(shell_argv(raw_cmd)))
-    if not argv:
-        return False
-    executable = pathlib.PurePath(argv[0]).name.lower()
-    if executable in {"bash", "sh", "zsh"}:
-        inline = shell_command_string(argv)
-        return bool(inline and _shell_writer_targets_protected(inline))
-    if executable not in _LIGHT_SHELL_WRITER_COMMANDS:
-        return False
-    target_text = " ".join(_writer_target_tokens(argv)).replace("\\", "/").lower()
-    return bool(target_text and any(cf in target_text for cf in _PROTECTED_RUNTIME_PATHS_LOWER))
-
-
-def _light_shell_repo_mutation(raw_cmd: Any, *, repo_dir: pathlib.Path, cwd: str = "") -> bool:
-    """Detect simple shell writer commands that target the repo in light mode."""
-    argv = shell_argv(raw_cmd)
-    if not argv:
-        return False
-    cmd_lower = " ".join(argv).lower()
-
-    unwrapped = unwrap_env_argv(argv)
-    if unwrapped != argv:
-        return _light_shell_repo_mutation(unwrapped, repo_dir=repo_dir, cwd=cwd)
-    argv = strip_leading_env_assignments(argv)
-    if not argv:
-        return False
-    executable = pathlib.PurePath(argv[0]).name.lower()
-
-    if executable in {"bash", "sh", "zsh"}:
-        inline = shell_command_string(argv)
-        if inline:
-            return _light_shell_repo_mutation(inline, repo_dir=repo_dir, cwd=cwd)
-
-    if executable in _LIGHT_SHELL_WRITER_COMMANDS and _writer_targets_repo(argv, repo_dir=repo_dir, cwd=cwd):
-        return True
-
-    # Redirection/tee only count when the same argv mentions a repo path.
-    if any(ind in cmd_lower for ind in (" > ", " >> ", " | tee ")):
-        return _repo_target_mentioned(argv, repo_dir=repo_dir, cwd=cwd)
-
-    return False
-
-
-
 def _task_constraint_path_allowed(path_text: str, constraint: Optional[TaskConstraint], drive_root: pathlib.Path) -> bool:
     return is_skill_payload_path(
         drive_root,
@@ -224,14 +109,48 @@ def _task_constraint_path_allowed(path_text: str, constraint: Optional[TaskConst
     )
 
 
+def _light_mode_payload_mutation_allowed(
+    *,
+    ctx: Any,
+    tool_name: str,
+    args: Dict[str, Any],
+    runtime_mode: str,
+    effective_constraint: Optional[TaskConstraint],
+    allow_short_relative: bool,
+) -> bool:
+    """Return True for light-mode data skill payload edits that do not touch repo files."""
+
+    if runtime_mode != "light" or tool_name not in {"edit_text", "write_file"}:
+        return False
+    requested_root = str(args.get("root", "") or "active_workspace")
+    legacy_data_skill_edit = False
+    if tool_name == "edit_text" and requested_root == "active_workspace":
+        try:
+            legacy_target = resolve_skill_payload_target(
+                pathlib.Path(ctx.drive_root),
+                str(args.get("path", "") or ""),
+            )
+            legacy_data_skill_edit = legacy_target.target_path.exists() and not legacy_target.control_plane
+        except Exception:
+            legacy_data_skill_edit = False
+    if requested_root not in {"runtime_data", "skill_payload"} and not legacy_data_skill_edit:
+        return False
+    return is_skill_payload_path(
+        pathlib.Path(ctx.drive_root),
+        str(args.get("path", "") or ""),
+        constraint=effective_constraint,
+        allow_short_relative=allow_short_relative,
+        allow_control_plane=False,
+    )
+
+
 _HEAL_MODE_ALLOWED_TOOLS = frozenset({
-    "claude_code_edit",
-    "data_read",
-    "data_list",
-    "data_write",
+    "read_file",
+    "list_files",
+    "write_file",
+    "edit_text",
     "list_skills",
-    "review_skill",
-    "str_replace_editor",
+    "skill_review",
     # Read-only payload syntax validator; no review/enabled/grant mutation.
     "skill_preflight",
 })
@@ -282,18 +201,20 @@ _GIT_READONLY_SUBCOMMANDS = frozenset([
 ])
 
 _WORKSPACE_ALLOWED_TOOLS = frozenset({
-    "repo_read",
-    "repo_list",
-    "repo_write",
-    "str_replace_editor",
-    "code_search",
+    "read_file",
+    "list_files",
+    "write_file",
+    "edit_text",
+    "search_code",
     "codebase_digest",
-    "run_shell",
-    "git_status",
-    "git_diff",
-    "data_read",
-    "data_list",
-    "data_write",
+    "run_command",
+    "run_script",
+    "start_service",
+    "service_status",
+    "service_logs",
+    "stop_service",
+    "vcs_status",
+    "vcs_diff",
     "chat_history",
     "recent_tasks",
     "web_search",
@@ -303,6 +224,19 @@ _WORKSPACE_ALLOWED_TOOLS = frozenset({
     "list_available_tools",
     "enable_tools",
 })
+_PROCESS_COMMAND_TOOLS = frozenset({"run_command", "run_script", "start_service"})
+
+
+def _process_shell_guard_args(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    if name == "run_script":
+        interpreter = str(args.get("interpreter") or "python3").strip() or "python3"
+        script = str(args.get("script") or "")
+        return {
+            "cmd": [interpreter, "-c", script],
+            "cwd": args.get("cwd", ""),
+            "__tool_name": name,
+        }
+    return {**args, "__tool_name": name}
 
 def _parse_porcelain_paths(output: str) -> list[str]:
     paths: list[str] = []
@@ -357,7 +291,7 @@ def _light_repo_snapshot(repo_dir: pathlib.Path) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _format_light_repo_write_block(before: Dict[str, Any], after: Dict[str, Any], result: str) -> str:
+def _format_light_repo_write_block(before: Dict[str, Any], after: Dict[str, Any], result: str, tool_name: str = "run_command") -> str:
     before_paths = set(before.get("paths") or [])
     after_paths = set(after.get("paths") or [])
     touched = sorted(after_paths | before_paths)
@@ -366,7 +300,7 @@ def _format_light_repo_write_block(before: Dict[str, Any], after: Dict[str, Any]
         listed += f", ... (+{len(touched) - 30} more)"
     return (
         "⚠️ LIGHT_MODE_REPO_WRITE_BLOCKED: runtime_mode=light detected "
-        "a mutation of the Ouroboros repository after run_shell. "
+        f"a mutation of the Ouroboros repository after {tool_name}. "
         "The command result is blocked and no automatic rollback was attempted "
         "to avoid overwriting concurrent human edits. "
         f"Affected/dirty paths: {listed}. Switch to advanced/pro for repo writes.\n\n"
@@ -654,7 +588,7 @@ class ToolRegistry:
     _FROZEN_TOOL_MODULES = [
         "browser", "ci", "claude_advisory_review", "compact_context", "control",
         "core", "evolution_stats", "git", "git_rollback", "github", "health",
-        "knowledge", "memory_tools", "plan_review", "recent_tasks", "review", "search", "shell",
+        "knowledge", "memory_tools", "plan_review", "recent_tasks", "review", "search", "services", "shell",
         # External skill surface.
         "skill_exec",
         "skill_publish",
@@ -1006,7 +940,7 @@ class ToolRegistry:
         return f"{safety_msg}\n\n---\n{result}" if safety_msg else result
 
     def _run_shell_safety_check(self, args: Dict[str, Any], runtime_mode: str) -> Optional[str]:
-        """Pre-execution run_shell filter; returns a block message or ``None``."""
+        """Pre-execution run_command filter; returns a block message or ``None``."""
         raw_cmd = args.get("cmd", args.get("command", ""))
         workspace_mode = bool(getattr(self._ctx, "is_workspace_mode", lambda: False)())
         argv = strip_leading_env_assignments(unwrap_env_argv(shell_argv(raw_cmd)))
@@ -1024,8 +958,8 @@ class ToolRegistry:
         while "//" in cmd_path_lower:
             cmd_path_lower = cmd_path_lower.replace("//", "/")
         argv_for_write = argv
-        writeish = any(w in cmd_lower for w in _SHELL_WRITE_INDICATORS) or (
-            bool(argv_for_write) and pathlib.PurePath(argv_for_write[0]).name.lower() in _LIGHT_SHELL_WRITER_COMMANDS
+        writeish = any(w in cmd_lower for w in SHELL_WRITE_INDICATORS) or (
+            bool(argv_for_write) and pathlib.PurePath(argv_for_write[0]).name.lower() in LIGHT_SHELL_WRITER_COMMANDS
         )
         if workspace_mode and writeish:
             active_root = active_repo_dir_for(self._ctx).resolve(strict=False)
@@ -1099,7 +1033,7 @@ class ToolRegistry:
             return (
                 "⚠️ SKILL_STATE_WRITE_BLOCKED: skill review, enablement, "
                 "grants, and marketplace provenance are owner/review "
-                "controlled state. Use review_skill, toggle_skill/the Skills "
+                "controlled state. Use skill_review, toggle_skill/the Skills "
                 "UI, or the desktop launcher confirmation flow."
             )
         if "state" in cmd_lower and "skills" in cmd_lower and _mentions_detached_process(cmd_lower):
@@ -1111,10 +1045,11 @@ class ToolRegistry:
 
         # Light-mode repo-mutation indicators.
         if runtime_mode == "light" and not workspace_mode:
-            if _light_shell_repo_mutation(
+            if light_shell_repo_mutation(
                 raw_cmd,
                 repo_dir=pathlib.Path(self._ctx.active_repo_dir()),
                 cwd=str(args.get("cwd") or ""),
+                detect_interpreter_inline=str(args.get("__tool_name") or "") == "run_script",
             ):
                 return (
                     "⚠️ LIGHT_MODE_BLOCKED: runtime_mode=light refuses "
@@ -1130,7 +1065,7 @@ class ToolRegistry:
                 *SKILL_PAYLOAD_CONTROL_FILENAMES,
                 *(SKILL_PAYLOAD_CONTROL_DIRNAMES - {"__pycache__"}),
             )
-        ) and any(w in cmd_lower for w in _SHELL_WRITE_INDICATORS):
+        ) and any(w in cmd_lower for w in SHELL_WRITE_INDICATORS):
             return (
                 "⚠️ SAFETY_VIOLATION: Shell command would modify a skill "
                 "provenance / launcher seed / dependency marker (.clawhub.json, "
@@ -1141,15 +1076,15 @@ class ToolRegistry:
             )
 
         # Protected runtime path writes.
-        if not workspace_mode and _shell_writer_targets_protected(raw_cmd):
+        if not workspace_mode and shell_writer_targets_protected(raw_cmd):
             return (
                 "⚠️ CRITICAL SAFETY_VIOLATION: Shell command would modify "
                 "a protected core/contract/release file. Protected: "
                 + ", ".join(sorted(PROTECTED_RUNTIME_PATHS))
             )
         if not workspace_mode:
-            for cf in _PROTECTED_RUNTIME_PATHS_LOWER:
-                if cf in cmd_path_lower and any(w in cmd_lower for w in _SHELL_WRITE_INDICATORS):
+            for cf in PROTECTED_RUNTIME_PATHS_LOWER:
+                if cf in cmd_path_lower and any(w in cmd_lower for w in SHELL_WRITE_INDICATORS):
                     return (
                         "⚠️ CRITICAL SAFETY_VIOLATION: Shell command would modify "
                         "a protected core/contract/release file. Protected: "
@@ -1172,16 +1107,16 @@ class ToolRegistry:
             )
             if git_violation:
                 return (
-                    "⚠️ WORKSPACE_GIT_BLOCKED: run_shell may only use read-only git "
+                    "⚠️ WORKSPACE_GIT_BLOCKED: run_command may only use read-only git "
                     f"operations inside the active workspace; blocked {git_violation}."
                 )
         subcmd = _extract_run_shell_git_subcommand(raw_cmd)
         if subcmd and subcmd.lower() not in _GIT_READONLY_SUBCOMMANDS:
             return (
                 f"⚠️ GIT_VIA_SHELL_BLOCKED: `git {subcmd}` must go through "
-                "repo_commit which enforces pre-commit "
-                "checks. For read-only git: git_status, git_diff tools, or "
-                "run_shell with git log/show/diff/status."
+                "commit_reviewed which enforces pre-commit "
+                "checks. For read-only git: vcs_status, vcs_diff tools, or "
+                "run_command with git log/show/diff/status."
             )
         return None
 
@@ -1245,6 +1180,7 @@ class ToolRegistry:
         owner_snapshot: Dict[pathlib.Path, Optional[str]],
         light_repo_before: Optional[Dict[str, Any]],
         workspace_refs_before: Optional[Dict[str, str]],
+        tool_name: str = "run_command",
     ) -> str:
         import time
 
@@ -1254,7 +1190,7 @@ class ToolRegistry:
             restored_owner_state = self._restore_owner_files(owner_snapshot) or restored_owner_state
         if restored_owner_state:
             result = (
-                f"{result}\n\n⚠️ OWNER_STATE_RESTORED: run_shell attempted to "
+                f"{result}\n\n⚠️ OWNER_STATE_RESTORED: run_command attempted to "
                 "change owner-only settings or skill trust state; protected files were restored."
             )
         if light_repo_before is not None:
@@ -1263,7 +1199,7 @@ class ToolRegistry:
                 light_repo_after is not None
                 and light_repo_after.get("digest") != light_repo_before.get("digest")
             ):
-                result = _format_light_repo_write_block(light_repo_before, light_repo_after, result)
+                result = _format_light_repo_write_block(light_repo_before, light_repo_after, result, tool_name=tool_name)
         if workspace_refs_before is not None:
             workspace_refs_after = _git_ref_snapshot(active_repo_dir_for(self._ctx))
             if (
@@ -1271,7 +1207,7 @@ class ToolRegistry:
                 and workspace_refs_after.get("digest") != workspace_refs_before.get("digest")
             ):
                 result = (
-                    "⚠️ WORKSPACE_GIT_REF_CHANGED: run_shell changed git HEAD or refs "
+                    "⚠️ WORKSPACE_GIT_REF_CHANGED: run_command changed git HEAD or refs "
                     "inside the external workspace. External workspace runs must leave "
                     "changes as files/patch artifacts, not commits/tags/resets.\n\n"
                     "Original command output:\n"
@@ -1339,22 +1275,49 @@ class ToolRegistry:
         heal_no_enable = bool(task_constraint and task_constraint.mode == "skill_repair")
         if heal_no_enable:
             heal_skill = task_constraint.skill_name if task_constraint else ""
-            if name in {"data_read", "data_write"}:
-                data_path = str(args.get("path", "") or "")
-                if not _task_constraint_path_allowed(data_path, task_constraint, pathlib.Path(self._ctx.drive_root)):
+            if (
+                name in {"read_file", "list_files", "write_file", "edit_text"}
+                and str(args.get("root", "") or "") == "skill_payload"
+            ):
+                expected_bucket, expected_skill = constraint_bucket_skill(task_constraint)
+                requested_bucket = str(args.get("bucket", "") or "").strip()
+                requested_skill = str(args.get("skill_name", "") or "").strip()
+                if (
+                    (requested_bucket and requested_bucket != expected_bucket)
+                    or (requested_skill and requested_skill != expected_skill)
+                ):
+                    if name in {"write_file", "edit_text"}:
+                        return (
+                            "⚠️ SKILL_REDIRECT_BLOCKED: active skill_repair "
+                            "task is scoped to the selected skill payload."
+                        )
                     return (
-                        "⚠️ HEAL_MODE_BLOCKED: Repair data access is limited "
-                        "to the selected skill payload under data/skills/external "
-                        "data/skills/clawhub, or data/skills/ouroboroshub."
+                        "⚠️ HEAL_MODE_BLOCKED: Repair payload access is limited "
+                        "to the selected skill payload."
                     )
-                if name == "data_write" and _heal_protected_payload_sidecar(data_path):
-                    return (
-                        "⚠️ HEAL_MODE_BLOCKED: Repair may not edit marketplace "
-                        "or official provenance sidecars (.clawhub.json, "
-                        ".ouroboroshub.json, SKILL.openclaw.md, .seed-origin). "
-                        "Edit the user-authored payload files instead."
-                    )
-            if name == "data_list":
+            if name in {"read_file", "write_file"} and str(args.get("root", "") or "") == "skill_payload":
+                payload_paths = []
+                maybe_path = str(args.get("path", "") or "")
+                if maybe_path:
+                    payload_paths.append(maybe_path)
+                for f_entry in args.get("files") or []:
+                    if isinstance(f_entry, dict):
+                        payload_paths.append(str(f_entry.get("path", "") or ""))
+                for payload_path in payload_paths or ["."]:
+                    if not _task_constraint_path_allowed(payload_path, task_constraint, pathlib.Path(self._ctx.drive_root)):
+                        return (
+                            "⚠️ HEAL_MODE_BLOCKED: Repair data access is limited "
+                            "to the selected skill payload under data/skills/external "
+                            "data/skills/clawhub, or data/skills/ouroboroshub."
+                        )
+                    if name == "write_file" and _heal_protected_payload_sidecar(payload_path):
+                        return (
+                            "⚠️ HEAL_MODE_BLOCKED: Repair may not edit marketplace "
+                            "or official provenance sidecars (.clawhub.json, "
+                            ".ouroboroshub.json, SKILL.openclaw.md, .seed-origin). "
+                            "Edit the user-authored payload files instead."
+                        )
+            if name == "list_files" and str(args.get("root", "") or "") == "skill_payload":
                 data_dir = str(args.get("dir", args.get("path", "")) or "")
                 if not _task_constraint_path_allowed(data_dir, task_constraint, pathlib.Path(self._ctx.drive_root)):
                     return (
@@ -1362,10 +1325,10 @@ class ToolRegistry:
                         "to the selected skill payload under data/skills/external "
                         "data/skills/clawhub, or data/skills/ouroboroshub."
                     )
-            if name == "str_replace_editor":
+            if name == "edit_text":
                 edit_path = str(args.get("path", "") or "")
                 if not _task_constraint_path_allowed(edit_path, task_constraint, pathlib.Path(self._ctx.drive_root)):
-                    return "⚠️ HEAL_MODE_BLOCKED: Repair str_replace_editor is limited to the selected skill payload."
+                    return "⚠️ HEAL_MODE_BLOCKED: Repair edit_text is limited to the selected skill payload."
                 if _heal_protected_payload_sidecar(edit_path):
                     return (
                         "⚠️ HEAL_MODE_BLOCKED: Repair may not edit marketplace "
@@ -1373,18 +1336,14 @@ class ToolRegistry:
                         ".ouroboroshub.json, SKILL.openclaw.md, .seed-origin). "
                         "Edit the user-authored payload files instead."
                     )
-            if name == "claude_code_edit":
-                cwd_text = str(args.get("cwd", "") or "")
-                if not _task_constraint_path_allowed(cwd_text, task_constraint, pathlib.Path(self._ctx.drive_root)):
-                    return "⚠️ HEAL_MODE_BLOCKED: Repair claude_code_edit cwd must be the selected skill payload."
-            if name == "review_skill" and str(args.get("skill", "") or "").strip() != heal_skill:
+            if name == "skill_review" and str(args.get("skill", "") or "").strip() != heal_skill:
                 return "⚠️ HEAL_MODE_BLOCKED: Repair may only review the selected skill."
             if name == "skill_preflight" and str(args.get("skill", "") or "").strip() != heal_skill:
                 return "⚠️ HEAL_MODE_BLOCKED: Repair may only preflight the selected skill."
             if ext_tool or is_mcp or name not in _HEAL_MODE_ALLOWED_TOOLS:
                 return (
                     "⚠️ HEAL_MODE_BLOCKED: Repair tasks may inspect/edit skill "
-                    "payloads and run review_skill only. Shell, browser automation, "
+                    "payloads and run skill_review only. Shell, browser automation, "
                     "repo mutation, skill execution, extension tools, MCP tools, "
                     "delegation, and enable/disable flows are unavailable. Use "
                     "the Skills UI after a fresh executable review."
@@ -1397,14 +1356,14 @@ class ToolRegistry:
             return f"⚠️ Unknown tool: {name}. Available: {', '.join(sorted(self._entries.keys()))}"
         _REPO_MUTATION_TOOLS = frozenset(
             {
-                "repo_write",
-                "repo_commit",
-                "str_replace_editor",
-                "claude_code_edit",
-                "revert_commit",
-                "pull_from_remote",
-                "restore_to_head",
-                "rollback_to_target",
+                "write_file",
+                "commit_reviewed",
+                "vcs_commit_reviewed",
+                "edit_text",
+                "vcs_revert",
+                "vcs_pull_ff",
+                "vcs_restore",
+                "vcs_rollback",
                 "promote_to_stable",
                 # PR integration tools mutate the local worktree/refs.
                 "fetch_pr_ref",
@@ -1416,7 +1375,7 @@ class ToolRegistry:
         )
         raw_bucket = str(args.get("bucket", "") or "")
         raw_skill_name = str(args.get("skill_name", "") or "")
-        short_path_text = str(args.get("cwd") if name == "claude_code_edit" else args.get("path", "") or "")
+        short_path_text = str(args.get("path", "") or "")
         short_form_decision = decide_payload_short_form(
             bucket=raw_bucket,
             skill_name=raw_skill_name,
@@ -1430,18 +1389,16 @@ class ToolRegistry:
             (raw_bucket or raw_skill_name)
             and short_form_decision.error
             and name in (
-                "data_write",
-                "str_replace_editor",
-                "claude_code_edit",
+                "write_file",
+                "edit_text",
             )
         ):
             return f"⚠️ SKILL_PAYLOAD_ARG_ERROR: {short_form_decision.error}"
         # Real skill_repair constraints beat synthesized short-form constraints.
         redirect_err = cross_skill_redirect_error(task_constraint, synth_constraint)
         if redirect_err and name in (
-            "data_write",
-            "str_replace_editor",
-            "claude_code_edit",
+            "write_file",
+            "edit_text",
         ):
             return f"⚠️ SKILL_REDIRECT_BLOCKED: {redirect_err}"
         # Existing skill_repair constraint remains authoritative.
@@ -1452,33 +1409,18 @@ class ToolRegistry:
         allow_short_relative = bool(
             effective_constraint and effective_constraint.mode == "skill_repair"
         )
-        light_skill_scoped_claude = (
-            _runtime_mode == "light"
-            and name == "claude_code_edit"
-            and is_skill_payload_path(
-                pathlib.Path(self._ctx.drive_root),
-                str(args.get("cwd") or "."),
-                constraint=effective_constraint,
-                allow_short_relative=allow_short_relative,
-                allow_control_plane=False,
-            )
-        )
-        light_skill_scoped_str_replace = (
-            _runtime_mode == "light"
-            and name == "str_replace_editor"
-            and is_skill_payload_path(
-                pathlib.Path(self._ctx.drive_root),
-                str(args.get("path", "") or ""),
-                constraint=effective_constraint,
-                allow_short_relative=allow_short_relative,
-                allow_control_plane=False,
-            )
+        light_skill_scoped_str_replace = _light_mode_payload_mutation_allowed(
+            ctx=self._ctx,
+            tool_name=name,
+            args=args,
+            runtime_mode=_runtime_mode,
+            effective_constraint=effective_constraint,
+            allow_short_relative=allow_short_relative,
         )
         if (
             _runtime_mode == "light"
             and name in _REPO_MUTATION_TOOLS
             and not workspace_mode
-            and not light_skill_scoped_claude
             and not light_skill_scoped_str_replace
         ):
             return (
@@ -1486,27 +1428,26 @@ class ToolRegistry:
                 "repo self-modification. Tool "
                 f"{name!r} would mutate the Ouroboros repository. "
                 "Payload edits under data/skills/{external,clawhub,ouroboroshub}/<skill>/ "
-                "are allowed via three paths: "
-                "(1) task_constraint.mode='skill_repair'; "
-                "(2) an explicit cwd/path under data/skills/<bucket>/<skill>/...; "
-                "(3) supplying bucket and skill_name args (a short relative cwd/path "
-                "then resolves under the skill payload). "
+                "(data/skills/<bucket>/<skill>/) are allowed when root=skill_payload "
+                "with bucket and skill_name, or through skill_repair constraints. "
                 "Switch to 'advanced' or 'pro' in Settings → Behavior "
                 "→ Runtime Mode to re-enable self-modification."
             )
 
         protected_write_paths = []
-        if name in ("repo_write", "str_replace_editor"):
-            if name == "repo_write":
+        if name in ("write_file", "edit_text"):
+            if name == "write_file":
                 maybe_path = str(args.get("path", "") or "")
                 if maybe_path:
                     protected_write_paths.append(maybe_path)
                 for f_entry in args.get("files") or []:
                     if isinstance(f_entry, dict):
                         protected_write_paths.append(str(f_entry.get("path", "") or ""))
-            elif name == "str_replace_editor":
+            elif name == "edit_text":
                 protected_write_paths.append(str(args.get("path", "") or ""))
-            protected_matches = [] if workspace_mode else protected_paths_in(protected_write_paths)
+            root_name = str(args.get("root", "") or "active_workspace")
+            protected_root = root_name in {"active_workspace", "system_repo"}
+            protected_matches = [] if workspace_mode or not protected_root else protected_paths_in(protected_write_paths)
             if protected_matches and not mode_allows_protected_write(_runtime_mode):
                 first = protected_matches[0]
                 return protected_write_block_message(
@@ -1515,8 +1456,15 @@ class ToolRegistry:
                     action=f"run tool {name!r} against",
                 )
 
-        if name == "run_shell":
-            block_msg = self._run_shell_safety_check(args, _runtime_mode)
+        if name in _PROCESS_COMMAND_TOOLS:
+            if name == "start_service" and _runtime_mode == "light" and not workspace_mode:
+                return (
+                    "⚠️ LIGHT_MODE_BLOCKED: runtime_mode=light refuses start_service "
+                    "against the Ouroboros repository because the service can mutate "
+                    "after initial tool checks. Use workspace mode or switch to "
+                    "advanced/pro for long-running repo services."
+                )
+            block_msg = self._run_shell_safety_check(_process_shell_guard_args(name, args), _runtime_mode)
             if block_msg:
                 return block_msg
 
@@ -1531,15 +1479,15 @@ class ToolRegistry:
         if not is_safe:
             return safety_msg
 
-        owner_snapshot = self._snapshot_owner_files() if name == "run_shell" else {}
+        owner_snapshot = self._snapshot_owner_files() if name in _PROCESS_COMMAND_TOOLS else {}
         light_repo_before = (
             _light_repo_snapshot(active_repo_dir_for(self._ctx))
-            if name == "run_shell" and _runtime_mode == "light"
+            if name in _PROCESS_COMMAND_TOOLS and _runtime_mode == "light"
             else None
         )
         workspace_refs_before = (
             _git_ref_snapshot(active_repo_dir_for(self._ctx))
-            if name == "run_shell" and workspace_mode
+            if name in _PROCESS_COMMAND_TOOLS and workspace_mode
             else None
         )
         try:
@@ -1548,34 +1496,16 @@ class ToolRegistry:
             return f"⚠️ TOOL_ARG_ERROR ({name}): {e}"
         except Exception as e:
             return f"⚠️ TOOL_ERROR ({name}): {e}"
-        if name == "run_shell":
+        if name in _PROCESS_COMMAND_TOOLS:
             result = self._run_shell_post_checks(
                 result,
                 owner_snapshot=owner_snapshot,
                 light_repo_before=light_repo_before,
                 workspace_refs_before=workspace_refs_before,
+                tool_name=name,
             )
 
         # Pro can touch protected files, but commit review still gates landing.
-        if name == "claude_code_edit":
-            reverted = _revert_protected_files(self._ctx.repo_dir, runtime_mode=_runtime_mode)
-            if reverted:
-                result += (
-                    "\n\n⚠️ SAFETY: Reverted modifications to protected files: "
-                    + ", ".join(reverted)
-                )
-            elif mode_allows_protected_write(_runtime_mode):
-                try:
-                    diff = subprocess.run(
-                        ["git", "diff", "--name-only"],
-                        cwd=str(self._ctx.repo_dir), capture_output=True, text=True, timeout=5,
-                    )
-                    protected_matches = protected_paths_in(diff.stdout.splitlines() if diff.returncode == 0 else [])
-                except Exception:
-                    protected_matches = []
-                if protected_matches:
-                    result += "\n\n" + core_patch_notice(protected_matches)
-
         if safety_msg:
             return f"{safety_msg}\n\n---\n{result}"
         return result
