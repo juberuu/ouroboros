@@ -1005,6 +1005,37 @@ def _handle_send_photo(evt: Dict[str, Any], ctx: Any) -> None:
         )
 
 
+def _handle_send_video(evt: Dict[str, Any], ctx: Any) -> None:
+    """Send a video to the owner's chat."""
+    import base64 as b64mod
+    try:
+        chat_id = int(evt.get("chat_id") or 0)
+        video_b64 = str(evt.get("video_base64") or "")
+        caption = str(evt.get("caption") or "")
+        mime = str(evt.get("mime") or "video/mp4")
+        if not chat_id or not video_b64:
+            return
+        video_bytes = b64mod.b64decode(video_b64)
+        ok, err = ctx.bridge.send_video(chat_id, video_bytes, caption=caption, mime=mime)
+        if not ok:
+            ctx.append_jsonl(
+                ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": utc_now_iso(),
+                    "type": "send_video_error",
+                    "chat_id": chat_id, "error": err,
+                },
+            )
+    except Exception as e:
+        ctx.append_jsonl(
+            ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": utc_now_iso(),
+                "type": "send_video_event_error", "error": repr(e),
+            },
+        )
+
+
 def _handle_owner_message_injected(evt: Dict[str, Any], ctx: Any) -> None:
     """Log owner injections so health checks can detect duplicate processing."""
     from ouroboros.utils import utc_now_iso
@@ -1070,6 +1101,7 @@ EVENT_HANDLERS = {
     "schedule_subagent": _handle_schedule_task,
     "cancel_task": _handle_cancel_task,
     "send_photo": _handle_send_photo,
+    "send_video": _handle_send_video,
     "toggle_evolution": _handle_toggle_evolution,
     "toggle_consciousness": _handle_toggle_consciousness,
     "owner_message_injected": _handle_owner_message_injected,

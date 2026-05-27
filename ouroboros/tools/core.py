@@ -906,6 +906,51 @@ def _send_photo(ctx: ToolContext, file_path: str = "", image_base64: str = "",
     })
     return "OK: photo queued for delivery to owner."
 
+
+_MAX_VIDEO_FILE_BYTES = 50 * 1024 * 1024  # 50 MB
+
+
+def _detect_video_mime(file_path: str, data: bytes) -> str:
+    """Detect video MIME type from path extension or magic bytes."""
+    mime, _ = __import__("mimetypes").guess_type(file_path)
+    if mime:
+        return mime
+    if len(data) >= 8 and data[4:8] == b'ftyp':
+        return "video/mp4"
+    if data[:4] == b'\x1a\x45\xdf\xa3':
+        return "video/webm"
+    return "video/mp4"
+
+
+def _send_video(ctx: ToolContext, file_path: str = "", caption: str = "") -> str:
+    """Queue an owner-chat video from a file."""
+    if not ctx.current_chat_id:
+        return "⚠️ No active chat — cannot send video."
+    if not file_path:
+        return "⚠️ Provide a file_path."
+
+    fp = pathlib.Path(file_path).expanduser().resolve()
+    if not fp.exists():
+        return f"⚠️ File not found: {file_path}"
+    if fp.stat().st_size > _MAX_VIDEO_FILE_BYTES:
+        return f"⚠️ File too large ({fp.stat().st_size} bytes). Max: {_MAX_VIDEO_FILE_BYTES} bytes."
+
+    try:
+        raw = fp.read_bytes()
+        mime = _detect_video_mime(str(fp), raw)
+        actual_b64 = __import__("base64").b64encode(raw).decode()
+    except Exception as e:
+        return f"⚠️ Failed to read video file: {e}"
+
+    ctx.pending_events.append({
+        "type": "send_video",
+        "chat_id": ctx.current_chat_id,
+        "video_base64": actual_b64,
+        "mime": mime,
+        "caption": caption or "",
+    })
+    return "OK: video queued for delivery to owner."
+
 _SEARCH_SKIP_DIRS = frozenset({
     ".git", "__pycache__", "node_modules", ".venv", "venv",
     ".pytest_cache", ".mypy_cache", ".tox", "build", "dist",
@@ -1187,6 +1232,14 @@ def get_tools() -> List[ToolEntry]:
                 "caption": {"type": "string", "description": "Optional caption for the photo"},
             }, "required": []},
         }, _send_photo),
+        ToolEntry("send_video", {
+            "name": "send_video",
+            "description": "Send a video to the owner's chat (e.g. an anime animation). Requires a local file_path.",
+            "parameters": {"type": "object", "properties": {
+                "file_path": {"type": "string", "description": "Local file path to video (preferred)"},
+                "caption": {"type": "string", "description": "Optional caption for the video"},
+            }, "required": ["file_path"]},
+        }, _send_video),
         ToolEntry("search_code", {
             "name": "search_code",
             "description": (

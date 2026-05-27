@@ -1033,6 +1033,11 @@ body {
     cursor: pointer;
 }
 
+.chat-video {
+    max-width: 100%;
+    border-radius: var(--radius-sm);
+}
+
 .chat-bubble.user .message { color: rgba(215, 230, 255, 0.96); }
 .chat-bubble.assistant .message { color: rgba(255, 235, 238, 0.96); }
 .chat-bubble.system .message { color: rgba(255, 240, 210, 0.78); }

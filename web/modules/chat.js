@@ -1765,6 +1765,36 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         incrementUnreadIfNeeded();
     });
 
+    ws.on('video', (msg) => {
+        hideTyping();
+        const role = msg.role === 'user' ? 'user' : 'assistant';
+        const sender = role === 'user'
+            ? getSenderLabel('user', false, '', {
+                source: msg.source || '',
+                senderLabel: msg.sender_label || '',
+                senderSessionId: msg.sender_session_id || '',
+            })
+            : 'Ouroboros';
+        const bubble = document.createElement('div');
+        bubble.className = `chat-bubble ${role}`;
+        const timeFmt = formatMsgTime(msg.ts || new Date().toISOString());
+        const timeHtml = timeFmt ? `<div class="msg-time" title="${escapeHtmlAttr(timeFmt.full)}">${escapeHtml(timeFmt.short)}</div>` : '';
+        const captionHtml = msg.caption ? `<div class="message">${escapeHtml(msg.caption)}</div>` : '';
+        const mime = /^video\/[a-z0-9.+-]+$/i.test(String(msg.mime || '')) ? String(msg.mime) : 'video/mp4';
+        const videoBase64 = /^[A-Za-z0-9+/=\s]+$/.test(String(msg.video_base64 || ''))
+            ? String(msg.video_base64 || '').replace(/\s+/g, '')
+            : '';
+        const videoUrl = videoBase64 ? `data:${mime};base64,${videoBase64}` : '';
+        bubble.innerHTML = `
+            <div class="sender">${escapeHtml(sender)}</div>
+            ${captionHtml}
+            <div class="message"><video class="chat-video" src="${escapeHtmlAttr(videoUrl)}" controls></video></div>
+            ${timeHtml}
+        `;
+        insertMessageNode(bubble);
+        incrementUnreadIfNeeded();
+    });
+
     let wsHasConnectedOnce = false;
 
     ws.on('open', () => {

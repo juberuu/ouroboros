@@ -16,6 +16,7 @@ def _build_registry() -> ToolRegistry:
 
 def test_core_surface_includes_user_message_and_media():
     assert "send_photo" in CORE_TOOL_NAMES
+    assert "send_video" in CORE_TOOL_NAMES
     assert "send_user_message" in CORE_TOOL_NAMES
 
 

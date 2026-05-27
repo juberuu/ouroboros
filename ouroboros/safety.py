@@ -91,6 +91,7 @@ TOOL_POLICY: Dict[str, str] = {
     "promote_to_stable": POLICY_SKIP,
     "send_user_message": POLICY_SKIP,
     "send_photo": POLICY_SKIP,
+    "send_video": POLICY_SKIP,
     "forward_to_worker": POLICY_SKIP,
     "compact_context": POLICY_SKIP,
     "enable_tools": POLICY_SKIP,
