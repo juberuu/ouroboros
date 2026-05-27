@@ -97,6 +97,12 @@ def _observability_root(drive_root: pathlib.Path) -> pathlib.Path:
     return root
 
 
+def posix_private_modes_supported() -> bool:
+    """Return true when chmod-style private modes are meaningful to assert."""
+
+    return os.name == "posix"
+
+
 def _chmod_private_dir(path: pathlib.Path) -> None:
     try:
         os.chmod(path, _PRIVATE_DIR_MODE)

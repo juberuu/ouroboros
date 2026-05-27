@@ -95,6 +95,9 @@ def _service_env() -> Dict[str, str]:
     allowed_exact = {
         "PATH",
         "HOME",
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
         "TMPDIR",
         "TMP",
         "TEMP",
@@ -104,11 +107,25 @@ def _service_env() -> Dict[str, str]:
         "PYTHONPATH",
         "NODE_PATH",
         "SystemRoot",
+        "SYSTEMROOT",
         "WINDIR",
+        "windir",
+        "COMSPEC",
+        "ComSpec",
+        "PATHEXT",
+        "PROCESSOR_ARCHITECTURE",
+        "NUMBER_OF_PROCESSORS",
+        "PROGRAMDATA",
+        "ProgramData",
+        "ProgramFiles",
+        "PROGRAMFILES",
+        "ProgramFiles(x86)",
+        "PROGRAMFILES(X86)",
     }
+    allowed_casefold = {key.casefold() for key in allowed_exact}
     env: Dict[str, str] = {}
     for key, value in os.environ.items():
-        if key not in allowed_exact and not key.startswith("LC_"):
+        if key.casefold() not in allowed_casefold and not key.startswith("LC_"):
             continue
         try:
             redacted = redact_projection(str(value))

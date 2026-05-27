@@ -2,7 +2,7 @@ import gzip
 import json
 import os
 
-from ouroboros.observability import persist_call, redact_projection
+from ouroboros.observability import persist_call, posix_private_modes_supported, redact_projection
 from ouroboros.outcomes import (
     RESULT_FAILED,
     RESULT_INFRA_FAILED,
@@ -56,20 +56,23 @@ def test_persist_call_writes_private_full_and_redacted_refs(tmp_path):
 
     manifest_path = tmp_path / "observability" / "calls" / "task-1" / "call-1.json"
     assert manifest_path.exists()
-    assert os.stat(tmp_path / "observability").st_mode & 0o777 == 0o700
-    assert os.stat(tmp_path / "observability" / "blobs").st_mode & 0o777 == 0o700
-    assert os.stat(manifest_path.parent).st_mode & 0o777 == 0o700
-    assert os.stat(manifest_path).st_mode & 0o777 == 0o600
+    if posix_private_modes_supported():
+        assert os.stat(tmp_path / "observability").st_mode & 0o777 == 0o700
+        assert os.stat(tmp_path / "observability" / "blobs").st_mode & 0o777 == 0o700
+        assert os.stat(manifest_path.parent).st_mode & 0o777 == 0o700
+        assert os.stat(manifest_path).st_mode & 0o777 == 0o600
 
     redacted_path = refs["redacted_projection_ref"]["path"]
-    assert os.stat(redacted_path).st_mode & 0o777 == 0o600
+    if posix_private_modes_supported():
+        assert os.stat(redacted_path).st_mode & 0o777 == 0o600
     assert "full_payload_ref" not in refs
     assert "redacted_projection" not in refs
     assert _read_gzip_json(redacted_path)["args"]["token"] == "***REDACTED***"
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     full_path = manifest["full_payload_ref"]["path"]
-    assert os.stat(full_path).st_mode & 0o777 == 0o600
+    if posix_private_modes_supported():
+        assert os.stat(full_path).st_mode & 0o777 == 0o600
     assert _read_gzip_json(full_path)["args"]["token"].startswith("ghp_")
     assert manifest["call_type"] == "tool_call"
     assert manifest["redaction"]["redacted"] is True
