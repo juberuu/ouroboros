@@ -1025,11 +1025,14 @@ def _handle_send_video(evt: Dict[str, Any], ctx: Any) -> None:
     """Send a video to the owner's chat."""
     import base64 as b64mod
     try:
-        chat_id = int(evt.get("chat_id") or 0)
+        raw_chat_id = evt.get("chat_id")
+        if raw_chat_id is None or raw_chat_id == "":
+            return
+        chat_id = int(raw_chat_id)
         video_b64 = str(evt.get("video_base64") or "")
         caption = str(evt.get("caption") or "")
         mime = str(evt.get("mime") or "video/mp4")
-        if not chat_id or not video_b64:
+        if not video_b64:
             return
         video_bytes = b64mod.b64decode(video_b64)
         ok, err = ctx.bridge.send_video(chat_id, video_bytes, caption=caption, mime=mime)

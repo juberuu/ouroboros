@@ -424,8 +424,11 @@ def _data_read(
     try:
         content = read_text(target)
         start_raw, max_raw = _coerce_line_window(start_line, max_lines)
-        if display_path is None and _is_cognitive_data_path(norm) and start_raw == 1 and max_raw == 2000:
-            return content
+        if _is_cognitive_data_path(norm) and start_raw == 1 and max_raw == 2000:
+            if display_path is None:
+                return content
+            full_line_count = max(1, len(content.splitlines()))
+            return _render_line_slice(display_path, content, max_lines=full_line_count, start_line=1)
         return _render_line_slice(display_path or norm, content, max_lines=max_raw, start_line=start_raw)
     except FileNotFoundError:
         if norm.replace("\\", "/").startswith("memory/"):
@@ -974,7 +977,8 @@ def _detect_video_mime(file_path: str, data: bytes) -> str:
 
 def _send_video(ctx: ToolContext, file_path: str = "", caption: str = "") -> str:
     """Queue an owner-chat video from a file."""
-    if not ctx.current_chat_id:
+    chat_id = getattr(ctx, "current_chat_id", None)
+    if chat_id is None or chat_id == "":
         return "⚠️ No active chat — cannot send video."
     if not file_path:
         return "⚠️ Provide a file_path."
@@ -994,7 +998,7 @@ def _send_video(ctx: ToolContext, file_path: str = "", caption: str = "") -> str
 
     ctx.pending_events.append({
         "type": "send_video",
-        "chat_id": ctx.current_chat_id,
+        "chat_id": chat_id,
         "video_base64": actual_b64,
         "mime": mime,
         "caption": caption or "",

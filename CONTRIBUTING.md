@@ -26,10 +26,10 @@ canonical doc instead of copying detailed rules here.
 
 ## Review Notes
 
-External PRs are reviewed by maintainers and CI. Ouroboros also has an internal
-self-modification commit gate; contributors do not need to run that gate for a
-normal fork PR, but `docs/CHECKLISTS.md` is the best summary of what reviewers
-will care about.
+External PRs are reviewed by maintainers with local checks and any configured
+automation. Ouroboros also has an internal self-modification commit gate;
+contributors do not need to run that gate for a normal fork PR, but
+`docs/CHECKLISTS.md` is the best summary of what reviewers will care about.
 
 ## Sensitive Areas
 

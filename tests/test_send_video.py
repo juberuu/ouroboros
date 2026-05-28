@@ -28,11 +28,21 @@ class TestSendVideoFilePath:
         assert event["caption"] == "promo clip"
         assert event["video_base64"] == base64.b64encode(mp4.read_bytes()).decode()
 
-    def test_no_active_chat_returns_error(self, tmp_path):
+    def test_chat_zero_is_valid(self, tmp_path):
         mp4 = tmp_path / "test.mp4"
         mp4.write_bytes(b'\x00\x00\x00\x18ftypmp42')
 
         ctx = _make_ctx(chat_id=0)
+        result = _send_video(ctx, file_path=str(mp4))
+
+        assert "OK" in result
+        assert ctx.pending_events[0]["chat_id"] == 0
+
+    def test_no_active_chat_returns_error(self, tmp_path):
+        mp4 = tmp_path / "test.mp4"
+        mp4.write_bytes(b'\x00\x00\x00\x18ftypmp42')
+
+        ctx = _make_ctx(chat_id=None)
         result = _send_video(ctx, file_path=str(mp4))
 
         assert "no active chat" in result.lower()

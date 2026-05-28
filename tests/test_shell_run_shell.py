@@ -16,7 +16,6 @@ distinct branch of the cascade).
 """
 from __future__ import annotations
 
-import inspect
 from subprocess import CompletedProcess
 from types import SimpleNamespace
 
@@ -141,9 +140,11 @@ class TestShellArgContract:
         result = _run_shell(_ctx(tmp_path), '["git", "log",')
         assert 'run_command(cmd=["git"' in result
 
-    def test_list_cmd_is_accepted(self):
-        src = inspect.getsource(_run_shell)
-        assert "isinstance(cmd, list)" in src or "not isinstance(cmd, list)" in src
+    def test_list_cmd_is_accepted(self, tmp_path, fake_subprocess):
+        fake_subprocess(stdout="ok")
+        result = _run_shell(_ctx(tmp_path), ["echo", "ok"])
+        assert "SHELL_ARG_ERROR" not in result
+        assert "exit_code=0" in result
 
 
 # ---------------------------------------------------------------------------

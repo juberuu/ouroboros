@@ -86,6 +86,8 @@
  * @property {string=} sender_session_id
  * @property {string=} client_message_id
  * @property {Object=} transport
+ * @property {number=} telegram_chat_id
+ * @property {string=} system_type
  * @property {number=} chat_id
  */
 
@@ -98,8 +100,13 @@
  * @property {string} ts
  * @property {string=} caption
  * @property {string=} content
+ * @property {string=} source
+ * @property {string=} sender_label
+ * @property {string=} sender_session_id
+ * @property {string=} client_message_id
  * @property {Object=} transport
  * @property {number=} chat_id
+ * @property {number=} telegram_chat_id
  */
 
 /**
@@ -111,8 +118,13 @@
  * @property {string} ts
  * @property {string=} caption
  * @property {string=} content
+ * @property {string=} source
+ * @property {string=} sender_label
+ * @property {string=} sender_session_id
+ * @property {string=} client_message_id
  * @property {Object=} transport
  * @property {number=} chat_id
+ * @property {number=} telegram_chat_id
  */
 
 /**
@@ -205,4 +217,4 @@
  * @property {string=} error
  */
 
-export const GATEWAY_CONTRACT_VERSION = '6.3.0-rc.2';
+export const GATEWAY_CONTRACT_VERSION = '6.4.0-rc.1';

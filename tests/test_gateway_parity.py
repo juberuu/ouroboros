@@ -2,14 +2,24 @@ from __future__ import annotations
 
 import pathlib
 import re
+from typing import get_type_hints
 
 from ouroboros.gateway.contracts import (
+    ChatOutbound,
     HTTP_ENDPOINTS,
+    PhotoOutbound,
     SkillDeleteResponse,
     SkillLifecycleQueueResponse,
+    VideoOutbound,
     WS_MESSAGE_TYPES,
 )
 from ouroboros.gateway.router import collect_routes
+
+
+def _js_typedef_fields(text: str, name: str) -> set[str]:
+    match = re.search(rf"@typedef \{{Object\}} {name}\b(?P<body>.*?)\n \*/", text, re.S)
+    assert match, f"api_types.js missing {name}"
+    return set(re.findall(r"@property \{[^}]+\} ([A-Za-z_][A-Za-z0-9_]*)\b", match.group("body")))
 
 
 def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
@@ -55,6 +65,10 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         "SkillDeleteResponse",
     ):
         assert re.search(rf"@typedef \{{Object\}} {name}\b", text), f"api_types.js missing {name}"
+    for cls in (ChatOutbound, PhotoOutbound, VideoOutbound):
+        expected = set(get_type_hints(cls, include_extras=True))
+        actual = _js_typedef_fields(text, cls.__name__)
+        assert actual == expected, f"{cls.__name__} JSDoc fields drifted: missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
     for field in ("source", "line", "root"):
         assert re.search(rf"@property \{{[^}}]+=\}} {field}\b", text), f"TaskEvent missing {field}"
     for field in (
