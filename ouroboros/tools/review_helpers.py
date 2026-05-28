@@ -717,6 +717,8 @@ def build_scope_actor_record(scope_result: object, *, fallback_model_id: str = "
         "tokens_out": getattr(scope_result, "tokens_out", 0),
         "cost_usd": getattr(scope_result, "cost_usd", 0.0),
         "context_manifest": getattr(scope_result, "context_manifest", {}) or {},
+        "prompt_ref": getattr(scope_result, "prompt_ref", {}) or {},
+        "response_ref": getattr(scope_result, "response_ref", {}) or {},
         "parsed_items": critical_findings + advisory_findings,  # scope has one reviewer; match triad shape.
         "critical_findings": critical_findings,
         "advisory_findings": advisory_findings,

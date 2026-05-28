@@ -13,6 +13,7 @@ import json
 import os
 import pathlib
 import re
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Tuple
@@ -25,9 +26,59 @@ SCHEMA_VERSION = 1
 _PRIVATE_FILE_MODE = 0o600
 _PRIVATE_DIR_MODE = 0o700
 
-_SECRET_KEY_RE = re.compile(
-    r"(?i)(api[_-]?key|token|secret|password|passwd|passphrase|authorization|"
-    r"credential|private[_-]?key|client[_-]?secret)"
+_NON_SECRET_KEY_NAMES = frozenset({
+    "prompt_tokens",
+    "completion_tokens",
+    "cached_tokens",
+    "token_estimate",
+    "token_count",
+    "total_tokens",
+    "reasoning_tokens",
+    "accepted_prediction_tokens",
+    "rejected_prediction_tokens",
+    "prompt_token_details",
+    "completion_token_details",
+    "input_tokens",
+    "output_tokens",
+})
+_SECRET_KEY_EXACT = frozenset({
+    "authorization",
+    "auth_token",
+    "aws_access_key_id",
+    "aws_secret_access_key",
+    "aws_session_token",
+    "password",
+    "passwd",
+    "passphrase",
+    "token",
+    "secret",
+    "apikey",
+    "credential",
+    "credentials",
+    "private_key",
+    "private_key_pem",
+    "stripe_secret_key",
+    "secret_key",
+    "client_secret",
+    "api_key",
+})
+_SECRET_KEY_SUFFIXES = (
+    "_api_key",
+    "_token",
+    "_secret",
+    "_password",
+    "_passwd",
+    "_passphrase",
+    "_authorization",
+    "_access_token",
+    "_refresh_token",
+    "_credential",
+    "_credentials",
+    "_private_key",
+    "_private_key_pem",
+    "_secret_key",
+    "_secret_access_key",
+    "_client_secret",
 )
 _TOKEN_PATTERNS: Tuple[Tuple[str, re.Pattern[str]], ...] = (
     ("bearer_token", re.compile(r"(?i)\bBearer\s+[A-Za-z0-9_\-./+=]{16,}")),
@@ -49,6 +100,31 @@ _TOKEN_PATTERNS: Tuple[Tuple[str, re.Pattern[str]], ...] = (
 _SECRET_LITERAL_RE = re.compile(
     r"""(?im)(?P<prefix>(?:^|[\s,{])["']?[A-Za-z_][A-Za-z0-9_-]*(?:token|secret|password|passwd|passphrase|api[_-]?key|authorization|credential)[A-Za-z0-9_-]*["']?\s*[:=]\s*["']?)(?P<value>[^"'\s,}]{12,})(?P<suffix>["']?)"""
 )
+_SECRET_LITERAL_KEY_RE = re.compile(r"""["']?(?P<key>[A-Za-z_][A-Za-z0-9_-]*)["']?\s*[:=]\s*["']?$""")
+
+
+def _normalize_key_name(name: str) -> str:
+    text = str(name or "").strip()
+    text = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", text)
+    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
+
+
+def _is_secret_key_name(name: str) -> bool:
+    normalized = _normalize_key_name(name)
+    if not normalized or normalized in _NON_SECRET_KEY_NAMES:
+        return False
+    if normalized in _SECRET_KEY_EXACT or normalized.endswith(_SECRET_KEY_SUFFIXES):
+        return True
+    parts = set(normalized.split("_"))
+    if "token" in parts or "password" in parts or "passwd" in parts or "passphrase" in parts:
+        return True
+    if "secret" in parts and parts & {"key", "token", "access", "credential", "credentials"}:
+        return True
+    if "private" in parts and "key" in parts:
+        return True
+    if "credential" in parts or "credentials" in parts:
+        return True
+    return False
 
 
 @dataclass
@@ -216,8 +292,12 @@ def _redact_text(text: str, records: List[RedactionRecord], path: str) -> str:
 
         out = pattern.sub(_repl, out)
     def _literal_repl(match: re.Match[str]) -> str:
+        prefix = match.group("prefix")
+        key_match = _SECRET_LITERAL_KEY_RE.search(prefix)
+        if key_match and not _is_secret_key_name(key_match.group("key")):
+            return match.group(0)
         records.append(RedactionRecord(path=path, rule="secret_literal_assignment"))
-        return f"{match.group('prefix')}***REDACTED***{match.group('suffix')}"
+        return f"{prefix}***REDACTED***{match.group('suffix')}"
 
     out = _SECRET_LITERAL_RE.sub(_literal_repl, out)
     return out
@@ -229,7 +309,7 @@ def _redact_any(value: Any, records: List[RedactionRecord], path: str) -> Any:
         for key, item in value.items():
             key_text = str(key)
             item_path = f"{path}.{key_text}" if path else key_text
-            if _SECRET_KEY_RE.search(key_text):
+            if _is_secret_key_name(key_text):
                 if item not in (None, "", False):
                     records.append(RedactionRecord(path=item_path, rule="secret_key_name"))
                 out[key_text] = "***REDACTED***" if item not in (None, "", False) else item
@@ -282,3 +362,77 @@ def persist_call(
         "manifest_ref": manifest_ref,
         "redaction": redacted.manifest(),
     }
+
+
+def prune_observability_blobs(
+    drive_root: pathlib.Path,
+    retention_days: int | None = None,
+    *,
+    now: float | None = None,
+) -> Dict[str, Any]:
+    """Best-effort observability retention audit.
+
+    Forensic call manifests and CAS blobs are durable replay evidence. This
+    function intentionally does not delete them; it returns counts for startup
+    housekeeping telemetry while preserving the "keep compressed" contract.
+    """
+
+    enabled = retention_days is not None
+    if retention_days is None:
+        raw = os.environ.get("OUROBOROS_OBSERVABILITY_RETENTION_DAYS", "").strip()
+        if not raw:
+            return {
+                "enabled": False,
+                "preserved_indefinitely": True,
+                "manifest_count": 0,
+                "blob_count": 0,
+                "deleted_manifests": 0,
+                "deleted_blobs": 0,
+                "errors": [],
+            }
+        try:
+            retention_days = int(raw)
+            enabled = True
+        except ValueError:
+            return {
+                "enabled": False,
+                "preserved_indefinitely": True,
+                "manifest_count": 0,
+                "blob_count": 0,
+                "deleted_manifests": 0,
+                "deleted_blobs": 0,
+                "errors": [f"invalid retention days: {raw!r}"],
+            }
+    retention_days = max(1, min(int(retention_days), 365))
+    root = pathlib.Path(drive_root) / OBSERVABILITY_DIR
+    calls_root = root / "calls"
+    blobs_root = root / "blobs"
+    report = {
+        "enabled": enabled,
+        "preserved_indefinitely": True,
+        "retention_days": retention_days,
+        "manifest_count": 0,
+        "blob_count": 0,
+        "deleted_manifests": 0,
+        "deleted_blobs": 0,
+        "errors": [],
+    }
+    if not root.exists():
+        return report
+
+    for manifest_path in list(calls_root.glob("*/*.json")) if calls_root.exists() else []:
+        try:
+            manifest_path.stat()
+            report["manifest_count"] += 1
+        except Exception as exc:
+            report["errors"].append(f"{manifest_path}: {type(exc).__name__}: {exc}")
+
+    if blobs_root.exists():
+        for blob_path in list(blobs_root.glob("*.gz")):
+            try:
+                blob_path.stat()
+                report["blob_count"] += 1
+            except Exception as exc:
+                report["errors"].append(f"{blob_path}: {type(exc).__name__}: {exc}")
+
+    return report

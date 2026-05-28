@@ -5,7 +5,7 @@ from __future__ import annotations
 CORE_TOOL_NAMES: frozenset[str] = frozenset({
     "read_file", "list_files", "write_file", "edit_text",
     "search_code",
-    "run_command", "run_script",
+    "run_command", "claude_code_edit", "run_script",
     "start_service", "service_status", "service_logs", "stop_service",
     "vcs_status", "vcs_diff", "vcs_commit_reviewed", "commit_reviewed",
     "vcs_restore", "vcs_revert", "vcs_pull_ff", "vcs_rollback",
@@ -58,6 +58,7 @@ STATEFUL_BROWSER_TOOLS: frozenset[str] = frozenset({
 UNTRUNCATED_TOOL_RESULTS: frozenset[str] = frozenset({
     "commit_reviewed",
     "vcs_commit_reviewed",
+    "plan_task",
     "task_acceptance_review",
     "advisory_review",
     "skill_review",
@@ -81,6 +82,7 @@ TOOL_RESULT_LIMITS: dict[str, int] = {
     "read_file": 80_000,
     "recent_tasks": 80_000,
     "knowledge_read": 80_000,
+    "claude_code_edit": 80_000,
     "run_command": 80_000,
     "run_script": 80_000,
     "search_code": 80_000,
@@ -95,4 +97,10 @@ DEFAULT_TOOL_RESULT_LIMIT: int = 15_000
 REVIEWED_MUTATIVE_TOOLS: frozenset[str] = frozenset({
     "commit_reviewed",
     "vcs_commit_reviewed",
+})
+
+# Foreground mutative tools may keep editing files after Python future timeout;
+# the loop must wait for terminal completion instead of returning while they run.
+FOREGROUND_MUTATIVE_TOOLS: frozenset[str] = frozenset({
+    "claude_code_edit",
 })

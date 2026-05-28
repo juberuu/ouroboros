@@ -391,18 +391,12 @@ def _owner_marked_content(content: Any) -> Any:
 def _task_acceptance_eligible(mode: str, llm_trace: Dict[str, Any]) -> bool:
     if mode == "off":
         return False
-    tool_calls = llm_trace.get("tool_calls") or []
     if mode == "required":
         return True
-    # Auto is structural: review non-trivial tasks with local/tool evidence.
-    return len(tool_calls) >= 2 or any(
-        str(call.get("tool") or "") in {
-            "write_file", "edit_text", "run_command", "run_script",
-            "start_service", "commit_reviewed", "vcs_commit_reviewed",
-        }
-        for call in tool_calls
-        if isinstance(call, dict)
-    )
+    # Auto is LLM-first: the agent decides whether to call the visible
+    # task_acceptance_review tool. Host-side heuristics would turn Auto into
+    # another deterministic gate and violate the intended review contract.
+    return False
 
 
 def _run_task_acceptance_review_once(

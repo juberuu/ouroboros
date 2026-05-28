@@ -98,6 +98,10 @@ def test_search_code_has_result_limit():
     """search_code must have an explicit result size limit."""
     from ouroboros.tool_capabilities import TOOL_RESULT_LIMITS
     assert "search_code" in TOOL_RESULT_LIMITS
+    from ouroboros.tool_capabilities import UNTRUNCATED_TOOL_RESULTS
+    assert "plan_task" in UNTRUNCATED_TOOL_RESULTS
+    from ouroboros.tool_capabilities import FOREGROUND_MUTATIVE_TOOLS
+    assert "claude_code_edit" in FOREGROUND_MUTATIVE_TOOLS
 
 
 # ---------------------------------------------------------------------------

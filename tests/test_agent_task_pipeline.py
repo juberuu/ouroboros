@@ -30,7 +30,7 @@ def test_task_summary_prefers_direct_model_when_openrouter_missing(tmp_path, mon
         env=None,
         llm=FakeLlm(),
         task={"id": "task-123", "type": "task", "text": "Reply with exactly OK."},
-        usage={"rounds": 3, "cost": 0.01},
+        usage={"rounds": 3, "cost": 0.01, "result_status": "failed", "reason_code": "empty_final_text"},
         llm_trace={"tool_calls": [{"tool": "read_file", "args": {}}], "reasoning_notes": []},
         drive_logs=drive_logs,
     )
@@ -44,6 +44,8 @@ def test_task_summary_prefers_direct_model_when_openrouter_missing(tmp_path, mon
     # Non-trivial task metadata is persisted
     assert payload["tool_calls"] == 1
     assert payload["rounds"] == 3
+    assert payload["result_status"] == "failed"
+    assert payload["reason_code"] == "empty_final_text"
 
 
 def test_task_summary_keeps_openrouter_model_when_key_present(monkeypatch):
@@ -149,6 +151,19 @@ def test_build_trace_summary_shows_structured_failure_facts():
     assert "signal=SIGKILL" in summary
     assert "Agent notes (supplementary, not source of truth)" in summary
 
+    long_trace = {
+        "tool_calls": [
+            {
+                "tool": "run_command",
+                "args": {"cmd": "x" * 5000},
+                "is_error": False,
+            }
+            for _ in range(40)
+        ],
+        "reasoning_notes": ["note" * 2000],
+    }
+    assert "OMISSION NOTE" in pipeline.build_trace_summary(long_trace)
+
 
 def test_task_summary_prompt_includes_review_evidence(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
@@ -205,7 +220,7 @@ def test_trivial_task_summary_bypasses_llm_and_uses_short_format(tmp_path):
         env=None,
         llm=FailIfCalledLlm(),
         task={"id": "task-trivial", "type": "task", "text": "Say hi"},
-        usage={"rounds": 1, "cost": 0.0},
+        usage={"rounds": 1, "cost": 0.0, "result_status": "infra_failed", "reason_code": "llm_api_error"},
         llm_trace={"tool_calls": [], "reasoning_notes": []},
         drive_logs=drive_logs,
     )
@@ -216,6 +231,8 @@ def test_trivial_task_summary_bypasses_llm_and_uses_short_format(tmp_path):
     assert payload["text"] == "Task task-trivial (task): Say hi. 1r, $0.00."
     assert payload["tool_calls"] == 0
     assert payload["rounds"] == 1
+    assert payload["result_status"] == "infra_failed"
+    assert payload["reason_code"] == "llm_api_error"
 
 
 def test_multi_round_zero_tool_task_uses_llm_summary_prompt(tmp_path, monkeypatch):

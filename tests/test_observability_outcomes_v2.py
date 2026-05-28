@@ -29,8 +29,23 @@ def test_redactor_records_key_and_value_rules_without_secret_leak():
     payload = {
         "OPENAI_API_KEY": "sk-testsecretvalue000000000000",
         "log": "MY_API_KEY=thisisaverylongsecretvalue123456 github_pat_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890",
+        "prompt_tokens": 123,
+        "completion_tokens": 45,
+        "cached_tokens": 6,
+        "token_estimate": 789,
+        "reasoning_tokens": 10,
         "nested": {
             "authorization": "Bearer verylongbearertokenvalue123456",
+            "access_token": "verylongaccesstokenvalue123456",
+            "refreshToken": "verylongrefreshtokenvalue123456",
+            "secret": "plainsecretvalue1234567890",
+            "secret_key": "secretkeyvalue1234567890",
+            "apiKey": "apikeyvalue1234567890",
+            "AWS_SECRET_ACCESS_KEY": "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+            "PRIVATE_KEY_PEM": "-----BEGINPRIVATEKEY-----abc1234567890",
+            "STRIPE_SECRET_KEY": "stripescretvalue1234567890",
+            "bearer_token": "verylongbearertokenvalueabcdef",
+            "anthropic_secret": "sk-ant-verylongsecretvalue123456",
             "url": "https://user:pass@example.com/path",
         },
     }
@@ -42,7 +57,21 @@ def test_redactor_records_key_and_value_rules_without_secret_leak():
     assert "thisisaverylongsecretvalue" not in rendered
     assert "github_pat_" not in rendered
     assert "verylongbearertokenvalue" not in rendered
+    assert "verylongaccesstokenvalue" not in rendered
+    assert "verylongrefreshtokenvalue" not in rendered
+    assert "plainsecretvalue" not in rendered
+    assert "secretkeyvalue" not in rendered
+    assert "apikeyvalue" not in rendered
+    assert "wJalrXUtnFEMI" not in rendered
+    assert "BEGINPRIVATEKEY" not in rendered
+    assert "stripescretvalue" not in rendered
+    assert "verylongsecretvalue" not in rendered
     assert "user:pass" not in rendered
+    assert redacted.value["prompt_tokens"] == 123
+    assert redacted.value["completion_tokens"] == 45
+    assert redacted.value["cached_tokens"] == 6
+    assert redacted.value["token_estimate"] == 789
+    assert redacted.value["reasoning_tokens"] == 10
     assert redacted.manifest()["redacted"] is True
     rules = {item["rule"] for item in redacted.manifest()["rules"]}
     assert {"secret_key_name", "url_credentials"} <= rules

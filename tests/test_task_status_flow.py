@@ -939,10 +939,24 @@ def test_handle_schedule_task_rejects_fourth_active_subagent(tmp_path, monkeypat
 def test_handle_task_done_finalizes_workspace_subagent_artifacts(tmp_path, monkeypatch):
     from supervisor import events as ev_module
     import ouroboros.headless as headless
+    from ouroboros.task_results import STATUS_COMPLETED, write_task_result
 
     calls = []
     monkeypatch.setattr(headless, "copy_child_task_result", lambda root, task: calls.append(("copy", task["id"])))
-    monkeypatch.setattr(headless, "finalize_task_artifacts", lambda root, task: calls.append(("finalize", task["id"])))
+
+    def fake_finalize(root, task):
+        calls.append(("finalize", task["id"]))
+        write_task_result(
+            pathlib.Path(root),
+            task["id"],
+            STATUS_COMPLETED,
+            result="done",
+            artifact_status="failed",
+            artifact_bundle={"status": "failed", "artifacts": []},
+        )
+
+    monkeypatch.setattr(headless, "finalize_task_artifacts", fake_finalize)
+    pushed = []
 
     worker = SimpleNamespace(busy_task_id="workspace-child")
     ctx = SimpleNamespace(
@@ -962,7 +976,7 @@ def test_handle_task_done_finalizes_workspace_subagent_artifacts(tmp_path, monke
             }
         },
         WORKERS={3: worker},
-        bridge=SimpleNamespace(push_log=lambda _payload: None),
+        bridge=SimpleNamespace(push_log=lambda payload: pushed.append(payload)),
         send_with_budget=lambda *args, **kwargs: None,
         persist_queue_snapshot=lambda reason="": None,
     )
@@ -971,6 +985,8 @@ def test_handle_task_done_finalizes_workspace_subagent_artifacts(tmp_path, monke
 
     assert ("copy", "workspace-child") in calls
     assert ("finalize", "workspace-child") in calls
+    assert pushed[-1]["artifact_status"] == "failed"
+    assert pushed[-1]["artifact_bundle"]["status"] == "failed"
 
 
 def test_queue_snapshot_preserves_subagent_contract_fields(tmp_path, monkeypatch):
@@ -1108,6 +1124,10 @@ def test_subagent_hard_timeout_retry_preserves_task_id(tmp_path, monkeypatch):
     worker = SimpleNamespace(busy_task_id="childtimeout", proc=FakeProc())
     monkeypatch.setattr(workers_module, "WORKERS", {9: worker})
     monkeypatch.setattr(workers_module, "respawn_worker", lambda worker_id: None)
+    child_drive = tmp_path / "child-drive"
+    service_dir = child_drive / "services" / "childtimeout"
+    service_dir.mkdir(parents=True)
+    (service_dir / "devserver.log").write_text("READY\n", encoding="utf-8")
 
     queue_module.RUNNING["childtimeout"] = {
         "task": {
@@ -1115,6 +1135,8 @@ def test_subagent_hard_timeout_retry_preserves_task_id(tmp_path, monkeypatch):
             "type": "task",
             "chat_id": 1,
             "delegation_role": "subagent",
+            "drive_root": str(child_drive),
+            "child_drive_root": str(child_drive),
             "_attempt": 1,
         },
         "started_at": time.time() - 10,
@@ -1132,6 +1154,7 @@ def test_subagent_hard_timeout_retry_preserves_task_id(tmp_path, monkeypatch):
     assert retried["timeout_retry_from"] == "childtimeout"
     assert load_task_result(tmp_path, "childtimeout")["status"] == STATUS_INTERRUPTED
     assert "childtimeout" not in queue_module.RUNNING
+    assert not service_dir.exists()
 
 
 def test_handle_text_response_keeps_full_reasoning_note():

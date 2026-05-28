@@ -43,7 +43,6 @@ from ouroboros.tools.shell_guards import (
     light_shell_repo_mutation,
     shell_writer_targets_protected,
 )
-from ouroboros.tools.legacy_aliases import constraint_bucket_skill
 from ouroboros.utils import safe_relpath
 from ouroboros.contracts.task_constraint import TaskConstraint, normalize_task_constraint, resolve_payload_path
 from ouroboros.contracts.skill_payload_policy import (
@@ -51,6 +50,7 @@ from ouroboros.contracts.skill_payload_policy import (
     SKILL_OWNER_STATE_STEMS,
     SKILL_PAYLOAD_CONTROL_DIRNAMES,
     SKILL_PAYLOAD_CONTROL_FILENAMES,
+    constraint_bucket_skill,
     cross_skill_redirect_error,
     decide_payload_short_form,
     is_skill_payload_control_filename,
@@ -116,12 +116,26 @@ def _light_mode_payload_mutation_allowed(
     args: Dict[str, Any],
     runtime_mode: str,
     effective_constraint: Optional[TaskConstraint],
+    implicit_skill_cwd_allowed: bool,
     allow_short_relative: bool,
 ) -> bool:
     """Return True for light-mode data skill payload edits that do not touch repo files."""
 
-    if runtime_mode != "light" or tool_name not in {"edit_text", "write_file"}:
+    if runtime_mode != "light" or tool_name not in {"edit_text", "write_file", "claude_code_edit"}:
         return False
+    if tool_name == "claude_code_edit":
+        cwd_text = str(args.get("cwd", "") or "")
+        if not cwd_text and effective_constraint and effective_constraint.mode == "skill_repair" and implicit_skill_cwd_allowed:
+            cwd_text = "."
+        elif not cwd_text:
+            return False
+        return is_skill_payload_path(
+            pathlib.Path(ctx.drive_root),
+            cwd_text,
+            constraint=effective_constraint,
+            allow_short_relative=allow_short_relative,
+            allow_control_plane=False,
+        )
     requested_root = str(args.get("root", "") or "active_workspace")
     legacy_data_skill_edit = False
     if tool_name == "edit_text" and requested_root == "active_workspace":
@@ -149,6 +163,7 @@ _HEAL_MODE_ALLOWED_TOOLS = frozenset({
     "list_files",
     "write_file",
     "edit_text",
+    "claude_code_edit",
     "list_skills",
     "skill_review",
     # Read-only payload syntax validator; no review/enabled/grant mutation.
@@ -192,6 +207,24 @@ def _skill_payload_cwd_allowed(cwd_text: str, drive_root: pathlib.Path) -> bool:
     return is_skill_payload_path(drive_root, cwd_text, allow_control_plane=False)
 
 
+def _heal_claude_code_edit_block(ctx: Any, args: Dict[str, Any], task_constraint: Optional[TaskConstraint]) -> str:
+    expected_bucket, expected_skill = constraint_bucket_skill(task_constraint)
+    requested_bucket = str(args.get("bucket", "") or "").strip()
+    requested_skill = str(args.get("skill_name", "") or "").strip()
+    if (
+        (requested_bucket and requested_bucket != expected_bucket)
+        or (requested_skill and requested_skill != expected_skill)
+    ):
+        return (
+            "⚠️ SKILL_REDIRECT_BLOCKED: active skill_repair "
+            "task is scoped to the selected skill payload."
+        )
+    cwd_text = str(args.get("cwd", "") or ".")
+    if not _task_constraint_path_allowed(cwd_text, task_constraint, pathlib.Path(ctx.drive_root)):
+        return "⚠️ HEAL_MODE_BLOCKED: Repair claude_code_edit cwd is limited to the selected skill payload."
+    return ""
+
+
 # Git via run_shell: only truly read-only subcommands allowed.
 _GIT_READONLY_SUBCOMMANDS = frozenset([
     "status", "diff", "log", "show", "ls-files",
@@ -205,6 +238,7 @@ _WORKSPACE_ALLOWED_TOOLS = frozenset({
     "list_files",
     "write_file",
     "edit_text",
+    "claude_code_edit",
     "search_code",
     "codebase_digest",
     "run_command",
@@ -225,6 +259,24 @@ _WORKSPACE_ALLOWED_TOOLS = frozenset({
     "enable_tools",
 })
 _PROCESS_COMMAND_TOOLS = frozenset({"run_command", "run_script", "start_service"})
+_REPO_MUTATION_TOOLS = frozenset({
+    "write_file",
+    "claude_code_edit",
+    "commit_reviewed",
+    "vcs_commit_reviewed",
+    "edit_text",
+    "vcs_revert",
+    "vcs_pull_ff",
+    "vcs_restore",
+    "vcs_rollback",
+    "promote_to_stable",
+    # PR integration tools mutate the local worktree/refs.
+    "fetch_pr_ref",
+    "create_integration_branch",
+    "cherry_pick_pr_commits",
+    "stage_adaptations",
+    "stage_pr_merge",
+})
 
 
 def _process_shell_guard_args(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -1340,6 +1392,10 @@ class ToolRegistry:
                 return "⚠️ HEAL_MODE_BLOCKED: Repair may only review the selected skill."
             if name == "skill_preflight" and str(args.get("skill", "") or "").strip() != heal_skill:
                 return "⚠️ HEAL_MODE_BLOCKED: Repair may only preflight the selected skill."
+            if name == "claude_code_edit":
+                block_msg = _heal_claude_code_edit_block(self._ctx, args, task_constraint)
+                if block_msg:
+                    return block_msg
             if ext_tool or is_mcp or name not in _HEAL_MODE_ALLOWED_TOOLS:
                 return (
                     "⚠️ HEAL_MODE_BLOCKED: Repair tasks may inspect/edit skill "
@@ -1354,28 +1410,9 @@ class ToolRegistry:
             if ext_tool and callable(ext_tool.get("handler")):
                 return self._dispatch_extension_tool(name, ext_tool, args)
             return f"⚠️ Unknown tool: {name}. Available: {', '.join(sorted(self._entries.keys()))}"
-        _REPO_MUTATION_TOOLS = frozenset(
-            {
-                "write_file",
-                "commit_reviewed",
-                "vcs_commit_reviewed",
-                "edit_text",
-                "vcs_revert",
-                "vcs_pull_ff",
-                "vcs_restore",
-                "vcs_rollback",
-                "promote_to_stable",
-                # PR integration tools mutate the local worktree/refs.
-                "fetch_pr_ref",
-                "create_integration_branch",
-                "cherry_pick_pr_commits",
-                "stage_adaptations",
-                "stage_pr_merge",
-            }
-        )
         raw_bucket = str(args.get("bucket", "") or "")
         raw_skill_name = str(args.get("skill_name", "") or "")
-        short_path_text = str(args.get("path", "") or "")
+        short_path_text = str(args.get("cwd", "") or "") if name == "claude_code_edit" else str(args.get("path", "") or "")
         short_form_decision = decide_payload_short_form(
             bucket=raw_bucket,
             skill_name=raw_skill_name,
@@ -1391,6 +1428,7 @@ class ToolRegistry:
             and name in (
                 "write_file",
                 "edit_text",
+                "claude_code_edit",
             )
         ):
             return f"⚠️ SKILL_PAYLOAD_ARG_ERROR: {short_form_decision.error}"
@@ -1399,6 +1437,7 @@ class ToolRegistry:
         if redirect_err and name in (
             "write_file",
             "edit_text",
+            "claude_code_edit",
         ):
             return f"⚠️ SKILL_REDIRECT_BLOCKED: {redirect_err}"
         # Existing skill_repair constraint remains authoritative.
@@ -1410,13 +1449,14 @@ class ToolRegistry:
             effective_constraint and effective_constraint.mode == "skill_repair"
         )
         light_skill_scoped_str_replace = _light_mode_payload_mutation_allowed(
-            ctx=self._ctx,
-            tool_name=name,
-            args=args,
-            runtime_mode=_runtime_mode,
-            effective_constraint=effective_constraint,
-            allow_short_relative=allow_short_relative,
-        )
+        ctx=self._ctx,
+        tool_name=name,
+        args=args,
+        runtime_mode=_runtime_mode,
+        effective_constraint=effective_constraint,
+        implicit_skill_cwd_allowed=bool(task_constraint and task_constraint.mode == "skill_repair"),
+        allow_short_relative=allow_short_relative,
+    )
         if (
             _runtime_mode == "light"
             and name in _REPO_MUTATION_TOOLS
@@ -1505,7 +1545,6 @@ class ToolRegistry:
                 tool_name=name,
             )
 
-        # Pro can touch protected files, but commit review still gates landing.
         if safety_msg:
             return f"{safety_msg}\n\n---\n{result}"
         return result

@@ -82,6 +82,7 @@ SETTINGS_DEFAULTS = {
     "OUROBOROS_SCOPE_REVIEW_MODELS": "openai/gpt-5.5",
     "OUROBOROS_SCOPE_REVIEW_MODEL": "openai/gpt-5.5",
     "OUROBOROS_TASK_REVIEW_MODE": "auto",
+    "OUROBOROS_SERVICE_LOG_RETENTION_DAYS": 14,
     # Reasoning effort per task type: none | low | medium | high
     "OUROBOROS_EFFORT_TASK": "medium",
     "OUROBOROS_EFFORT_EVOLUTION": "high",
@@ -656,6 +657,7 @@ def apply_settings_to_env(settings: dict) -> None:
         "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS",
         "OUROBOROS_SCOPE_REVIEW_MODELS", "OUROBOROS_SCOPE_REVIEW_MODEL",
         "OUROBOROS_TASK_REVIEW_MODE",
+        "OUROBOROS_SERVICE_LOG_RETENTION_DAYS",
         # Runtime-mode and skills-repo plumbing.
         "OUROBOROS_RUNTIME_MODE", "OUROBOROS_SKILLS_REPO_PATH",
         "OUROBOROS_HOST_SERVICE_PORT",

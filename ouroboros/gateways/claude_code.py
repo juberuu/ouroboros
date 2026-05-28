@@ -134,7 +134,7 @@ def _normalize_sdk_usage(usage: Any) -> Dict[str, Any]:
     return normalized
 
 
-def make_path_guard(cwd: str, repo_root: str | None = None):
+def make_path_guard(cwd: str, repo_root: str | None = None, *, protect_runtime_paths: bool = True):
     """Block SDK writes outside cwd or runtime-protected paths."""
     cwd_resolved = pathlib.Path(cwd).resolve()
     repo_root_resolved = pathlib.Path(repo_root).resolve() if repo_root else None
@@ -198,7 +198,7 @@ def make_path_guard(cwd: str, repo_root: str | None = None):
             runtime_mode = get_runtime_mode()
         except Exception:
             runtime_mode = "advanced"
-        if is_protected_runtime_path(rel) and not mode_allows_protected_write(runtime_mode):
+        if protect_runtime_paths and is_protected_runtime_path(rel) and not mode_allows_protected_write(runtime_mode):
             return {
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
@@ -247,9 +247,10 @@ async def _run_edit_async(
     budget: Optional[float] = None,
     system_prompt: Optional[str] = None,
     repo_root: Optional[str] = None,
+    protect_runtime_paths: bool = True,
 ) -> ClaudeCodeResult:
     """Run edit-mode SDK with safety hooks."""
-    path_guard = make_path_guard(cwd, repo_root=repo_root)
+    path_guard = make_path_guard(cwd, repo_root=repo_root, protect_runtime_paths=protect_runtime_paths)
     clear_stderr_buffer()
 
     options = ClaudeAgentOptions(
@@ -389,6 +390,7 @@ def run_edit(
     budget: Optional[float] = None,
     system_prompt: Optional[str] = None,
     repo_root: Optional[str] = None,
+    protect_runtime_paths: bool = True,
 ) -> ClaudeCodeResult:
     """Synchronous edit-mode SDK entry point."""
     return _run_async(_run_edit_async(
@@ -399,6 +401,7 @@ def run_edit(
         budget=budget,
         system_prompt=system_prompt,
         repo_root=repo_root,
+        protect_runtime_paths=protect_runtime_paths,
     ))
 
 

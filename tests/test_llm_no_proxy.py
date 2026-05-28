@@ -260,17 +260,17 @@ def test_chat_remote_passes_no_proxy_to_anthropic():
 
 
 # ---------------------------------------------------------------------------
-# Test: plan_review._query_reviewer calls chat_async with no_proxy=True
+# Test: plan_review ReviewCoordinator path calls LLM with no_proxy=True
 # ---------------------------------------------------------------------------
 
-def test_plan_review_query_reviewer_uses_no_proxy(tmp_path):
-    """_query_reviewer in plan_review.py must call chat_async with no_proxy=True."""
+def test_plan_review_slots_use_no_proxy(tmp_path):
+    """plan_review's shared ReviewCoordinator path must pass no_proxy=True."""
     from ouroboros.tools import plan_review
 
     captured_kwargs = []
 
     class FakeLLMClient:
-        async def chat_async(self, **kwargs):
+        def chat(self, **kwargs):
             captured_kwargs.append(kwargs)
             return {"content": "AGGREGATE: GREEN\nAll good."}, {
                 "prompt_tokens": 100,
@@ -278,22 +278,26 @@ def test_plan_review_query_reviewer_uses_no_proxy(tmp_path):
                 "resolved_model": "test-model",
             }
 
-    import asyncio
     import asyncio as _asyncio
-    fake_ctx = type("FakeCtx", (), {"drive_root": tmp_path, "task_id": "test-plan-review"})()
+    fake_ctx = type("FakeCtx", (), {
+        "drive_root": tmp_path,
+        "task_id": "test-plan-review",
+        "pending_events": [],
+        "event_queue": None,
+    })()
 
-    result = _asyncio.run(
-        plan_review._query_reviewer(
-            fake_ctx,
-            FakeLLMClient(),
-            "openai/gpt-5.5",
-            "system prompt",
-            "user content",
-            _asyncio.Semaphore(1),
+    with patch.object(plan_review, "LLMClient", return_value=FakeLLMClient()):
+        result = _asyncio.run(
+            plan_review._run_plan_review_slots(
+                fake_ctx,
+                ["openai/gpt-5.5"],
+                "system prompt",
+                "user content",
+            )
         )
-    )
 
-    assert len(captured_kwargs) == 1, "chat_async should be called once"
+    assert result[0]["error"] is None
+    assert len(captured_kwargs) == 1, "LLM should be called once"
     assert captured_kwargs[0].get("no_proxy") is True, (
         f"Expected no_proxy=True, got {captured_kwargs[0].get('no_proxy')}"
     )

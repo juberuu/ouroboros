@@ -491,6 +491,7 @@ def kill_workers(
     *,
     result_reason: str = "Worker process crashed (crash storm). Task was not completed.",
     result_status: str = "",
+    archive_service_logs: bool = True,
 ) -> None:
     from supervisor import queue
     with _queue_lock:
@@ -509,7 +510,15 @@ def kill_workers(
             orphaned_ids = []
             for task_id in list(RUNNING):
                 try:
+                    meta = RUNNING.get(task_id) or {}
+                    task = meta.get("task") if isinstance(meta, dict) and isinstance(meta.get("task"), dict) else {}
                     _write_failure_result(task_id, reason=result_reason, status=result_status)
+                    if archive_service_logs:
+                        try:
+                            from ouroboros.tools.services import archive_task_service_logs
+                            archive_task_service_logs(pathlib.Path(DRIVE_ROOT), str(task_id), task)
+                        except Exception:
+                            log.debug("Failed to archive service logs for task %s", task_id, exc_info=True)
                     orphaned_ids.append(task_id)
                 except Exception:
                     log.warning("Failed to write failure result for running task %s", task_id, exc_info=True)
@@ -690,6 +699,12 @@ def ensure_workers_healthy() -> None:
                 )
             if w.busy_task_id and w.busy_task_id in RUNNING:
                 meta = RUNNING.pop(w.busy_task_id) or {}
+                try:
+                    from ouroboros.tools.services import archive_task_service_logs
+                    task_for_roots = meta.get("task") if isinstance(meta, dict) and isinstance(meta.get("task"), dict) else {}
+                    archive_task_service_logs(pathlib.Path(DRIVE_ROOT), str(w.busy_task_id), task_for_roots)
+                except Exception:
+                    log.debug("Failed to archive service logs for task %s", w.busy_task_id, exc_info=True)
                 task = meta.get("task") if isinstance(meta, dict) else None
                 if isinstance(task, dict):
                     task_type = str(task.get("type") or "")

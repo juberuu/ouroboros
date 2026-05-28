@@ -17,6 +17,7 @@ from ouroboros.config import load_settings
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.tool_capabilities import (
     READ_ONLY_PARALLEL_TOOLS,
+    FOREGROUND_MUTATIVE_TOOLS,
     REVIEWED_MUTATIVE_TOOLS,
     STATEFUL_BROWSER_TOOLS,
     TOOL_RESULT_LIMITS as _TOOL_RESULT_LIMITS,
@@ -40,6 +41,8 @@ _FAILURE_PREFIXES = (
     "⚠️ TOOL_",
     "⚠️ SHELL_",
     "⚠️ CLAUDE_CODE_",
+    "⚠️ CORE_PROTECTION_BLOCKED",
+    "⚠️ SKILL_PAYLOAD_CONTROL_BLOCKED",
 )
 _EXIT_CODE_RE = re.compile(r"exit_code=(-?\d+)")
 _SIGNAL_RE = re.compile(r"signal=([A-Z0-9_]+)")
@@ -167,6 +170,10 @@ def _extract_result_metadata(fn_name: str, result: Any, is_error: bool) -> Dict[
         status = "unavailable"
     elif text.startswith("⚠️ CLAUDE_CODE_"):
         status = "claude_code_error"
+    elif text.startswith("⚠️ CORE_PROTECTION_BLOCKED"):
+        status = "protected_blocked"
+    elif text.startswith("⚠️ SKILL_PAYLOAD_CONTROL_BLOCKED"):
+        status = "skill_payload_control_blocked"
 
     meta: Dict[str, Any] = {"status": status}
     exit_match = _EXIT_CODE_RE.search(text)
@@ -511,13 +518,14 @@ def _execute_with_timeout(
                 return result
             except (TimeoutError, concurrent.futures.TimeoutError):
                 is_reviewed_mutative = fn_name in REVIEWED_MUTATIVE_TOOLS
+                is_foreground_mutative = fn_name in FOREGROUND_MUTATIVE_TOOLS
 
-                if is_reviewed_mutative:
-                    # Commit/review tools must not end with ambiguous timeout.
+                if is_reviewed_mutative or is_foreground_mutative:
+                    # Review/code mutation tools must not end with ambiguous timeout.
                     try:
                         from ouroboros.tools.commit_gate import _mark_review_attempt_late
                         ctx = getattr(tools, "_ctx", None)
-                        if ctx is not None:
+                        if ctx is not None and is_reviewed_mutative:
                             _mark_review_attempt_late(
                                 ctx,
                                 soft_timeout_sec=timeout_sec,
@@ -532,11 +540,29 @@ def _execute_with_timeout(
                         "args": args_for_log,
                         "soft_timeout_sec": timeout_sec,
                         "message": (
-                            f"Reviewed mutative tool '{fn_name}' exceeded "
+                            f"Foreground mutative tool '{fn_name}' exceeded "
                             f"{timeout_sec}s — still waiting for result "
-                            f"(hard ceiling: {_REVIEWED_MUTATIVE_HARD_CEILING}s)"
+                            + (
+                                f"(hard ceiling: {_REVIEWED_MUTATIVE_HARD_CEILING}s)"
+                                if is_reviewed_mutative else "(terminal wait: no background edits)"
+                            )
                         ),
                     }, correlation, tool_call_id=tool_call_id))
+                    if is_foreground_mutative:
+                        result = future.result()
+                        result_meta = result.get("result_meta") or {}
+                        _emit_live_log(tools, _with_correlation({
+                            "type": "tool_call_finished",
+                            "task_id": task_id,
+                            "tool": fn_name,
+                            "args": result.get("args_for_log", args_for_log),
+                            "duration_sec": round(time.perf_counter() - started_at, 3),
+                            "is_error": bool(result.get("is_error")),
+                            "status": result_meta.get("status"),
+                            "late": True,
+                            "terminal_wait": True,
+                        }, correlation, tool_call_id=tool_call_id))
+                        return result
                     try:
                         ceiling = max(_REVIEWED_MUTATIVE_HARD_CEILING, timeout_sec + 60)
                         remaining = max(1, ceiling - timeout_sec)

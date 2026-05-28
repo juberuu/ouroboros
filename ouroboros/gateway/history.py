@@ -169,6 +169,10 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
                         rec["tool_calls"] = int(entry["tool_calls"])
                     if "rounds" in entry:
                         rec["rounds"] = int(entry["rounds"])
+                    if "result_status" in entry:
+                        rec["result_status"] = str(entry.get("result_status") or "")
+                    if "reason_code" in entry:
+                        rec["reason_code"] = str(entry.get("reason_code") or "")
                 combined.append(rec)
         except Exception as exc:
             log.warning("Failed to read chat history: %s", exc)

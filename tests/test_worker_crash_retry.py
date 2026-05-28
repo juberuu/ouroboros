@@ -54,6 +54,12 @@ def test_attempt_incremented_before_requeue(tmp_path):
     import supervisor.workers as W
 
     task = _make_task(task_id="t001", attempt=1)
+    child_drive = tmp_path / "child-drive"
+    task["drive_root"] = str(child_drive)
+    task["child_drive_root"] = str(child_drive)
+    service_dir = child_drive / "services" / "t001"
+    service_dir.mkdir(parents=True)
+    (service_dir / "devserver.log").write_text("READY\n", encoding="utf-8")
     worker = _make_worker(busy_task_id="t001", exitcode=-11)
 
     W.DRIVE_ROOT = tmp_path
@@ -83,6 +89,7 @@ def test_attempt_incremented_before_requeue(tmp_path):
 
     assert len(enqueued) == 1, "Task should be requeued once"
     assert enqueued[0]["_attempt"] == 2, f"Expected _attempt=2, got {enqueued[0].get('_attempt')}"
+    assert not service_dir.exists(), "Child-drive service logs should be archived after worker death"
 
 
 # ---------------------------------------------------------------------------
