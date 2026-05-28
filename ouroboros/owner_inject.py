@@ -1,20 +1,12 @@
-"""
-Per-task owner message injection for running worker tasks.
-
-Each task gets its own mailbox file: owner_messages_{task_id}.jsonl
-Messages have unique IDs for dedup. Reading uses offset tracking
-(append-only within a session) instead of clearing the file.
-
-The supervisor does NOT write here directly. Only the LLM (via
-forward_to_worker tool) writes to a task's mailbox. Workers drain
-messages for their own task_id on each LLM round.
-"""
-import datetime
+"""Per-task owner-message mailboxes for running worker tasks."""
 import json
 import logging
 import pathlib
 import uuid
 from typing import List, Optional
+
+from ouroboros.task_results import validate_task_id
+from ouroboros.utils import utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -22,12 +14,7 @@ _MAILBOX_DIR = "memory/owner_mailbox"
 
 
 def _mailbox_path(drive_root: pathlib.Path, task_id: str) -> pathlib.Path:
-    return drive_root / _MAILBOX_DIR / f"{task_id}.jsonl"
-
-
-def get_pending_path(drive_root: pathlib.Path) -> pathlib.Path:
-    """Legacy compat: path to old global pending file (for cleanup on startup)."""
-    return drive_root / "memory/owner_messages_pending.jsonl"
+    return pathlib.Path(drive_root) / _MAILBOX_DIR / f"{validate_task_id(task_id)}.jsonl"
 
 
 def write_owner_message(
@@ -41,7 +28,7 @@ def write_owner_message(
     path.parent.mkdir(parents=True, exist_ok=True)
     entry = json.dumps({
         "msg_id": msg_id or uuid.uuid4().hex,
-        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "ts": utc_now_iso(),
         "text": text,
     }, ensure_ascii=False)
     try:
@@ -56,11 +43,7 @@ def drain_owner_messages(
     task_id: str,
     seen_ids: Optional[set] = None,
 ) -> List[str]:
-    """Read new messages for a specific task. Returns list of message texts.
-
-    Uses seen_ids set for dedup: messages already in the set are skipped,
-    new message IDs are added to it. Caller should keep the set across rounds.
-    """
+    """Read unseen message texts for one task, updating seen_ids for dedup."""
     path = _mailbox_path(drive_root, task_id)
     if not path.exists():
         return []

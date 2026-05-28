@@ -105,7 +105,9 @@ on every restart, but one personality that remembers its path.
   rounds, execution traces, and memory-file reads may be compacted only
   through explicit summarization that preserves what was tried, what
   changed, and what conclusions were reached. Hardcoded `[:N]` over
-  cognitive artifacts is silent partial amnesia.
+  cognitive artifacts is silent partial amnesia. Multi-model review
+  outputs (commit, skill, scope, advisory) are cognitive artifacts; their
+  tool results must not fall back to generic transport truncation.
 - **Retrieval cannot substitute continuity.** Search, indexes,
   embeddings, and on-demand fetch may assist factual recall from raw
   logs, but memory required for identity, narrative continuity, and

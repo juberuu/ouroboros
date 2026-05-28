@@ -31,6 +31,7 @@ on:
       - 'build_windows.ps1'
       - 'Dockerfile'
       - 'scripts/**'
+      - 'packaging/**'
       - 'VERSION'
       - 'README.md'
       - 'launcher.py'
@@ -62,6 +63,8 @@ jobs:
           pip install pytest
       - name: Run tests
         run: python -m pytest tests/ -q --tb=short
+      - name: Guard extracted transport imports stay out of core
+        run: python -m pytest tests/test_no_core_a2a_telegram_imports.py -q
 
   # ──────────────────────────────────────────────────────────────────
   # Tier 2: Full matrix (stable branch, manual, or tag push)
@@ -88,6 +91,8 @@ jobs:
           pip install pytest
       - name: Run tests
         run: python -m pytest tests/ -q --tb=short
+      - name: Guard extracted transport imports stay out of core
+        run: python -m pytest tests/test_no_core_a2a_telegram_imports.py -q
 
   # ──────────────────────────────────────────────────────────────────
   # Tier 2.5: Integration tests against real provider APIs
@@ -173,7 +178,7 @@ jobs:
       - name: Run host UI smoke
         env:
           OUROBOROS_RUN_UI_SMOKE: "1"
-        run: python -m pytest tests/test_ui_smoke_playwright.py -m ui_browser -q --tb=short
+        run: python -m pytest tests/ -m ui_browser -q --tb=short
       - name: Run browser tools Chromium smoke
         run: python -m pytest tests/test_browser_tools_smoke.py -m browser -q --tb=short
 

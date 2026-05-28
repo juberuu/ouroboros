@@ -1,8 +1,36 @@
 # tests/conftest.py — shared pytest fixtures for the Ouroboros test suite.
 #
 # Loaded automatically by pytest before any test module runs.
+# Cross-module helpers that are not pytest fixtures (e.g. SDK mock, extension
+# runtime cleanup) live in ``tests/_shared.py`` instead.
 import asyncio
+import pathlib
+
 import pytest
+
+
+def _mock_pollution_files(root: pathlib.Path) -> set[pathlib.Path]:
+    try:
+        return {p for p in root.iterdir() if p.is_file() and "<MagicMock" in p.name}
+    except OSError:
+        return set()
+
+
+def pytest_sessionstart(session):  # noqa: ARG001
+    repo_root = pathlib.Path(__file__).resolve().parents[1]
+    session.config._ouroboros_initial_mock_pollution = _mock_pollution_files(repo_root)
+
+
+def pytest_sessionfinish(session, exitstatus):  # noqa: ARG001
+    repo_root = pathlib.Path(__file__).resolve().parents[1]
+    initial = getattr(session.config, "_ouroboros_initial_mock_pollution", set())
+    leaked = sorted(_mock_pollution_files(repo_root) - initial)
+    if leaked:
+        paths = ", ".join(str(p.relative_to(repo_root)) for p in leaked[:5])
+        raise pytest.Exit(
+            f"Test pollution: mock-named files leaked into repo root: {paths}",
+            returncode=1,
+        )
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -51,13 +79,9 @@ def _reset_runtime_mode_baseline_between_tests():
 
 @pytest.fixture(autouse=True)
 def _hide_bundled_skills(monkeypatch):
-    """Phase 5: skill tests must not see the shipped ``repo/skills/``
-    reference skills. Tests build their own fixtures under ``tmp_path``
-    and rely on ``discover_skills`` returning exactly those — letting
-    the bundled reference skills leak into the view would make every
-    test assertion brittle to changes in the shipped reference set.
+    """Keep skill tests isolated from the developer machine's data plane.
 
-    v4.50: ALSO neutralise the data-plane skills lookup so a developer
+    v4.50: neutralise the data-plane skills lookup so a developer
     machine with installed skills under ``~/Ouroboros/data/skills/`` does
     not poison test results. ``discover_skills`` consults
     ``_resolve_data_skills_dir`` for its primary scan; pinning that to
@@ -66,13 +90,8 @@ def _hide_bundled_skills(monkeypatch):
     or stick to ``OUROBOROS_SKILLS_REPO_PATH`` fixtures under tmp_path.
 
     Production keeps the default behaviour untouched; this fixture only
-    neutralises the bundled / data-plane lookups inside the pytest
-    process.
+    neutralises global data-plane lookups inside the pytest process.
     """
-    monkeypatch.setattr(
-        "ouroboros.skill_loader._bundled_skills_dir",
-        lambda: None,
-    )
     # Patch the data-plane resolver to None unless the caller supplied
     # an explicit ``drive_root`` (in which case the v4.50 implementation
     # honours that argument and never touches the global). The signature
@@ -112,3 +131,11 @@ def pytest_runtest_teardown(item, nextitem):  # noqa: ARG001
     yield  # fixture finalizers and teardown run here
     teardown_loop.close()
     asyncio.set_event_loop(None)
+
+
+# Pre-v5.15 conftest exported four fixtures (``make_git_repo``, ``tool_context``,
+# ``make_chat_mock``, ``make_extension_skill``) that no test ever requested as a
+# parameter. They were removed in v5.15.0; tests build their own minimal repos /
+# contexts under ``tmp_path`` because the per-test layouts diverged enough that a
+# shared fixture was always wrong (different branch names, different ``ToolContext``
+# shapes, ``MagicMock`` vs real, etc.).

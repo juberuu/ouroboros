@@ -72,8 +72,9 @@ def _run_docker_ui_assertions(url: str) -> None:
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=30_000)
                 if page.locator("#onboarding-overlay").count():
-                    assert "Ouroboros" in page.locator("#onboarding-overlay").inner_text(timeout=5_000)
-                    return
+                    overlay_text = page.locator("#onboarding-overlay").inner_text(timeout=5_000)
+                    if "Ouroboros" in overlay_text:
+                        return
                 page.wait_for_selector("#page-chat", timeout=30_000)
                 assert page.locator("#page-chat").count() == 1
             finally:
@@ -85,7 +86,7 @@ def _run_docker_ui_assertions(url: str) -> None:
 
 
 @pytest.fixture()
-def direct_server(tmp_path):
+def direct_server_with_data(tmp_path):
     if os.environ.get("OUROBOROS_RUN_UI_SMOKE") != "1":
         pytest.skip("set OUROBOROS_RUN_UI_SMOKE=1 to run browser UI smoke")
     with MockLLMServer() as llm:
@@ -114,6 +115,7 @@ def direct_server(tmp_path):
             "OUROBOROS_REPO_DIR": REPO_ROOT,
             "OUROBOROS_SERVER_HOST": "127.0.0.1",
             "OUROBOROS_SERVER_PORT": str(port),
+            "OUROBOROS_HOST_SERVICE_PORT": str(port + 1),
             "OUROBOROS_NETWORK_PASSWORD": "ui-smoke-password",
         }
         proc = subprocess.Popen(
@@ -126,7 +128,7 @@ def direct_server(tmp_path):
         url = f"http://127.0.0.1:{port}"
         try:
             _wait_health(url)
-            yield url
+            yield {"url": url, "data_dir": data_dir}
         finally:
             proc.terminate()
             try:
@@ -134,6 +136,11 @@ def direct_server(tmp_path):
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=5)
+
+
+@pytest.fixture()
+def direct_server(direct_server_with_data):
+    return direct_server_with_data["url"]
 
 
 @pytest.mark.ui_browser
@@ -157,6 +164,142 @@ def test_ui_smoke_direct_mode_creates_task_with_mock_provider(direct_server):
                 page.click("#chat-send")
                 page.wait_for_selector(".chat-bubble.assistant", timeout=60_000)
                 assert "OK" in page.locator("#chat-messages").inner_text(timeout=5_000)
+                metrics = page.evaluate(
+                    """() => {
+                        const messages = document.querySelector('#chat-messages');
+                        const remaining = messages.scrollHeight - messages.scrollTop - messages.clientHeight;
+                        return {
+                            scrollTop: messages.scrollTop,
+                            scrollHeight: messages.scrollHeight,
+                            clientHeight: messages.clientHeight,
+                            remaining,
+                        };
+                    }"""
+                )
+                assert metrics["remaining"] <= 4, metrics
+            finally:
+                browser.close()
+    except PlaywrightError as exc:
+        if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc).lower():
+            pytest.skip(str(exc))
+        raise
+
+
+@pytest.mark.ui_browser
+def test_ui_smoke_direct_mode_groups_subagent_child_cards(direct_server_with_data):
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    from playwright.sync_api import Error as PlaywrightError
+    from playwright.sync_api import sync_playwright
+
+    url = direct_server_with_data["url"]
+    data_dir = direct_server_with_data["data_dir"]
+    logs_dir = data_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    rows = [
+        {
+            "ts": "2026-05-25T10:00:00+00:00",
+            "chat_id": 1,
+            "task_id": "parent1",
+            "content": "Parent task started",
+            "is_progress": True,
+        },
+        {
+            "ts": "2026-05-25T10:00:01+00:00",
+            "chat_id": 1,
+            "task_id": "child1",
+            "content": "Scheduled subagent child1",
+            "is_progress": True,
+            "delegation_role": "subagent",
+            "subagent_event": "scheduled",
+            "subagent_task_id": "child1",
+            "parent_task_id": "parent1",
+            "root_task_id": "parent1",
+            "subagent_role": "researcher",
+        },
+        {
+            "ts": "2026-05-25T10:00:02+00:00",
+            "chat_id": 1,
+            "task_id": "child1",
+            "content": "Subagent child1 running",
+            "is_progress": True,
+            "delegation_role": "subagent",
+            "subagent_event": "running",
+            "subagent_task_id": "child1",
+            "parent_task_id": "parent1",
+            "root_task_id": "parent1",
+            "subagent_role": "researcher",
+            "status": "running",
+        },
+        {
+            "ts": "2026-05-25T10:00:02.500000+00:00",
+            "chat_id": 1,
+            "task_id": "child1",
+            "content": "Searching evidence",
+            "is_progress": True,
+            "delegation_role": "subagent",
+            "subagent_event": "progress",
+            "subagent_task_id": "child1",
+            "parent_task_id": "parent1",
+            "root_task_id": "parent1",
+            "subagent_role": "researcher",
+            "status": "running",
+        },
+        {
+            "ts": "2026-05-25T10:00:03+00:00",
+            "chat_id": 1,
+            "task_id": "child1",
+            "content": "Subagent child1 completed",
+            "is_progress": True,
+            "delegation_role": "subagent",
+            "subagent_event": "completed",
+            "subagent_task_id": "child1",
+            "parent_task_id": "parent1",
+            "root_task_id": "parent1",
+            "subagent_role": "researcher",
+            "status": "completed",
+            "cost_usd": 0.125,
+            "result": "Child result with evidence table\n| source | verdict |\n| A | pass |",
+            "trace_summary": "searched sources\ncompared output",
+        },
+    ]
+    (logs_dir / "progress.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page(viewport={"width": 1280, "height": 800})
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                page.wait_for_selector(".chat-live-card", timeout=30_000)
+                page.wait_for_function("() => document.querySelectorAll('.chat-live-card').length === 2", timeout=30_000)
+                texts = page.locator(".chat-live-card").all_inner_texts()
+                assert len(texts) == 2
+                assert any("parent task" in text and "child=child1" in text for text in texts)
+                assert any("Subagent child1 completed" in text and "parent=parent1" in text and "cost=$0.1250" in text for text in texts)
+                assert page.locator(".chat-bubble.progress").count() == 0
+
+                child_card = page.locator(".chat-live-card").filter(has_text="cost=$0.1250").first
+                child_card.locator("[data-live-summary-button]").click()
+                line_toggles = child_card.locator(".chat-live-line-toggle")
+                if line_toggles.count():
+                    line_toggles.last.click()
+                expanded_text = child_card.inner_text(timeout=5_000)
+                assert "Child result with evidence table" in expanded_text
+                assert "| source | verdict |" in expanded_text
+                assert "searched sources" in expanded_text
+                assert "compared output" in expanded_text
+                assert child_card.locator("[data-live-summary-button]").get_attribute("aria-expanded") == "true"
+                assert child_card.locator("[data-live-timeline]").get_attribute("id")
+                assert child_card.locator(".chat-live-line-toggle").last.get_attribute("aria-controls")
+
+                page.reload(wait_until="domcontentloaded", timeout=30_000)
+                page.wait_for_function("() => document.querySelectorAll('.chat-live-card').length === 2", timeout=30_000)
+                replay_texts = page.locator(".chat-live-card").all_inner_texts()
+                assert len(replay_texts) == 2
+                assert page.locator(".chat-bubble.progress").count() == 0
             finally:
                 browser.close()
     except PlaywrightError as exc:

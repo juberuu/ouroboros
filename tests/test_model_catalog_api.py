@@ -3,7 +3,7 @@ import inspect
 import json
 
 import httpx
-import ouroboros.model_catalog_api as model_catalog_api
+import ouroboros.gateway.models as model_catalog_api
 
 
 class _Response:
@@ -131,6 +131,13 @@ def test_model_catalog_classifies_httpx_error_stage(monkeypatch):
 
 
 def test_model_catalog_no_longer_uses_requests_or_to_thread():
-    source = inspect.getsource(model_catalog_api)
+    source = "\n".join(
+        inspect.getsource(obj)
+        for obj in (
+            model_catalog_api.api_model_catalog,
+            model_catalog_api._provider_specs,
+            model_catalog_api._load_provider,
+        )
+    )
     assert "import requests" not in source
     assert "asyncio.to_thread" not in source

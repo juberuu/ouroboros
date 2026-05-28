@@ -1,20 +1,8 @@
-"""
-Ouroboros Launcher — Immutable process manager.
-
-This file is bundled into the .app via PyInstaller. It never self-modifies.
-All agent logic lives in REPO_DIR and is launched as a subprocess via the
-embedded python-build-standalone interpreter.
-
-Responsibilities:
-  - PID lock (single instance)
-  - Bootstrap REPO_DIR on first run
-  - Start/restart agent subprocess (server.py)
-  - Display pywebview window pointing at the agent's local HTTP server
-  - Handle restart signals (agent exits with code 42)
-"""
+"""Immutable desktop launcher: bootstrap repo, manage server.py, and host UI."""
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import pathlib
@@ -34,9 +22,11 @@ from ouroboros.config import (
     REPO_DIR,
     RESTART_EXIT_CODE,
     SETTINGS_PATH,
+    SETTINGS_DEFAULTS,
     acquire_pid_lock,
     apply_settings_to_env as _apply_settings_to_env,
     load_settings,
+    get_runtime_mode,
     normalize_runtime_mode,
     read_version,
     release_pid_lock,
@@ -47,6 +37,7 @@ from ouroboros.launcher_bootstrap import (
     bootstrap_repo as _bootstrap_repo,
     check_git as _check_git,
     install_deps as _install_deps_impl,
+    python_bytecode_env,
     sync_existing_repo_from_bundle as _sync_existing_repo_from_bundle_impl,
     verify_claude_runtime as _verify_claude_runtime,
 )
@@ -57,15 +48,26 @@ from ouroboros.platform_layer import (
     assign_pid_to_job,
     close_job,
     create_kill_on_close_job,
+    current_process_group_id,
     embedded_python_candidates,
     force_kill_pid,
     git_install_hint,
+    kill_pid_tree,
+    kill_process_group_id,
     kill_process_on_port,
+    kill_process_tree,
     merge_hidden_kwargs,
     open_path_external,
+    pid_is_alive,
+    process_command,
+    process_group_id,
     resume_process,
+    subprocess_new_group_kwargs,
     terminate_job,
+    terminate_process_group_id,
+    terminate_process_tree,
 )
+from ouroboros.utils import atomic_write_json, utc_now_iso
 from ouroboros.server_runtime import apply_runtime_provider_defaults, has_startup_ready_provider
 
 MAX_CRASH_RESTARTS = 5
@@ -73,9 +75,6 @@ CRASH_WINDOW_SEC = 120
 _CREATE_SUSPENDED = getattr(subprocess, "CREATE_SUSPENDED", 0x4) if IS_WINDOWS else 0
 _CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if IS_WINDOWS else 0
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
 _LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 _log_dir = DATA_DIR / "logs"
 _log_dir.mkdir(parents=True, exist_ok=True)
@@ -97,6 +96,10 @@ log = logging.getLogger("launcher")
 APP_VERSION = read_version()
 
 
+def _server_process_record_path() -> pathlib.Path:
+    return pathlib.Path(DATA_DIR) / "state" / "server_process.json"
+
+
 def _hidden_run(command, **kwargs):
     """subprocess.run() with platform-appropriate hidden-window flags."""
     return subprocess.run(command, **merge_hidden_kwargs(kwargs))
@@ -106,10 +109,6 @@ def _hidden_popen(command, **kwargs):
     """subprocess.Popen() with platform-appropriate hidden-window flags."""
     return subprocess.Popen(command, **merge_hidden_kwargs(kwargs))
 
-
-# ---------------------------------------------------------------------------
-# Embedded Python
-# ---------------------------------------------------------------------------
 def _find_embedded_python() -> str:
     """Locate the embedded python-build-standalone interpreter."""
     if getattr(sys, "frozen", False):
@@ -124,10 +123,6 @@ def _find_embedded_python() -> str:
 
 EMBEDDED_PYTHON = _find_embedded_python()
 
-
-# ---------------------------------------------------------------------------
-# Windows UI runtime
-# ---------------------------------------------------------------------------
 _windows_dll_dir_handles: list = []
 
 
@@ -231,10 +226,6 @@ def _prepare_windows_webview_runtime() -> tuple[bool, str]:
 
     return True, ""
 
-
-# ---------------------------------------------------------------------------
-# Bootstrap
-# ---------------------------------------------------------------------------
 def _bundle_dir() -> pathlib.Path:
     if getattr(sys, "frozen", False):
         return pathlib.Path(sys._MEIPASS)
@@ -250,8 +241,7 @@ def _bootstrap_context() -> BootstrapContext:
         embedded_python=EMBEDDED_PYTHON,
         app_version=APP_VERSION,
         hidden_run=_hidden_run,
-        # Launcher-driven save: owner-process action, allow_elevation=True
-        # so first-launch env migration can set any runtime_mode.
+        # Launcher is owner-process boundary; first-launch migration may set runtime mode.
         save_settings=lambda settings: save_settings(settings, allow_elevation=True),
         log=log,
     )
@@ -272,10 +262,6 @@ def _sync_existing_repo_from_bundle() -> None:
 def _install_deps() -> None:
     _install_deps_impl(_bootstrap_context())
 
-
-# ---------------------------------------------------------------------------
-# Agent process management
-# ---------------------------------------------------------------------------
 _agent_proc: Optional[subprocess.Popen] = None
 _agent_job: Optional[object] = None
 _agent_lock = threading.Lock()
@@ -283,13 +269,133 @@ _shutdown_event = threading.Event()
 _webview_window = None
 
 
+def _server_process_identity_matches(record: dict) -> bool:
+    try:
+        pid = int(record.get("pid") or 0)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0 or pid == os.getpid() or not pid_is_alive(pid):
+        return False
+    expected_server = str((REPO_DIR / "server.py").resolve())
+    expected_repo = str(REPO_DIR.resolve())
+    record_server = str(record.get("server_path") or "")
+    record_repo = str(record.get("repo_dir") or "")
+    if record_server and record_server != expected_server:
+        return False
+    if record_repo and record_repo != expected_repo:
+        return False
+    live_pgid = process_group_id(pid)
+    try:
+        recorded_pgid = int(record.get("pgid") or 0)
+    except (TypeError, ValueError):
+        recorded_pgid = 0
+    if not IS_WINDOWS and (recorded_pgid <= 0 or live_pgid <= 0 or recorded_pgid != live_pgid):
+        return False
+    command = process_command(pid)
+    if not command:
+        return False
+    return expected_server in command or ("server.py" in command and expected_repo in command)
+
+
+def _write_server_process_record(proc: subprocess.Popen, *, port: int, server_py: pathlib.Path) -> None:
+    try:
+        record = {
+            "pid": int(proc.pid),
+            "pgid": process_group_id(proc.pid),
+            "server_path": str(server_py.resolve()),
+            "repo_dir": str(REPO_DIR.resolve()),
+            "requested_port": int(port),
+            "port": int(port),
+            "argv": [str(EMBEDDED_PYTHON), str(server_py.resolve())],
+            "created_at": utc_now_iso(),
+        }
+        atomic_write_json(_server_process_record_path(), record, trailing_newline=True)
+    except Exception:
+        log.warning("Failed to write server process record", exc_info=True)
+
+
+def _update_server_process_record_port(pid: int, actual_port: int) -> None:
+    try:
+        record_path = _server_process_record_path()
+        if not record_path.exists():
+            return
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        if not isinstance(record, dict) or int(record.get("pid") or 0) != int(pid):
+            return
+        record["port"] = int(actual_port)
+        if "requested_port" not in record:
+            record["requested_port"] = int(actual_port)
+        record["port_updated_at"] = utc_now_iso()
+        atomic_write_json(record_path, record, trailing_newline=True)
+    except Exception:
+        log.debug("Failed to update server process record port", exc_info=True)
+
+
+def _cleanup_recorded_server_process(reason: str = "preflight") -> None:
+    try:
+        record_path = _server_process_record_path()
+        if not record_path.exists():
+            return
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        if not isinstance(record, dict):
+            record_path.unlink(missing_ok=True)
+            return
+        if not _server_process_identity_matches(record):
+            log.info("Ignoring stale server process record with non-matching identity (%s)", reason)
+            record_path.unlink(missing_ok=True)
+            return
+        pid = int(record.get("pid") or 0)
+        pgid = int(record.get("pgid") or 0)
+        log.info("Cleaning recorded server process pid=%d pgid=%d (%s)", pid, pgid, reason)
+        if not IS_WINDOWS and pgid > 0 and pgid != current_process_group_id():
+            terminate_process_group_id(pgid)
+            time.sleep(0.5)
+            kill_process_group_id(pgid)
+        if pid_is_alive(pid):
+            kill_pid_tree(pid)
+        record_path.unlink(missing_ok=True)
+    except Exception:
+        log.warning("Failed to clean recorded server process (%s)", reason, exc_info=True)
+
+
+def _cleanup_recorded_server_group_for_pid(pid: int, reason: str = "agent_exit") -> None:
+    try:
+        record_path = _server_process_record_path()
+        if not record_path.exists():
+            return
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        if not isinstance(record, dict) or int(record.get("pid") or 0) != int(pid):
+            return
+        pgid = int(record.get("pgid") or 0)
+        live_pgid = process_group_id(int(pid)) if pid_is_alive(int(pid)) else 0
+        if not IS_WINDOWS and live_pgid > 0 and pgid > 0 and pgid != live_pgid:
+            log.info(
+                "Ignoring mismatched recorded server pgid=%d for live pid=%d pgid=%d (%s)",
+                pgid,
+                pid,
+                live_pgid,
+                reason,
+            )
+            pgid = 0
+        if not IS_WINDOWS and pgid > 0 and pgid != current_process_group_id():
+            log.info("Cleaning server process group pgid=%d after pid=%d exit (%s)", pgid, pid, reason)
+            terminate_process_group_id(pgid)
+            time.sleep(0.2)
+            kill_process_group_id(pgid)
+        if pid_is_alive(int(pid)):
+            kill_pid_tree(int(pid))
+        record_path.unlink(missing_ok=True)
+    except Exception:
+        log.warning("Failed to clean recorded server process group (%s)", reason, exc_info=True)
+
+
 def start_agent(port: int = AGENT_SERVER_PORT) -> subprocess.Popen:
-    """Start the agent server.py as a subprocess."""
+    """Start server.py as the managed agent subprocess."""
     global _agent_proc, _agent_job
 
     settings = _load_settings()
     _apply_settings_to_env(settings)
-    env = os.environ.copy()
+    env = python_bytecode_env(DATA_DIR, os.environ.copy())
     env["PYTHONPATH"] = str(REPO_DIR)
     saved_host = str(settings.get("OUROBOROS_SERVER_HOST") or "").strip()
     if saved_host:
@@ -315,6 +421,8 @@ def start_agent(port: int = AGENT_SERVER_PORT) -> subprocess.Popen:
             | _CREATE_NEW_PROCESS_GROUP
             | _CREATE_SUSPENDED
         )
+    else:
+        popen_kwargs.update(subprocess_new_group_kwargs())
 
     proc = _hidden_popen([EMBEDDED_PYTHON, str(server_py)], **popen_kwargs)
     _agent_proc = proc
@@ -346,6 +454,8 @@ def start_agent(port: int = AGENT_SERVER_PORT) -> subprocess.Popen:
             return proc
         log.info("Agent pid %d assigned to Windows Job Object", proc.pid)
 
+    _write_server_process_record(proc, port=port, server_py=server_py)
+
     def _stream_output() -> None:
         log_path = DATA_DIR / "logs" / "agent_stdout.log"
         try:
@@ -374,23 +484,30 @@ def stop_agent() -> None:
 
     log.info("Stopping agent (pid=%s)...", proc.pid)
     try:
-        proc.terminate()
+        if IS_WINDOWS:
+            proc.terminate()
+        else:
+            terminate_process_tree(proc)
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
         if IS_WINDOWS and job is not None:
             terminate_job(job)
         else:
-            proc.kill()
-        proc.wait(timeout=5)
+            kill_process_tree(proc)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            log.warning("Agent process did not exit after forced stop (pid=%s)", proc.pid)
     except Exception:
         pass
 
     if IS_WINDOWS and job is not None:
         close_job(job)
+    _cleanup_recorded_server_group_for_pid(proc.pid, "stop_agent")
 
 
 def _read_port_file() -> int:
-    """Read the active port from PORT_FILE (written by server.py)."""
+    """Read the active server port from PORT_FILE."""
     try:
         if PORT_FILE.exists():
             return int(PORT_FILE.read_text(encoding="utf-8").strip())
@@ -400,7 +517,7 @@ def _read_port_file() -> int:
 
 
 def _kill_stale_on_port(port: int) -> None:
-    """Kill any process listening on the given port (cleanup from previous runs)."""
+    """Kill any process listening on a runtime port."""
     if IS_WINDOWS:
         kill_process_on_port(port)
         return
@@ -423,8 +540,25 @@ def _kill_stale_on_port(port: int) -> None:
         kill_process_on_port(port)
 
 
+def _host_service_port() -> int:
+    default_port = int(SETTINGS_DEFAULTS.get("OUROBOROS_HOST_SERVICE_PORT", 8767))
+    try:
+        raw_port = os.environ.get("OUROBOROS_HOST_SERVICE_PORT")
+        if not str(raw_port or "").strip():
+            raw_port = _load_settings().get("OUROBOROS_HOST_SERVICE_PORT", default_port)
+        return int(raw_port)
+    except (TypeError, ValueError, OSError):
+        return default_port
+
+
+def _kill_stale_runtime_ports(port: int) -> None:
+    """Clear core runtime listener ports before start/restart."""
+    _kill_stale_on_port(port)
+    _kill_stale_on_port(_host_service_port())
+
+
 def _wait_for_server(port: int, timeout: float = 30.0) -> bool:
-    """Wait for the agent HTTP server to become responsive."""
+    """Wait for the agent HTTP server to respond."""
     import urllib.request
 
     url = f"http://127.0.0.1:{port}/api/health"
@@ -441,7 +575,7 @@ def _wait_for_server(port: int, timeout: float = 30.0) -> bool:
 
 
 def _poll_port_file(timeout: float = 30.0) -> int:
-    """Poll port file until it's freshly written (mtime within last 10s)."""
+    """Poll until the port file is freshly written."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -456,11 +590,12 @@ def _poll_port_file(timeout: float = 30.0) -> int:
 
 
 def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
-    """Main loop: start agent, monitor, restart on exit code 42 or crash."""
+    """Start/monitor agent; restart on code 42 or bounded crashes."""
     global _agent_proc, _agent_job
     crash_times: list[float] = []
 
-    _kill_stale_on_port(port)
+    _cleanup_recorded_server_process("startup")
+    _kill_stale_runtime_ports(port)
 
     while not _shutdown_event.is_set():
         try:
@@ -471,12 +606,14 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
         proc = start_agent(port)
 
         actual_port = _poll_port_file(timeout=30)
+        _update_server_process_record_port(proc.pid, actual_port)
         if not _wait_for_server(actual_port, timeout=45):
             log.warning("Agent server did not become responsive within 45s (port %d)", actual_port)
 
         proc.wait()
         exit_code = proc.returncode
         log.info("Agent exited with code %d", exit_code)
+        _cleanup_recorded_server_group_for_pid(proc.pid, "agent_exit")
 
         with _agent_lock:
             _agent_proc = None
@@ -490,7 +627,7 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
         if exit_code == PANIC_EXIT_CODE:
             log.info("Panic stop (exit code %d) — shutting down completely.", PANIC_EXIT_CODE)
             _shutdown_event.set()
-            _kill_stale_on_port(port)
+            _kill_stale_runtime_ports(port)
             import multiprocessing as _mp
 
             for child in _mp.active_children():
@@ -511,7 +648,7 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
             log.info("Agent requested restart (exit code 42). Restarting...")
             _sync_existing_repo_from_bundle()
             _install_deps()
-            _kill_stale_on_port(port)
+            _kill_stale_runtime_ports(port)
             continue
 
         now = time.time()
@@ -522,34 +659,29 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
             break
 
         log.info("Agent crashed. Restarting in 3s...")
-        _kill_stale_on_port(port)
+        _kill_stale_runtime_ports(port)
         time.sleep(3)
 
-
-# ---------------------------------------------------------------------------
-# Settings and onboarding
-# ---------------------------------------------------------------------------
 def _load_settings() -> dict:
     return load_settings()
 
 
 def _save_settings(settings: dict) -> None:
-    # Launcher is the owner-process boundary: first-run wizard, env-var
-    # migration, and provider-default seeds all flow through here.
-    # ``allow_elevation=True`` lets the owner pick any ``OUROBOROS_RUNTIME_MODE``
-    # at first launch; the agent-callable path (``api_settings_post``,
-    # ``_set_tool_timeout``) keeps the default ``False``.
+    # Owner-process boundary: first-run/env/provider saves may elevate runtime mode.
     save_settings(settings, allow_elevation=True)
 
 
 def _request_runtime_mode_change(mode: str, confirm_fn) -> dict:
     new_mode = normalize_runtime_mode(mode)
     settings = _load_settings()
-    old_mode = normalize_runtime_mode(settings.get("OUROBOROS_RUNTIME_MODE"))
-    if new_mode == old_mode:
-        return {"ok": True, "runtime_mode": new_mode, "restart_required": False}
+    pending_mode = normalize_runtime_mode(settings.get("OUROBOROS_RUNTIME_MODE"))
+    active_mode = get_runtime_mode()
+    restart_required = new_mode != active_mode
+    if new_mode == pending_mode:
+        return {"ok": True, "runtime_mode": new_mode, "restart_required": restart_required}
     message = (
-        f"Change Ouroboros runtime mode from {old_mode} to {new_mode}?\n\n"
+        f"Change Ouroboros runtime mode from {pending_mode} to {new_mode}?\n\n"
+        f"Current boot is still running in {active_mode} mode. "
         "This is an owner-only operation. The new mode is saved by the "
         "desktop launcher and takes effect after restart."
     )
@@ -557,18 +689,43 @@ def _request_runtime_mode_change(mode: str, confirm_fn) -> dict:
         return {"ok": False, "error": "Runtime mode change cancelled."}
     settings["OUROBOROS_RUNTIME_MODE"] = new_mode
     _save_settings(settings)
-    return {"ok": True, "runtime_mode": new_mode, "restart_required": True}
+    return {"ok": True, "runtime_mode": new_mode, "restart_required": restart_required}
+
+
+def _request_auto_grant_reviewed_skills_change(enabled: bool, confirm_fn) -> dict:
+    settings = _load_settings()
+    old_enabled = str(settings.get("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS") or "false").strip().lower() in {"1", "true", "yes", "on"}
+    new_enabled = bool(enabled)
+    if new_enabled == old_enabled:
+        return {"ok": True, "enabled": new_enabled}
+    if new_enabled:
+        message = (
+            "Enable auto-grant for reviewed skills?\n\n"
+            "After this, any fresh executable skill review will grant the "
+            "skill's manifest-declared settings keys and host permissions for "
+            "that exact content hash. Only enable this for trusted closed-loop "
+            "skill development."
+        )
+    else:
+        message = "Disable auto-grant for reviewed skills?"
+    if not confirm_fn("Confirm Reviewed Skill Auto-Grant", message):
+        return {"ok": False, "error": "Auto-grant setting change cancelled."}
+    settings["OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS"] = "true" if new_enabled else "false"
+    _save_settings(settings)
+    return {"ok": True, "enabled": new_enabled}
 
 
 def _request_skill_key_grant(skill: str, keys: list, confirm_fn) -> dict:
     from ouroboros.skill_loader import (
         find_skill,
         requested_core_setting_keys,
+        requested_skill_permissions,
+        review_status_allows_execution,
         save_skill_grants,
     )
 
     skill_name = str(skill or "").strip()
-    requested = [str(k or "").strip().upper() for k in (keys or []) if str(k or "").strip()]
+    requested_raw = [str(k or "").strip() for k in (keys or []) if str(k or "").strip()]
     loaded = find_skill(
         DATA_DIR,
         skill_name,
@@ -577,42 +734,43 @@ def _request_skill_key_grant(skill: str, keys: list, confirm_fn) -> dict:
     if loaded is None:
         return {"ok": False, "error": f"Skill {skill_name!r} not found"}
     if not (loaded.manifest.is_script() or loaded.manifest.is_extension()):
-        return {"ok": False, "error": "Core-key grants are supported for script and extension skills."}
-    if loaded.review.status != "pass" or loaded.review.is_stale_for(loaded.content_hash):
-        return {"ok": False, "error": "Key grants require a fresh PASS review."}
+        return {"ok": False, "error": "Key and permission grants are supported for script and extension skills."}
+    if not review_status_allows_execution(loaded.review.status) or loaded.review.is_stale_for(loaded.content_hash):
+        return {"ok": False, "error": "Key and permission grants require a fresh executable review."}
     allowed = requested_core_setting_keys(list(loaded.manifest.env_from_settings or []))
-    if not requested or any(key not in allowed for key in requested):
-        return {"ok": False, "error": f"Grant keys must be requested by the current manifest: {allowed}"}
-    message = (
-        f"Grant skill {loaded.name!r} access to these settings keys?\n\n"
-        + "\n".join(requested)
-        + "\n\nOnly grant keys to reviewed skills you trust."
+    allowed_permissions = requested_skill_permissions(
+        list(getattr(loaded.manifest, "permissions", []) or []),
+        list(getattr(loaded.manifest, "subscribe_events", []) or []),
     )
-    if not confirm_fn("Confirm Skill Key Grant", message):
-        return {"ok": False, "error": "Skill key grant cancelled."}
+    allowed_permission_map = {permission.lower(): permission for permission in allowed_permissions}
+    requested_keys = [item.upper() for item in requested_raw if item.upper() in allowed]
+    requested_permissions = [
+        allowed_permission_map[item.lower()]
+        for item in requested_raw
+        if item.lower() in allowed_permission_map
+    ]
+    if not requested_raw or len(requested_keys) + len(requested_permissions) != len(requested_raw):
+        return {
+            "ok": False,
+            "error": f"Grant items must be requested by the current manifest: keys={allowed}, permissions={allowed_permissions}",
+        }
+    message = (
+        f"Grant skill {loaded.name!r} access to these settings keys / host permissions?\n\n"
+        + "\n".join([*requested_keys, *requested_permissions])
+        + "\n\nOnly grant keys and permissions to reviewed skills you trust."
+    )
+    if not confirm_fn("Confirm Skill Grant", message):
+        return {"ok": False, "error": "Skill grant cancelled."}
     save_skill_grants(
         DATA_DIR,
         loaded.name,
-        requested,
+        requested_keys,
         content_hash=loaded.content_hash,
         requested_keys=allowed,
+        granted_permissions=requested_permissions,
+        requested_permissions=allowed_permissions,
     )
-    # v5.2.2 dual-track grants: extensions need a runtime reconcile so
-    # the just-granted core key reaches ``PluginAPIImpl.get_settings``
-    # without forcing the operator to toggle disable/enable. Scripts
-    # pick up the grant on the next ``skill_exec`` call automatically
-    # via ``_scrub_env`` so they do not need this reload.
-    #
-    # Cross-process boundary: launcher.py and server.py are independent
-    # OS processes. The launcher cannot mutate the server's in-process
-    # ``extension_loader._extensions`` / ``_load_failures`` dicts; an
-    # in-launcher ``reconcile_extension`` call would only mutate dead
-    # state and additionally execute the plugin's ``register(api)``
-    # inside the immutable launcher process, which violates the
-    # launcher contract documented at the top of this file. We POST to
-    # the agent server's loopback ``/api/skills/<skill>/reconcile``
-    # endpoint instead, which clears the server's cached load failure
-    # and re-runs ``load_extension`` in the right address space.
+    # Extension grants must reconcile inside server.py, not the immutable launcher process.
     extension_action = None
     extension_reason = None
     extension_load_error = None
@@ -644,7 +802,8 @@ def _request_skill_key_grant(skill: str, keys: list, confirm_fn) -> dict:
     return {
         "ok": True,
         "skill": loaded.name,
-        "granted_keys": requested,
+        "granted_keys": requested_keys,
+        "granted_permissions": requested_permissions,
         "extension_action": extension_action,
         "extension_reason": extension_reason,
         "load_error": extension_load_error,
@@ -755,10 +914,6 @@ def _run_first_run_wizard() -> bool:
     webview.start()
     return _wizard_done["ok"]
 
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 def main():
     if IS_WINDOWS:
         ok, reason = _prepare_windows_webview_runtime()
@@ -920,6 +1075,18 @@ def main():
                 log.warning("Runtime mode native confirmation failed: %s", exc, exc_info=True)
                 return {"ok": False, "error": f"Native confirmation failed: {exc}"}
 
+        def request_auto_grant_reviewed_skills_change(self, enabled: bool) -> dict:
+            try:
+                return _request_auto_grant_reviewed_skills_change(
+                    bool(enabled),
+                    lambda title, message: bool(
+                        _webview_window and _webview_window.create_confirmation_dialog(title, message)
+                    ),
+                )
+            except Exception as exc:
+                log.warning("Reviewed-skill auto-grant confirmation failed: %s", exc, exc_info=True)
+                return {"ok": False, "error": f"Native confirmation failed: {exc}"}
+
         def request_skill_key_grant(self, skill: str, keys: list) -> dict:
             try:
                 return _request_skill_key_grant(
@@ -982,9 +1149,27 @@ def main():
     )
 
     def _kill_orphaned_children() -> None:
-        """Final safety net: kill any processes still on the server port."""
-        _kill_stale_on_port(port)
+        """Final safety net: kill processes still on runtime ports."""
+        _cleanup_recorded_server_process("window_close")
+        _kill_stale_runtime_ports(port)
         _kill_stale_on_port(8766)
+        try:
+            companions = json.loads((DATA_DIR / "state" / "extension_companions.json").read_text(encoding="utf-8"))
+            if isinstance(companions, dict):
+                for item in companions.values():
+                    if not isinstance(item, dict):
+                        continue
+                    try:
+                        force_kill_pid(int(item.get("pid") or 0))
+                    except (TypeError, ValueError, ProcessLookupError, PermissionError, OSError):
+                        pass
+                    for companion_port in item.get("ports") or []:
+                        try:
+                            kill_process_on_port(int(companion_port))
+                        except (TypeError, ValueError, OSError):
+                            pass
+        except Exception:
+            pass
         for child in __import__("multiprocessing").active_children():
             try:
                 force_kill_pid(child.pid)

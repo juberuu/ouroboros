@@ -1,18 +1,4 @@
-"""
-Ouroboros — Background Consciousness.
-
-A persistent thinking loop that runs between tasks, giving the agent
-continuous presence rather than purely reactive behavior.
-
-The consciousness:
-- Wakes periodically (interval decided by the LLM via set_next_wakeup)
-- Loads scratchpad, identity, recent events
-- Calls the LLM with a lightweight introspection prompt
-- Has access to a subset of tools (memory, messaging, scheduling)
-- Can message the user proactively
-- Can schedule tasks for itself
-- Pauses when a regular task is running
-"""
+"""Background thinking loop with scoped tools and no silent context drops."""
 
 from __future__ import annotations
 
@@ -29,15 +15,21 @@ from typing import Any, Callable, Dict, List, Optional
 
 from ouroboros.loop_tool_execution import StatefulToolExecutor, _truncate_tool_result
 from ouroboros.utils import (
-    utc_now_iso, read_text, append_jsonl,
-    truncate_for_log, sanitize_tool_result_for_log, sanitize_tool_args_for_log,
+    append_jsonl,
+    emit_log_event,
+    read_text,
+    sanitize_tool_args_for_log,
+    sanitize_tool_result_for_log,
+    truncate_for_log,
+    utc_now_iso,
 )
-from ouroboros.config import resolve_effort
-from ouroboros.llm import LLMClient, DEFAULT_LIGHT_MODEL
+from ouroboros.config import get_light_model, resolve_effort
+from ouroboros.llm import LLMClient
 from ouroboros.memory import Memory
 from ouroboros.context import (
     build_runtime_section, build_memory_sections,
-    build_recent_sections, build_health_invariants, safe_read,
+    build_recent_sections, build_health_invariants,
+    build_knowledge_sections, build_governance_sections, safe_read,
 )
 
 log = logging.getLogger(__name__)
@@ -74,7 +66,6 @@ class BackgroundConsciousness:
         self._deferred_events: list = []
         self._tool_executor = StatefulToolExecutor()
 
-        # Budget tracking
         self._bg_spent_usd: float = 0.0
         self._bg_budget_pct: float = float(
             os.environ.get("OUROBOROS_BG_BUDGET_PCT", "10")
@@ -83,10 +74,6 @@ class BackgroundConsciousness:
         self._last_cycle_finished_at: str = ""
         self._last_idle_reason: str = "stopped"
         self._last_error: str = ""
-
-    # -------------------------------------------------------------------
-    # Lifecycle
-    # -------------------------------------------------------------------
 
     @property
     def is_running(self) -> bool:
@@ -98,7 +85,7 @@ class BackgroundConsciousness:
 
     @property
     def _model(self) -> str:
-        return os.environ.get("OUROBOROS_MODEL_LIGHT", "") or DEFAULT_LIGHT_MODEL
+        return get_light_model()
 
     def status_snapshot(self) -> Dict[str, Any]:
         return {
@@ -137,12 +124,12 @@ class BackgroundConsciousness:
         return "Background consciousness stopping."
 
     def pause(self) -> None:
-        """Pause during task execution to avoid budget contention."""
+        """Pause during foreground task execution."""
         self._paused = True
         self._last_idle_reason = "paused_by_active_task"
 
     def resume(self) -> None:
-        """Resume after task completes. Flush any deferred events first."""
+        """Resume after a task and flush deferred events first."""
         if self._deferred_events and self._event_queue is not None:
             for evt in self._deferred_events:
                 self._event_queue.put(evt)
@@ -152,49 +139,39 @@ class BackgroundConsciousness:
         self._wakeup_event.set()
 
     def inject_observation(self, text: str) -> None:
-        """Push an event the consciousness should notice."""
+        """Push an observation for the next background cycle."""
         try:
             self._observations.put_nowait(text)
         except queue.Full:
             pass
 
     def _emit_live_log(self, event_type: str, **fields: Any) -> None:
-        if self._event_queue is None:
-            return
-        try:
-            self._event_queue.put({
-                "type": "log_event",
-                "data": {
-                    "type": event_type,
-                    "ts": utc_now_iso(),
-                    "task_id": "bg-consciousness",
-                    "task_type": "consciousness",
-                    **fields,
-                },
-            })
-        except Exception:
-            log.debug("Failed to emit consciousness live log", exc_info=True)
-
-    # -------------------------------------------------------------------
-    # Main loop
-    # -------------------------------------------------------------------
+        emit_log_event(
+            self._event_queue,
+            {
+                "type": event_type,
+                "ts": utc_now_iso(),
+                "task_id": "bg-consciousness",
+                "task_type": "consciousness",
+                **fields,
+            },
+            blocking=True,
+            log_label="consciousness live",
+        )
 
     def _loop(self) -> None:
-        """Daemon thread: sleep → wake → think → sleep."""
+        """Daemon thread: sleep, wake, think, repeat."""
         while not self._stop_event.is_set():
-            # Wait for next wakeup
             self._wakeup_event.clear()
             self._wakeup_event.wait(timeout=self._next_wakeup_sec)
 
             if self._stop_event.is_set():
                 break
 
-            # Skip if paused (task running)
             if self._paused:
                 self._last_idle_reason = "paused_by_active_task"
                 continue
 
-            # Budget check
             if not self._check_budget():
                 self._last_idle_reason = "budget_blocked"
                 self._next_wakeup_sec = self._wakeup_max
@@ -206,8 +183,7 @@ class BackgroundConsciousness:
                 self._last_error = ""
                 cycle_completed = self._think()
                 self._last_cycle_finished_at = utc_now_iso()
-                # Only set 'sleeping' for normal completions.
-                # Context overflow or LLM errors set their own distinct status inside _think().
+                # Preserve distinct overflow/LLM error statuses set inside _think().
                 if cycle_completed and not self._stop_event.is_set() and not self._paused:
                     self._last_idle_reason = "sleeping"
             except Exception as e:
@@ -226,7 +202,7 @@ class BackgroundConsciousness:
         self._last_idle_reason = "stopped"
 
     def _check_budget(self) -> bool:
-        """Check if background consciousness is within its budget allocation."""
+        """Return whether background consciousness is within its budget."""
         try:
             total_budget = float(os.environ.get("TOTAL_BUDGET", "1"))
             if total_budget <= 0:
@@ -237,21 +213,12 @@ class BackgroundConsciousness:
             log.warning("Failed to check background consciousness budget", exc_info=True)
             return True
 
-    # -------------------------------------------------------------------
-    # Think cycle
-    # -------------------------------------------------------------------
-
     def _think(self) -> bool:
-        """One thinking cycle: build context, call LLM, execute tools iteratively.
-
-        Returns True if the cycle completed normally, False if it was skipped
-        (e.g. context overflow).  _loop() uses this to set a distinct status
-        instead of overwriting last_idle_reason with 'sleeping'.
-        """
+        """Run one context/LLM/tools cycle; False preserves skip/error status."""
         try:
             context = self._build_context()
         except OverflowError as exc:
-            # Context too large — skip this wakeup cycle entirely (P1: no silent truncation).
+            # P1: skip the cycle rather than silently truncating cognitive context.
             log.warning("consciousness: wakeup cycle skipped: %s", exc)
             self._last_idle_reason = "context_overflow"
             append_jsonl(self._drive_root / "logs" / "events.jsonl", {
@@ -271,7 +238,7 @@ class BackgroundConsciousness:
         total_cost = 0.0
         final_content = ""
         round_idx = 0
-        all_pending_events = []  # Accumulate events across all tool calls
+        all_pending_events = []
 
         try:
             for round_idx in range(1, self._max_bg_rounds + 1):
@@ -286,22 +253,26 @@ class BackgroundConsciousness:
                     reasoning_effort="low",
                     use_local=bool(_use_local_light),
                 )
-                msg, usage = self._llm.chat(
+                from ouroboros.llm_observability import chat_observed
+
+                msg, usage = chat_observed(
+                    self._llm,
+                    drive_root=self._drive_root,
+                    task_id="consciousness",
+                    call_type="consciousness_round",
                     messages=messages,
                     model=model,
                     tools=tools,
                     reasoning_effort=resolve_effort("consciousness"),
-                    max_tokens=4096,
+                    max_tokens=65536,
                     use_local=_use_local_light,
                 )
                 cost = float(usage.get("cost") or 0)
                 total_cost += cost
                 self._bg_spent_usd += cost
 
-                # Global budget update happens via event queue → events.py _handle_llm_usage.
-                # Do NOT call update_budget_from_usage directly here — that would double-count.
+                # Global budget updates via events.py; direct updates would double-count.
 
-                # Budget check between rounds
                 if not self._check_budget():
                     self._last_idle_reason = "budget_blocked"
                     append_jsonl(self._drive_root / "logs" / "events.jsonl", {
@@ -311,7 +282,6 @@ class BackgroundConsciousness:
                     })
                     break
 
-                # Report usage to supervisor
                 if self._event_queue is not None:
                     provider = "local" if _use_local_light else "openrouter"
                     model_name = f"{model} (local)" if _use_local_light else model
@@ -349,12 +319,10 @@ class BackgroundConsciousness:
                 if self._paused:
                     break
 
-                # If we have content but no tool calls, we're done
                 if content and not tool_calls:
                     final_content = content
                     break
 
-                # If we have tool calls, execute them and continue loop
                 if tool_calls:
                     messages.append(msg)
                     for tc in tool_calls:
@@ -366,10 +334,8 @@ class BackgroundConsciousness:
                         })
                     continue
 
-                # If neither content nor tool_calls, stop
                 break
 
-            # Forward or defer accumulated events
             if all_pending_events and self._event_queue is not None:
                 if self._paused:
                     self._deferred_events.extend(all_pending_events)
@@ -377,7 +343,6 @@ class BackgroundConsciousness:
                     for evt in all_pending_events:
                         self._event_queue.put(evt)
 
-            # Log the thought with round count
             append_jsonl(self._drive_root / "logs" / "events.jsonl", {
                 "ts": utc_now_iso(),
                 "type": "consciousness_thought",
@@ -395,8 +360,7 @@ class BackgroundConsciousness:
                 "error": repr(e),
             })
             self._last_idle_reason = "llm_error"
-            # Apply exponential backoff so persistent provider/tool failures don't
-            # keep waking at the normal interval (mirrors _loop()'s error_backoff path).
+            # Back off persistent provider/tool failures.
             self._next_wakeup_sec = min(self._next_wakeup_sec * 2, self._wakeup_max)
             return False
 
@@ -417,7 +381,6 @@ class BackgroundConsciousness:
             "is_progress": True,
         }
         persist_locally = self._event_queue is None or chat_id is None
-        # 1. UI event queue (only if we have a chat_id)
         if self._event_queue is not None and chat_id is not None:
             try:
                 if self._paused:
@@ -427,16 +390,11 @@ class BackgroundConsciousness:
             except Exception:
                 log.warning("Failed to emit progress event", exc_info=True)
                 persist_locally = False
-        # 2. Persist directly only when the event will not go through supervisor
         if persist_locally:
             append_jsonl(self._drive_root / "logs" / "progress.jsonl", entry)
 
-    # -------------------------------------------------------------------
-    # Context building (lightweight)
-    # -------------------------------------------------------------------
-
     def _load_bg_prompt(self) -> str:
-        """Load consciousness system prompt from file."""
+        """Load consciousness system prompt."""
         prompt_path = self._repo_dir / "prompts" / "CONSCIOUSNESS.md"
         if prompt_path.exists():
             return read_text(prompt_path)
@@ -450,64 +408,21 @@ class BackgroundConsciousness:
 
         parts = [self._load_bg_prompt()]
 
-        # BIBLE.md — full
-        bible_md = safe_read(env.repo_path("BIBLE.md"))
-        if bible_md:
-            parts.append("## BIBLE.md\n\n" + bible_md)
-
-        # Section size warning threshold — defined early so all sections can use it.
-        _BG_SECTION_WARN_CHARS = 200_000  # warn if a single section exceeds ~50K tokens
-
-        # ARCHITECTURE.md — full (core cognitive artifact; must not be omitted)
-        # Per docs/DEVELOPMENT.md Core Governance Artifacts invariant: log a warning
-        # if the file is missing so the operator knows context is incomplete.
-        architecture_md = safe_read(env.repo_path("docs/ARCHITECTURE.md"))
-        if architecture_md:
-            if len(architecture_md) > _BG_SECTION_WARN_CHARS:
-                import logging as _logging
-                _logging.getLogger(__name__).warning(
-                    "consciousness: ARCHITECTURE.md is large (%d chars) — "
-                    "consider restructuring if this consistently causes context overflow",
-                    len(architecture_md),
-                )
-            parts.append("## ARCHITECTURE.md\n\n" + architecture_md)
-        else:
-            import logging as _logging
-            _logging.getLogger(__name__).warning(
-                "consciousness: docs/ARCHITECTURE.md not found or empty — "
-                "background consciousness is operating without architectural context"
+        if not (self._repo_dir / "docs" / "ARCHITECTURE.md").is_file():
+            logging.getLogger(__name__).warning(
+                "consciousness: docs/ARCHITECTURE.md not found or empty"
             )
+        parts.extend(build_governance_sections(env, warn_large=True, warn_label="consciousness"))
 
-        # Memory sections: scratchpad, identity, dialogue summary (full size)
         parts.extend(build_memory_sections(memory))
 
-        # Knowledge base index — full content, no clip_text.
-        # If content grows very large, emit a warning rather than silently truncating.
-        kb_index_path = env.drive_path("memory/knowledge/index-full.md")
-        if kb_index_path.exists():
-            kb_index = kb_index_path.read_text(encoding="utf-8")
-            if kb_index.strip():
-                if len(kb_index) > _BG_SECTION_WARN_CHARS:
-                    import logging as _logging
-                    _logging.getLogger(__name__).warning(
-                        "consciousness: knowledge index is large (%d chars) — "
-                        "consider grooming to keep consciousness context slim",
-                        len(kb_index),
-                    )
-                parts.append("## Knowledge base\n\n" + kb_index)
-
-        # Pattern register (P2 Meta-over-Patch) — full content, no clip_text.
-        patterns_path = env.drive_path("memory/knowledge/patterns.md")
-        if patterns_path.exists():
-            patterns_text = patterns_path.read_text(encoding="utf-8")
-            if patterns_text.strip():
-                if len(patterns_text) > _BG_SECTION_WARN_CHARS:
-                    import logging as _logging
-                    _logging.getLogger(__name__).warning(
-                        "consciousness: patterns register is large (%d chars)",
-                        len(patterns_text),
-                    )
-                parts.append("## Pattern Register\n\n" + patterns_text)
+        parts.extend(
+            build_knowledge_sections(
+                env,
+                warn_large=True,
+                pattern_header="## Pattern Register",
+            )
+        )
 
         try:
             from ouroboros.improvement_backlog import format_backlog_digest
@@ -518,27 +433,23 @@ class BackgroundConsciousness:
         except Exception:
             log.debug("Failed to include improvement backlog in consciousness context", exc_info=True)
 
-        # Health invariants
         health_section = build_health_invariants(env)
         if health_section:
             parts.append(health_section)
 
-        # Drive state — full content, no clip_text.
+        # Full drive state: no clip_text here.
         state_json = safe_read(env.drive_path("state/state.json"), fallback="{}")
-        if len(state_json) > _BG_SECTION_WARN_CHARS:
-            import logging as _logging
-            _logging.getLogger(__name__).warning(
+        if len(state_json) > 200_000:
+            log.warning(
                 "consciousness: drive state JSON is large (%d chars)", len(state_json)
             )
         parts.append("## Drive state\n\n" + state_json)
 
-        # Runtime section (same as main agent)
         parts.append(build_runtime_section(env, bg_task))
 
-        # Recent sections — empty task_id so we get ALL tasks' progress/tools/events
+        # Empty task_id includes recent sections across tasks.
         parts.extend(build_recent_sections(memory, env, task_id=""))
 
-        # Recent observations (consciousness-specific)
         observations = []
         while not self._observations.empty():
             try:
@@ -549,7 +460,6 @@ class BackgroundConsciousness:
             parts.append("## Recent observations\n\n" + "\n".join(
                 f"- {o}" for o in observations[-10:]))
 
-        # BG-specific runtime info
         bg_info_lines = [
             f"BG budget spent: ${self._bg_spent_usd:.4f}",
             f"Current wakeup interval: {self._next_wakeup_sec}s",
@@ -557,59 +467,43 @@ class BackgroundConsciousness:
         ]
         parts.append("## Background consciousness info\n\n" + "\n".join(bg_info_lines))
 
-        # Overflow guard (P1: cognitive artifacts must not be silently dropped).
-        # BIBLE P1: compaction only through explicit summarization preserving substance.
-        # Hard limit: if context would exceed the safe budget, fail this wakeup cycle
-        # fast with a clear error rather than truncating or omitting cognitive content.
-        # Warn-only threshold allows detecting growth before it becomes a hard failure.
+        # P1 guard: warn when large, fail the wakeup instead of truncating artifacts.
         _BG_TOTAL_WARN_CHARS = 600_000   # ~150K tokens — warn but proceed
         _BG_TOTAL_MAX_CHARS = 1_200_000  # ~300K tokens — fail fast (P1 compliance)
         full_text = "\n\n".join(parts)
         if len(full_text) > _BG_TOTAL_MAX_CHARS:
-            import logging as _logging
-            _logging.getLogger(__name__).warning(
+            log.warning(
                 "consciousness: context too large (%d chars > %d limit) — "
                 "skipping wakeup cycle; groom memory (knowledge, patterns, scratchpad) "
                 "to reduce size",
                 len(full_text), _BG_TOTAL_MAX_CHARS,
             )
-            # Raise so _think() / _run() can catch and log without dropping artifacts.
             raise OverflowError(
                 f"Background consciousness context too large ({len(full_text):,} chars). "
                 "Groom memory to continue."
             )
         if len(full_text) > _BG_TOTAL_WARN_CHARS:
-            import logging as _logging
-            _logging.getLogger(__name__).warning(
+            log.warning(
                 "consciousness: context is large (%d chars) — consider grooming memory",
                 len(full_text),
             )
         return full_text
 
-    # -------------------------------------------------------------------
-    # Tool registry (separate instance for consciousness, not shared with agent)
-    # -------------------------------------------------------------------
-
     _BG_TOOL_WHITELIST = frozenset({
-        # Memory & identity
-        "send_user_message", "schedule_task", "update_scratchpad",
+        "send_user_message", "schedule_subagent", "update_scratchpad",
         "update_identity", "set_next_wakeup",
-        # Knowledge base
         "knowledge_read", "knowledge_write", "knowledge_list",
-        # Read-only tools for awareness
-        "web_search", "repo_read", "repo_list", "data_read", "data_list",
-        "chat_history",
-        # GitHub Issues
+        "web_search", "read_file", "list_files",
+        "chat_history", "get_task_result", "wait_task", "wait_tasks",
         "list_github_issues", "get_github_issue",
     })
 
     def _build_registry(self) -> "ToolRegistry":
-        """Create a ToolRegistry scoped to consciousness-allowed tools."""
+        """Create a ToolRegistry scoped to background-allowed tools."""
         from ouroboros.tools.registry import ToolRegistry, ToolContext, ToolEntry
 
         registry = ToolRegistry(repo_dir=self._repo_dir, drive_root=self._drive_root)
 
-        # Register consciousness-specific tool (modifies self._next_wakeup_sec)
         def _set_next_wakeup(ctx: Any, seconds: int = 300) -> str:
             self._next_wakeup_sec = max(self._wakeup_min, min(self._wakeup_max, int(seconds)))
             return f"OK: next wakeup in {self._next_wakeup_sec}s"
@@ -627,14 +521,14 @@ class BackgroundConsciousness:
         return registry
 
     def _tool_schemas(self) -> List[Dict[str, Any]]:
-        """Return tool schemas filtered to the consciousness whitelist."""
+        """Return tool schemas filtered to the background whitelist."""
         return [
             s for s in self._registry.schemas()
             if s.get("function", {}).get("name") in self._BG_TOOL_WHITELIST
         ]
 
     def _execute_tool(self, tc: Dict[str, Any], all_pending_events: List[Dict[str, Any]]) -> str:
-        """Execute a consciousness tool call with timeout. Returns result string."""
+        """Execute a background tool call with timeout."""
         fn_name = tc.get("function", {}).get("name", "")
         if fn_name not in self._BG_TOOL_WHITELIST:
             return f"Tool {fn_name} not available in background mode."
@@ -653,6 +547,14 @@ class BackgroundConsciousness:
         chat_id = self._owner_chat_id_fn()
         self._registry._ctx.current_chat_id = chat_id
         self._registry._ctx.pending_events = []
+        self._registry._ctx.event_queue = self._event_queue
+        self._registry._ctx.task_id = "bg-consciousness"
+        self._registry._ctx.task_metadata = {
+            "root_task_id": "bg-consciousness",
+            "session_id": "background-consciousness",
+            "actor_id": "background-consciousness",
+            "delegation_role": "background",
+        }
 
         timeout_sec = self._registry.get_timeout(fn_name)
         result = None

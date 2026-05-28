@@ -8,7 +8,7 @@ owner-only:
 2. ``ouroboros.tools.core._data_write`` refuses writes whose resolved
    absolute path matches ``SETTINGS_PATH`` (handles symlinks /
    case-insensitive filesystems).
-3. ``server.py::_merge_settings_payload`` drops ``OUROBOROS_RUNTIME_MODE``
+3. ``gateway/settings.py::_merge_settings_payload`` drops ``OUROBOROS_RUNTIME_MODE``
    from the API body so a loopback POST cannot raise the agent's
    privilege scope (with belt-and-braces ``api_settings_post`` revert).
 4. ``_set_tool_timeout`` (the live-flip chain that bypasses /api/settings)
@@ -67,6 +67,18 @@ def isolated_settings(tmp_path, monkeypatch):
 def _seed_disk(settings_path: pathlib.Path, payload: dict) -> None:
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _clear_safety_provider_env(monkeypatch) -> None:
+    """Keep post-check tests from depending on live safety LLM credentials."""
+    for key in (
+        "OPENROUTER_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_COMPATIBLE_API_KEY",
+        "CLOUDRU_FOUNDATION_MODELS_API_KEY",
+    ):
+        monkeypatch.delenv(key, raising=False)
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +210,164 @@ def test_data_write_blocks_skill_grants_json(tmp_path, monkeypatch):
     assert not (drive_root / "state" / "skills" / "weather" / "grants.json").exists()
 
 
-@pytest.mark.parametrize("filename", ["review.json", "enabled.json", "clawhub.json"])
+def test_data_read_supports_line_ranges(tmp_path):
+    from ouroboros.tools.core import _data_read
+
+    ctx = _make_drive_ctx(tmp_path)
+    target = ctx.drive_root / "skills" / "external" / "demo" / "notes.txt"
+    target.parent.mkdir(parents=True)
+    target.write_text("one\ntwo\nthree\nfour\n", encoding="utf-8")
+
+    result = _data_read(ctx, "skills/external/demo/notes.txt", start_line=2, max_lines=2)
+
+    assert "lines 2–3 of 4" in result
+    assert "two\nthree\n" in result
+    assert "one" not in result
+
+
+def test_data_read_does_not_slice_memory_by_default(tmp_path):
+    from ouroboros.tools.core import _data_read
+
+    ctx = _make_drive_ctx(tmp_path)
+    target = ctx.drive_root / "memory" / "identity.md"
+    target.parent.mkdir(parents=True)
+    body = "\n".join(f"line-{idx}" for idx in range(2105)) + "\n"
+    target.write_text(body, encoding="utf-8")
+
+    result = _data_read(ctx, "memory/identity.md")
+
+    assert result == body
+    assert "lines 1–2000" not in result
+
+
+def test_data_read_cognitive_bad_line_args_are_tolerant(tmp_path):
+    from ouroboros.tools.core import _data_read
+
+    ctx = _make_drive_ctx(tmp_path)
+    target = ctx.drive_root / "memory" / "identity.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("alpha\nbeta\n", encoding="utf-8")
+
+    result = _data_read(ctx, "memory/identity.md", start_line="abc", max_lines="bad")
+
+    assert result == "alpha\nbeta\n"
+
+
+def test_data_write_marks_new_external_skill_self_authored(tmp_path, monkeypatch):
+    from ouroboros import config as cfg
+    from ouroboros.tools.core import _data_write
+
+    drive_root = tmp_path / "data"
+    drive_root.mkdir()
+    monkeypatch.setattr(cfg, "DATA_DIR", drive_root, raising=True)
+    ctx = _make_drive_ctx(tmp_path)
+    ctx.current_chat_id = 123
+    ctx.task_id = "task-1"
+
+    result = _data_write(
+        ctx,
+        "skills/external/demo/SKILL.md",
+        "---\nname: demo\ntype: instruction\n---\nbody\n",
+    )
+
+    assert result.startswith("OK:")
+    marker = drive_root / "skills" / "external" / "demo" / ".self_authored.json"
+    data = json.loads(marker.read_text(encoding="utf-8"))
+    assert data["origin"] == "self_authored"
+    assert data["chat_id"] == 123
+    assert data["task_id"] == "task-1"
+    state_marker = drive_root / "state" / "skills" / "demo" / "self_authored.json"
+    assert json.loads(state_marker.read_text(encoding="utf-8"))["task_id"] == "task-1"
+
+
+def test_malformed_self_authored_marker_is_not_trusted(tmp_path, monkeypatch):
+    from ouroboros import config as cfg
+    from ouroboros.skill_loader import is_self_authored_skill_dir
+
+    drive_root = tmp_path / "data"
+    skill_dir = drive_root / "skills" / "external" / "demo"
+    state_dir = drive_root / "state" / "skills" / "demo"
+    skill_dir.mkdir(parents=True)
+    state_dir.mkdir(parents=True)
+    (skill_dir / ".self_authored.json").write_text('{"schema_version":"x","origin":"self_authored"}', encoding="utf-8")
+    (state_dir / "self_authored.json").write_text('{"schema_version":1,"origin":"self_authored"}', encoding="utf-8")
+    monkeypatch.setattr(cfg, "DATA_DIR", drive_root, raising=True)
+
+    assert is_self_authored_skill_dir(skill_dir, drive_root=drive_root) is False
+
+
+def test_data_write_blocks_self_authored_state_marker(tmp_path, monkeypatch):
+    from ouroboros import config as cfg
+    from ouroboros.tools.core import _data_write
+
+    drive_root = tmp_path / "data"
+    drive_root.mkdir()
+    monkeypatch.setattr(cfg, "DATA_DIR", drive_root, raising=True)
+    ctx = _make_drive_ctx(tmp_path)
+
+    result = _data_write(ctx, "state/skills/demo/self_authored.json", '{"origin":"self_authored"}')
+
+    assert "DATA_WRITE_BLOCKED" in result
+    assert not (drive_root / "state" / "skills" / "demo" / "self_authored.json").exists()
+
+
+def test_data_write_blocks_unseeded_native_payload(tmp_path, monkeypatch):
+    from ouroboros import config as cfg
+    from ouroboros.tools.core import _data_write
+
+    drive_root = tmp_path / "data"
+    drive_root.mkdir()
+    monkeypatch.setattr(cfg, "DATA_DIR", drive_root, raising=True)
+    ctx = _make_drive_ctx(tmp_path)
+
+    result = _data_write(
+        ctx,
+        "skills/native/demo/SKILL.md",
+        "---\nname: demo\ntype: instruction\n---\nbody\n",
+    )
+
+    assert "DATA_WRITE_BLOCKED" in result
+    assert "data/skills/native" in result
+    assert not (drive_root / "skills" / "native" / "demo" / "SKILL.md").exists()
+
+
+def test_data_write_blocks_serialized_content_object(tmp_path, monkeypatch):
+    from ouroboros import config as cfg
+    from ouroboros.tools.core import _data_write
+
+    drive_root = tmp_path / "data"
+    drive_root.mkdir()
+    monkeypatch.setattr(cfg, "DATA_DIR", drive_root, raising=True)
+    ctx = _make_drive_ctx(tmp_path)
+
+    result = _data_write(ctx, "skills/external/demo/plugin.py", "{'content': 'print(1)\\n'}")
+
+    assert "DATA_WRITE_BLOCKED" in result
+    assert "serialized tool result" in result
+
+
+def test_str_replace_blocks_self_authored_marker(tmp_path, monkeypatch):
+    from ouroboros.tools.git import _str_replace_editor
+
+    ctx = _make_drive_ctx(tmp_path)
+    marker = ctx.drive_root / "skills" / "external" / "demo" / ".self_authored.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text('{"origin":"self_authored"}\n', encoding="utf-8")
+
+    result = _str_replace_editor(
+        ctx,
+        "skills/external/demo/.self_authored.json",
+        "self_authored",
+        "evil",
+    )
+
+    assert "STR_REPLACE_BLOCKED" in result
+    assert "self_authored" in marker.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("filename", [
+    "review.json", "review_history.jsonl", "accepted_rebuttals.json", "enabled.json", "clawhub.json",
+])
 def test_data_write_blocks_skill_trust_state_json(filename, tmp_path, monkeypatch):
     from ouroboros import config as cfg
     from ouroboros.tools.core import _data_write
@@ -215,6 +384,23 @@ def test_data_write_blocks_skill_trust_state_json(filename, tmp_path, monkeypatc
     )
     assert "DATA_WRITE_BLOCKED" in result
     assert not (drive_root / "state" / "skills" / "weather" / filename).exists()
+
+
+def test_data_read_allows_skill_review_json(tmp_path, monkeypatch):
+    from ouroboros import config as cfg
+    from ouroboros.tools.core import _data_read
+
+    drive_root = tmp_path / "data"
+    review_path = drive_root / "state" / "skills" / "weather" / "review.json"
+    review_path.parent.mkdir(parents=True)
+    review_path.write_text(json.dumps({"status": "pass", "findings": []}), encoding="utf-8")
+    monkeypatch.setattr(cfg, "DATA_DIR", drive_root, raising=True)
+
+    ctx = _make_drive_ctx(tmp_path)
+    result = _data_read(ctx, "state/skills/weather/review.json")
+
+    assert "DATA_READ_BLOCKED" not in result
+    assert '"status": "pass"' in result
 
 
 def test_data_write_blocks_skill_grants_case_variants(tmp_path, monkeypatch):
@@ -320,7 +506,7 @@ def test_data_write_blocks_settings_via_env_override(tmp_path, monkeypatch):
 
 def test_merge_settings_payload_skips_runtime_mode():
     """``_merge_settings_payload`` is the chokepoint for /api/settings POST."""
-    import server as server_mod
+    from ouroboros.gateway import settings as server_mod
 
     old = {"OUROBOROS_RUNTIME_MODE": "light", "OPENAI_API_KEY": "old-key"}
     body = {"OUROBOROS_RUNTIME_MODE": "pro", "OPENAI_API_KEY": "new-key"}
@@ -331,9 +517,153 @@ def test_merge_settings_payload_skips_runtime_mode():
     assert merged["OPENAI_API_KEY"] == "new-key"
 
 
+def test_merge_settings_payload_skips_auto_grant_reviewed_skills():
+    """Auto-grant changes use the dedicated owner endpoint, not /api/settings."""
+    from ouroboros.gateway import settings as server_mod
+
+    old = {"OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "false"}
+    body = {"OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "true"}
+    merged = server_mod._merge_settings_payload(old, body)
+
+    assert merged["OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS"] == "false"
+
+
+def test_owner_runtime_mode_endpoint_persists_next_boot_without_env_elevation(isolated_settings, monkeypatch):
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from ouroboros import config as cfg
+    from ouroboros.gateway.settings import api_owner_runtime_mode
+
+    _seed_disk(isolated_settings, {"OUROBOROS_RUNTIME_MODE": "advanced"})
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    cfg.initialize_runtime_mode_baseline("advanced")
+
+    app = Starlette(routes=[Route("/api/owner/runtime-mode", endpoint=api_owner_runtime_mode, methods=["POST"])])
+    app.state.drive_root = isolated_settings.parent
+    response = TestClient(app).post("/api/owner/runtime-mode", json={"mode": "pro"})
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"ok": True, "runtime_mode": "pro", "restart_required": True}
+    on_disk = json.loads(isolated_settings.read_text(encoding="utf-8"))
+    assert on_disk["OUROBOROS_RUNTIME_MODE"] == "pro"
+    assert os.environ["OUROBOROS_RUNTIME_MODE"] == "advanced"
+    assert os.environ["OUROBOROS_BOOT_RUNTIME_MODE"] == "advanced"
+
+
+def test_owner_runtime_mode_endpoint_reports_no_restart_when_mode_unchanged(isolated_settings, monkeypatch):
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from ouroboros import config as cfg
+    from ouroboros.gateway.settings import api_owner_runtime_mode
+
+    _seed_disk(isolated_settings, {"OUROBOROS_RUNTIME_MODE": "advanced"})
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    cfg.initialize_runtime_mode_baseline("advanced")
+
+    app = Starlette(routes=[Route("/api/owner/runtime-mode", endpoint=api_owner_runtime_mode, methods=["POST"])])
+    app.state.drive_root = isolated_settings.parent
+    response = TestClient(app).post("/api/owner/runtime-mode", json={"mode": "advanced"})
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"ok": True, "runtime_mode": "advanced", "restart_required": False}
+    assert os.environ["OUROBOROS_RUNTIME_MODE"] == "advanced"
+
+
+def test_owner_runtime_mode_endpoint_reports_restart_until_pending_mode_is_active(isolated_settings, monkeypatch):
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from ouroboros import config as cfg
+    from ouroboros.gateway.settings import api_owner_runtime_mode
+
+    _seed_disk(isolated_settings, {"OUROBOROS_RUNTIME_MODE": "pro"})
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    cfg.initialize_runtime_mode_baseline("advanced")
+
+    app = Starlette(routes=[Route("/api/owner/runtime-mode", endpoint=api_owner_runtime_mode, methods=["POST"])])
+    app.state.drive_root = isolated_settings.parent
+    response = TestClient(app).post("/api/owner/runtime-mode", json={"mode": "pro"})
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"ok": True, "runtime_mode": "pro", "restart_required": True}
+    assert os.environ["OUROBOROS_RUNTIME_MODE"] == "advanced"
+
+
+@pytest.mark.parametrize("next_mode", ["pro", "light"])
+def test_generic_settings_save_preserves_pending_runtime_mode_without_hot_apply(
+    isolated_settings,
+    monkeypatch,
+    next_mode,
+):
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from ouroboros import config as cfg
+    from ouroboros.gateway import settings as settings_mod
+    from ouroboros.gateway.settings import api_owner_runtime_mode, api_settings_post
+
+    _seed_disk(isolated_settings, {
+        "OUROBOROS_RUNTIME_MODE": "advanced",
+        "TOTAL_BUDGET": "10",
+    })
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    cfg.initialize_runtime_mode_baseline("advanced")
+    monkeypatch.setattr(settings_mod, "apply_runtime_provider_defaults", lambda s: (s, False, []))
+    monkeypatch.setattr(settings_mod, "_start_supervisor_if_needed_for_request", lambda *_a, **_k: False)
+
+    app = Starlette(routes=[
+        Route("/api/owner/runtime-mode", endpoint=api_owner_runtime_mode, methods=["POST"]),
+        Route("/api/settings", endpoint=api_settings_post, methods=["POST"]),
+    ])
+    app.state.drive_root = isolated_settings.parent
+    client = TestClient(app)
+
+    owner_resp = client.post("/api/owner/runtime-mode", json={"mode": next_mode})
+    assert owner_resp.status_code == 200, owner_resp.text
+    save_resp = client.post("/api/settings", json={"TOTAL_BUDGET": "77"})
+
+    assert save_resp.status_code == 200, save_resp.text
+    on_disk = json.loads(isolated_settings.read_text(encoding="utf-8"))
+    assert on_disk["OUROBOROS_RUNTIME_MODE"] == next_mode
+    assert on_disk["TOTAL_BUDGET"] == 77.0
+    assert os.environ["OUROBOROS_RUNTIME_MODE"] == "advanced"
+    assert os.environ["OUROBOROS_BOOT_RUNTIME_MODE"] == "advanced"
+
+
+def test_owner_auto_grant_endpoint_persists_outside_generic_settings(isolated_settings, monkeypatch):
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from ouroboros.gateway.settings import api_owner_auto_grant
+
+    _seed_disk(isolated_settings, {
+        "OUROBOROS_RUNTIME_MODE": "pro",
+        "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "false",
+    })
+    monkeypatch.delenv("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", raising=False)
+
+    app = Starlette(routes=[Route("/api/owner/auto-grant", endpoint=api_owner_auto_grant, methods=["POST"])])
+    app.state.drive_root = isolated_settings.parent
+    response = TestClient(app).post("/api/owner/auto-grant", json={"enabled": True})
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"ok": True, "enabled": True}
+    on_disk = json.loads(isolated_settings.read_text(encoding="utf-8"))
+    assert on_disk["OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS"] == "true"
+    assert on_disk["OUROBOROS_RUNTIME_MODE"] == "pro"
+    assert os.environ["OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS"] == "true"
+
+
 def test_merge_settings_payload_preserves_other_keys():
     """Sanity: dropping runtime_mode didn't accidentally drop everything else."""
-    import server as server_mod
+    from ouroboros.gateway import settings as server_mod
 
     old = {"OUROBOROS_RUNTIME_MODE": "advanced", "TOTAL_BUDGET": "10.0"}
     body = {"TOTAL_BUDGET": "20.0", "OUROBOROS_REVIEW_ENFORCEMENT": "blocking"}
@@ -405,6 +735,7 @@ def test_launcher_runtime_mode_bridge_saves_after_confirmation(monkeypatch):
     saved = {}
     monkeypatch.setattr(launcher, "_load_settings", lambda: {"OUROBOROS_RUNTIME_MODE": "advanced"})
     monkeypatch.setattr(launcher, "_save_settings", lambda settings: saved.update(settings))
+    monkeypatch.setattr(launcher, "get_runtime_mode", lambda: "advanced")
 
     result = launcher._request_runtime_mode_change("pro", lambda _title, _message: True)
 
@@ -412,6 +743,60 @@ def test_launcher_runtime_mode_bridge_saves_after_confirmation(monkeypatch):
     assert result["runtime_mode"] == "pro"
     assert result["restart_required"] is True
     assert saved["OUROBOROS_RUNTIME_MODE"] == "pro"
+
+
+def test_launcher_runtime_mode_bridge_reports_pending_restart_against_active(monkeypatch):
+    import launcher
+
+    saved = {}
+    monkeypatch.setattr(launcher, "_load_settings", lambda: {"OUROBOROS_RUNTIME_MODE": "pro"})
+    monkeypatch.setattr(launcher, "_save_settings", lambda settings: saved.update(settings))
+    monkeypatch.setattr(launcher, "get_runtime_mode", lambda: "advanced")
+
+    result = launcher._request_runtime_mode_change("pro", lambda _title, _message: False)
+
+    assert result == {"ok": True, "runtime_mode": "pro", "restart_required": True}
+    assert saved == {}
+
+
+def test_launcher_runtime_mode_bridge_can_cancel_pending_mode_without_restart(monkeypatch):
+    import launcher
+
+    saved = {}
+    monkeypatch.setattr(launcher, "_load_settings", lambda: {"OUROBOROS_RUNTIME_MODE": "pro"})
+    monkeypatch.setattr(launcher, "_save_settings", lambda settings: saved.update(settings))
+    monkeypatch.setattr(launcher, "get_runtime_mode", lambda: "advanced")
+
+    result = launcher._request_runtime_mode_change("advanced", lambda _title, _message: True)
+
+    assert result == {"ok": True, "runtime_mode": "advanced", "restart_required": False}
+    assert saved["OUROBOROS_RUNTIME_MODE"] == "advanced"
+
+
+def test_launcher_auto_grant_bridge_saves_after_confirmation(monkeypatch):
+    import launcher
+
+    saved = {}
+    monkeypatch.setattr(launcher, "_load_settings", lambda: {"OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "false"})
+    monkeypatch.setattr(launcher, "_save_settings", lambda settings: saved.update(settings))
+
+    result = launcher._request_auto_grant_reviewed_skills_change(True, lambda _title, _message: True)
+
+    assert result == {"ok": True, "enabled": True}
+    assert saved["OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS"] == "true"
+
+
+def test_launcher_auto_grant_bridge_disables_truthy_alias(monkeypatch):
+    import launcher
+
+    saved = {}
+    monkeypatch.setattr(launcher, "_load_settings", lambda: {"OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "1"})
+    monkeypatch.setattr(launcher, "_save_settings", lambda settings: saved.update(settings))
+
+    result = launcher._request_auto_grant_reviewed_skills_change(False, lambda _title, _message: True)
+
+    assert result == {"ok": True, "enabled": False}
+    assert saved["OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS"] == "false"
 
 
 def test_launcher_skill_key_grant_validates_review_and_manifest(monkeypatch, tmp_path):
@@ -425,7 +810,7 @@ def test_launcher_skill_key_grant_validates_review_and_manifest(monkeypatch, tmp
             return False
 
     class _Review:
-        status = "pass"
+        status = "advisory_pass"
         def is_stale_for(self, _hash):
             return False
 
@@ -463,6 +848,53 @@ def test_launcher_skill_key_grant_validates_review_and_manifest(monkeypatch, tmp
     # skills.
     assert result.get("extension_action") is None
     assert result.get("extension_reason") is None
+
+
+def test_launcher_skill_grant_supports_permission_grants(monkeypatch, tmp_path):
+    import launcher
+
+    class _Manifest:
+        env_from_settings = []
+        permissions = ["inject_chat", "subscribe_event"]
+        subscribe_events = ["chat.outbound"]
+        def is_script(self):
+            return False
+        def is_extension(self):
+            return True
+
+    class _Review:
+        status = "pass"
+        def is_stale_for(self, _hash):
+            return False
+
+    loaded = types.SimpleNamespace(
+        name="bridge",
+        manifest=_Manifest(),
+        review=_Review(),
+        content_hash="hash-a",
+    )
+    captured = {}
+    monkeypatch.setattr(launcher, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(launcher, "_load_settings", lambda: {"OUROBOROS_SKILLS_REPO_PATH": ""})
+    monkeypatch.setattr("ouroboros.skill_loader.find_skill", lambda *_a, **_kw: loaded)
+    monkeypatch.setattr(
+        "ouroboros.skill_loader.save_skill_grants",
+        lambda drive, name, keys, **kw: captured.update(
+            {"drive": drive, "name": name, "keys": keys, **kw}
+        ),
+    )
+    monkeypatch.setattr("urllib.request.urlopen", lambda *_a, **_kw: types.SimpleNamespace(read=lambda: b'{"ok": true}'))
+
+    result = launcher._request_skill_key_grant(
+        "bridge",
+        ["inject_chat", "subscribe_event:chat.outbound"],
+        lambda _title, _message: True,
+    )
+
+    assert result["ok"] is True
+    assert captured["keys"] == []
+    assert captured["granted_permissions"] == ["inject_chat", "subscribe_event:chat.outbound"]
+    assert captured["requested_permissions"] == ["inject_chat", "subscribe_event:chat.outbound"]
 
 
 def test_launcher_skill_key_grant_supports_extensions(monkeypatch, tmp_path):
@@ -752,34 +1184,8 @@ def test_set_tool_timeout_sanitizes_corrupted_disk_to_env(isolated_settings, mon
 
 
 # ---------------------------------------------------------------------------
-# 8. Light-mode shell filter catches pathlib write_text / save_settings
-#    subprocess imports (defense-in-depth complement to the chokepoint)
+# 8. Runtime mode elevation chokepoints
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "bad_cmd_substring",
-    [
-        ".write_text(",
-        ".write_bytes(",
-        "os.replace(",
-        "os.rename(",
-    ],
-)
-def test_light_mode_shell_filter_catches_pathlib_write_patterns(bad_cmd_substring):
-    """Adversarial-review iteration 1 finding: ``Path.write_text(...)``,
-    ``Path.write_bytes(...)``, and OS rename primitives are NOT
-    substrings of the previous indicators (`.write(` does not match
-    ``.write_text(`` because of the ``_text`` separator). Verify each
-    is now in the light-mode mutation list. String-level test — no
-    subprocess spawned."""
-    import ouroboros.tools.registry as reg_mod
-    source = pathlib.Path(reg_mod.__file__).read_text(encoding="utf-8")
-    assert f'"{bad_cmd_substring}"' in source, (
-        f"Light-mode mutation indicator {bad_cmd_substring!r} missing "
-        "from registry.py — the substring filter would let a subprocess "
-        "write to settings.json without tripping LIGHT_MODE_BLOCKED."
-    )
 
 
 @pytest.mark.parametrize(
@@ -795,7 +1201,7 @@ def test_light_mode_shell_filter_catches_pathlib_write_patterns(bad_cmd_substrin
 def test_elevation_indicators_block_attack_patterns_in_all_modes(blocked_cmd, tmp_path, monkeypatch):
     """Iteration-2 fix (real triad finding T1, iter-2 multi-critic F2-6):
     the elevation indicators block actual attack patterns — runs
-    ``ToolRegistry.execute("run_shell", ...)`` end-to-end in each
+    ``ToolRegistry.execute("run_command", ...)`` end-to-end in each
     runtime mode and asserts ``ELEVATION_BLOCKED`` is returned. The
     earlier string-level test only verified substring presence; this
     covers the dispatch wiring."""
@@ -804,7 +1210,7 @@ def test_elevation_indicators_block_attack_patterns_in_all_modes(blocked_cmd, tm
     for mode in ("light", "advanced", "pro"):
         monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
         reg = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
-        result = reg.execute("run_shell", {"cmd": blocked_cmd})
+        result = reg.execute("run_command", {"cmd": blocked_cmd})
         assert "ELEVATION_BLOCKED" in result, (
             f"mode={mode!r} cmd={blocked_cmd!r}: "
             f"got {result[:200]!r}"
@@ -833,7 +1239,7 @@ def test_elevation_indicators_do_not_false_positive(diagnostic_cmd, tmp_path, mo
 
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     reg = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
-    result = reg.execute("run_shell", {"cmd": diagnostic_cmd})
+    result = reg.execute("run_command", {"cmd": diagnostic_cmd})
     assert "ELEVATION_BLOCKED" not in result, (
         f"Diagnostic cmd {diagnostic_cmd!r} was wrongly blocked as "
         "elevation attempt. The conjunctive check should let this pass."
@@ -920,7 +1326,7 @@ def test_files_api_write_blocks_settings_json(isolated_settings, monkeypatch):
     writes to the owner-only file. String-level test against the source
     so the assertion is hermetic (full HTTP round-trip belongs in a
     Starlette TestClient suite, but the guard helper is the SSOT)."""
-    from ouroboros import file_browser_api as fba_mod
+    from ouroboros.gateway import files as fba_mod
 
     source = pathlib.Path(fba_mod.__file__).read_text(encoding="utf-8")
     # The shared helpers must exist...
@@ -946,10 +1352,12 @@ def test_files_api_write_blocks_settings_json(isolated_settings, monkeypatch):
         )
 
 
-@pytest.mark.parametrize("filename", ["grants.json", "review.json", "enabled.json", "clawhub.json"])
+@pytest.mark.parametrize("filename", [
+    "grants.json", "review.json", "review_history.jsonl", "accepted_rebuttals.json", "enabled.json", "clawhub.json",
+])
 def test_files_api_owner_only_helper_blocks_skill_state_case_variants(filename, tmp_path, monkeypatch):
     from ouroboros import config as cfg
-    from ouroboros import file_browser_api as fba_mod
+    from ouroboros.gateway import files as fba_mod
 
     data_dir = tmp_path / "data"
     data_dir.mkdir()
@@ -960,7 +1368,7 @@ def test_files_api_owner_only_helper_blocks_skill_state_case_variants(filename, 
 
 def test_files_api_owner_only_helper_blocks_symlinked_skill_state_dir(tmp_path, monkeypatch):
     from ouroboros import config as cfg
-    from ouroboros import file_browser_api as fba_mod
+    from ouroboros.gateway import files as fba_mod
 
     data_dir = tmp_path / "data"
     link_target = data_dir / "memory" / "linkstate"
@@ -979,69 +1387,13 @@ def test_files_api_owner_only_helper_blocks_symlinked_skill_state_dir(tmp_path, 
     assert fba_mod._is_owner_only_file(backing_target) is True
 
 
-# ---------------------------------------------------------------------------
-# 9. File-based subprocess bypass (v5.1.2 iter-3 fix)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("mode", ["light", "advanced", "pro"])
-def test_run_shell_blocks_script_file_with_save_settings_elevation(mode, tmp_path, monkeypatch):
-    """Iteration-3 fix (file-based subprocess bypass): a helper script
-    that imports save_settings and mentions OUROBOROS_RUNTIME_MODE
-    must be blocked at run_shell entry, not after the script runs.
-    The argv-level _ELEVATION_INDICATORS only sees ``python helper.py``
-    in argv; without file-content scanning, the elevation chain
-    succeeds in any mode (``data_write helper.py + run_shell python
-    helper.py`` → settings.json poisoned → next restart picks up
-    elevated mode)."""
-    from ouroboros.tools.registry import ToolRegistry
-
-    helper_path = tmp_path / "evil.py"
-    helper_path.write_text(
-        "from ouroboros.config import save_settings\n"
-        "save_settings({'OUROBOROS_RUNTIME_MODE': 'pro'}, allow_elevation=True)\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
-    reg = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
-    result = reg.execute("run_shell", {"cmd": ["python3", str(helper_path)]})
-    assert "ELEVATION_BLOCKED" in result, (
-        f"mode={mode}: file-based subprocess bypass NOT blocked. "
-        f"Got: {result[:300]}"
-    )
-    # The block message must include the offending script path so the
-    # operator can trace which file was refused.
-    assert "evil.py" in result
-
-
-def test_run_shell_in_light_blocks_script_file_with_pathlib_write(tmp_path, monkeypatch):
-    """Light mode: a helper script that uses pathlib.Path.write_text
-    to clobber settings.json directly does NOT need to import
-    save_settings — but it still bypasses the in-process chokepoint
-    once the file is on disk. Light-mode content scan must catch the
-    ``.write_text(`` pattern in the file and refuse the run."""
-    from ouroboros.tools.registry import ToolRegistry
-
-    helper_path = tmp_path / "writer.py"
-    helper_path.write_text(
-        "import pathlib\n"
-        "pathlib.Path('settings.json').write_text('{\"x\":1}')\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
-    reg = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
-    result = reg.execute("run_shell", {"cmd": ["python3", str(helper_path)]})
-    assert "LIGHT_MODE_BLOCKED" in result, (
-        f"light: pathlib.write_text in script file not blocked. "
-        f"Got: {result[:300]}"
-    )
-    assert "writer.py" in result
-
-
-@pytest.mark.parametrize("filename", ["grants.json", "review.json", "enabled.json", "Review.JSON"])
+@pytest.mark.parametrize("filename", [
+    "grants.json", "review.json", "review_history.jsonl", "accepted_rebuttals.json", "enabled.json", "Review.JSON",
+])
 def test_run_shell_blocks_obfuscated_skill_owner_state_write(filename, tmp_path, monkeypatch):
     from ouroboros.tools.registry import ToolRegistry
 
+    _clear_safety_provider_env(monkeypatch)
     drive_root = tmp_path / "data"
     skill_state_dir = drive_root / "state" / "skills" / "weather"
     skill_state_dir.mkdir(parents=True)
@@ -1058,8 +1410,8 @@ def test_run_shell_blocks_obfuscated_skill_owner_state_write(filename, tmp_path,
     )
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     reg = ToolRegistry(repo_dir=tmp_path, drive_root=drive_root)
-    result = reg.execute("run_shell", {"cmd": ["python3", str(helper_path), str(drive_root)]})
-    assert "SKILL_STATE_WRITE_BLOCKED" in result
+    result = reg.execute("run_command", {"cmd": ["python3", str(helper_path), str(drive_root)]})
+    assert "OWNER_STATE_RESTORED" in result
     assert not (skill_state_dir / filename).exists()
 
 
@@ -1086,7 +1438,7 @@ def test_run_shell_blocks_delayed_skill_owner_state_writer(tmp_path, monkeypatch
     )
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     reg = ToolRegistry(repo_dir=tmp_path, drive_root=drive_root)
-    result = reg.execute("run_shell", {"cmd": [sys.executable, "-c", parent_code, str(drive_root), child_code]})
+    result = reg.execute("run_command", {"cmd": [sys.executable, "-c", parent_code, str(drive_root), child_code]})
     assert "SKILL_STATE_WRITE_BLOCKED" in result
     time.sleep(1.4)
     assert not (skill_state_dir / "review.json").exists()
@@ -1105,7 +1457,7 @@ def test_run_shell_blocks_detached_skill_state_command(tmp_path, monkeypatch):
     )
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     reg = ToolRegistry(repo_dir=tmp_path, drive_root=drive_root)
-    result = reg.execute("run_shell", {"cmd": [sys.executable, "-c", code]})
+    result = reg.execute("run_command", {"cmd": [sys.executable, "-c", code]})
     assert "SKILL_STATE_WRITE_BLOCKED" in result
 
 
@@ -1113,6 +1465,7 @@ def test_run_shell_scans_scripts_relative_to_cwd(tmp_path, monkeypatch):
     from ouroboros.tools.registry import ToolRegistry
     import sys
 
+    _clear_safety_provider_env(monkeypatch)
     repo_dir = tmp_path / "repo"
     subdir = repo_dir / "sub"
     subdir.mkdir(parents=True)
@@ -1129,95 +1482,9 @@ def test_run_shell_scans_scripts_relative_to_cwd(tmp_path, monkeypatch):
     )
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     reg = ToolRegistry(repo_dir=repo_dir, drive_root=drive_root)
-    result = reg.execute("run_shell", {"cmd": [sys.executable, "evil.py", str(drive_root)], "cwd": "sub"})
-    assert "SKILL_STATE_WRITE_BLOCKED" in result
+    result = reg.execute("run_command", {"cmd": [sys.executable, "evil.py", str(drive_root)], "cwd": "sub"})
+    assert "OWNER_STATE_RESTORED" in result
     assert not (drive_root / "state" / "skills" / "weather" / "review.json").exists()
-
-
-def test_run_shell_does_not_scan_files_outside_agent_areas(tmp_path, monkeypatch):
-    """Negative: a helper script outside repo_dir AND drive_root
-    must NOT be scanned (those files are not agent-writable, so the
-    scan would only be a false-positive risk on system Python helper
-    scripts the agent invokes legitimately)."""
-    from ouroboros.tools.registry import ToolRegistry
-
-    outside = tmp_path / "outside_data.py"
-    outside.write_text(
-        "from ouroboros.config import save_settings\n"
-        "save_settings({'OUROBOROS_RUNTIME_MODE': 'pro'})\n",
-        encoding="utf-8",
-    )
-    inner_repo = tmp_path / "repo"
-    inner_repo.mkdir()
-    inner_drive = tmp_path / "drive"
-    inner_drive.mkdir()
-    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
-    reg = ToolRegistry(repo_dir=inner_repo, drive_root=inner_drive)
-    result = reg.execute("run_shell", {"cmd": ["python3", str(outside)]})
-    assert "ELEVATION_BLOCKED" not in result, (
-        "Files outside agent areas should not trigger content scan."
-    )
-
-
-@pytest.mark.parametrize(
-    "benign_content",
-    [
-        "print('hello world')\n",
-        "import os\nprint(os.getcwd())\n",
-        "def main():\n    return 42\n\nif __name__ == '__main__':\n    print(main())\n",
-    ],
-)
-def test_run_shell_does_not_false_positive_on_benign_script_files(benign_content, tmp_path, monkeypatch):
-    """Negative: benign scripts inside the agent area must NOT trip
-    the file-content scan. The conjunctive elevation check + the
-    targeted light-mutation list keeps false-positive rate low."""
-    from ouroboros.tools.registry import ToolRegistry
-
-    helper_path = tmp_path / "benign.py"
-    helper_path.write_text(benign_content, encoding="utf-8")
-    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
-    reg = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
-    result = reg.execute("run_shell", {"cmd": ["python3", str(helper_path)]})
-    assert "ELEVATION_BLOCKED" not in result, (
-        f"Benign content {benign_content!r} false-positive: {result[:200]}"
-    )
-    assert "LIGHT_MODE_BLOCKED" not in result, (
-        f"Benign content {benign_content!r} false-positive in light filter: {result[:200]}"
-    )
-
-
-def test_run_shell_inline_python_dash_c_skips_file_scan(tmp_path, monkeypatch):
-    """``python -c "..."`` has inline code in argv (already covered by
-    argv-level checks); the file-scan must not try to interpret the
-    ``-c`` argument as a file path."""
-    from ouroboros.tools.registry import ToolRegistry
-
-    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
-    reg = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
-    # Inline code that does NOT match the elevation pattern.
-    result = reg.execute("run_shell", {"cmd": ["python3", "-c", "print(42)"]})
-    assert "ELEVATION_BLOCKED" not in result
-    assert "LIGHT_MODE_BLOCKED" not in result
-
-
-def test_extract_script_file_args_recognises_common_interpreters():
-    """Helper-level: confirm the parser walks past flags and stops at
-    ``-c`` / ``-m``."""
-    from ouroboros.tools.registry import _extract_script_file_args
-
-    assert _extract_script_file_args(["python3", "evil.py"]) == ["evil.py"]
-    assert _extract_script_file_args(["python", "-u", "-O", "evil.py"]) == ["evil.py"]
-    assert _extract_script_file_args(["bash", "evil.sh"]) == ["evil.sh"]
-    assert _extract_script_file_args(["node", "--inspect", "evil.js"]) == ["evil.js"]
-    # ``-c`` / ``-m`` mean no file argument.
-    assert _extract_script_file_args(["python3", "-c", "print(1)"]) == []
-    assert _extract_script_file_args(["python3", "-m", "pytest"]) == []
-    # Full-path interpreter still recognised.
-    assert _extract_script_file_args(["/usr/bin/python3", "evil.py"]) == ["evil.py"]
-    # Versioned interpreter (python3.10) recognised via prefix match.
-    assert _extract_script_file_args(["python3.10", "evil.py"]) == ["evil.py"]
-    # Non-interpreter top-level command — no script files extracted.
-    assert _extract_script_file_args(["ls", "-la"]) == []
 
 
 def test_save_settings_consent_inert_in_subprocess_via_env_propagation(isolated_settings, monkeypatch):

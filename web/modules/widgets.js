@@ -1,54 +1,33 @@
 import { renderPageHeader } from './page_header.js';
-
-const WIDGETS_ICON = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>';
-
-function escapeHtml(value) {
-    return String(value ?? '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-}
-
-function renderMarkdownSafe(rawMd) {
-    const text = String(rawMd ?? '');
-    if (!text) return '';
-    if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') {
-        return `<pre><code>${escapeHtml(text)}</code></pre>`;
-    }
-    try {
-        const rendered = marked.parse(text, { async: false, gfm: true, breaks: false });
-        return DOMPurify.sanitize(rendered, {
-            USE_PROFILES: { html: true },
-            FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'form', 'input', 'img', 'video', 'audio', 'source'],
-            FORBID_ATTR: ['style', 'src', 'srcset', 'srcdoc'],
-        });
-    } catch (err) {
-        console.warn('widgets: markdown render failed', err);
-        return `<pre><code>${escapeHtml(text)}</code></pre>`;
-    }
-}
+import { PAGE_ICONS } from './page_icons.js';
+import { applyMasonry } from './masonry.js';
+import {
+    apiClient,
+    apiFetch,
+    cleanExtensionRoute,
+    extensionRoutePath,
+    extensionRoutePrefix,
+} from './api_client.js';
+import {
+    escapeHtmlAttr as escapeHtml,
+    renderMarkdownSafe,
+} from './utils.js';
+import { downloadViaHostBridge } from './ui_helpers.js';
 
 function pageTemplate() {
     return `
-        <section class="page" id="page-widgets">
+        <section class="page app-page-glass" id="page-widgets">
             ${renderPageHeader({
                 title: 'Widgets',
-                icon: WIDGETS_ICON,
+                icon: PAGE_ICONS.widgets,
                 description: 'Reviewed extension UI surfaces live here, separate from the skill catalogue.',
                 actionsHtml: '<button id="widgets-refresh" class="btn btn-default btn-sm">Refresh</button>',
             })}
-            <div id="widgets-list" class="widgets-list"></div>
+            <div class="widgets-scroll scroll-fade-y">
+                <div id="widgets-list" class="widgets-list"></div>
+            </div>
         </section>
     `;
-}
-
-async function fetchExtensions() {
-    const resp = await fetch('/api/extensions', { cache: 'no-store' });
-    const data = await resp.json().catch(() => ({}));
-    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
-    return data;
 }
 
 function renderShell(host, tabs) {
@@ -57,17 +36,15 @@ function renderShell(host, tabs) {
         return;
     }
     host.innerHTML = tabs.map((tab) => {
-        // v5.2.3: the previous "skill:tab_id" muted label leaked
-        // internal registry keys to end users (e.g. "weather:widget").
-        // Show the skill name as a friendly subtitle only when it
-        // differs from the widget title; otherwise omit it entirely
-        // so the card header stays visually clean.
+        // Avoid leaking internal "skill:tab_id"; show skill only as needed.
         const title = tab.title || tab.tab_id || tab.skill;
         const subtitle = tab.skill && tab.skill !== title
             ? `<span class="widgets-card-source">from ${escapeHtml(tab.skill)}</span>`
             : '';
+        const span = Number(tab.span || tab.grid_span || 1);
+        const spanClass = span >= 2 ? ' widgets-card-span-2' : '';
         return `
-        <article class="widgets-card" data-widget-key="${escapeHtml(tab.key || `${tab.skill}:${tab.tab_id}`)}">
+        <article class="widgets-card${spanClass}" data-widget-key="${escapeHtml(tab.key || `${tab.skill}:${tab.tab_id}`)}">
             <div class="widgets-card-head">
                 <strong>${escapeHtml(title)}</strong>
                 ${subtitle}
@@ -76,23 +53,6 @@ function renderShell(host, tabs) {
         </article>
         `;
     }).join('');
-}
-
-function cleanWidgetRoute(value) {
-    const route = String(value || '').trim().replace(/^\/+/, '');
-    const parts = route.split('/').filter(Boolean);
-    if (!route || route.includes('\\') || parts.some((part) => part === '.' || part === '..')) {
-        return '';
-    }
-    return parts.map(encodeURIComponent).join('/');
-}
-
-function extensionRouteUrl(tab, route, params) {
-    const cleanRoute = cleanWidgetRoute(route);
-    if (!cleanRoute) return '';
-    const base = `/api/extensions/${encodeURIComponent(tab.skill)}/${cleanRoute}`;
-    const query = params instanceof URLSearchParams && String(params) ? `?${params}` : '';
-    return base + query;
 }
 
 function getPath(root, path, fallback = '') {
@@ -112,7 +72,7 @@ function safeMediaSrc(tab, spec, state) {
         for (const [key, value] of Object.entries(spec.query || {})) {
             params.set(key, String(value ?? ''));
         }
-        return extensionRouteUrl(tab, route, params);
+        return extensionRoutePath(tab.skill, route, params);
     }
     const value = getPath(state[spec.target || 'result'], spec.path || '', spec.src || '');
     const text = String(value || '').trim();
@@ -122,7 +82,7 @@ function safeMediaSrc(tab, spec, state) {
     if (text.startsWith('/api/extensions/')) {
         try {
             const parsed = new URL(text, window.location.origin);
-            const expectedPrefix = `/api/extensions/${encodeURIComponent(tab.skill)}/`;
+            const expectedPrefix = extensionRoutePrefix(tab.skill);
             if (parsed.origin === window.location.origin && parsed.pathname.startsWith(expectedPrefix)) {
                 return parsed.pathname + parsed.search;
             }
@@ -131,6 +91,19 @@ function safeMediaSrc(tab, spec, state) {
         }
     }
     return '';
+}
+
+function routePrefixToMediaSpec(routePrefix, value, itemType = 'image') {
+    const text = String(value || '').trim();
+    const prefix = String(routePrefix || '').trim();
+    if (!prefix || !text) return { type: itemType, src: text };
+    const [route, queryKey = 'path'] = prefix.split('?', 2);
+    const key = queryKey.endsWith('=') ? queryKey.slice(0, -1) : queryKey;
+    return {
+        type: itemType,
+        route,
+        query: { [key || 'path']: text },
+    };
 }
 
 function filenameFromWidgetUrl(url, fallback = 'download') {
@@ -206,6 +179,9 @@ function renderDataComponent(tab, component, state, status, componentState = {},
     const type = String(component.type || '');
     const target = component.target || 'result';
     const data = state[target] || {};
+    if (component.condition_key && !getPath(data, component.condition_key, false)) {
+        return '';
+    }
     if (type === 'status') {
         const current = status[target] || 'idle';
         return `<div class="widget-status" data-state="${escapeHtml(current)}">${escapeHtml(component[current] || current)}</div>`;
@@ -218,6 +194,11 @@ function renderDataComponent(tab, component, state, status, componentState = {},
             return `<div class="widget-kv-row"><span>${label}</span><strong>${escapeHtml(value)}</strong></div>`;
         }).join('');
         return `<div class="widget-kv">${rows || '<div class="muted">No data.</div>'}</div>`;
+    }
+    if (type === 'key_value') {
+        const rows = getPath(data, component.items_key || component.path || '', []);
+        if (!Array.isArray(rows) || !rows.length) return '';
+        return `<div class="widget-kv">${rows.map((row) => `<div class="widget-kv-row"><span>${escapeHtml(row?.key || row?.label || '')}</span><strong>${escapeHtml(row?.value ?? '')}</strong></div>`).join('')}</div>`;
     }
     if (type === 'table') {
         const rows = getPath(data, component.path || '', []);
@@ -270,20 +251,24 @@ function renderDataComponent(tab, component, state, status, componentState = {},
         return `<button class="btn btn-default widget-download" type="button" data-widget-download-url="${escapeHtml(src)}" data-widget-download-filename="${filename}">${label}</button>`;
     }
     if (type === 'gallery') {
-        const items = component.items || getPath(data, component.path || '', []);
+        let items = component.items || getPath(data, component.path || component.items_key || '', []);
         if (!Array.isArray(items)) return '<div class="muted">No media items.</div>';
+        if (component.items_key && component.route_prefix) {
+            items = items.map((item) => routePrefixToMediaSpec(
+                component.route_prefix,
+                typeof item === 'object' ? (item.path || item.src || item.url || '') : item,
+                component.item_type || 'image',
+            ));
+        }
         return `<div class="widget-gallery">${items.map((item, idx) => renderDataComponent(tab, { ...item, type: item.type || 'image' }, state, status, componentState, `${componentKey}:gallery:${idx}`)).join('')}</div>`;
     }
     if (type === 'progress') {
-        const value = Number(getPath(data, component.path || 'progress', 0));
+        const value = Number(getPath(data, component.path || component.value_key || 'progress', 0));
         const bounded = Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 0;
-        return `<div class="widget-progress"><progress max="100" value="${bounded}"></progress><span>${bounded}%</span></div>`;
+        const label = component.label_key ? getPath(data, component.label_key, '') : '';
+        return `<div class="widget-progress"><progress max="100" value="${bounded}"></progress><span>${bounded}%${label ? ` · ${escapeHtml(label)}` : ''}</span></div>`;
     }
-    // v5.7.0: host-owned ``map`` renderer. Falls back to a flat marker
-    // list when Leaflet is not available; when Leaflet is loaded by the
-    // host (kept off the critical path for now) the markup is upgraded
-    // to a real interactive map. Either way, the widget never exposes
-    // skill-supplied JS to the SPA origin.
+    // Host-owned map renderer; no skill-supplied JS reaches the SPA origin.
     if (type === 'map') {
         const markers = Array.isArray(component.markers) ? component.markers : [];
         const list = markers.length
@@ -300,7 +285,8 @@ function renderDataComponent(tab, component, state, status, componentState = {},
     if (type === 'kanban') {
         const columns = Array.isArray(component.columns) ? component.columns : [];
         if (!columns.length) return '<div class="muted">Kanban has no columns.</div>';
-        const moveRoute = component.on_move?.route ? cleanWidgetRoute(component.on_move.route) : '';
+        const rawMoveRoute = component.on_move?.route || '';
+        const moveRoute = cleanExtensionRoute(rawMoveRoute) ? rawMoveRoute : '';
         const cardsByCol = new Map();
         for (const col of columns) cardsByCol.set(col.id || col.label, []);
         const cardsList = Array.isArray(component.cards) ? component.cards : (Array.isArray(getPath(data, component.path || '', [])) ? getPath(data, component.path || '', []) : []);
@@ -318,6 +304,18 @@ function renderDataComponent(tab, component, state, status, componentState = {},
             </div>`;
         }).join('');
         return `<div class="widget-kanban" data-widget-kanban-idx="${escapeHtml(componentKey)}" data-widget-kanban-route="${escapeHtml(moveRoute || '')}">${colHtml}</div>`;
+    }
+    if (type === 'subscription') {
+        const children = Array.isArray(component.render) ? component.render : [];
+        if (!children.length) return '';
+        return `<div class="widget-subscription-render">${children.map((child, idx) => {
+            if (!child || typeof child !== 'object') return '';
+            const normalized = {
+                ...child,
+                target: child.target || target,
+            };
+            return renderDataComponent(tab, normalized, state, status, componentState, `${componentKey}:subscription:${idx}`);
+        }).join('')}</div>`;
     }
     return '';
 }
@@ -340,7 +338,7 @@ async function callWidgetRoute(tab, spec, values, signal) {
         params.set(key, String(value ?? ''));
     }
     const noBody = method === 'GET' || method === 'HEAD';
-    const url = extensionRouteUrl(tab, spec.route || spec.api_route, noBody ? params : null);
+    const url = extensionRoutePath(tab.skill, spec.route || spec.api_route, noBody ? params : null);
     if (!url) throw new Error('invalid widget route');
     const init = noBody
         ? { method, signal }
@@ -350,7 +348,7 @@ async function callWidgetRoute(tab, spec, values, signal) {
             body: JSON.stringify(values || {}),
             signal,
         };
-    const resp = await fetch(url, init);
+    const resp = await apiFetch(url, init);
     const contentType = resp.headers.get('content-type') || '';
     const data = contentType.includes('application/json')
         ? await resp.json().catch(() => ({}))
@@ -380,29 +378,12 @@ async function mountDeclarativeWidget(mount, tab, render) {
 
     const downloadWidgetFile = async (url, filename) => {
         const resolvedUrl = new URL(url, window.location.origin);
-        const expectedPrefix = `/api/extensions/${encodeURIComponent(tab.skill)}/`;
+        const expectedPrefix = extensionRoutePrefix(tab.skill);
         if (resolvedUrl.origin !== window.location.origin || !resolvedUrl.pathname.startsWith(expectedPrefix)) {
             throw new Error('download URL is outside this widget extension');
         }
         const safeName = filenameFromWidgetUrl(resolvedUrl.toString(), filename || 'download');
-        const bridge = window.pywebview?.api?.download_file_to_downloads;
-        if (bridge) {
-            const result = await bridge(resolvedUrl.pathname + resolvedUrl.search, safeName, false);
-            if (!result?.ok) throw new Error(result?.error || 'desktop download failed');
-            return;
-        }
-        const resp = await fetch(resolvedUrl.pathname + resolvedUrl.search, { credentials: 'include' });
-        if (!resp.ok) throw new Error(`download failed: HTTP ${resp.status}`);
-        const blob = await resp.blob();
-        const blobUrl = URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        link.href = blobUrl;
-        link.download = safeName;
-        link.rel = 'noopener';
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+        await downloadViaHostBridge(resolvedUrl.pathname + resolvedUrl.search, safeName, { fetchOptions: { credentials: 'include' } });
     };
 
     const schedule = (fn, delay) => {
@@ -572,9 +553,6 @@ async function mountDeclarativeWidget(mount, tab, render) {
             if (type === 'poll') {
                 return `<button class="btn btn-default" data-widget-poll="${idx}">${escapeHtml(component.label || 'Start polling')}</button>`;
             }
-            if (type === 'subscription') {
-                return '';
-            }
             return renderDataComponent(tab, component, state, status, componentState, String(idx));
         }).join('');
         mount.querySelectorAll('[data-widget-form]').forEach((form) => {
@@ -726,7 +704,7 @@ async function mountDeclarativeWidget(mount, tab, render) {
         });
         components.forEach((component, idx) => {
             if (String(component.type || '') !== 'stream' || eventSources.has(idx)) return;
-            const url = extensionRouteUrl(tab, component.route || component.api_route, new URLSearchParams());
+            const url = extensionRoutePath(tab.skill, component.route || component.api_route, new URLSearchParams());
             if (!url || typeof EventSource === 'undefined') return;
             const target = component.target || 'result';
             const source = new EventSource(url);
@@ -775,79 +753,26 @@ async function mountTab(card, tab) {
     const render = tab.render || {};
     if (!mount) return;
     if (render.kind === 'iframe' && render.route) {
-        const route = cleanWidgetRoute(render.route);
-        if (!route) throw new Error('invalid widget iframe route');
-        mount.innerHTML = `<iframe class="widgets-frame" sandbox="" src="/api/extensions/${encodeURIComponent(tab.skill)}/${route}"></iframe>`;
+        const src = extensionRoutePath(tab.skill, render.route);
+        if (!src) throw new Error('invalid widget iframe route');
+        mount.innerHTML = `<iframe class="widgets-frame" sandbox="" src="${src}"></iframe>`;
         return;
-    }
-    if (render.kind === 'inline_card' && render.api_route) {
-        const apiRoute = cleanWidgetRoute(render.api_route);
-        if (!apiRoute) throw new Error('invalid widget api_route');
-        const persistenceKey = tab.key || `${tab.skill}:${tab.tab_id}`;
-        const saved = widgetSessionState.get(persistenceKey) || {};
-        const savedCity = escapeHtml(saved.city || 'Moscow');
-        const savedResult = saved.resultHtml || '<div class="muted">Press Refresh.</div>';
-        mount.innerHTML = `
-            <form class="skill-widget-weather-form" data-widget-form>
-                <input class="skill-widget-weather-city" value="${savedCity}" autocomplete="off" maxlength="80" aria-label="Widget query">
-                <button type="submit" class="btn btn-default btn-sm">Refresh</button>
-            </form>
-            <div class="skill-widget-weather-body" data-widget-result>${savedResult}</div>
-        `;
-        const form = mount.querySelector('[data-widget-form]');
-        const input = mount.querySelector('input');
-        const result = mount.querySelector('[data-widget-result]');
-        form.addEventListener('submit', async (event) => {
-            event.preventDefault();
-            const query = (input.value || '').trim();
-            result.innerHTML = '<div class="muted">Loading...</div>';
-            const resp = await fetch(`/api/extensions/${encodeURIComponent(tab.skill)}/${apiRoute}?city=${encodeURIComponent(query)}`);
-            const data = await resp.json().catch(() => ({}));
-            if (!resp.ok || data.error) {
-                result.innerHTML = `<div class="skills-load-error">${escapeHtml(data.error || `HTTP ${resp.status}`)}</div>`;
-                widgetSessionState.set(persistenceKey, { city: query, resultHtml: result.innerHTML });
-                return;
-            }
-            result.innerHTML = `
-                <div class="skill-widget-weather-card">
-                    <strong>${escapeHtml(data.resolved_to || data.city || query)}</strong>
-                    <div class="skill-widget-weather-temp">${escapeHtml(data.temp_c)}°C <span class="muted">feels like ${escapeHtml(data.feels_like_c)}°C</span></div>
-                    <div>${escapeHtml(data.condition || 'Unknown')}</div>
-                </div>
-            `;
-            widgetSessionState.set(persistenceKey, { city: query, resultHtml: result.innerHTML });
-        });
-        return () => {
-            widgetSessionState.set(persistenceKey, {
-                city: input.value || 'Moscow',
-                resultHtml: result.innerHTML || '<div class="muted">Press Refresh.</div>',
-            });
-        };
     }
     if (render.kind === 'declarative') {
         return mountDeclarativeWidget(mount, tab, render);
     }
     if (render.kind === 'module' && render.entry) {
-        // v5.7.0: ``kind: "module"`` mounts reviewed JS inside an opaque
-        // sandboxed iframe. We DO NOT load the JS via <script src>, because
-        // a srcdoc iframe without allow-same-origin has an opaque origin and
-        // `script-src 'self'` would not resolve to the parent app origin.
-        // Instead the parent fetches the reviewed static module file from a
-        // dedicated endpoint and embeds the text inline in srcdoc. The iframe
-        // gets a tiny postMessage bridge that overrides fetch(); extension JS
-        // can still call fetch('/api/extensions/<skill>/...'), but the parent
-        // performs the same-origin request and rejects any path outside that
-        // skill route prefix. This keeps the iframe opaque (no cookie/storage
-        // access) while preserving the useful extension-route IO surface.
+        // Reviewed JS runs in an opaque iframe; parent fetch bridge only allows
+        // this skill's extension route prefix, preserving route IO without cookies.
         const entryName = String(render.entry).replace(/[^A-Za-z0-9._-]/g, '');
-        const entryUrl = `/api/extensions/${encodeURIComponent(tab.skill)}/module/${encodeURIComponent(entryName)}`;
-        const resp = await fetch(entryUrl, { cache: 'no-store' });
+        const entryUrl = `${extensionRoutePrefix(tab.skill)}module/${encodeURIComponent(entryName)}`;
+        const resp = await apiFetch(entryUrl, { cache: 'no-store' });
         const moduleSource = await resp.text();
         if (!resp.ok) {
             mount.innerHTML = `<div class="skills-load-error">module load failed: ${escapeHtml(moduleSource || `HTTP ${resp.status}`)}</div>`;
             return;
         }
-        const expectedPrefix = `/api/extensions/${encodeURIComponent(tab.skill)}/`;
+        const expectedPrefix = extensionRoutePrefix(tab.skill);
         const nonce = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
         const csp = [
             "default-src 'none'",
@@ -910,7 +835,7 @@ async function mountTab(card, tab) {
                 if (parsed.origin !== window.location.origin || !parsed.pathname.startsWith(expectedPrefix)) {
                     throw new Error('module widget fetch outside extension route prefix');
                 }
-                const r = await fetch(parsed.pathname + parsed.search, {
+                const r = await apiFetch(parsed.pathname + parsed.search, {
                     method: String(msg.init?.method || 'GET').toUpperCase(),
                     headers: msg.init?.headers || {},
                     body: msg.init?.body || undefined,
@@ -975,11 +900,7 @@ export function initWidgets(ctx = {}) {
     let renderGeneration = 0;
     let widgetsVisible = false;
     let widgetsMounted = false;
-    // v5.7.0: cache of the most recent successful payload so revisiting
-    // the Widgets page paints from cache immediately and only the
-    // first-ever render shows "Loading…". The cache is also re-rendered
-    // when a fetch is in flight, so a slow GET /api/extensions never
-    // produces an empty viewport mid-typing in another part of the app.
+    // Last good payload keeps revisits and slow refreshes from blanking the page.
     let lastTabs = null;
     if (ctx.ws && !widgetsWsBridgeBound) {
         widgetsWsBridgeBound = true;
@@ -996,17 +917,18 @@ export function initWidgets(ctx = {}) {
         refreshBtn.classList.add('is-loading');
         disposeMountedWidgets();
         if (lastTabs) {
-            // Optimistic paint from cache while the fresh fetch is in flight.
             renderShell(list, lastTabs);
+            applyMasonry(list);
         } else {
             list.innerHTML = '<div class="muted">Loading widgets…</div>';
         }
         try {
-            const data = await fetchExtensions();
+            const data = await apiClient.extensions();
             if (!widgetsVisible || generation !== renderGeneration) return;
             const tabs = Array.isArray(data.live?.ui_tabs) ? data.live.ui_tabs : [];
             lastTabs = tabs;
             renderShell(list, tabs);
+            applyMasonry(list);
             widgetsMounted = true;
             for (const tab of tabs) {
                 if (!widgetsVisible || generation !== renderGeneration) return;
@@ -1015,15 +937,17 @@ export function initWidgets(ctx = {}) {
                 if (!card) continue;
                 try {
                     await mountTrackedTab(card, tab);
+                    applyMasonry(list);
                 } catch (err) {
                     const mount = card.querySelector('[data-widget-mount]');
                     if (mount) mount.innerHTML = `<div class="skills-load-error">widget failed: ${escapeHtml(err.message || err)}</div>`;
+                    applyMasonry(list);
                 }
             }
+            applyMasonry(list);
         } catch (err) {
             if (!widgetsVisible || generation !== renderGeneration) return;
-            // If we have a cached payload, keep showing it instead of
-            // wiping the page on a transient fetch error.
+            // Preserve cached widgets on transient fetch errors.
             if (!lastTabs) {
                 list.innerHTML = `<div class="skills-load-error">Failed to load widgets: ${escapeHtml(err.message || err)}</div>`;
             }
@@ -1041,10 +965,7 @@ export function initWidgets(ctx = {}) {
         if (event.detail?.page === 'widgets') {
             render();
         } else {
-            // v5.7.0: leaving the Widgets page no longer wipes the cached
-            // markup. ``widgetsVisible = false`` stops in-flight render()
-            // calls from painting; the next ``render()`` re-uses
-            // ``lastTabs`` for an instant repaint.
+            // Hide stops stale paints; next render reuses lastTabs for instant repaint.
             widgetsVisible = false;
             widgetsMounted = false;
             disposeMountedWidgets();

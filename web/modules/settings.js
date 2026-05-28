@@ -1,8 +1,37 @@
 import { refreshModelCatalog } from './settings_catalog.js';
 import { bindEffortSegments, syncEffortSegments } from './settings_controls.js';
 import { bindLocalModelControls } from './settings_local_model.js';
-import { bindSecretInputs, bindSettingsTabs, renderSettingsPage } from './settings_ui.js';
-import { formatDualVersion } from './utils.js';
+import { applyMcpSettings, collectMcpSettings, initMcpSettings } from './mcp_settings.js';
+import { SECRET_KEYS, bindSecretInputs, bindSettingsTabs, renderSettingsPage } from './settings_ui.js';
+import { showToast } from './toast.js';
+import { escapeHtmlAttr as escapeHtml, formatDualVersion } from './utils.js';
+import { apiClient, apiFetch, cleanExtensionRoute, extensionRoutePath } from './api_client.js';
+
+let markSettingsDirty = () => {};
+const BASE_SECRET_KEYS = new Set(SECRET_KEYS.map(([key]) => key));
+let setupContract = {};
+
+const INPUT_FIELDS = [
+    ['s-openai-base-url', 'OPENAI_BASE_URL'], ['s-openai-compatible-base-url', 'OPENAI_COMPATIBLE_BASE_URL'], ['s-cloudru-base-url', 'CLOUDRU_FOUNDATION_MODELS_BASE_URL'],
+    ['s-server-host', 'OUROBOROS_SERVER_HOST', '127.0.0.1'], ['s-claude-code-model', 'CLAUDE_CODE_MODEL', 'claude-opus-4-6[1m]'],
+    ['s-review-models', 'OUROBOROS_REVIEW_MODELS'], ['s-scope-review-models', 'OUROBOROS_SCOPE_REVIEW_MODELS'], ['s-skills-repo-path', 'OUROBOROS_SKILLS_REPO_PATH'],
+    ['s-clawhub-registry-url', 'OUROBOROS_CLAWHUB_REGISTRY_URL'], ['s-websearch-model', 'OUROBOROS_WEBSEARCH_MODEL'], ['s-gh-repo', 'GITHUB_REPO'],
+    ['s-local-source', 'LOCAL_MODEL_SOURCE'], ['s-local-filename', 'LOCAL_MODEL_FILENAME'], ['s-local-chat-format', 'LOCAL_MODEL_CHAT_FORMAT'],
+];
+const VALUE_FIELDS = [
+    ['s-effort-task', 'OUROBOROS_EFFORT_TASK', 'medium'], ['s-effort-evolution', 'OUROBOROS_EFFORT_EVOLUTION', 'high'], ['s-effort-review', 'OUROBOROS_EFFORT_REVIEW', 'medium'],
+    ['s-effort-consciousness', 'OUROBOROS_EFFORT_CONSCIOUSNESS', 'low'], ['s-effort-scope-review', 'OUROBOROS_EFFORT_SCOPE_REVIEW', 'high'],
+    ['s-review-enforcement', 'OUROBOROS_REVIEW_ENFORCEMENT', 'advisory'], ['s-task-review-mode', 'OUROBOROS_TASK_REVIEW_MODE', 'auto'], ['s-runtime-mode', 'OUROBOROS_RUNTIME_MODE', 'advanced'],
+];
+const NUMBER_FIELDS = [
+    ['s-workers', 'OUROBOROS_MAX_WORKERS', 5], ['s-soft-timeout', 'OUROBOROS_SOFT_TIMEOUT_SEC', 600], ['s-hard-timeout', 'OUROBOROS_HARD_TIMEOUT_SEC', 1800],
+    ['s-tool-timeout', 'OUROBOROS_TOOL_TIMEOUT_SEC', 600], ['s-local-port', 'LOCAL_MODEL_PORT', 8766], ['s-local-gpu-layers', 'LOCAL_MODEL_N_GPU_LAYERS', -1, true],
+    ['s-local-ctx', 'LOCAL_MODEL_CONTEXT_LENGTH', 16384],
+];
+
+function setupModelSlots() {
+    return Array.isArray(setupContract.modelSlots) ? setupContract.modelSlots : [];
+}
 
 function byId(id) {
     return document.getElementById(id);
@@ -13,7 +42,12 @@ function applyInputValue(id, value) {
 }
 
 function applyCheckboxValue(id, value) {
-    byId(id).checked = value === true || value === 'True';
+    byId(id).checked = isTruthySetting(value);
+}
+
+function isTruthySetting(value) {
+    const normalized = String(value ?? '').trim().toLowerCase();
+    return value === true || ['true', '1', 'yes', 'on'].includes(normalized);
 }
 
 function setStatus(text, tone = 'ok') {
@@ -27,11 +61,6 @@ function readInt(id, fallback) {
     return Number.isNaN(value) ? fallback : value;
 }
 
-function readFloat(id, fallback) {
-    const value = parseFloat(byId(id).value);
-    return Number.isNaN(value) ? fallback : value;
-}
-
 function resetSecretClearFlags(root) {
     root.querySelectorAll('.secret-input').forEach((input) => {
         delete input.dataset.forceClear;
@@ -39,6 +68,75 @@ function resetSecretClearFlags(root) {
     });
     root.querySelectorAll('.secret-toggle').forEach((button) => {
         button.textContent = 'Show';
+    });
+}
+
+function applySecretInputs(root, settings) {
+    root.querySelectorAll('[data-secret-setting]').forEach((input) => {
+        applyInputValue(input.id, settings[input.dataset.secretSetting]);
+    });
+}
+
+
+function wireSecretRow(row) {
+    const input = row.querySelector('.secret-input');
+    const toggle = row.querySelector('[data-row-secret-toggle]');
+    const clear = row.querySelector('[data-row-secret-clear]');
+    if (input) input.addEventListener('input', () => { if (input.value.trim()) delete input.dataset.forceClear; });
+    if (toggle && input) toggle.addEventListener('click', () => { input.type = input.type === 'password' ? 'text' : 'password'; toggle.textContent = input.type === 'password' ? 'Show' : 'Hide'; });
+    if (clear && input) clear.addEventListener('click', () => { input.value = ''; input.type = 'password'; input.dataset.forceClear = '1'; if (toggle) toggle.textContent = 'Show'; markSettingsDirty(); });
+}
+
+function customSecretRow(key = '', value = '') {
+    const id = `custom-secret-${Math.random().toString(36).slice(2)}`;
+    const row = document.createElement('div');
+    row.className = 'settings-custom-secret-row';
+    row.dataset.customSecretRow = '1';
+    row.innerHTML = `
+        <div class="form-field settings-custom-secret-key"><label>Key</label><input data-custom-secret-key value="${escapeHtml(key)}" placeholder="SLACK_WEBHOOK_URL" spellcheck="false"></div>
+        <div class="form-field settings-custom-secret-value"><label>Value</label><div class="secret-input-row">
+            <input id="${id}" data-custom-secret-value class="secret-input" type="password" value="${escapeHtml(value || '')}" placeholder="Secret value">
+            <button type="button" class="settings-ghost-btn" data-row-secret-toggle>Show</button>
+            <button type="button" class="settings-ghost-btn" data-row-secret-clear>Clear</button>
+        </div><div class="settings-inline-note" data-custom-secret-error hidden></div></div>
+        <button type="button" class="settings-ghost-btn settings-custom-secret-remove" data-custom-secret-remove>Remove</button>`;
+    wireSecretRow(row);
+    row.querySelector('[data-custom-secret-remove]')?.addEventListener('click', () => { row.dataset.removeCustomSecret = '1'; row.hidden = true; markSettingsDirty(); });
+    return row;
+}
+
+function renderCustomSecrets(root, settings) {
+    const host = root.querySelector('#custom-secrets-list');
+    if (!host) return;
+    host.innerHTML = '';
+    const keys = Array.isArray(settings?._meta?.custom_secret_keys) ? settings._meta.custom_secret_keys : [];
+    keys.forEach((key) => host.appendChild(customSecretRow(key, settings[key] || '')));
+    if (!keys.length) host.innerHTML = '<div class="muted">No custom keys yet.</div>';
+}
+
+function renderRequestedSkillSecrets(root, skills, settings) {
+    const host = root.querySelector('#skill-requested-secrets');
+    if (!host) return;
+    const keys = [];
+    (Array.isArray(skills) ? skills : []).forEach((skill) => {
+        (skill?.grants?.requested_keys || []).forEach((key) => {
+            const normalized = String(key || '').trim();
+            if (normalized && !BASE_SECRET_KEYS.has(normalized)) keys.push(normalized);
+        });
+    });
+    const unique = Array.from(new Set(keys)).sort((a, b) => a.localeCompare(b));
+    if (!unique.length) { host.innerHTML = '<div class="muted">No skill-requested secrets.</div>'; return; }
+    host.innerHTML = '';
+    unique.forEach((key, idx) => {
+        const id = `requested-secret-${idx}`;
+        const el = document.createElement('div');
+        el.className = 'settings-requested-secret-row';
+        el.innerHTML = `<div class="form-field"><label>${escapeHtml(key)}</label><div class="secret-input-row">
+            <input id="${id}" data-secret-setting="${escapeHtml(key)}" class="secret-input" type="password" value="${escapeHtml(settings[key] || '')}" placeholder="Secret value">
+            <button type="button" class="settings-ghost-btn" data-row-secret-toggle>Show</button>
+            <button type="button" class="settings-ghost-btn" data-row-secret-clear>Clear</button>
+        </div></div>`;
+        wireSecretRow(el); host.appendChild(el);
     });
 }
 
@@ -50,14 +148,6 @@ function renderExtensionSettingsSections(root, sections) {
         host.innerHTML = '<div class="muted">No extension settings registered.</div>';
         return;
     }
-    const cleanExtensionRoute = (value) => {
-        const route = String(value || '').trim().replace(/^\/+/, '');
-        const parts = route.split('/').filter(Boolean);
-        if (!route || route.includes('\\') || parts.some((part) => part === '.' || part === '..')) {
-            return '';
-        }
-        return parts.map(encodeURIComponent).join('/');
-    };
     const fieldHtml = (field) => {
         const name = escapeHtml(field.name || '');
         const label = escapeHtml(field.label || field.name || '');
@@ -81,12 +171,12 @@ function renderExtensionSettingsSections(root, sections) {
         }
         if (type === 'form' || type === 'action') {
             const fields = Array.isArray(component.fields) ? component.fields : [];
-            const route = cleanExtensionRoute(component.route || component.api_route || '');
-            if (!route) {
+            const rawRoute = component.route || component.api_route || '';
+            if (!cleanExtensionRoute(rawRoute)) {
                 return '<div class="settings-inline-note">Invalid extension settings route.</div>';
             }
             return `
-                <form class="settings-extension-form" data-extension-settings-form data-skill="${escapeHtml(section.skill || '')}" data-route="${escapeHtml(route)}">
+                <form class="settings-extension-form" data-extension-settings-form data-skill="${escapeHtml(section.skill || '')}" data-route="${escapeHtml(rawRoute)}">
                     <div class="form-grid two">${fields.map(fieldHtml).join('')}</div>
                     <button class="btn btn-primary btn-sm" type="submit">${escapeHtml(component.submit_label || component.label || 'Save')}</button>
                     <div class="settings-inline-status" data-extension-settings-status></div>
@@ -130,7 +220,7 @@ function renderExtensionSettingsSections(root, sections) {
             try {
                 const cleanRoute = cleanExtensionRoute(route);
                 if (!cleanRoute) throw new Error('invalid extension settings route');
-                const resp = await fetch(`/api/extensions/${encodeURIComponent(skill)}/${cleanRoute}`, {
+                const resp = await apiFetch(extensionRoutePath(skill, route), {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(values),
@@ -164,31 +254,26 @@ function collectSecretValue(id, body) {
     if (value && !value.includes('...')) body[settingKey] = value;
 }
 
+// Fallback picker pills mirror config defaults plus useful direct-provider ids.
 const SETTINGS_FALLBACK_MODELS = [
+    'google/gemini-3.5-flash',
+    'anthropic/claude-sonnet-4.6',
+    'anthropic/claude-opus-4.7',
+    'anthropic::claude-opus-4-7',
     'anthropic::claude-opus-4-6',
     'anthropic::claude-sonnet-4-6',
     'openai::gpt-5.5',
     'openai::gpt-5.5-mini',
     'openai/gpt-5.5',
     'anthropic/claude-opus-4.6',
-    'google/gemini-3.1-pro-preview',
 ];
 
 let settingsModelCatalogItems = SETTINGS_FALLBACK_MODELS.map((value) => ({ value, label: 'Suggested model' }));
 
-function escapeHtml(value) {
-    return String(value ?? '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-}
-
-export function initSettings({ state, setBeforePageLeave } = {}) {
+export function initSettings({ state, setBeforePageLeave, ws } = {}) {
     const page = document.createElement('div');
     page.id = 'page-settings';
-    page.className = 'page';
+    page.className = 'page app-page-glass';
     page.innerHTML = renderSettingsPage();
     document.getElementById('content').appendChild(page);
 
@@ -201,11 +286,8 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
     bindSecretInputs(page);
     bindEffortSegments(page);
     bindLocalModelControls({ state });
-    // Populate the About sub-tab version label from /api/health so the
-    // existing #nav-version short label and the in-Settings detailed version
-    // string stay consistent. The fetch is best-effort — if it fails the
-    // label simply remains empty rather than blocking settings load.
-    fetch('/api/health')
+    // Best-effort About version from /api/health.
+    apiFetch('/api/health')
         .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
         .then((d) => {
             const verEl = document.getElementById('about-version');
@@ -214,15 +296,13 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
         .catch(() => { /* about version is best-effort */ });
     let currentSettings = {};
     let claudeCodePollStarted = false;
-    // v4.33.1 status_label priority fix: even when the user has not configured
-    // ANTHROPIC_API_KEY, we still surface the runtime card when the backend
-    // reports status="error" (e.g. SDK below baseline). Otherwise a version-gate
-    // failure is silently hidden until the user adds a key, which defeats the
-    // whole point of prioritizing error over no_api_key in `status_label`.
+    let extensionRefreshPending = false;
+    // Runtime errors must surface even before ANTHROPIC_API_KEY is configured.
     let claudeRuntimeHasError = false;
     let settingsLoaded = false;
     let settingsBaseline = '';
     let settingsDirty = false;
+    initMcpSettings({ onChange: updateSettingsDirtyState });
 
     function anthropicKeyConfigured() {
         const input = byId('s-anthropic');
@@ -234,9 +314,6 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
     }
 
     function shouldShowClaudeRuntimeCard() {
-        // Show when the user has configured an Anthropic key, OR when the
-        // backend has reported a concrete runtime error that the user needs
-        // to see and repair (e.g. SDK below baseline, bundled CLI missing).
         return anthropicKeyConfigured() || claudeRuntimeHasError;
     }
 
@@ -270,10 +347,10 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
         if (group) {
             group.title = hasBridge
                 ? 'Runtime mode changes require native launcher confirmation and restart.'
-                : 'Runtime mode is view-only here. Use the desktop app or edit settings.json while Ouroboros is stopped.';
+                : 'Runtime mode changes are saved through the owner endpoint and take effect after restart.';
         }
         document.querySelectorAll('[data-runtime-mode-group] [data-effort-value]').forEach((button) => {
-            button.disabled = !hasBridge;
+            button.disabled = false;
         });
     }
 
@@ -314,8 +391,7 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
         const installed = Boolean(payload.installed);
         const busy = Boolean(payload.busy);
         const error = String(payload.error || '').trim();
-        // Track backend error state so `shouldShowClaudeRuntimeCard` can
-        // surface the card even without a configured API key.
+        // Backend error state controls visibility without an API key.
         claudeRuntimeHasError = Boolean(error);
         const message = String(payload.message || '').trim()
             || (ready ? 'Claude runtime ready.' : (installed ? 'Claude runtime available but not ready.' : 'Claude runtime not available.'));
@@ -335,11 +411,9 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
     }
 
     async function refreshClaudeCodeStatus() {
-        // Always poll the backend — status errors (e.g. SDK below baseline) must
-        // surface even without a configured API key. The backend distinguishes
-        // "no_api_key" from "error" via the v4.33.1 `status_label` priority fix.
+        // Poll even without API key; backend separates no_api_key from errors.
         try {
-            const resp = await fetch('/api/claude-code/status', { cache: 'no-store' });
+            const resp = await apiFetch('/api/claude-code/status', { cache: 'no-store' });
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
             applyClaudeCodeStatus(data);
@@ -354,72 +428,51 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
         }
     }
 
+    function syncAutoGrantBridgeState() {
+        const hasBridge = Boolean(window.pywebview?.api?.request_auto_grant_reviewed_skills_change);
+        const checkbox = byId('s-auto-grant-reviewed-skills');
+        const label = checkbox?.closest('.local-toggle');
+        if (checkbox) checkbox.disabled = false;
+        if (label) {
+            label.title = hasBridge
+                ? 'Requires native confirmation. Applies only after a fresh executable skill review and only to manifest-declared grants for that exact content hash.'
+                : 'Uses the owner endpoint. Applies only after a fresh executable skill review and only to manifest-declared grants for that exact content hash.';
+        }
+    }
+
     function startClaudeCodePolling() {
         if (claudeCodePollStarted) return;
         claudeCodePollStarted = true;
         refreshClaudeCodeStatus();
         setInterval(() => {
-            // Poll unconditionally so a below-baseline SDK stays visible even
-            // after the user clears the Anthropic key.
             refreshClaudeCodeStatus();
         }, 3000);
     }
 
     function applySettings(s) {
-        applyInputValue('s-openrouter', s.OPENROUTER_API_KEY);
-        applyInputValue('s-openai', s.OPENAI_API_KEY);
-        applyInputValue('s-openai-base-url', s.OPENAI_BASE_URL);
-        applyInputValue('s-openai-compatible-key', s.OPENAI_COMPATIBLE_API_KEY);
-        applyInputValue('s-openai-compatible-base-url', s.OPENAI_COMPATIBLE_BASE_URL);
-        applyInputValue('s-cloudru-key', s.CLOUDRU_FOUNDATION_MODELS_API_KEY);
-        applyInputValue('s-cloudru-base-url', s.CLOUDRU_FOUNDATION_MODELS_BASE_URL);
-        applyInputValue('s-anthropic', s.ANTHROPIC_API_KEY);
-        applyInputValue('s-network-password', s.OUROBOROS_NETWORK_PASSWORD);
-        applyInputValue('s-server-host', s.OUROBOROS_SERVER_HOST || '127.0.0.1');
-        applyInputValue('s-telegram-token', s.TELEGRAM_BOT_TOKEN);
-        applyInputValue('s-telegram-chat-id', s.TELEGRAM_CHAT_ID);
-
-        applyInputValue('s-model', s.OUROBOROS_MODEL);
-        applyInputValue('s-model-code', s.OUROBOROS_MODEL_CODE);
-        applyInputValue('s-model-light', s.OUROBOROS_MODEL_LIGHT);
-        applyInputValue('s-model-fallback', s.OUROBOROS_MODEL_FALLBACK);
-        applyInputValue('s-claude-code-model', s.CLAUDE_CODE_MODEL);
-        byId('s-effort-task').value = s.OUROBOROS_EFFORT_TASK || s.OUROBOROS_INITIAL_REASONING_EFFORT || 'medium';
-        byId('s-effort-evolution').value = s.OUROBOROS_EFFORT_EVOLUTION || 'high';
-        byId('s-effort-review').value = s.OUROBOROS_EFFORT_REVIEW || 'medium';
-        byId('s-effort-consciousness').value = s.OUROBOROS_EFFORT_CONSCIOUSNESS || 'low';
-        applyInputValue('s-review-models', s.OUROBOROS_REVIEW_MODELS);
-        applyInputValue('s-scope-review-model', s.OUROBOROS_SCOPE_REVIEW_MODEL);
-        byId('s-effort-scope-review').value = s.OUROBOROS_EFFORT_SCOPE_REVIEW || 'high';
-        byId('s-review-enforcement').value = s.OUROBOROS_REVIEW_ENFORCEMENT || 'advisory';
-        byId('s-runtime-mode').value = s.OUROBOROS_RUNTIME_MODE || 'advanced';
-        applyInputValue('s-skills-repo-path', s.OUROBOROS_SKILLS_REPO_PATH);
-        applyInputValue('s-clawhub-registry-url', s.OUROBOROS_CLAWHUB_REGISTRY_URL);
-        if (s.OUROBOROS_MAX_WORKERS) byId('s-workers').value = s.OUROBOROS_MAX_WORKERS;
-        if (s.OUROBOROS_SOFT_TIMEOUT_SEC) byId('s-soft-timeout').value = s.OUROBOROS_SOFT_TIMEOUT_SEC;
-        if (s.OUROBOROS_HARD_TIMEOUT_SEC) byId('s-hard-timeout').value = s.OUROBOROS_HARD_TIMEOUT_SEC;
-        if (s.OUROBOROS_TOOL_TIMEOUT_SEC) byId('s-tool-timeout').value = s.OUROBOROS_TOOL_TIMEOUT_SEC;
-        applyInputValue('s-websearch-model', s.OUROBOROS_WEBSEARCH_MODEL);
-        applyInputValue('s-gh-token', s.GITHUB_TOKEN);
-        applyInputValue('s-gh-repo', s.GITHUB_REPO);
-        applyInputValue('s-local-source', s.LOCAL_MODEL_SOURCE);
-        applyInputValue('s-local-filename', s.LOCAL_MODEL_FILENAME);
-        if (s.LOCAL_MODEL_PORT) byId('s-local-port').value = s.LOCAL_MODEL_PORT;
-        if (s.LOCAL_MODEL_N_GPU_LAYERS !== null && s.LOCAL_MODEL_N_GPU_LAYERS !== undefined) byId('s-local-gpu-layers').value = s.LOCAL_MODEL_N_GPU_LAYERS;
-        if (s.LOCAL_MODEL_CONTEXT_LENGTH) byId('s-local-ctx').value = s.LOCAL_MODEL_CONTEXT_LENGTH;
-        applyInputValue('s-local-chat-format', s.LOCAL_MODEL_CHAT_FORMAT);
-        applyCheckboxValue('s-local-main', s.USE_LOCAL_MAIN);
-        applyCheckboxValue('s-local-code', s.USE_LOCAL_CODE);
-        applyCheckboxValue('s-local-light', s.USE_LOCAL_LIGHT);
-        applyCheckboxValue('s-local-fallback', s.USE_LOCAL_FALLBACK);
-        // A2A settings
-        applyCheckboxValue('s-a2a-enabled', s.A2A_ENABLED);
-        if (s.A2A_PORT) applyInputValue('s-a2a-port', s.A2A_PORT);
-        applyInputValue('s-a2a-host', s.A2A_HOST);
-        applyInputValue('s-a2a-agent-name', s.A2A_AGENT_NAME);
-        applyInputValue('s-a2a-agent-description', s.A2A_AGENT_DESCRIPTION);
-        if (s.A2A_MAX_CONCURRENT) applyInputValue('s-a2a-max-concurrent', s.A2A_MAX_CONCURRENT);
-        if (s.A2A_TASK_TTL_HOURS) applyInputValue('s-a2a-ttl-hours', s.A2A_TASK_TTL_HOURS);
+        setupContract = s?._meta?.setup_contract || setupContract || {};
+        applySecretInputs(page, s);
+        INPUT_FIELDS.forEach(([id, key, fallback = '']) => applyInputValue(id, fallback && !s[key] ? fallback : s[key]));
+        VALUE_FIELDS.forEach(([id, key, fallback]) => { byId(id).value = s[key] || fallback; });
+        setupModelSlots().forEach((slot) => {
+            applyInputValue(slot.settingsInputId, s[slot.settingKey]);
+            applyCheckboxValue(slot.settingsToggleId, s[`USE_LOCAL_${slot.slot.toUpperCase()}`]);
+        });
+        applyCheckboxValue('s-auto-grant-reviewed-skills', s.OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS);
+        NUMBER_FIELDS.forEach(([id, key, fallback, allowFalsy]) => {
+            const value = s[key];
+            if (allowFalsy ? value !== null && value !== undefined : value) byId(id).value = value;
+            else byId(id).value = fallback;
+        });
+        (Array.isArray(setupContract.budgetFields) ? setupContract.budgetFields : []).forEach((field) => {
+            const id = field.settingsInputId;
+            const input = byId(id);
+            if (!input) return;
+            input.min = field.min || '0.01';
+            input.step = field.step || 'any';
+            input.value = s[field.settingKey] ?? field.default ?? '';
+        });
+        applyMcpSettings(s);
         resetSecretClearFlags(page);
         syncEffortSegments(page);
         syncRuntimeModeBridgeState();
@@ -450,29 +503,25 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
     }
 
     async function loadSettings() {
-        const [settingsResp, extResp] = await Promise.all([
-            fetch('/api/settings', { cache: 'no-store' }),
-            fetch('/api/extensions', { cache: 'no-store' }).catch(() => null),
+        const [data, extData] = await Promise.all([
+            apiClient.settings(),
+            apiClient.extensions().catch(() => ({})),
         ]);
-        const data = await settingsResp.json().catch(() => ({}));
-        const extData = extResp && extResp.ok ? await extResp.json().catch(() => ({})) : {};
         const sections = Array.isArray(extData?.live?.settings_sections)
             ? extData.live.settings_sections
             : [];
-        if (!settingsResp.ok) throw new Error(data.error || `HTTP ${settingsResp.status}`);
         currentSettings = data;
         applySettings(data);
         renderExtensionSettingsSections(page, sections);
+        renderRequestedSkillSecrets(page, extData.skills || [], data);
+        renderCustomSecrets(page, data);
         setSettingsCleanBaseline();
         closeSettingsModelPickers();
         _renderNetworkHint(data._meta);
         renderClaudeCodeUi();
         settingsLoaded = true;
+        markSettingsDirty = updateSettingsDirtyState;
         syncSettingsLoadState();
-        // Always start polling so a below-baseline SDK surfaces even before
-        // the user sets ANTHROPIC_API_KEY. `refreshClaudeCodeStatus` is now
-        // unconditional, and `shouldShowClaudeRuntimeCard` uses the runtime
-        // error signal to decide visibility.
         startClaudeCodePolling();
     }
 
@@ -501,65 +550,67 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
         }
     }
 
-    function collectBody() {
-        const body = {
-            OUROBOROS_MODEL: byId('s-model').value,
-            OUROBOROS_MODEL_CODE: byId('s-model-code').value,
-            OUROBOROS_MODEL_LIGHT: byId('s-model-light').value,
-            OUROBOROS_MODEL_FALLBACK: byId('s-model-fallback').value,
-            CLAUDE_CODE_MODEL: byId('s-claude-code-model').value || 'claude-opus-4-6[1m]',
-            OUROBOROS_SERVER_HOST: (byId('s-server-host')?.value || '127.0.0.1').trim() || '127.0.0.1',
-            OUROBOROS_EFFORT_TASK: byId('s-effort-task').value,
-            OUROBOROS_EFFORT_EVOLUTION: byId('s-effort-evolution').value,
-            OUROBOROS_EFFORT_REVIEW: byId('s-effort-review').value,
-            OUROBOROS_EFFORT_CONSCIOUSNESS: byId('s-effort-consciousness').value,
-            OUROBOROS_REVIEW_MODELS: byId('s-review-models').value.trim(),
-            OUROBOROS_SCOPE_REVIEW_MODEL: byId('s-scope-review-model').value.trim(),
-            OUROBOROS_EFFORT_SCOPE_REVIEW: byId('s-effort-scope-review').value,
-            OUROBOROS_REVIEW_ENFORCEMENT: byId('s-review-enforcement').value,
-            // OUROBOROS_RUNTIME_MODE is owner-only: /api/settings still
-            // ignores it, while desktop mode changes go through the
-            // launcher-native confirmation bridge after normal settings save.
-            OUROBOROS_SKILLS_REPO_PATH: byId('s-skills-repo-path').value.trim(),
-            OUROBOROS_CLAWHUB_REGISTRY_URL: byId('s-clawhub-registry-url')?.value.trim() || '',
-            OUROBOROS_MAX_WORKERS: readInt('s-workers', 5),
-            OUROBOROS_SOFT_TIMEOUT_SEC: readInt('s-soft-timeout', 600),
-            OUROBOROS_HARD_TIMEOUT_SEC: readInt('s-hard-timeout', 1800),
-            OUROBOROS_TOOL_TIMEOUT_SEC: readInt('s-tool-timeout', 120),
-            OUROBOROS_WEBSEARCH_MODEL: byId('s-websearch-model').value.trim(),
-            GITHUB_REPO: byId('s-gh-repo').value,
-            LOCAL_MODEL_SOURCE: byId('s-local-source').value,
-            LOCAL_MODEL_FILENAME: byId('s-local-filename').value,
-            LOCAL_MODEL_PORT: readInt('s-local-port', 8766),
-            LOCAL_MODEL_N_GPU_LAYERS: readInt('s-local-gpu-layers', -1),
-            LOCAL_MODEL_CONTEXT_LENGTH: readInt('s-local-ctx', 16384),
-            LOCAL_MODEL_CHAT_FORMAT: byId('s-local-chat-format').value,
-            USE_LOCAL_MAIN: byId('s-local-main').checked,
-            USE_LOCAL_CODE: byId('s-local-code').checked,
-            USE_LOCAL_LIGHT: byId('s-local-light').checked,
-            USE_LOCAL_FALLBACK: byId('s-local-fallback').checked,
-            // A2A settings
-            A2A_ENABLED: byId('s-a2a-enabled')?.checked ?? false,
-            A2A_PORT: readInt('s-a2a-port', 18800),
-            A2A_HOST: (byId('s-a2a-host')?.value || '127.0.0.1').trim(),
-            A2A_AGENT_NAME: (byId('s-a2a-agent-name')?.value || '').trim(),
-            A2A_AGENT_DESCRIPTION: (byId('s-a2a-agent-description')?.value || '').trim(),
-            A2A_MAX_CONCURRENT: readInt('s-a2a-max-concurrent', 3),
-            A2A_TASK_TTL_HOURS: readInt('s-a2a-ttl-hours', 24),
-            OPENAI_BASE_URL: byId('s-openai-base-url').value.trim(),
-            OPENAI_COMPATIBLE_BASE_URL: byId('s-openai-compatible-base-url').value.trim(),
-            CLOUDRU_FOUNDATION_MODELS_BASE_URL: byId('s-cloudru-base-url').value.trim(),
-            TELEGRAM_CHAT_ID: byId('s-telegram-chat-id').value.trim(),
-        };
+    async function refreshSettingsAfterExtensionChange(reason = 'skills changed') {
+        if (extensionRefreshPending) return;
+        if (settingsDirty) {
+            setStatus(`Settings changed externally (${reason}). Reload after saving or discarding your draft.`, 'warn');
+            return;
+        }
+        extensionRefreshPending = true;
+        try {
+            await loadSettings();
+            setStatus('Settings refreshed', 'ok');
+        } catch (error) {
+            setStatus(`Settings refresh failed: ${error.message || error}`, 'warn');
+        } finally {
+            extensionRefreshPending = false;
+        }
+    }
 
-        collectSecretValue('s-openrouter', body);
-        collectSecretValue('s-openai', body);
-        collectSecretValue('s-openai-compatible-key', body);
-        collectSecretValue('s-cloudru-key', body);
-        collectSecretValue('s-anthropic', body);
-        collectSecretValue('s-network-password', body);
-        collectSecretValue('s-telegram-token', body);
-        collectSecretValue('s-gh-token', body);
+    function collectBody() {
+        const fieldValue = (id) => byId(id)?.value || '';
+        const body = {
+            OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS: byId('s-auto-grant-reviewed-skills')?.checked ? 'true' : 'false',
+            ...collectMcpSettings(),
+        };
+        setupModelSlots().forEach((slot) => {
+            body[slot.settingKey] = fieldValue(slot.settingsInputId);
+            body[`USE_LOCAL_${slot.slot.toUpperCase()}`] = Boolean(byId(slot.settingsToggleId)?.checked);
+        });
+        INPUT_FIELDS.forEach(([id, key, fallback = '']) => {
+            const value = fieldValue(id).trim();
+            body[key] = key === 'OUROBOROS_SERVER_HOST' ? value || fallback : value || (key === 'CLAUDE_CODE_MODEL' ? fallback : '');
+        });
+        VALUE_FIELDS
+            .filter(([, key]) => key !== 'OUROBOROS_RUNTIME_MODE')
+            .forEach(([id, key]) => { body[key] = fieldValue(id); });
+        NUMBER_FIELDS.forEach(([id, key, fallback]) => { body[key] = readInt(id, fallback); });
+        (Array.isArray(setupContract.budgetFields) ? setupContract.budgetFields : []).forEach((field) => {
+            const id = field.settingsInputId;
+            const input = byId(id);
+            if (!input) return;
+            const raw = String(input.value || '').trim();
+            const parsed = Number(raw);
+            const value = Number.isFinite(parsed) && parsed > 0 ? parsed : raw;
+            if (String(value) !== String(currentSettings?.[field.settingKey] ?? field.default)) {
+                body[field.settingKey] = value;
+            }
+        });
+
+        page.querySelectorAll('[data-secret-setting]').forEach((input) => {
+            collectSecretValue(input.id, body);
+        });
+        page.querySelectorAll('[data-custom-secret-row]').forEach((row) => {
+            const keyInput = row.querySelector('[data-custom-secret-key]');
+            const valueInput = row.querySelector('[data-custom-secret-value]');
+            const key = (keyInput?.value || '').trim().toUpperCase();
+            const error = row.querySelector('[data-custom-secret-error]');
+            if (!key) return;
+            if (!/^[A-Z][A-Z0-9_]{2,}$/.test(key)) { if (error) { error.hidden = false; error.textContent = 'Use uppercase letters, numbers, and underscores.'; } return; }
+            if (row.dataset.removeCustomSecret === '1' || valueInput?.dataset.forceClear === '1') { body[key] = ''; return; }
+            const value = valueInput?.value || '';
+            if (value && !value.includes('...')) body[key] = value;
+        });
 
         return body;
     }
@@ -567,23 +618,42 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
     async function saveRuntimeModeViaNativeBridgeIfNeeded() {
         const nextMode = byId('s-runtime-mode').value || 'advanced';
         const currentMode = currentSettings?.OUROBOROS_RUNTIME_MODE || 'advanced';
-        if (nextMode === currentMode) return null;
         const bridge = window.pywebview?.api?.request_runtime_mode_change;
-        if (!bridge) {
-            throw new Error(
-                'Runtime mode changes require the desktop launcher confirmation bridge. '
-                + 'Use the desktop app, or stop Ouroboros and edit settings.json manually.'
-            );
+        if (nextMode === currentMode) {
+            return bridge ? await bridge(nextMode) : await apiClient.ownerRuntimeMode(nextMode);
         }
-        const result = await bridge(nextMode);
+        const result = bridge
+            ? await bridge(nextMode)
+            : (confirm(`Change Ouroboros runtime mode from ${currentMode} to ${nextMode}? The change takes effect after restart.`)
+                ? await apiClient.ownerRuntimeMode(nextMode)
+                : { ok: false, error: 'Runtime mode change cancelled.' });
         if (!result || result.ok !== true) {
             throw new Error(result?.error || 'Runtime mode change was cancelled.');
         }
         return result;
     }
 
+    async function saveAutoGrantViaNativeBridgeIfNeeded() {
+        const checkbox = byId('s-auto-grant-reviewed-skills');
+        if (!checkbox) return null;
+        const nextEnabled = Boolean(checkbox.checked);
+        const currentEnabled = isTruthySetting(currentSettings?.OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS);
+        if (nextEnabled === currentEnabled) return null;
+        const bridge = window.pywebview?.api?.request_auto_grant_reviewed_skills_change;
+        const result = bridge
+            ? await bridge(nextEnabled)
+            : (confirm(`${nextEnabled ? 'Enable' : 'Disable'} reviewed-skill auto-grant? It only applies after a fresh executable review for the current content hash.`)
+                ? await apiClient.ownerAutoGrant(nextEnabled)
+                : { ok: false, error: 'Reviewed-skill auto-grant change cancelled.' });
+        if (!result || result.ok !== true) {
+            throw new Error(result?.error || 'Reviewed-skill auto-grant change was cancelled.');
+        }
+        return result;
+    }
+
     syncSettingsLoadState();
     syncRuntimeModeBridgeState();
+    syncAutoGrantBridgeState();
     reloadSettingsWithFeedback();
 
     if (typeof setBeforePageLeave === 'function') {
@@ -606,9 +676,39 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
     page.addEventListener('input', updateSettingsDirtyState);
     page.addEventListener('change', updateSettingsDirtyState);
     page.addEventListener('click', (event) => {
-        if (event.target.closest('[data-effort-value], .secret-clear')) {
+        if (event.target.closest('[data-effort-value], .secret-clear, [data-row-secret-clear], [data-custom-secret-remove]')) {
             queueMicrotask(updateSettingsDirtyState);
         }
+    });
+    byId('btn-add-custom-secret')?.addEventListener('click', () => {
+        const host = byId('custom-secrets-list');
+        if (!host) return;
+        if (host.querySelector('.muted')) host.innerHTML = '';
+        const row = customSecretRow();
+        host.appendChild(row);
+        row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        row.querySelector('[data-custom-secret-key]')?.focus();
+        markSettingsDirty();
+    });
+
+    window.addEventListener('ouro:skill-lifecycle', (event) => {
+        const action = String(event.detail?.action || 'skills changed');
+        refreshSettingsAfterExtensionChange(action);
+    });
+    window.addEventListener('ouro:settings-updated', (event) => {
+        if (event.detail?.source === 'settings') return;
+        const action = String(event.detail?.reason || 'settings changed');
+        refreshSettingsAfterExtensionChange(action);
+    });
+    if (ws && typeof ws.on === 'function') {
+        ws.on('extension_lifecycle', (event) => {
+            const action = String(event?.action || 'extension lifecycle');
+            refreshSettingsAfterExtensionChange(action);
+        });
+    }
+
+    window.addEventListener('ouro:page-shown', (event) => {
+        if (event.detail?.page === 'settings') refreshSettingsAfterExtensionChange('settings page shown');
     });
 
     function closeSettingsModelPickers(exceptPicker = null) {
@@ -726,7 +826,7 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
             error: '',
         });
         try {
-            const resp = await fetch('/api/claude-code/install', { method: 'POST' });
+            const resp = await apiFetch('/api/claude-code/install', { method: 'POST' });
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
             applyClaudeCodeStatus(data);
@@ -760,21 +860,23 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
         const body = collectBody();
 
         try {
-            const resp = await fetch('/api/settings', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body),
-            });
-            const data = await resp.json().catch(() => ({}));
-            if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+            const data = await apiClient.saveSettings(body);
             let runtimeModeResult = null;
             let runtimeModeError = '';
+            let autoGrantResult = null;
+            let autoGrantError = '';
             try {
                 runtimeModeResult = await saveRuntimeModeViaNativeBridgeIfNeeded();
             } catch (error) {
                 runtimeModeError = error.message || String(error);
             }
+            try {
+                autoGrantResult = await saveAutoGrantViaNativeBridgeIfNeeded();
+            } catch (error) {
+                autoGrantError = error.message || String(error);
+            }
             await loadSettings();
+            syncAutoGrantBridgeState();
             let statusMsg;
             let statusType = 'ok';
             if (data.no_changes) {
@@ -801,7 +903,15 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
                 statusMsg = `${statusMsg} Runtime mode was not changed: ${runtimeModeError}`;
                 statusType = 'warn';
             }
+            if (autoGrantResult) {
+                statusMsg = `${statusMsg} Reviewed-skill auto-grant ${autoGrantResult.enabled ? 'enabled' : 'disabled'}.`;
+            }
+            if (autoGrantError) {
+                statusMsg = `${statusMsg} Reviewed-skill auto-grant was not changed: ${autoGrantError}`;
+                statusType = 'warn';
+            }
             setStatus(statusMsg, statusType);
+            window.dispatchEvent(new CustomEvent('ouro:settings-updated', { detail: { reason: 'settings saved', source: 'settings' } }));
         } catch (e) {
             setStatus('Failed to save: ' + e.message, 'warn');
         }
@@ -810,12 +920,12 @@ export function initSettings({ state, setBeforePageLeave } = {}) {
     byId('btn-reset').addEventListener('click', async () => {
         if (!confirm('This will delete all runtime data (state, memory, logs, settings) and restart.\nThe repo (agent code) will be preserved.\nYou will need to re-enter your provider settings.\n\nContinue?')) return;
         try {
-            const res = await fetch('/api/reset', { method: 'POST' });
+            const res = await apiFetch('/api/reset', { method: 'POST' });
             const data = await res.json();
             if (data.status === 'ok') alert('Deleted: ' + (data.deleted.join(', ') || 'nothing') + '\nRestarting...');
             else alert('Error: ' + (data.error || 'unknown'));
         } catch (e) {
-            alert('Reset failed: ' + e.message);
+            showToast('Reset failed: ' + e.message, 'error');
         }
     });
 

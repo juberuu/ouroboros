@@ -1,4 +1,4 @@
-"""File tools: repo_read, repo_list, data_read, data_list, data_write, code_search, codebase_digest, summarize_dialogue."""
+"""File/data tools plus code search and digest helpers."""
 
 from __future__ import annotations
 
@@ -12,170 +12,124 @@ import re
 import uuid
 from typing import Any, Dict, List, Tuple
 
-from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.utils import read_text, safe_relpath, utc_now_iso
+from ouroboros.tools.registry import ToolContext, ToolEntry, active_repo_dir_for
+from ouroboros.tool_access import (
+    decide_tool_access,
+    active_tool_profile,
+    normalize_root,
+    resolve_resource_path,
+    resource_root_path,
+)
+from ouroboros.tool_capabilities import LOCAL_READONLY_SUBAGENT_MODE
+from ouroboros.utils import atomic_write_json, read_text, safe_relpath, utc_now_iso
+from ouroboros.contracts.task_constraint import normalize_task_constraint, resolve_payload_path
+from ouroboros.contracts.skill_payload_policy import (
+    SKILL_PAYLOAD_ALL_BUCKETS,
+    SKILL_OWNER_STATE_FILENAMES,
+    SkillPayloadPathError,
+    cross_skill_redirect_error,
+    decide_payload_short_form,
+    is_skill_control_plane_path as _policy_is_skill_control_plane_path,
+    is_skill_owner_state_alias,
+    is_skill_owner_state_target as _policy_is_skill_owner_state_target,
+    resolve_skill_payload_target,
+)
 
 log = logging.getLogger(__name__)
 
-_SKILL_OWNER_STATE_FILENAMES = frozenset({
-    "enabled.json",
-    "grants.json",
-    "review.json",
-    "clawhub.json",
-    # v5.7.0: isolated dependency install state/fingerprint. If agents can
-    # forge ``deps.json`` to {"status":"installed"} they can bypass the
-    # new dependency enable gate. Treat it as owner/lifecycle state.
-    "deps.json",
-})
+_SKILL_OWNER_STATE_FILENAMES = SKILL_OWNER_STATE_FILENAMES
 
-# v5.7.0: provenance / control-plane sidecars that live INSIDE a payload
-# directory (``data/skills/<bucket>/<skill>/``) but are owned by the
-# launcher/marketplace pipeline, not by the skill author. Any tool that
-# accepts arbitrary user-supplied paths (data_write, run_shell file scan,
-# file_browser_api delete/upload, heal-mode write check) consults
-# ``is_skill_control_plane_path`` to refuse writes to these markers.
-# Pre-v5.7.0 these names were only protected in heal mode, leaving normal
-# tool flows free to overwrite provenance.
-_SKILL_PAYLOAD_CONTROL_PLANE_FILENAMES = frozenset({
-    ".clawhub.json",
-    ".ouroboroshub.json",
-    "skill.openclaw.md",
-    ".seed-origin",
-})
-
-_SKILL_PAYLOAD_CONTROL_PLANE_DIRNAMES = frozenset({
-    ".ouroboros_env",
-    "node_modules",
-})
-
-# Buckets in ``data/skills/<bucket>/<skill>/`` where the payload
-# control-plane filenames are protected. We deliberately list every
-# bucket the launcher / marketplace pipelines own (native is launcher-
-# seeded, the others are user/marketplace-installed).
-_SKILL_PAYLOAD_BUCKETS = frozenset({
-    "native",
-    "external",
-    "clawhub",
-    "ouroboroshub",
-})
+# Payload-local provenance sidecars are launcher/marketplace-owned, not
+# skill-author-editable. Generic write/delete/upload paths must block them.
+_SELF_AUTHORED_MARKER = ".self_authored.json"
 
 
-def _is_skill_owner_state_target(target: pathlib.Path, data_root: pathlib.Path) -> bool:
-    if target.name.lower() not in _SKILL_OWNER_STATE_FILENAMES:
-        return False
+def _render_line_slice(path: str, content: str, max_lines: int = 2000, start_line: int = 1) -> str:
+    """Return a line-ranged file view with the shared read-tool header."""
+    start_raw, max_raw = _coerce_line_window(start_line, max_lines)
+    max_raw = max(1, max_raw)
+    lines = content.splitlines(keepends=True)
+    total = len(lines)
+    start = max(1, min(start_raw, total + 1))
+    end = min(start + max_raw - 1, total)
+    result = "".join(lines[start - 1:end])
+    header = f"# {path} — lines {start}\u2013{end} of {total}\n"
+    return header + result
+
+
+def _coerce_line_window(start_line: Any = 1, max_lines: Any = 2000) -> tuple[int, int]:
     try:
-        rel_to_data = target.relative_to(data_root)
-        parts = rel_to_data.parts
-        if (
-            len(parts) == 4
-            and parts[0].lower() == "state"
-            and parts[1].lower() == "skills"
-        ):
-            return True
-    except (OSError, ValueError):
-        pass
+        start_raw = int(start_line)
+    except (TypeError, ValueError):
+        start_raw = 1
     try:
-        rel_to_data = target.resolve(strict=False).relative_to(data_root)
-        parts = rel_to_data.parts
-        if (
-            len(parts) == 4
-            and parts[0].lower() == "state"
-            and parts[1].lower() == "skills"
-        ):
-            return True
-    except (OSError, ValueError):
-        pass
-    skills_state_root = data_root / "state" / "skills"
-    if not skills_state_root.is_dir():
-        return False
-    try:
-        target_parent = target.parent.resolve(strict=False)
-    except OSError:
-        return False
-    for skill_state_dir in skills_state_root.iterdir():
-        try:
-            if skill_state_dir.resolve(strict=False) == target_parent:
-                return True
-        except OSError:
-            continue
-    return False
+        max_raw = int(max_lines)
+    except (TypeError, ValueError):
+        max_raw = 2000
+    return start_raw, max(1, max_raw)
 
 
-def is_skill_control_plane_path(target: pathlib.Path, data_root: pathlib.Path) -> bool:
-    """Return True if ``target`` is a skill provenance / control-plane
-    file that must NEVER be edited via generic file-write tooling.
+def _is_cognitive_data_path(norm: str) -> bool:
+    text = str(norm or "").replace("\\", "/").lstrip("./")
+    return text.startswith("memory/") or text in _MEMORY_AT_DRIVE_MEMORY
 
-    Two surfaces qualify:
 
-    1. ``data/state/skills/<skill>/{enabled,grants,review,clawhub}.json``
-       (launcher-owned trust state — already covered by
-       ``_is_skill_owner_state_target`` for back-compat callers).
-    2. ``data/skills/<bucket>/<skill>/`` payload sidecars that the
-       launcher / marketplace pipelines own:
-       ``.clawhub.json``, ``.ouroboroshub.json``, ``SKILL.openclaw.md``,
-       ``.seed-origin`` (case-insensitive on the filename).
-
-    Symlinks are resolved so a payload-local symlink like
-    ``notes.txt -> .clawhub.json`` still trips the guard.
-    """
-    if _is_skill_owner_state_target(target, data_root):
-        return True
-
-    def _matches_payload(candidate: pathlib.Path) -> bool:
+def _skill_payload_parts(target: pathlib.Path, data_root: pathlib.Path) -> tuple[str, str, pathlib.Path] | None:
+    """Return (bucket, skill, payload_root) for data/skills payload paths."""
+    for candidate in (target, pathlib.Path(target).resolve(strict=False)):
         try:
             rel = candidate.relative_to(data_root)
         except (OSError, ValueError):
-            return False
+            continue
         parts = rel.parts
-        # ``skills/<bucket>/<skill>/<filename>`` = 4 parts.
-        if len(parts) < 4:
-            return False
-        if parts[0].lower() != "skills":
-            return False
-        if parts[1].lower() not in _SKILL_PAYLOAD_BUCKETS:
-            return False
-        rel_tail = [part.lower() for part in parts[3:]]
-        if any(part in _SKILL_PAYLOAD_CONTROL_PLANE_DIRNAMES for part in rel_tail):
-            return True
-        return candidate.name.lower() in _SKILL_PAYLOAD_CONTROL_PLANE_FILENAMES
+        if len(parts) < 3 or parts[0].lower() != "skills":
+            continue
+        bucket = parts[1]
+        if bucket.lower() not in SKILL_PAYLOAD_ALL_BUCKETS:
+            continue
+        skill_name = parts[2]
+        if not skill_name or skill_name in {".", ".."}:
+            continue
+        return bucket.lower(), skill_name, data_root / "skills" / bucket / skill_name
+    return None
 
-    if _matches_payload(target):
-        return True
 
-    # Resolve symlinks so a payload-local symlink or benign-looking path
-    # like ``notes.txt -> .clawhub.json`` still trips the guard. Pre-v5.7.0
-    # review found our first implementation checked basename before
-    # resolving, which missed this exact shape.
-    try:
-        resolved = pathlib.Path(target).resolve(strict=False)
-    except OSError:
-        resolved = pathlib.Path(target)
-    if _matches_payload(resolved):
-        return True
-
-    # Hardlink/inode defense: if ``target`` exists and points to the same
-    # inode as a protected sidecar in the same payload directory, a benign
-    # basename would otherwise bypass the name-based guard. Samefile is
-    # the portable API here (works on APFS/NTFS case-insensitive FS too).
-    try:
-        if not pathlib.Path(target).exists():
-            return False
-        rel = pathlib.Path(target).resolve(strict=False).relative_to(data_root)
-        parts = rel.parts
-        if len(parts) < 4 or parts[0].lower() != "skills" or parts[1].lower() not in _SKILL_PAYLOAD_BUCKETS:
-            return False
-        payload_root = data_root / parts[0] / parts[1] / parts[2]
-        for protected in payload_root.iterdir():
-            if protected.name.lower() not in _SKILL_PAYLOAD_CONTROL_PLANE_FILENAMES:
-                continue
-            try:
-                if protected.exists() and pathlib.Path(target).samefile(protected):
-                    return True
-            except OSError:
-                continue
-    except (OSError, ValueError):
+def _native_payload_without_seed(target: pathlib.Path, data_root: pathlib.Path) -> bool:
+    payload = _skill_payload_parts(target, data_root)
+    if payload is None:
         return False
-    return False
+    bucket, _skill_name, payload_root = payload
+    return bucket == "native" and not (payload_root / ".seed-origin").is_file()
+
+
+def _data_skill_path(path: str, drive_root: pathlib.Path) -> pathlib.Path | None:
+    try:
+        return resolve_skill_payload_target(pathlib.Path(drive_root), path).target_path
+    except SkillPayloadPathError:
+        return None
+
+
+def _looks_like_serialized_tool_result(content: Any) -> bool:
+    text = str(content or "").lstrip()
+    if not (text.startswith("{'content'") or text.startswith('{"content"')):
+        return False
+    try:
+        parsed = ast.literal_eval(text)
+    except Exception:
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return False
+    return isinstance(parsed, dict) and isinstance(parsed.get("content"), str)
+
+
+def _is_skill_owner_state_target(target: pathlib.Path, data_root: pathlib.Path) -> bool:
+    return _policy_is_skill_owner_state_target(target, data_root)
+
+
+def is_skill_control_plane_path(target: pathlib.Path, data_root: pathlib.Path) -> bool:
+    """Return True for skill owner/provenance files blocked from generic writes."""
+    return _policy_is_skill_control_plane_path(target, data_root)
 
 
 def _list_dir(root: pathlib.Path, rel: str, max_entries: int = 500) -> List[str]:
@@ -197,6 +151,158 @@ def _list_dir(root: pathlib.Path, rel: str, max_entries: int = 500) -> List[str]
     return items
 
 
+_SUBAGENT_SECRET_FILE_NAMES = frozenset({
+    ".env",
+    ".netrc",
+    "auth.json",
+    "credentials",
+    "credentials.json",
+    "keys.json",
+    "secret.json",
+    "secrets.json",
+    "settings.json",
+    "settings.json.lock",
+    "token.json",
+    "tokens.json",
+})
+
+
+def _is_local_readonly_subagent(ctx: ToolContext) -> bool:
+    task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
+    return bool(task_constraint and task_constraint.mode == LOCAL_READONLY_SUBAGENT_MODE)
+
+
+def _is_subagent_secret_data_path(norm: str) -> bool:
+    text = str(norm or "").replace("\\", "/").strip()
+    while text.startswith("./"):
+        text = text[2:]
+    if not text:
+        return False
+    parts = [part.lower() for part in text.split("/") if part and part != "."]
+    if not parts:
+        return False
+    if any(part in {"auth", "credentials", "secrets", "tokens"} for part in parts):
+        return True
+    name = parts[-1]
+    normalized_names = {name, name.lstrip(".")}
+    if name.lstrip(".") == "settings.tmp":
+        normalized_names.add("settings.json")
+    for protected_name in (_SUBAGENT_SECRET_FILE_NAMES | _SKILL_OWNER_STATE_FILENAMES):
+        bare = name.lstrip(".")
+        if bare.startswith(f"{protected_name}.tmp") or bare.startswith(f"{protected_name}.lock"):
+            normalized_names.add(protected_name)
+    if normalized_names & (_SUBAGENT_SECRET_FILE_NAMES | _SKILL_OWNER_STATE_FILENAMES):
+        return True
+    if name.startswith(".env") or name.endswith(".env") or ".env." in name:
+        return True
+    if name.endswith((".key", ".pem", ".p12", ".pfx")):
+        return True
+    return bool(re.search(r"(?:^|[._-])(api[_-]?key|credential|password|secret|token)(?:[._-]|$)", name))
+
+
+def _is_subagent_secret_repo_path(norm: str) -> bool:
+    text = str(norm or "").replace("\\", "/").strip()
+    while text.startswith("./"):
+        text = text[2:]
+    parts = [part.lower() for part in text.split("/") if part and part != "."]
+    if ".git" in parts or any(part in {"auth", "credentials", "secrets", "tokens"} for part in parts):
+        return True
+    if not parts:
+        return False
+    name = parts[-1]
+    if name in _SUBAGENT_SECRET_FILE_NAMES or name == "settings.tmp":
+        return True
+    if name.startswith(".env") or name.endswith(".env") or ".env." in name:
+        return True
+    if name.endswith((".key", ".pem", ".p12", ".pfx")):
+        return True
+    if re.search(r"(?:^|[._-])(api[_-]?key|credential|password|secret|token)(?:[._-]|$)", name):
+        suffix = pathlib.PurePosixPath(name).suffix.lower()
+        return suffix in {"", ".json", ".env", ".key", ".pem", ".p12", ".pfx", ".toml", ".yaml", ".yml", ".ini", ".cfg", ".conf"}
+    return False
+
+
+def _is_subagent_secret_repo_target(target: pathlib.Path, repo_root: pathlib.Path) -> bool:
+    root = pathlib.Path(repo_root).resolve(strict=False)
+    try:
+        rel = str(pathlib.Path(target).resolve(strict=False).relative_to(root)).replace(os.sep, "/")
+    except (OSError, ValueError):
+        rel = str(target).replace(os.sep, "/")
+    if _is_subagent_secret_repo_path(rel):
+        return True
+    secret_candidates = [
+        root / ".git" / "credentials",
+        root / ".git" / "config",
+    ]
+    try:
+        secret_candidates.extend(
+            candidate
+            for candidate in root.iterdir()
+            if candidate.is_file() and _is_subagent_secret_repo_path(candidate.name)
+        )
+    except OSError:
+        pass
+    return any(
+        candidate.is_file()
+        and target.exists()
+        and target.samefile(candidate)
+        for candidate in secret_candidates
+    )
+
+
+def _filter_subagent_secret_repo_listing(items: List[str], repo_root: pathlib.Path) -> List[str]:
+    filtered: List[str] = []
+    redacted = 0
+    root = pathlib.Path(repo_root).resolve(strict=False)
+    for item in items:
+        marker = item.rstrip("/")
+        if marker.startswith("⚠️") or marker.startswith("...("):
+            filtered.append(item)
+            continue
+        if _is_subagent_secret_repo_path(marker) or _is_subagent_secret_repo_target(root / marker, root):
+            redacted += 1
+            continue
+        filtered.append(item)
+    if redacted:
+        filtered.append(f"⚠️ {redacted} secret/control entr{'y' if redacted == 1 else 'ies'} hidden from local_readonly_subagent.")
+    return filtered
+
+
+def _filter_subagent_secret_listing(items: List[str], data_root: pathlib.Path) -> List[str]:
+    filtered: List[str] = []
+    redacted = 0
+    root = pathlib.Path(data_root).resolve(strict=False)
+    for item in items:
+        marker = item.rstrip("/")
+        if marker.startswith("⚠️") or marker.startswith("...("):
+            filtered.append(item)
+            continue
+        target = root / marker
+        try:
+            resolved_rel = str(pathlib.Path(target).resolve(strict=False).relative_to(root)).replace(os.sep, "/")
+        except (OSError, ValueError):
+            resolved_rel = marker
+        if (
+            _is_subagent_secret_data_path(marker)
+            or _is_subagent_secret_data_path(resolved_rel)
+            or _is_skill_owner_state_target(target, root)
+            or is_skill_owner_state_alias(target, root)
+            or any(
+                candidate.is_file()
+                and _is_subagent_secret_data_path(candidate.name)
+                and target.exists()
+                and target.samefile(candidate)
+                for candidate in root.iterdir()
+            )
+        ):
+            redacted += 1
+            continue
+        filtered.append(item)
+    if redacted:
+        filtered.append(f"⚠️ {redacted} secret/control entr{'y' if redacted == 1 else 'ies'} hidden from local_readonly_subagent.")
+    return filtered
+
+
 _MEMORY_AT_DRIVE_MEMORY = frozenset({
     "identity.md", "scratchpad.md", "dialogue_summary.md",
     "dialogue_blocks.json", "registry.md", "deep_review.md",
@@ -205,16 +311,12 @@ _MEMORY_AT_DRIVE_MEMORY = frozenset({
 
 
 def _repo_read(ctx: ToolContext, path: str, max_lines: int = 2000, start_line: int = 1) -> str:
-    """Read a file from the repo, optionally slicing to a line range.
-
-    When the requested path is a known memory artifact (identity.md,
-    scratchpad.md, etc.) at the repo root level, return a hint rather than
-    letting an opaque ENOENT scroll past. These files live at
-    ``data_root/memory/``; some are already present in context, and all raw
-    memory files should be read through ``data_read`` rather than ``repo_read``.
-    """
+    """Read a repo file; root-level memory names return a runtime_data read hint."""
+    target = ctx.repo_path(path)
+    if _is_local_readonly_subagent(ctx) and _is_subagent_secret_repo_target(target, active_repo_dir_for(ctx)):
+        return "⚠️ REPO_READ_BLOCKED: local_readonly_subagent cannot read repo secret or control files."
     try:
-        content = read_text(ctx.repo_path(path))
+        content = read_text(target)
     except FileNotFoundError:
         norm = path.strip().lstrip("./").replace("\\", "/")
         base = norm.rsplit("/", 1)[-1]
@@ -226,33 +328,30 @@ def _repo_read(ctx: ToolContext, path: str, max_lines: int = 2000, start_line: i
                 f"git repo. Some memory artifacts are already summarized in "
                 f"context as `## {title}`, but raw memory state must be read "
                 f"from the data root. If you need the raw file, call "
-                f"`data_read(path='memory/{base}')`."
+                f"`read_file(root='runtime_data', path='memory/{base}')`."
             )
         raise
-    lines = content.splitlines(keepends=True)
-    total = len(lines)
-    start = max(1, min(start_line, total + 1))
-    end = min(start + max_lines - 1, total)
-    slice_lines = lines[start - 1:end]
-    result = "".join(slice_lines)
-    header = f"# {path} — lines {start}\u2013{end} of {total}\n"
-    return header + result
+    return _render_line_slice(path, content, max_lines=max_lines, start_line=start_line)
 
 
 def _repo_list(ctx: ToolContext, dir: str = ".", max_entries: int = 500) -> str:
-    return json.dumps(_list_dir(ctx.repo_dir, dir, max_entries), ensure_ascii=False, indent=2)
+    repo_root = active_repo_dir_for(ctx)
+    target = ctx.repo_path(dir)
+    if _is_local_readonly_subagent(ctx) and _is_subagent_secret_repo_target(target, repo_root):
+        return json.dumps(
+            ["⚠️ REPO_LIST_BLOCKED: local_readonly_subagent cannot list repo secret or control paths."],
+            ensure_ascii=False,
+            indent=2,
+        )
+    items = _list_dir(repo_root, dir, max_entries)
+    if _is_local_readonly_subagent(ctx):
+        items = _filter_subagent_secret_repo_listing(items, repo_root)
+    return json.dumps(items, ensure_ascii=False, indent=2)
 
 
-def _data_read(ctx: ToolContext, path: str) -> str:
-    """Read a UTF-8 text file from the drive (relative to drive_root).
+def _normalize_data_read_path(ctx: ToolContext, path: str) -> str:
+    """Normalize paths that redundantly include the drive root."""
 
-    Paths that include the drive_root prefix (e.g.
-    ``.tmp-data-qwen-coder-next/data/memory/identity.md`` or the absolute
-    ``/Users/.../data/memory/...``) used to silently fail with ENOENT
-    because ``drive_path()`` prepends drive_root again, producing a doubled
-    path. Strip the duplicate prefix when we recognize one so the call works
-    rather than burning a round on a confusing path-doubling error.
-    """
     norm = str(path).strip().replace("\\", "/")
     if norm.startswith("./"):
         norm = norm[2:]
@@ -270,8 +369,52 @@ def _data_read(ctx: ToolContext, path: str) -> str:
                 norm = after[len("data/"):]
             else:
                 norm = after
+    return norm
+
+
+def _data_read(ctx: ToolContext, path: str, max_lines: int = 2000, start_line: int = 1) -> str:
+    """Read a drive text file; duplicate drive_root prefixes are stripped."""
+    task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
+    norm = _normalize_data_read_path(ctx, path)
+    if _is_local_readonly_subagent(ctx) and _is_subagent_secret_data_path(norm):
+        return "⚠️ DATA_READ_BLOCKED: local_readonly_subagent cannot read secret or owner-control data files."
+    if task_constraint and task_constraint.mode == "skill_repair" and task_constraint.payload_root:
+        try:
+            target = resolve_payload_path(pathlib.Path(ctx.drive_root), task_constraint, norm)
+        except ValueError as e:
+            return f"⚠️ DATA_READ_BLOCKED: {e}"
+    else:
+        target = ctx.drive_path(norm)
+    if _is_local_readonly_subagent(ctx):
+        root = pathlib.Path(ctx.drive_root).resolve(strict=False)
+        try:
+            resolved_rel = str(pathlib.Path(target).resolve(strict=False).relative_to(root)).replace(os.sep, "/")
+        except (OSError, ValueError):
+            resolved_rel = norm
+        if (
+            _is_subagent_secret_data_path(resolved_rel)
+            or _is_skill_owner_state_target(target, root)
+            or is_skill_owner_state_alias(target, root)
+            or any(
+                candidate.is_file()
+                and _is_subagent_secret_data_path(candidate.name)
+                and pathlib.Path(target).exists()
+                and pathlib.Path(target).samefile(candidate)
+                for candidate in root.iterdir()
+            )
+        ):
+            return "⚠️ DATA_READ_BLOCKED: local_readonly_subagent cannot read secret or owner-control data files."
+    if (
+        _is_skill_owner_state_target(target, pathlib.Path(ctx.drive_root))
+        and target.name.lower() != "review.json"
+    ):
+        return "DATA_READ_BLOCKED: skill owner state is not readable through generic data tools."
     try:
-        return read_text(ctx.drive_path(norm))
+        content = read_text(target)
+        start_raw, max_raw = _coerce_line_window(start_line, max_lines)
+        if _is_cognitive_data_path(norm) and start_raw == 1 and max_raw == 2000:
+            return content
+        return _render_line_slice(norm, content, max_lines=max_raw, start_line=start_raw)
     except FileNotFoundError:
         if norm.replace("\\", "/").startswith("memory/"):
             explanation = (
@@ -288,69 +431,126 @@ def _data_read(ctx: ToolContext, path: str) -> str:
             )
         return (
             f"⚠️ DATA_NOT_YET_CREATED: {path}\n\n"
-            f"{explanation} Use data_list to confirm what currently exists."
+            f"{explanation} Use list_files with root=runtime_data to confirm what currently exists."
         )
 
 
 def _data_list(ctx: ToolContext, dir: str = ".", max_entries: int = 500) -> str:
-    return json.dumps(_list_dir(ctx.drive_root, dir, max_entries), ensure_ascii=False, indent=2)
+    task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
+    norm_dir = _normalize_data_read_path(ctx, dir)
+    if _is_local_readonly_subagent(ctx) and _is_subagent_secret_data_path(norm_dir):
+        return json.dumps(
+            ["⚠️ DATA_LIST_BLOCKED: local_readonly_subagent cannot list secret or owner-control data paths."],
+            ensure_ascii=False,
+            indent=2,
+        )
+    if _is_local_readonly_subagent(ctx):
+        try:
+            list_target = ctx.drive_path(norm_dir)
+        except ValueError as e:
+            return json.dumps([f"⚠️ DATA_LIST_BLOCKED: {e}"], ensure_ascii=False, indent=2)
+        root = pathlib.Path(ctx.drive_root).resolve(strict=False)
+        if _is_skill_owner_state_target(list_target, root) or is_skill_owner_state_alias(list_target, root):
+            return json.dumps(
+                ["⚠️ DATA_LIST_BLOCKED: local_readonly_subagent cannot list secret or owner-control data paths."],
+                ensure_ascii=False,
+                indent=2,
+            )
+    if task_constraint and task_constraint.mode == "skill_repair" and task_constraint.payload_root:
+        try:
+            root = resolve_payload_path(pathlib.Path(ctx.drive_root), task_constraint, dir)
+        except ValueError as e:
+            return json.dumps([f"⚠️ DATA_LIST_BLOCKED: {e}"], ensure_ascii=False, indent=2)
+        items = _list_dir(root, ".", max_entries)
+        return json.dumps(items, ensure_ascii=False, indent=2)
+    items = _list_dir(ctx.drive_root, dir, max_entries)
+    if _is_local_readonly_subagent(ctx):
+        items = _filter_subagent_secret_listing(items, pathlib.Path(ctx.drive_root))
+    return json.dumps(items, ensure_ascii=False, indent=2)
 
 
-def _data_write(ctx: ToolContext, path: str, content: str, mode: str = "overwrite") -> str:
-    p = ctx.drive_path(path)
-    # v5.1.2 elevation ratchet defense-in-depth: settings.json is owner-only.
-    # The chokepoint in ``ouroboros.config.save_settings`` already refuses
-    # disk-level elevation; blocking ``data_write`` here turns the whole
-    # class of attempts into a clear tool-level error.
-    #
-    # The match is inode-aware (``Path.samefile``) so it handles symlinks,
-    # hardlinks, and case-insensitive filesystems (macOS APFS / Windows NTFS
-    # — ``os.path.normcase`` is a no-op on darwin, so a string-equality
-    # compare against the resolved path would let ``data_write("Settings.json",
-    # ...)`` bypass on darwin even though APFS routes both names to the same
-    # inode). For not-yet-existing paths ``samefile`` is unavailable; we
-    # fall back to a parent-resolve + case-insensitive name compare which
-    # covers the same-directory case-variant attack.
+def _data_write(
+    ctx: ToolContext,
+    path: str,
+    content: str,
+    mode: str = "overwrite",
+    bucket: str = "",
+    skill_name: str = "",
+) -> str:
+    # bucket+skill_name synthesize a payload-confined skill_repair constraint.
+    short_form = decide_payload_short_form(
+        bucket=bucket,
+        skill_name=skill_name,
+        path_text=path,
+        repo_dir=pathlib.Path(ctx.repo_dir),
+        drive_root=pathlib.Path(ctx.drive_root),
+    )
+    if short_form.error:
+        return f"⚠️ DATA_WRITE_ERROR: {short_form.error}"
+    synth = short_form.constraint
+    existing_tc = normalize_task_constraint(getattr(ctx, "task_constraint", None))
+    redirect_err = cross_skill_redirect_error(existing_tc, synth)
+    if redirect_err:
+        return f"⚠️ SKILL_REDIRECT_BLOCKED: {redirect_err}"
+    # Real skill_repair confinement wins over synthesized short-form context.
+    if existing_tc and existing_tc.mode == "skill_repair":
+        task_constraint = existing_tc
+    else:
+        task_constraint = synth or existing_tc
+    write_path = _normalize_data_read_path(ctx, path)
+    if task_constraint and task_constraint.mode == "skill_repair" and task_constraint.payload_root:
+        try:
+            p = resolve_payload_path(pathlib.Path(ctx.drive_root), task_constraint, path)
+        except ValueError as e:
+            return f"⚠️ DATA_WRITE_ERROR: {e}"
+    else:
+        explicit_skill_target = _data_skill_path(path, pathlib.Path(ctx.drive_root))
+        p = explicit_skill_target if explicit_skill_target is not None else ctx.drive_path(write_path)
+    # Defense-in-depth: settings.json is owner-only. Use inode-aware matching
+    # for symlinks/hardlinks/case-insensitive APFS/NTFS, with a fallback for
+    # not-yet-existing case variants.
     from ouroboros import config as _cfg
     target_path = pathlib.Path(p)
     settings_path = pathlib.Path(_cfg.SETTINGS_PATH)
     data_root = pathlib.Path(_cfg.DATA_DIR).resolve(strict=False)
-    lexical_target = pathlib.Path(ctx.drive_root).resolve(strict=False) / safe_relpath(path)
+    if task_constraint and task_constraint.mode == "skill_repair" and task_constraint.payload_root:
+        lexical_target = pathlib.Path(p).resolve(strict=False)
+    else:
+        lexical_target = pathlib.Path(ctx.drive_root).resolve(strict=False) / safe_relpath(write_path)
+    suffix = pathlib.PurePosixPath(str(path or "")).suffix.lower()
+    if suffix in {".py", ".md", ".json", ".sh"} and _looks_like_serialized_tool_result(content):
+        return (
+            "⚠️ DATA_WRITE_BLOCKED: content looks like a serialized tool result "
+            "object (for example {'content': ...}) rather than file text. "
+            "Extract the actual file body before calling write_file."
+        )
+    if _native_payload_without_seed(lexical_target, data_root) or _native_payload_without_seed(target_path, data_root):
+        return (
+            "⚠️ DATA_WRITE_BLOCKED: data/skills/native/<skill>/ is reserved "
+            "for launcher-seeded skills that carry a .seed-origin marker. "
+            "Write user- or agent-authored skill payloads under "
+            "data/skills/external/<skill>/ instead."
+        )
     skill_owner_state_path = (
         _is_skill_owner_state_target(lexical_target, data_root)
         or _is_skill_owner_state_target(target_path, data_root)
     )
     if not skill_owner_state_path:
-        skills_state_root = pathlib.Path(_cfg.DATA_DIR) / "state" / "skills"
-        if target_path.exists() and skills_state_root.is_dir():
-            for owner_state_file in skills_state_root.glob("*/*"):
-                if owner_state_file.name.lower() not in _SKILL_OWNER_STATE_FILENAMES:
-                    continue
-                try:
-                    if owner_state_file.exists() and target_path.samefile(owner_state_file):
-                        skill_owner_state_path = True
-                        break
-                except OSError:
-                    continue
+        skill_owner_state_path = is_skill_owner_state_alias(target_path, data_root)
     if skill_owner_state_path:
         return (
             "⚠️ DATA_WRITE_BLOCKED: skill review, enablement, grants, and "
             "marketplace provenance are owner/review controlled state. Edit "
-            "the skill payload under data/skills/ and use review_skill, the "
+            "the skill payload under data/skills/ and use skill_review, the "
             "Skills UI toggle, or the desktop launcher grant flow."
         )
-    # v5.7.0: extend the control-plane block to payload-side provenance
-    # sidecars (.clawhub.json / .ouroboroshub.json / SKILL.openclaw.md
-    # / .seed-origin) for ALL data_write calls, not just heal mode. The
-    # marketplace adapter and launcher own these markers; rewriting them
-    # via generic tools could launder provenance or detach a launcher-
-    # seeded skill from its update lane.
+    # Block marketplace/launcher sidecars for every data_write path, not only heal mode.
     if is_skill_control_plane_path(lexical_target, data_root) or is_skill_control_plane_path(target_path, data_root):
         return (
             "⚠️ DATA_WRITE_BLOCKED: marketplace provenance and launcher "
             "seed markers (.clawhub.json, .ouroboroshub.json, "
             "SKILL.openclaw.md, .seed-origin) are owner/review controlled. "
-            "Edit the payload's user-authored files instead and rerun review_skill."
+            "Edit the payload's user-authored files instead and rerun skill_review."
         )
     matches = False
     try:
@@ -374,22 +574,278 @@ def _data_write(ctx: ToolContext, path: str, content: str, mode: str = "overwrit
             "owner-only values, stop the agent, edit ~/Ouroboros/data/settings.json "
             "directly, then restart."
         )
+    marker_payload = _skill_payload_parts(lexical_target, data_root) or _skill_payload_parts(target_path, data_root)
+    should_mark_self_authored = False
+    marker_path: pathlib.Path | None = None
+    if (
+        mode == "overwrite"
+        and not (task_constraint and task_constraint.mode == "skill_repair")
+        and marker_payload is not None
+        and marker_payload[0] == "external"
+        and pathlib.PurePosixPath(str(path or "")).name.lower() in {"skill.md", "skill.json"}
+        and not target_path.exists()
+    ):
+        marker_path = marker_payload[2] / _SELF_AUTHORED_MARKER
+        should_mark_self_authored = not marker_path.exists()
+
     p.parent.mkdir(parents=True, exist_ok=True)
     if mode == "overwrite":
         p.write_text(content, encoding="utf-8")
     else:
         with p.open("a", encoding="utf-8") as f:
             f.write(content)
-    # 2026-05-26 (issue #40): name the root in the OK message so the agent
-    # immediately sees that this file lives under data_root, not under
-    # repo_root — relative ``run_shell`` lookups will not find it.
-    norm_path = str(path).strip().replace("\\", "/").lstrip("./")
-    return f"OK: wrote {mode} data_root/{norm_path} ({len(content)} chars)"
+    if should_mark_self_authored and marker_path is not None:
+        from ouroboros.skill_loader import compute_content_hash
+
+        marker_payload[2].mkdir(parents=True, exist_ok=True)
+        try:
+            initial_hash = compute_content_hash(marker_payload[2])
+        except Exception:
+            initial_hash = ""
+        marker_payload_data = {
+            "schema_version": 1,
+            "origin": "self_authored",
+            "created_at": utc_now_iso(),
+            "chat_id": int(getattr(ctx, "current_chat_id", 0) or 0),
+            "task_id": str(getattr(ctx, "task_id", "") or ""),
+            "created_by_tool": "data_write",
+            "initial_content_hash": initial_hash,
+        }
+        atomic_write_json(marker_path, marker_payload_data, trailing_newline=True)
+        state_marker = pathlib.Path(ctx.drive_root) / "state" / "skills" / marker_payload[1] / "self_authored.json"
+        state_marker.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(state_marker, marker_payload_data, trailing_newline=True)
+    result = f"OK: wrote {mode} {path} ({len(content)} chars)"
+    if short_form.ignored_reason:
+        result += f"\n⚠️ SKILL_SHORT_FORM_IGNORED: {short_form.ignored_reason}."
+    return result
 
 
-# ---------------------------------------------------------------------------
-# Send photo to owner
-# ---------------------------------------------------------------------------
+def _access_or_block(ctx: ToolContext, root: str, operation: str) -> tuple[str, str]:
+    try:
+        normalized = normalize_root(root)
+    except ValueError as exc:
+        return "", f"⚠️ TOOL_ARG_ERROR: {exc}"
+    profile = active_tool_profile(ctx)
+    decision = decide_tool_access(profile=profile, root=normalized, operation=operation)  # type: ignore[arg-type]
+    if not decision.allow:
+        return "", f"⚠️ TOOL_ACCESS_BLOCKED: {decision.reason}"
+    return normalized, ""
+
+
+def _local_readonly_resource_block(
+    ctx: ToolContext,
+    normalized: str,
+    target: pathlib.Path,
+    base: pathlib.Path,
+    *,
+    action: str,
+) -> str:
+    if not _is_local_readonly_subagent(ctx):
+        return ""
+    if normalized in {"active_workspace", "system_repo"}:
+        if _is_subagent_secret_repo_target(target, pathlib.Path(base)):
+            return f"⚠️ {action}_BLOCKED: local_readonly_subagent cannot access repo secret or control paths."
+        return ""
+    if normalized in {"runtime_data", "task_drive", "skill_payload", "artifact_store"}:
+        root = pathlib.Path(base).resolve(strict=False)
+        try:
+            rel = pathlib.Path(target).resolve(strict=False).relative_to(root).as_posix()
+        except (OSError, ValueError):
+            rel = str(target).replace(os.sep, "/")
+        data_root = pathlib.Path(ctx.drive_root).resolve(strict=False)
+        if (
+            _is_subagent_secret_data_path(rel)
+            or _is_skill_owner_state_target(target, data_root)
+            or is_skill_owner_state_alias(target, data_root)
+        ):
+            return f"⚠️ {action}_BLOCKED: local_readonly_subagent cannot access secret or owner-control data files."
+    return ""
+
+
+def _root_display_path(root: str, path: str) -> str:
+    return f"{root}:{path or '.'}"
+
+
+def _read_file(
+    ctx: ToolContext,
+    path: str,
+    root: str = "active_workspace",
+    max_lines: int = 2000,
+    start_line: int = 1,
+    bucket: str = "",
+    skill_name: str = "",
+) -> str:
+    normalized, block = _access_or_block(ctx, root, "read")
+    if block:
+        return block
+    if normalized == "active_workspace":
+        return _repo_read(ctx, path, max_lines=max_lines, start_line=start_line)
+    if normalized == "runtime_data":
+        return _data_read(ctx, path, max_lines=max_lines, start_line=start_line)
+    try:
+        base = resource_root_path(ctx, normalized, bucket=bucket, skill_name=skill_name)
+        target = resolve_resource_path(ctx, root=normalized, path=path, bucket=bucket, skill_name=skill_name)
+        block_msg = _local_readonly_resource_block(ctx, normalized, target, base, action="READ_FILE")
+        if block_msg:
+            return block_msg
+        content = read_text(target)
+        return _render_line_slice(_root_display_path(normalized, path), content, max_lines=max_lines, start_line=start_line)
+    except FileNotFoundError:
+        return f"⚠️ NOT_FOUND: {_root_display_path(normalized, path)}"
+    except Exception as exc:
+        return f"⚠️ READ_FILE_ERROR: {type(exc).__name__}: {exc}"
+
+
+def _list_files(
+    ctx: ToolContext,
+    dir: str = ".",
+    root: str = "active_workspace",
+    max_entries: int = 500,
+    bucket: str = "",
+    skill_name: str = "",
+) -> str:
+    normalized, block = _access_or_block(ctx, root, "list")
+    if block:
+        return block
+    if normalized == "active_workspace":
+        return _repo_list(ctx, dir=dir, max_entries=max_entries)
+    if normalized == "runtime_data":
+        return _data_list(ctx, dir=dir, max_entries=max_entries)
+    try:
+        base = resource_root_path(ctx, normalized, bucket=bucket, skill_name=skill_name)
+        items = _list_dir(base, dir, max_entries)
+        if _is_local_readonly_subagent(ctx):
+            if normalized == "system_repo":
+                items = _filter_subagent_secret_repo_listing(items, base)
+            elif normalized in {"task_drive", "skill_payload", "artifact_store"}:
+                items = _filter_subagent_secret_listing(items, base)
+        return json.dumps(items, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        return json.dumps([f"⚠️ LIST_FILES_ERROR: {type(exc).__name__}: {exc}"], ensure_ascii=False, indent=2)
+
+
+def _write_file(
+    ctx: ToolContext,
+    path: str = "",
+    content: str = "",
+    files: List[Dict[str, str]] | None = None,
+    root: str = "active_workspace",
+    mode: str = "overwrite",
+    force: bool = False,
+    bucket: str = "",
+    skill_name: str = "",
+) -> str:
+    normalized, block = _access_or_block(ctx, root, "write")
+    if block:
+        return block
+    if normalized == "system_repo":
+        try:
+            from ouroboros.tool_access import resource_root_path
+
+            active_root = resource_root_path(ctx, "active_workspace")
+            system_root = resource_root_path(ctx, "system_repo")
+            if active_root.resolve(strict=False) != system_root.resolve(strict=False):
+                return "⚠️ WRITE_FILE_BLOCKED: root=system_repo writes require the active workspace to be the system repo."
+        except Exception as exc:
+            return f"⚠️ WRITE_FILE_BLOCKED: could not validate system_repo root: {type(exc).__name__}: {exc}"
+    if normalized in {"active_workspace", "system_repo"}:
+        from ouroboros.tools.git import _repo_write
+
+        return _repo_write(ctx, path=path, content=content, files=files or [], force=force)
+    if normalized == "runtime_data":
+        if files:
+            results = []
+            for item in files:
+                if not isinstance(item, dict):
+                    continue
+                results.append(_data_write(ctx, str(item.get("path") or ""), str(item.get("content") or ""), mode=mode))
+            return "\n".join(results) if results else "⚠️ TOOL_ARG_ERROR: files must contain {path, content} objects."
+        return _data_write(ctx, path=path, content=content, mode=mode)
+    if normalized == "skill_payload":
+        if files:
+            results = []
+            for item in files:
+                rel = str(item.get("path") or "") if isinstance(item, dict) else ""
+                body = str(item.get("content") or "") if isinstance(item, dict) else ""
+                results.append(_data_write(ctx, rel, body, mode=mode, bucket=bucket, skill_name=skill_name))
+            return "\n".join(results)
+        return _data_write(ctx, path=path, content=content, mode=mode, bucket=bucket, skill_name=skill_name)
+    try:
+        if files:
+            results = []
+            for item in files:
+                if not isinstance(item, dict):
+                    continue
+                target = resolve_resource_path(ctx, root=normalized, path=str(item.get("path") or ""), bucket=bucket, skill_name=skill_name)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(str(item.get("content") or ""), encoding="utf-8")
+                results.append(f"OK: wrote {normalized}:{item.get('path')} ({len(str(item.get('content') or ''))} chars)")
+            return "\n".join(results) if results else "⚠️ TOOL_ARG_ERROR: files must contain {path, content} objects."
+        target = resolve_resource_path(ctx, root=normalized, path=path, bucket=bucket, skill_name=skill_name)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if mode == "append":
+            with target.open("a", encoding="utf-8") as fh:
+                fh.write(content)
+        else:
+            target.write_text(content, encoding="utf-8")
+        return f"OK: wrote {normalized}:{path} ({len(content)} chars)"
+    except Exception as exc:
+        return f"⚠️ WRITE_FILE_ERROR: {type(exc).__name__}: {exc}"
+
+
+def _edit_text(
+    ctx: ToolContext,
+    path: str,
+    old_str: str,
+    new_str: str,
+    root: str = "active_workspace",
+    bucket: str = "",
+    skill_name: str = "",
+) -> str:
+    normalized, block = _access_or_block(ctx, root, "edit")
+    if block:
+        return block
+    if normalized == "system_repo":
+        try:
+            from ouroboros.tool_access import resource_root_path
+
+            active_root = resource_root_path(ctx, "active_workspace")
+            system_root = resource_root_path(ctx, "system_repo")
+            if active_root.resolve(strict=False) != system_root.resolve(strict=False):
+                return "⚠️ EDIT_TEXT_BLOCKED: root=system_repo edits require the active workspace to be the system repo."
+        except Exception as exc:
+            return f"⚠️ EDIT_TEXT_BLOCKED: could not validate system_repo root: {type(exc).__name__}: {exc}"
+    if normalized in {"active_workspace", "system_repo"}:
+        from ouroboros.tools.git import _str_replace_editor
+
+        result = _str_replace_editor(ctx, path=path, old_str=old_str, new_str=new_str)
+        short_form = decide_payload_short_form(
+            bucket=bucket,
+            skill_name=skill_name,
+            path_text=path,
+            repo_dir=pathlib.Path(ctx.repo_dir),
+            drive_root=pathlib.Path(ctx.drive_root),
+        )
+        if short_form.ignored_reason:
+            result += f"\n⚠️ SKILL_SHORT_FORM_IGNORED: {short_form.ignored_reason}."
+        return result
+    if normalized == "skill_payload":
+        from ouroboros.tools.git import _str_replace_editor
+
+        return _str_replace_editor(ctx, path=path, old_str=old_str, new_str=new_str, bucket=bucket, skill_name=skill_name)
+    try:
+        target = resolve_resource_path(ctx, root=normalized, path=path, bucket=bucket, skill_name=skill_name)
+        text = target.read_text(encoding="utf-8")
+        count = text.count(old_str)
+        if count != 1:
+            return f"⚠️ EDIT_TEXT_ERROR: old_str matched {count} times; expected exactly 1."
+        target.write_text(text.replace(old_str, new_str, 1), encoding="utf-8")
+        return f"OK: edited {normalized}:{path}"
+    except FileNotFoundError:
+        return f"⚠️ EDIT_TEXT_ERROR: file not found: {normalized}:{path}"
+    except Exception as exc:
+        return f"⚠️ EDIT_TEXT_ERROR: {type(exc).__name__}: {exc}"
 
 _MAX_PHOTO_FILE_BYTES = 10 * 1024 * 1024  # 10 MB
 
@@ -409,11 +865,7 @@ def _detect_image_mime(data: bytes) -> str:
 
 def _send_photo(ctx: ToolContext, file_path: str = "", image_base64: str = "",
                 caption: str = "") -> str:
-    """Send an image to the owner's chat.
-
-    Preferred: file_path — reads a local image file.
-    Legacy:    image_base64 — accepts raw base64 string or __last_screenshot__.
-    """
+    """Queue an owner-chat image from a file or legacy base64 payload."""
     if not ctx.current_chat_id:
         return "⚠️ No active chat — cannot send photo."
 
@@ -454,11 +906,6 @@ def _send_photo(ctx: ToolContext, file_path: str = "", image_base64: str = "",
     })
     return "OK: photo queued for delivery to owner."
 
-
-# ---------------------------------------------------------------------------
-# Code search
-# ---------------------------------------------------------------------------
-
 _SEARCH_SKIP_DIRS = frozenset({
     ".git", "__pycache__", "node_modules", ".venv", "venv",
     ".pytest_cache", ".mypy_cache", ".tox", "build", "dist",
@@ -480,7 +927,7 @@ _MAX_FILE_SIZE_BYTES = 1024 * 1024  # 1 MB — skip huge files
 
 
 def _is_search_skippable(path: pathlib.Path) -> bool:
-    """Return True if the file should be skipped during code search."""
+    """Return True for files excluded from search_code."""
     name = path.name
     for glob_pat in _SEARCH_SKIP_GLOBS:
         if fnmatch.fnmatch(name, glob_pat):
@@ -495,24 +942,29 @@ def _is_search_skippable(path: pathlib.Path) -> bool:
 
 def _code_search(ctx: ToolContext, query: str, path: str = ".",
                  regex: bool = False, max_results: int = 200,
-                 include: str = "") -> str:
-    """Search for a pattern in the repository.
-
-    Literal search by default.  Set regex=True for regular expressions.
-    ``path`` scopes the search to a subdirectory (relative to repo root).
-    ``include`` filters by glob pattern (e.g. "*.py").
-    ``max_results`` caps the number of returned matches (default/max 200).
-    """
+                 include: str = "", root: str = "active_workspace",
+                 bucket: str = "", skill_name: str = "") -> str:
+    """Search repo text with optional regex, path, glob, and result cap."""
     if not query:
         return "⚠️ SEARCH_ERROR: query is required."
+    normalized, block = _access_or_block(ctx, root, "search")
+    if block:
+        return block
 
     max_results = min(max(1, max_results), _MAX_SEARCH_RESULTS)
-    root = ctx.repo_dir
-    search_root = (root / safe_relpath(path)).resolve()
+    try:
+        root_path = resource_root_path(ctx, normalized, bucket=bucket, skill_name=skill_name)
+    except Exception as exc:
+        return f"⚠️ SEARCH_ERROR: {type(exc).__name__}: {exc}"
+    search_root = (root_path / safe_relpath(path)).resolve()
     if not search_root.exists():
         return f"⚠️ SEARCH_ERROR: path not found: {path}"
+    subagent_readonly = _is_local_readonly_subagent(ctx)
+    if subagent_readonly:
+        block_msg = _local_readonly_resource_block(ctx, normalized, search_root, root_path, action="SEARCH")
+        if block_msg:
+            return block_msg
 
-    # Compile the pattern
     try:
         if regex:
             pattern = re.compile(query)
@@ -526,14 +978,21 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
     truncated = False
 
     for dirpath, dirnames, filenames in os.walk(str(search_root)):
-        # Prune skipped directories in-place
+        # Prune skipped dirs in-place.
         dirnames[:] = [d for d in sorted(dirnames) if d not in _SEARCH_SKIP_DIRS]
+        if subagent_readonly:
+            dirnames[:] = [
+                d for d in dirnames
+                if not _local_readonly_resource_block(ctx, normalized, pathlib.Path(dirpath) / d, root_path, action="SEARCH")
+            ]
 
         for fname in sorted(filenames):
             fp = pathlib.Path(dirpath) / fname
 
-            # Apply include filter
             if include and not fnmatch.fnmatch(fname, include):
+                continue
+
+            if subagent_readonly and _local_readonly_resource_block(ctx, normalized, fp, root_path, action="SEARCH"):
                 continue
 
             if _is_search_skippable(fp):
@@ -545,7 +1004,7 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
                 continue
 
             files_searched += 1
-            rel = fp.relative_to(root).as_posix()
+            rel = fp.relative_to(root_path).as_posix()
 
             for lineno, line in enumerate(text.splitlines(), 1):
                 if pattern.search(line):
@@ -566,11 +1025,6 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
         header += f" — truncated at {max_results} results"
     return header + "\n\n" + "\n".join(matches)
 
-
-# ---------------------------------------------------------------------------
-# Codebase digest
-# ---------------------------------------------------------------------------
-
 _SKIP_DIRS = frozenset({
     ".git", "__pycache__", "node_modules", ".venv", "venv",
     ".pytest_cache", ".mypy_cache", ".tox", "build", "dist",
@@ -578,7 +1032,7 @@ _SKIP_DIRS = frozenset({
 
 
 def _extract_python_symbols(file_path: pathlib.Path) -> Tuple[List[str], List[str]]:
-    """Extract class and function names from a Python file using AST."""
+    """Extract Python class/function names with AST."""
     try:
         code = file_path.read_text(encoding="utf-8")
         tree = ast.parse(code, filename=str(file_path))
@@ -596,260 +1050,129 @@ def _extract_python_symbols(file_path: pathlib.Path) -> Tuple[List[str], List[st
 
 
 def _codebase_digest(ctx: ToolContext) -> str:
-    """Generate a compact digest of the codebase: files, sizes, classes, functions."""
-    repo_dir = ctx.repo_dir
-    py_files: List[pathlib.Path] = []
-    md_files: List[pathlib.Path] = []
-    other_files: List[pathlib.Path] = []
+    """Generate a compact file/symbol digest for the codebase."""
+    from ouroboros.code_intelligence import build_code_inventory, render_codebase_digest
 
-    for dirpath, dirnames, filenames in os.walk(str(repo_dir)):
-        # Skip excluded directories
-        dirnames[:] = [d for d in sorted(dirnames) if d not in _SKIP_DIRS]
-        for fn in sorted(filenames):
-            p = pathlib.Path(dirpath) / fn
-            if not p.is_file():
-                continue
-            if p.suffix == ".py":
-                py_files.append(p)
-            elif p.suffix == ".md":
-                md_files.append(p)
-            elif p.suffix in (".txt", ".cfg", ".toml", ".yml", ".yaml", ".json"):
-                other_files.append(p)
-
-    total_lines = 0
-    total_functions = 0
-    sections: List[str] = []
-
-    # Python files
-    for pf in py_files:
-        try:
-            lines = pf.read_text(encoding="utf-8").splitlines()
-            line_count = len(lines)
-            total_lines += line_count
-            classes, functions = _extract_python_symbols(pf)
-            total_functions += len(functions)
-            rel = pf.relative_to(repo_dir).as_posix()
-            parts = [f"\n== {rel} ({line_count} lines) =="]
-            if classes:
-                cl = ", ".join(classes[:10])
-                if len(classes) > 10:
-                    cl += f", ... ({len(classes)} total)"
-                parts.append(f"  Classes: {cl}")
-            if functions:
-                fn = ", ".join(functions[:20])
-                if len(functions) > 20:
-                    fn += f", ... ({len(functions)} total)"
-                parts.append(f"  Functions: {fn}")
-            sections.append("\n".join(parts))
-        except Exception:
-            log.debug(f"Failed to process Python file {pf} in codebase_digest", exc_info=True)
-            pass
-
-    # Markdown files
-    for mf in md_files:
-        try:
-            line_count = len(mf.read_text(encoding="utf-8").splitlines())
-            total_lines += line_count
-            rel = mf.relative_to(repo_dir).as_posix()
-            sections.append(f"\n== {rel} ({line_count} lines) ==")
-        except Exception:
-            log.debug(f"Failed to process markdown file {mf} in codebase_digest", exc_info=True)
-            pass
-
-    # Other config files (just names + sizes)
-    for of in other_files:
-        try:
-            line_count = len(of.read_text(encoding="utf-8").splitlines())
-            total_lines += line_count
-            rel = of.relative_to(repo_dir).as_posix()
-            sections.append(f"\n== {rel} ({line_count} lines) ==")
-        except Exception:
-            log.debug(f"Failed to process config file {of} in codebase_digest", exc_info=True)
-            pass
-
-    total_files = len(py_files) + len(md_files) + len(other_files)
-    header = f"Codebase Digest ({total_files} files, {total_lines} lines, {total_functions} functions)"
-    return header + "\n" + "\n".join(sections)
-
-
-# ---------------------------------------------------------------------------
-# Summarize dialogue
-# ---------------------------------------------------------------------------
-
-def _summarize_dialogue(ctx: ToolContext, last_n: int = 200) -> str:
-    """Summarize dialogue history into key moments, decisions, and user preferences."""
-    from ouroboros.llm import LLMClient, DEFAULT_LIGHT_MODEL
-
-    # Read last_n messages from chat.jsonl
-    chat_path = ctx.drive_root / "logs" / "chat.jsonl"
-    if not chat_path.exists():
-        return "⚠️ chat.jsonl not found"
-
-    try:
-        entries = []
-        with chat_path.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    try:
-                        entries.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        log.debug("Failed to parse chat.jsonl line in summarize_dialogue", exc_info=True)
-                        continue
-
-        # Take last N entries
-        entries = entries[-last_n:] if len(entries) > last_n else entries
-
-        if not entries:
-            return "⚠️ No chat entries found"
-
-        # Format entries as text
-        dialogue_text = []
-        for entry in entries:
-            ts = entry.get("ts", "")
-            direction = entry.get("direction", "")
-            role = "User" if direction == "in" else "Ouroboros"
-            text = entry.get("text", "")
-            dialogue_text.append(f"[{ts}] {role}: {text}")
-
-        formatted_dialogue = "\n".join(dialogue_text)
-
-        # Build summarization prompt
-        prompt = f"""Summarize the following dialogue history between the user and Ouroboros.
-
-Extract:
-1. Key decisions made (technical, architectural, strategic)
-2. User preferences and communication style
-3. Important technical choices and their rationale
-4. Recurring themes or patterns
-
-For each key moment, include the timestamp.
-
-Format as markdown with clear sections.
-
-Dialogue history ({len(entries)} messages):
-
-{formatted_dialogue}
-
-Now write a comprehensive summary:"""
-
-        # Call LLM
-        llm = LLMClient()
-        model = os.environ.get("OUROBOROS_MODEL_LIGHT", "") or DEFAULT_LIGHT_MODEL
-
-        messages = [
-            {"role": "user", "content": prompt}
+    inventory = build_code_inventory(
+        active_repo_dir_for(ctx),
+        drive_root=pathlib.Path(ctx.drive_root),
+        persist=not _is_local_readonly_subagent(ctx),
+    )
+    if _is_local_readonly_subagent(ctx):
+        repo_root = active_repo_dir_for(ctx)
+        inventory.files = [
+            file for file in inventory.files
+            if not _is_subagent_secret_repo_target(repo_root / file.path, repo_root)
         ]
-
-        _use_local_light = os.environ.get("USE_LOCAL_LIGHT", "").lower() in ("true", "1")
-        response, usage = llm.chat(
-            messages=messages,
-            model=model,
-            max_tokens=4096,
-            use_local=_use_local_light,
-        )
-
-        # Track cost in budget system
-        if usage:
-            usage_event = {
-                "type": "llm_usage",
-                "ts": utc_now_iso(),
-                "task_id": ctx.task_id if ctx.task_id else "",
-                "usage": {
-                    "prompt_tokens": usage.get("prompt_tokens", 0),
-                    "completion_tokens": usage.get("completion_tokens", 0),
-                    "cost": usage.get("cost", 0),
-                },
-                "category": "summarize",
-            }
-            if ctx.event_queue is not None:
-                try:
-                    ctx.event_queue.put_nowait(usage_event)
-                except Exception:
-                    if hasattr(ctx, "pending_events"):
-                        ctx.pending_events.append(usage_event)
-            elif hasattr(ctx, "pending_events"):
-                ctx.pending_events.append(usage_event)
-
-        summary = response.get("content", "")
-        if not summary:
-            return "⚠️ LLM returned empty summary"
-
-        # Write to memory/dialogue_summary.md
-        summary_path = ctx.drive_root / "memory" / "dialogue_summary.md"
-        summary_path.parent.mkdir(parents=True, exist_ok=True)
-        summary_path.write_text(summary, encoding="utf-8")
-
-        cost = float(usage.get("cost", 0))
-        return f"OK: Summarized {len(entries)} messages. Written to memory/dialogue_summary.md. Cost: ${cost:.4f}\n\n{summary[:500]}..."
-
-    except Exception as e:
-        log.warning("Failed to summarize dialogue", exc_info=True)
-        return f"⚠️ Error: {repr(e)}"
-
-
-# ---------------------------------------------------------------------------
-# forward_to_worker — LLM-initiated message routing to worker tasks
-# ---------------------------------------------------------------------------
+    return render_codebase_digest(inventory)
 
 def _forward_to_worker(ctx: ToolContext, task_id: str, message: str) -> str:
     """Forward a message to a running worker task's mailbox."""
     from ouroboros.owner_inject import write_owner_message
-    write_owner_message(ctx.drive_root, message, task_id=task_id, msg_id=uuid.uuid4().hex)
-    return f"Message forwarded to task {task_id}"
+    from ouroboros.task_results import STATUS_RUNNING, validate_task_id
+    from ouroboros.task_status import FINAL_STATUSES, load_effective_task_result
 
-
-# ---------------------------------------------------------------------------
-# Tool registration
-# ---------------------------------------------------------------------------
+    try:
+        tid = validate_task_id(task_id)
+    except ValueError as exc:
+        return f"⚠️ TOOL_ARG_ERROR (forward_to_worker): {exc}"
+    data = load_effective_task_result(pathlib.Path(ctx.drive_root), tid)
+    status = str(data.get("status") or "").lower()
+    if not data:
+        return f"⚠️ TASK_NOT_FOUND: task {tid} is not registered."
+    if status in FINAL_STATUSES:
+        return f"⚠️ TASK_NOT_ACTIVE: task {tid} is already {status}."
+    if status != STATUS_RUNNING:
+        return f"⚠️ TASK_NOT_ACTIVE: task {tid} is {status or 'unknown'}, not running."
+    current_task_id = str(getattr(ctx, "task_id", "") or "").strip()
+    target_parent = str(data.get("parent_task_id") or "").strip()
+    target_root = str(data.get("root_task_id") or "").strip()
+    if not current_task_id:
+        return "⚠️ TASK_FORBIDDEN: forward_to_worker requires an active task context."
+    allowed = target_parent == current_task_id or target_root == current_task_id
+    if not allowed:
+        return f"⚠️ TASK_FORBIDDEN: task {tid} is not a child or descendant of the current task."
+    child_drive = str(data.get("child_drive_root") or data.get("headless_child_drive_root") or data.get("drive_root") or "").strip()
+    mailbox_drive = pathlib.Path(child_drive) if child_drive else pathlib.Path(ctx.drive_root)
+    write_owner_message(mailbox_drive, message, task_id=tid, msg_id=uuid.uuid4().hex)
+    return f"Message forwarded to task {tid}"
 
 def get_tools() -> List[ToolEntry]:
     return [
-        ToolEntry("repo_read", {
-            "name": "repo_read",
+        ToolEntry("read_file", {
+            "name": "read_file",
             "description": (
-                "Read a UTF-8 text file from the local repo (relative path). "
+                "Read a UTF-8 text file from a declared resource root. "
+                "Default root=active_workspace (the user's workspace or the Ouroboros repo in self-modification tasks). "
                 "Use max_lines (default 2000) and start_line (default 1) to read large files in chunks. "
                 "The result header shows 'lines X\u2013Y of Z' so you know whether you saw the full file."
             ),
             "parameters": {"type": "object", "properties": {
                 "path": {"type": "string"},
+                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store"], "default": "active_workspace"},
                 "max_lines": {"type": "integer", "default": 2000,
                               "description": "Maximum number of lines to return (default 2000)."},
                 "start_line": {"type": "integer", "default": 1,
                                "description": "1-indexed line to start reading from (default 1 = beginning)."},
+                "bucket": {"type": "string", "description": "Required only for root=skill_payload."},
+                "skill_name": {"type": "string", "description": "Required only for root=skill_payload."},
             }, "required": ["path"]},
-        }, _repo_read),
-        ToolEntry("repo_list", {
-            "name": "repo_list",
-            "description": "List files under a repo directory (relative path).",
+        }, _read_file),
+        ToolEntry("list_files", {
+            "name": "list_files",
+            "description": "List files under a resource root directory.",
             "parameters": {"type": "object", "properties": {
                 "dir": {"type": "string", "default": "."},
+                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store"], "default": "active_workspace"},
                 "max_entries": {"type": "integer", "default": 500},
+                "bucket": {"type": "string", "description": "Required only for root=skill_payload."},
+                "skill_name": {"type": "string", "description": "Required only for root=skill_payload."},
             }, "required": []},
-        }, _repo_list),
-        ToolEntry("data_read", {
-            "name": "data_read",
-            "description": "Read a UTF-8 text file from the local data directory.",
-            "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
-        }, _data_read),
-        ToolEntry("data_list", {
-            "name": "data_list",
-            "description": "List files under a local data directory.",
-            "parameters": {"type": "object", "properties": {
-                "dir": {"type": "string", "default": "."},
-                "max_entries": {"type": "integer", "default": 500},
-            }, "required": []},
-        }, _data_list),
-        ToolEntry("data_write", {
-            "name": "data_write",
-            "description": "Write a UTF-8 text file to the local data directory.",
+        }, _list_files),
+        ToolEntry("write_file", {
+            "name": "write_file",
+            "description": (
+                "Write UTF-8 file(s) to a declared resource root. "
+                "Default root=active_workspace. "
+                "Use mode='append' to write a large file in chunks across multiple calls "
+                "(useful when the full content exceeds a single LLM output budget). "
+                "For root=skill_payload, supply bucket and skill_name."
+            ),
             "parameters": {"type": "object", "properties": {
                 "path": {"type": "string"},
                 "content": {"type": "string"},
+                "files": {"type": "array", "items": {"type": "object", "properties": {
+                    "path": {"type": "string"}, "content": {"type": "string"},
+                }, "required": ["path", "content"]}},
+                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store"], "default": "active_workspace"},
                 "mode": {"type": "string", "enum": ["overwrite", "append"], "default": "overwrite"},
-            }, "required": ["path", "content"]},
-        }, _data_write),
+                "force": {"type": "boolean", "default": False, "description": "Bypass shrink guard for intentional active_workspace full rewrites."},
+                "bucket": {
+                    "type": "string",
+                    "enum": ["external", "clawhub", "ouroboroshub"],
+                    "description": "Skill payload bucket. Required for root=skill_payload.",
+                },
+                "skill_name": {
+                    "type": "string",
+                    "description": "Skill slug. Required for root=skill_payload.",
+                },
+            }, "required": []},
+        }, _write_file, is_code_tool=True),
+        ToolEntry("edit_text", {
+            "name": "edit_text",
+            "description": (
+                "Replace exactly one occurrence of old_str with new_str in a file. "
+                "Default root=active_workspace. For root=skill_payload, supply bucket and skill_name."
+            ),
+            "parameters": {"type": "object", "properties": {
+                "path": {"type": "string"},
+                "old_str": {"type": "string"},
+                "new_str": {"type": "string"},
+                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store"], "default": "active_workspace"},
+                "bucket": {"type": "string", "enum": ["external", "clawhub", "ouroboroshub"]},
+                "skill_name": {"type": "string"},
+            }, "required": ["path", "old_str", "new_str"]},
+        }, _edit_text, is_code_tool=True),
         ToolEntry("send_photo", {
             "name": "send_photo",
             "description": (
@@ -864,18 +1187,21 @@ def get_tools() -> List[ToolEntry]:
                 "caption": {"type": "string", "description": "Optional caption for the photo"},
             }, "required": []},
         }, _send_photo),
-        ToolEntry("code_search", {
-            "name": "code_search",
+        ToolEntry("search_code", {
+            "name": "search_code",
             "description": (
                 "Search for a pattern in the repository code. "
                 "Literal search by default; set regex=True for regular expressions. "
-                "Scoped to path (default: entire repo). "
+                "Scoped to path (default: entire active workspace). "
                 "Skips binaries, caches, vendor dirs, and files >1MB. "
                 "Returns up to max_results matches (default 200) with file:line: context."
             ),
             "parameters": {"type": "object", "properties": {
                 "query": {"type": "string", "description": "Search pattern (literal or regex)"},
                 "path": {"type": "string", "default": ".", "description": "Subdirectory to search (relative to repo root)"},
+                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store"], "default": "active_workspace"},
+                "bucket": {"type": "string", "description": "Required only for root=skill_payload."},
+                "skill_name": {"type": "string", "description": "Required only for root=skill_payload."},
                 "regex": {"type": "boolean", "default": False, "description": "Treat query as a regular expression"},
                 "max_results": {"type": "integer", "default": 200, "description": "Maximum number of matches to return (max 200)"},
                 "include": {"type": "string", "default": "", "description": "Filter by glob pattern (e.g. '*.py')"},
@@ -883,23 +1209,16 @@ def get_tools() -> List[ToolEntry]:
         }, _code_search),
         ToolEntry("codebase_digest", {
             "name": "codebase_digest",
-            "description": "Get a compact digest of the entire codebase: files, sizes, classes, functions. One call instead of many repo_read calls.",
+            "description": "Get a compact digest of the entire codebase: files, sizes, classes, functions. One call instead of many read_file calls.",
             "parameters": {"type": "object", "properties": {}, "required": []},
         }, _codebase_digest),
-        ToolEntry("summarize_dialogue", {
-            "name": "summarize_dialogue",
-            "description": "Summarize dialogue history into key moments, decisions, and user preferences. Writes to memory/dialogue_summary.md.",
-            "parameters": {"type": "object", "properties": {
-                "last_n": {"type": "integer", "description": "Number of recent messages to summarize (default 200)"},
-            }, "required": []},
-        }, _summarize_dialogue),
         ToolEntry("forward_to_worker", {
             "name": "forward_to_worker",
             "description": (
                 "Forward a message to a running worker task's mailbox. "
-                "Use when the owner sends a message during your active conversation "
+                "Use when my human sends a message during your active conversation "
                 "that is relevant to a specific running background task. "
-                "The worker will see it as [Owner message during task] on its next LLM round."
+                "The worker will see it as [Message from my human] on its next LLM round."
             ),
             "parameters": {"type": "object", "properties": {
                 "task_id": {"type": "string", "description": "ID of the running task to forward to"},

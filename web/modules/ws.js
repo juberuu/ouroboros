@@ -1,9 +1,5 @@
-/**
- * WebSocket Manager module.
- *
- * Connection is deferred: call ws.connect() AFTER all modules
- * have registered their event listeners to avoid race conditions.
- */
+import { apiFetch } from './api_client.js';
+/** WebSocket manager; connect after modules register listeners. */
 
 export class WS {
     constructor(url) {
@@ -20,7 +16,6 @@ export class WS {
         this._watchdogTimer = null;
         this._pendingMessages = [];
         this._nextClientMessageId = 1;
-        // Do NOT connect here — wait for all modules to register listeners first
     }
 
     _getUrl() {
@@ -64,7 +59,7 @@ export class WS {
         this._uiRecoveryTimer = setTimeout(async () => {
             this._uiRecoveryTimer = null;
             try {
-                const resp = await fetch('/api/state', { cache: 'no-store' });
+                const resp = await apiFetch('/api/state', { cache: 'no-store' });
                 if (resp.ok) {
                     this._refreshWindow(reason);
                     return;
@@ -99,21 +94,17 @@ export class WS {
     }
 
     _refreshStateAfterOpen(previouslyConnected) {
-        fetch('/api/state', { cache: 'no-store' }).then(r => r.json()).then(d => {
+        apiFetch('/api/state', { cache: 'no-store' }).then(r => r.json()).then(d => {
             const newSha = d.sha || '';
             if (previouslyConnected && newSha) {
                 if (!this._lastSha || this._lastSha !== newSha) {
-                    // SHA changed (or was unknown before reconnect) — reload to pick up
-                    // new JS/CSS. This covers the PyWebView case where the window stays
-                    // open across server restarts but the JS state is lost.
+                    // Reload on SHA change so PyWebView picks up new JS/CSS after restart.
                     this._refreshWindow('sha-change');
                     return;
                 }
             }
             this._lastSha = newSha || this._lastSha;
-        }).catch(() => {
-            // Keep the socket usable even if the HTTP state probe fails once.
-        });
+        }).catch(() => {});
     }
 
     _flushPendingMessages() {
@@ -191,7 +182,7 @@ export class WS {
         };
     }
 
-    send(msg) {
+    send(msg, options = {}) {
         const payload = { ...msg };
         if (!payload.client_message_id && payload.type === 'chat') {
             payload.client_message_id = `msg-${Date.now()}-${this._nextClientMessageId++}`;
@@ -206,6 +197,9 @@ export class WS {
                 });
                 return { status: 'sent', clientMessageId: payload.client_message_id || '' };
             } catch {}
+        }
+        if (options.queue === false) {
+            return { status: 'failed', clientMessageId: payload.client_message_id || '' };
         }
         if (this._pendingMessages.length >= 100) this._pendingMessages.shift();
         this._pendingMessages.push(payload);

@@ -1,31 +1,22 @@
-"""
-Supervisor — Message Bus & Formatting.
-
-Queue-based message bus that connects the Web UI, Telegram, and the Agent
-Supervisor.
-"""
+"""Queue-based bridge between UI/skill transports and the supervisor."""
 
 from __future__ import annotations
 
 import base64
-import datetime
 import logging
-import mimetypes
 import queue
 import re
 import threading
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
-import requests
-
+from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
+from ouroboros.event_bus import CHAT_OUTBOUND, CHAT_PHOTO, CHAT_TYPING, publish_event
 from supervisor.state import append_jsonl, load_state, save_state
+from ouroboros.utils import utc_now_iso
 
 log = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Module-level config (set via init())
-# ---------------------------------------------------------------------------
 DATA_DIR = None  # pathlib.Path
 TOTAL_BUDGET_LIMIT: float = 0.0
 BUDGET_REPORT_EVERY_MESSAGES: int = 10
@@ -51,15 +42,12 @@ def get_bridge() -> "LocalChatBridge":
 
 
 def try_get_bridge() -> "Optional[LocalChatBridge]":
-    """Return the bridge or None if not yet initialized (safe for early callers)."""
+    """Return initialized bridge, if any."""
     return _BRIDGE
 
 
 def refresh_budget_limit(new_limit: Optional[float]) -> None:
-    """Hot-reload the total budget limit used for status messages.
-
-    Accepts None gracefully (treated as 0.0 / no limit).
-    """
+    """Hot-reload budget limit for status messages."""
     global TOTAL_BUDGET_LIMIT
     try:
         TOTAL_BUDGET_LIMIT = float(new_limit) if new_limit is not None else 0.0
@@ -67,12 +55,8 @@ def refresh_budget_limit(new_limit: Optional[float]) -> None:
         pass
 
 
-# ---------------------------------------------------------------------------
-# LocalChatBridge
-# ---------------------------------------------------------------------------
-
 class LocalChatBridge:
-    """Local message bus using queue.Queue."""
+    """Local Queue-backed message bus."""
 
     def __init__(self, settings: Optional[Dict[str, Any]] = None):
         self._inbox = queue.Queue()   # user -> agent
@@ -83,34 +67,20 @@ class LocalChatBridge:
         # A2A response subscriptions: {subscription_id: (chat_id, callback)}
         self._response_subs: Dict[str, tuple] = {}
         self._response_subs_lock = threading.Lock()
-        self._telegram_bot_token = ""
-        self._telegram_chat_id: int = 0
-        self._telegram_active_chat_id: int = 0
-        self._telegram_poll_thread: Optional[threading.Thread] = None
-        self._telegram_stop = threading.Event()
+        self._chat_transports: Dict[int, Dict[str, Any]] = {}
         if settings:
             self.configure_from_settings(settings)
 
     def broadcast(self, payload: dict) -> None:
-        """Broadcast a payload to WebSocket clients if the broadcast hook is wired.
-
-        A2A virtual chat_ids (negative values) are intentionally skipped so that
-        A2A task traffic does not appear in the human-visible chat UI live stream.
-        The history API (server_history_api.py) separately filters negative chat_ids
-        from page-reload history, providing consistent isolation.
-        """
+        """Broadcast to WebSocket clients, excluding A2A virtual chat_ids."""
         chat_id = payload.get("chat_id")
-        if chat_id is not None:
-            try:
-                if int(chat_id) < 0:
-                    return
-            except (ValueError, TypeError):
-                pass
+        if is_a2a_chat_id(chat_id):
+            return
         if self._broadcast_fn:
             self._broadcast_fn(payload)
 
     def get_updates(self, offset: int, timeout: int = 10) -> List[Dict[str, Any]]:
-        """Block on the inbox queue and return updates."""
+        """Block on inbox and return supervisor-style updates."""
         try:
             raw_msg = self._inbox.get(timeout=timeout)
             if isinstance(raw_msg, str):
@@ -130,15 +100,21 @@ class LocalChatBridge:
                 "text": str(msg.get("text") or ""),
                 "source": str(msg.get("source") or "web"),
             }
+            chat_id_value = int(msg.get("chat_id") or 1)
+            if isinstance(msg.get("transport"), dict) and msg.get("transport") and chat_id_value != 1:
+                self._chat_transports[chat_id_value] = dict(msg.get("transport") or {})
+            else:
+                self._chat_transports.pop(chat_id_value, None)
             for key in (
                 "sender_label",
                 "sender_session_id",
                 "client_message_id",
-                "telegram_chat_id",
+                "transport",
                 "image_base64",
                 "image_mime",
                 "image_caption",
                 "suppress_chat_log",
+                "task_constraint",
             ):
                 value = msg.get(key)
                 if value not in (None, "", 0):
@@ -153,25 +129,11 @@ class LocalChatBridge:
             return []
 
     def configure_from_settings(self, settings: Dict[str, Any]) -> None:
-        token = str(settings.get("TELEGRAM_BOT_TOKEN", "") or "").strip()
-        chat_id = self._parse_single_chat_id(
-            str(settings.get("TELEGRAM_CHAT_ID", "") or "").strip(),
-        )
-        token_changed = token != self._telegram_bot_token
-        chat_id_changed = chat_id != self._telegram_chat_id
-
-        self._telegram_bot_token = token
-        self._telegram_chat_id = chat_id
-        if chat_id:
-            self._telegram_active_chat_id = chat_id
-        elif token_changed:
-            self._telegram_active_chat_id = 0
-
-        if token_changed or chat_id_changed:
-            self._restart_telegram_polling()
+        """Compatibility no-op; chat bridges are skills now."""
+        return None
 
     def subscribe_response(self, chat_id: int, callback) -> str:
-        """Subscribe to agent responses for a given chat_id. Returns subscription_id."""
+        """Subscribe to responses for a chat_id."""
         import uuid as _uuid
         sub_id = _uuid.uuid4().hex
         with self._response_subs_lock:
@@ -184,234 +146,7 @@ class LocalChatBridge:
             self._response_subs.pop(subscription_id, None)
 
     def shutdown(self) -> None:
-        self._stop_telegram_polling()
-
-    def _parse_single_chat_id(self, raw: str) -> int:
-        text = str(raw or "").strip()
-        if not text:
-            return 0
-        try:
-            return int(text)
-        except ValueError:
-            return 0
-
-    def _restart_telegram_polling(self) -> None:
-        self._stop_telegram_polling()
-        if not self._telegram_bot_token:
-            return
-        self._telegram_stop.clear()
-        self._telegram_poll_thread = threading.Thread(
-            target=self._telegram_poll_loop,
-            daemon=True,
-            name="telegram-poll",
-        )
-        self._telegram_poll_thread.start()
-
-    def _stop_telegram_polling(self) -> None:
-        self._telegram_stop.set()
-        thread = self._telegram_poll_thread
-        if thread and thread.is_alive():
-            thread.join(timeout=2)
-        if not (thread and thread.is_alive()):
-            self._telegram_poll_thread = None
-
-    def _telegram_api(
-        self,
-        method: str,
-        *,
-        params: Optional[dict] = None,
-        files: Optional[dict] = None,
-        timeout: int = 35,
-    ) -> dict:
-        if not self._telegram_bot_token:
-            raise RuntimeError("Telegram bot token is not configured")
-        url = f"https://api.telegram.org/bot{self._telegram_bot_token}/{method}"
-        response = requests.post(url, data=params, files=files, timeout=timeout)
-        response.raise_for_status()
-        payload = response.json()
-        if not payload.get("ok"):
-            raise RuntimeError(payload.get("description") or f"Telegram API error for {method}")
-        return payload
-
-    def _telegram_download_file(self, file_id: str, timeout: int = 30) -> tuple[bytes, str]:
-        payload = self._telegram_api(
-            "getFile",
-            params={"file_id": str(file_id or "")},
-            timeout=20,
-        )
-        file_path = str((payload.get("result") or {}).get("file_path") or "").strip()
-        if not file_path:
-            raise RuntimeError("Telegram file path is missing")
-        url = f"https://api.telegram.org/file/bot{self._telegram_bot_token}/{file_path}"
-        response = requests.get(url, timeout=timeout)
-        response.raise_for_status()
-        mime = mimetypes.guess_type(file_path)[0] or "image/jpeg"
-        return response.content, mime
-
-    def _telegram_target(self, preferred_chat_id: int = 0) -> int:
-        # Reject A2A virtual chat IDs (negative values) — they must not route to Telegram
-        if preferred_chat_id is not None and int(preferred_chat_id) < 0:
-            preferred_chat_id = None
-        if self._telegram_chat_id:
-            return self._telegram_chat_id
-        if preferred_chat_id and int(preferred_chat_id) > 1:
-            return int(preferred_chat_id)
-        return int(self._telegram_active_chat_id or 0)
-
-    def _register_telegram_chat(self, chat_id: int) -> None:
-        if not chat_id:
-            return
-        if self._telegram_chat_id and int(chat_id) != self._telegram_chat_id:
-            return
-        if not self._telegram_active_chat_id:
-            self._telegram_active_chat_id = int(chat_id)
-
-    def _telegram_poll_loop(self) -> None:
-        offset = 0
-        while not self._telegram_stop.is_set():
-            try:
-                payload = self._telegram_api(
-                    "getUpdates",
-                    params={"timeout": 20, "offset": offset},
-                    timeout=25,
-                )
-                for update in payload.get("result", []):
-                    update_id = int(update.get("update_id") or 0)
-                    if update_id >= offset:
-                        offset = update_id + 1
-                    message = update.get("message") or {}
-                    text = str(message.get("text") or "").strip()
-                    caption = str(message.get("caption") or "").strip()
-                    photos = message.get("photo") or []
-                    if not text and not photos:
-                        continue
-                    chat = message.get("chat") or {}
-                    sender = message.get("from") or {}
-                    chat_id = int(chat.get("id") or 0)
-                    if self._telegram_chat_id and chat_id != self._telegram_chat_id:
-                        continue
-                    if (
-                        not self._telegram_chat_id
-                        and self._telegram_active_chat_id
-                        and chat_id != self._telegram_active_chat_id
-                    ):
-                        continue
-                    user_id = int(sender.get("id") or chat_id or 0)
-                    sender_name = (
-                        str(sender.get("username") or "").strip()
-                        or " ".join(
-                            str(part).strip()
-                            for part in (sender.get("first_name"), sender.get("last_name"))
-                            if part
-                        )
-                        or f"Telegram {user_id}"
-                    )
-                    image_base64 = ""
-                    image_mime = ""
-                    if photos:
-                        file_id = str((photos[-1] or {}).get("file_id") or "").strip()
-                        if file_id:
-                            try:
-                                photo_bytes, image_mime = self._telegram_download_file(file_id)
-                                image_base64 = base64.b64encode(photo_bytes).decode("ascii")
-                            except Exception as exc:
-                                log.warning("Telegram photo download failed: %s", exc)
-                    clean_text = text or caption
-                    if not clean_text and not image_base64:
-                        continue
-                    self._register_telegram_chat(chat_id)
-                    self.enqueue_local_message(
-                        clean_text,
-                        chat_id=chat_id,
-                        user_id=user_id,
-                        source="telegram",
-                        sender_label=f"Telegram ({sender_name})",
-                        telegram_chat_id=chat_id,
-                        image_base64=image_base64,
-                        image_mime=image_mime,
-                        image_caption=caption,
-                    )
-                    if self._broadcast_fn:
-                        ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
-                        if image_base64:
-                            self._broadcast_fn({
-                                "type": "photo",
-                                "role": "user",
-                                "image_base64": image_base64,
-                                "mime": image_mime or "image/jpeg",
-                                "caption": caption,
-                                "ts": ts,
-                                "source": "telegram",
-                                "sender_label": f"Telegram ({sender_name})",
-                                "telegram_chat_id": chat_id,
-                            })
-                        else:
-                            self._broadcast_fn({
-                                "type": "chat",
-                                "role": "user",
-                                "content": clean_text,
-                                "ts": ts,
-                                "source": "telegram",
-                                "sender_label": f"Telegram ({sender_name})",
-                                "telegram_chat_id": chat_id,
-                            })
-            except Exception as exc:
-                log.warning("Telegram polling error: %s", exc)
-                self._telegram_stop.wait(5)
-
-    def _send_telegram_text(self, text: str, preferred_chat_id: int = 0) -> None:
-        clean_text = str(text or "").strip()
-        if not clean_text or not self._telegram_bot_token:
-            return
-        chat_id = self._telegram_target(preferred_chat_id)
-        if not chat_id:
-            return
-        try:
-            self._telegram_api(
-                "sendMessage",
-                params={"chat_id": str(chat_id), "text": clean_text},
-                timeout=20,
-            )
-        except Exception:
-            log.debug("Failed to send Telegram message to chat %s", chat_id, exc_info=True)
-
-    def _send_telegram_action(self, action: str, preferred_chat_id: int = 0) -> None:
-        if not self._telegram_bot_token:
-            return
-        chat_id = self._telegram_target(preferred_chat_id)
-        if not chat_id:
-            return
-        try:
-            self._telegram_api(
-                "sendChatAction",
-                params={"chat_id": str(chat_id), "action": action},
-                timeout=10,
-            )
-        except Exception:
-            log.debug("Failed to send Telegram chat action to chat %s", chat_id, exc_info=True)
-
-    def _send_telegram_photo(
-        self,
-        photo_bytes: bytes,
-        caption: str = "",
-        mime: str = "image/png",
-        preferred_chat_id: int = 0,
-    ) -> None:
-        if not self._telegram_bot_token:
-            return
-        filename = "image.png" if mime == "image/png" else "image.jpg"
-        chat_id = self._telegram_target(preferred_chat_id)
-        if not chat_id:
-            return
-        try:
-            self._telegram_api(
-                "sendPhoto",
-                params={"chat_id": str(chat_id), "caption": str(caption or "")},
-                files={"photo": (filename, photo_bytes, mime)},
-                timeout=30,
-            )
-        except Exception:
-            log.debug("Failed to send Telegram photo to chat %s", chat_id, exc_info=True)
+        return None
 
     def handle_web_message(
         self,
@@ -423,8 +158,7 @@ class LocalChatBridge:
         clean_text = str(text or "").strip()
         if not clean_text:
             return
-        ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        preferred_chat_id = self._telegram_target()
+        ts = utc_now_iso()
         if self._broadcast_fn:
             self._broadcast_fn({
                 "type": "chat",
@@ -435,22 +169,15 @@ class LocalChatBridge:
                 "sender_session_id": sender_session_id,
                 "client_message_id": client_message_id,
             })
-        if preferred_chat_id:
-            sender = sender_session_id[:8] if sender_session_id else "web"
-            self._send_telegram_text(
-                f"WebUI ({sender}):\n{clean_text}",
-                preferred_chat_id=preferred_chat_id,
-            )
         self.enqueue_local_message(
             clean_text,
-            chat_id=preferred_chat_id or 1,
+            chat_id=1,
             user_id=1,
             source="web",
             sender_label="",
             sender_session_id=sender_session_id,
             client_message_id=client_message_id,
-            telegram_chat_id=preferred_chat_id or 0,
-        )
+                    )
 
     def enqueue_local_message(
         self,
@@ -462,11 +189,12 @@ class LocalChatBridge:
         sender_label: str = "",
         sender_session_id: str = "",
         client_message_id: str = "",
-        telegram_chat_id: int = 0,
+        transport: Optional[Dict[str, Any]] = None,
         image_base64: str = "",
         image_mime: str = "",
         image_caption: str = "",
         suppress_chat_log: bool = False,
+        task_constraint: Optional[Dict[str, Any]] = None,
     ) -> None:
         clean_text = str(text or "").strip()
         caption_text = str(image_caption or "").strip()
@@ -483,11 +211,12 @@ class LocalChatBridge:
             "sender_label": str(sender_label or ""),
             "sender_session_id": str(sender_session_id or ""),
             "client_message_id": str(client_message_id or ""),
-            "telegram_chat_id": int(telegram_chat_id or 0),
+            "transport": dict(transport or {}),
             "image_base64": image_b64,
             "image_mime": str(image_mime or ""),
             "image_caption": caption_text,
             "suppress_chat_log": bool(suppress_chat_log),
+            "task_constraint": dict(task_constraint or {}),
         })
 
     def send_message(
@@ -498,10 +227,13 @@ class LocalChatBridge:
         ts: Optional[str] = None,
         is_progress: bool = False,
         task_id: str = "",
+        progress_meta: Optional[Dict[str, Any]] = None,
     ) -> Tuple[bool, str]:
-        """Put a message in the outbox for the UI to consume."""
+        """Send text to UI, A2A subscribers, and host event stream."""
         clean_text = _strip_markdown(text) if not parse_mode else text
-        message_ts = ts or datetime.datetime.now(datetime.timezone.utc).isoformat()
+        message_ts = ts or utc_now_iso()
+        transport = dict(self._chat_transports.get(int(chat_id or 0), {}) or {})
+        meta = dict(progress_meta or {})
         msg = {
             "type": "text",
             "content": clean_text,
@@ -510,8 +242,9 @@ class LocalChatBridge:
             "ts": message_ts,
             "task_id": str(task_id or ""),
         }
+        if meta:
+            msg.update(meta)
         self._outbox.put(msg)
-        # Notify A2A response subscribers
         with self._response_subs_lock:
             subs = [(sid, cb) for sid, (cid, cb) in self._response_subs.items()
                     if cid == chat_id and not is_progress]
@@ -520,9 +253,8 @@ class LocalChatBridge:
                 cb(clean_text)
             except Exception:
                 log.debug("A2A response callback error for sub %s", sid, exc_info=True)
-        # Skip WebSocket broadcast for A2A virtual chat_ids (negative values)
-        if self._broadcast_fn and chat_id >= 0:
-            self._broadcast_fn({
+        if self._broadcast_fn and not is_a2a_chat_id(chat_id):
+            payload = {
                 "type": "chat",
                 "role": "assistant",
                 "content": clean_text,
@@ -530,20 +262,38 @@ class LocalChatBridge:
                 "is_progress": bool(is_progress),
                 "ts": message_ts,
                 "task_id": str(task_id or ""),
-            })
-        self._send_telegram_text(_strip_markdown(clean_text), preferred_chat_id=chat_id)
+                "transport": transport,
+            }
+            if meta:
+                payload.update(meta)
+            self._broadcast_fn(payload)
+        if not is_a2a_chat_id(chat_id):
+            event = {
+                "chat_id": int(chat_id or 0),
+                "text": clean_text,
+                "markdown": bool(parse_mode),
+                "is_progress": bool(is_progress),
+                "ts": message_ts,
+                "task_id": str(task_id or ""),
+                "transport": transport,
+            }
+            if meta:
+                event.update(meta)
+            publish_event(CHAT_OUTBOUND, event)
         return True, "ok"
 
     def send_chat_action(self, chat_id: int, action: str = "typing") -> bool:
-        """Send typing indicator to UI via WebSocket broadcast."""
+        """Send typing indicator to UI/event subscribers."""
+        if is_a2a_chat_id(chat_id):
+            return True
         self._outbox.put({
             "type": "action",
             "content": action,
         })
         if self._broadcast_fn:
             self._broadcast_fn({"type": "typing", "action": action})
-        if action == "typing":
-            self._send_telegram_action("typing", preferred_chat_id=chat_id)
+        typing_transport = dict(self._chat_transports.get(int(chat_id or 0), {}) or {})
+        publish_event(CHAT_TYPING, {"chat_id": int(chat_id or 0), "action": str(action or ""), "transport": typing_transport})
         return True
 
     def send_photo(
@@ -553,7 +303,9 @@ class LocalChatBridge:
         caption: str = "",
         mime: str = "image/png",
     ) -> Tuple[bool, str]:
-        """Send photo to UI and Telegram."""
+        """Send photo to UI and host event subscribers."""
+        if is_a2a_chat_id(chat_id):
+            return True, "ok"
         b64_str = base64.b64encode(photo_bytes).decode("ascii")
         msg = {
             "type": "photo",
@@ -561,25 +313,24 @@ class LocalChatBridge:
             "image_base64": b64_str,
             "mime": mime,
             "caption": caption,
-            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "ts": utc_now_iso(),
         }
         self._outbox.put(msg)
         if self._broadcast_fn:
             self._broadcast_fn(msg)
-        self._send_telegram_photo(photo_bytes, caption=caption, mime=mime, preferred_chat_id=chat_id)
+        photo_transport = dict(self._chat_transports.get(int(chat_id or 0), {}) or {})
+        publish_event(CHAT_PHOTO, {
+            "chat_id": int(chat_id or 0),
+            "transport": photo_transport,
+            "caption": str(caption or ""),
+            "image_base64": b64_str,
+            "mime": str(mime or ""),
+            "ts": msg["ts"],
+        })
         return True, "ok"
 
-    def download_file_base64(
-        self,
-        file_id: str,
-        max_bytes: int = 10_000_000,
-    ) -> Tuple[Optional[str], str]:
-        """Placeholder for future web UI file upload support."""
-        return None, ""
-
-    # Log streaming
     def push_log(self, event: dict):
-        """Called by append_jsonl hook to stream log events to the UI."""
+        """Stream append_jsonl events to UI."""
         try:
             self._log_queue.put_nowait(event)
         except queue.Full:
@@ -595,7 +346,7 @@ class LocalChatBridge:
             self._broadcast_fn({"type": "log", "data": event})
 
     def ui_poll_logs(self) -> list:
-        """Called by the web UI to drain pending log events."""
+        """Drain pending log events for the web UI."""
         batch = []
         for _ in range(50):
             try:
@@ -604,7 +355,6 @@ class LocalChatBridge:
                 break
         return batch
 
-    # UI hooks
     def ui_send(
         self,
         text: str,
@@ -613,8 +363,9 @@ class LocalChatBridge:
         sender_session_id: str = "",
         client_message_id: str = "",
         suppress_chat_log: bool = False,
+        task_constraint: Optional[Dict[str, Any]] = None,
     ):
-        """Called by the web UI to send a message to the agent."""
+        """Accept a web UI message for the agent."""
         if broadcast:
             self.handle_web_message(
                 text,
@@ -622,35 +373,18 @@ class LocalChatBridge:
                 client_message_id=client_message_id,
             )
             return
-        self.enqueue_local_message(text, suppress_chat_log=suppress_chat_log)
+        self.enqueue_local_message(text, suppress_chat_log=suppress_chat_log, task_constraint=task_constraint)
 
     def ui_receive(self, timeout: float = 0.1) -> Optional[Dict[str, Any]]:
-        """Called by the web UI to check for new messages from the agent."""
+        """Poll agent messages for the web UI."""
         try:
             return self._outbox.get(timeout=timeout)
         except queue.Empty:
             return None
 
 
-# ---------------------------------------------------------------------------
-# Formatting helpers
-# ---------------------------------------------------------------------------
-
-def split_message(text: str, limit: int = 4000) -> List[str]:
-    chunks: List[str] = []
-    s = text
-    while len(s) > limit:
-        cut = s.rfind("\n", 0, limit)
-        if cut < 100:
-            cut = limit
-        chunks.append(s[:cut])
-        s = s[cut:]
-    chunks.append(s)
-    return chunks
-
-
 def _strip_markdown(text: str) -> str:
-    """Strip all markdown formatting markers, leaving only plain text."""
+    """Best-effort markdown-to-plain-text fallback."""
     text = re.sub(r"```[^\n]*\n([\s\S]*?)```", r"\1", text)
     text = re.sub(r"`([^`]+)`", r"\1", text)
     text = re.sub(r"\*\*\*(.+?)\*\*\*", r"\1", text)
@@ -672,8 +406,9 @@ def _send_markdown(
     ts: Optional[str] = None,
     is_progress: bool = False,
     task_id: str = "",
+    progress_meta: Optional[Dict[str, Any]] = None,
 ) -> Tuple[bool, str]:
-    """Send markdown text to the UI."""
+    """Send markdown text through the bridge."""
     bridge = get_bridge()
     if not text:
         return False, "empty"
@@ -684,12 +419,9 @@ def _send_markdown(
         ts=ts,
         is_progress=is_progress,
         task_id=task_id,
+        progress_meta=progress_meta,
     )
 
-
-# ---------------------------------------------------------------------------
-# Budget + logging
-# ---------------------------------------------------------------------------
 
 def _format_budget_line(st: Dict[str, Any]) -> str:
     spent = float(st.get("spent_usd") or 0.0)
@@ -734,12 +466,12 @@ def log_chat(
     sender_label: str = "",
     sender_session_id: str = "",
     client_message_id: str = "",
-    telegram_chat_id: int = 0,
+    transport: Optional[Dict[str, Any]] = None,
     task_id: str = "",
 ) -> None:
     if DATA_DIR:
         append_jsonl(DATA_DIR / "logs" / "chat.jsonl", {
-            "ts": ts or datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "ts": ts or utc_now_iso(),
             "session_id": load_state().get("session_id"),
             "direction": direction,
             "chat_id": chat_id,
@@ -750,23 +482,23 @@ def log_chat(
             "sender_label": sender_label,
             "sender_session_id": sender_session_id,
             "client_message_id": client_message_id,
-            "telegram_chat_id": int(telegram_chat_id or 0),
+            "transport": dict(transport or {}),
             "task_id": str(task_id or ""),
         })
 
 
 def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
-                     force_budget: bool = False, fmt: str = "",
+                     fmt: str = "",
                      is_progress: bool = False, task_id: str = "",
+                     progress_meta: Optional[Dict[str, Any]] = None,
                      ts: Optional[str] = None) -> None:
-    # force_budget kept in signature for caller compat but is a no-op since 3.3.0
     st = load_state()
     owner_id = int(st.get("owner_id") or 0)
     _text = str(text or "")
-    msg_ts = ts or datetime.datetime.now(datetime.timezone.utc).isoformat()
+    msg_ts = ts or utc_now_iso()
 
     if is_progress and DATA_DIR:
-        append_jsonl(DATA_DIR / "logs" / "progress.jsonl", {
+        progress_record = {
             "ts": msg_ts,
             "type": "send_message",
             "task_id": task_id,
@@ -775,7 +507,10 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
             "text": text if log_text is None else log_text,
             "content": _text,
             "format": fmt,
-        })
+        }
+        if progress_meta:
+            progress_record.update(dict(progress_meta))
+        append_jsonl(DATA_DIR / "logs" / "progress.jsonl", progress_record)
     else:
         log_chat(
             "out",
@@ -789,8 +524,7 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
 
     if _text.strip() in ("", "\u200b"):
         return
-    # Budget footers are now shown in dashboard/status flows, not auto-appended
-    # to every outgoing chat message.
+    # Budget footers belong in dashboard/status flows, not every chat reply.
     full = _text
 
     if fmt == "markdown":
@@ -800,8 +534,16 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
             ts=msg_ts,
             is_progress=is_progress,
             task_id=task_id,
+            progress_meta=progress_meta,
         )
         return
 
     bridge = get_bridge()
-    bridge.send_message(chat_id, full, ts=msg_ts, is_progress=is_progress, task_id=task_id)
+    bridge.send_message(
+        chat_id,
+        full,
+        ts=msg_ts,
+        is_progress=is_progress,
+        task_id=task_id,
+        progress_meta=progress_meta,
+    )

@@ -3,38 +3,19 @@
 Split from test_commit_gate.py to keep each test module within the ~1000-line limit (P7).
 """
 import importlib
-import importlib.util as _ilu
 import json
 import os
 import sys
-import types
 
 import asyncio
 
 import pytest
 
+from tests._shared import ensure_claude_agent_sdk_mock
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-
-def _ensure_sdk_mock():
-    """Install a lightweight mock of claude_agent_sdk only when truly absent."""
-    try:
-        spec = _ilu.find_spec("claude_agent_sdk")
-        sdk_available = spec is not None
-    except (ValueError, ModuleNotFoundError):
-        sdk_available = "claude_agent_sdk" in sys.modules
-    if not sdk_available:
-        mock_sdk = types.ModuleType("claude_agent_sdk")
-        mock_sdk.ClaudeAgentOptions = type("ClaudeAgentOptions", (), {})
-        mock_sdk.ClaudeSDKClient = type("ClaudeSDKClient", (), {})
-        mock_sdk.HookMatcher = type("HookMatcher", (), {"__init__": lambda self, **kw: None})
-        mock_sdk.AssistantMessage = type("AssistantMessage", (), {})
-        mock_sdk.ResultMessage = type("ResultMessage", (), {})
-        mock_sdk.query = lambda **kw: None
-        sys.modules["claude_agent_sdk"] = mock_sdk
-
-
-_ensure_sdk_mock()
+ensure_claude_agent_sdk_mock()
 
 
 def _get_advisory_module():
@@ -46,31 +27,22 @@ def _get_advisory_module():
 # Model-drift: resolve_claude_code_model
 # ---------------------------------------------------------------------------
 
-def test_resolve_claude_code_model_returns_env_value(monkeypatch):
-    """resolve_claude_code_model must return CLAUDE_CODE_MODEL env var value."""
+@pytest.mark.parametrize(
+    "case_id,env_value,expected",
+    [
+        ("returns_env_value", "sonnet", "sonnet"),
+        ("falls_back_to_shipped_default", None, "claude-opus-4-6[1m]"),
+        ("strips_whitespace", "  claude-opus-4.6  ", "claude-opus-4.6"),
+    ],
+)
+def test_resolve_claude_code_model(monkeypatch, case_id, env_value, expected):
     sys.path.insert(0, REPO)
     gw = importlib.import_module("ouroboros.gateways.claude_code")
-    monkeypatch.setenv("CLAUDE_CODE_MODEL", "sonnet")
-    assert gw.resolve_claude_code_model() == "sonnet"
-
-
-def test_resolve_claude_code_model_falls_back_to_shipped_default(monkeypatch):
-    """resolve_claude_code_model defaults to shipped SETTINGS_DEFAULTS value
-    when env var is absent. Keeping the fallback aligned with the shipped
-    default avoids cross-module drift where code reached before settings
-    are applied would resolve differently than fresh installs see in UI."""
-    sys.path.insert(0, REPO)
-    gw = importlib.import_module("ouroboros.gateways.claude_code")
-    monkeypatch.delenv("CLAUDE_CODE_MODEL", raising=False)
-    assert gw.resolve_claude_code_model() == "claude-opus-4-6[1m]"
-
-
-def test_resolve_claude_code_model_strips_whitespace(monkeypatch):
-    """resolve_claude_code_model strips leading/trailing whitespace."""
-    sys.path.insert(0, REPO)
-    gw = importlib.import_module("ouroboros.gateways.claude_code")
-    monkeypatch.setenv("CLAUDE_CODE_MODEL", "  claude-opus-4.6  ")
-    assert gw.resolve_claude_code_model() == "claude-opus-4.6"
+    if env_value is None:
+        monkeypatch.delenv("CLAUDE_CODE_MODEL", raising=False)
+    else:
+        monkeypatch.setenv("CLAUDE_CODE_MODEL", env_value)
+    assert gw.resolve_claude_code_model() == expected
 
 
 def test_shell_edit_uses_resolve_claude_code_model_helper():
@@ -89,6 +61,182 @@ def test_advisory_uses_resolve_claude_code_model_helper():
     adv_mod = _get_advisory_module()
     source = inspect.getsource(adv_mod._run_claude_advisory)
     assert "resolve_claude_code_model" in source
+
+
+def test_advisory_passes_scope_review_effort_to_claude_code(monkeypatch, tmp_path):
+    adv_mod = _get_advisory_module()
+    from types import SimpleNamespace
+    from ouroboros.gateways.claude_code import ClaudeCodeResult
+    import ouroboros.gateways.claude_code as gw
+
+    captured = {}
+
+    def fake_run_readonly(**kwargs):
+        captured.update(kwargs)
+        return ClaudeCodeResult(
+            success=True,
+            result_text='[{"item":"bible_compliance","verdict":"PASS","reason":"ok","severity":"critical"}]',
+            session_id="sess-effort",
+            cost_usd=0,
+            usage={},
+        )
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("OUROBOROS_EFFORT_SCOPE_REVIEW", "low")
+    monkeypatch.setattr(gw, "run_readonly", fake_run_readonly)
+    monkeypatch.setattr(adv_mod, "_get_staged_diff", lambda *a, **kw: "diff")
+    monkeypatch.setattr(adv_mod, "_get_changed_file_list", lambda *a, **kw: "M file.py")
+    monkeypatch.setattr(adv_mod, "build_advisory_changed_context", lambda *a, **kw: (["file.py"], "pack", []))
+    monkeypatch.setattr(adv_mod, "_build_advisory_prompt", lambda *a, **kw: "prompt")
+    ctx = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, pending_events=[], emit_progress_fn=lambda *_: None)
+
+    adv_mod._run_claude_advisory(tmp_path, "msg", ctx)
+
+    assert captured["effort"] == "low"
+
+
+def test_paid_empty_advisory_result_is_error(monkeypatch, tmp_path):
+    adv_mod = _get_advisory_module()
+    from types import SimpleNamespace
+    from ouroboros.gateways.claude_code import ClaudeCodeResult
+    import ouroboros.gateways.claude_code as gw
+
+    def fake_run_readonly(**kwargs):
+        return ClaudeCodeResult(
+            success=True,
+            result_text="(no output)",
+            session_id="sess-empty",
+            cost_usd=1.23,
+            usage={"prompt_tokens": 100, "completion_tokens": 0},
+        )
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(gw, "run_readonly", fake_run_readonly)
+    monkeypatch.setattr(adv_mod, "_get_staged_diff", lambda *a, **kw: "diff")
+    monkeypatch.setattr(adv_mod, "_get_changed_file_list", lambda *a, **kw: "M file.py")
+    monkeypatch.setattr(adv_mod, "build_advisory_changed_context", lambda *a, **kw: (["file.py"], "pack", []))
+    monkeypatch.setattr(adv_mod, "_build_advisory_prompt", lambda *a, **kw: "prompt")
+    ctx = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, pending_events=[], emit_progress_fn=lambda *_: None)
+
+    items, raw, _model, _chars = adv_mod._run_claude_advisory(tmp_path, "msg", ctx)
+
+    assert items == []
+    assert raw.startswith("⚠️ ADVISORY_ERROR:")
+    assert "paid empty output" in raw
+    assert any(ev.get("type") == "advisory_sdk_suspect_result" for ev in ctx.pending_events)
+
+
+def test_handle_advisory_error_persists_session_id(monkeypatch, tmp_path):
+    adv_mod = _get_advisory_module()
+    from types import SimpleNamespace
+    from ouroboros.review_state import load_state
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(
+        adv_mod,
+        "_advisory_pre_sdk_gate",
+        lambda **kwargs: ([], "M file.py", None),
+    )
+
+    def fake_run(*args, **kwargs):
+        ctx = args[2]
+        ctx._last_claude_advisory_meta = {"session_id": "sess-paid-empty"}
+        return [], "⚠️ ADVISORY_ERROR: paid empty output", "claude-opus", 12345
+
+    monkeypatch.setattr(adv_mod, "_run_claude_advisory", fake_run)
+    ctx = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, pending_events=[], emit_progress_fn=lambda *_: None, task_id="t")
+
+    raw = adv_mod._handle_advisory_pre_review(ctx, commit_message="msg", skip_tests=True)
+    result = json.loads(raw)
+
+    assert result["status"] == "error"
+    assert result["session_id"] == "sess-paid-empty"
+    state = load_state(tmp_path)
+    assert state.advisory_runs
+    run = state.advisory_runs[-1]
+    assert run.status == "error"
+    assert run.session_id == "sess-paid-empty"
+    assert run.prompt_chars == 12345
+
+
+def test_skill_advisory_duplicate_expected_items_warn_not_error(monkeypatch, tmp_path):
+    adv_mod = _get_advisory_module()
+    from types import SimpleNamespace
+    from ouroboros.gateways.claude_code import ClaudeCodeResult
+    import ouroboros.gateways.claude_code as gw
+
+    def fake_run_readonly(**kwargs):
+        return ClaudeCodeResult(
+            success=True,
+            result_text=json.dumps([
+                {"item": "manifest_schema", "verdict": "PASS", "reason": "ok", "severity": "critical"},
+                {"item": "permissions_honesty", "verdict": "PASS", "reason": "ok", "severity": "critical"},
+                {"item": "permissions_honesty", "verdict": "FAIL", "reason": "second issue", "severity": "critical"},
+            ]),
+            session_id="sess-duplicate",
+            cost_usd=0.2,
+            usage={"prompt_tokens": 100, "completion_tokens": 20},
+        )
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(gw, "run_readonly", fake_run_readonly)
+    monkeypatch.setattr(adv_mod, "_build_advisory_prompt", lambda *a, **kw: "prompt")
+    ctx = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, pending_events=[], emit_progress_fn=lambda *_: None)
+
+    items, raw, _model, _chars = adv_mod._run_claude_advisory(
+        tmp_path,
+        "skill advisory",
+        ctx,
+        scope="plugin.py",
+        options={
+            "include_repo_diff": False,
+            "review_surface": "skill",
+            "expected_items": ["manifest_schema", "permissions_honesty"],
+        },
+    )
+
+    assert len(items) == 3
+    assert not raw.startswith("⚠️ ADVISORY_ERROR:")
+    assert any(ev.get("type") == "advisory_contract_warning" for ev in ctx.pending_events)
+    assert not any(ev.get("type") == "advisory_sdk_suspect_result" for ev in ctx.pending_events)
+
+
+def test_skill_advisory_missing_expected_items_still_errors(monkeypatch, tmp_path):
+    adv_mod = _get_advisory_module()
+    from types import SimpleNamespace
+    from ouroboros.gateways.claude_code import ClaudeCodeResult
+    import ouroboros.gateways.claude_code as gw
+
+    def fake_run_readonly(**kwargs):
+        return ClaudeCodeResult(
+            success=True,
+            result_text='[{"item":"manifest_schema","verdict":"PASS","reason":"ok","severity":"critical"}]',
+            session_id="sess-partial",
+            cost_usd=0.2,
+            usage={"prompt_tokens": 100, "completion_tokens": 20},
+        )
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(gw, "run_readonly", fake_run_readonly)
+    monkeypatch.setattr(adv_mod, "_build_advisory_prompt", lambda *a, **kw: "prompt")
+    ctx = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, pending_events=[], emit_progress_fn=lambda *_: None)
+
+    items, raw, _model, _chars = adv_mod._run_claude_advisory(
+        tmp_path,
+        "skill advisory",
+        ctx,
+        scope="plugin.py",
+        options={
+            "include_repo_diff": False,
+            "review_surface": "skill",
+            "expected_items": ["manifest_schema", "permissions_honesty"],
+        },
+    )
+
+    assert items == []
+    assert raw.startswith("⚠️ ADVISORY_ERROR:")
+    assert "checklist contract mismatch" in raw
+    assert any(ev.get("type") == "advisory_sdk_suspect_result" for ev in ctx.pending_events)
 
 
 # ---------------------------------------------------------------------------
@@ -165,73 +313,81 @@ def _make_minimal_git_repo(tmp_path):
     import subprocess
     subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
     (tmp_path / "BIBLE.md").write_text("bible", encoding="utf-8")
+    (tmp_path / "VERSION").write_text("5.99.0-rc.1\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text('[project]\nversion = "5.99.0rc1"\n', encoding="utf-8")
+    (tmp_path / "README.md").write_text(
+        "[![Version 5.99.0-rc.1](https://img.shields.io/badge/version-5.99.0--rc.1-green.svg)](VERSION)\n\n"
+        "## Version History\n\n| Version | Date | Description |\n|---------|------|-------------|\n"
+        "| 5.99.0-rc.1 | 2026-05-16 | test row |\n",
+        encoding="utf-8",
+    )
     (tmp_path / "docs").mkdir(parents=True, exist_ok=True)
     (tmp_path / "docs" / "CHECKLISTS.md").write_text("# Repo Commit Checklist\n", encoding="utf-8")
+    (tmp_path / "docs" / "ARCHITECTURE.md").write_text(
+        "# Ouroboros v5.99.0-rc.1 — Architecture & Reference\n",
+        encoding="utf-8",
+    )
     (tmp_path / "state").mkdir(parents=True, exist_ok=True)
 
 
-def test_advisory_budget_gate_returns_skipped_on_large_prompt(monkeypatch, tmp_path):
-    """_run_claude_advisory must return ADVISORY_SKIPPED when prompt exceeds budget gate."""
+@pytest.fixture
+def budget_gate_env(monkeypatch, tmp_path):
+    """Pin the prompt budget to 10 chars and prepare a minimal env+repo.
+
+    Yields ``(adv_mod, tmp_path)`` so callers can build their own ctx and
+    invoke the advisory entrypoint they care about. Restores the original
+    ``_ADVISORY_PROMPT_MAX_CHARS`` at teardown.
+    """
     adv_mod = _get_advisory_module()
     _make_minimal_git_repo(tmp_path)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.setenv("CLAUDE_CODE_MODEL", "opus")
-
     original_limit = adv_mod._ADVISORY_PROMPT_MAX_CHARS
+    adv_mod._ADVISORY_PROMPT_MAX_CHARS = 10
     try:
-        adv_mod._ADVISORY_PROMPT_MAX_CHARS = 10
-        from types import SimpleNamespace
-        ctx = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path,
-                              emit_progress_fn=lambda _: None, pending_events=[])
-        items, raw, _model, _chars = adv_mod._run_claude_advisory(tmp_path, "test commit", ctx)
+        yield adv_mod, tmp_path
     finally:
         adv_mod._ADVISORY_PROMPT_MAX_CHARS = original_limit
 
+
+def _budget_ctx(tmp_path, *, task_id=None):
+    from types import SimpleNamespace
+    ctx_kwargs = {
+        "repo_dir": tmp_path,
+        "drive_root": tmp_path,
+        "emit_progress_fn": lambda _: None,
+        "pending_events": [],
+    }
+    if task_id is not None:
+        ctx_kwargs["task_id"] = task_id
+    return SimpleNamespace(**ctx_kwargs)
+
+
+def test_advisory_budget_gate_returns_skipped_on_large_prompt(budget_gate_env):
+    """_run_claude_advisory must return ADVISORY_SKIPPED when prompt exceeds budget gate."""
+    adv_mod, tmp_path = budget_gate_env
+    ctx = _budget_ctx(tmp_path)
+    items, raw, _model, _chars = adv_mod._run_claude_advisory(tmp_path, "test commit", ctx)
     assert items == []
     assert raw.startswith("⚠️ ADVISORY_SKIPPED:")
     assert "chars" in raw
 
 
-def test_handle_advisory_pre_review_returns_skipped_status_on_budget_gate(
-    monkeypatch, tmp_path
-):
+def test_handle_advisory_pre_review_returns_skipped_status_on_budget_gate(budget_gate_env):
     """_handle_advisory_pre_review must surface ADVISORY_SKIPPED as status='skipped'."""
-    adv_mod = _get_advisory_module()
-    _make_minimal_git_repo(tmp_path)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
-    monkeypatch.setenv("CLAUDE_CODE_MODEL", "opus")
-
-    original_limit = adv_mod._ADVISORY_PROMPT_MAX_CHARS
-    try:
-        adv_mod._ADVISORY_PROMPT_MAX_CHARS = 10
-        from types import SimpleNamespace
-        ctx = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, task_id="t-test",
-                              emit_progress_fn=lambda _: None, pending_events=[])
-        raw_json = adv_mod._handle_advisory_pre_review(ctx, commit_message="test commit")
-    finally:
-        adv_mod._ADVISORY_PROMPT_MAX_CHARS = original_limit
-
+    adv_mod, tmp_path = budget_gate_env
+    ctx = _budget_ctx(tmp_path, task_id="t-test")
+    raw_json = adv_mod._handle_advisory_pre_review(ctx, commit_message="test commit")
     result = json.loads(raw_json)
     assert result["status"] == "skipped"
     assert "ADVISORY_SKIPPED" in result["message"]
 
 
-def test_budget_gate_skip_persists_durable_state(monkeypatch, tmp_path):
+def test_budget_gate_skip_persists_durable_state(budget_gate_env):
     """Budget-gate skip must write status='skipped' to state; is_fresh() must return True."""
-    adv_mod = _get_advisory_module()
-    _make_minimal_git_repo(tmp_path)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
-    monkeypatch.setenv("CLAUDE_CODE_MODEL", "opus")
-
-    original_limit = adv_mod._ADVISORY_PROMPT_MAX_CHARS
-    try:
-        adv_mod._ADVISORY_PROMPT_MAX_CHARS = 10
-        from types import SimpleNamespace
-        ctx = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, task_id="t-bg",
-                              emit_progress_fn=lambda _: None, pending_events=[])
-        raw_json = adv_mod._handle_advisory_pre_review(ctx, commit_message="budget gate test")
-    finally:
-        adv_mod._ADVISORY_PROMPT_MAX_CHARS = original_limit
+    adv_mod, tmp_path = budget_gate_env
+    ctx = _budget_ctx(tmp_path, task_id="t-bg")
+    raw_json = adv_mod._handle_advisory_pre_review(ctx, commit_message="budget gate test")
 
     result = json.loads(raw_json)
     assert result["status"] == "skipped"
@@ -272,7 +428,7 @@ def test_next_step_guidance_for_skipped_advisory():
     assert "skip" in msg.lower() or "budget" in msg.lower(), (
         "skipped advisory must produce a distinct message, not the generic fresh-pass message"
     )
-    assert "repo_commit" in msg, "message should still indicate commit can proceed"
+    assert "commit_reviewed" in msg, "message should still indicate commit can proceed"
 
 
 def test_next_step_guidance_requires_reaudit_when_obligations_remain():
@@ -425,23 +581,27 @@ def test_budget_gate_skip_becomes_stale_after_edit(monkeypatch, tmp_path):
 # SDK break-after-ResultMessage fix (spurious exit code 1 prevention)
 # ---------------------------------------------------------------------------
 
-def test_run_readonly_async_breaks_after_result_message():
-    """_run_readonly_async must stop iterating after ResultMessage.
+@pytest.mark.parametrize("mode", ["readonly", "edit"])
+def test_run_async_breaks_after_result_message(mode):
+    """Both ``_run_readonly_async`` and ``_run_edit_async`` use
+    ClaudeSDKClient.receive_response and must stop
+    iterating after ResultMessage. Root cause: the SDK stream can raise
+    when iterated past the ResultMessage because the CLI subprocess has
+    exited and the message reader hits a closed pipe.
 
-    Root cause of the spurious 'exit code 1' error: the SDK's query() generator
-    raises when iterated past the ResultMessage because the CLI subprocess has
-    already exited and the message reader tries to read from a closed pipe.
+    The fix adds a ``break`` after processing ResultMessage. The test
+    verifies that the break prevents the post-ResultMessage Exception
+    from reaching the caller as a failure.
 
-    The fix adds a `break` after processing ResultMessage. This test verifies
-    that the break prevents the post-ResultMessage Exception from reaching the
-    caller as a failure.
+    Parametrized in v5.15.x — previously two near-identical tests
+    test_run_{readonly,edit}_async_breaks_after_result_message, ~150 LOC
+    of duplicated mock setup.
     """
     import sys
-    import types
 
     sys.path.insert(0, REPO)
 
-    # Build realistic mock message types
+    # ---- Shared mock message types ------------------------------------
     AssistantMsg = type("AssistantMessage", (), {})
     ResultMsg = type("ResultMessage", (), {})
 
@@ -449,138 +609,93 @@ def test_run_readonly_async_breaks_after_result_message():
         def __init__(self, text):
             self.text = text
 
-    class FakeAssistantMessage(AssistantMsg):
-        def __init__(self):
-            self.content = [FakeTextBlock("Hello")]
-
-    class FakeResultMessage(ResultMsg):
-        session_id = "test-session-123"
-        total_cost_usd = 0.001
-        usage = {"input_tokens": 10, "output_tokens": 5}
-        subtype = "success"
-
-    async def fake_query_raises_after_result(prompt, options):
-        """Simulates SDK: yields AssistantMessage + ResultMessage, then raises on next iteration."""
-        yield FakeAssistantMessage()
-        yield FakeResultMessage()
-        # This raise simulates the CLI pipe-closed error that happened WITHOUT the break fix
-        raise Exception("Command failed with exit code 1 (exit code: 1)\nError output: Check stderr output for details")
-
-    # Patch claude_agent_sdk in the gateway module
-    import ouroboros.gateways.claude_code as gw
-
-    class FakeClaudeAgentOptions:
-        def __init__(self, **kwargs):
-            pass  # accept all kwargs from _run_readonly_async
-
-    orig_query = gw.query
-    orig_AssistantMessage = gw.AssistantMessage
-    orig_ResultMessage = gw.ResultMessage
-    orig_ClaudeAgentOptions = gw.ClaudeAgentOptions
-    try:
-        gw.query = fake_query_raises_after_result
-        gw.AssistantMessage = FakeAssistantMessage
-        gw.ResultMessage = FakeResultMessage
-        gw.ClaudeAgentOptions = FakeClaudeAgentOptions
-
-        result = asyncio.run(gw._run_readonly_async(
-            prompt="test",
-            cwd="/tmp",
-            model="opus",
-            max_turns=1,
-            effort=None,
-        ))
-    finally:
-        gw.query = orig_query
-        gw.AssistantMessage = orig_AssistantMessage
-        gw.ResultMessage = orig_ResultMessage
-        gw.ClaudeAgentOptions = orig_ClaudeAgentOptions
-    assert result.success, f"Expected success but got error: {result.error}"
-    assert result.session_id == "test-session-123"
-    assert "Hello" in result.result_text
-
-
-def test_run_edit_async_breaks_after_result_message():
-    """_run_edit_async must stop iterating after ResultMessage (edit/ClaudeSDKClient path).
-
-    Companion to test_run_readonly_async_breaks_after_result_message.
-    Verifies the same break-after-ResultMessage fix on the ClaudeSDKClient+receive_response path.
-    """
-    import sys
-
-    sys.path.insert(0, REPO)
-
-    AssistantMsg = type("AssistantMessage", (), {})
-    ResultMsg = type("ResultMessage", (), {})
-
-    class FakeTextBlock:
-        def __init__(self, text):
-            self.text = text
+    text_payload = "Edit output" if mode == "edit" else "Hello"
+    session_id = "edit-session-456" if mode == "edit" else "test-session-123"
+    in_tokens = 20 if mode == "edit" else 10
+    out_tokens = 10 if mode == "edit" else 5
+    cost = 0.002 if mode == "edit" else 0.001
 
     class FakeAssistantMessage(AssistantMsg):
         def __init__(self):
-            self.content = [FakeTextBlock("Edit output")]
+            self.content = [FakeTextBlock(text_payload)]
 
     class FakeResultMessage(ResultMsg):
-        session_id = "edit-session-456"
-        total_cost_usd = 0.002
-        usage = {"input_tokens": 20, "output_tokens": 10}
-        subtype = "success"
+        pass
 
-    class FakeSDKClient:
-        """Mock ClaudeSDKClient context manager."""
-        def __init__(self, options=None):
-            self.options = options
-        async def __aenter__(self):
-            return self
-        async def __aexit__(self, *args):
-            pass
-        async def query(self, prompt):
-            pass
-        async def receive_response(self):
-            yield FakeAssistantMessage()
-            yield FakeResultMessage()
-            # This simulates the CLI pipe-closed error WITHOUT the break fix
-            raise Exception("Command failed with exit code 1 (exit code: 1)\nError output: Check stderr output for details")
+    FakeResultMessage.session_id = session_id
+    FakeResultMessage.total_cost_usd = cost
+    FakeResultMessage.usage = {"input_tokens": in_tokens, "output_tokens": out_tokens}
+    FakeResultMessage.subtype = "success"
 
     import ouroboros.gateways.claude_code as gw
 
     class FakeClaudeAgentOptions:
         def __init__(self, **kwargs):
             pass
-
-    orig_ClaudeSDKClient = gw.ClaudeSDKClient
-    orig_AssistantMessage = gw.AssistantMessage
-    orig_ResultMessage = gw.ResultMessage
-    orig_ClaudeAgentOptions = gw.ClaudeAgentOptions
-    orig_HookMatcher = gw.HookMatcher
 
     class FakeHookMatcher:
         def __init__(self, **kwargs):
             pass
 
+    orig_AssistantMessage = gw.AssistantMessage
+    orig_ResultMessage = gw.ResultMessage
+    orig_ClaudeAgentOptions = gw.ClaudeAgentOptions
+    orig_ClaudeSDKClient = gw.ClaudeSDKClient
+    orig_HookMatcher = gw.HookMatcher
+
     try:
-        gw.ClaudeSDKClient = FakeSDKClient
         gw.AssistantMessage = FakeAssistantMessage
         gw.ResultMessage = FakeResultMessage
         gw.ClaudeAgentOptions = FakeClaudeAgentOptions
         gw.HookMatcher = FakeHookMatcher
 
-        result = asyncio.run(gw._run_edit_async(
-            prompt="test edit",
-            cwd="/tmp",
-            model="opus",
-            max_turns=1,
-        ))
+        class FakeSDKClient:
+            def __init__(self, options=None):
+                self.options = options
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                pass
+
+            async def query(self, prompt):
+                pass
+
+            async def receive_response(self):
+                yield FakeAssistantMessage()
+                yield FakeResultMessage()
+                raise Exception(
+                    "Command failed with exit code 1 (exit code: 1)\n"
+                    "Error output: Check stderr output for details"
+                )
+
+        gw.ClaudeSDKClient = FakeSDKClient
+        if mode == "readonly":
+            result = asyncio.run(gw._run_readonly_async(
+                prompt="test",
+                cwd="/tmp",
+                model="opus",
+                max_turns=1,
+                effort=None,
+            ))
+        else:
+            result = asyncio.run(gw._run_edit_async(
+                prompt="test edit",
+                cwd="/tmp",
+                model="opus",
+                max_turns=1,
+            ))
     finally:
-        gw.ClaudeSDKClient = orig_ClaudeSDKClient
         gw.AssistantMessage = orig_AssistantMessage
         gw.ResultMessage = orig_ResultMessage
         gw.ClaudeAgentOptions = orig_ClaudeAgentOptions
+        gw.ClaudeSDKClient = orig_ClaudeSDKClient
         gw.HookMatcher = orig_HookMatcher
+
     assert result.success, f"Expected success but got error: {result.error}"
-    assert result.session_id == "edit-session-456"
-    assert "Edit output" in result.result_text
+    assert result.session_id == session_id
+    assert text_payload in result.result_text
 
 
 @pytest.mark.parametrize(
@@ -708,7 +823,7 @@ class TestParseAdvisoryOutput:
 
     @pytest.fixture(autouse=True)
     def _import(self):
-        _ensure_sdk_mock()
+        ensure_claude_agent_sdk_mock()
         import importlib
         self.mod = importlib.import_module(
             "ouroboros.tools.claude_advisory_review"
@@ -805,7 +920,7 @@ class TestLLMFallbackExtraction:
 
     @pytest.fixture(autouse=True)
     def _import(self):
-        _ensure_sdk_mock()
+        ensure_claude_agent_sdk_mock()
         import importlib
         self.mod = importlib.import_module("ouroboros.tools.claude_advisory_review")
 

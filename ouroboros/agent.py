@@ -1,14 +1,7 @@
-"""
-Ouroboros agent core — thin orchestrator.
-
-Delegates to: loop.py (LLM tool loop), tools/ (tool schemas/execution),
-llm.py (LLM calls), memory.py (scratchpad/identity),
-context.py (context building), review.py (code collection/metrics).
-"""
+"""Thin agent orchestrator around context, LLM loop, tools, memory, and review."""
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import pathlib
@@ -22,9 +15,14 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 log = logging.getLogger(__name__)
 
 from ouroboros.utils import (
-    utc_now_iso, read_text, append_jsonl,
-    safe_relpath, truncate_for_log,
-    get_git_info, sanitize_task_for_event,
+    append_jsonl,
+    emit_log_event,
+    get_git_info,
+    read_json_dict,
+    safe_relpath,
+    sanitize_task_for_event,
+    truncate_for_log,
+    utc_now_iso,
 )
 from ouroboros.llm import LLMClient
 from ouroboros.tools import ToolRegistry
@@ -34,9 +32,6 @@ from ouroboros.context import build_llm_messages
 from ouroboros.loop import run_llm_loop
 from ouroboros.config import resolve_effort
 from ouroboros.agent_startup_checks import (
-    check_budget,
-    check_uncommitted_changes,
-    check_version_sync,
     inject_crash_report,
     verify_restart,
     verify_system_state,
@@ -45,6 +40,7 @@ from ouroboros.agent_task_pipeline import (
     build_trace_summary, emit_task_results, build_review_context,
 )
 from ouroboros.task_results import STATUS_RUNNING, write_task_result
+from ouroboros.contracts.task_constraint import normalize_task_constraint
 
 
 _worker_boot_logged = False
@@ -64,16 +60,8 @@ class Env:
         return (self.drive_root / safe_relpath(rel)).resolve()
 
 
-# ---------------------------------------------------------------------------
-# Backward-compat shim — kept so existing tests that import this symbol
-# directly do not break. New code should call config.resolve_effort().
-# ---------------------------------------------------------------------------
-def _resolve_initial_effort(task_type: str) -> str:
-    return resolve_effort(task_type)
-
-
 class OuroborosAgent:
-    """One agent instance per worker process. Mostly stateless; long-term state lives on Drive."""
+    """Per-worker agent instance; long-term state lives on Drive."""
 
     def __init__(self, env: Env, event_queue: Any = None):
         self.env = env
@@ -82,6 +70,7 @@ class OuroborosAgent:
         self._current_chat_id: Optional[int] = None
         self._current_task_type: Optional[str] = None
         self._current_task_id: Optional[str] = None
+        self._current_task_metadata: Dict[str, Any] = {}
 
         self._incoming_messages: queue.Queue = queue.Queue()
         self._busy = False
@@ -115,16 +104,12 @@ class OuroborosAgent:
 
     def _emit_live_log(self, event_type: str, **fields: Any) -> None:
         """Send a session-only live log event to supervisor/UI."""
-        if self._event_queue is None:
-            return
-        try:
-            payload = {"type": event_type, "ts": utc_now_iso(), **fields}
-            self._event_queue.put({
-                "type": "log_event",
-                "data": payload,
-            })
-        except Exception:
-            log.warning("Failed to emit live log event", exc_info=True)
+        emit_log_event(
+            self._event_queue,
+            {"type": event_type, "ts": utc_now_iso(), **fields},
+            blocking=True,
+            log_label="agent live",
+        )
 
     def _log_worker_boot_once(self) -> None:
         global _worker_boot_logged
@@ -145,27 +130,6 @@ class OuroborosAgent:
             log.warning("Worker boot logging failed", exc_info=True)
             return
 
-    # Backward-compat wrappers for legacy tests and internal callers
-    def _verify_restart(self, git_sha: str) -> None:
-        verify_restart(self.env, git_sha)
-
-    def _verify_system_state(self, git_sha: str) -> None:
-        # crash_rollback_detected events are emitted via inject_crash_report();
-        # keep the marker here for legacy source-inspecting tests.
-        verify_system_state(self.env, git_sha)
-
-    def _check_uncommitted_changes(self):
-        return check_uncommitted_changes(self.env)
-
-    def _check_version_sync(self):
-        # Backward-compat note for tests: VERSION sync includes
-        # ARCHITECTURE.md header checks and stores architecture_version.
-        # The executable logic lives in agent_startup_checks.check_version_sync().
-        return check_version_sync(self.env)
-
-    def _check_budget(self):
-        return check_budget(self.env)
-
     def _prepare_task_context(self, task: Dict[str, Any]) -> Tuple[ToolContext, List[Dict[str, Any]], Dict[str, Any]]:
         """Set up ToolContext, build messages, return (ctx, messages, cap_info)."""
         drive_logs = self.env.drive_path("logs")
@@ -177,8 +141,21 @@ class OuroborosAgent:
                 str(task.get("id") or ""),
                 STATUS_RUNNING,
                 parent_task_id=task.get("parent_task_id"),
+                root_task_id=task.get("root_task_id"),
+                session_id=task.get("session_id"),
+                actor_id=task.get("actor_id"),
+                delegation_role=task.get("delegation_role"),
+                role=task.get("role"),
                 description=task.get("description"),
+                objective=task.get("objective") or task.get("description"),
+                expected_output=task.get("expected_output"),
+                constraints=task.get("constraints"),
                 context=task.get("context"),
+                memory_mode=task.get("memory_mode"),
+                drive_root=task.get("drive_root"),
+                child_drive_root=task.get("child_drive_root") or task.get("drive_root"),
+                budget_drive_root=task.get("budget_drive_root"),
+                task_constraint=task.get("task_constraint"),
                 result="Task is running.",
             )
         except Exception:
@@ -188,17 +165,67 @@ class OuroborosAgent:
             task_id=str(task.get("id") or ""),
             task_type=str(task.get("type") or ""),
         )
+        if str(task.get("delegation_role") or "") == "subagent" and self._event_queue is not None and self._current_chat_id is not None:
+            try:
+                self._event_queue.put({
+                    "type": "send_message",
+                    "chat_id": self._current_chat_id,
+                    "text": f"▶️ Subagent {task.get('id')} running ({task.get('role') or 'researcher'}).",
+                    "format": "markdown",
+                    "is_progress": True,
+                    "task_id": str(task.get("id") or ""),
+                    "progress_meta": {
+                        "subagent_event": "running",
+                        "subagent_task_id": str(task.get("id") or ""),
+                        "root_task_id": str(task.get("root_task_id") or ""),
+                        "parent_task_id": str(task.get("parent_task_id") or ""),
+                        "delegation_role": "subagent",
+                        "subagent_role": str(task.get("role") or ""),
+                    },
+                    "ts": utc_now_iso(),
+                })
+            except Exception:
+                log.debug("Failed to emit subagent running progress", exc_info=True)
+
+        task_metadata = dict(task.get("metadata") or {}) if isinstance(task.get("metadata"), dict) else {}
+        for key in (
+            "parent_task_id",
+            "root_task_id",
+            "session_id",
+            "actor_id",
+            "delegation_role",
+            "role",
+            "workspace_root",
+            "workspace_mode",
+            "memory_mode",
+            "drive_root",
+            "child_drive_root",
+            "budget_drive_root",
+        ):
+            if task.get(key) not in (None, ""):
+                task_metadata[key] = task.get(key)
+        self._current_task_metadata = dict(task_metadata)
 
         ctx = ToolContext(
             repo_dir=self.env.repo_dir,
             drive_root=self.env.drive_root,
             branch_dev=self.env.branch_dev,
+            system_repo_dir=self.env.repo_dir,
+            workspace_root=pathlib.Path(task["workspace_root"]).resolve(strict=False)
+            if str(task.get("workspace_root") or "").strip()
+            else None,
+            workspace_mode=str(task.get("workspace_mode") or ""),
+            memory_mode=str(task.get("memory_mode") or ""),
+            task_metadata=task_metadata,
             pending_events=self._pending_events,
             current_chat_id=self._current_chat_id,
             current_task_type=self._current_task_type,
             emit_progress_fn=self._emit_progress,
+            event_queue=self._event_queue,
+            task_id=str(task.get("id") or ""),
             task_depth=int(task.get("depth", 0)),
             is_direct_chat=bool(task.get("_is_direct_chat")),
+            task_constraint=normalize_task_constraint(task.get("task_constraint")),
         )
         self.tools.set_context(ctx)
 
@@ -228,8 +255,9 @@ class OuroborosAgent:
 
         budget_remaining = None
         try:
-            state_path = self.env.drive_path("state") / "state.json"
-            state_data = json.loads(read_text(state_path))
+            budget_root_text = str(task.get("budget_drive_root") or "").strip()
+            budget_root = pathlib.Path(budget_root_text) if budget_root_text else self.env.drive_root
+            state_data = read_json_dict(budget_root / "state" / "state.json") or {}
             total_budget = float(os.environ.get("TOTAL_BUDGET", "1"))
             spent = float(state_data.get("spent_usd", 0))
             if total_budget > 0:
@@ -248,11 +276,7 @@ class OuroborosAgent:
         return ctx, messages, cap_info
 
     def handle_task(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
-        # Hot-reload settings at the start of every task so that changes saved
-        # via the UI (models, API keys, budget, effort, review config) take
-        # effect on the next task without requiring a full process restart.
-        # Errors are intentionally swallowed — a settings read failure must
-        # not prevent the task from running.
+        # Hot-reload settings so UI changes affect the next task without restart.
         try:
             from ouroboros.config import load_settings, apply_settings_to_env
             apply_settings_to_env(load_settings())
@@ -264,10 +288,7 @@ class OuroborosAgent:
         self._task_started_ts = start_time
         self._last_progress_ts = start_time
         self._pending_events = []
-        # Preserve chat_id=0 verbatim — `int(x or 0) or None` collapsed
-        # legitimate chat_id=0 sessions to None, mixing tasks across sessions
-        # in logs and breaking UI updates. Branch explicitly on the missing
-        # case (None / empty) and pass any int value (including 0) through.
+        # Preserve chat_id=0; it is a real session, not missing.
         _raw_chat = task.get("chat_id")
         if _raw_chat is None or _raw_chat == "":
             self._current_chat_id = None
@@ -300,7 +321,7 @@ class OuroborosAgent:
             initial_effort = resolve_effort(task_type_str)
 
             if task_type_str == "deep_self_review":
-                # Deep self-review: bypass tool loop, direct single LLM call
+                # Deep self-review bypasses the tool loop.
                 try:
                     from ouroboros.deep_self_review import run_deep_self_review, is_review_available
                     self._emit_progress("Starting deep self-review... This may take several minutes.")
@@ -311,7 +332,10 @@ class OuroborosAgent:
                             review_model = ""
                     if not review_model:
                         text = "❌ Deep self-review unavailable: no OPENROUTER_API_KEY or OPENAI_API_KEY configured."
-                        usage = {}
+                        usage = {
+                            "result_status": "infra_failed",
+                            "reason_code": "deep_self_review_unavailable",
+                        }
                     else:
                         text, usage = run_deep_self_review(
                             repo_dir=self.env.repo_dir,
@@ -321,7 +345,6 @@ class OuroborosAgent:
                             event_queue=self._event_queue,
                             model=review_model,
                         )
-                    # Emit usage event for budget tracking
                     if usage:
                         self._pending_events.append({
                             "type": "llm_usage",
@@ -331,7 +354,6 @@ class OuroborosAgent:
                             "usage": usage,
                             "category": "deep_self_review",
                         })
-                    # Save to memory
                     try:
                         review_path = pathlib.Path(self.env.drive_root) / "memory" / "deep_review.md"
                         review_path.write_text(text, encoding="utf-8")
@@ -346,7 +368,10 @@ class OuroborosAgent:
                         "traceback": truncate_for_log(tb, 2000),
                     })
                     text = f"⚠️ Deep self-review error: {type(e).__name__}: {e}"
-                    usage = {}
+                    usage = {
+                        "result_status": "infra_failed",
+                        "reason_code": "deep_self_review_error",
+                    }
                     llm_trace = {"reasoning_notes": ["deep_self_review_error"], "tool_calls": []}
             else:
                 try:
@@ -372,6 +397,10 @@ class OuroborosAgent:
                         "traceback": truncate_for_log(tb, 2000),
                     })
                     text = f"⚠️ Error during processing: {type(e).__name__}: {e}"
+                    usage = {
+                        "result_status": "infra_failed",
+                        "reason_code": "task_exception",
+                    }
                     try:
                         from ouroboros.task_results import STATUS_FAILED, write_task_result
                         write_task_result(
@@ -379,6 +408,8 @@ class OuroborosAgent:
                             str(task.get("id") or ""),
                             STATUS_FAILED,
                             result=text,
+                            result_status="infra_failed",
+                            reason_code="task_exception",
                         )
                     except Exception:
                         pass
@@ -422,21 +453,23 @@ class OuroborosAgent:
                 heartbeat_stop.set()
             self._current_task_type = None
             self._current_task_id = None
-
-    # Keep _build_trace_summary as a static method for backward compat
-    _build_trace_summary = staticmethod(build_trace_summary)
+            self._current_task_metadata = {}
 
     def _emit_progress(self, text: str) -> None:
         self._last_progress_ts = time.time()
         if self._event_queue is None or self._current_chat_id is None:
             return
         try:
-            self._event_queue.put({
+            event = {
                 "type": "send_message", "chat_id": self._current_chat_id,
                 "text": f"💬 {text}", "format": "markdown", "is_progress": True,
                 "task_id": self._current_task_id or "",
                 "ts": utc_now_iso(),
-            })
+            }
+            progress_meta = self._subagent_progress_meta("progress")
+            if progress_meta:
+                event["progress_meta"] = progress_meta
+            self._event_queue.put(event)
         except Exception:
             log.warning("Failed to emit progress event", exc_info=True)
             pass
@@ -460,10 +493,25 @@ class OuroborosAgent:
             self._event_queue.put({
                 "type": "task_heartbeat", "task_id": task_id,
                 "phase": phase, "ts": utc_now_iso(),
+                **self._subagent_progress_meta(phase),
             })
         except Exception:
             log.warning("Failed to emit task heartbeat event", exc_info=True)
             pass
+
+    def _subagent_progress_meta(self, event: str) -> Dict[str, Any]:
+        metadata = self._current_task_metadata if isinstance(self._current_task_metadata, dict) else {}
+        if str(metadata.get("delegation_role") or "").lower() != "subagent":
+            return {}
+        task_id = str(self._current_task_id or metadata.get("subagent_task_id") or metadata.get("task_id") or "")
+        return {
+            "subagent_event": str(event or "progress"),
+            "subagent_task_id": task_id,
+            "root_task_id": str(metadata.get("root_task_id") or ""),
+            "parent_task_id": str(metadata.get("parent_task_id") or ""),
+            "delegation_role": "subagent",
+            "subagent_role": str(metadata.get("role") or ""),
+        }
 
     def _start_task_heartbeat_loop(self, task_id: str) -> Optional[threading.Event]:
         if self._event_queue is None or not task_id.strip():

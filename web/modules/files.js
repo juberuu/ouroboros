@@ -1,12 +1,9 @@
 import { renderPageHeader } from './page_header.js';
-
-const FILES_ICON = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><path d="M3 7h5l2 2h11v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M3 7V5a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v2"/></svg>';
-
-function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
+import { PAGE_ICONS } from './page_icons.js';
+import { escapeHtmlAttr, escapeHtmlText as escapeHtml } from './utils.js';
+import { apiFetch, jsonPost } from './api_client.js';
+import { openConfirmDialog } from './confirm_dialog.js';
+import { downloadViaHostBridge } from './ui_helpers.js';
 
 function formatFileSize(size) {
     const num = Number(size);
@@ -31,11 +28,11 @@ function defaultDirectoryContent() {
 export function initFiles({ state: appState, setBeforePageLeave } = {}) {
     const page = document.createElement('div');
     page.id = 'page-files';
-    page.className = 'page';
+    page.className = 'page app-page-glass';
     page.innerHTML = `
         ${renderPageHeader({
             title: 'Files',
-            icon: FILES_ICON,
+            icon: PAGE_ICONS.files,
             description: defaultDirectoryMeta(),
             actionsHtml: '<button class="btn btn-default" id="files-refresh">Refresh</button>',
         })}
@@ -52,7 +49,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
                         <button class="btn btn-default" id="files-new-dir" title="Create directory">+ Dir</button>
                     </div>
                 </div>
-                <div id="files-list" class="files-list"></div>
+                <div id="files-list" class="files-list scroll-fade-y"></div>
             </section>
             <section class="files-preview">
                 <div class="files-preview-header">
@@ -66,7 +63,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
                         <button class="btn btn-primary" id="files-save" hidden disabled>Save</button>
                     </div>
                 </div>
-                <div id="files-preview-content" class="files-preview-content">${defaultDirectoryContent()}</div>
+                <div id="files-preview-content" class="files-preview-content scroll-fade-y">${defaultDirectoryContent()}</div>
             </section>
             <div class="files-drop-overlay" aria-hidden="true">
                 <div class="files-drop-card">Drop files to upload into the current folder</div>
@@ -77,18 +74,6 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
                 <button type="button" class="files-context-item" data-action="move">Move</button>
                 <button type="button" class="files-context-item" data-action="paste">Paste Here</button>
                 <button type="button" class="files-context-item files-context-item-danger" data-action="delete">Delete</button>
-            </div>
-            <div id="files-modal" class="files-modal" hidden>
-                <div class="files-modal-backdrop" data-close="backdrop"></div>
-                <div class="files-modal-card" role="dialog" aria-modal="true" aria-labelledby="files-modal-title">
-                    <div class="files-modal-title" id="files-modal-title"></div>
-                    <div class="files-modal-message" id="files-modal-message"></div>
-                    <input id="files-modal-input" class="files-modal-input" type="text" hidden>
-                    <div class="files-modal-actions">
-                        <button type="button" class="btn btn-default" id="files-modal-cancel">Cancel</button>
-                        <button type="button" class="btn btn-primary" id="files-modal-confirm">OK</button>
-                    </div>
-                </div>
             </div>
         </div>
     `;
@@ -101,12 +86,9 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
     const previewMetaEl = page.querySelector('#files-preview-meta');
     const previewContentEl = page.querySelector('#files-preview-content');
     const contextMenuEl = page.querySelector('#files-context-menu');
-    const modalEl = page.querySelector('#files-modal');
-    const modalTitleEl = page.querySelector('#files-modal-title');
-    const modalMessageEl = page.querySelector('#files-modal-message');
-    const modalInputEl = page.querySelector('#files-modal-input');
-    const modalCancelBtn = page.querySelector('#files-modal-cancel');
-    const modalConfirmBtn = page.querySelector('#files-modal-confirm');
+    const contextMenuPositionStyle = document.createElement('style');
+    contextMenuPositionStyle.id = 'files-context-menu-position-style';
+    page.appendChild(contextMenuPositionStyle);
     const saveBtn = page.querySelector('#files-save');
     const downloadBtn = page.querySelector('#files-download');
     const openExternalBtn = page.querySelector('#files-open-external');
@@ -134,7 +116,6 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
         editorWritable: false,
         editorIsNew: false,
         editorFilename: '',
-        modalResolve: null,
         clipboard: null,
         contextEntryType: '',
         contextDestinationPath: '.',
@@ -228,29 +209,17 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
         return wrapper;
     }
 
-    function closeModal(result) {
-        modalEl.hidden = true;
-        const resolver = state.modalResolve;
-        state.modalResolve = null;
-        if (resolver) resolver(result);
-    }
-
-    function showModal({ title, message, input = false, initialValue = '', confirmLabel = 'OK', cancelLabel = 'Cancel' }) {
-        modalTitleEl.textContent = title || '';
-        modalMessageEl.textContent = message || '';
-        modalInputEl.hidden = !input;
-        modalInputEl.value = input ? initialValue : '';
-        modalConfirmBtn.textContent = confirmLabel;
-        modalCancelBtn.textContent = cancelLabel;
-        modalEl.hidden = false;
-        if (input) {
-            queueMicrotask(() => modalInputEl.focus());
-        } else {
-            queueMicrotask(() => modalConfirmBtn.focus());
-        }
-        return new Promise((resolve) => {
-            state.modalResolve = resolve;
+    async function showModal({ title, message, input = false, initialValue = '', confirmLabel = 'OK', cancelLabel = 'Cancel' }) {
+        const result = await openConfirmDialog({
+            title,
+            body: message,
+            input,
+            initialValue,
+            confirmLabel,
+            cancelLabel,
+            danger: /delete|discard/i.test(confirmLabel),
         });
+        return typeof result === 'boolean' ? { confirmed: result, value: '' } : result;
     }
 
     async function canLeaveEditor() {
@@ -285,14 +254,16 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
         const rect = contextMenuEl.getBoundingClientRect();
         const left = Math.min(Math.max(margin, x), Math.max(margin, window.innerWidth - rect.width - margin));
         const top = Math.min(Math.max(margin, y), Math.max(margin, window.innerHeight - rect.height - margin));
-        contextMenuEl.style.left = `${left}px`;
-        contextMenuEl.style.top = `${top}px`;
+        contextMenuPositionStyle.textContent = `#files-context-menu[data-open="1"]{left:${Math.round(left)}px;top:${Math.round(top)}px;}`;
+        contextMenuEl.dataset.open = '1';
     }
 
     function hideContextMenu() {
         state.contextPath = '';
         state.contextEntryType = '';
         state.contextDestinationPath = '.';
+        delete contextMenuEl.dataset.open;
+        contextMenuPositionStyle.textContent = '';
         contextMenuEl.hidden = true;
     }
 
@@ -405,7 +376,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
             params.set('path', path);
         }
         const query = params.toString();
-        const resp = await fetch(`/api/files/list${query ? `?${query}` : ''}`);
+        const resp = await apiFetch(`/api/files/list${query ? `?${query}` : ''}`);
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
 
@@ -433,7 +404,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
         if (!options.skipLeaveCheck && state.selectedPath !== path && !(await canLeaveEditor())) return;
         hideContextMenu();
         const params = new URLSearchParams({ path });
-        const resp = await fetch(`/api/files/read?${params.toString()}`);
+        const resp = await apiFetch(`/api/files/read?${params.toString()}`);
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
 
@@ -442,18 +413,18 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
             setPreview({
                 path: data.display_path || state.rootPath || 'Files',
                 meta: `${formatFileSize(data.size)} • ${data.media_type || 'image'}`,
-                html: `<img class="files-preview-image" src="${escapeHtml(data.content_url)}" alt="${escapeHtml(data.name || data.path || 'image')}">`,
+                html: `<img class="files-preview-image" src="${escapeHtmlAttr(data.content_url)}" alt="${escapeHtmlAttr(data.name || data.path || 'image')}">`,
             });
             return;
         }
 
         if (data.is_pdf && data.content_url) {
             resetEditorState();
-            const safeUrl = escapeHtml(data.content_url);
+            const safeUrl = escapeHtmlAttr(data.content_url);
             setPreview({
                 path: data.display_path || state.rootPath || 'Files',
                 meta: `${formatFileSize(data.size)} • PDF preview`,
-                html: `<iframe class="files-preview-frame" sandbox="allow-same-origin" src="${safeUrl}" title="${escapeHtml(data.name || 'PDF preview')}"></iframe>`,
+                html: `<iframe class="files-preview-frame" sandbox="allow-same-origin" src="${safeUrl}" title="${escapeHtmlAttr(data.name || 'PDF preview')}"></iframe>`,
             });
             return;
         }
@@ -496,10 +467,8 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
         const params = new URLSearchParams({ path });
         const url = `/api/files/download?${params.toString()}`;
         const filename = filenameFromPath(path);
-        const bridge = window.pywebview?.api?.download_file_to_downloads;
-        if (bridge) {
-            const result = await bridge(url, filename, Boolean(openExternal));
-            if (!result?.ok) throw new Error(result?.error || 'native download failed');
+        const result = await downloadViaHostBridge(url, filename, { openExternal });
+        if (result.native) {
             setPreview({
                 path,
                 meta: openExternal ? 'Opened externally' : 'Downloaded',
@@ -507,18 +476,6 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
             });
             return;
         }
-        const resp = await fetch(url);
-        if (!resp.ok) throw new Error(`download failed: HTTP ${resp.status}`);
-        const blob = await resp.blob();
-        const blobUrl = URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        link.href = blobUrl;
-        link.download = filename;
-        link.rel = 'noopener';
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
     }
 
     async function createDirectory() {
@@ -532,65 +489,21 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
         });
         const name = (result?.value || '').trim();
         if (!result?.confirmed || !name) return;
-        const resp = await fetch('/api/files/mkdir', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                path: state.path || '.',
-                name,
-            }),
-        });
-        const data = await resp.json();
-        if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+        const data = await jsonPost('/api/files/mkdir', { path: state.path || '.', name });
         state.selectedPath = '';
         state.selectedType = 'dir';
         await loadDirectory(state.path || '.', { skipLeaveCheck: true });
     }
 
-    async function pasteClipboard() {
+    async function pasteClipboard(destinationPath = state.path || '.') {
         if (!state.clipboard) return;
         if (!(await canLeaveEditor())) return;
 
-        const resp = await fetch('/api/files/transfer', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                source_path: state.clipboard.path,
-                destination_dir: state.path || '.',
-                mode: state.clipboard.mode,
-            }),
+        const data = await jsonPost('/api/files/transfer', {
+            source_path: state.clipboard.path,
+            destination_dir: destinationPath || '.',
+            mode: state.clipboard.mode,
         });
-        const data = await resp.json();
-        if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
-
-        const pastedMode = state.clipboard.mode;
-        state.clipboard = null;
-        updateClipboardActions();
-        state.selectedPath = data.path || '';
-        state.selectedType = data.type || '';
-        await loadDirectory(state.path || '.', { skipLeaveCheck: true });
-        setPreview({
-            path: data.display_path || state.rootPath || 'Files',
-            meta: `${pastedMode === 'move' ? 'Moved' : 'Copied'} ${data.type || 'item'}`,
-            content: '',
-        });
-    }
-
-    async function pasteClipboardInto(destinationPath) {
-        if (!state.clipboard) return;
-        if (!(await canLeaveEditor())) return;
-
-        const resp = await fetch('/api/files/transfer', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                source_path: state.clipboard.path,
-                destination_dir: destinationPath || '.',
-                mode: state.clipboard.mode,
-            }),
-        });
-        const data = await resp.json();
-        if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
 
         const pastedMode = state.clipboard.mode;
         state.clipboard = null;
@@ -622,13 +535,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
         });
         if (!result?.confirmed) return;
 
-        const resp = await fetch('/api/files/delete', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ path: state.selectedPath }),
-        });
-        const data = await resp.json();
-        if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+        await jsonPost('/api/files/delete', { path: state.selectedPath });
 
         resetEditorState();
         state.selectedPath = '';
@@ -656,7 +563,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
                 content: `Uploading ${file.name}...`,
             });
 
-            const resp = await fetch('/api/files/upload', {
+            const resp = await apiFetch('/api/files/upload', {
                 method: 'POST',
                 body: form,
             });
@@ -685,17 +592,11 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
             ? (state.path && state.path !== '.' ? `${state.path}/${relName}` : relName)
             : state.editorPath;
         if (!savePath) return;
-        const resp = await fetch('/api/files/write', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                path: savePath,
-                content: state.editorValue,
-                create: state.editorIsNew,
-            }),
+        const data = await jsonPost('/api/files/write', {
+            path: savePath,
+            content: state.editorValue,
+            create: state.editorIsNew,
         });
-        const data = await resp.json();
-        if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
 
         state.selectedPath = data.path || savePath;
         state.selectedType = 'file';
@@ -820,37 +721,11 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
                 });
             }
         } else if (action === 'paste') {
-            pasteClipboardInto(state.contextDestinationPath).catch(showError);
+            pasteClipboard(state.contextDestinationPath).catch(showError);
         } else if (action === 'delete') {
             deleteSelectedEntry().catch(showError);
         }
         hideContextMenu();
-    });
-
-    modalCancelBtn.addEventListener('click', () => {
-        closeModal({ confirmed: false, value: '' });
-    });
-
-    modalConfirmBtn.addEventListener('click', () => {
-        closeModal({ confirmed: true, value: modalInputEl.hidden ? '' : modalInputEl.value });
-    });
-
-    modalEl.addEventListener('click', (event) => {
-        const target = event.target instanceof HTMLElement ? event.target : null;
-        if (target?.dataset.close === 'backdrop') {
-            closeModal({ confirmed: false, value: '' });
-        }
-    });
-
-    modalInputEl.addEventListener('keydown', (event) => {
-        if (event.key === 'Enter') {
-            event.preventDefault();
-            closeModal({ confirmed: true, value: modalInputEl.value });
-        }
-        if (event.key === 'Escape') {
-            event.preventDefault();
-            closeModal({ confirmed: false, value: '' });
-        }
     });
 
     document.addEventListener('click', () => {
@@ -884,8 +759,9 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
             active.classList?.contains('files-editor') ||
             active.classList?.contains('files-editor-name') ||
             active.id === 'files-search' ||
-            active.id === 'files-modal-input'
+            active.matches?.('[data-confirm-input]')
         );
+        const dialogOpen = Boolean(document.querySelector('.confirm-dialog-backdrop'));
         if (!page.classList.contains('active')) return;
         if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
             if (!inEditor) return;
@@ -894,7 +770,7 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
             return;
         }
         if (event.key === 'Delete') {
-            if (inEditor || modalEl.hidden === false) return;
+            if (inEditor || dialogOpen) return;
             event.preventDefault();
             deleteSelectedEntry().catch(showError);
         }

@@ -2,7 +2,7 @@
 
 Verifies:
 - Threshold is 30000 chars
-- should_consolidate_scratchpad triggers correctly
+- should_consolidate_scratchpad triggers only for block scratchpads
 - _rebuild_knowledge_index exists and works
 - consolidate_scratchpad calls _rebuild_knowledge_index
 """
@@ -43,14 +43,14 @@ def test_should_not_consolidate_small_scratchpad(tmp_path):
     assert not mod.should_consolidate_scratchpad(mem)
 
 
-def test_should_consolidate_large_scratchpad(tmp_path):
+def test_should_not_consolidate_large_flat_scratchpad(tmp_path):
     mod = _get_consolidator()
     drive = tmp_path / "data"
     (drive / "memory").mkdir(parents=True)
     (drive / "logs").mkdir(parents=True)
     mem = Memory(drive_root=drive)
     mem.scratchpad_path().write_text("x" * 35000, encoding="utf-8")
-    assert mod.should_consolidate_scratchpad(mem)
+    assert not mod.should_consolidate_scratchpad(mem)
 
 
 def test_should_not_consolidate_missing_file(tmp_path):
@@ -98,14 +98,29 @@ def test_rebuild_knowledge_index_skips_underscore_files():
         assert "visible" in index_text
 
 
-def test_consolidate_scratchpad_flat_calls_index_rebuild():
-    """Flat scratchpad consolidation pipeline must call _rebuild_knowledge_index."""
+def test_flat_scratchpad_consolidation_is_retired():
+    """Pre-block flat scratchpads require manual upgrade; they are not rewritten."""
     mod = _get_consolidator()
-    source = inspect.getsource(mod._consolidate_scratchpad_flat)
-    assert "_rebuild_knowledge_index" in source, (
-        "scratchpad consolidation does not call _rebuild_knowledge_index — "
-        "auto-extracted knowledge won't appear in context"
-    )
+    assert not hasattr(mod, "_consolidate_scratchpad_flat")
+
+
+def test_consolidate_scratchpad_does_not_rewrite_flat_scratchpad(tmp_path):
+    mod = _get_consolidator()
+    drive = tmp_path / "data"
+    (drive / "memory").mkdir(parents=True)
+    (drive / "logs").mkdir(parents=True)
+    mem = Memory(drive_root=drive)
+    legacy = "legacy flat scratchpad\n" + ("x" * 35000)
+    mem.scratchpad_path().write_text(legacy, encoding="utf-8")
+
+    class FailingLLM:
+        def chat(self, *args, **kwargs):
+            raise AssertionError("flat scratchpad consolidation should not call the LLM")
+
+    result = mod.consolidate_scratchpad(mem, drive / "memory" / "knowledge", FailingLLM())
+
+    assert result is None
+    assert mem.scratchpad_path().read_text(encoding="utf-8") == legacy
 
 
 def test_consolidate_scratchpad_blocks_calls_index_rebuild():

@@ -1,44 +1,58 @@
-"""Shell tools: run_shell, claude_code_edit."""
+"""Process tools: run_command and run_script."""
 
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import logging
 import os
 import pathlib
 import re
+import shutil
 import shlex
 import signal
+import stat
 import subprocess
 import sys
 import threading
+import uuid
 from subprocess import Popen, CompletedProcess
 from typing import Any, Dict, List
 
-from ouroboros.platform_layer import IS_WINDOWS, kill_process_tree, subprocess_new_group_kwargs
-from ouroboros.config import load_settings
+from ouroboros.platform_layer import IS_WINDOWS, bootstrap_process_path, kill_process_tree, subprocess_new_group_kwargs
+from ouroboros.config import get_runtime_mode, load_settings
+from ouroboros.runtime_mode_policy import (
+    core_patch_notice,
+    is_protected_runtime_path,
+    mode_allows_protected_write,
+    protected_paths_in,
+)
 from ouroboros.tools.commit_gate import _invalidate_advisory
-from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.utils import utc_now_iso, run_cmd
+from ouroboros.tools.registry import ToolContext, ToolEntry, active_repo_dir_for
+from ouroboros.utils import safe_relpath, utc_now_iso, run_cmd
+from ouroboros.contracts.task_constraint import normalize_task_constraint
+from ouroboros.contracts.skill_payload_policy import (
+    SKILL_PAYLOAD_CONTROL_DIRNAMES,
+    SKILL_PAYLOAD_CONTROL_FILENAMES,
+    SkillPayloadPathError,
+    cross_skill_redirect_error,
+    decide_payload_short_form,
+    resolve_skill_payload_target,
+)
 
 log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Subprocess process-group registry (for panic kill)
-# ---------------------------------------------------------------------------
+# Tracked process groups let panic kill descendant trees too.
 _active_subprocesses: set = set()
 _subprocess_lock = threading.Lock()
 
 _RUN_SHELL_DEFAULT_TIMEOUT_SEC = 360
+_CONTROL_DIR_BACKUP_MAX_BYTES = 5 * 1024 * 1024
 
 
 def _tracked_subprocess_run(cmd, **kwargs):
-    """subprocess.run() replacement with process group tracking.
-
-    Each subprocess gets its own session (start_new_session=True) so the
-    entire process tree can be killed via os.killpg() on panic.
-    """
+    """subprocess.run replacement with process-tree tracking."""
     timeout = kwargs.pop("timeout", None)
     kwargs.update(subprocess_new_group_kwargs())
     kwargs.setdefault("stdin", subprocess.DEVNULL)
@@ -58,12 +72,12 @@ def _tracked_subprocess_run(cmd, **kwargs):
 
 
 def _kill_process_group(proc):
-    """Kill a subprocess and its entire process tree."""
+    """Kill a subprocess tree."""
     kill_process_tree(proc)
 
 
 def kill_all_tracked_subprocesses():
-    """Kill all tracked subprocess trees. Called on panic."""
+    """Kill all tracked subprocess trees on panic."""
     with _subprocess_lock:
         procs = list(_active_subprocesses)
     for proc in procs:
@@ -91,32 +105,20 @@ def _resolve_effective_timeout(default_timeout_sec: int) -> int:
     return max(int(default_timeout_sec), 1)
 
 
-def _describe_returncode(returncode: int, cwd: pathlib.Path | None = None) -> str:
-    """Render a return code with signal details and resolved cwd when applicable.
-
-    Issue #40: ``run_shell`` needs to expose its resolved working directory so
-    the agent can immediately see when a path-mismatch (data_root vs repo_root
-    vs invented absolute path) caused a failure. The ``cwd=`` token rides
-    inside the same parenthesised suffix as ``signal=`` to keep the existing
-    ``exit_code=(-?\\d+)`` regex consumer in ``loop_tool_execution`` tolerant.
-    """
-    parts: List[str] = []
+def _describe_returncode(returncode: int) -> str:
+    """Render a return code with signal details when applicable."""
     if int(returncode) < 0:
         signal_num = abs(int(returncode))
         try:
             signal_name = signal.Signals(signal_num).name
         except ValueError:
             signal_name = f"SIG{signal_num}"
-        parts.append(f"signal={signal_name}")
-    if cwd is not None:
-        parts.append(f"cwd={cwd}")
-    if parts:
-        return f"exit_code={returncode} ({', '.join(parts)})"
+        return f"exit_code={returncode} (signal={signal_name})"
     return f"exit_code={returncode}"
 
 
 def _format_process_output(stdout: str, stderr: str, *, limit: int = 50_000) -> str:
-    """Render stdout/stderr sections with truncation."""
+    """Render bounded stdout/stderr sections."""
     stdout_text = str(stdout or "").strip()
     stderr_text = str(stderr or "").strip()
     parts: List[str] = []
@@ -130,31 +132,20 @@ def _format_process_output(stdout: str, stderr: str, *, limit: int = 50_000) -> 
     return rendered
 
 
-def _format_process_failure(
-    prefix: str,
-    action: str,
-    res: CompletedProcess,
-    *,
-    cwd: pathlib.Path | None = None,
-) -> str:
-    """Render a subprocess failure with output context and resolved cwd."""
+def _format_process_failure(prefix: str, action: str, res: CompletedProcess) -> str:
+    """Render a subprocess failure with output context."""
     return (
-        f"{prefix}: {action} with {_describe_returncode(res.returncode, cwd=cwd)}.\n\n"
+        f"{prefix}: {action} with {_describe_returncode(res.returncode)}.\n\n"
         f"{_format_process_output(res.stdout or '', res.stderr or '')}"
     )
 
 
-def _looks_absolute_cwd(cwd: str) -> bool:
-    """Return True when ``cwd`` looks absolute on either POSIX or Windows.
-
-    Detects both styles regardless of host platform so a Windows-style path
-    sent to a POSIX agent (or vice versa) is rejected with a clear error
-    instead of silently routing to ``repo_dir`` via the old fallback.
-    """
-    return (
-        pathlib.PurePosixPath(cwd).is_absolute()
-        or pathlib.PureWindowsPath(cwd).is_absolute()
-    )
+def _path_is_relative_to(path: pathlib.Path, root: pathlib.Path) -> bool:
+    try:
+        pathlib.Path(path).resolve(strict=False).relative_to(pathlib.Path(root).resolve(strict=False))
+        return True
+    except ValueError:
+        return False
 
 
 def _resolve_git_root(path: pathlib.Path) -> pathlib.Path | None:
@@ -172,9 +163,188 @@ def _status_snapshot(repo_dir: pathlib.Path | None) -> list[str]:
     return sorted(_get_changed_files(repo_dir))
 
 
-# ---------------------------------------------------------------------------
-# Shell builtins / operators that cannot run via subprocess
-# ---------------------------------------------------------------------------
+def _protected_runtime_dirty_paths(repo_dir: pathlib.Path) -> list[str]:
+    dirty: set[str] = set()
+    for cmd in (["git", "diff", "--name-only"], ["git", "diff", "--cached", "--name-only"]):
+        try:
+            res = subprocess.run(
+                cmd,
+                cwd=str(repo_dir),
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if res.returncode == 0:
+                dirty.update(rel for rel in res.stdout.splitlines() if is_protected_runtime_path(rel))
+        except Exception:
+            pass
+    return sorted(dirty)
+
+
+def _restore_protected_runtime_paths(repo_dir: pathlib.Path, paths: list[str]) -> list[str]:
+    restored: list[str] = []
+    for rel in sorted(set(paths)):
+        try:
+            subprocess.run(
+                ["git", "reset", "HEAD", "--", rel],
+                cwd=str(repo_dir),
+                capture_output=True,
+                timeout=5,
+            )
+            subprocess.run(
+                ["git", "checkout", "--", rel],
+                cwd=str(repo_dir),
+                capture_output=True,
+                timeout=5,
+            )
+            restored.append(rel)
+        except Exception:
+            pass
+    return restored
+
+
+def _tree_fingerprint(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    root = pathlib.Path(path)
+    if not root.exists():
+        return ""
+    for child in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+        try:
+            st = child.lstat()
+        except OSError:
+            continue
+        try:
+            rel = child.relative_to(root).as_posix()
+        except ValueError:
+            rel = safe_relpath(str(child))
+        digest.update(rel.encode("utf-8", errors="replace"))
+        digest.update(str(st.st_mode).encode())
+        digest.update(str(st.st_size).encode())
+        digest.update(str(st.st_mtime_ns).encode())
+        if stat.S_ISLNK(st.st_mode):
+            try:
+                digest.update(os.readlink(child).encode("utf-8", errors="replace"))
+            except OSError:
+                pass
+    return digest.hexdigest()
+
+
+def _snapshot_skill_control_paths(payload_root: pathlib.Path) -> Dict[pathlib.Path, Any]:
+    snapshots: Dict[pathlib.Path, Any] = {}
+    root = pathlib.Path(payload_root).resolve(strict=False)
+    control_file_names = set(SKILL_PAYLOAD_CONTROL_FILENAMES) | {"SKILL.openclaw.md"}
+    existing_names: set[str] = set()
+    try:
+        existing_names = {child.name for child in root.iterdir() if child.name.lower() in SKILL_PAYLOAD_CONTROL_FILENAMES}
+    except OSError:
+        existing_names = set()
+    for name in sorted(control_file_names | existing_names):
+        path = root / name
+        try:
+            snapshots[path] = ("file", path.read_bytes() if path.exists() else None)
+        except OSError:
+            snapshots[path] = ("file", None)
+    for name in SKILL_PAYLOAD_CONTROL_DIRNAMES:
+        path = root / name
+        backup = None
+        if path.exists() and path.is_dir():
+            before_fingerprint = _tree_fingerprint(path)
+            try:
+                total = 0
+                for child in sorted(path.rglob("*"), key=lambda item: item.as_posix()):
+                    try:
+                        total += child.lstat().st_size
+                    except OSError:
+                        continue
+                    if total > _CONTROL_DIR_BACKUP_MAX_BYTES:
+                        break
+                if total <= _CONTROL_DIR_BACKUP_MAX_BYTES:
+                    backup = pathlib.Path(
+                        shutil.copytree(
+                            path,
+                            root.parent / f".ouroboros-control-backup-{uuid.uuid4().hex}" / name,
+                            symlinks=True,
+                        )
+                    )
+            except Exception:
+                backup = None
+            snapshots[path] = ("dir", True, before_fingerprint, backup)
+        elif path.exists():
+            try:
+                snapshots[path] = ("dir_file", path.read_bytes())
+            except OSError:
+                snapshots[path] = ("dir_file", None)
+        else:
+            snapshots[path] = ("dir", False, "", None)
+    return snapshots
+
+
+def _restore_skill_control_changes(snapshots: Dict[pathlib.Path, Any]) -> list[str]:
+    changed: list[str] = []
+    for path, state in snapshots.items():
+        kind = state[0]
+        before = state[1:]
+        name = path.name
+        try:
+            if kind == "file":
+                before_bytes = before[0] if before else None
+                after = path.read_bytes() if path.exists() else None
+                if after != before_bytes:
+                    if before_bytes is None:
+                        path.unlink(missing_ok=True)
+                    else:
+                        path.write_bytes(before_bytes)
+                    changed.append(name)
+            elif kind == "dir":
+                existed, before_fingerprint, backup = before
+                after_fingerprint = _tree_fingerprint(path) if path.exists() and path.is_dir() else None
+                if not existed:
+                    if path.exists():
+                        if path.is_dir():
+                            shutil.rmtree(path)
+                        else:
+                            path.unlink(missing_ok=True)
+                        changed.append(name)
+                elif after_fingerprint != before_fingerprint:
+                    if backup is not None and pathlib.Path(backup).exists():
+                        if path.exists():
+                            if path.is_dir():
+                                shutil.rmtree(path)
+                            else:
+                                path.unlink(missing_ok=True)
+                        shutil.move(str(backup), str(path))
+                    changed.append(name)
+                if backup is not None:
+                    try:
+                        shutil.rmtree(pathlib.Path(backup).parent, ignore_errors=True)
+                    except OSError:
+                        pass
+            elif kind == "dir_file":
+                before_bytes = before[0] if before else None
+                after = path.read_bytes() if path.exists() and path.is_file() else None
+                if after != before_bytes:
+                    if path.exists():
+                        if path.is_dir():
+                            shutil.rmtree(path)
+                        else:
+                            path.unlink(missing_ok=True)
+                    if before_bytes is not None:
+                        path.write_bytes(before_bytes)
+                    changed.append(name)
+            elif kind == "dir_unmoved":
+                before_fingerprint, temp_root = before
+                after_fingerprint = _tree_fingerprint(path) if path.exists() else None
+                if after_fingerprint != before_fingerprint:
+                    changed.append(name)
+                try:
+                    shutil.rmtree(temp_root, ignore_errors=True)
+                except OSError:
+                    pass
+        except OSError:
+            changed.append(name)
+    return sorted(set(changed))
+
+
 _SHELL_BUILTINS = frozenset([
     "cd", "source", ".", "export", "alias", "eval",
     "set", "unset", "pushd", "popd", "read", "ulimit",
@@ -189,14 +359,7 @@ _SHELL_INTERPRETERS = frozenset({
 })
 _ENV_REF_PATTERN = re.compile(r'\$(?:\{[A-Z][A-Z0-9_]*\}|[A-Z][A-Z0-9_]*)')
 
-# 2026-05-04: detect one bash/GNU grep alternation idiom that doesn't work
-# portably in argv mode. In bash, ``grep "A\|B"`` works on GNU grep because
-# basic-regex with `\|` as alternation is a GNU extension (and shell doesn't
-# expand the backslash inside double quotes). BSD grep on macOS treats ``\|``
-# as the literal two-character sequence, so the pattern matches nothing. Smaller
-# models that learned ``grep "A\|B"`` from bash scripts hit this when their
-# tool calls go to subprocess directly. Refuse with a teachable error
-# pointing at the correct argv form (``-E "A|B"`` or ``-e "A" -e "B"``).
+# Portable grep fix: GNU basic-regex "\|" fails on BSD grep in argv mode.
 _GREP_TOOLS = frozenset(("grep", "egrep", "fgrep"))
 _GREP_REGEX_MODE_FLAGS = frozenset((
     "-E", "--extended-regexp",
@@ -205,10 +368,20 @@ _GREP_REGEX_MODE_FLAGS = frozenset((
     "-G", "--basic-regexp",
 ))
 _GREP_BACKSLASH_PIPE_PATTERN = re.compile(r'\\\|')
+_NO_MATCH_EXIT_TOOLS = frozenset(("grep", "egrep", "fgrep", "rg", "ag", "ack"))
+
+
+def _is_search_no_match(res: CompletedProcess) -> bool:
+    tool = pathlib.Path(str(res.args[0] if res.args else "")).name.lower()
+    return (
+        int(res.returncode) == 1
+        and tool in _NO_MATCH_EXIT_TOOLS
+        and not str(res.stderr or "").strip()
+    )
 
 
 def _grep_has_explicit_regex_mode(cmd: List[str]) -> bool:
-    """Return True when grep argv explicitly chooses regex/string flavor."""
+    """Return whether grep argv already chooses regex/string flavor."""
     if not cmd:
         return False
     tool = pathlib.Path(cmd[0]).name.lower()
@@ -227,22 +400,37 @@ def _grep_has_explicit_regex_mode(cmd: List[str]) -> bool:
     return False
 
 
-# ---------------------------------------------------------------------------
-# run_shell
-# ---------------------------------------------------------------------------
+def _maybe_autocorrect_grep_backslash_pipe(cmd: List[str]) -> tuple[List[str], str]:
+    if not cmd or pathlib.Path(cmd[0]).name.lower() not in _GREP_TOOLS:
+        return cmd, ""
+    if _grep_has_explicit_regex_mode(cmd):
+        return cmd, ""
+    corrected = list(cmd)
+    changed_args: list[str] = []
+    for idx, arg in enumerate(corrected[1:], start=1):
+        if isinstance(arg, str) and _GREP_BACKSLASH_PIPE_PATTERN.search(arg):
+            corrected[idx] = _GREP_BACKSLASH_PIPE_PATTERN.sub("|", arg)
+            changed_args.append(arg)
+    if not changed_args:
+        return cmd, ""
+    corrected.insert(1, "-E")
+    return corrected, (
+        "⚠️ SHELL_REGEX_AUTO_CORRECTED: converted grep backslash-escaped "
+        "alternation (\\|) to extended regex mode (`grep -E`) and rewrote "
+        f"{changed_args!r} to use `|`.\n"
+    )
+
+
 def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
     if isinstance(cmd, str):
-        # Cascade recovery: try to parse the string into a list before failing.
-        # LLMs frequently pass cmd as a string instead of a JSON array.
+        # Recover common stringified argv mistakes before failing.
         recovered = None
-        # 1. JSON array: '["grep", "-r", "pattern"]'
         try:
             parsed = json.loads(cmd)
             if isinstance(parsed, list) and all(isinstance(x, str) for x in parsed):
                 recovered = parsed
         except (json.JSONDecodeError, ValueError):
             pass
-        # 2. Python literal: "['grep', '-r']"
         if recovered is None:
             try:
                 parsed = ast.literal_eval(cmd)
@@ -250,14 +438,7 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
                     recovered = parsed
             except (ValueError, SyntaxError):
                 pass
-        # 3. Shell-style string: "grep -rn pattern ."
-        #
-        # If the input STARTED with `[` or `{` and both structured-parse
-        # layers failed, it's a malformed JSON/Python literal — NOT a
-        # shell command. Refuse here rather than letting shlex.split strip
-        # the brackets and produce garbage argv that subprocess will fail
-        # to exec with a useless ENOENT (e.g. ``'[git,'``). 2026-05-03
-        # production bug.
+        # Malformed structured literals are not shell commands; refuse explicitly.
         if recovered is None:
             stripped = cmd.lstrip()
             is_posix_test_cmd = stripped.startswith("[ ") and stripped.rstrip().endswith(" ]")
@@ -267,11 +448,11 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
                     'but failed to parse cleanly (likely an escape or quote-mismatch '
                     'issue). Pass cmd as an actual array, not a stringified array.\n\n'
                     'Correct usage:\n'
-                    '  run_shell(cmd=["git", "log", "--oneline", "-10"])\n\n'
+                    '  run_command(cmd=["git", "log", "--oneline", "-10"])\n\n'
                     'Wrong usage (the failure that brought you here):\n'
-                    '  run_shell(cmd=\'["git", "log", "--oneline", "-10"]\')\n\n'
-                    'For reading files, prefer `repo_read` / `data_read`.\n'
-                    'For searching code, prefer `code_search`.'
+                    '  run_command(cmd=\'["git", "log", "--oneline", "-10"]\')\n\n'
+                    'For reading files, prefer `read_file`.\n'
+                    'For searching code, prefer `search_code`.'
                 )
             try:
                 parts = shlex.split(cmd)
@@ -285,12 +466,12 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
             return (
                 '⚠️ SHELL_ARG_ERROR: `cmd` must be a JSON array of strings, not a plain string.\n\n'
                 'Correct usage:\n'
-                '  run_shell(cmd=["grep", "-r", "pattern", "path/"])\n'
-                '  run_shell(cmd=["python", "-c", "print(1+1)"])\n\n'
+                '  run_command(cmd=["grep", "-r", "pattern", "path/"])\n'
+                '  run_command(cmd=["python", "-c", "print(1+1)"])\n\n'
                 'Wrong usage:\n'
-                '  run_shell(cmd="grep -r pattern path/")\n\n'
-                'For reading files, prefer `repo_read` / `data_read`.\n'
-                'For searching code, prefer `code_search`.'
+                '  run_command(cmd="grep -r pattern path/")\n\n'
+                'For reading files, prefer `read_file`.\n'
+                'For searching code, prefer `search_code`.'
             )
 
     if not isinstance(cmd, list):
@@ -304,18 +485,17 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
             if match:
                 return (
                     f'⚠️ SHELL_ENV_ERROR: Found literal env reference "{match.group(0)}" in cmd array. '
-                    "run_shell executes argv directly, so shell variables are not expanded. "
+                    "run_command executes argv directly, so shell variables are not expanded. "
                     'Use ["sh", "-c", "..."] if you intentionally need shell expansion, '
                     "or read the environment variable inside the called program."
                 )
 
-    # Reject shell builtins (they are not executables)
     if cmd and cmd[0] in _SHELL_BUILTINS:
         if cmd[0] == "cd":
             return (
                 '⚠️ SHELL_CMD_ERROR: "cd" is a shell builtin, not an executable. '
                 'Use the "cwd" parameter instead: '
-                'run_shell(cmd=["git", "log"], cwd="/target/dir")'
+                'run_command(cmd=["git", "log"], cwd="/target/dir")'
             )
         return (
             f'⚠️ SHELL_CMD_ERROR: "{cmd[0]}" is a shell builtin and cannot '
@@ -323,73 +503,42 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
             'Use ["sh", "-c", "your command"] if you need shell builtins.'
         )
 
-    # 2026-05-04: detect bash/GNU grep `\|` alternation in argv when it
-    # has not explicitly selected a regex flavor (see comment above).
-    # Only fires when the user hasn't explicitly chosen a regex flavor —
-    # if they passed -E / -G / -P / -F they know what they're asking for.
-    if cmd and pathlib.Path(cmd[0]).name.lower() in _GREP_TOOLS:
-        if not _grep_has_explicit_regex_mode(cmd):
-            for arg in cmd[1:]:
-                if isinstance(arg, str) and _GREP_BACKSLASH_PIPE_PATTERN.search(arg):
-                    return (
-                        f'⚠️ SHELL_REGEX_HINT: argv contains backslash-escaped '
-                        f'grep alternation (\\|) in arg {arg!r}. '
-                        'GNU grep accepts \\| as a basic-regex extension, '
-                        'but BSD grep on macOS treats it as the literal '
-                        'two-character sequence unless a compatible mode is '
-                        'selected. Fixes:\n'
-                        '  - Extended regex (no escaping): grep -E "A|B" file\n'
-                        '  - Multiple patterns: grep -e "A" -e "B" file\n'
-                        '  - Force basic regex with GNU-style alternation: '
-                        'grep -G "A\\|B" file (only works on GNU grep, not BSD)\n'
-                        '  - Or use code_search for symbolic lookups inside '
-                        'the repo.'
-                    )
+    cmd, autocorrect_note = _maybe_autocorrect_grep_backslash_pipe(cmd)
 
-    # Reject shell operators in cmd array (subprocess doesn't interpret them)
     found_ops = _SHELL_OPERATORS.intersection(cmd)
     if found_ops:
         op = sorted(found_ops)[0]
         return (
             f'⚠️ SHELL_CMD_ERROR: Shell operator "{op}" found in cmd array. '
             'Subprocess does not interpret shell syntax. '
-            'Options: (1) Split into separate run_shell calls. '
+            'Options: (1) Split into separate run_command calls. '
             '(2) For pipes/chaining: ["sh", "-c", "cmd1 && cmd2"]'
         )
 
-    # Resolve the working directory.
-    # 2026-05-26 (issue #40): refuse absolute or nonexistent ``cwd`` values
-    # with an explicit ``SHELL_CWD_ERROR`` instead of silently routing to
-    # ``ctx.repo_dir``. The silent fallback was the root cause of the
-    # "wrote file in data_root, ran it via /abs/path, got ENOENT" recovery
-    # loop documented in the issue.
-    repo_root_abs = pathlib.Path(ctx.repo_dir).resolve()
-    work_dir: pathlib.Path = repo_root_abs
+    active_repo_dir = active_repo_dir_for(ctx)
+    active_root = pathlib.Path(active_repo_dir).resolve(strict=False)
+    work_dir = pathlib.Path(active_root)
     if cwd and cwd.strip() not in ("", ".", "./"):
-        if _looks_absolute_cwd(cwd):
-            return (
-                f'⚠️ SHELL_CWD_ERROR: cwd={cwd!r} is absolute. The cwd '
-                f'parameter must be a path RELATIVE to the repo root '
-                f'(repo_root={repo_root_abs}). Default cwd (omit the '
-                f'parameter) is the repo root. Files written via '
-                f'data_write live under a separate data_root and are NOT '
-                f'visible to relative run_shell lookups; use a fully '
-                f'qualified absolute path inside the command itself when '
-                f'you need to reach them.'
-            )
-        candidate = (ctx.repo_dir / cwd).resolve()
+        cwd_text = str(cwd).strip()
+        try:
+            raw_cwd = pathlib.Path(cwd_text).expanduser()
+            candidate = raw_cwd.resolve(strict=False) if raw_cwd.is_absolute() else (active_root / safe_relpath(cwd_text)).resolve(strict=False)
+            allowed_roots = [active_root]
+            if bool(getattr(ctx, "is_workspace_mode", lambda: False)()):
+                task_drive_root = ctx.task_drive_root() if hasattr(ctx, "task_drive_root") else pathlib.Path(ctx.drive_root).resolve(strict=False)
+                allowed_roots.append(task_drive_root)
+            if not any(_path_is_relative_to(candidate, root) for root in allowed_roots):
+                raise ValueError("cwd is outside active workspace/repo and task drive")
+        except (OSError, ValueError) as exc:
+            return f"⚠️ SHELL_CWD_BLOCKED: cwd escapes active workspace/repo: {exc}"
         if not candidate.exists() or not candidate.is_dir():
-            return (
-                f'⚠️ SHELL_CWD_ERROR: cwd={cwd!r} did not resolve to an '
-                f'existing directory under repo_root={repo_root_abs} '
-                f'(tried {candidate}). Verify the directory exists with '
-                f'repo_list, or omit cwd to run at the repo root.'
-            )
+            return f"⚠️ SHELL_CWD_BLOCKED: cwd is not a directory: {cwd_text}"
         work_dir = candidate
     repo_root = _resolve_git_root(pathlib.Path(work_dir))
     before_changed = _status_snapshot(repo_root)
 
     timeout_sec = _resolve_effective_timeout(_RUN_SHELL_DEFAULT_TIMEOUT_SEC)
+    bootstrap_process_path()
     try:
         res = _tracked_subprocess_run(
             cmd, cwd=str(work_dir),
@@ -397,11 +546,15 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
             text=True, timeout=timeout_sec,
         )
         if res.returncode != 0:
-            return _format_process_failure(
+            if _is_search_no_match(res):
+                return autocorrect_note + (
+                    f"{_describe_returncode(res.returncode)} (no matches)\n"
+                    f"{_format_process_output(res.stdout or '', '')}"
+                )
+            return autocorrect_note + _format_process_failure(
                 "⚠️ SHELL_EXIT_ERROR",
                 "command exited",
                 res,
-                cwd=work_dir,
             )
         after_changed = _status_snapshot(repo_root)
         if after_changed != before_changed:
@@ -409,27 +562,20 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
                 ctx,
                 changed_paths=after_changed or before_changed,
                 mutation_root=repo_root,
-                source_tool="run_shell",
+                source_tool="run_command",
             )
-        return (
-            f"{_describe_returncode(0, cwd=work_dir)}\n"
-            f"{_format_process_output(res.stdout or '', res.stderr or '')}"
-        )
+        return autocorrect_note + f"exit_code=0\n{_format_process_output(res.stdout or '', res.stderr or '')}"
     except subprocess.TimeoutExpired:
         return (
-            f"⚠️ TOOL_TIMEOUT (run_shell): command exceeded {timeout_sec}s "
-            f"(cwd={work_dir}). Subprocess tree was terminated."
+            f"⚠️ TOOL_TIMEOUT (run_command): command exceeded {timeout_sec}s. "
+            "Subprocess tree was terminated."
         )
     except Exception as e:
-        return f"⚠️ SHELL_ERROR: {e} (cwd={work_dir})"
+        return f"⚠️ SHELL_ERROR: {e}"
 
-
-# ---------------------------------------------------------------------------
-# Orchestration helpers (live in tool layer, not in gateway)
-# ---------------------------------------------------------------------------
 
 def _load_project_context(repo_dir: pathlib.Path) -> str:
-    """Load project docs for Claude Code system_prompt injection."""
+    """Load governance docs for Claude Code system_prompt injection."""
     docs = [
         ("BIBLE.md", "CONSTITUTION"),
         ("docs/DEVELOPMENT.md", "DEVELOPMENT GUIDE"),
@@ -442,8 +588,6 @@ def _load_project_context(repo_dir: pathlib.Path) -> str:
         if fpath.is_file():
             try:
                 content = fpath.read_text(encoding="utf-8")
-                if len(content) > 50_000:
-                    content = content[:50_000] + "\n\n[... truncated for context size ...]"
                 parts.append(f"## {label}\n\n{content}")
             except Exception:
                 pass
@@ -451,14 +595,14 @@ def _load_project_context(repo_dir: pathlib.Path) -> str:
 
 
 def _get_changed_files(repo_dir: pathlib.Path) -> list:
-    """Return list of changed files after an edit."""
+    """Return changed files after an edit."""
     try:
         res = subprocess.run(
             ["git", "status", "--porcelain"],
             cwd=str(repo_dir), capture_output=True, text=True, timeout=5,
         )
         if res.returncode == 0 and res.stdout.strip():
-            return [line[3:].strip() for line in res.stdout.strip().splitlines() if len(line) > 3]
+            return [line[3:].strip() for line in res.stdout.splitlines() if len(line) > 3 and line.strip()]
     except Exception:
         pass
     return []
@@ -479,7 +623,7 @@ def _get_diff_stat(repo_dir: pathlib.Path) -> str:
 
 
 def _run_validation(repo_dir: pathlib.Path) -> str:
-    """Run basic validation after edit (tests). Returns summary."""
+    """Run basic post-edit validation."""
     agent_python = sys.executable or os.environ.get("OUROBOROS_AGENT_PYTHON") or "python3"
     try:
         res = subprocess.run(
@@ -496,54 +640,200 @@ def _run_validation(repo_dir: pathlib.Path) -> str:
         return f"ERROR: validation failed: {e}"
 
 
-# ---------------------------------------------------------------------------
-# claude_code_edit — SDK-only path
-# ---------------------------------------------------------------------------
-
 def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
-                      budget: float = 5.0, validate: bool = False) -> str:
-    """Delegate code edits via the Claude Agent SDK gateway.
-
-    Uses the claude-agent-sdk Python package with PreToolUse safety hooks
-    that block writes outside cwd and to protected runtime paths.
-    """
+                      budget: float = 5.0, validate: bool = False,
+                      bucket: str = "", skill_name: str = "") -> str:
+    """Delegate SDK edits with cwd and protected-path safety hooks."""
     from ouroboros.tools.git import _acquire_git_lock, _release_git_lock
 
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         return "⚠️ CLAUDE_CODE_UNAVAILABLE: ANTHROPIC_API_KEY not set."
 
-    work_dir = str(ctx.repo_dir)
-    if cwd and cwd.strip() not in ("", ".", "./"):
-        candidate = (ctx.repo_dir / cwd).resolve()
-        if candidate.exists():
-            work_dir = str(candidate)
-    work_dir_path = pathlib.Path(work_dir).resolve()
-    target_repo_root = _resolve_git_root(work_dir_path) or pathlib.Path(ctx.repo_dir)
-    before_changed = _status_snapshot(target_repo_root)
-
-    from ouroboros.gateways.claude_code import resolve_claude_code_model
-    model = resolve_claude_code_model()
-
-    lock = _acquire_git_lock(ctx)
-    try:
+    active_root = active_repo_dir_for(ctx).resolve(strict=False)
+    system_repo_root = pathlib.Path(ctx.repo_dir).resolve(strict=False)
+    existing_tc = normalize_task_constraint(getattr(ctx, "task_constraint", None))
+    workspace_mode = str(getattr(ctx, "workspace_mode", "") or "").strip()
+    workspace_task_mode = bool(workspace_mode and workspace_mode != "self")
+    work_dir = str(active_root)
+    skill_payload_root = None
+    short_form_path_text = cwd if str(cwd or "").strip() else str(active_root)
+    synth = None
+    ignored_reason = ""
+    if workspace_task_mode and not (existing_tc and existing_tc.mode == "skill_repair"):
+        if str(bucket or "").strip() or str(skill_name or "").strip():
+            return (
+                "⚠️ CLAUDE_CODE_ERROR: skill payload short-form is unavailable in workspace mode. "
+                "Use a workspace-relative cwd, or run a skill_repair task for data skill payload edits."
+            )
+    else:
+        short_form = decide_payload_short_form(
+            bucket=bucket,
+            skill_name=skill_name,
+            path_text=short_form_path_text,
+            repo_dir=active_root,
+            drive_root=pathlib.Path(ctx.drive_root),
+        )
+        if short_form.error:
+            return f"⚠️ CLAUDE_CODE_ERROR: {short_form.error}"
+        synth = short_form.constraint
+        ignored_reason = short_form.ignored_reason
+    redirect_err = cross_skill_redirect_error(existing_tc, synth)
+    if redirect_err:
+        return f"⚠️ SKILL_REDIRECT_BLOCKED: {redirect_err}"
+    # Real skill_repair constraint wins; repair confinement is sticky.
+    if existing_tc and existing_tc.mode == "skill_repair":
+        task_constraint = existing_tc
+    else:
+        task_constraint = synth or existing_tc
+    if task_constraint and task_constraint.mode == "skill_repair" and task_constraint.payload_root:
         try:
-            run_cmd(["git", "checkout", ctx.branch_dev], cwd=ctx.repo_dir)
-        except Exception as e:
-            return f"⚠️ GIT_ERROR (checkout): {e}"
+            resolved_skill_target = resolve_skill_payload_target(
+                pathlib.Path(ctx.drive_root),
+                cwd or ".",
+                constraint=task_constraint,
+                allow_short_relative=True,
+            )
+            work_dir = str(resolved_skill_target.target_path)
+            skill_payload_root = resolved_skill_target.payload_root
+        except (SkillPayloadPathError, ValueError) as e:
+            return f"⚠️ CLAUDE_CODE_ERROR: {e}"
+    elif cwd and cwd.strip() not in ("", ".", "./"):
+        raw_cwd = cwd.strip()
+        if workspace_task_mode:
+            raw_path = pathlib.Path(raw_cwd)
+            candidate = (
+                raw_path.resolve(strict=False)
+                if raw_path.is_absolute()
+                else (active_root / raw_cwd).resolve(strict=False)
+            )
+            try:
+                candidate.relative_to(active_root)
+            except ValueError:
+                return "⚠️ CLAUDE_CODE_ERROR: cwd escapes active workspace."
+        else:
+            try:
+                resolved_skill_target = resolve_skill_payload_target(pathlib.Path(ctx.drive_root), raw_cwd)
+                candidate = resolved_skill_target.target_path
+                skill_payload_root = resolved_skill_target.payload_root
+            except SkillPayloadPathError as exc:
+                normalized_cwd = raw_cwd.replace("\\", "/").strip().lstrip("/")
+                if normalized_cwd.startswith("data/skills/") or normalized_cwd.startswith("skills/"):
+                    return f"⚠️ CLAUDE_CODE_ERROR: skill cwd is invalid: {exc}"
+                raw_path = pathlib.Path(raw_cwd)
+                candidate_for_data_check = (
+                    raw_path.resolve(strict=False)
+                    if raw_path.is_absolute()
+                    else (active_root / raw_cwd).resolve(strict=False)
+                )
+                try:
+                    candidate_for_data_check.relative_to(active_root)
+                    candidate_is_repo = True
+                except ValueError:
+                    candidate_is_repo = False
+                try:
+                    candidate_for_data_check.relative_to(pathlib.Path(ctx.drive_root).resolve(strict=False))
+                except ValueError:
+                    pass
+                else:
+                    if not candidate_is_repo:
+                        return (
+                            "⚠️ CLAUDE_CODE_ERROR: non-skill data cwd is not allowed. "
+                            "Use explicit data/skills/<bucket>/<skill>/... for skill payload edits, "
+                            "or omit cwd/use a repo cwd for repo edits."
+                        )
+                candidate = candidate_for_data_check
+                try:
+                    candidate.relative_to(active_root)
+                except ValueError:
+                    return "⚠️ CLAUDE_CODE_ERROR: cwd escapes active workspace."
+        if not candidate.exists() or not candidate.is_dir():
+            return f"⚠️ CLAUDE_CODE_ERROR: cwd not found or not a directory: {cwd}"
+        work_dir = str(candidate)
+    work_dir_path = pathlib.Path(work_dir).resolve()
+    skill_control_snapshots = {}
+    sidecar_root = pathlib.Path(skill_payload_root).resolve() if skill_payload_root is not None else None
+    if sidecar_root is not None:
+        skill_control_snapshots = _snapshot_skill_control_paths(sidecar_root)
+
+    def _restore_skill_control_snapshots() -> list[str]:
+        nonlocal skill_control_snapshots
+        if not skill_control_snapshots:
+            return []
+        restored = _restore_skill_control_changes(skill_control_snapshots)
+        skill_control_snapshots = {}
+        return restored
+
+    def _control_restore_note(restored: list[str]) -> str:
+        if not restored:
+            return ""
+        return (
+            "\n\n⚠️ SKILL_PAYLOAD_CONTROL_RESTORED: restored skill provenance/control-plane "
+            "paths after claude_code_edit: "
+            + ", ".join(sorted(set(restored)))
+            + "."
+        )
+
+    def _control_block_message(restored: list[str]) -> str:
+        return (
+            "⚠️ SKILL_PAYLOAD_CONTROL_BLOCKED: claude_code_edit attempted to modify "
+            "skill provenance/control-plane paths: "
+            + ", ".join(sorted(set(restored)))
+            + ". Created control paths and sidecar changes were reverted where possible; edit payload code files instead."
+        )
+
+    target_repo_root = _resolve_git_root(work_dir_path)
+    repo_mode = target_repo_root is not None
+    if target_repo_root is None:
+        target_repo_root = work_dir_path
+    system_repo_mode = repo_mode and pathlib.Path(target_repo_root).resolve(strict=False) == system_repo_root
+    runtime_mode = get_runtime_mode()
+    if system_repo_mode and not mode_allows_protected_write(runtime_mode):
+        protected_dirty_before = _protected_runtime_dirty_paths(target_repo_root)
+        if protected_dirty_before:
+            restored_sidecars = _restore_skill_control_snapshots()
+            return (
+                "⚠️ CORE_PROTECTION_BLOCKED: protected runtime files are already dirty; "
+                "refusing claude_code_edit so existing human/operator changes are not overwritten. "
+                "Resolve or commit them before delegating edits. Files: "
+                + ", ".join(protected_dirty_before)
+                + _control_restore_note(restored_sidecars)
+            )
+    before_changed = _status_snapshot(target_repo_root)
+    invalidate_if_changed = lambda: (
+        _invalidate_advisory(
+            ctx,
+            changed_paths=_status_snapshot(target_repo_root) or before_changed,
+            mutation_root=target_repo_root,
+            source_tool="claude_code_edit",
+        )
+        if repo_mode and _status_snapshot(target_repo_root) != before_changed
+        else None
+    )
+
+    lock = _acquire_git_lock(ctx) if system_repo_mode else None
+    try:
+        if system_repo_mode:
+            try:
+                run_cmd(["git", "checkout", ctx.branch_dev], cwd=ctx.repo_dir)
+            except Exception as e:
+                restored_sidecars = _restore_skill_control_snapshots()
+                return f"⚠️ GIT_ERROR (checkout): {e}" + _control_restore_note(restored_sidecars)
 
         ctx.emit_progress_fn("Delegating to Claude Agent SDK...")
 
         try:
             from ouroboros.gateways.claude_code import (
                 DEFAULT_CLAUDE_CODE_MAX_TURNS,
+                resolve_claude_code_model,
                 run_edit,
             )
+            model = resolve_claude_code_model()
 
             system_prompt = (
                 f"STRICT: Only modify files inside {work_dir}. "
                 f"Git branch: {ctx.branch_dev}. Do NOT commit or push.\n\n"
-                + _load_project_context(pathlib.Path(ctx.repo_dir))
+                + _load_project_context(system_repo_root)
             )
 
             result = run_edit(
@@ -553,6 +843,8 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
                 max_turns=DEFAULT_CLAUDE_CODE_MAX_TURNS,
                 budget=budget,
                 system_prompt=system_prompt,
+                repo_root=str(target_repo_root if repo_mode else work_dir_path),
+                protect_runtime_paths=system_repo_mode,
             )
 
             result.changed_files = _get_changed_files(target_repo_root)
@@ -576,10 +868,32 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
                 })
 
             if not result.success:
-                return f"⚠️ CLAUDE_CODE_ERROR: {result.error}\n\n{result.result_text}"
+                restored_sidecars = _restore_skill_control_snapshots()
+                invalidate_if_changed()
+                return (
+                    f"⚠️ CLAUDE_CODE_ERROR: {result.error}\n\n{result.result_text}"
+                    + _control_restore_note(restored_sidecars)
+                )
+
+            restored_sidecars = _restore_skill_control_snapshots()
+            if restored_sidecars:
+                invalidate_if_changed()
+                return _control_block_message(restored_sidecars)
+
+            if system_repo_mode and not mode_allows_protected_write(runtime_mode):
+                protected_dirty_after = _protected_runtime_dirty_paths(target_repo_root)
+                if protected_dirty_after:
+                    restored = _restore_protected_runtime_paths(target_repo_root, protected_dirty_after)
+                    invalidate_if_changed()
+                    return (
+                        "⚠️ CORE_PROTECTION_BLOCKED: claude_code_edit attempted to modify "
+                        "protected Ouroboros runtime files in non-pro mode. Reverted: "
+                        + ", ".join(restored or protected_dirty_after)
+                        + ". Switch to pro mode only after an explicit reviewed plan."
+                    )
 
             after_changed = _status_snapshot(target_repo_root)
-            if after_changed != before_changed:
+            if repo_mode and after_changed != before_changed:
                 _invalidate_advisory(
                     ctx,
                     changed_paths=result.changed_files or after_changed or before_changed,
@@ -587,14 +901,25 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
                     source_tool="claude_code_edit",
                 )
 
-            return result.to_tool_output()
+            output = result.to_tool_output()
+            if system_repo_mode and mode_allows_protected_write(runtime_mode):
+                protected_written = protected_paths_in(result.changed_files or after_changed)
+                if protected_written:
+                    output += "\n\n" + core_patch_notice(protected_written)
+            if ignored_reason:
+                output += f"\n\n⚠️ SKILL_SHORT_FORM_IGNORED: {ignored_reason}."
+            return output
 
         except ImportError:
+            restored_sidecars = _restore_skill_control_snapshots()
             return (
                 "⚠️ CLAUDE_CODE_UNAVAILABLE: claude-agent-sdk not installed. "
                 "Install: pip install 'ouroboros[claude-sdk]'"
+                + _control_restore_note(restored_sidecars)
             )
         except Exception as e:
+            restored_sidecars = _restore_skill_control_snapshots()
+            invalidate_if_changed()
             import sys
             sdk_version = "(unknown)"
             try:
@@ -605,26 +930,55 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
             return (
                 f"⚠️ CLAUDE_CODE_FAILED: {type(e).__name__}: {e}\n"
                 f"Diagnostic: sdk_version={sdk_version}, python={sys.executable}"
+                + _control_restore_note(restored_sidecars)
             )
 
     finally:
-        _release_git_lock(lock)
+        if lock is not None:
+            _release_git_lock(lock)
+
+
+def _run_script(
+    ctx: ToolContext,
+    script: str,
+    interpreter: str = "python3",
+    args: List[str] | None = None,
+    cwd: str = "",
+) -> str:
+    """Write a task-scoped temporary script and run it as a foreground command."""
+    interp = str(interpreter or "python3").strip()
+    allowed = {"python", "python3", "bash", "sh", "node", "ruby"}
+    if pathlib.PurePath(interp).name not in allowed:
+        return f"⚠️ RUN_SCRIPT_BLOCKED: interpreter must be one of {sorted(allowed)}."
+    body = str(script or "")
+    if not body.strip():
+        return "⚠️ TOOL_ARG_ERROR (run_script): script is required."
+    try:
+        root = pathlib.Path(ctx.task_drive_root()) / "tmp_scripts"
+    except Exception:
+        root = pathlib.Path(ctx.drive_root) / "tmp_scripts"
+    root.mkdir(parents=True, exist_ok=True)
+    suffix = ".py" if "python" in pathlib.PurePath(interp).name else ".sh"
+    script_path = root / f"script_{uuid.uuid4().hex}{suffix}"
+    script_path.write_text(body, encoding="utf-8")
+    try:
+        os.chmod(script_path, 0o600)
+    except OSError:
+        pass
+    argv = [interp, str(script_path), *[str(item) for item in (args or [])]]
+    result = _run_shell(ctx, argv, cwd=cwd)
+    return f"# script_path={script_path}\n{result}"
 
 
 def get_tools() -> List[ToolEntry]:
     return [
-        ToolEntry("run_shell", {
-            "name": "run_shell",
+        ToolEntry("run_command", {
+            "name": "run_command",
             "description": (
-                "Run a command inside the repo. Returns stdout+stderr. "
+                "Run a foreground bounded command inside the active workspace/repo. Returns stdout+stderr. "
                 "cmd MUST be an array of strings, never a single shell-style "
                 "string. Use cwd= for working directory; cd is rejected. "
-                "For pipes/chaining use [\"sh\", \"-c\", \"cmd1 && cmd2\"]. "
-                "Default cwd is the repo root and is echoed in every result "
-                "header as (cwd=<abs path>). Files written via data_write "
-                "live under a separate data_root and are NOT visible to "
-                "relative run_shell lookups; use the absolute data_root "
-                "path inside the command itself when you need to reach them."
+                "For pipes/chaining use [\"sh\", \"-c\", \"cmd1 && cmd2\"]."
             ),
             "parameters": {"type": "object", "properties": {
                 "cmd": {
@@ -640,10 +994,11 @@ def get_tools() -> List[ToolEntry]:
                 "cwd": {
                     "type": "string", "default": "",
                     "description": (
-                        "Working directory RELATIVE to the repo root. "
-                        "Absolute paths and nonexistent directories are "
-                        "rejected with SHELL_CWD_ERROR. Use this instead "
-                        "of `cd` (which is a shell builtin and is rejected)."
+                        "Working directory relative to the active repo/workspace root. "
+                        "External workspace tasks may also use an absolute cwd under "
+                        "the workspace or task drive. Use "
+                        "this instead of `cd` (which is a shell builtin "
+                        "and is rejected)."
                     ),
                 },
             }, "required": ["cmd"]},
@@ -651,19 +1006,38 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("claude_code_edit", {
             "name": "claude_code_edit",
             "description": (
-                "Delegate code edits to Claude Code (via Agent SDK with safety guards). "
-                "Prefer this for anything beyond one exact replacement: large single-file "
-                "edits, repeated coordinated edits, multi-hunk work, multi-file changes, "
-                "renames/signature changes, or uncertain scope. Prefer it over chaining "
-                "many str_replace_editor calls. Follow with repo_commit."
+                "Delegate a bounded code-editing task to the Claude Agent SDK. "
+                "Use this as the strongest coding helper for substantial edits. "
+                "It may edit files under cwd, never commits or pushes, and still "
+                "runs through Ouroboros runtime-mode and review protections."
             ),
             "parameters": {"type": "object", "properties": {
-                "prompt": {"type": "string"},
-                "cwd": {"type": "string", "default": ""},
-                "budget": {"type": "number",
-                           "description": "Max USD for this Claude Code call. Default: 5.0"},
-                "validate": {"type": "boolean", "default": False,
-                             "description": "Run post-edit validation (tests). Returns summary in result."},
+                "prompt": {"type": "string", "description": "Precise coding task and constraints."},
+                "cwd": {
+                    "type": "string",
+                    "default": "",
+                    "description": (
+                        "Working directory under the active repo/workspace or an explicit "
+                        "data/skills/<bucket>/<skill> payload path for skill repair."
+                    ),
+                },
+                "budget": {"type": "number", "default": 5.0},
+                "validate": {"type": "boolean", "default": False},
+                "bucket": {"type": "string", "default": ""},
+                "skill_name": {"type": "string", "default": ""},
             }, "required": ["prompt"]},
         }, _claude_code_edit, is_code_tool=True, timeout_sec=1200),
+        ToolEntry("run_script", {
+            "name": "run_script",
+            "description": (
+                "Run a short task-scoped temporary script with a declared interpreter. "
+                "Use for multi-line diagnostics or harness helpers; generated script files live under the task drive."
+            ),
+            "parameters": {"type": "object", "properties": {
+                "script": {"type": "string"},
+                "interpreter": {"type": "string", "enum": ["python", "python3", "bash", "sh", "node", "ruby"], "default": "python3"},
+                "args": {"type": "array", "items": {"type": "string"}, "default": []},
+                "cwd": {"type": "string", "default": ""},
+            }, "required": ["script"]},
+        }, _run_script, is_code_tool=True, timeout_sec=_RUN_SHELL_DEFAULT_TIMEOUT_SEC),
     ]

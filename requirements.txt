@@ -10,8 +10,10 @@ huggingface_hub
 PyYAML>=6.0
 pytest>=7.0
 claude-agent-sdk>=0.1.60
-# A2A (Agent-to-Agent) protocol is part of the packaged/base runtime.
-a2a-sdk[http-server]>=0.3.20,<1.0.0
+# MCP (Model Context Protocol) client. The runtime guards imports so a
+# broken/minimal source checkout reports sdk_available=false instead of
+# crashing, but packaged/source installs include the SDK by default.
+mcp>=1.6,<2.0
 # optional: browser automation tools (for browse_page/browser_action)
 playwright
 playwright-stealth

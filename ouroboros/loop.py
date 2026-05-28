@@ -1,9 +1,4 @@
-"""
-Ouroboros — LLM tool loop.
-
-Core loop: send messages to LLM, execute tool calls, repeat until final response.
-Extracted from agent.py to keep the agent thin.
-"""
+"""LLM tool loop: call model, execute tools, repeat until final response."""
 
 from __future__ import annotations
 
@@ -16,6 +11,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import logging
 
 from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage
+from ouroboros.config import get_light_model, get_task_review_mode, resolve_effort
+from ouroboros.observability import new_call_id, persist_call
 from ouroboros.tool_policy import initial_tool_schemas, list_non_core_tools
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.context import build_user_content
@@ -31,24 +28,14 @@ from ouroboros.loop_tool_execution import (
 )
 from ouroboros.loop_llm_call import call_llm_with_retry, emit_llm_usage_event, estimate_cost
 
-# Backward-compat alias for source-inspecting and monkeypatched tests
+# Backward-compat alias for source-inspecting/monkeypatched tests.
 _call_llm_with_retry = call_llm_with_retry
 
 log = logging.getLogger(__name__)
 
 
 def _estimate_messages_chars(messages: List[Dict[str, Any]]) -> int:
-    """Estimate the serialised size of a message list in characters.
-
-    Counts all serialised fields that actually reach the provider:
-    - message `content` (string or multipart list)
-    - `tool_calls` (serialised to JSON)
-    - `tool_call_id`
-    This deliberately excludes the static system-prompt block (built once in
-    context.py and amortised across rounds by prompt caching), focusing on
-    the mutable per-round portion of the transcript which is what grows
-    unboundedly during long tasks.
-    """
+    """Estimate mutable transcript size; excludes the static cached system block."""
     total = 0
     for msg in messages:
         content = msg.get("content")
@@ -57,8 +44,7 @@ def _estimate_messages_chars(messages: List[Dict[str, Any]]) -> int:
         elif isinstance(content, list):
             for block in content:
                 if isinstance(block, dict):
-                    # Serialise the whole block so non-text types (image_url, etc.)
-                    # are counted — not just the "text" field.
+                    # Count whole multipart blocks, including images/cache markers.
                     try:
                         import json as _json2
                         total += len(_json2.dumps(block, ensure_ascii=False))
@@ -84,6 +70,22 @@ def _provider_failure_hint(accumulated_usage: Dict[str, Any]) -> str:
     return f" Last provider error: {detail}"
 
 
+def _provider_recovery_hint(accumulated_usage: Dict[str, Any]) -> str:
+    """Explain whether retrying later is likely to help."""
+    detail = str(accumulated_usage.get("_last_llm_error") or "").lower()
+    if "prefill" in detail or "conversation must end with a user message" in detail:
+        return (
+            " This looks like a client-side transcript-shape error, not a "
+            "provider outage; retrying the same input will not help."
+        )
+    if "provider returned incomplete response" in detail or "finish_reason=null" in detail:
+        return (
+            " The provider returned incomplete responses repeatedly; this may "
+            "be transient, but it can also indicate malformed client input."
+        )
+    return " If background consciousness is running, it will retry when the provider recovers."
+
+
 def _handle_text_response(
     content: Optional[str],
     llm_trace: Dict[str, Any],
@@ -93,6 +95,84 @@ def _handle_text_response(
     if content and content.strip():
         llm_trace["reasoning_notes"].append(content.strip())
     return (content or ""), accumulated_usage, llm_trace
+
+
+def _final_text_acknowledges_incomplete_children(content: Any, children: List[Dict[str, Any]]) -> bool:
+    text = str(content or "").lower()
+    if not text.strip():
+        return False
+    incomplete_words = ("incomplete", "pending", "running", "scheduled", "not complete", "still")
+    if not any(word in text for word in incomplete_words):
+        return False
+    for child in children:
+        task_id = str(child.get("task_id") or child.get("id") or "").strip().lower()
+        status = str(child.get("status") or "").strip().lower()
+        if task_id and task_id not in text:
+            return False
+        if status and status not in text:
+            return False
+    return True
+
+
+def _skill_names_touched_by_trace(llm_trace: Dict[str, Any]) -> List[str]:
+    names: List[str] = []
+    for call in llm_trace.get("tool_calls") or []:
+        if not isinstance(call, dict):
+            continue
+        tool = str(call.get("tool") or "")
+        if tool not in {"write_file", "edit_text", "claude_code_edit"}:
+            continue
+        args = call.get("args") if isinstance(call.get("args"), dict) else {}
+        bucket = str(args.get("bucket") or "").strip().lower()
+        skill_name = str(args.get("skill_name") or "").strip()
+        if bucket in {"external", "clawhub", "ouroboroshub"} and skill_name:
+            if skill_name not in names:
+                names.append(skill_name)
+            continue
+        candidates = [str(args.get("cwd") or "")] if tool == "claude_code_edit" else [str(args.get("path") or "")]
+        for raw in candidates:
+            norm = raw.replace("\\", "/").strip().lstrip("/")
+            if norm.startswith("data/"):
+                norm = norm[len("data/"):]
+            parts = pathlib.PurePosixPath(norm).parts
+            if len(parts) >= 3 and parts[0] == "skills" and parts[1] in {"external", "clawhub", "ouroboroshub", "native"}:
+                name = parts[2]
+                if name and name not in names:
+                    names.append(name)
+    return names
+
+
+def _skill_finalization_message(drive_root: pathlib.Path, llm_trace: Dict[str, Any]) -> str:
+    names = _skill_names_touched_by_trace(llm_trace)
+    if not names:
+        return ""
+    try:
+        from ouroboros.skill_loader import find_skill
+        from ouroboros.skill_readiness import skill_readiness_for_execution
+    except Exception:
+        return ""
+    blockers: List[str] = []
+    for name in names:
+        try:
+            skill = find_skill(pathlib.Path(drive_root), name)
+            if skill is None or not getattr(skill, "is_self_authored", False):
+                continue
+            readiness = skill_readiness_for_execution(pathlib.Path(drive_root), skill)
+            ready = readiness.ready
+        except Exception:
+            continue
+        if not ready:
+            blockers.append(
+                f"{skill.name}: status={skill.review.status!r}, "
+                f"blockers={readiness.blockers}"
+            )
+    if not blockers:
+        return ""
+    return (
+        "⚠️ SKILL_NOT_FINALIZED: You edited self-authored skill payloads but "
+        "they are not ready yet. Call skill_review for each skill before "
+        "declaring the task done. Current blockers: " + "; ".join(blockers)
+    )
 
 
 def _check_budget_limits(
@@ -111,13 +191,7 @@ def _check_budget_limits(
     task_type: str = "task",
     use_local: bool = False,
 ) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
-    """
-    Check budget limits and handle budget overrun.
-
-    Returns:
-        None if budget is OK (continue loop)
-        (final_text, accumulated_usage, llm_trace) if budget exceeded (stop loop)
-    """
+    """Return a final-response tuple when budget limits require stopping."""
     if budget_remaining_usd is None:
         return None
 
@@ -125,45 +199,46 @@ def _check_budget_limits(
 
     if budget_remaining_usd <= 0:
         finish_reason = f"🚫 Task rejected. Total budget exhausted. Please increase TOTAL_BUDGET in settings."
+        accumulated_usage["result_status"] = "failed"
+        accumulated_usage["reason_code"] = "budget_exhausted"
         return finish_reason, accumulated_usage, llm_trace
 
     budget_pct = task_cost / budget_remaining_usd if budget_remaining_usd > 0 else 1.0
 
     per_task_limit = float(os.environ.get("OUROBOROS_PER_TASK_COST_USD", "20.0") or 20.0)
     if task_cost >= per_task_limit and round_idx % 10 == 0:
-        messages.append({
-            "role": "user",
-            "content": f"[COST NOTE] Task spent ${task_cost:.3f}, which is at or above the per-task soft threshold of ${per_task_limit:.2f}. Continue only if the expected value still justifies the cost.",
-        })
+        _append_or_merge_user_message(
+            messages,
+            f"[COST NOTE] Task spent ${task_cost:.3f}, which is at or above the per-task soft threshold of ${per_task_limit:.2f}. Continue only if the expected value still justifies the cost.",
+        )
 
     if budget_pct > 0.5:
         finish_reason = f"Task spent ${task_cost:.3f} (>50% of remaining ${budget_remaining_usd:.2f}). Budget exhausted."
-        messages.append({"role": "user", "content": f"[BUDGET LIMIT] {finish_reason} Give your final response now."})
+        _append_or_merge_user_message(messages, f"[BUDGET LIMIT] {finish_reason} Give your final response now.")
         try:
             final_msg, final_cost = _call_llm_with_retry(
                 llm, messages, active_model, None, active_effort,
                 max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type,
                 use_local=use_local,
             )
+            accumulated_usage["result_status"] = "failed"
+            accumulated_usage["reason_code"] = "budget_exhausted"
             if final_msg:
                 return (final_msg.get("content") or finish_reason), accumulated_usage, llm_trace
             return finish_reason, accumulated_usage, llm_trace
         except Exception:
             log.warning("Failed to get final response after budget limit", exc_info=True)
+            accumulated_usage["result_status"] = "failed"
+            accumulated_usage["reason_code"] = "budget_exhausted"
             return finish_reason, accumulated_usage, llm_trace
     elif budget_pct > 0.3 and round_idx % 10 == 0:
-        messages.append({"role": "user", "content": f"[INFO] Task spent ${task_cost:.3f} of ${budget_remaining_usd:.2f}. Wrap up if possible."})
+        _append_or_merge_user_message(messages, f"[INFO] Task spent ${task_cost:.3f} of ${budget_remaining_usd:.2f}. Wrap up if possible.")
 
     return None
 
 
 def _build_recent_tool_trace(messages: List[Dict[str, Any]], window: int = 15) -> str:
-    """Build a factual trace of recent tool calls for the LLM to evaluate.
-
-    Returns a compact trace string showing the last N tool calls with their
-    names and argument summaries. The LLM uses this to assess whether
-    it is making progress or repeating the same actions (P5 LLM-First).
-    """
+    """Build a compact recent-tool trace for the self-check prompt."""
     all_calls: List[str] = []
     for msg in messages:
         if msg.get("role") == "assistant" and msg.get("tool_calls"):
@@ -187,12 +262,8 @@ def _emit_checkpoint_event(
     task_id: str,
     drive_logs: Optional[pathlib.Path],
     data: Dict[str, Any],
-) -> None:
-    """Emit a task_checkpoint event for observability.
-
-    Routes via the supervisor event queue when available (which persists to
-    events.jsonl). Falls back to direct append when queue is absent.
-    """
+) -> bool:
+    """Emit a task_checkpoint via event queue or direct events.jsonl append."""
     from ouroboros.loop_llm_call import _emit_live_log
     payload = {"type": "task_checkpoint", "task_id": task_id, **data}
     if event_queue is not None:
@@ -205,12 +276,60 @@ def _emit_checkpoint_event(
             pass
 
 
-def _extract_plain_text_from_content(content: Any) -> str:
-    """Extract plain text from either a string or a multipart content list.
+def _persist_compaction_checkpoint(
+    messages: List[Dict[str, Any]],
+    *,
+    drive_root: Optional[pathlib.Path],
+    drive_logs: pathlib.Path,
+    task_id: str,
+    reason: str,
+    keep_recent: int,
+    round_idx: int,
+    event_queue: Optional[queue.Queue],
+) -> None:
+    """Persist the pre-compaction transcript so compaction is only a view."""
+    root = pathlib.Path(drive_root) if drive_root is not None else pathlib.Path(drive_logs).parent
+    call_id = new_call_id("compaction_checkpoint")
+    try:
+        ref = persist_call(
+            root,
+            task_id=task_id,
+            call_id=call_id,
+            call_type="compaction_checkpoint",
+            payload={
+                "reason": reason,
+                "keep_recent": keep_recent,
+                "round": round_idx,
+                "messages": messages,
+            },
+            manifest={
+                "round": round_idx,
+                "reason": reason,
+                "keep_recent": keep_recent,
+            },
+        )
+        _emit_checkpoint_event(event_queue, task_id, drive_logs, {
+            "checkpoint_kind": "pre_compaction_transcript",
+            "round": round_idx,
+            "reason": reason,
+            "keep_recent": keep_recent,
+            "checkpoint_ref": ref.get("manifest_ref"),
+        })
+        return True
+    except Exception:
+        log.debug("Failed to persist pre-compaction transcript checkpoint", exc_info=True)
+        _emit_checkpoint_event(event_queue, task_id, drive_logs, {
+            "checkpoint_kind": "pre_compaction_transcript",
+            "round": round_idx,
+            "reason": reason,
+            "keep_recent": keep_recent,
+            "checkpoint_status": "failed",
+        })
+        return False
 
-    Used by seal_task_transcript to compute prefix token estimates and to
-    flatten previously-sealed multipart tool messages back to plain strings.
-    """
+
+def _extract_plain_text_from_content(content: Any) -> str:
+    """Extract text from strings or multipart content for transcript sealing."""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -220,6 +339,160 @@ def _extract_plain_text_from_content(content: Any) -> str:
                 parts.append(block.get("text", ""))
         return "".join(parts)
     return str(content) if content is not None else ""
+
+
+def _append_or_merge_user_message(messages: List[Dict[str, Any]], text: str) -> None:
+    """Append a user message without creating consecutive user turns."""
+    _append_or_merge_user_content(messages, text)
+
+
+def _append_or_merge_user_content(messages: List[Dict[str, Any]], content: Any) -> None:
+    """Append user content without flattening multipart blocks."""
+    if messages and messages[-1].get("role") == "user":
+        prior = messages[-1].get("content")
+        if isinstance(content, list):
+            new_blocks = list(content)
+            if isinstance(prior, list):
+                messages[-1] = {"role": "user", "content": list(prior) + new_blocks}
+                return
+            prior_text = prior if isinstance(prior, str) else str(prior or "")
+            prefix_block = [{"type": "text", "text": prior_text.rstrip() + "\n\n---\n\n"}] if prior_text else []
+            messages[-1] = {"role": "user", "content": prefix_block + new_blocks}
+            return
+        text = str(content or "")
+        if isinstance(prior, list):
+            messages[-1] = {
+                "role": "user",
+                "content": list(prior) + [{"type": "text", "text": "\n\n---\n\n" + text}],
+            }
+            return
+        prior_text = prior if isinstance(prior, str) else str(prior or "")
+        messages[-1] = {
+            "role": "user",
+            "content": (prior_text.rstrip() + "\n\n---\n\n" + text) if prior_text else text,
+        }
+        return
+    messages.append({"role": "user", "content": content})
+
+
+def _owner_marked_content(content: Any) -> Any:
+    """Mark direct owner injections with the same priority tag as mailbox messages."""
+    prefix = "[Message from my human]: "
+    if isinstance(content, list):
+        blocks = [dict(block) if isinstance(block, dict) else block for block in content]
+        for block in blocks:
+            if isinstance(block, dict) and str(block.get("type") or "") in {"text", "input_text"}:
+                block["text"] = prefix + str(block.get("text") or "")
+                return blocks
+        return [{"type": "text", "text": prefix.rstrip()}] + blocks
+    return prefix + str(content or "")
+
+
+def _task_acceptance_eligible(mode: str, llm_trace: Dict[str, Any]) -> bool:
+    if mode == "off":
+        return False
+    if mode == "required":
+        return True
+    # Auto is LLM-first: the agent decides whether to call the visible
+    # task_acceptance_review tool. Host-side heuristics would turn Auto into
+    # another deterministic gate and violate the intended review contract.
+    return False
+
+
+def _run_task_acceptance_review_once(
+    *,
+    tools: ToolRegistry,
+    content: str,
+    task_id: str,
+    task_type: str,
+    llm_trace: Dict[str, Any],
+    drive_root: Optional[pathlib.Path],
+    messages: List[Dict[str, Any]],
+    emit_progress: Callable[[str], None],
+) -> bool:
+    mode = get_task_review_mode()
+    if getattr(tools._ctx, "_task_acceptance_reviewed", False):
+        return False
+    if not _task_acceptance_eligible(mode, llm_trace):
+        return False
+    try:
+        from ouroboros.review_substrate import ReviewRequest, reviewer_slots, run_review_request
+
+        tools._ctx._task_acceptance_reviewed = True
+        evidence = {
+            "task_id": task_id,
+            "task_type": task_type,
+            "tool_calls": llm_trace.get("tool_calls") or [],
+            "reasoning_notes": llm_trace.get("reasoning_notes") or [],
+        }
+        slots = reviewer_slots(effort=resolve_effort("review"), role_hint="task acceptance")
+        min_successful = 2 if len(slots) >= 3 else max(1, len(slots))
+        request = ReviewRequest(
+            surface="task_acceptance",
+            goal=_extract_plain_text_from_content(messages[1].get("content")) if len(messages) > 1 else "",
+            subject=str(content or ""),
+            evidence=evidence,
+            checklist=(
+                "Check whether the claimed result follows from the tool trace, "
+                "whether errors/timeouts/artifacts were handled honestly, and "
+                "whether the final response should be changed before release."
+            ),
+            policy={
+                "verdict_is_advisory": True,
+                "full_output_enters_context": True,
+                "min_successful_slots": min_successful,
+                "fail_closed_on_errors": True,
+            },
+            task_id=task_id,
+        )
+        result = run_review_request(
+            request,
+            slots=slots,
+            drive_root=pathlib.Path(drive_root) if drive_root is not None else pathlib.Path(tools._ctx.drive_root),
+            usage_ctx=tools._ctx,
+        )
+        payload = json.dumps(result.__dict__, ensure_ascii=False, indent=2, default=str)
+        messages.append({"role": "assistant", "content": content or ""})
+        _append_or_merge_user_message(
+            messages,
+            "[TASK ACCEPTANCE REVIEW]\n"
+            "The following full reviewer output is advisory but must be considered before finalizing. "
+            "If findings are valid, continue fixing. If not, explicitly reject them with evidence.\n\n"
+            f"{payload}",
+        )
+        llm_trace.setdefault("review_runs", []).append(result.__dict__)
+        emit_progress("Task acceptance review completed; reviewer output injected before final response.")
+        return True
+    except Exception as exc:
+        if mode == "required":
+            tools._ctx._task_acceptance_reviewed = True
+            safe_error = _extract_plain_text_from_content(str(exc))[:2000]
+            degraded_result = {
+                "request": {"surface": "task_acceptance", "task_id": task_id},
+                "actors": [],
+                "parsed_findings": [{
+                    "severity": "critical",
+                    "item": "task_acceptance_infra_failure",
+                    "evidence": f"{type(exc).__name__}: {safe_error}",
+                    "recommendation": "Do not report semantic success unless the failure is explicitly accounted for.",
+                }],
+                "aggregate_signal": "DEGRADED",
+                "degraded": True,
+                "degraded_reasons": [f"{type(exc).__name__}: {safe_error}"],
+            }
+            llm_trace.setdefault("review_runs", []).append(degraded_result)
+            messages.append({"role": "assistant", "content": content or ""})
+            _append_or_merge_user_message(
+                messages,
+                "[TASK ACCEPTANCE REVIEW DEGRADED]\n"
+                "Required task acceptance review failed before reviewers returned. "
+                "This degraded review record is part of the task evidence; do not finalize "
+                "as clean success unless you explicitly account for it.\n\n"
+                f"{json.dumps(degraded_result, ensure_ascii=False, indent=2)}",
+            )
+            return True
+        log.debug("Task acceptance review skipped after failure", exc_info=True)
+        return False
 
 
 def _maybe_inject_self_check(
@@ -233,33 +506,13 @@ def _maybe_inject_self_check(
     task_id: str = "",
     drive_logs: Optional[pathlib.Path] = None,
 ) -> bool:
-    """Inject a periodic self-check user message every REMINDER_INTERVAL rounds.
-
-    Contract: this is a plain `user` message inserted into the transcript carrying
-    round/cost/context summary, the last-N tool-call trace, and a short directed
-    self-check prompt. The next LLM round runs normally — tools remain enabled,
-    reasoning effort is unchanged, and the message flows through normal compaction.
-    There is no structured reflection format, no audit-only mode, and no anomaly
-    classification: the model reads the message like any other user turn and
-    decides whether to continue, narrow scope, or wrap up.
-
-    Rationale for the minimalist design: the previous structured-reflection
-    mechanism (Known/Blocker/Decision/Next four-field contract, tools disabled,
-    effort=xhigh) produced 0 valid reflections and 37 task_checkpoint_anomaly
-    records in production logs before this rewrite — the ceremony competed
-    with the model's actual work without adding usable signal.
-
-    Emits a single task_checkpoint event for observability.
-    Returns True if a checkpoint was injected (caller uses this for logging).
-    """
+    """Inject a normal user-turn self-check and emit one checkpoint event."""
     REMINDER_INTERVAL = 15
     if round_idx <= 1 or round_idx % REMINDER_INTERVAL != 0 or round_idx >= max_rounds:
         return False
 
     ctx_tokens = sum(
-        estimate_tokens(str(m.get("content", "")))
-        if isinstance(m.get("content"), str)
-        else sum(estimate_tokens(str(b.get("text", ""))) for b in m.get("content", []) if isinstance(b, dict))
+        estimate_tokens(_extract_plain_text_from_content(m.get("content")))
         for m in messages
     )
     task_cost = accumulated_usage.get("cost", 0)
@@ -284,36 +537,9 @@ def _maybe_inject_self_check(
         "\nNo special format required — just think, then act."
     )
 
-    # Defense-in-depth against consecutive same-role messages: if the previous
-    # message is already a `user` turn (for example: an owner message drained
-    # by `_drain_incoming_messages` in the same loop iteration), merge the
-    # checkpoint reminder into that turn instead of appending a second user
-    # message. Anthropic's Messages API rejects consecutive user messages
-    # with a 400, and OpenRouter routes Anthropic models through that path —
-    # a bare append could cause a checkpoint round to lose its LLM call.
-    #
-    # When the prior user message carries multipart content (e.g. image_url
-    # blocks from the photo bridge, or cache_control-annotated blocks), we
-    # append a new `{"type": "text", "text": ...}` block to the existing
-    # list instead of flattening to a plain string — flattening would drop
-    # image data and cache markers silently, breaking the implicit message
-    # format contract with `ouroboros/context.py::build_user_content` and
-    # `ouroboros/llm.py::_anthropic_blocks_from_content`.
-    if messages and messages[-1].get("role") == "user":
-        prior = messages[-1].get("content")
-        if isinstance(prior, list):
-            messages[-1] = {
-                "role": "user",
-                "content": list(prior) + [{"type": "text", "text": "\n\n---\n\n" + reminder}],
-            }
-        else:
-            prior_text = prior if isinstance(prior, str) else str(prior or "")
-            messages[-1] = {
-                "role": "user",
-                "content": (prior_text.rstrip() + "\n\n---\n\n" + reminder) if prior_text else reminder,
-            }
-    else:
-        messages.append({"role": "user", "content": reminder})
+    # Merge into a prior user turn to avoid Anthropic consecutive-role 400s,
+    # preserving multipart blocks so images/cache markers survive.
+    _append_or_merge_user_message(messages, reminder)
     emit_progress(
         f"Checkpoint {checkpoint_num} at round {round_idx}: "
         f"~{ctx_tokens} tokens, ${task_cost:.2f} spent"
@@ -335,42 +561,24 @@ def seal_task_transcript(
     keep_active: int = 5,
     min_prefix_tokens: int = 2048,
 ) -> None:
-    """Seal one stable tool-result message with cache_control to improve prompt cache hits.
-
-    Strategy:
-    - First, revert any previously sealed tool message back to a plain string so
-      compaction and later rounds always see normal content (not stale multipart blocks).
-    - Then identify the last tool-result message that falls BEFORE the active recent
-      window (last `keep_active` tool results). That message is the "seal boundary".
-    - If the token estimate for content up to and including that message exceeds
-      `min_prefix_tokens`, mark it with a multipart cache_control block.
-    - Only one sealed boundary exists at a time. Non-Anthropic paths strip
-      cache_control in llm.py before sending, so they are unaffected.
-
-    Mutates `messages` in-place. Returns None.
-    """
-    # Step 1: revert any previously sealed tool messages to plain strings
+    """Mark one stable old tool-result boundary for provider prompt caching."""
     for msg in messages:
         if msg.get("role") != "tool":
             continue
         content = msg.get("content")
         if isinstance(content, list):
-            # Was sealed — flatten back to plain text
+            # Flatten the old sealed boundary before choosing a new one.
             msg["content"] = _extract_plain_text_from_content(content)
 
-    # Step 2: collect indices of all tool-result messages
     tool_indices = [
         i for i, m in enumerate(messages)
         if m.get("role") == "tool"
     ]
     if len(tool_indices) <= keep_active:
-        # Not enough tool rounds for a stable prefix yet
         return
 
-    # The candidate to seal: last tool result before the active window
     seal_candidate_idx = tool_indices[-(keep_active + 1)]
 
-    # Step 3: estimate prefix token count up to and including the candidate
     prefix_text_len = sum(
         len(_extract_plain_text_from_content(m.get("content", "")))
         for m in messages[: seal_candidate_idx + 1]
@@ -380,7 +588,6 @@ def seal_task_transcript(
     if prefix_tokens < min_prefix_tokens:
         return
 
-    # Step 4: seal the candidate message
     candidate = messages[seal_candidate_idx]
     plain_text = str(candidate.get("content", ""))
     candidate["content"] = [
@@ -393,16 +600,7 @@ def seal_task_transcript(
 
 
 def _setup_dynamic_tools(tools_registry, tool_schemas, messages):
-    """
-    Wire tool-discovery handlers onto an existing tool_schemas list.
-
-    Creates closures for list_available_tools / enable_tools, registers them
-    as handler overrides, and injects a system message advertising non-core
-    tools.  Mutates tool_schemas in-place (via list.append) when tools are
-    enabled, so the caller's reference stays live.
-
-    Returns (tool_schemas, enabled_extra_set).
-    """
+    """Attach list/enable tool handlers and mutate the active schema list."""
     enabled_extra: set = set()
     active_tool_names = {
         str(schema.get("function", {}).get("name") or "").strip()
@@ -474,9 +672,9 @@ def _drain_incoming_messages(
         try:
             injected = incoming_messages.get_nowait()
             if isinstance(injected, dict):
-                messages.append({"role": "user", "content": build_user_content(injected)})
+                _append_or_merge_user_content(messages, _owner_marked_content(build_user_content(injected)))
             else:
-                messages.append({"role": "user", "content": injected})
+                _append_or_merge_user_message(messages, _owner_marked_content(injected))
         except queue.Empty:
             break
 
@@ -484,10 +682,7 @@ def _drain_incoming_messages(
         from ouroboros.owner_inject import drain_owner_messages
         drive_msgs = drain_owner_messages(drive_root, task_id=task_id, seen_ids=_owner_msg_seen)
         for dmsg in drive_msgs:
-            messages.append({
-                "role": "user",
-                "content": f"[Owner message during task]: {dmsg}",
-            })
+            _append_or_merge_user_message(messages, _owner_marked_content(dmsg))
             if event_queue is not None:
                 try:
                     event_queue.put_nowait({
@@ -513,14 +708,7 @@ def run_llm_loop(
     initial_effort: str = "medium",
     drive_root: Optional[pathlib.Path] = None,
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
-    """
-    Core LLM-with-tools loop.
-
-    Sends messages to LLM, executes tool calls, retries on errors.
-    LLM controls model/effort via switch_model tool (LLM-first, Bible P5).
-
-    Returns: (final_text, accumulated_usage, llm_trace)
-    """
+    """Run the LLM-with-tools loop and return final text, usage, and trace."""
     active_model = llm.default_model()
     active_effort = initial_effort
     active_use_local = os.environ.get("USE_LOCAL_MAIN", "").lower() in ("true", "1")
@@ -550,19 +738,23 @@ def run_llm_loop(
             round_idx += 1
 
             if round_idx > MAX_ROUNDS:
-                finish_reason = f"⚠️ Task exceeded MAX_ROUNDS ({MAX_ROUNDS}). Consider decomposing into subtasks via schedule_task."
-                messages.append({"role": "system", "content": f"[ROUND_LIMIT] {finish_reason}"})
+                finish_reason = f"⚠️ Task exceeded MAX_ROUNDS ({MAX_ROUNDS}). Consider decomposing into subtasks via schedule_subagent."
+                _append_or_merge_user_message(messages, f"[ROUND_LIMIT] {finish_reason}")
                 try:
                     final_msg, final_cost = call_llm_with_retry(
                         llm, messages, active_model, None, active_effort,
                         max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type,
                         use_local=active_use_local,
                     )
+                    accumulated_usage["result_status"] = "failed"
+                    accumulated_usage["reason_code"] = "round_limit"
                     if final_msg:
                         return (final_msg.get("content") or finish_reason), accumulated_usage, llm_trace
                     return finish_reason, accumulated_usage, llm_trace
                 except Exception:
                     log.warning("Failed to get final response after round limit", exc_info=True)
+                    accumulated_usage["result_status"] = "failed"
+                    accumulated_usage["reason_code"] = "round_limit"
                     return finish_reason, accumulated_usage, llm_trace
 
             ctx = tools._ctx
@@ -578,22 +770,8 @@ def run_llm_loop(
 
             _drain_incoming_messages(messages, incoming_messages, drive_root, task_id, event_queue, _owner_msg_seen)
 
-            # Periodic self-check: inject a user message with round/cost/context
-            # summary + recent tool-call trace + a short directed self-check prompt.
-            # Ordering note: injection runs AFTER `_drain_incoming_messages` so
-            # the checkpoint is always the LAST message before the LLM call.
-            # If drain appended a user turn, the merge branch inside
-            # `_maybe_inject_self_check` folds the checkpoint reminder into
-            # that turn with a `\n\n---\n\n` separator — which both avoids
-            # consecutive same-role messages (Anthropic rejects those with 400)
-            # and keeps the self-check visible at the tail of the transcript.
-            # Not a special round — tools and effort are unchanged, the message
-            # flows through the next normal LLM turn. The only coupling with
-            # the rest of the loop is a small compaction skip below: running
-            # the light-model compactor on the same round we just appended a
-            # fresh user message doubles LLM cost for a marginal benefit (the
-            # checkpoint message is already inside `keep_recent=50` so
-            # compaction would not summarize it anyway).
+            # Inject after owner messages so the checkpoint is the LLM-call tail.
+            # It is a normal user turn; only routine compaction is skipped below.
             _checkpoint_injected = _maybe_inject_self_check(
                 round_idx, MAX_ROUNDS, messages, accumulated_usage, emit_progress,
                 event_queue=event_queue, task_id=task_id, drive_logs=drive_logs,
@@ -601,58 +779,68 @@ def run_llm_loop(
 
             _compaction_usage = None
             pending_compaction = getattr(tools._ctx, '_pending_compaction', None)
-            # Compaction policy:
-            #
-            # Manual compaction (_pending_compaction) and the remote emergency path
-            # run UNCONDITIONALLY — even on checkpoint rounds.  Only the routine
-            # per-round compaction (local threshold / old "every round > 12" remote
-            # path) is suppressed on checkpoint rounds to avoid paying twice for the
-            # compaction LLM call on the same turn the self-check was injected.
-            #
-            # Remote mode (default): automatic semantic compaction is DISABLED for
-            # routine rounds.  The previous policy called compact_tool_history_llm
-            # every round after round_idx > 12, which meant that once tool-rounds
-            # exceeded keep_recent=50 the compactor ran on EVERY round — destroying
-            # raw tool outputs, breaking cache continuity, and hurting cache hit rate.
-            # Remote models handle large contexts (~400k tokens); preserving exact
-            # history is more valuable than saving tokens.
-            #
-            # Emergency threshold: if the total context grows beyond ~1.2M chars
-            # (~300k tokens) we must compact regardless of mode to stay within
-            # provider context limits.
-            #
-            # Local mode: compact at a lower threshold because local models typically
-            # have small context windows (8k–32k tokens).
-
-            # --- Manual compaction (always runs) ---
+            # Compaction: manual and emergency always run; routine is local-only
+            # and suppressed on checkpoint rounds to avoid a duplicate LLM call.
             if pending_compaction is not None:
-                messages, _compaction_usage = compact_tool_history_llm(messages, keep_recent=pending_compaction)
-                tools._ctx._pending_compaction = None
+                if _persist_compaction_checkpoint(
+                    messages,
+                    drive_root=drive_root,
+                    drive_logs=drive_logs,
+                    task_id=task_id,
+                    reason="manual",
+                    keep_recent=int(pending_compaction),
+                    round_idx=round_idx,
+                    event_queue=event_queue,
+                ):
+                    messages, _compaction_usage = compact_tool_history_llm(messages, keep_recent=pending_compaction)
+                    tools._ctx._pending_compaction = None
+                else:
+                    emit_progress("⚠️ Context compaction skipped: forensic checkpoint could not be persisted.")
 
-            # --- Emergency compaction (always runs, catches both remote and local) ---
             elif _estimate_messages_chars(messages) > 1_200_000:
-                messages, _compaction_usage = compact_tool_history_llm(messages, keep_recent=50)
+                if _persist_compaction_checkpoint(
+                    messages,
+                    drive_root=drive_root,
+                    drive_logs=drive_logs,
+                    task_id=task_id,
+                    reason="emergency_context_size",
+                    keep_recent=50,
+                    round_idx=round_idx,
+                    event_queue=event_queue,
+                ):
+                    messages, _compaction_usage = compact_tool_history_llm(messages, keep_recent=50)
+                else:
+                    emit_progress("⚠️ Emergency compaction skipped: forensic checkpoint could not be persisted.")
 
-            # --- Routine compaction (suppressed on checkpoint rounds) ---
             elif not _checkpoint_injected:
                 if active_use_local:
-                    # Local models: compact aggressively to fit small context windows.
                     if round_idx > 6 and len(messages) > 40:
-                        messages, _compaction_usage = compact_tool_history_llm(messages, keep_recent=20)
-                # Remote: no routine compaction — emergency path above handles overflow.
+                        if _persist_compaction_checkpoint(
+                            messages,
+                            drive_root=drive_root,
+                            drive_logs=drive_logs,
+                            task_id=task_id,
+                            reason="local_routine",
+                            keep_recent=20,
+                            round_idx=round_idx,
+                            event_queue=event_queue,
+                        ):
+                            messages, _compaction_usage = compact_tool_history_llm(messages, keep_recent=20)
+                # Remote routine compaction stays off; emergency handles overflow.
             if tools._ctx.messages is not messages:
                 tools._ctx.messages = messages
             if _compaction_usage:
                 add_usage(accumulated_usage, _compaction_usage)
-                _cm = os.environ.get("OUROBOROS_MODEL_LIGHT") or "anthropic/claude-sonnet-4.6"
+                _cm = get_light_model()
                 _cc = float(_compaction_usage.get("cost") or 0) or estimate_cost(
                     _cm, int(_compaction_usage.get("prompt_tokens") or 0),
                     int(_compaction_usage.get("completion_tokens") or 0),
-                    int(_compaction_usage.get("cached_tokens") or 0))
+                    int(_compaction_usage.get("cached_tokens") or 0),
+                    int(_compaction_usage.get("cache_write_tokens") or 0),
+                    _compaction_usage.get("prompt_cache_ttl"))
                 emit_llm_usage_event(event_queue, task_id, _cm, _compaction_usage, _cc, "compaction")
 
-            # Seal one stable tool-result boundary for prompt caching (Anthropic-only path;
-            # non-Anthropic providers strip cache_control in llm.py).
+            # Provider cache boundary; unsupported providers strip cache_control in llm.py.
             seal_task_transcript(messages)
 
             msg, cost = call_llm_with_retry(
@@ -660,6 +848,7 @@ def run_llm_loop(
                 max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type,
                 use_local=active_use_local,
             )
+            tools._ctx._current_llm_call_meta = dict(accumulated_usage.get("_last_llm_call_meta") or {})
 
             if msg is None:
                 fallback_model = os.environ.get("OUROBOROS_MODEL_FALLBACK", "").strip()
@@ -668,7 +857,7 @@ def run_llm_loop(
                     return (
                         f"⚠️ Failed to get a response from model {active_model}{local_tag} after {max_retries} attempts. "
                         f"No viable fallback model configured.{_provider_failure_hint(accumulated_usage)} "
-                        f"If background consciousness is running, it will retry when the provider recovers."
+                        f"{_provider_recovery_hint(accumulated_usage)}"
                     ), accumulated_usage, llm_trace
 
                 fallback_use_local = os.environ.get("USE_LOCAL_FALLBACK", "").lower() in ("true", "1")
@@ -685,15 +874,73 @@ def run_llm_loop(
                     return (
                         f"⚠️ All models are down. Primary ({active_model}{primary_tag}) and fallback ({fallback_model}{fallback_tag}) "
                         f"both returned no response. Stopping.{_provider_failure_hint(accumulated_usage)} "
-                        f"Background consciousness will attempt recovery when the provider is back."
+                        f"{_provider_recovery_hint(accumulated_usage)}"
                     ), accumulated_usage, llm_trace
 
             tool_calls = msg.get("tool_calls") or []
             content = msg.get("content")
             if not tool_calls:
+                handoff_msg = ""
+                if drive_root is not None and task_id:
+                    try:
+                        from ouroboros.task_status import FINAL_STATUSES, find_child_tasks, format_handoff_message
+
+                        metadata = getattr(tools._ctx, "task_metadata", {}) if isinstance(getattr(tools._ctx, "task_metadata", {}), dict) else {}
+                        children = find_child_tasks(
+                            drive_root,
+                            parent_task_id=task_id,
+                            root_task_id=str(metadata.get("root_task_id") or task_id),
+                            exclude_task_id=task_id,
+                        )
+                        signature = "|".join(
+                            f"{child.get('task_id') or child.get('id')}:{child.get('status')}:{len(str(child.get('result') or ''))}"
+                            for child in children
+                        )
+                        previous = getattr(tools._ctx, "_subagent_handoff_signature", "")
+                        nonterminal_children = [
+                            child for child in children
+                            if str(child.get("status") or "").strip().lower() not in FINAL_STATUSES
+                        ]
+                        needs_incomplete_ack = bool(nonterminal_children) and not _final_text_acknowledges_incomplete_children(content, nonterminal_children)
+                        if children and signature and (signature != previous or needs_incomplete_ack):
+                            tools._ctx._subagent_handoff_signature = signature
+                            handoff_msg = format_handoff_message(children)
+                    except Exception:
+                        log.debug("Failed to build subagent handoff reminder", exc_info=True)
+                if handoff_msg:
+                    if content and content.strip():
+                        messages.append({"role": "assistant", "content": content})
+                    _append_or_merge_user_message(messages, f"[SYSTEM REMINDER]\n{handoff_msg}")
+                    emit_progress("Subagent handoff status refreshed before final response.")
+                    llm_trace["reasoning_notes"].append("Subagent handoff status refreshed before final response.")
+                    continue
+                finalization_msg = _skill_finalization_message(drive_root, llm_trace) if drive_root is not None else ""
+                if finalization_msg and not getattr(tools._ctx, "_skill_finalization_injected", False):
+                    tools._ctx._skill_finalization_injected = True
+                    if content and content.strip():
+                        messages.append({"role": "assistant", "content": content})
+                    _append_or_merge_user_message(messages, f"[SYSTEM REMINDER]\n{finalization_msg}")
+                    emit_progress(finalization_msg)
+                    llm_trace["reasoning_notes"].append(finalization_msg)
+                    continue
+                if _run_task_acceptance_review_once(
+                    tools=tools,
+                    content=content or "",
+                    task_id=task_id,
+                    task_type=task_type,
+                    llm_trace=llm_trace,
+                    drive_root=drive_root,
+                    messages=messages,
+                    emit_progress=emit_progress,
+                ):
+                    continue
                 return _handle_text_response(content, llm_trace, accumulated_usage)
 
-            messages.append({"role": "assistant", "content": content or "", "tool_calls": tool_calls})
+            if getattr(tools._ctx, "_skill_finalization_injected", False):
+                tools._ctx._skill_finalization_injected = False
+            assistant_msg = dict(msg)
+            assistant_msg.setdefault("role", "assistant")
+            messages.append(assistant_msg)
 
             if content and content.strip():
                 emit_progress(content.strip())
@@ -724,6 +971,21 @@ def run_llm_loop(
             except Exception:
                 log.warning("Failed to shutdown stateful executor", exc_info=True)
         if drive_root is not None and task_id:
+            try:
+                from ouroboros.tools.services import stop_task_services
+
+                stopped_services = stop_task_services(tools._ctx)
+                if stopped_services:
+                    _emit_checkpoint_event(event_queue, task_id, drive_logs, {
+                        "checkpoint_kind": "services_stopped",
+                        "services": stopped_services,
+                    })
+                    llm_trace.setdefault("verification_events", []).append({
+                        "kind": "services_stopped",
+                        "services": stopped_services,
+                    })
+            except Exception:
+                log.debug("Failed to stop task services", exc_info=True)
             try:
                 from ouroboros.owner_inject import cleanup_task_mailbox
                 cleanup_task_mailbox(drive_root, task_id)

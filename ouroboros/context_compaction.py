@@ -1,26 +1,23 @@
-"""
-Tool-history compaction for LLM context management.
-
-Extracted from context.py to keep the context builder focused on prompt assembly.
-Provides LLM-driven summarization of old reasoning rounds. On LLM failure,
-falls back to a safe, non-destructive structural compaction instead of
-hard-truncating process memory.
-"""
+"""Tool-history compaction with safe structural fallback on LLM failure."""
 
 from __future__ import annotations
 
 import json
 import logging
 import os
+import pathlib
 from typing import Any, Dict, List, Optional, Tuple
 
 log = logging.getLogger(__name__)
 
 _COMPACTION_PROTECTED_TOOLS = frozenset({
-    "repo_commit",
-    "repo_write_commit",
+    "commit_reviewed",
+    "vcs_commit_reviewed",
+    "advisory_review",
+    "task_acceptance_review",
+    "skill_review",
+    "review_status",
     "knowledge_read",
-    "data_read",
 })
 
 _SUMMARY_INPUT_LIMIT = 2500
@@ -71,11 +68,7 @@ def _round_has_protected_content(messages: list, start: int, end: int) -> bool:
         msg = messages[idx]
         role = msg.get("role", "")
         content = str(msg.get("content") or "")
-        # Protect tool-result messages for critical tools or error markers.
-        # (v4.34.0: checkpoint-marker protection removed — the structured
-        # Known/Blocker/Decision/Next reflection format was retired in favour
-        # of a plain periodic user-message self-check, so there is no longer
-        # a durable checkpoint artifact that needs to survive compaction.)
+        # Protect critical tool results and error markers from compaction.
         if role == "tool":
             tool_name = _find_tool_name_for_result(msg, messages)
             if tool_name in _COMPACTION_PROTECTED_TOOLS or content.startswith("⚠️"):
@@ -109,10 +102,7 @@ def _compact_argument_value(value: Any, depth: int = 0) -> Any:
 def _compact_tool_call_arguments(tool_name: str, args_json: str) -> Dict[str, Any]:
     """Compact tool call arguments for old rounds without silent truncation."""
     large_content_tools = {
-        "repo_write": "content",
-        "repo_write_commit": "content",
-        "data_write": "content",
-        "claude_code_edit": "prompt",
+        "write_file": "content",
         "update_scratchpad": "content",
         "update_identity": "content",
     }
@@ -203,16 +193,23 @@ def _summarize_round_batch(
         + batch_text
     )
 
-    from ouroboros.llm import LLMClient, DEFAULT_LIGHT_MODEL
+    from ouroboros.config import get_light_model
+    from ouroboros.llm import LLMClient
 
-    light_model = os.environ.get("OUROBOROS_MODEL_LIGHT") or DEFAULT_LIGHT_MODEL
+    light_model = get_light_model()
     client = LLMClient()
     use_local_light = os.environ.get("USE_LOCAL_LIGHT", "").lower() in ("true", "1")
-    resp_msg, usage = client.chat(
+    from ouroboros.llm_observability import chat_observed
+
+    resp_msg, usage = chat_observed(
+        client,
+        drive_root=pathlib.Path("../data").resolve(strict=False),
+        task_id="context_compaction",
+        call_type="context_compaction",
         messages=[{"role": "user", "content": prompt}],
         model=light_model,
         reasoning_effort="low",
-        max_tokens=16384,
+        max_tokens=32768,
         use_local=use_local_light,
     )
     summary_text = resp_msg.get("content") or ""

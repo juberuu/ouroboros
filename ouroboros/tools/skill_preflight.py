@@ -1,34 +1,13 @@
-"""Skill payload preflight — read-only validators a heal-mode agent can run.
+"""Read-only skill payload syntax/contract preflight for heal-mode agents.
 
-The Skill Review Checklist (``docs/CHECKLISTS.md`` §"Skill Review Checklist")
-is the single enable-gate for skill payloads. Tri-model ``review_skill`` is
-the authoritative pass; ``skill_preflight`` is its **cheap, syntax-only**
-companion: it runs ``python -m py_compile`` / ``node --check`` / ``bash -n``
-on the payload's actual files plus a manifest parse, with no LLM calls and
-no review-state mutation. The agent can therefore catch trivial syntax
-errors before spending money on a tri-model review.
-
-Heal-mode agents are blocked from ``run_shell``, so prior to v5.7.0 they
-had no way to even syntax-check their just-edited payload.
-``skill_preflight`` is added to ``_HEAL_MODE_ALLOWED_TOOLS`` so the heal
-prompt's "fix payload, then re-review" loop is reachable end-to-end.
-
-Safety contract (mirrors ``skill_exec``'s argv-only invariant):
-
-- argv array, never a shell string. We never set ``shell=True``.
-- ``cwd=skill_dir`` so a script can't escape into peer payloads.
-- Scrubbed environment via the same ``_scrub_env`` allowlist as
-  ``skill_exec``, with no ``env_from_settings`` keys forwarded
-  (preflight does NOT need provider tokens to run a syntax check).
-- 30s wall-clock timeout per JS/shell file; killed via ``_kill_process_group``
-  on overflow (panic-tracked, like ``skill_exec``). Python syntax checks are
-  done in-process via ``compile()`` over file text so they are genuinely
-  read-only (``py_compile`` writes ``__pycache__``).
-- Read-only: no review.json / enabled.json / grants.json mutation.
+Tri-model review remains authoritative. Preflight uses argv-only subprocesses,
+cwd=skill_dir, scrubbed env, 30s timeout, in-process Python compile(), and no
+review/enablement/grant state mutation.
 """
 
 from __future__ import annotations
 
+import ast
 import logging
 import pathlib
 import shutil
@@ -44,6 +23,7 @@ from ouroboros.platform_layer import (
     subprocess_new_group_kwargs,
 )
 from ouroboros.contracts.skill_manifest import (
+    SkillManifest,
     SkillManifestError,
     parse_skill_manifest_text,
 )
@@ -54,10 +34,7 @@ _PREFLIGHT_TIMEOUT_SEC = 30
 _PREFLIGHT_MAX_OUTPUT_BYTES = 16 * 1024
 _PREFLIGHT_HARD_FILE_LIMIT = 60  # mirrors skill_review's _MAX_SKILL_FILES headroom
 
-# Mapping from file extension to (validator argv template, runtime label).
-# Each template uses ``{path}`` as a placeholder for the absolute file path
-# under cwd=skill_dir; we substitute it explicitly into the argv array so
-# there is never a shell string anywhere in the chain.
+# Extension -> argv template + runtime; {path} is substituted into argv only.
 _VALIDATORS: Dict[str, Tuple[List[str], str]] = {
     ".js": (["node", "--check", "{path}"], "node"),
     ".mjs": (["node", "--check", "{path}"], "node"),
@@ -76,9 +53,7 @@ def _resolve_runtime(runtime: str) -> Optional[str]:
 
 
 def _run_check(cmd: List[str], cwd: pathlib.Path) -> Dict[str, Any]:
-    """Run a validator argv with the same panic-tracked subprocess machinery
-    skill_exec uses. Returns a dict with ``returncode``, ``stdout``, ``stderr``,
-    ``timeout`` flags. Never raises."""
+    """Run validator argv through panic-tracked subprocess machinery; never raises."""
     popen_kwargs: Dict[str, Any] = {
         "stdout": subprocess.PIPE,
         "stderr": subprocess.PIPE,
@@ -127,12 +102,7 @@ def _run_check(cmd: List[str], cwd: pathlib.Path) -> Dict[str, Any]:
 
 
 def _run_python_syntax_check(path: pathlib.Path) -> Dict[str, Any]:
-    """Read-only Python syntax check.
-
-    ``py_compile`` would write ``__pycache__`` under the skill payload, which
-    violates the advertised read-only preflight contract. ``compile()`` over
-    source text catches the same syntax errors without touching disk.
-    """
+    """Use compile() so Python syntax checks stay read-only."""
     try:
         text = path.read_text(encoding="utf-8")
         compile(text, str(path), "exec")
@@ -144,6 +114,115 @@ def _run_python_syntax_check(path: pathlib.Path) -> Dict[str, Any]:
             "stderr": f"{type(exc).__name__}: {exc}",
             "timeout": False,
         }
+
+
+def _validate_widget_render(render: Any, *, source: str) -> Dict[str, Any]:
+    """Validate a declarative/module widget render block without importing plugin code."""
+    try:
+        from ouroboros.extension_loader import _validate_ui_render  # pylint: disable=W0212
+        from ouroboros.contracts.plugin_api import ExtensionRegistrationError
+
+        _validate_ui_render(render if isinstance(render, dict) else {})
+        return {"item": "widget_schema", "source": source, "ok": True, "detail": "ok"}
+    except ExtensionRegistrationError as exc:
+        return {"item": "widget_schema", "source": source, "ok": False, "detail": str(exc)}
+    except Exception as exc:
+        return {
+            "item": "widget_schema",
+            "source": source,
+            "ok": False,
+            "detail": f"{type(exc).__name__}: {exc}",
+        }
+
+
+def _literal_widget_renders_from_plugin(plugin_path: pathlib.Path) -> List[Dict[str, Any]]:
+    """Extract literal top-level widget render dicts without importing plugin.py."""
+    try:
+        tree = ast.parse(plugin_path.read_text(encoding="utf-8"), filename=str(plugin_path))
+    except Exception:
+        return []
+    renders: List[Dict[str, Any]] = []
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not isinstance(node.value, ast.Dict):
+            continue
+        try:
+            value = ast.literal_eval(node.value)
+        except Exception:
+            continue
+        if not isinstance(value, dict):
+            continue
+        kind = str(value.get("kind") or "").strip()
+        if kind not in {"declarative", "module", "iframe"}:
+            continue
+        targets = [
+            target.id
+            for target in node.targets
+            if isinstance(target, ast.Name)
+        ]
+        source = targets[0] if targets else f"line {getattr(node, 'lineno', '?')}"
+        renders.append({"source": source, "render": value})
+    return renders
+
+
+def _widget_schema_findings(skill_dir: pathlib.Path, manifest: Optional[SkillManifest]) -> List[Dict[str, Any]]:
+    findings: List[Dict[str, Any]] = []
+    if manifest is not None and isinstance(manifest.ui_tab, dict):
+        render = manifest.ui_tab.get("render")
+        findings.append(_validate_widget_render(render, source="manifest.ui_tab.render"))
+    plugin = skill_dir / "plugin.py"
+    if plugin.is_file():
+        for item in _literal_widget_renders_from_plugin(plugin):
+            findings.append(
+                _validate_widget_render(
+                    item.get("render"),
+                    source=f"plugin.py:{item.get('source')}",
+                )
+            )
+    return findings
+
+
+def _plugin_permission_findings(skill_dir: pathlib.Path, manifest: Optional[SkillManifest]) -> List[Dict[str, Any]]:
+    """Statically catch common PluginAPI calls whose manifest permission is missing."""
+    if manifest is None or not manifest.is_extension():
+        return []
+    plugin = skill_dir / (manifest.entry or "plugin.py")
+    if not plugin.is_file():
+        return []
+    required_by_call = {
+        "register_route": "route",
+        "register_tool": "tool",
+        "register_ui_tab": "widget",
+        "register_settings_section": "widget",
+        "register_ws_handler": "ws_handler",
+        "send_ws_message": "ws_handler",
+        "get_settings": "read_settings",
+    }
+    try:
+        tree = ast.parse(plugin.read_text(encoding="utf-8"), filename=str(plugin))
+    except Exception:
+        return []
+    seen: dict[str, int] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            perm = required_by_call.get(func.attr)
+            if perm and perm not in seen:
+                seen[perm] = getattr(node, "lineno", 0)
+    declared = set(manifest.permissions or [])
+    findings: List[Dict[str, Any]] = []
+    for perm, line in sorted(seen.items()):
+        findings.append({
+            "item": "permission_static",
+            "source": f"{plugin.name}:{line}" if line else plugin.name,
+            "permission": perm,
+            "ok": perm in declared,
+            "detail": "ok" if perm in declared else f"plugin calls PluginAPI surface requiring permission {perm!r}",
+        })
+    return findings
 
 
 def _handle_skill_preflight(
@@ -165,11 +244,11 @@ def _handle_skill_preflight(
 
     skill_dir = loaded.skill_dir.resolve()
 
-    # Manifest parse first: even if the manifest itself is broken, we still
-    # report it as a preflight finding rather than refusing to run other
-    # validators. The user expects "tell me what's broken", not "exit on
-    # first error".
+    # Broken manifests still become findings; keep other validators running.
     manifest_findings: List[Dict[str, Any]] = []
+    widget_findings: List[Dict[str, Any]] = []
+    permission_findings: List[Dict[str, Any]] = []
+    manifest: Optional[SkillManifest] = None
     manifest_path = None
     for candidate in ("SKILL.md", "skill.json"):
         cand = skill_dir / candidate
@@ -183,6 +262,8 @@ def _handle_skill_preflight(
             text = manifest_path.read_text(encoding="utf-8")
             manifest = parse_skill_manifest_text(text)
             manifest_findings.append({"item": "manifest_parse", "ok": True, "detail": "ok"})
+            widget_findings.extend(_widget_schema_findings(skill_dir, manifest))
+            permission_findings.extend(_plugin_permission_findings(skill_dir, manifest))
             if manifest.entry:
                 entry = (skill_dir / manifest.entry).resolve()
                 ok = entry.is_file()
@@ -217,10 +298,9 @@ def _handle_skill_preflight(
                 "ok": False,
                 "detail": f"{type(exc).__name__}: {exc}",
             })
+            widget_findings.extend(_widget_schema_findings(skill_dir, None))
 
-    # Resolve which files to validate. ``paths`` lets the caller scope the
-    # check to a single file they just edited; otherwise we walk the same
-    # surface ``skill_loader._iter_payload_files`` exposes.
+    # paths scopes recent edits; otherwise walk the reviewable payload surface.
     files_to_check: List[pathlib.Path] = []
     path_findings: List[Dict[str, Any]] = []
     if paths:
@@ -305,6 +385,8 @@ def _handle_skill_preflight(
 
     overall_ok = (
         all(f.get("ok") for f in manifest_findings)
+        and all(f.get("ok") for f in widget_findings)
+        and all(f.get("ok") for f in permission_findings)
         and all(f.get("ok") for f in file_findings)
         and omitted_count == 0
         and (not paths or any(f.get("ok") for f in file_findings))
@@ -313,6 +395,8 @@ def _handle_skill_preflight(
         "skill": skill_name,
         "skill_dir": str(skill_dir),
         "manifest": manifest_findings,
+        "widgets": widget_findings,
+        "permissions": permission_findings,
         "files": file_findings,
         "files_checked": len(file_findings),
         "files_failed": sum(1 for f in file_findings if not f.get("ok") and not f.get("skipped")),
@@ -326,12 +410,12 @@ def _handle_skill_preflight(
 _PREFLIGHT_SCHEMA = {
     "name": "skill_preflight",
     "description": (
-        "Read-only payload syntax validator for one skill. Runs Python "
+        "Read-only payload syntax/contract validator for one skill. Runs Python "
         "compile() (no __pycache__), node --check, and bash -n on every reviewable file "
         "(or just the ones in `paths` if provided), plus a manifest "
-        "parse. Cheap and offline (no LLM, no review.json mutation, "
+        "parse and static widget render-schema validation. Cheap and offline (no LLM, no review.json mutation, "
         "no review status change). Heal-mode agents use this before "
-        "calling review_skill so silly syntax errors are caught "
+        "calling skill_review so silly syntax errors are caught "
         "without spending tri-model review tokens. Argv-only "
         "subprocess invocation, cwd=skill_dir, scrubbed env, 30s "
         "per-file cap, panic-tracked process group."

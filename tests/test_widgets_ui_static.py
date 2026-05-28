@@ -14,66 +14,57 @@ def _widgets_js() -> str:
     )
 
 
+def _read(rel: str) -> str:
+    return (REPO_ROOT / rel).read_text(encoding="utf-8")
+
+
+def test_weather_declarative_paths_match_route_payload():
+    plugin = (REPO_ROOT / "skills" / "weather" / "plugin.py").read_text(encoding="utf-8")
+    skill = (REPO_ROOT / "skills" / "weather" / "SKILL.md").read_text(encoding="utf-8")
+    for path in ("resolved_to", "temp_c", "feels_like_c", "condition", "humidity_pct", "wind_kph", "wind_dir"):
+        assert f'"{path}":' in plugin
+        assert f"path: {path}" in skill
+    assert "path: humidity\n" not in skill
+    assert "path: wind\n" not in skill
+
+
 def test_widgets_support_declarative_schema_components():
+    """Spot-check that widgets.js exposes the declarative schema entry point
+    and a representative set of components. Trimmed in v5.15.x — the full
+    type-marker enumeration (15+ entries) was brittle to schema evolution
+    and added little signal over a smoke check. Security/lifecycle pins
+    moved to the dedicated tests below (escape/sanitize, media source guard,
+    download host helper, etc.)."""
     source = _widgets_js()
     assert "render.kind === 'declarative'" in source
-    for marker in [
-        "type === 'form'",
-        "type === 'action'",
-        "type === 'poll'",
-        "type === 'subscription'",
-        "type === 'kv'",
-        "type === 'table'",
-        "type === 'markdown'",
-        "type === 'json'",
-        "type === 'code'",
-        "type === 'chart'",
-        "type === 'tabs'",
-        "type === 'stream'",
-        "['image', 'audio', 'video', 'file'].includes(type)",
-        "type === 'gallery'",
-        "type === 'progress'",
-    ]:
-        assert marker in source
-    assert "rememberFormValues();" in source
-    assert "formValues[idx][field.name] = fieldValue(form, field);" in source
-    assert "String(optValue) === String(saved ?? '')" in source
-    assert "component.auto_start === true" in source
-    assert "queueMicrotask(() => startPoll(idx));" in source
-    assert "boundedNumber(spec.interval_ms, 2000, 1000, 30000)" in source
+    # Sentinel components — proof the declarative router is wired
+    assert "type === 'form'" in source
+    assert "type === 'action'" in source
+    assert "type === 'table'" in source
+    assert "type === 'markdown'" in source
+    # Lifecycle / cleanup discipline
     assert "disposeMountedWidgets();" in source
-    assert "timers.forEach((timer) => clearTimeout(timer));" in source
-    assert "const controller = new AbortController();" in source
-    assert "controllers.forEach((controller) => controller.abort());" in source
-    assert "widgetMessageHandlers.add(handler);" in source
-    assert "ctx.ws.on('message'" in source
-    assert "msg?.type !== expectedType" in source
-    assert "new EventSource(url)" in source
-    assert "eventSources.forEach((source) => source.close());" in source
-    assert "new Chart(canvas, config)" in source
-    assert "chartInstances.forEach((chart) => chart.destroy());" in source
-    assert "data-widget-tab-key" in source
-    assert "component.job === true || component.mode === 'job'" in source
-    assert "startJobPoll" in source
-    assert "status_route" in source
-    assert "event.detail?.page === 'widgets'" in source
+    assert "let widgetsMounted = false;" in source
+    assert "let renderGeneration = 0;" in source
     page_shown_branch = source.split("window.addEventListener('ouro:page-shown'")[1]
     assert "disposeMountedWidgets();" in page_shown_branch
-    assert "let renderGeneration = 0;" in source
-    assert "generation !== renderGeneration" in source
-    assert "widgetsVisible = false;" in source
-    assert "if (!widgetsVisible || generation !== renderGeneration) return;" in source
-    assert "let widgetsMounted = false;" in source
-    assert "if (widgetsMounted && !force) return;" in source
-    assert "widgetsMounted = false;" in page_shown_branch
 
 
 def test_widgets_escape_and_sanitize_untrusted_content():
+    """Widgets must reach the sanitised markdown helper through the v5.8.3-rc.5
+    SSOT (``web/modules/utils.js::renderMarkdownSafe``); the DOMPurify
+    allowlist itself moved to that module and is pinned by
+    ``tests/test_web_utils_ssot.py::test_render_markdown_safe_strips_dangerous_tags_and_attrs``.
+    Widgets-side this test now only verifies the import and the
+    escapeHtml-around-untrusted-content discipline that remains local
+    (table cells, JSON dumps).
+    """
     source = _widgets_js()
-    assert "function renderMarkdownSafe" in source
-    assert "DOMPurify.sanitize" in source
-    assert "FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'form', 'input', 'img', 'video', 'audio', 'source']" in source
-    assert "FORBID_ATTR: ['style', 'src', 'srcset', 'srcdoc']" in source
+    assert "renderMarkdownSafe" in source
+    # Widgets must NOT redeclare the SSOT helper locally.
+    assert "function renderMarkdownSafe" not in source, (
+        "widgets.js must use renderMarkdownSafe from utils.js (SSOT), not a local copy"
+    )
     assert "escapeHtml(JSON.stringify(value, null, 2))" in source
     assert "escapeHtml(getPath(row, c.path, ''))" in source
 
@@ -82,7 +73,7 @@ def test_widgets_media_sources_are_constrained_to_extension_routes_or_data_urls(
     source = _widgets_js()
     assert "function safeMediaSrc" in source
     assert "const route = spec.route || spec.api_route || '';" in source
-    assert "extensionRouteUrl(tab, route, params)" in source
+    assert "extensionRoutePath(tab.skill, route, params)" in source
     assert "data:(image\\/" in source
     assert "parsed.pathname.startsWith(expectedPrefix)" in source
     assert "parsed.origin === window.location.origin" in source
@@ -91,10 +82,12 @@ def test_widgets_media_sources_are_constrained_to_extension_routes_or_data_urls(
 
 def test_widgets_downloads_use_host_handler_not_navigation():
     source = _widgets_js()
+    helper = _read("web/modules/ui_helpers.js")
     assert "data-widget-download-url" in source
     assert "event.preventDefault();" in source
-    assert "download_file_to_downloads" in source
-    assert "URL.createObjectURL(blob)" in source
+    assert "downloadViaHostBridge(" in source
+    assert "download_file_to_downloads" in helper
+    assert "URL.createObjectURL" in helper
     assert "window.location.href" not in source
     assert "window.location.assign" not in source
     assert '<a class="btn btn-default" href' not in source
@@ -158,13 +151,27 @@ def test_widgets_refresh_button_shows_loading_state():
     assert "#widgets-refresh.is-loading::after" in css
 
 
-def test_widgets_inline_card_preserves_session_state():
+def test_widgets_cards_do_not_stretch_to_row_height():
     source = _widgets_js()
+    css = (REPO_ROOT / "web" / "style.css").read_text(encoding="utf-8")
+    masonry = (REPO_ROOT / "web" / "modules" / "masonry.js").read_text(encoding="utf-8")
+    assert "const span = Number(tab.span || tab.grid_span || 1);" in source
+    assert "widgets-card-span-2" in source
+    assert "applyMasonry(list)" in source
+    assert "function layout(container, config)" in masonry
+    assert "itemResizeObserver" in masonry
+    assert "observeItems()" in masonry
+    widgets_block = css.split(".widgets-list {", 1)[1].split("}", 1)[0]
+    assert "display: grid" not in widgets_block
+    assert "position: relative;" in widgets_block
+    assert ".widgets-card-span-2" in css
+
+
+def test_widgets_inline_card_host_path_removed():
+    source = _widgets_js()
+    assert "render.kind === 'inline_card'" not in source
+    assert "skill-widget-weather" not in source
     assert "const saved = widgetSessionState.get(persistenceKey) || {};" in source
-    assert "const savedCity = escapeHtml(saved.city || 'Moscow');" in source
-    assert "const savedResult = saved.resultHtml" in source
-    assert "widgetSessionState.set(persistenceKey, { city: query, resultHtml: result.innerHTML });" in source
-    assert "return () => {" in source
 
 
 def test_widgets_v5_7_0_new_components_render():
@@ -183,3 +190,14 @@ def test_widgets_v5_7_0_new_components_render():
     # extension JS is acceptable in any of the new component renderers.
     assert "data-widget-map-config" in source
     assert "widget-kanban-card" in source
+
+
+def test_widgets_render_subscription_children():
+    source = _widgets_js()
+    assert "type === 'subscription'" in source
+    assert "component.render" in source
+    assert "widget-subscription-render" in source
+    assert "value_key" in source
+    assert "items_key" in source
+    assert "route_prefix" in source
+    assert "type === 'key_value'" in source

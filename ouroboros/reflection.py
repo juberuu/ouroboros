@@ -1,14 +1,4 @@
-"""
-Ouroboros — Execution Reflection (Process Memory).
-
-Generates brief LLM summaries of task execution when errors occurred OR
-when the task was non-trivial (high round count or high cost).
-Stored in task_reflections.jsonl and loaded into the next task's context,
-giving Ouroboros visibility into its own process across task boundaries.
-
-Process memory is as essential as factual memory — seeing the class of
-error requires seeing the process that produced it.
-"""
+"""Generate post-task process-memory reflections for non-trivial/error runs."""
 
 from __future__ import annotations
 
@@ -33,8 +23,7 @@ def _truncate_with_notice(text: Any, limit: int) -> str:
 
 log = logging.getLogger(__name__)
 
-# Thresholds for triggering reflection on non-trivial (but error-free) tasks.
-# Tune by changing these constants — no logic edits needed.
+# Reflection triggers for non-trivial clean tasks.
 NONTRIVIAL_ROUNDS_THRESHOLD: int = 15
 NONTRIVIAL_COST_THRESHOLD: float = 5.0
 
@@ -54,8 +43,6 @@ _ERROR_MARKERS = frozenset({
 })
 
 REFLECTIONS_FILENAME = "task_reflections.jsonl"
-
-# ── Prompt variants ──────────────────────────────────────────────────────────
 
 _REFLECTION_PROMPT_ERROR = """\
 You are reviewing a completed task execution trace for Ouroboros, a self-modifying AI agent.
@@ -85,7 +72,7 @@ Write a concise 150-250 word reflection covering:
 Be concrete — cite specific file names, tool names, decision points. No platitudes.\
 """
 
-# Shared tail appended to both variants — contains the {format} fields.
+# Shared tail with {format} fields.
 _REFLECTION_PROMPT_TAIL = """
 
 Then, if there is at least one concrete deferred improvement worth tracking, append a final line:
@@ -105,6 +92,8 @@ Rules for candidates:
 - Prefer recurring process/tool/review friction over one-off noise.
 - Do not propose autonomous execution or workflow states.
 - If nothing deserves backlog tracking, output BACKLOG_CANDIDATES_JSON: []
+- Tool arguments in logs may show `<TRUNCATED:key:Nch:sha=...>` placeholders.
+  That is logging metadata, not the value passed to the tool.
 
 ## Task goal
 
@@ -125,15 +114,9 @@ Rules for candidates:
 Write the reflection now. Plain text, no markdown headers except the exact final BACKLOG_CANDIDATES_JSON line.
 """
 
-# Convenience composites used by generate_reflection().
 _REFLECTION_PROMPT_ERROR_FULL = _REFLECTION_PROMPT_ERROR + _REFLECTION_PROMPT_TAIL
 _REFLECTION_PROMPT_NONTRIVIAL_FULL = _REFLECTION_PROMPT_NONTRIVIAL + _REFLECTION_PROMPT_TAIL
 
-# Legacy alias — kept so any external caller that imports the old name still works.
-_REFLECTION_PROMPT = _REFLECTION_PROMPT_ERROR_FULL
-
-
-# ── Trigger logic ────────────────────────────────────────────────────────────
 
 def should_generate_reflection(
     llm_trace: Dict[str, Any],
@@ -141,30 +124,16 @@ def should_generate_reflection(
     rounds: int = 0,
     cost_usd: float = 0.0,
 ) -> bool:
-    """Check if a task's execution warrants an automatic reflection.
-
-    Returns True when ANY of the following apply:
-
-    * Tool calls had errors or non-OK structured status.
-    * Results contained known blocking markers (REVIEW_BLOCKED, TESTS_FAILED, …).
-    * ``rounds`` >= NONTRIVIAL_ROUNDS_THRESHOLD — many-round tasks deserve a look.
-    * ``cost_usd`` >= NONTRIVIAL_COST_THRESHOLD — expensive tasks deserve a look.
-
-    The threshold triggers fire even for clean (error-free) tasks so that
-    systemic process friction is captured, not just hard failures.
-    """
-    # Threshold triggers — fast path, no iteration needed.
+    """Return True for tool errors/blocking markers or costly many-round tasks."""
     if rounds >= NONTRIVIAL_ROUNDS_THRESHOLD:
         return True
     if cost_usd >= NONTRIVIAL_COST_THRESHOLD:
         return True
 
-    # Error / marker triggers — original logic unchanged.
     tool_calls = llm_trace.get("tool_calls") or []
     for tc in tool_calls:
         if not isinstance(tc, dict):
             continue
-        # Failure: is_error flag or non-OK structured status
         if tc.get("is_error") or str(tc.get("status") or "").strip().lower() not in ("", "ok"):
             return True
         result_str = str(tc.get("result", ""))
@@ -188,9 +157,6 @@ def _has_error_evidence(llm_trace: Dict[str, Any]) -> bool:
             if marker in result_str:
                 return True
     return False
-
-
-# ── Error detail helpers ─────────────────────────────────────────────────────
 
 def _collect_error_details(llm_trace: Dict[str, Any], cap: int = 3000) -> str:
     """Extract error tool results from the trace, up to *cap* chars."""
@@ -238,9 +204,6 @@ def _detect_markers(llm_trace: Dict[str, Any]) -> List[str]:
                 found.add(marker)
     return sorted(found)
 
-
-# ── Core reflection generator ────────────────────────────────────────────────
-
 def generate_reflection(
     task: Dict[str, Any],
     llm_trace: Dict[str, Any],
@@ -249,15 +212,8 @@ def generate_reflection(
     usage_dict: Dict[str, Any],
     review_evidence: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Call the light LLM to produce an execution reflection.
-
-    Selects the error-focused prompt when the trace contains hard errors or
-    blocking markers; otherwise uses the non-trivial-task prompt (triggered
-    by rounds/cost threshold).
-
-    Returns a structured dict ready for appending to the reflections JSONL.
-    """
-    from ouroboros.llm import DEFAULT_LIGHT_MODEL
+    """Call the light LLM and return a JSONL-ready reflection entry."""
+    from ouroboros.config import get_light_model
 
     goal = _truncate_with_notice(task.get("text", ""), 200)
     error_details = _collect_error_details(llm_trace)
@@ -275,7 +231,6 @@ def generate_reflection(
     except Exception:
         review_evidence_text = "(review evidence unavailable)"
 
-    # Choose prompt based on whether the trace has hard errors.
     if _has_error_evidence(llm_trace) or markers:
         prompt_template = _REFLECTION_PROMPT_ERROR_FULL
     else:
@@ -288,17 +243,22 @@ def generate_reflection(
         review_evidence=review_evidence_text,
     )
 
-    light_model = os.environ.get("OUROBOROS_MODEL_LIGHT") or DEFAULT_LIGHT_MODEL
+    light_model = get_light_model()
     try:
-        resp_msg, refl_usage = llm_client.chat(
+        from ouroboros.llm_observability import chat_observed
+
+        resp_msg, refl_usage = chat_observed(
+            llm_client,
+            drive_root=pathlib.Path(str(task.get("drive_root") or "../data")),
+            task_id=str(task.get("id") or task.get("task_id") or "reflection"),
+            call_type="task_reflection",
             messages=[{"role": "user", "content": prompt}],
             model=light_model,
             reasoning_effort="low",
-            max_tokens=4096,
+            max_tokens=16384,
         )
         raw_reflection_text = (resp_msg.get("content") or "").strip()
 
-        # --- Parse backlog candidates from reflection text ---
         _backlog_marker = "BACKLOG_CANDIDATES_JSON:"
         if _backlog_marker in raw_reflection_text:
             body, marker_tail = raw_reflection_text.rsplit(_backlog_marker, 1)
@@ -336,8 +296,7 @@ def generate_reflection(
             reflection_text = raw_reflection_text.strip()
             backlog_candidates = []
 
-        # Track cost directly (bypass ctx.pending_events) — reflection runs
-        # outside the main tool-event loop and has no pending_events reference.
+        # Reflection runs outside the tool-event loop; update budget directly.
         if refl_usage:
             try:
                 from supervisor.state import update_budget_from_usage
@@ -380,9 +339,6 @@ def append_reflection(drive_root: pathlib.Path, entry: Dict[str, Any]) -> None:
         except Exception:
             log.debug("Pattern register update failed (non-critical)", exc_info=True)
 
-
-# ── Pattern register ─────────────────────────────────────────────────────────
-
 _PATTERNS_PROMPT = """\
 You maintain a Pattern Register for Ouroboros, a self-modifying AI agent.
 Below is the current register and a new error reflection. Update the register.
@@ -415,8 +371,9 @@ _PATTERNS_HEADER = (
 
 
 def _update_patterns(drive_root: pathlib.Path, entry: Dict[str, Any]) -> None:
-    """Update patterns.md knowledge base topic via LLM (Pattern Register)."""
-    from ouroboros.llm import LLMClient, DEFAULT_LIGHT_MODEL
+    """Update the Pattern Register topic via LLM."""
+    from ouroboros.config import get_light_model
+    from ouroboros.llm import LLMClient
 
     patterns_path = drive_root / "memory" / "knowledge" / "patterns.md"
     patterns_path.parent.mkdir(parents=True, exist_ok=True)
@@ -441,16 +398,21 @@ def _update_patterns(drive_root: pathlib.Path, entry: Dict[str, Any]) -> None:
         reflection=_truncate_with_notice(entry.get("reflection", ""), 500),
     )
 
-    light_model = os.environ.get("OUROBOROS_MODEL_LIGHT") or DEFAULT_LIGHT_MODEL
+    light_model = get_light_model()
     client = LLMClient()
-    resp_msg, patterns_usage = client.chat(
+    from ouroboros.llm_observability import chat_observed
+
+    resp_msg, patterns_usage = chat_observed(
+        client,
+        drive_root=drive_root,
+        task_id=str(entry.get("task_id") or entry.get("id") or "patterns"),
+        call_type="pattern_register_update",
         messages=[{"role": "user", "content": prompt}],
         model=light_model,
         reasoning_effort="low",
-        max_tokens=4096,
+        max_tokens=16384,
     )
-    # Track cost directly (bypass ctx.pending_events) — pattern update runs
-    # outside the main tool-event loop and has no pending_events reference.
+    # Pattern update also runs outside the tool-event loop.
     if patterns_usage:
         try:
             from supervisor.state import update_budget_from_usage

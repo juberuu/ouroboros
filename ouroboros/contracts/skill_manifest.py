@@ -1,44 +1,12 @@
-"""Unified ``SKILL.md`` / ``skill.json`` manifest (v1).
-
-One manifest format describes all three kinds of external packages:
-
-- ``type: instruction`` — pure markdown guide, no executable payload.
-- ``type: script``      — markdown guide + one or more scripts invoked
-                          through the upcoming ``skill_exec`` tool.
-- ``type: extension``   — markdown guide + ``plugin.py``-style entry plus
-                          optional routes / ws handlers and future UI-tab
-                          declarations.
-
-The parser intentionally works on either::
-
-    ---
-    name: weather
-    type: script
-    ...
-    ---
-    # body (human readable instructions)
-    ...
-
-(YAML frontmatter in ``SKILL.md``) **or** a standalone ``skill.json`` file.
-
-The parser is intentionally tolerant for missing optional fields and
-unknown extras, but it FAILS CLOSED on structural contract damage:
-invalid JSON/YAML, malformed structured fields (for example ``ui_tab``),
-or an unsupported ``schema_version`` all raise ``SkillManifestError``.
-
-To avoid adding a PyYAML dependency at this stage, the YAML frontmatter
-parser is a *minimal* key: value reader that covers the subset we actually
-use (scalars, inline lists, nested ``ui_tab`` block). When a consumer needs
-richer YAML later, it can swap to ``yaml.safe_load`` without changing the
-dataclass shape.
-"""
+"""Unified SKILL.md/skill.json parser; tolerant extras, fail-closed structure."""
 
 from __future__ import annotations
 
 import json
+import pathlib
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 
 SKILL_MANIFEST_SCHEMA_VERSION = 1
@@ -50,10 +18,7 @@ VALID_SKILL_RUNTIMES = frozenset({
     "python3",
     "node",
     "bash",
-    # v5.7.0: extended runtime set. The actual binary is still resolved via
-    # ``shutil.which`` at exec time and the skill subprocess fails closed if
-    # the operator's host doesn't ship the runtime, but the manifest
-    # validator no longer rejects these declarations as unknown.
+    # Binaries resolve at exec time; missing runtimes still fail closed there.
     "deno",
     "ruby",
     "go",
@@ -65,31 +30,27 @@ VALID_SKILL_PERMISSIONS = frozenset(
         "subprocess",
         "widget",
         "ws_handler",
-        # Phase 4 ``type: extension`` permissions — kept in sync with
-        # ``ouroboros.contracts.plugin_api.VALID_EXTENSION_PERMISSIONS``
-        # so ``SkillManifest.validate()`` does not warn "unknown
-        # permission" on legitimate extension manifests that declare
-        # these Phase-4 surfaces. The single frozen-set remains the
-        # SSOT for both script-type and extension-type permissions.
+        # Keep extension permissions aligned with plugin_api's frozen contract.
         "route",
         "tool",
         "read_settings",
         "iframe_raw",
+        "companion_process",
+        "supervised_task",
+        "subscribe_event",
+        "inject_chat",
     }
 )
+_EVENT_TOPIC_RE = re.compile(r"^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$")
 
 
 class SkillManifestError(ValueError):
-    """Raised when a manifest is structurally broken (not just missing fields)."""
+    """Manifest has structural contract damage."""
 
 
 @dataclass
 class SkillManifest:
-    """Structural description of one skill package.
-
-    Fields marked optional default to empty values so the evolutionary layer
-    can render partial skills in the UI with a ``needs_review`` badge.
-    """
+    """Structural description of one skill package."""
 
     name: str
     description: str
@@ -101,20 +62,19 @@ class SkillManifest:
     runtime: str = ""
     timeout_sec: int = 60
     env_from_settings: List[str] = field(default_factory=list)
-    # script-typed manifests list their scripts; each item is a mapping with
-    # at least ``name`` and optionally ``description``.
+    # Script manifests list script mappings.
     scripts: List[Dict[str, str]] = field(default_factory=list)
-    # extension-typed manifests point at a Python entry module.
+    # Extension manifests point at a Python entry module.
     entry: str = ""
     permissions: List[str] = field(default_factory=list)
+    subscribe_events: List[str] = field(default_factory=list)
+    companion_processes: List[Dict[str, Any]] = field(default_factory=list)
     ui_tab: Optional[Dict[str, Any]] = None
-    # Human-readable body from SKILL.md after the closing ``---`` line.
+    # Human-readable body after SKILL.md frontmatter.
     body: str = ""
-    # Anything we didn't understand, preserved for forward-compatibility.
+    # Unknown fields preserved for forward compatibility.
     raw_extra: Dict[str, Any] = field(default_factory=dict)
     schema_version: int = SKILL_MANIFEST_SCHEMA_VERSION
-
-    # --- Convenience --------------------------------------------------
 
     def is_instruction(self) -> bool:
         return self.type == "instruction"
@@ -126,12 +86,7 @@ class SkillManifest:
         return self.type == "extension"
 
     def validate(self) -> List[str]:
-        """Return a list of non-blocking warnings for a parsed manifest.
-
-        Blocking failures are raised by ``parse_skill_manifest_text``; this
-        function describes *soft* issues useful to show in review output
-        (unknown type, unknown runtime, permissions typo, etc.).
-        """
+        """Return soft warnings; parse errors already raised on structural damage."""
         warnings: List[str] = []
         if self.type not in VALID_SKILL_TYPES:
             warnings.append(
@@ -149,6 +104,12 @@ class SkillManifest:
                     f"unknown permission '{perm}' (expected one of "
                     f"{sorted(VALID_SKILL_PERMISSIONS)})"
                 )
+        for topic in self.subscribe_events:
+            if not _EVENT_TOPIC_RE.match(topic):
+                warnings.append(
+                    f"invalid subscribe_events topic '{topic}' "
+                    "(expected lower.dotted format)"
+                )
         if self.is_extension() and not self.entry:
             warnings.append("type=extension requires non-empty 'entry'")
         if self.is_script() and not self.scripts:
@@ -158,10 +119,6 @@ class SkillManifest:
         return warnings
 
 
-# ---------------------------------------------------------------------------
-# Parsers
-# ---------------------------------------------------------------------------
-
 _FRONTMATTER_RE = re.compile(
     r"\A---\s*\n(.*?)\n---\s*\n?(.*)\Z",
     re.DOTALL,
@@ -169,20 +126,8 @@ _FRONTMATTER_RE = re.compile(
 
 
 def parse_skill_manifest_text(text: str) -> SkillManifest:
-    """Parse a ``SKILL.md`` (frontmatter + body) or a ``skill.json`` document.
-
-    Auto-detects which form the input is in:
-
-    - Starts with ``{`` -> parsed as JSON.
-    - Starts with ``---`` -> parsed as YAML-ish frontmatter, the trailing
-      body becomes ``manifest.body``.
-    - Otherwise treated as an instruction-only markdown file with no
-      frontmatter; a best-effort ``name`` is derived from the first heading.
-
-    Raises ``SkillManifestError`` only on structural damage. Missing optional
-    fields become empty values; unknown fields are preserved in ``raw_extra``.
-    """
-    src = text.lstrip("\ufeff")  # strip BOM if any
+    """Parse JSON, YAML frontmatter, or body-only instruction markdown."""
+    src = text.lstrip("\ufeff")
     stripped = src.lstrip()
 
     if stripped.startswith("{"):
@@ -197,30 +142,20 @@ def parse_skill_manifest_text(text: str) -> SkillManifest:
     match = _FRONTMATTER_RE.match(src)
     if match is not None:
         front, body = match.group(1), match.group(2) or ""
-        # Prefer real YAML when PyYAML is available (handles nested
-        # block mappings like ``metadata.openclaw.requires.env`` that
-        # OpenClaw/ClawHub skills use). Fall back to the minimal
-        # in-tree parser for environments without the dependency.
         try:
             import yaml  # type: ignore
+        except ImportError as exc:
+            raise SkillManifestError(
+                "PyYAML is required to parse SKILL.md frontmatter"
+            ) from exc
+        try:
             data: Any = yaml.safe_load(front) or {}
-        except ImportError:
-            try:
-                data = _parse_minimal_yaml(front)
-            except _MiniYamlError as exc:
-                raise SkillManifestError(f"invalid SKILL.md frontmatter: {exc}") from exc
         except yaml.YAMLError as exc:  # type: ignore[name-defined]
             raise SkillManifestError(f"invalid SKILL.md frontmatter: {exc}") from exc
         if not isinstance(data, dict):
             raise SkillManifestError("SKILL.md frontmatter must be a mapping")
         return _manifest_from_mapping(data, body=body.strip())
-    # Fallback: body-only markdown, treat as instruction skill.
-    # ``stripped.startswith("---")`` is NOT treated as a broken frontmatter
-    # fence here — a markdown document that legitimately starts with a
-    # thematic break (``---`` on its own line) is a valid instruction
-    # skill body. Real frontmatter parse failures (malformed YAML, bad
-    # mapping shape) are caught by the branch above which only runs when
-    # the full frontmatter regex actually matches.
+    # A leading thematic break is valid body markdown, not broken frontmatter.
     name = _derive_name_from_body(src)
     return SkillManifest(
         name=name,
@@ -230,11 +165,6 @@ def parse_skill_manifest_text(text: str) -> SkillManifest:
         body=src.strip(),
         schema_version=SKILL_MANIFEST_SCHEMA_VERSION,
     )
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
 
 
 def _manifest_from_mapping(data: Dict[str, Any], *, body: str) -> SkillManifest:
@@ -252,6 +182,8 @@ def _manifest_from_mapping(data: Dict[str, Any], *, body: str) -> SkillManifest:
         "scripts",
         "entry",
         "permissions",
+        "subscribe_events",
+        "companion_processes",
         "ui_tab",
         "schema_version",
     }
@@ -283,6 +215,52 @@ def _manifest_from_mapping(data: Dict[str, Any], *, body: str) -> SkillManifest:
     if ui_tab is not None and not isinstance(ui_tab, dict):
         raise SkillManifestError("'ui_tab' must be a mapping when provided")
 
+    companion_raw = data.get("companion_processes", [])
+    if companion_raw in (None, ""):
+        companion_raw = []
+    if not isinstance(companion_raw, list):
+        raise SkillManifestError("'companion_processes' must be a list when provided")
+    companion_processes: List[Dict[str, Any]] = []
+    for item in companion_raw:
+        if not isinstance(item, dict):
+            raise SkillManifestError("each 'companion_processes' item must be a mapping")
+        if not str(item.get("name") or "").strip():
+            raise SkillManifestError("each 'companion_processes' item must include name")
+        if not isinstance(item.get("command"), list) or not item.get("command"):
+            raise SkillManifestError("each 'companion_processes' item must include a non-empty command list")
+        runtime = str(item.get("runtime") or "").strip().lower()
+        if not runtime:
+            raise SkillManifestError("each 'companion_processes' item must include runtime")
+        if runtime and runtime not in VALID_SKILL_RUNTIMES:
+            raise SkillManifestError(
+                f"companion_processes runtime '{runtime}' is not supported"
+            )
+        command0 = str((item.get("command") or [""])[0] or "").strip().lower()
+        command = [str(part or "").strip() for part in (item.get("command") or [])]
+        inline_flags = {"-c", "-m", "-e", "--eval", "eval"}
+        if any(arg in inline_flags for arg in command[1:]):
+            raise SkillManifestError("companion inline/eval commands are not allowed")
+        for arg in command[1:]:
+            arg_path = pathlib.PurePosixPath(arg)
+            if arg_path.is_absolute() or ".." in arg_path.parts:
+                raise SkillManifestError("companion command arguments must stay inside the reviewed skill tree")
+        if runtime in {"python", "python3"} and command0 not in {"python", "python3"}:
+            raise SkillManifestError("python companion runtime must use python/python3 command")
+        if runtime in {"python", "python3"}:
+            if len(command) < 2:
+                raise SkillManifestError("python companion command must name a reviewed script")
+            if pathlib.PurePosixPath(command[1]).is_absolute() or ".." in pathlib.PurePosixPath(command[1]).parts:
+                raise SkillManifestError("python companion script must be a relative reviewed path")
+        if runtime in {"node", "npm"} and command0 not in {"node", "npm"}:
+            raise SkillManifestError("node companion runtime must use node/npm command")
+        if runtime in {"bash", "deno", "ruby", "go"} and command0 != runtime:
+            raise SkillManifestError(f"{runtime} companion runtime must use {runtime} command")
+        if runtime in {"bash", "deno", "ruby", "go"} and len(command) > 1:
+            script_path = pathlib.PurePosixPath(command[1])
+            if script_path.is_absolute() or ".." in script_path.parts:
+                raise SkillManifestError(f"{runtime} companion script must be a relative reviewed path")
+        companion_processes.append(dict(item))
+
     schema_version = data.get("schema_version", SKILL_MANIFEST_SCHEMA_VERSION)
     try:
         schema_version_int = int(schema_version)
@@ -308,6 +286,8 @@ def _manifest_from_mapping(data: Dict[str, Any], *, body: str) -> SkillManifest:
         scripts=scripts,
         entry=str(data.get("entry") or "").strip(),
         permissions=_string_list(data.get("permissions")),
+        subscribe_events=_string_list(data.get("subscribe_events")),
+        companion_processes=companion_processes,
         ui_tab=ui_tab,
         body=body,
         raw_extra=extras,
@@ -331,244 +311,6 @@ def _derive_name_from_body(text: str) -> str:
         if stripped.startswith("#"):
             return stripped.lstrip("#").strip().lower().replace(" ", "_") or "unnamed"
     return "unnamed"
-
-
-# ---------------------------------------------------------------------------
-# Minimal YAML-ish frontmatter reader (no external dependency).
-# ---------------------------------------------------------------------------
-
-
-class _MiniYamlError(ValueError):
-    pass
-
-
-def _parse_minimal_yaml(text: str) -> Dict[str, Any]:
-    """Parse the strict subset of YAML we allow in SKILL.md frontmatter.
-
-    Supported:
-      - ``key: value`` scalars (string, bool, int).
-      - Inline sequences: ``key: [a, b, "c d"]``.
-      - Block sequences with ``- item`` lines (scalars only).
-      - Block sequences of mappings (``- name: foo\\n  description: bar``)
-        but only one level deep (enough for ``scripts``).
-      - A single nested mapping block for ``ui_tab: {…}`` via indentation.
-
-    Not supported (explicitly rejected with ``_MiniYamlError``): anchors,
-    tags, multiline scalars, complex nesting. If a manifest needs those,
-    it should use ``skill.json`` or wait for Phase 4's full parser.
-    """
-    result: Dict[str, Any] = {}
-    lines = text.splitlines()
-    i = 0
-    while i < len(lines):
-        raw = lines[i]
-        if not raw.strip() or raw.lstrip().startswith("#"):
-            i += 1
-            continue
-        if raw.startswith(" ") or raw.startswith("\t"):
-            raise _MiniYamlError(
-                f"top-level line must not start with whitespace: {raw!r}"
-            )
-        if ":" not in raw:
-            raise _MiniYamlError(f"expected 'key: value', got: {raw!r}")
-        key, _, rest = raw.partition(":")
-        key = key.strip()
-        rest = rest.strip()
-        if rest == "":
-            # Possible block value: either a block list (`- item`) or a
-            # nested mapping. Scan following indented lines.
-            block_lines, consumed = _collect_block(lines, i + 1)
-            i += 1 + consumed
-            if not block_lines:
-                result[key] = ""
-                continue
-            # A block is a sequence if its *first non-empty* logical entry
-            # starts with ``- ``. Indented continuation lines belonging to a
-            # sequence item are not themselves prefixed with ``- `` and must
-            # not demote the block to a plain mapping.
-            first_non_empty = next(
-                (ln for ln in block_lines if ln.strip()),
-                "",
-            )
-            first_stripped = first_non_empty.lstrip()
-            if first_stripped.startswith("- "):
-                result[key] = _parse_block_sequence(block_lines)
-            elif first_stripped.startswith("{") or first_stripped.startswith("["):
-                # YAML flow block following a bare key (common in
-                # OpenClaw-format manifests where ``metadata:`` opens a
-                # multi-line JSON object). The structured block must
-                # parse cleanly — otherwise the manifest is malformed.
-                blob = "\n".join(ln for ln in block_lines if ln.strip())
-                try:
-                    result[key] = json.loads(blob)
-                except Exception as exc:
-                    raise _MiniYamlError(
-                        f"invalid flow block for {key!r}: {exc}"
-                    ) from exc
-            else:
-                result[key] = _parse_block_mapping(block_lines)
-            continue
-        if rest.startswith("[") and rest.endswith("]"):
-            result[key] = _parse_inline_list(rest)
-        elif rest.startswith("{") or rest.startswith("["):
-            # YAML flow syntax (`{...}` / `[...]` possibly spanning
-            # multiple lines, as used by OpenClaw-format ``metadata``).
-            # We greedily consume subsequent lines until the bracket
-            # balance returns to zero and then try ``json.loads`` — if
-            # that fails the value stays as a raw string so the field
-            # still round-trips without breaking the whole manifest.
-            collected = [rest]
-            depth = _bracket_depth(rest)
-            j = i + 1
-            while depth > 0 and j < len(lines):
-                collected.append(lines[j])
-                depth += _bracket_depth(lines[j])
-                j += 1
-            blob = "\n".join(collected)
-            try:
-                result[key] = json.loads(blob)
-            except Exception as exc:
-                raise _MiniYamlError(
-                    f"invalid flow value for {key!r}: {exc}"
-                ) from exc
-            i = j
-            continue
-        else:
-            result[key] = _coerce_scalar(rest)
-        i += 1
-    return result
-
-
-def _bracket_depth(text: str) -> int:
-    """Rough bracket/brace depth change — ignoring strings is fine for
-    skill manifests since the YAML flow blocks in OpenClaw format
-    don't contain unescaped quotes that would mess up the count."""
-    depth = 0
-    for ch in text:
-        if ch in "{[":
-            depth += 1
-        elif ch in "}]":
-            depth -= 1
-    return depth
-
-
-def _collect_block(lines: List[str], start: int) -> Tuple[List[str], int]:
-    block: List[str] = []
-    consumed = 0
-    for line in lines[start:]:
-        if not line.strip():
-            block.append(line)
-            consumed += 1
-            continue
-        if not (line.startswith(" ") or line.startswith("\t")):
-            break
-        block.append(line)
-        consumed += 1
-    # Drop trailing empty lines.
-    while block and not block[-1].strip():
-        block.pop()
-    return block, consumed
-
-
-def _parse_block_sequence(block_lines: List[str]) -> List[Any]:
-    items: List[Any] = []
-    current: Dict[str, Any] | None = None
-    for line in block_lines:
-        stripped = line.lstrip()
-        # Blank / comment-only lines never contribute to the sequence.
-        # `_collect_block` intentionally preserves interior blank lines so
-        # any layout tool that visualises block YAML (e.g. dash between list
-        # items) still parses cleanly instead of raising or silently writing
-        # an empty ``""`` key into the current item.
-        if not stripped or stripped.startswith("#"):
-            continue
-        if stripped.startswith("- "):
-            if current is not None:
-                items.append(current)
-                current = None
-            rest = stripped[2:].strip()
-            if ":" in rest and not rest.startswith("["):
-                key, _, val = rest.partition(":")
-                current = {key.strip(): _coerce_scalar(val.strip())}
-            elif rest.startswith("[") and rest.endswith("]"):
-                items.append(_parse_inline_list(rest))
-            else:
-                items.append(_coerce_scalar(rest))
-        else:
-            if current is None:
-                raise _MiniYamlError(
-                    f"indented line without a current list item: {line!r}"
-                )
-            if ":" not in stripped:
-                raise _MiniYamlError(
-                    f"expected 'key: value' in list item continuation, got: {line!r}"
-                )
-            key, _, val = stripped.partition(":")
-            val_stripped = val.strip()
-            if val_stripped == "":
-                raise _MiniYamlError(
-                    f"nested mappings deeper than one level are not supported: {line!r}"
-                )
-            current[key.strip()] = _coerce_scalar(val_stripped)
-    if current is not None:
-        items.append(current)
-    return items
-
-
-def _parse_block_mapping(block_lines: List[str]) -> Dict[str, Any]:
-    mapping: Dict[str, Any] = {}
-    for line in block_lines:
-        stripped = line.lstrip()
-        if not stripped:
-            continue
-        if ":" not in stripped:
-            raise _MiniYamlError(f"expected 'key: value', got: {stripped!r}")
-        key, _, val = stripped.partition(":")
-        val_stripped = val.strip()
-        if val_stripped == "":
-            raise _MiniYamlError(
-                f"nested mappings deeper than one level are not supported: {stripped!r}"
-            )
-        if val_stripped.startswith("[") and val_stripped.endswith("]"):
-            mapping[key.strip()] = _parse_inline_list(val_stripped)
-        else:
-            mapping[key.strip()] = _coerce_scalar(val_stripped)
-    return mapping
-
-
-_INLINE_LIST_SPLIT = re.compile(r",(?=(?:[^\"']*[\"'][^\"']*[\"'])*[^\"']*$)")
-
-
-def _parse_inline_list(text: str) -> List[Any]:
-    inner = text.strip()
-    if inner.startswith("[") and inner.endswith("]"):
-        inner = inner[1:-1]
-    if not inner.strip():
-        return []
-    parts = [p.strip() for p in _INLINE_LIST_SPLIT.split(inner)]
-    return [_coerce_scalar(p) for p in parts if p != ""]
-
-
-def _coerce_scalar(text: str) -> Any:
-    s = text.strip()
-    if (s.startswith('"') and s.endswith('"')) or (
-        s.startswith("'") and s.endswith("'")
-    ):
-        return s[1:-1]
-    lower = s.lower()
-    if lower in ("true", "false"):
-        return lower == "true"
-    if lower in ("null", "~", ""):
-        return "" if s == "" else None
-    try:
-        return int(s)
-    except ValueError:
-        pass
-    try:
-        return float(s)
-    except ValueError:
-        pass
-    return s
 
 
 __all__ = [

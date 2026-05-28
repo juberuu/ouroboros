@@ -8,7 +8,7 @@ Verifies:
 - Broader repo pack excludes touched files
 - Path-aware freshness
 - Stale marking lifecycle
-- repo_write_commit doesn't bypass the new stack
+- repo_commit doesn't bypass the new stack
 - review_helpers imports cleanly (no circular deps)
 """
 
@@ -150,9 +150,10 @@ class TestBroaderRepoPack:
             cwd=str(tmp_path), capture_output=True,
         )
         mod = _get_module("ouroboros.tools.review_helpers")
-        pack = mod.build_broader_repo_pack(tmp_path, exclude_paths={"a.py"})
+        pack, omitted = mod.build_full_repo_pack(tmp_path, exclude_paths={"a.py"})
         assert "BBB" in pack
         assert "AAA" not in pack
+        assert "a.py" not in omitted
 
 
 # ---------------------------------------------------------------------------
@@ -372,10 +373,9 @@ class TestRunScopeReviewFailClosed:
 
 
 class TestScopeReviewModule:
-    def test_scope_review_imports(self):
-        mod = _get_module("ouroboros.tools.scope_review")
-        assert hasattr(mod, "run_scope_review")
-        assert callable(mod.run_scope_review)
+    # test_scope_review_imports removed in v5.15.x — pure callable-existence
+    # check. The fail-closed test below already imports the module, and the
+    # behavioral integration tests exercise run_scope_review end-to-end.
 
     def test_scope_review_fail_closed_design(self):
         """run_scope_review must be fail-closed: errors return blocking strings."""
@@ -398,7 +398,9 @@ class TestScopeReviewModule:
         mod = _get_module("ouroboros.tools.scope_review")
         import os
         old = os.environ.get("OUROBOROS_SCOPE_REVIEW_MODEL")
+        old_plural = os.environ.get("OUROBOROS_SCOPE_REVIEW_MODELS")
         try:
+            os.environ.pop("OUROBOROS_SCOPE_REVIEW_MODELS", None)
             os.environ["OUROBOROS_SCOPE_REVIEW_MODEL"] = "google/gemini-2.5-pro"
             assert mod._get_scope_model() == "google/gemini-2.5-pro"
         finally:
@@ -406,6 +408,10 @@ class TestScopeReviewModule:
                 os.environ.pop("OUROBOROS_SCOPE_REVIEW_MODEL", None)
             else:
                 os.environ["OUROBOROS_SCOPE_REVIEW_MODEL"] = old
+            if old_plural is None:
+                os.environ.pop("OUROBOROS_SCOPE_REVIEW_MODELS", None)
+            else:
+                os.environ["OUROBOROS_SCOPE_REVIEW_MODELS"] = old_plural
 
     def test_scope_review_effort_configurable(self):
         """OUROBOROS_EFFORT_SCOPE_REVIEW should resolve via resolve_effort."""
@@ -428,12 +434,61 @@ class TestScopeReviewModule:
         source = inspect.getsource(mod._build_scope_prompt)
         assert "Intent / Scope Review Checklist" in source
 
-    def test_scope_prompt_includes_full_repo_pack(self):
-        # scope_review now uses build_full_repo_pack (DRY, no char cap)
-        # The call is in _gather_scope_packs which _build_scope_prompt delegates to
+    def test_scope_prompt_includes_generated_scope_atlas(self):
+        # scope_review now uses the bounded generated Atlas instead of the legacy full pack.
+        # The call is in _gather_scope_packs which _build_scope_prompt delegates to.
         mod = _get_module("ouroboros.tools.scope_review")
         source = inspect.getsource(mod._gather_scope_packs)
-        assert "build_full_repo_pack" in source
+        assert "compile_review_context_atlas" in source
+        assert "ReviewContextAtlasRequest" in source
+        assert "fixed_prompt_tokens" in source
+
+    def test_scope_prompt_fails_closed_on_atlas_inventory_error(self, tmp_path, monkeypatch):
+        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
+        (tmp_path / "docs").mkdir(exist_ok=True)
+        (tmp_path / "docs" / "CHECKLISTS.md").write_text(
+            "## Intent / Scope Review Checklist\n\nplaceholder\n", encoding="utf-8"
+        )
+        (tmp_path / "docs" / "DEVELOPMENT.md").write_text("dev guide\n", encoding="utf-8")
+        (tmp_path / "a.py").write_text("aaa", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.email=t@o", "-c", "user.name=T", "commit", "-m", "init"],
+            cwd=str(tmp_path), capture_output=True,
+        )
+        (tmp_path / "a.py").write_text("bbb", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
+
+        mod = _get_module("ouroboros.tools.scope_review")
+        monkeypatch.setattr(
+            mod,
+            "compile_review_context_atlas",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("inventory failed")),
+        )
+        with pytest.raises(RuntimeError, match="inventory failed"):
+            mod._build_scope_prompt(tmp_path, "test msg")
+
+    def test_scope_prompt_keeps_literal_atlas_placeholder_in_touched_content(self, tmp_path):
+        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
+        (tmp_path / "docs").mkdir(exist_ok=True)
+        (tmp_path / "docs" / "CHECKLISTS.md").write_text(
+            "## Intent / Scope Review Checklist\n\nplaceholder\n", encoding="utf-8"
+        )
+        (tmp_path / "docs" / "DEVELOPMENT.md").write_text("dev guide\n", encoding="utf-8")
+        (tmp_path / "a.py").write_text("aaa", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.email=t@o", "-c", "user.name=T", "commit", "-m", "init"],
+            cwd=str(tmp_path), capture_output=True,
+        )
+        (tmp_path / "a.py").write_text("print('__GENERATED_SCOPE_ATLAS_PENDING__')\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
+
+        mod = _get_module("ouroboros.tools.scope_review")
+        prompt, status = mod._build_scope_prompt(tmp_path, "test msg")
+        assert status is None
+        current_section = prompt[prompt.index("## Current touched files"):prompt.index("## Wider repository context")]
+        assert "__GENERATED_SCOPE_ATLAS_PENDING__" in current_section
 
 
 # ---------------------------------------------------------------------------
@@ -481,15 +536,15 @@ class TestPathAwareFreshness:
             status="fresh", ts="2026-01-01T00:00:00",
         )
         state.add_run(run1)
-        assert state.runs[0].status == "fresh"
+        assert state.advisory_runs[0].status == "fresh"
 
         run2 = rs.AdvisoryRunRecord(
             snapshot_hash="hash2", commit_message="m2",
             status="fresh", ts="2026-01-01T01:00:00",
         )
         state.add_run(run2)
-        assert state.runs[0].status == "stale"  # hash1 became stale
-        assert state.runs[1].status == "fresh"   # hash2 is fresh
+        assert state.advisory_runs[0].status == "stale"  # hash1 became stale
+        assert state.advisory_runs[1].status == "fresh"   # hash2 is fresh
 
 
 # ---------------------------------------------------------------------------
@@ -523,7 +578,7 @@ class TestGitWiring:
     def test_repo_commit_schema_has_goal_scope(self):
         git = _get_module("ouroboros.tools.git")
         tools = git.get_tools()
-        commit = next(t for t in tools if t.name == "repo_commit")
+        commit = next(t for t in tools if t.name == "commit_reviewed")
         props = commit.schema["parameters"]["properties"]
         assert "goal" in props
         assert "scope" in props
@@ -546,10 +601,10 @@ class TestGitWiring:
         # ThreadPoolExecutor must be used for parallel execution
         assert "ThreadPoolExecutor" in parallel_source
 
-    def test_repo_write_commit_not_bypass_scope(self):
-        """Legacy _repo_write_commit must reach scope review via the shared stage helper."""
+    def test_repo_commit_not_bypass_scope(self):
+        """repo_commit must reach scope review via the shared stage helper."""
         git = _get_module("ouroboros.tools.git")
-        source = inspect.getsource(git._repo_write_commit)
+        source = inspect.getsource(git._repo_commit_push)
         assert "_run_reviewed_stage_cycle" in source
         shared_source = inspect.getsource(git._run_reviewed_stage_cycle)
         assert "_check_advisory_freshness" in shared_source
@@ -1086,11 +1141,13 @@ class TestSharedLLMRouting:
         assert "httpx" not in source
 
     def test_triad_emits_llm_usage_events(self):
-        """_emit_usage_event must write to event_queue or pending_events."""
+        """Triad review must use the shared review usage emitter."""
         mod = _get_module("ouroboros.tools.review")
-        source = inspect.getsource(mod._emit_usage_event)
-        assert "event_queue" in source or "pending_events" in source
-        assert "llm_usage" in source
+        source = inspect.getsource(mod._multi_model_review_async)
+        assert "emit_review_usage" in source
+        helper = inspect.getsource(_get_module("ouroboros.tools.review_helpers").emit_review_usage)
+        assert "llm_usage" in helper
+        assert "emit_review_event" in helper
 
     def test_scope_review_uses_llm_client(self):
         """Scope review must use LLMClient for its model call.
@@ -1108,8 +1165,10 @@ class TestSharedLLMRouting:
         """Scope review must emit llm_usage event for cost tracking."""
         mod = _get_module("ouroboros.tools.scope_review")
         source = inspect.getsource(mod._emit_usage)
-        assert "llm_usage" in source
-        assert "event_queue" in source or "eq" in source
+        assert "emit_review_usage" in source
+        helper = inspect.getsource(_get_module("ouroboros.tools.review_helpers").emit_review_usage)
+        assert "llm_usage" in helper
+        assert "emit_review_event" in helper
 
 
 # ---------------------------------------------------------------------------
@@ -1120,7 +1179,7 @@ class TestAdvisorySchemaEnriched:
     def test_advisory_schema_has_goal_scope_paths(self):
         adv = _get_module("ouroboros.tools.claude_advisory_review")
         tools = adv.get_tools()
-        adv_tool = next(t for t in tools if t.name == "advisory_pre_review")
+        adv_tool = next(t for t in tools if t.name == "advisory_review")
         props = adv_tool.schema["parameters"]["properties"]
         assert "goal" in props
         assert "scope" in props
@@ -1172,10 +1231,11 @@ class TestScopePromptMatrixContract:
         return prompt
 
     def test_full_matrix_contract_is_present(self, tmp_path):
-        """Scope prompt must require one entry per checklist item."""
+        """Scope prompt must require coverage for every checklist item."""
         prompt = self._get_scope_prompt(tmp_path)
-        assert "EXACTLY ONE entry per checklist item" in prompt
+        assert "cover every checklist item" in prompt
         assert "Skipping an item is not allowed" in prompt
+        assert "multiple distinct concrete problems" in prompt
 
     def test_pass_justification_is_mandatory(self, tmp_path):
         """PASS entries must require 1-2 sentences of justification.
@@ -1239,4 +1299,3 @@ class TestTriadPromptAntiPatternLock:
         # Accept any casing — "different concern class" / "DIFFERENT concern class"
         assert "concern class" in flat.lower()
         assert "second pass" in flat.lower()
-

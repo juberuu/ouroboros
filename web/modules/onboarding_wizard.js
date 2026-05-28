@@ -1,46 +1,40 @@
 (() => {
-    const bootstrap = window.__OURO_ONBOARDING_BOOTSTRAP__ || {};
-    const HOST_MODE = bootstrap.hostMode || 'desktop';
-    const LOCAL_RUNTIME_CONTROLS = Boolean(bootstrap.supportsLocalRuntimeControls);
-    const STEP_ORDER = bootstrap.stepOrder || ['providers', 'models', 'review_mode', 'budget', 'summary'];
-    const MODEL_DEFAULTS = bootstrap.modelDefaults || {};
-    const LOCAL_PRESETS = bootstrap.localPresets || {};
-    const MODEL_SUGGESTIONS = bootstrap.modelSuggestions || [];
-    const INITIAL_STATE = bootstrap.initialState || {};
-    const root = document.getElementById('root');
+    // Self-contained IIFE mirror of utils.escapeHtmlAttr; SSOT drift is tested.
+    function escapeHtml(value) {
+        return String(value ?? '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;')
+            .replace(/`/g, '&#96;');
+    }
 
-    const STEP_META = {
-        providers: {
-            title: 'Add your access',
-            railCopy: 'Keys + local',
-            copy: 'Fill at least one remote key or a local model source. The next step adapts to what you configured here.',
-            footer: 'Paste only what you already have. OpenRouter, direct provider keys, and an optional local model can coexist.',
-        },
-        models: {
-            title: 'Choose models',
-            railCopy: '4 model slots',
-            copy: 'Review the visible model defaults derived from your current setup, then edit anything you want before launch.',
-            footer: 'Plain openai/... or anthropic/... remains router-style. Direct values use openai::... and anthropic::....',
-        },
-        review_mode: {
-            title: 'Choose review mode',
-            railCopy: 'Advisory vs blocking',
-            copy: 'Decide how strict pre-commit review should be before Ouroboros starts modifying itself.',
-            footer: 'Pick both review enforcement and the initial runtime mode before Ouroboros starts.',
-        },
-        budget: {
-            title: 'Set your budget',
-            railCopy: 'Session limits',
-            copy: 'Budget is its own step because it directly shapes how far Ouroboros can go in one session and in a single task.',
-            footer: 'Total budget is global. Per-task cost cap is a soft reminder, not a hard kill switch.',
-        },
-        summary: {
-            title: 'Review before launch',
-            railCopy: 'Final check',
-            copy: 'Check the final provider, model, review, and budget picture. Ouroboros will save these onboarding values before starting.',
-            footer: 'The same onboarding values remain editable later in Settings.',
-        },
-    };
+        const bootstrap = window.__OURO_ONBOARDING_BOOTSTRAP__ || {};
+        const SETUP_CONTRACT = bootstrap.contract || {};
+        const HOST_MODE = bootstrap.hostMode || 'desktop';
+        const LOCAL_RUNTIME_CONTROLS = Boolean(bootstrap.supportsLocalRuntimeControls);
+        const STEP_ORDER = bootstrap.stepOrder || (SETUP_CONTRACT.steps || []).map((step) => step.id);
+        const STEP_META = Object.fromEntries((SETUP_CONTRACT.steps || []).map((step) => [step.id, step]));
+        const PROVIDER_FIELDS = SETUP_CONTRACT.providerFields || [];
+        const PROVIDER_PROFILES = SETUP_CONTRACT.providerProfiles || {};
+        const MODEL_SLOTS = SETUP_CONTRACT.modelSlots || [];
+        const REVIEW_MODES = SETUP_CONTRACT.reviewModes || [];
+        const RUNTIME_MODES = SETUP_CONTRACT.runtimeModes || [];
+        const LOCAL_ROUTING_MODES = SETUP_CONTRACT.localRoutingModes || [];
+        const BUDGET_FIELDS = SETUP_CONTRACT.budgetFields || [];
+        const LOCAL_FIELDS = [
+            ['local-source', 'localSource', 'Model Source', 'Qwen/Qwen2.5-7B-Instruct-GGUF or /absolute/path/model.gguf', 'Use either a HuggingFace repo ID or a local absolute GGUF path.', 'field field-full'],
+            ['local-filename', 'localFilename', 'GGUF Filename', 'qwen2.5-7b-instruct-q3_k_m.gguf', 'Required only for HuggingFace repo IDs. Leave empty when the source is a direct filesystem path.', 'field field-full'],
+            ['local-context', 'localContextLength', 'Context Length', '', '', 'field', 'number', '2048', '1024'],
+            ['local-gpu-layers', 'localGpuLayers', 'GPU Layers', '', '', 'field', 'number', '', '1'],
+            ['local-chat-format', 'localChatFormat', 'Chat Format', 'Leave empty for auto-detect', '', 'field field-full'],
+        ];
+        const MODEL_DEFAULTS = bootstrap.modelDefaults || {};
+        const LOCAL_PRESETS = bootstrap.localPresets || {};
+        const MODEL_SUGGESTIONS = bootstrap.modelSuggestions || [];
+        const INITIAL_STATE = bootstrap.initialState || {};
+        const root = document.getElementById('root');
 
     const state = Object.assign({
         currentStep: STEP_ORDER[0],
@@ -69,14 +63,6 @@
         return String(value || '').trim();
     }
 
-    function escapeHtml(value) {
-        return String(value || '')
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;');
-    }
-
     function formatUsd(value) {
         const num = Number(value);
         return Number.isFinite(num) ? `$${num.toFixed(2)}` : '$0.00';
@@ -94,24 +80,32 @@
         return hasAnthropicKeyConfigured() && !state.claudeCliDismissed;
     }
 
-    function isLocalFilesystemSource(value) {
-        const text = trim(value);
-        return text.startsWith('/') || text.startsWith('~');
-    }
+        function isLocalFilesystemSource(value) {
+            const text = trim(value);
+            return text.startsWith('/') || text.startsWith('~');
+        }
 
-    function detectProviderProfile() {
-        const hasOpenrouter = trim(state.openrouterKey).length >= 10;
-        const hasOpenai = trim(state.openaiKey).length >= 10;
-        const hasCloudru = trim(state.cloudruKey).length >= 10;
-        const hasAnthropic = trim(state.anthropicKey).length >= 10;
-        if (hasOpenrouter) return 'openrouter';
-        if ([hasOpenai, hasCloudru, hasAnthropic].filter(Boolean).length > 1) return 'direct-multi';
-        if (hasOpenai) return 'openai';
-        if (hasCloudru) return 'cloudru';
-        if (hasAnthropic) return 'anthropic';
-        if (hasLocalModel()) return 'local';
-        return 'openrouter';
-    }
+        function optionByValue(items, value) {
+            return (items || []).find((item) => item.value === value) || {};
+        }
+
+        function detectProviderProfile() {
+            const configured = Object.fromEntries(PROVIDER_FIELDS.map((field) => [
+                field.settingKey,
+                trim(state[field.stateKey]).length >= 10,
+            ]));
+            const hasOpenrouter = configured.OPENROUTER_API_KEY;
+            const direct = [
+                ['OPENAI_API_KEY', 'openai'],
+                ['CLOUDRU_FOUNDATION_MODELS_API_KEY', 'cloudru'],
+                ['ANTHROPIC_API_KEY', 'anthropic'],
+            ].filter(([settingKey]) => configured[settingKey]);
+            if (hasOpenrouter) return 'openrouter';
+            if (direct.length > 1) return 'direct-multi';
+            if (direct.length === 1) return direct[0][1];
+            if (hasLocalModel()) return 'local';
+            return 'openrouter';
+        }
 
     function activeProviderProfile() {
         const profile = detectProviderProfile();
@@ -119,30 +113,21 @@
         return profile;
     }
 
-    function profileLabel(profile) {
-        if (profile === 'openai') return 'OpenAI';
-        if (profile === 'cloudru') return 'Cloud.ru Foundation Models';
-        if (profile === 'anthropic') return 'Anthropic';
-        if (profile === 'direct-multi') return 'Direct multi-provider';
-        if (profile === 'local') return 'Local-first';
-        return 'OpenRouter';
-    }
+        function profileLabel(profile) {
+            return PROVIDER_PROFILES[profile]?.label || PROVIDER_PROFILES.openrouter?.label || 'OpenRouter';
+        }
 
-    function reviewLabel(mode) {
-        return mode === 'blocking' ? 'Blocking' : 'Advisory';
-    }
+        function reviewLabel(mode) {
+            return optionByValue(REVIEW_MODES, mode).label || 'Advisory';
+        }
 
-    function runtimeModeLabel(mode) {
-        if (mode === 'light') return 'Light';
-        if (mode === 'pro') return 'Pro';
-        return 'Advanced';
-    }
+        function runtimeModeLabel(mode) {
+            return optionByValue(RUNTIME_MODES, mode).label || 'Advanced';
+        }
 
-    function localRoutingLabel(mode) {
-        if (mode === 'all') return 'All models local';
-        if (mode === 'fallback') return 'Fallback model local';
-        return 'Cloud models only';
-    }
+        function localRoutingLabel(mode) {
+            return optionByValue(LOCAL_ROUTING_MODES, mode).label || 'Cloud models only';
+        }
 
     function nextButtonShouldBeDisabled() {
         if (state.saving) return true;
@@ -153,6 +138,11 @@
     function syncCurrentStepActionState() {
         const next = document.getElementById('next-btn');
         if (next) next.disabled = nextButtonShouldBeDisabled();
+    }
+
+    function markStepEdited() {
+        state.error = '';
+        syncCurrentStepActionState();
     }
 
     function applyPresetSelection(presetId) {
@@ -209,23 +199,19 @@
         state.modelsDirty = false;
     }
 
-    function validateProvidersStep() {
-        const openrouterKey = trim(state.openrouterKey);
-        const openaiKey = trim(state.openaiKey);
-        const cloudruKey = trim(state.cloudruKey);
-        const anthropicKey = trim(state.anthropicKey);
-        const localSource = trim(state.localSource);
-        const localFilename = trim(state.localFilename);
-        if (openrouterKey && openrouterKey.length < 10) return 'OpenRouter API key looks too short.';
-        if (openaiKey && openaiKey.length < 10) return 'OpenAI API key looks too short.';
-        if (cloudruKey && cloudruKey.length < 10) return 'Cloud.ru Foundation Models API key looks too short.';
-        if (anthropicKey && anthropicKey.length < 10) return 'Anthropic API key looks too short.';
-        if (!openrouterKey && !openaiKey && !cloudruKey && !anthropicKey && !localSource) {
-            return 'Enter at least one remote key or a local model source before continuing.';
-        }
-        if (localSource && !openrouterKey && !openaiKey && !cloudruKey && !anthropicKey && trim(state.localRoutingMode) === 'cloud') {
-            return 'Local-only setups must route at least one model to the local runtime.';
-        }
+        function validateProvidersStep() {
+            const keyValues = PROVIDER_FIELDS.map((field) => [field, trim(state[field.stateKey])]);
+            const localSource = trim(state.localSource);
+            const localFilename = trim(state.localFilename);
+            const shortKey = keyValues.find(([, value]) => value && value.length < 10);
+            if (shortKey) return `${shortKey[0].label.replace(' API Key', '')} API key looks too short.`;
+            const hasRemote = keyValues.some(([, value]) => value);
+            if (!hasRemote && !localSource) {
+                return 'Enter at least one remote key or a local model source before continuing.';
+            }
+            if (localSource && !hasRemote && trim(state.localRoutingMode) === 'cloud') {
+                return 'Local-only setups must route at least one model to the local runtime.';
+            }
         if (localSource && localSource.includes('/') && !isLocalFilesystemSource(localSource) && !localFilename) {
             return 'Local HuggingFace sources need a GGUF filename.';
         }
@@ -253,13 +239,12 @@
     }
 
     function validateBudgetStep() {
-        const totalBudget = Number(state.totalBudget);
-        const perTaskCostUsd = Number(state.perTaskCostUsd);
-        if (!Number.isFinite(totalBudget) || totalBudget <= 0) {
-            return 'Total budget must be greater than zero.';
-        }
-        if (!Number.isFinite(perTaskCostUsd) || perTaskCostUsd <= 0) {
-            return 'Per-task soft threshold must be greater than zero.';
+        for (const field of BUDGET_FIELDS) {
+            const value = Number(state[field.stateKey]);
+            const min = Number(field.min || 0.01);
+            if (!Number.isFinite(value) || value < min) {
+                return `${field.title || field.label || 'Budget'} must be greater than zero.`;
+            }
         }
         return '';
     }
@@ -366,7 +351,7 @@
 
     function syncClaudeCliVisibility() {
         const card = document.getElementById('wizard-claude-card');
-        if (card) card.style.display = shouldShowClaudeCliCta() ? '' : 'none';
+        if (card) card.hidden = !shouldShowClaudeCliCta();
         renderClaudeCliStatus();
     }
 
@@ -375,7 +360,7 @@
         const statusEl = document.getElementById('wizard-claude-status');
         const installButton = document.getElementById('wizard-claude-install');
         const skipButton = document.getElementById('wizard-claude-skip');
-        if (card) card.style.display = shouldShowClaudeCliCta() ? '' : 'none';
+        if (card) card.hidden = !shouldShowClaudeCliCta();
         if (statusEl) {
             statusEl.textContent = state.claudeCliStatusText || 'Checking Claude runtime...';
             statusEl.dataset.tone = state.claudeCliTone || 'muted';
@@ -403,7 +388,7 @@
         if (stopButton) stopButton.disabled = !state.localRuntimeReady;
         if (testButton) testButton.disabled = !state.localRuntimeReady;
         if (resultEl) {
-            resultEl.style.display = state.localTestResult ? 'block' : 'none';
+            resultEl.hidden = !state.localTestResult;
             resultEl.dataset.tone = state.localTestTone || 'muted';
             resultEl.textContent = state.localTestResult || '';
         }
@@ -469,7 +454,7 @@
 
     function renderClaudeCliControls() {
         return `
-            <div class="panel-card" id="wizard-claude-card" style="${shouldShowClaudeCliCta() ? '' : 'display:none;'}">
+            <div class="panel-card" id="wizard-claude-card"${shouldShowClaudeCliCta() ? '' : ' hidden'}>
                 <h3>Claude Runtime</h3>
                 <p>Claude runtime powers delegated code editing and advisory review. It is managed automatically by the app.</p>
                 <div class="wizard-runtime-strip">
@@ -513,7 +498,33 @@
         return rows;
     }
 
-    function renderProvidersStep() {
+        function providerKeyField({ id, label, placeholder, value, note }) {
+            return `
+                <div class="field">
+                <div class="field-label-row">
+                    <label for="${escapeHtml(id)}">${escapeHtml(label)}</label>
+                    <button class="field-clear" data-clear="${escapeHtml(id)}" type="button">Clear</button>
+                </div>
+                <input id="${escapeHtml(id)}" type="password" placeholder="${escapeHtml(placeholder)}" value="${escapeHtml(value)}">
+                <div class="field-note">${escapeHtml(note)}</div>
+            </div>
+            `;
+        }
+
+        function localInputField([id, stateKey, label, placeholder, note, className, type = 'text', min = '', step = '']) {
+            const clear = ['local-source', 'local-filename', 'local-chat-format'].includes(id)
+                ? `<button class="field-clear" data-clear="${id}" type="button">Clear</button>`
+                : '';
+            return `
+                <div class="${className}">
+                    <div class="field-label-row"><label for="${id}">${label}</label>${clear}</div>
+                    <input id="${id}" type="${type}" ${min ? `min="${min}"` : ''} ${step ? `step="${step}"` : ''} placeholder="${placeholder}" value="${escapeHtml(state[stateKey])}">
+                    ${note ? `<div class="field-note">${note}</div>` : ''}
+                </div>
+            `;
+        }
+
+        function renderProvidersStep() {
         const selectedProfile = activeProviderProfile();
         const localPreset = trim(state.localPreset);
         const localSourceOpen = state.localSourceOpen || hasLocalModel();
@@ -524,56 +535,16 @@
                     <p class="step-copy">${escapeHtml(STEP_META.providers.copy)}</p>
                 </div>
             </div>
-            <div class="panel-card">
-                <h3>Keys first, routing second</h3>
-                <p>${escapeHtml(
-                    trim(state.openrouterKey)
-                        ? 'OpenRouter is present, so the next step keeps router-style defaults while still saving any extra direct keys you paste here.'
-                        : selectedProfile === 'direct-multi'
-                            ? 'Multiple direct providers are present, so the next step keeps your model values editable without forcing one provider family.'
-                            : selectedProfile === 'openai'
-                                ? 'OpenAI is present, so the next step prefills direct openai:: model values.'
-                                : selectedProfile === 'cloudru'
-                                    ? 'Cloud.ru is present, so the next step prefills direct cloudru:: model values.'
-                                : selectedProfile === 'anthropic'
-                                    ? 'Anthropic is present, so the next step prefills direct anthropic:: model values.'
-                                    : 'No remote key is present yet, so local-only setup remains available below.'
-                )}</p>
-            </div>
-            <div class="field-grid">
-                <div class="field">
-                    <div class="field-label-row">
-                        <label for="openrouter-key">OpenRouter API Key</label>
-                        <button class="field-clear" data-clear="openrouter-key" type="button">Clear</button>
-                    </div>
-                    <input id="openrouter-key" type="password" placeholder="sk-or-v1-..." value="${escapeHtml(state.openrouterKey)}">
-                    <div class="field-note">Optional. Best when you want one router for OpenAI, Anthropic, Google, and more.</div>
+                <div class="panel-card">
+                    <h3>Keys first, routing second</h3>
+                    <p>${escapeHtml(PROVIDER_PROFILES[selectedProfile]?.providerCopy || '')}</p>
                 </div>
-                <div class="field">
-                    <div class="field-label-row">
-                        <label for="openai-key">OpenAI API Key</label>
-                        <button class="field-clear" data-clear="openai-key" type="button">Clear</button>
-                    </div>
-                    <input id="openai-key" type="password" placeholder="sk-..." value="${escapeHtml(state.openaiKey)}">
-                    <div class="field-note">Optional. If this is the only remote key, the next step prefills direct <code>openai::...</code> models.</div>
+                <div class="field-grid">
+                    ${PROVIDER_FIELDS.map((field) => providerKeyField({
+                        ...field,
+                        value: state[field.stateKey],
+                    })).join('')}
                 </div>
-                <div class="field">
-                    <div class="field-label-row">
-                        <label for="cloudru-key">Cloud.ru Foundation Models API Key</label>
-                        <button class="field-clear" data-clear="cloudru-key" type="button">Clear</button>
-                    </div>
-                    <input id="cloudru-key" type="password" placeholder="Cloud.ru API key" value="${escapeHtml(state.cloudruKey)}">
-                    <div class="field-note">Optional. If this is the only remote key, the next step prefills direct <code>cloudru::...</code> models.</div>
-                </div>
-                <div class="field">
-                    <div class="field-label-row">
-                        <label for="anthropic-key">Anthropic API Key</label>
-                        <button class="field-clear" data-clear="anthropic-key" type="button">Clear</button>
-                    </div>
-                    <input id="anthropic-key" type="password" placeholder="sk-ant-..." value="${escapeHtml(state.anthropicKey)}">
-                    <div class="field-note">Optional. Saved for direct <code>anthropic::...</code> models and Claude tooling.</div>
-                </div>
-            </div>
             ${renderClaudeCliControls()}
             <details class="wizard-collapse" ${localSourceOpen ? 'open' : ''}>
                 <summary>
@@ -587,56 +558,22 @@
                                 <label for="local-preset">Preset</label>
                                 <button class="field-clear" data-clear="local-preset" type="button">Clear</button>
                             </div>
-                            <select id="local-preset">
-                                <option value="" ${localPreset === '' ? 'selected' : ''}>None</option>
-                                <option value="qwen25-7b" ${localPreset === 'qwen25-7b' ? 'selected' : ''}>Qwen2.5-7B Instruct Q3_K_M</option>
-                                <option value="qwen3-14b" ${localPreset === 'qwen3-14b' ? 'selected' : ''}>Qwen3-14B Instruct Q4_K_M</option>
-                                <option value="qwen3-32b" ${localPreset === 'qwen3-32b' ? 'selected' : ''}>Qwen3-32B Instruct Q4_K_M</option>
-                                <option value="custom" ${localPreset === 'custom' ? 'selected' : ''}>Custom source</option>
-                            </select>
+                                <select id="local-preset">
+                                    <option value="" ${localPreset === '' ? 'selected' : ''}>None</option>
+                                    ${Object.entries(LOCAL_PRESETS).map(([id, preset]) => `<option value="${escapeHtml(id)}" ${localPreset === id ? 'selected' : ''}>${escapeHtml(preset.label)}</option>`).join('')}
+                                    <option value="custom" ${localPreset === 'custom' ? 'selected' : ''}>Custom source</option>
+                                </select>
                             <div class="field-note">Most people can ignore this. Open it only if you want local GGUF routing.</div>
                         </div>
                         <div class="field">
-                            <div class="field-label-row"><label>Local routing</label></div>
-                            <div class="selection-row">
-                                <button class="selection-pill ${state.localRoutingMode === 'cloud' ? 'active' : ''}" data-local-mode="cloud" type="button">Cloud only</button>
-                                <button class="selection-pill ${state.localRoutingMode === 'fallback' ? 'active' : ''}" data-local-mode="fallback" type="button">Fallback local</button>
-                                <button class="selection-pill ${state.localRoutingMode === 'all' ? 'active' : ''}" data-local-mode="all" type="button">All models local</button>
+                                <div class="field-label-row"><label>Local routing</label></div>
+                                <div class="selection-row">
+                                    ${LOCAL_ROUTING_MODES.map((mode) => `<button class="selection-pill ${state.localRoutingMode === mode.value ? 'active' : ''}" data-local-mode="${escapeHtml(mode.value)}" type="button">${escapeHtml(mode.buttonLabel || mode.label)}</button>`).join('')}
+                                </div>
+                                <div class="field-note">Ignored unless a local model source is configured below.</div>
                             </div>
-                            <div class="field-note">Ignored unless a local model source is configured below.</div>
+                            ${LOCAL_FIELDS.map(localInputField).join('')}
                         </div>
-                        <div class="field field-full">
-                            <div class="field-label-row">
-                                <label for="local-source">Model Source</label>
-                                <button class="field-clear" data-clear="local-source" type="button">Clear</button>
-                            </div>
-                            <input id="local-source" placeholder="Qwen/Qwen2.5-7B-Instruct-GGUF or /absolute/path/model.gguf" value="${escapeHtml(state.localSource)}">
-                            <div class="field-note">Use either a HuggingFace repo ID or a local absolute GGUF path.</div>
-                        </div>
-                        <div class="field field-full">
-                            <div class="field-label-row">
-                                <label for="local-filename">GGUF Filename</label>
-                                <button class="field-clear" data-clear="local-filename" type="button">Clear</button>
-                            </div>
-                            <input id="local-filename" placeholder="qwen2.5-7b-instruct-q3_k_m.gguf" value="${escapeHtml(state.localFilename)}">
-                            <div class="field-note">Required only for HuggingFace repo IDs. Leave empty when the source is a direct filesystem path.</div>
-                        </div>
-                        <div class="field">
-                            <label for="local-context">Context Length</label>
-                            <input id="local-context" type="number" min="2048" step="1024" value="${escapeHtml(state.localContextLength)}">
-                        </div>
-                        <div class="field">
-                            <label for="local-gpu-layers">GPU Layers</label>
-                            <input id="local-gpu-layers" type="number" step="1" value="${escapeHtml(state.localGpuLayers)}">
-                        </div>
-                        <div class="field field-full">
-                            <div class="field-label-row">
-                                <label for="local-chat-format">Chat Format</label>
-                                <button class="field-clear" data-clear="local-chat-format" type="button">Clear</button>
-                            </div>
-                            <input id="local-chat-format" placeholder="Leave empty for auto-detect" value="${escapeHtml(state.localChatFormat)}">
-                        </div>
-                    </div>
                     ${renderLocalControls()}
                 </div>
             </details>
@@ -646,94 +583,72 @@
     function modelSuggestionField({ id, label, value, note }) {
         return `
             <div class="field wizard-model-field" data-wizard-model-field>
-                <label for="${id}">${label}</label>
-                <input id="${id}" value="${escapeHtml(value)}" autocomplete="off" spellcheck="false" data-wizard-model-input>
+                <label for="${escapeHtml(id)}">${escapeHtml(label)}</label>
+                <input id="${escapeHtml(id)}" value="${escapeHtml(value)}" autocomplete="off" spellcheck="false" data-wizard-model-input>
                 <div class="wizard-model-suggestions" hidden></div>
-                <div class="field-note">${note}</div>
+                <div class="field-note">${escapeHtml(note)}</div>
             </div>
         `;
     }
 
-    function renderModelsStep() {
-        return `
+        function renderModelsStep() {
+            const profile = activeProviderProfile();
+            return `
             <div class="step-header">
                 <div>
                     <h2 class="step-title">${escapeHtml(STEP_META.models.title)}</h2>
                     <p class="step-copy">${escapeHtml(STEP_META.models.copy)}</p>
                 </div>
             </div>
-            <div class="panel-card">
-                <h3>Current profile</h3>
-                <p>${escapeHtml(
-                    activeProviderProfile() === 'openai'
-                        ? 'OpenAI-only setup detected. These defaults are explicit and official.'
-                        : activeProviderProfile() === 'cloudru'
-                            ? 'Cloud.ru-only setup detected. These defaults use explicit cloudru:: model IDs.'
-                        : activeProviderProfile() === 'anthropic'
-                            ? 'Anthropic-only setup detected. These defaults are explicit and official.'
-                        : activeProviderProfile() === 'direct-multi'
-                                ? 'Multiple direct providers are configured. Start here, then split model slots across them if you want.'
-                                : activeProviderProfile() === 'local'
-                                    ? 'Local-only setup detected. Review the model values and local routing before launch.'
-                                    : 'OpenRouter-style routing remains active. Unprefixed provider IDs like openai/gpt-5.5 or anthropic/claude-sonnet-4.6 continue to route through OpenRouter.'
-                )}</p>
-            </div>
-            <div class="grid two">
-                ${modelSuggestionField({ id: 'main-model', label: 'Main Model', value: state.mainModel, note: 'Primary reasoning and long-form work.' })}
-                ${modelSuggestionField({ id: 'code-model', label: 'Code Model', value: state.codeModel, note: 'Tool-heavy coding and edits.' })}
-                ${modelSuggestionField({ id: 'light-model', label: 'Light Model', value: state.lightModel, note: 'Fast summaries and lightweight tasks.' })}
-                ${modelSuggestionField({ id: 'fallback-model', label: 'Fallback Model', value: state.fallbackModel, note: 'Fallback and resilience path.' })}
-            </div>
+                <div class="panel-card">
+                    <h3>Current profile</h3>
+                    <p>${escapeHtml(PROVIDER_PROFILES[profile]?.modelCopy || '')}</p>
+                </div>
+                <div class="grid two">
+                    ${MODEL_SLOTS.map((slot) => modelSuggestionField({
+                        id: slot.inputId,
+                        label: slot.label,
+                        value: state[slot.stateKey],
+                        note: slot.note,
+                    })).join('')}
+                </div>
             <div class="wizard-inline-note">Direct providers use <code>openai::gpt-5.5</code>, <code>cloudru::zai-org/GLM-4.7</code>, and <code>anthropic::claude-sonnet-4-6</code>. Plain <code>openai/...</code> or <code>anthropic/...</code> stays router-style by design.</div>
         `;
     }
 
     function renderReviewModeStep() {
         const runtimeMode = trim(state.runtimeMode) || 'advanced';
-        const runtimeModeDisabled = HOST_MODE !== 'desktop';
-        const runtimeModeCopy = runtimeModeDisabled
-            ? 'Runtime mode is owner-controlled in web/Docker onboarding and cannot be saved through /api/settings. Use the desktop launcher or edit settings.json while stopped.'
-            : 'Separate axis from review enforcement. This first-run choice becomes the boot baseline before Ouroboros starts; later elevation requires native launcher confirmation.';
-        const disabledAttr = runtimeModeDisabled ? ' disabled aria-disabled="true"' : '';
+        const runtimeModeCopy = HOST_MODE === 'desktop'
+            ? 'Separate axis from review enforcement. This first-run choice becomes the boot baseline before Ouroboros starts; later elevation requires native launcher confirmation.'
+            : 'Separate axis from review enforcement. Web/Docker onboarding saves this through the owner endpoint; the selected mode becomes active after restart.';
         return `
             <div class="step-header">
                 <div>
                     <h2 class="step-title">${escapeHtml(STEP_META.review_mode.title)}</h2>
                     <p class="step-copy">${escapeHtml(STEP_META.review_mode.copy)}</p>
                 </div>
-            </div>
-            <div class="wizard-choice-grid">
-                <button type="button" class="wizard-choice advisory ${state.reviewEnforcement === 'advisory' ? 'active' : ''}" data-review-mode="advisory">
-                    <span class="tone">Flexible</span>
-                    <h3>Advisory</h3>
-                    <p>Faster and cheaper. Review still runs, but you decide how to handle findings. Best when you want iteration speed and can manually watch for drift.</p>
-                </button>
-                <button type="button" class="wizard-choice blocking ${state.reviewEnforcement === 'blocking' ? 'active' : ''}" data-review-mode="blocking">
-                    <span class="tone">Strict</span>
-                    <h3>Blocking</h3>
-                    <p>Slower and more expensive, but much safer. Critical review findings stop commits, which dramatically reduces the chance of gradual code degradation.</p>
-                </button>
-            </div>
+                </div>
+                <div class="wizard-choice-grid">
+                    ${REVIEW_MODES.map((mode) => `
+                        <button type="button" class="wizard-choice ${escapeHtml(mode.className || mode.value)} ${state.reviewEnforcement === mode.value ? 'active' : ''}" data-review-mode="${escapeHtml(mode.value)}">
+                            <span class="tone">${escapeHtml(mode.tone)}</span>
+                            <h3>${escapeHtml(mode.label)}</h3>
+                            <p>${escapeHtml(mode.copy)}</p>
+                        </button>
+                    `).join('')}
+                </div>
             <div class="panel-card runtime-mode-card">
                 <h3>Runtime mode</h3>
-                <p class="field-note">${escapeHtml(runtimeModeCopy)}</p>
-                <div class="wizard-choice-grid three">
-                    <button type="button" class="wizard-choice light ${runtimeMode === 'light' ? 'active' : ''}" data-runtime-mode="light"${disabledAttr}>
-                        <span class="tone">Safest</span>
-                        <h3>Light</h3>
-                        <p>Self-modification of the main repo is disabled. Best for trying Ouroboros out or running it as a pure assistant.</p>
-                    </button>
-                    <button type="button" class="wizard-choice advanced ${runtimeMode === 'advanced' ? 'active' : ''}" data-runtime-mode="advanced"${disabledAttr}>
-                        <span class="tone">Default</span>
-                        <h3>Advanced</h3>
-                        <p>Self-modification of the evolutionary layer is allowed (current behaviour). Protected core/contract/release files stay guarded by Advanced mode.</p>
-                    </button>
-                    <button type="button" class="wizard-choice pro ${runtimeMode === 'pro' ? 'active' : ''}" data-runtime-mode="pro"${disabledAttr}>
-                        <span class="tone">Power</span>
-                        <h3>Pro</h3>
-                        <p>Direct protected-surface mode. Protected core/contract/release edits are allowed on disk, but commits still require the normal triad + scope review gate.</p>
-                    </button>
-                </div>
+                    <p class="field-note">${escapeHtml(runtimeModeCopy)}</p>
+                    <div class="wizard-choice-grid three">
+                        ${RUNTIME_MODES.map((mode) => `
+                            <button type="button" class="wizard-choice ${escapeHtml(mode.className || mode.value)} ${runtimeMode === mode.value ? 'active' : ''}" data-runtime-mode="${escapeHtml(mode.value)}">
+                                <span class="tone">${escapeHtml(mode.tone)}</span>
+                                <h3>${escapeHtml(mode.label)}</h3>
+                                <p>${escapeHtml(mode.copy)}</p>
+                            </button>
+                        `).join('')}
+                    </div>
                 <div class="field">
                     <div class="field-label-row">
                         <label for="skills-repo-path">External skills repo (optional)</label>
@@ -746,34 +661,28 @@
         `;
     }
 
-    function renderBudgetStep() {
-        return `
+        function renderBudgetStep() {
+            return `
             <div class="step-header">
                 <div>
                     <h2 class="step-title">${escapeHtml(STEP_META.budget.title)}</h2>
                     <p class="step-copy">${escapeHtml(STEP_META.budget.copy)}</p>
                 </div>
-            </div>
-            <div class="grid two">
-                <div class="panel-card">
-                    <h3>Total budget</h3>
-                    <div class="field">
-                        <label for="total-budget">Total Budget (USD)</label>
-                        <input id="total-budget" type="number" min="1" step="1" value="${escapeHtml(state.totalBudget)}">
-                        <div class="field-note">Global spend budget across the runtime. Keep this editable even after onboarding.</div>
-                    </div>
                 </div>
-                <div class="panel-card">
-                    <h3>Per-task soft threshold</h3>
-                    <div class="field">
-                        <label for="per-task-budget">Per-task Cost Cap (USD)</label>
-                        <input id="per-task-budget" type="number" min="1" step="1" value="${escapeHtml(state.perTaskCostUsd)}">
-                        <div class="field-note">This does not hard-stop the task. It injects a budget reminder when one task starts getting expensive.</div>
-                    </div>
+                <div class="grid two">
+                    ${BUDGET_FIELDS.map((field) => `
+                        <div class="panel-card">
+                            <h3>${escapeHtml(field.title)}</h3>
+                            <div class="field">
+                                <label for="${escapeHtml(field.inputId)}">${escapeHtml(field.label)}</label>
+                                <input id="${escapeHtml(field.inputId)}" type="number" min="${escapeHtml(field.min || '0.01')}" step="${escapeHtml(field.step || 'any')}" value="${escapeHtml(state[field.stateKey])}">
+                                <div class="field-note">${escapeHtml(field.note)}</div>
+                            </div>
+                        </div>
+                    `).join('')}
                 </div>
-            </div>
-        `;
-    }
+            `;
+        }
 
     function renderSummaryStep() {
         const summary = summaryRows().map(([label, value]) => `
@@ -850,31 +759,34 @@
         renderClaudeCliStatus();
     }
 
-    function bindClearButtons() {
+        function bindClearButtons() {
+            const clearActions = Object.fromEntries(PROVIDER_FIELDS.map((field) => [
+                field.id,
+                () => { state[field.stateKey] = ''; },
+            ]));
+            Object.assign(clearActions, {
+                'local-preset': () => {
+                    state.localPreset = '';
+                    state.localSource = '';
+                state.localFilename = '';
+                state.localRoutingMode = 'cloud';
+                state.localSourceOpen = false;
+            },
+            'local-source': () => {
+                state.localSource = '';
+                state.localPreset = detectLocalPresetSelection();
+            },
+            'local-filename': () => {
+                state.localFilename = '';
+                state.localPreset = detectLocalPresetSelection();
+                },
+                'local-chat-format': () => { state.localChatFormat = ''; },
+                'skills-repo-path': () => { state.skillsRepoPath = ''; },
+            });
         root.querySelectorAll('[data-clear]').forEach((button) => {
             button.addEventListener('click', () => {
                 const target = button.getAttribute('data-clear');
-                if (target === 'openrouter-key') state.openrouterKey = '';
-                if (target === 'openai-key') state.openaiKey = '';
-                if (target === 'cloudru-key') state.cloudruKey = '';
-                if (target === 'anthropic-key') state.anthropicKey = '';
-                if (target === 'local-preset') {
-                    state.localPreset = '';
-                    state.localSource = '';
-                    state.localFilename = '';
-                    state.localRoutingMode = 'cloud';
-                    state.localSourceOpen = false;
-                }
-                if (target === 'local-source') {
-                    state.localSource = '';
-                    state.localPreset = detectLocalPresetSelection();
-                }
-                if (target === 'local-filename') {
-                    state.localFilename = '';
-                    state.localPreset = detectLocalPresetSelection();
-                }
-                if (target === 'local-chat-format') state.localChatFormat = '';
-                if (target === 'skills-repo-path') state.skillsRepoPath = '';
+                if (clearActions[target]) clearActions[target]();
                 state.error = '';
                 render();
             });
@@ -888,54 +800,57 @@
                 state.localSourceOpen = details.open;
             });
         }
-        const openrouterInput = document.getElementById('openrouter-key');
-        const openaiInput = document.getElementById('openai-key');
-        const cloudruInput = document.getElementById('cloudru-key');
-        const anthropicInput = document.getElementById('anthropic-key');
-        const localPreset = document.getElementById('local-preset');
-        const localSource = document.getElementById('local-source');
+            const localPreset = document.getElementById('local-preset');
+            const localSource = document.getElementById('local-source');
         const localFilename = document.getElementById('local-filename');
         const localContext = document.getElementById('local-context');
         const localGpuLayers = document.getElementById('local-gpu-layers');
         const localChatFormat = document.getElementById('local-chat-format');
 
-        if (openrouterInput) openrouterInput.addEventListener('input', () => { state.openrouterKey = openrouterInput.value; state.error = ''; syncCurrentStepActionState(); });
-        if (openaiInput) openaiInput.addEventListener('input', () => { state.openaiKey = openaiInput.value; state.error = ''; syncCurrentStepActionState(); });
-        if (cloudruInput) cloudruInput.addEventListener('input', () => { state.cloudruKey = cloudruInput.value; state.error = ''; syncCurrentStepActionState(); });
-        if (anthropicInput) anthropicInput.addEventListener('input', () => {
-            const wasConfigured = hasAnthropicKeyConfigured();
-            state.anthropicKey = anthropicInput.value;
-            if (!wasConfigured && hasAnthropicKeyConfigured()) {
-                state.claudeCliDismissed = false;
-                startClaudeCliStatusPolling();
-                updateClaudeCliStatus();
-            }
-            state.error = '';
-            syncClaudeCliVisibility();
-            syncCurrentStepActionState();
-        });
+        function bindStateInput(input, key, after = null) {
+            if (!input) return;
+            input.addEventListener('input', () => {
+                state[key] = input.value;
+                if (after) after(input);
+                markStepEdited();
+            });
+        }
+
+            PROVIDER_FIELDS.forEach((field) => {
+                const input = document.getElementById(field.id);
+                if (field.settingKey !== 'ANTHROPIC_API_KEY') {
+                    bindStateInput(input, field.stateKey);
+                    return;
+                }
+                if (!input) return;
+                input.addEventListener('input', () => {
+                    const wasConfigured = hasAnthropicKeyConfigured();
+                    state[field.stateKey] = input.value;
+                    if (!wasConfigured && hasAnthropicKeyConfigured()) {
+                        state.claudeCliDismissed = false;
+                        startClaudeCliStatusPolling();
+                        updateClaudeCliStatus();
+                    }
+                    syncClaudeCliVisibility();
+                    markStepEdited();
+                });
+            });
         if (localPreset) localPreset.addEventListener('change', () => { applyPresetSelection(localPreset.value); state.error = ''; render(); });
-        if (localSource) localSource.addEventListener('input', () => {
-            state.localSource = localSource.value;
+        bindStateInput(localSource, 'localSource', () => {
             state.localPreset = detectLocalPresetSelection();
             if (localPreset) localPreset.value = state.localPreset || '';
             state.localSourceOpen = true;
             if (trim(state.localSource) && activeProviderProfile() === 'local' && trim(state.localRoutingMode) === 'cloud') {
                 state.localRoutingMode = 'all';
             }
-            state.error = '';
-            syncCurrentStepActionState();
         });
-        if (localFilename) localFilename.addEventListener('input', () => {
-            state.localFilename = localFilename.value;
+        bindStateInput(localFilename, 'localFilename', () => {
             state.localPreset = detectLocalPresetSelection();
             if (localPreset) localPreset.value = state.localPreset || '';
-            state.error = '';
-            syncCurrentStepActionState();
         });
-        if (localContext) localContext.addEventListener('input', () => { state.localContextLength = localContext.value; state.error = ''; syncCurrentStepActionState(); });
-        if (localGpuLayers) localGpuLayers.addEventListener('input', () => { state.localGpuLayers = localGpuLayers.value; state.error = ''; syncCurrentStepActionState(); });
-        if (localChatFormat) localChatFormat.addEventListener('input', () => { state.localChatFormat = localChatFormat.value; state.error = ''; syncCurrentStepActionState(); });
+        bindStateInput(localContext, 'localContextLength');
+        bindStateInput(localGpuLayers, 'localGpuLayers');
+        bindStateInput(localChatFormat, 'localChatFormat');
         root.querySelectorAll('[data-local-mode]').forEach((button) => {
             button.addEventListener('click', () => {
                 state.localRoutingMode = button.getAttribute('data-local-mode');
@@ -961,7 +876,6 @@
                     });
                     const data = await resp.json().catch(() => ({}));
                     if (resp.status === 412 && data.error === 'runtime_missing') {
-                        // llama-cpp-python not installed — show actionable message
                         setLocalTestResult(
                             'Local runtime (llama-cpp-python) is not installed.\n' +
                             'Go to Settings → Advanced → Local Model Runtime\n' +
@@ -1030,26 +944,14 @@
         syncCurrentStepActionState();
     }
 
-    function bindModelsStep() {
-        const map = {
-            'main-model': 'mainModel',
-            'code-model': 'codeModel',
-            'light-model': 'lightModel',
-            'fallback-model': 'fallbackModel',
-        };
-        function suggestionMatches(query) {
-            const needle = trim(query).toLowerCase();
-            const source = MODEL_SUGGESTIONS.length ? MODEL_SUGGESTIONS : [
-                'openai::gpt-5.5',
-                'openai::gpt-5.5-mini',
-                'anthropic::claude-opus-4-6',
-                'anthropic::claude-sonnet-4-6',
-                'openai/gpt-5.5',
-            ];
-            return source
-                .filter((model) => !needle || String(model).toLowerCase().includes(needle))
-                .slice(0, 8);
-        }
+        function bindModelsStep() {
+            const modelInputMap = Object.fromEntries(MODEL_SLOTS.map((slot) => [slot.inputId, slot.stateKey]));
+            function suggestionMatches(query) {
+                const needle = trim(query).toLowerCase();
+                return MODEL_SUGGESTIONS
+                    .filter((model) => !needle || String(model).toLowerCase().includes(needle))
+                    .slice(0, 8);
+            }
         function closeSuggestions(exceptInput = null) {
             root.querySelectorAll('.wizard-model-suggestions').forEach((panel) => {
                 if (exceptInput && panel.parentElement?.querySelector('input') === exceptInput) return;
@@ -1071,7 +973,7 @@
             )).join('');
             panel.hidden = false;
         }
-        Object.entries(map).forEach(([id, key]) => {
+            Object.entries(modelInputMap).forEach(([id, key]) => {
             const input = document.getElementById(id);
             if (!input) return;
             input.addEventListener('focus', () => {
@@ -1129,31 +1031,36 @@
             });
         });
         const skillsInput = document.getElementById('skills-repo-path');
-        if (skillsInput) {
-            skillsInput.addEventListener('input', () => {
-                state.skillsRepoPath = skillsInput.value;
-                syncCurrentStepActionState();
-            });
-        }
+        if (skillsInput) skillsInput.addEventListener('input', () => { state.skillsRepoPath = skillsInput.value; markStepEdited(); });
         syncCurrentStepActionState();
     }
 
-    function bindBudgetStep() {
-        const totalBudget = document.getElementById('total-budget');
-        const perTaskBudget = document.getElementById('per-task-budget');
-        if (totalBudget) totalBudget.addEventListener('input', () => { state.totalBudget = totalBudget.value; state.error = ''; syncCurrentStepActionState(); });
-        if (perTaskBudget) perTaskBudget.addEventListener('input', () => { state.perTaskCostUsd = perTaskBudget.value; state.error = ''; syncCurrentStepActionState(); });
-        syncCurrentStepActionState();
-    }
+        function bindBudgetStep() {
+            BUDGET_FIELDS.forEach((field) => {
+                const input = document.getElementById(field.inputId);
+                if (input) input.addEventListener('input', () => { state[field.stateKey] = input.value; markStepEdited(); });
+            });
+            syncCurrentStepActionState();
+        }
 
     async function saveWizardPayload(payload) {
         if (HOST_MODE === 'web') {
+            const runtimeMode = trim(state.runtimeMode) || 'advanced';
             await apiRequest('/api/settings', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload),
             });
-            window.parent?.postMessage({ type: 'ouroboros:onboarding-complete' }, '*');
+            const runtimeResult = await apiRequest('/api/owner/runtime-mode', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mode: runtimeMode }),
+            });
+            window.parent?.postMessage({
+                type: 'ouroboros:onboarding-complete',
+                restart_required: Boolean(runtimeResult?.restart_required),
+                runtime_mode: runtimeResult?.runtime_mode || runtimeMode,
+            }, '*');
             if (!window.parent || window.parent === window) {
                 window.location.replace('/');
             }
@@ -1177,32 +1084,23 @@
             render();
             return;
         }
-        state.saving = true;
-        state.error = '';
-        render();
-        const payload = {
-            OPENROUTER_API_KEY: trim(state.openrouterKey),
-            OPENAI_API_KEY: trim(state.openaiKey),
-            CLOUDRU_FOUNDATION_MODELS_API_KEY: trim(state.cloudruKey),
-            ANTHROPIC_API_KEY: trim(state.anthropicKey),
-            TOTAL_BUDGET: Number(state.totalBudget || 0),
-            OUROBOROS_PER_TASK_COST_USD: Number(state.perTaskCostUsd || 0),
-            OUROBOROS_REVIEW_ENFORCEMENT: trim(state.reviewEnforcement) || 'advisory',
-            OUROBOROS_SKILLS_REPO_PATH: trim(state.skillsRepoPath),
-            LOCAL_MODEL_SOURCE: trim(state.localSource),
+            state.saving = true;
+            state.error = '';
+            render();
+            const payload = {
+                ...Object.fromEntries(PROVIDER_FIELDS.map((field) => [field.settingKey, trim(state[field.stateKey])])),
+                ...Object.fromEntries(BUDGET_FIELDS.map((field) => [field.settingKey, Number(state[field.stateKey] || 0)])),
+                OUROBOROS_REVIEW_ENFORCEMENT: trim(state.reviewEnforcement) || 'advisory',
+                OUROBOROS_SKILLS_REPO_PATH: trim(state.skillsRepoPath),
+                LOCAL_MODEL_SOURCE: trim(state.localSource),
             LOCAL_MODEL_FILENAME: trim(state.localFilename),
             LOCAL_MODEL_CONTEXT_LENGTH: Number(state.localContextLength || 0),
-            LOCAL_MODEL_N_GPU_LAYERS: Number(state.localGpuLayers || 0),
-            LOCAL_MODEL_CHAT_FORMAT: trim(state.localChatFormat),
-            LOCAL_ROUTING_MODE: trim(state.localSource) ? (trim(state.localRoutingMode) || 'cloud') : 'cloud',
-            OUROBOROS_MODEL: trim(state.mainModel),
-            OUROBOROS_MODEL_CODE: trim(state.codeModel),
-            OUROBOROS_MODEL_LIGHT: trim(state.lightModel),
-            OUROBOROS_MODEL_FALLBACK: trim(state.fallbackModel),
-        };
-        if (HOST_MODE === 'desktop') {
-            payload.OUROBOROS_RUNTIME_MODE = trim(state.runtimeMode) || 'advanced';
-        }
+                LOCAL_MODEL_N_GPU_LAYERS: Number(state.localGpuLayers || 0),
+                LOCAL_MODEL_CHAT_FORMAT: trim(state.localChatFormat),
+                LOCAL_ROUTING_MODE: trim(state.localSource) ? (trim(state.localRoutingMode) || 'cloud') : 'cloud',
+                ...Object.fromEntries(MODEL_SLOTS.map((slot) => [slot.settingKey, trim(state[slot.stateKey])])),
+            };
+        payload.OUROBOROS_RUNTIME_MODE = trim(state.runtimeMode) || 'advanced';
         try {
             await saveWizardPayload(payload);
         } catch (error) {

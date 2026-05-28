@@ -1,6 +1,6 @@
 import { renderPageHeader, renderTabStrip } from './page_header.js';
+import { PAGE_ICONS } from './page_icons.js';
 
-const DASHBOARD_ICON = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><path d="M3 13h8V3H3z"/><path d="M13 21h8V11h-8z"/><path d="M13 9h8V3h-8z"/><path d="M3 21h8v-6H3z"/></svg>';
 const DASHBOARD_TABS = [
     { value: 'logs', label: 'Logs' },
     { value: 'evolution', label: 'Evolution' },
@@ -14,11 +14,11 @@ const DASHBOARD_TABS = [
 export function initDashboard({ state }) {
     const page = document.createElement('div');
     page.id = 'page-dashboard';
-    page.className = 'page';
+    page.className = 'page app-page-glass';
     page.innerHTML = `
         ${renderPageHeader({
             title: 'Dashboard',
-            icon: DASHBOARD_ICON,
+            icon: PAGE_ICONS.dashboard,
             description: 'Monitor logs, evolution, costs, and update state from one view.',
             tabsHtml: renderTabStrip({
                 items: DASHBOARD_TABS,

@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import json
-import os
 import pathlib
+import re
 from typing import Any, Dict, List, Optional
 
-from ouroboros.utils import utc_now_iso
+from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
 
 STATUS_REQUESTED = "requested"
 STATUS_SCHEDULED = "scheduled"
@@ -18,6 +17,15 @@ STATUS_FAILED = "failed"
 STATUS_INTERRUPTED = "interrupted"
 STATUS_CANCELLED = "cancelled"
 
+_TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+
+
+def validate_task_id(task_id: Any) -> str:
+    text = str(task_id or "").strip()
+    if not _TASK_ID_RE.fullmatch(text):
+        raise ValueError("task_id must match [A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+    return text
+
 
 def task_results_dir(drive_root: Any) -> pathlib.Path:
     path = pathlib.Path(drive_root) / "task_results"
@@ -26,17 +34,15 @@ def task_results_dir(drive_root: Any) -> pathlib.Path:
 
 
 def task_result_path(drive_root: Any, task_id: str) -> pathlib.Path:
-    return task_results_dir(drive_root) / f"{task_id}.json"
+    return task_results_dir(drive_root) / f"{validate_task_id(task_id)}.json"
 
 
 def load_task_result(drive_root: Any, task_id: str) -> Optional[Dict[str, Any]]:
-    path = task_result_path(drive_root, task_id)
-    if not path.exists():
-        return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+        path = task_result_path(drive_root, task_id)
+    except ValueError:
         return None
+    return read_json_dict(path)
 
 
 def list_task_results(
@@ -47,9 +53,8 @@ def list_task_results(
     wanted = {str(item) for item in list(statuses or []) if str(item).strip()}
     results: List[Dict[str, Any]] = []
     for path in sorted(task_results_dir(drive_root).glob("*.json")):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
+        data = read_json_dict(path)
+        if data is None:
             continue
         if wanted and str(data.get("status") or "") not in wanted:
             continue
@@ -58,13 +63,13 @@ def list_task_results(
 
 
 def write_task_result(
-    drive_root: Any,
+    results_drive_root: Any,
     task_id: str,
     status: str,
     **fields: Any,
 ) -> Dict[str, Any]:
-    path = task_result_path(drive_root, task_id)
-    existing = load_task_result(drive_root, task_id) or {}
+    path = task_result_path(results_drive_root, task_id)
+    existing = load_task_result(results_drive_root, task_id) or {}
 
     ts = str(fields.pop("ts", "") or existing.get("ts") or utc_now_iso())
     payload = {
@@ -75,7 +80,5 @@ def write_task_result(
         "ts": ts,
     }
 
-    tmp_path = path.parent / f"{task_id}.json.tmp"
-    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp_path, path)
+    atomic_write_json(path, payload)
     return payload

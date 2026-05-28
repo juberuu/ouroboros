@@ -10,6 +10,7 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 def test_version_file_and_pyproject_are_synced():
     version = (REPO / "VERSION").read_text(encoding="utf-8").strip()
     pyproject = (REPO / "pyproject.toml").read_text(encoding="utf-8")
+    package_json = (REPO / "web" / "package.json").read_text(encoding="utf-8")
 
     # ``VERSION`` holds the author-facing spelling (``4.50.0-rc.1`` /
     # ``4.50.0``); ``pyproject.toml`` must carry the PEP 440-canonical
@@ -19,6 +20,7 @@ def test_version_file_and_pyproject_are_synced():
     # separators.
     pyproject_version = _normalize_pep440(version)
     assert f'version = "{pyproject_version}"' in pyproject
+    assert f'"version": "{version}"' in package_json
 
 
 def test_readme_version_history_contains_current_version_row():
@@ -73,11 +75,23 @@ def test_readme_documents_release_tag_prerequisite_for_build_scripts():
     assert "git tag -a" in readme
 
 
+def test_readme_documents_packaged_cli_installer_and_source_venv():
+    readme = (REPO / "README.md").read_text(encoding="utf-8")
+
+    assert "Install CLI.command" in readme
+    assert "./Ouroboros/bin/install-ouroboros-cli" in readme
+    assert r"Ouroboros\bin\install-ouroboros-cli.cmd" in readme
+    assert "python3.11 -m venv .venv" in readme
+    assert "ouroboros run --start \"2+2?\"" in readme
+
+
 def test_architecture_doc_describes_build_script_release_tag_check():
     architecture = (REPO / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
 
     assert "Release tag prerequisite" in architecture
-    assert "git tag --points-at HEAD" in architecture
+    assert "scripts/build_repo_bundle.py" in architecture
+    assert "release-tag SSOT" in architecture
+    assert "annotated `v$(cat VERSION)` tag points at `HEAD`" in architecture
 
 
 def test_system_prompt_lists_bible_in_safety_critical_set():
@@ -130,7 +144,7 @@ def test_server_workers_init_reads_manifest_branches_not_hardcoded_strings():
 
 
 def test_architecture_module_tree_lists_all_live_extension_http_endpoints():
-    """The high-level module map entry for ``ouroboros/extensions_api.py``
+    """The high-level module map entry for ``ouroboros/gateway/extensions.py``
     must list every HTTP path the module actually registers, so the
     architecture map does not contradict the endpoint table later in the
     same document. Specifically the Phase 5 review surface
@@ -138,11 +152,12 @@ def test_architecture_module_tree_lists_all_live_extension_http_endpoints():
     ``server.py`` and must appear in both places."""
     architecture = (REPO / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
 
-    # Module map entry lives on the ``extensions_api.py`` tree line.
-    tree_idx = architecture.find("├── extensions_api.py")
+    # Module map entry lives on the ``gateway/extensions.py`` tree line.
+    tree_idx = architecture.find("├── extensions.py")
     assert tree_idx != -1
     tree_line = architecture[tree_idx : architecture.find("\n", tree_idx)]
     assert "POST /api/skills/<skill>/toggle" in tree_line
+    assert "POST /api/skills/<skill>/delete" in tree_line
     assert "POST /api/skills/<skill>/review" in tree_line
 
 

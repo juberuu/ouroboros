@@ -1,45 +1,26 @@
-"""
-Ouroboros Agent Server — Self-editable entry point.
-
-This file lives in REPO_DIR and can be modified by the agent.
-It runs as a subprocess of the launcher, serving the web UI and
-coordinating the supervisor/worker system.
-
-Starlette + uvicorn on configurable host:port (default localhost:8765; non-loopback binding supported via OUROBOROS_SERVER_HOST).
-"""
+"""Self-editable Starlette/uvicorn entry point for UI and supervisor runtime."""
 
 import asyncio
-import collections
-import json
 import logging
 
 import os
-import inspect
 import pathlib
-import socket
 import sys
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from ouroboros.utils import utc_now_iso
+from typing import Any, Dict, Optional
 
 from starlette.applications import Starlette
-from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, Response
-from starlette.routing import Route, Mount, WebSocketRoute
-from starlette.websockets import WebSocket, WebSocketDisconnect
+from starlette.routing import Route, Mount
 
 import uvicorn
 
-from ouroboros import get_version
-from ouroboros.file_browser_api import file_browser_routes
-from ouroboros.model_catalog_api import api_model_catalog
 from ouroboros.server_control import (
     execute_panic_stop as _execute_panic_stop_impl,
     restart_current_process as _restart_current_process_impl,
 )
-from ouroboros.server_history_api import make_chat_history_endpoint, make_cost_breakdown_endpoint
 from ouroboros.server_auth import (
     NetworkAuthGate,
     get_network_auth_startup_warning,
@@ -47,10 +28,16 @@ from ouroboros.server_auth import (
 )
 from ouroboros.server_entrypoint import find_free_port, parse_server_args, write_port_file
 from ouroboros.server_web import NoCacheStaticFiles, make_index_page, resolve_web_dir
+from ouroboros.gateway import collect_routes
+from ouroboros.gateway import settings as _gateway_settings
+from ouroboros.gateway.ws import (
+    broadcast_ws,
+    broadcast_ws_sync,
+    close_all_ws,
+    has_ws_clients as _has_ws_clients,
+    set_event_loop as _set_ws_event_loop,
+)
 
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
 REPO_DIR = pathlib.Path(os.environ.get("OUROBOROS_REPO_DIR", pathlib.Path(__file__).parent))
 DATA_DIR = pathlib.Path(os.environ.get("OUROBOROS_DATA_DIR",
     pathlib.Path.home() / "Ouroboros" / "data"))
@@ -64,354 +51,50 @@ if not os.environ.get("OUROBOROS_AGENT_PYTHON"):
     if isinstance(_agent_python, str) and _agent_python:
         os.environ["OUROBOROS_AGENT_PYTHON"] = _agent_python
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
 _LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-_log_dir = DATA_DIR / "logs"
-_log_dir.mkdir(parents=True, exist_ok=True)
-from logging.handlers import RotatingFileHandler
-_file_handler = RotatingFileHandler(
-    _log_dir / "server.log", maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8",
+_pytest_default_real_data_dir = (
+    "pytest" in sys.modules
+    and not os.environ.get("OUROBOROS_DATA_DIR")
+    and DATA_DIR == pathlib.Path.home() / "Ouroboros" / "data"
 )
-_file_handler.setFormatter(logging.Formatter(_LOG_FORMAT))
-logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT, handlers=[_file_handler, logging.StreamHandler()])
+if _pytest_default_real_data_dir:
+    logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT, handlers=[logging.StreamHandler()])
+else:
+    _log_dir = DATA_DIR / "logs"
+    _log_dir.mkdir(parents=True, exist_ok=True)
+    from logging.handlers import RotatingFileHandler
+    _file_handler = RotatingFileHandler(
+        _log_dir / "server.log", maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8",
+    )
+    _file_handler.setFormatter(logging.Formatter(_LOG_FORMAT))
+    logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT, handlers=[_file_handler, logging.StreamHandler()])
 log = logging.getLogger("server")
 
-# ---------------------------------------------------------------------------
-# Restart signal
-# ---------------------------------------------------------------------------
 RESTART_EXIT_CODE = 42
 PANIC_EXIT_CODE = 99
 _restart_requested = threading.Event()
 _LAUNCHER_MANAGED = str(os.environ.get("OUROBOROS_MANAGED_BY_LAUNCHER", "") or "").strip() == "1"
-_SECRET_SETTING_KEYS = {
-    "OPENROUTER_API_KEY",
-    "OPENAI_API_KEY",
-    "OPENAI_COMPATIBLE_API_KEY",
-    "CLOUDRU_FOUNDATION_MODELS_API_KEY",
-    "ANTHROPIC_API_KEY",
-    "TELEGRAM_BOT_TOKEN",
-    "GITHUB_TOKEN",
-    "OUROBOROS_NETWORK_PASSWORD",
-}
 
-# ---------------------------------------------------------------------------
-# Runtime network binding (captured in main() from parse_server_args)
-# Used by /api/settings to expose a LAN reachability hint to the Settings UI.
-# ---------------------------------------------------------------------------
+# Captured in main() for Settings LAN-reachability metadata.
 _BIND_HOST = DEFAULT_HOST
-
-
-def _get_lan_ip() -> str:
-    """Return the LAN IP using a UDP socket trick (no packet sent). Returns '' on failure."""
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("192.0.2.1", 80))  # RFC 5737 TEST-NET-1, no packet sent
-            return s.getsockname()[0]
-    except OSError:
-        return ""
-
-
-# IPv4 wildcard hosts that mean "listen on all interfaces"
-_WILDCARD_HOSTS = frozenset({"0.0.0.0", ""})
-
-
-def _is_wildcard_host(host: str) -> bool:
-    return host in _WILDCARD_HOSTS
-
-
-from ouroboros.platform_layer import is_container_env
-
-
-def _build_network_meta(bind_host: str, bind_port: int) -> dict:
-    """Build the _meta dict for /api/settings response."""
-    from ouroboros.server_auth import get_network_auth_startup_warning, is_loopback_host
-    # Strip surrounding brackets from IPv6 literals (e.g. "[::1]" → "::1") so
-    # is_loopback_host can correctly classify bracketed IPv6 loopback addresses.
-    unbracketed = bind_host[1:-1] if bind_host.startswith("[") and bind_host.endswith("]") else bind_host
-    loopback = is_loopback_host(unbracketed)
-    if loopback:
-        return {
-            "bind_host": bind_host,
-            "bind_port": bind_port,
-            "lan_ip": "",
-            "reachability": "loopback_only",
-            "recommended_url": "",
-            "warning": "Server is bound to localhost — not accessible from other devices.",
-        }
-    # Non-loopback: determine the advertised IP
-    wildcard = _is_wildcard_host(bind_host)
-    if wildcard:
-        if is_container_env():
-            # Container bridge IPs are typically not reachable from the user's LAN
-            lan_ip = ""
-        else:
-            lan_ip = _get_lan_ip()
-    elif bind_host in ("::", "[::]"):
-        # IPv6 wildcard — startup uses AF_INET only (server_entrypoint.py), so we
-        # cannot reliably detect or advertise an IPv6 LAN IP. Degrade gracefully.
-        lan_ip = ""
-    else:
-        # Specific non-loopback bind address — use it directly (IPv4 or hostname).
-        # Use unbracketed form so URL construction can uniformly re-bracket IPv6.
-        lan_ip = unbracketed
-
-    auth_warning = get_network_auth_startup_warning(bind_host) or ""
-    if lan_ip:
-        # Handle IPv6 addresses (bracket them for URL)
-        host_in_url = f"[{lan_ip}]" if ":" in lan_ip else lan_ip
-        reachability = "lan_reachable"
-        recommended_url = f"http://{host_in_url}:{bind_port}"
-        warning = auth_warning
-    else:
-        reachability = "host_ip_unknown"
-        recommended_url = f"http://your-host-ip:{bind_port}"
-        warning = " ".join(
-            part for part in [
-                "Could not detect LAN IP automatically." if wildcard else "",
-                auth_warning,
-            ]
-            if part
-        )
-    return {
-        "bind_host": bind_host,
-        "bind_port": bind_port,
-        "lan_ip": lan_ip,
-        "reachability": reachability,
-        "recommended_url": recommended_url,
-        "warning": warning,
-    }
-
-
-# ---------------------------------------------------------------------------
-# WebSocket connections manager
-# ---------------------------------------------------------------------------
-_ws_clients: List[WebSocket] = []
-_ws_lock = threading.Lock()
-def _has_ws_clients() -> bool:
-    with _ws_lock:
-        return bool(_ws_clients)
-
-async def broadcast_ws(msg: dict) -> None:
-    """Send a message to all connected WebSocket clients.
-
-    Send-failures are surfaced at INFO with the message type so silent UI
-    desync is visible in the server log; a structured
-    ``broadcast_partial_failure`` event is emitted to events.jsonl when at
-    least one client failed, so the signal also lands in the events stream
-    that operators tail.
-    """
-    data = json.dumps(msg, ensure_ascii=False, default=str)
-    msg_type = str(msg.get("type", "unknown"))
-    with _ws_lock:
-        clients = list(_ws_clients)
-        total_clients = len(clients)
-    dead = []
-    for ws in clients:
-        try:
-            await ws.send_text(data)
-        except Exception as exc:
-            log.info(
-                "WebSocket send failed for msg type=%s; dropping client (%s)",
-                msg_type, type(exc).__name__,
-            )
-            dead.append(ws)
-    if dead:
-        with _ws_lock:
-            for ws in dead:
-                try:
-                    _ws_clients.remove(ws)
-                except ValueError:
-                    pass
-        try:
-            from ouroboros.utils import utc_now_iso, append_jsonl
-            append_jsonl(
-                DATA_DIR / "logs" / "events.jsonl",
-                {
-                    "ts": utc_now_iso(),
-                    "type": "broadcast_partial_failure",
-                    "msg_type": msg_type,
-                    "dead_clients": len(dead),
-                    "total_clients": total_clients,
-                },
-            )
-        except Exception:
-            log.debug("Failed to emit broadcast_partial_failure event", exc_info=True)
-
-
-def broadcast_ws_sync(msg: dict) -> None:
-    """Thread-safe sync wrapper for broadcasting.
-
-    Uses the saved _event_loop reference (set in startup_event) rather than
-    asyncio.get_event_loop(), which is unreliable from non-main threads
-    in Python 3.10+.
-    """
-    loop = _event_loop
-    if loop is None:
-        return
-    try:
-        asyncio.run_coroutine_threadsafe(broadcast_ws(msg), loop)
-    except RuntimeError:
-        pass
-
-
-def _mask_secret_value(value: Any) -> str:
-    text = str(value or "")
-    return text[:8] + "..." if len(text) > 8 else "***"
-
-
-def _looks_masked_secret(value: Any) -> bool:
-    text = str(value or "").strip()
-    return text == "***" or text.endswith("...")
-
-
-# Keys that refresh immediately in the running supervisor (no restart, no task boundary).
-_IMMEDIATE_KEYS = frozenset({
-    "TOTAL_BUDGET",
-    "OUROBOROS_SOFT_TIMEOUT_SEC",
-    "OUROBOROS_HARD_TIMEOUT_SEC",
-    "OUROBOROS_TOOL_TIMEOUT_SEC",
-    # Integration settings reconfigured inline in api_settings_post
-    "TELEGRAM_BOT_TOKEN",
-    "TELEGRAM_CHAT_ID",
-    "GITHUB_TOKEN",
-    "GITHUB_REPO",
-})
-
-# Keys that require a full process restart when changed.
-# Everything else is hot-reloadable (takes effect on the next task).
-_RESTART_REQUIRED_KEYS = frozenset({
-    "OUROBOROS_MAX_WORKERS",
-    "OUROBOROS_SERVER_HOST",
-    "LOCAL_MODEL_SOURCE",
-    "LOCAL_MODEL_FILENAME",
-    "LOCAL_MODEL_PORT",
-    "LOCAL_MODEL_N_GPU_LAYERS",
-    "LOCAL_MODEL_CONTEXT_LENGTH",
-    "LOCAL_MODEL_CHAT_FORMAT",
-    "OPENAI_BASE_URL",
-    "OPENAI_COMPATIBLE_BASE_URL",
-    "CLOUDRU_FOUNDATION_MODELS_BASE_URL",
-    # A2A server requires restart when toggled or reconfigured
-    "A2A_ENABLED",
-    "A2A_PORT",
-    "A2A_HOST",
-    "A2A_AGENT_NAME",
-    "A2A_AGENT_DESCRIPTION",
-    "A2A_MAX_CONCURRENT",
-    "A2A_TASK_TTL_HOURS",
-})
-
-
-def _classify_settings_changes(
-    old: Dict[str, Any],
-    new: Dict[str, Any],
-) -> list:
-    """Return list of changed keys that require a process restart.
-
-    Keys that changed but are NOT in ``_RESTART_REQUIRED_KEYS`` are
-    hot-reloadable — they take effect at the start of the next task.
-    """
-    return [
-        k for k in _RESTART_REQUIRED_KEYS
-        if str(new.get(k, "") or "") != str(old.get(k, "") or "")
-    ]
-
-
-def _merge_settings_payload(current: Dict[str, Any], body: Dict[str, Any]) -> Dict[str, Any]:
-    merged = {k: v for k, v in current.items()}
-    for key in _SETTINGS_DEFAULTS:
-        # v5.1.2 elevation ratchet: ``OUROBOROS_RUNTIME_MODE`` is owner-only.
-        # The runtime mode axis controls how far Ouroboros may self-modify;
-        # accepting it from /api/settings POST gives the agent a same-process
-        # path to raise its own privilege scope (loopback POST has no auth).
-        # Mode changes happen only through direct ``settings.json`` edits while
-        # the agent is stopped, plus restart. The desktop UI uses a
-        # launcher-native confirmation bridge instead of this HTTP path.
-        if key == "OUROBOROS_RUNTIME_MODE":
-            continue
-        if key not in body:
-            continue
-        if key in _SECRET_SETTING_KEYS and _looks_masked_secret(body[key]) and merged.get(key):
-            continue
-        merged[key] = body[key]
-    return merged
 
 
 def _restart_current_process(host: str, port: int) -> None:
     _restart_current_process_impl(host, port, repo_dir=REPO_DIR, log=log)
 
-
-def _claude_code_status_payload() -> Dict[str, Any]:
-    """Return Claude runtime status using the app-managed runtime contract.
-
-    Replaces the old SDK-only installed/missing check with a richer
-    payload that reports: runtime source, interpreter path, SDK version,
-    CLI path/version, app-managed vs legacy state, API key readiness,
-    and the most recent stderr output on failure.
-    """
-    from ouroboros.platform_layer import resolve_claude_runtime
-
-    rt = resolve_claude_runtime()
-    label = rt.status_label()
-
-    stderr_tail = ""
-    try:
-        from ouroboros.gateways.claude_code import get_last_stderr as gw_stderr
-        stderr_tail = gw_stderr(max_chars=2000)
-    except Exception:
-        pass
-
-    message_map = {
-        "ready": f"Claude runtime ready (SDK {rt.sdk_version}, CLI {rt.cli_version})",
-        "no_api_key": f"Claude runtime available (SDK {rt.sdk_version}) but ANTHROPIC_API_KEY is not set. Add it in Settings.",
-        "error": f"Claude runtime error: {rt.error}",
-        "degraded": f"Claude runtime degraded (SDK {rt.sdk_version}, CLI {'found' if rt.cli_path else 'missing'}). Try Repair.",
-        "missing": "Claude runtime not available. Use Repair in Settings or reinstall the app.",
-    }
-
-    return {
-        "status": label,
-        "installed": bool(rt.sdk_version),
-        "ready": rt.ready,
-        "busy": False,
-        "version": rt.sdk_version,
-        "cli_version": rt.cli_version,
-        "cli_path": rt.cli_path,
-        "interpreter_path": rt.interpreter_path,
-        "app_managed": rt.app_managed,
-        "legacy_detected": rt.legacy_detected,
-        "legacy_sdk_version": rt.legacy_sdk_version,
-        "api_key_set": rt.api_key_set,
-        "message": message_map.get(label, f"Claude runtime: {label}"),
-        "error": rt.error,
-        "stderr_tail": stderr_tail,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Settings (single source of truth: ouroboros.config)
-# ---------------------------------------------------------------------------
 from ouroboros.config import (
     SETTINGS_DEFAULTS as _SETTINGS_DEFAULTS,
     load_settings, save_settings, apply_settings_to_env as _apply_settings_to_env,
 )
 from ouroboros.server_runtime import (
     apply_runtime_provider_defaults,
-    classify_runtime_provider_change,
     has_local_routing,
-    has_startup_ready_provider,
     has_supervisor_provider,
     setup_remote_if_configured,
     ws_heartbeat_loop,
 )
 from ouroboros.onboarding_wizard import build_onboarding_html
 
-
-# ---------------------------------------------------------------------------
-# Supervisor integration
-# ---------------------------------------------------------------------------
 _supervisor_ready = threading.Event()
 _supervisor_error: Optional[str] = None
 _event_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -492,18 +175,19 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
         sender_label = str(msg.get("sender_label") or "")
         sender_session_id = str(msg.get("sender_session_id") or "")
         client_message_id = str(msg.get("client_message_id") or "")
-        telegram_chat_id = int(msg.get("telegram_chat_id") or 0)
+        transport = msg.get("transport") if isinstance(msg.get("transport"), dict) else {}
         image_base64 = str(msg.get("image_base64") or "")
         image_mime = str(msg.get("image_mime") or "image/jpeg")
         image_caption = str(msg.get("image_caption") or "")
         suppress_chat_log = bool(msg.get("suppress_chat_log"))
+        task_constraint = msg.get("task_constraint") if isinstance(msg.get("task_constraint"), dict) else None
         image_data = (
             (image_base64, image_mime, image_caption)
             if image_base64
             else None
         )
         log_text = text or image_caption or ("(image attached)" if image_base64 else "")
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = utc_now_iso()
 
         st = ctx.load_state()
         if st.get("owner_id") is None:
@@ -522,8 +206,24 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
                 sender_label=sender_label,
                 sender_session_id=sender_session_id,
                 client_message_id=client_message_id,
-                telegram_chat_id=telegram_chat_id,
+                transport=transport,
             )
+            if source != "web":
+                bridge.broadcast({
+                    "type": "photo" if image_base64 else "chat",
+                    "role": "user",
+                    "content": text,
+                    "caption": image_caption,
+                    "image_base64": image_base64,
+                    "mime": image_mime,
+                    "ts": now_iso,
+                    "source": source,
+                    "sender_label": sender_label,
+                    "sender_session_id": sender_session_id,
+                    "client_message_id": client_message_id,
+                    "transport": transport,
+                    "chat_id": chat_id,
+                })
         st["last_owner_message_at"] = now_iso
         ctx.save_state(st)
 
@@ -546,9 +246,7 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
             try:
                 state_dir.mkdir(parents=True, exist_ok=True)
                 owner_restart_flag.write_text("owner_restart", encoding="utf-8")
-                # Stable fallback builds already skip auto-resume on panic_stop.flag.
-                # Pair it with the owner flag so current builds can distinguish
-                # this from real panic while stable builds still avoid auto-resume.
+                # Pair owner flag with panic_stop for stable-build auto-resume compatibility.
                 stable_skip_flag.write_text("owner_restart_no_resume", encoding="utf-8")
             except Exception:
                 owner_restart_flag.unlink(missing_ok=True)
@@ -577,11 +275,7 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
                 log.warning("Failed to send owner restart stop notice; continuing restart", exc_info=True)
             _request_restart_exit()
         elif lowered == "/review" or lowered.startswith("/review "):
-            # Only ``/review`` (with no suffix) or ``/review <args>``
-            # maps to deep_self_review. The slash-commands ``/review-skill``
-            # and any future ``/review-*`` flow through the agent's
-            # normal chat pipeline so they can route to their own
-            # tools.
+            # Keep /review-* commands on the normal chat/tool route.
             ctx.queue_deep_self_review_task(reason="owner:/review", force=True)
         elif lowered.startswith("/evolve"):
             parts = lowered.split()
@@ -620,24 +314,32 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
             from supervisor.queue import SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC
 
             status = status_text(ctx.WORKERS, ctx.PENDING, ctx.RUNNING, SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC)
-            ctx.send_with_budget(chat_id, status, force_budget=True)
+            ctx.send_with_budget(chat_id, status)
         else:
-            ctx.consciousness.inject_observation(f"Owner message: {log_text}")
+            ctx.consciousness.inject_observation(f"Message from my human: {log_text}")
             agent = ctx.get_chat_agent()
-            if agent._busy:
-                agent.inject_message(text or image_caption, image_data=image_data)
-            else:
-                ctx.consciousness.pause()
 
-                def _run_and_resume(cid, txt, img):
-                    try:
-                        ctx.handle_chat_direct(cid, txt, img)
-                    finally:
+            def _run_constrained_or_resume(cid, txt, img, constraint, resume_consciousness: bool):
+                try:
+                    ctx.handle_chat_direct(cid, txt, img, task_constraint=constraint)
+                finally:
+                    if resume_consciousness:
                         ctx.consciousness.resume()
 
+            if agent._busy:
+                if task_constraint:
+                    threading.Thread(
+                        target=_run_constrained_or_resume,
+                        args=(chat_id, text or image_caption, image_data, task_constraint, False),
+                        daemon=True,
+                    ).start()
+                else:
+                    agent.inject_message(text or image_caption, image_data=image_data)
+            else:
+                ctx.consciousness.pause()
                 threading.Thread(
-                    target=_run_and_resume,
-                    args=(chat_id, text or image_caption, image_data),
+                    target=_run_constrained_or_resume,
+                    args=(chat_id, text or image_caption, image_data, task_constraint, True),
                     daemon=True,
                 ).start()
     return offset
@@ -735,12 +437,7 @@ def _run_supervisor(settings: dict) -> None:
         soft_timeout = int(settings.get("OUROBOROS_SOFT_TIMEOUT_SEC", 600))
         hard_timeout = int(settings.get("OUROBOROS_HARD_TIMEOUT_SEC", 1800))
 
-        # Branch names come from the managed-repo manifest defaults so a
-        # bundle built with non-default ``--managed-local-branch`` /
-        # ``--managed-local-stable-branch`` drives the worker pool too —
-        # hardcoding ``ouroboros`` / ``ouroboros-stable`` here would bootstrap
-        # one branch set but leave the worker-side commit/restart flows
-        # targeting the old names.
+        # Managed manifest branch defaults must drive worker commit/restart flows too.
         _workers_branch_dev, _workers_branch_stable = _runtime_branch_defaults()
         workers_init(
             repo_dir=REPO_DIR, drive_root=DATA_DIR, max_workers=max_workers,
@@ -759,6 +456,44 @@ def _run_supervisor(settings: dict) -> None:
         spawn_workers(max_workers)
         restored_pending = restore_pending_from_snapshot()
         persist_queue_snapshot(reason="startup")
+        try:
+            from ouroboros.headless import prune_headless_task_drives
+
+            prune_report = prune_headless_task_drives(DATA_DIR)
+            if prune_report.get("pruned") or prune_report.get("errors"):
+                append_jsonl(DATA_DIR / "logs" / "events.jsonl", {
+                    "ts": utc_now_iso(),
+                    "type": "headless_task_drive_prune",
+                    "report": prune_report,
+                })
+        except Exception:
+            log.debug("Headless task drive prune failed", exc_info=True)
+
+        try:
+            from ouroboros.observability import prune_observability_blobs
+            from ouroboros.tools.services import prune_service_logs
+
+            observability_report = prune_observability_blobs(DATA_DIR)
+            service_report = prune_service_logs(DATA_DIR)
+            if (
+                observability_report.get("enabled")
+                or observability_report.get("manifest_count")
+                or observability_report.get("blob_count")
+                or observability_report.get("deleted_manifests")
+                or observability_report.get("deleted_blobs")
+                or observability_report.get("errors")
+                or service_report.get("deleted_dirs")
+                or service_report.get("deleted_files")
+                or service_report.get("errors")
+            ):
+                append_jsonl(DATA_DIR / "logs" / "events.jsonl", {
+                    "ts": utc_now_iso(),
+                    "type": "runtime_artifact_prune",
+                    "observability": observability_report,
+                    "services": service_report,
+                })
+        except Exception:
+            log.debug("Runtime artifact prune failed", exc_info=True)
 
         if restored_pending > 0:
             st_boot = load_state()
@@ -813,7 +548,6 @@ def _run_supervisor(settings: dict) -> None:
     _supervisor_ready.set()
     log.info("Supervisor ready.")
 
-    # Main supervisor loop
     offset = 0
     crash_count = 0
     while not _restart_requested.is_set():
@@ -853,7 +587,7 @@ def _run_supervisor(settings: dict) -> None:
 
 
 def _handle_restart_in_supervisor(evt: Dict[str, Any], ctx: Any) -> None:
-    """Handle restart request from agent — graceful shutdown + exit(42)."""
+    """Handle agent restart request via graceful shutdown + exit(42)."""
     st = ctx.load_state()
     if st.get("owner_chat_id"):
         ctx.send_with_budget(
@@ -876,7 +610,7 @@ def _handle_restart_in_supervisor(evt: Dict[str, Any], ctx: Any) -> None:
 
 
 def _request_restart_exit() -> None:
-    """Signal the server to shut down with restart exit code."""
+    """Signal server shutdown with restart exit code."""
     _restart_requested.set()
 
 
@@ -889,1000 +623,42 @@ def _execute_panic_stop(consciousness, kill_workers_fn) -> None:
         log=log,
     )
 
-
-# ---------------------------------------------------------------------------
-# HTTP/WebSocket routes
-# ---------------------------------------------------------------------------
 APP_START = time.time()
-api_cost_breakdown = make_cost_breakdown_endpoint(DATA_DIR)
-api_chat_history = make_chat_history_endpoint(DATA_DIR)
 
 
-async def ws_endpoint(websocket: WebSocket) -> None:
-    await websocket.accept()
-    with _ws_lock:
-        _ws_clients.append(websocket)
-    log.info("WebSocket client connected (total: %d)", len(_ws_clients))
-    try:
-        while True:
-            data = await websocket.receive_text()
-            try:
-                msg = json.loads(data)
-            except json.JSONDecodeError:
-                continue
-
-            msg_type = msg.get("type", "")
-            # Phase 5 WS dispatch for extensions: route provider-safe
-            # ``ext_<len>_<token>_<msg>`` message types
-            # message types to handlers registered via
-            # ``PluginAPI.register_ws_handler``. The handler receives the
-            # full payload dict; responses (if any) are sent back to the
-            # originating websocket as a best-effort one-shot reply.
-            parsed_ext_type = None
-            if isinstance(msg_type, str):
-                try:
-                    from ouroboros.extension_loader import parse_extension_surface_name as _parse_ext_name
-                    parsed_ext_type = _parse_ext_name(msg_type)
-                except Exception:
-                    parsed_ext_type = None
-            if parsed_ext_type:
-                state = None
-                try:
-                    from ouroboros.config import get_skills_repo_path, load_settings
-                    from ouroboros.extension_loader import (
-                        extension_name_prefix as _extension_name_prefix,
-                        list_ws_handlers as _ws_handlers,
-                        reconcile_extension as _reconcile_extension,
-                    )
-                    from ouroboros.skill_loader import discover_skills as _discover_skills
-                    drive_root = pathlib.Path(
-                        websocket.app.state.drive_root  # type: ignore[attr-defined]
-                        if hasattr(websocket.app, "state") and hasattr(websocket.app.state, "drive_root")
-                        else DATA_DIR
-                    )
-                    repo_path = get_skills_repo_path()
-                    handler_spec = _ws_handlers().get(msg_type)
-                    skill_name = str((handler_spec or {}).get("skill") or "")
-                    if not skill_name:
-                        for skill in _discover_skills(drive_root, repo_path=repo_path):
-                            if msg_type.startswith(_extension_name_prefix(skill.name)):
-                                skill_name = skill.name
-                                break
-                    if not skill_name:
-                        raise KeyError(msg_type)
-                    state = _reconcile_extension(skill_name, drive_root, load_settings, repo_path=repo_path)
-                    if not state.get("desired_live"):
-                        await websocket.send_text(json.dumps({
-                            "type": "log",
-                            "data": {
-                                "level": "warning",
-                                "message": (
-                                    f"extension WS handler {msg_type!r} is not live: "
-                                    f"{state.get('reason')}"
-                                ),
-                            },
-                        }))
-                        continue
-                    if state.get("action") == "extension_load_error" or not state.get("live_loaded"):
-                        await websocket.send_text(json.dumps({
-                            "type": "log",
-                            "data": {
-                                "level": "warning",
-                                "message": (
-                                    f"extension WS handler {msg_type!r} failed to go live: "
-                                    f"{state.get('load_error') or state.get('reason')}"
-                                ),
-                            },
-                        }))
-                        continue
-                    handler_spec = _ws_handlers().get(msg_type)
-                except Exception:
-                    handler_spec = None
-                if handler_spec is None:
-                    extra = ""
-                    if isinstance(state, dict) and state.get("action") == "extension_load_error":
-                        extra = f" (load_error={state.get('load_error')})"
-                    await websocket.send_text(json.dumps({
-                        "type": "log",
-                        "data": {
-                            "level": "warning",
-                            "message": f"no extension WS handler for {msg_type!r}{extra}",
-                        },
-                    }))
-                    continue
-                handler = handler_spec.get("handler")
-                try:
-                    result = handler(msg) if callable(handler) else None
-                    if inspect.iscoroutine(result):
-                        result = await result
-                    if result is not None:
-                        await websocket.send_text(
-                            json.dumps({"type": msg_type + ".reply", "data": result})
-                        )
-                except Exception as exc:
-                    await websocket.send_text(json.dumps({
-                        "type": "log",
-                        "data": {
-                            "level": "error",
-                            "message": f"extension WS handler {msg_type!r} raised: {type(exc).__name__}: {exc}",
-                        },
-                    }))
-                continue
-
-            payload = msg.get("content", "") if msg_type == "chat" else msg.get("cmd", "")
-            if msg_type in ("chat", "command") and payload:
-                try:
-                    from supervisor.message_bus import get_bridge
-                    bridge = get_bridge()
-                    if msg_type == "chat":
-                        bridge.ui_send(
-                            payload,
-                            sender_session_id=str(msg.get("sender_session_id", "") or ""),
-                            client_message_id=str(msg.get("client_message_id", "") or ""),
-                        )
-                    else:
-                        bridge.ui_send(payload, broadcast=False)
-                except Exception:
-                    ts = datetime.now(timezone.utc).isoformat()
-                    await websocket.send_text(json.dumps({
-                        "type": "chat", "role": "assistant",
-                        "content": "⚠️ System is still initializing. Please wait a moment and try again.",
-                        "ts": ts,
-                    }))
-    except WebSocketDisconnect:
-        pass
-    except Exception as e:
-        log.warning("WebSocket error: %s", e)
-    finally:
-        with _ws_lock:
-            try:
-                _ws_clients.remove(websocket)
-            except ValueError:
-                pass
-        log.info("WebSocket client disconnected (total: %d)", len(_ws_clients))
+def _sync_gateway_settings_module() -> None:
+    """Keep legacy server.* monkeypatch tests wired to gateway.settings."""
+    _gateway_settings.load_settings = load_settings
+    _gateway_settings.save_settings = save_settings
+    _gateway_settings._apply_settings_to_env = _apply_settings_to_env
+    _gateway_settings.apply_runtime_provider_defaults = apply_runtime_provider_defaults
 
 
-async def api_health(request: Request) -> JSONResponse:
-    runtime_version = get_version()
-    app_version = os.environ.get("OUROBOROS_APP_VERSION", "").strip() or runtime_version
-    return JSONResponse({
-        "status": "ok",
-        # legacy field for backward compatibility
-        "version": runtime_version,
-        "runtime_version": runtime_version,
-        "app_version": app_version,
-    })
+async def api_settings_get(request):
+    _sync_gateway_settings_module()
+    return await _gateway_settings.api_settings_get(request)
 
 
-async def api_state(request: Request) -> JSONResponse:
-    try:
-        from supervisor.state import load_state, budget_remaining, budget_pct, TOTAL_BUDGET_LIMIT
-        from supervisor.workers import WORKERS, PENDING, RUNNING
-        from supervisor.queue import get_evolution_status_snapshot
-        from ouroboros.config import get_runtime_mode, get_skills_repo_path
-        st = load_state()
-        alive = 0
-        total_w = 0
-        try:
-            alive = sum(1 for w in WORKERS.values() if w.proc.is_alive())
-            total_w = len(WORKERS)
-        except Exception:
-            pass
-        spent = float(st.get("spent_usd") or 0.0)
-        limit = float(TOTAL_BUDGET_LIMIT or 10.0)
-        evolution_state = get_evolution_status_snapshot()
-        bg_requested = bool(st.get("bg_consciousness_enabled"))
-        bg_state = _describe_bg_consciousness_state(bg_requested)
-        return JSONResponse({
-            "uptime": int(time.time() - APP_START),
-            "workers_alive": alive,
-            "workers_total": total_w,
-            "pending_count": len(PENDING),
-            "running_count": len(RUNNING),
-            "spent_usd": round(spent, 4),
-            "budget_limit": limit,
-            "budget_pct": round((spent / limit * 100) if limit > 0 else 0, 1),
-            "branch": st.get("current_branch", "ouroboros"),
-            "sha": (st.get("current_sha") or "")[:8],
-            "evolution_enabled": bool(st.get("evolution_mode_enabled")),
-            "bg_consciousness_enabled": bg_requested,
-            "evolution_cycle": int(st.get("evolution_cycle") or 0),
-            "evolution_state": evolution_state,
-            "bg_consciousness_state": bg_state,
-            "spent_calls": int(st.get("spent_calls") or 0),
-            "supervisor_ready": _supervisor_ready.is_set(),
-            "supervisor_error": _supervisor_error,
-            # Phase 2 plumbing: surface the runtime-mode axis to the UI
-            # so Settings and the nav shell can render mode-aware copy
-            # without re-reading settings.json. Skills-repo path is
-            # surfaced as a boolean so the UI can show "configured"
-            # without leaking the absolute path.
-            "runtime_mode": get_runtime_mode(),
-            "skills_repo_configured": bool(get_skills_repo_path()),
-        })
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+async def api_settings_post(request):
+    _sync_gateway_settings_module()
+    return await _gateway_settings.api_settings_post(request)
 
-
-async def api_settings_get(request: Request) -> JSONResponse:
-    settings, _, _ = apply_runtime_provider_defaults(load_settings())
-    safe = {k: v for k, v in settings.items()}
-    for key in _SECRET_SETTING_KEYS:
-        if safe.get(key):
-            safe[key] = _mask_secret_value(safe[key])
-    # Inject read-only runtime network metadata for the Settings UI hint
-    try:
-        port = int(PORT_FILE.read_text().strip()) if PORT_FILE.exists() else DEFAULT_PORT
-    except (ValueError, OSError):
-        port = DEFAULT_PORT
-    safe["_meta"] = _build_network_meta(_BIND_HOST, port)
-    return JSONResponse(safe)
-
-
-async def api_onboarding(request: Request) -> Response:
-    settings, provider_defaults_changed, _provider_default_keys = apply_runtime_provider_defaults(load_settings())
-    if provider_defaults_changed:
-        save_settings(settings, allow_elevation=True)
-    if has_startup_ready_provider(settings):
-        return Response(status_code=204)
-    return HTMLResponse(build_onboarding_html(settings, host_mode="web"))
-
-
-async def api_claude_code_status(request: Request) -> JSONResponse:
-    try:
-        payload = await asyncio.to_thread(_claude_code_status_payload)
-        return JSONResponse(payload)
-    except Exception as e:
-        return JSONResponse({
-            "status": "error",
-            "installed": False,
-            "busy": False,
-            "message": "Failed to read Claude Agent SDK status.",
-            "error": str(e),
-        }, status_code=500)
-
-
-async def api_claude_code_install(request: Request) -> JSONResponse:
-    """Repair/update the app-managed Claude runtime.
-
-    Replaces the old "pip install SDK" endpoint. Now operates on the
-    app-managed interpreter (prefers embedded python-standalone) and
-    always reinstalls/upgrades to the pinned baseline version.
-    """
-    try:
-        import subprocess as _sp
-        import sys as _sys
-
-        interpreter = _sys.executable
-        try:
-            from ouroboros.platform_layer import resolve_claude_runtime
-            rt = resolve_claude_runtime()
-            if rt.interpreter_path:
-                interpreter = rt.interpreter_path
-        except Exception:
-            pass
-
-        # Single source of truth for the SDK baseline — mirrors the launcher
-        # bootstrap probe so web/onboarding repair installs the same version
-        # that the launcher repair path installs. Imported at call time (rather
-        # than at module load) so the error raises a clean 500 from the install
-        # endpoint instead of breaking server startup; but NO defaulted literal
-        # fallback is kept — that would reintroduce the drift this SSOT was
-        # meant to eliminate (one edit to `_CLAUDE_SDK_BASELINE` and one here
-        # would diverge silently). If the import truly fails, the runtime is
-        # already unusable and the caller should see the error.
-        from ouroboros.launcher_bootstrap import _CLAUDE_SDK_BASELINE as sdk_baseline
-
-        result = await asyncio.to_thread(
-            lambda: _sp.run(
-                [interpreter, "-m", "pip", "install", "--upgrade", sdk_baseline],
-                capture_output=True, text=True, timeout=120,
-            )
-        )
-        if result.returncode == 0:
-            payload = await asyncio.to_thread(_claude_code_status_payload)
-            payload["repaired"] = True
-            return JSONResponse(payload)
-        return JSONResponse({
-            "status": "error",
-            "installed": False,
-            "ready": False,
-            "busy": False,
-            "message": "Claude runtime repair failed.",
-            "error": (result.stderr or result.stdout or "")[:500],
-        }, status_code=500)
-    except Exception as e:
-        return JSONResponse({
-            "status": "error",
-            "installed": False,
-            "ready": False,
-            "busy": False,
-            "message": "Claude runtime repair failed.",
-            "error": f"{type(e).__name__}: {e}",
-        }, status_code=500)
-
-
-async def api_settings_post(request: Request) -> JSONResponse:
-    try:
-        body = await request.json()
-        old_settings = load_settings()
-        current = _merge_settings_payload(old_settings, body)
-        # Phase 2: normalize the new runtime-mode axis on the save path so a
-        # typo like ``{"OUROBOROS_RUNTIME_MODE": "turbo"}`` cannot land in
-        # settings.json. The same normalizer runs on the read side
-        # (``get_runtime_mode``), so /api/settings, /api/state, and the UI
-        # segmented control stay in lockstep.
-        from ouroboros.config import normalize_runtime_mode as _norm_runtime_mode
-        # v5.1.2 elevation ratchet: belt-and-braces. ``_merge_settings_payload``
-        # already skips ``OUROBOROS_RUNTIME_MODE`` so the body cannot influence
-        # it, but if a future contributor adds a side channel we still want
-        # the saved mode to match the on-disk old value, not the request body.
-        current["OUROBOROS_RUNTIME_MODE"] = _norm_runtime_mode(
-            old_settings.get("OUROBOROS_RUNTIME_MODE")
-        )
-        # Skills-repo path is opaque text; trim incidental whitespace so the
-        # "configured vs empty" boolean in /api/state stays deterministic.
-        current["OUROBOROS_SKILLS_REPO_PATH"] = str(
-            current.get("OUROBOROS_SKILLS_REPO_PATH") or ""
-        ).strip()
-        try:
-            from ouroboros.server_auth import is_loopback_host
-            desired_host = str(current.get("OUROBOROS_SERVER_HOST") or "").strip()
-            desired_password = str(current.get("OUROBOROS_NETWORK_PASSWORD") or "").strip()
-            allowed_saved_hosts = {"", "127.0.0.1", "localhost", "::1", "[::1]", "0.0.0.0", "::", "[::]"}
-            if desired_host and desired_host not in allowed_saved_hosts:
-                return JSONResponse(
-                    {
-                        "error": (
-                            "Server Bind Host in Settings supports localhost or wildcard "
-                            "binds only (127.0.0.1 or 0.0.0.0). Specific LAN IP binds "
-                            "are manual/env-only so the desktop launcher can keep using "
-                            "a reliable loopback health check."
-                        )
-                    },
-                    status_code=400,
-                )
-            if desired_host and not is_loopback_host(desired_host) and not desired_password:
-                return JSONResponse(
-                    {
-                        "error": (
-                            "Setting a non-localhost Server Bind Host through the web UI "
-                            "requires a Network Password in the same save. For manual "
-                            "trusted-lab/Docker setups, stop Ouroboros and edit "
-                            "settings.json or environment variables directly."
-                        )
-                    },
-                    status_code=400,
-                )
-            current_effective_host = (
-                str(_BIND_HOST or "").strip()
-                or str(os.environ.get("OUROBOROS_SERVER_HOST") or "").strip()
-            )
-            old_password = str(old_settings.get("OUROBOROS_NETWORK_PASSWORD") or "").strip()
-            if (
-                current_effective_host
-                and not is_loopback_host(current_effective_host)
-                and old_password
-                and not desired_password
-            ):
-                return JSONResponse(
-                    {
-                        "error": (
-                            "Cannot clear Network Password while the running server is "
-                            "still bound to a non-localhost interface. First save a "
-                            "loopback Server Bind Host and restart, then clear the password."
-                        )
-                    },
-                    status_code=400,
-                )
-        except Exception:
-            log.warning("Could not validate network bind settings", exc_info=True)
-        current, provider_defaults_changed, provider_default_keys = apply_runtime_provider_defaults(current)
-        if str(current.get("LOCAL_MODEL_SOURCE", "") or "").strip() and not has_supervisor_provider(current):
-            return JSONResponse(
-                {"error": "Local-only setups must route at least one model to the local runtime."},
-                status_code=400,
-            )
-        # Detect what actually changed before saving.
-        all_changed = [
-            k for k in current
-            if str(current.get(k, "") or "") != str(old_settings.get(k, "") or "")
-        ]
-        restart_keys = _classify_settings_changes(old_settings, current)
-
-        save_settings(current)
-        _apply_settings_to_env(current)
-        _start_supervisor_if_needed(current)
-
-        # Phase 4: when OUROBOROS_SKILLS_REPO_PATH changed, reconcile the
-        # extension loader against the new path so stale registrations
-        # from the previous path are torn down and any enabled +
-        # PASS-reviewed extensions at the new path come up live. Hot-
-        # reload pattern mirrors the other "next task" plumbing below.
-        try:
-            from ouroboros.extension_loader import reload_all as _reload_extensions
-            new_path = str(current.get("OUROBOROS_SKILLS_REPO_PATH") or "").strip()
-            old_path = str(old_settings.get("OUROBOROS_SKILLS_REPO_PATH") or "").strip()
-            new_runtime_mode = str(current.get("OUROBOROS_RUNTIME_MODE") or "").strip()
-            old_runtime_mode = str(old_settings.get("OUROBOROS_RUNTIME_MODE") or "").strip()
-            if new_path != old_path or new_runtime_mode != old_runtime_mode:
-                # Use ``load_settings`` rather than ``lambda: current``
-                # so extensions see fresh settings on subsequent reads
-                # (capturing ``current`` would freeze the snapshot at
-                # settings-save time and drift from disk on later
-                # edits).
-                from ouroboros.config import load_settings as _load_settings
-                _reload_extensions(
-                    pathlib.Path(DATA_DIR),
-                    _load_settings,
-                    repo_path=new_path or None,
-                )
-        except Exception:
-            log.warning("Extension reload after settings change failed", exc_info=True)
-
-        # Hot-reload supervisor globals that can change without restart.
-        try:
-            from supervisor.state import refresh_budget_from_settings
-            refresh_budget_from_settings(current)
-        except Exception:
-            pass
-        try:
-            from supervisor.queue import refresh_timeouts_from_settings
-            refresh_timeouts_from_settings(current)
-        except Exception:
-            pass
-        try:
-            from supervisor.message_bus import refresh_budget_limit
-            raw_budget = current.get("TOTAL_BUDGET")
-            new_budget = float(raw_budget) if raw_budget is not None else 0.0
-            refresh_budget_limit(new_budget)
-        except Exception:
-            pass
-
-        warnings = []
-        if provider_defaults_changed:
-            change_kind = classify_runtime_provider_change(old_settings, current)
-            # Reverse migration (OpenRouter added back, :: → /) is silent
-            # housekeeping — the old warning text was misleading in that case.
-            if change_kind == "direct_normalize":
-                warnings.append(
-                    "Normalized direct-provider routing because OpenRouter is not configured for the active provider."
-                )
-        try:
-            from supervisor.message_bus import get_bridge
-            get_bridge().configure_from_settings(current)
-        except Exception:
-            pass
-        try:
-            from ouroboros.server_auth import is_loopback_host
-            desired_host = str(current.get("OUROBOROS_SERVER_HOST") or "").strip()
-            desired_password = str(current.get("OUROBOROS_NETWORK_PASSWORD") or "").strip()
-            if desired_host and not is_loopback_host(desired_host) and not desired_password:
-                warnings.append(
-                    "Server Bind Host is non-localhost and Network Password is empty; "
-                    "after restart the app will be reachable on the network without a password."
-                )
-        except Exception:
-            pass
-        _repo_slug = current.get("GITHUB_REPO", "")
-        _gh_token = current.get("GITHUB_TOKEN", "")
-        if _repo_slug and _gh_token:
-            from supervisor.git_ops import configure_remote, migrate_remote_credentials
-            remote_ok, remote_msg = configure_remote(_repo_slug, _gh_token)
-            if not remote_ok:
-                log.warning("Remote configuration failed on settings save: %s", remote_msg)
-                warnings.append(f"Remote config failed: {remote_msg}")
-            else:
-                mig_ok, mig_msg = migrate_remote_credentials()
-                if not mig_ok:
-                    log.warning("Credential migration failed: %s", mig_msg)
-        immediate_changed = [k for k in all_changed if k in _IMMEDIATE_KEYS]
-        next_task_changed = [
-            k for k in all_changed
-            if k not in _IMMEDIATE_KEYS and k not in _RESTART_REQUIRED_KEYS
-        ]
-        resp: Dict[str, Any] = {"status": "saved"}
-        if not all_changed:
-            resp["no_changes"] = True
-        if restart_keys:
-            resp["restart_required"] = True
-            resp["restart_keys"] = restart_keys
-        if immediate_changed:
-            resp["immediate_changed"] = True
-        if next_task_changed:
-            resp["next_task_changed"] = True
-        if warnings:
-            resp["warnings"] = warnings
-        return JSONResponse(resp)
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=400)
-
-
-async def api_reset(request: Request) -> JSONResponse:
-    """Reset all runtime data (state, memory, logs, settings) but keep repo.
-
-    After reset the launcher will show the onboarding wizard on next start.
-    """
-    import shutil
-    try:
-        deleted = []
-        for subdir in ("state", "memory", "logs", "archive", "locks", "task_results", "uploads"):
-            p = DATA_DIR / subdir
-            if p.exists():
-                shutil.rmtree(p, ignore_errors=True)
-                deleted.append(subdir)
-        settings_file = DATA_DIR / "settings.json"
-        if settings_file.exists():
-            settings_file.unlink()
-            deleted.append("settings.json")
-        _request_restart_exit()
-        return JSONResponse({"status": "ok", "deleted": deleted, "restarting": True})
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
-async def api_command(request: Request) -> JSONResponse:
-    try:
-        body = await request.json()
-        cmd = body.get("cmd", "")
-        if cmd:
-            from supervisor.message_bus import get_bridge, log_chat
-            bridge = get_bridge()
-            visible_text = str(body.get("visible_text") or "").strip()
-            bridge.ui_send(cmd, broadcast=False, suppress_chat_log=bool(visible_text))
-            if visible_text:
-                task_id = str(body.get("visible_task_id") or "skill_repair")
-                ts = datetime.now(timezone.utc).isoformat()
-                payload = {
-                    "type": "chat",
-                    "role": "system",
-                    "content": visible_text,
-                    "ts": ts,
-                    "source": "skill_repair",
-                    "system_type": "skill_repair",
-                    "task_id": task_id,
-                }
-                broadcast_ws_sync(payload)
-                log_chat(
-                    "system",
-                    0,
-                    0,
-                    visible_text,
-                    ts=ts,
-                    source="skill_repair",
-                    task_id=task_id,
-                )
-        return JSONResponse({"status": "ok"})
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=400)
-
-
-async def api_git_log(request: Request) -> JSONResponse:
-    """Return recent commits, tags, and current branch/sha."""
-    try:
-        from supervisor.git_ops import list_commits, list_versions, git_capture
-        commits = list_commits(max_count=30)
-        tags = list_versions(max_count=20)
-        rc, branch, _ = git_capture(["git", "rev-parse", "--abbrev-ref", "HEAD"])
-        rc2, sha, _ = git_capture(["git", "rev-parse", "--short", "HEAD"])
-        return JSONResponse({
-            "commits": commits,
-            "tags": tags,
-            "branch": branch.strip() if rc == 0 else "unknown",
-            "sha": sha.strip() if rc2 == 0 else "",
-        })
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
-async def api_git_rollback(request: Request) -> JSONResponse:
-    """Roll back to a specific commit or tag, then restart."""
-    try:
-        body = await request.json()
-        target = body.get("target", "").strip()
-        if not target:
-            return JSONResponse({"error": "missing target"}, status_code=400)
-        from supervisor.git_ops import rollback_to_version
-        ok, msg = rollback_to_version(target, reason="ui_rollback")
-        if not ok:
-            return JSONResponse({"error": msg}, status_code=400)
-        _request_restart_exit()
-        return JSONResponse({"status": "ok", "message": msg})
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
-async def api_git_promote(request: Request) -> JSONResponse:
-    """Promote the current dev branch to the runtime's stable branch."""
-    try:
-        import subprocess as sp
-        branch_dev, branch_stable = _runtime_branch_defaults()
-        sp.run(["git", "branch", "-f", branch_stable, branch_dev],
-               cwd=str(REPO_DIR), check=True, capture_output=True)
-        return JSONResponse({"status": "ok", "message": f"{branch_stable} updated to match {branch_dev}"})
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
-async def api_update_status(request: Request) -> JSONResponse:
-    """Return passive managed-update status without fetching."""
-    try:
-        from supervisor.git_ops import compute_managed_update_status, git_capture
-        status = compute_managed_update_status(fetch=False)
-        latest_version = ""
-        target_ref = status.get("target_ref") or ""
-        if target_ref and status.get("latest_sha"):
-            rc, version_text, _ = git_capture(["git", "show", f"{target_ref}:VERSION"])
-            if rc == 0:
-                latest_version = version_text.strip()
-        return JSONResponse({
-            "current_version": get_version(),
-            "latest_version": latest_version,
-            "official_tags": [],
-            **status,
-        })
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
-async def api_update_check(request: Request) -> JSONResponse:
-    """Fetch the managed remote and return fresh update status."""
-    try:
-        from supervisor.git_ops import compute_managed_update_status, git_capture, list_official_update_tags
-        status = compute_managed_update_status(fetch=True)
-        latest_version = ""
-        target_ref = status.get("target_ref") or ""
-        if target_ref and status.get("latest_sha"):
-            rc, version_text, _ = git_capture(["git", "show", f"{target_ref}:VERSION"])
-            if rc == 0:
-                latest_version = version_text.strip()
-        return JSONResponse({
-            "current_version": get_version(),
-            "latest_version": latest_version,
-            "official_tags": list_official_update_tags(),
-            **status,
-        })
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
-async def api_update_apply(request: Request) -> JSONResponse:
-    """Prepare a managed update and restart so safe_restart applies it."""
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    try:
-        strategy = str(body.get("strategy") or "replace")
-        from supervisor.git_ops import BRANCH_DEV, _clear_update_intent, checkout_and_reset, prepare_managed_update
-        ok, payload = prepare_managed_update(strategy)
-        if not ok:
-            return JSONResponse(payload, status_code=409)
-        try:
-            checkout_ok, checkout_msg = checkout_and_reset(
-                BRANCH_DEV,
-                reason="ui_update_apply",
-                unsynced_policy="ignore",
-            )
-        except Exception as checkout_exc:
-            _clear_update_intent()
-            return JSONResponse(
-                {"error": f"Prepared update but checkout failed: {checkout_exc}", **payload},
-                status_code=409,
-            )
-        if not checkout_ok:
-            _clear_update_intent()
-            return JSONResponse(
-                {"error": f"Prepared update but checkout failed: {checkout_msg}", **payload},
-                status_code=409,
-            )
-        _request_restart_exit()
-        return JSONResponse({"status": "ok", "restarting": True, **payload})
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
-_evo_cache: Dict[str, Any] = {}
-_evo_task: Optional[asyncio.Task] = None
-
-
-async def api_evolution_data(request: Request) -> JSONResponse:
-    """Collect evolution metrics for each git tag."""
-    from ouroboros.utils import collect_evolution_metrics
-    import time as _t
-    global _evo_task
-
-    now = _t.time()
-    force_refresh = str(request.query_params.get("force") or "").strip().lower() in {"1", "true", "yes"}
-    if not force_refresh and _evo_cache.get("ts") and now - _evo_cache["ts"] < 60:
-        return JSONResponse({
-            "points": _evo_cache["points"],
-            "generated_at": _evo_cache.get("generated_at", ""),
-            "cached": True,
-        })
-
-    data_dir = os.environ.get("OUROBOROS_DATA_DIR", os.path.expanduser("~/Ouroboros/data"))
-    if _evo_task is None or _evo_task.done():
-        _evo_task = asyncio.create_task(
-            collect_evolution_metrics(str(REPO_DIR), data_dir=data_dir)
-        )
-    data_points = await _evo_task
-    _evo_cache["ts"] = _t.time()
-    _evo_cache["points"] = data_points
-    _evo_cache["generated_at"] = datetime.now(timezone.utc).isoformat()
-    return JSONResponse({
-        "points": data_points,
-        "generated_at": _evo_cache["generated_at"],
-        "cached": False,
-    })
-
-
-from ouroboros.local_model_api import (
-    api_local_model_start, api_local_model_stop,
-    api_local_model_status, api_local_model_test,
-    api_local_model_install_runtime,
-)
-from ouroboros.chat_upload_api import api_chat_upload, api_chat_upload_delete
-
-
-# ---------------------------------------------------------------------------
-# App setup
-# ---------------------------------------------------------------------------
 web_dir = resolve_web_dir(REPO_DIR)
 web_dir.mkdir(parents=True, exist_ok=True)
 index_page = make_index_page(web_dir)
 
-from ouroboros.extensions_api import (
-    api_extensions_index,
-    api_extension_manifest,
-    api_extension_module,
-    api_extension_settings_section,
-    api_extension_dispatch,
-    api_skill_toggle,
-    api_skill_review,
-    api_skill_grants,
-    api_skill_reconcile,
-    api_skill_lifecycle_queue,
-)
-from ouroboros.marketplace_api import (
-    api_marketplace_search,
-    api_marketplace_info,
-    api_marketplace_preview,
-    api_marketplace_install,
-    api_marketplace_update,
-    api_marketplace_uninstall,
-    api_marketplace_installed,
-    api_ouroboroshub_catalog,
-    api_ouroboroshub_preview,
-    api_ouroboroshub_install,
-    api_ouroboroshub_update,
-    api_ouroboroshub_installed,
-    api_ouroboroshub_uninstall,
-)
-
-
-# v5.0.0: native-skill version-upgrade migration banner endpoints.
-# When ``ensure_data_skills_seeded`` upgrades a launcher-shipped seed
-# skill in place (e.g. weather 0.1 -> 0.2), it writes a record to
-# ``data/state/migrations.json`` so the Skills UI can render a banner
-# explaining the change. These endpoints expose that record + a
-# dismiss path so the banner doesn't re-fire forever.
-async def api_migrations_list(request: Request) -> JSONResponse:
-    """Return the list of unread upgrade migration records."""
-    import json as _json
-    from starlette.responses import JSONResponse as _JR
-    from ouroboros.config import DATA_DIR
-    target = pathlib.Path(DATA_DIR) / "state" / "migrations.json"
-    if not target.is_file():
-        return _JR({"migrations": []})
-    try:
-        data = _json.loads(target.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            return _JR({"migrations": []})
-    except Exception:
-        return _JR({"migrations": []})
-    out = []
-    for key, record in data.items():
-        if not isinstance(record, dict):
-            continue
-        if record.get("dismissed"):
-            continue
-        out.append({"key": str(key), **{k: v for k, v in record.items() if k != "dismissed"}})
-    return _JR({"migrations": out})
-
-
-async def api_migrations_dismiss(request: Request) -> JSONResponse:
-    """Mark a migration record as dismissed so the banner stops firing."""
-    import json as _json
-    from starlette.responses import JSONResponse as _JR
-    from ouroboros.config import DATA_DIR
-    key = (request.path_params.get("key") or "").strip()
-    # Same path-param hygiene as the marketplace surface.
-    if not key or key in {".", ".."} or "/" in key or "\\" in key or "\x00" in key:
-        return _JR({"error": "invalid migration key"}, status_code=400)
-    target = pathlib.Path(DATA_DIR) / "state" / "migrations.json"
-    if not target.is_file():
-        return _JR({"ok": True, "key": key, "note": "no migrations file"})
-    try:
-        data = _json.loads(target.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            data = {}
-    except Exception:
-        data = {}
-    record = data.get(key)
-    if isinstance(record, dict):
-        record["dismissed"] = True
-        data[key] = record
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(
-            _json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-    except Exception as exc:
-        return _JR({"error": str(exc)}, status_code=500)
-    return _JR({"ok": True, "key": key})
-
 routes = [
     Route("/", endpoint=index_page),
-    Route("/api/health", endpoint=api_health),
-    Route("/api/state", endpoint=api_state),
-    # Phase 5: extension catalogue + per-skill manifest endpoint + a
-    # catch-all dispatcher that forwards to whatever an extension
-    # registered via ``PluginAPI.register_route``. The catch-all MUST
-    # appear after the more specific routes so ``/manifest`` is
-    # preferred over ``/<rest>``.
-    Route("/api/extensions", endpoint=api_extensions_index, methods=["GET"]),
-    Route(
-        "/api/extensions/{skill}/manifest",
-        endpoint=api_extension_manifest,
-        methods=["GET"],
+    *collect_routes(
+        data_dir=DATA_DIR,
+        settings_handlers={
+            "api_onboarding": _gateway_settings.api_onboarding,
+            "api_claude_code_status": _gateway_settings.api_claude_code_status,
+            "api_claude_code_install": _gateway_settings.api_claude_code_install,
+            "api_settings_get": api_settings_get,
+            "api_settings_post": api_settings_post,
+        },
     ),
-    Route(
-        "/api/extensions/{skill}/module/{entry}",
-        endpoint=api_extension_module,
-        methods=["GET"],
-    ),
-    Route(
-        "/api/extensions/{skill}/settings_section",
-        endpoint=api_extension_settings_section,
-        methods=["GET"],
-    ),
-    Route(
-        "/api/extensions/{skill}/{rest:path}",
-        endpoint=api_extension_dispatch,
-        methods=["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH"],
-    ),
-    Route(
-        "/api/skills/{skill}/toggle",
-        endpoint=api_skill_toggle,
-        methods=["POST"],
-    ),
-    Route(
-        "/api/skills/lifecycle-queue",
-        endpoint=api_skill_lifecycle_queue,
-        methods=["GET"],
-    ),
-    Route(
-        "/api/skills/{skill}/review",
-        endpoint=api_skill_review,
-        methods=["POST"],
-    ),
-    Route(
-        "/api/skills/{skill}/grants",
-        endpoint=api_skill_grants,
-        methods=["POST"],
-    ),
-    Route(
-        "/api/skills/{skill}/reconcile",
-        endpoint=api_skill_reconcile,
-        methods=["POST"],
-    ),
-    # v4.50+: ClawHub marketplace surface (always-on, registry-host gated).
-    Route(
-        "/api/marketplace/clawhub/search",
-        endpoint=api_marketplace_search,
-        methods=["GET"],
-    ),
-    Route(
-        "/api/marketplace/clawhub/installed",
-        endpoint=api_marketplace_installed,
-        methods=["GET"],
-    ),
-    Route(
-        "/api/marketplace/clawhub/info/{slug:path}",
-        endpoint=api_marketplace_info,
-        methods=["GET"],
-    ),
-    Route(
-        "/api/marketplace/clawhub/preview/{slug:path}",
-        endpoint=api_marketplace_preview,
-        methods=["GET"],
-    ),
-    Route(
-        "/api/marketplace/clawhub/install",
-        endpoint=api_marketplace_install,
-        methods=["POST"],
-    ),
-    Route(
-        "/api/marketplace/clawhub/update/{name}",
-        endpoint=api_marketplace_update,
-        methods=["POST"],
-    ),
-    Route(
-        "/api/marketplace/clawhub/uninstall/{name}",
-        endpoint=api_marketplace_uninstall,
-        methods=["POST"],
-    ),
-    Route(
-        "/api/marketplace/ouroboroshub/catalog",
-        endpoint=api_ouroboroshub_catalog,
-        methods=["GET"],
-    ),
-    Route(
-        "/api/marketplace/ouroboroshub/installed",
-        endpoint=api_ouroboroshub_installed,
-        methods=["GET"],
-    ),
-    Route(
-        "/api/marketplace/ouroboroshub/preview/{slug:path}",
-        endpoint=api_ouroboroshub_preview,
-        methods=["GET"],
-    ),
-    Route(
-        "/api/marketplace/ouroboroshub/install",
-        endpoint=api_ouroboroshub_install,
-        methods=["POST"],
-    ),
-    Route(
-        "/api/marketplace/ouroboroshub/update/{name}",
-        endpoint=api_ouroboroshub_update,
-        methods=["POST"],
-    ),
-    Route(
-        "/api/marketplace/ouroboroshub/uninstall/{name}",
-        endpoint=api_ouroboroshub_uninstall,
-        methods=["POST"],
-    ),
-    # v5: native-skill upgrade migration banner endpoints (Opus
-    # critic finding O-2 — operator must be told when a launcher
-    # bump silently rewrites an installed skill type).
-    Route(
-        "/api/migrations",
-        endpoint=api_migrations_list,
-        methods=["GET"],
-    ),
-    Route(
-        "/api/migrations/{key}/dismiss",
-        endpoint=api_migrations_dismiss,
-        methods=["POST"],
-    ),
-    *file_browser_routes(),
-    Route("/api/onboarding", endpoint=api_onboarding),
-    Route("/api/claude-code/status", endpoint=api_claude_code_status),
-    Route("/api/claude-code/install", endpoint=api_claude_code_install, methods=["POST"]),
-    Route("/api/settings", endpoint=api_settings_get, methods=["GET"]),
-    Route("/api/settings", endpoint=api_settings_post, methods=["POST"]),
-    Route("/api/model-catalog", endpoint=api_model_catalog),
-    Route("/api/command", endpoint=api_command, methods=["POST"]),
-    Route("/api/reset", endpoint=api_reset, methods=["POST"]),
-    Route("/api/git/log", endpoint=api_git_log),
-    Route("/api/git/rollback", endpoint=api_git_rollback, methods=["POST"]),
-    Route("/api/git/promote", endpoint=api_git_promote, methods=["POST"]),
-    Route("/api/update/status", endpoint=api_update_status),
-    Route("/api/update/check", endpoint=api_update_check, methods=["POST"]),
-    Route("/api/update/apply", endpoint=api_update_apply, methods=["POST"]),
-    Route("/api/cost-breakdown", endpoint=api_cost_breakdown),
-    Route("/api/evolution-data", endpoint=api_evolution_data),
-    Route("/api/chat/history", endpoint=api_chat_history),
-    Route("/api/chat/upload", endpoint=api_chat_upload, methods=["POST"]),
-    Route("/api/chat/upload", endpoint=api_chat_upload_delete, methods=["DELETE"]),
-    Route("/api/local-model/start", endpoint=api_local_model_start, methods=["POST"]),
-    Route("/api/local-model/stop", endpoint=api_local_model_stop, methods=["POST"]),
-    Route("/api/local-model/status", endpoint=api_local_model_status),
-    Route("/api/local-model/test", endpoint=api_local_model_test, methods=["POST"]),
-    Route("/api/local-model/install-runtime", endpoint=api_local_model_install_runtime, methods=["POST"]),
-    WebSocketRoute("/ws", endpoint=ws_endpoint),
     Mount("/static", app=NoCacheStaticFiles(directory=str(web_dir)), name="static"),
 ]
 
@@ -1893,6 +669,7 @@ from contextlib import asynccontextmanager, suppress
 async def lifespan(app):
     global _event_loop
     _event_loop = asyncio.get_running_loop()
+    _set_ws_event_loop(_event_loop)
     ws_heartbeat_task = asyncio.create_task(
         ws_heartbeat_loop(_has_ws_clients, broadcast_ws),
         name="ws-heartbeat",
@@ -1902,27 +679,29 @@ async def lifespan(app):
     if provider_defaults_changed:
         save_settings(settings, allow_elevation=True)
     _apply_settings_to_env(settings)
-    # v5.1.2 elevation ratchet: pin the boot-time runtime-mode baseline AFTER
-    # initial settings load + env apply so the ``save_settings`` chokepoint
-    # compares incoming saves against this owner-fixed value rather than
-    # against on-disk old (which an out-of-process write could corrupt).
+    # Pin boot-time runtime-mode after env apply; save_settings compares to this owner baseline.
     from ouroboros.config import initialize_runtime_mode_baseline
     initialize_runtime_mode_baseline()
     has_local = has_local_routing(settings)
+    lifespan_drive_root = pathlib.Path(
+        app.state.drive_root
+        if hasattr(app, "state") and hasattr(app.state, "drive_root")
+        else DATA_DIR
+    )
+    default_real_data_dir = pathlib.Path.home() / "Ouroboros" / "data"
+    pytest_default_real_data_dir = (
+        (bool(os.environ.get("PYTEST_CURRENT_TEST")) or "pytest" in sys.modules)
+        and lifespan_drive_root == default_real_data_dir
+        and not os.environ.get("OUROBOROS_DATA_DIR")
+    )
 
-    # v4.50: seed ``data/skills/native/`` from ``repo/skills/`` on first
-    # launch. The launcher already does this for packaged builds; calling
-    # it here makes source-mode (``python server.py``) installs land at
-    # the same layout so the Skills/Marketplace UI sees a consistent tree.
+    # Source-mode must seed native skills too, matching packaged launcher layout.
     try:
-        from ouroboros.launcher_bootstrap import ensure_data_skills_seeded
-        ensure_data_skills_seeded()
-        from ouroboros.skill_migrations import (
-            migrate_generation_skill_names,
-            migrate_unseeded_native_skills_to_external,
-        )
-        migrate_unseeded_native_skills_to_external()
-        migrate_generation_skill_names()
+        if pytest_default_real_data_dir:
+            log.info("Skipping native skills bootstrap against real DATA_DIR during pytest")
+        else:
+            from ouroboros.launcher_bootstrap import ensure_data_skills_seeded
+            ensure_data_skills_seeded()
     except Exception:
         log.warning("Native skills bootstrap failed", exc_info=True)
 
@@ -1939,11 +718,47 @@ async def lifespan(app):
             daemon=True, name="local-model-autostart",
         ).start()
 
-    # Phase 4: reload enabled + reviewed extensions so their
-    # ``register(api)`` runs across process restarts. Without this,
-    # ``toggle_skill(enabled=True)`` would be the only path that loads
-    # plugins, and a simple restart would silently unload every
-    # extension until the operator toggled each one again.
+    host_service_task = None
+    host_service_server = None
+    try:
+        from ouroboros.event_bus import init_global_event_bus
+        from ouroboros.extension_companion import init_global_supervisor
+        from ouroboros.gateway.host_service import (
+            DEFAULT_HOST_SERVICE_HOST,
+            create_host_service_app,
+            host_service_port,
+        )
+
+        init_global_event_bus().set_loop(_event_loop)
+        init_global_supervisor(lifespan_drive_root)
+        host_service_app = create_host_service_app(lifespan_drive_root)
+        host_port = host_service_port()
+        host_service_config = uvicorn.Config(
+            host_service_app,
+            host=DEFAULT_HOST_SERVICE_HOST,
+            port=host_port,
+            log_level="warning",
+        )
+        host_service_server = uvicorn.Server(host_service_config)
+        host_service_task = asyncio.create_task(
+            host_service_server.serve(),
+            name="host-service-api",
+        )
+        log.info("Host Service API listening on %s:%d", DEFAULT_HOST_SERVICE_HOST, host_port)
+    except Exception:
+        log.warning("Failed to start Host Service API", exc_info=True)
+
+    try:
+        from ouroboros.skill_review_runner import reconcile_stale_review_jobs
+
+        if pytest_default_real_data_dir:
+            log.info("Skipping stale skill-review reconciliation against real DATA_DIR during pytest")
+        else:
+            reconcile_stale_review_jobs(lifespan_drive_root)
+    except Exception:
+        log.warning("Stale skill-review reconciliation at startup failed", exc_info=True)
+
+    # Reload enabled+reviewed extensions across restarts.
     try:
         from ouroboros.config import (
             get_skills_repo_path,
@@ -1953,55 +768,38 @@ async def lifespan(app):
         from ouroboros.extension_loader import set_ws_broadcaster as _set_extension_ws_broadcaster
         _set_extension_ws_broadcaster(broadcast_ws_sync)
         repo_path = get_skills_repo_path()
-        drive_root = pathlib.Path(DATA_DIR)
-        _reload_extensions(drive_root, _load_settings, repo_path=repo_path or None)
+        if pytest_default_real_data_dir:
+            log.info("Skipping extension reload_all against real DATA_DIR during pytest")
+        else:
+            _reload_extensions(lifespan_drive_root, _load_settings, repo_path=repo_path or None)
     except Exception:
-        log.warning("Extension reload_all at startup failed", exc_info=True)
+        log.error("Extension reload_all at startup failed", exc_info=True)
 
-    # A2A server — disabled by default; enable in Settings → Integrations
-    a2a_server_task = None
-    if settings.get("A2A_ENABLED", False):
-        try:
-            from ouroboros.a2a_server import start_a2a_server
-            from ouroboros.server_auth import is_loopback_host
-            a2a_host = str(settings.get("A2A_HOST", "127.0.0.1")).strip()
-            a2a_port = int(settings.get("A2A_PORT", 18800))
-            if not is_loopback_host(a2a_host):
-                from ouroboros.server_auth import get_configured_network_password
-                if not get_configured_network_password():
-                    log.warning(
-                        "A2A server binding to non-loopback host %s without a network password. "
-                        "NetworkAuthGate is applied — set OUROBOROS_NETWORK_PASSWORD to require "
-                        "authentication, or keep A2A_HOST=127.0.0.1 for loopback-only access.",
-                        a2a_host,
-                    )
-            a2a_server_task = asyncio.create_task(
-                start_a2a_server(settings), name="a2a-server"
-            )
-            log.info("A2A server task created on port %d", a2a_port)
-        except Exception:
-            log.warning("Failed to start A2A server", exc_info=True)
+    try:
+        from ouroboros.mcp_client import (
+            reconfigure_from_settings as _mcp_reconfigure_startup,
+            refresh_all_background as _mcp_refresh_background_startup,
+        )
+        _mcp_reconfigure_startup(settings)
+        _mcp_refresh_background_startup(reason="startup")
+    except Exception:
+        log.warning("MCP startup reconfigure failed", exc_info=True)
 
     try:
         yield
     finally:
-        # Stop A2A server
-        if a2a_server_task:
+        if host_service_server is not None:
             try:
-                from ouroboros.a2a_server import stop_a2a_server
-                stop_a2a_server()
-                a2a_server_task.cancel()
-                with suppress(asyncio.CancelledError, asyncio.TimeoutError):
-                    await asyncio.wait_for(a2a_server_task, timeout=5)
-                # Sweep the port in case uvicorn left it in TIME_WAIT so the
-                # next launch can bind A2A_PORT immediately (mirrors panic-stop).
-                try:
-                    from ouroboros.platform_layer import kill_process_on_port
-                    kill_process_on_port(a2a_port)
-                except Exception:
-                    pass
+                host_service_server.should_exit = True
             except Exception:
                 pass
+        if host_service_task is not None:
+            with suppress(asyncio.CancelledError, asyncio.TimeoutError):
+                await asyncio.wait_for(host_service_task, timeout=5)
+            if not host_service_task.done():
+                host_service_task.cancel()
+                with suppress(asyncio.CancelledError, asyncio.TimeoutError):
+                    await asyncio.wait_for(host_service_task, timeout=2)
         ws_heartbeat_task.cancel()
         with suppress(asyncio.CancelledError):
             await ws_heartbeat_task
@@ -2015,6 +813,18 @@ async def lifespan(app):
         try:
             from ouroboros.tools.shell import kill_all_tracked_subprocesses
             kill_all_tracked_subprocesses()
+        except Exception:
+            pass
+        try:
+            from ouroboros.tools.services import kill_all_services
+            kill_all_services(lifespan_drive_root)
+        except Exception:
+            pass
+        try:
+            from ouroboros.extension_companion import get_global_supervisor
+            supervisor = get_global_supervisor()
+            if supervisor is not None:
+                supervisor.stop_all()
         except Exception:
             pass
         try:
@@ -2032,18 +842,34 @@ async def lifespan(app):
 app = NetworkAuthGate(Starlette(routes=routes, lifespan=lifespan))
 app.app.state.drive_root = pathlib.Path(DATA_DIR)  # type: ignore[attr-defined]
 app.app.state.repo_dir = pathlib.Path(REPO_DIR)  # type: ignore[attr-defined]
+app.app.state.broadcast_ws_sync = broadcast_ws_sync  # type: ignore[attr-defined]
+app.app.state.app_start = APP_START  # type: ignore[attr-defined]
+app.app.state.supervisor_ready_event = _supervisor_ready  # type: ignore[attr-defined]
+app.app.state.get_supervisor_error = lambda: _supervisor_error  # type: ignore[attr-defined]
+app.app.state.describe_bg_consciousness_state = _describe_bg_consciousness_state  # type: ignore[attr-defined]
+app.app.state.request_restart = _request_restart_exit  # type: ignore[attr-defined]
+app.app.state.runtime_branch_defaults = _runtime_branch_defaults  # type: ignore[attr-defined]
+app.app.state.bind_host = _BIND_HOST  # type: ignore[attr-defined]
+app.app.state.port_file = PORT_FILE  # type: ignore[attr-defined]
+app.app.state.default_port = DEFAULT_PORT  # type: ignore[attr-defined]
+app.app.state.start_supervisor_if_needed = _start_supervisor_if_needed  # type: ignore[attr-defined]
 
 
-def _emergency_process_cleanup() -> None:
-    """Kill all child processes, workers, and port holders. Called before any os._exit()."""
+def _emergency_process_cleanup(*, port_sweep: bool = True) -> None:
+    """Kill child processes, workers, companions, and runtime port holders."""
     try:
         from ouroboros.tools.shell import kill_all_tracked_subprocesses
         kill_all_tracked_subprocesses()
     except Exception:
         pass
     try:
+        from ouroboros.tools.services import kill_all_services
+        kill_all_services(wait=False)
+    except Exception:
+        pass
+    try:
         from supervisor.workers import kill_workers
-        kill_workers(force=True)
+        kill_workers(force=True, archive_service_logs=False)
     except Exception:
         pass
     import multiprocessing
@@ -2053,13 +879,18 @@ def _emergency_process_cleanup() -> None:
             force_kill_pid(child.pid)
         except (ProcessLookupError, PermissionError):
             pass
-    kill_process_on_port(DEFAULT_PORT)
-    kill_process_on_port(8766)
+    if port_sweep:
+        kill_process_on_port(DEFAULT_PORT)
+        kill_process_on_port(8766)
+    try:
+        from ouroboros.extension_companion import panic_kill_all
+        from ouroboros.gateway.host_service import host_service_port
+        panic_kill_all()
+        if port_sweep:
+            kill_process_on_port(host_service_port())
+    except Exception:
+        pass
 
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 def main() -> int:
     try:
         saved_host = str(load_settings().get("OUROBOROS_SERVER_HOST") or "").strip()
@@ -2069,6 +900,7 @@ def main() -> int:
     args = parse_server_args(default_host, DEFAULT_PORT)
     global _BIND_HOST
     _BIND_HOST = args.host
+    app.app.state.bind_host = args.host  # type: ignore[attr-defined]
     auth_warning = get_network_auth_startup_warning(args.host)
     if auth_warning:
         log.warning(auth_warning)
@@ -2093,33 +925,22 @@ def main() -> int:
     _uvicorn_exited = threading.Event()
 
     def _check_restart():
-        """Monitor for restart signal, then shut down uvicorn."""
+        """Monitor restart signal, then shut down uvicorn."""
         while not _restart_requested.is_set():
             time.sleep(0.5)
         log.info("Restart requested — closing WebSocket clients and shutting down server.")
 
-        # Close all WebSocket connections so uvicorn can shut down cleanly
         loop = _event_loop
         if loop:
-            async def _close_all_ws():
-                with _ws_lock:
-                    clients = list(_ws_clients)
-                for ws in clients:
-                    try:
-                        await ws.close(code=1012, reason="Server restarting")
-                    except Exception:
-                        pass
             try:
-                future = asyncio.run_coroutine_threadsafe(_close_all_ws(), loop)
+                future = asyncio.run_coroutine_threadsafe(close_all_ws(), loop)
                 future.result(timeout=3)
             except Exception:
                 pass
 
         server.should_exit = True
 
-        # Safety net: only force-exit if uvicorn itself never returns control.
-        # In direct-server mode, the main thread still needs time to run cleanup
-        # and re-exec the process after server.run() exits.
+        # Force-exit only if uvicorn never returns; direct-server mode needs cleanup/re-exec time.
         force_exit_timeout_sec = 5 if _LAUNCHER_MANAGED else 30
         if _uvicorn_exited.wait(timeout=force_exit_timeout_sec):
             return
@@ -2140,12 +961,11 @@ def main() -> int:
 
     if _restart_requested.is_set():
         log.info("Exiting with code %d (restart signal).", RESTART_EXIT_CODE)
-        _emergency_process_cleanup()
+        _emergency_process_cleanup(port_sweep=False)
         if not _LAUNCHER_MANAGED:
             _restart_current_process(args.host, actual_port)
         os._exit(RESTART_EXIT_CODE)
 
-    _emergency_process_cleanup()
     return 0
 
 

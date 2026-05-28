@@ -1,8 +1,4 @@
-"""
-Supervisor — Git operations.
-
-Clone, checkout, reset, rescue snapshots, dependency sync, import test.
-"""
+"""Supervisor git/reset/rescue/dependency operations."""
 
 from __future__ import annotations
 
@@ -21,13 +17,11 @@ from typing import Any, Dict, List, Optional, Tuple
 from supervisor.state import (
     load_state, save_state, append_jsonl, atomic_write_text,
 )
+from ouroboros.utils import utc_now_iso
 
 log = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Module-level config (set via init())
-# ---------------------------------------------------------------------------
 REPO_DIR: pathlib.Path = pathlib.Path.home() / "Ouroboros" / "repo"
 DRIVE_ROOT: pathlib.Path = pathlib.Path.home() / "Ouroboros" / "data"
 REMOTE_URL: str = ""
@@ -175,11 +169,6 @@ def _clear_update_intent() -> None:
     except Exception:
         log.warning("Failed to clear update intent marker", exc_info=True)
 
-
-# ---------------------------------------------------------------------------
-# Git helpers
-# ---------------------------------------------------------------------------
-
 def git_capture(cmd: List[str]) -> Tuple[int, str, str]:
     for _attempt in range(2):
         r = subprocess.run(cmd, cwd=str(REPO_DIR), capture_output=True, text=True)
@@ -310,7 +299,7 @@ python-standalone/
 
 
 def _ensure_repo_gitignore(repo_dir: pathlib.Path = None) -> None:
-    """Write .gitignore if missing — MUST run before any git add -A."""
+    """Write .gitignore if missing before any git add -A."""
     target = repo_dir or REPO_DIR
     gi = target / ".gitignore"
     if not gi.exists():
@@ -369,8 +358,7 @@ def ensure_repo_present() -> None:
                 "Launcher-managed repo is missing .git metadata. "
                 "The launcher bootstrap must recreate REPO_DIR from the embedded repo bundle."
             )
-        # REPO_DIR is the working code directory - never rm -rf it.
-        # Just initialize git in-place over the existing files.
+        # REPO_DIR is live code: initialize in place, never remove it.
         REPO_DIR.mkdir(parents=True, exist_ok=True)
         _ensure_repo_gitignore()
         import dulwich.repo
@@ -383,17 +371,11 @@ def ensure_repo_present() -> None:
             subprocess.run(["git", "add", "-A"], cwd=str(REPO_DIR), check=True)
             subprocess.run(["git", "commit", "-m", "Initial commit from bundle"], cwd=str(REPO_DIR), check=False)
 
-        # Create branches
         subprocess.run(["git", "branch", "-M", BRANCH_DEV], cwd=str(REPO_DIR), check=False)
         subprocess.run(["git", "branch", BRANCH_STABLE], cwd=str(REPO_DIR), check=False)
 
     if not _is_launcher_managed_repo():
         _ensure_local_version_tag()
-
-
-# ---------------------------------------------------------------------------
-# Repo sync state collection
-# ---------------------------------------------------------------------------
 
 def _collect_repo_sync_state() -> Dict[str, Any]:
     state: Dict[str, Any] = {
@@ -605,11 +587,6 @@ def _preserve_branch_for_official_reset(
         return False, branch_or_error
     return True, branch_or_error
 
-
-# ---------------------------------------------------------------------------
-# Checkout + reset
-# ---------------------------------------------------------------------------
-
 def checkout_and_reset(branch: str, reason: str = "unspecified",
                        unsynced_policy: str = "ignore") -> Tuple[bool, str]:
     managed_meta = _read_managed_repo_meta()
@@ -640,7 +617,7 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
             append_jsonl(
                 DRIVE_ROOT / "logs" / "supervisor.jsonl",
                 {
-                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "ts": utc_now_iso(),
                     "type": "reset_fetch_failed",
                     "target_branch": branch, "reason": reason, "error": msg,
                     "remote": fetch_remote,
@@ -680,7 +657,7 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
                     append_jsonl(
                         DRIVE_ROOT / "logs" / "supervisor.jsonl",
                         {
-                            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                            "ts": utc_now_iso(),
                             "type": "reset_blocked_rescue_failed",
                             "target_branch": branch, "reason": reason, "policy": policy,
                             "current_branch": repo_state.get("current_branch"),
@@ -702,7 +679,7 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
                     append_jsonl(
                         DRIVE_ROOT / "logs" / "supervisor.jsonl",
                         {
-                            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                            "ts": utc_now_iso(),
                             "type": "reset_blocked_rescue_incomplete",
                             "target_branch": branch, "reason": reason, "policy": policy,
                             "current_branch": repo_state.get("current_branch"),
@@ -725,7 +702,7 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
                     append_jsonl(
                         DRIVE_ROOT / "logs" / "supervisor.jsonl",
                         {
-                            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                            "ts": utc_now_iso(),
                             "type": "reset_blocked_rescue_incomplete",
                             "target_branch": branch, "reason": reason, "policy": policy,
                             "current_branch": repo_state.get("current_branch"),
@@ -752,7 +729,7 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
                 append_jsonl(
                     DRIVE_ROOT / "logs" / "supervisor.jsonl",
                     {
-                        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        "ts": utc_now_iso(),
                         "type": "reset_blocked_unsynced_state",
                         "target_branch": branch, "reason": reason, "policy": policy,
                         "current_branch": repo_state.get("current_branch"),
@@ -769,7 +746,7 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
             append_jsonl(
                 DRIVE_ROOT / "logs" / "supervisor.jsonl",
                 {
-                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "ts": utc_now_iso(),
                     "type": "reset_unsynced_rescued_then_reset",
                     "target_branch": branch, "reason": reason, "policy": policy,
                     "current_branch": repo_state.get("current_branch"),
@@ -826,7 +803,7 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
                 append_jsonl(
                     DRIVE_ROOT / "logs" / "supervisor.jsonl",
                     {
-                        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        "ts": utc_now_iso(),
                         "type": "ui_update_preserved_late_head",
                         "target_branch": branch,
                         "reason": reason,
@@ -859,7 +836,7 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
             if policy == "rescue_and_reset":
                 _run_git_resilient(["git", "clean", "-fd"], cwd=str(REPO_DIR), check=True)
 
-    # Clean __pycache__ to prevent stale bytecode (git checkout may not update mtime)
+    # Checkout may not update mtimes; remove stale bytecode.
     for p in REPO_DIR.rglob("__pycache__"):
         shutil.rmtree(p, ignore_errors=True)
     st = load_state()
@@ -876,11 +853,6 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
     if update_intent_target and str(reason or "") != "ui_update_apply":
         _clear_update_intent()
     return True, "ok"
-
-
-# ---------------------------------------------------------------------------
-# Dependencies + import test
-# ---------------------------------------------------------------------------
 
 def sync_runtime_dependencies(reason: str) -> Tuple[bool, str]:
     if getattr(sys, 'frozen', False):
@@ -901,7 +873,7 @@ def sync_runtime_dependencies(reason: str) -> Tuple[bool, str]:
         append_jsonl(
             DRIVE_ROOT / "logs" / "supervisor.jsonl",
             {
-                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "ts": utc_now_iso(),
                 "type": "deps_sync_ok", "reason": reason, "source": source,
             },
         )
@@ -911,7 +883,7 @@ def sync_runtime_dependencies(reason: str) -> Tuple[bool, str]:
         append_jsonl(
             DRIVE_ROOT / "logs" / "supervisor.jsonl",
             {
-                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "ts": utc_now_iso(),
                 "type": "deps_sync_error", "reason": reason, "source": source, "error": msg,
             },
         )
@@ -931,29 +903,11 @@ def import_test() -> Dict[str, Any]:
     return {"ok": (r.returncode == 0), "stdout": r.stdout, "stderr": r.stderr,
             "returncode": r.returncode}
 
-
-# ---------------------------------------------------------------------------
-# Safe restart orchestration
-# ---------------------------------------------------------------------------
-
 def safe_restart(
     reason: str,
     unsynced_policy: str = "rescue_and_reset",
 ) -> Tuple[bool, str]:
-    """
-    Attempt to checkout dev branch, sync deps, and verify imports.
-    Falls back to stable branch if dev fails.
-
-    Args:
-        reason: Human-readable reason for the restart (logged to supervisor.jsonl)
-        unsynced_policy: Policy for handling unsynced state (default: "rescue_and_reset")
-
-    Returns:
-        Tuple of (ok: bool, message: str)
-        - If successful: (True, "OK: <branch>")
-        - If failed: (False, "<error description>")
-    """
-    # Try dev branch
+    """Checkout dev, sync deps, import-test, then fall back to stable if needed."""
     ok, err = checkout_and_reset(BRANCH_DEV, reason=reason, unsynced_policy=unsynced_policy)
     if not ok:
         return False, f"Failed checkout {BRANCH_DEV}: {err}"
@@ -966,11 +920,10 @@ def safe_restart(
     if t["ok"]:
         return True, f"OK: {BRANCH_DEV}"
 
-    # Dev branch failed import — log the failure and fall back to stable
     append_jsonl(
         DRIVE_ROOT / "logs" / "supervisor.jsonl",
         {
-            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "ts": utc_now_iso(),
             "type": "safe_restart_dev_import_failed",
             "reason": reason,
             "branch": BRANCH_DEV,
@@ -980,7 +933,6 @@ def safe_restart(
         },
     )
 
-    # Fallback to stable
     ok_s, err_s = checkout_and_reset(
         BRANCH_STABLE,
         reason=f"{reason}_fallback_stable",
@@ -997,13 +949,8 @@ def safe_restart(
     if t2["ok"]:
         return True, f"OK: fell back to {BRANCH_STABLE}"
 
-    # Both branches failed
     return False, f"Both branches failed import (dev and stable)"
 
-
-# ---------------------------------------------------------------------------
-# Version listing (for UI version panel)
-# ---------------------------------------------------------------------------
 
 def list_versions(max_count: int = 50) -> List[Dict[str, Any]]:
     """Return list of annotated git tags sorted newest-first."""
@@ -1245,13 +1192,13 @@ def prepare_managed_update(strategy: str = "replace") -> Tuple[bool, Dict[str, A
         "target_ref": status.get("target_ref") or "",
         "strategy": strategy,
         "keep_branch": keep_branch,
-        "requested_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "requested_at": utc_now_iso(),
     })
 
     append_jsonl(
         DRIVE_ROOT / "logs" / "supervisor.jsonl",
         {
-            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "ts": utc_now_iso(),
             "type": "ui_update_requested",
             "strategy": strategy,
             "status": status,
@@ -1310,7 +1257,7 @@ def rollback_to_version(tag_or_sha: str, reason: str = "manual_rollback") -> Tup
     append_jsonl(
         DRIVE_ROOT / "logs" / "supervisor.jsonl",
         {
-            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "ts": utc_now_iso(),
             "type": "manual_rollback",
             "target": tag_or_sha,
             "reason": reason,
@@ -1321,17 +1268,8 @@ def rollback_to_version(tag_or_sha: str, reason: str = "manual_rollback") -> Tup
     )
     return True, f"Rolled back to {tag_or_sha} ({st['current_sha'][:8]}){warning}"
 
-
-# ---------------------------------------------------------------------------
-# GitHub remote sync
-# ---------------------------------------------------------------------------
-
 def configure_remote(repo_slug: str, token: str) -> Tuple[bool, str]:
-    """Set up or update the 'origin' remote using credential helper.
-
-    Uses git credential helper to avoid embedding the token in the remote URL
-    (which would expose it in `git remote -v` output and log files).
-    """
+    """Configure origin while storing the token in git credential helper."""
     if not repo_slug or not token:
         return False, "Missing repo slug or token"
 
@@ -1349,11 +1287,7 @@ def configure_remote(repo_slug: str, token: str) -> Tuple[bool, str]:
 
 
 def _configure_credential_helper(repo_slug: str, token: str) -> None:
-    """Store credentials via repo-local credential helper (not global ~/.git-credentials).
-
-    Each repo gets its own credentials file at .git/credentials, so multiple
-    repos can have different tokens without conflict.
-    """
+    """Store credentials in repo-local .git/credentials, not global state."""
     cred_path = REPO_DIR / ".git" / "credentials"
     git_capture([
         "git", "config", "--local", "credential.helper",
@@ -1385,30 +1319,3 @@ def push_to_remote(branch: Optional[str] = None, push_tags: bool = True) -> Tupl
         else:
             result += " + tags"
     return True, result
-
-
-def migrate_remote_credentials() -> Tuple[bool, str]:
-    """One-shot: if origin has a token embedded in the URL, migrate to credential helper.
-
-    Safe to call repeatedly — if origin is already clean, this is a no-op.
-    Handles both formats: https://TOKEN@github.com/... and https://user:TOKEN@github.com/...
-    """
-    if not _has_remote("origin"):
-        return False, "No remote configured"
-    rc, url, _ = git_capture(["git", "remote", "get-url", "origin"])
-    if rc != 0:
-        return False, "Cannot read origin URL"
-    url = url.strip()
-    m = re.match(r"https://([^@]+)@github\.com/(.+)", url)
-    if not m:
-        return True, "Origin already clean (no embedded token)"
-    userinfo = m.group(1)
-    # Handle user:token format (e.g. x-access-token:ghp_xxx)
-    if ":" in userinfo:
-        token = userinfo.split(":", 1)[1]
-    else:
-        token = userinfo
-    slug = m.group(2).rstrip("/")
-    if slug.endswith(".git"):
-        slug = slug[:-4]
-    return configure_remote(slug, token)

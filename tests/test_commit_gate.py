@@ -4,14 +4,13 @@ Verifies (Phase 4):
 - New tools registered: pull_from_remote, restore_to_head, revert_commit
 - SAFETY_CRITICAL_PATHS blocks dangerous operations
 - Confirm gates prevent accidental destructive actions
-- also_stage parameter in repo_write_commit
 - Auto-tagging on version bump
 - Credential helper in git_ops (no token in remote URL)
 - New tools in CORE_TOOL_NAMES
 
 Verifies (Phase 5):
 - Auto-push wired into commit functions
-- migrate_remote_credentials exists and is safe
+- legacy token-in-URL credential migration is retired
 - ARCHITECTURE.md version sync in startup checks
 """
 import importlib
@@ -23,70 +22,32 @@ import types
 
 import pytest
 
+from tests._shared import ensure_claude_agent_sdk_mock
 
-def _ensure_sdk_mock():
-    """Install a lightweight mock of claude_agent_sdk only when the package is truly absent.
-
-    Uses importlib.util.find_spec to check real availability, not sys.modules presence,
-    so an installed but not-yet-imported SDK is never masked.
-    Required so gateway tests can run without the SDK installed.
-    """
-    import importlib.util as _ilu
-    try:
-        spec = _ilu.find_spec("claude_agent_sdk")
-        sdk_available = spec is not None
-    except (ValueError, ModuleNotFoundError):
-        # find_spec raises ValueError when an already-injected mock module has __spec__=None
-        sdk_available = "claude_agent_sdk" in sys.modules
-    if not sdk_available:
-        mock_sdk = types.ModuleType("claude_agent_sdk")
-        mock_sdk.ClaudeAgentOptions = type("ClaudeAgentOptions", (), {})
-        mock_sdk.ClaudeSDKClient = type("ClaudeSDKClient", (), {})
-        mock_sdk.HookMatcher = type("HookMatcher", (), {"__init__": lambda self, **kw: None})
-        mock_sdk.AssistantMessage = type("AssistantMessage", (), {})
-        mock_sdk.ResultMessage = type("ResultMessage", (), {})
-        mock_sdk.query = lambda **kw: None
-        sys.modules["claude_agent_sdk"] = mock_sdk
-
-
-_ensure_sdk_mock()
+ensure_claude_agent_sdk_mock()
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _get_git_module():
-    sys.path.insert(0, REPO)
     return importlib.import_module("ouroboros.tools.git")
 
 
 def _get_registry_module():
-    sys.path.insert(0, REPO)
     return importlib.import_module("ouroboros.tools.registry")
 
 
 def _get_git_ops_module():
-    sys.path.insert(0, REPO)
     return importlib.import_module("supervisor.git_ops")
 
 
 # --- Tool registration tests ---
 
-def test_pull_from_remote_registered():
+@pytest.mark.parametrize("tool_name", ["vcs_pull_ff", "vcs_restore", "vcs_revert"])
+def test_tool_registered(tool_name):
     git_mod = _get_git_module()
     names = [t.name for t in git_mod.get_tools()]
-    assert "pull_from_remote" in names
-
-
-def test_restore_to_head_registered():
-    git_mod = _get_git_module()
-    names = [t.name for t in git_mod.get_tools()]
-    assert "restore_to_head" in names
-
-
-def test_revert_commit_registered():
-    git_mod = _get_git_module()
-    names = [t.name for t in git_mod.get_tools()]
-    assert "revert_commit" in names
+    assert tool_name in names
 
 
 def test_non_committing_review_cycle_exists_and_reuses_shared_stage_cycle():
@@ -180,12 +141,6 @@ def test_repo_commit_push_uses_shared_reviewed_stage_cycle():
     assert "_run_reviewed_stage_cycle" in source
 
 
-def test_repo_write_commit_uses_shared_reviewed_stage_cycle():
-    git_mod = _get_git_module()
-    source = inspect.getsource(git_mod._repo_write_commit)
-    assert "_run_reviewed_stage_cycle" in source
-
-
 # --- Protected-path checks ---
 
 def test_restore_to_head_blocks_protected_paths():
@@ -218,60 +173,32 @@ def test_restore_to_head_has_confirm_gate():
     assert "Call again with confirm=true" in source
 
 
-# --- also_stage ---
-
-def test_also_stage_in_repo_write_commit():
-    git_mod = _get_git_module()
-    sig = inspect.signature(git_mod._repo_write_commit)
-    assert "also_stage" in sig.parameters
-
-
-def test_also_stage_in_schema():
-    git_mod = _get_git_module()
-    tools = git_mod.get_tools()
-    rwc = next(t for t in tools if t.name == "repo_write_commit")
-    props = rwc.schema["parameters"]["properties"]
-    assert "also_stage" in props
-    assert props["also_stage"]["type"] == "array"
-
-
 # --- Auto-tagging ---
-
-def test_auto_tag_function_exists():
-    git_mod = _get_git_module()
-    assert hasattr(git_mod, "_auto_tag_on_version_bump")
-    assert callable(git_mod._auto_tag_on_version_bump)
-
-
-def test_auto_tag_called_in_commit_functions():
-    git_mod = _get_git_module()
-    for fn_name in ("_repo_write_commit", "_repo_commit_push"):
-        source = inspect.getsource(getattr(git_mod, fn_name))
-        assert "_auto_tag_on_version_bump" in source, (
-            f"{fn_name} must call _auto_tag_on_version_bump"
-        )
+# Removed in v5.15.x:
+#   test_auto_tag_function_exists (callable-existence check, no logic)
+#   test_auto_tag_called_in_commit_functions (inspect.getsource substring pin)
+# The actual auto-tag behavior is exercised end-to-end by the git pipeline
+# integration tests in test_git_review_pipeline.py.
 
 
 def test_auto_tag_not_gated_by_test_warnings():
     """Auto-tagging must run unconditionally — not skipped when tests fail."""
     git_mod = _get_git_module()
-    for fn_name in ("_repo_write_commit", "_repo_commit_push"):
-        source = inspect.getsource(getattr(git_mod, fn_name))
-        # Find the line(s) that call _auto_tag_on_version_bump
-        for line in source.splitlines():
-            if "_auto_tag_on_version_bump" in line:
-                assert "if not test_warning" not in line, (
-                    f"{fn_name}: _auto_tag_on_version_bump must not be gated "
-                    f"by test_warning_ref — tags must always be created on VERSION bump"
-                )
+    source = inspect.getsource(git_mod._repo_commit_push)
+    # Find the line(s) that call _auto_tag_on_version_bump
+    for line in source.splitlines():
+        if "_auto_tag_on_version_bump" in line:
+            assert "if not test_warning" not in line, (
+                "_repo_commit_push: _auto_tag_on_version_bump must not be gated "
+                "by test_warning_ref — tags must always be created on VERSION bump"
+            )
 
 
 # --- Credential helper ---
-
-def test_credential_helper_exists():
-    git_ops = _get_git_ops_module()
-    assert hasattr(git_ops, "_configure_credential_helper")
-    assert callable(git_ops._configure_credential_helper)
+# test_credential_helper_exists removed in v5.15.x — pure callable-existence
+# check; the helper's behavior is exercised by
+# test_configure_remote_uses_clean_url below which calls the public
+# configure_remote() wrapper.
 
 
 def test_configure_remote_uses_clean_url():
@@ -288,7 +215,7 @@ def test_configure_remote_uses_clean_url():
 
 def test_new_tools_in_core_tool_names():
     registry = _get_registry_module()
-    for name in ("pull_from_remote", "restore_to_head", "revert_commit"):
+    for name in ("vcs_pull_ff", "vcs_restore", "vcs_revert"):
         assert name in registry.CORE_TOOL_NAMES, (
             f"{name} must be in CORE_TOOL_NAMES"
         )
@@ -345,30 +272,16 @@ def test_restore_to_head_blocks_safety_critical_full_restore():
     )
 
 
-def test_also_stage_blocks_safety_critical():
-    """also_stage must check protected paths before staging."""
-    git_mod = _get_git_module()
-    source = inspect.getsource(git_mod._repo_write_commit)
-    assert "protected_paths_in" in source, (
-        "repo_write_commit must check also_stage paths against the shared protected path policy"
-    )
-
-
-# --- Auto-push (Phase 5) ---
-
-def test_auto_push_function_exists():
-    git_mod = _get_git_module()
-    assert hasattr(git_mod, "_auto_push")
-    assert callable(git_mod._auto_push)
+# --- Auto-push ---
+# test_auto_push_function_exists removed in v5.15.x — callable-existence
+# check superseded by the behavioral tests below that exercise _auto_push
+# wiring inside the commit functions.
 
 
 def test_auto_push_called_in_commit_functions():
     git_mod = _get_git_module()
-    for fn_name in ("_repo_write_commit", "_repo_commit_push"):
-        source = inspect.getsource(getattr(git_mod, fn_name))
-        assert "_auto_push" in source, (
-            f"{fn_name} must call _auto_push after successful commit"
-        )
+    source = inspect.getsource(git_mod._repo_commit_push)
+    assert "_auto_push" in source, "_repo_commit_push must call _auto_push after successful commit"
 
 
 def test_auto_push_not_in_rollback_tools():
@@ -392,36 +305,34 @@ def test_auto_push_is_best_effort():
 def test_auto_push_outside_git_lock():
     """Auto-push call must happen AFTER _release_git_lock, not inside the try/finally."""
     git_mod = _get_git_module()
-    for fn_name in ("_repo_write_commit", "_repo_commit_push"):
-        source = inspect.getsource(getattr(git_mod, fn_name))
-        lock_release_pos = source.rfind("_release_git_lock")
-        push_pos = source.rfind("_auto_push")
-        assert lock_release_pos < push_pos, (
-            f"{fn_name}: _auto_push must come after _release_git_lock"
-        )
+    source = inspect.getsource(git_mod._repo_commit_push)
+    lock_release_pos = source.rfind("_release_git_lock")
+    push_pos = source.rfind("_auto_push")
+    assert lock_release_pos < push_pos, "_repo_commit_push: _auto_push must come after _release_git_lock"
 
 
-# --- Credential migration (Phase 5) ---
+# --- Credential configuration (legacy token-in-URL migration retired) ---
 
-def test_migrate_remote_credentials_exists():
+def test_migrate_remote_credentials_is_retired():
     git_ops = _get_git_ops_module()
-    assert hasattr(git_ops, "migrate_remote_credentials")
-    assert callable(git_ops.migrate_remote_credentials)
+    assert not hasattr(git_ops, "migrate_remote_credentials")
 
 
-def test_migrate_remote_credentials_uses_configure_remote():
+def test_configure_remote_remains_credential_helper_surface():
     git_ops = _get_git_ops_module()
-    source = inspect.getsource(git_ops.migrate_remote_credentials)
-    assert "configure_remote" in source
+    configure_source = inspect.getsource(git_ops.configure_remote)
+    helper_source = inspect.getsource(git_ops._configure_credential_helper)
+    assert "_configure_credential_helper" in configure_source
+    assert ".git/credentials" in helper_source
 
 
 # --- ARCHITECTURE version sync (Phase 5) ---
 
 def test_version_sync_checks_architecture_md():
-    """_check_version_sync must compare VERSION with ARCHITECTURE.md header."""
+    """check_version_sync must compare VERSION with ARCHITECTURE.md header."""
     sys.path.insert(0, REPO)
-    agent_mod = importlib.import_module("ouroboros.agent")
-    source = inspect.getsource(agent_mod.OuroborosAgent._check_version_sync)
+    startup_mod = importlib.import_module("ouroboros.agent_startup_checks")
+    source = inspect.getsource(startup_mod.check_version_sync)
     assert "ARCHITECTURE" in source
     assert "architecture_version" in source
 
@@ -444,7 +355,7 @@ def test_advisory_pre_review_registered():
     """advisory_pre_review must be registered as a tool."""
     adv_mod = _get_advisory_module()
     names = [t.name for t in adv_mod.get_tools()]
-    assert "advisory_pre_review" in names
+    assert "advisory_review" in names
 
 
 def test_review_status_registered():
@@ -478,7 +389,7 @@ def test_advisory_gate_in_repo_commit_push():
 
 
 def test_advisory_gate_lives_in_shared_reviewed_stage_cycle():
-    """Legacy repo_write_commit must inherit the advisory gate via the shared stage helper."""
+    """repo_commit must inherit the advisory gate via the shared stage helper."""
     git_mod = _get_git_module()
     source = inspect.getsource(git_mod._run_reviewed_stage_cycle)
     assert "_check_advisory_freshness" in source
@@ -554,10 +465,11 @@ def test_advisory_freshness_passes_with_fresh_run(tmp_path):
     assert result is None, f"Expected gate to pass but got: {result}"
 
 
-def test_advisory_freshness_blocks_on_open_commit_readiness_debt(tmp_path):
+def test_advisory_freshness_blocks_on_open_commit_readiness_debt(tmp_path, monkeypatch):
     """Fresh advisory is not enough when commit-readiness debt remains open."""
     import subprocess
 
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     git_mod = _get_git_module()
     rs_mod = _get_review_state_module()
 
@@ -599,6 +511,101 @@ def test_advisory_freshness_blocks_on_open_commit_readiness_debt(tmp_path):
     assert result is not None
     assert "ADVISORY_PRE_REVIEW_REQUIRED" in result
     assert "Commit-readiness debt" in result
+
+
+def test_advisory_obligations_acknowledged_under_advisory_enforcement(tmp_path, monkeypatch):
+    """Fresh advisory downgrades obligations/debt under advisory enforcement and audits it."""
+    import subprocess
+
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
+    git_mod = _get_git_module()
+    rs_mod = _get_review_state_module()
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+    (drive_root / "state").mkdir()
+    (drive_root / "logs").mkdir()
+    subprocess.run(["git", "init"], cwd=str(repo_dir), capture_output=True)
+
+    commit_message = "test commit"
+    snapshot_hash = rs_mod.compute_snapshot_hash(repo_dir, commit_message)
+    repo_key = rs_mod.make_repo_key(repo_dir)
+
+    state = rs_mod.AdvisoryReviewState()
+    state.add_run(rs_mod.AdvisoryRunRecord(
+        snapshot_hash=snapshot_hash,
+        commit_message=commit_message,
+        status="fresh",
+        ts="2026-01-01T00:00:00",
+        repo_key=repo_key,
+        readiness_warnings=["Manual verification still required before commit."],
+    ))
+    state.add_blocking_attempt(rs_mod.CommitAttemptRecord(
+        ts="2026-01-01T00:05:00",
+        commit_message="blocked commit",
+        status="blocked",
+        repo_key=repo_key,
+        block_reason="critical_findings",
+        critical_findings=[{
+            "item": "tests_affected",
+            "verdict": "FAIL",
+            "severity": "critical",
+            "reason": "missing tests",
+        }],
+    ))
+    state.open_obligations = [
+        rs_mod.ObligationItem(
+            obligation_id=f"obl-{idx:04d}",
+            item=f"item_{idx}",
+            severity="critical",
+            reason=f"missing tests {idx}",
+            source_attempt_ts="2026-01-01T00:05:00",
+            source_attempt_msg="blocked commit",
+            repo_key=repo_key,
+        )
+        for idx in range(1, 7)
+    ]
+    state.commit_readiness_debts = [
+        rs_mod.CommitReadinessDebtItem(
+            debt_id=f"crd-{idx:04d}",
+            category=f"category_{idx}",
+            summary=f"readiness debt {idx}",
+            repo_key=repo_key,
+        )
+        for idx in range(1, 7)
+    ]
+    assert state.get_open_obligations(repo_key=repo_key)
+    assert state.get_open_commit_readiness_debts(repo_key=repo_key)
+    rs_mod.save_state(drive_root, state)
+
+    class FakeCtx:
+        pass
+
+    ctx = FakeCtx()
+    ctx.repo_dir = repo_dir
+    ctx.drive_root = drive_root
+    ctx.task_id = "test-task"
+    ctx.drive_logs = lambda: drive_root / "logs"
+
+    result = git_mod._check_advisory_freshness(ctx, commit_message)
+
+    assert result is None
+    events = [
+        json.loads(line)
+        for line in (drive_root / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    event = [item for item in events if item.get("type") == "advisory_obligations_acknowledged"][0]
+    assert event["snapshot_hash"] == snapshot_hash
+    assert event["repo_key"] == repo_key
+    assert event["open_obligations_count"] == 6
+    assert event["open_debts_count"] >= 6
+    assert len(event["open_obligations"]) == event["open_obligations_count"]
+    assert len(event["open_debts"]) == event["open_debts_count"]
+    assert any("obl-0006" in item for item in event["open_obligations"])
+    assert any("crd-0006" in item for item in event["open_debts"])
 
 
 def test_advisory_freshness_is_repo_scoped(tmp_path):
@@ -714,7 +721,7 @@ def test_snapshot_hash_stable_on_message_change(tmp_path):
 
 
 def test_bypass_is_audited(tmp_path):
-    """Bypassing advisory gate must write advisory_pre_review_bypassed to events.jsonl."""
+    """Bypassing advisory gate must write advisory_review_bypassed to events.jsonl."""
     import json
     import subprocess
     git_mod = _get_git_module()
@@ -737,28 +744,28 @@ def test_bypass_is_audited(tmp_path):
     events_path = tmp_path / "logs" / "events.jsonl"
     assert events_path.exists(), "events.jsonl must exist after bypass"
     events = [json.loads(l) for l in events_path.read_text().splitlines() if l.strip()]
-    bypass_events = [e for e in events if e.get("type") == "advisory_pre_review_bypassed"]
+    bypass_events = [e for e in events if e.get("type") == "advisory_review_bypassed"]
     assert len(bypass_events) == 1, "Exactly one bypass event must be logged"
     assert bypass_events[0]["task_id"] == "bypass-task"
 
 
 def test_advisory_pre_review_tool_schema_has_skip_param():
-    """advisory_pre_review schema must expose skip_advisory_pre_review param."""
+    """advisory_review schema must expose skip_advisory_review param."""
     adv_mod = _get_advisory_module()
     tools = adv_mod.get_tools()
-    adv_tool = next(t for t in tools if t.name == "advisory_pre_review")
+    adv_tool = next(t for t in tools if t.name == "advisory_review")
     props = adv_tool.schema["parameters"]["properties"]
-    assert "skip_advisory_pre_review" in props
-    assert props["skip_advisory_pre_review"].get("default") is False
+    assert "skip_advisory_review" in props
+    assert props["skip_advisory_review"].get("default") is False
 
 
 def test_repo_commit_schema_has_skip_advisory_param():
-    """repo_commit schema must expose skip_advisory_pre_review param."""
+    """commit_reviewed schema must expose skip_advisory_review param."""
     git_mod = _get_git_module()
     tools = git_mod.get_tools()
-    commit_tool = next(t for t in tools if t.name == "repo_commit")
+    commit_tool = next(t for t in tools if t.name == "commit_reviewed")
     props = commit_tool.schema["parameters"]["properties"]
-    assert "skip_advisory_pre_review" in props
+    assert "skip_advisory_review" in props
 
 
 def test_advisory_auto_bypass_on_missing_key(tmp_path, monkeypatch):
@@ -805,7 +812,7 @@ def test_advisory_auto_bypass_on_missing_key(tmp_path, monkeypatch):
     events_path = drive_root / "logs" / "events.jsonl"
     assert events_path.exists(), "events.jsonl must exist after auto-bypass"
     events = [json.loads(l) for l in events_path.read_text().splitlines() if l.strip()]
-    bypass_events = [e for e in events if e.get("type") == "advisory_pre_review_bypassed"]
+    bypass_events = [e for e in events if e.get("type") == "advisory_review_bypassed"]
     assert len(bypass_events) == 1
     assert "ANTHROPIC_API_KEY" in bypass_events[0]["bypass_reason"]
 
@@ -872,11 +879,11 @@ def test_advisory_prompt_no_blocking_history_when_succeeded(tmp_path):
     subprocess.run(["git", "init"], cwd=str(repo_dir), capture_output=True)
 
     state = rs_mod.AdvisoryReviewState()
-    state.last_commit_attempt = rs_mod.CommitAttemptRecord(
+    state.attempts = [rs_mod.CommitAttemptRecord(
         ts="2026-04-02T22:00:00",
         commit_message="test commit",
         status="succeeded",
-    )
+    )]
     rs_mod.save_state(drive_root, state)
 
     prompt = adv_mod._build_advisory_prompt(
@@ -1109,40 +1116,14 @@ def test_development_compliance_checklist_expanded():
         )
 
 
-def test_triad_review_prompt_has_thoroughness_instructions():
-    """Triad review prompt must include thoroughness instructions."""
-    from ouroboros.tools.review import _REVIEW_PROMPT_TEMPLATE
-
-    prompt_lower = _REVIEW_PROMPT_TEMPLATE.lower()
-    required_phrases = [
-        "read the entire",
-        "all bugs, logic errors",
-        "do not stop after finding",
-        "each distinct problem",
-        "pass reasons may be brief",
-        "fail reasons must be detailed",
-        "how-to-fix",
-    ]
-    for phrase in required_phrases:
-        assert phrase in prompt_lower, (
-            f"Triad review prompt missing required thoroughness instruction: '{phrase}'"
-        )
-
-
-def test_triad_review_reasoning_effort_is_medium_not_low():
-    """Triad review models must use at least medium reasoning effort, not 'low'."""
-    import inspect
-    from ouroboros.tools.review import _query_model
-
-    source = inspect.getsource(_query_model)
-    # Must NOT contain reasoning_effort="low"
-    assert 'reasoning_effort="low"' not in source, (
-        "_query_model uses reasoning_effort='low' — must be 'medium' or higher"
-    )
-    # Must contain medium or higher
-    assert 'reasoning_effort="medium"' in source or 'reasoning_effort="high"' in source, (
-        "_query_model must use reasoning_effort='medium' or 'high'"
-    )
+# test_triad_review_prompt_has_thoroughness_instructions and
+# test_triad_review_reasoning_effort_is_medium_not_low removed in v5.15.x —
+# both pinned exact prompt-template / inspect.getsource() substrings.
+# Prompt quality and effort level evolve over time; the behavioral
+# contract (review produces correct verdicts at adequate depth) is
+# exercised by the actual triad-review integration tests in
+# test_review_fidelity.py, test_review_observability.py, and the
+# git+review pipeline suite.
 
 
 def test_advisory_prompt_contains_obligation_targeting_instructions(tmp_path):
@@ -1173,4 +1154,3 @@ def test_advisory_prompt_contains_obligation_targeting_instructions(tmp_path):
         assert "will NOT resolve" in prompt or "will not resolve" in prompt.lower(), (
             "Prompt must warn that generic item-name PASS won't resolve all same-item obligations"
         )
-

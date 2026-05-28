@@ -201,8 +201,10 @@ def test_advisory_prompt_includes_verdict_authoritative_and_anti_rephrase_rules(
         goal="",
         scope="",
         drive_root=None,
-        diff="--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-old\n+new",
-        changed_files="foo.py",
+        prompt_context={
+            "diff": "--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-old\n+new",
+            "changed_files": "foo.py",
+        },
     )
     assert "VERDICT IS AUTHORITATIVE" in prompt
     assert "DO NOT REPHRASE" in prompt
@@ -407,7 +409,7 @@ def test_scope_build_prompt_loads_obligations_from_drive_root(tmp_path, monkeypa
     monkeypatch.setattr(
         scope_review_mod,
         "_gather_scope_packs",
-        lambda _rd, _paths: "(full repo pack)",
+        lambda _rd, _paths, fixed_prompt_tokens=0: "(generated scope atlas)",
     )
     monkeypatch.setattr(
         scope_review_mod,

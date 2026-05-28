@@ -1,8 +1,4 @@
-"""
-Supervisor — Task queue management.
-
-Queue operations, priority, timeouts, persistence, evolution/review scheduling.
-"""
+"""Supervisor task queue, persistence, timeouts, and evolution scheduling."""
 
 from __future__ import annotations
 
@@ -21,13 +17,11 @@ from supervisor.state import (
     budget_remaining, EVOLUTION_BUDGET_RESERVE,
 )
 from supervisor.message_bus import send_with_budget
+from ouroboros.utils import utc_now_iso
 
 log = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Module-level config (set via init())
-# ---------------------------------------------------------------------------
 DRIVE_ROOT: pathlib.Path = pathlib.Path.home() / "Ouroboros" / "data"
 SOFT_TIMEOUT_SEC: int = 600
 HARD_TIMEOUT_SEC: int = 1800
@@ -43,11 +37,7 @@ def init(drive_root: pathlib.Path, soft_timeout: int, hard_timeout: int) -> None
 
 
 def refresh_timeouts_from_settings(settings: dict) -> None:
-    """Hot-reload soft/hard timeout globals from a settings dict.
-
-    Each key is parsed independently — a bad value for one key does not
-    prevent the other from being updated.  Silently swallows parse errors.
-    """
+    """Hot-reload soft/hard timeouts independently, ignoring bad values."""
     global SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC
     soft_raw = settings.get("OUROBOROS_SOFT_TIMEOUT_SEC")
     if soft_raw is not None:
@@ -63,31 +53,23 @@ def refresh_timeouts_from_settings(settings: dict) -> None:
             pass
 
 
-# ---------------------------------------------------------------------------
-# Queue data structures (references to workers module globals)
-# ---------------------------------------------------------------------------
-# These will be set by workers.init_queue_refs()
+# Set by workers.init_queue_refs().
 PENDING: List[Dict[str, Any]] = []
 RUNNING: Dict[str, Dict[str, Any]] = {}
 QUEUE_SEQ_COUNTER_REF: Dict[str, int] = {"value": 0}
 
-# Lock for all mutations to PENDING, RUNNING, WORKERS shared collections.
-# Protects against concurrent access from main loop, direct-chat threads, watchdog.
+# Guards PENDING/RUNNING mutations across main loop, direct chat, watchdog.
 _queue_lock = threading.RLock()
 
 
 def init_queue_refs(pending: List[Dict[str, Any]], running: Dict[str, Dict[str, Any]],
                     seq_counter_ref: Dict[str, int]) -> None:
-    """Called by workers.py to provide references to queue data structures."""
+    """Bind queue structures owned by workers.py."""
     global PENDING, RUNNING, QUEUE_SEQ_COUNTER_REF
     PENDING = pending
     RUNNING = running
     QUEUE_SEQ_COUNTER_REF = seq_counter_ref
 
-
-# ---------------------------------------------------------------------------
-# Queue priority
-# ---------------------------------------------------------------------------
 
 def _task_priority(task_type: str) -> int:
     t = str(task_type or "").strip().lower()
@@ -107,19 +89,12 @@ def _queue_sort_key(task: Dict[str, Any]) -> Tuple[int, int]:
 
 
 def sort_pending() -> None:
-    """Sort PENDING queue by priority."""
+    """Sort pending queue by priority and insertion sequence."""
     PENDING.sort(key=_queue_sort_key)
 
 
-# ---------------------------------------------------------------------------
-# Queue operations
-# ---------------------------------------------------------------------------
-
 def drain_all_pending() -> list:
-    """Remove and return all pending tasks. Used during crash storm cleanup.
-
-    Caller must already hold _queue_lock (called from kill_workers which holds it).
-    """
+    """Drain pending tasks during crash-storm cleanup; caller holds _queue_lock."""
     drained = list(PENDING)
     PENDING.clear()
     persist_queue_snapshot(reason="drain_all_pending")
@@ -127,7 +102,7 @@ def drain_all_pending() -> list:
 
 
 def enqueue_task(task: Dict[str, Any], front: bool = False) -> Dict[str, Any]:
-    """Add task to PENDING queue."""
+    """Add task to PENDING."""
     t = dict(task)
     QUEUE_SEQ_COUNTER_REF["value"] += 1
     seq = QUEUE_SEQ_COUNTER_REF["value"]
@@ -135,14 +110,14 @@ def enqueue_task(task: Dict[str, Any], front: bool = False) -> Dict[str, Any]:
     _att = t.get("_attempt")
     t.setdefault("_attempt", int(_att) if _att is not None else 1)
     t["_queue_seq"] = -seq if front else seq
-    t["queued_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    t["queued_at"] = utc_now_iso()
     PENDING.append(t)
     sort_pending()
     return t
 
 
 def queue_has_task_type(task_type: str) -> bool:
-    """Check if a task of given type exists in PENDING or RUNNING."""
+    """Return whether this task type is pending or running."""
     tt = str(task_type or "")
     if any(str(t.get("type") or "") == tt for t in PENDING):
         return True
@@ -154,7 +129,7 @@ def queue_has_task_type(task_type: str) -> bool:
 
 
 def persist_queue_snapshot(reason: str = "") -> None:
-    """Save PENDING and RUNNING to snapshot file."""
+    """Persist queue snapshot for restart/recovery diagnostics."""
     pending_rows = []
     for t in PENDING:
         pending_rows.append({
@@ -165,7 +140,17 @@ def persist_queue_snapshot(reason: str = "") -> None:
                 "id": t.get("id"), "type": t.get("type"), "chat_id": t.get("chat_id"),
                 "text": t.get("text"), "priority": t.get("priority"),
                 "depth": t.get("depth"), "description": t.get("description"),
+                "objective": t.get("objective"), "expected_output": t.get("expected_output"),
+                "constraints": t.get("constraints"), "role": t.get("role"),
                 "context": t.get("context"), "parent_task_id": t.get("parent_task_id"),
+                "root_task_id": t.get("root_task_id"), "session_id": t.get("session_id"),
+                "actor_id": t.get("actor_id"), "delegation_role": t.get("delegation_role"),
+                "workspace_root": t.get("workspace_root"), "workspace_mode": t.get("workspace_mode"),
+                "memory_mode": t.get("memory_mode"), "drive_root": t.get("drive_root"),
+                "child_drive_root": t.get("child_drive_root"),
+                "budget_drive_root": t.get("budget_drive_root"),
+                "task_constraint": t.get("task_constraint"),
+                "metadata": t.get("metadata"),
                 "_attempt": t.get("_attempt"), "review_reason": t.get("review_reason"),
                 "review_source_task_id": t.get("review_source_task_id"),
             },
@@ -184,7 +169,7 @@ def persist_queue_snapshot(reason: str = "") -> None:
             "soft_sent": bool(meta.get("soft_sent")), "task": task,
         })
     payload = {
-        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "ts": utc_now_iso(),
         "reason": reason,
         "pending_count": len(PENDING), "running_count": len(RUNNING),
         "pending": pending_rows, "running": running_rows,
@@ -197,7 +182,7 @@ def persist_queue_snapshot(reason: str = "") -> None:
 
 
 def parse_iso_to_ts(iso_ts: str) -> Optional[float]:
-    """Parse ISO timestamp to Unix timestamp."""
+    """Parse ISO timestamp to Unix time."""
     txt = str(iso_ts or "").strip()
     if not txt:
         return None
@@ -209,7 +194,7 @@ def parse_iso_to_ts(iso_ts: str) -> Optional[float]:
 
 
 def restore_pending_from_snapshot(max_age_sec: int = 900) -> int:
-    """Restore PENDING queue from snapshot file."""
+    """Restore recent pending tasks from queue snapshot."""
     if PENDING:
         return 0
     try:
@@ -229,7 +214,8 @@ def restore_pending_from_snapshot(max_age_sec: int = 900) -> int:
             task = row.get("task") if isinstance(row, dict) else None
             if not isinstance(task, dict):
                 continue
-            if not task.get("id") or not task.get("chat_id"):
+            chat_id = task.get("chat_id")
+            if not task.get("id") or chat_id is None or chat_id == "":
                 continue
             enqueue_task(task)
             restored += 1
@@ -237,7 +223,7 @@ def restore_pending_from_snapshot(max_age_sec: int = 900) -> int:
             append_jsonl(
                 DRIVE_ROOT / "logs" / "supervisor.jsonl",
                 {
-                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "ts": utc_now_iso(),
                     "type": "queue_restored_from_snapshot",
                     "restored_pending": restored,
                 },
@@ -250,7 +236,7 @@ def restore_pending_from_snapshot(max_age_sec: int = 900) -> int:
 
 
 def cancel_task_by_id(task_id: str) -> bool:
-    """Cancel a task by ID (from PENDING or RUNNING)."""
+    """Cancel a pending or running task by id."""
     from supervisor import workers
 
     with _queue_lock:
@@ -270,7 +256,8 @@ def cancel_task_by_id(task_id: str) -> bool:
 
         for w in workers.WORKERS.values():
             if w.busy_task_id == task_id:
-                RUNNING.pop(task_id, None)
+                meta = RUNNING.pop(task_id, None) or {}
+                task = meta.get("task") if isinstance(meta, dict) and isinstance(meta.get("task"), dict) else {}
                 try:
                     from ouroboros.task_results import STATUS_CANCELLED, write_task_result
                     write_task_result(
@@ -286,19 +273,20 @@ def cancel_task_by_id(task_id: str) -> bool:
                     from ouroboros.platform_layer import kill_pid_tree
                     kill_pid_tree(w.proc.pid)
                     w.proc.join(timeout=2)
+                try:
+                    from ouroboros.tools.services import archive_task_service_logs
+                    archive_task_service_logs(pathlib.Path(DRIVE_ROOT), str(task_id), task)
+                except Exception:
+                    log.debug("Failed to archive service logs for cancelled task %s", task_id, exc_info=True)
                 workers.respawn_worker(w.wid)
                 persist_queue_snapshot(reason="cancel_running")
                 return True
     return False
 
 
-# ---------------------------------------------------------------------------
-# Timeout enforcement
-# ---------------------------------------------------------------------------
-
 def enforce_task_timeouts() -> None:
-    """Check all RUNNING tasks for timeouts and enforce them."""
-    # Import here to avoid circular dependency during module load
+    """Enforce soft/hard timeouts for running tasks."""
+    # Avoid circular dependency during module load.
     from supervisor import workers
     
     if not RUNNING:
@@ -326,7 +314,6 @@ def enforce_task_timeouts() -> None:
             _att = task.get("_attempt")
         attempt = int(_att) if _att is not None else 1
 
-        # Deep self-review gets a longer timeout (60 min)
         effective_soft = 3000 if task_type == "deep_self_review" else SOFT_TIMEOUT_SEC
         effective_hard = 3600 if task_type == "deep_self_review" else HARD_TIMEOUT_SEC
 
@@ -349,35 +336,75 @@ def enforce_task_timeouts() -> None:
         if worker_id in workers.WORKERS:
             w = workers.WORKERS[worker_id]
             try:
-                if w.proc.is_alive():
+                if w.proc.pid:
+                    from ouroboros.platform_layer import kill_pid_tree
+                    kill_pid_tree(w.proc.pid)
+                elif w.proc.is_alive():
                     w.proc.terminate()
                 w.proc.join(timeout=5)
                 if w.proc.is_alive() and w.proc.pid:
-                    from ouroboros.platform_layer import kill_pid_tree
                     kill_pid_tree(w.proc.pid)
                     w.proc.join(timeout=2)
             except Exception:
                 log.warning("Failed to terminate worker %d during hard timeout", worker_id, exc_info=True)
+            try:
+                from ouroboros.tools.services import archive_task_service_logs
+                archive_task_service_logs(pathlib.Path(DRIVE_ROOT), str(task_id), task)
+            except Exception:
+                log.debug("Failed to archive service logs for timed-out task %s", task_id, exc_info=True)
             workers.respawn_worker(worker_id)
 
+        will_retry = attempt <= QUEUE_MAX_RETRIES and isinstance(task, dict)
+        retry_task_id = ""
+        if will_retry:
+            retry_task_id = task_id if str(task.get("delegation_role") or "") == "subagent" else uuid.uuid4().hex[:8]
         try:
-            from ouroboros.task_results import STATUS_FAILED, write_task_result
+            from ouroboros.task_results import STATUS_FAILED, STATUS_INTERRUPTED, STATUS_SCHEDULED, write_task_result
             write_task_result(
-                DRIVE_ROOT, task_id, STATUS_FAILED,
-                result=f"Task killed by hard timeout after {int(runtime_sec)}s.",
+                DRIVE_ROOT,
+                task_id,
+                STATUS_INTERRUPTED if will_retry else STATUS_FAILED,
+                result_status="infra_failed",
+                reason_code="hard_timeout_retry" if will_retry else "hard_timeout",
+                superseded_by=retry_task_id if retry_task_id and retry_task_id != task_id else "",
+                retry_task_id=retry_task_id if retry_task_id else "",
+                result=(
+                    f"Task killed by hard timeout after {int(runtime_sec)}s. Retrying."
+                    if will_retry
+                    else f"Task killed by hard timeout after {int(runtime_sec)}s."
+                ),
             )
+            if will_retry and retry_task_id and retry_task_id != task_id:
+                write_task_result(
+                    DRIVE_ROOT,
+                    retry_task_id,
+                    STATUS_SCHEDULED,
+                    result_status="pending",
+                    reason_code="hard_timeout_retry_scheduled",
+                    supersedes_task_id=task_id,
+                    original_task_id=task_id,
+                    result="Retry scheduled after hard timeout.",
+                    parent_task_id=task.get("parent_task_id"),
+                    root_task_id=task.get("root_task_id") or task_id,
+                    description=task.get("description"),
+                    context=task.get("context"),
+                    workspace_root=task.get("workspace_root"),
+                    workspace_mode=task.get("workspace_mode"),
+                    memory_mode=task.get("memory_mode"),
+                    metadata=task.get("metadata") if isinstance(task.get("metadata"), dict) else {},
+                )
         except Exception:
             pass
 
         requeued = False
         new_attempt = attempt
-        if attempt <= QUEUE_MAX_RETRIES and isinstance(task, dict):
+        if will_retry:
             retried = dict(task)
             retried["original_task_id"] = task_id
-            retried["id"] = uuid.uuid4().hex[:8]
+            retried["id"] = retry_task_id or task_id
             retried["_attempt"] = attempt + 1
             retried["timeout_retry_from"] = task_id
-            retried["timeout_retry_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            retried["timeout_retry_at"] = utc_now_iso()
             enqueue_task(retried, front=True)
             requeued = True
             new_attempt = attempt + 1
@@ -385,7 +412,7 @@ def enforce_task_timeouts() -> None:
         append_jsonl(
             DRIVE_ROOT / "logs" / "supervisor.jsonl",
             {
-                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "ts": utc_now_iso(),
                 "type": "task_hard_timeout",
                 "task_id": task_id, "task_type": task_type,
                 "worker_id": worker_id, "runtime_sec": round(runtime_sec, 2),
@@ -410,12 +437,8 @@ def enforce_task_timeouts() -> None:
         persist_queue_snapshot(reason="task_hard_timeout")
 
 
-# ---------------------------------------------------------------------------
-# Evolution + review scheduling
-# ---------------------------------------------------------------------------
-
 def build_evolution_task_text(cycle: int) -> str:
-    """Build evolution task text. Minimal trigger — SYSTEM.md has the full instructions."""
+    """Build minimal evolution trigger; SYSTEM.md carries instructions."""
     return f"EVOLUTION #{cycle}"
 
 
@@ -441,7 +464,7 @@ def queue_deep_self_review_task(reason: str, model: str = "", force: bool = Fals
 
 
 def get_evolution_status_snapshot() -> Dict[str, Any]:
-    """Return a non-mutating snapshot of evolution scheduling state."""
+    """Return a non-mutating evolution scheduling snapshot."""
     st = load_state()
     enabled = bool(st.get("evolution_mode_enabled"))
     owner_chat_id = int(st.get("owner_chat_id") or 0)
@@ -513,11 +536,7 @@ def get_evolution_status_snapshot() -> Dict[str, Any]:
 
 
 def enqueue_evolution_task_if_needed() -> None:
-    """Enqueue evolution task if queue is empty and evolution mode is enabled.
-
-    Circuit breaker: pauses evolution after 3 consecutive failures to prevent
-    burning budget on infinite retry loops.
-    """
+    """Queue evolution only when idle, enabled, within budget, and not failure-paused."""
     if PENDING or RUNNING:
         return
     st = load_state()
@@ -527,7 +546,6 @@ def enqueue_evolution_task_if_needed() -> None:
     if not owner_chat_id:
         return
 
-    # Circuit breaker: check for consecutive evolution failures
     consecutive_failures = int(st.get("evolution_consecutive_failures") or 0)
     if consecutive_failures >= 3:
         st["evolution_mode_enabled"] = False
@@ -553,6 +571,6 @@ def enqueue_evolution_task_if_needed() -> None:
         "text": build_evolution_task_text(cycle),
     })
     st["evolution_cycle"] = cycle
-    st["last_evolution_task_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    st["last_evolution_task_at"] = utc_now_iso()
     save_state(st)
     send_with_budget(int(owner_chat_id), f"🧬 Evolution #{cycle}: {tid}")

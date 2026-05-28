@@ -23,9 +23,14 @@ ANTHROPIC_DIRECT_DEFAULTS = {
     "fallback": "anthropic::claude-sonnet-4-6",
 }
 
+_DIRECT_PROVIDER_DEFAULTS = {
+    "openai": OPENAI_DIRECT_DEFAULTS,
+    "anthropic": ANTHROPIC_DIRECT_DEFAULTS,
+}
+
 _ANTHROPIC_MODEL_ALIASES = {
     "claude-opus-4.6": "claude-opus-4-6",
-    "claude-opus-" + "4.7": "claude-opus-4-6",
+    "claude-opus-4.7": "claude-opus-4-7",
     "claude-sonnet-4.6": "claude-sonnet-4-6",
 }
 
@@ -48,6 +53,32 @@ def migrate_model_value(provider: str, value: str) -> str:
             return f"anthropic::{normalize_anthropic_model_id(text[len('anthropic/'):])}"
         return text
     return text
+
+
+def compute_direct_review_models_fallback(
+    provider: str,
+    main_model: str,
+    light_model: str = "",
+    *,
+    review_runs: int = 3,
+) -> list[str]:
+    """Return direct-provider review fallback preserving commit-triad shape.
+
+    The quorum-safe shape is ``[main, light, light]`` when main/light are
+    distinct provider-prefixed lanes; otherwise it degrades to ``[main] * N``.
+    """
+    if provider not in _DIRECT_PROVIDER_DEFAULTS:
+        return []
+    provider_prefix = f"{provider}::"
+    main = migrate_model_value(provider, main_model)
+    if not main.startswith(provider_prefix):
+        return []
+    light = migrate_model_value(provider, light_model) if light_model else ""
+    default_light = migrate_model_value(provider, _DIRECT_PROVIDER_DEFAULTS[provider].get("light", ""))
+    light_slot = light if light.startswith(provider_prefix) else default_light
+    if light_slot and light_slot != main:
+        return [main, light_slot, light_slot]
+    return [main] * int(review_runs or 3)
 
 
 def normalize_model_identity(model: str) -> str:

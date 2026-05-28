@@ -13,7 +13,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    import ouroboros.chat_upload_api as upload_api
+    import ouroboros.gateway.files as upload_api
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
     app = Starlette(routes=[
         Route("/api/chat/upload", endpoint=upload_api.api_chat_upload, methods=["POST"]),
@@ -232,3 +232,18 @@ def test_upload_file_persists_for_queued_message(client, tmp_path):
     del_resp = _delete(client, {"filename": stored_name})
     assert del_resp.status_code == 200
     assert not dest.exists(), "File removed only by explicit DELETE"
+
+
+def test_upload_parse_error_returns_400(client, monkeypatch):
+    """If form parsing raises a general exception (e.g. disconnect), we return 400."""
+    from starlette.requests import Request
+
+    async def mock_form(self):
+        raise RuntimeError("Unexpected disconnect or parse error")
+
+    monkeypatch.setattr(Request, "form", mock_form)
+
+    resp = client.post("/api/chat/upload", files={"file": ("test.txt", io.BytesIO(b"data"), "text/plain")})
+    assert resp.status_code == 400
+    assert resp.json()["ok"] is False
+    assert "Unexpected disconnect" in resp.json()["error"]
