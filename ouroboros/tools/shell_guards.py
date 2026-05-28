@@ -38,6 +38,9 @@ INTERPRETER_WRITE_RE = re.compile(
     r"""open\s*\([^)]*,\s*['"][^'"]*[wax+])"""
 )
 EMBEDDED_RELATIVE_PATH_RE = re.compile(r"(?<![A-Za-z0-9_.-])(?:\.\.?/)+[^\s'\"\\),;\]]+")
+EMBEDDED_WINDOWS_ABSOLUTE_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9_.-])(?:[A-Za-z]:[\\/][^\s'\"),;\]]+|\\\\[^\s'\"),;\]]+)"
+)
 
 
 def _path_inside(path: pathlib.Path, root: pathlib.Path) -> bool:
@@ -80,9 +83,10 @@ def runtime_data_write_targets(
         }
         candidates: List[str] = []
         for expanded in expanded_texts:
-            if expanded.startswith(("/", "~")):
+            if expanded.startswith(("/", "~")) or re.match(r"^[A-Za-z]:[\\/]", expanded):
                 candidates.append(expanded)
             candidates.extend(EMBEDDED_ABSOLUTE_PATH_RE.findall(expanded))
+            candidates.extend(EMBEDDED_WINDOWS_ABSOLUTE_PATH_RE.findall(expanded))
             candidates.extend(EMBEDDED_RELATIVE_PATH_RE.findall(expanded))
         for candidate in candidates:
             try:

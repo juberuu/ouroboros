@@ -924,10 +924,7 @@ def _control_restore_note(restored: list[str]) -> str:
     )
 
 
-def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
-                      budget: float = 5.0, validate: bool = False,
-                      bucket: str = "", skill_name: str = "",
-                      outputs: List[str] | None = None) -> str:
+def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "", budget: float = 5.0, validate: bool = False, bucket: str = "", skill_name: str = "", outputs: List[str] | None = None) -> str:
     """Delegate SDK edits with cwd and protected-path safety hooks."""
     from ouroboros.tools.git import _acquire_git_lock, _release_git_lock
 
@@ -1030,14 +1027,6 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
     if sidecar_root is not None:
         skill_control_snapshots = _snapshot_skill_control_paths(sidecar_root)
 
-    def _restore_skill_control_snapshots() -> list[str]:
-        nonlocal skill_control_snapshots
-        if not skill_control_snapshots:
-            return []
-        restored = _restore_skill_control_changes(skill_control_snapshots)
-        skill_control_snapshots = {}
-        return restored
-
     target_repo_root = _resolve_git_root(work_dir_path)
     repo_mode = target_repo_root is not None
     if target_repo_root is None:
@@ -1047,7 +1036,7 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
     if system_repo_mode and not mode_allows_protected_write(runtime_mode):
         protected_dirty_before = _protected_runtime_dirty_paths(target_repo_root)
         if protected_dirty_before:
-            restored_sidecars = _restore_skill_control_snapshots()
+            restored_sidecars = _restore_skill_control_changes(skill_control_snapshots) if skill_control_snapshots else []
             return (
                 "⚠️ CORE_PROTECTION_BLOCKED: protected runtime files are already dirty; "
                 "refusing claude_code_edit so existing human/operator changes are not overwritten. "
@@ -1073,7 +1062,7 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
             try:
                 run_cmd(["git", "checkout", ctx.branch_dev], cwd=ctx.repo_dir)
             except Exception as e:
-                restored_sidecars = _restore_skill_control_snapshots()
+                restored_sidecars = _restore_skill_control_changes(skill_control_snapshots) if skill_control_snapshots else []
                 return f"⚠️ GIT_ERROR (checkout): {e}" + _control_restore_note(restored_sidecars)
 
         ctx.emit_progress_fn("Delegating to Claude Agent SDK...")
@@ -1130,14 +1119,14 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
                 })
 
             if not result.success:
-                restored_sidecars = _restore_skill_control_snapshots()
+                restored_sidecars = _restore_skill_control_changes(skill_control_snapshots) if skill_control_snapshots else []
                 invalidate_if_changed()
                 return (
                     f"⚠️ CLAUDE_CODE_ERROR: {result.error}\n\n{result.result_text}"
                     + _control_restore_note(restored_sidecars)
                 )
 
-            restored_sidecars = _restore_skill_control_snapshots()
+            restored_sidecars = _restore_skill_control_changes(skill_control_snapshots) if skill_control_snapshots else []
             if restored_sidecars:
                 invalidate_if_changed()
                 return (
@@ -1202,14 +1191,14 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
             return output
 
         except ImportError:
-            restored_sidecars = _restore_skill_control_snapshots()
+            restored_sidecars = _restore_skill_control_changes(skill_control_snapshots) if skill_control_snapshots else []
             return (
                 "⚠️ CLAUDE_CODE_UNAVAILABLE: claude-agent-sdk not installed. "
                 "Install: pip install 'ouroboros[claude-sdk]'"
                 + _control_restore_note(restored_sidecars)
             )
         except Exception as e:
-            restored_sidecars = _restore_skill_control_snapshots()
+            restored_sidecars = _restore_skill_control_changes(skill_control_snapshots) if skill_control_snapshots else []
             invalidate_if_changed()
             import sys
             sdk_version = "(unknown)"

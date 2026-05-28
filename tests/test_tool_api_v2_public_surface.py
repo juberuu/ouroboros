@@ -1,5 +1,6 @@
 import pathlib
 import re
+import shlex
 import sys
 from types import ModuleType, SimpleNamespace
 
@@ -822,7 +823,7 @@ def test_run_command_without_outputs_detects_shell_redirection_to_user_files(tmp
 
     result = registry.execute(
         "run_command",
-        {"cmd": ["sh", "-c", f"echo ok > {target}"], "cwd": str(desktop)},
+        {"cmd": ["sh", "-c", f"echo ok > {shlex.quote(target.as_posix())}"], "cwd": str(desktop)},
     )
 
     assert result.startswith("⚠️ ARTIFACT_OUTPUT_ERROR"), result
