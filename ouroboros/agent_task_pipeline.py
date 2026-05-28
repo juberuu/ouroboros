@@ -93,18 +93,19 @@ def build_trace_summary(llm_trace: dict) -> str:
             args = tc.get("args", {})
             if isinstance(args, dict):
                 parts = []
-                for k, v in list(args.items())[:2]:
+                arg_items = list(args.items())
+                for k, v in arg_items[:2]:
                     v_str = str(v)
                     if len(v_str) > 60:
-                        v_str = v_str[:57] + "..."
+                        v_str = _truncate_with_notice(v_str, 60).replace("\n", " ")
                     parts.append(f"{k}={v_str!r}")
-                if len(args) > 2:
-                    parts.append(f"... (+{len(args) - 2} more args)")
+                if len(arg_items) > 2:
+                    parts.append(f"⚠️ OMISSION NOTE: {len(arg_items) - 2} more args omitted")
                 args_str = ", ".join(parts)
             else:
                 args_str = repr(args)
                 if len(args_str) > 80:
-                    args_str = args_str[:77] + "..."
+                    args_str = _truncate_with_notice(args_str, 80).replace("\n", " ")
             facts = []
             status = str(tc.get("status") or "").strip()
             if status and status != "ok":
@@ -120,7 +121,7 @@ def build_trace_summary(llm_trace: dict) -> str:
         if n > 30:
             shown = (
                 [_fmt_call(i + 1, tool_calls[i]) for i in range(15)]
-                + [f"... ({n - 30} more calls) ..."]
+                + [f"⚠️ OMISSION NOTE: {n - 30} middle tool calls omitted from trace summary."]
                 + [_fmt_call(n - 14 + i, tool_calls[n - 15 + i]) for i in range(15)]
             )
         else:
@@ -133,7 +134,7 @@ def build_trace_summary(llm_trace: dict) -> str:
 
     summary = "\n".join(lines)
     if len(summary) > 4000:
-        summary = summary[:3997] + "..."
+        summary = _truncate_with_notice(summary, 4000)
     return summary
 
 
@@ -293,11 +294,14 @@ def emit_task_results(
             pass
 
     if str(task.get("delegation_role") or "") != "subagent":
+        post_usage = dict(usage or {})
+        post_usage["result_status"] = result_status
+        post_usage["reason_code"] = reason_code
         _run_chat_consolidation(env, memory, llm, task, drive_logs)
         _run_scratchpad_consolidation(env, memory, llm)
         # LLM-heavy memory work stays off the reply critical path.
         _run_post_task_processing_async(
-            env, task, usage, llm_trace, review_evidence, drive_logs,
+            env, task, post_usage, llm_trace, review_evidence, drive_logs,
         )
 
 
@@ -412,6 +416,8 @@ def _run_task_summary(env, llm, task, usage, llm_trace, drive_logs, review_evide
         n_tool_calls = len(llm_trace.get("tool_calls", []) or [])
         rounds = int(usage.get("rounds") or 0)
         cost = float(usage.get("cost") or 0)
+        result_status = str(usage.get("result_status") or "")
+        reason_code = str(usage.get("reason_code") or "")
 
         # Skip LLM summary for trivial tasks.
         if n_tool_calls == 0 and rounds <= 1:
@@ -424,6 +430,7 @@ def _run_task_summary(env, llm, task, usage, llm_trace, drive_logs, review_evide
                 "ts": utc_now_iso(), "direction": "system",
                 "type": "task_summary", "task_id": task_id, "text": summary_text,
                 "tool_calls": n_tool_calls, "rounds": rounds,
+                "result_status": result_status, "reason_code": reason_code,
             })
             return
 
@@ -465,6 +472,7 @@ def _run_task_summary(env, llm, task, usage, llm_trace, drive_logs, review_evide
                 "ts": utc_now_iso(), "direction": "system",
                 "type": "task_summary", "task_id": task_id, "text": summary_text,
                 "tool_calls": n_tool_calls, "rounds": rounds,
+                "result_status": result_status, "reason_code": reason_code,
             })
     except Exception:
         log.debug("Task summary generation failed (non-critical)", exc_info=True)

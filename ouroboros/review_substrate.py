@@ -8,9 +8,11 @@ reviewer slots.
 
 from __future__ import annotations
 
-import concurrent.futures
+import asyncio
 import json
 import pathlib
+import queue
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List
@@ -19,7 +21,7 @@ from ouroboros.config import get_review_models
 from ouroboros.llm import LLMClient
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.triad_review import extract_json_array
-from ouroboros.utils import sanitize_tool_result_for_log, utc_now_iso
+from ouroboros.utils import sanitize_tool_result_for_log, truncate_review_artifact, utc_now_iso
 
 
 @dataclass(frozen=True)
@@ -27,7 +29,7 @@ class ReviewSlot:
     slot_id: str
     model: str
     effort: str = "medium"
-    timeout_sec: int = 300
+    timeout_sec: float = 300
     max_tokens: int = 16_384
     temperature: float | None = None
     role_hint: str = ""
@@ -44,6 +46,11 @@ class ReviewRequest:
     checklist: str = ""
     policy: Dict[str, Any] = field(default_factory=dict)
     task_id: str = ""
+    messages: List[Dict[str, Any]] = field(default_factory=list)
+    call_type: str = ""
+    max_tokens: int | None = None
+    temperature: float | None = None
+    no_proxy: bool = False
 
 
 @dataclass
@@ -108,6 +115,23 @@ def _render_prompt(request: ReviewRequest, slot: ReviewSlot) -> str:
     )
 
 
+def _request_messages(request: ReviewRequest, slot: ReviewSlot) -> List[Dict[str, Any]]:
+    if request.messages:
+        return [dict(message) if isinstance(message, dict) else {"role": "user", "content": str(message)} for message in request.messages]
+    return [{"role": "user", "content": _render_prompt(request, slot)}]
+
+
+def _messages_char_count(messages: List[Dict[str, Any]]) -> int:
+    total = 0
+    for message in messages:
+        content = message.get("content") if isinstance(message, dict) else message
+        if isinstance(content, list):
+            total += sum(len(str(block.get("text", block))) if isinstance(block, dict) else len(str(block)) for block in content)
+        else:
+            total += len(str(content or ""))
+    return total
+
+
 def _parse_findings(raw_text: str) -> tuple[Any, List[Dict[str, Any]], str]:
     text = str(raw_text or "").strip()
     parsed: Any = None
@@ -163,44 +187,48 @@ class ReviewCoordinator:
                 degraded_reasons=["no_review_slots"],
             )
 
-        pool = concurrent.futures.ThreadPoolExecutor(max_workers=min(len(slots), 8))
-        future_by_slot = {
-            pool.submit(self._run_slot, request, slot): slot
-            for slot in slots
-        }
+        result_queue: "queue.Queue[ReviewActorRecord]" = queue.Queue()
+        started_slots: List[ReviewSlot] = []
+
+        def _start_slot(slot: ReviewSlot) -> None:
+            started_slots.append(slot)
+
+            def _worker() -> None:
+                try:
+                    result_queue.put(self._run_slot(request, slot))
+                except Exception as exc:
+                    result_queue.put(self._error_actor(request, slot, f"{type(exc).__name__}: {exc}"))
+
+            thread = threading.Thread(
+                target=_worker,
+                name=f"ouroboros-review-{request.surface}-{slot.slot_id}",
+                daemon=True,
+            )
+            thread.start()
+
+        for slot in slots:
+            _start_slot(slot)
+
         actors: List[ReviewActorRecord] = []
-        try:
+        slot_timeout = max(0.001, max(float(slot.timeout_sec or 1) for slot in slots))
+        deadline = time.monotonic() + slot_timeout
+        while len(actors) < len(slots):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
             try:
-                completed = concurrent.futures.as_completed(
-                    future_by_slot,
-                    timeout=max(1, max(int(slot.timeout_sec or 1) for slot in slots)),
-                )
-                for future in completed:
-                    slot = future_by_slot[future]
-                    try:
-                        actors.append(future.result(timeout=0))
-                    except Exception as exc:
-                        actors.append(ReviewActorRecord(
-                            slot_id=slot.slot_id,
-                            model=slot.model,
-                            status="error",
-                            error=sanitize_tool_result_for_log(f"{type(exc).__name__}: {exc}"),
-                        ))
-            except concurrent.futures.TimeoutError:
-                pass
-            seen = {actor.slot_id for actor in actors}
-            for future, slot in future_by_slot.items():
-                if slot.slot_id in seen:
-                    continue
-                future.cancel()
-                actors.append(ReviewActorRecord(
-                    slot_id=slot.slot_id,
-                    model=slot.model,
-                    status="error",
-                    error=sanitize_tool_result_for_log(f"Timeout after {slot.timeout_sec}s"),
-                ))
-        finally:
-            pool.shutdown(wait=False, cancel_futures=True)
+                actors.append(result_queue.get(timeout=remaining))
+            except queue.Empty:
+                break
+
+        seen = {actor.slot_id for actor in actors}
+        started_ids = {slot.slot_id for slot in started_slots}
+        for slot in slots:
+            if slot.slot_id not in seen:
+                if slot.slot_id in started_ids:
+                    actors.append(self._error_actor(request, slot, f"Timeout after {slot.timeout_sec:g}s"))
+                else:
+                    actors.append(self._error_actor(request, slot, "Not started before reviewer timeout budget expired"))
         slot_order = {slot.slot_id: idx for idx, slot in enumerate(slots)}
         actors.sort(key=lambda actor: slot_order.get(actor.slot_id, len(slot_order)))
 
@@ -239,9 +267,47 @@ class ReviewCoordinator:
             degraded_reasons=degraded_reasons,
         )
 
+    def _error_actor(self, request: ReviewRequest, slot: ReviewSlot, error: str) -> ReviewActorRecord:
+        call_id = new_call_id(f"review_{request.surface}_{slot.slot_id}_error")
+        base_call_type = request.call_type or f"{request.surface}_review"
+        messages = _request_messages(request, slot)
+        prompt_ref: Dict[str, Any] = {}
+        response_ref: Dict[str, Any] = {}
+        try:
+            prompt_ref = persist_call(
+                self.drive_root,
+                task_id=request.task_id or "review",
+                call_id=f"{call_id}_prompt",
+                call_type=f"{base_call_type}_prompt",
+                payload={"request": asdict(request), "slot": asdict(slot), "messages": messages},
+                manifest={"surface": request.surface, "slot_id": slot.slot_id, "model": slot.model, "synthetic": True},
+            )
+        except Exception:
+            prompt_ref = {}
+        try:
+            response_ref = persist_call(
+                self.drive_root,
+                task_id=request.task_id or "review",
+                call_id=f"{call_id}_error",
+                call_type=f"{base_call_type}_error",
+                payload={"error": sanitize_tool_result_for_log(error)},
+                manifest={"surface": request.surface, "slot_id": slot.slot_id, "model": slot.model, "status": "error", "synthetic": True},
+            )
+        except Exception:
+            response_ref = {}
+        return ReviewActorRecord(
+            slot_id=slot.slot_id,
+            model=slot.model,
+            status="error",
+            error=sanitize_tool_result_for_log(error),
+            prompt_ref=prompt_ref,
+            response_ref=response_ref,
+        )
+
     def _run_slot(self, request: ReviewRequest, slot: ReviewSlot) -> ReviewActorRecord:
-        prompt = _render_prompt(request, slot)
+        messages = _request_messages(request, slot)
         call_id = new_call_id(f"review_{request.surface}_{slot.slot_id}")
+        base_call_type = request.call_type or f"{request.surface}_review"
         prompt_ref: Dict[str, Any] = {}
         response_ref: Dict[str, Any] = {}
         start = time.time()
@@ -250,28 +316,34 @@ class ReviewCoordinator:
                 self.drive_root,
                 task_id=request.task_id or "review",
                 call_id=f"{call_id}_prompt",
-                call_type="review_prompt",
-                payload={"request": asdict(request), "slot": asdict(slot), "prompt": prompt},
+                call_type=f"{base_call_type}_prompt",
+                payload={"request": asdict(request), "slot": asdict(slot), "messages": messages},
                 manifest={"surface": request.surface, "slot_id": slot.slot_id, "model": slot.model},
             )
         except Exception:
             prompt_ref = {}
         try:
-            msg, usage = self.llm.chat(
-                messages=[{"role": "user", "content": prompt}],
-                model=slot.model,
-                reasoning_effort=slot.effort,
-                max_tokens=slot.max_tokens,
-                temperature=slot.temperature,
-            )
+            chat_kwargs = {
+                "messages": messages,
+                "model": slot.model,
+                "reasoning_effort": slot.effort,
+                "max_tokens": int(request.max_tokens or slot.max_tokens),
+                "temperature": request.temperature if request.temperature is not None else slot.temperature,
+                "no_proxy": bool(request.no_proxy),
+            }
+            chat = getattr(self.llm, "chat", None)
+            if callable(chat):
+                msg, usage = chat(**chat_kwargs)
+            else:
+                msg, usage = asyncio.run(self.llm.chat_async(**chat_kwargs))
             raw_text = str(msg.get("content") or "")
-            self._emit_usage(request, slot, usage, prompt_chars=len(prompt))
+            self._emit_usage(request, slot, usage, prompt_chars=_messages_char_count(messages))
             try:
                 response_ref = persist_call(
                     self.drive_root,
                     task_id=request.task_id or "review",
                     call_id=f"{call_id}_response",
-                    call_type="review_response",
+                    call_type=f"{base_call_type}_response",
                     payload={"message": msg, "usage": usage},
                     manifest={"surface": request.surface, "slot_id": slot.slot_id, "model": slot.model},
                 )
@@ -288,11 +360,26 @@ class ReviewCoordinator:
                 duration_sec=round(time.time() - start, 3),
             )
         except Exception as exc:
+            error_msg = truncate_review_artifact(str(exc), limit=4000)
+            try:
+                response_ref = persist_call(
+                    self.drive_root,
+                    task_id=request.task_id or "review",
+                    call_id=f"{call_id}_error",
+                    call_type=f"{base_call_type}_error",
+                    payload={
+                        "error_type": type(exc).__name__,
+                        "error": sanitize_tool_result_for_log(error_msg),
+                    },
+                    manifest={"surface": request.surface, "slot_id": slot.slot_id, "model": slot.model, "status": "error"},
+                )
+            except Exception:
+                response_ref = {}
             return ReviewActorRecord(
                 slot_id=slot.slot_id,
                 model=slot.model,
                 status="error",
-                error=sanitize_tool_result_for_log(f"{type(exc).__name__}: {exc}"),
+                error=sanitize_tool_result_for_log(error_msg),
                 prompt_ref=prompt_ref,
                 response_ref=response_ref,
                 duration_sec=round(time.time() - start, 3),

@@ -369,6 +369,7 @@ function chatView({
     fullHeadline = '',
     visible = false,
     promote = false,
+    terminal = false,
     human = false,
     dedupeKey = '',
     meta = [],
@@ -379,6 +380,7 @@ function chatView({
         body,
         visible,
         promote,
+        terminal,
         human,
         dedupeKey,
     };
@@ -416,6 +418,7 @@ export function summarizeChatLiveEvent(evt) {
             fullBody: body,
             visible: true,
             promote: true,
+            terminal: phase === 'done' || phase === 'lifecycle_error',
             human: true,
             dedupeKey: lifecycle.id ? `lifecycle:${lifecycle.id}:${status}:${label}:${stale ? 'stale' : 'fresh'}` : key(status, label),
         });
@@ -574,6 +577,7 @@ export function summarizeChatLiveEvent(evt) {
             headline: failed ? taskDoneLabel(evt) : 'Done',
             visible: true,
             promote: true,
+            terminal: true,
             dedupeKey: key(evt.result_status || '', evt.reason_code || ''),
         });
     }

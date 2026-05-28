@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import logging
 import os
 import pathlib
 import re
+import shutil
 import shlex
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -18,12 +21,20 @@ from subprocess import Popen, CompletedProcess
 from typing import Any, Dict, List
 
 from ouroboros.platform_layer import IS_WINDOWS, bootstrap_process_path, kill_process_tree, subprocess_new_group_kwargs
-from ouroboros.config import load_settings
+from ouroboros.config import get_runtime_mode, load_settings
+from ouroboros.runtime_mode_policy import (
+    core_patch_notice,
+    is_protected_runtime_path,
+    mode_allows_protected_write,
+    protected_paths_in,
+)
 from ouroboros.tools.commit_gate import _invalidate_advisory
 from ouroboros.tools.registry import ToolContext, ToolEntry, active_repo_dir_for
 from ouroboros.utils import safe_relpath, utc_now_iso, run_cmd
 from ouroboros.contracts.task_constraint import normalize_task_constraint
 from ouroboros.contracts.skill_payload_policy import (
+    SKILL_PAYLOAD_CONTROL_DIRNAMES,
+    SKILL_PAYLOAD_CONTROL_FILENAMES,
     SkillPayloadPathError,
     cross_skill_redirect_error,
     decide_payload_short_form,
@@ -37,6 +48,7 @@ _active_subprocesses: set = set()
 _subprocess_lock = threading.Lock()
 
 _RUN_SHELL_DEFAULT_TIMEOUT_SEC = 360
+_CONTROL_DIR_BACKUP_MAX_BYTES = 5 * 1024 * 1024
 
 
 def _tracked_subprocess_run(cmd, **kwargs):
@@ -149,6 +161,188 @@ def _status_snapshot(repo_dir: pathlib.Path | None) -> list[str]:
     if repo_dir is None:
         return []
     return sorted(_get_changed_files(repo_dir))
+
+
+def _protected_runtime_dirty_paths(repo_dir: pathlib.Path) -> list[str]:
+    dirty: set[str] = set()
+    for cmd in (["git", "diff", "--name-only"], ["git", "diff", "--cached", "--name-only"]):
+        try:
+            res = subprocess.run(
+                cmd,
+                cwd=str(repo_dir),
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if res.returncode == 0:
+                dirty.update(rel for rel in res.stdout.splitlines() if is_protected_runtime_path(rel))
+        except Exception:
+            pass
+    return sorted(dirty)
+
+
+def _restore_protected_runtime_paths(repo_dir: pathlib.Path, paths: list[str]) -> list[str]:
+    restored: list[str] = []
+    for rel in sorted(set(paths)):
+        try:
+            subprocess.run(
+                ["git", "reset", "HEAD", "--", rel],
+                cwd=str(repo_dir),
+                capture_output=True,
+                timeout=5,
+            )
+            subprocess.run(
+                ["git", "checkout", "--", rel],
+                cwd=str(repo_dir),
+                capture_output=True,
+                timeout=5,
+            )
+            restored.append(rel)
+        except Exception:
+            pass
+    return restored
+
+
+def _tree_fingerprint(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    root = pathlib.Path(path)
+    if not root.exists():
+        return ""
+    for child in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+        try:
+            st = child.lstat()
+        except OSError:
+            continue
+        try:
+            rel = child.relative_to(root).as_posix()
+        except ValueError:
+            rel = safe_relpath(str(child))
+        digest.update(rel.encode("utf-8", errors="replace"))
+        digest.update(str(st.st_mode).encode())
+        digest.update(str(st.st_size).encode())
+        digest.update(str(st.st_mtime_ns).encode())
+        if stat.S_ISLNK(st.st_mode):
+            try:
+                digest.update(os.readlink(child).encode("utf-8", errors="replace"))
+            except OSError:
+                pass
+    return digest.hexdigest()
+
+
+def _snapshot_skill_control_paths(payload_root: pathlib.Path) -> Dict[pathlib.Path, Any]:
+    snapshots: Dict[pathlib.Path, Any] = {}
+    root = pathlib.Path(payload_root).resolve(strict=False)
+    control_file_names = set(SKILL_PAYLOAD_CONTROL_FILENAMES) | {"SKILL.openclaw.md"}
+    existing_names: set[str] = set()
+    try:
+        existing_names = {child.name for child in root.iterdir() if child.name.lower() in SKILL_PAYLOAD_CONTROL_FILENAMES}
+    except OSError:
+        existing_names = set()
+    for name in sorted(control_file_names | existing_names):
+        path = root / name
+        try:
+            snapshots[path] = ("file", path.read_bytes() if path.exists() else None)
+        except OSError:
+            snapshots[path] = ("file", None)
+    for name in SKILL_PAYLOAD_CONTROL_DIRNAMES:
+        path = root / name
+        backup = None
+        if path.exists() and path.is_dir():
+            before_fingerprint = _tree_fingerprint(path)
+            try:
+                total = 0
+                for child in sorted(path.rglob("*"), key=lambda item: item.as_posix()):
+                    try:
+                        total += child.lstat().st_size
+                    except OSError:
+                        continue
+                    if total > _CONTROL_DIR_BACKUP_MAX_BYTES:
+                        break
+                if total <= _CONTROL_DIR_BACKUP_MAX_BYTES:
+                    backup = pathlib.Path(
+                        shutil.copytree(
+                            path,
+                            root.parent / f".ouroboros-control-backup-{uuid.uuid4().hex}" / name,
+                            symlinks=True,
+                        )
+                    )
+            except Exception:
+                backup = None
+            snapshots[path] = ("dir", True, before_fingerprint, backup)
+        elif path.exists():
+            try:
+                snapshots[path] = ("dir_file", path.read_bytes())
+            except OSError:
+                snapshots[path] = ("dir_file", None)
+        else:
+            snapshots[path] = ("dir", False, "", None)
+    return snapshots
+
+
+def _restore_skill_control_changes(snapshots: Dict[pathlib.Path, Any]) -> list[str]:
+    changed: list[str] = []
+    for path, state in snapshots.items():
+        kind = state[0]
+        before = state[1:]
+        name = path.name
+        try:
+            if kind == "file":
+                before_bytes = before[0] if before else None
+                after = path.read_bytes() if path.exists() else None
+                if after != before_bytes:
+                    if before_bytes is None:
+                        path.unlink(missing_ok=True)
+                    else:
+                        path.write_bytes(before_bytes)
+                    changed.append(name)
+            elif kind == "dir":
+                existed, before_fingerprint, backup = before
+                after_fingerprint = _tree_fingerprint(path) if path.exists() and path.is_dir() else None
+                if not existed:
+                    if path.exists():
+                        if path.is_dir():
+                            shutil.rmtree(path)
+                        else:
+                            path.unlink(missing_ok=True)
+                        changed.append(name)
+                elif after_fingerprint != before_fingerprint:
+                    if backup is not None and pathlib.Path(backup).exists():
+                        if path.exists():
+                            if path.is_dir():
+                                shutil.rmtree(path)
+                            else:
+                                path.unlink(missing_ok=True)
+                        shutil.move(str(backup), str(path))
+                    changed.append(name)
+                if backup is not None:
+                    try:
+                        shutil.rmtree(pathlib.Path(backup).parent, ignore_errors=True)
+                    except OSError:
+                        pass
+            elif kind == "dir_file":
+                before_bytes = before[0] if before else None
+                after = path.read_bytes() if path.exists() and path.is_file() else None
+                if after != before_bytes:
+                    if path.exists():
+                        if path.is_dir():
+                            shutil.rmtree(path)
+                        else:
+                            path.unlink(missing_ok=True)
+                    if before_bytes is not None:
+                        path.write_bytes(before_bytes)
+                    changed.append(name)
+            elif kind == "dir_unmoved":
+                before_fingerprint, temp_root = before
+                after_fingerprint = _tree_fingerprint(path) if path.exists() else None
+                if after_fingerprint != before_fingerprint:
+                    changed.append(name)
+                try:
+                    shutil.rmtree(temp_root, ignore_errors=True)
+                except OSError:
+                    pass
+        except OSError:
+            changed.append(name)
+    return sorted(set(changed))
 
 
 _SHELL_BUILTINS = frozenset([
@@ -394,8 +588,6 @@ def _load_project_context(repo_dir: pathlib.Path) -> str:
         if fpath.is_file():
             try:
                 content = fpath.read_text(encoding="utf-8")
-                if len(content) > 50_000:
-                    content = content[:50_000] + "\n\n[... truncated for context size ...]"
                 parts.append(f"## {label}\n\n{content}")
             except Exception:
                 pass
@@ -410,7 +602,7 @@ def _get_changed_files(repo_dir: pathlib.Path) -> list:
             cwd=str(repo_dir), capture_output=True, text=True, timeout=5,
         )
         if res.returncode == 0 and res.stdout.strip():
-            return [line[3:].strip() for line in res.stdout.strip().splitlines() if len(line) > 3]
+            return [line[3:].strip() for line in res.stdout.splitlines() if len(line) > 3 and line.strip()]
     except Exception:
         pass
     return []
@@ -458,20 +650,34 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
     if not api_key:
         return "⚠️ CLAUDE_CODE_UNAVAILABLE: ANTHROPIC_API_KEY not set."
 
-    work_dir = str(ctx.repo_dir)
-    skill_payload_root = None
-    short_form_path_text = cwd if str(cwd or "").strip() else str(ctx.repo_dir)
-    short_form = decide_payload_short_form(
-        bucket=bucket,
-        skill_name=skill_name,
-        path_text=short_form_path_text,
-        repo_dir=pathlib.Path(ctx.repo_dir),
-        drive_root=pathlib.Path(ctx.drive_root),
-    )
-    if short_form.error:
-        return f"⚠️ CLAUDE_CODE_ERROR: {short_form.error}"
-    synth = short_form.constraint
+    active_root = active_repo_dir_for(ctx).resolve(strict=False)
+    system_repo_root = pathlib.Path(ctx.repo_dir).resolve(strict=False)
     existing_tc = normalize_task_constraint(getattr(ctx, "task_constraint", None))
+    workspace_mode = str(getattr(ctx, "workspace_mode", "") or "").strip()
+    workspace_task_mode = bool(workspace_mode and workspace_mode != "self")
+    work_dir = str(active_root)
+    skill_payload_root = None
+    short_form_path_text = cwd if str(cwd or "").strip() else str(active_root)
+    synth = None
+    ignored_reason = ""
+    if workspace_task_mode and not (existing_tc and existing_tc.mode == "skill_repair"):
+        if str(bucket or "").strip() or str(skill_name or "").strip():
+            return (
+                "⚠️ CLAUDE_CODE_ERROR: skill payload short-form is unavailable in workspace mode. "
+                "Use a workspace-relative cwd, or run a skill_repair task for data skill payload edits."
+            )
+    else:
+        short_form = decide_payload_short_form(
+            bucket=bucket,
+            skill_name=skill_name,
+            path_text=short_form_path_text,
+            repo_dir=active_root,
+            drive_root=pathlib.Path(ctx.drive_root),
+        )
+        if short_form.error:
+            return f"⚠️ CLAUDE_CODE_ERROR: {short_form.error}"
+        synth = short_form.constraint
+        ignored_reason = short_form.ignored_reason
     redirect_err = cross_skill_redirect_error(existing_tc, synth)
     if redirect_err:
         return f"⚠️ SKILL_REDIRECT_BLOCKED: {redirect_err}"
@@ -494,79 +700,140 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
             return f"⚠️ CLAUDE_CODE_ERROR: {e}"
     elif cwd and cwd.strip() not in ("", ".", "./"):
         raw_cwd = cwd.strip()
-        try:
-            resolved_skill_target = resolve_skill_payload_target(pathlib.Path(ctx.drive_root), raw_cwd)
-            candidate = resolved_skill_target.target_path
-            skill_payload_root = resolved_skill_target.payload_root
-        except SkillPayloadPathError as exc:
-            normalized_cwd = raw_cwd.replace("\\", "/").strip().lstrip("/")
-            if normalized_cwd.startswith("data/skills/") or normalized_cwd.startswith("skills/"):
-                return f"⚠️ CLAUDE_CODE_ERROR: skill cwd is invalid: {exc}"
+        if workspace_task_mode:
             raw_path = pathlib.Path(raw_cwd)
-            candidate_for_data_check = (
+            candidate = (
                 raw_path.resolve(strict=False)
                 if raw_path.is_absolute()
-                else (pathlib.Path(ctx.repo_dir) / raw_cwd).resolve(strict=False)
+                else (active_root / raw_cwd).resolve(strict=False)
             )
             try:
-                candidate_for_data_check.relative_to(pathlib.Path(ctx.repo_dir).resolve(strict=False))
-                candidate_is_repo = True
+                candidate.relative_to(active_root)
             except ValueError:
-                candidate_is_repo = False
+                return "⚠️ CLAUDE_CODE_ERROR: cwd escapes active workspace."
+        else:
             try:
-                candidate_for_data_check.relative_to(pathlib.Path(ctx.drive_root).resolve(strict=False))
-            except ValueError:
-                pass
-            else:
-                if not candidate_is_repo:
-                    return (
-                        "⚠️ CLAUDE_CODE_ERROR: non-skill data cwd is not allowed. "
-                        "Use explicit data/skills/<bucket>/<skill>/... for skill payload edits, "
-                        "or omit cwd/use a repo cwd for repo edits."
-                    )
-            candidate = (ctx.repo_dir / raw_cwd).resolve()
+                resolved_skill_target = resolve_skill_payload_target(pathlib.Path(ctx.drive_root), raw_cwd)
+                candidate = resolved_skill_target.target_path
+                skill_payload_root = resolved_skill_target.payload_root
+            except SkillPayloadPathError as exc:
+                normalized_cwd = raw_cwd.replace("\\", "/").strip().lstrip("/")
+                if normalized_cwd.startswith("data/skills/") or normalized_cwd.startswith("skills/"):
+                    return f"⚠️ CLAUDE_CODE_ERROR: skill cwd is invalid: {exc}"
+                raw_path = pathlib.Path(raw_cwd)
+                candidate_for_data_check = (
+                    raw_path.resolve(strict=False)
+                    if raw_path.is_absolute()
+                    else (active_root / raw_cwd).resolve(strict=False)
+                )
+                try:
+                    candidate_for_data_check.relative_to(active_root)
+                    candidate_is_repo = True
+                except ValueError:
+                    candidate_is_repo = False
+                try:
+                    candidate_for_data_check.relative_to(pathlib.Path(ctx.drive_root).resolve(strict=False))
+                except ValueError:
+                    pass
+                else:
+                    if not candidate_is_repo:
+                        return (
+                            "⚠️ CLAUDE_CODE_ERROR: non-skill data cwd is not allowed. "
+                            "Use explicit data/skills/<bucket>/<skill>/... for skill payload edits, "
+                            "or omit cwd/use a repo cwd for repo edits."
+                        )
+                candidate = candidate_for_data_check
+                try:
+                    candidate.relative_to(active_root)
+                except ValueError:
+                    return "⚠️ CLAUDE_CODE_ERROR: cwd escapes active workspace."
         if not candidate.exists() or not candidate.is_dir():
             return f"⚠️ CLAUDE_CODE_ERROR: cwd not found or not a directory: {cwd}"
         work_dir = str(candidate)
     work_dir_path = pathlib.Path(work_dir).resolve()
-    repair_sidecar_snapshots = {}
+    skill_control_snapshots = {}
     sidecar_root = pathlib.Path(skill_payload_root).resolve() if skill_payload_root is not None else None
     if sidecar_root is not None:
-        for sidecar_name in (".clawhub.json", ".ouroboroshub.json", ".self_authored.json", ".seed-origin", "SKILL.openclaw.md"):
-            sidecar_path = sidecar_root / sidecar_name
-            try:
-                repair_sidecar_snapshots[sidecar_path] = sidecar_path.read_bytes() if sidecar_path.exists() else None
-            except OSError:
-                repair_sidecar_snapshots[sidecar_path] = None
+        skill_control_snapshots = _snapshot_skill_control_paths(sidecar_root)
+
+    def _restore_skill_control_snapshots() -> list[str]:
+        nonlocal skill_control_snapshots
+        if not skill_control_snapshots:
+            return []
+        restored = _restore_skill_control_changes(skill_control_snapshots)
+        skill_control_snapshots = {}
+        return restored
+
+    def _control_restore_note(restored: list[str]) -> str:
+        if not restored:
+            return ""
+        return (
+            "\n\n⚠️ SKILL_PAYLOAD_CONTROL_RESTORED: restored skill provenance/control-plane "
+            "paths after claude_code_edit: "
+            + ", ".join(sorted(set(restored)))
+            + "."
+        )
+
+    def _control_block_message(restored: list[str]) -> str:
+        return (
+            "⚠️ SKILL_PAYLOAD_CONTROL_BLOCKED: claude_code_edit attempted to modify "
+            "skill provenance/control-plane paths: "
+            + ", ".join(sorted(set(restored)))
+            + ". Created control paths and sidecar changes were reverted where possible; edit payload code files instead."
+        )
+
     target_repo_root = _resolve_git_root(work_dir_path)
     repo_mode = target_repo_root is not None
     if target_repo_root is None:
         target_repo_root = work_dir_path
+    system_repo_mode = repo_mode and pathlib.Path(target_repo_root).resolve(strict=False) == system_repo_root
+    runtime_mode = get_runtime_mode()
+    if system_repo_mode and not mode_allows_protected_write(runtime_mode):
+        protected_dirty_before = _protected_runtime_dirty_paths(target_repo_root)
+        if protected_dirty_before:
+            restored_sidecars = _restore_skill_control_snapshots()
+            return (
+                "⚠️ CORE_PROTECTION_BLOCKED: protected runtime files are already dirty; "
+                "refusing claude_code_edit so existing human/operator changes are not overwritten. "
+                "Resolve or commit them before delegating edits. Files: "
+                + ", ".join(protected_dirty_before)
+                + _control_restore_note(restored_sidecars)
+            )
     before_changed = _status_snapshot(target_repo_root)
+    invalidate_if_changed = lambda: (
+        _invalidate_advisory(
+            ctx,
+            changed_paths=_status_snapshot(target_repo_root) or before_changed,
+            mutation_root=target_repo_root,
+            source_tool="claude_code_edit",
+        )
+        if repo_mode and _status_snapshot(target_repo_root) != before_changed
+        else None
+    )
 
-    from ouroboros.gateways.claude_code import resolve_claude_code_model
-    model = resolve_claude_code_model()
-
-    lock = _acquire_git_lock(ctx) if repo_mode else None
+    lock = _acquire_git_lock(ctx) if system_repo_mode else None
     try:
-        if repo_mode:
+        if system_repo_mode:
             try:
                 run_cmd(["git", "checkout", ctx.branch_dev], cwd=ctx.repo_dir)
             except Exception as e:
-                return f"⚠️ GIT_ERROR (checkout): {e}"
+                restored_sidecars = _restore_skill_control_snapshots()
+                return f"⚠️ GIT_ERROR (checkout): {e}" + _control_restore_note(restored_sidecars)
 
         ctx.emit_progress_fn("Delegating to Claude Agent SDK...")
 
         try:
             from ouroboros.gateways.claude_code import (
                 DEFAULT_CLAUDE_CODE_MAX_TURNS,
+                resolve_claude_code_model,
                 run_edit,
             )
+            model = resolve_claude_code_model()
 
             system_prompt = (
                 f"STRICT: Only modify files inside {work_dir}. "
                 f"Git branch: {ctx.branch_dev}. Do NOT commit or push.\n\n"
-                + _load_project_context(pathlib.Path(ctx.repo_dir))
+                + _load_project_context(system_repo_root)
             )
 
             result = run_edit(
@@ -576,7 +843,8 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
                 max_turns=DEFAULT_CLAUDE_CODE_MAX_TURNS,
                 budget=budget,
                 system_prompt=system_prompt,
-                repo_root=str(ctx.repo_dir),
+                repo_root=str(target_repo_root if repo_mode else work_dir_path),
+                protect_runtime_paths=system_repo_mode,
             )
 
             result.changed_files = _get_changed_files(target_repo_root)
@@ -600,28 +868,29 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
                 })
 
             if not result.success:
-                return f"⚠️ CLAUDE_CODE_ERROR: {result.error}\n\n{result.result_text}"
-
-            restored_sidecars = []
-            for sidecar_path, before_bytes in repair_sidecar_snapshots.items():
-                try:
-                    after_exists = sidecar_path.exists()
-                    after_bytes = sidecar_path.read_bytes() if after_exists else None
-                    if after_bytes != before_bytes:
-                        if before_bytes is None:
-                            sidecar_path.unlink(missing_ok=True)
-                        else:
-                            sidecar_path.write_bytes(before_bytes)
-                        restored_sidecars.append(sidecar_path.name)
-                except OSError:
-                    restored_sidecars.append(sidecar_path.name)
-            if restored_sidecars:
+                restored_sidecars = _restore_skill_control_snapshots()
+                invalidate_if_changed()
                 return (
-                    "⚠️ SKILL_PAYLOAD_CONTROL_BLOCKED: claude_code_edit attempted to modify "
-                    "skill provenance/control-plane sidecars: "
-                    + ", ".join(sorted(set(restored_sidecars)))
-                    + ". The sidecar changes were reverted; edit payload code files instead."
+                    f"⚠️ CLAUDE_CODE_ERROR: {result.error}\n\n{result.result_text}"
+                    + _control_restore_note(restored_sidecars)
                 )
+
+            restored_sidecars = _restore_skill_control_snapshots()
+            if restored_sidecars:
+                invalidate_if_changed()
+                return _control_block_message(restored_sidecars)
+
+            if system_repo_mode and not mode_allows_protected_write(runtime_mode):
+                protected_dirty_after = _protected_runtime_dirty_paths(target_repo_root)
+                if protected_dirty_after:
+                    restored = _restore_protected_runtime_paths(target_repo_root, protected_dirty_after)
+                    invalidate_if_changed()
+                    return (
+                        "⚠️ CORE_PROTECTION_BLOCKED: claude_code_edit attempted to modify "
+                        "protected Ouroboros runtime files in non-pro mode. Reverted: "
+                        + ", ".join(restored or protected_dirty_after)
+                        + ". Switch to pro mode only after an explicit reviewed plan."
+                    )
 
             after_changed = _status_snapshot(target_repo_root)
             if repo_mode and after_changed != before_changed:
@@ -633,16 +902,24 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
                 )
 
             output = result.to_tool_output()
-            if short_form.ignored_reason:
-                output += f"\n\n⚠️ SKILL_SHORT_FORM_IGNORED: {short_form.ignored_reason}."
+            if system_repo_mode and mode_allows_protected_write(runtime_mode):
+                protected_written = protected_paths_in(result.changed_files or after_changed)
+                if protected_written:
+                    output += "\n\n" + core_patch_notice(protected_written)
+            if ignored_reason:
+                output += f"\n\n⚠️ SKILL_SHORT_FORM_IGNORED: {ignored_reason}."
             return output
 
         except ImportError:
+            restored_sidecars = _restore_skill_control_snapshots()
             return (
                 "⚠️ CLAUDE_CODE_UNAVAILABLE: claude-agent-sdk not installed. "
                 "Install: pip install 'ouroboros[claude-sdk]'"
+                + _control_restore_note(restored_sidecars)
             )
         except Exception as e:
+            restored_sidecars = _restore_skill_control_snapshots()
+            invalidate_if_changed()
             import sys
             sdk_version = "(unknown)"
             try:
@@ -653,6 +930,7 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
             return (
                 f"⚠️ CLAUDE_CODE_FAILED: {type(e).__name__}: {e}\n"
                 f"Diagnostic: sdk_version={sdk_version}, python={sys.executable}"
+                + _control_restore_note(restored_sidecars)
             )
 
     finally:
@@ -725,6 +1003,30 @@ def get_tools() -> List[ToolEntry]:
                 },
             }, "required": ["cmd"]},
         }, _run_shell, is_code_tool=True, timeout_sec=_RUN_SHELL_DEFAULT_TIMEOUT_SEC),
+        ToolEntry("claude_code_edit", {
+            "name": "claude_code_edit",
+            "description": (
+                "Delegate a bounded code-editing task to the Claude Agent SDK. "
+                "Use this as the strongest coding helper for substantial edits. "
+                "It may edit files under cwd, never commits or pushes, and still "
+                "runs through Ouroboros runtime-mode and review protections."
+            ),
+            "parameters": {"type": "object", "properties": {
+                "prompt": {"type": "string", "description": "Precise coding task and constraints."},
+                "cwd": {
+                    "type": "string",
+                    "default": "",
+                    "description": (
+                        "Working directory under the active repo/workspace or an explicit "
+                        "data/skills/<bucket>/<skill> payload path for skill repair."
+                    ),
+                },
+                "budget": {"type": "number", "default": 5.0},
+                "validate": {"type": "boolean", "default": False},
+                "bucket": {"type": "string", "default": ""},
+                "skill_name": {"type": "string", "default": ""},
+            }, "required": ["prompt"]},
+        }, _claude_code_edit, is_code_tool=True, timeout_sec=1200),
         ToolEntry("run_script", {
             "name": "run_script",
             "description": (

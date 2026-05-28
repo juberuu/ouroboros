@@ -539,11 +539,15 @@ block repo commits and vice versa.
 
 Used by `plan_task` for pre-implementation design reviews, BEFORE any code is written.
 Reviewers see the proposed plan, HEAD snapshots of files planned to be touched,
-and a Generated Plan Review Atlas that raw-inlines selected protected/central files
-while accounting for every tracked path in its manifest.
+and an agent-selected context level: `minimal`, `localized`, `broad`, or
+`constitutional`. `minimal` keeps governance docs and touched-file snapshots
+but omits the generated Atlas; `localized` adds a bounded neighborhood around
+planned files, `broad` is for shared contracts, and `constitutional` is
+reserved for self-evolution / immune-system surfaces.
 
 **Reviewer role is GENERATIVE, not audit.** The primary job is to contribute
-ideas the implementer may not see, using broad Atlas-backed repo access. Finding defects in
+ideas the implementer may not see, using the repository evidence available for
+the selected context level. Finding defects in
 the plan is secondary; proposing concrete alternatives, surfacing existing
 surfaces that already solve the goal, and flagging subtle contract breaks the
 implementer missed is primary.
@@ -553,7 +557,7 @@ implementer missed is primary.
 Reviewers must structure their response in this order:
 
 1. **Your own approach** (1-2 sentences). State what YOU would do if this goal
-   came to you with broad Atlas-backed repo access: the concrete alternative path, the
+   came to you with the available repository evidence: the concrete alternative path, the
    existing file/function you would reuse, or the simpler route. If after real
    effort you genuinely see no better approach, say so explicitly.
 2. **`## PROPOSALS` section** (top 1-2 contributions). The highest-value thing

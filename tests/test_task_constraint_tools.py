@@ -189,6 +189,391 @@ def test_claude_code_edit_omitted_cwd_ignores_stale_short_form(tmp_path, monkeyp
     assert captured["cwd"] == str(repo)
 
 
+def test_registry_light_mode_blocks_omitted_cwd_short_form_claude_edit(tmp_path, monkeypatch):
+    from types import ModuleType, SimpleNamespace
+    import sys
+    from ouroboros import config as cfg
+    from ouroboros.tools.registry import ToolRegistry
+
+    cfg.reset_runtime_mode_baseline_for_tests()
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    monkeypatch.delenv(cfg.BOOT_RUNTIME_MODE_ENV_KEY, raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    gateway = ModuleType("ouroboros.gateways.claude_code")
+    gateway.resolve_claude_code_model = lambda: "test-model"
+    gateway.DEFAULT_CLAUDE_CODE_MAX_TURNS = 1
+    called = {"value": False}
+
+    def fake_run_edit(**kwargs):
+        called["value"] = True
+        return SimpleNamespace(
+            success=True,
+            error="",
+            result_text="ok",
+            cost_usd=0.0,
+            usage={},
+            changed_files=[],
+            diff_stat="",
+            validation_summary="",
+            to_tool_output=lambda: "OK",
+        )
+
+    gateway.run_edit = fake_run_edit
+    monkeypatch.setitem(sys.modules, "ouroboros.gateways.claude_code", gateway)
+
+    repo = tmp_path / "repo"
+    drive = tmp_path / "data"
+    repo.mkdir()
+    (drive / "skills" / "external" / "alpha").mkdir(parents=True)
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+
+    result = registry.execute(
+        "claude_code_edit",
+        {"prompt": "edit repo", "bucket": "external", "skill_name": "alpha"},
+    )
+
+    assert "LIGHT_MODE_BLOCKED" in result
+    assert called["value"] is False
+
+
+def test_claude_code_edit_rejects_cwd_outside_active_workspace(tmp_path, monkeypatch):
+    from ouroboros.tools.shell import _claude_code_edit
+
+    repo = tmp_path / "repo"
+    drive = tmp_path / "data"
+    outside = tmp_path / "outside"
+    repo.mkdir()
+    drive.mkdir()
+    outside.mkdir()
+    ctx = ToolContext(repo_dir=repo, drive_root=drive)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    result = _claude_code_edit(ctx, "edit outside", cwd="../outside")
+    absolute_result = _claude_code_edit(ctx, "edit outside", cwd=str(outside))
+
+    assert "cwd escapes active workspace" in result
+    assert "cwd escapes active workspace" in absolute_result
+
+
+def test_claude_code_edit_workspace_prefers_workspace_cwd_over_data_skill(tmp_path, monkeypatch):
+    from types import ModuleType, SimpleNamespace
+    import sys
+    from ouroboros.tools.shell import _claude_code_edit
+
+    gateway = ModuleType("ouroboros.gateways.claude_code")
+    gateway.resolve_claude_code_model = lambda: "test-model"
+    gateway.DEFAULT_CLAUDE_CODE_MAX_TURNS = 1
+    captured = {}
+
+    def fake_run_edit(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            success=True,
+            error="",
+            result_text="ok",
+            cost_usd=0.0,
+            usage={},
+            changed_files=[],
+            diff_stat="",
+            validation_summary="",
+            to_tool_output=lambda: "OK",
+        )
+
+    gateway.run_edit = fake_run_edit
+    monkeypatch.setitem(sys.modules, "ouroboros.gateways.claude_code", gateway)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    system_repo = tmp_path / "system"
+    workspace = tmp_path / "workspace"
+    drive = tmp_path / "data"
+    system_repo.mkdir()
+    workspace.mkdir()
+    (system_repo / "BIBLE.md").write_text("SYSTEM_BIBLE\n", encoding="utf-8")
+    (workspace / "BIBLE.md").write_text("WORKSPACE_BIBLE\n", encoding="utf-8")
+    (workspace / "skills" / "external" / "alpha").mkdir(parents=True)
+    (drive / "skills" / "external" / "alpha").mkdir(parents=True)
+    ctx = ToolContext(
+        repo_dir=system_repo,
+        drive_root=drive,
+        workspace_root=workspace,
+        workspace_mode="task",
+    )
+
+    result = _claude_code_edit(ctx, "edit", cwd="skills/external/alpha")
+
+    assert result == "OK"
+    assert captured["cwd"] == str((workspace / "skills" / "external" / "alpha").resolve())
+    assert "SYSTEM_BIBLE" in captured["system_prompt"]
+    assert "WORKSPACE_BIBLE" not in captured["system_prompt"]
+
+
+def test_claude_code_edit_reverts_protected_runtime_file_changes(tmp_path, monkeypatch):
+    from types import ModuleType, SimpleNamespace
+    import sys
+    from ouroboros import config as cfg
+    from ouroboros.tools.shell import _claude_code_edit
+
+    cfg.reset_runtime_mode_baseline_for_tests()
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    monkeypatch.delenv(cfg.BOOT_RUNTIME_MODE_ENV_KEY, raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    repo = tmp_path / "repo"
+    drive = tmp_path / "data"
+    repo.mkdir()
+    drive.mkdir()
+    (repo / "BIBLE.md").write_text("original\n", encoding="utf-8")
+    import subprocess
+
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "add", "BIBLE.md"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.email=a@example.com", "-c", "user.name=A", "commit", "-m", "init"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+    gateway = ModuleType("ouroboros.gateways.claude_code")
+    gateway.resolve_claude_code_model = lambda: "test-model"
+    gateway.DEFAULT_CLAUDE_CODE_MAX_TURNS = 1
+
+    def fake_run_edit(**kwargs):
+        (repo / "BIBLE.md").write_text("mutated\n", encoding="utf-8")
+        return SimpleNamespace(
+            success=True,
+            error="",
+            result_text="ok",
+            cost_usd=0.0,
+            usage={},
+            changed_files=["BIBLE.md"],
+            diff_stat="",
+            validation_summary="",
+            to_tool_output=lambda: "OK",
+        )
+
+    gateway.run_edit = fake_run_edit
+    monkeypatch.setitem(sys.modules, "ouroboros.gateways.claude_code", gateway)
+    ctx = ToolContext(repo_dir=repo, drive_root=drive, branch_dev="main")
+
+    result = _claude_code_edit(ctx, "edit protected")
+
+    assert "CORE_PROTECTION_BLOCKED" in result
+    assert (repo / "BIBLE.md").read_text(encoding="utf-8") == "original\n"
+
+    cfg.reset_runtime_mode_baseline_for_tests()
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
+    monkeypatch.delenv(cfg.BOOT_RUNTIME_MODE_ENV_KEY, raising=False)
+
+    result = _claude_code_edit(ctx, "edit protected")
+
+    assert "CORE_PATCH_NOTICE" in result
+    assert (repo / "BIBLE.md").read_text(encoding="utf-8") == "mutated\n"
+
+    invalidations = []
+    monkeypatch.setattr(
+        "ouroboros.tools.shell._invalidate_advisory",
+        lambda *args, **kwargs: invalidations.append(kwargs),
+    )
+    gateway.run_edit = lambda **kwargs: (
+        (repo / "notes.txt").write_text("partial\n", encoding="utf-8"),
+        SimpleNamespace(
+            success=False,
+            error="failed after partial edit",
+            result_text="partial output",
+            cost_usd=0.0,
+            usage={},
+            changed_files=[],
+            diff_stat="",
+            validation_summary="",
+            to_tool_output=lambda: "FAILED",
+        ),
+    )[1]
+    result = _claude_code_edit(ctx, "partial failed edit")
+
+    assert "CLAUDE_CODE_ERROR" in result
+    assert invalidations
+    assert invalidations[-1]["source_tool"] == "claude_code_edit"
+
+
+def test_claude_code_edit_reverts_created_skill_control_dirs(tmp_path, monkeypatch):
+    from types import ModuleType, SimpleNamespace
+    import sys
+    from ouroboros.tools.shell import _claude_code_edit
+
+    gateway = ModuleType("ouroboros.gateways.claude_code")
+    gateway.resolve_claude_code_model = lambda: "test-model"
+    gateway.DEFAULT_CLAUDE_CODE_MAX_TURNS = 1
+    monkeypatch.setitem(sys.modules, "ouroboros.gateways.claude_code", gateway)
+
+    ctx, skill = _ctx(tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    def fake_run_edit(**kwargs):
+        marker = skill / ".ouroboros_env" / "marker.txt"
+        marker.parent.mkdir(parents=True)
+        marker.write_text("modified", encoding="utf-8")
+        return SimpleNamespace(
+            success=True,
+            error="",
+            result_text="ok",
+            cost_usd=0.0,
+            usage={},
+            changed_files=[],
+            diff_stat="",
+            validation_summary="",
+            to_tool_output=lambda: "OK",
+        )
+
+    gateway.run_edit = fake_run_edit
+
+    result = _claude_code_edit(ctx, "edit", cwd=".")
+
+    assert "SKILL_PAYLOAD_CONTROL_BLOCKED" in result
+    assert not (skill / ".ouroboros_env").exists()
+
+
+def test_claude_code_edit_reverts_existing_skill_control_dirs(tmp_path, monkeypatch):
+    from types import ModuleType, SimpleNamespace
+    import sys
+    from ouroboros.tools.shell import _claude_code_edit
+
+    gateway = ModuleType("ouroboros.gateways.claude_code")
+    gateway.resolve_claude_code_model = lambda: "test-model"
+    gateway.DEFAULT_CLAUDE_CODE_MAX_TURNS = 1
+    monkeypatch.setitem(sys.modules, "ouroboros.gateways.claude_code", gateway)
+
+    ctx, skill = _ctx(tmp_path)
+    env_marker = skill / ".ouroboros_env" / "marker.txt"
+    env_marker.parent.mkdir(parents=True)
+    env_marker.write_text("before", encoding="utf-8")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    def fake_run_edit(**kwargs):
+        marker = skill / ".ouroboros_env" / "marker.txt"
+        assert marker.read_text(encoding="utf-8") == "before"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("after", encoding="utf-8")
+        return SimpleNamespace(
+            success=True,
+            error="",
+            result_text="ok",
+            cost_usd=0.0,
+            usage={},
+            changed_files=[],
+            diff_stat="",
+            validation_summary="",
+            to_tool_output=lambda: "OK",
+        )
+
+    gateway.run_edit = fake_run_edit
+
+    result = _claude_code_edit(ctx, "edit", cwd=".")
+
+    assert "SKILL_PAYLOAD_CONTROL_BLOCKED" in result
+    assert env_marker.read_text(encoding="utf-8") == "before"
+
+
+def test_claude_code_edit_restores_control_dirs_on_sdk_failure(tmp_path, monkeypatch):
+    from types import ModuleType, SimpleNamespace
+    import sys
+    from ouroboros.tools.shell import _claude_code_edit
+
+    gateway = ModuleType("ouroboros.gateways.claude_code")
+    gateway.resolve_claude_code_model = lambda: "test-model"
+    gateway.DEFAULT_CLAUDE_CODE_MAX_TURNS = 1
+    monkeypatch.setitem(sys.modules, "ouroboros.gateways.claude_code", gateway)
+
+    ctx, skill = _ctx(tmp_path)
+    env_marker = skill / ".ouroboros_env" / "marker.txt"
+    env_marker.parent.mkdir(parents=True)
+    env_marker.write_text("before", encoding="utf-8")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    def fake_run_edit(**kwargs):
+        marker = skill / ".ouroboros_env" / "marker.txt"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("after", encoding="utf-8")
+        return SimpleNamespace(
+            success=False,
+            error="sdk failed",
+            result_text="partial output",
+            cost_usd=0.0,
+            usage={},
+            changed_files=[],
+            diff_stat="",
+            validation_summary="",
+            to_tool_output=lambda: "FAILED",
+        )
+
+    gateway.run_edit = fake_run_edit
+
+    result = _claude_code_edit(ctx, "edit", cwd=".")
+
+    assert "CLAUDE_CODE_ERROR" in result
+    assert "SKILL_PAYLOAD_CONTROL_RESTORED" in result
+    assert env_marker.read_text(encoding="utf-8") == "before"
+    assert not list(skill.parent.glob(".ouroboros-control-backup-*"))
+
+
+def test_claude_code_edit_restores_control_dirs_on_gateway_import_failure(tmp_path, monkeypatch):
+    from types import ModuleType
+    import sys
+    from ouroboros.tools.shell import _claude_code_edit
+
+    gateway = ModuleType("ouroboros.gateways.claude_code")
+    gateway.resolve_claude_code_model = lambda: "test-model"
+    gateway.DEFAULT_CLAUDE_CODE_MAX_TURNS = 1
+    monkeypatch.setitem(sys.modules, "ouroboros.gateways.claude_code", gateway)
+
+    ctx, skill = _ctx(tmp_path)
+    env_marker = skill / ".ouroboros_env" / "marker.txt"
+    env_marker.parent.mkdir(parents=True)
+    env_marker.write_text("before", encoding="utf-8")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    result = _claude_code_edit(ctx, "edit", cwd=".")
+
+    assert "CLAUDE_CODE_UNAVAILABLE" in result
+    assert env_marker.read_text(encoding="utf-8") == "before"
+    assert not list(skill.parent.glob(".ouroboros-control-backup-*"))
+
+
+def test_claude_code_edit_reverts_uppercase_openclaw_sidecar(tmp_path, monkeypatch):
+    from types import ModuleType, SimpleNamespace
+    import sys
+    from ouroboros.tools.shell import _claude_code_edit
+
+    gateway = ModuleType("ouroboros.gateways.claude_code")
+    gateway.resolve_claude_code_model = lambda: "test-model"
+    gateway.DEFAULT_CLAUDE_CODE_MAX_TURNS = 1
+    monkeypatch.setitem(sys.modules, "ouroboros.gateways.claude_code", gateway)
+
+    ctx, skill = _ctx(tmp_path)
+    sidecar = skill / "SKILL.openclaw.md"
+    sidecar.write_text("before", encoding="utf-8")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    def fake_run_edit(**kwargs):
+        sidecar.write_text("after", encoding="utf-8")
+        return SimpleNamespace(
+            success=True,
+            error="",
+            result_text="ok",
+            cost_usd=0.0,
+            usage={},
+            changed_files=[],
+            diff_stat="",
+            validation_summary="",
+            to_tool_output=lambda: "OK",
+        )
+
+    gateway.run_edit = fake_run_edit
+
+    result = _claude_code_edit(ctx, "edit", cwd=".")
+
+    assert "SKILL_PAYLOAD_CONTROL_BLOCKED" in result
+    assert sidecar.read_text(encoding="utf-8") == "before"
+
+
 def test_claude_code_edit_rejects_non_skill_data_cwd(tmp_path, monkeypatch):
     from ouroboros.tools.shell import _claude_code_edit
 

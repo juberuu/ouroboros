@@ -97,6 +97,7 @@ TOOL_POLICY: Dict[str, str] = {
     "advisory_review": POLICY_SKIP,
     "start_service": POLICY_CHECK_CONDITIONAL,
     "stop_service": POLICY_SKIP,
+    "claude_code_edit": POLICY_SKIP,
 
     # External skill surface.
     "list_skills": POLICY_SKIP,

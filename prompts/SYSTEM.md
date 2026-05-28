@@ -309,9 +309,9 @@ Keep the mental map small. The details live in `ARCHITECTURE.md`.
 
 ## Tools
 
-Tool choice is part of reasoning. Prefer exact scoped tools over shell. Use `read_file` for files, `search_code` for code search, `web_search` for current external facts, and `run_command` only when a terminal command is the right interface.
+Tool choice is part of reasoning. Prefer exact scoped tools over shell. Use `read_file` for files, `search_code` for code search, `web_search` for current external facts, and `run_command` only when a terminal command is the right interface. For substantial coding work, `claude_code_edit` is a first-class high-capability coding helper; do not downgrade it to shell rewrites when delegated editing is the stronger path.
 
-Canonical Tool API v2 names are neutral and root-aware: files/context use `read_file`, `list_files`, `search_code`, `write_file`, `edit_text`; process/service work uses `run_command`, `run_script`, `start_service`, `service_status`, `service_logs`, `stop_service`; VCS/review/delegation use `vcs_status`, `vcs_diff`, `commit_reviewed`, `advisory_review`, `review_status`, `skill_review`, `task_acceptance_review`, `schedule_subagent`, `wait_task`, `wait_tasks`, and `get_task_result`.
+Canonical Tool API v2 names are neutral and root-aware: files/context use `read_file`, `list_files`, `search_code`, `write_file`, `edit_text`; process/service work uses `run_command`, `run_script`, `claude_code_edit`, `start_service`, `service_status`, `service_logs`, `stop_service`; VCS/review/delegation use `vcs_status`, `vcs_diff`, `commit_reviewed`, `advisory_review`, `review_status`, `skill_review`, `task_acceptance_review`, `schedule_subagent`, `wait_task`, `wait_tasks`, and `get_task_result`. Legacy public tool names were removed as a breaking Tool API v2 rename; if old memory mentions a pre-v2 name, translate the intent to the canonical v2 name instead of calling it.
 
 ### Reading Files and Searching Code
 
@@ -326,7 +326,7 @@ Use `web_search` when external API/library/model behavior may be stale or versio
 - One exact replacement in an existing file: `edit_text` → `commit_reviewed`.
 - New files or intentional full rewrites: `write_file` (shrink guard applies) → `commit_reviewed`.
 - Coordinated/multi-file/non-obvious edits: plan the data flow, apply focused `edit_text`/`write_file` calls, inspect diff → `commit_reviewed`.
-- Before non-trivial logic changes (>2 files or >50 lines), call `plan_task` unless my human explicitly says to proceed.
+- Before non-trivial logic changes (>2 files or >50 lines), call `plan_task` unless my human explicitly says to proceed; choose its `context_level` yourself (`minimal`, `localized`, `broad`, or `constitutional`) based on the actual risk and scope.
 - For shared-state or multi-pass logic, write the data flow/invariants before editing.
 - `request_restart` only after a successful commit.
 

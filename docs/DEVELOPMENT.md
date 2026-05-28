@@ -151,8 +151,15 @@ Concrete requirements:
 | Background consciousness (`consciousness.py`) | ✅ full | ✅ full | — (not yet required) |
 | Advisory pre-review (`tools/claude_advisory_review.py`) | ✅ via `_load_doc` | ✅ via `_load_doc` | ✅ via `_load_doc` |
 | Scope review (`tools/scope_review.py`) | full canonical doc + Atlas accounting | full canonical doc + Atlas accounting | full canonical doc + Atlas accounting |
-| Plan review (`tools/plan_review.py`) | full canonical doc + Atlas accounting | full canonical doc + Atlas accounting | full canonical doc + Atlas accounting |
+| Plan review (`tools/plan_review.py`) | full canonical doc + adaptive context level | full canonical doc + adaptive context level | full canonical doc + adaptive context level |
 | Deep self-review (`deep_self_review.py`) | full canonical doc + Atlas accounting | full canonical doc + Atlas accounting | full canonical doc + Atlas accounting |
+
+Plan review always keeps BIBLE.md, ARCHITECTURE.md, DEVELOPMENT.md, the proposed
+plan, touched-file snapshots, and reviewer-slot framing as first-class context.
+The agent must choose `context_level` explicitly; there is no host-side `auto`
+heuristic. That field controls only the generated repository Atlas: `minimal`
+omits Atlas accounting for bounded/local plans, while `localized`, `broad`, and
+`constitutional` add progressively larger Atlas packs.
 
 ### Invariant: No silent truncation
 

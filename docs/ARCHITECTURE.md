@@ -1,4 +1,4 @@
-# Ouroboros v6.3.0-rc.1 — Architecture & Reference
+# Ouroboros v6.3.0-rc.2 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -137,14 +137,13 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── git_pr.py          ← PR integration tools: fetch_pr_ref, create_integration_branch, cherry_pick_pr_commits, stage_adaptations, stage_pr_merge (non-core, require enable_tools)
       │   ├── github.py          ← GitHub integration: issues (list/get/comment/close) + PR tools: list_github_prs, get_github_pr, comment_on_pr (non-core; github.py is in _FROZEN_TOOL_MODULES so PR inspection/comment tools work in packaged builds)
       │   ├── parallel_review.py ← Parallel triad+scope orchestration and verdict aggregation (extracted from git.py)
-      │   ├── plan_review.py     ← Pre-implementation design review (2–3 parallel Atlas-backed reviewer slots, duplicate model IDs allowed, plan_task tool)
-      │   ├── review.py          ← Task acceptance review tool plus legacy internal multi-review helpers
+      │   ├── plan_review.py     ← Pre-implementation design review (adaptive context levels, shared ReviewCoordinator slots, duplicate model IDs allowed, plan_task tool)
+      │   ├── review.py          ← Task acceptance review tool plus multi-review adapters backed by the shared review substrate
       │   ├── review_context_atlas.py ← Deterministic bounded-context compiler for scope_review, plan_task, and deep_self_review; raw-inlines selected files and accounts for every tracked path in the manifest
       │   ├── review_helpers.py  ← Shared review helpers (section loader, touched/head packs, intent, pytest preflight via agent interpreter)
       │   ├── review_revalidation.py ← Reviewed-commit fingerprint revalidation helpers (blocks when staged diff changes after review)
       │   ├── scope_review.py   ← Scope reviewer (enforcement-aware, budget-aware)
-      │   ├── services.py        ← Task-scoped long-running service mini-manager: start/status/logs/stop with process-group cleanup
-      │   ├── legacy_aliases.py  ← Private v1→v2 tool-name migration aliases; old names are not exposed in public schemas
+      │   ├── services.py        ← Task-scoped long-running service mini-manager: start/status/logs/stop with process-group cleanup and retained private log blobs
       │   ├── skill_exec.py      ← Phase 3 external-skill surface: list_skills, skill_review, toggle_skill, skill_exec (subprocess runner with cwd confinement, env scrubbing, timeout, runtime allowlist python/python3/bash/node/deno/ruby/go; gated by enabled + fresh executable review + fresh content hash — v5.1.2 Frame A: runtime_mode no longer blocks execution)
       │   ├── skill_publish.py   ← Agent-callable `submit_skill_to_hub` tool: validates a fresh clean-reviewed local skill (sources `external`/`self_authored`/`user_repo`/`ouroboroshub`/`clawhub`; `native` only when no `.seed-origin` marker), infers OuroborosHub from `OUROBOROS_HUB_CATALOG_URL`, commits payload + catalog update to the user's fork via GitHub GraphQL, and opens a PR without mutating the local Ouroboros repo. For marketplace-managed sources the generated PR body is force-prefixed with a `## Provenance` block read from the local sidecar (`.ouroboroshub.json` slug / `.clawhub.json` clawhub_slug); when no sidecar exists the source is reclassified as `external` by skill_loader and submit proceeds without the block.
       │   └── skill_preflight.py ← v5.7.0 heal-safe, read-only skill payload preflight validator (manifest parse + Python compile() / node --check / bash -n; no review-state mutation)
@@ -760,10 +759,10 @@ Loop checkpoints are plain user-message self-checks by design. A prior structure
 
 Tool API v2 exposes neutral canonical names directly. Public schemas use
 `read_file`, `list_files`, `search_code`, `write_file`, `edit_text`,
-`run_command`, `run_script`, service tools, `commit_reviewed`, `vcs_*`,
-`schedule_subagent`, `wait_task`, and `wait_tasks`. Private legacy aliases
-exist only in `tools/legacy_aliases.py` for migration; prompts and skills
-should not rely on them.
+`run_command`, `run_script`, `claude_code_edit`, service tools,
+`commit_reviewed`, `vcs_*`, `schedule_subagent`, `wait_task`, and
+`wait_tasks`. Legacy public tool names are a breaking rename in v6.3: they
+are not exposed and are not translated at execute time.
 
 ### Safety and runtime mode
 
@@ -891,7 +890,9 @@ Runtime floors:
 | OUROBOROS_WEBSEARCH_MODEL | gpt-5.2 | Official OpenAI Responses model for `web_search` when `OPENAI_BASE_URL` is empty |
 | OUROBOROS_REVIEW_MODELS | openai/gpt-5.5,google/gemini-3.5-flash,anthropic/claude-opus-4.6 | Comma-separated reviewer slots for triad/plan/task/skill review; duplicate model IDs are independent slots |
 | OUROBOROS_SCOPE_REVIEW_MODELS | openai/gpt-5.5 | Comma-separated scope reviewer slots; falls back from legacy `OUROBOROS_SCOPE_REVIEW_MODEL` |
-| OUROBOROS_TASK_REVIEW_MODE | auto | Task result review mode: `off`, `auto`, or `required`; verdicts are advisory, full output is injected untruncated |
+| OUROBOROS_TASK_REVIEW_MODE | auto | Task result review mode: `off`, `auto`, or `required`; `auto` is agent-choice via the visible review tool, `required` is host-injected before finalization, verdicts are advisory, full output is injected untruncated |
+| OUROBOROS_OBSERVABILITY_RETENTION_DAYS | unset | Deprecated audit knob for private observability manifests/blobs; forensic replay blobs are kept compressed indefinitely |
+| OUROBOROS_SERVICE_LOG_RETENTION_DAYS | 14 | Startup prune for leftover task-scoped live service log directories; pruned small logs are copied into private blobs first and oversized logs are retained |
 | OUROBOROS_REVIEW_MODEL_TIMEOUT_SEC | 600 | Env-only override read directly by `ouroboros.tools.review`. Per-reviewer model call timeout for multi-model review; timed-out reviewers become ERROR actors and quorum still requires at least two parseable reviewers. |
 | OUROBOROS_REVIEW_ENFORCEMENT | advisory | Review enforcement: `blocking` blocks commit critical findings, fresh-advisory open obligations/debts, and skill `blockers`; `advisory` downgrades those to warnings by operator choice. Fresh advisory with open obligations/debts writes `advisory_obligations_acknowledged`; stale advisory still blocks. Skill `warnings` do not block execution in either mode. |
 | OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS | false | Owner-confirmed setting. When enabled, a fresh executable skill review grants only the manifest-declared settings keys and host permissions for that exact content hash so closed-loop skill development can run without repeated manual grants. Under `blocking`, blocker reviews are not executable and do not auto-grant; under `advisory`, blocker findings may auto-grant only because the current enforcement mode makes the review executable. Plain `/api/settings` POST drops this key; desktop uses the launcher confirmation bridge and web uses `/api/owner/auto-grant`. |
@@ -1004,8 +1005,8 @@ The panic sequence (in `server.py:_execute_panic_stop()`):
 3. Write ~/Ouroboros/data/state/panic_stop.flag
 4. LocalModelManager.stop_server()   ← kill local model server if running
 5. kill_all_tracked_subprocesses()   ← os.killpg(SIGKILL) every tracked
-   │                                    subprocess process group (SDK agent,
-   │                                    shell commands, and ALL their children)
+   │                                    foreground subprocess process group
+   │                                    (shell commands and ALL their children)
 6. kill_workers(force=True)          ← SIGTERM+SIGKILL all multiprocessing workers
 7. os._exit(99)                      ← immediate hard exit, kills daemon threads
 ```
@@ -1029,19 +1030,32 @@ On next manual launch:
 
 ### 9.3 Subprocess Process Group Management
 
-All subprocesses spawned by agent tools (`run_command`, `run_script`, service tools, and internal SDK gateways)
-use `start_new_session=True` (via `_tracked_subprocess_run()` in
-`ouroboros/tools/shell.py`). This creates a separate process group for each
-subprocess and all its children.
+Subprocesses spawned by foreground agent tools (`run_command` and `run_script`)
+use `start_new_session=True` via `_tracked_subprocess_run()` in
+`ouroboros/tools/shell.py`. Task-scoped service tools use
+`ouroboros/tools/services.py::_start_service`, which starts each service with
+`subprocess_new_group_kwargs()` and records it in the `_SERVICES` registry.
+Both paths create a separate process group for each subprocess and its children.
 
 On panic or timeout, the entire process tree is killed via
 `os.killpg(pgid, SIGKILL)` — no orphans possible, even for deeply nested
-subprocess trees (e.g., SDK agent processes spawned during internal review/advisory gateways).
+foreground shell/script/service subprocess trees.
+Panic/emergency paths call `kill_all_tracked_subprocesses()` and
+`kill_all_services()` without log finalization so emergency stop remains fast;
+normal lifespan shutdown may pass a drive root to `kill_all_services(drive_root)`
+to archive server-process service logs before removing live log files. Services
+started inside worker tasks normally finalize in `loop.py` task cleanup; forced
+worker termination kills the worker process tree and archives remaining task
+service logs best-effort from `data/services/<task_id>/`.
 
 Active subprocesses are tracked in a thread-safe global set and cleaned up
 automatically on completion or via `kill_all_tracked_subprocesses()` on panic.
 `run_command` surfaces timeout-vs-signal distinctions in its result text so
 `exit_code=-9` no longer looks like a silent success in summaries/reflections.
+Claude Agent SDK gateways (`gateways/claude_code.py`) use the SDK client
+lifecycle and SDK-level path/tool guards; they are not represented in
+`_tracked_subprocess_run()` unless a future SDK transport exposes a first-class
+child process handle.
 
 ---
 

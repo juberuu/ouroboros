@@ -20,6 +20,7 @@ from ouroboros.loop import (
     _maybe_inject_self_check,
     _skill_finalization_message,
     _skill_names_touched_by_trace,
+    _task_acceptance_eligible,
     run_llm_loop,
 )
 from ouroboros.skill_loader import (
@@ -92,6 +93,19 @@ def test_maybe_inject_self_check_handles_assistant_none_content():
     assert messages[-1]["role"] == "user"
     assert "[CHECKPOINT 1" in messages[-1]["content"]
     assert progress
+
+
+def test_task_acceptance_auto_is_llm_first_not_host_enforced():
+    trace = {
+        "tool_calls": [
+            {"tool": "write_file", "args": {"path": "x.py"}},
+            {"tool": "run_command", "args": {"cmd": ["pytest"]}},
+        ]
+    }
+
+    assert _task_acceptance_eligible("auto", trace) is False
+    assert _task_acceptance_eligible("required", trace) is True
+    assert _task_acceptance_eligible("off", trace) is False
 
 
 # ---------------------------------------------------------------------------

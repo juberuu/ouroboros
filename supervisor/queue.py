@@ -256,7 +256,8 @@ def cancel_task_by_id(task_id: str) -> bool:
 
         for w in workers.WORKERS.values():
             if w.busy_task_id == task_id:
-                RUNNING.pop(task_id, None)
+                meta = RUNNING.pop(task_id, None) or {}
+                task = meta.get("task") if isinstance(meta, dict) and isinstance(meta.get("task"), dict) else {}
                 try:
                     from ouroboros.task_results import STATUS_CANCELLED, write_task_result
                     write_task_result(
@@ -272,6 +273,11 @@ def cancel_task_by_id(task_id: str) -> bool:
                     from ouroboros.platform_layer import kill_pid_tree
                     kill_pid_tree(w.proc.pid)
                     w.proc.join(timeout=2)
+                try:
+                    from ouroboros.tools.services import archive_task_service_logs
+                    archive_task_service_logs(pathlib.Path(DRIVE_ROOT), str(task_id), task)
+                except Exception:
+                    log.debug("Failed to archive service logs for cancelled task %s", task_id, exc_info=True)
                 workers.respawn_worker(w.wid)
                 persist_queue_snapshot(reason="cancel_running")
                 return True
@@ -341,6 +347,11 @@ def enforce_task_timeouts() -> None:
                     w.proc.join(timeout=2)
             except Exception:
                 log.warning("Failed to terminate worker %d during hard timeout", worker_id, exc_info=True)
+            try:
+                from ouroboros.tools.services import archive_task_service_logs
+                archive_task_service_logs(pathlib.Path(DRIVE_ROOT), str(task_id), task)
+            except Exception:
+                log.debug("Failed to archive service logs for timed-out task %s", task_id, exc_info=True)
             workers.respawn_worker(worker_id)
 
         will_retry = attempt <= QUEUE_MAX_RETRIES and isinstance(task, dict)

@@ -43,6 +43,7 @@ def test_legacy_tool_names_are_not_public_schemas(tmp_path):
         "write_file",
         "search_code",
         "run_command",
+        "claude_code_edit",
         "commit_reviewed",
         "schedule_subagent",
         "skill_review",

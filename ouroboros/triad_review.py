@@ -25,6 +25,8 @@ class ReviewActorRecord:
     tokens_out: int = 0
     cost_usd: float = 0.0
     slot: int = 0
+    prompt_ref: Dict[str, Any] = field(default_factory=dict)
+    response_ref: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -37,6 +39,8 @@ class ReviewActorRecord:
             "cost_usd": self.cost_usd,
             "slot": self.slot,
             "slot_id": f"slot_{self.slot}" if self.slot else "",
+            "prompt_ref": dict(self.prompt_ref),
+            "response_ref": dict(self.response_ref),
         }
 
 
@@ -78,6 +82,8 @@ def _actor_record(
         tokens_out=int(actor.get("tokens_out", 0) or 0),
         cost_usd=float(actor.get("cost_estimate", 0.0) or 0.0),
         slot=idx + 1,
+        prompt_ref=dict(actor.get("prompt_ref") or {}),
+        response_ref=dict(actor.get("response_ref") or {}),
     )
 
 

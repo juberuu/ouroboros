@@ -6,6 +6,7 @@ import json
 import os
 import pathlib
 import re
+import stat
 import subprocess
 import threading
 import time
@@ -21,7 +22,7 @@ from ouroboros.platform_layer import (
     subprocess_new_group_kwargs,
 )
 from ouroboros.tools.registry import ToolContext, ToolEntry, active_repo_dir_for
-from ouroboros.utils import safe_relpath, utc_now_iso
+from ouroboros.utils import append_jsonl, safe_relpath, utc_now_iso
 
 
 @dataclass
@@ -137,15 +138,162 @@ def _service_env() -> Dict[str, str]:
     return env
 
 
-def _stop_record(record: ServiceRecord) -> None:
+def _stop_record(record: ServiceRecord, *, wait: bool = True) -> None:
     if record.pgid:
         kill_process_group_id(record.pgid)
     elif record.proc.poll() is None:
         kill_process_tree(record.proc)
+    if not wait:
+        return
     try:
         record.proc.wait(timeout=5)
     except Exception:
         pass
+
+
+def _finalize_service_log_for_drive(drive_root: pathlib.Path, record: ServiceRecord) -> Dict[str, Any]:
+    result: Dict[str, Any] = {"deleted_live_log": False, "full_log_ref": {}, "tail": "", "errors": []}
+    log_path = record.log_path
+    try:
+        size = log_path.stat().st_size if log_path.exists() else 0
+        result["tail"] = str(redact_projection(_tail(log_path, _MAX_SERVICE_LOG_TAIL_CHARS)).value)
+        if size <= _MAX_SERVICE_LOG_BLOB_BYTES:
+            text = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
+            result["full_log_ref"] = write_blob(pathlib.Path(drive_root), text, kind="txt")
+        else:
+            result["full_log_omitted"] = f"log exceeds {_MAX_SERVICE_LOG_BLOB_BYTES} byte blob cap"
+    except Exception as exc:
+        result["errors"].append(f"capture: {type(exc).__name__}: {exc}")
+    should_delete = bool((result.get("full_log_ref") or {}).get("sha256")) or not log_path.exists()
+    if should_delete:
+        try:
+            log_path.unlink(missing_ok=True)
+            result["deleted_live_log"] = True
+            parent = log_path.parent
+            if parent.exists() and not any(parent.iterdir()):
+                parent.rmdir()
+        except Exception as exc:
+            result["errors"].append(f"delete: {type(exc).__name__}: {exc}")
+    elif log_path.exists():
+        result["retained_live_log_path"] = str(log_path)
+    return result
+
+
+def _finalize_service_log(ctx: ToolContext, record: ServiceRecord) -> Dict[str, Any]:
+    return _finalize_service_log_for_drive(pathlib.Path(ctx.drive_root), record)
+
+
+def _archive_stale_service_log(
+    drive_root: pathlib.Path,
+    log_path: pathlib.Path,
+    *,
+    event_type: str = "service_log_pruned",
+) -> Dict[str, Any]:
+    result: Dict[str, Any] = {"archived": False, "deleted_live_log": False, "full_log_ref": {}, "errors": []}
+    try:
+        size = log_path.lstat().st_size
+        if size > _MAX_SERVICE_LOG_BLOB_BYTES:
+            result["retained_live_log_path"] = str(log_path)
+            result["full_log_omitted"] = f"log exceeds {_MAX_SERVICE_LOG_BLOB_BYTES} byte blob cap"
+            return result
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+        result["full_log_ref"] = write_blob(pathlib.Path(drive_root), text, kind="txt")
+        result["tail_chars"] = len(str(redact_projection(_tail(log_path, _MAX_SERVICE_LOG_TAIL_CHARS)).value))
+        append_jsonl(pathlib.Path(drive_root) / "logs" / "events.jsonl", {
+            "ts": utc_now_iso(),
+            "type": event_type,
+            "task_id": log_path.parent.name,
+            "name": log_path.stem,
+            "full_log_ref": result["full_log_ref"],
+            "tail_chars": result["tail_chars"],
+        })
+        result["archived"] = True
+        log_path.unlink(missing_ok=True)
+        result["deleted_live_log"] = True
+    except Exception as exc:
+        result["errors"].append(f"{log_path}: {type(exc).__name__}: {exc}")
+    return result
+
+
+def archive_task_service_logs(
+    drive_root: pathlib.Path,
+    task_id: str,
+    task: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Archive and remove leftover live service logs for a terminal task."""
+
+    task_text = str(task_id or "").strip()
+    if isinstance(task, dict):
+        seen: set[str] = set()
+        roots: List[pathlib.Path] = []
+        for candidate in (
+            drive_root,
+            task.get("drive_root"),
+            task.get("child_drive_root"),
+            task.get("headless_child_drive_root"),
+        ):
+            if not candidate:
+                continue
+            root = pathlib.Path(candidate).resolve(strict=False)
+            key = str(root)
+            if key in seen:
+                continue
+            seen.add(key)
+            roots.append(root)
+        reports = [archive_task_service_logs(root, task_text) for root in roots]
+        return {
+            "task_id": task_text,
+            "roots": [str(root) for root in roots],
+            "archived_files": sum(int(report.get("archived_files") or 0) for report in reports),
+            "deleted_files": sum(int(report.get("deleted_files") or 0) for report in reports),
+            "deleted_dirs": sum(int(report.get("deleted_dirs") or 0) for report in reports),
+            "retained_files": sum(int(report.get("retained_files") or 0) for report in reports),
+            "errors": [err for report in reports for err in (report.get("errors") or [])],
+        }
+    report = {
+        "task_id": task_text,
+        "archived_files": 0,
+        "deleted_files": 0,
+        "deleted_dirs": 0,
+        "retained_files": 0,
+        "errors": [],
+    }
+    if not task_text or pathlib.Path(task_text).name != task_text:
+        report["errors"].append("invalid task_id")
+        return report
+    task_dir = pathlib.Path(drive_root) / "services" / task_text
+    try:
+        task_stat = task_dir.lstat()
+    except OSError:
+        return report
+    if not stat.S_ISDIR(task_stat.st_mode):
+        return report
+    try:
+        for child in task_dir.glob("*.log"):
+            try:
+                child_stat = child.lstat()
+            except OSError:
+                continue
+            if not stat.S_ISREG(child_stat.st_mode):
+                continue
+            archive_result = _archive_stale_service_log(
+                pathlib.Path(drive_root),
+                child,
+                event_type="service_log_archived",
+            )
+            if archive_result.get("archived"):
+                report["archived_files"] += 1
+            if archive_result.get("deleted_live_log"):
+                report["deleted_files"] += 1
+            if archive_result.get("retained_live_log_path"):
+                report["retained_files"] += 1
+            report["errors"].extend(archive_result.get("errors") or [])
+        if task_dir.exists() and not any(task_dir.iterdir()):
+            task_dir.rmdir()
+            report["deleted_dirs"] += 1
+    except Exception as exc:
+        report["errors"].append(f"{task_dir}: {type(exc).__name__}: {exc}")
+    return report
 
 
 def _refresh_ready(record: ServiceRecord) -> bool:
@@ -318,7 +466,9 @@ def _stop_service(ctx: ToolContext, name: str = "service") -> str:
     if not record:
         return f"⚠️ SERVICE_NOT_FOUND: {name}"
     _stop_record(record)
-    return json.dumps(_status_payload(record), ensure_ascii=False, indent=2)
+    payload = _status_payload(record)
+    payload["log_finalization"] = _finalize_service_log(ctx, record)
+    return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
 def stop_task_services(ctx: ToolContext) -> List[Dict[str, Any]]:
@@ -339,7 +489,11 @@ def stop_task_services(ctx: ToolContext) -> List[Dict[str, Any]]:
     return stopped
 
 
-def kill_all_services() -> List[Dict[str, Any]]:
+def kill_all_services(
+    drive_root: pathlib.Path | None = None,
+    *,
+    wait: bool = True,
+) -> List[Dict[str, Any]]:
     """Stop every tracked service process group for panic/shutdown paths."""
 
     with _LOCK:
@@ -347,9 +501,91 @@ def kill_all_services() -> List[Dict[str, Any]]:
         _SERVICES.clear()
     stopped: List[Dict[str, Any]] = []
     for record in records:
-        _stop_record(record)
-        stopped.append(_status_payload(record))
+        _stop_record(record, wait=wait)
+        payload = _status_payload(record)
+        if wait and drive_root is not None:
+            payload["log_finalization"] = _finalize_service_log_for_drive(pathlib.Path(drive_root), record)
+        stopped.append(payload)
+    if wait and drive_root is not None and stopped:
+        def _compact(payload: Dict[str, Any]) -> Dict[str, Any]:
+            item = dict(payload)
+            finalization = dict(item.get("log_finalization") or {})
+            tail = finalization.pop("tail", "")
+            if tail:
+                finalization["tail_chars"] = len(str(tail))
+            item["log_finalization"] = finalization
+            return item
+
+        try:
+            append_jsonl(pathlib.Path(drive_root) / "logs" / "events.jsonl", {
+                "ts": utc_now_iso(),
+                "type": "services_shutdown_cleanup",
+                "services": [_compact(payload) for payload in stopped],
+            })
+        except Exception:
+            pass
     return stopped
+
+
+def prune_service_logs(
+    drive_root: pathlib.Path,
+    retention_days: int | None = None,
+    *,
+    now: float | None = None,
+) -> Dict[str, Any]:
+    if retention_days is None:
+        try:
+            from ouroboros.config import SETTINGS_DEFAULTS
+            default_days = str(SETTINGS_DEFAULTS.get("OUROBOROS_SERVICE_LOG_RETENTION_DAYS") or 14)
+        except Exception:
+            default_days = "14"
+        raw = os.environ.get("OUROBOROS_SERVICE_LOG_RETENTION_DAYS", default_days).strip() or default_days
+        try:
+            retention_days = int(raw)
+        except ValueError:
+            return {"enabled": False, "deleted_dirs": 0, "deleted_files": 0, "errors": [f"invalid retention days: {raw!r}"]}
+    retention_days = max(1, min(int(retention_days), 365))
+    cutoff = (time.time() if now is None else float(now)) - retention_days * 86400
+    services_root = pathlib.Path(drive_root) / "services"
+    report = {
+        "enabled": True,
+        "retention_days": retention_days,
+        "deleted_dirs": 0,
+        "deleted_files": 0,
+        "archived_files": 0,
+        "retained_files": 0,
+        "errors": [],
+    }
+    if not services_root.exists():
+        return report
+    for task_dir in list(services_root.iterdir()):
+        try:
+            task_stat = task_dir.lstat()
+        except OSError:
+            continue
+        if not stat.S_ISDIR(task_stat.st_mode):
+            continue
+        try:
+            for child in task_dir.glob("*.log"):
+                try:
+                    child_stat = child.lstat()
+                except OSError:
+                    continue
+                if stat.S_ISREG(child_stat.st_mode) and child_stat.st_mtime < cutoff:
+                    archive_result = _archive_stale_service_log(pathlib.Path(drive_root), child)
+                    if archive_result.get("archived"):
+                        report["archived_files"] += 1
+                    if archive_result.get("deleted_live_log"):
+                        report["deleted_files"] += 1
+                    if archive_result.get("retained_live_log_path"):
+                        report["retained_files"] += 1
+                    report["errors"].extend(archive_result.get("errors") or [])
+            if not any(task_dir.iterdir()):
+                task_dir.rmdir()
+                report["deleted_dirs"] += 1
+        except Exception as exc:
+            report["errors"].append(f"{task_dir}: {type(exc).__name__}: {exc}")
+    return report
 
 
 def get_tools() -> List[ToolEntry]:

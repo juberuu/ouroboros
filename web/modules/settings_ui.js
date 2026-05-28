@@ -336,11 +336,11 @@ export function renderSettingsPage() {
 
                     <div class="form-section">
                         <h3>Task Result Review</h3>
-                        <div class="settings-section-copy">Controls advisory reviewer slots before eligible task results are released.</div>
+                        <div class="settings-section-copy">Auto leaves the decision to Ouroboros via the visible review tool; Required injects reviewer output before eligible task results are released.</div>
                         <div class="settings-effort-card">
                             <label>Task Result Review</label>
                             <input id="s-task-review-mode" type="hidden" value="auto">
-                            <div class="settings-effort-group" data-effort-group data-enforcement-group data-effort-target="s-task-review-mode">
+                            <div class="settings-effort-group" data-effort-group data-task-review-group data-effort-target="s-task-review-mode">
                                 <button type="button" class="settings-effort-btn" data-effort-value="off">Off</button>
                                 <button type="button" class="settings-effort-btn" data-effort-value="auto">Auto</button>
                                 <button type="button" class="settings-effort-btn" data-effort-value="required">Required</button>

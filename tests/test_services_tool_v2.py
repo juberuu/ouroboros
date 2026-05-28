@@ -1,7 +1,11 @@
 import json
+import os
+import pathlib
 import sys
+from types import SimpleNamespace
 
 from ouroboros.tools.registry import ToolRegistry
+from ouroboros.tools.services import archive_task_service_logs, prune_service_logs
 
 
 def _force_advanced_runtime(monkeypatch):
@@ -41,6 +45,8 @@ def test_task_scoped_service_lifecycle(tmp_path, monkeypatch):
 
     stopped = json.loads(registry.execute("stop_service", {"name": "demo"}))
     assert stopped["state"] == "exited"
+    assert stopped["log_finalization"]["deleted_live_log"] is True
+    assert not (drive / "services" / "task-1" / "demo.log").exists()
     assert registry.execute("service_status", {"name": "demo"}).startswith("⚠️ SERVICE_NOT_FOUND")
 
 
@@ -89,3 +95,211 @@ def test_service_logs_tail_is_capped(tmp_path, monkeypatch):
     registry.execute("stop_service", {"name": "bigtail"})
 
     assert len(logs["tail"]) <= 80_000
+
+
+def test_service_log_retention_prunes_stale_directories(tmp_path):
+    drive = tmp_path / "data"
+    stale = drive / "services" / "task-old"
+    stale.mkdir(parents=True)
+    log = stale / "demo.log"
+    log.write_text("old", encoding="utf-8")
+    now = 1_000_000.0
+    old = now - 30 * 86400
+    os.utime(stale, (old, old))
+    os.utime(log, (old, old))
+
+    report = prune_service_logs(drive, retention_days=14, now=now)
+
+    assert report["archived_files"] == 1
+    assert report["deleted_files"] == 1
+    assert report["deleted_dirs"] == 1
+    assert not stale.exists()
+    events = [
+        json.loads(line)
+        for line in (drive / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    event = [item for item in events if item.get("type") == "service_log_pruned"][-1]
+    assert event["task_id"] == "task-old"
+    assert event["name"] == "demo"
+    assert event["full_log_ref"]["sha256"]
+
+
+def test_archive_task_service_logs_finalizes_forced_worker_leftovers(tmp_path):
+    drive = tmp_path / "data"
+    task_dir = drive / "services" / "task-forced"
+    task_dir.mkdir(parents=True)
+    log = task_dir / "devserver.log"
+    log.write_text("READY\n", encoding="utf-8")
+
+    report = archive_task_service_logs(drive, "task-forced")
+
+    assert report["archived_files"] == 1
+    assert report["deleted_files"] == 1
+    assert report["deleted_dirs"] == 1
+    assert not task_dir.exists()
+    events = [
+        json.loads(line)
+        for line in (drive / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    event = [item for item in events if item.get("type") == "service_log_archived"][-1]
+    assert event["task_id"] == "task-forced"
+    assert event["name"] == "devserver"
+    assert event["full_log_ref"]["sha256"]
+
+    child_drive = tmp_path / "child-data"
+    child_task_dir = child_drive / "services" / "task-child"
+    child_task_dir.mkdir(parents=True)
+    (child_task_dir / "devserver.log").write_text("READY\n", encoding="utf-8")
+
+    child_report = archive_task_service_logs(
+        drive,
+        "task-child",
+        {"child_drive_root": str(child_drive)},
+    )
+
+    assert child_report["archived_files"] == 1
+    assert child_report["deleted_dirs"] == 1
+    assert not child_task_dir.exists()
+
+
+def test_stop_service_retains_live_log_when_full_blob_omitted(tmp_path, monkeypatch):
+    from ouroboros.tools import services as services_mod
+
+    _force_advanced_runtime(monkeypatch)
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(services_mod, "_MAX_SERVICE_LOG_BLOB_BYTES", 10)
+    repo = tmp_path / "repo"
+    drive = tmp_path / "data"
+    repo.mkdir()
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    registry._ctx.task_id = "task-oversize"
+
+    registry.execute("start_service", {
+        "name": "oversize",
+        "cmd": [sys.executable, "-c", "print('x' * 100, flush=True)"],
+        "readiness": {"timeout_sec": 1},
+    })
+    stopped = json.loads(registry.execute("stop_service", {"name": "oversize"}))
+
+    finalization = stopped["log_finalization"]
+    assert finalization["deleted_live_log"] is False
+    assert finalization["retained_live_log_path"].endswith("oversize.log")
+    assert (drive / "services" / "task-oversize" / "oversize.log").exists()
+
+
+def test_service_log_finalization_checks_size_before_full_read(tmp_path, monkeypatch):
+    from ouroboros.tools import services as services_mod
+
+    drive = tmp_path / "data"
+    log_path = drive / "services" / "task-big" / "big.log"
+    log_path.parent.mkdir(parents=True)
+    log_path.write_text("x" * 100, encoding="utf-8")
+    monkeypatch.setattr(services_mod, "_MAX_SERVICE_LOG_BLOB_BYTES", 10)
+    original_read_text = pathlib.Path.read_text
+
+    def guarded_read_text(self, *args, **kwargs):
+        if self == log_path:
+            raise AssertionError("oversized service log should not be fully read")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "read_text", guarded_read_text)
+
+    result = services_mod._finalize_service_log_for_drive(drive, SimpleNamespace(log_path=log_path))
+
+    assert result["deleted_live_log"] is False
+    assert result["tail"]
+    assert "full_log_omitted" in result
+    assert log_path.exists()
+
+
+def test_kill_all_services_records_shutdown_cleanup_event(tmp_path, monkeypatch):
+    from ouroboros.tools.services import kill_all_services
+
+    _force_advanced_runtime(monkeypatch)
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
+    repo = tmp_path / "repo"
+    drive = tmp_path / "data"
+    repo.mkdir()
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    registry._ctx.task_id = "task-shutdown"
+
+    registry.execute("start_service", {
+        "name": "shutdown",
+        "cmd": [sys.executable, "-c", "import time; print('READY', flush=True); time.sleep(60)"],
+        "readiness": {"log_contains": "READY", "timeout_sec": 3},
+    })
+    stopped = kill_all_services(drive)
+
+    assert stopped
+    events = [
+        json.loads(line)
+        for line in (drive / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    cleanup = [event for event in events if event.get("type") == "services_shutdown_cleanup"]
+    assert cleanup
+    service = cleanup[-1]["services"][0]
+    assert service["name"] == "shutdown"
+    assert service["task_id"] == "task-shutdown"
+    assert service["log_finalization"]["full_log_ref"]["sha256"]
+    assert "tail" not in service["log_finalization"]
+
+
+def test_service_log_retention_uses_log_mtime_and_skips_symlinks(tmp_path):
+    drive = tmp_path / "data"
+    services_root = drive / "services"
+    stale_dir = services_root / "task-old-dir"
+    stale_dir.mkdir(parents=True)
+    fresh_log = stale_dir / "fresh.log"
+    fresh_log.write_text("fresh", encoding="utf-8")
+    stale_log = stale_dir / "stale.log"
+    stale_log.write_text("old", encoding="utf-8")
+    other_file = stale_dir / "notes.txt"
+    other_file.write_text("keep", encoding="utf-8")
+    now = 1_000_000.0
+    old = now - 30 * 86400
+    os.utime(stale_dir, (old, old))
+    os.utime(stale_log, (old, old))
+    os.utime(fresh_log, (now, now))
+    os.utime(other_file, (old, old))
+
+    target = tmp_path / "outside"
+    target.mkdir()
+    (target / "evil.log").write_text("keep", encoding="utf-8")
+    symlink_dir = services_root / "linked"
+    try:
+        symlink_dir.symlink_to(target, target_is_directory=True)
+    except OSError:
+        symlink_dir = None
+
+    report = prune_service_logs(drive, retention_days=14, now=now)
+
+    assert report["archived_files"] == 1
+    assert report["deleted_files"] == 1
+    assert stale_log.exists() is False
+    assert fresh_log.exists()
+    assert other_file.exists()
+    assert stale_dir.exists()
+    if symlink_dir is not None:
+        assert symlink_dir.exists()
+        assert (target / "evil.log").exists()
+
+
+def test_service_log_retention_retains_oversized_stale_logs(tmp_path, monkeypatch):
+    from ouroboros.tools import services as services_mod
+
+    drive = tmp_path / "data"
+    stale = drive / "services" / "task-big"
+    stale.mkdir(parents=True)
+    log = stale / "big.log"
+    log.write_text("x" * 100, encoding="utf-8")
+    monkeypatch.setattr(services_mod, "_MAX_SERVICE_LOG_BLOB_BYTES", 10)
+    now = 1_000_000.0
+    old = now - 30 * 86400
+    os.utime(log, (old, old))
+
+    report = prune_service_logs(drive, retention_days=14, now=now)
+
+    assert report["deleted_files"] == 0
+    assert report["archived_files"] == 0
+    assert report["retained_files"] == 1
+    assert log.exists()

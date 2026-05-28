@@ -472,8 +472,8 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         return taskId === 'bg-consciousness';
     }
 
-    function isTerminalTaskPhase(phase = '') {
-        return phase === 'done' || phase === 'lifecycle_error';
+    function isTerminalTaskPhase(phase = '', terminal = false) {
+        return Boolean(terminal) || ['done', 'lifecycle_error'].includes(phase);
     }
 
     function createTaskUiState(taskId) {
@@ -523,7 +523,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
 
     function revealBufferedCardIfNeeded(taskState, { suppressDomInsert = false } = {}) {
         if (!taskState || taskState.cardVisible) return;
-        if (!(taskState.forceCard || taskState.toolCalls > 1 || shouldAlwaysShowTaskCard(taskState.taskId))) {
+        if (!(taskState.forceCard || taskState.toolCalls > 0 || shouldAlwaysShowTaskCard(taskState.taskId))) {
             return;
         }
         taskState.cardVisible = true;
@@ -590,7 +590,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         if (!resolvedTaskId) return;
         const taskState = getTaskUiState(resolvedTaskId, true);
         if (!taskState) return;
-        if (taskState.completed && !isTerminalTaskPhase(summary.phase || '')) {
+        if (taskState.completed && !isTerminalTaskPhase(summary.phase || '', summary.terminal)) {
             // A non-terminal event on a reusable id starts a fresh visible cycle.
             if (REUSABLE_TASK_IDS.has(resolvedTaskId)) {
                 if (taskState.cleanupTimer) clearTimeout(taskState.cleanupTimer);
@@ -865,7 +865,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         const nextGroupId = groupId || activeLiveGroupId || 'active';
         const record = getLiveCardRecord(nextGroupId);
         const nextPhase = summary.phase || '';
-        if (record.finished && !isTerminalTaskPhase(nextPhase)) {
+        if (record.finished && !isTerminalTaskPhase(nextPhase, summary.terminal)) {
             return;
         }
 
@@ -873,7 +873,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         ensureLiveCardVisible(record, { suppressDomInsert });
         record.updates += 1;
         const wasFinished = record.finished;
-        record.finished = isTerminalTaskPhase(nextPhase);
+        record.finished = isTerminalTaskPhase(nextPhase, summary.terminal);
         record.root.dataset.finished = record.finished ? '1' : '0';
         const headline = summary.headline || 'Working...';
         if (summary.human && headline) {
@@ -1012,13 +1012,14 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
                 visible: false,
                 human: false,
                 promote: true,
+                terminal: true,
             },
             taskId,
             normalizeLogTs(msg.ts || new Date().toISOString()),
             `task_done|${taskId}`,
             { suppressDomInsert },
         );
-        finishLiveCard(taskId, 'done');
+        finishLiveCard(taskId, failedResult ? 'error' : 'done');
         scheduleTaskUiCleanup(taskState);
     }
 
@@ -1243,7 +1244,8 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
                         // Historical cards only for non-trivial tasks.
                         const hadToolCalls = (msg.tool_calls || 0) > 0;
                         const hadMultipleRounds = (msg.rounds || 0) > 1;
-                        if (hadToolCalls || hadMultipleRounds) {
+                        const failedResult = ['failed', 'infra_failed'].includes(String(msg.result_status || ''));
+                        if (hadToolCalls || hadMultipleRounds || failedResult) {
                             const taskState = getTaskUiState(taskId, true);
                             if (taskState) taskState.forceCard = true;
                         }
@@ -1273,7 +1275,10 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
                     if (msg.system_type === 'task_summary') continue;
                     if (taskId && (msg.role === 'assistant' || msg.role === 'system')) {
                         insertCardIfNeeded(taskId);
-                        finishLiveCard(taskId);
+                        const taskState = getTaskUiState(taskId, false);
+                        const record = liveCardRecords.get(taskId);
+                        const preservedPhase = taskState?.completedPhase || record?.phaseEl?.dataset?.phase || 'done';
+                        finishLiveCard(taskId, preservedPhase);
                     }
                     addMessage(msg.text, msg.role, !!msg.markdown, msg.ts || null, false, {
                         systemType: msg.system_type || '',

@@ -333,56 +333,7 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
     meta = ctx.RUNNING.get(str(task_id or ""), {}) if task_id else {}
     task = meta.get("task") if isinstance(meta, dict) and isinstance(meta.get("task"), dict) else {}
 
-    # Persist here so send_message reaches the UI before task_done collapses the card.
-    from ouroboros.utils import utc_now_iso, append_jsonl
-    task_done_event = {
-        "ts": evt.get("ts", utc_now_iso()),
-        "type": "task_done",
-        "task_id": task_id,
-        "task_type": task_type,
-        "result_status": evt.get("result_status"),
-        "reason_code": evt.get("reason_code"),
-        "artifact_status": evt.get("artifact_status"),
-        "cost_usd": float(evt.get("cost_usd") or 0),
-        "total_rounds": int(evt.get("total_rounds") or 0),
-        "prompt_tokens": int(evt.get("prompt_tokens") or 0),
-        "completion_tokens": int(evt.get("completion_tokens") or 0),
-    }
-    if isinstance(evt.get("artifact_bundle"), dict):
-        task_done_event["artifact_bundle"] = evt.get("artifact_bundle")
-    if isinstance(evt.get("review_status"), dict):
-        task_done_event["review_status"] = evt.get("review_status")
-    try:
-        append_jsonl(ctx.DRIVE_ROOT / "logs" / "events.jsonl", task_done_event)
-    except Exception:
-        log.warning("Failed to log task_done to events.jsonl", exc_info=True)
-
-    if task_type == "evolution":
-        st = ctx.load_state()
-        # Meaningful evolution work has non-trivial cost plus at least one round.
-        cost = float(evt.get("cost_usd") or 0)
-        rounds = int(evt.get("total_rounds") or 0)
-
-        evo_cost_threshold = float(os.environ.get("OUROBOROS_EVO_COST_THRESHOLD", "0.10"))
-        if cost > evo_cost_threshold and rounds >= 1:
-            st["evolution_consecutive_failures"] = 0
-            ctx.save_state(st)
-        else:
-            failures = int(st.get("evolution_consecutive_failures") or 0) + 1
-            st["evolution_consecutive_failures"] = failures
-            ctx.save_state(st)
-            ctx.append_jsonl(
-                ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
-                {
-                    "ts": utc_now_iso(),
-                    "type": "evolution_task_failure_tracked",
-                    "task_id": task_id,
-                    "consecutive_failures": failures,
-                    "cost_usd": cost,
-                    "rounds": rounds,
-                },
-            )
-
+    final_task_result: Dict[str, Any] = {}
     if task_id:
         try:
             from ouroboros.headless import copy_child_task_result, finalize_task_artifacts
@@ -419,13 +370,78 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
             except Exception:
                 pass
             log.warning("Failed to finalize headless artifacts for task %s", task_id, exc_info=True)
+        try:
+            final_task_result = load_task_result(ctx.DRIVE_ROOT, str(task_id)) or {}
+        except Exception:
+            final_task_result = {}
+
+    # Persist here so send_message reaches the UI before task_done collapses the card.
+    from ouroboros.utils import utc_now_iso, append_jsonl
+    result_status = final_task_result.get("result_status") or evt.get("result_status")
+    reason_code = final_task_result.get("reason_code") or evt.get("reason_code")
+    artifact_status = final_task_result.get("artifact_status") or evt.get("artifact_status")
+    task_done_event = {
+        "ts": evt.get("ts", utc_now_iso()),
+        "type": "task_done",
+        "task_id": task_id,
+        "task_type": task_type,
+        "result_status": result_status,
+        "reason_code": reason_code,
+        "artifact_status": artifact_status,
+        "cost_usd": float(evt.get("cost_usd") or 0),
+        "total_rounds": int(evt.get("total_rounds") or 0),
+        "prompt_tokens": int(evt.get("prompt_tokens") or 0),
+        "completion_tokens": int(evt.get("completion_tokens") or 0),
+    }
+    artifact_bundle = final_task_result.get("artifact_bundle") if isinstance(final_task_result, dict) else None
+    if not isinstance(artifact_bundle, dict):
+        artifact_bundle = evt.get("artifact_bundle")
+    if isinstance(artifact_bundle, dict):
+        task_done_event["artifact_bundle"] = artifact_bundle
+    review_status = final_task_result.get("review_status") if isinstance(final_task_result, dict) else None
+    if not isinstance(review_status, dict):
+        review_status = evt.get("review_status")
+    if isinstance(review_status, dict):
+        task_done_event["review_status"] = review_status
+    try:
+        append_jsonl(ctx.DRIVE_ROOT / "logs" / "events.jsonl", task_done_event)
+    except Exception:
+        log.warning("Failed to log task_done to events.jsonl", exc_info=True)
+
+    if task_type == "evolution":
+        st = ctx.load_state()
+        # Meaningful evolution work has non-trivial cost plus at least one round.
+        cost = float(evt.get("cost_usd") or 0)
+        rounds = int(evt.get("total_rounds") or 0)
+
+        evo_cost_threshold = float(os.environ.get("OUROBOROS_EVO_COST_THRESHOLD", "0.10"))
+        if cost > evo_cost_threshold and rounds >= 1:
+            st["evolution_consecutive_failures"] = 0
+            ctx.save_state(st)
+        else:
+            failures = int(st.get("evolution_consecutive_failures") or 0) + 1
+            st["evolution_consecutive_failures"] = failures
+            ctx.save_state(st)
+            ctx.append_jsonl(
+                ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": utc_now_iso(),
+                    "type": "evolution_task_failure_tracked",
+                    "task_id": task_id,
+                    "consecutive_failures": failures,
+                    "cost_usd": cost,
+                    "rounds": rounds,
+                },
+            )
+
+    if task_id:
         if isinstance(task, dict) and str(task.get("delegation_role") or "") == "subagent":
             try:
                 chat_id = int(task.get("chat_id") or 0)
             except (TypeError, ValueError):
                 chat_id = 0
             if chat_id:
-                effective_result = load_task_result(ctx.DRIVE_ROOT, str(task_id or "")) or {}
+                effective_result = final_task_result or load_task_result(ctx.DRIVE_ROOT, str(task_id or "")) or {}
                 status = str(effective_result.get("status") or evt.get("status") or STATUS_COMPLETED)
                 if status == STATUS_COMPLETED:
                     icon, subagent_event, verb = "✅", "completed", "completed"
