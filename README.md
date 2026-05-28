@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 6.5.0-rc.2](https://img.shields.io/badge/version-6.5.0--rc.2-green.svg)](VERSION)
+[![Version 6.5.0-rc.3](https://img.shields.io/badge/version-6.5.0--rc.3-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -31,7 +31,7 @@ Not a coding assistant. A digital being with a constitution, background consciou
 | **Linux** x86_64 | [Ouroboros-linux.tar.gz](https://github.com/joi-lab/ouroboros-desktop/releases/latest) | Extract → run `./Ouroboros/Ouroboros` → optional CLI: `./Ouroboros/bin/install-ouroboros-cli`. If browser tools fail due to missing system libs, run: `./Ouroboros/python-standalone/bin/python3 -m playwright install-deps chromium` |
 | **Windows** x64 | [Ouroboros-windows.zip](https://github.com/joi-lab/ouroboros-desktop/releases/latest) | Extract → run `Ouroboros\Ouroboros.exe` → optional CLI: `Ouroboros\bin\install-ouroboros-cli.cmd` |
 
-Prerelease RC artifacts are published on their tag page, for example [`v6.5.0-rc.2`](https://github.com/joi-lab/ouroboros-desktop/releases/tag/v6.5.0-rc.2); `/releases/latest` intentionally stays on the latest stable release.
+Prerelease RC artifacts are published on their tag page, for example [`v6.5.0-rc.3`](https://github.com/joi-lab/ouroboros-desktop/releases/tag/v6.5.0-rc.3); `/releases/latest` intentionally stays on the latest stable release.
 
 <p align="center">
   <img src="assets/setup.png" width="500" alt="Drag Ouroboros.app to install">
@@ -484,12 +484,12 @@ the contribution guide only routes to those sources.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 6.5.0-rc.3 | 2026-05-28 | **rc(ci): finish Windows runtime-data guard portability.** Keeps the rc.2 scope and fixes escaped Windows Python path literals in light-mode runtime-data process guards so full CI can build release artifacts. |
 | 6.5.0-rc.2 | 2026-05-28 | **rc(ci): harden light-mode artifact release candidate.** Keeps the rc.1 runtime scope, fixes CI smoke gates around Claude Code helper size/function counts, and makes runtime-data artifact guards portable across Windows path forms. |
 | 6.5.0-rc.1 | 2026-05-28 | **rc(runtime): repair light-mode external deliverables and artifact audit.** Adds `user_files`, makes light mode a self-repo/control-plane boundary rather than an OS sandbox, allows task/user/artifact cwd for process tools and `claude_code_edit`, registers declared external outputs into task artifacts, classifies tool blocks as semantic failures, and repairs stale running task status after infra failures. |
 | 6.4.0-rc.1 | 2026-05-28 | **rc(runtime): integrate contributor filesystem, docs, and video transport work.** Adds root-qualified filesystem output observability, keeps shell cwd diagnostics explicit, introduces a compact contributor routing guide, adds the `send_video` transport path with gateway/UI contract coverage, and updates prerelease carriers. |
 | 6.3.0-rc.2 | 2026-05-27 | **rc(runtime): harden review unification, tool surface, and replay retention.** Restores `claude_code_edit` as a first-class coding tool, makes task-result Auto review LLM-first instead of host-enforced, routes plan/scope/multi-model calls through the shared review substrate, fixes forensic redaction over-match, adds observability retention audit plus service-log archival/pruning, and documents Tool API v2 as a breaking public rename without legacy aliases. |
-| 6.3.0-rc.1 | 2026-05-27 | **rc(runtime): add forensic observability, typed outcomes, Tool API v2, task acceptance review, and code inventory.** Captures private full replay payloads with redacted projections, records semantic task outcomes/artifact/verification ledgers, exposes neutral canonical tools plus task-scoped services, shares reviewer slots across review surfaces, and improves benchmark harness failure reporting without changing BIBLE.md. |
-Older releases are preserved in Git tags and GitHub releases. The 6.0.0 through 6.2.0-rc.1 rows, the 5.2.0 through 5.33.0-rc.6 rows, and former `4.0.0` rows are rolled off to respect the P9 changelog cap; their full bodies remain at their git tags.
+Older releases are preserved in Git tags and GitHub releases. The 6.0.0 through 6.3.0-rc.1 rows, the 5.2.0 through 5.33.0-rc.6 rows, and former `4.0.0` rows are rolled off to respect the P9 changelog cap; their full bodies remain at their git tags.
 
 ---
 

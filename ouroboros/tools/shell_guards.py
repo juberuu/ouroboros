@@ -89,16 +89,20 @@ def runtime_data_write_targets(
             candidates.extend(EMBEDDED_WINDOWS_ABSOLUTE_PATH_RE.findall(expanded))
             candidates.extend(EMBEDDED_RELATIVE_PATH_RE.findall(expanded))
         for candidate in candidates:
-            try:
-                raw_path = pathlib.Path(candidate).expanduser()
-                path = raw_path.resolve(strict=False) if raw_path.is_absolute() else (cwd / raw_path).resolve(strict=False)
-            except Exception:
-                continue
-            if not _path_inside(path, drive) or any(_path_inside(path, root) for root in allowed):
-                continue
-            rendered = str(path)
-            if rendered not in blocked:
-                blocked.append(rendered)
+            candidate_variants = {candidate}
+            if "\\\\" in candidate:
+                candidate_variants.add(candidate.replace("\\\\", "\\"))
+            for candidate_text in candidate_variants:
+                try:
+                    raw_path = pathlib.Path(candidate_text).expanduser()
+                    path = raw_path.resolve(strict=False) if raw_path.is_absolute() else (cwd / raw_path).resolve(strict=False)
+                except Exception:
+                    continue
+                if not _path_inside(path, drive) or any(_path_inside(path, root) for root in allowed):
+                    continue
+                rendered = str(path)
+                if rendered not in blocked:
+                    blocked.append(rendered)
     return blocked
 
 
