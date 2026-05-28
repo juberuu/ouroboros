@@ -471,6 +471,15 @@ not paraphrase it.
 
 ---
 
+## Contributing
+
+External contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md)
+for the contributor workflow. The project rules remain in `BIBLE.md`,
+`docs/ARCHITECTURE.md`, `docs/DEVELOPMENT.md`, and `docs/CHECKLISTS.md`;
+the contribution guide only routes to those sources.
+
+---
+
 ## Version History
 
 | Version | Date | Description |
