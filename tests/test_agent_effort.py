@@ -3,8 +3,6 @@
 import os
 from unittest.mock import patch
 from ouroboros.config import resolve_effort
-# Backward-compat shim in agent.py must still work
-from ouroboros.agent import _resolve_initial_effort
 
 
 # ---------------------------------------------------------------------------
@@ -26,17 +24,11 @@ def test_task_effort_via_new_env():
             assert resolve_effort("task") == effort
 
 
-def test_task_effort_legacy_fallback():
-    """Legacy OUROBOROS_INITIAL_REASONING_EFFORT is honoured when OUROBOROS_EFFORT_TASK is absent."""
-    with patch.dict(os.environ, {"OUROBOROS_INITIAL_REASONING_EFFORT": "medium"}, clear=True):
+def test_task_effort_legacy_alias_no_longer_honoured():
+    """v5.15.0 retired OUROBOROS_INITIAL_REASONING_EFFORT — only the new key is read."""
+    with patch.dict(os.environ, {"OUROBOROS_INITIAL_REASONING_EFFORT": "high"}, clear=True):
+        # Legacy alias is ignored; default applies.
         assert resolve_effort("task") == "medium"
-
-
-def test_task_effort_new_takes_precedence_over_legacy():
-    """OUROBOROS_EFFORT_TASK wins over legacy alias."""
-    env = {"OUROBOROS_EFFORT_TASK": "high", "OUROBOROS_INITIAL_REASONING_EFFORT": "low"}
-    with patch.dict(os.environ, env, clear=True):
-        assert resolve_effort("task") == "high"
 
 
 def test_task_effort_invalid_falls_back_to_medium():
@@ -103,15 +95,3 @@ def test_task_type_is_case_insensitive():
         assert resolve_effort("EVOLUTION") == "high"
         assert resolve_effort("Review") == "medium"
         assert resolve_effort("CONSCIOUSNESS") == "low"
-
-
-# ---------------------------------------------------------------------------
-# Backward-compat shim
-# ---------------------------------------------------------------------------
-
-def test_shim_still_works():
-    """_resolve_initial_effort in agent.py is still callable and correct."""
-    with patch.dict(os.environ, {}, clear=True):
-        assert _resolve_initial_effort("task") == "medium"
-        assert _resolve_initial_effort("evolution") == "high"
-        assert _resolve_initial_effort("review") == "medium"

@@ -1,3 +1,4 @@
+import { apiFetch } from './api_client.js';
 const MODEL_CATALOG_TIMEOUT_MS = 25000;
 let catalogRefreshSeq = 0;
 
@@ -35,7 +36,7 @@ export async function refreshModelCatalog() {
     const timeoutId = setTimeout(() => controller.abort(), MODEL_CATALOG_TIMEOUT_MS);
 
     try {
-        const resp = await fetch('/api/model-catalog', {
+        const resp = await apiFetch('/api/model-catalog', {
             cache: 'no-store',
             signal: controller.signal,
         });

@@ -1,4 +1,10 @@
-"""Guardrails for README and architecture docs after UI/routing overhaul."""
+"""Guardrails for architecture docs after UI/routing overhaul.
+
+README prose pins were retired in v5.8.3-rc.5 — the README is intentionally
+allowed to evolve its marketing copy without dragging tests along; the
+ARCHITECTURE.md pins below are the load-bearing rationale-layer guards
+(P6) that must survive every doc-touch commit.
+"""
 
 import os
 import pathlib
@@ -8,15 +14,6 @@ REPO = pathlib.Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def _read(rel: str) -> str:
     return (REPO / rel).read_text(encoding="utf-8")
-
-
-def test_readme_mentions_multistep_wizard_and_live_task_ui():
-    readme = _read("README.md")
-
-    assert "shared desktop/web wizard is now multi-step" in readme
-    assert "add access first, choose visible models second, set review mode third, set budget fourth" in readme
-    assert "Focused Task UX" in readme
-    assert "live task card" in readme
 
 
 def test_architecture_mentions_shared_log_grouping_and_direct_provider_review_fallback():
@@ -46,3 +43,12 @@ def test_architecture_mentions_shared_log_grouping_and_direct_provider_review_fa
     # browser-side `catch` block paths that set `claudeRuntimeHasError`.
     assert "refreshClaudeCodeStatus" in arch
     assert "transport failure" in arch
+
+
+def test_consciousness_prompt_matches_subagent_wait_and_memory_contracts():
+    consciousness = _read("prompts/CONSCIOUSNESS.md")
+
+    assert "memory_mode=forked|empty" in consciousness
+    assert "memory_mode=forked|empty|shared" not in consciousness
+    assert "`shared` is disabled" in consciousness
+    assert "wait_tasks" in consciousness

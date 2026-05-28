@@ -179,25 +179,11 @@ def test_all_three_models_ok_no_degraded(tmp_path):
 
 # ── Test 4: scope_raw_result populated ────────────────────────────────────────
 
-def test_scope_review_result_has_raw_text_and_model_id():
-    """ScopeReviewResult must carry raw_text, model_id, and status after LLM call."""
-    from ouroboros.tools.scope_review import ScopeReviewResult
-
-    result = ScopeReviewResult(
-        blocked=False,
-        raw_text='[{"item":"intent_alignment","verdict":"PASS","severity":"critical","reason":"OK"}]',
-        model_id="anthropic/claude-opus-4.6",
-        status="responded",
-        prompt_chars=5000,
-        tokens_in=1200,
-        tokens_out=300,
-        cost_usd=0.05,
-    )
-    assert result.raw_text
-    assert result.model_id
-    assert result.status == "responded"
-    assert result.tokens_in == 1200
-    assert result.cost_usd == 0.05
+# test_scope_review_result_has_raw_text_and_model_id removed in v5.15.x —
+# the test only constructed a ScopeReviewResult dataclass and asserted the
+# field values it just passed in. No production code is exercised. The
+# dataclass shape is enforced by the type system + downstream tests that
+# actually consume ScopeReviewResult instances from real review runs.
 
 
 # ── Test 5: budget_exceeded status on scope ───────────────────────────────────
@@ -526,24 +512,12 @@ def test_scope_history_section_labels_blocked_as_blocked():
     assert "PASSED" not in round1_line
 
 
-def test_scope_round_label_helper_all_paths():
-    """Direct unit coverage of _scope_round_label for all three branches."""
-    from ouroboros.tools.scope_review import _scope_round_label
-
-    # blocked=True wins over any status
-    assert _scope_round_label({"blocked": True, "status": "responded"}) == "BLOCKED"
-    assert _scope_round_label({"blocked": True, "status": "budget_exceeded"}) == "BLOCKED"
-    # non-responded status surfaces as upper-cased label
-    assert _scope_round_label({"blocked": False, "status": "budget_exceeded"}) == "BUDGET_EXCEEDED"
-    assert _scope_round_label({"blocked": False, "status": "omitted"}) == "OMITTED"
-    assert _scope_round_label({"blocked": False, "status": "parse_failure"}) == "PARSE_FAILURE"
-    assert _scope_round_label({"blocked": False, "status": "error"}) == "ERROR"
-    # responded + no block = PASSED
-    assert _scope_round_label({"blocked": False, "status": "responded"}) == "PASSED"
-    # missing status defaults to responded → PASSED
-    assert _scope_round_label({"blocked": False}) == "PASSED"
-    # empty status string defaults to responded → PASSED
-    assert _scope_round_label({"blocked": False, "status": ""}) == "PASSED"
+# test_scope_round_label_helper_all_paths trimmed in v5.15.x — the three
+# behavioural branches (BLOCKED wins / status uppercased / responded+no
+# block = PASSED) are exercised end-to-end by the
+# test_scope_history_section_does_not_label_{budget_exceeded,omitted,
+# parse_failure}_as_passed integration tests above. The direct unit-level
+# coverage is redundant.
 
 
 def test_last_triad_raw_results_reset_at_start_of_run_unified_review(tmp_path):
@@ -673,7 +647,7 @@ def test_two_responded_plus_one_parse_failure_meets_quorum(tmp_path):
 
 def test_stale_actor_evidence_cleared_at_commit_start(tmp_path):
     """ctx._last_triad_raw_results, _last_scope_raw_result, _review_degraded_reasons
-    must be reset at the start of _repo_commit_push / _repo_write_commit so that
+    must be reset at the start of _repo_commit_push so that
     stale data from a prior attempt never bleeds into early-exit paths (e.g.
     fingerprint failure before run_parallel_review runs).
     """
@@ -761,59 +735,9 @@ def test_scope_empty_response_distinct_from_error(tmp_path):
 
 # ── Test 11: scope_raw_result has parsed_items for shape parity ───────────────
 
-def test_scope_raw_result_has_parsed_items(tmp_path):
-    """scope_raw_result must include parsed_items (critical + advisory findings combined)
-    to match the shape of triad actor records.
-
-    Tests the dict-construction block in parallel_review.py directly — no mocking of
-    internal functions that may not exist as module attributes.
-    """
-    from ouroboros.tools.scope_review import ScopeReviewResult
-
-    critical_item = {"verdict": "FAIL", "severity": "critical", "item": "code_quality",
-                     "reason": "bug found"}
-    advisory_item = {"verdict": "FAIL", "severity": "advisory", "item": "context_building",
-                     "reason": "minor note"}
-
-    scope_result = ScopeReviewResult(
-        blocked=False,
-        block_message="",
-        status="responded",
-        model_id="claude-opus",
-        raw_text="some scope output",
-        prompt_chars=1000,
-        tokens_in=200,
-        tokens_out=50,
-        cost_usd=0.01,
-        critical_findings=[critical_item],
-        advisory_findings=[advisory_item],
-    )
-
-    # Replicate the dict-construction logic from parallel_review.py verbatim
-    scope_raw = {
-        "model_id": getattr(scope_result, "model_id", "") or "claude-opus",
-        "status": getattr(scope_result, "status", "responded"),
-        "raw_text": getattr(scope_result, "raw_text", ""),
-        "prompt_chars": getattr(scope_result, "prompt_chars", 0),
-        "tokens_in": getattr(scope_result, "tokens_in", 0),
-        "tokens_out": getattr(scope_result, "tokens_out", 0),
-        "cost_usd": getattr(scope_result, "cost_usd", 0.0),
-        "parsed_items": list(
-            (scope_result.critical_findings or []) + (scope_result.advisory_findings or [])
-        ),
-        "critical_findings": list(scope_result.critical_findings or []),
-        "advisory_findings": list(scope_result.advisory_findings or []),
-    }
-
-    assert "parsed_items" in scope_raw, "scope_raw_result must have parsed_items for shape parity"
-    assert len(scope_raw["parsed_items"]) == 2, (
-        f"parsed_items should contain critical+advisory findings; got {scope_raw['parsed_items']}"
-    )
-    assert scope_raw["parsed_items"][0]["item"] == "code_quality"
-    assert scope_raw["parsed_items"][1]["item"] == "context_building"
-    # Verify triad-actor shape parity: same keys as triad records
-    triad_shape_keys = {"model_id", "status", "raw_text", "parsed_items",
-                        "tokens_in", "tokens_out", "cost_usd"}
-    assert triad_shape_keys.issubset(scope_raw.keys()), (
-        f"scope_raw_result missing triad-parity keys: {triad_shape_keys - scope_raw.keys()}"
-    )
+# test_scope_raw_result_has_parsed_items removed in v5.15.x — the test
+# replicated the dict-construction logic from parallel_review.py inline
+# and asserted on the test's own output. It exercised no production code.
+# Real shape parity between scope_raw and triad actor records is enforced
+# by the integration tests in test_review_observability that consume
+# `_last_scope_raw_result` after a real review run.

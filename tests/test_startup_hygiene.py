@@ -1,3 +1,4 @@
+import json
 import pathlib
 import types
 
@@ -133,6 +134,36 @@ def test_check_uncommitted_changes_never_commits_outside_launcher(monkeypatch, t
     assert result["auto_committed"] is False
     assert result["auto_rescue_skipped"] == "supervisor_side_rescue_owns_this"
     assert calls == [["git", "status", "--porcelain"]]
+
+
+def test_check_budget_reports_corrupt_state_json(tmp_path, monkeypatch):
+    (tmp_path / "state").mkdir(parents=True)
+    (tmp_path / "state" / "state.json").write_text("{not-json", encoding="utf-8")
+    env = types.SimpleNamespace(drive_path=lambda rel: tmp_path / rel)
+
+    monkeypatch.setenv("TOTAL_BUDGET", "10")
+    result, issues = startup_mod.check_budget(env)
+
+    assert issues == 1
+    assert result["status"] == "error"
+    assert "state.json" in result["error"]
+
+
+def test_verify_restart_reports_corrupt_claim_json(tmp_path):
+    (tmp_path / "state").mkdir(parents=True)
+    (tmp_path / "logs").mkdir(parents=True)
+    (tmp_path / "state" / "pending_restart_verify.json").write_text("{bad", encoding="utf-8")
+    env = types.SimpleNamespace(drive_path=lambda rel: tmp_path / rel)
+
+    startup_mod.verify_restart(env, "abc123")
+
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert events[-1]["type"] == "restart_verify"
+    assert events[-1]["ok"] is False
+    assert events[-1]["error"] == "pending_restart_verify_invalid"
 
 
 def test_lifespan_calls_apply_settings_to_env_before_supervisor(monkeypatch):

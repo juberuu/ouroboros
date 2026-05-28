@@ -15,16 +15,19 @@ from __future__ import annotations
 import os
 import pathlib
 import unittest
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 def _make_ctx(tmp_path: pathlib.Path | None = None) -> MagicMock:
+    root = tmp_path or pathlib.Path(".")
     ctx = MagicMock()
-    ctx.repo_dir = tmp_path or pathlib.Path(".")
-    ctx.drive_root = pathlib.Path(".")
+    ctx.repo_dir = root
+    ctx.drive_root = root
+    ctx.drive_logs.return_value = root / "logs"
     ctx.emit_progress_fn = MagicMock()
     return ctx
 
@@ -103,12 +106,12 @@ class TestPlanReviewModels(unittest.TestCase):
 
     def test_returns_configured_models(self):
         from ouroboros.tools.plan_review import _get_review_models
-        configured = "openai/gpt-5.5,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.6"
+        configured = "openai/gpt-5.5,google/gemini-3.5-flash,anthropic/claude-opus-4.6"
         with patch.dict(os.environ, {"OUROBOROS_REVIEW_MODELS": configured}, clear=False):
             models = _get_review_models()
         self.assertEqual(models, [
             "openai/gpt-5.5",
-            "google/gemini-3.1-pro-preview",
+            "google/gemini-3.5-flash",
             "anthropic/claude-opus-4.6",
         ])
 
@@ -119,23 +122,19 @@ class TestPlanReviewModels(unittest.TestCase):
             models = _get_review_models()
         self.assertEqual(len(models), 3)
 
-    def test_pads_to_three_when_one_model_configured(self):
-        """One model configured → pad to exactly 3 by repeating."""
+    def test_preserves_one_model_config_for_quorum_error(self):
+        """One model configured stays one slot; caller returns quorum error."""
         from ouroboros.tools.plan_review import _get_review_models
         with patch.dict(os.environ, {"OUROBOROS_REVIEW_MODELS": "only/one"}, clear=False):
             models = _get_review_models()
-        self.assertEqual(len(models), 3)
-        self.assertTrue(all(m == "only/one" for m in models))
+        self.assertEqual(models, ["only/one"])
 
-    def test_pads_to_three_when_two_models_configured(self):
-        """Two models configured → pad last to reach 3."""
+    def test_preserves_two_model_config(self):
+        """Two configured models are two reviewer slots, not an implicit third."""
         from ouroboros.tools.plan_review import _get_review_models
         with patch.dict(os.environ, {"OUROBOROS_REVIEW_MODELS": "model/a,model/b"}, clear=False):
             models = _get_review_models()
-        self.assertEqual(len(models), 3)
-        self.assertEqual(models[0], "model/a")
-        self.assertEqual(models[1], "model/b")
-        self.assertEqual(models[2], "model/b")  # last model padded
+        self.assertEqual(models, ["model/a", "model/b"])
 
     def test_delegates_to_config_get_review_models_for_direct_provider_fallback(self):
         """plan_task must use the same direct-provider fallback as the commit triad.
@@ -143,18 +142,17 @@ class TestPlanReviewModels(unittest.TestCase):
         Regression guard for v4.33.1 scope review finding
         ``plan_task_review_model_parity`` + v4.39.0 quorum-safe-fallback fix:
         ``config.get_review_models``'s OpenAI-only / Anthropic-only fallback
-        now rewrites the list to ``[main, light, light]`` (3 slots, 2 unique)
+        now rewrites the list to ``[main, light, light]`` (3 slots)
         when the configured reviewers don't match the exclusive direct-
         provider prefix, and ``_get_review_models`` must see that shape
-        unchanged. The shape satisfies both the commit triad's 3-reviewer
-        contract and plan_task's 2-unique-reviewer quorum gate.
+        unchanged. Duplicate model IDs are valid stochastic reviewer slots.
         """
         from ouroboros.tools.plan_review import _get_review_models
         # Simulate Anthropic-only direct setup: only ANTHROPIC key present,
         # main is anthropic::..., but the reviewer list is still the default
         # OpenRouter-style set (so none match the anthropic:: prefix).
         env = {
-            "OUROBOROS_REVIEW_MODELS": "openai/gpt-5.5,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.6",
+            "OUROBOROS_REVIEW_MODELS": "openai/gpt-5.5,google/gemini-3.5-flash,anthropic/claude-opus-4.6",
             "OUROBOROS_MODEL": "anthropic::claude-opus-4-6",
             "OUROBOROS_MODEL_LIGHT": "anthropic::claude-sonnet-4-6",
             "OPENROUTER_API_KEY": "",
@@ -166,8 +164,7 @@ class TestPlanReviewModels(unittest.TestCase):
         }
         with patch.dict(os.environ, env, clear=False):
             models = _get_review_models()
-        # Expect the Anthropic-only fallback: `[main, light, light]` — 3 slots,
-        # 2 unique, both commit-triad and plan_task quorum-compatible.
+        # Expect the Anthropic-only fallback: `[main, light, light]`.
         self.assertEqual(len(models), 3)
         self.assertEqual(
             models,
@@ -226,13 +223,12 @@ class TestPlanReviewSystemPrompt(unittest.TestCase):
 
     def test_system_prompt_explains_majority_vote_coordination(self):
         """The prompt must explain that REVISE_PLAN requires majority agreement
-        across the configured reviewer count (2 or 3 distinct models per
-        v4.39.0)."""
+        across the configured reviewer slot count (2 or 3 slots)."""
         from ouroboros.tools.plan_review import _build_system_prompt
         prompt = _build_system_prompt("checklist", "", "", "")
         self.assertIn("majority-vote", prompt)
-        self.assertIn("at least 2 distinct reviewers", prompt)
-        self.assertIn("2-3 distinct reviewers", prompt)
+        self.assertIn("at least 2 reviewer slots", prompt)
+        self.assertIn("2-3 reviewer slots", prompt)
 
     def test_system_prompt_preserves_aggregate_contract(self):
         from ouroboros.tools.plan_review import _build_system_prompt
@@ -406,9 +402,10 @@ class TestPlanReviewBudgetGate(unittest.IsolatedAsyncioTestCase):
 
         ctx = _make_ctx()
         ctx.repo_dir = pathlib.Path(".")
+        atlas = SimpleNamespace(text="x" * 1_000_000, manifest={}, status="budget_constrained")
 
         with (
-            patch.object(pr, "build_full_repo_pack", return_value=("x" * 1_000_000, [])),
+            patch.object(pr, "compile_review_context_atlas", return_value=atlas),
             patch.object(pr, "build_head_snapshot_section", return_value=""),
             patch.object(pr, "_load_plan_checklist", return_value="checklist"),
             patch.object(pr, "_load_bible", return_value=""),
@@ -424,9 +421,30 @@ class TestPlanReviewBudgetGate(unittest.IsolatedAsyncioTestCase):
             # estimate_tokens returns a large number
             patch("ouroboros.tools.plan_review.estimate_tokens", return_value=1_100_000),
         ):
-            result = await pr._run_plan_review_async(ctx, "my plan", "my goal", [])
+            result = await pr._run_plan_review_async(ctx, "my plan", "my goal", [], context_level="constitutional")
 
         self.assertIn("PLAN_REVIEW_SKIPPED", result)
+
+        atlas = SimpleNamespace(
+            text="small atlas",
+            manifest={"estimated_total_tokens": 950_000},
+            status="budget_exceeded",
+        )
+        with (
+            patch.object(pr, "compile_review_context_atlas", return_value=atlas),
+            patch.object(pr, "build_head_snapshot_section", return_value=""),
+            patch.object(pr, "_load_plan_checklist", return_value="checklist"),
+            patch.object(pr, "_load_bible", return_value=""),
+            patch.object(pr, "_load_doc", return_value=""),
+            patch("ouroboros.config.get_review_models",
+                  return_value=["model-a", "model-b"]),
+            patch.object(pr, "_get_review_models", return_value=["model-a", "model-b"]),
+            patch("ouroboros.tools.plan_review.estimate_tokens", return_value=10_000),
+        ):
+            result = await pr._run_plan_review_async(ctx, "my plan", "my goal", [], context_level="constitutional")
+
+        self.assertIn("PLAN_REVIEW_SKIPPED", result)
+        self.assertIn("generated repository atlas exceeded hard budget", result)
 
     async def test_proceeds_when_within_budget(self):
         """When prompt is within budget, reviewers are called."""
@@ -442,9 +460,10 @@ class TestPlanReviewBudgetGate(unittest.IsolatedAsyncioTestCase):
             "tokens_in": 100,
             "tokens_out": 50,
         }
+        atlas = SimpleNamespace(text="small atlas", manifest={}, status="ok")
 
         with (
-            patch.object(pr, "build_full_repo_pack", return_value=("small pack", [])),
+            patch.object(pr, "compile_review_context_atlas", return_value=atlas),
             patch.object(pr, "build_head_snapshot_section", return_value=""),
             patch.object(pr, "_load_plan_checklist", return_value="checklist"),
             patch.object(pr, "_load_bible", return_value=""),
@@ -457,12 +476,28 @@ class TestPlanReviewBudgetGate(unittest.IsolatedAsyncioTestCase):
                   return_value=["model-a", "model-b"]),
             patch.object(pr, "_get_review_models", return_value=["model-a", "model-b"]),
             patch("ouroboros.tools.plan_review.estimate_tokens", return_value=10_000),
-            patch.object(pr, "_query_reviewer", return_value=mock_result),
+            patch.object(pr, "_run_plan_review_slots", new=AsyncMock(return_value=[mock_result, mock_result])),
         ):
-            result = await pr._run_plan_review_async(ctx, "my plan", "my goal", [])
+            result = await pr._run_plan_review_async(ctx, "my plan", "my goal", [], context_level="localized")
 
         self.assertIn("Plan Review Results", result)
         self.assertIn("GREEN", result)
+
+    async def test_context_level_must_be_agent_chosen_explicitly(self):
+        """plan_task must not use host-side auto heuristics for context selection."""
+        from ouroboros.tools import plan_review as pr
+
+        ctx = _make_ctx()
+        with (
+            patch("ouroboros.config.get_review_models",
+                  return_value=["model-a", "model-b"]),
+            patch.object(pr, "_get_review_models", return_value=["model-a", "model-b"]),
+        ):
+            result = await pr._run_plan_review_async(ctx, "my plan", "my goal", [])
+
+        self.assertIn("ERROR", result)
+        self.assertIn("explicit context_level", result)
+        self.assertIn("host-side auto", result)
 
 
 class TestParseAggregateSignal(unittest.TestCase):
@@ -519,7 +554,9 @@ class TestPlanReviewToolRegistration(unittest.TestCase):
         self.assertIn("plan", params)
         self.assertIn("goal", params)
         self.assertIn("files_to_touch", params)
-        self.assertEqual(tool.schema["parameters"]["required"], ["plan", "goal"])
+        self.assertIn("context_level", params)
+        self.assertEqual(tool.schema["parameters"]["required"], ["plan", "goal", "context_level"])
+        self.assertNotIn("auto", params["context_level"].get("enum", []))
 
     def test_plan_review_deduplicates_canonical_docs_from_repo_pack(self):
         import inspect
@@ -567,7 +604,7 @@ class TestClassifyReviewerError(unittest.TestCase):
         """The user should not think it's a JSON format issue in our code."""
         import json
         exc = json.JSONDecodeError("Expecting value", "doc", 902)
-        msg = self.classify(exc, "google/gemini-3.1-pro-preview")
+        msg = self.classify(exc, "google/gemini-3.5-flash")
         # Should NOT say things like "JSON format" or "checklist formatting"
         self.assertNotIn("format", msg.lower().replace("non-JSON", ""))
 

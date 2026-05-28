@@ -12,15 +12,49 @@ ui_tab:
   title: Weather widget
   icon: cloud
   render:
-    kind: inline_card
-    api_route: forecast
+    kind: declarative
     schema_version: 1
+    components:
+      - type: form
+        route: forecast
+        method: GET
+        target: result
+        submit_label: Refresh
+        fields:
+          - name: city
+            label: City
+            type: text
+            default: Moscow
+            required: true
+      - type: status
+        target: result
+        idle: Enter a city and press Refresh.
+        loading: Loading...
+        error: Weather lookup failed.
+        success: Latest conditions
+      - type: kv
+        target: result
+        fields:
+          - label: City
+            path: resolved_to
+          - label: Temperature
+            path: temp_c
+          - label: Feels like
+            path: feels_like_c
+          - label: Condition
+            path: condition
+          - label: Humidity
+            path: humidity_pct
+          - label: Wind speed
+            path: wind_kph
+          - label: Wind direction
+            path: wind_dir
 ---
 
 # Weather skill (visual widget reference)
 
 This is the v5 reference ``type: extension`` skill shipped with Ouroboros.
-It demonstrates the minimum viable widget extension:
+It demonstrates a small declarative widget extension:
 
 - A manifest declaring ``type: extension`` + an ``ui_tab`` block so the
   top-level Widgets page knows how to render the weather card separately
@@ -58,4 +92,7 @@ review-time threat model.
 
 No persistent state is written; the widget fetches on-demand and the
 result is rendered directly. The extension's
-:meth:`PluginAPI.get_state_dir` is unused.
+:meth:`PluginAPI.get_state_dir` is unused. Skills that do manage
+per-request assets should use ``api.skill_job_dir(job_id)`` so generated
+files live under isolated ``jobs/<sanitized_id>-<hash>/{assets,output,tmp}``
+folders.

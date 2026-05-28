@@ -7,27 +7,12 @@ import {
     setPending,
     startLifecyclePoller,
 } from './lifecycle_card.js';
-
-function escapeHtml(value) {
-    return String(value ?? '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-}
-
-
-async function fetchJson(url, init) {
-    const resp = await fetch(url, init);
-    const body = await resp.json().catch(() => ({}));
-    if (!resp.ok) {
-        const err = new Error(body.error || `HTTP ${resp.status}`);
-        err.body = body;
-        throw err;
-    }
-    return body;
-}
+import {
+    emitSkillLifecycle,
+    escapeHtmlAttr as escapeHtml,
+    fetchJson,
+    renderHubCard,
+} from './utils.js';
 
 
 function lifecycleFor(installed, pending) {
@@ -51,8 +36,11 @@ function lifecycleFor(installed, pending) {
     }
     if (installed) {
         const review = installed.review_status ? `Review ${installed.review_status}` : 'Installed';
+        const executable = installed.review_gate && typeof installed.review_gate.executable_review === 'boolean'
+            ? installed.review_gate.executable_review
+            : ['clean', 'warnings'].includes(installed.review_status);
         return {
-            tone: installed.review_status === 'pass' && !installed.review_stale ? 'ok' : 'warn',
+            tone: executable && !installed.review_stale ? 'ok' : 'warn',
             label: review,
             hint: installed.review_stale ? 'Review is stale; re-review from My skills before enabling.' : '',
             button: 'Installed',
@@ -69,14 +57,21 @@ function lifecycleFor(installed, pending) {
 }
 
 
-function template() {
+function controlsTemplate() {
+    return `
+        <div class="marketplace-controls">
+            <input type="search" id="oh-query" class="marketplace-search"
+                   placeholder="Search official Ouroboros skills…" autocomplete="off">
+            <button class="btn btn-primary" data-oh-search>Search</button>
+        </div>
+    `;
+}
+
+
+function template({ includeControls = true } = {}) {
     return `
         <div class="marketplace-shell">
-            <div class="marketplace-controls">
-                <input type="search" id="oh-query" class="marketplace-search"
-                       placeholder="Search official Ouroboros skills…" autocomplete="off">
-                <button class="btn btn-primary" data-oh-search>Search</button>
-            </div>
+            ${includeControls ? controlsTemplate() : ''}
             <div id="oh-status" class="muted marketplace-status"></div>
             <div id="oh-results" class="marketplace-results"></div>
         </div>
@@ -88,49 +83,21 @@ function card(item, installed) {
     const slug = item.slug;
     const pending = getPending(slug);
     const lifecycle = lifecycleFor(installed, pending);
-    const cardClass = lifecycleCardClassFor(pending);
-    const spinner = lifecycleSpinnerFor(pending);
-    const lifecycleHint = lifecycle.hint
-        ? `<div class="marketplace-card-state-hint">${escapeHtml(lifecycle.hint)}</div>`
-        : '';
-    const status = installed
-        ? `<span class="skills-status-chip skills-status-ok">Installed v${escapeHtml(installed.version || item.latest_version || '')}</span>`
-        : '<span class="skills-status-chip skills-status-muted">Not installed</span>';
-    const primary = (installed && !pending)
+    const primaryHtml = (installed && !pending)
         ? '<button class="btn btn-default" disabled>Installed</button>'
         : `<button class="btn ${pending?.failed ? 'btn-default' : 'btn-primary'}" data-oh-install="${escapeHtml(slug)}" ${lifecycle.disabled ? 'disabled' : ''}>${escapeHtml(lifecycle.button)}</button>`;
-    return `
-        <article class="${cardClass}" data-slug="${escapeHtml(slug)}">
-            <div class="marketplace-card-head">
-                <div class="marketplace-card-title">
-                    <strong>${escapeHtml(item.display_name || slug)}</strong>
-                    <span class="muted">${escapeHtml(slug)} · v${escapeHtml(item.latest_version || '—')}</span>
-                </div>
-                <div class="marketplace-card-badges">
-                    <span class="skills-badge skills-badge-ok">official</span>
-                    ${status}
-                </div>
-            </div>
-            <div class="marketplace-card-body">${escapeHtml(item.summary || item.description || '')}</div>
-            <div class="marketplace-card-state marketplace-state-${lifecycle.tone}">
-                <strong>${spinner}${escapeHtml(lifecycle.label)}</strong>
-                ${lifecycleHint}
-            </div>
-            <div class="marketplace-card-actions">
-                <div class="marketplace-primary-action">${primary}</div>
-                <div class="marketplace-secondary-actions">
-                    <button class="btn btn-default" data-oh-preview="${escapeHtml(slug)}">Details</button>
-                </div>
-            </div>
-        </article>
-    `;
+    return renderHubCard(item, { pending, installed, lifecycle, primaryHtml, official: true });
 }
 
 
-export function initOuroborosHub(pane) {
-    pane.innerHTML = template();
+export function initOuroborosHub(pane, controlsHost = null) {
+    pane.innerHTML = template({ includeControls: !controlsHost });
+    if (controlsHost) {
+        controlsHost.innerHTML = controlsTemplate();
+    }
     const state = { query: '', results: [], installed: new Map() };
-    const queryInput = pane.querySelector('#oh-query');
+    const controlsRoot = controlsHost || pane;
+    const queryInput = controlsRoot.querySelector('#oh-query');
     const results = pane.querySelector('#oh-results');
     const status = pane.querySelector('#oh-status');
 
@@ -171,19 +138,13 @@ export function initOuroborosHub(pane) {
         clearTimeout(pane._ohTimer);
         pane._ohTimer = setTimeout(refresh, 250);
     });
-    pane.querySelector('[data-oh-search]').addEventListener('click', refresh);
+    controlsRoot.querySelector('[data-oh-search]').addEventListener('click', refresh);
     startLifecyclePoller(() => {
         state.installed.pendingBySlug = getPendingBySlug();
         renderCards();
     });
     results.addEventListener('click', async (event) => {
         const install = event.target.closest('[data-oh-install]');
-        const preview = event.target.closest('[data-oh-preview]');
-        if (preview) {
-            const slug = preview.dataset.ohPreview;
-            show(`${slug}: official skill details are shown in the catalog card.`, 'muted');
-            return;
-        }
         if (!install) return;
         const slug = install.dataset.ohInstall;
         install.disabled = true;
@@ -200,6 +161,7 @@ export function initOuroborosHub(pane) {
                 data.review_status ? `${slug}: installed, review ${data.review_status}` : `${slug}: installed`,
                 data.ok ? 'ok' : 'warn',
             );
+            emitSkillLifecycle('install', data.sanitized_name || slug, data);
             clearPending(slug);
         } catch (err) {
             setPending(slug, {

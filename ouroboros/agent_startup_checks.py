@@ -1,21 +1,14 @@
-"""
-Startup verification checks for the Ouroboros agent.
-
-Runs on worker boot to detect uncommitted changes, version desync,
-budget issues, and missing memory files.
-Extracted from agent.py to keep the agent thin.
-"""
+"""Worker-boot checks for dirty repo, version sync, budget, and memory files."""
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
 import subprocess
 from typing import Any, Dict, Tuple
 
-from ouroboros.utils import utc_now_iso, read_text, append_jsonl
+from ouroboros.utils import utc_now_iso, read_text, append_jsonl, read_json_dict
 
 log = logging.getLogger(__name__)
 
@@ -27,23 +20,7 @@ def _is_release_tag(tag: str) -> bool:
 
 
 def check_uncommitted_changes(env: Any) -> Tuple[dict, int]:
-    """Diagnose uncommitted changes on worker boot. Warning-only: never commits.
-
-    Rescue of a dirty worktree is owned by the supervisor-side mechanism
-    ``safe_restart(..., unsynced_policy='rescue_and_reset')`` in
-    ``server.py::_bootstrap_supervisor_repo``, which creates a proper rescue
-    snapshot directory via ``supervisor/git_ops.py::_create_rescue_snapshot`` —
-    it runs exactly once per supervisor start and does not pollute the
-    ``ouroboros`` dev branch.
-
-    This worker-side check used to perform its own ``git add -u`` + ``git
-    commit`` as a second rescue mechanism. That duplication was the root
-    cause of the v4.36.0 bug: because ``OUROBOROS_MANAGED_BY_LAUNCHER=1`` is
-    inherited by every subprocess (pytest runs, A2A agent-card builder,
-    supervisor-side ``_get_chat_agent``), any code path reaching
-    ``make_agent()`` would steal the agent's in-progress edits into a
-    worker-side auto-rescue commit on the dev branch.
-    """
+    """Warn on dirty worker boot; rescue/reset is supervisor-owned, never worker-owned."""
     try:
         lock_path = env.repo_path(".git/index.lock")
         if lock_path.exists():
@@ -160,7 +137,13 @@ def check_budget(env: Any) -> Tuple[dict, int]:
     """Check budget remaining with warning thresholds."""
     try:
         state_path = env.drive_path("state") / "state.json"
-        state_data = json.loads(read_text(state_path))
+        state_data = read_json_dict(state_path)
+        if state_data is None:
+            return {
+                "status": "error",
+                "error": "state.json missing or invalid",
+                "path": str(state_path),
+            }, 1
         total_budget_str = os.environ.get("TOTAL_BUDGET", "")
 
         if not total_budget_str or float(total_budget_str) == 0:
@@ -348,13 +331,21 @@ def inject_crash_report(env: Any) -> None:
 
     The file is NOT deleted — it stays so that build_health_invariants()
     shows CRITICAL: RECENT CRASH ROLLBACK on every task until the issue
-    is investigated and removed via run_shell (LLM-first, P5).
+    is investigated and removed via run_command (LLM-first, P5).
     """
     try:
         crash_path = env.drive_path("state") / "crash_report.json"
         if not crash_path.exists():
             return
-        crash_data = json.loads(crash_path.read_text(encoding="utf-8"))
+        crash_data = read_json_dict(crash_path)
+        if not crash_data:
+            append_jsonl(env.drive_path("logs") / "events.jsonl", {
+                "ts": utc_now_iso(),
+                "type": "crash_report_invalid",
+                "path": str(crash_path),
+            })
+            log.warning("Crash report exists but is not valid JSON object: %s", crash_path)
+            return
         append_jsonl(env.drive_path("logs") / "events.jsonl", {
             "ts": utc_now_iso(),
             "type": "crash_rollback_detected",
@@ -375,7 +366,15 @@ def verify_restart(env: Any, git_sha: str) -> None:
         except (FileNotFoundError, Exception):
             return
         try:
-            claim_data = json.loads(read_text(claim_path))
+            claim_data = read_json_dict(claim_path)
+            if claim_data is None:
+                append_jsonl(env.drive_path('logs') / 'events.jsonl', {
+                    'ts': utc_now_iso(), 'type': 'restart_verify',
+                    'pid': os.getpid(), 'ok': False,
+                    'error': 'pending_restart_verify_invalid',
+                    'observed_sha': git_sha,
+                })
+                return
             expected_sha = str(claim_data.get("expected_sha", "")).strip()
             ok = bool(expected_sha and expected_sha == git_sha)
             append_jsonl(env.drive_path('logs') / 'events.jsonl', {

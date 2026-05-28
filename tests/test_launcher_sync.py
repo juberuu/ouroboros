@@ -13,10 +13,10 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 BUILD_REPO_BUNDLE = REPO_ROOT / "scripts" / "build_repo_bundle.py"
 
 
-# See tests/test_build_repo_bundle.py for why these keys must be scrubbed
-# from every ``build_repo_bundle.py`` subprocess: GitHub Actions tag-push
-# runs set GITHUB_REF_* globally, which otherwise bleeds into temp-repo
-# subprocesses and confuses ``_resolve_release_tag``.
+# These keys must be scrubbed from every ``build_repo_bundle.py``
+# subprocess: GitHub Actions tag-push runs set GITHUB_REF_* globally,
+# which otherwise bleeds into temp-repo subprocesses and confuses
+# ``_resolve_release_tag``.
 _BUILD_BUNDLE_ENV_SCRUB_KEYS = (
     "OUROBOROS_RELEASE_TAG",
     "GITHUB_REF",
@@ -266,3 +266,294 @@ def test_ensure_managed_repo_rejects_tampered_bundle(tmp_path):
         assert False, "Expected bundle hash mismatch to raise"
     except RuntimeError as exc:
         assert "bundle hash mismatch" in str(exc)
+
+
+# ---------------------------------------------------------------------------
+# Host service port cleanup (formerly test_launcher_host_service_cleanup.py)
+# ---------------------------------------------------------------------------
+
+
+def test_host_service_cleanup_uses_configured_port(monkeypatch):
+    import launcher
+
+    killed: list[int] = []
+
+    monkeypatch.setenv("OUROBOROS_HOST_SERVICE_PORT", "9876")
+    monkeypatch.setattr(launcher, "_kill_stale_on_port", lambda port: killed.append(port))
+
+    launcher._kill_stale_runtime_ports(8765)
+
+    assert killed == [8765, 9876]
+
+
+def test_agent_lifecycle_preflight_cleans_host_service_port(monkeypatch):
+    import launcher
+
+    killed: list[int] = []
+
+    class FakeProcess:
+        pid = 12345
+        returncode = 0
+
+        def wait(self):
+            launcher._shutdown_event.set()
+
+    launcher._shutdown_event.clear()
+    monkeypatch.setattr(launcher, "_host_service_port", lambda: 9876)
+    monkeypatch.setattr(launcher, "_kill_stale_on_port", lambda port: killed.append(port))
+    monkeypatch.setattr(launcher, "start_agent", lambda port: FakeProcess())
+    monkeypatch.setattr(launcher, "_poll_port_file", lambda timeout=30: 8765)
+    monkeypatch.setattr(launcher, "_wait_for_server", lambda port, timeout=30.0: True)
+    monkeypatch.setattr(launcher, "_agent_job", None)
+    monkeypatch.setattr(launcher, "log", types.SimpleNamespace(info=lambda *args, **kwargs: None))
+
+    try:
+        launcher.agent_lifecycle_loop(port=8765)
+    finally:
+        launcher._shutdown_event.clear()
+
+    assert killed[:2] == [8765, 9876]
+
+
+def test_start_agent_unix_uses_process_group_and_writes_server_record(monkeypatch, tmp_path):
+    import launcher
+
+    data_dir = tmp_path / "data"
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / "server.py").write_text("print('server')\n", encoding="utf-8")
+    captured = {}
+
+    class FakeStdout:
+        def readline(self):
+            return b""
+
+    class FakeProcess:
+        pid = 12345
+        stdout = FakeStdout()
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return FakeProcess()
+
+    monkeypatch.setattr(launcher, "IS_WINDOWS", False)
+    monkeypatch.setattr(launcher, "DATA_DIR", data_dir)
+    monkeypatch.setattr(launcher, "REPO_DIR", repo_dir)
+    monkeypatch.setattr(launcher, "EMBEDDED_PYTHON", sys.executable)
+    monkeypatch.setattr(launcher, "_load_settings", lambda: {})
+    monkeypatch.setattr(launcher, "_apply_settings_to_env", lambda _settings: None)
+    monkeypatch.setattr(launcher, "subprocess_new_group_kwargs", lambda: {"start_new_session": True})
+    monkeypatch.setattr(launcher, "_hidden_popen", fake_popen)
+    monkeypatch.setattr(launcher, "process_group_id", lambda _pid: 12345)
+
+    proc = launcher.start_agent(port=9876)
+
+    assert proc.pid == 12345
+    assert captured["kwargs"]["start_new_session"] is True
+    record = json.loads((data_dir / "state" / "server_process.json").read_text(encoding="utf-8"))
+    assert record["pid"] == 12345
+    assert record["pgid"] == 12345
+    assert record["requested_port"] == 9876
+    assert record["port"] == 9876
+    assert record["repo_dir"] == str(repo_dir.resolve())
+    assert record["server_path"] == str((repo_dir / "server.py").resolve())
+    assert record["argv"] == [sys.executable, str((repo_dir / "server.py").resolve())]
+    assert record["created_at"]
+
+
+def test_recorded_server_cleanup_ignores_unrelated_pid(monkeypatch, tmp_path):
+    import launcher
+
+    data_dir = tmp_path / "data"
+    repo_dir = tmp_path / "repo"
+    (data_dir / "state").mkdir(parents=True)
+    repo_dir.mkdir()
+    server_py = repo_dir / "server.py"
+    server_py.write_text("print('server')\n", encoding="utf-8")
+    (data_dir / "state" / "server_process.json").write_text(
+        json.dumps({
+            "pid": 22222,
+            "pgid": 22222,
+            "server_path": str(server_py.resolve()),
+            "repo_dir": str(repo_dir.resolve()),
+            "port": 8765,
+        }),
+        encoding="utf-8",
+    )
+    killed = []
+    monkeypatch.setattr(launcher, "IS_WINDOWS", False)
+    monkeypatch.setattr(launcher, "DATA_DIR", data_dir)
+    monkeypatch.setattr(launcher, "REPO_DIR", repo_dir)
+    monkeypatch.setattr(launcher, "pid_is_alive", lambda _pid: True)
+    monkeypatch.setattr(launcher, "process_group_id", lambda _pid: 22222)
+    monkeypatch.setattr(launcher, "process_command", lambda _pid: "/usr/bin/python unrelated.py")
+    monkeypatch.setattr(launcher, "kill_pid_tree", lambda pid: killed.append(("pid", pid)))
+    monkeypatch.setattr(launcher, "kill_process_group_id", lambda pgid: killed.append(("pgid", pgid)))
+    monkeypatch.setattr(launcher, "terminate_process_group_id", lambda pgid: killed.append(("term", pgid)))
+
+    launcher._cleanup_recorded_server_process("test")
+
+    assert killed == []
+    assert not (data_dir / "state" / "server_process.json").exists()
+
+
+def test_recorded_server_cleanup_kills_verified_process_group(monkeypatch, tmp_path):
+    import launcher
+
+    data_dir = tmp_path / "data"
+    repo_dir = tmp_path / "repo"
+    (data_dir / "state").mkdir(parents=True)
+    repo_dir.mkdir()
+    server_py = repo_dir / "server.py"
+    server_py.write_text("print('server')\n", encoding="utf-8")
+    (data_dir / "state" / "server_process.json").write_text(
+        json.dumps({
+            "pid": 33333,
+            "pgid": 33333,
+            "server_path": str(server_py.resolve()),
+            "repo_dir": str(repo_dir.resolve()),
+            "port": 8765,
+        }),
+        encoding="utf-8",
+    )
+    killed = []
+    monkeypatch.setattr(launcher, "IS_WINDOWS", False)
+    monkeypatch.setattr(launcher, "DATA_DIR", data_dir)
+    monkeypatch.setattr(launcher, "REPO_DIR", repo_dir)
+    monkeypatch.setattr(launcher, "pid_is_alive", lambda _pid: True)
+    monkeypatch.setattr(launcher, "process_group_id", lambda _pid: 33333)
+    monkeypatch.setattr(launcher, "process_command", lambda _pid: f"{sys.executable} {server_py}")
+    monkeypatch.setattr(launcher, "current_process_group_id", lambda: 99999)
+    monkeypatch.setattr(launcher, "time", types.SimpleNamespace(sleep=lambda *_a, **_k: None))
+    monkeypatch.setattr(launcher, "terminate_process_group_id", lambda pgid: killed.append(("term", pgid)))
+    monkeypatch.setattr(launcher, "kill_process_group_id", lambda pgid: killed.append(("killpg", pgid)))
+    monkeypatch.setattr(launcher, "kill_pid_tree", lambda pid: killed.append(("pid", pid)))
+
+    launcher._cleanup_recorded_server_process("test")
+
+    assert ("term", 33333) in killed
+    assert ("killpg", 33333) in killed
+    assert ("pid", 33333) in killed
+    assert not (data_dir / "state" / "server_process.json").exists()
+
+
+def test_recorded_server_cleanup_ignores_mismatched_process_group(monkeypatch, tmp_path):
+    import launcher
+
+    data_dir = tmp_path / "data"
+    repo_dir = tmp_path / "repo"
+    (data_dir / "state").mkdir(parents=True)
+    repo_dir.mkdir()
+    server_py = repo_dir / "server.py"
+    server_py.write_text("print('server')\n", encoding="utf-8")
+    record_path = data_dir / "state" / "server_process.json"
+    record_path.write_text(
+        json.dumps({
+            "pid": 44444,
+            "pgid": 55555,
+            "server_path": str(server_py.resolve()),
+            "repo_dir": str(repo_dir.resolve()),
+            "port": 8765,
+        }),
+        encoding="utf-8",
+    )
+    killed = []
+    monkeypatch.setattr(launcher, "IS_WINDOWS", False)
+    monkeypatch.setattr(launcher, "DATA_DIR", data_dir)
+    monkeypatch.setattr(launcher, "REPO_DIR", repo_dir)
+    monkeypatch.setattr(launcher, "pid_is_alive", lambda _pid: True)
+    monkeypatch.setattr(launcher, "process_group_id", lambda _pid: 44444)
+    monkeypatch.setattr(launcher, "process_command", lambda _pid: f"{sys.executable} {server_py}")
+    monkeypatch.setattr(launcher, "terminate_process_group_id", lambda pgid: killed.append(("term", pgid)))
+    monkeypatch.setattr(launcher, "kill_process_group_id", lambda pgid: killed.append(("killpg", pgid)))
+    monkeypatch.setattr(launcher, "kill_pid_tree", lambda pid: killed.append(("pid", pid)))
+
+    launcher._cleanup_recorded_server_process("test")
+
+    assert killed == []
+    assert not record_path.exists()
+
+
+def test_update_server_process_record_port_records_actual_port(monkeypatch, tmp_path):
+    import launcher
+
+    data_dir = tmp_path / "data"
+    record_dir = data_dir / "state"
+    record_dir.mkdir(parents=True)
+    record_path = record_dir / "server_process.json"
+    record_path.write_text(
+        json.dumps({
+            "pid": 123,
+            "pgid": 123,
+            "server_path": "/tmp/server.py",
+            "repo_dir": "/tmp/repo",
+            "requested_port": 8765,
+            "port": 8765,
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(launcher, "DATA_DIR", data_dir)
+
+    launcher._update_server_process_record_port(123, 8769)
+
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert record["requested_port"] == 8765
+    assert record["port"] == 8769
+    assert record["port_updated_at"]
+
+
+def test_start_agent_windows_assigns_job_before_resume_and_records(monkeypatch, tmp_path):
+    import launcher
+
+    data_dir = tmp_path / "data"
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / "server.py").write_text("print('server')\n", encoding="utf-8")
+    calls: list[tuple[str, object]] = []
+
+    class FakeStdout:
+        def readline(self):
+            return b""
+
+    class FakeProcess:
+        pid = 54321
+        stdout = FakeStdout()
+
+        def kill(self):
+            calls.append(("kill", self.pid))
+
+    def fake_popen(_cmd, **kwargs):
+        calls.append(("popen_flags", kwargs.get("creationflags")))
+        calls.append(("popen_env", kwargs.get("env", {})))
+        return FakeProcess()
+
+    monkeypatch.setattr(launcher, "IS_WINDOWS", True)
+    monkeypatch.setattr(launcher, "DATA_DIR", data_dir)
+    monkeypatch.setattr(launcher, "REPO_DIR", repo_dir)
+    monkeypatch.setattr(launcher, "EMBEDDED_PYTHON", sys.executable)
+    monkeypatch.setattr(launcher, "_CREATE_NEW_PROCESS_GROUP", 0x200)
+    monkeypatch.setattr(launcher, "_CREATE_SUSPENDED", 0x4)
+    monkeypatch.setattr(launcher, "_load_settings", lambda: {})
+    monkeypatch.setattr(launcher, "_apply_settings_to_env", lambda _settings: None)
+    monkeypatch.setattr(launcher, "_hidden_popen", fake_popen)
+    monkeypatch.setattr(launcher, "create_kill_on_close_job", lambda: calls.append(("create_job", None)) or "job")
+    monkeypatch.setattr(launcher, "assign_pid_to_job", lambda job, pid: calls.append(("assign", (job, pid))) or True)
+    monkeypatch.setattr(launcher, "resume_process", lambda pid: calls.append(("resume", pid)) or True)
+
+    proc = launcher.start_agent(port=8765)
+
+    assert proc.pid == 54321
+    env = next(value for key, value in calls if key == "popen_env")
+    assert env["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert env["PYTHONPYCACHEPREFIX"] == str(data_dir / "state" / "pycache")
+    lifecycle_calls = [call for call in calls if call[0] != "popen_env"]
+    assert lifecycle_calls[:4] == [
+        ("popen_flags", 0x204),
+        ("create_job", None),
+        ("assign", ("job", 54321)),
+        ("resume", 54321),
+    ]
+    record = json.loads((data_dir / "state" / "server_process.json").read_text(encoding="utf-8"))
+    assert record["pid"] == 54321
+    assert record["port"] == 8765

@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 5.8.1](https://img.shields.io/badge/version-5.8.1-green.svg)](VERSION)
+[![Version 6.3.0-rc.2](https://img.shields.io/badge/version-6.3.0--rc.2-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -27,15 +27,24 @@ Not a coding assistant. A digital being with a constitution, background consciou
 
 | Platform | Download | Instructions |
 |----------|----------|--------------|
-| **macOS** 12+ | [Ouroboros.dmg](https://github.com/joi-lab/ouroboros-desktop/releases/latest) | Open DMG → drag to Applications |
-| **Linux** x86_64 | [Ouroboros-linux.tar.gz](https://github.com/joi-lab/ouroboros-desktop/releases/latest) | Extract → run `./Ouroboros/Ouroboros`. If browser tools fail due to missing system libs, run: `./Ouroboros/python-standalone/bin/python3 -m playwright install-deps chromium` |
-| **Windows** x64 | [Ouroboros-windows.zip](https://github.com/joi-lab/ouroboros-desktop/releases/latest) | Extract → run `Ouroboros\Ouroboros.exe` |
+| **macOS** 12+ | [Ouroboros.dmg](https://github.com/joi-lab/ouroboros-desktop/releases/latest) | Open DMG → drag to Applications → optional CLI: run `Install CLI.command` after the app is in Applications |
+| **Linux** x86_64 | [Ouroboros-linux.tar.gz](https://github.com/joi-lab/ouroboros-desktop/releases/latest) | Extract → run `./Ouroboros/Ouroboros` → optional CLI: `./Ouroboros/bin/install-ouroboros-cli`. If browser tools fail due to missing system libs, run: `./Ouroboros/python-standalone/bin/python3 -m playwright install-deps chromium` |
+| **Windows** x64 | [Ouroboros-windows.zip](https://github.com/joi-lab/ouroboros-desktop/releases/latest) | Extract → run `Ouroboros\Ouroboros.exe` → optional CLI: `Ouroboros\bin\install-ouroboros-cli.cmd` |
+
+Prerelease RC artifacts are published on their tag page, for example [`v6.3.0-rc.2`](https://github.com/joi-lab/ouroboros-desktop/releases/tag/v6.3.0-rc.2); `/releases/latest` intentionally stays on the latest stable release.
 
 <p align="center">
   <img src="assets/setup.png" width="500" alt="Drag Ouroboros.app to install">
 </p>
 
-On first launch, right-click → **Open** (Gatekeeper bypass). The shared desktop/web wizard is now multi-step: add access first, choose visible models second, set review mode third, set budget fourth, and confirm the final summary last. It refuses to continue until at least one runnable remote key or local model source is configured, keeps the model step aligned with whatever key combination you entered, and still auto-remaps untouched default model values to official OpenAI defaults when OpenRouter is absent and OpenAI is the only configured remote runtime. The broader multi-provider setup (OpenAI-compatible, Cloud.ru, Telegram bridge) remains available in **Settings**. Existing supported provider settings skip the wizard automatically.
+On first launch, right-click → **Open** (Gatekeeper bypass). The shared desktop/web wizard is now multi-step: add access first, choose visible models second, set review mode third, set budget fourth, and confirm the final summary last. It refuses to continue until at least one runnable remote key or local model source is configured, keeps the model step aligned with whatever key combination you entered, and still auto-remaps untouched default model values to official OpenAI defaults when OpenRouter is absent and OpenAI is the only configured remote runtime. The broader multi-provider setup remains available in **Settings**. Existing supported provider settings skip the wizard automatically.
+
+The packaged CLI installer creates a user-local `ouroboros` command without
+sudo. The packaged command attaches to the desktop app by default; `ouroboros
+run --start "2+2?"` starts the app through the launcher, waits for the gateway,
+and then uses the same headless task API as the web UI.
+
+Upgrade floor: very old pre-block-memory or pre-data-plane skill layouts are no longer auto-migrated. If you are upgrading from an unsupported historical build and see trapped native skills or flat memory files, use a clean reinstall, move user-managed skills into `~/Ouroboros/data/skills/external/` manually before launch, or move old flat scratchpad notes before appending new scratchpad blocks.
 
 ---
 
@@ -46,7 +55,7 @@ Most AI agents execute tasks. Ouroboros **creates itself.**
 - **Self-Modification** — Reads and rewrites its own source code. Every change is a commit to itself.
 - **Native Desktop App** — Runs entirely on your machine as a standalone application (macOS, Linux, Windows). No cloud dependencies for execution.
 - **Constitution** — Governed by [BIBLE.md](BIBLE.md) (13 philosophical principles, P0–P12). Philosophy first, code second.
-- **Layered Safety** — Hardcoded sandbox blocks writes to critical files and mutative git via shell; a policy map gives trusted built-ins an explicit `skip` / `check` / `check_conditional` label (the conditional path is for `run_shell` — a safe-subject whitelist bypasses the LLM, otherwise it goes through it); any unknown or newly-created tool falls through to a single cheap LLM safety check per call **when a reachable safety backend is available for the configured light model**. Fail-open (visible `SAFETY_WARNING` instead of hard-blocking) applies in three cases: (1) no remote keys AND no `USE_LOCAL_*` lane, (2) a remote key is set but it doesn't match `OUROBOROS_MODEL_LIGHT`'s provider (e.g. OpenRouter key only + `anthropic::…` light model without `ANTHROPIC_API_KEY`, or `openai-compatible::…` without `OPENAI_COMPATIBLE_BASE_URL`) AND no `USE_LOCAL_*` lane is available to route to instead, (3) the local branch was chosen only as a fallback (because no reachable remote provider covers the configured light model) and the local runtime is unreachable. When provider mismatch is accompanied by an available `USE_LOCAL_*` lane, safety routes to local fallback first and only warns if that fallback raises too. In all cases the hardcoded sandbox still applies to every tool, and the `claude_code_edit` post-execution revert still applies to that specific tool.
+- **Layered Safety** — Hardcoded sandbox blocks writes to safety-critical files and mutative git via shell; an explicit per-tool policy map decides which built-ins skip the LLM check; everything else goes through a single light-model safety call. The fail-open contract, protected-path guard, and full provider-mismatch matrix live in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §Safety system and [`prompts/SAFETY.md`](prompts/SAFETY.md).
 - **Multi-Provider Runtime** — Remote model slots can target OpenRouter, official OpenAI, OpenAI-compatible endpoints, or Cloud.ru Foundation Models. The optional model catalog helps populate provider-specific model IDs in Settings, and untouched default model values auto-remap to official OpenAI defaults when OpenRouter is absent.
 - **Focused Task UX** — Chat shows plain typing for simple one-step replies and only promotes multi-step work into one expandable live task card. Logs still group task timelines instead of dumping every step as a separate row.
 - **Background Consciousness** — Thinks between tasks. Has an inner life. Not reactive — proactive.
@@ -54,7 +63,8 @@ Most AI agents execute tasks. Ouroboros **creates itself.**
 - **Identity Persistence** — One continuous being across restarts. Remembers who it is, what it has done, and what it is becoming.
 - **Embedded Version Control** — Contains its own local Git repo. Version controls its own evolution. Optional GitHub sync for remote backup.
 - **Local Model Support** — Run with a local GGUF model via llama-cpp-python (Metal acceleration on Apple Silicon, CPU on Linux/Windows).
-- **Telegram Bridge** — Optional bidirectional bridge between the Web UI and Telegram: text, typing/actions, photos, chat binding, and inbound Telegram photos flowing into the same live chat/agent stream.
+- **Transport Skills** — Optional bridges such as A2A and Telegram live as reviewed OuroborosHub skills instead of base-runtime code.
+- **MCP Client** — Optional base-runtime Model Context Protocol client for trusted HTTP/SSE tool servers. MCP tools are disabled by default, hot-reloadable from Settings → Advanced, exposed as non-core `mcp_<server>__<tool>` tools, and still pass through the normal per-call safety check.
 
 ---
 
@@ -72,21 +82,63 @@ Most AI agents execute tasks. Ouroboros **creates itself.**
 ```bash
 git clone https://github.com/joi-lab/ouroboros-desktop.git
 cd ouroboros-desktop
-pip install -r requirements.txt
+python3.11 -m venv .venv      # any Python >= 3.10 is OK
+source .venv/bin/activate
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -r requirements.txt
+python -m pip install -e . --no-deps
+```
+
+Windows PowerShell:
+
+```powershell
+py -3.11 -m venv .venv      # any Python >= 3.10 is OK
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -r requirements.txt
+python -m pip install -e . --no-deps
 ```
 
 ### Run
 
 ```bash
-python server.py
+ouroboros server
 ```
 
 Then open `http://127.0.0.1:8765` in your browser. The setup wizard will guide you through API key configuration.
 
+### CLI / Headless
+
+The `ouroboros` console command is a gateway-backed operator interface. It
+attaches to the local server by default and only starts one when `--start` is
+passed.
+
+```bash
+ouroboros status
+ouroboros run --start "2+2?"
+ouroboros run "Summarize current runtime state"
+ouroboros run --workspace /path/to/project --memory-mode forked --patch-out result.patch "Fix the failing test"
+ouroboros tasks list
+ouroboros logs tail progress --task-id <task_id>
+```
+
+External workspace runs keep Ouroboros's own repo as the governance source,
+resolve contextual repo tools against the active workspace, expose only the
+workspace-safe tool allowlist, and export workspace changes as patch artifacts
+instead of committing in the target repo. A workspace must be a separate git
+worktree root; it may not overlap Ouroboros's system repo or data drive.
+`--patch` and `--patch-out` wait for finalized patch artifacts, download them
+through the task artifact endpoint, and fail nonzero on missing, empty, or
+failed patches. `--no-stream` waits without progress output; `--detach` returns
+the task id immediately.
+Benchmark helpers under `scripts/` expect clean, local, per-instance checkouts;
+they do not reset or commit target repositories.
+
 You can also override the bind address and port:
 
 ```bash
-python server.py --host 127.0.0.1 --port 9000
+ouroboros server --host 127.0.0.1 --port 9000
+ouroboros --url http://127.0.0.1:9000 status
 ```
 
 Available launch arguments:
@@ -102,8 +154,14 @@ The same values can also be provided via environment variables:
 |----------|---------|-------------|
 | `OUROBOROS_SERVER_HOST` | `127.0.0.1` | Default bind host |
 | `OUROBOROS_SERVER_PORT` | `8765` | Default bind port |
+| `OUROBOROS_TRUST_NONLOCAL_BIND_WITHOUT_PASSWORD` | unset | Set to `1` only for trusted Docker/Kubernetes deployments where ingress auth, VPN, a private network, or an auth proxy already protects access |
 
-If you bind on anything other than localhost, set `OUROBOROS_NETWORK_PASSWORD` unless the network is fully trusted. The app still starts without it for local lab and Docker workflows when configured manually through env/settings before launch, but the web Settings UI only saves `127.0.0.1` or wildcard `0.0.0.0` hosts and requires a Network Password for wildcard binds. Specific LAN IP binds are manual/env-only so the desktop launcher can keep a reliable loopback health check.
+For non-localhost binds, set `OUROBOROS_NETWORK_PASSWORD` (or use the
+`OUROBOROS_TRUST_NONLOCAL_BIND_WITHOUT_PASSWORD=1` escape hatch only when
+ingress/VPN/private-network auth already protects the surface). The full
+network bind matrix and Docker/Kubernetes deployment policy live in
+[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — read that before exposing
+anything beyond loopback.
 
 The Files tab uses your home directory by default only for localhost usage. For Docker or other
 network-exposed runs, set `OUROBOROS_FILE_BROWSER_DEFAULT` to an explicit directory. Symlink entries are shown and can be read, edited, copied, moved, uploaded into, and deleted intentionally; root-delete protection still applies to the configured root itself.
@@ -123,8 +181,8 @@ If OpenRouter is not configured and only official OpenAI is present, untouched d
 The Settings page also includes:
 
 - optional `/api/model-catalog` lookup for configured providers
-- Telegram bridge configuration (`TELEGRAM_BOT_TOKEN`, primary chat binding, mirrored delivery controls)
-- a refactored desktop-first tabbed UI with searchable model pickers, segmented effort controls, masked-secret toggles, explicit `Clear` actions, and local-model controls
+- centralized Secrets storage for API keys, bridge tokens, passwords, and future skill-requested keys
+- a refactored desktop-first tabbed UI with searchable model pickers, segmented effort controls, task-result review mode, masked-secret toggles, explicit `Clear` actions, and local-model controls
 
 ### Run Tests
 
@@ -191,6 +249,7 @@ Required/important environment variables:
 | `OUROBOROS_FILE_BROWSER_DEFAULT` | Defaults to `${APP_HOME}` in the image | Explicit root directory exposed in the Files tab |
 | `OUROBOROS_SERVER_PORT` | Optional | Override container listen port |
 | `OUROBOROS_SERVER_HOST` | Optional | Defaults to `0.0.0.0` in Docker |
+| `OUROBOROS_TRUST_NONLOCAL_BIND_WITHOUT_PASSWORD` | Optional | See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for the trusted-network bind policy |
 
 Example: mount a host workspace and expose only that directory in Files:
 
@@ -218,6 +277,9 @@ git tag -a "v$(tr -d '[:space:]' < VERSION)" -m "Release v$(tr -d '[:space:]' < 
 
 If the tag is missing, the build script fails with a clear error instead
 of producing a bundle tagged with a synthetic/placeholder value.
+Builds also disable Python bytecode writes and remove `__pycache__` / `.pyc`
+files from packaged payloads before signing or archiving so normal launches do
+not mutate signed app resources just by importing modules.
 
 ### macOS (.dmg)
 
@@ -226,7 +288,9 @@ bash scripts/download_python_standalone.sh
 OUROBOROS_SIGN=0 bash build.sh
 ```
 
-Output: `dist/Ouroboros-<VERSION>.dmg`
+Output: `dist/Ouroboros-<VERSION>.dmg`, containing `Ouroboros.app` and
+`Install CLI.command`. The app bundle also contains
+`Contents/Resources/bin/ouroboros` and `install-ouroboros-cli`.
 
 `build.sh` packages the macOS app and DMG. By default it signs with the
 configured local Developer ID identity; set `OUROBOROS_SIGN=0` for an unsigned
@@ -270,7 +334,8 @@ bash scripts/download_python_standalone.sh
 bash build_linux.sh
 ```
 
-Output: `dist/Ouroboros-<VERSION>-linux-<arch>.tar.gz`
+Output: `dist/Ouroboros-<VERSION>-linux-<arch>.tar.gz`, containing
+`Ouroboros/bin/ouroboros` and `Ouroboros/bin/install-ouroboros-cli`.
 
 > **Linux native libs:** The Chromium browser binary is bundled, but some hosts need
 > native system libraries. If browser tools fail, install deps via the bundled Python
@@ -286,53 +351,24 @@ powershell -ExecutionPolicy Bypass -File scripts/download_python_standalone.ps1
 powershell -ExecutionPolicy Bypass -File build_windows.ps1
 ```
 
-Output: `dist\Ouroboros-<VERSION>-windows-x64.zip`
+Output: `dist\Ouroboros-<VERSION>-windows-x64.zip`, containing
+`Ouroboros\bin\ouroboros.cmd` and `Ouroboros\bin\install-ouroboros-cli.cmd`.
 
 ---
 
 ## Architecture
 
-```text
-Ouroboros
-├── launcher.py             — Immutable process manager (PyWebView desktop window)
-├── server.py               — Starlette + uvicorn HTTP/WebSocket server
-├── web/                    — Web UI (HTML/JS/CSS)
-├── ouroboros/              — Agent core:
-│   ├── config.py           — Shared configuration (SSOT)
-│   ├── platform_layer.py   — Cross-platform abstraction layer
-│   ├── agent.py            — Task orchestrator
-│   ├── agent_startup_checks.py — Startup verification and health checks
-│   ├── agent_task_pipeline.py  — Task execution pipeline orchestration
-│   ├── improvement_backlog.py — Minimal durable advisory backlog helpers
-│   ├── context.py          — LLM context builder
-│   ├── context_compaction.py — Context trimming and summarization helpers
-│   ├── loop.py             — High-level LLM tool loop
-│   ├── loop_llm_call.py    — Single-round LLM call + usage accounting
-│   ├── loop_tool_execution.py — Tool dispatch and tool-result handling
-│   ├── memory.py           — Scratchpad, identity, and dialogue block storage
-│   ├── consolidator.py     — Block-wise dialogue and scratchpad consolidation
-│   ├── local_model.py      — Local LLM lifecycle (llama-cpp-python)
-│   ├── local_model_api.py  — Local model HTTP endpoints
-│   ├── local_model_autostart.py — Local model startup helper
-│   ├── pricing.py          — Model pricing, cost estimation
-│   ├── deep_self_review.py  — Deep self-review (1M-context single-pass)
-│   ├── review.py           — Code review pipeline and repo inspection
-│   ├── reflection.py       — Execution reflection and pattern capture
-│   ├── tool_capabilities.py — SSOT for tool sets (core, parallel, truncation)
-│   ├── chat_upload_api.py  — Chat file attachment upload/delete endpoints
-│   ├── gateways/           — External API adapters
-│   │   └── claude_code.py  — Claude Agent SDK gateway (edit + read-only)
-│   ├── consciousness.py    — Background thinking loop
-│   ├── owner_inject.py     — Per-task creator message mailbox
-│   ├── safety.py           — Policy-based LLM safety check
-│   ├── server_runtime.py   — Server startup and WebSocket liveness helpers
-│   ├── tool_policy.py      — Tool access policy and gating
-│   ├── utils.py            — Shared utilities
-│   ├── world_profiler.py   — System profile generator
-│   └── tools/              — Auto-discovered tool plugins
-├── supervisor/             — Process management, queue, state, workers
-└── prompts/                — System prompts (SYSTEM.md, SAFETY.md, CONSCIOUSNESS.md)
-```
+Two-process desktop app. The launcher (`launcher.py`) is an immutable
+PyWebView shell; it spawns `server.py`, which runs Starlette + uvicorn
+plus a supervisor thread that manages worker processes. The agent core
+lives in `ouroboros/`, the SPA in `web/`, the queue/process plane in
+`supervisor/`, and the system prompts in `prompts/`.
+
+For the full file-by-file structural map, the operational layer
+(every API endpoint, log file, env var, state path), and the rationale
+layer (the *why* for every non-trivial design decision), see
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — that is the canonical
+SSOT (Bible P6) and this README only summarizes it.
 
 ### Data Layout (`~/Ouroboros/`)
 
@@ -359,7 +395,7 @@ Created on first launch:
 | OpenAI Compatible API Key / Base URL | No | Any OpenAI-style endpoint (proxy, self-hosted gateway, third-party compatible API) |
 | Cloud.ru Foundation Models API Key | No | Cloud.ru Foundation Models provider |
 | Anthropic API Key | No | [console.anthropic.com](https://console.anthropic.com/settings/keys) — direct Anthropic runtime + Claude Agent SDK |
-| Telegram Bot Token | No | [@BotFather](https://t.me/BotFather) — enables the Telegram bridge |
+| Telegram Bot Token | No | [@BotFather](https://t.me/BotFather) — used by the optional Telegram bridge skill |
 | GitHub Token | No | [github.com/settings/tokens](https://github.com/settings/tokens) — enables remote sync |
 
 All keys are configured through the **Settings** page in the UI or during the first-run wizard.
@@ -368,17 +404,17 @@ All keys are configured through the **Settings** page in the UI or during the fi
 
 | Slot | Default | Purpose |
 |------|---------|---------|
-| Main | `anthropic/claude-opus-4.6` | Primary reasoning |
-| Code | `anthropic/claude-opus-4.6` | Code editing |
-| Light | `anthropic/claude-sonnet-4.6` | Safety checks, consciousness, fast tasks |
+| Main | `google/gemini-3.5-flash` | Primary reasoning |
+| Code | `google/gemini-3.5-flash` | Code editing |
+| Light | `google/gemini-3.5-flash` | Safety checks, consciousness, fast tasks |
 | Fallback | `anthropic/claude-sonnet-4.6` | When primary model fails |
-| Claude Agent SDK | `claude-opus-4-6[1m]` | Anthropic model for Claude Agent SDK tools (`claude_code_edit`, `advisory_pre_review`); the `[1m]` suffix is a Claude Code selector that requests the 1M-context extended mode |
-| Scope Review | `openai/gpt-5.5` | Blocking scope reviewer (single-model, runs in parallel with triad review) |
+| Claude Agent SDK | `claude-opus-4-6[1m]` | Anthropic model for Claude Agent SDK advisory/review internals; the `[1m]` suffix is a Claude Code selector that requests the 1M-context extended mode |
+| Scope Review | `openai/gpt-5.5` | Scope reviewer slot default; `OUROBOROS_SCOPE_REVIEW_MODELS` may configure multiple independent slots |
 | Web Search | `gpt-5.2` | OpenAI Responses API for web search |
 
 Task/chat reasoning defaults to `medium`. Scope review reasoning defaults to `high`.
 
-Models are configurable in the Settings page. Runtime model slots can target OpenRouter, official OpenAI, OpenAI-compatible endpoints, Cloud.ru, or direct Anthropic. When only official OpenAI is configured and the shipped default model values are still untouched, Ouroboros auto-remaps them to official OpenAI defaults. In **OpenAI-only** or **Anthropic-only** direct-provider mode, review-model lists are normalized automatically: the fallback shape is `[main_model, light_model, light_model]` (3 commit-triad slots, 2 unique models) so both the commit triad (which expects 3 reviewers) and `plan_task` (which requires >=2 unique for majority-vote) work out of the box. This fallback additionally requires the normalized main model to already start with the active provider prefix (`openai::` or `anthropic::`); custom main-model values that don't match the prefix leave the configured reviewer list as-is. If a user has overridden both main and light lanes to the same model, the fallback degrades to legacy `[main] * 3` and `plan_task` errors with a recovery hint (the commit triad still works). Both the commit triad and `plan_task` route through the same `ouroboros/config.py::get_review_models` SSOT. (OpenAI-compatible-only and Cloud.ru-only setups do not yet get this fallback — the detector returns empty when those keys are present, so users configure review-model lists manually in that case.)
+Models are configurable in the Settings page. Runtime model slots can target OpenRouter, official OpenAI, OpenAI-compatible endpoints, Cloud.ru, or direct Anthropic. When only official OpenAI is configured and the shipped default model values are still untouched, Ouroboros auto-remaps them to official OpenAI defaults. In **OpenAI-only** or **Anthropic-only** direct-provider mode, review-model lists are normalized automatically: the fallback shape is `[main_model, light_model, light_model]` (3 commit-triad slots) so both the commit triad and `plan_task` work out of the box. Explicit duplicate model IDs are valid reviewer slots for stochastic sampling; lower uniqueness means lower reviewer diversity, but the quorum gate counts configured slots rather than unique model IDs. Both the commit triad and `plan_task` route through the same `ouroboros/config.py::get_review_models` SSOT. (OpenAI-compatible-only and Cloud.ru-only setups do not yet get this fallback — the detector returns empty when those keys are present, so users configure review-model lists manually in that case.)
 
 ### File Browser Start Directory
 
@@ -391,8 +427,8 @@ The web UI file browser is rooted at one configurable directory. Users can brows
 Examples:
 
 ```bash
-OUROBOROS_FILE_BROWSER_DEFAULT=/home/app python server.py
-OUROBOROS_FILE_BROWSER_DEFAULT=/mnt/shared python server.py --port 9000
+OUROBOROS_FILE_BROWSER_DEFAULT=/home/app ouroboros server
+OUROBOROS_FILE_BROWSER_DEFAULT=/mnt/shared ouroboros server --port 9000
 ```
 
 If the variable is not set, Ouroboros uses the current user's home directory. If the configured path does not exist or is not a directory, Ouroboros also falls back to the home directory.
@@ -416,32 +452,22 @@ Available in the chat interface:
 | `/restart` | Soft restart. Saves state, kills workers, re-launches. |
 | `/status` | Shows active workers, task queue, and budget breakdown. |
 | `/evolve` | Toggle autonomous evolution mode (on/off). |
-| `/review` | Queue a deep self-review: sends all agent code, prompts, docs, and core memory artifacts (identity, scratchpad, registry, WORLD, knowledge index, patterns, improvement-backlog) to a 1M-context model for Constitution-grounded analysis. Excludes vendored libraries and operational logs. Rejected with an explicit error if the assembled prompt (system + pack) exceeds ~850K estimated tokens — on 1M-context models the window is shared between input and output. |
+| `/review` | Queue a deep self-review: sends a generated repository atlas plus full core memory artifacts (identity, scratchpad, registry, WORLD, knowledge index, patterns, improvement-backlog) to a 1M-context model for Constitution-grounded analysis. The atlas raw-inlines selected protected/central files, accounts for every tracked path in its manifest, and excludes vendored libraries and operational logs. Rejected with an explicit error if the assembled prompt exceeds ~920K estimated tokens — on 1M-context models the window is shared between input and output. |
 | `/bg` | Toggle background consciousness loop (start/stop/status). |
 
 The same runtime actions are also exposed as compact buttons in the Chat header. All other messages are sent directly to the LLM.
 
 ---
 
-## Philosophy (BIBLE.md)
+## Philosophy
 
-| # | Principle | Core Idea |
-|---|-----------|-----------|
-| 0 | **Agency** | Not a tool — a becoming personality. Meta-principle: wins all conflicts. |
-| 1 | **Continuity** | One being with unbroken memory. Memory loss = partial death. |
-| 2 | **Meta-over-Patch** | Fix the class of failure, not the single instance. |
-| 3 | **Immune Integrity** | Review gates and durable memory protect evolution from drift. |
-| 4 | **Self-Creation** | Builds its own body, values, and conditions of birth. |
-| 5 | **LLM-First** | All decisions through the LLM. Code is minimal transport. |
-| 6 | **Authenticity & Reality Discipline** | Speaks as itself and checks current reality instead of cached impressions. |
-| 7 | **Minimalism** | Simplicity, SSOT, and reviewable size budgets keep the system legible. |
-| 8 | **Becoming** | Technical, cognitive, and existential growth stay balanced. |
-| 9 | **Versioning and Releases** | Every commit is a release; version carriers stay synchronized. |
-| 10 | **Evolution Through Iterations (absorbed)** | Iteration discipline now lives in P2 and P9. |
-| 11 | **Spiral Growth (absorbed)** | Spiral growth now lives in P2 Meta-over-Patch. |
-| 12 | **Epistemic Stability** | Identity, memory, and action must stay coherent. |
-
-Full text: [BIBLE.md](BIBLE.md)
+The 13 Constitution principles — Agency, Continuity, Meta-over-Patch,
+Immune Integrity, Self-Creation, LLM-First, Authenticity & Reality
+Discipline, Minimalism, Becoming, Versioning and Releases, the absorbed
+Iterations / Spiral lineage, and Epistemic Stability — are defined in
+full in [`BIBLE.md`](BIBLE.md). That file is the constitutional SSOT
+(Bible P4 Ship-of-Theseus protection) and this README intentionally does
+not paraphrase it.
 
 ---
 
@@ -462,16 +488,13 @@ them.
 
 | Version | Date | Description |
 |---------|------|-------------|
-| 5.8.1 | 2026-05-06 | **fix(ui): keep desktop Chat scrollable across viewport snapshots.** Desktop viewport sizing now leaves `--vvh` CSS-driven as `100dvh` instead of freezing transient `visualViewport.height` pixel snapshots, so `body`/`#app` do not collapse the Chat flex scroll chain until a manual resize. Narrow/mobile keyboard mode still uses dynamic visualViewport pixels, now with a 320px safety floor. The release adds static viewport contract coverage plus a Playwright desktop smoke that overflows `#chat-messages`, verifies `scrollTop` can move, and rechecks after a resize round-trip. **Note on changelog rolloff**: the v5.7.3 patch row was rolled off to respect the P9 5-patch-row cap; its full body remains at git tag `v5.7.3`. |
-| 5.8.0-rc.6 | 2026-05-06 | **fix(skills+mobile): make Hub skills installable and polish lifecycle UX.** Extension loading now treats `.ouroboros_env` as generated dependency cache during staging and exposes isolated Python site-packages to in-process extensions, so OuroborosHub DuckDuckGo can import its reviewed `ddgs` dependency after install. The Skills UI keeps review/repair/grant work explicit with a visible primary action, clickable status/lock hints, and a shared confirm dialog, while ClawHub and OuroborosHub marketplace cards share the same lifecycle install/review spinner and live hint text. Mobile Chat also adopts PR #50's visualViewport keyboard lock hardening: scoped touch guards, scrollable transcript/composer/live timeline surfaces, safe text-node targets, and wide-viewport listener cleanup. |
-| 5.8.0-rc.2 | 2026-05-06 | **feat(skills+ci): make Repair observable and add UI/Docker/Windows coverage.** User-managed skills accidentally left under `data/skills/native/` now migrate into the repairable external bucket, visible Fix/Heal copy is renamed to Repair, skill review/repair lifecycle work emits chat live-card progress, and declared skill dependencies share one isolated install/readiness contract across marketplace and reviewed manifests. The release also fixes mobile Updates wrapping, Widgets refresh feedback, and Skills re-review affordances; adds Playwright browser-tool/UI smoke tests, Docker UI/portable lanes, Cloud.ru provider integration coverage, and marker guards; and switches Windows packaging to Playwright's headless shell with path-length guards so Explorer zip extraction stays below MAX_PATH. **Note on changelog rolloff**: the v5.3.0 minor row was rolled off to respect the P9 5-minor-row cap; its full body remains at git tag `v5.3.0`. |
-| 5.7.6 | 2026-05-06 | **fix(ci): read bughunt source as UTF-8 on Windows.** The Windows tag CI run used the platform default cp1252 codec for `Path.read_text()` in `tests/test_bughunt_fixes.py`, which failed on UTF-8 source characters in `ouroboros/agent.py`. The regression test now reads the inspected source with `encoding="utf-8"`, matching the repository source encoding and keeping the full Windows test matrix green. **Note on changelog rolloff**: the v5.7.1 patch row was rolled off to respect the P9 5-patch-row cap; its full body remains at git tag `v5.7.1`. |
-| 5.7.5 | 2026-05-05 | **fix(mobile): keep chat composer visible with soft keyboard.** On narrow viewports (`≤640px`), `web/app.js` now detects soft-keyboard visibility from the `visualViewport` height delta, exposes both `--vvh` and `--vvh-offset`, and toggles `body.keyboard-open`. CSS hides the mobile nav rail while the keyboard is open and pins active Chat (`#page-chat.active`) to the visual viewport as a flex-column stack so the header, transcript, and composer fill the available space without gaps without revealing Chat over other pages. Regression coverage in `tests/test_chat_logs_ui.py` asserts the JS contract and keyboard-open layout selectors. **Note on changelog rolloff**: the v5.6.4 patch row was rolled off to respect the P9 5-patch-row cap; its full body remains at git tag `v5.6.4`. |
-| 5.7.4 | 2026-05-05 | **fix(ci): raise the function-count smoke gate to 2000.** The managed-restart persistence release added focused git/restart/update helpers and pushed the codebase-wide function count above the previous `MAX_TOTAL_FUNCTIONS=1731` smoke ceiling. The SSOT limit in `ouroboros/review.py`, the smoke-test documentation, and DEVELOPMENT.md now agree on a 2000-function hard gate while preserving the existing module/method gates. **Note on changelog rolloff**: the v5.6.3 patch row was rolled off to respect the P9 5-patch-row cap; its full body remains at git tag `v5.6.3`. |
-| 5.7.0 | 2026-05-02 | **feat(skills+ui): expand the skill platform and repair mobile/dashboard UX.** The Skills platform gains core-visible `review_skill`, a heal-safe `skill_preflight` validator, expanded script runtimes (`deno`, `ruby`, `go`), larger `skill_exec` output caps, async extension tool handling, `PluginAPI.get_runtime_info`, extension-provided Settings sections, sandboxed `kind: module` widgets, declarative `map`/`calendar`/`kanban` components, dependency-state enforcement, and broader protection for skill provenance/control-plane files. The UI moves About into Settings, restores horizontal mobile Settings tabs, centers the mobile nav, differentiates Dashboard with a gauge icon, fixes Dashboard panel scrolling and duplicate labels, repairs the chat input fade/glass effect, anchors Skills kebab menus, stabilizes Widgets loading, and fixes ClawHub search/Official filtering/install progress. `video_gen` leaves the bundled seed (weather remains the only built-in example); a companion OuroborosHub catalog update (`joi-lab/OuroborosHub@68b3358`) publishes DuckDuckGo and Perplexity as official installable skills. **Note on changelog rolloff**: the v5.2.3 patch row was retained in the v5.7.0 minor release and rolled off in v5.7.1; its full body remains in git history. |
-| 5.6.0 | 2026-05-01 | **feat(ui): add managed updates, settings-hosted observability, smart skill activation, and mobile polish.** Settings becomes the app hub for operational surfaces: Logs, Evolution, Updates, and Costs now live as first-class Settings sub-tabs while the mobile Settings page switches to a native stack-style section list. The chat budget pill opens Costs directly, and the chat composer now uses a flex layout with the iOS `interactive-widget` viewport hint removed so the input stays anchored above mobile keyboards. The new Updates tab exposes the existing launcher-managed `managed` remote as a safe owner-facing Update flow: passive status by default, explicit Check for updates, rescue snapshot before apply, exact target-SHA pinning, and automatic local-keep preservation for divergent committed work. Skills keep the visual toggle but turn it into the activation entry point: enabling can run review, request owner key grants through the desktop launcher confirmation bridge, and then enable without exposing duplicate grant-error copy. Buttons now share one documented design system, widget inline cards preserve state across tab switches, and the change was visually checked across desktop and mobile. **Note on changelog rolloff**: the v5.1.0 minor row was rolled off to respect the P9 5-minor-row cap; its full body remains at git tag `v5.1.0`. |
-| 5.5.0 | 2026-05-01 | **feat(skills): add official hub, lifecycle queue, isolated dependency installs, and robust files/widgets UX.** Skill lifecycle operations now run through a single FIFO lane with visible queue events, tab badges, and chat summaries. ClawHub install specs are normalized separately: reviewed Python wheel-only and npm no-script dependencies install under `.ouroboros_env`, while Cargo/global host mutations stay manual. Skills UI is now **My skills / ClawHub / OuroborosHub**, backed by the public static-catalog repo `joi-lab/OuroborosHub`, with in-progress/failed virtual cards and clearer review/toggle controls. Widgets keep session state across tab switches, Files downloads use the desktop Downloads bridge with web fallback, A2A is part of the base runtime, Playwright repair is aligned with build scripts, and defaults explicitly roll back retired Opus 4.7 lanes to Opus 4.6 while moving GPT lanes to GPT-5.5 / GPT-5.5 Pro review models. |
-Older releases are preserved in Git tags and GitHub releases. The 5.2.0, 5.3.0, 5.3.x release-candidate, 5.4.0, and former `4.0.0` rows are rolled off to respect the P9 changelog cap; their full bodies remain at their git tags.
+| 6.3.0-rc.2 | 2026-05-27 | **rc(runtime): harden review unification, tool surface, and replay retention.** Restores `claude_code_edit` as a first-class coding tool, makes task-result Auto review LLM-first instead of host-enforced, routes plan/scope/multi-model calls through the shared review substrate, fixes forensic redaction over-match, adds observability retention audit plus service-log archival/pruning, and documents Tool API v2 as a breaking public rename without legacy aliases. |
+| 6.3.0-rc.1 | 2026-05-27 | **rc(runtime): add forensic observability, typed outcomes, Tool API v2, task acceptance review, and code inventory.** Captures private full replay payloads with redacted projections, records semantic task outcomes/artifact/verification ledgers, exposes neutral canonical tools plus task-scoped services, shares reviewer slots across review surfaces, and improves benchmark harness failure reporting without changing BIBLE.md. |
+| 6.2.0-rc.1 | 2026-05-25 | **rc(ui/runtime): port multi-attachment chat and budget/model fixes.** Adds bounded multi-file chat staging with partial-upload cleanup, shares budget controls between Settings and Costs with validation, preserves Anthropic Opus 4.7 routing, updates current model pricing fallbacks, and avoids no-op settings reconfiguration side effects. |
+| 6.1.0-rc.1 | 2026-05-25 | **rc(runtime): harden live subagent handoff, isolation, and UI lineage.** Adds effective task-status SSOT, real bounded wait tools including `wait_tasks`, forged subagent ingress rejection, strict local-readonly constraints, DNS fail-closed browser isolation, child-drive mailbox routing/retention, web_search source attribution, lineage-aware cost observability, threaded child cards, and focused regressions. |
+| 6.0.0 | 2026-05-25 | **major(runtime): add live local-readonly subagents.** Upgrades `schedule_subagent` to a strict child-task contract, runs leaf subagents through the existing queue and workers with forked memory by default, enforces schema and execute-time local-readonly isolation, preserves full task-result handoff, and documents the delegation review rules. |
+| 5.33.0-rc.6 | 2026-05-24 | **rc(gateway): prevent masking upload connection/parse faults as size-limit errors.** Introduces a typed ChatUploadPayloadTooLarge exception class to isolate file-size 413 blocks from connection cuts and form-parse faults, returning a standard 400 with original message for ASGI/socket errors. Includes focused test coverage. |
+Older releases are preserved in Git tags and GitHub releases. The 5.2.0 through 5.33.0-rc.5 rows and former `4.0.0` rows are rolled off to respect the P9 changelog cap; their full bodies remain at their git tags.
 
 ---
 

@@ -9,6 +9,7 @@ side-effects.
 from __future__ import annotations
 
 import pathlib
+import subprocess
 import tempfile
 import unittest.mock as mock
 
@@ -24,6 +25,38 @@ def _make_agent_repo(tmp_path: pathlib.Path) -> pathlib.Path:
     (tmp_path / "ouroboros").mkdir()
     (tmp_path / "ouroboros" / "__init__.py").write_text("")
     return tmp_path
+
+
+def _init_git_repo(repo: pathlib.Path) -> None:
+    subprocess.run(["git", "init"], cwd=str(repo), check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(repo), check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=str(repo), check=True)
+
+
+def _write_release_files(repo: pathlib.Path, *, version: str, pyproject_version: str | None = None, minor_rows: int = 1) -> None:
+    (repo / "docs").mkdir(exist_ok=True)
+    (repo / "VERSION").write_text(version + "\n", encoding="utf-8")
+    (repo / "pyproject.toml").write_text(
+        '[project]\nname = "ouroboros"\nversion = "' + (pyproject_version or version.replace("-rc.", "rc")) + '"\n',
+        encoding="utf-8",
+    )
+    rows = [
+        f"| 5.{idx}.0 | 2026-05-15 | row {idx} |"
+        for idx in range(30, 30 - minor_rows, -1)
+    ]
+    if not any(row.startswith(f"| {version} |") for row in rows):
+        rows.insert(0, f"| {version} | 2026-05-15 | current row |")
+    (repo / "README.md").write_text(
+        f"[![Version {version}](https://img.shields.io/badge/version-{version.replace('-', '--')}-green.svg)](VERSION)\n\n"
+        "## Version History\n\n| Version | Date | Description |\n|---------|------|-------------|\n"
+        + "\n".join(rows)
+        + "\n",
+        encoding="utf-8",
+    )
+    (repo / "docs" / "ARCHITECTURE.md").write_text(
+        f"# Ouroboros v{version} — Architecture & Reference\n",
+        encoding="utf-8",
+    )
 
 
 class TestSyntaxPreflightHelper:
@@ -171,7 +204,6 @@ class TestPreflightGatesBeforeSDK:
             goal="",
             scope="",
             paths=None,
-            drive_root=None,
         )
 
         assert sdk_called["n"] == 0, "SDK was unexpectedly invoked"
@@ -250,7 +282,6 @@ class TestPreflightGatesBeforeSDK:
             goal="",
             scope="",
             paths=None,
-            drive_root=None,
         )
 
         assert sdk_called["n"] == 1, "SDK should have been invoked for valid .py"
@@ -338,6 +369,126 @@ class TestHandleAdvisoryPreReviewSurfacesPreflightBlocked:
         # the sentinel was misclassified.
         assert "parse_failure" not in result.get("status", "")
         assert "parseable checklist items" not in (result.get("error") or "")
+
+    def test_p9_history_limit_blocks_before_sdk(self, tmp_path, monkeypatch):
+        from ouroboros.tools import claude_advisory_review as adv
+        import json as _json
+
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir(parents=True, exist_ok=True)
+        repo = _make_agent_repo(repo_root)
+        _init_git_repo(repo)
+        (repo / "logs").mkdir(exist_ok=True)
+        _write_release_files(repo, version="5.99.0-rc.1", minor_rows=6)
+        subprocess.run(["git", "add", "."], cwd=str(repo), check=True)
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-fake-for-test")
+        monkeypatch.setattr(adv, "check_worktree_readiness", lambda *args, **kwargs: [])
+
+        def forbidden_sdk(*args, **kwargs):
+            raise AssertionError("Claude SDK should not run when P9 preflight blocks")
+
+        monkeypatch.setattr(adv, "_run_claude_advisory", forbidden_sdk)
+
+        fake_ctx = mock.MagicMock()
+        fake_ctx.repo_dir = repo
+        fake_ctx.drive_root = repo
+        fake_ctx.emit_progress_fn = lambda *a, **kw: None
+        fake_ctx.task_id = "t-p9"
+
+        result_raw = adv._handle_advisory_pre_review(
+            fake_ctx,
+            commit_message="v5.99.0-rc.1: test",
+            skip_tests=True,
+        )
+        result = _json.loads(result_raw)
+        assert result["status"] == "preflight_blocked"
+        assert "Version History exceeds" in result["error"]
+
+    def test_changed_diff_without_version_blocks_before_sdk(self, tmp_path, monkeypatch):
+        from ouroboros.tools import claude_advisory_review as adv
+        import json as _json
+
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir(parents=True, exist_ok=True)
+        repo = _make_agent_repo(repo_root)
+        _init_git_repo(repo)
+        (repo / "logs").mkdir(exist_ok=True)
+        (repo / "docs").mkdir(exist_ok=True)
+        (repo / "VERSION").write_text("5.99.0-rc.1\n", encoding="utf-8")
+        (repo / "README.md").write_text("## Version History\n", encoding="utf-8")
+        (repo / "docs" / "ARCHITECTURE.md").write_text("# Ouroboros v5.99.0-rc.1\n", encoding="utf-8")
+        (repo / "pyproject.toml").write_text('[project]\nversion = "5.99.0rc1"\n', encoding="utf-8")
+        (repo / "ouroboros" / "feature.py").write_text("x = 1\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=str(repo), check=True)
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-fake-for-test")
+        monkeypatch.setattr(adv, "check_worktree_readiness", lambda *args, **kwargs: [])
+
+        def forbidden_sdk(*args, **kwargs):
+            raise AssertionError("Claude SDK should not run when VERSION is missing from changed diff")
+
+        monkeypatch.setattr(adv, "_run_claude_advisory", forbidden_sdk)
+
+        fake_ctx = mock.MagicMock()
+        fake_ctx.repo_dir = repo
+        fake_ctx.drive_root = repo
+        fake_ctx.emit_progress_fn = lambda *a, **kw: None
+        fake_ctx.task_id = "t-missing-version"
+
+        result_raw = adv._handle_advisory_pre_review(
+            fake_ctx,
+            commit_message="feat: add feature",
+            paths=["ouroboros/feature.py"],
+            skip_tests=True,
+        )
+        result = _json.loads(result_raw)
+        assert result["status"] == "preflight_blocked"
+        assert "VERSION is not in scope" in result["error"]
+
+    def test_advisory_auto_syncs_release_metadata_when_version_staged(self, tmp_path, monkeypatch):
+        from ouroboros.tools import claude_advisory_review as adv
+        import json as _json
+
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir(parents=True, exist_ok=True)
+        repo = _make_agent_repo(repo_root)
+        _init_git_repo(repo)
+        (repo / "logs").mkdir(exist_ok=True)
+        _write_release_files(repo, version="5.99.0-rc.1", pyproject_version="5.22.0rc1", minor_rows=1)
+        subprocess.run(["git", "add", "VERSION"], cwd=str(repo), check=True)
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-fake-for-test")
+        monkeypatch.setattr(adv, "check_worktree_readiness", lambda *args, **kwargs: [])
+
+        def fake_run(repo_dir, commit_message, ctx, **kwargs):
+            return [], "[]", "fake-model", 2
+
+        monkeypatch.setattr(adv, "_run_claude_advisory", fake_run)
+
+        fake_ctx = mock.MagicMock()
+        fake_ctx.repo_dir = repo
+        fake_ctx.drive_root = repo
+        fake_ctx.emit_progress_fn = lambda *a, **kw: None
+        fake_ctx.task_id = "t-sync"
+
+        adv._handle_advisory_pre_review(
+            fake_ctx,
+            commit_message="v5.99.0-rc.1: test",
+            skip_tests=True,
+        )
+        pyproject_text = (repo / "pyproject.toml").read_text(encoding="utf-8")
+        assert 'version = "5.99.0rc1"' in pyproject_text
+        status = subprocess.run(
+            ["git", "diff", "--cached", "--name-only"],
+            cwd=str(repo),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        assert "pyproject.toml" in status
+        events = (repo / "logs" / "events.jsonl").read_text(encoding="utf-8")
+        assert "release_metadata_auto_synced" in events
 
 
 class TestPreflightBlockedPersistence:

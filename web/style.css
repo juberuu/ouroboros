@@ -11,6 +11,16 @@
     --accent-light: #f07a86;
     --accent-dim: rgba(201, 53, 69, 0.15);
     --accent-glow: rgba(201, 53, 69, 0.08);
+    /* Accent alpha tokens; keep future tweaks off hardcoded rgba literals. */
+    --accent-04: rgba(201, 53, 69, 0.04);
+    --accent-05: rgba(201, 53, 69, 0.05);
+    --accent-08: rgba(201, 53, 69, 0.08);
+    --accent-10: rgba(201, 53, 69, 0.10);
+    --accent-12: rgba(201, 53, 69, 0.12);
+    --accent-18: rgba(201, 53, 69, 0.18);
+    --accent-22: rgba(201, 53, 69, 0.22);
+    --accent-25: rgba(201, 53, 69, 0.25);
+    --accent-55: rgba(201, 53, 69, 0.55);
     --blue: #3b82f6;
     --blue-dim: rgba(30, 64, 175, 0.3);
     --amber: #f59e0b;
@@ -20,11 +30,39 @@
     --red: #ef4444;
     --red-dim: rgba(239, 68, 68, 0.15);
     --divider: rgba(255, 255, 255, 0.06);
+    --surface-border: rgba(255, 255, 255, 0.08);
+    --surface-border-soft: rgba(255, 255, 255, 0.06);
+    --surface-card: rgba(255, 255, 255, 0.03);
+    --surface-card-soft: rgba(255, 255, 255, 0.025);
+    --surface-control: rgba(255, 255, 255, 0.04);
+    --ui-card-bg: var(--surface-card);
+    --ui-card-bg-soft: var(--surface-card-soft);
+    --ui-card-border: var(--surface-border);
+    --ui-modal-bg: rgba(18, 20, 26, 0.98);
+    --ui-tone-ok: #22c55e;
+    --ui-tone-warn: #f59e0b;
+    --ui-tone-danger: #ef4444;
+    --focus-accent-border: rgba(232, 93, 111, 0.4);
+    --focus-accent-ring: rgba(232, 93, 111, 0.10);
     --radius-xs: 3px;
     --radius-sm: 8px;
+    /* In-between radius used by chips, counters, and fade rules. */
+    --radius-md: 10px;
     --radius: 12px;
     --radius-lg: 16px;
     --radius-xl: 20px;
+    --page-header-padding-y: 10px;
+    --page-header-padding-x: 20px;
+    --page-header-padding-bottom: 6px;
+    --pill-padding-y: 7px;
+    --pill-padding-x: 14px;
+    --pill-font-size: 13px;
+    --pill-radius: 999px;
+    --pill-strip-padding: 6px 0 8px;
+    --button-padding-y: 8px;
+    --button-padding-x: 16px;
+    --button-font-size: 13px;
+    --button-min-height: 34px;
     --vvh: 100dvh;
 }
 
@@ -48,7 +86,6 @@ body {
     position: relative;
 }
 
-/* Matrix rain canvas */
 #matrix-rain {
     position: fixed;
     top: 0;
@@ -60,11 +97,7 @@ body {
     z-index: 0;
 }
 
-/* Navigation Rail — floating overlay.
-   v5.7.0 spacing pass: top padding 12 -> 28 and inter-item gap 4 -> 10 so
-   the rail is no longer "stuck" to the viewport top edge and tiles breathe.
-   These values track the Material 3 / Apple HIG navigation rail norms and
-   are documented in docs/DEVELOPMENT.md "Navigation rail spacing". */
+/* Floating navigation rail. */
 #nav-rail {
     position: fixed;
     left: 0;
@@ -106,8 +139,8 @@ body {
     gap: 4px;
     padding: 10px 6px;
     width: 64px;
-    border: 1px solid rgba(201, 53, 69, 0.08);
-    background: rgba(201, 53, 69, 0.04);
+    border: 1px solid var(--accent-08);
+    background: var(--accent-04);
     backdrop-filter: blur(8px);
     color: var(--text-secondary);
     cursor: pointer;
@@ -137,26 +170,26 @@ body {
 }
 
 .nav-btn:hover {
-    background: rgba(201, 53, 69, 0.10);
-    border-color: rgba(201, 53, 69, 0.18);
+    background: var(--accent-10);
+    border-color: var(--accent-18);
     color: var(--text-primary);
     transform: scale(1.04);
-    box-shadow: 0 2px 12px rgba(201, 53, 69, 0.08);
+    box-shadow: 0 2px 12px var(--accent-08);
 }
 .nav-btn.active {
-    background: rgba(201, 53, 69, 0.12);
-    border-color: rgba(201, 53, 69, 0.25);
+    background: var(--accent-12);
+    border-color: var(--accent-25);
     color: var(--accent);
     box-shadow:
-        0 0 16px rgba(201, 53, 69, 0.10),
-        inset 0 0 12px rgba(201, 53, 69, 0.05);
+        0 0 16px var(--accent-10),
+        inset 0 0 12px var(--accent-05);
 }
 
 #divider {
     display: none;
 }
 
-/* Main content — full width with left padding for floating nav */
+/* Main content offsets the floating nav. */
 #content {
     width: 100%;
     display: flex;
@@ -179,7 +212,13 @@ body {
 }
 .page.active { display: flex; }
 
-/* Shared containment for narrow screens and unbroken runtime text. */
+.app-page-glass {
+    background:
+        linear-gradient(180deg, rgba(13, 11, 15, 0.76) 0%, rgba(13, 11, 15, 0.34) 170px, rgba(13, 11, 15, 0.08) 100%),
+        radial-gradient(circle at 18% 0%, rgba(232, 93, 111, 0.10), transparent 300px);
+}
+
+/* Containment for narrow screens and unbroken runtime text. */
 #content,
 #content .page,
 #chat-messages,
@@ -248,7 +287,7 @@ body {
     background: rgba(255, 255, 255, 0.04);
     border: 1px solid var(--divider);
     color: var(--text-primary);
-    border-radius: 10px;
+    border-radius: var(--radius-md);
     padding: 10px 12px;
 }
 
@@ -317,7 +356,7 @@ body {
     border: none;
     background: transparent;
     color: var(--text-primary);
-    border-radius: 10px;
+    border-radius: var(--radius-md);
     padding: 10px 12px;
     cursor: pointer;
     text-align: left;
@@ -332,8 +371,8 @@ body {
 }
 
 .files-entry.selected {
-    background: rgba(201, 53, 69, 0.10);
-    box-shadow: inset 0 0 0 1px rgba(201, 53, 69, 0.22);
+    background: var(--accent-10);
+    box-shadow: inset 0 0 0 1px var(--accent-22);
 }
 
 .files-entry-icon {
@@ -366,7 +405,7 @@ body {
     display: flex;
     flex-direction: column;
     background:
-        linear-gradient(180deg, rgba(201, 53, 69, 0.05), transparent 120px),
+        linear-gradient(180deg, var(--accent-05), transparent 120px),
         rgba(255, 255, 255, 0.015);
 }
 
@@ -425,7 +464,7 @@ body {
 .files-editor-name {
     width: 100%;
     border: 1px solid var(--divider);
-    border-radius: 10px;
+    border-radius: var(--radius-md);
     padding: 10px 12px;
     background: rgba(255, 255, 255, 0.04);
     color: var(--text-primary);
@@ -454,7 +493,7 @@ body {
     max-width: 100%;
     max-height: 100%;
     margin: 0 auto;
-    border-radius: 12px;
+    border-radius: var(--radius);
     box-shadow: 0 18px 50px rgba(0, 0, 0, 0.28);
 }
 
@@ -462,7 +501,7 @@ body {
     width: 100%;
     min-height: 70vh;
     border: 1px solid var(--divider);
-    border-radius: 12px;
+    border-radius: var(--radius);
     background: #111827;
 }
 
@@ -484,9 +523,9 @@ body {
 
 .files-drop-card {
     padding: 22px 28px;
-    border-radius: 16px;
-    border: 1px dashed rgba(201, 53, 69, 0.55);
-    background: rgba(201, 53, 69, 0.10);
+    border-radius: var(--radius-lg);
+    border: 1px dashed var(--accent-55);
+    background: var(--accent-10);
     color: var(--text-primary);
     font-size: 14px;
     font-weight: 600;
@@ -498,7 +537,7 @@ body {
     position: fixed;
     min-width: 160px;
     padding: 6px;
-    border-radius: 12px;
+    border-radius: var(--radius);
     border: 1px solid var(--divider);
     background: rgba(18, 20, 26, 0.96);
     box-shadow: 0 20px 45px rgba(0, 0, 0, 0.35);
@@ -508,7 +547,7 @@ body {
 .files-context-item {
     width: 100%;
     border: none;
-    border-radius: 8px;
+    border-radius: var(--radius-sm);
     padding: 10px 12px;
     background: transparent;
     color: var(--text-primary);
@@ -529,63 +568,15 @@ body {
     color: #fecaca;
 }
 
-.files-modal {
-    position: absolute;
-    inset: 0;
-    z-index: 30;
-}
-
-.files-modal-backdrop {
-    position: absolute;
-    inset: 0;
-    background: rgba(6, 7, 10, 0.66);
-    backdrop-filter: blur(4px);
-}
-
-.files-modal-card {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    width: min(420px, calc(100% - 32px));
-    transform: translate(-50%, -50%);
-    padding: 18px;
-    border-radius: 18px;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    background:
-        linear-gradient(180deg, rgba(201, 53, 69, 0.10), transparent 100px),
-        rgba(18, 20, 26, 0.98);
-    box-shadow: 0 28px 70px rgba(0, 0, 0, 0.45);
-}
-
-.files-modal-title {
-    font-size: 16px;
-    font-weight: 600;
-    color: var(--text-primary);
-}
-
-.files-modal-message {
-    margin-top: 8px;
-    font-size: 13px;
-    line-height: 1.5;
-    color: var(--text-secondary);
-}
-
 .files-modal-input {
     width: 100%;
     margin-top: 14px;
     border: 1px solid var(--divider);
-    border-radius: 10px;
+    border-radius: var(--radius-md);
     padding: 11px 12px;
     background: rgba(255, 255, 255, 0.04);
     color: var(--text-primary);
     font: inherit;
-}
-
-.files-modal-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 10px;
-    margin-top: 16px;
 }
 
 .page-header,
@@ -593,7 +584,7 @@ body {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 12px 20px;
+    padding: var(--page-header-padding-y) var(--page-header-padding-x) var(--page-header-padding-bottom);
     background: transparent;
     backdrop-filter: none;
     flex-shrink: 0;
@@ -602,7 +593,7 @@ body {
 
 .app-page-header {
     align-items: flex-start;
-    gap: 12px;
+    gap: 10px 12px;
     flex-wrap: wrap;
 }
 
@@ -638,10 +629,10 @@ body {
 }
 
 .app-page-description {
-    margin: 4px 0 0;
+    margin: 2px 0 0;
     color: var(--text-secondary);
     font-size: 13px;
-    line-height: 1.45;
+    line-height: 1.35;
     max-width: 760px;
 }
 
@@ -664,7 +655,7 @@ body {
     flex-wrap: nowrap;
     gap: 10px;
     overflow-x: auto;
-    padding: 8px 0 12px;
+    padding: var(--pill-strip-padding);
     scrollbar-width: none;
 }
 
@@ -675,13 +666,13 @@ body {
 .app-tab {
     flex: 0 0 auto;
     white-space: nowrap;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--surface-border);
+    background: var(--surface-card);
     color: var(--text-secondary);
-    border-radius: 999px;
-    padding: 9px 16px;
+    border-radius: var(--pill-radius);
+    padding: var(--pill-padding-y) var(--pill-padding-x);
     font: inherit;
-    font-size: 13px;
+    font-size: var(--pill-font-size);
     font-weight: 600;
     cursor: pointer;
     transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
@@ -691,7 +682,7 @@ body {
 .app-tab.active,
 .app-tab.is-active {
     color: var(--text-primary);
-    border-color: rgba(232, 93, 111, 0.4);
+    border-color: var(--focus-accent-border);
     background: rgba(232, 93, 111, 0.12);
 }
 
@@ -708,6 +699,24 @@ body {
     color: #f59e0b;
     font-size: 11px;
     font-family: 'JetBrains Mono', monospace;
+}
+
+.scroll-fade-y {
+    --scroll-fade-edge: 32px;
+    -webkit-mask-image: linear-gradient(
+        180deg,
+        transparent 0,
+        black var(--scroll-fade-edge),
+        black calc(100% - var(--scroll-fade-edge)),
+        transparent 100%
+    );
+            mask-image: linear-gradient(
+        180deg,
+        transparent 0,
+        black var(--scroll-fade-edge),
+        black calc(100% - var(--scroll-fade-edge)),
+        transparent 100%
+    );
 }
 
 .page-header .spacer { flex: 1; }
@@ -729,10 +738,7 @@ body {
     flex-wrap: wrap;
     row-gap: 10px;
     pointer-events: none;
-    /* Fade fully to transparent at the bottom edge so no hard border
-       shows up between the scrim and the transcript. The previous stop
-       at 0.32 alpha left a visible discontinuity; fading to 0 produces
-       a clean scroll-under effect at every scroll position. */
+    /* Fade to transparent so the transcript scrolls under without a hard edge. */
     background: linear-gradient(
         180deg,
         rgba(13, 11, 15, 0.92) 0%,
@@ -742,8 +748,7 @@ body {
     );
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
-    /* Soft-mask the blur to fall off in lockstep with the gradient,
-       otherwise the glass effect creates its own visible hard edge. */
+    /* Mask blur with the gradient to avoid a glass-edge seam. */
     -webkit-mask-image: linear-gradient(180deg, black 0%, black 70%, transparent 100%);
             mask-image: linear-gradient(180deg, black 0%, black 70%, transparent 100%);
 }
@@ -798,7 +803,6 @@ body {
     background: rgba(239, 68, 68, 0.08);
 }
 
-/* Budget pill in chat header */
 .chat-budget-pill {
     appearance: none;
     display: flex;
@@ -850,42 +854,8 @@ body {
     width: 0;
 }
 
-/* Evolution sub-tabs */
-.evo-subtabs {
-    display: flex;
-    gap: 4px;
-    padding: 0 4px;
-}
-
-.evo-subtab {
-    padding: 6px 16px;
-    border: 1px solid rgba(201, 53, 69, 0.10);
-    border-radius: 999px;
-    background: rgba(201, 53, 69, 0.03);
-    color: var(--text-secondary);
-    font-size: 12px;
-    font-weight: 600;
-    font-family: inherit;
-    cursor: pointer;
-    transition: all 0.15s;
-}
-
-.evo-subtab:hover {
-    border-color: rgba(201, 53, 69, 0.22);
-    background: rgba(201, 53, 69, 0.08);
-    color: var(--text-primary);
-}
-
-.evo-subtab.active {
-    border-color: rgba(201, 53, 69, 0.38);
-    background: rgba(201, 53, 69, 0.14);
-    color: var(--accent-light);
-}
-
-/* Status badge */
 .status-badge {
     padding: 4px 10px;
-    border-radius: 12px;
     font-size: 11px;
     font-weight: 500;
     background: rgba(26, 21, 32, 0.78);
@@ -905,7 +875,6 @@ body {
     50% { opacity: 0.5; }
 }
 
-/* Typing indicator */
 .typing-bubble { opacity: 0.7; }
 .typing-dots {
     display: inline-flex;
@@ -927,7 +896,6 @@ body {
     30% { transform: translateY(-6px); opacity: 1; }
 }
 
-/* Web onboarding overlay */
 .onboarding-overlay {
     position: fixed;
     inset: 0;
@@ -953,6 +921,30 @@ body {
     background: transparent;
 }
 
+.onboarding-restart-card {
+    position: relative;
+    z-index: 1;
+    align-self: center;
+    width: min(460px, calc(100vw - 32px));
+    padding: 24px;
+    border: 1px solid var(--divider);
+    border-radius: var(--radius-sm);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    box-shadow: 0 24px 80px rgba(0, 0, 0, 0.38);
+}
+
+.onboarding-restart-card h2 {
+    margin: 0 0 10px;
+    font-size: 20px;
+}
+
+.onboarding-restart-card p {
+    margin: 0 0 18px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
 @media (max-width: 980px) {
     .files-layout {
         grid-template-columns: 1fr;
@@ -974,7 +966,6 @@ body {
     }
 }
 
-/* Chat page */
 #chat-messages {
     flex: 1;
     min-height: 0;
@@ -1006,7 +997,7 @@ body {
 }
 
 .chat-bubble.assistant {
-    background: linear-gradient(135deg, rgba(201, 53, 69, 0.18), rgba(120, 24, 36, 0.18));
+    background: linear-gradient(135deg, var(--accent-18), rgba(120, 24, 36, 0.18));
     border: 1px solid rgba(240, 122, 134, 0.24);
     box-shadow: inset 0 1px 0 rgba(255, 214, 220, 0.05);
     align-self: flex-start;
@@ -1036,9 +1027,88 @@ body {
     white-space: pre-wrap;
 }
 
+.chat-photo {
+    max-width: 100%;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+}
+
 .chat-bubble.user .message { color: rgba(215, 230, 255, 0.96); }
 .chat-bubble.assistant .message { color: rgba(255, 235, 238, 0.96); }
 .chat-bubble.system .message { color: rgba(255, 240, 210, 0.78); }
+
+.chat-bubble.system[data-system-type="skill_review"] {
+    padding: 0;
+    overflow: hidden;
+}
+
+.chat-bubble.system[data-system-type="skill_review"] .sender,
+.chat-bubble.system[data-system-type="skill_review"] .msg-time {
+    margin-left: 14px;
+    margin-right: 14px;
+}
+
+.chat-bubble.system[data-system-type="skill_review"] .sender {
+    margin-top: 10px;
+}
+
+.chat-bubble.system[data-system-type="skill_review"] .message {
+    white-space: normal;
+}
+
+.skill-review-disclosure {
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.skill-review-summary-button {
+    width: 100%;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    padding: 11px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    text-align: left;
+}
+
+.skill-review-summary-button:hover {
+    background: rgba(245, 158, 11, 0.08);
+}
+
+.skill-review-summary-main {
+    color: rgba(255, 244, 220, 0.96);
+    font-weight: 650;
+}
+
+.skill-review-summary-side {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    color: rgba(255, 240, 210, 0.66);
+    font-size: 12px;
+}
+
+.skill-review-meta {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.skill-review-toggle-label {
+    flex-shrink: 0;
+    color: rgba(245, 158, 11, 0.95);
+    font-weight: 650;
+}
+
+.skill-review-full {
+    padding: 0 14px 14px;
+    color: rgba(255, 240, 210, 0.82);
+    white-space: pre-wrap;
+}
 
 .chat-bubble.pending {
     opacity: 0.78;
@@ -1079,7 +1149,7 @@ body {
     text-align: left;
 }
 
-/* Progress (thinking) messages — subdued and smaller than regular bubbles */
+/* Subdued progress messages. */
 .chat-bubble.progress {
     border-left: 2px solid rgba(220, 38, 38, 0.2);
     padding-left: 14px;
@@ -1105,16 +1175,16 @@ body {
     max-width: calc(100% - 20%);
     margin-right: 20%;
     padding: 0;
-    border-radius: 16px;
-    border: 1px solid rgba(201, 53, 69, 0.15);
-    background: rgba(201, 53, 69, 0.04);
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--accent-dim);
+    background: var(--accent-04);
     backdrop-filter: blur(12px);
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18), inset 0 1px 0 rgba(255, 200, 210, 0.03);
     overflow: hidden;
 }
 
 .chat-live-card[data-finished="1"] {
-    border-color: rgba(201, 53, 69, 0.08);
+    border-color: var(--accent-08);
     background: rgba(201, 53, 69, 0.02);
 }
 
@@ -1176,74 +1246,45 @@ body {
     text-transform: none;
 }
 
-.chat-live-phase.start,
-.chat-live-phase.calling,
-.chat-live-phase.context,
-.chat-live-phase.progress,
-.chat-live-phase.working,
-.chat-live-phase.thought,
-.chat-live-phase.thinking,
-.chat-live-phase.boot,
-.chat-live-line-phase.start,
-.chat-live-line-phase.calling,
-.chat-live-line-phase.context,
-.chat-live-line-phase.progress,
-.chat-live-line-phase.working,
-.chat-live-line-phase.thought,
-.chat-live-line-phase.thinking,
-.chat-live-line-phase.boot {
+.chat-live-phase:is(.start, .calling, .context, .progress, .working, .thought, .thinking, .boot),
+.chat-live-line-phase:is(.start, .calling, .context, .progress, .working, .thought, .thinking, .boot) {
     color: rgba(248, 130, 140, 0.95);
     border-color: rgba(201, 53, 69, 0.24);
-    background: rgba(201, 53, 69, 0.10);
+    background: var(--accent-10);
 }
 
-/* Active (non-finished) live card: pulse the Working/Thinking phase badge */
-.chat-live-card:not([data-finished="1"]) .chat-live-phase.working,
-.chat-live-card:not([data-finished="1"]) .chat-live-phase.thinking,
-.chat-live-card:not([data-finished="1"]) .chat-live-phase.progress,
-.chat-live-card:not([data-finished="1"]) .chat-live-phase.calling,
-.chat-live-card:not([data-finished="1"]) .chat-live-phase.context {
+.chat-live-card:not([data-finished="1"]) .chat-live-phase:is(.working, .thinking, .progress, .calling, .context) {
     animation: thinking-pulse 1.5s ease-in-out infinite;
 }
 
-.chat-live-phase.done,
-.chat-live-phase.ready,
-.chat-live-phase.ok,
-.chat-live-phase.result,
-.chat-live-phase.usage,
-.chat-live-phase.metrics,
-.chat-live-line-phase.done,
-.chat-live-line-phase.ready,
-.chat-live-line-phase.ok,
-.chat-live-line-phase.result,
-.chat-live-line-phase.usage,
-.chat-live-line-phase.metrics {
+.chat-live-phase:is(.done, .ready, .ok, .result, .usage, .metrics),
+.chat-live-line-phase:is(.done, .ready, .ok, .result, .usage, .metrics),
+.log-entry .log-phase:is(.done, .ready, .ok, .result, .usage, .metrics),
+.evo-runtime-pill.online {
     color: var(--green);
     border-color: rgba(34, 197, 94, 0.22);
     background: rgba(34, 197, 94, 0.10);
 }
 
-.chat-live-phase.warn,
-.chat-live-phase.alive,
-.chat-live-phase.empty,
-.chat-live-line-phase.warn,
-.chat-live-line-phase.alive,
-.chat-live-line-phase.empty {
+.chat-live-phase:is(.warn, .alive, .empty),
+.chat-live-line-phase:is(.warn, .alive, .empty),
+.log-entry .log-phase:is(.warn, .alive, .empty),
+.evo-runtime-pill.starting {
     color: var(--amber);
     border-color: rgba(245, 158, 11, 0.25);
     background: rgba(245, 158, 11, 0.10);
 }
 
-.chat-live-phase.error,
-.chat-live-phase.timeout,
-.chat-live-line-phase.error,
-.chat-live-line-phase.timeout {
+.chat-live-phase:is(.error, .timeout, .lifecycle_error),
+.chat-live-line-phase:is(.error, .timeout, .lifecycle_error),
+.log-entry .log-phase:is(.error, .timeout, .lifecycle_error),
+.evo-runtime-pill.error {
     color: var(--red);
     border-color: rgba(239, 68, 68, 0.25);
     background: rgba(239, 68, 68, 0.10);
 }
 
-/* Inline typing dots inside the live card summary row */
+/* Live-card typing dots. */
 .chat-live-typing {
     display: inline-flex;
     gap: 3px;
@@ -1255,14 +1296,13 @@ body {
     width: 4px;
     height: 4px;
     border-radius: 50%;
-    background: rgba(201, 53, 69, 0.55);
+    background: var(--accent-55);
     animation: typing-bounce 1.4s ease-in-out infinite;
 }
 
 .chat-live-typing span:nth-child(2) { animation-delay: 0.2s; }
 .chat-live-typing span:nth-child(3) { animation-delay: 0.4s; }
 
-/* Hide typing dots when card is finished */
 .chat-live-card[data-finished="1"] .chat-live-typing {
     display: none;
 }
@@ -1339,7 +1379,7 @@ body {
 }
 
 .chat-live-line.expandable {
-    border-radius: 12px;
+    border-radius: var(--radius);
     transition: background 0.18s ease;
 }
 
@@ -1463,7 +1503,7 @@ body {
     border-bottom: 1px solid rgba(255,255,255,0.06);
 }
 
-/* Markdown rendering classes — global, used by renderMarkdown in all contexts */
+/* Global markdown rendering classes. */
 .md-h1 {
     font-size: 16px;
     color: var(--text-primary);
@@ -1491,7 +1531,7 @@ body {
     text-decoration: underline;
 }
 
-/* Table overflow wrapper — prevents wide tables from breaking bubble layout */
+/* Prevent wide tables from breaking bubble layout. */
 .md-table-wrap {
     display: block;
     overflow-x: auto;
@@ -1499,23 +1539,17 @@ body {
     max-width: 100%;
 }
 
-/* Nav spacer (replaces inline style="flex:1") */
 .nav-spacer {
     flex: 1;
 }
 
-/* Mobile responsive — narrow screens only; desktop layout unchanged.
-   NOTE: Rules here apply only to selectors whose base definitions appear
-   BEFORE this block. Overrides for selectors defined later live in the
-   second @media (max-width: 640px) block at the END of this file so they
-   reliably win without !important. */
+/* Early mobile overrides; late-defined selectors are handled at file end. */
 @media (max-width: 640px) {
-    /* Prevent iOS zoom on input focus */
+    /* Prevent iOS zoom on input focus. */
     textarea, input[type="text"], input[type="password"], input[type="email"], select {
         font-size: 16px !important;
     }
 
-    /* Compact chat bubbles on small screens */
     .chat-bubble {
         max-width: 92%;
     }
@@ -1531,12 +1565,7 @@ body {
         margin-right: 0;
     }
 
-    /* Nav-rail — convert vertical sidebar to horizontal bottom bar.
-       v5.7.0: ``justify-content: safe center`` centers the row when all
-       buttons fit (~6 buttons × 60px ≈ 360-410px), and falls back to
-       ``flex-start`` when content overflows so leftmost items remain
-       reachable on narrow phones. ``min-width: 60px`` on .nav-btn keeps
-       labels like "Dashboard" from truncating in space-evenly mode. */
+    /* Bottom nav uses safe center so overflow keeps leftmost items reachable. */
     #nav-rail {
         flex-direction: row;
         top: auto;
@@ -1596,15 +1625,7 @@ body {
         padding-bottom: calc(62px + env(safe-area-inset-bottom, 0px));
     }
 
-    /* Chat header — keep the floating-overlay glass treatment on mobile too
-       so the same soft-gradient + masked-blur scroll-under effect holds
-       across viewports. v5.6.x had switched it to ``position: static`` to
-       avoid hiding the first chat message under wrapped action rows, but
-       that introduced a hard "black bar" edge above the transcript. We
-       restore the overlay and instead reduce the row gap so the header
-       stays compact on phones; #chat-messages already reserves
-       ``padding-top: 12px`` and the absolute composer compensates for any
-       wrapping via its own padding. */
+    /* Preserve floating glass header on mobile; compact row gap prevents overlap. */
     .chat-page-header {
         row-gap: 6px;
     }
@@ -1633,13 +1654,7 @@ body {
 }
 
 #chat-input-area {
-    /* Hybrid translucent overlay (v5.7.0). Mirrors the ``.chat-page-header``
-       pattern at the bottom of the chat page: a compact absolute-positioned
-       wrapper with a soft 4-stop gradient that only darkens transcript
-       text as it approaches the composer. The actual frosted blur lives on
-       the input field itself, not this wrapper, so the fade never becomes a
-       tall smeared glass band. ``#chat-messages`` reserves enough bottom
-       padding so the last bubble is reachable above the composer surface. */
+    /* Bottom fade darkens transcript before the frosted input without trapping scroll. */
     display: flex;
     flex-direction: column;
     gap: 4px;
@@ -1672,7 +1687,7 @@ body {
     gap: 6px;
 }
 
-/* Attach button sits INSIDE the textarea on the left */
+/* Attach button sits inside the textarea. */
 .chat-attach-btn {
     position: absolute;
     left: 10px;
@@ -1708,11 +1723,15 @@ body {
 .chat-attachment-preview {
     display: none;
     padding: 4px 8px 2px;
+    max-height: 112px;
+    overflow-y: auto;
 }
 
 .chat-attachment-preview.visible {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
 }
 
 .attach-badge {
@@ -1730,18 +1749,11 @@ body {
     max-width: 100%;
 }
 
-.attach-thumb {
-    width: 24px;
-    height: 24px;
-    object-fit: cover;
-    border-radius: var(--radius-xs);
-}
-
 .attach-name {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    max-width: 200px;
+    max-width: min(220px, 56vw);
 }
 
 .attach-remove {
@@ -1767,12 +1779,7 @@ body {
     background: rgba(26, 21, 32, 0.55);
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
-    /* The textarea is the focal "glass" element. Its own dense blur
-       (20px) together with a moderately translucent fill (0.55) is what
-       makes message bubbles read THROUGH the input field as a frosted
-       surface. The wrapper's mask-faded blur handles the scroll-under
-       gradient zone above the textarea, so the textarea itself does not
-       need to carry the wrapper's gradient. */
+    /* Textarea is the primary frosted input surface. */
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
     color: var(--text-primary);
     font-size: 15px;
@@ -1786,12 +1793,11 @@ body {
 #chat-input:focus {
     border-color: rgba(232, 93, 111, 0.4);
     background: rgba(26, 21, 32, 0.85);
-    /* Focus ring only — no ambient halo. */
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 0 0 3px rgba(201, 53, 69, 0.10);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 0 0 3px var(--accent-10);
 }
 #chat-input::placeholder { color: var(--text-muted); }
 
-/* Send group: positions the Send button + chevron as an absolute unit */
+/* Absolute send button + chevron group. */
 .chat-send-group {
     position: absolute;
     right: 8px;
@@ -1807,7 +1813,7 @@ body {
     opacity: 0.72;
 }
 
-/* --send-color: resolved per send-mode via dataset attribute below */
+/* --send-color resolves from data-send-mode. */
 .chat-send-inline {
     border: none;
     background: transparent;
@@ -1827,14 +1833,14 @@ body {
 }
 .chat-send-inline:hover {
     opacity: 1;
-    background: rgba(201, 53, 69, 0.10);
+    background: var(--accent-10);
 }
 .chat-send-inline:active {
-    background: rgba(201, 53, 69, 0.18);
+    background: var(--accent-18);
     opacity: 1;
 }
 
-/* Plan mode overrides — toggled via data-send-mode="plan" on the group */
+/* Plan-mode send color. */
 .chat-send-group[data-send-mode="plan"] .chat-send-inline {
     color: var(--amber);
     opacity: 0.85;
@@ -1848,7 +1854,7 @@ body {
     opacity: 1;
 }
 
-/* Chevron button — always visible for touch-screen accessibility */
+/* Chevron remains visible for touch accessibility. */
 .chat-send-chevron {
     border: none;
     border-left: 1px solid rgba(201, 53, 69, 0.20);
@@ -1866,7 +1872,7 @@ body {
 .chat-send-chevron:hover,
 .chat-send-chevron.active {
     opacity: 1;
-    background: rgba(201, 53, 69, 0.10);
+    background: var(--accent-10);
 }
 .chat-send-group[data-send-mode="plan"] .chat-send-chevron {
     color: var(--amber);
@@ -1878,7 +1884,6 @@ body {
     opacity: 1;
 }
 
-/* Dropdown panel */
 .chat-send-dropdown {
     display: none;
     position: absolute;
@@ -1914,30 +1919,85 @@ body {
     opacity: 0.85;
 }
 .chat-send-dropdown-item:hover {
-    background: rgba(201, 53, 69, 0.12);
+    background: var(--accent-12);
     color: var(--accent);
     opacity: 1;
 }
-/* Active-mode marker: the currently selected mode item gets a subtle tint */
+/* Active send-mode tint. */
 .chat-send-dropdown-item[data-mode-active="true"] {
     opacity: 1;
     font-weight: 600;
 }
-/* Plan item tinted amber when it's the active mode */
 #chat-dropdown-plan[data-mode-active="true"] {
     color: var(--amber);
 }
-/* Send item tinted accent when it's the active mode */
 #chat-dropdown-send[data-mode-active="true"] {
     color: var(--accent);
 }
 
-/* Shared UI components (stat cards used by Costs, section titles by Evolution) */
+/* Shared UI components. */
+.ui-card,
+:where(.settings-shell .form-section, .settings-card, .settings-provider-card, .settings-extension-section, .mcp-server-card, .settings-model-card, .settings-effort-card, .settings-custom-secret-row, .skills-card, .marketplace-card, .widgets-card, .updates-card, .costs-budget-card) {
+    border: 1px solid var(--ui-card-border);
+    border-radius: var(--radius);
+    background: var(--ui-card-bg);
+}
+
+.ui-card-soft,
+:where(.settings-model-card, .settings-effort-card, .settings-custom-secret-row, .skills-card, .marketplace-card, .widgets-card) {
+    background: var(--ui-card-bg-soft);
+}
+
+.ui-chip,
+:where(.status-badge, .skills-status-chip, .mcp-server-status, .evo-runtime-pill, .evo-runtime-chip) {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border-radius: 999px;
+    white-space: nowrap;
+}
+
+.ui-status,
+:where(.settings-inline-status, .marketplace-status, .wizard-runtime-status) {
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.45;
+}
+
+.ui-status[data-tone="ok"],
+:where(.settings-inline-status[data-tone="ok"], .settings-test-result[data-tone="ok"], .marketplace-status[data-tone="ok"]) { color: var(--ui-tone-ok); }
+.ui-status[data-tone="warn"],
+:where(.settings-inline-status[data-tone="warn"], .settings-test-result[data-tone="warn"], .marketplace-status[data-tone="warn"]) { color: var(--ui-tone-warn); }
+.ui-status[data-tone="danger"],
+.ui-status[data-tone="error"],
+:where(.settings-inline-status[data-tone="error"], .settings-test-result[data-tone="error"], .marketplace-status[data-tone="danger"]) { color: var(--ui-tone-danger); }
+
+.ui-modal-backdrop,
+:where(.marketplace-modal-backdrop) {
+    position: fixed;
+    inset: 0;
+    z-index: 90;
+    display: flex;
+    justify-content: center;
+    overflow-y: auto;
+    background: rgba(0, 0, 0, 0.55);
+}
+
+.ui-modal,
+:where(.marketplace-modal) {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--surface-border);
+    background: var(--ui-modal-bg);
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+
 .stat-card {
     background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.02));
     border-radius: var(--radius);
     padding: 16px 20px;
-    border: 1px solid rgba(201, 53, 69, 0.08);
+    border: 1px solid var(--accent-08);
     backdrop-filter: blur(14px);
     box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
     transition: border-color 0.3s;
@@ -1970,47 +2030,11 @@ body {
     margin: 16px 0 12px;
 }
 
-/* Toggle switch */
-.toggle-wrapper {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-
-.toggle {
-    width: 44px;
-    height: 24px;
-    border-radius: 12px;
-    background: rgba(255, 255, 255, 0.12);
-    border: none;
-    cursor: pointer;
-    position: relative;
-    transition: background 0.2s;
-}
-
-.toggle.on { background: var(--accent); }
-
-.toggle::after {
-    content: '';
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    background: white;
-    position: absolute;
-    top: 3px;
-    left: 3px;
-    transition: transform 0.2s;
-}
-.toggle.on::after { transform: translateX(20px); }
-
-.toggle-label { font-size: 13px; color: var(--text-secondary); }
-
-/* Buttons */
 .btn {
-    padding: 8px 16px;
+    padding: var(--button-padding-y) var(--button-padding-x);
     border-radius: var(--radius-sm);
     border: 1px solid transparent;
-    font-size: 13px;
+    font-size: var(--button-font-size);
     font-weight: 500;
     font-family: inherit;
     cursor: pointer;
@@ -2018,7 +2042,7 @@ body {
     align-items: center;
     justify-content: center;
     gap: 6px;
-    min-height: 34px;
+    min-height: var(--button-min-height);
     text-align: center;
     transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
 }
@@ -2029,7 +2053,7 @@ body {
 
 .btn:active {
     transform: scale(0.98);
-    box-shadow: 0 0 0 3px rgba(201, 53, 69, 0.08);
+    box-shadow: 0 0 0 3px var(--accent-08);
 }
 
 .btn:disabled {
@@ -2045,7 +2069,7 @@ body {
     border-color: rgba(201, 53, 69, 0.20);
 }
 .btn-primary:hover {
-    background: rgba(201, 53, 69, 0.25);
+    background: var(--accent-25);
     border-color: rgba(232, 93, 111, 0.35);
 }
 .btn-secondary {
@@ -2170,13 +2194,6 @@ body {
     padding: 0;
 }
 
-.divider {
-    height: 1px;
-    background: var(--divider);
-    margin: 20px 0;
-}
-
-/* Logs */
 .logs-filters {
     display: flex;
     flex-wrap: wrap;
@@ -2185,15 +2202,13 @@ body {
     align-items: center;
 }
 
-/* v5.7.0: the embedded-Logs Clear button lives inside the filters row
-   (right-aligned) instead of in a duplicate inner page header. */
 .logs-inline-clear {
     margin-left: auto;
 }
 
 .filter-chip {
     padding: 4px 12px;
-    border-radius: 16px;
+    border-radius: var(--radius-lg);
     border: 1px solid var(--divider);
     background: transparent;
     color: var(--text-secondary);
@@ -2223,7 +2238,7 @@ body {
 
 .log-entry {
     padding: 10px 12px;
-    border-radius: 8px;
+    border-radius: var(--radius-sm);
     display: flex;
     flex-direction: column;
     gap: 6px;
@@ -2267,43 +2282,10 @@ body {
     background: rgba(255,255,255,0.04);
 }
 
-.log-entry .log-phase.start,
-.log-entry .log-phase.calling,
-.log-entry .log-phase.context,
-.log-entry .log-phase.progress,
-.log-entry .log-phase.thought,
-.log-entry .log-phase.boot,
-.log-entry .log-phase.working,
-.log-entry .log-phase.thinking {
+.log-entry .log-phase:is(.start, .calling, .context, .progress, .thought, .boot, .working, .thinking) {
     color: rgba(248, 130, 140, 0.95);
-    border-color: rgba(201, 53, 69, 0.25);
-    background: rgba(201, 53, 69, 0.10);
-}
-
-.log-entry .log-phase.done,
-.log-entry .log-phase.ready,
-.log-entry .log-phase.ok,
-.log-entry .log-phase.result,
-.log-entry .log-phase.usage,
-.log-entry .log-phase.metrics {
-    color: var(--green);
-    border-color: rgba(34, 197, 94, 0.22);
-    background: rgba(34, 197, 94, 0.10);
-}
-
-.log-entry .log-phase.warn,
-.log-entry .log-phase.alive,
-.log-entry .log-phase.empty {
-    color: var(--amber);
-    border-color: rgba(245, 158, 11, 0.25);
-    background: rgba(245, 158, 11, 0.10);
-}
-
-.log-entry .log-phase.error,
-.log-entry .log-phase.timeout {
-    color: var(--red);
-    border-color: rgba(239, 68, 68, 0.25);
-    background: rgba(239, 68, 68, 0.10);
+    border-color: var(--accent-25);
+    background: var(--accent-10);
 }
 
 .log-entry .log-headline {
@@ -2364,7 +2346,7 @@ body {
 .log-raw {
     margin: 0;
     padding: 10px;
-    border-radius: 8px;
+    border-radius: var(--radius-sm);
     background: rgba(0, 0, 0, 0.25);
     color: var(--text-secondary);
     overflow-x: auto;
@@ -2380,7 +2362,7 @@ body {
 .log-type.consciousness { color: #d68cff; }
 
 .log-task-card {
-    border-color: rgba(201, 53, 69, 0.12);
+    border-color: var(--accent-12);
     background:
         linear-gradient(135deg, rgba(201, 53, 69, 0.07), rgba(255,255,255,0.01)),
         rgba(255,255,255,0.015);
@@ -2413,7 +2395,7 @@ body {
 
 .log-task-event {
     padding: 8px 10px;
-    border-radius: 8px;
+    border-radius: var(--radius-sm);
     background: rgba(0, 0, 0, 0.16);
     border: 1px solid rgba(255,255,255,0.04);
     display: flex;
@@ -2421,13 +2403,11 @@ body {
     gap: 6px;
 }
 
-/* Scrollbar */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(201, 53, 69, 0.2); border-radius: 3px; }
+::-webkit-scrollbar-thumb { background: rgba(201, 53, 69, 0.2); border-radius: var(--radius-xs); }
 ::-webkit-scrollbar-thumb:hover { background: rgba(201, 53, 69, 0.35); }
 
-/* Reconnecting overlay */
 #reconnect-overlay {
     display: none;
     position: fixed;
@@ -2453,7 +2433,6 @@ body {
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* Cost tables */
 .cost-table {
     width: 100%;
     border-collapse: collapse;
@@ -2476,11 +2455,7 @@ body {
     background: rgba(255,255,255,0.03);
 }
 
-/* ---------------------------------------------------------------------------
- * Settings — LAN reachability hint
- * Rendered by web/modules/settings.js::_renderNetworkHint into the
- * #settings-lan-hint container inside the Network Gate section.
- * --------------------------------------------------------------------------- */
+/* Settings LAN reachability hint. */
 .settings-lan-hint {
     margin-top: 8px;
     padding: 8px 12px;
@@ -2495,24 +2470,11 @@ body {
 .settings-lan-hint[data-tone="info"] { border-color: rgba(100,150,220,0.25); }
 .settings-lan-hint a { color: inherit; text-decoration: underline; opacity: 0.9; }
 .btn-sm {
-    padding: 4px 12px;
-    font-size: 12px;
+    padding: calc(var(--button-padding-y) - 4px) calc(var(--button-padding-x) - 4px);
+    font-size: calc(var(--button-font-size) - 1px);
     min-height: 28px;
 }
 
-.btn-md {
-    padding: 8px 16px;
-    font-size: 13px;
-    min-height: 34px;
-}
-
-.btn-lg {
-    padding: 10px 18px;
-    font-size: 14px;
-    min-height: 42px;
-}
-
-/* Evolution Page */
 .evo-refresh-btn {
     min-width: 92px;
 }
@@ -2529,9 +2491,9 @@ body {
 .evo-runtime-card,
 .evo-chart-wrap {
     background:
-        linear-gradient(180deg, rgba(201, 53, 69, 0.05), rgba(255, 255, 255, 0.02)),
+        linear-gradient(180deg, var(--accent-05), rgba(255, 255, 255, 0.02)),
         rgba(255, 255, 255, 0.02);
-    border: 1px solid rgba(201, 53, 69, 0.12);
+    border: 1px solid var(--accent-12);
     border-radius: var(--radius-lg);
     box-shadow: 0 14px 36px rgba(0, 0, 0, 0.18);
     backdrop-filter: blur(14px);
@@ -2565,43 +2527,18 @@ body {
     gap: 8px;
 }
 
-/* v5.7.0: when Evolution is embedded in the Dashboard tab strip, the
-   "Refresh" button + status badge that used to live in a duplicate
-   inner ".page-header" relocate into the runtime card head, sitting
-   alongside the existing pills cluster. */
+/* Runtime-card head hosts embedded Evolution controls. */
 .evo-runtime-controls {
     align-items: center;
 }
 
 .evo-runtime-pill,
 .evo-runtime-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
     padding: 6px 10px;
-    border-radius: 999px;
     border: 1px solid rgba(255, 255, 255, 0.08);
     background: rgba(255, 255, 255, 0.04);
     color: var(--text-secondary);
     font-size: 12px;
-}
-
-.evo-runtime-pill.online {
-    color: var(--green);
-    border-color: rgba(34, 197, 94, 0.22);
-    background: rgba(34, 197, 94, 0.10);
-}
-
-.evo-runtime-pill.starting {
-    color: var(--amber);
-    border-color: rgba(245, 158, 11, 0.25);
-    background: rgba(245, 158, 11, 0.10);
-}
-
-.evo-runtime-pill.error {
-    color: var(--red);
-    border-color: rgba(239, 68, 68, 0.25);
-    background: rgba(239, 68, 68, 0.10);
 }
 
 .evo-runtime-chip strong {
@@ -2645,7 +2582,6 @@ body {
     }
 }
 
-/* About page */
 .about-body {
     display: flex;
     flex-direction: column;
@@ -2670,19 +2606,14 @@ body {
 .about-links a { color: var(--accent); text-decoration: none; }
 .about-footer { margin-top: auto; padding-top: 32px; color: var(--text-muted); font-size: 12px; }
 
-/* Costs page layout */
 .costs-scroll { overflow-y: auto; flex: 1; padding: 16px 20px; }
 .costs-budget-card {
-    background: rgba(26, 21, 32, 0.72);
     backdrop-filter: blur(12px);
-    border: 1px solid rgba(201, 53, 69, 0.18);
-    border-radius: 18px;
     padding: 20px 24px;
     margin-bottom: 20px;
 }
 .costs-budget-title { font-size: 15px; font-weight: 600; margin: 0; color: var(--text-primary); }
-/* v5.7.0: budget card head row hosts the title plus (when costs is
-   embedded in the Dashboard tab strip) the relocated Refresh button. */
+/* Budget card head row hosts title plus embedded Refresh. */
 .costs-budget-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
 .costs-budget-refresh { flex: 0 0 auto; }
 .costs-budget-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px 20px; margin-bottom: 16px; }
@@ -2705,10 +2636,12 @@ body {
 .cost-cell-right { text-align: right; }
 .cost-top-model { font-size: 12px; }
 .cost-bar-cell { width: 60px; }
-.cost-bar { background: var(--accent); height: 6px; border-radius: var(--radius-xs); opacity: 0.7; }
+.cost-bar { width: 60px; height: 6px; border: 0; border-radius: var(--radius-xs); overflow: hidden; opacity: 0.7; }
+.cost-bar::-webkit-progress-bar { background: rgba(255, 255, 255, 0.08); }
+.cost-bar::-webkit-progress-value { background: var(--accent); }
+.cost-bar::-moz-progress-bar { background: var(--accent); }
 .cost-empty-cell { color: var(--text-muted); text-align: center; }
 
-/* Updates panel */
 .updates-scroll {
     flex: 1;
     min-height: 0;
@@ -2720,10 +2653,7 @@ body {
 }
 
 .updates-card {
-    background: rgba(26, 21, 32, 0.72);
     backdrop-filter: blur(12px);
-    border: 1px solid rgba(201, 53, 69, 0.14);
-    border-radius: 18px;
     padding: 18px;
 }
 
@@ -2739,9 +2669,7 @@ body {
     flex: 1 1 auto;
 }
 
-/* v5.7.0: actions cluster (status badge + relocated Check-for-updates
-   button) sits to the right of the head row, replacing the duplicate
-   inner page-header that used to host the button. */
+/* Updates actions cluster sits in the head row. */
 .updates-head-actions {
     display: flex;
     align-items: center;
@@ -2764,7 +2692,6 @@ body {
     margin-top: 12px;
 }
 
-/* Dashboard */
 #page-dashboard {
     min-height: 0;
 }
@@ -2778,37 +2705,7 @@ body {
     overflow: hidden;
 }
 
-.dashboard-tabs {
-    display: flex;
-    gap: 10px;
-    padding: 8px 0 12px;
-    overflow-x: auto;
-    scrollbar-width: none;
-}
-
-.dashboard-tabs::-webkit-scrollbar {
-    display: none;
-}
-
-.dashboard-tab {
-    flex: 0 0 auto;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    background: rgba(255, 255, 255, 0.03);
-    color: var(--text-secondary);
-    border-radius: 999px;
-    padding: 9px 16px;
-    font: inherit;
-    font-size: 13px;
-    font-weight: 600;
-    cursor: pointer;
-}
-
-.dashboard-tab:hover,
-.dashboard-tab.active {
-    color: var(--text-primary);
-    border-color: rgba(232, 93, 111, 0.4);
-    background: rgba(232, 93, 111, 0.12);
-}
+/* Dashboard tabs inherit shared .app-tab* styling. */
 
 .dashboard-panels,
 .dashboard-panel {
@@ -2817,14 +2714,7 @@ body {
     overflow: hidden;
 }
 
-/* v5.7.0 scroll-chain fix: ``.dashboard-panels`` is the parent of every
-   embedded sub-panel. Without ``display: flex; flex-direction: column;``
-   the active panel's ``flex: 1; min-height: 0`` collapses to content
-   height, which kills overflow scrolling for Logs / Updates / Costs
-   (and the 3-column Updates Tags view). Evolution previously bypassed
-   the broken chain via an explicit ``height: calc(var(--vvh) - 120px)``
-   on ``.evolution-container`` — that rule stays as a belt-and-braces.
-   With this single rule the sub-panel's flex chain is intact end-to-end. */
+/* Dashboard panels own the scroll-chain for embedded sub-panels. */
 .dashboard-panels {
     display: flex;
     flex-direction: column;
@@ -2845,15 +2735,6 @@ body {
     min-height: 0;
     flex-direction: column;
     overflow: hidden;
-}
-
-/* Evolution Versions sub-tab layout */
-.evo-versions-content {
-    display: none;
-    flex: 1;
-    flex-direction: column;
-    overflow: hidden;
-    padding: 20px;
 }
 
 .evo-versions-header {
@@ -2903,7 +2784,6 @@ body {
     flex: 1;
 }
 
-/* Extra-small button variant */
 .btn-xs {
     padding: 2px 8px;
     font-size: 11px;
@@ -2914,28 +2794,30 @@ body {
     color: var(--red);
 }
 
-/* ------------------------------------------------------------------ */
-/* Phase 5: Skills page                                               */
-/* ------------------------------------------------------------------ */
-#page-skills {
+/* Skills page. */
+#page-skills,
+#page-widgets {
+    flex-direction: column;
+    min-height: 0;
     padding: 16px 24px;
+    overflow: hidden;
+}
+
+.skills-scroll,
+.widgets-scroll {
+    flex: 1;
+    min-height: 0;
     overflow-y: auto;
+    padding-right: 2px;
 }
 
-.skills-header h2 {
-    margin: 0 0 6px 0;
+.skills-search-chrome {
+    flex: 0 0 auto;
+    margin: 2px 0 12px;
 }
 
-.skills-header .muted {
-    margin: 0 0 12px 0;
-    color: rgba(250, 250, 250, 0.55);
-}
-
-.skills-controls {
-    display: flex;
-    gap: 12px;
-    align-items: center;
-    margin-bottom: 14px;
+.skills-search-chrome[hidden] {
+    display: none !important;
 }
 
 .skills-list {
@@ -2944,17 +2826,8 @@ body {
     gap: 12px;
 }
 
-/* v5.2.3: redesigned skill card — calmer hierarchy, single status
- * chip, real toggle switch, technical detail collapsed under a
- * disclosure. The previous wall-of-badges design overwhelmed users
- * with developer metadata (NATIVE / PASS / LIVE / ENABLED / GRANT
- * MISSING) competing for attention; this rewrite shows one chip per
- * card and folds everything else into "Show details". */
 .skills-card {
-    border: 1px solid rgba(250, 250, 250, 0.08);
-    border-radius: 12px;
     padding: 16px 18px;
-    background: rgba(255, 255, 255, 0.025);
     display: flex;
     flex-direction: column;
     gap: 12px;
@@ -2986,6 +2859,11 @@ body {
     line-height: 1.45;
 }
 
+.skills-card-installed {
+    margin-top: 5px;
+    font-size: 11.5px;
+}
+
 .skills-card-toggle {
     display: flex;
     align-items: center;
@@ -2996,16 +2874,12 @@ body {
     min-width: 0;
 }
 
-/* v5.2.3: single status chip — the "summary verdict" of the skill.
- * Replaces the old badge cluster (NATIVE / PASS / LIVE / ENABLED). */
 .skills-status-chip {
     padding: 4px 10px;
-    border-radius: 999px;
     font-size: 12px;
     font-weight: 500;
     letter-spacing: 0.01em;
     border: 1px solid transparent;
-    white-space: nowrap;
 }
 
 .skills-status-chip.is-clickable,
@@ -3042,13 +2916,6 @@ body {
     border-color: rgba(250, 250, 250, 0.12);
 }
 
-/* v5.2.3: iOS-style on/off toggle switch.
- * Replaces the previous Enable/Disable button so the on/off action
- * uses an affordance everyone recognizes. The native checkbox stays
- * keyboard-accessible; the visible track + thumb is purely
- * decorative (aria-hidden in the markup). The padding around the
- * track grows the click hit area to ~44x44 (WCAG 2.5.5) without
- * changing the visible track size. */
 .skills-switch {
     position: relative;
     display: inline-flex;
@@ -3118,9 +2985,7 @@ body {
     background: rgba(245, 158, 11, 0.85);
 }
 
-/* v5.2.3: small inline hint shown right under the toggle when the
- * switch is locked by missing review or grants. Replaces the old
- * full-width "Locked: …" pill that competed with the status chip. */
+/* Inline hint for switches locked by review/grants. */
 .skills-lock-hint {
     font-size: 12px;
     color: #fbbf24;
@@ -3136,7 +3001,7 @@ body {
 
 .skills-lock-hint[role="button"]:focus-visible,
 .skills-status-chip[role="button"]:focus-visible {
-    box-shadow: 0 0 0 2px rgba(201, 53, 69, 0.55);
+    box-shadow: 0 0 0 2px var(--accent-55);
 }
 
 .skills-lock-hint::before {
@@ -3153,7 +3018,7 @@ body {
     padding: 6px 10px;
     border-radius: 999px;
     border: 1px solid rgba(201, 53, 69, 0.24);
-    background: rgba(201, 53, 69, 0.08);
+    background: var(--accent-08);
     color: rgba(255, 220, 226, 0.86);
     font-size: 12px;
 }
@@ -3185,12 +3050,9 @@ body {
     vertical-align: -1px;
 }
 
-/* v5.2.3: friendly "Access" panel for skills that need API key grants.
- * Replaces the previous developer-style line "core key grants:
- * requested OPENROUTER_API_KEY; granted none; missing: ..." */
 .skills-access {
     border: 1px solid rgba(250, 250, 250, 0.1);
-    border-radius: 10px;
+    border-radius: var(--radius-md);
     padding: 10px 12px;
     background: rgba(255, 255, 255, 0.02);
     display: flex;
@@ -3239,9 +3101,6 @@ body {
     font-size: 11.5px;
 }
 
-/* v5.2.3: collapsed details disclosure — keeps power-user metadata
- * (permissions, runtime info, version drift, provenance, review
- * findings list) one click away without crowding the card. */
 .skills-details {
     margin-top: 4px;
     border-top: 1px solid rgba(250, 250, 250, 0.06);
@@ -3302,15 +3161,8 @@ body {
 .skills-card-actions {
     display: flex;
     gap: 8px;
-    /* v5.2.3 review-cycle fix: align-items: flex-start so opening the
-     * Show details disclosure does not vertically re-center the
-     * Review/Update/Uninstall buttons mid-row. */
     align-items: flex-start;
     flex-wrap: wrap;
-}
-
-.skills-next-action {
-    min-width: 130px;
 }
 
 .skills-primary-action {
@@ -3325,16 +3177,10 @@ body {
 }
 
 .skills-card-actions .skills-details > summary {
-    /* Match the visual height of the action buttons so summary lines
-     * up neatly with Review/Update/Uninstall on closed state. */
+    /* Match action-button height so closed summaries align. */
     padding: 6px 4px;
 }
 
-/* v5.7.0 kebab menu: anchored popover under the trigger (not a centered
-   modal). The wrapper is position:relative so the dialog can position:
-   absolute inside it under the button. The dialog opens via .show()
-   (non-modal) so the rest of the page stays interactive and there is no
-   ::backdrop dim. */
 .skills-card-menu {
     position: relative;
     display: inline-flex;
@@ -3364,10 +3210,7 @@ body {
 }
 
 .skills-card-menu-dialog {
-    /* Anchored popover (non-modal). position: absolute relative to the
-       wrapper so the menu sits right under the kebab; right: 0 keeps the
-       menu's right edge aligned with the trigger's right edge so it
-       never overflows the card on the right. */
+    /* Anchored non-modal popover aligned to the trigger's right edge. */
     position: absolute;
     top: calc(100% + 6px);
     right: 0;
@@ -3375,7 +3218,7 @@ body {
     margin: 0;
     min-width: 160px;
     padding: 6px;
-    border-radius: 12px;
+    border-radius: var(--radius);
     border: 1px solid rgba(255, 255, 255, 0.08);
     background: rgba(18, 20, 26, 0.96);
     color: var(--text-primary);
@@ -3388,7 +3231,7 @@ body {
     border: 0;
     background: transparent;
     color: var(--text-secondary);
-    border-radius: 8px;
+    border-radius: var(--radius-sm);
     padding: 9px 10px;
     text-align: left;
     cursor: pointer;
@@ -3396,16 +3239,24 @@ body {
     font-size: 12px;
 }
 
+.skills-menu-item:disabled,
+.skills-menu-item.is-disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+.skills-menu-item:disabled:hover,
+.skills-menu-item.is-disabled:hover {
+    background: transparent;
+    color: var(--text-secondary);
+}
+
 .skills-menu-item:hover {
-    background: rgba(201, 53, 69, 0.10);
+    background: var(--accent-10);
     color: var(--text-primary);
 }
 
-/* v5.2.3 review-cycle fix: source chip on the card front face for
- * non-built-in skills. Surfaces P1 "Provenance matters" without
- * recreating the old 5-badge cluster: built-in skills carry no chip
- * (absence is the signal); ClawHub/External/User-repo skills get a
- * small inline pill next to the title. */
+/* Source/provenance chip for non-built-in skills. */
 .skills-source-chip {
     display: inline-block;
     margin-left: 6px;
@@ -3439,7 +3290,7 @@ body {
 
 .skills-badge {
     padding: 2px 8px;
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
     font-size: 11px;
     font-family: 'JetBrains Mono', monospace;
     text-transform: uppercase;
@@ -3451,78 +3302,62 @@ body {
 .skills-badge-warn { background: rgba(245, 158, 11, 0.15); color: #f59e0b; }
 .skills-badge-muted { background: rgba(250, 250, 250, 0.06); color: rgba(250, 250, 250, 0.55); }
 
-.skills-banner {
-    padding: 10px 14px;
-    border-radius: 6px;
-    margin-bottom: 12px;
-    font-size: 13px;
-    border: 1px solid transparent;
+.toast-stack {
+    position: fixed;
+    right: 18px;
+    top: calc(76px + env(safe-area-inset-top));
+    z-index: 120;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 10px;
+    pointer-events: none;
 }
 
-.skills-banner-ok { background: rgba(34, 197, 94, 0.08); border-color: rgba(34, 197, 94, 0.3); color: #22c55e; }
-.skills-banner-danger { background: rgba(239, 68, 68, 0.08); border-color: rgba(239, 68, 68, 0.3); color: #ef4444; }
-.skills-banner-warn { background: rgba(245, 158, 11, 0.08); border-color: rgba(245, 158, 11, 0.3); color: #f59e0b; }
-.skills-banner-muted { background: rgba(250, 250, 250, 0.04); border-color: rgba(250, 250, 250, 0.1); color: rgba(250, 250, 250, 0.7); }
+.toast {
+    max-width: min(420px, calc(100vw - 112px));
+    padding: 11px 14px;
+    border-radius: var(--radius);
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    background: rgba(18, 20, 26, 0.94);
+    color: var(--text-primary);
+    box-shadow: 0 18px 42px rgba(0, 0, 0, 0.34);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    font-size: 13px;
+    line-height: 1.45;
+    pointer-events: auto;
+    cursor: pointer;
+    animation: toast-in 160ms ease-out;
+}
 
-/* ----- Skills tab navigation (Installed / Marketplace) ----- */
+.toast.is-hiding {
+    animation: toast-out 160ms ease-in forwards;
+}
+
+.toast-ok { border-color: rgba(34, 197, 94, 0.28); color: #bbf7d0; }
+.toast-danger { border-color: rgba(239, 68, 68, 0.35); color: #fecaca; }
+.toast-warn { border-color: rgba(245, 158, 11, 0.35); color: #fde68a; }
+.toast-muted,
+.toast-info { color: rgba(250, 250, 250, 0.78); }
+
+@keyframes toast-in {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes toast-out {
+    from { opacity: 1; transform: translateY(0); }
+    to { opacity: 0; transform: translateY(8px); }
+}
 
 .skills-tabs {
-    display: flex;
-    gap: 10px;
     margin-bottom: 14px;
-    padding: 8px 0 12px;
-    overflow-x: auto;
-    border-bottom: none;
-    scrollbar-width: none;
-}
-
-.skills-tabs::-webkit-scrollbar {
-    display: none;
-}
-
-.skills-tab {
-    appearance: none;
-    flex: 0 0 auto;
-    white-space: nowrap;
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    color: var(--text-secondary);
-    cursor: pointer;
-    font: inherit;
-    font-size: 13px;
-    font-weight: 600;
-    padding: 9px 16px;
-    border-radius: 999px;
-    transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
-}
-
-.skills-tab:hover,
-.skills-tab.is-active {
-    color: var(--text-primary);
-    border-color: rgba(232, 93, 111, 0.4);
-    background: rgba(232, 93, 111, 0.12);
-}
-
-.skills-tab-pill {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    margin-left: 6px;
-    padding: 0 6px;
-    min-width: 18px;
-    height: 18px;
-    border-radius: 9px;
-    background: rgba(245, 158, 11, 0.15);
-    color: #f59e0b;
-    font-size: 11px;
-    font-family: 'JetBrains Mono', monospace;
 }
 
 .skills-tab-panel {
     margin-top: 4px;
 }
-
-/* ----- ClawHub Marketplace shell ----- */
 
 .marketplace-shell {
     display: flex;
@@ -3557,21 +3392,6 @@ body {
     background: rgba(255, 255, 255, 0.05);
 }
 
-.marketplace-select,
-.marketplace-input {
-    padding: 6px 10px;
-    border: 1px solid rgba(250, 250, 250, 0.1);
-    background: rgba(255, 255, 255, 0.03);
-    color: inherit;
-    border-radius: 6px;
-    font: inherit;
-    font-size: 13px;
-}
-
-.marketplace-input {
-    flex: 0 1 220px;
-}
-
 .marketplace-checkbox {
     display: inline-flex;
     align-items: center;
@@ -3585,10 +3405,6 @@ body {
     font-size: 12px;
 }
 
-.marketplace-status[data-tone="ok"] { color: #22c55e; }
-.marketplace-status[data-tone="warn"] { color: #f59e0b; }
-.marketplace-status[data-tone="danger"] { color: #ef4444; }
-
 .marketplace-results {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
@@ -3596,10 +3412,7 @@ body {
 }
 
 .marketplace-card {
-    border: 1px solid rgba(250, 250, 250, 0.08);
-    border-radius: var(--radius-lg);
     padding: 14px;
-    background: rgba(255, 255, 255, 0.02);
     display: flex;
     flex-direction: column;
     gap: 10px;
@@ -3608,10 +3421,7 @@ body {
 .marketplace-card.is-working {
     border-color: rgba(245, 158, 11, 0.35);
     background: linear-gradient(135deg, rgba(245, 158, 11, 0.08), rgba(255, 255, 255, 0.02));
-    /* v5.7.0: gentle pulsing background so a long install (download +
-       adapt + review + deps) reads as actively in progress rather than
-       a frozen card. Animation runs only while the card carries the
-       is-working class. */
+    /* Pulse during long install/adapt/review/deps work. */
     animation: marketplace-card-pulse 2.4s ease-in-out infinite;
 }
 
@@ -3621,11 +3431,7 @@ body {
     100% { background: linear-gradient(135deg, rgba(245, 158, 11, 0.06), rgba(255, 255, 255, 0.02)); }
 }
 
-/* v5.7.0: marketplace filter row + Official-only toggle (replaces the
-   awkward inline native <input type="checkbox"> wedged between the search
-   field and the Search button). The toggle visually mirrors the design
-   system's switch surface (track + thumb) but uses a real <input> for
-   keyboard / a11y. */
+/* Marketplace filter row; real input preserves keyboard/a11y. */
 .marketplace-filters {
     display: flex;
     flex-wrap: wrap;
@@ -3658,7 +3464,7 @@ body {
 .marketplace-filter-track {
     width: 36px;
     height: 20px;
-    border-radius: 10px;
+    border-radius: var(--radius-md);
     background: rgba(255, 255, 255, 0.12);
     border: 1px solid rgba(255, 255, 255, 0.06);
     position: relative;
@@ -3808,31 +3614,18 @@ body {
     font-size: 12px;
 }
 
-/* ----- Detail modal ----- */
+/* Detail modal. */
 
 .marketplace-modal-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.55);
-    z-index: 90;
-    display: flex;
     align-items: flex-start;
-    justify-content: center;
     padding: 4vh 16px;
-    overflow-y: auto;
 }
 
 .marketplace-modal {
-    background: var(--bg, #0e0e10);
-    border: 1px solid rgba(250, 250, 250, 0.08);
-    border-radius: 10px;
+    border-radius: var(--radius-md);
     padding: 16px;
     max-width: 900px;
-    width: 100%;
-    display: flex;
-    flex-direction: column;
     gap: 12px;
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
 }
 
 .confirm-dialog {
@@ -3878,134 +3671,12 @@ body {
     gap: 8px;
 }
 
-.marketplace-manifest-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 12px;
-}
-
-.marketplace-manifest-table th {
-    text-align: left;
-    width: 30%;
-    padding: 4px 8px;
-    color: rgba(250, 250, 250, 0.55);
-    font-weight: 500;
-    vertical-align: top;
-}
-
-.marketplace-manifest-table td {
-    padding: 4px 8px;
-    border-top: 1px solid rgba(250, 250, 250, 0.05);
-    word-break: break-word;
-}
-
-.marketplace-manifest-table ul {
-    margin: 0;
-    padding-left: 16px;
-}
-
 .marketplace-block-list h4 { color: #ef4444; }
 .marketplace-block-list ul { margin: 4px 0 0 0; padding-left: 18px; color: #ef4444; font-size: 12px; }
 .marketplace-warn-list h4 { color: #f59e0b; }
 .marketplace-warn-list ul { margin: 4px 0 0 0; padding-left: 18px; color: #f59e0b; font-size: 12px; }
 
-.marketplace-file-list {
-    margin: 0;
-    padding-left: 18px;
-    font-size: 12px;
-    color: rgba(250, 250, 250, 0.7);
-    columns: 2;
-}
-
-.marketplace-skillmd {
-    background: rgba(0, 0, 0, 0.4);
-    border: 1px solid rgba(250, 250, 250, 0.05);
-    border-radius: 6px;
-    padding: 10px;
-    font-size: 12px;
-    max-height: 280px;
-    overflow: auto;
-}
-
-/* v5: rendered Markdown body inside the marketplace detail modal.
-   Uses the same surface as the plain ``<pre>`` fallback but applies
-   typography to make the rendered headings/lists/links readable. */
-.marketplace-skillmd-rendered {
-    background: rgba(0, 0, 0, 0.32);
-    border: 1px solid rgba(250, 250, 250, 0.05);
-    border-radius: 6px;
-    padding: 14px 18px;
-    font-size: 13px;
-    line-height: 1.55;
-    max-height: 360px;
-    overflow: auto;
-}
-.marketplace-skillmd-rendered h1,
-.marketplace-skillmd-rendered h2,
-.marketplace-skillmd-rendered h3,
-.marketplace-skillmd-rendered h4 {
-    margin: 14px 0 6px;
-    line-height: 1.25;
-}
-.marketplace-skillmd-rendered h1 { font-size: 18px; }
-.marketplace-skillmd-rendered h2 { font-size: 16px; }
-.marketplace-skillmd-rendered h3 { font-size: 14px; }
-.marketplace-skillmd-rendered h4 { font-size: 13px; color: var(--text-secondary); }
-.marketplace-skillmd-rendered p { margin: 6px 0; }
-.marketplace-skillmd-rendered ul,
-.marketplace-skillmd-rendered ol { padding-left: 22px; margin: 6px 0; }
-.marketplace-skillmd-rendered code {
-    background: rgba(255, 255, 255, 0.07);
-    padding: 1px 5px;
-    border-radius: 3px;
-    font-size: 12px;
-}
-.marketplace-skillmd-rendered pre {
-    background: rgba(0, 0, 0, 0.4);
-    padding: 10px;
-    border-radius: 5px;
-    overflow-x: auto;
-}
-.marketplace-skillmd-rendered pre code {
-    background: transparent;
-    padding: 0;
-}
-.marketplace-skillmd-rendered a {
-    color: rgba(232, 93, 111, 0.9);
-    text-decoration: underline;
-}
-.marketplace-skillmd-rendered blockquote {
-    border-left: 3px solid rgba(255, 255, 255, 0.16);
-    margin: 6px 0;
-    padding-left: 12px;
-    color: var(--text-secondary);
-}
-
-/* v5: meta strip inside the marketplace detail modal (version pin
-   select + sha snippet + license + homepage link). Items wrap cleanly
-   on narrow viewports. */
-.marketplace-modal-meta {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 12px;
-    align-items: center;
-    margin-top: 6px;
-}
-.marketplace-version-pin {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-}
-.marketplace-version-pin select {
-    background: rgba(26, 21, 32, 0.7);
-    color: var(--text-primary);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 4px;
-    padding: 3px 6px;
-    font-size: 12px;
-}
-
-/* v5: provenance + adapter-warning rows inside Installed-tab cards. */
+/* Installed-card provenance and adapter warnings. */
 .skills-card-provenance {
     display: flex;
     flex-wrap: wrap;
@@ -4027,108 +3698,30 @@ body {
     padding: 0;
 }
 
-/* v5: native-skill upgrade migration banner — surfaced on the Skills
-   tab when the launcher's per-skill version-aware resync replaces an
-   installed seeded skill. Operators see the change, can dismiss the
-   banner, and can act on stale skill_exec / extension call shapes. */
-.skills-migration-banner {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    margin: 6px 0;
-}
-.skills-migration-banner-item {
-    display: flex;
-    gap: 12px;
-    align-items: flex-start;
-    justify-content: space-between;
-    padding: 10px 14px;
-    border-radius: 8px;
-    border: 1px solid rgba(232, 165, 53, 0.35);
-    background: linear-gradient(135deg, rgba(232, 165, 53, 0.10), rgba(180, 110, 30, 0.06));
-}
-.skills-migration-banner-text {
-    flex: 1;
-    font-size: 13px;
-    line-height: 1.45;
-}
-.skills-migration-banner-text strong {
-    color: var(--text-primary);
-}
-
-/* ------------------------------------------------------------------ */
-/* Widgets page                                                       */
-/* ------------------------------------------------------------------ */
-
-.skill-widget-weather-form {
-    display: flex;
-    gap: 10px;
-    margin-bottom: 10px;
-}
-
-.skill-widget-weather-city {
-    flex: 1;
-    min-width: 0;
-    border: 1px solid rgba(255, 255, 255, 0.09);
-    border-radius: 9px;
-    background: rgba(13, 11, 15, 0.74);
-    color: var(--text-primary);
-    padding: 8px 10px;
-    font: inherit;
-}
-
-.skill-widget-weather-city:focus {
-    outline: 2px solid rgba(201, 53, 69, 0.25);
-}
-
-.skill-widget-weather-body[data-state="loading"] {
-    opacity: 0.72;
-}
-
-.skill-widget-weather-card {
-    display: flex;
-    flex-direction: column;
-    gap: 7px;
-}
-
-.skill-widget-weather-head {
-    font-size: 15px;
-}
-
-.skill-widget-weather-temp {
-    font-size: 24px;
-    font-weight: 700;
-    color: rgba(250, 250, 250, 0.95);
-}
-
-.skill-widget-weather-cond {
-    color: rgba(250, 250, 250, 0.8);
-}
-
-.skill-widget-weather-meta {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-}
-
-#page-widgets {
-    padding: 16px 24px;
-    overflow-y: auto;
-}
+/* Widgets page. */
 
 .widgets-list {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-    gap: 14px;
+    position: relative;
     margin-top: 16px;
 }
 
 .widgets-card {
-    background: rgba(26, 21, 32, 0.72);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 18px;
+    position: absolute;
+    left: 0;
+    top: 0;
+    transition: transform 0.18s ease;
     padding: 14px;
     backdrop-filter: blur(12px);
+}
+
+.widgets-card-span-2 {
+    grid-column: span 2;
+}
+
+@media (max-width: 760px) {
+    .widgets-card-span-2 {
+        grid-column: span 1;
+    }
 }
 
 .widgets-card-head {
@@ -4162,7 +3755,11 @@ body {
 .widget-stream,
 .widget-media,
 .widget-gallery,
-.widget-progress {
+.widget-progress,
+.widget-map,
+.widget-calendar,
+.widget-kanban,
+.widget-subscription-render {
     margin-top: 10px;
 }
 
@@ -4238,13 +3835,10 @@ body {
     gap: 10px;
 }
 
-/* v5.7.0: host-owned map / calendar / kanban renderers. Lightweight
-   declarative layouts; Leaflet upgrade for ``.widget-map`` is kept as
-   a follow-up integration so the widget surface ships without a new
-   third-party dependency in this update. */
+/* Host-owned map/calendar/kanban defaults without extra dependencies. */
 .widget-map {
     border: 1px solid rgba(255, 255, 255, 0.06);
-    border-radius: 8px;
+    border-radius: var(--radius-sm);
     padding: 10px;
     background: rgba(255, 255, 255, 0.02);
 }
@@ -4269,7 +3863,7 @@ body {
 }
 .widget-kanban-col {
     background: rgba(255, 255, 255, 0.03);
-    border-radius: 8px;
+    border-radius: var(--radius-sm);
     padding: 10px;
     min-height: 120px;
 }
@@ -4331,11 +3925,9 @@ body {
     color: var(--text-primary);
 }
 
-/* Mobile overrides — second block, placed AFTER all base rules so media-query
-   rules reliably win without !important. Kept scoped to <= 640px so desktop
-   is never affected. */
+/* Late mobile overrides; placed after base rules so they win without !important. */
 @media (max-width: 640px) {
-    /* Input area safe-area inset for iOS notch */
+    /* iOS safe-area inset. */
     #chat-input-area {
         padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
     }
@@ -4345,20 +3937,14 @@ body {
         min-width: 0;
     }
 
-    /* Header is back to being a floating overlay on mobile (v5.7.0). The
-       transcript needs to clear the absolute header (taller on phones
-       because action buttons wrap to ~2 rows). Bottom padding clears
-       the absolute composer + safe-area. */
+    /* Transcript clears taller mobile header and absolute composer. */
     #chat-messages {
         padding-top: 80px;
         padding-bottom: calc(var(--chat-input-reserve, 108px) + env(safe-area-inset-bottom, 0px));
         overflow-x: hidden;
     }
 
-    /* Keyboard-open chat layout: make the document itself no taller than the
-       visual viewport, then keep only #chat-messages scrollable. Boundary-aware
-       touch handling in web/app.js prevents message overscroll from chaining
-       back into page / visualViewport movement on iOS and Android browsers. */
+    /* Keyboard-open layout: only #chat-messages scrolls within visual viewport. */
     html.keyboard-open,
     body.keyboard-open {
         position: fixed;
@@ -4425,7 +4011,6 @@ body {
         padding-bottom: 8px;
     }
 
-    /* Logs page — reduce horizontal padding on filters and entries margin. */
     .logs-filters {
         padding: 8px 12px;
     }
@@ -4436,15 +4021,10 @@ body {
         overflow-x: hidden;
     }
 
-    /* Evolution page — stack version columns and use taller chart area. */
     .evo-versions-cols {
         flex-direction: column;
         gap: 16px;
         overflow: visible;
-    }
-
-    .evo-versions-content {
-        padding: 12px;
     }
 
     .evo-chart-wrap {
@@ -4453,16 +4033,10 @@ body {
         padding: 10px;
     }
 
-    /* Costs page — collapse multi-column grids to single column. */
-    .costs-budget-fields {
-        grid-template-columns: 1fr;
-    }
-
-    .costs-stats-grid {
-        grid-template-columns: 1fr;
-    }
-
-    .costs-tables-grid {
+    .costs-budget-fields,
+    .costs-stats-grid,
+    .costs-tables-grid,
+    .marketplace-results {
         grid-template-columns: 1fr;
     }
 
@@ -4470,7 +4044,9 @@ body {
         padding: 12px 12px;
     }
 
-    .updates-card-head {
+    .updates-card-head,
+    .skills-card-head,
+    .marketplace-controls {
         flex-direction: column;
         align-items: stretch;
     }
@@ -4480,14 +4056,8 @@ body {
         flex-wrap: wrap;
     }
 
-    /* Skills page — reduce padding so cards don't get squeezed. */
     #page-skills {
         padding: 12px 12px;
-    }
-
-    .skills-card-head {
-        flex-direction: column;
-        align-items: stretch;
     }
 
     .skills-card-title {
@@ -4505,27 +4075,9 @@ body {
         width: 100%;
     }
 
-    .skills-next-action {
-        min-width: 0;
-        flex: 1 1 150px;
-    }
-
-    /* Marketplace controls collapse to single column on phone screens. */
-    .marketplace-controls {
-        flex-direction: column;
-        align-items: stretch;
-    }
-
     .marketplace-search {
         flex: 0 0 auto;
         width: 100%;
     }
 
-    .marketplace-results {
-        grid-template-columns: 1fr;
-    }
-
-    .marketplace-file-list {
-        columns: 1;
-    }
 }

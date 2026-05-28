@@ -45,7 +45,7 @@ def test_repo_read_max_lines_slice(tmp_path):
 def test_data_read_memory_file_never_truncated():
     from ouroboros.loop_tool_execution import _truncate_tool_result
     big = "m" * 70000
-    result = _truncate_tool_result(big, "data_read", {"path": "memory/scratchpad.md"})
+    result = _truncate_tool_result(big, "read_file", {"path": "memory/scratchpad.md"})
     assert result == big
 
 
@@ -137,16 +137,17 @@ def test_data_read_sentinel_narrower_for_non_memory_paths(tmp_path):
 def test_repo_read_prompt_file_never_truncated():
     from ouroboros.loop_tool_execution import _truncate_tool_result
     big = "p" * 90000
-    result = _truncate_tool_result(big, "repo_read", {"path": "prompts/SYSTEM.md"})
+    result = _truncate_tool_result(big, "read_file", {"path": "prompts/SYSTEM.md"})
     assert result == big
 
 
 def test_repo_commit_results_never_truncated():
     from ouroboros.loop_tool_execution import _truncate_tool_result
     big = "r" * 90000
-    assert _truncate_tool_result(big, "repo_commit") == big
-    assert _truncate_tool_result(big, "repo_write_commit") == big
-    assert _truncate_tool_result(big, "multi_model_review") == big
+    assert _truncate_tool_result(big, "commit_reviewed") == big
+    assert _truncate_tool_result(big, "commit_reviewed") == big
+    assert _truncate_tool_result(big, "task_acceptance_review") == big
+    assert _truncate_tool_result(big, "skill_review") == big
 
 
 def test_self_check_returns_bool_and_interval_15():
@@ -163,7 +164,7 @@ def test_advisory_pre_review_results_never_truncated():
     """advisory_pre_review results must not be truncated (full JSON needed)."""
     from ouroboros.loop_tool_execution import _truncate_tool_result
     big = "a" * 90000
-    assert _truncate_tool_result(big, "advisory_pre_review") == big
+    assert _truncate_tool_result(big, "advisory_review") == big
 
 
 def test_review_status_results_never_truncated():
@@ -171,6 +172,15 @@ def test_review_status_results_never_truncated():
     from ouroboros.loop_tool_execution import _truncate_tool_result
     big = "b" * 90000
     assert _truncate_tool_result(big, "review_status") == big
+
+
+def test_child_task_handoff_results_never_truncated():
+    """Child-task handoff tools must return the full result to the parent."""
+    from ouroboros.loop_tool_execution import _truncate_tool_result
+    big = "c" * 90000
+    assert _truncate_tool_result(big, "get_task_result") == big
+    assert _truncate_tool_result(big, "wait_task") == big
+    assert _truncate_tool_result(big, "wait_tasks") == big
 
 
 # ---------------------------------------------------------------------------
@@ -193,8 +203,8 @@ def test_repo_read_schema_default_is_2000():
     """Tool schema for repo_read must advertise default 2000 for max_lines."""
     from ouroboros.tools.core import get_tools
     tools = {t.name: t for t in get_tools()}
-    assert "repo_read" in tools
-    schema = tools["repo_read"].schema
+    assert "read_file" in tools
+    schema = tools["read_file"].schema
     ml_param = schema["parameters"]["properties"]["max_lines"]
     assert ml_param["default"] == 2000, (
         f"repo_read schema default for max_lines should be 2000, got {ml_param['default']}."
@@ -334,6 +344,8 @@ def test_triad_review_prompt_includes_architecture_md(tmp_path):
     rendered = _REVIEW_PROMPT_TEMPLATE.format(
         preamble="PREAMBLE",
         critical_calibration=CRITICAL_FINDING_CALIBRATION,
+        json_contract="JSON",
+        anti_pattern_lock_guard="LOCK",
         checklist_section="CHECKLIST",
         goal_section="GOAL",
         dev_guide_text="DEVGUIDE",
@@ -350,11 +362,26 @@ def test_triad_review_prompt_includes_architecture_md(tmp_path):
     assert "## ARCHITECTURE.md" in rendered
 
 
-def test_load_architecture_text_returns_empty_on_missing(tmp_path):
-    """_load_architecture_text returns empty string (not an exception) when file is absent."""
+def test_load_architecture_text_emits_explicit_omission_marker_on_missing(tmp_path):
+    """``_load_architecture_text`` must emit a visible ``[⚠️ OMISSION: ...]``
+    marker (not a silent empty string) when ARCHITECTURE.md is absent.
+
+    DEVELOPMENT.md "No silent truncation" forbids the silent-empty-string
+    fallback that the function used pre-v5.8.3-rc.5 — invisible omission
+    of a core governance artifact in a triad-review prompt would let
+    reviewers PASS without ever seeing the architectural rationale they
+    are supposed to grade against. The function now routes through the
+    SSOT ``review_helpers.load_governance_doc`` which returns an explicit
+    ``[⚠️ OMISSION: docs/ARCHITECTURE.md not found at <path>]`` so the
+    review prompt and any downstream operator inspection see the gap.
+    """
     from ouroboros.tools.review import _load_architecture_text
     result = _load_architecture_text(tmp_path)
-    assert result == "", "Missing ARCHITECTURE.md should return empty string, not raise"
+    assert result.startswith("[⚠️ OMISSION:"), (
+        f"Missing ARCHITECTURE.md should yield an explicit omission marker, got: {result!r}"
+    )
+    assert "docs/ARCHITECTURE.md" in result
+    # Never raises — the function still degrades gracefully.
 
 
 def test_consciousness_logs_warning_when_architecture_md_missing(tmp_path):

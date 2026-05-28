@@ -1,36 +1,11 @@
-import { escapeHtml } from './utils.js';
+import { escapeHtmlText, formatUsd2 } from './utils.js';
+import { apiFetch } from './api_client.js';
 
-export function initEvolution({ ws, state, mount = null, embedded = false, chartOnly = false, hostPage = 'settings', hostSubtab = 'evolution' }) {
+export function initEvolution({ ws, state, mount }) {
     const page = document.createElement('div');
     page.id = 'page-evolution';
-    page.className = embedded ? 'settings-embedded-content settings-evolution-panel' : 'page';
-    // v5.7.0: drop the duplicate inner page-header when embedded (Dashboard
-    // pill strip already labels the panel). Move Refresh + status badge
-    // into the runtime card head row alongside the existing pills.
-    const headerBlock = embedded
-        ? ''
-        : `
-        <div class="page-header">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
-            <h2>Evolution</h2>
-            <div class="spacer"></div>
-            <div class="evo-subtabs" ${chartOnly ? 'hidden' : ''}>
-                <button class="evo-subtab active" data-subtab="chart">Chart</button>
-                <button class="evo-subtab" data-subtab="versions">Versions</button>
-            </div>
-            <button id="evo-refresh" class="btn btn-default btn-sm evo-refresh-btn" type="button">Refresh</button>
-            <span id="evo-status" class="status-badge">Loading...</span>
-        </div>`;
-    const inlineEvoControls = embedded
-        ? `
-                    <div class="evo-runtime-pills evo-runtime-controls">
-                        <button id="evo-refresh" class="btn btn-default btn-sm evo-refresh-btn" type="button">Refresh</button>
-                        <span id="evo-status" class="status-badge">Loading...</span>
-                    </div>`
-        : '';
+    page.className = 'settings-embedded-content settings-evolution-panel';
     page.innerHTML = `
-        ${headerBlock}
-        <!-- Chart sub-tab -->
         <div id="evo-chart-content" class="evolution-container">
             <div class="evo-runtime-card">
                 <div class="evo-runtime-head">
@@ -42,7 +17,10 @@ export function initEvolution({ ws, state, mount = null, embedded = false, chart
                         <span id="evo-mode-pill" class="evo-runtime-pill">Evolution</span>
                         <span id="evo-bg-pill" class="evo-runtime-pill">Consciousness</span>
                     </div>
-                    ${inlineEvoControls}
+                    <div class="evo-runtime-pills evo-runtime-controls">
+                        <button id="evo-refresh" class="btn btn-default btn-sm evo-refresh-btn" type="button">Refresh</button>
+                        <span id="evo-status" class="status-badge">Loading...</span>
+                    </div>
                 </div>
                 <div id="evo-runtime-meta" class="evo-runtime-meta"></div>
             </div>
@@ -51,56 +29,15 @@ export function initEvolution({ ws, state, mount = null, embedded = false, chart
             </div>
             <div id="evo-tags-list" class="evo-tags-list"></div>
         </div>
-        <!-- Versions sub-tab -->
-        <div id="evo-versions-content" class="evo-versions-content">
-            <div class="evo-versions-header">
-                <div id="ver-current" class="evo-versions-branch"></div>
-                <button class="btn btn-primary" id="btn-promote">Promote to Stable</button>
-            </div>
-            <div class="evo-versions-cols">
-                <div class="evo-versions-col">
-                    <h3 class="section-title">Recent Commits</h3>
-                    <div id="ver-commits" class="log-scroll evo-versions-list"></div>
-                </div>
-                <div class="evo-versions-col">
-                    <h3 class="section-title">Tags</h3>
-                    <div id="ver-tags" class="log-scroll evo-versions-list"></div>
-                </div>
-            </div>
-        </div>
     `;
-    (mount || document.getElementById('content')).appendChild(page);
-
-    // -----------------------------------------------------------------------
-    // Sub-tab switching
-    // -----------------------------------------------------------------------
-    let activeSubtab = 'chart';
-    const subtabButtons = page.querySelectorAll('.evo-subtab');
-    const chartContent = document.getElementById('evo-chart-content');
-    const versionsContent = document.getElementById('evo-versions-content');
-    if (chartOnly && versionsContent) versionsContent.hidden = true;
+    mount.appendChild(page);
 
     function isEvolutionVisible() {
-        return embedded
-            ? state.activePage === hostPage && (hostPage === 'dashboard' ? state.dashboardActiveSubtab : state.settingsActiveSubtab) === hostSubtab
-            : state.activePage === 'evolution';
+        return state.activePage === 'dashboard' && state.dashboardActiveSubtab === 'evolution';
     }
-
-    function showSubtab(name) {
-        activeSubtab = name;
-        subtabButtons.forEach(btn => btn.classList.toggle('active', btn.dataset.subtab === name));
-        chartContent.style.display = name === 'chart' ? '' : 'none';
-        versionsContent.style.display = name === 'versions' ? 'flex' : 'none';
-        if (name === 'chart' && isEvolutionVisible()) ensureEvolutionLoaded(false);
-        if (name === 'versions' && !versionsLoaded) loadVersions();
-    }
-
-    subtabButtons.forEach(btn => {
-        btn.addEventListener('click', () => showSubtab(btn.dataset.subtab));
-    });
 
     // -----------------------------------------------------------------------
-    // Chart sub-tab (existing evolution logic)
+    // Evolution chart + runtime state
     // -----------------------------------------------------------------------
     let evoChart = null;
     let loadSequence = 0;
@@ -195,7 +132,7 @@ export function initEvolution({ ws, state, mount = null, embedded = false, chart
             runtimeChip('Cycle', evolution.cycle || 0),
             runtimeChip('Queue', `${evolution.pending_count || 0} pending / ${evolution.running_count || 0} running`),
             runtimeChip('Failures', evolution.consecutive_failures || 0),
-            runtimeChip('Budget left', Number.isFinite(Number(evolution.budget_remaining_usd)) ? `$${Number(evolution.budget_remaining_usd).toFixed(2)}` : ''),
+            runtimeChip('Budget left', Number.isFinite(Number(evolution.budget_remaining_usd)) ? formatUsd2(evolution.budget_remaining_usd) : ''),
             runtimeChip('Last evolution', formatTs(evolution.last_task_at)),
             runtimeChip('Next wakeup', consciousness.next_wakeup_sec ? `${consciousness.next_wakeup_sec}s` : ''),
             runtimeChip('Last background cycle', formatTs(consciousness.last_cycle_finished_at || consciousness.last_cycle_started_at)),
@@ -219,8 +156,8 @@ export function initEvolution({ ws, state, mount = null, embedded = false, chart
         try {
             const suffix = force ? '?force=1' : '';
             const [stateResp, evoResp] = await Promise.all([
-                fetch('/api/state', { cache: 'no-store' }),
-                fetch(`/api/evolution-data${suffix}`, { cache: 'no-store' }),
+                apiFetch('/api/state', { cache: 'no-store' }),
+                apiFetch(`/api/evolution-data${suffix}`, { cache: 'no-store' }),
             ]);
             if (!stateResp.ok) throw new Error('State API error ' + stateResp.status);
             if (!evoResp.ok) throw new Error('Evolution API error ' + evoResp.status);
@@ -250,7 +187,6 @@ export function initEvolution({ ws, state, mount = null, embedded = false, chart
     }
 
     function ensureEvolutionLoaded(force = false) {
-        if (activeSubtab !== 'chart') return;
         if (!force && chartLoaded) {
             loadEvolution(false);
             return;
@@ -347,15 +283,21 @@ export function initEvolution({ ws, state, mount = null, embedded = false, chart
         const rows = points.map(p => {
             const d = new Date(p.date);
             const dateStr = d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+            const codeLines = Number(p.code_lines || 0);
+            const bibleKb = Number(p.bible_kb || 0);
+            const systemKb = Number(p.system_kb || 0);
+            const identityKb = Number(p.identity_kb || 0);
+            const scratchpadKb = Number(p.scratchpad_kb || 0);
+            const memoryKb = Number(p.memory_kb || 0);
             return `<tr>
-                <td><code>${p.tag}</code></td>
-                <td>${dateStr}</td>
-                <td>${(p.code_lines || 0).toLocaleString()}</td>
-                <td>${(p.bible_kb || 0).toFixed(1)}</td>
-                <td>${(p.system_kb || 0).toFixed(1)}</td>
-                <td>${(p.identity_kb || 0).toFixed(1)}</td>
-                <td>${(p.scratchpad_kb || 0).toFixed(1)}</td>
-                <td>${(p.memory_kb || 0).toFixed(1)}</td>
+                <td><code>${escapeHtmlText(p.tag || '')}</code></td>
+                <td>${escapeHtmlText(dateStr)}</td>
+                <td>${Number.isFinite(codeLines) ? codeLines.toLocaleString() : '0'}</td>
+                <td>${Number.isFinite(bibleKb) ? bibleKb.toFixed(1) : '0.0'}</td>
+                <td>${Number.isFinite(systemKb) ? systemKb.toFixed(1) : '0.0'}</td>
+                <td>${Number.isFinite(identityKb) ? identityKb.toFixed(1) : '0.0'}</td>
+                <td>${Number.isFinite(scratchpadKb) ? scratchpadKb.toFixed(1) : '0.0'}</td>
+                <td>${Number.isFinite(memoryKb) ? memoryKb.toFixed(1) : '0.0'}</td>
             </tr>`;
         }).reverse().join('');
         tagsList.innerHTML = `
@@ -371,117 +313,30 @@ export function initEvolution({ ws, state, mount = null, embedded = false, chart
     }
 
     // -----------------------------------------------------------------------
-    // Versions sub-tab (merged from versions.js)
-    // -----------------------------------------------------------------------
-    const commitsDiv = document.getElementById('ver-commits');
-    const tagsDiv = document.getElementById('ver-tags');
-    const currentDiv = document.getElementById('ver-current');
-    let versionsLoaded = false;
-
-    function renderRow(item, labelText, targetId) {
-        const row = document.createElement('div');
-        row.className = 'log-entry evo-versions-row';
-        const date = (item.date || '').slice(0, 16).replace('T', ' ');
-        const msg = escapeHtml((item.message || '').slice(0, 60));
-        row.innerHTML = `
-            <span class="log-type tools evo-versions-row-label">${escapeHtml(labelText)}</span>
-            <span class="log-ts">${date}</span>
-            <span class="log-msg evo-versions-row-msg">${msg}</span>
-            <button class="btn btn-danger btn-xs" data-target="${escapeHtml(targetId)}">Restore</button>
-        `;
-        row.querySelector('button').addEventListener('click', () => rollback(targetId));
-        return row;
-    }
-
-    async function loadVersions() {
-        try {
-            const resp = await fetch('/api/git/log');
-            if (!resp.ok) throw new Error('Git log API error ' + resp.status);
-            const data = await resp.json();
-            currentDiv.textContent = `Branch: ${data.branch || '?'} @ ${data.sha || '?'}`;
-
-            commitsDiv.innerHTML = '';
-            (data.commits || []).forEach(c => {
-                commitsDiv.appendChild(renderRow(c, c.short_sha || c.sha?.slice(0, 8), c.sha));
-            });
-            if (!data.commits?.length) commitsDiv.innerHTML = '<div class="evo-empty">No commits found</div>';
-
-            tagsDiv.innerHTML = '';
-            (data.tags || []).forEach(t => {
-                tagsDiv.appendChild(renderRow(t, t.tag, t.tag));
-            });
-            if (!data.tags?.length) tagsDiv.innerHTML = '<div class="evo-empty">No tags found</div>';
-            versionsLoaded = true;
-        } catch (e) {
-            const errHtml = `<div class="evo-empty evo-empty-error">Failed to load: ${escapeHtml(e.message)}</div>`;
-            commitsDiv.innerHTML = errHtml;
-            tagsDiv.innerHTML = errHtml;
-            currentDiv.textContent = 'Branch: unknown';
-            versionsLoaded = false;
-        }
-    }
-
-    async function rollback(target) {
-        if (!confirm(`Roll back to ${target}?\n\nA rescue snapshot of the current state will be saved. The server will restart.`)) return;
-        try {
-            const resp = await fetch('/api/git/rollback', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ target }),
-            });
-            const data = await resp.json();
-            if (data.status === 'ok') {
-                alert('Rollback successful: ' + data.message + '\n\nServer is restarting...');
-            } else {
-                alert('Rollback failed: ' + (data.error || 'unknown error'));
-            }
-        } catch (e) {
-            alert('Rollback failed: ' + e.message);
-        }
-    }
-
-    document.getElementById('btn-promote').addEventListener('click', async () => {
-        if (!confirm('Promote current ouroboros branch to ouroboros-stable?')) return;
-        try {
-            const resp = await fetch('/api/git/promote', { method: 'POST' });
-            const data = await resp.json();
-            alert(data.status === 'ok' ? data.message : 'Error: ' + (data.error || 'unknown'));
-        } catch (e) {
-            alert('Failed: ' + e.message);
-        }
-    });
-
-    // -----------------------------------------------------------------------
     // Refresh button + event listeners
     // -----------------------------------------------------------------------
     refreshBtn.addEventListener('click', () => {
-        if (chartOnly || activeSubtab === 'chart') loadEvolution(true);
-        else loadVersions();
+        loadEvolution(true);
     });
 
     ws.on('open', () => {
         if (isEvolutionVisible()) {
             ensureEvolutionLoaded(false);
-            if (activeSubtab === 'versions') loadVersions();
         }
     });
 
     window.addEventListener('ouro:page-shown', (event) => {
-        if (!embedded && event?.detail?.page === 'evolution') {
-            if (activeSubtab === 'chart') ensureEvolutionLoaded(false);
-            else loadVersions();
+        if (event?.detail?.page === 'dashboard' && state.dashboardActiveSubtab === 'evolution') {
+            ensureEvolutionLoaded(false);
         }
     });
-    window.addEventListener('ouro:settings-subtab-shown', (event) => {
-        if (embedded && event?.detail?.tab === 'evolution') ensureEvolutionLoaded(false);
-    });
     window.addEventListener('ouro:dashboard-subtab-shown', (event) => {
-        if (embedded && event?.detail?.tab === 'evolution') ensureEvolutionLoaded(false);
+        if (event?.detail?.tab === 'evolution') ensureEvolutionLoaded(false);
     });
 
     document.addEventListener('visibilitychange', () => {
         if (!document.hidden && isEvolutionVisible()) {
-            if (activeSubtab === 'chart' && chartLoaded) loadEvolution(false);
+            if (chartLoaded) loadEvolution(false);
         }
     });
 }

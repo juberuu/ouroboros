@@ -1,16 +1,30 @@
 import { renderPageHeader, renderTabStrip } from './page_header.js';
+import { PAGE_ICONS } from './page_icons.js';
 
-const SETTINGS_ICON = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><circle cx="12" cy="12" r="3"/></svg>';
 const SETTINGS_TABS = [
     { value: 'providers', label: 'Providers' },
+    { value: 'secrets', label: 'Secrets' },
     { value: 'models', label: 'Models' },
     { value: 'behavior', label: 'Behavior' },
-    { value: 'integrations', label: 'Integrations' },
     { value: 'advanced', label: 'Advanced' },
     { value: 'about', label: 'About' },
 ];
-// Static guard markers: renderTabStrip emits data-settings-tab="behavior"
-// and data-settings-tab="advanced" from SETTINGS_TABS at runtime.
+// Guard markers: renderTabStrip emits behavior/advanced tabs at runtime.
+
+const MODEL_CARDS = [
+    ['Main', 'Primary reasoning model.', 's-model', 's-local-main', 'google/gemini-3.5-flash'],
+    ['Code', 'Tool-heavy coding model.', 's-model-code', 's-local-code', 'google/gemini-3.5-flash'],
+    ['Light', 'Fast summaries and lightweight tasks.', 's-model-light', 's-local-light', 'google/gemini-3.5-flash'],
+    ['Fallback', 'Resilience and degraded path.', 's-model-fallback', 's-local-fallback', 'anthropic/claude-sonnet-4.6'],
+];
+
+const EFFORT_FIELDS = [
+    ['s-effort-task', 'Task / Chat', 'medium'],
+    ['s-effort-evolution', 'Evolution', 'high'],
+    ['s-effort-review', 'Review', 'medium'],
+    ['s-effort-scope-review', 'Scope Review', 'high'],
+    ['s-effort-consciousness', 'Consciousness', 'low'],
+];
 
 function providerCard({ id, title, icon, hint, body, open = false }) {
     return `
@@ -40,6 +54,63 @@ function secretField({ id, settingKey, label, placeholder }) {
             </div>
         </div>
     `;
+}
+
+function plainField({ id, label, placeholder }) {
+    return `<div class="form-field"><label>${label}</label><input id="${id}" placeholder="${placeholder}"></div>`;
+}
+
+const PROVIDER_CARDS = [
+    {
+        id: 'openrouter', title: 'OpenRouter', icon: '/static/providers/openrouter.ico', hint: 'Default multi-model router', open: true,
+        fields: [{ id: 's-openrouter', settingKey: 'OPENROUTER_API_KEY', label: 'OpenRouter API Key', placeholder: 'sk-or-...' }],
+    },
+    {
+        id: 'openai', title: 'OpenAI', icon: '/static/providers/openai.svg', hint: 'Official OpenAI API',
+        fields: [{ id: 's-openai', settingKey: 'OPENAI_API_KEY', label: 'OpenAI API Key', placeholder: 'sk-...' }],
+        note: 'Use model values like <code>openai::gpt-5.5</code> in the Models tab to route models directly here. If OpenRouter is absent and the shipped defaults are still untouched, Ouroboros auto-remaps them to official OpenAI defaults.',
+    },
+    {
+        id: 'compatible', title: 'OpenAI Compatible', icon: '/static/providers/openai-compatible.svg', hint: 'Custom OpenAI-style endpoint',
+        fields: [
+            { id: 's-openai-compatible-key', settingKey: 'OPENAI_COMPATIBLE_API_KEY', label: 'API Key', placeholder: 'Compatible provider key' },
+            { id: 's-openai-compatible-base-url', label: 'Base URL', placeholder: 'https://provider.example/v1' },
+        ],
+        note: 'Use this card for custom base URLs. Built-in web search only works with the official OpenAI Responses API, so keep <code>OPENAI_BASE_URL</code> empty when you want <code>web_search</code>.',
+    },
+    {
+        id: 'cloudru', title: 'Cloud.ru Foundation Models', icon: '/static/providers/cloudru.svg', hint: 'Cloud.ru OpenAI-compatible runtime',
+        fields: [
+            { id: 's-cloudru-key', settingKey: 'CLOUDRU_FOUNDATION_MODELS_API_KEY', label: 'API Key', placeholder: 'Cloud.ru Foundation Models API key' },
+            { id: 's-cloudru-base-url', label: 'Base URL', placeholder: 'https://foundation-models.api.cloud.ru/v1' },
+        ],
+    },
+    {
+        id: 'anthropic', title: 'Anthropic', icon: '/static/providers/anthropic.png', hint: 'Direct runtime plus Claude tooling',
+        fields: [{ id: 's-anthropic', settingKey: 'ANTHROPIC_API_KEY', label: 'Anthropic API Key', placeholder: 'sk-ant-...' }],
+        note: 'Use model values like <code>anthropic::claude-sonnet-4-6</code> in the Models tab to route models directly through Anthropic. Claude tooling still reuses this key.',
+        extra: `
+            <div class="settings-toolbar" id="settings-claude-code-panel" hidden>
+                <button type="button" class="settings-ghost-btn" id="btn-claude-code-install">Repair Runtime</button>
+                <span id="settings-claude-code-status" class="settings-inline-status">Checking Claude runtime...</span>
+            </div>
+            <div class="settings-inline-note" id="settings-claude-code-copy" hidden>Claude runtime powers delegated code editing and advisory review. It is managed automatically by the app.</div>
+        `,
+    },
+];
+
+function providerSettingsCard(spec) {
+    const fields = (spec.fields || [])
+        .map((field) => field.settingKey ? secretField(field) : plainField(field))
+        .join('');
+    return providerCard({
+        id: spec.id,
+        title: spec.title,
+        icon: spec.icon,
+        hint: spec.hint,
+        open: spec.open,
+        body: `<div class="form-row">${fields}</div>${spec.note ? `<div class="settings-inline-note">${spec.note}</div>` : ''}${spec.extra || ''}`,
+    });
 }
 
 function modelCard({ title, copy, inputId, toggleId, defaultValue }) {
@@ -80,12 +151,63 @@ function effortField({ id, label, defaultValue }) {
     `;
 }
 
+export const SECRET_KEYS = [
+    ['OPENROUTER_API_KEY', 'OpenRouter API Key', 'sk-or-...'],
+    ['OPENAI_API_KEY', 'OpenAI API Key', 'sk-...'],
+    ['OPENAI_COMPATIBLE_API_KEY', 'OpenAI-compatible API Key', 'Compatible provider key'],
+    ['CLOUDRU_FOUNDATION_MODELS_API_KEY', 'Cloud.ru Foundation Models API Key', 'Cloud.ru key'],
+    ['ANTHROPIC_API_KEY', 'Anthropic API Key', 'sk-ant-...'],
+    ['GITHUB_TOKEN', 'GitHub Token', 'ghp_...'],
+    ['OUROBOROS_NETWORK_PASSWORD', 'Network Password', 'Required for LAN/Docker binds'],
+];
+
+function secretSettingsSection() {
+    return `
+        <section class="settings-card">
+            <h3>Stored Secrets</h3>
+            <div class="settings-section-copy">
+                Central place for API keys, bridge tokens, passwords, and future skill-requested secrets.
+                Skills only receive grant-only keys after explicit human approval.
+            </div>
+            <div class="form-grid two">
+                ${SECRET_KEYS.map(([key, label, placeholder]) => secretField({
+                    id: `s-secret-${key.toLowerCase().replace(/_/g, '-')}`,
+                    settingKey: key,
+                    label,
+                    placeholder,
+                })).join('')}
+            </div>
+        </section>
+        <section class="settings-card">
+            <h3>Requested By Skills</h3>
+            <div class="settings-section-copy">
+                Secrets requested by installed skills appear here only when a skill asks for them.
+            </div>
+            <div id="skill-requested-secrets" class="settings-secret-list">
+                <div class="muted">No skill-requested secrets.</div>
+            </div>
+        </section>
+        <section class="settings-card">
+            <div class="settings-card-head">
+                <div>
+                    <h3>Custom Keys</h3>
+                    <div class="settings-section-copy">
+                        Optional key/value storage for future skills. Use uppercase names such as <code>SLACK_WEBHOOK_URL</code>.
+                    </div>
+                </div>
+                <button type="button" class="btn btn-default btn-sm" id="btn-add-custom-secret">Add custom key</button>
+            </div>
+            <div id="custom-secrets-list" class="settings-secret-list settings-custom-secret-list"></div>
+        </section>
+    `;
+}
+
 export function renderSettingsPage() {
     return `
         ${renderPageHeader({
             title: 'Settings',
-            icon: SETTINGS_ICON,
-            description: 'Configure providers, models, behavior, integrations, and runtime controls.',
+            icon: PAGE_ICONS.settings,
+            description: 'Configure providers, secrets, models, behavior, source control, and runtime controls.',
             tabsHtml: `
                 <div class="settings-tabs-bar">
                     <button type="button" class="settings-mobile-back" data-settings-back hidden>Settings</button>
@@ -101,101 +223,13 @@ export function renderSettingsPage() {
             `,
         })}
         <div class="settings-shell">
-            <div class="settings-scroll">
+            <div class="settings-scroll scroll-fade-y">
                 <section class="settings-panel active" data-settings-panel="providers">
                     <div class="settings-section-copy">
                         Configure remote providers and the optional network gate. Secret fields now have explicit
                         <code>Clear</code> actions so masked values can be removed intentionally.
                     </div>
-                    ${providerCard({
-                        id: 'openrouter',
-                        title: 'OpenRouter',
-                        icon: '/static/providers/openrouter.ico',
-                        hint: 'Default multi-model router',
-                        open: true,
-                        body: `<div class="form-row">${secretField({
-                            id: 's-openrouter',
-                            settingKey: 'OPENROUTER_API_KEY',
-                            label: 'OpenRouter API Key',
-                            placeholder: 'sk-or-...',
-                        })}</div>`,
-                    })}
-                    ${providerCard({
-                        id: 'openai',
-                        title: 'OpenAI',
-                        icon: '/static/providers/openai.svg',
-                        hint: 'Official OpenAI API',
-                        body: `
-                            <div class="form-row">${secretField({
-                                id: 's-openai',
-                                settingKey: 'OPENAI_API_KEY',
-                                label: 'OpenAI API Key',
-                                placeholder: 'sk-...',
-                            })}</div>
-                            <div class="settings-inline-note">Use model values like <code>openai::gpt-5.5</code> in the Models tab to route models directly here. If OpenRouter is absent and the shipped defaults are still untouched, Ouroboros auto-remaps them to official OpenAI defaults.</div>
-                        `,
-                    })}
-                    ${providerCard({
-                        id: 'compatible',
-                        title: 'OpenAI Compatible',
-                        icon: '/static/providers/openai-compatible.svg',
-                        hint: 'Custom OpenAI-style endpoint',
-                        body: `
-                            <div class="form-row">
-                                ${secretField({
-                                    id: 's-openai-compatible-key',
-                                    settingKey: 'OPENAI_COMPATIBLE_API_KEY',
-                                    label: 'API Key',
-                                    placeholder: 'Compatible provider key',
-                                })}
-                                <div class="form-field">
-                                    <label>Base URL</label>
-                                    <input id="s-openai-compatible-base-url" placeholder="https://provider.example/v1">
-                                </div>
-                            </div>
-                            <div class="settings-inline-note">Use this card for custom base URLs. Built-in web search only works with the official OpenAI Responses API, so keep <code>OPENAI_BASE_URL</code> empty when you want <code>web_search</code>.</div>
-                        `,
-                    })}
-                    ${providerCard({
-                        id: 'cloudru',
-                        title: 'Cloud.ru Foundation Models',
-                        icon: '/static/providers/cloudru.svg',
-                        hint: 'Cloud.ru OpenAI-compatible runtime',
-                        body: `
-                            <div class="form-row">
-                                ${secretField({
-                                    id: 's-cloudru-key',
-                                    settingKey: 'CLOUDRU_FOUNDATION_MODELS_API_KEY',
-                                    label: 'API Key',
-                                    placeholder: 'Cloud.ru Foundation Models API key',
-                                })}
-                                <div class="form-field">
-                                    <label>Base URL</label>
-                                    <input id="s-cloudru-base-url" placeholder="https://foundation-models.api.cloud.ru/v1">
-                                </div>
-                            </div>
-                        `,
-                    })}
-                    ${providerCard({
-                        id: 'anthropic',
-                        title: 'Anthropic',
-                        icon: '/static/providers/anthropic.png',
-                        hint: 'Direct runtime plus Claude tooling',
-                        body: `
-                            <div class="form-row">${secretField({
-                                id: 's-anthropic',
-                                settingKey: 'ANTHROPIC_API_KEY',
-                                label: 'Anthropic API Key',
-                                placeholder: 'sk-ant-...',
-                            })}</div>
-                            <div class="settings-inline-note">Use model values like <code>anthropic::claude-sonnet-4-6</code> in the Models tab to route models directly through Anthropic. Claude tooling still reuses this key.</div>
-                            <div class="settings-toolbar" id="settings-claude-code-panel" hidden>
-                                <button type="button" class="settings-ghost-btn" id="btn-claude-code-install">Repair Runtime</button>
-                                <span id="settings-claude-code-status" class="settings-inline-status">Checking Claude runtime...</span>
-                            </div>
-                            <div class="settings-inline-note" id="settings-claude-code-copy" hidden>Claude runtime powers delegated code editing and advisory review. It is managed automatically by the app.</div>
-                        `,
-                    })}
+                    ${PROVIDER_CARDS.map(providerSettingsCard).join('')}
                     <div class="form-section compact">
                         <h3>Legacy Compatibility</h3>
                         <div class="form-row">
@@ -226,6 +260,10 @@ export function renderSettingsPage() {
                     </div>
                 </section>
 
+                <section class="settings-panel" data-settings-panel="secrets">
+                    ${secretSettingsSection()}
+                </section>
+
                 <section class="settings-panel" data-settings-panel="models">
                     <div class="form-section">
                         <h3>Model Routing</h3>
@@ -238,35 +276,32 @@ export function renderSettingsPage() {
                             <span id="settings-model-catalog-status" class="settings-inline-status">Model catalog is optional and failure-tolerant.</span>
                         </div>
                         <div class="settings-model-grid">
-                            ${modelCard({ title: 'Main', copy: 'Primary reasoning model.', inputId: 's-model', toggleId: 's-local-main', defaultValue: 'anthropic/claude-opus-4.6' })}
-                            ${modelCard({ title: 'Code', copy: 'Tool-heavy coding model.', inputId: 's-model-code', toggleId: 's-local-code', defaultValue: 'anthropic/claude-opus-4.6' })}
-                            ${modelCard({ title: 'Light', copy: 'Fast summaries and lightweight tasks.', inputId: 's-model-light', toggleId: 's-local-light', defaultValue: 'anthropic/claude-sonnet-4.6' })}
-                            ${modelCard({ title: 'Fallback', copy: 'Resilience and degraded path.', inputId: 's-model-fallback', toggleId: 's-local-fallback', defaultValue: 'anthropic/claude-sonnet-4.6' })}
+                            ${MODEL_CARDS.map(([title, copy, inputId, toggleId, defaultValue]) => modelCard({ title, copy, inputId, toggleId, defaultValue })).join('')}
                         </div>
                         <div class="form-row">
                             <div class="form-field">
                                 <label>Claude Code Model</label>
                                 <input id="s-claude-code-model" value="claude-opus-4-6[1m]" placeholder="sonnet, opus, claude-opus-4-6[1m], or full name">
-                                <div class="settings-inline-note">Anthropic model for <code>claude_code_edit</code> and <code>advisory_pre_review</code> tools. Requires Anthropic key in Providers.</div>
+                                <div class="settings-inline-note">Anthropic model for delegated review/edit integrations. Requires Anthropic key in Providers.</div>
                             </div>
                         </div>
                     </div>
 
                     <div class="form-section">
                         <h3>Review Models</h3>
-                        <div class="settings-section-copy">Models used by the pre-commit review gate. Runs automatically on every <code>repo_commit</code>.</div>
+                        <div class="settings-section-copy">Reviewer slots used by plan, task acceptance, and commit review surfaces.</div>
                         <div class="form-row">
                             <div class="form-field">
-                                <label>Pre-commit Review Models</label>
+                                <label>Review Slots</label>
                                 <input id="s-review-models" placeholder="model1,model2,model3">
-                                <div class="settings-inline-note">Comma-separated review models (triad). In OpenAI-only or Anthropic-only direct-provider mode, the list is auto-normalized to [main, light, light] (3 slots, 2 unique) so both the commit triad and plan_task (which requires >=2 distinct models for majority-vote) work out of the box. OpenAI-compatible and Cloud.ru setups are not auto-normalized and must configure the list explicitly.</div>
+                                <div class="settings-inline-note">Comma-separated reviewer slots. Duplicate model IDs are valid independent slots for same-model sampling.</div>
                             </div>
                         </div>
                         <div class="form-grid two">
                             <div class="form-field">
-                                <label>Scope Review Model</label>
-                                <input id="s-scope-review-model" placeholder="openai/gpt-5.5">
-                                <div class="settings-inline-note">Single model for the blocking scope reviewer. Runs in parallel with the triad diff review.</div>
+                                <label>Scope Review Slots</label>
+                                <input id="s-scope-review-models" placeholder="openai/gpt-5.5">
+                                <div class="settings-inline-note">Comma-separated scope reviewer slots. Empty falls back to the legacy single scope model setting.</div>
                             </div>
                             <div class="form-field">
                                 <label>Web Search Model</label>
@@ -282,17 +317,13 @@ export function renderSettingsPage() {
                         <h3>Reasoning Effort</h3>
                         <div class="settings-section-copy">Controls how deeply the model thinks per task type. Higher effort = slower but more thorough.</div>
                         <div class="settings-effort-grid">
-                            ${effortField({ id: 's-effort-task', label: 'Task / Chat', defaultValue: 'medium' })}
-                            ${effortField({ id: 's-effort-evolution', label: 'Evolution', defaultValue: 'high' })}
-                            ${effortField({ id: 's-effort-review', label: 'Review', defaultValue: 'medium' })}
-                            ${effortField({ id: 's-effort-scope-review', label: 'Scope Review', defaultValue: 'high' })}
-                            ${effortField({ id: 's-effort-consciousness', label: 'Consciousness', defaultValue: 'low' })}
+                            ${EFFORT_FIELDS.map(([id, label, defaultValue]) => effortField({ id, label, defaultValue })).join('')}
                         </div>
                     </div>
 
                     <div class="form-section">
                         <h3>Review Enforcement</h3>
-                        <div class="settings-section-copy"><code>Advisory</code> keeps review visible but non-blocking. <code>Blocking</code> stops commits when critical findings remain unresolved.</div>
+                        <div class="settings-section-copy"><code>Advisory</code> keeps review visible but non-blocking. <code>Blocking</code> stops commits and reviewed-skill activation when critical findings remain unresolved.</div>
                         <div class="settings-effort-card">
                             <label>Enforcement Mode</label>
                             <input id="s-review-enforcement" type="hidden" value="advisory">
@@ -304,14 +335,40 @@ export function renderSettingsPage() {
                     </div>
 
                     <div class="form-section">
+                        <h3>Task Result Review</h3>
+                        <div class="settings-section-copy">Auto leaves the decision to Ouroboros via the visible review tool; Required injects reviewer output before eligible task results are released.</div>
+                        <div class="settings-effort-card">
+                            <label>Task Result Review</label>
+                            <input id="s-task-review-mode" type="hidden" value="auto">
+                            <div class="settings-effort-group" data-effort-group data-task-review-group data-effort-target="s-task-review-mode">
+                                <button type="button" class="settings-effort-btn" data-effort-value="off">Off</button>
+                                <button type="button" class="settings-effort-btn" data-effort-value="auto">Auto</button>
+                                <button type="button" class="settings-effort-btn" data-effort-value="required">Required</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="form-section">
+                        <h3>Skills</h3>
+                        <div class="settings-section-copy">
+                            Closed-loop skill development can auto-grant the keys and host permissions a skill declares after a fresh executable review for the current content hash.
+                            Leave this off when every skill permission should require a separate human approval.
+                        </div>
+                        <label class="local-toggle" title="Applies only after a fresh executable skill review and only to manifest-declared grants for that exact content hash.">
+                            <input type="checkbox" id="s-auto-grant-reviewed-skills">
+                            Auto-grant reviewed skills' keys and permissions
+                        </label>
+                    </div>
+
+                    <div class="form-section">
                         <h3>Runtime Mode</h3>
                         <div class="settings-section-copy">
                             Separate axis from Review Enforcement. Controls how far Ouroboros is allowed to self-modify.
                             <code>Light</code> blocks repo self-modification but allows reviewed + enabled skills to run.
                             <code>Advanced</code> is the default &mdash; self-modify the evolutionary layer; protected core/contract/release files stay guarded by the shared runtime-mode policy.
                             <code>Pro</code> can edit protected core/contract/release surfaces, but commits still go through the normal triad + scope review gate; Advanced remains limited to the evolutionary layer.
-                            <br><strong>Owner controlled:</strong> desktop builds ask the launcher for native confirmation before saving a mode change.
-                            Web/Docker sessions can view the current mode but cannot elevate it from this page.
+                            <br><strong>Human controlled:</strong> desktop builds ask the launcher for native confirmation before saving a mode change.
+                            Web/Docker sessions save mode changes through the owner endpoint; the new mode takes effect after restart.
                         </div>
                         <div class="settings-effort-card">
                             <label>Runtime Mode</label>
@@ -362,83 +419,48 @@ export function renderSettingsPage() {
                     </div>
                 </section>
 
-                <section class="settings-panel" data-settings-panel="integrations">
+                <section class="settings-panel" data-settings-panel="advanced">
                     <div class="form-section">
-                        <h3>Telegram Bridge</h3>
-                        <div class="form-row">${secretField({
-                            id: 's-telegram-token',
-                            settingKey: 'TELEGRAM_BOT_TOKEN',
-                            label: 'Bot Token',
-                            placeholder: '123456:ABCDEF...',
-                        })}</div>
-                        <div class="form-row">
-                            <div class="form-field">
-                                <label>Primary Chat ID (optional)</label>
-                                <input id="s-telegram-chat-id" placeholder="123456789">
+                        <div class="settings-card-head">
+                            <div>
+                                <h3>MCP Servers</h3>
+                                <div class="settings-section-copy">
+                                    External Model Context Protocol tool servers. MCP is a base-runtime client:
+                                    it borrows tools from trusted HTTP/SSE servers and exposes them as non-core
+                                    <code>mcp_&lt;server&gt;__&lt;tool&gt;</code> tools after refresh. Changes are hot-reloadable.
+                                    Treat server descriptions and results as untrusted third-party data.
+                                </div>
+                            </div>
+                            <div class="settings-toolbar">
+                                <button type="button" class="btn btn-default btn-sm" id="btn-mcp-add-server">Add server</button>
+                                <button type="button" class="btn btn-default btn-sm" id="btn-mcp-refresh-all">Refresh all</button>
                             </div>
                         </div>
-                        <div class="settings-inline-note">If no primary chat is pinned, the bridge binds to the first active Telegram chat and keeps replies attached there.</div>
+                        <div class="form-grid two">
+                            <label class="local-toggle">
+                                <input type="checkbox" id="s-mcp-enabled">
+                                Enable MCP client
+                            </label>
+                            <div class="form-field">
+                                <label>Per-tool timeout (s)</label>
+                                <input id="s-mcp-tool-timeout" type="number" min="1" value="60">
+                            </div>
+                        </div>
+                        <div id="mcp-global-status" class="settings-inline-status">MCP disabled by default.</div>
+                        <div id="mcp-servers-list" class="mcp-servers-list"></div>
                     </div>
 
                     <div class="form-section">
-                        <h3>GitHub</h3>
-                        <div class="form-row">${secretField({
-                            id: 's-gh-token',
-                            settingKey: 'GITHUB_TOKEN',
-                            label: 'GitHub Token',
-                            placeholder: 'ghp_...',
-                        })}</div>
+                        <h3>Source Control</h3>
+                        <div class="settings-section-copy">Repository metadata for GitHub integration. Tokens live in Secrets; this is not secret.</div>
                         <div class="form-row">
                             <div class="form-field">
                                 <label>GitHub Repo</label>
                                 <input id="s-gh-repo" placeholder="owner/repo-name">
                             </div>
                         </div>
-                        <div class="settings-inline-note">Only needed for in-app remote sync features. Safe to leave empty if you work locally.</div>
                     </div>
-                    <div class="form-section">
-                        <h3>A2A Protocol</h3>
-                        <div class="settings-section-copy">Agent-to-Agent communication server. Disabled by default. Requires restart to toggle.</div>
-                        <div class="form-row">
-                            <div class="form-field checkbox-field">
-                                <label for="s-a2a-enabled">Enable A2A Server</label>
-                                <input type="checkbox" id="s-a2a-enabled">
-                            </div>
-                        </div>
-                        <div class="form-grid two">
-                            <div class="form-field">
-                                <label for="s-a2a-host">A2A Host</label>
-                                <input type="text" id="s-a2a-host" placeholder="127.0.0.1">
-                            </div>
-                            <div class="form-field">
-                                <label for="s-a2a-port">A2A Port</label>
-                                <input type="number" id="s-a2a-port" placeholder="18800">
-                            </div>
-                        </div>
-                        <div class="form-grid two">
-                            <div class="form-field">
-                                <label for="s-a2a-agent-name">Agent Name (override)</label>
-                                <input type="text" id="s-a2a-agent-name" placeholder="Auto-detected from identity.md">
-                            </div>
-                            <div class="form-field">
-                                <label for="s-a2a-agent-description">Agent Description (override)</label>
-                                <input type="text" id="s-a2a-agent-description" placeholder="Auto-detected from identity.md">
-                            </div>
-                        </div>
-                        <div class="form-grid two">
-                            <div class="form-field">
-                                <label for="s-a2a-max-concurrent">Max Concurrent Tasks</label>
-                                <input type="number" id="s-a2a-max-concurrent" placeholder="3">
-                            </div>
-                            <div class="form-field">
-                                <label for="s-a2a-ttl-hours">Task TTL (hours)</label>
-                                <input type="number" id="s-a2a-ttl-hours" placeholder="24">
-                            </div>
-                        </div>
-                    </div>
-                </section>
 
-                <section class="settings-panel" data-settings-panel="advanced">
                     <div class="form-section">
                         <h3>Local Model Runtime</h3>
                         <div class="settings-section-copy">Only fill this in when you want Ouroboros to start and route to a GGUF model on this machine.</div>
@@ -485,7 +507,7 @@ export function renderSettingsPage() {
 
                     <div class="form-section">
                         <h3>Runtime Limits</h3>
-                        <div class="settings-section-copy">Workers control parallel task capacity. Timeout values are safety rails for long or stuck tasks and tools.</div>
+                        <div class="settings-section-copy">Workers control parallel task capacity. Timeout values are safety rails for long or stuck tasks and tools. Budget limits control runtime cost thresholds.</div>
                         <div class="form-grid two">
                             <div class="form-field">
                                 <label>Max Workers</label>
@@ -501,7 +523,15 @@ export function renderSettingsPage() {
                             </div>
                             <div class="form-field">
                                 <label>Tool Timeout (s)</label>
-                                <input id="s-tool-timeout" type="number" value="120">
+                                <input id="s-tool-timeout" type="number" value="600">
+                            </div>
+                            <div class="form-field">
+                                <label>Total Budget (USD)</label>
+                                <input id="s-total-budget" type="number" min="0.01" step="any" value="10.0">
+                            </div>
+                            <div class="form-field">
+                                <label>Per-Task Soft Threshold (USD)</label>
+                                <input id="s-settings-per-task-cost" type="number" min="0.01" step="any" value="20.0">
                             </div>
                         </div>
                     </div>
@@ -569,12 +599,7 @@ export function bindSettingsTabs(root, options = {}) {
     const state = options.state || null;
     const onActivate = typeof options.onActivate === 'function' ? options.onActivate : null;
 
-    // v5.7.0: the v5.6.0 drill-down ("settings-subtab-open" + back button)
-    // is gone. On every viewport the tab strip stays as horizontal-scroll
-    // pills (auto-scrolling the active pill into view), and tapping a tab
-    // simply swaps panels in place. The .settings-mobile-back element is
-    // still present in the DOM for back-compat, but is hidden via CSS and
-    // we never bind a handler to it.
+    // All viewports use horizontal tab pills; mobile back remains DOM-only for compat.
     function activate(tabName) {
         root.dataset.activeSettingsTab = tabName;
         let activeButton = null;
@@ -588,8 +613,7 @@ export function bindSettingsTabs(root, options = {}) {
         });
         if (scrollRoot) scrollRoot.scrollTop = 0;
         if (state) state.settingsActiveSubtab = tabName;
-        // Auto-scroll the active pill into the visible part of the strip
-        // on narrow viewports (the strip itself horizontally scrolls).
+        // Keep active pill visible in the horizontal strip.
         if (activeButton && typeof activeButton.scrollIntoView === 'function') {
             activeButton.scrollIntoView({
                 behavior: 'auto',

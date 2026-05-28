@@ -8,6 +8,11 @@ import pytest
 import ouroboros.skill_lifecycle_queue as q
 
 
+@pytest.fixture(autouse=True)
+def _isolated_data_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path / "drive")
+
+
 def _reset_queue():
     q._events.clear()
     q._active = None
@@ -42,6 +47,7 @@ def test_lifecycle_job_success_notifies(monkeypatch):
     progress = [kwargs for _args, kwargs in sent if kwargs.get("is_progress")]
     assert progress
     assert any(str(item.get("task_id") or "").startswith("skill_lifecycle_review_weather_") for item in progress)
+    assert any(isinstance(item.get("progress_meta", {}).get("lifecycle"), dict) for item in progress)
     assert not any(kwargs.get("task_id") == "skill_lifecycle_review" for _args, kwargs in sent)
 
 
@@ -166,6 +172,91 @@ def test_lifecycle_job_blocking_wrapper_records_event():
     assert event["status"] == "succeeded"
 
 
+def test_lifecycle_on_finished_exception_releases_lane_and_dedupe(monkeypatch):
+    _reset_queue()
+    monkeypatch.setattr("supervisor.message_bus.send_with_budget", lambda *a, **k: None)
+
+    async def runner():
+        return {"ok": True}
+
+    def on_finished(_job, _result, _error):
+        raise RuntimeError("finalizer failed")
+
+    async def main():
+        await q.run_lifecycle_job(
+            kind="review",
+            target="weather",
+            dedupe_key="review:weather",
+            runner=runner,
+            options=q.LifecycleJobOptions(on_finished=on_finished),
+        )
+        await q.run_lifecycle_job(
+            kind="review",
+            target="weather",
+            dedupe_key="review:weather",
+            runner=runner,
+        )
+
+    asyncio.run(main())
+    snap = q.queue_snapshot()
+    assert snap["active"] is None
+    assert q._dedupe_jobs == {}
+    assert [event["status"] for event in snap["events"][-2:]] == ["succeeded", "succeeded"]
+
+
+def test_lifecycle_on_finished_cancelled_error_still_cleans_lane(monkeypatch):
+    _reset_queue()
+    sent = []
+    monkeypatch.setattr("supervisor.message_bus.send_with_budget", lambda *a, **k: sent.append((a, k)))
+
+    async def runner():
+        return {"ok": True}
+
+    def on_finished(_job, _result, _error):
+        raise asyncio.CancelledError()
+
+    result = asyncio.run(
+        q.run_lifecycle_job(
+            kind="review",
+            target="weather",
+            dedupe_key="review:weather",
+            runner=runner,
+            options=q.LifecycleJobOptions(on_finished=on_finished),
+        )
+    )
+
+    assert result == {"ok": True}
+    snap = q.queue_snapshot()
+    assert snap["active"] is None
+    assert q._dedupe_jobs == {}
+    assert snap["events"][-1]["status"] == "succeeded"
+    assert any("completed" in str(args[1]) for args, kwargs in sent if kwargs.get("is_progress"))
+
+
+def test_lifecycle_snapshot_marks_stale_without_unlocking(monkeypatch):
+    _reset_queue()
+    monkeypatch.setattr(q, "_STALE_RUNNING_JOB_SEC", 60)
+    job = q.LifecycleJob(
+        id="skill-job-stale",
+        kind="review",
+        target="weather",
+        status="running",
+        message="Running review",
+        queued_at="2026-01-01T00:00:00+00:00",
+        started_at="2026-01-01T00:00:00+00:00",
+    )
+    q._active = job
+    q._events.append(job)
+
+    snap = q.queue_snapshot()
+
+    assert snap["active"]["stale"] is True
+    assert snap["active"]["stale_reason"] == "running_too_long"
+    assert "Restart Ouroboros" in snap["active"]["recovery_hint"]
+    assert snap["active"]["chat_task_id"].startswith("skill_lifecycle_review_weather_")
+    assert q._active is job
+
+
 def test_lifecycle_dedupe_rejects_active_duplicate():
     _reset_queue()
     started = threading.Event()
@@ -200,8 +291,10 @@ def test_lifecycle_dedupe_rejects_active_duplicate():
     asyncio.run(main())
 
 
-def test_cancelled_waiting_lifecycle_job_releases_lock_and_dedupe():
+def test_cancelled_waiting_lifecycle_job_releases_lock_and_dedupe(monkeypatch):
     _reset_queue()
+    sent = []
+    monkeypatch.setattr("supervisor.message_bus.send_with_budget", lambda *a, **k: sent.append((a, k)))
     first_started = threading.Event()
     release_first = threading.Event()
 
@@ -235,6 +328,10 @@ def test_cancelled_waiting_lifecycle_job_releases_lock_and_dedupe():
         second.cancel()
         with pytest.raises(asyncio.CancelledError):
             await second
+        active = q.queue_snapshot()["active"]
+        assert active is not None
+        assert active["target"] == "alpha"
+        assert active["status"] == "running"
         release_first.set()
         assert await asyncio.wait_for(first, timeout=2) == {"first": True}
         assert await asyncio.wait_for(
@@ -246,6 +343,102 @@ def test_cancelled_waiting_lifecycle_job_releases_lock_and_dedupe():
             ),
             timeout=2,
         ) == {"ok": True}
+
+    asyncio.run(main())
+
+    assert any(
+        kwargs.get("is_progress")
+        and str(kwargs.get("task_id") or "").startswith("skill_lifecycle_review_beta_")
+        and "cancelled" in str(args[1])
+        for args, kwargs in sent
+    )
+
+
+def test_cancelled_blocking_worker_keeps_lifecycle_lane_until_done():
+    _reset_queue()
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_work():
+        started.set()
+        release.wait(2)
+        return {"done": True}
+
+    async def runner():
+        return await q.run_blocking_preserving_cancellation(blocking_work)
+
+    async def quick_runner():
+        return {"quick": True}
+
+    async def main():
+        first = asyncio.create_task(
+            q.run_lifecycle_job(
+                kind="install",
+                target="alpha",
+                dedupe_key="install:alpha",
+                runner=runner,
+            )
+        )
+        assert await asyncio.to_thread(started.wait, 2)
+        first.cancel()
+        await asyncio.sleep(0.05)
+        first.cancel()
+        await asyncio.sleep(0.05)
+        active = q.queue_snapshot()["active"]
+        assert active is not None
+        assert active["target"] == "alpha"
+        second = asyncio.create_task(
+            q.run_lifecycle_job(
+                kind="install",
+                target="beta",
+                dedupe_key="install:beta",
+                runner=quick_runner,
+            )
+        )
+        await asyncio.sleep(0.05)
+        assert not second.done()
+        release.set()
+        assert await asyncio.wait_for(first, timeout=2) == {"done": True}
+        assert await asyncio.wait_for(second, timeout=2) == {"quick": True}
+
+    asyncio.run(main())
+
+
+def test_on_started_runs_only_after_cross_process_file_lock(monkeypatch, tmp_path):
+    _reset_queue()
+    entered_file_lock = threading.Event()
+    release_file_lock = threading.Event()
+    started_called = threading.Event()
+
+    @contextlib.asynccontextmanager
+    async def fake_file_lock(_drive_root):
+        entered_file_lock.set()
+        await asyncio.to_thread(release_file_lock.wait)
+        yield
+
+    monkeypatch.setattr(q, "async_skill_lifecycle_file_lock", fake_file_lock)
+
+    async def runner():
+        return {"ok": True}
+
+    async def main():
+        task = asyncio.create_task(
+            q.run_lifecycle_job(
+                kind="review",
+                target="alpha",
+                runner=runner,
+                options=q.LifecycleJobOptions(
+                    drive_root=tmp_path,
+                    on_started=lambda _job: started_called.set(),
+                ),
+            )
+        )
+        assert await asyncio.to_thread(entered_file_lock.wait, 2)
+        await asyncio.sleep(0.05)
+        assert not started_called.is_set()
+        release_file_lock.set()
+        assert await asyncio.wait_for(task, timeout=2) == {"ok": True}
+        assert started_called.is_set()
 
     asyncio.run(main())
 

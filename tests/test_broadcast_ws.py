@@ -10,21 +10,21 @@ class _DeadWebSocket:
 
 
 def test_broadcast_partial_failure_uses_module_data_dir(tmp_path, monkeypatch):
-    import server
+    from ouroboros.gateway import ws
 
     monkeypatch.delenv("OUROBOROS_DATA_DIR", raising=False)
-    monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(ws, "DATA_DIR", tmp_path)
 
-    with server._ws_lock:
-        original_clients = list(server._ws_clients)
-        server._ws_clients.clear()
-        server._ws_clients.append(_DeadWebSocket())
+    with ws._ws_lock:
+        original_clients = list(ws._ws_clients)
+        ws._ws_clients.clear()
+        ws._ws_clients.append(_DeadWebSocket())
     try:
-        asyncio.run(server.broadcast_ws({"type": "unit_test"}))
+        asyncio.run(ws.broadcast_ws({"type": "unit_test"}))
     finally:
-        with server._ws_lock:
-            server._ws_clients.clear()
-            server._ws_clients.extend(original_clients)
+        with ws._ws_lock:
+            ws._ws_clients.clear()
+            ws._ws_clients.extend(original_clients)
 
     events_path = tmp_path / "logs" / "events.jsonl"
     rows = [

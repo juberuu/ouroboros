@@ -1,9 +1,4 @@
-"""
-Ouroboros — Shared utilities.
-
-Single source for helper functions used across all modules.
-Does not import anything from ouroboros.* (zero dependency level).
-"""
+"""Shared low-level utilities with no ouroboros.* imports."""
 
 from __future__ import annotations
 
@@ -11,17 +6,19 @@ import datetime as _dt
 import hashlib
 import json
 import logging
+import math
 import os
 import pathlib
 import subprocess
+import threading
 import time
+import uuid
+from collections import deque
+from collections.abc import Iterator
 from typing import Any, Callable, Dict, List, Optional
 
 log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Realtime log sink (set by app.py to stream events to the UI)
-# ---------------------------------------------------------------------------
 _log_sink: Optional[Callable[[Dict[str, Any]], None]] = None
 
 
@@ -29,26 +26,30 @@ def set_log_sink(fn: Optional[Callable[[Dict[str, Any]], None]]) -> None:
     global _log_sink
     _log_sink = fn
 
-
-# ---------------------------------------------------------------------------
-# Time
-# ---------------------------------------------------------------------------
-
 def utc_now_iso() -> str:
     return _dt.datetime.now(tz=_dt.timezone.utc).isoformat()
 
-
-# ---------------------------------------------------------------------------
-# Hashing
-# ---------------------------------------------------------------------------
+def emit_log_event(
+    event_queue: Any,
+    payload: Dict[str, Any],
+    *,
+    blocking: bool = False,
+    log_label: str = "live log",
+) -> None:
+    """Best-effort log_event publish; blocking preserves critical live logs."""
+    if event_queue is None:
+        return
+    try:
+        envelope = {"type": "log_event", "data": dict(payload)}
+        if blocking:
+            event_queue.put(envelope)
+        else:
+            event_queue.put_nowait(envelope)
+    except Exception:
+        log.debug("Failed to emit %s event", log_label, exc_info=True)
 
 def sha256_text(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
-
-
-# ---------------------------------------------------------------------------
-# File I/O
-# ---------------------------------------------------------------------------
 
 def read_text(path: pathlib.Path) -> str:
     return path.read_text(encoding="utf-8")
@@ -57,6 +58,55 @@ def read_text(path: pathlib.Path) -> str:
 def write_text(path: pathlib.Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+
+def atomic_write_json(
+    path: pathlib.Path,
+    payload: Dict[str, Any],
+    *,
+    trailing_newline: bool = False,
+    fsync: bool = False,
+) -> None:
+    """Atomically persist a JSON object using a unique sibling temp file."""
+    path = pathlib.Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_name = (
+        f".{path.name}.tmp.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}"
+    )
+    tmp = path.with_name(tmp_name)
+    content = json.dumps(payload, ensure_ascii=False, indent=2)
+    if trailing_newline:
+        content += "\n"
+    try:
+        if fsync:
+            fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+            try:
+                os.write(fd, content.encode("utf-8"))
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        else:
+            tmp.write_text(content, encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def read_json_dict(path: pathlib.Path) -> Optional[Dict[str, Any]]:
+    """Return a JSON object from ``path`` or ``None`` when absent/invalid."""
+    path = pathlib.Path(path)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        log.warning("Failed to parse JSON file %s", path, exc_info=True)
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> bool:
@@ -68,6 +118,8 @@ def append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> bool:
     so the caller can fall back to an in-memory queue or stderr instead
     of pretending the write succeeded.
     """
+    if not isinstance(path, pathlib.Path):
+        raise TypeError(f"append_jsonl: path must be pathlib.Path, got {type(path).__name__}")
     path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(obj, ensure_ascii=False)
     data = (line + "\n").encode("utf-8")
@@ -152,19 +204,69 @@ def append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> bool:
     return _written
 
 
+def iter_jsonl_objects(
+    path: pathlib.Path,
+    max_entries: Optional[int] = None,
+    tail_bytes: Optional[int] = None,
+    dict_only: bool = True,
+) -> Iterator[Any]:
+    """Yield parseable JSONL entries; max_entries applies to raw tail lines."""
+    path = pathlib.Path(path)
+    if (max_entries is not None and max_entries <= 0) or (tail_bytes is not None and tail_bytes <= 0):
+        return
+    try:
+        with path.open("rb") as handle:
+            if tail_bytes is not None:
+                file_size = path.stat().st_size
+                if file_size > tail_bytes:
+                    start = file_size - tail_bytes
+                    handle.seek(start - 1)
+                    if handle.read(1) != b"\n":
+                        handle.readline()
+            lines = deque(handle, maxlen=max_entries) if max_entries else handle
+            for raw in lines:
+                line = raw.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not dict_only or isinstance(entry, dict):
+                    yield entry
+    except FileNotFoundError:
+        return
+
+
+def iter_llm_usage_events(
+    path: pathlib.Path,
+    *,
+    max_entries: Optional[int] = None,
+    tail_bytes: Optional[int] = None,
+) -> Iterator[Dict[str, Any]]:
+    for event in iter_jsonl_objects(path, max_entries=max_entries, tail_bytes=tail_bytes):
+        if event.get("type") == "llm_usage":
+            yield event
+
+
+def llm_usage_cost(event: Dict[str, Any]) -> float:
+    usage = event.get("usage")
+    value = event.get("cost")
+    if value is None and isinstance(usage, dict):
+        value = usage.get("cost")
+    try:
+        cost = float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return cost if math.isfinite(cost) else 0.0
+
+
 # ---------------------------------------------------------------------------
 # Path safety
 # ---------------------------------------------------------------------------
 
 def safe_relpath(p: str) -> str:
-    """Normalize a relative path and reject path-traversal / control-char
-    payloads. The previous form accepted strings containing NUL bytes and
-    other ASCII control characters. Most Python file ops truncate at NUL —
-    a path like ``"BIBLE.md\\x00.pdf"`` then writes to ``BIBLE.md`` on disk
-    while the safety-critical check (which compares the raw string) sees a
-    different name. Reject any control character below 0x20 except
-    tab/newline/CR.
-    """
+    """Normalize relative paths and reject traversal/NUL/control-char payloads."""
     if not isinstance(p, str):
         raise ValueError("Path must be a string.")
     for ch in p:
@@ -178,11 +280,6 @@ def safe_relpath(p: str) -> str:
     if ".." in pathlib.PurePosixPath(p).parts:
         raise ValueError("Path traversal is not allowed.")
     return p
-
-
-# ---------------------------------------------------------------------------
-# Text helpers
-# ---------------------------------------------------------------------------
 
 def truncate_for_log(s: str, max_chars: int = 4000) -> str:
     if len(s) <= max_chars:
@@ -208,11 +305,7 @@ def estimate_tokens(text: str) -> int:
 
 
 def is_tool_success(result: str) -> bool:
-    """Check whether a tool result indicates success (not an error).
-
-    Shared by presence loop, consciousness, and task loop for outgoing
-    reply capture.  Checks error prefixes and JSON {"ok": false} patterns.
-    """
+    """Return False for error-prefix results and JSON {"ok": false}."""
     _err_prefixes = ("\u26a0\ufe0f", "Error:", "[TIMEOUT", "Failed")
     if result.startswith(_err_prefixes):
         return False
@@ -225,11 +318,6 @@ def is_tool_success(result: str) -> bool:
             pass
     return True
 
-
-# ---------------------------------------------------------------------------
-# Subprocess
-# ---------------------------------------------------------------------------
-
 def run_cmd(cmd: List[str], cwd: Optional[pathlib.Path] = None) -> str:
     res = subprocess.run(cmd, cwd=str(cwd) if cwd else None, capture_output=True, text=True)
     if res.returncode != 0:
@@ -237,11 +325,6 @@ def run_cmd(cmd: List[str], cwd: Optional[pathlib.Path] = None) -> str:
             f"Command failed: {' '.join(cmd)}\n\nSTDOUT:\n{res.stdout}\n\nSTDERR:\n{res.stderr}"
         )
     return res.stdout.strip()
-
-
-# ---------------------------------------------------------------------------
-# Git helpers
-# ---------------------------------------------------------------------------
 
 def get_git_info(repo_dir: pathlib.Path) -> tuple[str, str]:
     """Best-effort retrieval of (git_branch, git_sha)."""
@@ -269,23 +352,16 @@ def get_git_info(repo_dir: pathlib.Path) -> tuple[str, str]:
         pass
     return branch, sha
 
-
-# ---------------------------------------------------------------------------
-# Sanitization helpers (for logging)
-# ---------------------------------------------------------------------------
-
 def sanitize_task_for_event(
     task: Dict[str, Any], drive_logs: pathlib.Path, threshold: int = 4000,
 ) -> Dict[str, Any]:
-    """Sanitize task dict for event logging: truncate large text, strip base64 images, persist full text."""
+    """Sanitize task event logs while persisting full oversized text."""
     try:
         sanitized = task.copy()
 
-        # Strip all keys ending with _base64 (images, etc.)
         keys_to_strip = [k for k in sanitized.keys() if k.endswith("_base64")]
         for key in keys_to_strip:
             value = sanitized.pop(key)
-            # Record that it was present and its size
             sanitized[f"{key}_present"] = True
             if isinstance(value, str):
                 sanitized[f"{key}_len"] = len(value)
@@ -323,23 +399,148 @@ _SECRET_KEYS = frozenset([
     "token", "api_key", "apikey", "authorization", "secret", "password", "passwd", "passphrase",
 ])
 
-# Patterns that indicate leaked secrets in tool output
 import re as _re
 _SECRET_PATTERNS = _re.compile(
     r'ghp_[A-Za-z0-9]{30,}'       # GitHub personal access token
-    r'|sk-ant-[A-Za-z0-9\-]{30,}' # Anthropic API key
+    r'|gh[ousr]_[A-Za-z0-9]{30,}' # GitHub OAuth/user/server/refresh tokens
+    r'|github_pat_[A-Za-z0-9_]{30,}'  # GitHub fine-grained personal access token
+    r'|AKIA[0-9A-Z]{16}'          # AWS access key id
+    r'|sk_live_[A-Za-z0-9]{24,}'  # Stripe live secret key
+    r'|sk_test_[A-Za-z0-9]{24,}'  # Stripe test secret key
+    r'|sk-ant-[A-Za-z0-9_\-]{30,}' # Anthropic API key
     r'|sk-or-[A-Za-z0-9\-]{30,}'  # OpenRouter API key
+    r'|sk-proj-[A-Za-z0-9_\-]{30,}'  # OpenAI project key
+    r'|sk-svcacct-[A-Za-z0-9_\-]{30,}'  # OpenAI service account key
+    r'|sk-admin-[A-Za-z0-9_\-]{30,}'  # OpenAI admin key
     r'|gsk_[A-Za-z0-9]{30,}'      # Groq API key
     r'|sk-[A-Za-z0-9]{40,}'       # OpenAI API key
     r'|\b[0-9]{8,}:[A-Za-z0-9_\-]{30,}\b'  # Telegram bot token (digits:alphanum)
 )
+_SECRET_BEARER_RE = _re.compile(r'(?i)\bBearer\s+([A-Za-z0-9_\-./+=]{24,})')
+_SECRET_URL_CREDENTIAL_RE = _re.compile(
+    r'(?i)\b(?:postgres|postgresql|mysql|mariadb|mongodb(?:\+srv)?|redis)://[^/\s:@]+:[^/\s@]+@'
+)
+_SECRET_LITERAL_FIELDS_RE = _re.compile(
+    r'(?im)(?:^|[\s,{])["\']?([A-Za-z_][A-Za-z0-9_-]*)["\']?\s*[:=]\s*["\']([^"\']+)["\']'
+)
+_SECRET_BRACKET_LITERAL_RE = _re.compile(
+    r'(?im)\[\s*["\']([A-Za-z_][A-Za-z0-9_-]*)["\']\s*\]\s*[:=]\s*["\']([^"\']+)["\']'
+)
+_SECRET_UNQUOTED_ASSIGNMENT_RE = _re.compile(
+    r'(?im)^([A-Za-z_][A-Za-z0-9_-]*)\s*[:=]\s*([A-Za-z0-9_\-./+=]{16,})\s*$'
+)
+_SECRET_FALLBACK_LITERAL_RE = _re.compile(
+    r'(?i)(?:os\.getenv|os\.environ\.get|settings\.get)\(\s*[\'"]([^\'"]+)[\'"][^)]*,\s*[\'"]([^\'"]+)[\'"]'
+    r'|api\.get_settings\([^)]*\)\.get\(\s*[\'"]([^\'"]+)[\'"][^)]*,\s*[\'"]([^\'"]+)[\'"]'
+    r'|process\.env\.([A-Z0-9_]+)\s*(?:\|\||\?\?)\s*[\'"]([^\'"]+)[\'"]'
+)
+_SECRET_KEY_NAME_RE = _re.compile(
+    r'(?i)^(?:'
+    r'token|access_token|refresh_token|auth_token|secret|secret_key|password|passwd|passphrase|authorization|'
+    r'api[_-]?key|database_url|db_url|ouroboros_network_password|aws_access_key_id|aws_secret_access_key|stripe_secret_key|'
+    r'[a-z0-9_-]+(?:[_-](?:token|secret|password|passwd|passphrase|api[_-]?key))'
+    r')$'
+)
+
+
+def _secret_key_name(key: str) -> bool:
+    raw = str(key or "").strip()
+    snake = raw.lower() if raw.upper() == raw else _re.sub(r"(?<!^)(?=[A-Z])", "_", raw).lower()
+    normalized = _re.sub(r"[^a-z0-9]+", "_", snake).strip("_")
+    return bool(_SECRET_KEY_NAME_RE.match(normalized))
+
+
+def _secret_placeholder_value(value: str) -> bool:
+    cleaned = str(value or "").strip().rstrip(",}]").strip().strip("'\"").strip()
+    if not cleaned:
+        return True
+    lowered = cleaned.lower()
+    if lowered in {"redacted", "***redacted***", "set_via_env", "set-in-settings", "changeme", "example"}:
+        return True
+    if lowered == "bearer":
+        return True
+    if lowered.startswith("bearer "):
+        bearer_value = cleaned[7:].strip()
+        if _secret_placeholder_value(bearer_value):
+            return True
+    if lowered in {"str", "string", "int", "float", "bool", "none", "null", "undefined"}:
+        return True
+    if lowered.startswith(("str ", "str|", "str |", "str)", "str):", "string ", "string|", "string |", "string)", "string):")):
+        return True
+    if lowered.startswith(("os.environ", "os.getenv", "process.env", "settings.", "api.get_settings")):
+        for literal in _re.findall(r"['\"]([^'\"]*)['\"]", cleaned):
+            if literal and not _secret_placeholder_value(literal) and not _secret_key_name(literal):
+                return False
+        return True
+    if lowered.startswith(("f\"", "f'")) and "{" in cleaned:
+        return True
+    if "settings" in lowered and any(word in lowered for word in ("configure", "configured", "set", "enter", "provide")):
+        return True
+    if "+" in cleaned and any(part in lowered for part in ("token", "key", "secret", "settings", "env")):
+        return True
+    if cleaned.startswith(("<", "${", "{")) and (cleaned.endswith((">", "}")) or cleaned.count("{") == 1):
+        return True
+    if _re.match(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+\(?[^)]*\)?$", cleaned):
+        return True
+    if _re.match(r"^[A-Za-z_][A-Za-z0-9_]*\([^)]*\)$", cleaned):
+        return True
+    if _re.match(r"^[a-z_][a-z0-9_]*$", cleaned) and cleaned in {
+        "password",
+        "token",
+        "secret",
+        "api_key",
+        "auth_header",
+        "access_token",
+        "refresh_token",
+    }:
+        return True
+    if cleaned.isupper() and "_" in cleaned and not any(ch.isdigit() for ch in cleaned) and _secret_key_name(cleaned):
+        return True
+    return False
 
 
 def sanitize_tool_result_for_log(result: str) -> str:
     """Redact potential secrets from tool result before logging."""
     if not isinstance(result, str) or len(result) < 20:
         return result
-    return _SECRET_PATTERNS.sub("***REDACTED***", result)
+    redacted = _SECRET_PATTERNS.sub("***REDACTED***", result)
+    return _SECRET_URL_CREDENTIAL_RE.sub(
+        lambda match: match.group(0).split("://", 1)[0] + "://***REDACTED***@",
+        redacted,
+    )
+
+
+def contains_real_secret_value(text: str) -> tuple[bool, List[str]]:
+    """Detect concrete secret values by format and simple literal assignments."""
+    if not isinstance(text, str) or not text:
+        return False, []
+    matches = [
+        *_SECRET_PATTERNS.findall(text),
+        *_SECRET_BEARER_RE.findall(text),
+        *_SECRET_URL_CREDENTIAL_RE.findall(text),
+    ]
+    matches.extend(
+        literal
+        for env_key, env_literal, api_key, api_literal, js_key, js_literal in _SECRET_FALLBACK_LITERAL_RE.findall(text)
+        for key, literal in ((env_key, env_literal), (api_key, api_literal), (js_key, js_literal))
+        if key and literal and _secret_key_name(key) and not _secret_placeholder_value(literal)
+    )
+    matches.extend(
+        value.strip()
+        for key, value in _SECRET_LITERAL_FIELDS_RE.findall(text)
+        if _secret_key_name(key) and not _secret_placeholder_value(value)
+    )
+    matches.extend(
+        value.strip()
+        for key, value in _SECRET_BRACKET_LITERAL_RE.findall(text)
+        if _secret_key_name(key) and not _secret_placeholder_value(value)
+    )
+    matches.extend(
+        value.strip()
+        for key, value in _SECRET_UNQUOTED_ASSIGNMENT_RE.findall(text)
+        if _secret_key_name(key) and not _secret_placeholder_value(value)
+    )
+    return bool(matches), list(matches)
 
 
 def sanitize_tool_args_for_log(
@@ -347,19 +548,29 @@ def sanitize_tool_args_for_log(
 ) -> Dict[str, Any]:
     """Sanitize tool arguments for logging: redact secrets, truncate large fields."""
 
+    def _redact_public_string(value: str) -> tuple[str, bool]:
+        try:
+            from ouroboros.observability import redact_projection
+
+            redacted = redact_projection(value)
+            return str(redacted.value), bool(redacted.records)
+        except Exception:
+            log.debug("Failed to run observability redactor for tool args", exc_info=True)
+            return sanitize_tool_result_for_log(value), sanitize_tool_result_for_log(value) != value
+
     def _sanitize_value(key: str, value: Any, depth: int) -> Any:
         if depth > 3:
             return {"_depth_limit": True}
         if key.lower() in _SECRET_KEYS:
             return "*** REDACTED ***"
-        if isinstance(value, str) and len(value) > threshold:
-            return {
-                key: truncate_for_log(value, threshold),
-                f"{key}_len": len(value),
-                f"{key}_sha256": sha256_text(value),
-                f"{key}_truncated": True,
-            }
         if isinstance(value, str):
+            redacted, did_redact = _redact_public_string(value)
+            if did_redact:
+                if len(redacted) > threshold:
+                    return f"<REDACTED_TRUNCATED:{key}:{len(redacted)}ch>"
+                return redacted
+            if len(value) > threshold:
+                return f"<TRUNCATED:{key}:{len(value)}ch:sha={sha256_text(value)[:12]}>"
             return value
         if isinstance(value, dict):
             return {k: _sanitize_value(k, v, depth + 1) for k, v in value.items()}
@@ -391,9 +602,8 @@ async def collect_evolution_metrics(repo_dir: str, data_dir: str | None = None) 
     import asyncio
     import subprocess as sp
 
-    # --- Parse journal files from data_dir for historical interpolation ---
     def _parse_journal(filepath: str, size_key: str) -> list[tuple[_dt.datetime, float]]:
-        """Parse a JSONL journal file into sorted (datetime, size_kb) tuples."""
+        """Parse a JSONL journal into sorted (datetime, size_kb) tuples."""
         entries: list[tuple[_dt.datetime, float]] = []
         try:
             with open(filepath, "r", encoding="utf-8") as f:
@@ -485,7 +695,6 @@ async def collect_evolution_metrics(repo_dir: str, data_dir: str | None = None) 
 
         files = ls_result.stdout.strip().split(chr(10))
 
-        # Count Python LOC (all .py files)
         python_lines = 0
         for f in files:
             if f.endswith(".py"):
@@ -510,7 +719,6 @@ async def collect_evolution_metrics(repo_dir: str, data_dir: str | None = None) 
         bible_kb = get_file_size_kb("BIBLE.md")
         system_kb = get_file_size_kb("prompts/SYSTEM.md")
 
-        # Identity and scratchpad from journal interpolation
         identity_kb = _interpolate_from_journal(identity_journal, date)
         scratchpad_kb = _interpolate_from_journal(scratchpad_journal, date)
         memory_kb = round(identity_kb + scratchpad_kb, 2)
@@ -565,7 +773,7 @@ async def collect_evolution_metrics(repo_dir: str, data_dir: str | None = None) 
         except OSError:
             log.warning("Failed to write evolution metrics cache: %s", cache_path, exc_info=True)
 
-    # Override latest tag's memory with live file sizes (same formula as historical: identity + scratchpad)
+    # Latest tag uses live identity+scratchpad sizes.
     if data_dir and points:
         mem_dir = os.path.join(data_dir, "memory")
         if os.path.isdir(mem_dir):
@@ -584,22 +792,8 @@ async def collect_evolution_metrics(repo_dir: str, data_dir: str | None = None) 
 
     return points
 
-
-# ---------------------------------------------------------------------------
-# Review-artifact preview helper (DEVELOPMENT.md item 2(f) compliance)
-# ---------------------------------------------------------------------------
-
 def truncate_review_artifact(text: str | None, limit: int = 4000) -> str:
-    """Return text or a capped prefix with an explicit OMISSION NOTE.
-
-    Complies with DEVELOPMENT.md item 2(f): review outputs and cognitive
-    artifacts must not be silently clipped with raw [:N] slicing.  Use this
-    helper everywhere a review-output string needs a display-safe preview.
-    An omission note including the original length is appended so nothing is
-    silently lost.
-
-    Accepts None (e.g. JSON null from a reviewer) and coerces it to "".
-    """
+    """Return a display-safe preview with explicit OMISSION NOTE, never silent clipping."""
     text = str(text or "")
     if len(text) <= limit:
         return text
@@ -607,8 +801,5 @@ def truncate_review_artifact(text: str | None, limit: int = 4000) -> str:
 
 
 def truncate_review_reason(text: str, limit: int = 120) -> str:
-    """Compact preview of a single reviewer reason/finding string.
-
-    Uses explicit omission note rather than silent clipping.
-    """
+    """Compact reviewer reason preview with explicit omission note."""
     return truncate_review_artifact(text, limit=limit)

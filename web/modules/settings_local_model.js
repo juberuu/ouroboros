@@ -1,3 +1,7 @@
+import { showToast } from './toast.js';
+import { apiFetch } from './api_client.js';
+
+
 function readLocalModelBody() {
     return {
         source: document.getElementById('s-local-source').value.trim(),
@@ -28,7 +32,6 @@ function setInstallBtnVisible(visible) {
 }
 
 function setProgressBar(fraction) {
-    // fraction: 0.0–1.0, or null to hide
     const wrap = document.getElementById('local-model-progress-wrap');
     const bar = document.getElementById('local-model-progress-bar');
     if (!wrap || !bar) return;
@@ -45,7 +48,7 @@ export function bindLocalModelControls({ state }) {
     async function updateLocalStatus() {
         if (state.activePage !== 'settings') return;
         try {
-            const resp = await fetch('/api/local-model/status', { cache: 'no-store' });
+            const resp = await apiFetch('/api/local-model/status', { cache: 'no-store' });
             const d = await resp.json();
             const el = document.getElementById('local-model-status');
             if (!el) return;
@@ -54,7 +57,6 @@ export function bindLocalModelControls({ state }) {
             const isDownloading = d.status === 'downloading';
             const runtimeMissing = d.runtime_status === 'missing' || d.runtime_status === 'install_error';
 
-            // Status text
             let text = 'Status: ' + (d.status || 'offline').charAt(0).toUpperCase() + (d.status || 'offline').slice(1);
             if (isReady && d.context_length) text += ` (ctx: ${d.context_length})`;
             if (isDownloading && d.download_progress != null) {
@@ -72,23 +74,18 @@ export function bindLocalModelControls({ state }) {
             el.textContent = text;
             el.dataset.tone = isReady ? 'ok' : (d.status === 'error' || d.runtime_status === 'install_error' ? 'error' : 'muted');
 
-            // Button states
             document.getElementById('btn-local-stop').disabled = !isReady;
             document.getElementById('btn-local-test').disabled = !isReady;
             document.getElementById('btn-local-start').disabled = isInstalling || isDownloading;
 
-            // Install button: show when runtime missing/errored, hide otherwise
             setInstallBtnVisible(runtimeMissing);
-            // Re-enable the install button when not actively installing (allows retry after failure)
             const installBtn = document.getElementById('btn-local-install-runtime');
             if (installBtn) installBtn.disabled = isInstalling;
 
-            // Install log (shown on error)
             if (d.runtime_status === 'install_error' && d.runtime_install_log) {
                 setTestResult('Install failed:\n' + d.runtime_install_log, 'error');
             }
 
-            // If install just completed successfully, auto-retry start if we have a source
             if (d.runtime_status === 'install_ok' && state._pendingLocalStart) {
                 state._pendingLocalStart = false;
                 triggerStart();
@@ -112,20 +109,19 @@ export function bindLocalModelControls({ state }) {
     async function triggerStart() {
         const body = readLocalModelBody();
         if (!body.source) {
-            alert('Enter a model source (HuggingFace repo ID or local path)');
+            showToast('Enter a model source (HuggingFace repo ID or local path)', 'error');
             return;
         }
         setTestResult('');
         setProgressBar(null);
         try {
-            const resp = await fetch('/api/local-model/start', {
+            const resp = await apiFetch('/api/local-model/start', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
             });
             const data = await resp.json();
             if (resp.status === 412 && data.error === 'runtime_missing') {
-                // Runtime not installed — show the install button and a clear message
                 setInstallBtnVisible(true);
                 setLocalStatus('Local runtime not installed. Click "Install Local Runtime" below.', 'error');
                 setTestResult(
@@ -149,18 +145,18 @@ export function bindLocalModelControls({ state }) {
 
     document.getElementById('btn-local-stop').addEventListener('click', async () => {
         try {
-            await fetch('/api/local-model/stop', { method: 'POST' });
+            await apiFetch('/api/local-model/stop', { method: 'POST' });
             setProgressBar(null);
             updateLocalStatus();
         } catch (e) {
-            alert('Failed: ' + e.message);
+            showToast('Failed: ' + e.message, 'error');
         }
     });
 
     document.getElementById('btn-local-test').addEventListener('click', async () => {
         setTestResult('Running tests...', 'muted');
         try {
-            const resp = await fetch('/api/local-model/test', { method: 'POST' });
+            const resp = await apiFetch('/api/local-model/test', { method: 'POST' });
             const r = await resp.json();
             if (r.error) {
                 setTestResult('Error: ' + r.error, 'error');
@@ -178,24 +174,21 @@ export function bindLocalModelControls({ state }) {
         }
     });
 
-    // Install Local Runtime button
     const installBtn = document.getElementById('btn-local-install-runtime');
     if (installBtn) {
         installBtn.addEventListener('click', async () => {
             installBtn.disabled = true;
             setTestResult('Installing llama-cpp-python, this may take a few minutes…', 'muted');
             setLocalStatus('Status: Installing local runtime…', 'muted');
-            // Remember that we want to start after install
             const body = readLocalModelBody();
             state._pendingLocalStart = !!body.source;
             try {
-                const resp = await fetch('/api/local-model/install-runtime', { method: 'POST' });
+                const resp = await apiFetch('/api/local-model/install-runtime', { method: 'POST' });
                 const d = await resp.json();
                 if (d.error) {
                     setTestResult('Install request failed: ' + d.error, 'error');
                     installBtn.disabled = false;
                 }
-                // Polling will pick up the progress and handle auto-start on install_ok
             } catch (e) {
                 setTestResult('Install failed: ' + e.message, 'error');
                 installBtn.disabled = false;

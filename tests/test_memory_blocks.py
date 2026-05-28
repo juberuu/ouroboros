@@ -55,15 +55,15 @@ class TestScratchpadBlocks:
         assert "first block" in md
         assert f"{_SCRATCHPAD_MAX_BLOCKS} blocks" in md
 
-    def test_legacy_migration(self, memory):
+    def test_append_block_refuses_retired_legacy_flat_scratchpad(self, memory):
         memory.scratchpad_path().write_text("Legacy scratchpad content here", encoding="utf-8")
-        memory.append_scratchpad_block("new block")
-        blocks = memory.load_scratchpad_blocks()
-        assert len(blocks) == 2
-        assert blocks[0]["source"] == "migration"
-        assert "Legacy scratchpad" in blocks[0]["content"]
+        with pytest.raises(RuntimeError, match="LEGACY_SCRATCHPAD_REQUIRES_MANUAL_UPGRADE"):
+            memory.append_scratchpad_block("new block")
+        assert memory.load_scratchpad_blocks() == []
+        assert "Legacy scratchpad" in memory.scratchpad_path().read_text(encoding="utf-8")
+        assert "legacy_scratchpad_requires_manual_upgrade" in memory.journal_path().read_text(encoding="utf-8")
 
-    def test_migration_skips_default(self, memory):
+    def test_append_block_from_default_scratchpad(self, memory):
         memory.ensure_files()
         memory.append_scratchpad_block("new block")
         blocks = memory.load_scratchpad_blocks()

@@ -5,6 +5,10 @@
   --panel-2: rgba(255, 255, 255, 0.04);
   --panel-3: rgba(255, 255, 255, 0.03);
   --border: rgba(255, 255, 255, 0.10);
+  --ui-card-bg: var(--panel);
+  --ui-card-border: var(--border);
+  --ui-tone-ok: var(--green);
+  --ui-tone-danger: var(--red);
   --border-strong: rgba(232, 93, 111, 0.35);
   --text: #edf2f7;
   --muted: rgba(237, 242, 247, 0.62);
@@ -215,7 +219,7 @@ textarea::placeholder {
 .wizard-runtime-strip {
   border: 1px solid var(--border);
   border-radius: 18px;
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--panel-3);
 }
 
 .panel-card,
@@ -262,10 +266,11 @@ textarea::placeholder {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
-.field-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px;
+.field-grid,
+.wizard-choice-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
 }
 
 .field {
@@ -361,10 +366,11 @@ select:focus {
   box-shadow: 0 0 0 3px rgba(232, 93, 111, 0.12);
 }
 
-.selection-row {
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
+.selection-row,
+.footer-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
 }
 
 .selection-pill {
@@ -421,16 +427,8 @@ select:focus {
   font-weight: 600;
 }
 
-.wizard-choice-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px;
-}
-
 .wizard-choice-grid.three {
-  /* Phase 2: runtime-mode picker in the review_mode step has three
-     buttons (Light / Advanced / Pro). Without this rule the grid falls
-     back to the default 2-column layout, producing an ugly 2 + 1 split. */
+  /* Runtime-mode picker has three choices, not the default two. */
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
@@ -482,11 +480,11 @@ select:focus {
 }
 
 .wizard-runtime-status[data-tone="ok"] {
-  color: #6ee7b7;
+  color: var(--ui-tone-ok);
 }
 
 .wizard-runtime-status[data-tone="error"] {
-  color: #fca5a5;
+  color: var(--ui-tone-danger);
 }
 
 .wizard-test-result {
@@ -550,12 +548,6 @@ select:focus {
   line-height: 1.45;
 }
 
-.footer-actions {
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
 .btn {
   border: 1px solid var(--border);
   border-radius: 14px;
@@ -568,11 +560,6 @@ select:focus {
   transform: translateY(-1px);
 }
 
-.btn-secondary {
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--text);
-}
-
 .btn-primary {
   min-width: 170px;
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
@@ -581,6 +568,7 @@ select:focus {
   font-weight: 700;
 }
 
+.btn-secondary,
 .btn-ghost {
   background: rgba(255, 255, 255, 0.03);
   color: var(--text);

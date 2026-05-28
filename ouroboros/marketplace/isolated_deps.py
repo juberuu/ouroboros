@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-import json
 import os
 import pathlib
 import shutil
 import subprocess
 import sys
-from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from ouroboros.marketplace.install_specs import install_specs_hash
 from ouroboros.skill_loader import skill_state_dir
+from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
 
 
 ENV_DIRNAME = ".ouroboros_env"
@@ -66,21 +65,16 @@ def _installer_env(env_root: pathlib.Path, *, ecosystem: str = "") -> Dict[str, 
     for path in (tmp_dir, home_dir, cache_dir):
         path.mkdir(parents=True, exist_ok=True)
     env = {key: os.environ[key] for key in _SAFE_ENV_KEYS if key in os.environ}
-    env["HOME"] = str(home_dir)
-    env["USERPROFILE"] = str(home_dir)
-    env["APPDATA"] = str(home_dir / "AppData" / "Roaming")
-    env["LOCALAPPDATA"] = str(home_dir / "AppData" / "Local")
-    env["TMPDIR"] = str(tmp_dir)
-    env["TMP"] = str(tmp_dir)
-    env["TEMP"] = str(tmp_dir)
-    env["PYTHONNOUSERSITE"] = "1"
-    env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
-    env["PIP_CACHE_DIR"] = str(cache_dir / "pip")
-    env["PIP_CONFIG_FILE"] = os.devnull
-    env["npm_config_cache"] = str(cache_dir / "npm")
-    env["npm_config_userconfig"] = str(env_root / "npmrc")
-    env["CARGO_HOME"] = str(env_root / "cargo" / "home")
-    env["CARGO_TARGET_DIR"] = str(env_root / "cargo" / "target")
+    env.update({
+        "HOME": str(home_dir), "USERPROFILE": str(home_dir),
+        "APPDATA": str(home_dir / "AppData" / "Roaming"),
+        "LOCALAPPDATA": str(home_dir / "AppData" / "Local"),
+        "TMPDIR": str(tmp_dir), "TMP": str(tmp_dir), "TEMP": str(tmp_dir),
+        "PYTHONNOUSERSITE": "1", "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+        "PIP_CACHE_DIR": str(cache_dir / "pip"), "PIP_CONFIG_FILE": os.devnull,
+        "npm_config_cache": str(cache_dir / "npm"), "npm_config_userconfig": str(env_root / "npmrc"),
+        "CARGO_HOME": str(env_root / "cargo" / "home"), "CARGO_TARGET_DIR": str(env_root / "cargo" / "target"),
+    })
     return env
 
 
@@ -108,10 +102,7 @@ def _run(cmd: List[str], *, cwd: pathlib.Path, env: Dict[str, str], timeout_sec:
     finally:
         with _subprocess_lock:
             _active_subprocesses.discard(proc)
-    return {
-        "cmd": cmd[:2] + ["..."] if len(cmd) > 2 else list(cmd),
-        "returncode": proc.returncode,
-    }
+    return {"cmd": cmd[:2] + ["..."] if len(cmd) > 2 else list(cmd), "returncode": proc.returncode}
 
 
 def _ensure_python_env(env_root: pathlib.Path, timeout_sec: int) -> pathlib.Path:
@@ -166,14 +157,7 @@ def install_isolated_dependencies(
     *,
     timeout_sec: int = _DEFAULT_TIMEOUT_SEC,
 ) -> Dict[str, Any]:
-    """Install normalized dependency specs into ``<skill>/.ouroboros_env``.
-
-    v5.7.0: deps.json carries an explicit ``status`` field (``installed``
-    / ``failed`` / ``pending``) plus the ``specs_hash`` so callers can
-    decide whether the install is still in sync with the current
-    provenance. ``failed`` carries the error message; ``installed``
-    keeps the previous shape (installed list, log tail, fingerprint).
-    """
+    """Install normalized specs and persist deps.json status/specs_hash."""
 
     env_root = isolated_env_dir(skill_dir)
     env_root.mkdir(parents=True, exist_ok=True)
@@ -200,7 +184,7 @@ def install_isolated_dependencies(
         failure = {"error": f"{type(exc).__name__}: {exc}"}
     fingerprint = {
         "schema_version": 1,
-        "installed_at": datetime.now(timezone.utc).isoformat(),
+        "installed_at": utc_now_iso(),
         "skill": skill_name,
         "env_dir": ENV_DIRNAME,
         "specs_hash": install_specs_hash(specs),
@@ -209,36 +193,34 @@ def install_isolated_dependencies(
         "status": "failed" if failure else "installed",
         "error": failure.get("error", ""),
     }
-    (env_root / FINGERPRINT_FILENAME).write_text(
-        json.dumps(fingerprint, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    atomic_write_json(env_root / FINGERPRINT_FILENAME, fingerprint, trailing_newline=True)
     state_dir = skill_state_dir(drive_root, skill_name)
-    (state_dir / DEPS_STATE_FILENAME).write_text(
-        json.dumps(fingerprint, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    atomic_write_json(state_dir / DEPS_STATE_FILENAME, fingerprint, trailing_newline=True)
     if failure:
-        # Re-raise so existing call-sites that rely on the failure
-        # surface (install_skill's deps_status="failed") keep behaving
-        # as before. The fingerprint with status=failed is already
-        # written, so durable state survives the exception.
+        # Re-raise after durable failed fingerprint is written.
         raise RuntimeError(failure["error"])
     return fingerprint
 
 
-def read_deps_state(drive_root: pathlib.Path, skill_name: str) -> Dict[str, Any]:
-    """Return the persisted ``deps.json`` for a skill, or an empty dict.
-
-    v5.7.0 helper used by ``toggle_skill`` to refuse enable when the
-    skill's auto specs are not installed (status != ``installed``) or
-    are stale relative to the current provenance.
-    """
+def read_deps_state(
+    drive_root: pathlib.Path,
+    skill_name: str,
+    skill_dir: pathlib.Path | None = None,
+) -> Dict[str, Any]:
+    """Return persisted deps.json, optionally verified against the live env."""
     try:
         state_dir = skill_state_dir(drive_root, skill_name)
         path = state_dir / DEPS_STATE_FILENAME
-        if not path.is_file():
-            return {}
-        return json.loads(path.read_text(encoding="utf-8"))
+        state = read_json_dict(path) or {}
     except Exception:
         return {}
+    if skill_dir is None or str(state.get("status") or "") != "installed":
+        return state
+    fingerprint = read_json_dict(isolated_env_dir(skill_dir) / FINGERPRINT_FILENAME) or {}
+    state_hash = str(state.get("specs_hash") or "")
+    fingerprint_hash = str(fingerprint.get("specs_hash") or "")
+    if str(fingerprint.get("status") or "") != "installed":
+        return {**state, "status": "missing", "error": "isolated environment fingerprint is missing"}
+    if fingerprint_hash != state_hash:
+        return {**state, "status": "stale", "error": "isolated environment fingerprint is stale"}
+    return state

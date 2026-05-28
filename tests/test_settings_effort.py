@@ -1,4 +1,5 @@
 """Tests for effort, review models, and review enforcement settings."""
+import json
 import os
 from ouroboros.config import (
     SETTINGS_DEFAULTS,
@@ -6,6 +7,9 @@ from ouroboros.config import (
     resolve_effort,
     get_review_models,
     get_review_enforcement,
+    get_scope_review_models,
+    get_task_review_mode,
+    get_auto_grant_enabled,
 )
 
 
@@ -16,7 +20,6 @@ from ouroboros.config import (
 def test_initial_effort_default(monkeypatch):
     """Default effort is 'medium' when env var not set."""
     monkeypatch.delenv("OUROBOROS_EFFORT_TASK", raising=False)
-    monkeypatch.delenv("OUROBOROS_INITIAL_REASONING_EFFORT", raising=False)
     assert resolve_effort("task") == "medium"
 
 
@@ -24,14 +27,12 @@ def test_initial_effort_valid_values(monkeypatch):
     """Valid effort values pass through unchanged via OUROBOROS_EFFORT_TASK."""
     for effort in ("none", "low", "medium", "high"):
         monkeypatch.setenv("OUROBOROS_EFFORT_TASK", effort)
-        monkeypatch.delenv("OUROBOROS_INITIAL_REASONING_EFFORT", raising=False)
         assert resolve_effort("task") == effort
 
 
 def test_initial_effort_invalid_falls_back_to_medium(monkeypatch):
     """Invalid effort values fall back to 'medium'."""
     monkeypatch.setenv("OUROBOROS_EFFORT_TASK", "extreme")
-    monkeypatch.delenv("OUROBOROS_INITIAL_REASONING_EFFORT", raising=False)
     assert resolve_effort("task") == "medium"
 
 
@@ -40,10 +41,11 @@ def test_initial_effort_invalid_falls_back_to_medium(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_effort_defaults_in_config():
-    """All four effort keys have correct defaults in SETTINGS_DEFAULTS."""
+    """All effort keys have correct defaults in SETTINGS_DEFAULTS."""
     assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_TASK") == "medium"
     assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_EVOLUTION") == "high"
     assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_REVIEW") == "medium"
+    assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_SCOPE_REVIEW") == "high"
     assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_CONSCIOUSNESS") == "low"
 
 
@@ -58,6 +60,15 @@ def test_review_models_default_in_config():
 def test_review_enforcement_default_in_config():
     """OUROBOROS_REVIEW_ENFORCEMENT defaults to advisory."""
     assert SETTINGS_DEFAULTS.get("OUROBOROS_REVIEW_ENFORCEMENT") == "advisory"
+
+
+def test_scope_review_and_task_review_defaults_in_config():
+    assert SETTINGS_DEFAULTS.get("OUROBOROS_SCOPE_REVIEW_MODELS") == "openai/gpt-5.5"
+    assert SETTINGS_DEFAULTS.get("OUROBOROS_TASK_REVIEW_MODE") == "auto"
+
+
+def test_auto_grant_reviewed_skills_default_in_config():
+    assert SETTINGS_DEFAULTS.get("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS") == "false"
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +137,7 @@ def test_get_review_models_falls_back_to_main_light_light_in_openai_only_mode(mo
     monkeypatch.setenv("OUROBOROS_MODEL", "openai::gpt-5.5")
     monkeypatch.setenv(
         "OUROBOROS_REVIEW_MODELS",
-        "openai/gpt-5.5,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.6",
+        "openai/gpt-5.5,google/gemini-3.5-flash,anthropic/claude-opus-4.6",
     )
 
     models = get_review_models()
@@ -167,7 +178,7 @@ def test_get_review_models_falls_back_to_main_light_light_in_anthropic_only_mode
     monkeypatch.setenv("OUROBOROS_MODEL", "anthropic::claude-opus-4-6")
     monkeypatch.setenv(
         "OUROBOROS_REVIEW_MODELS",
-        "openai/gpt-5.5,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.6",
+        "openai/gpt-5.5,google/gemini-3.5-flash,anthropic/claude-opus-4.6",
     )
 
     models = get_review_models()
@@ -199,6 +210,52 @@ def test_get_review_enforcement_invalid_falls_back(monkeypatch):
     assert get_review_enforcement() == "advisory"
 
 
+def test_get_scope_review_models_preserves_duplicate_slots(monkeypatch):
+    monkeypatch.setenv("OUROBOROS_SCOPE_REVIEW_MODELS", "model/a, model/a, model/b")
+    assert get_scope_review_models() == ["model/a", "model/a", "model/b"]
+
+
+def test_get_scope_review_models_falls_back_to_singular(monkeypatch):
+    monkeypatch.setenv("OUROBOROS_SCOPE_REVIEW_MODELS", "")
+    monkeypatch.setenv("OUROBOROS_SCOPE_REVIEW_MODEL", "legacy/scope")
+    assert get_scope_review_models() == ["legacy/scope"]
+
+
+def test_get_task_review_mode_clamps_invalid(monkeypatch):
+    monkeypatch.delenv("OUROBOROS_TASK_REVIEW_MODE", raising=False)
+    assert get_task_review_mode() == "auto"
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "required")
+    assert get_task_review_mode() == "required"
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "blocking")
+    assert get_task_review_mode() == "auto"
+
+
+def test_get_auto_grant_enabled(monkeypatch, tmp_path):
+    from ouroboros import config as cfg
+
+    monkeypatch.setattr(cfg, "SETTINGS_PATH", tmp_path / "missing-settings.json", raising=True)
+    monkeypatch.delenv("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", raising=False)
+    assert cfg.get_auto_grant_enabled() is False
+    monkeypatch.setenv("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", "true")
+    assert cfg.get_auto_grant_enabled() is True
+    monkeypatch.setenv("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", "false")
+    assert cfg.get_auto_grant_enabled() is False
+
+
+def test_get_auto_grant_enabled_prefers_settings_file(monkeypatch, tmp_path):
+    from ouroboros import config as cfg
+
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(
+        json.dumps({"OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "true"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cfg, "SETTINGS_PATH", settings_path, raising=True)
+    monkeypatch.setenv("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", "false")
+
+    assert cfg.get_auto_grant_enabled() is True
+
+
 def test_apply_settings_clears_review_models_restores_default(monkeypatch):
     """Clearing OUROBOROS_REVIEW_MODELS in settings restores the default in env."""
     # Simulate user clearing the field in Settings UI (empty string)
@@ -220,29 +277,61 @@ def test_apply_settings_clears_review_enforcement_restores_default(monkeypatch):
     assert get_review_enforcement() == "advisory"
 
 
+def test_apply_settings_clears_task_and_scope_review_restores_default(monkeypatch):
+    settings = {"OUROBOROS_SCOPE_REVIEW_MODELS": "", "OUROBOROS_SCOPE_REVIEW_MODEL": "", "OUROBOROS_TASK_REVIEW_MODE": ""}
+    apply_settings_to_env(settings)
+    assert os.environ.get("OUROBOROS_SCOPE_REVIEW_MODELS") == SETTINGS_DEFAULTS["OUROBOROS_SCOPE_REVIEW_MODELS"]
+    assert os.environ.get("OUROBOROS_TASK_REVIEW_MODE") == SETTINGS_DEFAULTS["OUROBOROS_TASK_REVIEW_MODE"]
+
+
 # ---------------------------------------------------------------------------
 # apply_settings_to_env propagation
 # ---------------------------------------------------------------------------
 
-def test_apply_settings_to_env_includes_effort_keys():
-    """apply_settings_to_env propagates all four effort keys."""
+def test_apply_settings_to_env_includes_effort_keys(monkeypatch, tmp_path):
+    """apply_settings_to_env propagates all effort keys."""
     settings = {
         "OUROBOROS_EFFORT_TASK": "low",
         "OUROBOROS_EFFORT_EVOLUTION": "medium",
         "OUROBOROS_EFFORT_REVIEW": "high",
+        "OUROBOROS_EFFORT_SCOPE_REVIEW": "low",
         "OUROBOROS_EFFORT_CONSCIOUSNESS": "none",
         "OUROBOROS_REVIEW_MODELS": "model-a,model-b",
         "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
+        "OUROBOROS_SCOPE_REVIEW_MODELS": "scope-a,scope-b",
+        "OUROBOROS_TASK_REVIEW_MODE": "required",
+        "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "true",
+        "OUROBOROS_RETURN_REASONING": "",
     }
     apply_settings_to_env(settings)
     assert os.environ.get("OUROBOROS_EFFORT_TASK") == "low"
     assert os.environ.get("OUROBOROS_EFFORT_EVOLUTION") == "medium"
     assert os.environ.get("OUROBOROS_EFFORT_REVIEW") == "high"
+    assert os.environ.get("OUROBOROS_EFFORT_SCOPE_REVIEW") == "low"
     assert os.environ.get("OUROBOROS_EFFORT_CONSCIOUSNESS") == "none"
     assert os.environ.get("OUROBOROS_REVIEW_MODELS") == "model-a,model-b"
     assert os.environ.get("OUROBOROS_REVIEW_ENFORCEMENT") == "advisory"
+    assert os.environ.get("OUROBOROS_SCOPE_REVIEW_MODELS") == "scope-a,scope-b"
+    assert os.environ.get("OUROBOROS_TASK_REVIEW_MODE") == "required"
+    assert os.environ.get("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS") == "true"
+    assert os.environ.get("OUROBOROS_RETURN_REASONING") == ""
     # cleanup
     for k in ("OUROBOROS_EFFORT_TASK", "OUROBOROS_EFFORT_EVOLUTION",
-              "OUROBOROS_EFFORT_REVIEW", "OUROBOROS_EFFORT_CONSCIOUSNESS",
-              "OUROBOROS_REVIEW_MODELS", "OUROBOROS_REVIEW_ENFORCEMENT"):
+              "OUROBOROS_EFFORT_REVIEW", "OUROBOROS_EFFORT_SCOPE_REVIEW",
+              "OUROBOROS_EFFORT_CONSCIOUSNESS",
+              "OUROBOROS_REVIEW_MODELS", "OUROBOROS_REVIEW_ENFORCEMENT",
+              "OUROBOROS_SCOPE_REVIEW_MODELS", "OUROBOROS_TASK_REVIEW_MODE",
+              "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", "OUROBOROS_RETURN_REASONING"):
         os.environ.pop(k, None)
+
+    import ouroboros.config as cfg
+
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps({"OUROBOROS_RETURN_REASONING": True}), encoding="utf-8")
+    monkeypatch.setattr(cfg, "SETTINGS_PATH", settings_path, raising=True)
+    monkeypatch.setenv("OUROBOROS_RETURN_REASONING", "")
+
+    loaded = cfg.load_settings()
+    assert loaded["OUROBOROS_RETURN_REASONING"] == ""
+    cfg.apply_settings_to_env(loaded)
+    assert os.environ.get("OUROBOROS_RETURN_REASONING") == ""

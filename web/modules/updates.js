@@ -1,14 +1,12 @@
-import { escapeHtml } from './utils.js';
+import { escapeHtmlAttr as escapeHtml } from './utils.js';
+import { showToast } from './toast.js';
+import { apiFetch } from './api_client.js';
 
-export function initUpdates({ mount, hostPage = 'settings', hostSubtab = 'updates', state = {} }) {
-    const host = mount || document.getElementById('content');
+export function initUpdates({ mount, state }) {
     const page = document.createElement('div');
     page.id = 'page-updates';
     page.className = 'settings-embedded-content settings-updates-panel';
-    // v5.7.0: drop the duplicate inner ".page-header" (the outer Dashboard
-    // tab strip already labels the panel). The "Check for updates" button
-    // moves into ".updates-card-head" alongside the status badge so the
-    // refresh-style action sits with the status it refreshes.
+    // Keep the update action beside the status it refreshes.
     page.innerHTML = `
         <div class="updates-scroll">
             <section class="updates-card" id="updates-status-card">
@@ -49,7 +47,7 @@ export function initUpdates({ mount, hostPage = 'settings', hostSubtab = 'update
             </section>
         </div>
     `;
-    host.appendChild(page);
+    mount.appendChild(page);
 
     const checkBtn = page.querySelector('#btn-update-check');
     const applyBtn = page.querySelector('#btn-update-apply');
@@ -126,7 +124,7 @@ export function initUpdates({ mount, hostPage = 'settings', hostSubtab = 'update
         checkBtn.disabled = true;
         setBadge('starting', fetchRemote ? 'Checking...' : 'Loading...');
         try {
-            const resp = await fetch(fetchRemote ? '/api/update/check' : '/api/update/status', {
+            const resp = await apiFetch(fetchRemote ? '/api/update/check' : '/api/update/status', {
                 method: fetchRemote ? 'POST' : 'GET',
                 cache: 'no-store',
             });
@@ -175,7 +173,7 @@ export function initUpdates({ mount, hostPage = 'settings', hostSubtab = 'update
 
     async function loadVersions() {
         try {
-            const resp = await fetch('/api/git/log', { cache: 'no-store' });
+            const resp = await apiFetch('/api/git/log', { cache: 'no-store' });
             if (!resp.ok) throw new Error('Git log API error ' + resp.status);
             const data = await resp.json();
             current.textContent = `Branch: ${data.branch || '?'} @ ${data.sha || '?'}`;
@@ -200,17 +198,19 @@ export function initUpdates({ mount, hostPage = 'settings', hostSubtab = 'update
     async function rollback(target) {
         if (!confirm(`Roll back to ${target}?\n\nA rescue snapshot of the current state will be saved. The server will restart.`)) return;
         try {
-            const resp = await fetch('/api/git/rollback', {
+            const resp = await apiFetch('/api/git/rollback', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ target }),
             });
             const data = await resp.json();
-            alert(data.status === 'ok'
-                ? `Rollback successful: ${data.message}\n\nServer is restarting...`
-                : `Rollback failed: ${data.error || 'unknown error'}`);
+            if (data.status === 'ok') {
+                showToast(`Rollback successful: ${data.message}. Server is restarting...`, 'success');
+            } else {
+                showToast(`Rollback failed: ${data.error || 'unknown error'}`, 'error');
+            }
         } catch (err) {
-            alert('Rollback failed: ' + (err.message || err));
+            showToast('Rollback failed: ' + (err.message || err), 'error');
         }
     }
 
@@ -229,17 +229,17 @@ export function initUpdates({ mount, hostPage = 'settings', hostSubtab = 'update
         applyBtn.disabled = true;
         applyBtn.textContent = 'Preparing...';
         try {
-            const resp = await fetch('/api/update/apply', {
+            const resp = await apiFetch('/api/update/apply', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ strategy }),
             });
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
-            const keep = data.keep_branch ? `\nLocal commits preserved as ${data.keep_branch}.` : '';
-            alert(`Update prepared. Server is restarting.${keep}`);
+            const keep = data.keep_branch ? ` Local commits preserved as ${data.keep_branch}.` : '';
+            showToast(`Update prepared. Server is restarting.${keep}`, 'success');
         } catch (err) {
-            alert('Update failed: ' + (err.message || err));
+            showToast('Update failed: ' + (err.message || err), 'error');
             applyBtn.disabled = false;
             applyBtn.textContent = safe ? 'Update Now' : 'Update with Options';
         }
@@ -253,21 +253,20 @@ export function initUpdates({ mount, hostPage = 'settings', hostSubtab = 'update
     page.querySelector('#updates-promote').addEventListener('click', async () => {
         if (!confirm('Promote current ouroboros branch to ouroboros-stable?')) return;
         try {
-            const resp = await fetch('/api/git/promote', { method: 'POST' });
+            const resp = await apiFetch('/api/git/promote', { method: 'POST' });
             const data = await resp.json();
-            alert(data.status === 'ok' ? data.message : 'Error: ' + (data.error || 'unknown'));
+            if (data.status === 'ok') {
+                showToast(data.message, 'success');
+            } else {
+                showToast('Error: ' + (data.error || 'unknown'), 'error');
+            }
         } catch (err) {
-            alert('Failed: ' + (err.message || err));
+            showToast('Failed: ' + (err.message || err), 'error');
         }
     });
 
-    window.addEventListener('ouro:settings-subtab-shown', (event) => {
-        if (event.detail?.tab !== 'updates') return;
-        loadStatus({ fetchRemote: false });
-        loadVersions();
-    });
     window.addEventListener('ouro:dashboard-subtab-shown', (event) => {
-        if (event.detail?.tab !== hostSubtab || state.activePage !== hostPage) return;
+        if (event.detail?.tab !== 'updates' || state.activePage !== 'dashboard') return;
         loadStatus({ fetchRemote: false });
         loadVersions();
     });

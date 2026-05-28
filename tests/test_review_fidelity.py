@@ -9,6 +9,8 @@ Ref: v4.16.1 — review pipeline fidelity fix.
 import json
 from typing import Any, Dict, List
 
+import pytest
+
 
 # ---------------------------------------------------------------------------
 # Helpers — build minimal dataclass stand-ins to avoid full state setup
@@ -43,7 +45,7 @@ def _make_commit_attempt(findings: List[Dict[str, Any]]) -> Any:
     ca.critical_findings = findings
     ca.advisory_findings = []
     ca.readiness_warnings = []
-    ca.tool_name = "repo_commit"
+    ca.tool_name = "commit_reviewed"
     ca.attempt = 1
     ca.phase = "blocking_review"
     ca.blocked = True
@@ -167,7 +169,6 @@ class TestFormatStatusSection:
         state = AdvisoryReviewState.__new__(AdvisoryReviewState)
         state.advisory_runs = []
         state.attempts = []
-        state.blocking_history = []
         state.open_obligations = obs
         state.last_stale_from_edit_ts = ""
         state.last_stale_reason = ""
@@ -175,53 +176,30 @@ class TestFormatStatusSection:
 
         ca = _make_commit_attempt(findings)
         ca.readiness_warnings = warnings
-        # Put the attempt in state.attempts so filter_attempts picks it up.
-        # Also set last_commit_attempt so format_status_section (repo_dir=None path)
-        # renders the critical_findings / readiness_warnings block.
+        # Put the attempt in state.attempts so format_status_section renders it.
         state.attempts = [ca]
-        state.last_commit_attempt = ca
 
         return state, findings, warnings, obs
 
-    def test_more_than_five_findings_all_shown(self):
-        """Old cap was [:3] on critical_findings in recent attempts section."""
+    @pytest.mark.parametrize(
+        "case_id,n_findings,n_warnings,n_obs,prefix,count",
+        [
+            ("more_than_five_findings_all_shown", 7, 0, 1, "problem ", 7),
+            ("more_than_three_warnings_all_shown", 1, 5, 1, "warning text ", 5),
+            ("more_than_six_obligations_all_shown", 1, 0, 9, "ob", 9),
+        ],
+    )
+    def test_truncation_caps_removed(self, case_id, n_findings, n_warnings, n_obs, prefix, count):
+        """Old [:3] / [:5] / [:6] caps must be gone — every item appears."""
         from ouroboros.review_state import format_status_section
 
-        state, findings, _, _ = self._build_state_with_blocked_attempt(
-            n_findings=7, n_warnings=0, n_obs=1
-        )
-        # repo_dir=None → no filesystem lookup; uses all advisory_runs/attempts
-        output = format_status_section(state, repo_dir=None)
-        assert "... and" not in output, (
-            f"Truncation marker found. Output snippet: {output[:800]}"
-        )
-        # All finding reasons should appear
-        for i in range(7):
-            assert f"problem {i}" in output, f"Missing finding for problem {i}"
-
-    def test_more_than_three_warnings_all_shown(self):
-        """Old cap was [:3] on readiness_warnings."""
-        from ouroboros.review_state import format_status_section
-
-        state, _, warnings, _ = self._build_state_with_blocked_attempt(
-            n_findings=1, n_warnings=5, n_obs=1
+        state, *_ = self._build_state_with_blocked_attempt(
+            n_findings=n_findings, n_warnings=n_warnings, n_obs=n_obs,
         )
         output = format_status_section(state, repo_dir=None)
-        for i in range(5):
-            assert f"warning text {i}" in output, f"Missing warning {i}"
-        assert "... and" not in output
-
-    def test_more_than_six_obligations_all_shown(self):
-        """Old cap was [:6] on open_obs in format_status_section."""
-        from ouroboros.review_state import format_status_section
-
-        state, _, _, obs = self._build_state_with_blocked_attempt(
-            n_findings=1, n_warnings=0, n_obs=9
-        )
-        output = format_status_section(state, repo_dir=None)
-        for i in range(9):
-            assert f"ob{i}" in output, f"Missing obligation ob{i}"
-        assert "... and" not in output
+        for i in range(count):
+            assert f"{prefix}{i}" in output, f"Missing {prefix}{i} in output"
+        assert "... and" not in output, f"Truncation marker found. Snippet: {output[:800]}"
 
     def test_more_than_three_advisory_runs_all_shown(self):
         """Old cap was advisory_runs[-3:] — 5 runs must all appear."""
@@ -241,12 +219,10 @@ class TestFormatStatusSection:
             for i in range(5)
         ]
         state.attempts = []
-        state.blocking_history = []
         state.open_obligations = []
         state.last_stale_from_edit_ts = ""
         state.last_stale_reason = ""
         state.last_stale_repo_key = ""
-        state.last_commit_attempt = None
 
         output = format_status_section(state, repo_dir=None)
         for i in range(5):
@@ -263,7 +239,7 @@ class TestFormatStatusSection:
                 ts=f"2026-04-0{i+1}T00:00:00",
                 commit_message=f"attempt msg {i}",
                 status="succeeded",
-                tool_name="repo_commit",
+                tool_name="commit_reviewed",
                 attempt=i + 1,
                 repo_key="",
             )
@@ -272,14 +248,10 @@ class TestFormatStatusSection:
         state = AdvisoryReviewState.__new__(AdvisoryReviewState)
         state.advisory_runs = []
         state.attempts = attempts
-        state.blocking_history = []
         state.open_obligations = []
         state.last_stale_from_edit_ts = ""
         state.last_stale_reason = ""
         state.last_stale_repo_key = ""
-        # last_commit_attempt must point to one attempt so the early-exit guard
-        # (not advisory_runs and last_attempt is None and not open_obs) is bypassed.
-        state.last_commit_attempt = attempts[-1]
 
         output = format_status_section(state, repo_dir=None)
         # All 5 attempts must appear (old cap was attempts[-3:])
@@ -349,13 +321,14 @@ class TestCommitGateFreshnessMessages:
         ]
         save_state(drive_root, state)
 
-    def test_fresh_with_open_obligations_shows_all(self):
+    def test_fresh_with_open_obligations_shows_all(self, monkeypatch):
         """fresh advisory + >5 obligations: all obligations appear in warning text."""
         from ouroboros.review_state import (
             AdvisoryReviewState, AdvisoryRunRecord, save_state, compute_snapshot_hash,
         )
         from ouroboros.tools.commit_gate import _check_advisory_freshness
 
+        monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
         _, ctx, repo_dir, drive_root, save_state_fn, _, rs_mod = self._setup()
 
         commit_message = "test commit"
@@ -449,35 +422,28 @@ class TestCommitGateFreshnessMessages:
 class TestCommitGateJsonHelperNotTruncated:
     """build_blocking_findings_json_section must not cap findings or attempts."""
 
-    def test_eight_obligations_all_in_json_payload(self):
-        """build_blocking_findings_json_section with 8 obligations — all must appear."""
+    @pytest.mark.parametrize("count", [6, 8])  # 6 = old cap + 1; 8 = well above old [:5] cap
+    def test_n_obligations_all_in_json_payload(self, count):
+        """All obligations must appear in the JSON section — no [:N] cap.
+
+        Parametrized in v5.15.x — collapsed
+        test_six_obligations_boundary_case + test_eight_obligations_all_in_json_payload.
+        """
         from ouroboros.tools.review_helpers import build_blocking_findings_json_section
 
         obs = [_make_obligation(f"ob{i}", reason=f"gate reason {i}")
-               for i in range(8)]  # 8 > old [:5] cap
+               for i in range(count)]
         attempt = _make_commit_attempt([{"item": "code_quality", "severity": "critical",
                                          "reason": "something"}])
 
         output = build_blocking_findings_json_section(obs, [attempt])
         payload = json.loads(output[output.find("```json") + 7:output.rfind("```")].strip())
 
-        assert len(payload["open_obligations"]) == 8
+        assert len(payload["open_obligations"]) == count
         ids = {ob["obligation_id"] for ob in payload["open_obligations"]}
-        for i in range(8):
+        for i in range(count):
             assert f"ob{i}" in ids, f"Missing obligation ob{i}"
         assert "... and" not in output
-
-    def test_six_obligations_boundary_case(self):
-        """Exactly 6 obligations (old cap + 1) — all must appear."""
-        from ouroboros.tools.review_helpers import build_blocking_findings_json_section
-
-        obs = [_make_obligation(f"ob{i}") for i in range(6)]
-        attempt = _make_commit_attempt([{"item": "code_quality", "severity": "critical",
-                                         "reason": "r"}])
-
-        output = build_blocking_findings_json_section(obs, [attempt])
-        payload = json.loads(output[output.find("```json") + 7:output.rfind("```")].strip())
-        assert len(payload["open_obligations"]) == 6
 
     def test_long_reason_not_silently_truncated(self):
         """reason > 500 chars must survive in full (_sanitize_text no longer truncates)."""
@@ -558,12 +524,10 @@ class TestFormatStatusSectionNoFieldSlicing:
             )
         ]
         state.attempts = []
-        state.blocking_history = []
         state.open_obligations = []
         state.last_stale_from_edit_ts = ""
         state.last_stale_reason = ""
         state.last_stale_repo_key = ""
-        state.last_commit_attempt = None
 
         output = format_status_section(state, repo_dir=None)
         assert full_ts in output, f"Full timestamp not found in output. Got: {output[:400]}"
@@ -587,12 +551,10 @@ class TestFormatStatusSectionNoFieldSlicing:
         state = AdvisoryReviewState.__new__(AdvisoryReviewState)
         state.advisory_runs = []
         state.attempts = [ca]
-        state.blocking_history = []
         state.open_obligations = []
         state.last_stale_from_edit_ts = ""
         state.last_stale_reason = ""
         state.last_stale_repo_key = ""
-        state.last_commit_attempt = ca
 
         output = format_status_section(state, repo_dir=None)
         assert full_ts in output, f"Full timestamp not found in output. Got: {output[:400]}"
@@ -618,7 +580,6 @@ class TestHandleReviewStatusNotTruncated:
 
         state = AdvisoryReviewState()
         state.attempts = [ca]
-        state.last_commit_attempt = ca
 
         tmp = pathlib.Path(tempfile.mkdtemp())
         (tmp / "state").mkdir()
@@ -644,7 +605,6 @@ class TestHandleReviewStatusNotTruncated:
 
         state = AdvisoryReviewState()
         state.attempts = [ca]
-        state.last_commit_attempt = ca
 
         tmp = pathlib.Path(tempfile.mkdtemp())
         (tmp / "state").mkdir()
@@ -708,7 +668,7 @@ class TestHandleReviewStatusNotTruncated:
             ca.ts = f"2026-04-08T00:{i:02d}:00"
             ca.commit_message = f"fix: attempt {i}"
             ca.repo_key = ""
-            ca.tool_name = "repo_commit"
+            ca.tool_name = "commit_reviewed"
             ca.task_id = "t"
             ca.attempt = i
             state.attempts.append(ca)
@@ -786,7 +746,7 @@ class TestPersistencePathNotTruncated:
         ca.critical_findings = [{"item": "code_quality", "severity": "critical", "reason": "r"}]
         ca.advisory_findings = []
         ca.readiness_warnings = []
-        ca.tool_name = "repo_commit"
+        ca.tool_name = "commit_reviewed"
         ca.attempt = 1
         ca.phase = "blocking_review"
         ca.blocked = True
@@ -811,12 +771,10 @@ class TestPersistencePathNotTruncated:
         state = AdvisoryReviewState.__new__(AdvisoryReviewState)
         state.advisory_runs = []
         state.attempts = [ca]
-        state.blocking_history = []
         state.open_obligations = []
         state.last_stale_from_edit_ts = ""
         state.last_stale_reason = ""
         state.last_stale_repo_key = ""
-        state.last_commit_attempt = ca
 
         save_state(tmp, state)
         loaded = load_state(tmp)
@@ -940,7 +898,7 @@ class TestReviewEvidenceOmissionBudget:
         ca = CommitAttemptRecord(
             ts="2026-01-01T00:00:00",
             commit_message="test commit",
-            tool_name="repo_commit",
+            tool_name="commit_reviewed",
             attempt=1,
             status="succeeded",
             duration_sec=42.5,
@@ -980,9 +938,9 @@ class TestGitCommitFailureForensicMetadata:
     """_record_commit_attempt on git commit exception must preserve triad_models
     and scope_model so forensic metadata is not lost in infra_failure paths.
 
-    This is a regression test for obligation ab1cb5db88ac: the except blocks in
-    _repo_commit_push() and _repo_write_commit() must pass forensic fields through
-    to _record_commit_attempt even when the `git commit` subprocess raises.
+    This is a regression test for obligation ab1cb5db88ac: the except block in
+    _repo_commit_push() must pass forensic fields through to _record_commit_attempt
+    even when the `git commit` subprocess raises.
     """
 
     def _make_ctx(self, tmp_dir):

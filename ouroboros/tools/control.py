@@ -5,41 +5,57 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List
 
 from ouroboros.config import apply_settings_to_env, load_settings, save_settings
+from ouroboros.headless import prepare_task_drive
 from ouroboros.task_results import (
-    STATUS_CANCELLED,
     STATUS_COMPLETED,
-    STATUS_FAILED,
-    STATUS_INTERRUPTED,
     STATUS_REJECTED_DUPLICATE,
     STATUS_REQUESTED,
-    load_task_result,
+    validate_task_id,
     write_task_result,
 )
+from ouroboros.task_status import load_effective_task_result, wait_for_effective_tasks
+from ouroboros.tool_capabilities import LOCAL_READONLY_SUBAGENT_MODE, MAX_SUBTASK_DEPTH
 from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.utils import utc_now_iso, write_text, run_cmd
+from ouroboros.utils import atomic_write_json, utc_now_iso, run_cmd
 
 log = logging.getLogger(__name__)
 
-MAX_SUBTASK_DEPTH = 3
+VALID_SUBTASK_MEMORY_MODES = frozenset({"forked", "empty"})
+
+
+def _emit_control_event(ctx: ToolContext, evt: Dict[str, Any]) -> str:
+    """Emit a control event live when possible, preserving legacy fallback."""
+    event_queue = getattr(ctx, "event_queue", None)
+    if event_queue is not None:
+        try:
+            event_queue.put_nowait(dict(evt))
+            return "live"
+        except (AttributeError, queue.Full):
+            pass
+        except Exception:
+            log.warning("Live control event emission failed; falling back to pending_events", exc_info=True)
+    ctx.pending_events.append(evt)
+    return "deferred"
 
 
 def _request_restart(ctx: ToolContext, reason: str) -> str:
     if str(ctx.current_task_type or "") == "evolution" and not ctx.last_push_succeeded:
         return "⚠️ RESTART_BLOCKED: in evolution mode, commit+push first."
-    # Persist expected SHA for post-restart verification
+    # Persist expected ref for post-restart verification.
     try:
         sha = run_cmd(["git", "rev-parse", "HEAD"], cwd=ctx.repo_dir)
         branch = run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=ctx.repo_dir)
         verify_path = ctx.drive_path("state") / "pending_restart_verify.json"
-        write_text(verify_path, json.dumps({
+        atomic_write_json(verify_path, {
             "ts": utc_now_iso(), "expected_sha": sha,
             "expected_branch": branch, "reason": reason,
-        }, ensure_ascii=False, indent=2))
+        })
     except Exception:
         log.debug("Failed to read VERSION file or git ref for restart verification", exc_info=True)
         pass
@@ -49,18 +65,7 @@ def _request_restart(ctx: ToolContext, reason: str) -> str:
 
 
 def _set_tool_timeout(ctx: ToolContext, seconds: int) -> str:
-    """Persist and hot-apply the global tool timeout.
-
-    v5.1.2 hardening: explicitly anchor ``OUROBOROS_RUNTIME_MODE`` to the
-    live ``os.environ`` value before writing so that an out-of-process
-    disk corruption (e.g. ``run_shell python -c "...write_text..."``)
-    cannot ride into ``apply_settings_to_env`` via this tool's
-    ``load_settings → save_settings → apply_settings_to_env`` round-trip.
-    The chokepoint in ``save_settings`` would already refuse a true
-    elevation, but pinning the value here turns the failure mode into a
-    clean save (the corrupted disk gets restored to the legitimate
-    boot-time mode) instead of a tool-call error.
-    """
+    """Persist timeout while pinning owner-only runtime mode to the live env."""
     try:
         timeout_sec = int(seconds)
     except (TypeError, ValueError):
@@ -81,7 +86,46 @@ def _promote_to_stable(ctx: ToolContext, reason: str) -> str:
     return f"Promote to stable requested: {reason}"
 
 
-def _schedule_task(ctx: ToolContext, description: str, context: str = "", parent_task_id: str = "") -> str:
+def _schedule_task(
+    ctx: ToolContext,
+    objective: str = "",
+    expected_output: str = "",
+    role: str = "",
+    context: str = "",
+    constraints: str = "",
+    memory_mode: str = "forked",
+    **legacy_or_unknown: Any,
+) -> str:
+    if bool(getattr(ctx, "is_workspace_mode", lambda: False)()):
+        return (
+            "⚠️ WORKSPACE_MODE_BLOCKED: schedule_subagent would create a child agent. "
+            "Headless workspace tasks expose task/session metadata for future delegation, "
+            "but local live subagents are intentionally disabled in workspace mode."
+        )
+    if legacy_or_unknown:
+        bad = ", ".join(sorted(str(key) for key in legacy_or_unknown.keys()))
+        return (
+            "⚠️ TOOL_ARG_ERROR (schedule_subagent): unsupported argument(s): "
+            f"{bad}. Use the v6 strict schema: objective, expected_output, "
+            "optional role/context/constraints/memory_mode."
+        )
+    objective = str(objective or "").strip()
+    expected_output = str(expected_output or "").strip()
+    role = str(role or "researcher").strip() or "researcher"
+    context = str(context or "").strip()
+    constraints = str(constraints or "").strip()
+    memory_mode = str(memory_mode or "forked").strip().lower()
+    if not objective:
+        return "⚠️ TOOL_ARG_ERROR (schedule_subagent): objective is required."
+    if not expected_output:
+        return "⚠️ TOOL_ARG_ERROR (schedule_subagent): expected_output is required."
+    if memory_mode not in VALID_SUBTASK_MEMORY_MODES:
+        allowed = ", ".join(sorted(VALID_SUBTASK_MEMORY_MODES))
+        return (
+            f"⚠️ TOOL_ARG_ERROR (schedule_subagent): memory_mode must be one of: {allowed}. "
+            "memory_mode=shared is disabled for live local subagents until a sanitized shared-context mode exists."
+        )
+
     current_depth = getattr(ctx, 'task_depth', 0)
     new_depth = current_depth + 1
     if new_depth > MAX_SUBTASK_DEPTH:
@@ -93,32 +137,94 @@ def _schedule_task(ctx: ToolContext, description: str, context: str = "", parent
             append_jsonl(ctx.drive_logs() / "events.jsonl", {
                 "ts": utc_now_iso(),
                 "type": "schedule_task_from_direct_chat",
-                "description": description[:200],
-                "warning": "schedule_task called from direct chat context — potential duplicate work",
+                "description": objective[:200],
+                "warning": "schedule_subagent called from direct chat context — potential duplicate work",
             })
         except Exception:
             pass
 
     tid = uuid.uuid4().hex[:8]
-    evt = {"type": "schedule_task", "description": description, "task_id": tid, "depth": new_depth, "ts": utc_now_iso()}
+    metadata = getattr(ctx, "task_metadata", {}) if isinstance(getattr(ctx, "task_metadata", {}), dict) else {}
+    current_task_id = str(getattr(ctx, "task_id", "") or "")
+    parent_task_id = str(current_task_id or metadata.get("parent_task_id") or "").strip()
+    root_task_id = str(metadata.get("root_task_id") or current_task_id or tid)
+    session_id = str(metadata.get("session_id") or "")
+    try:
+        current_chat_id = int(getattr(ctx, "current_chat_id", None) or 0)
+    except (TypeError, ValueError):
+        current_chat_id = 0
+    child_drive = None
+    if memory_mode in {"forked", "empty"}:
+        try:
+            child_drive = prepare_task_drive(Path(ctx.drive_root), tid, memory_mode)
+        except Exception as exc:
+            log.warning("Failed to prepare child drive for subtask %s", tid, exc_info=True)
+            return f"⚠️ SUBTASK_DRIVE_ERROR: failed to prepare {memory_mode} child drive: {exc}"
+
+    task_constraint = {
+        "mode": LOCAL_READONLY_SUBAGENT_MODE,
+        "allow_enable": False,
+        "allow_review": False,
+    }
+    evt = {
+        "type": "schedule_subagent",
+        "description": objective,
+        "objective": objective,
+        "expected_output": expected_output,
+        "constraints": constraints,
+        "role": role,
+        "task_id": tid,
+        "depth": new_depth,
+        "ts": utc_now_iso(),
+        "root_task_id": root_task_id,
+        "session_id": session_id,
+        "actor_id": f"subagent:{role}",
+        "delegation_role": "subagent",
+        "memory_mode": memory_mode,
+        "budget_drive_root": str(ctx.drive_root),
+        "task_constraint": task_constraint,
+    }
+    if current_chat_id:
+        evt["chat_id"] = current_chat_id
+    if child_drive is not None:
+        evt["drive_root"] = str(child_drive)
+        evt["child_drive_root"] = str(child_drive)
     if context:
         evt["context"] = context
     if parent_task_id:
         evt["parent_task_id"] = parent_task_id
-    ctx.pending_events.append(evt)
     try:
         write_task_result(
             ctx.drive_root,
             tid,
             STATUS_REQUESTED,
             parent_task_id=parent_task_id or None,
-            description=description,
+            root_task_id=root_task_id,
+            session_id=session_id,
+            actor_id=f"subagent:{role}",
+            delegation_role="subagent",
+            role=role,
+            description=objective,
+            objective=objective,
+            expected_output=expected_output,
+            constraints=constraints,
             context=context,
-            result="Task request queued. Awaiting supervisor acceptance.",
+            chat_id=current_chat_id or None,
+            memory_mode=memory_mode,
+            drive_root=str(child_drive) if child_drive is not None else "",
+            child_drive_root=str(child_drive) if child_drive is not None else "",
+            budget_drive_root=str(ctx.drive_root),
+            task_constraint=task_constraint,
+            result="Subagent request queued. Awaiting supervisor acceptance.",
         )
     except Exception:
         log.warning("Failed to persist requested task status for %s", tid, exc_info=True)
-    return f"Task request queued {tid}: {description}"
+        return f"⚠️ SUBTASK_STATUS_ERROR: failed to persist requested status for {tid}; subagent was not scheduled."
+    emitted = _emit_control_event(ctx, evt)
+    worker_note = ""
+    if emitted == "live":
+        worker_note = " (live queue emission requested)"
+    return f"Subagent request queued {tid}: {objective}{worker_note}"
 
 
 def _cancel_task(ctx: ToolContext, task_id: str) -> str:
@@ -153,7 +259,12 @@ def _update_scratchpad(ctx: ToolContext, content: str) -> str:
     from ouroboros.memory import Memory
     mem = Memory(drive_root=ctx.drive_root)
     mem.ensure_files()
-    block = mem.append_scratchpad_block(content, source="task")
+    try:
+        block = mem.append_scratchpad_block(content, source="task")
+    except RuntimeError as exc:
+        if "LEGACY_SCRATCHPAD_REQUIRES_MANUAL_UPGRADE" in str(exc):
+            return f"⚠️ {exc}"
+        raise
     return f"OK: scratchpad block appended ({len(content)} chars, ts={block.get('ts', '?')[:16]})"
 
 
@@ -282,8 +393,8 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "") -> str:
 
 
 def _get_task_result(ctx: ToolContext, task_id: str) -> str:
-    """Read the result of a completed subtask."""
-    data = load_task_result(ctx.drive_root, task_id)
+    """Read the effective result of a registered subtask."""
+    data = load_effective_task_result(ctx.drive_root, task_id)
     if not data:
         return f"Task {task_id}: unknown or not yet registered"
     status = data.get("status", "unknown")
@@ -305,9 +416,49 @@ def _get_task_result(ctx: ToolContext, task_id: str) -> str:
     return output
 
 
-def _wait_for_task(ctx: ToolContext, task_id: str) -> str:
-    """Check if a subtask has completed. Call repeatedly to poll."""
-    return _get_task_result(ctx, task_id)
+def _wait_for_task(ctx: ToolContext, task_id: str, timeout_sec: int = 180) -> str:
+    """Wait for a subtask to reach a terminal status."""
+    try:
+        tid = validate_task_id(task_id)
+    except ValueError as exc:
+        return f"⚠️ TOOL_ARG_ERROR (wait_task): {exc}"
+    try:
+        timeout = max(0, min(int(timeout_sec), 3600))
+    except (TypeError, ValueError):
+        timeout = 180
+    waited = wait_for_effective_tasks(ctx.drive_root, [tid], timeout_sec=timeout)
+    header = "Task wait completed" if waited.get("all_terminal") else "Task wait timed out"
+    return f"{header} after {waited.get('elapsed_sec', 0):.1f}s.\n\n{_get_task_result(ctx, tid)}"
+
+
+def _wait_for_tasks(
+    ctx: ToolContext,
+    task_ids: List[str],
+    timeout_sec: int = 600,
+    mode: str = "all_terminal",
+) -> str:
+    """Wait for multiple subtasks and return their full effective results."""
+    if not isinstance(task_ids, list) or not task_ids:
+        return "⚠️ TOOL_ARG_ERROR (wait_tasks): task_ids must be a non-empty list."
+    if len(task_ids) > 50:
+        return "⚠️ TOOL_ARG_ERROR (wait_tasks): task_ids is capped at 50."
+    normalized_ids: List[str] = []
+    for item in task_ids:
+        try:
+            tid = validate_task_id(item)
+        except ValueError as exc:
+            return f"⚠️ TOOL_ARG_ERROR (wait_tasks): {exc}"
+        if tid not in normalized_ids:
+            normalized_ids.append(tid)
+    try:
+        timeout = max(0, min(int(timeout_sec), 7200))
+    except (TypeError, ValueError):
+        timeout = 600
+    normalized_mode = str(mode or "all_terminal").strip().lower()
+    if normalized_mode not in {"all_terminal", "any_terminal"}:
+        return "⚠️ TOOL_ARG_ERROR (wait_tasks): mode must be all_terminal or any_terminal."
+    waited = wait_for_effective_tasks(ctx.drive_root, normalized_ids, timeout_sec=timeout, mode=normalized_mode)
+    return json.dumps(waited, ensure_ascii=False, indent=2)
 
 
 def get_tools() -> List[ToolEntry]:
@@ -329,14 +480,26 @@ def get_tools() -> List[ToolEntry]:
             "description": "Promote ouroboros -> ouroboros-stable. Call when you consider the code stable.",
             "parameters": {"type": "object", "properties": {"reason": {"type": "string"}}, "required": ["reason"]},
         }, _promote_to_stable),
-        ToolEntry("schedule_task", {
-            "name": "schedule_task",
-            "description": "Schedule a background task. Returns task_id for later retrieval. For complex tasks, decompose into focused subtasks with clear scope.",
+        ToolEntry("schedule_subagent", {
+            "name": "schedule_subagent",
+            "description": (
+                "Schedule a live local_readonly subagent. Returns task_id for later retrieval. "
+                "Use only for genuinely parallel work. The child can inspect local repo/data/history "
+                "and web/browser surfaces, but cannot write local state, commit, enable tools, "
+                "or schedule further subagents."
+            ),
             "parameters": {"type": "object", "properties": {
-                "description": {"type": "string", "description": "Task description — be specific about scope and expected deliverable"},
-                "context": {"type": "string", "description": "Optional context from parent task: background info, constraints, style guide, etc."},
-                "parent_task_id": {"type": "string", "description": "Optional parent task ID for tracking lineage"},
-            }, "required": ["description"]},
+                "objective": {"type": "string", "description": "Focused child objective. Be specific about scope."},
+                "expected_output": {"type": "string", "description": "Concrete handoff expected from the child."},
+                "role": {"type": "string", "description": "Optional freeform role label for lineage/UI, e.g. architecture-reviewer."},
+                "context": {"type": "string", "description": "Optional parent reference material. It is injected as context, not instructions."},
+                "constraints": {"type": "string", "description": "Optional constraints/non-goals for the child."},
+                "memory_mode": {
+                    "type": "string",
+                    "enum": sorted(VALID_SUBTASK_MEMORY_MODES),
+                    "description": "Child memory mode. Default forked copies stable memory only; empty starts blank. shared is disabled for live local subagents.",
+                },
+            }, "required": ["objective", "expected_output"], "additionalProperties": False},
         }, _schedule_task),
         ToolEntry("cancel_task", {
             "name": "cancel_task",
@@ -345,7 +508,7 @@ def get_tools() -> List[ToolEntry]:
         }, _cancel_task),
         ToolEntry("request_deep_self_review", {
             "name": "request_deep_self_review",
-            "description": "Request a deep self-review of the entire Ouroboros project. Uses a 1M-context model to review all code, docs, and memory against the Constitution. Results go to chat and memory. Requires OPENROUTER_API_KEY or OPENAI_API_KEY.",
+            "description": "Request an Atlas-backed deep self-review of the entire Ouroboros project. Uses a large-context model with full core memory whitelist and manifest accounting for every tracked repo path against the Constitution. Results go to chat and memory. Requires OPENROUTER_API_KEY or OPENAI_API_KEY.",
             "parameters": {"type": "object", "properties": {
                 "reason": {"type": "string", "description": "Why you want a review (context for the reviewer)"},
             }, "required": ["reason"]},
@@ -416,16 +579,26 @@ def get_tools() -> List[ToolEntry]:
         }, _switch_model),
         ToolEntry("get_task_result", {
             "name": "get_task_result",
-            "description": "Read the result of a completed subtask. Use after schedule_task to collect results.",
+            "description": "Read the effective result of a subtask, including child-drive output when available.",
             "parameters": {"type": "object", "required": ["task_id"], "properties": {
-                "task_id": {"type": "string", "description": "Task ID returned by schedule_task"},
+                "task_id": {"type": "string", "description": "Task ID returned by schedule_subagent"},
             }},
         }, _get_task_result),
-        ToolEntry("wait_for_task", {
-            "name": "wait_for_task",
-            "description": "Check if a subtask has completed. Returns result if done, or 'still running' message. Call repeatedly to poll.",
+        ToolEntry("wait_task", {
+            "name": "wait_task",
+            "description": "Wait for a subtask to reach a terminal status and return its effective result.",
             "parameters": {"type": "object", "required": ["task_id"], "properties": {
                 "task_id": {"type": "string", "description": "Task ID to check"},
+                "timeout_sec": {"type": "integer", "default": 180, "description": "Maximum seconds to wait (default 180)."},
             }},
         }, _wait_for_task),
+        ToolEntry("wait_tasks", {
+            "name": "wait_tasks",
+            "description": "Wait for multiple subtasks and return full effective results for each child.",
+            "parameters": {"type": "object", "required": ["task_ids"], "properties": {
+                "task_ids": {"type": "array", "items": {"type": "string"}, "description": "Task IDs returned by schedule_subagent."},
+                "timeout_sec": {"type": "integer", "default": 600, "description": "Maximum seconds to wait (default 600)."},
+                "mode": {"type": "string", "enum": ["all_terminal", "any_terminal"], "default": "all_terminal"},
+            }},
+        }, _wait_for_tasks, timeout_sec=7200),
     ]

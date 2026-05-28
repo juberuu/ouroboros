@@ -12,7 +12,7 @@ from starlette.applications import Starlette
 from starlette.datastructures import UploadFile
 from starlette.testclient import TestClient
 
-import ouroboros.file_browser_api as file_browser_api
+import ouroboros.gateway.files as file_browser_api
 
 
 def _make_client(root: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:

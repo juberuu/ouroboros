@@ -1,10 +1,4 @@
-"""
-Post-task processing pipeline for the Ouroboros agent.
-
-Handles task-result emission, trace summarization, memory consolidation,
-scratchpad compaction, execution reflection, and review context building.
-Extracted from agent.py to keep the agent thin.
-"""
+"""Post-task result emission, memory work, reflections, and review context."""
 
 from __future__ import annotations
 
@@ -21,6 +15,13 @@ from ouroboros.task_results import (
     STATUS_FAILED,
     load_task_result,
     write_task_result,
+)
+from ouroboros.outcomes import (
+    RESULT_SUCCEEDED,
+    artifact_bundle_from_result,
+    build_verification_ledger,
+    derive_loop_outcome,
+    maybe_write_verification_artifact,
 )
 from ouroboros.utils import utc_now_iso, append_jsonl, truncate_review_artifact as _truncate_with_notice
 
@@ -92,18 +93,19 @@ def build_trace_summary(llm_trace: dict) -> str:
             args = tc.get("args", {})
             if isinstance(args, dict):
                 parts = []
-                for k, v in list(args.items())[:2]:
+                arg_items = list(args.items())
+                for k, v in arg_items[:2]:
                     v_str = str(v)
                     if len(v_str) > 60:
-                        v_str = v_str[:57] + "..."
+                        v_str = _truncate_with_notice(v_str, 60).replace("\n", " ")
                     parts.append(f"{k}={v_str!r}")
-                if len(args) > 2:
-                    parts.append(f"... (+{len(args) - 2} more args)")
+                if len(arg_items) > 2:
+                    parts.append(f"⚠️ OMISSION NOTE: {len(arg_items) - 2} more args omitted")
                 args_str = ", ".join(parts)
             else:
                 args_str = repr(args)
                 if len(args_str) > 80:
-                    args_str = args_str[:77] + "..."
+                    args_str = _truncate_with_notice(args_str, 80).replace("\n", " ")
             facts = []
             status = str(tc.get("status") or "").strip()
             if status and status != "ok":
@@ -119,7 +121,7 @@ def build_trace_summary(llm_trace: dict) -> str:
         if n > 30:
             shown = (
                 [_fmt_call(i + 1, tool_calls[i]) for i in range(15)]
-                + [f"... ({n - 30} more calls) ..."]
+                + [f"⚠️ OMISSION NOTE: {n - 30} middle tool calls omitted from trace summary."]
                 + [_fmt_call(n - 14 + i, tool_calls[n - 15 + i]) for i in range(15)]
             )
         else:
@@ -132,7 +134,7 @@ def build_trace_summary(llm_trace: dict) -> str:
 
     summary = "\n".join(lines)
     if len(summary) > 4000:
-        summary = summary[:3997] + "..."
+        summary = _truncate_with_notice(summary, 4000)
     return summary
 
 
@@ -161,15 +163,7 @@ def _run_post_task_processing_async(
     review_evidence: Dict[str, Any],
     drive_logs: pathlib.Path,
 ) -> None:
-    """Best-effort async post-task memory work that must not block reply delivery.
-
-    Runs in a daemon thread so reflection, backlog candidate persistence, and
-    task-summary generation stay off the reply critical path. The previous
-    synchronous variant added reflection latency (1–3 s LLM round) to every
-    reply; daemon-thread async restores the pre-v4.39.0 UX contract
-    (ARCHITECTURE.md "Only task summary remains async" was a misnomer — all
-    LLM-heavy post-task work belongs off the critical path).
-    """
+    """Run best-effort LLM-heavy post-task memory work off the reply path."""
     task_snapshot = json.loads(json.dumps(task, ensure_ascii=False, default=str))
     usage_snapshot = json.loads(json.dumps(usage, ensure_ascii=False, default=str))
     trace_snapshot = json.loads(json.dumps(llm_trace, ensure_ascii=False, default=str))
@@ -180,11 +174,7 @@ def _run_post_task_processing_async(
             from ouroboros.llm import LLMClient
 
             llm_client = LLMClient()
-            # Order matters for hard-restart durability: task summary writes
-            # to `logs/chat.jsonl` (durable chat history) and is more
-            # important than reflection/backlog (best-effort process memory).
-            # Running summary FIRST minimises the chance that a worker
-            # shutdown mid-thread drops the more valuable artifact.
+            # Summary first: chat.jsonl is more durable than best-effort reflection/backlog.
             _run_task_summary(
                 env,
                 llm_client,
@@ -214,6 +204,9 @@ def emit_task_results(
     ctx: Any = None,
 ) -> None:
     """Emit all end-of-task events to supervisor and run post-task processing."""
+    loop_outcome = derive_loop_outcome(text or "", usage, llm_trace)
+    result_status = str(loop_outcome.get("result_status") or "")
+    reason_code = str(loop_outcome.get("reason_code") or "")
     pending_events.append({
         "type": "send_message", "chat_id": task["chat_id"],
         "text": text or "\u200b", "log_text": text or "",
@@ -227,8 +220,10 @@ def emit_task_results(
                         if isinstance(tc, dict) and tc.get("is_error"))
     try:
         append_jsonl(drive_logs / "events.jsonl", {
-            "ts": utc_now_iso(), "type": "task_eval", "ok": True,
+            "ts": utc_now_iso(), "type": "task_eval", "ok": result_status == RESULT_SUCCEEDED,
             "task_id": task.get("id"), "task_type": task.get("type"),
+            "result_status": result_status,
+            "reason_code": reason_code,
             "duration_sec": duration_sec,
             "tool_calls": n_tool_calls,
             "tool_errors": n_tool_errors,
@@ -241,6 +236,8 @@ def emit_task_results(
     pending_events.append({
         "type": "task_metrics",
         "task_id": task.get("id"), "task_type": task.get("type"),
+        "result_status": result_status,
+        "reason_code": reason_code,
         "duration_sec": duration_sec,
         "tool_calls": n_tool_calls, "tool_errors": n_tool_errors,
         "cost_usd": round(float(usage.get("cost") or 0), 6),
@@ -249,21 +246,6 @@ def emit_task_results(
         "total_rounds": int(usage.get("rounds") or 0),
         "ts": utc_now_iso(),
     })
-
-    pending_events.append({
-        "type": "task_done",
-        "task_id": task.get("id"),
-        "task_type": task.get("type"),
-        "cost_usd": round(float(usage.get("cost") or 0), 6),
-        "total_rounds": int(usage.get("rounds") or 0),
-        "prompt_tokens": int(usage.get("prompt_tokens") or 0),
-        "completion_tokens": int(usage.get("completion_tokens") or 0),
-        "ts": utc_now_iso(),
-    })
-    # NOTE: task_done is NOT written to events.jsonl here.
-    # It goes through EVENT_Q → supervisor _handle_task_done → append_jsonl.
-    # This ensures causal ordering: send_message reaches the UI before task_done,
-    # preventing the live card from collapsing before the assistant reply arrives.
 
     review_evidence: Dict[str, Any] = {}
     try:
@@ -278,6 +260,27 @@ def emit_task_results(
         log.debug("Failed to collect review evidence", exc_info=True)
 
     _store_task_result(env, task, text, usage, llm_trace, review_evidence=review_evidence)
+    stored_result = load_task_result(env.drive_root, str(task.get("id") or "")) or {}
+    artifact_bundle = stored_result.get("artifact_bundle") if isinstance(stored_result.get("artifact_bundle"), dict) else {}
+    pending_events.append({
+        "type": "task_done",
+        "task_id": task.get("id"),
+        "task_type": task.get("type"),
+        "result_status": result_status,
+        "reason_code": reason_code,
+        "artifact_status": stored_result.get("artifact_status") or artifact_bundle.get("status") or "",
+        "artifact_bundle": artifact_bundle,
+        "review_status": stored_result.get("review_status") if isinstance(stored_result.get("review_status"), dict) else {},
+        "cost_usd": round(float(usage.get("cost") or 0), 6),
+        "total_rounds": int(usage.get("rounds") or 0),
+        "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+        "completion_tokens": int(usage.get("completion_tokens") or 0),
+        "ts": utc_now_iso(),
+    })
+    # NOTE: task_done is NOT written to events.jsonl here.
+    # It goes through EVENT_Q → supervisor _handle_task_done → append_jsonl.
+    # This ensures causal ordering: send_message reaches the UI before task_done,
+    # preventing the live card from collapsing before the assistant reply arrives.
     restart_reason = str(getattr(ctx, "pending_restart_reason", "") or "").strip()
     if restart_reason:
         pending_events.append({
@@ -290,14 +293,16 @@ def emit_task_results(
         except Exception:
             pass
 
-    _run_chat_consolidation(env, memory, llm, task, drive_logs)
-    _run_scratchpad_consolidation(env, memory, llm)
-    # Reflection, backlog persistence, and task summary all run in the daemon
-    # thread started below — LLM-heavy work must stay off the reply critical
-    # path so send_message reaches the UI without extra latency.
-    _run_post_task_processing_async(
-        env, task, usage, llm_trace, review_evidence, drive_logs,
-    )
+    if str(task.get("delegation_role") or "") != "subagent":
+        post_usage = dict(usage or {})
+        post_usage["result_status"] = result_status
+        post_usage["reason_code"] = reason_code
+        _run_chat_consolidation(env, memory, llm, task, drive_logs)
+        _run_scratchpad_consolidation(env, memory, llm)
+        # LLM-heavy memory work stays off the reply critical path.
+        _run_post_task_processing_async(
+            env, task, post_usage, llm_trace, review_evidence, drive_logs,
+        )
 
 
 def _store_task_result(env: Any, task: Dict[str, Any], text: str,
@@ -307,19 +312,64 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
     try:
         trace_summary = build_trace_summary(llm_trace)
         existing = load_task_result(env.drive_root, str(task.get("id") or "")) or {}
-        status = STATUS_FAILED if str(existing.get("status") or "") == STATUS_FAILED else STATUS_COMPLETED
+        loop_outcome = derive_loop_outcome(text or "", usage, llm_trace)
+        result_status = str(loop_outcome.get("result_status") or "")
+        reason_code = str(loop_outcome.get("reason_code") or "")
+        status = (
+            STATUS_FAILED
+            if str(existing.get("status") or "") == STATUS_FAILED or result_status != RESULT_SUCCEEDED
+            else STATUS_COMPLETED
+        )
+        artifact_bundle_for_ledger = artifact_bundle_from_result(existing)
+        verification_ledger = build_verification_ledger(
+            task=task,
+            loop_outcome=loop_outcome,
+            llm_trace=llm_trace,
+            artifact_bundle=artifact_bundle_for_ledger,
+            review_evidence=review_evidence or {},
+        )
+        verification_refs = maybe_write_verification_artifact(
+            env.drive_root,
+            str(task.get("id") or ""),
+            verification_ledger,
+        )
+        artifacts = list(existing.get("artifacts") or []) if isinstance(existing.get("artifacts"), list) else []
+        artifact_record = verification_refs.get("artifact")
+        if artifact_record and artifact_record not in artifacts:
+            artifacts.append(artifact_record)
+        provisional = {
+            **existing,
+            "artifacts": artifacts,
+        }
+        artifact_bundle = artifact_bundle_from_result(provisional)
         write_task_result(
             env.drive_root,
             str(task.get("id") or ""),
             status,
+            result_status=result_status,
+            reason_code=reason_code,
+            loop_outcome=loop_outcome,
             parent_task_id=task.get("parent_task_id"),
+            root_task_id=task.get("root_task_id"),
+            session_id=task.get("session_id"),
+            actor_id=task.get("actor_id"),
+            delegation_role=task.get("delegation_role"),
             description=task.get("description"),
             context=task.get("context"),
+            workspace_root=task.get("workspace_root"),
+            workspace_mode=task.get("workspace_mode"),
+            memory_mode=task.get("memory_mode"),
+            child_drive_root=task.get("child_drive_root") or task.get("drive_root"),
+            metadata=task.get("metadata") if isinstance(task.get("metadata"), dict) else {},
             result=text or "",
             trace_summary=trace_summary,
+            trace_refs=loop_outcome.get("trace_refs") or {},
             cost_usd=round(float(usage.get("cost") or 0), 6),
             total_rounds=int(usage.get("rounds") or 0),
             review_evidence=review_evidence or {},
+            verification_ledger=verification_refs.get("inline"),
+            artifact_bundle=artifact_bundle,
+            artifacts=artifacts,
             ts=utc_now_iso(),
         )
     except Exception as e:
@@ -366,8 +416,10 @@ def _run_task_summary(env, llm, task, usage, llm_trace, drive_logs, review_evide
         n_tool_calls = len(llm_trace.get("tool_calls", []) or [])
         rounds = int(usage.get("rounds") or 0)
         cost = float(usage.get("cost") or 0)
+        result_status = str(usage.get("result_status") or "")
+        reason_code = str(usage.get("reason_code") or "")
 
-        # Skip LLM summary for trivial tasks (0 tool calls, ≤1 round)
+        # Skip LLM summary for trivial tasks.
         if n_tool_calls == 0 and rounds <= 1:
             goal = _truncate_with_notice(task.get("text", ""), 200)
             summary_text = (
@@ -378,6 +430,7 @@ def _run_task_summary(env, llm, task, usage, llm_trace, drive_logs, review_evide
                 "ts": utc_now_iso(), "direction": "system",
                 "type": "task_summary", "task_id": task_id, "text": summary_text,
                 "tool_calls": n_tool_calls, "rounds": rounds,
+                "result_status": result_status, "reason_code": reason_code,
             })
             return
 
@@ -400,7 +453,7 @@ def _run_task_summary(env, llm, task, usage, llm_trace, drive_logs, review_evide
             msg, _usage = llm.chat(messages=[{"role": "user", "content": prompt}],
                                    model=summary_model,
                                    reasoning_effort=CONSOLIDATION_REASONING_EFFORT,
-                                   max_tokens=2048)
+                                   max_tokens=16384)
             summary_text = (msg.get("content") or "").strip()
             if _usage.get("cost"):
                 try:
@@ -419,6 +472,7 @@ def _run_task_summary(env, llm, task, usage, llm_trace, drive_logs, review_evide
                 "ts": utc_now_iso(), "direction": "system",
                 "type": "task_summary", "task_id": task_id, "text": summary_text,
                 "tool_calls": n_tool_calls, "rounds": rounds,
+                "result_status": result_status, "reason_code": reason_code,
             })
     except Exception:
         log.debug("Task summary generation failed (non-critical)", exc_info=True)
@@ -429,8 +483,8 @@ def _run_chat_consolidation(env, memory, llm, task, drive_logs):
     try:
         from ouroboros import consolidator as _c
 
-        should_consolidate = getattr(_c, "should_consolidate_chat_blocks", None) or getattr(_c, "should_consolidate")
-        consolidate = getattr(_c, "consolidate_chat_blocks", None) or getattr(_c, "consolidate")
+        should_consolidate = _c.should_consolidate
+        consolidate = _c.consolidate
         chat_path = drive_logs / "chat.jsonl"
         blocks_path = env.drive_path("memory") / "dialogue_blocks.json"
         meta_path = env.drive_path("memory") / "dialogue_meta.json"
@@ -444,7 +498,7 @@ def _run_chat_consolidation(env, memory, llm, task, drive_logs):
                         append_jsonl(_logs / "events.jsonl", {"ts": utc_now_iso(),
                             "type": "chat_block_consolidation", "task_id": _id,
                             "cost_usd": round(float(u.get("cost") or 0), 6)})
-                        # Track cost — consolidation runs in daemon thread, update directly.
+                        # Daemon-thread work updates budget directly.
                         if u.get("cost") or u.get("prompt_tokens"):
                             try:
                                 from supervisor.state import update_budget_from_usage
@@ -463,8 +517,8 @@ def _run_scratchpad_consolidation(env: Any, memory: Any, llm: Any) -> None:
     try:
         from ouroboros import consolidator as _c
 
-        should_consolidate = getattr(_c, "should_consolidate_scratchpad_blocks", None) or getattr(_c, "should_consolidate_scratchpad")
-        consolidate = getattr(_c, "consolidate_scratchpad_blocks", None) or getattr(_c, "consolidate_scratchpad")
+        should_consolidate = _c.should_consolidate_scratchpad
+        consolidate = _c.consolidate_scratchpad
         if should_consolidate(memory):
             kb_dir = env.drive_path("memory/knowledge")
             _identity = memory.load_identity()
@@ -472,7 +526,7 @@ def _run_scratchpad_consolidation(env: Any, memory: Any, llm: Any) -> None:
             def _run():
                 try:
                     u = consolidate(memory, kb_dir, llm, _identity)
-                    # Track cost — scratchpad consolidation runs in daemon thread.
+                    # Daemon-thread work updates budget directly.
                     if u and (u.get("cost") or u.get("prompt_tokens")):
                         try:
                             from supervisor.state import update_budget_from_usage
@@ -498,7 +552,6 @@ def _run_reflection(env: Any, llm: Any, task: Dict[str, Any],
         if should_generate_reflection(
             llm_trace,
             rounds=int(usage.get("rounds", 0)),
-            # usage key is "cost" (not "cost_usd") — map explicitly
             cost_usd=float(usage.get("cost", 0.0)),
         ):
             trace_summary = build_trace_summary(llm_trace)
@@ -539,7 +592,7 @@ def build_review_context(env: Any) -> str:
         open_debts = state.get_open_commit_readiness_debts(repo_key=repo_key)
         if (
             not state.advisory_runs
-            and not state.last_commit_attempt
+            and not state.latest_attempt()
             and not continuations
             and not corrupt
             and not open_obs
@@ -618,9 +671,7 @@ def build_review_context(env: Any) -> str:
         if scoped_continuations:
             lines.append("\n### Open review continuations")
             scoped_continuations.sort(key=lambda item: str(item.updated_ts or item.created_ts or ""), reverse=True)
-            # Cognitive artifact: keep visible list capped (context budget) but emit
-            # explicit OMISSION NOTEs whenever a cap truncates — DEVELOPMENT.md /
-            # CHECKLISTS 2(f): no silent `[:N]` slicing of review-output artifacts.
+            # Cap review context only with explicit OMISSION NOTEs; no silent slicing.
             _CONTINUATION_CAP = 5
             _PER_FINDING_CAP = 3
             shown_continuations = scoped_continuations[:_CONTINUATION_CAP]
@@ -633,7 +684,7 @@ def build_review_context(env: Any) -> str:
                 task_status = str((load_task_result(env.drive_root, item.task_id) or {}).get("status") or "missing")
                 lines.append(
                     f"- task={item.task_id} status={task_status} source={item.source} "
-                    f"stage={item.stage} tool={item.tool_name or 'repo_commit'} "
+                    f"stage={item.stage} tool={item.tool_name or 'commit_reviewed'} "
                     f"attempt={int(item.attempt or 0)}"
                 )
                 if item.block_reason:

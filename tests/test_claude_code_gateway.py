@@ -24,21 +24,9 @@ import pytest
 # Mock SDK so the gateway can be imported on Python 3.9 / without SDK
 # ---------------------------------------------------------------------------
 
-def _ensure_gateway_importable():
-    """Install a lightweight mock of claude_agent_sdk if the real one is absent."""
-    if "claude_agent_sdk" not in sys.modules:
-        mock_sdk = types.ModuleType("claude_agent_sdk")
-        # Provide the names the gateway expects at import time
-        mock_sdk.ClaudeAgentOptions = type("ClaudeAgentOptions", (), {})
-        mock_sdk.ClaudeSDKClient = type("ClaudeSDKClient", (), {})
-        mock_sdk.HookMatcher = type("HookMatcher", (), {"__init__": lambda self, **kw: None})
-        mock_sdk.AssistantMessage = type("AssistantMessage", (), {})
-        mock_sdk.ResultMessage = type("ResultMessage", (), {})
-        mock_sdk.query = lambda **kw: None  # async generator mock
-        sys.modules["claude_agent_sdk"] = mock_sdk
+from tests._shared import ensure_claude_agent_sdk_mock
 
-
-_ensure_gateway_importable()
+ensure_claude_agent_sdk_mock()
 
 
 async def _async_gen(items):
@@ -51,6 +39,7 @@ from ouroboros.gateways.claude_code import (  # noqa: E402
     ClaudeCodeResult,
     make_path_guard,
     make_readonly_guard,
+    _normalize_sdk_usage,
     SAFETY_CRITICAL,
 )
 
@@ -134,6 +123,14 @@ class TestPathGuard:
                 f"tid-{critical}", None,
             ))
             assert "deny" in str(result), f"Should block {critical}"
+
+    def test_can_disable_runtime_path_guard_for_external_workspaces(self, tmp_path):
+        guard = make_path_guard(str(tmp_path), protect_runtime_paths=False)
+        result = self._run(guard(
+            {"tool_name": "Edit", "tool_input": {"file_path": str(tmp_path / ".github" / "workflows" / "ci.yml")}},
+            "tid-external-ci", None,
+        ))
+        assert result == {}
 
     def test_blocks_safety_critical_with_backslash_paths(self, tmp_path):
         """Safety-critical check must work regardless of OS path separator.
@@ -233,10 +230,11 @@ class TestProjectContext:
         ctx = _load_project_context(tmp_path)
         assert ctx == ""  # no docs, empty context
 
-    def test_truncates_large_docs(self, tmp_path):
+    def test_preserves_large_governance_docs(self, tmp_path):
         (tmp_path / "BIBLE.md").write_text("x" * 100_000, encoding="utf-8")
         ctx = _load_project_context(tmp_path)
-        assert "truncated" in ctx.lower()
+        assert "truncated" not in ctx.lower()
+        assert "x" * 100_000 in ctx
 
 
 # ---------------------------------------------------------------------------
@@ -285,7 +283,7 @@ class TestImportFallback:
             sys.modules.update(saved_modules)
             # If nothing was saved (SDK not installed), ensure mock is in place
             if not saved_modules:
-                _ensure_gateway_importable()
+                ensure_claude_agent_sdk_mock()
             # Re-import gateway with real/mock SDK
             sys.modules.pop("ouroboros.gateways.claude_code", None)
             importlib.import_module("ouroboros.gateways.claude_code")
@@ -319,12 +317,13 @@ class TestSDKAPISurface:
             "receive_messages() streams indefinitely — use receive_response() instead"
         )
 
-    def test_readonly_path_uses_query_function(self):
-        """v4.8.1 fix: read-only path should use query() not ClaudeSDKClient."""
+    def test_readonly_path_uses_sdk_client_lifecycle(self):
+        """Read-only path must use ClaudeSDKClient, not query()+early generator break."""
         src = self._gateway_source()
-        # _run_readonly_async should iterate with `async for message in query(`
-        assert "async for message in query(" in src, \
-            "Read-only path should use query() function for one-shot requests"
+        assert "async with ClaudeSDKClient(options=options) as client:" in src
+        assert "await client.query(prompt)" in src
+        assert "async for message in client.receive_response():" in src
+        assert "async for message in query(" not in src
 
     def test_max_budget_in_constructor(self):
         """v4.8.1 fix: max_budget_usd should be passed in ClaudeAgentOptions constructor."""
@@ -336,13 +335,11 @@ class TestSDKAPISurface:
         assert "max_budget_usd=budget" in src, \
             "max_budget_usd should be passed as constructor kwarg"
 
-    def test_query_imported_from_sdk(self):
-        """query() must be imported from claude_agent_sdk."""
-        from ouroboros.gateways.claude_code import query as gw_query
-        # The mock installs query on the mock module
-        mock_sdk = sys.modules.get("claude_agent_sdk")
-        assert gw_query is mock_sdk.query, \
-            "Gateway's query should be the SDK's query function"
+    def test_query_helper_not_used_by_gateway(self):
+        """The gateway avoids query() for read-only cleanup correctness."""
+        src = self._gateway_source()
+        assert " query," not in src
+        assert "query(prompt=prompt" not in src
 
 
 # ---------------------------------------------------------------------------
@@ -359,23 +356,14 @@ class TestSDKOnlyPath:
 
         ctx = SimpleNamespace(
             repo_dir=tmp_path,
+            drive_root=tmp_path,
             branch_dev="ouroboros",
             pending_events=[],
             emit_progress_fn=lambda _: None,
         )
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-key")
 
-        # Patch run_edit to raise ImportError
         import ouroboros.gateways.claude_code as gw_mod
-        monkeypatch.setattr(gw_mod, "run_edit", None)
-
-        # Patch the import itself
-        import builtins
-        real_import = builtins.__import__
-        def mock_import(name, *args, **kwargs):
-            if name == "ouroboros.gateways.claude_code":
-                raise ImportError("claude-agent-sdk not installed")
-            return real_import(name, *args, **kwargs)
 
         # Directly test the error message in the function
         from ouroboros.tools.shell import _claude_code_edit
@@ -387,23 +375,13 @@ class TestSDKOnlyPath:
         import ouroboros.utils as utils_mod
         monkeypatch.setattr(utils_mod, "run_cmd", lambda *args, **kwargs: None)
 
-        # Simulate SDK ImportError in the try block
-        original_run_edit = None
-        try:
-            import ouroboros.gateways.claude_code as gw
-            original_run_edit = gw.run_edit
-        except Exception:
-            pass
-
-        # Patch to raise ImportError
         def raise_import_error(*args, **kwargs):
             raise ImportError("No module named 'claude_agent_sdk'")
 
-        if original_run_edit is not None:
-            monkeypatch.setattr("ouroboros.gateways.claude_code.run_edit", raise_import_error)
-            result = _claude_code_edit(ctx, "Test prompt")
-            assert "CLAUDE_CODE_UNAVAILABLE" in result
-            assert "claude-agent-sdk" in result
+        monkeypatch.setattr(gw_mod, "run_edit", raise_import_error)
+        result = _claude_code_edit(ctx, "Test prompt")
+        assert "CLAUDE_CODE_UNAVAILABLE" in result
+        assert "claude-agent-sdk" in result
 
     def test_advisory_returns_error_when_sdk_missing(self, monkeypatch, tmp_path):
         """When SDK not installed → advisory returns install hint."""
@@ -496,10 +474,26 @@ class TestRunReadonlyEffortParam:
         import asyncio
         from unittest.mock import AsyncMock, MagicMock, patch
 
+        class FakeSDKClient:
+            def __init__(self, options=None):
+                self.options = options
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            async def query(self, prompt):
+                return None
+
+            async def receive_response(self):
+                if False:
+                    yield None
+
         # Patch ClaudeAgentOptions with one that accepts effort
         with patch("ouroboros.gateways.claude_code.ClaudeAgentOptions", FakeOptions), \
-             patch("ouroboros.gateways.claude_code.query") as mock_query:
-            mock_query.return_value = _async_gen([])  # empty stream
+             patch("ouroboros.gateways.claude_code.ClaudeSDKClient", FakeSDKClient):
             asyncio.get_event_loop().run_until_complete(
                 __import__("ouroboros.gateways.claude_code", fromlist=["_run_readonly_async"])
                 ._run_readonly_async("test", cwd="/tmp", effort="high")
@@ -523,9 +517,25 @@ class TestRunReadonlyEffortParam:
         import asyncio
         from unittest.mock import patch
 
+        class FakeSDKClient:
+            def __init__(self, options=None):
+                self.options = options
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            async def query(self, prompt):
+                return None
+
+            async def receive_response(self):
+                if False:
+                    yield None
+
         with patch("ouroboros.gateways.claude_code.ClaudeAgentOptions", FakeOptionsNoEffort), \
-             patch("ouroboros.gateways.claude_code.query") as mock_query:
-            mock_query.return_value = _async_gen([])
+             patch("ouroboros.gateways.claude_code.ClaudeSDKClient", FakeSDKClient):
             # Should not raise — effort silently dropped
             asyncio.get_event_loop().run_until_complete(
                 __import__("ouroboros.gateways.claude_code", fromlist=["_run_readonly_async"])
@@ -533,6 +543,18 @@ class TestRunReadonlyEffortParam:
             )
 
         assert "effort" not in captured, "effort must be omitted when SDK lacks support"
+
+    def test_normalize_sdk_usage_maps_anthropic_keys(self):
+        usage = _normalize_sdk_usage({
+            "input_tokens": 100,
+            "output_tokens": 25,
+            "cache_read_input_tokens": 40,
+            "cache_creation_input_tokens": 12,
+        })
+        assert usage["prompt_tokens"] == 100
+        assert usage["completion_tokens"] == 25
+        assert usage["cached_tokens"] == 40
+        assert usage["cache_write_tokens"] == 12
 
 
 class TestSDKStatusPayload:
@@ -557,7 +579,7 @@ class TestSDKStatusPayload:
 
         monkeypatch.setattr("ouroboros.platform_layer.resolve_claude_runtime", mock_resolve)
 
-        import server as server_mod
+        from ouroboros.gateway import settings as server_mod
         payload = server_mod._claude_code_status_payload()
 
         assert payload["installed"] is True
@@ -577,7 +599,7 @@ class TestSDKStatusPayload:
 
         monkeypatch.setattr("ouroboros.platform_layer.resolve_claude_runtime", mock_resolve)
 
-        import server as server_mod
+        from ouroboros.gateway import settings as server_mod
         payload = server_mod._claude_code_status_payload()
 
         assert payload["installed"] is False
@@ -602,7 +624,7 @@ class TestSDKStatusPayload:
 
         monkeypatch.setattr("ouroboros.platform_layer.resolve_claude_runtime", mock_resolve)
 
-        import server as server_mod
+        from ouroboros.gateway import settings as server_mod
         payload = server_mod._claude_code_status_payload()
 
         assert payload["installed"] is True
@@ -628,7 +650,7 @@ class TestSDKStatusPayload:
 
         monkeypatch.setattr("ouroboros.platform_layer.resolve_claude_runtime", mock_resolve)
 
-        import server as server_mod
+        from ouroboros.gateway import settings as server_mod
         payload = server_mod._claude_code_status_payload()
 
         assert "cli_path" in payload

@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
 from typing import Awaitable, Callable
 
 from ouroboros.provider_models import (
     ANTHROPIC_DIRECT_DEFAULTS,
     OPENAI_DIRECT_DEFAULTS,
+    compute_direct_review_models_fallback,
     migrate_model_value,
 )
-from ouroboros.config import SETTINGS_DEFAULTS
+from ouroboros.config import SETTINGS_DEFAULTS, _DIRECT_PROVIDER_REVIEW_RUNS
+from ouroboros.utils import utc_now_iso
 
 
 _DIRECT_PROVIDER_AUTO_DEFAULTS = {
@@ -30,13 +31,27 @@ _DIRECT_PROVIDER_AUTO_DEFAULTS = {
 }
 _DIRECT_PROVIDER_LEGACY_DEFAULTS = {
     "openai": {
-        "OUROBOROS_MODEL_LIGHT": {"openai::gpt-4.1"},
-        "OUROBOROS_MODEL_FALLBACK": {"openai::gpt-4.1"},
+        "OUROBOROS_MODEL": {"anthropic/claude-opus-4.6"},
+        "OUROBOROS_MODEL_CODE": {"anthropic/claude-opus-4.6"},
+        "OUROBOROS_MODEL_LIGHT": {"anthropic/claude-sonnet-4.6"},
+        "OUROBOROS_MODEL_FALLBACK": {"anthropic/claude-sonnet-4.6"},
     },
-    "anthropic": {},
+    "anthropic": {
+        "OUROBOROS_MODEL": {"anthropic/claude-opus-4.6"},
+        "OUROBOROS_MODEL_CODE": {"anthropic/claude-opus-4.6"},
+        "OUROBOROS_MODEL_LIGHT": {"anthropic/claude-sonnet-4.6"},
+        "OUROBOROS_MODEL_FALLBACK": {"anthropic/claude-sonnet-4.6"},
+    },
 }
+_DIRECT_PROVIDER_LEGACY_DEFAULTS["openai"]["OUROBOROS_MODEL_LIGHT"].add("openai::gpt-4.1")
+_DIRECT_PROVIDER_LEGACY_DEFAULTS["openai"]["OUROBOROS_MODEL_FALLBACK"].add("openai::gpt-4.1")
+_LEGACY_GEMINI_31_FLASH_LITE = "google/gemini-" + "3.1-flash-lite"
+_LEGACY_GEMINI_31_PRO_PREVIEW = "google/gemini-" + "3.1-pro-preview"
+_LEGACY_GEMINI_3_FLASH_PREVIEW = "google/gemini-" + "3-flash-preview"
+for _legacy_defaults in _DIRECT_PROVIDER_LEGACY_DEFAULTS.values():
+    for _slot in ("OUROBOROS_MODEL", "OUROBOROS_MODEL_CODE", "OUROBOROS_MODEL_LIGHT"):
+        _legacy_defaults[_slot].add(_LEGACY_GEMINI_31_FLASH_LITE)
 _ALL_MODEL_SLOT_KEYS = tuple(_DIRECT_PROVIDER_AUTO_DEFAULTS["openai"].keys())
-_DIRECT_PROVIDER_REVIEW_RUNS = 3
 _SCOPE_REVIEW_LEGACY_DEFAULTS = frozenset({
     "",
     "anthropic/claude-opus-4.6",
@@ -53,15 +68,15 @@ _SCOPE_REVIEW_LEGACY_DEFAULTS = frozenset({
     "openai::gpt-" + "5.4-mini",
 })
 _RETIRED_MODEL_DEFAULT_REPLACEMENTS = {
-    "anthropic/claude-opus-" + "4.7": "anthropic/claude-opus-4.6",
-    "anthropic::claude-opus-" + "4-7": "anthropic::claude-opus-4-6",
-    "claude-opus-" + "4-7[1m]": "claude-opus-4-6[1m]",
     "openai/gpt-" + "5.4": "openai/gpt-5.5",
     "openai::gpt-" + "5.4": "openai::gpt-5.5",
     "openai/gpt-" + "5.4-pro": "openai/gpt-5.5-pro",
     "openai::gpt-" + "5.4-pro": "openai::gpt-5.5-pro",
     "openai/gpt-" + "5.4-mini": "openai/gpt-5.5-mini",
     "openai::gpt-" + "5.4-mini": "openai::gpt-5.5-mini",
+    _LEGACY_GEMINI_31_FLASH_LITE: "google/gemini-3.5-flash",
+    _LEGACY_GEMINI_31_PRO_PREVIEW: "google/gemini-3.5-flash",
+    _LEGACY_GEMINI_3_FLASH_PREVIEW: "google/gemini-3.5-flash",
 }
 
 
@@ -79,6 +94,10 @@ def _parse_model_list(value: str) -> list[str]:
 
 def _serialize_model_list(models: list[str]) -> str:
     return ",".join(model.strip() for model in models if str(model or "").strip())
+
+
+def _unique_changed_keys(keys: list[str]) -> list[str]:
+    return list(dict.fromkeys(keys))
 
 
 def _refresh_retired_model_defaults(settings: dict) -> tuple[dict, list[str]]:
@@ -108,7 +127,17 @@ def _refresh_retired_model_defaults(settings: dict) -> tuple[dict, list[str]]:
         if serialized != review_value:
             normalized["OUROBOROS_REVIEW_MODELS"] = serialized
             changed.append("OUROBOROS_REVIEW_MODELS")
-    return normalized, changed
+    scope_review_value = _setting_text(normalized, "OUROBOROS_SCOPE_REVIEW_MODELS")
+    if scope_review_value:
+        models = [
+            _RETIRED_MODEL_DEFAULT_REPLACEMENTS.get(item, item)
+            for item in _parse_model_list(scope_review_value)
+        ]
+        serialized = _serialize_model_list(models)
+        if serialized != scope_review_value:
+            normalized["OUROBOROS_SCOPE_REVIEW_MODELS"] = serialized
+            changed.append("OUROBOROS_SCOPE_REVIEW_MODELS")
+    return normalized, _unique_changed_keys(changed)
 
 
 def _provider_prefix(provider: str) -> str:
@@ -142,42 +171,13 @@ def _normalize_direct_review_models(settings: dict, provider: str) -> str:
 
     has_foreign_models = any(not model.startswith(provider_prefix) for model in migrated_models)
     if not migrated_models or len(migrated_models) < 2 or has_foreign_models:
-        # v4.39.0: seed a quorum-safe direct-provider fallback that still
-        # fills all three commit-triad slots: `[main, light, light]`
-        # (3 entries, 2 unique models).
-        #
-        # - Commit triad in `_run_unified_review` sees 3 reviewers — unchanged
-        #   from the pre-v4.39.0 contract documented in DEVELOPMENT.md and
-        #   ARCHITECTURE.md (`three models review the staged diff`).
-        # - plan_task in `_run_plan_review_async` dedupes to 2 unique reviewers
-        #   and passes the v4.39.0 quorum gate.
-        # - The duplicated `light` slot is a minor redundancy in the commit
-        #   triad's third vote — majority-vote already tolerates it, and the
-        #   old fallback `[main] * 3` had even more duplication.
-        #
-        # `light_slot` is derived from the user's actual
-        # `OUROBOROS_MODEL_LIGHT` first (so a custom lane like
-        # `openai::o4-mini` is honoured); only when that setting is empty
-        # or points at a foreign-provider model do we fall back to the
-        # shipped `_DIRECT_PROVIDER_AUTO_DEFAULTS` light for this provider.
-        # If the resolved light still collapses to the same model as main
-        # (user explicitly overrode both lanes identically), degrade to the
-        # legacy `[main] * _DIRECT_PROVIDER_REVIEW_RUNS` shape — commit
-        # triad still works, `plan_task` emits its quorum-error hint.
         user_light_raw = _setting_text(settings, "OUROBOROS_MODEL_LIGHT")
-        user_light = migrate_model_value(provider, user_light_raw) if user_light_raw else ""
-        provider_defaults = _DIRECT_PROVIDER_AUTO_DEFAULTS.get(provider, {})
-        default_light = migrate_model_value(
-            provider, provider_defaults.get("OUROBOROS_MODEL_LIGHT", "")
+        fallback = compute_direct_review_models_fallback(
+            provider,
+            main_model,
+            user_light_raw,
+            review_runs=_DIRECT_PROVIDER_REVIEW_RUNS,
         )
-        if user_light and user_light.startswith(provider_prefix):
-            light_slot = user_light
-        else:
-            light_slot = default_light
-        if light_slot and light_slot != main_model:
-            fallback = [main_model, light_slot, light_slot]
-        else:
-            fallback = [main_model] * _DIRECT_PROVIDER_REVIEW_RUNS
         return _serialize_model_list(fallback)
     return _serialize_model_list(migrated_models)
 
@@ -203,6 +203,21 @@ def _normalize_direct_scope_review_model(settings: dict, provider: str) -> str:
     if current.startswith(provider_prefix) and current_raw:
         return current
     return current or auto_value
+
+
+def _normalize_direct_scope_review_models(settings: dict, provider: str) -> str:
+    raw = _setting_text(settings, "OUROBOROS_SCOPE_REVIEW_MODELS")
+    models = _parse_model_list(raw)
+    if not models:
+        singular = _normalize_direct_scope_review_model(settings, provider)
+        return _serialize_model_list([singular] if singular else [])
+    migrated = [migrate_model_value(provider, model) for model in models]
+    provider_prefix = _provider_prefix(provider)
+    if raw == _setting_text(SETTINGS_DEFAULTS, "OUROBOROS_SCOPE_REVIEW_MODELS"):
+        return _serialize_model_list([_normalize_direct_scope_review_model(settings, provider)])
+    if all(model.startswith(provider_prefix) for model in migrated):
+        return _serialize_model_list(migrated)
+    return _serialize_model_list([_normalize_direct_scope_review_model(settings, provider)])
 
 
 def classify_runtime_provider_change(before: dict, after: dict) -> str:
@@ -299,24 +314,26 @@ def apply_runtime_provider_defaults(settings: dict) -> tuple[dict, bool, list[st
         normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] = scope_review_model
         changed_keys.append("OUROBOROS_SCOPE_REVIEW_MODEL")
 
+    scope_review_models = _normalize_direct_scope_review_models(normalized, provider)
+    if scope_review_models != _setting_text(normalized, "OUROBOROS_SCOPE_REVIEW_MODELS"):
+        normalized["OUROBOROS_SCOPE_REVIEW_MODELS"] = scope_review_models
+        changed_keys.append("OUROBOROS_SCOPE_REVIEW_MODELS")
+
+    changed_keys = _unique_changed_keys(changed_keys)
     return normalized, bool(changed_keys), changed_keys
 
 
 def setup_remote_if_configured(settings: dict, log) -> None:
-    """Set up GitHub remote and migrate credentials if configured."""
+    """Set up GitHub remote when credentials are configured."""
     slug = settings.get("GITHUB_REPO", "")
     token = settings.get("GITHUB_TOKEN", "")
     if not slug or not token:
         return
-    from supervisor.git_ops import configure_remote, migrate_remote_credentials
+    from supervisor.git_ops import configure_remote
 
     remote_ok, remote_msg = configure_remote(slug, token)
     if not remote_ok:
         log.warning("Remote configuration failed on startup: %s", remote_msg)
-        return
-    mig_ok, mig_msg = migrate_remote_credentials()
-    if not mig_ok:
-        log.warning("Credential migration failed on startup: %s", mig_msg)
 
 
 async def ws_heartbeat_loop(
@@ -331,5 +348,5 @@ async def ws_heartbeat_loop(
             continue
         await broadcast_fn({
             "type": "heartbeat",
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": utc_now_iso(),
         })

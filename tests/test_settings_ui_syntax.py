@@ -65,18 +65,13 @@ def _extract_render_settings_page_body(content: str) -> str:
     return content[brace_start:]  # fallback: rest of file
 
 
-def test_settings_ui_js_exists():
-    """The settings_ui.js module file exists."""
-    assert SETTINGS_UI_JS.exists(), f"Missing: {SETTINGS_UI_JS}"
-
-
-def test_render_settings_page_function_present():
-    """renderSettingsPage() is exported from settings_ui.js."""
-    content = SETTINGS_UI_JS.read_text(encoding="utf-8")
-    assert "export function renderSettingsPage()" in content, (
-        "renderSettingsPage() not found in settings_ui.js. "
-        "If the function was renamed, update this test."
-    )
+# ``test_settings_ui_js_exists`` and ``test_render_settings_page_function_present``
+# were retired in v5.8.3-rc.5 — both are subsumed by the assertions below.
+# ``_extract_render_settings_page_body`` returns empty when the file is
+# missing or the function body cannot be located, and the backtick /
+# bracket-backtick tests assert ``body`` is truthy with an explicit
+# message that points at the same root cause. Keeping the two tiny
+# existence tests added cost without adding signal.
 
 
 def test_render_settings_page_backtick_balance():
