@@ -115,7 +115,8 @@ class TestPathGuard:
         assert result != {}
         assert "deny" in str(result)
 
-    def test_blocks_safety_critical_file(self, tmp_path):
+    def test_blocks_safety_critical_file(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
         guard = make_path_guard(str(tmp_path))
         for critical in SAFETY_CRITICAL:
             result = self._run(guard(
@@ -124,21 +125,14 @@ class TestPathGuard:
             ))
             assert "deny" in str(result), f"Should block {critical}"
 
-    def test_can_disable_runtime_path_guard_for_external_workspaces(self, tmp_path):
-        guard = make_path_guard(str(tmp_path), protect_runtime_paths=False)
-        result = self._run(guard(
-            {"tool_name": "Edit", "tool_input": {"file_path": str(tmp_path / ".github" / "workflows" / "ci.yml")}},
-            "tid-external-ci", None,
-        ))
-        assert result == {}
-
-    def test_blocks_safety_critical_with_backslash_paths(self, tmp_path):
+    def test_blocks_safety_critical_with_backslash_paths(self, tmp_path, monkeypatch):
         """Safety-critical check must work regardless of OS path separator.
 
         On Windows os.path.relpath returns backslashes. The guard must normalize
         to forward slashes (via pathlib.as_posix) before comparing against
         SAFETY_CRITICAL which uses forward slashes.
         """
+        monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
         guard = make_path_guard(str(tmp_path))
         # Simulate a Windows-style resolved path by using the native separator
         for critical in SAFETY_CRITICAL:
@@ -151,6 +145,14 @@ class TestPathGuard:
             assert "deny" in str(result), (
                 f"Should block '{critical}' even with native path separators"
             )
+
+    def test_can_disable_runtime_path_guard_for_external_workspaces(self, tmp_path):
+        guard = make_path_guard(str(tmp_path), protect_runtime_paths=False)
+        result = self._run(guard(
+            {"tool_name": "Edit", "tool_input": {"file_path": str(tmp_path / ".github" / "workflows" / "ci.yml")}},
+            "tid-external-ci", None,
+        ))
+        assert result == {}
 
     def test_allows_read_tool(self, tmp_path):
         guard = make_path_guard(str(tmp_path))

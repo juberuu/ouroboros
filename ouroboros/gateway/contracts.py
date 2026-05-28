@@ -120,6 +120,26 @@ class PhotoOutbound(TypedDict):
     telegram_chat_id: NotRequired[int]
 
 
+class VideoOutbound(TypedDict):
+    """Outbound WS video frame."""
+
+    type: Literal["video"]
+    role: Literal["user", "assistant"]
+    video_base64: str
+    mime: str
+    ts: str
+    caption: NotRequired[str]
+    content: NotRequired[str]
+    source: NotRequired[str]
+    sender_label: NotRequired[str]
+    sender_session_id: NotRequired[str]
+    client_message_id: NotRequired[str]
+    transport: NotRequired[TransportMetadata]
+    chat_id: NotRequired[int]
+    # Deprecated compatibility field: runtime emits ``transport`` instead.
+    telegram_chat_id: NotRequired[int]
+
+
 class TypingOutbound(TypedDict):
     """Outbound WS typing indicator."""
 
@@ -474,6 +494,7 @@ WS_MESSAGE_TYPES: tuple[str, ...] = (
     "chat",
     "command",
     "photo",
+    "video",
     "typing",
     "log",
     "heartbeat",
@@ -489,6 +510,7 @@ __all__ = [
     "TransportMetadata",
     "ChatOutbound",
     "PhotoOutbound",
+    "VideoOutbound",
     "TypingOutbound",
     "LogOutbound",
     "HeartbeatOutbound",

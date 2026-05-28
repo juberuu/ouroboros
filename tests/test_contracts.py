@@ -165,10 +165,10 @@ def test_every_registered_tool_matches_protocol():
 
 
 def test_api_v1_declares_core_ws_message_types():
-    """api_v1 must declare at least chat, photo, typing, log."""
+    """api_v1 must declare the core chat/media/status WS envelopes."""
     from ouroboros.contracts import api_v1
 
-    for name in ("ChatInbound", "ChatOutbound", "PhotoOutbound", "TypingOutbound", "LogOutbound"):
+    for name in ("ChatInbound", "ChatOutbound", "PhotoOutbound", "VideoOutbound", "TypingOutbound", "LogOutbound"):
         assert hasattr(api_v1, name), f"api_v1 missing {name}"
 
 
@@ -268,6 +268,7 @@ def _collect_literal_progress_meta_keys(source_path: pathlib.Path) -> set[str]:
 
 _CHAT_OUTBOUND_REQUIRED = frozenset({"type", "role", "content", "ts"})
 _PHOTO_OUTBOUND_REQUIRED = frozenset({"type", "role", "image_base64", "mime", "ts"})
+_VIDEO_OUTBOUND_REQUIRED = frozenset({"type", "role", "video_base64", "mime", "ts"})
 _TYPING_OUTBOUND_REQUIRED = frozenset({"type", "action"})
 _LOG_OUTBOUND_REQUIRED = frozenset({"type", "data"})
 
@@ -398,6 +399,24 @@ def test_photo_outbound_matches_message_bus_sends():
         declared_keys=declared,
         required_keys=_PHOTO_OUTBOUND_REQUIRED,
         envelope_name="PhotoOutbound",
+    )
+
+
+def test_video_outbound_matches_message_bus_sends():
+    """VideoOutbound TypedDict must match every video envelope emitted."""
+    from ouroboros.gateway.contracts import VideoOutbound
+
+    declared = set(VideoOutbound.__annotations__.keys())
+    assert _VIDEO_OUTBOUND_REQUIRED <= declared, (
+        "VideoOutbound lost a required key: "
+        f"{_VIDEO_OUTBOUND_REQUIRED - declared}"
+    )
+    _assert_envelope_parity(
+        REPO_ROOT / "supervisor" / "message_bus.py",
+        discriminator="video",
+        declared_keys=declared,
+        required_keys=_VIDEO_OUTBOUND_REQUIRED,
+        envelope_name="VideoOutbound",
     )
 
 

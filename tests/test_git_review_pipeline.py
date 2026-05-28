@@ -151,7 +151,8 @@ class TestRepoWriteMultiFile:
         result = git_mod._repo_write(ctx, files=[{"path": "", "content": "x"}])
         assert "WRITE_ERROR" in result
 
-    def test_multi_file_blocks_safety_critical(self, git_ctx):
+    def test_multi_file_blocks_safety_critical(self, git_ctx, monkeypatch):
+        monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
         git_mod, ctx = git_ctx
         result = git_mod._repo_write(ctx, files=[
             {"path": "ok.py", "content": "x"},

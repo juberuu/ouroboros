@@ -560,7 +560,8 @@ def test_workspace_context_routes_repo_tools_and_blocks_self_commit(tmp_path):
     assert (workspace / "README.md").read_text(encoding="utf-8") == "workspace edited"
 
 
-def test_workspace_run_shell_blocks_escaping_cwd(tmp_path):
+def test_workspace_run_shell_blocks_escaping_cwd(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     system_repo = tmp_path / "system"
     workspace = tmp_path / "workspace"
     outside = tmp_path / "outside"

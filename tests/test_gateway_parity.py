@@ -44,6 +44,8 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         "SettingsMeta",
         "ChatInbound",
         "ChatOutbound",
+        "PhotoOutbound",
+        "VideoOutbound",
         "UploadResponse",
         "TaskCreateResponse",
         "TaskEvent",
@@ -75,7 +77,7 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
     assert re.search(r"@property \{boolean=\} worker_saturation_warning\b", text), "ChatOutbound missing worker_saturation_warning"
     assert "setup_contract" in text
     assert re.search(r"@property \{string=\} error\b", text), "SkillDeleteResponse missing optional error"
-    assert {"chat", "command", "log", "heartbeat"} <= set(WS_MESSAGE_TYPES)
+    assert {"chat", "command", "photo", "video", "typing", "log", "heartbeat", "extension_lifecycle"} <= set(WS_MESSAGE_TYPES)
 
 
 def test_skill_lifecycle_queue_contract_matches_runtime_shape():

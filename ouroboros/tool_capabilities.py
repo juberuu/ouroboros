@@ -15,7 +15,7 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     "knowledge_read", "knowledge_write", "knowledge_list",
     "web_search",
     "browse_page", "browser_action", "analyze_screenshot",
-    "send_user_message", "send_photo",
+    "send_user_message", "send_photo", "send_video",
     "switch_model",
     "request_restart", "promote_to_stable",
     "advisory_review", "review_status", "task_acceptance_review",
