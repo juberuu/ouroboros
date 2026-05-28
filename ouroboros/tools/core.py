@@ -912,13 +912,13 @@ _MAX_VIDEO_FILE_BYTES = 50 * 1024 * 1024  # 50 MB
 
 def _detect_video_mime(file_path: str, data: bytes) -> str:
     """Detect video MIME type from path extension or magic bytes."""
-    mime, _ = __import__("mimetypes").guess_type(file_path)
-    if mime:
-        return mime
     if len(data) >= 8 and data[4:8] == b'ftyp':
         return "video/mp4"
     if data[:4] == b'\x1a\x45\xdf\xa3':
         return "video/webm"
+    mime, _ = __import__("mimetypes").guess_type(file_path)
+    if mime and str(mime).lower().startswith("video/"):
+        return mime
     return "video/mp4"
 
 

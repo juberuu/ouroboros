@@ -165,10 +165,10 @@ def test_every_registered_tool_matches_protocol():
 
 
 def test_api_v1_declares_core_ws_message_types():
-    """api_v1 must declare at least chat, photo, typing, log."""
+    """api_v1 must declare the core chat/media/status WS envelopes."""
     from ouroboros.contracts import api_v1
 
-    for name in ("ChatInbound", "ChatOutbound", "PhotoOutbound", "TypingOutbound", "LogOutbound"):
+    for name in ("ChatInbound", "ChatOutbound", "PhotoOutbound", "VideoOutbound", "TypingOutbound", "LogOutbound"):
         assert hasattr(api_v1, name), f"api_v1 missing {name}"
 
 

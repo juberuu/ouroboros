@@ -90,6 +90,32 @@
  */
 
 /**
+ * @typedef {Object} PhotoOutbound
+ * @property {"photo"} type
+ * @property {"user"|"assistant"} role
+ * @property {string} image_base64
+ * @property {string} mime
+ * @property {string} ts
+ * @property {string=} caption
+ * @property {string=} content
+ * @property {Object=} transport
+ * @property {number=} chat_id
+ */
+
+/**
+ * @typedef {Object} VideoOutbound
+ * @property {"video"} type
+ * @property {"user"|"assistant"} role
+ * @property {string} video_base64
+ * @property {string} mime
+ * @property {string} ts
+ * @property {string=} caption
+ * @property {string=} content
+ * @property {Object=} transport
+ * @property {number=} chat_id
+ */
+
+/**
  * @typedef {Object} LogOutbound
  * @property {"log"} type
  * @property {Object} data
