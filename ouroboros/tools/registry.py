@@ -993,8 +993,9 @@ class ToolRegistry:
         while "//" in cmd_path_lower:
             cmd_path_lower = cmd_path_lower.replace("//", "/")
         argv_for_write = argv
+        argv_executable = pathlib.PurePath(argv_for_write[0]).name.lower().removesuffix(".exe") if argv_for_write else ""
         writeish = any(w in cmd_lower for w in SHELL_WRITE_INDICATORS) or (
-            bool(argv_for_write) and pathlib.PurePath(argv_for_write[0]).name.lower() in LIGHT_SHELL_WRITER_COMMANDS
+            bool(argv_for_write) and argv_executable in LIGHT_SHELL_WRITER_COMMANDS
         )
         if workspace_mode and writeish:
             active_root = active_repo_dir_for(self._ctx).resolve(strict=False)
@@ -1094,9 +1095,8 @@ class ToolRegistry:
                     "or root=task_drive. Switch to advanced/pro only for "
                     "reviewed Ouroboros self-modification."
                 )
-            runtime_data_scan = writeish or (
-                argv and pathlib.PurePath(argv[0]).name.lower() in {"python", "python3", "node", "ruby", "perl", "php", "sh", "bash", "zsh"}
-            )
+            runtime_data_executable = pathlib.PurePath(argv[0]).name.lower().removesuffix(".exe") if argv else ""
+            runtime_data_scan = writeish or runtime_data_executable in {"python", "python3", "node", "ruby", "perl", "php", "sh", "bash", "zsh"}
             if runtime_data_scan:
                 operation = "service" if str(args.get("__tool_name") or "") == "start_service" else "shell"
                 try:

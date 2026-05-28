@@ -177,7 +177,7 @@ def repo_target_mentioned(argv: List[str], *, repo_dir: pathlib.Path, cwd: str =
 def writer_target_tokens(argv: List[str]) -> List[str]:
     if not argv:
         return []
-    cmd = pathlib.PurePath(argv[0]).name.lower()
+    cmd = pathlib.PurePath(argv[0]).name.lower().removesuffix(".exe")
     operands = [arg for arg in argv[1:] if arg and not arg.startswith("-")]
     if cmd == "cp":
         return operands[-1:] if len(operands) >= 2 else []
@@ -205,7 +205,7 @@ def shell_writer_targets_protected(raw_cmd: Any) -> bool:
     argv = strip_leading_env_assignments(unwrap_env_argv(shell_argv(raw_cmd)))
     if not argv:
         return False
-    executable = pathlib.PurePath(argv[0]).name.lower()
+    executable = pathlib.PurePath(argv[0]).name.lower().removesuffix(".exe")
     if executable in {"bash", "sh", "zsh"}:
         inline = shell_command_string(argv)
         return bool(inline and shell_writer_targets_protected(inline))
@@ -239,7 +239,7 @@ def light_shell_repo_mutation(
     argv = strip_leading_env_assignments(argv)
     if not argv:
         return False
-    executable = pathlib.PurePath(argv[0]).name.lower()
+    executable = pathlib.PurePath(argv[0]).name.lower().removesuffix(".exe")
 
     if executable in {"bash", "sh", "zsh"}:
         inline = shell_command_string(argv)

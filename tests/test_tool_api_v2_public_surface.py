@@ -366,12 +366,15 @@ def test_light_mode_blocks_interpreter_runtime_data_touch_without_write_marker(t
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     registry, _repo, data, _desktop = _registry_under_fake_home(tmp_path, monkeypatch)
     upload = data / "uploads" / "touch-report.html"
+    python_exe = str(pathlib.Path(sys.executable))
+    if not pathlib.PurePath(python_exe).name.lower().endswith(".exe"):
+        python_exe = f"{python_exe}.exe"
 
     result = registry.execute(
         "run_command",
         {
             "cmd": [
-                sys.executable,
+                python_exe,
                 "-c",
                 (
                     "from pathlib import Path\n"
