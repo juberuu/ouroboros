@@ -77,7 +77,7 @@ class TestShellArgContract:
         fake_subprocess(stdout="hello")
         result = _run_shell(_ctx(tmp_path), "echo hello")
         assert "SHELL_ARG_ERROR" not in result
-        assert "exit_code=0" in result
+        assert f"exit_code=0 (cwd={tmp_path.resolve()})" in result
 
     def test_json_array_string_recovered(self, tmp_path, fake_subprocess):
         fake_subprocess(stdout="ok")
@@ -169,7 +169,7 @@ def test_run_shell_nonzero_exit_is_reported_as_failure(tmp_path, fake_subprocess
     result = _run_shell(_ctx(tmp_path), ["npm", "install", "-g", "@anthropic-ai/claude-code"])
 
     assert result.startswith("⚠️ SHELL_EXIT_ERROR:")
-    assert "exit_code=3" in result
+    assert f"exit_code=3 (cwd={tmp_path.resolve()})" in result
     assert "permission denied" in result
 
 
@@ -183,6 +183,7 @@ def test_run_shell_timeout_uses_settings_timeout(tmp_path, monkeypatch):
 
     assert "TOOL_TIMEOUT (run_command)" in result
     assert "42s" in result
+    assert f"cwd={tmp_path.resolve()}" in result
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +200,9 @@ def test_grep_or_rg_exit_one_without_stderr_is_no_match(cmd, tmp_path, fake_subp
     result = _run_shell(_ctx(tmp_path), cmd)
 
     assert "SHELL_EXIT_ERROR" not in result
-    assert "exit_code=1 (no matches)" in result
+    assert "exit_code=1" in result
+    assert f"cwd={tmp_path.resolve()}" in result
+    assert "no matches" in result
 
 
 def test_grep_exit_one_with_stderr_still_surfaces_shell_error(tmp_path, fake_subprocess):

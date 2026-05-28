@@ -851,7 +851,8 @@ def _check_shrink_guard(ctx: ToolContext, file_path: str, new_content: str, forc
 
 def _repo_write(ctx: ToolContext, path: str = "", content: str = "",
                 files: Optional[List[Dict[str, str]]] = None,
-                force: bool = False) -> str:
+                force: bool = False,
+                display_root: str = "active_workspace") -> str:
     """Write file(s) to the repo working directory without committing."""
     write_list: List[Dict[str, str]] = []
     if files:
@@ -902,7 +903,7 @@ def _repo_write(ctx: ToolContext, path: str = "", content: str = "",
             target = ctx.repo_path(e["path"])
             target.parent.mkdir(parents=True, exist_ok=True)
             write_text(target, e["content"])
-            written.append(f"{e['path']} ({len(e['content'])} chars)")
+            written.append(f"{display_root}:{safe_relpath(e['path'])} ({len(e['content'])} chars)")
             written_paths.append(e["path"])
         except Exception as exc:
             if written:
@@ -949,6 +950,7 @@ def _str_replace_editor(
     new_str: str,
     bucket: str = "",
     skill_name: str = "",
+    display_root: str = "active_workspace",
 ) -> str:
     """Replace exactly one occurrence of old_str with new_str in a file."""
     if not path or not path.strip():
@@ -1070,7 +1072,7 @@ def _str_replace_editor(
         source_tool="edit_text",
     )
     result = (
-        f"✅ Replaced in {path} (line {replacement_line}).\n"
+        f"✅ Replaced in {display_root}:{safe_relpath(path)} (line {replacement_line}).\n"
         f"Context:\n{context_preview}\n\n"
         "File is on disk but NOT committed."
     )

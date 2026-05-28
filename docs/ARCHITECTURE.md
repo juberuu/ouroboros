@@ -764,6 +764,11 @@ Tool API v2 exposes neutral canonical names directly. Public schemas use
 `wait_tasks`. Legacy public tool names are a breaking rename in v6.3: they
 are not exposed and are not translated at execute time.
 
+Filesystem tool output is self-locating: file/search/edit/write results use
+canonical `root:path` labels, and `run_command` / `run_script` echo the
+resolved `cwd` in command result headers. This makes root mismatches visible
+without collapsing the storage or safety boundaries between resource roots.
+
 ### Safety and runtime mode
 
 Every tool call passes hardcoded registry sandbox first, then policy-based LLM safety when required. `runtime_mode_policy.py` defines protected paths: safety-critical files, frozen contracts, release/build/managed-repo invariants. Light mode blocks core/repo mutation except reviewed skill-payload repair lanes; advanced can evolve normal app code; pro can leave protected edits on disk but the commit still requires review.

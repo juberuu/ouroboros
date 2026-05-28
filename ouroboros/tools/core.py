@@ -310,7 +310,13 @@ _MEMORY_AT_DRIVE_MEMORY = frozenset({
 })
 
 
-def _repo_read(ctx: ToolContext, path: str, max_lines: int = 2000, start_line: int = 1) -> str:
+def _repo_read(
+    ctx: ToolContext,
+    path: str,
+    max_lines: int = 2000,
+    start_line: int = 1,
+    display_path: str | None = None,
+) -> str:
     """Read a repo file; root-level memory names return a runtime_data read hint."""
     target = ctx.repo_path(path)
     if _is_local_readonly_subagent(ctx) and _is_subagent_secret_repo_target(target, active_repo_dir_for(ctx)):
@@ -331,7 +337,7 @@ def _repo_read(ctx: ToolContext, path: str, max_lines: int = 2000, start_line: i
                 f"`read_file(root='runtime_data', path='memory/{base}')`."
             )
         raise
-    return _render_line_slice(path, content, max_lines=max_lines, start_line=start_line)
+    return _render_line_slice(display_path or path, content, max_lines=max_lines, start_line=start_line)
 
 
 def _repo_list(ctx: ToolContext, dir: str = ".", max_entries: int = 500) -> str:
@@ -372,7 +378,13 @@ def _normalize_data_read_path(ctx: ToolContext, path: str) -> str:
     return norm
 
 
-def _data_read(ctx: ToolContext, path: str, max_lines: int = 2000, start_line: int = 1) -> str:
+def _data_read(
+    ctx: ToolContext,
+    path: str,
+    max_lines: int = 2000,
+    start_line: int = 1,
+    display_path: str | None = None,
+) -> str:
     """Read a drive text file; duplicate drive_root prefixes are stripped."""
     task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
     norm = _normalize_data_read_path(ctx, path)
@@ -412,9 +424,9 @@ def _data_read(ctx: ToolContext, path: str, max_lines: int = 2000, start_line: i
     try:
         content = read_text(target)
         start_raw, max_raw = _coerce_line_window(start_line, max_lines)
-        if _is_cognitive_data_path(norm) and start_raw == 1 and max_raw == 2000:
+        if display_path is None and _is_cognitive_data_path(norm) and start_raw == 1 and max_raw == 2000:
             return content
-        return _render_line_slice(norm, content, max_lines=max_raw, start_line=start_raw)
+        return _render_line_slice(display_path or norm, content, max_lines=max_raw, start_line=start_raw)
     except FileNotFoundError:
         if norm.replace("\\", "/").startswith("memory/"):
             explanation = (
@@ -476,6 +488,7 @@ def _data_write(
     mode: str = "overwrite",
     bucket: str = "",
     skill_name: str = "",
+    display_root: str = "runtime_data",
 ) -> str:
     # bucket+skill_name synthesize a payload-confined skill_repair constraint.
     short_form = decide_payload_short_form(
@@ -615,7 +628,7 @@ def _data_write(
         state_marker = pathlib.Path(ctx.drive_root) / "state" / "skills" / marker_payload[1] / "self_authored.json"
         state_marker.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_json(state_marker, marker_payload_data, trailing_newline=True)
-    result = f"OK: wrote {mode} {path} ({len(content)} chars)"
+    result = f"OK: wrote {mode} {_root_display_path(display_root, write_path)} ({len(content)} chars)"
     if short_form.ignored_reason:
         result += f"\n⚠️ SKILL_SHORT_FORM_IGNORED: {short_form.ignored_reason}."
     return result
@@ -664,7 +677,10 @@ def _local_readonly_resource_block(
 
 
 def _root_display_path(root: str, path: str) -> str:
-    return f"{root}:{path or '.'}"
+    rel = safe_relpath(str(path or "."))
+    if rel.startswith("./"):
+        rel = rel[2:]
+    return f"{root}:{rel or '.'}"
 
 
 def _read_file(
@@ -680,9 +696,21 @@ def _read_file(
     if block:
         return block
     if normalized == "active_workspace":
-        return _repo_read(ctx, path, max_lines=max_lines, start_line=start_line)
+        return _repo_read(
+            ctx,
+            path,
+            max_lines=max_lines,
+            start_line=start_line,
+            display_path=_root_display_path(normalized, path),
+        )
     if normalized == "runtime_data":
-        return _data_read(ctx, path, max_lines=max_lines, start_line=start_line)
+        return _data_read(
+            ctx,
+            path,
+            max_lines=max_lines,
+            start_line=start_line,
+            display_path=_root_display_path(normalized, path),
+        )
     try:
         base = resource_root_path(ctx, normalized, bucket=bucket, skill_name=skill_name)
         target = resolve_resource_path(ctx, root=normalized, path=path, bucket=bucket, skill_name=skill_name)
@@ -752,25 +780,39 @@ def _write_file(
     if normalized in {"active_workspace", "system_repo"}:
         from ouroboros.tools.git import _repo_write
 
-        return _repo_write(ctx, path=path, content=content, files=files or [], force=force)
+        return _repo_write(ctx, path=path, content=content, files=files or [], force=force, display_root=normalized)
     if normalized == "runtime_data":
         if files:
             results = []
             for item in files:
                 if not isinstance(item, dict):
                     continue
-                results.append(_data_write(ctx, str(item.get("path") or ""), str(item.get("content") or ""), mode=mode))
+                results.append(_data_write(
+                    ctx,
+                    str(item.get("path") or ""),
+                    str(item.get("content") or ""),
+                    mode=mode,
+                    display_root=normalized,
+                ))
             return "\n".join(results) if results else "⚠️ TOOL_ARG_ERROR: files must contain {path, content} objects."
-        return _data_write(ctx, path=path, content=content, mode=mode)
+        return _data_write(ctx, path=path, content=content, mode=mode, display_root=normalized)
     if normalized == "skill_payload":
         if files:
             results = []
             for item in files:
                 rel = str(item.get("path") or "") if isinstance(item, dict) else ""
                 body = str(item.get("content") or "") if isinstance(item, dict) else ""
-                results.append(_data_write(ctx, rel, body, mode=mode, bucket=bucket, skill_name=skill_name))
+                results.append(_data_write(
+                    ctx,
+                    rel,
+                    body,
+                    mode=mode,
+                    bucket=bucket,
+                    skill_name=skill_name,
+                    display_root=normalized,
+                ))
             return "\n".join(results)
-        return _data_write(ctx, path=path, content=content, mode=mode, bucket=bucket, skill_name=skill_name)
+        return _data_write(ctx, path=path, content=content, mode=mode, bucket=bucket, skill_name=skill_name, display_root=normalized)
     try:
         if files:
             results = []
@@ -780,7 +822,7 @@ def _write_file(
                 target = resolve_resource_path(ctx, root=normalized, path=str(item.get("path") or ""), bucket=bucket, skill_name=skill_name)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(str(item.get("content") or ""), encoding="utf-8")
-                results.append(f"OK: wrote {normalized}:{item.get('path')} ({len(str(item.get('content') or ''))} chars)")
+                results.append(f"OK: wrote {_root_display_path(normalized, str(item.get('path') or ''))} ({len(str(item.get('content') or ''))} chars)")
             return "\n".join(results) if results else "⚠️ TOOL_ARG_ERROR: files must contain {path, content} objects."
         target = resolve_resource_path(ctx, root=normalized, path=path, bucket=bucket, skill_name=skill_name)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -789,7 +831,7 @@ def _write_file(
                 fh.write(content)
         else:
             target.write_text(content, encoding="utf-8")
-        return f"OK: wrote {normalized}:{path} ({len(content)} chars)"
+        return f"OK: wrote {_root_display_path(normalized, path)} ({len(content)} chars)"
     except Exception as exc:
         return f"⚠️ WRITE_FILE_ERROR: {type(exc).__name__}: {exc}"
 
@@ -819,7 +861,7 @@ def _edit_text(
     if normalized in {"active_workspace", "system_repo"}:
         from ouroboros.tools.git import _str_replace_editor
 
-        result = _str_replace_editor(ctx, path=path, old_str=old_str, new_str=new_str)
+        result = _str_replace_editor(ctx, path=path, old_str=old_str, new_str=new_str, display_root=normalized)
         short_form = decide_payload_short_form(
             bucket=bucket,
             skill_name=skill_name,
@@ -833,7 +875,15 @@ def _edit_text(
     if normalized == "skill_payload":
         from ouroboros.tools.git import _str_replace_editor
 
-        return _str_replace_editor(ctx, path=path, old_str=old_str, new_str=new_str, bucket=bucket, skill_name=skill_name)
+        return _str_replace_editor(
+            ctx,
+            path=path,
+            old_str=old_str,
+            new_str=new_str,
+            bucket=bucket,
+            skill_name=skill_name,
+            display_root=normalized,
+        )
     try:
         target = resolve_resource_path(ctx, root=normalized, path=path, bucket=bucket, skill_name=skill_name)
         text = target.read_text(encoding="utf-8")
@@ -841,9 +891,9 @@ def _edit_text(
         if count != 1:
             return f"⚠️ EDIT_TEXT_ERROR: old_str matched {count} times; expected exactly 1."
         target.write_text(text.replace(old_str, new_str, 1), encoding="utf-8")
-        return f"OK: edited {normalized}:{path}"
+        return f"OK: edited {_root_display_path(normalized, path)}"
     except FileNotFoundError:
-        return f"⚠️ EDIT_TEXT_ERROR: file not found: {normalized}:{path}"
+        return f"⚠️ EDIT_TEXT_ERROR: file not found: {_root_display_path(normalized, path)}"
     except Exception as exc:
         return f"⚠️ EDIT_TEXT_ERROR: {type(exc).__name__}: {exc}"
 
@@ -956,9 +1006,10 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
         root_path = resource_root_path(ctx, normalized, bucket=bucket, skill_name=skill_name)
     except Exception as exc:
         return f"⚠️ SEARCH_ERROR: {type(exc).__name__}: {exc}"
+    display_search_path = _root_display_path(normalized, path)
     search_root = (root_path / safe_relpath(path)).resolve()
     if not search_root.exists():
-        return f"⚠️ SEARCH_ERROR: path not found: {path}"
+        return f"⚠️ SEARCH_ERROR: path not found: {display_search_path}"
     subagent_readonly = _is_local_readonly_subagent(ctx)
     if subagent_readonly:
         block_msg = _local_readonly_resource_block(ctx, normalized, search_root, root_path, action="SEARCH")
@@ -1008,7 +1059,7 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
 
             for lineno, line in enumerate(text.splitlines(), 1):
                 if pattern.search(line):
-                    matches.append(f"{rel}:{lineno}: {line.rstrip()}")
+                    matches.append(f"{_root_display_path(normalized, rel)}:{lineno}: {line.rstrip()}")
                     if len(matches) >= max_results:
                         truncated = True
                         break
@@ -1018,9 +1069,9 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
             break
 
     if not matches:
-        return f"No matches found for {'regex' if regex else 'literal'} `{query}` in {path} ({files_searched} files searched)."
+        return f"No matches found for {'regex' if regex else 'literal'} `{query}` in {display_search_path} ({files_searched} files searched)."
 
-    header = f"Found {len(matches)} match{'es' if len(matches) != 1 else ''} ({files_searched} files searched)"
+    header = f"Found {len(matches)} match{'es' if len(matches) != 1 else ''} in {display_search_path} ({files_searched} files searched)"
     if truncated:
         header += f" — truncated at {max_results} results"
     return header + "\n\n" + "\n".join(matches)
@@ -1105,7 +1156,7 @@ def get_tools() -> List[ToolEntry]:
                 "Read a UTF-8 text file from a declared resource root. "
                 "Default root=active_workspace (the user's workspace or the Ouroboros repo in self-modification tasks). "
                 "Use max_lines (default 2000) and start_line (default 1) to read large files in chunks. "
-                "The result header shows 'lines X\u2013Y of Z' so you know whether you saw the full file."
+                "The result header shows root:path and 'lines X\u2013Y of Z' so you know where and how much you read."
             ),
             "parameters": {"type": "object", "properties": {
                 "path": {"type": "string"},
@@ -1134,6 +1185,7 @@ def get_tools() -> List[ToolEntry]:
             "description": (
                 "Write UTF-8 file(s) to a declared resource root. "
                 "Default root=active_workspace. "
+                "OK messages show root:path. "
                 "Use mode='append' to write a large file in chunks across multiple calls "
                 "(useful when the full content exceeds a single LLM output budget). "
                 "For root=skill_payload, supply bucket and skill_name."
@@ -1162,7 +1214,8 @@ def get_tools() -> List[ToolEntry]:
             "name": "edit_text",
             "description": (
                 "Replace exactly one occurrence of old_str with new_str in a file. "
-                "Default root=active_workspace. For root=skill_payload, supply bucket and skill_name."
+                "Default root=active_workspace. Result messages show root:path. "
+                "For root=skill_payload, supply bucket and skill_name."
             ),
             "parameters": {"type": "object", "properties": {
                 "path": {"type": "string"},
@@ -1194,7 +1247,7 @@ def get_tools() -> List[ToolEntry]:
                 "Literal search by default; set regex=True for regular expressions. "
                 "Scoped to path (default: entire active workspace). "
                 "Skips binaries, caches, vendor dirs, and files >1MB. "
-                "Returns up to max_results matches (default 200) with file:line: context."
+                "Returns up to max_results matches (default 200) with root:file:line context."
             ),
             "parameters": {"type": "object", "properties": {
                 "query": {"type": "string", "description": "Search pattern (literal or regex)"},

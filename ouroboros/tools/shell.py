@@ -105,16 +105,20 @@ def _resolve_effective_timeout(default_timeout_sec: int) -> int:
     return max(int(default_timeout_sec), 1)
 
 
-def _describe_returncode(returncode: int) -> str:
+def _describe_returncode(returncode: int, *, cwd: pathlib.Path | str | None = None) -> str:
     """Render a return code with signal details when applicable."""
+    suffix: list[str] = []
     if int(returncode) < 0:
         signal_num = abs(int(returncode))
         try:
             signal_name = signal.Signals(signal_num).name
         except ValueError:
             signal_name = f"SIG{signal_num}"
-        return f"exit_code={returncode} (signal={signal_name})"
-    return f"exit_code={returncode}"
+        suffix.append(f"signal={signal_name}")
+    if cwd is not None:
+        suffix.append(f"cwd={pathlib.Path(cwd).resolve(strict=False)}")
+    rendered_suffix = f" ({', '.join(suffix)})" if suffix else ""
+    return f"exit_code={returncode}{rendered_suffix}"
 
 
 def _format_process_output(stdout: str, stderr: str, *, limit: int = 50_000) -> str:
@@ -132,10 +136,16 @@ def _format_process_output(stdout: str, stderr: str, *, limit: int = 50_000) -> 
     return rendered
 
 
-def _format_process_failure(prefix: str, action: str, res: CompletedProcess) -> str:
+def _format_process_failure(
+    prefix: str,
+    action: str,
+    res: CompletedProcess,
+    *,
+    cwd: pathlib.Path | str | None = None,
+) -> str:
     """Render a subprocess failure with output context."""
     return (
-        f"{prefix}: {action} with {_describe_returncode(res.returncode)}.\n\n"
+        f"{prefix}: {action} with {_describe_returncode(res.returncode, cwd=cwd)}.\n\n"
         f"{_format_process_output(res.stdout or '', res.stderr or '')}"
     )
 
@@ -146,6 +156,10 @@ def _path_is_relative_to(path: pathlib.Path, root: pathlib.Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _format_allowed_shell_roots(roots: list[tuple[str, pathlib.Path]]) -> str:
+    return ", ".join(f"{name}={pathlib.Path(root).resolve(strict=False)}" for name, root in roots)
 
 
 def _resolve_git_root(path: pathlib.Path) -> pathlib.Path | None:
@@ -523,16 +537,18 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
         try:
             raw_cwd = pathlib.Path(cwd_text).expanduser()
             candidate = raw_cwd.resolve(strict=False) if raw_cwd.is_absolute() else (active_root / safe_relpath(cwd_text)).resolve(strict=False)
-            allowed_roots = [active_root]
+            allowed_roots = [("active_workspace", active_root)]
             if bool(getattr(ctx, "is_workspace_mode", lambda: False)()):
                 task_drive_root = ctx.task_drive_root() if hasattr(ctx, "task_drive_root") else pathlib.Path(ctx.drive_root).resolve(strict=False)
-                allowed_roots.append(task_drive_root)
-            if not any(_path_is_relative_to(candidate, root) for root in allowed_roots):
+                allowed_roots.append(("task_drive", pathlib.Path(task_drive_root).resolve(strict=False)))
+            if not any(_path_is_relative_to(candidate, root) for _, root in allowed_roots):
                 raise ValueError("cwd is outside active workspace/repo and task drive")
         except (OSError, ValueError) as exc:
-            return f"⚠️ SHELL_CWD_BLOCKED: cwd escapes active workspace/repo: {exc}"
+            roots = _format_allowed_shell_roots(allowed_roots if "allowed_roots" in locals() else [("active_workspace", active_root)])
+            return f"⚠️ SHELL_CWD_BLOCKED: cwd escapes active workspace/repo: {exc}. allowed_roots: {roots}"
         if not candidate.exists() or not candidate.is_dir():
-            return f"⚠️ SHELL_CWD_BLOCKED: cwd is not a directory: {cwd_text}"
+            roots = _format_allowed_shell_roots(allowed_roots)
+            return f"⚠️ SHELL_CWD_BLOCKED: cwd is not a directory: {cwd_text}. allowed_roots: {roots}"
         work_dir = candidate
     repo_root = _resolve_git_root(pathlib.Path(work_dir))
     before_changed = _status_snapshot(repo_root)
@@ -548,13 +564,14 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
         if res.returncode != 0:
             if _is_search_no_match(res):
                 return autocorrect_note + (
-                    f"{_describe_returncode(res.returncode)} (no matches)\n"
+                    f"{_describe_returncode(res.returncode, cwd=work_dir)} (no matches)\n"
                     f"{_format_process_output(res.stdout or '', '')}"
                 )
             return autocorrect_note + _format_process_failure(
                 "⚠️ SHELL_EXIT_ERROR",
                 "command exited",
                 res,
+                cwd=work_dir,
             )
         after_changed = _status_snapshot(repo_root)
         if after_changed != before_changed:
@@ -564,14 +581,14 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
                 mutation_root=repo_root,
                 source_tool="run_command",
             )
-        return autocorrect_note + f"exit_code=0\n{_format_process_output(res.stdout or '', res.stderr or '')}"
+        return autocorrect_note + f"{_describe_returncode(0, cwd=work_dir)}\n{_format_process_output(res.stdout or '', res.stderr or '')}"
     except subprocess.TimeoutExpired:
         return (
             f"⚠️ TOOL_TIMEOUT (run_command): command exceeded {timeout_sec}s. "
-            "Subprocess tree was terminated."
+            f"Subprocess tree was terminated. cwd={work_dir}"
         )
     except Exception as e:
-        return f"⚠️ SHELL_ERROR: {e}"
+        return f"⚠️ SHELL_ERROR: {e}. cwd={work_dir}"
 
 
 def _load_project_context(repo_dir: pathlib.Path) -> str:
@@ -976,6 +993,7 @@ def get_tools() -> List[ToolEntry]:
             "name": "run_command",
             "description": (
                 "Run a foreground bounded command inside the active workspace/repo. Returns stdout+stderr. "
+                "Every result header echoes the resolved cwd. "
                 "cmd MUST be an array of strings, never a single shell-style "
                 "string. Use cwd= for working directory; cd is rejected. "
                 "For pipes/chaining use [\"sh\", \"-c\", \"cmd1 && cmd2\"]."
@@ -1031,7 +1049,8 @@ def get_tools() -> List[ToolEntry]:
             "name": "run_script",
             "description": (
                 "Run a short task-scoped temporary script with a declared interpreter. "
-                "Use for multi-line diagnostics or harness helpers; generated script files live under the task drive."
+                "Use for multi-line diagnostics or harness helpers; generated script files live under the task drive. "
+                "The underlying command result echoes the resolved cwd."
             ),
             "parameters": {"type": "object", "properties": {
                 "script": {"type": "string"},
