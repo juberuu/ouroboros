@@ -7,7 +7,6 @@ def test_review_blocked_is_not_treated_as_tool_failure():
 
 def test_domain_errors_are_not_treated_as_tool_failures():
     assert not _is_tool_execution_failure(True, "⚠️ GIT_ERROR (commit): hook rejected commit")
-    assert not _is_tool_execution_failure(True, "⚠️ SAFETY_VIOLATION: blocked by sandbox")
 
 
 def test_executor_failures_are_still_tool_failures():
@@ -38,10 +37,38 @@ def test_shell_and_claude_failures_are_treated_as_tool_failures():
     assert _extract_result_metadata("claude_code_edit", skill, True)["status"] == "skill_payload_control_blocked"
 
 
+def test_runtime_policy_blocks_are_semantic_tool_failures():
+    cases = [
+        ("write_file", "⚠️ LIGHT_MODE_BLOCKED: runtime_mode=light blocks Ouroboros self-repo/control-plane mutation.", "light_mode_blocked"),
+        ("run_command", "⚠️ SHELL_CWD_BLOCKED: cwd escapes allowed roots.", "cwd_blocked"),
+        ("run_script", "⚠️ RUN_SCRIPT_BLOCKED: interpreter must be one of ['python3'].", "run_script_blocked"),
+        ("run_command", "⚠️ WORKSPACE_SHELL_BLOCKED: write-like shell command mentions Ouroboros system/data paths.", "workspace_blocked"),
+        ("run_command", "⚠️ ELEVATION_BLOCKED: shell command pattern looks like an elevation attempt.", "elevation_blocked"),
+        ("run_command", "⚠️ SKILL_STATE_WRITE_BLOCKED: skill trust state is owner controlled.", "skill_state_blocked"),
+        ("run_command", "⚠️ ARTIFACT_OUTPUT_ERROR: command succeeded but declared output registration failed.", "artifact_output_error"),
+        ("run_command", "⚠️ SAFETY_VIOLATION: blocked by policy.", "safety_violation"),
+        ("run_command", "⚠️ GIT_VIA_SHELL_BLOCKED: use vcs tools.", "git_via_shell_blocked"),
+        ("write_file", "⚠️ HEAL_MODE_BLOCKED: repair scope only.", "heal_mode_blocked"),
+        ("read_file", "⚠️ REPO_READ_BLOCKED: protected path.", "blocked"),
+    ]
+    for tool, text, status in cases:
+        assert _is_tool_execution_failure(True, text)
+        assert _extract_result_metadata(tool, text, True)["status"] == status
+
+
 def test_shell_regex_autocorrect_success_is_not_tool_failure():
     result = "⚠️ SHELL_REGEX_AUTO_CORRECTED: converted grep backslash-escaped alternation\nexit_code=0\nSTDOUT:\nmatch"
     assert not _is_tool_execution_failure(True, result)
     assert _extract_result_metadata("run_command", result, False)["status"] == "ok_autocorrected"
+
+
+def test_shell_regex_autocorrect_with_artifact_error_still_fails():
+    result = (
+        "⚠️ SHELL_REGEX_AUTO_CORRECTED: converted grep backslash-escaped alternation\n"
+        "⚠️ ARTIFACT_OUTPUT_ERROR: command appears to write user_files outputs without declaring outputs=[...]."
+    )
+    assert _is_tool_execution_failure(True, result)
+    assert _extract_result_metadata("run_command", result, True)["status"] == "artifact_output_error"
 
 
 def test_shell_regex_autocorrect_nonzero_still_fails():

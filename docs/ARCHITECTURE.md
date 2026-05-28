@@ -1,4 +1,4 @@
-# Ouroboros v6.4.0-rc.1 — Architecture & Reference
+# Ouroboros v6.5.0-rc.1 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -55,6 +55,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── context.py           ← LLM context builder (public API for consciousness)
       ├── context_compaction.py ← Context trimming and summarization helpers
       ├── headless.py          ← Headless task child-drive isolation, workspace patch artifacts, and memory export helpers
+      ├── artifacts.py         ← Task-scoped artifact helpers shared by user-file tools, process outputs, and outcome finalization
       ├── workspace_preflight.py ← Read-only external-workspace git/manifest/toolchain snapshot used by gateway task creation
       ├── local_model.py       ← Local LLM lifecycle (llama-cpp-python)
       ├── local_model_autostart.py ← Local model startup helper
@@ -345,9 +346,14 @@ finalization states.
 │   │   ├── CREATING_SKILLS.md ← Skill author guide (manifest schema, PluginAPI, widgets, publishing)
 │   │   └── DEPLOYMENT.md ← Deployment notes, including trusted Docker/Kubernetes non-local bind policy
 │   └── prompts/        ← System prompts (SYSTEM.md, SAFETY.md, CONSCIOUSNESS.md)
-├── data/
-│   ├── settings.json   ← User settings (API keys, models, budget)
-│   ├── state/
+	├── data/
+	│   ├── settings.json   ← User settings (API keys, models, budget)
+	│   ├── task_results/
+	│   │   └── artifacts/<task_id>/
+	│   │       ├── .artifact_manifest.json ← Private task-artifact metadata for copied user/process outputs and provenance
+	│   │       └── <artifact files> ← Canonical task artifacts, including workspace patches, verification ledgers, and copied external deliverables
+	│   ├── task_drives/<task_id>/ ← Task-scoped scratch for direct tasks and light-mode run_script defaults; startup prunes terminal tasks after the headless retention window
+	│   ├── state/
 │   │   ├── state.json  ← Runtime state (spent_usd, session_id, branch, etc.)
 │   │   ├── server_port ← Active HTTP port used by the launcher/browser handoff
 │   │   ├── server_process.json ← Launcher-owned server PID/process-group identity record for relaunch cleanup
@@ -768,12 +774,19 @@ Filesystem tool output is self-locating: file/search/edit/write results use
 canonical `root:path` labels, and `run_command` / `run_script` echo the
 resolved `cwd` in command result headers. This makes root mismatches visible
 without collapsing the storage or safety boundaries between resource roots.
+`user_files` is the first-class root for user-visible files under the owner's
+home directory. It accepts relative home paths such as `Desktop/report.html`,
+`~` paths, and safe absolute home paths, but rejects the Ouroboros repo and
+runtime control-plane. `task_drive` is task-scoped scratch and
+`artifact_store` is task-scoped under `data/task_results/artifacts/<task_id>/`;
+external deliverables written through `user_files` or declared process
+`outputs` are copied into that canonical artifact store for audit.
 
 ### Safety and runtime mode
 
-Every tool call passes hardcoded registry sandbox first, then policy-based LLM safety when required. `runtime_mode_policy.py` defines protected paths: safety-critical files, frozen contracts, release/build/managed-repo invariants. Light mode blocks core/repo mutation except reviewed skill-payload repair lanes; advanced can evolve normal app code; pro can leave protected edits on disk but the commit still requires review.
+Every tool call passes hardcoded registry sandbox first, then policy-based LLM safety when required. `runtime_mode_policy.py` defines protected paths: safety-critical files, frozen contracts, release/build/managed-repo invariants. Light mode blocks Ouroboros self-repo/control-plane mutation, not ordinary user-file creation: `write_file(root=user_files|task_drive|artifact_store)`, process cwd under those roots, and `claude_code_edit` in external user/task/artifact directories remain valid. Light still blocks `runtime_data` as an artifact workaround, direct repo writes, native/control-plane skill paths, state/memory/settings, VCS mutation, and runtime-mode self-elevation. Advanced can evolve normal app code; pro can leave protected edits on disk but the commit still requires review.
 
-Rationale: runtime mode is a self-modification boundary, not an OS sandbox. It prevents casual damage to core identity/safety/release surfaces while preserving self-creation through reviewed commits.
+Rationale: runtime mode is a self-modification boundary, not an OS sandbox. It prevents casual damage to core identity/safety/release surfaces while preserving self-creation through reviewed commits and preserving normal user deliverables in light mode.
 
 ### Claude runtime
 

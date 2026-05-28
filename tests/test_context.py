@@ -100,6 +100,10 @@ def test_runtime_section_includes_light_runtime_mode_rule(tmp_path, monkeypatch)
 
     assert payload["runtime_mode"] == "light"
     assert "forbids Ouroboros repo mutation" in payload["runtime_mode_rule"]
+    assert "user_files" in payload["runtime_mode_rule"]
+    assert "artifact_store" in payload["runtime_mode_rule"]
+    assert "explicit scoped skill-payload work/repair" in payload["runtime_mode_rule"]
+    assert "runtime_data/uploads" in payload["runtime_mode_rule"]
 
 
 def test_runtime_section_omits_light_rule_for_advanced(tmp_path, monkeypatch):

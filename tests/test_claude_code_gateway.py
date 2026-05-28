@@ -170,6 +170,26 @@ class TestPathGuard:
         ))
         assert "deny" in str(result)
 
+    def test_applies_external_write_path_blocker(self, tmp_path):
+        guard = make_path_guard(
+            str(tmp_path),
+            protect_runtime_paths=False,
+            write_path_blocker=lambda target: "path is credential-like" if target.name == ".env" else "",
+        )
+
+        blocked = self._run(guard(
+            {"tool_name": "Write", "tool_input": {"file_path": str(tmp_path / ".env")}},
+            "tid-user-files-secret", None,
+        ))
+        allowed = self._run(guard(
+            {"tool_name": "Write", "tool_input": {"file_path": str(tmp_path / "report.html")}},
+            "tid-user-files-report", None,
+        ))
+
+        assert "deny" in str(blocked)
+        assert "credential-like" in str(blocked)
+        assert allowed == {}
+
 
 # ---------------------------------------------------------------------------
 # Read-only guard hook
@@ -342,6 +362,12 @@ class TestSDKAPISurface:
         src = self._gateway_source()
         assert " query," not in src
         assert "query(prompt=prompt" not in src
+
+    def test_edit_mode_allows_write_tool_for_new_files(self):
+        """Edit mode must allow SDK Write for new-file deliverables."""
+        src = self._gateway_source()
+        assert 'allowed_tools=["Read", "Edit", "Write", "Grep", "Glob"]' in src
+        assert 'matcher="Edit|Write|MultiEdit"' in src
 
 
 # ---------------------------------------------------------------------------

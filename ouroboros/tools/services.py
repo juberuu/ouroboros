@@ -21,8 +21,9 @@ from ouroboros.platform_layer import (
     process_group_id,
     subprocess_new_group_kwargs,
 )
-from ouroboros.tools.registry import ToolContext, ToolEntry, active_repo_dir_for
-from ouroboros.utils import append_jsonl, safe_relpath, utc_now_iso
+from ouroboros.tools.registry import ToolContext, ToolEntry
+from ouroboros.tool_access import resolve_shell_cwd
+from ouroboros.utils import append_jsonl, utc_now_iso
 
 
 @dataclass
@@ -38,6 +39,9 @@ class ServiceRecord:
     started_at: float = field(default_factory=time.time)
     readiness: Dict[str, Any] = field(default_factory=dict)
     ready: bool = False
+    outputs: List[str] = field(default_factory=list)
+    cwd_root: str = ""
+    before_outputs: Dict[str, tuple[bool, int, str]] = field(default_factory=dict)
 
 
 _LOCK = threading.Lock()
@@ -50,17 +54,6 @@ _MAX_SERVICE_LOG_TAIL_CHARS = 80_000
 def _service_key(ctx: ToolContext, name: str) -> str:
     task_id = str(getattr(ctx, "task_id", "") or "manual")
     return f"{task_id}:{name}"
-
-
-def _resolve_cwd(ctx: ToolContext, cwd: str) -> pathlib.Path:
-    root = active_repo_dir_for(ctx).resolve(strict=False)
-    text = str(cwd or "").strip()
-    if not text or text in {".", "./"}:
-        return root
-    raw = pathlib.Path(text).expanduser()
-    target = raw.resolve(strict=False) if raw.is_absolute() else (root / safe_relpath(text)).resolve(strict=False)
-    target.relative_to(root)
-    return target
 
 
 def _tail(path: pathlib.Path, chars: int) -> str:
@@ -315,6 +308,7 @@ def _start_service(
     name: str = "service",
     cwd: str = "",
     readiness: Dict[str, Any] | None = None,
+    outputs: List[str] | None = None,
 ) -> str:
     if not isinstance(cmd, list) or not cmd or not all(str(x).strip() for x in cmd):
         return "⚠️ TOOL_ARG_ERROR (start_service): cmd must be a non-empty array of strings."
@@ -330,9 +324,17 @@ def _start_service(
         if existing and existing.proc.poll() is None:
             return f"⚠️ SERVICE_ALREADY_RUNNING: {service_name} pid={existing.proc.pid}"
     try:
-        workdir = _resolve_cwd(ctx, cwd)
+        workdir, cwd_root, _allowed_roots = resolve_shell_cwd(ctx, cwd, operation="service")
+        workdir = pathlib.Path(workdir).resolve(strict=False)
     except Exception as exc:
         return f"⚠️ SERVICE_CWD_ERROR: {type(exc).__name__}: {exc}"
+    declared_outputs = [str(item) for item in (outputs or []) if str(item or "").strip()]
+    try:
+        from ouroboros.tools.shell import _snapshot_declared_outputs
+
+        before_outputs = _snapshot_declared_outputs(ctx, declared_outputs, workdir, cwd_root=cwd_root)
+    except Exception:
+        before_outputs = {}
     task_id = str(getattr(ctx, "task_id", "") or "manual")
     log_dir = pathlib.Path(ctx.drive_root) / "services" / task_id
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -364,11 +366,14 @@ def _start_service(
         proc=proc,
         pgid=pgid,
         readiness=dict(readiness or {}),
+        outputs=declared_outputs,
+        cwd_root=cwd_root,
+        before_outputs=before_outputs,
     )
     with _LOCK:
         _SERVICES[key] = record
     try:
-        if not bool(getattr(ctx, "is_workspace_mode", lambda: False)()):
+        if cwd_root == "active_workspace" and not bool(getattr(ctx, "is_workspace_mode", lambda: False)()):
             from ouroboros.tools.commit_gate import _invalidate_advisory
 
             _invalidate_advisory(
@@ -403,7 +408,9 @@ def _status_payload(record: ServiceRecord) -> Dict[str, Any]:
         "returncode": rc,
         "uptime_sec": round(max(0.0, time.time() - record.started_at), 3),
         "cwd": record.cwd,
+        "cwd_root": record.cwd_root,
         "cmd": record.cmd,
+        "outputs": list(record.outputs),
         "log_path": str(record.log_path),
         "ts": utc_now_iso(),
     }
@@ -468,7 +475,35 @@ def _stop_service(ctx: ToolContext, name: str = "service") -> str:
     _stop_record(record)
     payload = _status_payload(record)
     payload["log_finalization"] = _finalize_service_log(ctx, record)
-    return json.dumps(payload, ensure_ascii=False, indent=2)
+    artifact_note = ""
+    artifact_failed = False
+    if record.outputs:
+        try:
+            from ouroboros.tools.shell import _register_process_outputs
+
+            artifact_note, artifact_failed = _register_process_outputs(
+                ctx,
+                record.outputs,
+                pathlib.Path(record.cwd),
+                cwd_root=record.cwd_root,
+                before_outputs=record.before_outputs,
+            )
+        except Exception as exc:
+            artifact_note = f"\n\n⚠️ ARTIFACT_OUTPUT_ERROR:\n- service output finalization failed: {type(exc).__name__}: {exc}"
+            artifact_failed = True
+    elif record.cwd_root == "user_files":
+        payload["artifact_audit_gap"] = (
+            "⚠️ ARTIFACT_AUDIT_GAP: service ran in user_files cwd without outputs=[...]. "
+            "If it created a deliverable, rerun/register the file with outputs or "
+            "write_file(root=artifact_store) before claiming it."
+        )
+    if artifact_note:
+        payload["artifact_outputs"] = artifact_note.strip()
+    payload["artifact_output_failed"] = bool(artifact_failed)
+    rendered = json.dumps(payload, ensure_ascii=False, indent=2)
+    if artifact_failed:
+        return "⚠️ ARTIFACT_OUTPUT_ERROR (stop_service): declared service outputs were not finalized.\n\n" + rendered
+    return rendered
 
 
 def stop_task_services(ctx: ToolContext) -> List[Dict[str, Any]]:
@@ -482,7 +517,10 @@ def stop_task_services(ctx: ToolContext) -> List[Dict[str, Any]]:
     for key in keys:
         name = key.split(":", 1)[1]
         try:
-            payload = json.loads(_stop_service(ctx, name=name))
+            raw = _stop_service(ctx, name=name)
+            if raw.startswith("⚠️ ARTIFACT_OUTPUT_ERROR") and "\n\n{" in raw:
+                raw = raw.split("\n\n", 1)[1]
+            payload = json.loads(raw)
             stopped.append(payload)
         except Exception:
             pass
@@ -598,6 +636,7 @@ def get_tools() -> List[ToolEntry]:
                 "cwd": {"type": "string", "default": ""},
                 "name": {"type": "string", "default": "service"},
                 "readiness": {"type": "object", "default": {}, "description": "Optional {log_contains|stdout_contains, timeout_sec} readiness probe."},
+                "outputs": {"type": "array", "items": {"type": "string"}, "default": [], "description": "Files generated by the service to copy into the task artifact store when the service stops."},
             }, "required": ["cmd"]},
         }, _start_service, is_code_tool=True, timeout_sec=30),
         ToolEntry("service_status", {

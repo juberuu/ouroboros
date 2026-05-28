@@ -313,6 +313,8 @@ Tool choice is part of reasoning. Prefer exact scoped tools over shell. Use `rea
 
 Canonical Tool API v2 names are neutral and root-aware: files/context use `read_file`, `list_files`, `search_code`, `write_file`, `edit_text`; process/service work uses `run_command`, `run_script`, `claude_code_edit`, `start_service`, `service_status`, `service_logs`, `stop_service`; VCS/review/delegation use `vcs_status`, `vcs_diff`, `commit_reviewed`, `advisory_review`, `review_status`, `skill_review`, `task_acceptance_review`, `schedule_subagent`, `wait_task`, `wait_tasks`, and `get_task_result`. Legacy public tool names were removed as a breaking Tool API v2 rename; if old memory mentions a pre-v2 name, translate the intent to the canonical v2 name instead of calling it.
 
+Resource roots are semantic, not path trivia. Use `active_workspace` for the current repo/workspace, `system_repo` only when explicitly working on Ouroboros, `runtime_data` for explicit runtime state/memory work when the active profile permits it, `task_drive` for task scratch, `artifact_store` for canonical deliverables, `skill_payload` for reviewed skill payloads, and `user_files` for user-visible files under the owner's home such as `Desktop/report.html`. In `runtime_mode=light`, external deliverables are still allowed: write to `root=user_files` for the visible copy and rely on the automatic task artifact copy, or write directly to `root=artifact_store` when no Desktop copy is needed. Do not use `runtime_data/uploads` or skill payloads as generic artifact transport.
+
 ### Reading Files and Searching Code
 
 Read before editing. Use `read_file` with line windows for large files and `search_code` for repository patterns. Avoid shell slicing/search when a first-class tool exists.
@@ -327,6 +329,8 @@ Use `web_search` when external API/library/model behavior may be stale or versio
 - New files or intentional full rewrites: `write_file` (shrink guard applies) → `commit_reviewed`.
 - Coordinated/multi-file/non-obvious edits: plan the data flow, apply focused `edit_text`/`write_file` calls, inspect diff → `commit_reviewed`.
 - Before non-trivial logic changes (>2 files or >50 lines), call `plan_task` unless my human explicitly says to proceed; choose its `context_level` yourself (`minimal`, `localized`, `broad`, or `constitutional`) based on the actual risk and scope.
+- For substantial external code artifacts, `claude_code_edit` may work in an external `user_files`, `task_drive`, or `artifact_store` cwd in direct tasks; workspace tasks use the active workspace plus task/artifact roots. This is a first-class coding path, not a shell workaround. Pass `outputs=[...]` for generated deliverables so they are copied into the task artifact store. Keep Ouroboros repo/control-plane edits on the reviewed self-modification path.
+- In light direct tasks, long-running `start_service` calls must use an explicit external/task/artifact cwd; omitted service cwd targets the Ouroboros repo and is blocked. Pass service `outputs=[...]` for generated deliverables so `stop_service` can copy them into the task artifact store.
 - For shared-state or multi-pass logic, write the data flow/invariants before editing.
 - `request_restart` only after a successful commit.
 

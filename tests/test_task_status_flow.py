@@ -285,6 +285,98 @@ def test_effective_status_keeps_workspace_finalization_nonterminal_without_child
     assert waited["timed_out"] is True
 
 
+def test_effective_status_repairs_stale_running_infra_failure_when_queue_empty(tmp_path):
+    from ouroboros.headless import ARTIFACT_STATUS_FINALIZING, ARTIFACT_STATUS_FAILED
+    from ouroboros.task_results import STATUS_FAILED, STATUS_RUNNING, write_task_result
+    from ouroboros.task_status import load_effective_task_result
+
+    write_task_result(
+        tmp_path,
+        "providerfail",
+        STATUS_RUNNING,
+        workspace_root=str(tmp_path / "workspace"),
+        artifact_status=ARTIFACT_STATUS_FINALIZING,
+        result_status="infra_failed",
+        reason_code="provider_failure",
+        result="provider error",
+        artifact_bundle={
+            "status": ARTIFACT_STATUS_FINALIZING,
+            "artifacts": [
+                {"name": "deck.html", "status": ARTIFACT_STATUS_FINALIZING, "errors": []},
+            ],
+        },
+    )
+    (tmp_path / "state").mkdir(exist_ok=True)
+    (tmp_path / "state" / "queue_snapshot.json").write_text('{"pending": [], "running": []}', encoding="utf-8")
+
+    effective = load_effective_task_result(tmp_path, "providerfail")
+
+    assert effective["status"] == STATUS_FAILED
+    assert effective["status_reconciled_from"] == STATUS_RUNNING
+    assert effective["artifact_status"] == ARTIFACT_STATUS_FAILED
+    assert effective["artifact_bundle"]["status"] == ARTIFACT_STATUS_FAILED
+    assert effective["artifact_bundle"]["artifacts"][0]["status"] == ARTIFACT_STATUS_FAILED
+    assert "task ended before artifact finalization" in effective["artifact_bundle"]["artifacts"][0]["errors"]
+
+
+def test_effective_status_does_not_repair_running_when_queue_snapshot_missing(tmp_path):
+    from ouroboros.task_results import STATUS_RUNNING, write_task_result
+    from ouroboros.task_status import load_effective_task_result
+
+    write_task_result(
+        tmp_path,
+        "providerfail",
+        STATUS_RUNNING,
+        result_status="infra_failed",
+        reason_code="provider_failure",
+        result="provider error",
+    )
+
+    effective = load_effective_task_result(tmp_path, "providerfail")
+
+    assert effective["status"] == STATUS_RUNNING
+    assert effective["queue_reconciliation_warning"] == "queue snapshot missing or invalid"
+
+
+def test_effective_status_repairs_orphan_running_after_worker_restart(tmp_path, monkeypatch):
+    from ouroboros.headless import ARTIFACT_STATUS_FINALIZING, ARTIFACT_STATUS_FAILED
+    from ouroboros.task_results import STATUS_FAILED, STATUS_RUNNING, write_task_result
+    from ouroboros.task_status import load_effective_task_result
+    from ouroboros.utils import append_jsonl
+
+    monkeypatch.setattr(time, "time", lambda: 1_800_000_000.0)
+    write_task_result(
+        tmp_path,
+        "cc4db6fa",
+        STATUS_RUNNING,
+        result="Task is running.",
+        ts="2026-05-28T00:00:00+00:00",
+        artifact_status=ARTIFACT_STATUS_FINALIZING,
+        artifact_bundle={
+            "status": ARTIFACT_STATUS_FINALIZING,
+            "artifacts": [
+                {"name": "presentation.html", "status": ARTIFACT_STATUS_FINALIZING, "errors": []},
+            ],
+        },
+    )
+    (tmp_path / "state").mkdir(exist_ok=True)
+    (tmp_path / "state" / "queue_snapshot.json").write_text('{"pending": [], "running": []}', encoding="utf-8")
+    events = tmp_path / "logs" / "events.jsonl"
+    append_jsonl(events, {"ts": "2026-05-28T00:00:01+00:00", "type": "llm_round", "task_id": "cc4db6fa"})
+    append_jsonl(events, {"ts": "2026-05-28T00:00:02+00:00", "type": "worker_boot"})
+
+    effective = load_effective_task_result(tmp_path, "cc4db6fa")
+
+    assert effective["status"] == STATUS_FAILED
+    assert effective["status_reconciled_from"] == STATUS_RUNNING
+    assert effective["result_status"] == "infra_failed"
+    assert effective["reason_code"] == "orphaned_running_after_worker_restart"
+    assert "TASK_ORPHAN_RECONCILED" in effective["result"]
+    assert effective["artifact_status"] == ARTIFACT_STATUS_FAILED
+    assert effective["artifact_bundle"]["artifacts"][0]["status"] == ARTIFACT_STATUS_FAILED
+    assert "task interrupted before artifact finalization" in effective["artifact_bundle"]["artifacts"][0]["errors"]
+
+
 def test_find_child_tasks_does_not_regress_terminal_or_running_from_stale_queue_snapshot(tmp_path):
     from ouroboros.task_results import STATUS_COMPLETED, STATUS_RUNNING, write_task_result
     from ouroboros.task_status import find_child_tasks, load_effective_task_result

@@ -23,6 +23,7 @@ from ouroboros.utils import atomic_write_json, utc_now_iso
 
 HEADLESS_TASKS_DIR = pathlib.Path("state") / "headless_tasks"
 ARTIFACTS_DIR = pathlib.Path("task_results") / "artifacts"
+TASK_DRIVES_DIR = pathlib.Path("task_drives")
 ARTIFACT_STATUS_PENDING = "pending"
 ARTIFACT_STATUS_FINALIZING = "finalizing"
 ARTIFACT_STATUS_READY = "ready"
@@ -53,9 +54,10 @@ def task_state_dir(drive_root: pathlib.Path, task_id: str) -> pathlib.Path:
     return pathlib.Path(drive_root) / HEADLESS_TASKS_DIR / validate_task_id(task_id)
 
 
-def task_artifacts_dir(drive_root: pathlib.Path, task_id: str) -> pathlib.Path:
+def task_artifacts_dir(drive_root: pathlib.Path, task_id: str, *, create: bool = True) -> pathlib.Path:
     path = pathlib.Path(drive_root) / ARTIFACTS_DIR / validate_task_id(task_id)
-    path.mkdir(parents=True, exist_ok=True)
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
     return path
 
 
@@ -167,7 +169,12 @@ def prune_headless_task_drives(
         try:
             validate_task_id(task_id)
             dir_mtime = task_dir.stat().st_mtime
-            result = load_task_result(parent, task_id) or {}
+            try:
+                from ouroboros.task_status import load_effective_task_result
+
+                result = load_effective_task_result(parent, task_id) or {}
+            except Exception:
+                result = load_task_result(parent, task_id) or {}
             status = str(result.get("status") or "").lower()
             if status not in _FINAL_STATUSES:
                 report["skipped"].append({"task_id": task_id, "reason": "parent_not_terminal", "status": status})
@@ -189,6 +196,49 @@ def prune_headless_task_drives(
             ).strip()
             if known_child and str(pathlib.Path(known_child).resolve(strict=False)) != expected_child:
                 report["skipped"].append({"task_id": task_id, "reason": "child_drive_mismatch"})
+                continue
+            shutil.rmtree(task_dir)
+            report["pruned"].append({"task_id": task_id, "path": str(task_dir)})
+        except Exception as exc:
+            report["errors"].append({"task_id": task_id, "error": f"{type(exc).__name__}: {exc}"})
+    return report
+
+
+def prune_task_drives(
+    parent_drive_root: pathlib.Path,
+    *,
+    retention_days: Optional[int] = None,
+    now: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Best-effort startup prune for direct-task scratch drives."""
+
+    parent = pathlib.Path(parent_drive_root)
+    base = parent / TASK_DRIVES_DIR
+    days = headless_task_retention_days() if retention_days is None else max(1, int(retention_days))
+    cutoff = float(now if now is not None else time.time()) - days * 86400
+    report: Dict[str, Any] = {"retention_days": days, "scanned": 0, "pruned": [], "skipped": [], "errors": []}
+    if not base.is_dir():
+        return report
+    for task_dir in sorted(base.iterdir()):
+        if not task_dir.is_dir():
+            continue
+        task_id = task_dir.name
+        report["scanned"] += 1
+        try:
+            validate_task_id(task_id)
+            dir_mtime = task_dir.stat().st_mtime
+            try:
+                from ouroboros.task_status import load_effective_task_result
+
+                result = load_effective_task_result(parent, task_id) or {}
+            except Exception:
+                result = load_task_result(parent, task_id) or {}
+            status = str(result.get("status") or "").lower()
+            if status not in _FINAL_STATUSES:
+                report["skipped"].append({"task_id": task_id, "reason": "task_not_terminal", "status": status})
+                continue
+            if _timestamp_from_result(result, dir_mtime) > cutoff:
+                report["skipped"].append({"task_id": task_id, "reason": "younger_than_retention"})
                 continue
             shutil.rmtree(task_dir)
             report["pruned"].append({"task_id": task_id, "path": str(task_dir)})
@@ -862,22 +912,19 @@ def _merge_artifacts(
 ) -> List[Dict[str, Any]]:
     merged: List[Dict[str, Any]] = []
     drop = drop_kinds or set()
-    keys = {_artifact_merge_key(item) for item in new_items if isinstance(item, dict)}
+    key_for = lambda item: (
+        str(item.get("kind") or ""),
+        str(item.get("name") or pathlib.Path(str(item.get("path") or "")).name),
+    )
+    keys = {key_for(item) for item in new_items if isinstance(item, dict)}
     for item in existing:
         if not isinstance(item, dict):
             continue
-        key = _artifact_merge_key(item)
+        key = key_for(item)
         if key[0] not in drop and key not in keys:
             merged.append(item)
     merged.extend(new_items)
     return merged
-
-
-def _artifact_merge_key(item: Dict[str, Any]) -> tuple[str, str]:
-    return (
-        str(item.get("kind") or ""),
-        str(item.get("name") or pathlib.Path(str(item.get("path") or "")).name),
-    )
 
 
 __all__ = [
@@ -891,6 +938,7 @@ __all__ = [
     "finalize_task_artifacts",
     "prepare_task_drive",
     "prune_headless_task_drives",
+    "prune_task_drives",
     "task_artifacts_dir",
     "task_state_dir",
     "write_workspace_patch_artifacts",

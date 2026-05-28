@@ -37,16 +37,21 @@ def test_read_file_headers_are_root_qualified(tmp_path):
     assert runtime.startswith("# runtime_data:notes.txt")
 
 
-def test_write_file_outputs_use_normalized_root_paths(tmp_path):
+def test_write_file_outputs_use_normalized_root_paths(tmp_path, monkeypatch):
     ctx = _make_ctx(tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr("pathlib.Path.home", lambda: home)
 
     workspace = _write_file(ctx, "/tmp/tool.py", "print('x')", root="active_workspace")
     runtime = _write_file(ctx, "/tmp/tool.txt", "x", root="runtime_data")
     task_drive = _write_file(ctx, "./artifact.txt", "x", root="task_drive")
+    user_file = _write_file(ctx, "Desktop/tool.txt", "x", root="user_files")
 
     assert "active_workspace:tmp/tool.py" in workspace
     assert "runtime_data:tmp/tool.txt" in runtime
     assert "task_drive:artifact.txt" in task_drive
+    assert "user_files:Desktop/tool.txt" in user_file
 
 
 def test_edit_text_and_search_outputs_are_root_qualified(tmp_path):

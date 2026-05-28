@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import pathlib
 import time
+from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List
 
 from ouroboros.headless import (
@@ -25,7 +27,7 @@ from ouroboros.task_results import (
     load_task_result,
     validate_task_id,
 )
-from ouroboros.utils import read_json_dict
+from ouroboros.utils import iter_jsonl_objects, read_json_dict
 
 
 FINAL_STATUSES: frozenset[str] = frozenset({
@@ -48,13 +50,34 @@ ARTIFACT_NONTERMINAL_STATUSES: frozenset[str] = frozenset({
     ARTIFACT_STATUS_FINALIZING,
 })
 HANDOFF_SNIPPET_CHARS = 240
+_TERMINAL_FAILURE_RESULT_STATUSES = frozenset({"failed", "infra_failed", "cancelled"})
+_ORPHAN_RUNNING_GRACE_SECONDS = 30.0
 
 
-def _is_workspace_result(result: Dict[str, Any]) -> bool:
-    if str(result.get("workspace_root") or "").strip():
-        return True
-    metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
-    return bool(str(metadata.get("workspace_root") or "").strip())
+def _fail_nonterminal_artifact_bundle(bundle: Dict[str, Any], message: str) -> Dict[str, Any]:
+    updated = dict(bundle or {})
+    updated["status"] = ARTIFACT_STATUS_FAILED
+    errors = list(updated.get("errors") or []) if isinstance(updated.get("errors"), list) else []
+    if message not in errors:
+        errors.append(message)
+    updated["errors"] = errors
+    artifacts = updated.get("artifacts")
+    if isinstance(artifacts, list):
+        patched_artifacts = []
+        for artifact in artifacts:
+            if isinstance(artifact, dict):
+                item = dict(artifact)
+                if str(item.get("status") or "").strip().lower() in ARTIFACT_NONTERMINAL_STATUSES:
+                    item["status"] = ARTIFACT_STATUS_FAILED
+                    item_errors = list(item.get("errors") or []) if isinstance(item.get("errors"), list) else []
+                    if message not in item_errors:
+                        item_errors.append(message)
+                    item["errors"] = item_errors
+                patched_artifacts.append(item)
+            else:
+                patched_artifacts.append(artifact)
+        updated["artifacts"] = patched_artifacts
+    return updated
 
 
 def _child_drive_candidates(result: Dict[str, Any]) -> List[pathlib.Path]:
@@ -72,10 +95,18 @@ def _child_drive_candidates(result: Dict[str, Any]) -> List[pathlib.Path]:
 
 
 def _load_queue_snapshot(drive_root: pathlib.Path) -> Dict[str, Any]:
-    return read_json_dict(pathlib.Path(drive_root) / "state" / "queue_snapshot.json") or {}
+    path = pathlib.Path(drive_root) / "state" / "queue_snapshot.json"
+    if not path.exists():
+        return {"_snapshot_missing": True}
+    data = read_json_dict(path)
+    if not isinstance(data, dict):
+        return {"_snapshot_invalid": True}
+    return data
 
 
 def _queue_task_status(snapshot: Dict[str, Any], task_id: str) -> tuple[str, Dict[str, Any]]:
+    if snapshot.get("_snapshot_missing") or snapshot.get("_snapshot_invalid"):
+        return "unknown", {}
     for row in snapshot.get("running") or []:
         if not isinstance(row, dict):
             continue
@@ -91,8 +122,42 @@ def _queue_task_status(snapshot: Dict[str, Any], task_id: str) -> tuple[str, Dic
     return "", {}
 
 
+def _is_stale_orphan_running_task(drive_root: pathlib.Path, task_id: str, result: Dict[str, Any]) -> bool:
+    status = str(result.get("status") or "").lower()
+    if status != STATUS_RUNNING:
+        return False
+    result_status = str(result.get("result_status") or "").strip().lower()
+    if result_status:
+        return False
+    heartbeat = 0.0
+    try:
+        parsed = datetime.fromisoformat(str(result.get("ts") or result.get("started_at") or result.get("created_at") or "").strip().replace("Z", "+00:00"))
+        heartbeat = float((parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)).timestamp())
+    except Exception:
+        pass
+    if heartbeat and time.time() - heartbeat < _ORPHAN_RUNNING_GRACE_SECONDS:
+        return False
+    latest_task_event = heartbeat
+    latest_worker_boot = 0.0
+    for event in iter_jsonl_objects(pathlib.Path(drive_root) / "logs" / "events.jsonl", tail_bytes=2_000_000):
+        try:
+            parsed = datetime.fromisoformat(str(event.get("ts") or "").strip().replace("Z", "+00:00"))
+            ev_ts = float((parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)).timestamp())
+        except Exception:
+            ev_ts = 0.0
+        event_task_id = str(event.get("task_id") or "")
+        if not event_task_id and isinstance(event.get("task"), dict):
+            event_task_id = str((event.get("task") or {}).get("id") or "")
+        if event_task_id == task_id:
+            latest_task_event = max(latest_task_event, ev_ts)
+        if str(event.get("type") or "") == "worker_boot":
+            latest_worker_boot = max(latest_worker_boot, ev_ts)
+    return bool(latest_worker_boot and latest_worker_boot > latest_task_event)
+
+
 def _normalize_workspace_artifact_status(result: Dict[str, Any]) -> Dict[str, Any]:
-    if not _is_workspace_result(result):
+    metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    if not (str(result.get("workspace_root") or "").strip() or str(metadata.get("workspace_root") or "").strip()):
         return result
     status = str(result.get("status") or "").lower()
     if status not in FINAL_STATUSES:
@@ -170,8 +235,10 @@ def effective_task_result(drive_root: pathlib.Path, result: Dict[str, Any], *, _
         parent_status = str(result.get("status") or "").lower()
         child_status = str(child_result.get("status") or "").lower()
         copied_child_status = str(result.get("child_status") or "").lower()
+        metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+        result_is_workspace = bool(str(result.get("workspace_root") or "").strip() or str(metadata.get("workspace_root") or "").strip())
         copied_child_terminal = (
-            _is_workspace_result(result)
+            result_is_workspace
             and copied_child_status in FINAL_STATUSES
             and parent_status == copied_child_status
         )
@@ -196,11 +263,9 @@ def effective_task_result(drive_root: pathlib.Path, result: Dict[str, Any], *, _
             merged[key] = value
         merged.setdefault("child_drive_root", child_text)
         merged.setdefault("headless_child_drive_root", child_text)
-        if (
-            _is_workspace_result(merged)
-            and child_status in FINAL_STATUSES
-            and (parent_status not in {STATUS_FAILED, STATUS_CANCELLED, STATUS_REJECTED_DUPLICATE} or copied_child_terminal)
-        ):
+        metadata = merged.get("metadata") if isinstance(merged.get("metadata"), dict) else {}
+        merged_is_workspace = bool(str(merged.get("workspace_root") or "").strip() or str(metadata.get("workspace_root") or "").strip())
+        if merged_is_workspace and child_status in FINAL_STATUSES and (parent_status not in {STATUS_FAILED, STATUS_CANCELLED, STATUS_REJECTED_DUPLICATE} or copied_child_terminal):
             merged = _normalize_workspace_artifact_status(merged)
 
     merged = _normalize_workspace_artifact_status(merged)
@@ -208,7 +273,7 @@ def effective_task_result(drive_root: pathlib.Path, result: Dict[str, Any], *, _
     parent_status = str(merged.get("status") or "").lower()
     if parent_status not in FINAL_STATUSES:
         queue_status, queue_task = _queue_task_status(_load_queue_snapshot(pathlib.Path(drive_root)), task_id)
-        if queue_status:
+        if queue_status and queue_status != "unknown":
             merged["status"] = _merge_queue_status(parent_status, queue_status)
             for key in (
                 "parent_task_id",
@@ -225,6 +290,90 @@ def effective_task_result(drive_root: pathlib.Path, result: Dict[str, Any], *, _
             ):
                 if not merged.get(key) and queue_task.get(key):
                     merged[key] = queue_task.get(key)
+        else:
+            result_status = str(merged.get("result_status") or "").strip().lower()
+            if queue_status == "unknown":
+                merged["queue_reconciliation_warning"] = "queue snapshot missing or invalid"
+            elif result_status in _TERMINAL_FAILURE_RESULT_STATUSES:
+                merged["status"] = STATUS_CANCELLED if result_status == "cancelled" else STATUS_FAILED
+                merged["status_reconciled_from"] = parent_status
+                artifact_status = str(merged.get("artifact_status") or "").strip().lower()
+                if artifact_status in ARTIFACT_NONTERMINAL_STATUSES:
+                    merged["artifact_status"] = ARTIFACT_STATUS_FAILED
+                    bundle = dict(merged.get("artifact_bundle") or {}) if isinstance(merged.get("artifact_bundle"), dict) else {}
+                    merged["artifact_bundle"] = _fail_nonterminal_artifact_bundle(
+                        bundle,
+                        "task ended before artifact finalization",
+                    )
+            elif _is_stale_orphan_running_task(pathlib.Path(drive_root), task_id, merged):
+                merged["status"] = STATUS_FAILED
+                merged["result_status"] = "infra_failed"
+                merged["reason_code"] = "orphaned_running_after_worker_restart"
+                merged["status_reconciled_from"] = parent_status
+                merged["result"] = (
+                    str(merged.get("result") or "Task was interrupted before a terminal result was recorded.")
+                    + "\n\n⚠️ TASK_ORPHAN_RECONCILED: queue is empty and worker restarted after this task; "
+                    "marking the stale running task as infra_failed."
+                )
+                artifact_status = str(merged.get("artifact_status") or "").strip().lower()
+                if artifact_status in ARTIFACT_NONTERMINAL_STATUSES:
+                    merged["artifact_status"] = ARTIFACT_STATUS_FAILED
+                    bundle = dict(merged.get("artifact_bundle") or {}) if isinstance(merged.get("artifact_bundle"), dict) else {}
+                    merged["artifact_bundle"] = _fail_nonterminal_artifact_bundle(
+                        bundle,
+                        "task interrupted before artifact finalization",
+                    )
+    try:
+        from ouroboros.artifacts import (
+            collect_task_artifact_records,
+            copy_file_to_task_artifacts,
+            merge_artifact_records,
+        )
+        from ouroboros.outcomes import artifact_bundle_from_result
+
+        rebased_child_artifacts: List[Dict[str, Any]] = []
+        if child_text:
+            parent_artifact_ctx = SimpleNamespace(drive_root=pathlib.Path(drive_root), task_id=task_id)
+            child_artifacts = merge_artifact_records(
+                [item for item in (child_result.get("artifacts") or []) if isinstance(item, dict)],
+                collect_task_artifact_records(pathlib.Path(child_text), task_id),
+            )
+            for child_artifact in child_artifacts:
+                source_text = str(child_artifact.get("path") or "").strip()
+                if not source_text:
+                    continue
+                source = pathlib.Path(source_text).expanduser().resolve(strict=False)
+                if not source.is_file():
+                    continue
+                copied = copy_file_to_task_artifacts(
+                    parent_artifact_ctx,
+                    source,
+                    kind=str(child_artifact.get("kind") or "child_artifact"),
+                )
+                if copied:
+                    rebased_child_artifacts.append(copied)
+
+        collected_artifacts = collect_task_artifact_records(drive_root, task_id)
+        if collected_artifacts or rebased_child_artifacts:
+            existing_artifacts = [item for item in (merged.get("artifacts") or []) if isinstance(item, dict)]
+            rebased_names = {
+                str(item.get("name") or pathlib.Path(str(item.get("path") or "")).name)
+                for item in rebased_child_artifacts
+                if isinstance(item, dict)
+            }
+            if rebased_names:
+                existing_artifacts = [
+                    item
+                    for item in existing_artifacts
+                    if str(item.get("name") or pathlib.Path(str(item.get("path") or "")).name) not in rebased_names
+                ]
+                collected_artifacts = collect_task_artifact_records(drive_root, task_id)
+            merged["artifacts"] = merge_artifact_records(existing_artifacts, rebased_child_artifacts, collected_artifacts)
+            merged["artifact_bundle"] = artifact_bundle_from_result(merged)
+            if not merged.get("artifact_status"):
+                merged["artifact_status"] = merged["artifact_bundle"].get("status")
+    except Exception:
+        pass
     return merged
 
 

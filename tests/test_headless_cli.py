@@ -16,6 +16,7 @@ from starlette.testclient import TestClient
 
 from ouroboros.gateway.tasks import (
     _compose_task_text,
+    _resolve_workspace_root,
     api_task_artifact,
     api_task_events,
     api_task_get,
@@ -30,6 +31,7 @@ from ouroboros.headless import (
     build_workspace_patch,
     finalize_task_artifacts,
     prune_headless_task_drives,
+    prune_task_drives,
     task_artifacts_dir,
     write_workspace_patch_artifacts,
 )
@@ -168,6 +170,20 @@ def test_task_api_rejects_unsafe_task_id_and_system_workspace(tmp_path, monkeypa
 
     typed = client.post("/api/tasks", json={"description": "x", "type": "deep_self_review", "workspace_root": str(workspace)})
     assert typed.status_code == 400
+
+
+def test_resolve_workspace_root_blocks_case_variant_control_plane(tmp_path):
+    system_repo = tmp_path / "Ouroboros" / "repo"
+    drive = tmp_path / "Ouroboros" / "data"
+    workspace_repo_case = tmp_path / "ouroboros" / "repo"
+    workspace_data_case = tmp_path / "ouroboros" / "data" / "workspace"
+    for path in (system_repo, drive / "workspace"):
+        path.mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="Ouroboros system repo"):
+        _resolve_workspace_root(workspace_repo_case, system_repo_dir=system_repo, drive_root=drive)
+    with pytest.raises(ValueError, match="Ouroboros data drive"):
+        _resolve_workspace_root(workspace_data_case, system_repo_dir=system_repo, drive_root=drive)
 
 
 def test_task_api_rejects_forged_subagent_without_child_drive_side_effect(tmp_path, monkeypatch):
@@ -598,14 +614,16 @@ def test_workspace_run_shell_allows_absolute_cwd_under_workspace_and_child_drive
     workspace = tmp_path / "workspace"
     parent_data = tmp_path / "data"
     child_drive = tmp_path / "child-data"
-    child_dir = child_drive / "scratch"
-    for path in (system_repo, workspace, parent_data / "logs", child_dir):
+    child_dir = child_drive / "task_drives" / "task-workspace" / "scratch"
+    child_control_dir = child_drive / "memory"
+    for path in (system_repo, workspace, parent_data / "logs", child_dir, child_control_dir):
         path.mkdir(parents=True)
     ctx = ToolContext(
         repo_dir=system_repo,
         drive_root=parent_data,
         workspace_root=workspace,
         workspace_mode="external",
+        task_id="task-workspace",
         task_metadata={"drive_root": str(child_drive), "budget_drive_root": str(parent_data)},
     )
     registry = ToolRegistry(repo_dir=system_repo, drive_root=parent_data)
@@ -622,6 +640,8 @@ def test_workspace_run_shell_allows_absolute_cwd_under_workspace_and_child_drive
 
     assert_python_cwd(workspace)
     assert_python_cwd(child_dir)
+    child_control = registry.execute("run_command", {"cmd": ["pwd"], "cwd": str(child_control_dir)})
+    assert "SHELL_CWD_BLOCKED" in child_control
     blocked = registry.execute("run_command", {"cmd": ["pwd"], "cwd": str(parent_data / "logs")})
     assert "SHELL_CWD_BLOCKED" in blocked
     git_escape = registry._run_shell_safety_check(
@@ -843,6 +863,77 @@ def test_task_artifact_endpoint_serves_only_declared_artifacts(tmp_path):
     assert client.get("/api/tasks/task-artifact/artifacts/bad%5Cname").status_code == 400
 
 
+def test_task_artifact_endpoint_serves_manifest_artifact_after_status_repair(tmp_path):
+    from ouroboros.artifacts import copy_file_to_task_artifacts
+
+    data = tmp_path / "data"
+    source_dir = tmp_path / "Desktop"
+    source_dir.mkdir()
+    source = source_dir / "report.html"
+    source.write_text("<h1>ok</h1>", encoding="utf-8")
+    copy_file_to_task_artifacts(SimpleNamespace(drive_root=data, task_id="orphaned"), source, kind="user_file")
+    write_task_result(
+        data,
+        "orphaned",
+        "running",
+        result_status="infra_failed",
+        reason_code="provider_failure",
+        result="provider failed before normal finalization",
+    )
+    (data / "state").mkdir(parents=True, exist_ok=True)
+    (data / "state" / "queue_snapshot.json").write_text('{"pending": [], "running": []}', encoding="utf-8")
+    app = Starlette(routes=[Route("/api/tasks/{task_id}/artifacts/{name}", endpoint=api_task_artifact, methods=["GET"])])
+    app.state.drive_root = data
+
+    response = TestClient(app).get("/api/tasks/orphaned/artifacts/report.html")
+
+    assert response.status_code == 200
+    assert response.text == "<h1>ok</h1>"
+
+
+def test_task_artifact_endpoint_rebases_child_drive_artifact_after_status_repair(tmp_path):
+    from ouroboros.artifacts import collect_task_artifact_records, copy_file_to_task_artifacts
+
+    data = tmp_path / "data"
+    child = tmp_path / "child"
+    source_dir = tmp_path / "Desktop"
+    source_dir.mkdir()
+    source = source_dir / "report.html"
+    source.write_text("<h1>child</h1>", encoding="utf-8")
+    copy_file_to_task_artifacts(SimpleNamespace(drive_root=child, task_id="childart"), source, kind="user_file")
+    child_artifacts = collect_task_artifact_records(child, "childart")
+    write_task_result(
+        child,
+        "childart",
+        "completed",
+        result="done",
+        artifacts=child_artifacts,
+        artifact_status="ready",
+        ts="2026-01-01T00:00:02Z",
+    )
+    write_task_result(
+        data,
+        "childart",
+        "running",
+        child_drive_root=str(child),
+        workspace_root=str(tmp_path / "workspace"),
+        result_status="infra_failed",
+        reason_code="provider_failure",
+        result="provider failed before normal finalization",
+    )
+    (data / "state").mkdir(parents=True, exist_ok=True)
+    (data / "state" / "queue_snapshot.json").write_text('{"pending": [], "running": []}', encoding="utf-8")
+    app = Starlette(routes=[Route("/api/tasks/{task_id}/artifacts/{name}", endpoint=api_task_artifact, methods=["GET"])])
+    app.state.drive_root = data
+
+    response = TestClient(app).get("/api/tasks/childart/artifacts/report.html")
+
+    parent_artifact = task_artifacts_dir(data, "childart", create=False) / "report.html"
+    assert response.status_code == 200
+    assert response.text == "<h1>child</h1>"
+    assert parent_artifact.read_text(encoding="utf-8") == "<h1>child</h1>"
+
+
 def test_task_artifact_endpoint_rejects_metadata_name_path_mismatch(tmp_path):
     data = tmp_path / "data"
     artifact_dir = task_artifacts_dir(data, "task-artifact")
@@ -906,6 +997,77 @@ def test_startup_prune_removes_only_old_terminal_child_drives(tmp_path):
     assert fresh_timestamp_dir.exists()
     assert any(item["task_id"] == "oldpending" and item["reason"] == "parent_not_terminal" for item in report["skipped"])
     assert any(item["task_id"] == "freshresult" and item["reason"] == "younger_than_retention" for item in report["skipped"])
+
+
+def test_startup_prune_uses_effective_terminal_status(tmp_path):
+    data = tmp_path / "data"
+    task_drive = data / "task_drives" / "stalerun"
+    child_dir = data / "state" / "headless_tasks" / "stalechild"
+    child_drive = child_dir / "data"
+    task_drive.mkdir(parents=True)
+    child_drive.mkdir(parents=True)
+    (task_drive / "scratch.txt").write_text("scratch", encoding="utf-8")
+    (child_drive / "scratch.txt").write_text("child", encoding="utf-8")
+    (data / "state").mkdir(parents=True, exist_ok=True)
+    (data / "state" / "queue_snapshot.json").write_text('{"pending": [], "running": []}', encoding="utf-8")
+
+    now = time.time()
+    old = now - (8 * 86400)
+    old_iso = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(old))
+    for task_id, extra in (
+        ("stalerun", {}),
+        ("stalechild", {"child_drive_root": str(child_drive)}),
+    ):
+        write_task_result(
+            data,
+            task_id,
+            "running",
+            result_status="infra_failed",
+            reason_code="provider_failure",
+            result="provider failed",
+            ts=old_iso,
+            **extra,
+        )
+    os.utime(task_drive, (old, old))
+    os.utime(child_dir, (old, old))
+
+    direct_report = prune_task_drives(data, retention_days=7, now=now)
+    child_report = prune_headless_task_drives(data, retention_days=7, now=now)
+
+    assert [item["task_id"] for item in direct_report["pruned"]] == ["stalerun"]
+    assert [item["task_id"] for item in child_report["pruned"]] == ["stalechild"]
+    assert not task_drive.exists()
+    assert not child_dir.exists()
+
+
+def test_startup_prune_removes_only_old_terminal_task_scratch(tmp_path):
+    data = tmp_path / "data"
+    old_terminal = data / "task_drives" / "oldterminal"
+    old_pending = data / "task_drives" / "oldpending"
+    fresh_terminal = data / "task_drives" / "freshterminal"
+    for path in (old_terminal, old_pending, fresh_terminal):
+        path.mkdir(parents=True)
+        (path / "scratch.txt").write_text("scratch", encoding="utf-8")
+
+    now = time.time()
+    old = now - (8 * 86400)
+    old_iso = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(old))
+    fresh_iso = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now))
+    write_task_result(data, "oldterminal", "completed", result="done", ts=old_iso)
+    write_task_result(data, "oldpending", "running", result="running")
+    write_task_result(data, "freshterminal", "completed", result="done", ts=fresh_iso)
+    os.utime(old_terminal, (old, old))
+    os.utime(old_pending, (old, old))
+    os.utime(fresh_terminal, (old, old))
+
+    report = prune_task_drives(data, retention_days=7, now=now)
+
+    assert [item["task_id"] for item in report["pruned"]] == ["oldterminal"]
+    assert not old_terminal.exists()
+    assert old_pending.exists()
+    assert fresh_terminal.exists()
+    assert any(item["task_id"] == "oldpending" and item["reason"] == "task_not_terminal" for item in report["skipped"])
+    assert any(item["task_id"] == "freshterminal" and item["reason"] == "younger_than_retention" for item in report["skipped"])
 
 
 def test_external_child_task_budget_uses_parent_drive_state(tmp_path, monkeypatch):

@@ -16,6 +16,14 @@ def _force_advanced_runtime(monkeypatch):
     monkeypatch.delenv(cfg.BOOT_RUNTIME_MODE_ENV_KEY, raising=False)
 
 
+def _force_light_runtime(monkeypatch):
+    from ouroboros import config as cfg
+
+    cfg.reset_runtime_mode_baseline_for_tests()
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    monkeypatch.delenv(cfg.BOOT_RUNTIME_MODE_ENV_KEY, raising=False)
+
+
 def test_task_scoped_service_lifecycle(tmp_path, monkeypatch):
     _force_advanced_runtime(monkeypatch)
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
@@ -303,3 +311,229 @@ def test_service_log_retention_retains_oversized_stale_logs(tmp_path, monkeypatc
     assert report["archived_files"] == 0
     assert report["retained_files"] == 1
     assert log.exists()
+
+
+def test_light_start_service_blocks_repo_default_but_allows_task_drive_cwd(tmp_path, monkeypatch):
+    _force_light_runtime(monkeypatch)
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
+    invalidations = []
+    monkeypatch.setattr(
+        "ouroboros.tools.commit_gate._invalidate_advisory",
+        lambda *args, **kwargs: invalidations.append({"args": args, "kwargs": kwargs}),
+    )
+    repo = tmp_path / "repo"
+    drive = tmp_path / "data"
+    repo.mkdir()
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    registry._ctx.task_id = "task-light-service"
+
+    blocked = registry.execute("start_service", {
+        "name": "repo_default",
+        "cmd": [sys.executable, "-c", "print('READY', flush=True)"],
+        "readiness": {"timeout_sec": 1},
+    })
+    assert "LIGHT_MODE_BLOCKED" in blocked
+
+    task_drive = drive / "task_drives" / "task-light-service"
+    artifact_store = drive / "task_results" / "artifacts" / "task-light-service"
+    assert not task_drive.exists()
+    assert not artifact_store.exists()
+    for name, cwd in (("task_drive_service", task_drive), ("artifact_store_service", artifact_store)):
+        started = registry.execute("start_service", {
+            "name": name,
+            "cmd": [sys.executable, "-c", "import time; print('READY', flush=True); time.sleep(60)"],
+            "cwd": str(cwd),
+            "readiness": {"log_contains": "READY", "timeout_sec": 3},
+        })
+
+        payload = json.loads(started)
+        assert payload["cwd"] == str(cwd)
+        assert payload["state"] == "running"
+        assert payload["ready"] is True
+        assert cwd.is_dir()
+        assert "LIGHT_MODE_BLOCKED" not in started
+        registry.execute("stop_service", {"name": name})
+    assert invalidations == []
+
+
+def test_user_files_service_without_outputs_reports_audit_gap(tmp_path, monkeypatch):
+    _force_light_runtime(monkeypatch)
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
+    home = tmp_path / "home"
+    desktop = home / "Desktop"
+    desktop.mkdir(parents=True)
+    monkeypatch.setattr(pathlib.Path, "home", staticmethod(lambda: home))
+    repo = tmp_path / "repo"
+    drive = tmp_path / "data"
+    repo.mkdir()
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    registry._ctx.task_id = "task-user-service"
+
+    started = registry.execute("start_service", {
+        "name": "user_file_service",
+        "cmd": [sys.executable, "-c", "import time; print('READY', flush=True); time.sleep(60)"],
+        "cwd": str(desktop),
+        "readiness": {"log_contains": "READY", "timeout_sec": 3},
+    })
+    start_payload = json.loads(started)
+    assert start_payload["cwd_root"] == "user_files"
+
+    stopped = json.loads(registry.execute("stop_service", {"name": "user_file_service"}))
+
+    assert "ARTIFACT_AUDIT_GAP" in stopped["artifact_audit_gap"]
+    assert stopped["artifact_output_failed"] is False
+
+
+def test_light_start_service_blocks_runtime_data_upload_write(tmp_path, monkeypatch):
+    _force_light_runtime(monkeypatch)
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
+    repo = tmp_path / "repo"
+    drive = tmp_path / "data"
+    repo.mkdir()
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    registry._ctx.task_id = "task-service-runtime-data"
+    upload = drive / "uploads" / "report.html"
+    task_drive = registry._ctx.task_drive_root()
+
+    result = registry.execute("start_service", {
+        "name": "runtime_data_writer",
+        "cmd": [
+            sys.executable,
+            "-c",
+            (
+                "from pathlib import Path\n"
+                f"p = Path({str(upload)!r})\n"
+                "p.parent.mkdir(parents=True, exist_ok=True)\n"
+                "p.write_text('bad')\n"
+            ),
+        ],
+        "cwd": str(task_drive),
+        "readiness": {"timeout_sec": 1},
+    })
+
+    assert "LIGHT_MODE_BLOCKED" in result
+    assert "runtime_data" in result
+    assert not upload.exists()
+    assert registry.execute("service_status", {"name": "runtime_data_writer"}).startswith("⚠️ SERVICE_NOT_FOUND")
+
+
+def test_light_start_service_blocks_relative_runtime_data_upload_write(tmp_path, monkeypatch):
+    _force_light_runtime(monkeypatch)
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
+    repo = tmp_path / "repo"
+    drive = tmp_path / "data"
+    repo.mkdir()
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    registry._ctx.task_id = "task-service-runtime-data"
+    upload = drive / "uploads" / "relative-report.html"
+    task_drive = registry._ctx.task_drive_root()
+
+    result = registry.execute("start_service", {
+        "name": "runtime_data_relative_writer",
+        "cmd": [
+            sys.executable,
+            "-c",
+            (
+                "from pathlib import Path\n"
+                "p = Path('../../uploads/relative-report.html')\n"
+                "p.parent.mkdir(parents=True, exist_ok=True)\n"
+                "p.write_text('bad')\n"
+            ),
+        ],
+        "cwd": str(task_drive),
+        "readiness": {"timeout_sec": 1},
+    })
+
+    assert "LIGHT_MODE_BLOCKED" in result
+    assert "runtime_data" in result
+    assert not upload.exists()
+    assert registry.execute("service_status", {"name": "runtime_data_relative_writer"}).startswith("⚠️ SERVICE_NOT_FOUND")
+
+
+def test_light_start_service_blocks_env_runtime_data_upload_write(tmp_path, monkeypatch):
+    _force_light_runtime(monkeypatch)
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
+    repo = tmp_path / "repo"
+    drive = tmp_path / "data"
+    repo.mkdir()
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    registry._ctx.task_id = "task-service-runtime-data"
+    upload = drive / "uploads" / "env-report.html"
+
+    result = registry.execute("start_service", {
+        "name": "runtime_data_env_writer",
+        "cmd": ["sh", "-c", "mkdir -p \"$OUROBOROS_DATA_DIR/uploads\" && echo bad > \"$OUROBOROS_DATA_DIR/uploads/env-report.html\""],
+        "cwd": str(registry._ctx.task_drive_root()),
+        "readiness": {"timeout_sec": 1},
+    })
+
+    assert "LIGHT_MODE_BLOCKED" in result
+    assert "runtime_data" in result
+    assert not upload.exists()
+    assert registry.execute("service_status", {"name": "runtime_data_env_writer"}).startswith("⚠️ SERVICE_NOT_FOUND")
+
+
+def test_service_outputs_register_artifacts_on_stop(tmp_path, monkeypatch):
+    _force_light_runtime(monkeypatch)
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
+    repo = tmp_path / "repo"
+    drive = tmp_path / "data"
+    repo.mkdir()
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    registry._ctx.task_id = "task-service-output"
+    task_drive = drive / "task_drives" / "task-service-output"
+    task_drive.mkdir(parents=True)
+
+    start = registry.execute("start_service", {
+        "name": "artifact_service",
+        "cmd": [
+            sys.executable,
+            "-c",
+            "from pathlib import Path; Path('service.html').write_text('<h1>ok</h1>'); print('READY', flush=True)",
+        ],
+        "cwd": str(task_drive),
+        "outputs": ["service.html"],
+        "readiness": {"timeout_sec": 1},
+    })
+    assert "LIGHT_MODE_BLOCKED" not in start
+
+    stopped = json.loads(registry.execute("stop_service", {"name": "artifact_service"}))
+
+    assert "ARTIFACT_OUTPUTS" in stopped["artifact_outputs"]
+    artifact_path = drive / "task_results" / "artifacts" / "task-service-output" / "service.html"
+    assert artifact_path.read_text(encoding="utf-8") == "<h1>ok</h1>"
+
+
+def test_stop_task_services_preserves_output_finalization_failure(tmp_path, monkeypatch):
+    from ouroboros.outcomes import derive_loop_outcome
+    from ouroboros.tools.services import stop_task_services
+
+    _force_light_runtime(monkeypatch)
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
+    repo = tmp_path / "repo"
+    drive = tmp_path / "data"
+    repo.mkdir()
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    registry._ctx.task_id = "task-service-missing-output"
+    task_drive = drive / "task_drives" / "task-service-missing-output"
+    task_drive.mkdir(parents=True)
+
+    registry.execute("start_service", {
+        "name": "missing_output_service",
+        "cmd": [sys.executable, "-c", "print('READY', flush=True)"],
+        "cwd": str(task_drive),
+        "outputs": ["missing.html"],
+        "readiness": {"timeout_sec": 1},
+    })
+
+    stopped = stop_task_services(registry._ctx)
+    outcome = derive_loop_outcome(
+        "Done",
+        {"rounds": 2},
+        {"tool_calls": [], "verification_events": [{"kind": "services_stopped", "services": stopped}]},
+    )
+
+    assert stopped[0]["artifact_output_failed"] is True
+    assert "ARTIFACT_OUTPUT_ERROR" in stopped[0]["artifact_outputs"]
+    assert outcome["result_status"] == "failed"
+    assert outcome["failure"]["kind"] == "verification"

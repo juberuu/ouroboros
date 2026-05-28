@@ -35,6 +35,109 @@ REASON_ARTIFACT_PENDING = "artifact_pending"
 REASON_TASK_EXCEPTION = "task_exception"
 REASON_DEEP_SELF_REVIEW_UNAVAILABLE = "deep_self_review_unavailable"
 REASON_DEEP_SELF_REVIEW_ERROR = "deep_self_review_error"
+REASON_TOOL_FAILURE = "tool_failure"
+
+_BLOCKING_TOOL_STATUSES = frozenset({
+    "artifact_output_error",
+    "blocked",
+    "claude_code_error",
+    "cwd_blocked",
+    "data_blocked",
+    "edit_text_blocked",
+    "elevation_blocked",
+    "error",
+    "git_via_shell_blocked",
+    "heal_mode_blocked",
+    "install_error",
+    "light_mode_blocked",
+    "non_zero_exit",
+    "protected_blocked",
+    "run_script_blocked",
+    "safety_violation",
+    "shell_error",
+    "skill_payload_blocked",
+    "skill_payload_control_blocked",
+    "skill_state_blocked",
+    "timeout",
+    "unavailable",
+    "violation",
+    "workspace_blocked",
+    "write_file_blocked",
+})
+_RECOVERY_TOOL_NAMES = frozenset({
+    "claude_code_edit",
+    "edit_text",
+    "run_command",
+    "run_script",
+    "start_service",
+    "stop_service",
+    "write_file",
+})
+
+
+def _unresolved_tool_errors(llm_trace: Dict[str, Any]) -> List[Dict[str, Any]]:
+    calls = [item for item in (llm_trace.get("tool_calls") or []) if isinstance(item, dict)]
+    unresolved: List[Dict[str, Any]] = []
+    for idx, item in enumerate(calls):
+        if not item.get("is_error"):
+            continue
+        tool = str(item.get("tool") or "unknown")
+        status = str(item.get("status") or "error")
+        if status not in _BLOCKING_TOOL_STATUSES and tool not in _RECOVERY_TOOL_NAMES:
+            continue
+        args = item.get("args") if isinstance(item.get("args"), dict) else {}
+        target_parts = []
+        target_paths = set()
+        for key in ("root", "path", "cwd", "cmd", "script", "name", "outputs"):
+            if key not in args:
+                continue
+            value = args.get(key)
+            target_parts.append((key, value))
+            if key in {"path", "cwd"} and value:
+                target_paths.add(str(value))
+            if key == "outputs" and isinstance(value, list):
+                target_paths.update(str(part) for part in value if str(part or "").strip())
+        target_key = json.dumps(target_parts, sort_keys=True, default=str)
+        recovered = False
+        for later in calls[idx + 1:]:
+            if later.get("is_error"):
+                continue
+            later_tool = str(later.get("tool") or "")
+            later_status = str(later.get("status") or "ok")
+            later_result = str(later.get("result") or "")
+            if later_status not in {"", "ok", "ok_autocorrected"}:
+                continue
+            later_args = later.get("args") if isinstance(later.get("args"), dict) else {}
+            later_parts = []
+            later_paths = set()
+            for key in ("root", "path", "cwd", "cmd", "script", "name", "outputs"):
+                if key not in later_args:
+                    continue
+                value = later_args.get(key)
+                later_parts.append((key, value))
+                if key in {"path", "cwd"} and value:
+                    later_paths.add(str(value))
+                if key == "outputs" and isinstance(value, list):
+                    later_paths.update(str(part) for part in value if str(part or "").strip())
+            same_target = later_tool == tool and target_key == json.dumps(later_parts, sort_keys=True, default=str)
+            same_path = bool(target_paths and later_paths and target_paths.intersection(later_paths))
+            artifact_registered = "ARTIFACT_OUTPUTS" in later_result or "registered output" in later_result
+            if status == "artifact_output_error":
+                recovered = artifact_registered and (same_path or not target_paths)
+            else:
+                recovered = same_target or (artifact_registered and same_path)
+            if recovered:
+                break
+        if recovered:
+            continue
+        unresolved.append({
+            "tool": tool,
+            "status": status,
+            "exit_code": item.get("exit_code"),
+            "signal": item.get("signal"),
+            "result": str(item.get("result") or "")[:500],
+        })
+    return unresolved
 
 
 def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[str, Any]) -> Dict[str, Any]:
@@ -46,6 +149,22 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
     failure: Dict[str, Any] | None = None
     result_status = RESULT_SUCCEEDED
     reason_code = REASON_FINAL_MESSAGE
+    tool_errors = _unresolved_tool_errors(llm_trace)
+    verification_failures: List[Dict[str, Any]] = []
+    for event in llm_trace.get("verification_events") or []:
+        if not isinstance(event, dict):
+            continue
+        for service in event.get("services") or []:
+            if not isinstance(service, dict):
+                continue
+            artifact_text = str(service.get("artifact_outputs") or "")
+            if bool(service.get("artifact_output_failed")) or artifact_text.startswith("⚠️ ARTIFACT_OUTPUT_ERROR"):
+                verification_failures.append({
+                    "kind": str(event.get("kind") or "runtime_event"),
+                    "service": service.get("name"),
+                    "status": "artifact_output_error",
+                    "reason": artifact_text[:500],
+                })
 
     if usage_status == RESULT_INFRA_FAILED:
         result_status = RESULT_INFRA_FAILED
@@ -75,6 +194,22 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
         result_status = RESULT_INFRA_FAILED
         reason_code = usage_reason or REASON_DEEP_SELF_REVIEW_ERROR
         failure = {"kind": "runtime", "reason_code": reason_code}
+    elif verification_failures:
+        result_status = RESULT_FAILED
+        reason_code = usage_reason or REASON_TOOL_FAILURE
+        failure = {
+            "kind": "verification",
+            "reason_code": reason_code,
+            "verification_failures": verification_failures[:20],
+        }
+    elif tool_errors:
+        result_status = RESULT_FAILED
+        reason_code = usage_reason or REASON_TOOL_FAILURE
+        failure = {
+            "kind": "tool",
+            "reason_code": reason_code,
+            "tool_errors": tool_errors[:20],
+        }
 
     return {
         "schema_version": 1,

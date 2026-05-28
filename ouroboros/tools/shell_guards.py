@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import pathlib
 import re
-from typing import Any, List
+from typing import Any, Dict, List
 
 from ouroboros.runtime_mode_policy import FROZEN_CONTRACT_PATH_PREFIXES, PROTECTED_RUNTIME_PATHS
 from ouroboros.tools.shell_parse import (
+    EMBEDDED_ABSOLUTE_PATH_RE,
     shell_argv,
+    shell_argv_with_inline,
     shell_command_string,
     strip_leading_env_assignments,
     unwrap_env_argv,
@@ -35,6 +37,105 @@ INTERPRETER_WRITE_RE = re.compile(
     r"""createwritestream|unlink\(|rename\(|mkdir\(|rmtree\(|remove\(|"""
     r"""open\s*\([^)]*,\s*['"][^'"]*[wax+])"""
 )
+EMBEDDED_RELATIVE_PATH_RE = re.compile(r"(?<![A-Za-z0-9_.-])(?:\.\.?/)+[^\s'\"\\),;\]]+")
+
+
+def _path_inside(path: pathlib.Path, root: pathlib.Path) -> bool:
+    try:
+        pathlib.Path(path).resolve(strict=False).relative_to(pathlib.Path(root).resolve(strict=False))
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def runtime_data_write_targets(
+    raw_cmd: Any,
+    *,
+    drive_root: pathlib.Path,
+    work_dir: pathlib.Path,
+    allowed_roots: List[pathlib.Path],
+) -> List[str]:
+    """Find write-like path mentions under runtime data but outside task artifact roots."""
+
+    try:
+        drive = pathlib.Path(drive_root).resolve(strict=False)
+        cwd = pathlib.Path(work_dir).resolve(strict=False)
+    except Exception:
+        return []
+    allowed = [pathlib.Path(root).resolve(strict=False) for root in allowed_roots]
+    try:
+        home = pathlib.Path.home().resolve(strict=False)
+    except Exception:
+        home = pathlib.Path("~").expanduser()
+    blocked: List[str] = []
+    for token in shell_argv_with_inline(raw_cmd):
+        text = str(token or "")
+        expanded_texts = {
+            text,
+            text.replace("$OUROBOROS_DATA_DIR", str(drive))
+            .replace("${OUROBOROS_DATA_DIR}", str(drive))
+            .replace("%OUROBOROS_DATA_DIR%", str(drive)),
+            text.replace("$HOME", str(home)).replace("${HOME}", str(home)).replace("%USERPROFILE%", str(home)),
+            text.replace("~/", f"{home}/"),
+        }
+        candidates: List[str] = []
+        for expanded in expanded_texts:
+            if expanded.startswith(("/", "~")):
+                candidates.append(expanded)
+            candidates.extend(EMBEDDED_ABSOLUTE_PATH_RE.findall(expanded))
+            candidates.extend(EMBEDDED_RELATIVE_PATH_RE.findall(expanded))
+        for candidate in candidates:
+            try:
+                raw_path = pathlib.Path(candidate).expanduser()
+                path = raw_path.resolve(strict=False) if raw_path.is_absolute() else (cwd / raw_path).resolve(strict=False)
+            except Exception:
+                continue
+            if not _path_inside(path, drive) or any(_path_inside(path, root) for root in allowed):
+                continue
+            rendered = str(path)
+            if rendered not in blocked:
+                blocked.append(rendered)
+    return blocked
+
+
+def process_shell_guard_args(name: str, args: Dict[str, Any], *, ctx: Any = None, runtime_mode: str = "") -> Dict[str, Any]:
+    """Normalize process-tool arguments into the command shape inspected by shell guards."""
+
+    if name == "run_script":
+        interpreter = str(args.get("interpreter") or "python3").strip() or "python3"
+        script = str(args.get("script") or "")
+        cwd = args.get("cwd", "")
+        if (
+            not str(cwd or "").strip()
+            and ctx is not None
+            and str(runtime_mode or "").strip() == "light"
+            and not bool(getattr(ctx, "is_workspace_mode", lambda: False)())
+        ):
+            try:
+                cwd = str(ctx.task_drive_root())
+            except Exception:
+                cwd = ""
+        return {
+            "cmd": [interpreter, "-c", script],
+            "cwd": cwd,
+            "__tool_name": name,
+        }
+    return {**args, "__tool_name": name}
+
+
+def parse_porcelain_paths(output: str) -> list[str]:
+    paths: list[str] = []
+    for raw_line in str(output or "").splitlines():
+        line = raw_line.rstrip()
+        if len(line) < 4:
+            continue
+        path_text = line[3:].strip()
+        if " -> " in path_text:
+            old_path, new_path = path_text.rsplit(" -> ", 1)
+            paths.extend([old_path.strip(), new_path.strip()])
+        else:
+            paths.append(path_text)
+    return sorted({p for p in paths if p})
 
 
 def _candidate_path_inside(root: pathlib.Path, work_dir: pathlib.Path, path_text: str) -> bool:
@@ -152,11 +253,17 @@ def light_shell_repo_mutation(
         try:
             work_dir = work_dir.resolve(strict=False)
             work_dir.relative_to(pathlib.Path(repo_dir).resolve(strict=False))
+            work_dir_inside_repo = True
         except (OSError, ValueError):
-            return False
+            work_dir_inside_repo = False
         inline = shell_command_string(argv) or " ".join(argv[1:])
         if INTERPRETER_WRITE_RE.search(inline):
-            return True
+            if work_dir_inside_repo:
+                return True
+            repo_text = str(pathlib.Path(repo_dir).resolve(strict=False)).replace("\\", "/")
+            if repo_text and repo_text in inline.replace("\\", "/"):
+                return True
+        return False
 
     if any(ind in cmd_lower for ind in (" > ", " >> ", " | tee ")):
         return repo_target_mentioned(argv, repo_dir=repo_dir, cwd=cwd)

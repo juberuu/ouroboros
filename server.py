@@ -457,14 +457,21 @@ def _run_supervisor(settings: dict) -> None:
         restored_pending = restore_pending_from_snapshot()
         persist_queue_snapshot(reason="startup")
         try:
-            from ouroboros.headless import prune_headless_task_drives
+            from ouroboros.headless import prune_headless_task_drives, prune_task_drives
 
             prune_report = prune_headless_task_drives(DATA_DIR)
-            if prune_report.get("pruned") or prune_report.get("errors"):
+            task_drive_report = prune_task_drives(DATA_DIR)
+            if (
+                prune_report.get("pruned")
+                or prune_report.get("errors")
+                or task_drive_report.get("pruned")
+                or task_drive_report.get("errors")
+            ):
                 append_jsonl(DATA_DIR / "logs" / "events.jsonl", {
                     "ts": utc_now_iso(),
                     "type": "headless_task_drive_prune",
                     "report": prune_report,
+                    "task_drives": task_drive_report,
                 })
         except Exception:
             log.debug("Headless task drive prune failed", exc_info=True)

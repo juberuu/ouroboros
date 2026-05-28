@@ -40,9 +40,29 @@ log = logging.getLogger(__name__)
 _FAILURE_PREFIXES = (
     "⚠️ TOOL_",
     "⚠️ SHELL_",
+    "⚠️ RUN_SCRIPT_",
     "⚠️ CLAUDE_CODE_",
+    "⚠️ LIGHT_MODE_",
+    "⚠️ WORKSPACE_",
+    "⚠️ ELEVATION_",
+    "⚠️ SKILL_STATE_",
+    "⚠️ SKILL_REDIRECT_",
+    "⚠️ SKILL_PAYLOAD_ARG_",
+    "⚠️ DATA_WRITE_",
+    "⚠️ DATA_READ_BLOCKED",
+    "⚠️ DATA_LIST_BLOCKED",
+    "⚠️ WRITE_FILE_",
+    "⚠️ EDIT_TEXT_",
+    "⚠️ ARTIFACT_OUTPUT_ERROR",
     "⚠️ CORE_PROTECTION_BLOCKED",
     "⚠️ SKILL_PAYLOAD_CONTROL_BLOCKED",
+)
+_FAILURE_MARKERS = (
+    "_BLOCKED",
+    "_ERROR",
+    "_FAILED",
+    "_UNAVAILABLE",
+    "_VIOLATION",
 )
 _EXIT_CODE_RE = re.compile(r"exit_code=(-?\d+)")
 _SIGNAL_RE = re.compile(r"signal=([A-Z0-9_]+)")
@@ -145,9 +165,17 @@ def _is_tool_execution_failure(tool_ok: bool, result: Any) -> bool:
     if not tool_ok:
         return True
     text = str(result or "")
-    if text.startswith("⚠️ SHELL_REGEX_AUTO_CORRECTED") and "⚠️ SHELL_EXIT_ERROR" not in text:
+    if text.startswith("⚠️ SHELL_REGEX_AUTO_CORRECTED"):
+        remainder = text.split("\n", 1)[1] if "\n" in text else ""
+        if any(prefix in remainder for prefix in _FAILURE_PREFIXES):
+            return True
         return False
-    return text.startswith(_FAILURE_PREFIXES)
+    if text.startswith("⚠️ REVIEW_BLOCKED") or text.startswith("⚠️ GIT_ERROR"):
+        return False
+    if text.startswith(_FAILURE_PREFIXES):
+        return True
+    first_line = text.splitlines()[0] if text.startswith("⚠️ ") else ""
+    return bool(first_line and any(marker in first_line for marker in _FAILURE_MARKERS))
 
 
 def _extract_result_metadata(fn_name: str, result: Any, is_error: bool) -> Dict[str, Any]:
@@ -156,12 +184,18 @@ def _extract_result_metadata(fn_name: str, result: Any, is_error: bool) -> Dict[
     status = "error" if is_error else "ok"
     if text.startswith("⚠️ TOOL_TIMEOUT"):
         status = "timeout"
+    elif text.startswith("⚠️ SHELL_REGEX_AUTO_CORRECTED") and "⚠️ ARTIFACT_OUTPUT_ERROR" in text:
+        status = "artifact_output_error"
     elif text.startswith("⚠️ SHELL_REGEX_AUTO_CORRECTED") and "⚠️ SHELL_EXIT_ERROR" not in text:
         status = "ok_autocorrected"
     elif text.startswith("⚠️ SHELL_EXIT_ERROR"):
         status = "non_zero_exit"
+    elif text.startswith("⚠️ SHELL_CWD_BLOCKED"):
+        status = "cwd_blocked"
     elif text.startswith("⚠️ SHELL_"):
         status = "shell_error"
+    elif text.startswith("⚠️ RUN_SCRIPT_BLOCKED"):
+        status = "run_script_blocked"
     elif text.startswith("⚠️ CLAUDE_CODE_TIMEOUT"):
         status = "timeout"
     elif text.startswith("⚠️ CLAUDE_CODE_INSTALL_ERROR"):
@@ -174,6 +208,36 @@ def _extract_result_metadata(fn_name: str, result: Any, is_error: bool) -> Dict[
         status = "protected_blocked"
     elif text.startswith("⚠️ SKILL_PAYLOAD_CONTROL_BLOCKED"):
         status = "skill_payload_control_blocked"
+    elif text.startswith("⚠️ LIGHT_MODE_REPO_WRITE_BLOCKED") or text.startswith("⚠️ LIGHT_MODE_BLOCKED"):
+        status = "light_mode_blocked"
+    elif text.startswith("⚠️ WORKSPACE_"):
+        status = "workspace_blocked"
+    elif text.startswith("⚠️ ELEVATION_"):
+        status = "elevation_blocked"
+    elif text.startswith("⚠️ SKILL_STATE_"):
+        status = "skill_state_blocked"
+    elif text.startswith("⚠️ SKILL_REDIRECT_") or text.startswith("⚠️ SKILL_PAYLOAD_ARG_"):
+        status = "skill_payload_blocked"
+    elif text.startswith("⚠️ DATA_WRITE_") or text.startswith("⚠️ DATA_READ_BLOCKED") or text.startswith("⚠️ DATA_LIST_BLOCKED"):
+        status = "data_blocked"
+    elif text.startswith("⚠️ WRITE_FILE_"):
+        status = "write_file_blocked"
+    elif text.startswith("⚠️ EDIT_TEXT_"):
+        status = "edit_text_blocked"
+    elif text.startswith("⚠️ ARTIFACT_OUTPUT_ERROR"):
+        status = "artifact_output_error"
+    elif text.startswith("⚠️ SAFETY_VIOLATION") or text.startswith("⚠️ CRITICAL SAFETY_VIOLATION"):
+        status = "safety_violation"
+    elif text.startswith("⚠️ HEAL_MODE_BLOCKED"):
+        status = "heal_mode_blocked"
+    elif text.startswith("⚠️ GIT_VIA_SHELL_BLOCKED"):
+        status = "git_via_shell_blocked"
+    elif text.startswith("⚠️ ") and "_BLOCKED" in text.splitlines()[0]:
+        status = "blocked"
+    elif text.startswith("⚠️ ") and "_VIOLATION" in text.splitlines()[0]:
+        status = "violation"
+    elif text.startswith("⚠️ ") and any(marker in text.splitlines()[0] for marker in ("_ERROR", "_FAILED", "_UNAVAILABLE")):
+        status = "error"
 
     meta: Dict[str, Any] = {"status": status}
     exit_match = _EXIT_CODE_RE.search(text)
@@ -267,6 +331,9 @@ def _execute_single_tool(
             "tool": fn_name, "args": args_for_log, "error": safe_error,
         }, correlation, tool_call_id=tool_call_id))
 
+    is_error = _is_tool_execution_failure(tool_ok, result)
+    result_meta = _extract_result_metadata(fn_name, result, is_error)
+
     trace_ref = {}
     try:
         trace_ref = persist_call(
@@ -283,6 +350,8 @@ def _execute_single_tool(
                 "args": args,
                 "result": result,
                 "tool_ok": tool_ok,
+                "semantic_ok": not is_error,
+                "result_meta": result_meta,
             },
             manifest={
                 "execution_id": correlation.get("execution_id"),
@@ -290,7 +359,8 @@ def _execute_single_tool(
                 "parent_call_id": correlation.get("llm_call_id"),
                 "tool_call_id": tool_call_id,
                 "tool": fn_name,
-                "status": "ok" if tool_ok else "exception",
+                "status": str(result_meta.get("status") or ("ok" if tool_ok else "exception")),
+                "semantic_ok": not is_error,
             },
         )
     except Exception:
@@ -300,11 +370,11 @@ def _execute_single_tool(
         "ts": utc_now_iso(), "type": "tool_call", "tool": fn_name, "task_id": task_id,
         "args": args_for_log,
         "result_preview": sanitize_tool_result_for_log(truncate_for_log(result, 2000)),
+        "is_error": is_error,
+        "status": result_meta.get("status"),
         "args_ref": (trace_ref.get("manifest_ref") or {}).get("path") if trace_ref else None,
         "result_ref": trace_ref.get("manifest_ref") if trace_ref else None,
     }, correlation, tool_call_id=tool_call_id))
-
-    is_error = _is_tool_execution_failure(tool_ok, result)
 
     return {
         "tool_call_id": tool_call_id,
@@ -315,7 +385,7 @@ def _execute_single_tool(
         "args_for_log": args_for_log,
         "is_code_tool": is_code_tool,
         "trace_ref": trace_ref,
-        "result_meta": _extract_result_metadata(fn_name, result, is_error),
+        "result_meta": result_meta,
     }
 
 

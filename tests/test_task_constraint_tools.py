@@ -51,6 +51,23 @@ def test_data_read_and_list_use_payload_relative_paths(tmp_path):
     assert "secret" not in _data_read(ctx, "memory/identity.md")
 
 
+def test_registry_repair_mode_reads_lists_skill_payload_root_without_bucket(tmp_path):
+    from ouroboros.tools.registry import ToolRegistry
+
+    ctx, skill = _ctx(tmp_path)
+    (skill / "plugin.py").write_text("VALUE = 1\n", encoding="utf-8")
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+    registry._ctx = ctx
+
+    read_result = registry.execute("read_file", {"root": "skill_payload", "path": "plugin.py"})
+    list_result = registry.execute("list_files", {"root": "skill_payload", "dir": "."})
+
+    assert "VALUE = 1" in read_result
+    assert "READ_FILE_ERROR" not in read_result
+    assert "plugin.py" in list_result
+    assert "LIST_FILES_ERROR" not in list_result
+
+
 def test_payload_absolute_other_skill_path_is_blocked(tmp_path):
     from ouroboros.tools.core import _data_read
     ctx, _skill = _ctx(tmp_path)
@@ -251,8 +268,8 @@ def test_claude_code_edit_rejects_cwd_outside_active_workspace(tmp_path, monkeyp
     result = _claude_code_edit(ctx, "edit outside", cwd="../outside")
     absolute_result = _claude_code_edit(ctx, "edit outside", cwd=str(outside))
 
-    assert "cwd escapes active workspace" in result
-    assert "cwd escapes active workspace" in absolute_result
+    assert "cwd escapes allowed edit roots" in result
+    assert "cwd escapes allowed edit roots" in absolute_result
 
 
 def test_claude_code_edit_workspace_prefers_workspace_cwd_over_data_skill(tmp_path, monkeypatch):
@@ -588,7 +605,7 @@ def test_claude_code_edit_rejects_non_skill_data_cwd(tmp_path, monkeypatch):
     result = _claude_code_edit(ctx, "edit settings", cwd=str(drive))
 
     assert "CLAUDE_CODE_ERROR" in result
-    assert "non-skill data cwd is not allowed" in result
+    assert "cwd escapes allowed edit roots" in result
 
 
 def test_repair_data_write_manifest_does_not_create_self_authored_markers(tmp_path, monkeypatch):

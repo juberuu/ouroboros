@@ -16,6 +16,7 @@ from ouroboros.task_results import (
     load_task_result,
     write_task_result,
 )
+from ouroboros.artifacts import collect_task_artifact_records, merge_artifact_records
 from ouroboros.outcomes import (
     RESULT_SUCCEEDED,
     artifact_bundle_from_result,
@@ -337,6 +338,8 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
         artifact_record = verification_refs.get("artifact")
         if artifact_record and artifact_record not in artifacts:
             artifacts.append(artifact_record)
+        collected_artifacts = collect_task_artifact_records(env.drive_root, str(task.get("id") or ""))
+        artifacts = merge_artifact_records(artifacts, collected_artifacts)
         provisional = {
             **existing,
             "artifacts": artifacts,

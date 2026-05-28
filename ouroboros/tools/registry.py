@@ -28,7 +28,6 @@ from ouroboros.tool_capabilities import (
     META_TOOL_NAMES,
 )
 from ouroboros.tools.shell_parse import (
-    EMBEDDED_ABSOLUTE_PATH_RE,
     shell_argv,
     shell_argv_with_inline,
     shell_command_string,
@@ -41,8 +40,13 @@ from ouroboros.tools.shell_guards import (
     PROTECTED_RUNTIME_PATHS_LOWER,
     SHELL_WRITE_INDICATORS,
     light_shell_repo_mutation,
+    parse_porcelain_paths,
+    process_shell_guard_args,
+    runtime_data_write_targets,
     shell_writer_targets_protected,
 )
+from ouroboros.artifacts import task_artifact_dir_path, task_id_for_artifacts
+from ouroboros.tool_access import normalize_root, resolve_shell_cwd, workspace_mode_block_reason
 from ouroboros.utils import safe_relpath
 from ouroboros.contracts.task_constraint import TaskConstraint, normalize_task_constraint, resolve_payload_path
 from ouroboros.contracts.skill_payload_policy import (
@@ -59,7 +63,6 @@ from ouroboros.contracts.skill_payload_policy import (
 )
 
 log = logging.getLogger(__name__)
-
 def _coerce_real_path(value: Any) -> pathlib.Path | None:
     if value is None or value.__class__.__module__.startswith("unittest.mock"):
         return None
@@ -67,8 +70,6 @@ def _coerce_real_path(value: Any) -> pathlib.Path | None:
         return pathlib.Path(os.fspath(value))
     except TypeError:
         return None
-
-
 def active_repo_dir_for(ctx: Any) -> pathlib.Path:
     """Return the active repo/workspace root for real and lightweight test contexts."""
     active = getattr(ctx, "active_repo_dir", None)
@@ -90,14 +91,12 @@ def active_repo_dir_for(ctx: Any) -> pathlib.Path:
 
     return pathlib.Path(getattr(ctx, "repo_dir"))
 
-
 def _detect_runtime_mode_elevation(text_lower: str) -> bool:
     """Detect shell/script attempts to change ``OUROBOROS_RUNTIME_MODE``."""
     has_save = "save_settings" in text_lower
     has_mode_key = "ouroboros_runtime_mode" in text_lower
     has_dotted_path = "ouroboros.config.save_settings" in text_lower
     return (has_save and has_mode_key) or has_dotted_path
-
 
 def _task_constraint_path_allowed(path_text: str, constraint: Optional[TaskConstraint], drive_root: pathlib.Path) -> bool:
     return is_skill_payload_path(
@@ -107,7 +106,6 @@ def _task_constraint_path_allowed(path_text: str, constraint: Optional[TaskConst
         allow_short_relative=True,
         allow_control_plane=True,
     )
-
 
 def _light_mode_payload_mutation_allowed(
     *,
@@ -129,6 +127,12 @@ def _light_mode_payload_mutation_allowed(
             cwd_text = "."
         elif not cwd_text:
             return False
+        try:
+            _cwd_path, cwd_root, _allowed_roots = resolve_shell_cwd(ctx, cwd_text)
+            if cwd_root in {"user_files", "task_drive", "artifact_store"}:
+                return True
+        except Exception:
+            pass
         return is_skill_payload_path(
             pathlib.Path(ctx.drive_root),
             cwd_text,
@@ -137,6 +141,12 @@ def _light_mode_payload_mutation_allowed(
             allow_control_plane=False,
         )
     requested_root = str(args.get("root", "") or "active_workspace")
+    try:
+        requested_root = normalize_root(requested_root)
+    except Exception:
+        requested_root = str(args.get("root", "") or "active_workspace")
+    if requested_root in {"task_drive", "artifact_store", "user_files"}:
+        return True
     legacy_data_skill_edit = False
     if tool_name == "edit_text" and requested_root == "active_workspace":
         try:
@@ -279,33 +289,6 @@ _REPO_MUTATION_TOOLS = frozenset({
 })
 
 
-def _process_shell_guard_args(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
-    if name == "run_script":
-        interpreter = str(args.get("interpreter") or "python3").strip() or "python3"
-        script = str(args.get("script") or "")
-        return {
-            "cmd": [interpreter, "-c", script],
-            "cwd": args.get("cwd", ""),
-            "__tool_name": name,
-        }
-    return {**args, "__tool_name": name}
-
-def _parse_porcelain_paths(output: str) -> list[str]:
-    paths: list[str] = []
-    for raw_line in str(output or "").splitlines():
-        # Porcelain v1 has two status columns; keep leading status spaces.
-        line = raw_line.rstrip()
-        if len(line) < 4:
-            continue
-        path_text = line[3:].strip()
-        if " -> " in path_text:
-            old_path, new_path = path_text.rsplit(" -> ", 1)
-            paths.extend([old_path.strip(), new_path.strip()])
-        else:
-            paths.append(path_text)
-    return sorted({p for p in paths if p})
-
-
 def _light_repo_snapshot(repo_dir: pathlib.Path) -> Optional[Dict[str, Any]]:
     """Worktree tripwire for light-mode shell writes, not rollback machinery."""
     try:
@@ -324,7 +307,7 @@ def _light_repo_snapshot(repo_dir: pathlib.Path) -> Optional[Dict[str, Any]]:
             ["git", "diff", "--cached", "--binary", "--no-ext-diff"],
             cwd=str(repo), capture_output=True, text=True, timeout=10,
         )
-        paths = _parse_porcelain_paths(status.stdout)
+        paths = parse_porcelain_paths(status.stdout)
         digest = hashlib.sha256()
         digest.update((status.stdout or "").encode("utf-8", errors="replace"))
         digest.update((unstaged.stdout if unstaged.returncode == 0 else "").encode("utf-8", errors="replace"))
@@ -582,12 +565,16 @@ class ToolContext:
     _review_history: list = field(default_factory=list)
 
     def active_repo_dir(self) -> pathlib.Path:
-        if self.workspace_root is not None and str(self.workspace_mode or "").strip():
+        if self.is_workspace_mode():
             return pathlib.Path(self.workspace_root)
         return pathlib.Path(self.repo_dir)
 
     def is_workspace_mode(self) -> bool:
-        return self.workspace_root is not None and bool(str(self.workspace_mode or "").strip())
+        return (
+            self.workspace_root is not None
+            and bool(str(self.workspace_mode or "").strip())
+            and not workspace_mode_block_reason(self)
+        )
 
     def repo_path(self, rel: str) -> pathlib.Path:
         root = self.active_repo_dir()
@@ -610,12 +597,7 @@ class ToolContext:
         return (self.drive_root / "logs").resolve()
 
     def task_drive_root(self) -> pathlib.Path:
-        if self.is_workspace_mode():
-            for key in ("drive_root", "child_drive_root", "headless_child_drive_root"):
-                text = str(self.task_metadata.get(key) or "").strip()
-                if text:
-                    return pathlib.Path(text).resolve(strict=False)
-        return pathlib.Path(self.drive_root).resolve(strict=False)
+        return (pathlib.Path(self.drive_root).resolve(strict=False) / "task_drives" / task_id_for_artifacts(self)).resolve(strict=False)
 
 
 @dataclass
@@ -705,22 +687,23 @@ class ToolRegistry:
 
     def _schema_for_entry(self, entry: ToolEntry) -> Dict[str, Any]:
         schema = entry.schema
-        if self._is_local_readonly_subagent() and entry.name in {"browse_page", "browser_action"}:
-            schema = copy.deepcopy(entry.schema)
-            if entry.name == "browse_page":
-                schema["description"] = ("Open an external HTTP(S) URL in headless browser. Returns page content as text, html, markdown, or screenshot (base64 PNG). "
-                                         "Local, loopback, private-network, and non-HTTP URLs are blocked for subagents. Use analyze_screenshot to inspect screenshots. "
-                                         "Use viewport to test mobile layouts (e.g. '375x812').")
-            if entry.name == "browser_action":
-                schema["description"] = ("Perform action on current external browser page. Actions: click (selector), fill (selector + value), select (selector + value), "
-                                         "screenshot (base64 PNG), scroll (value: up/down/top/bottom). JavaScript evaluate is unavailable to local-readonly subagents.")
-                props = schema.get("parameters", {}).get("properties", {})
-                action_schema = props.get("action", {})
-                if isinstance(action_schema.get("enum"), list):
-                    action_schema["enum"] = [name for name in action_schema["enum"] if name != "evaluate"]
-                value_schema = props.get("value", {})
-                if isinstance(value_schema, dict):
-                    value_schema["description"] = "Value for fill/select or direction for scroll"
+        if self._is_local_readonly_subagent():
+            if entry.name in {"read_file", "list_files", "search_code"}:
+                schema = copy.deepcopy(schema)
+                root_schema = schema.get("parameters", {}).get("properties", {}).get("root", {})
+                allowed = {"active_workspace", "system_repo"} if entry.name == "search_code" else {"active_workspace", "system_repo", "runtime_data", "task_drive", "artifact_store"}
+                if isinstance(root_schema.get("enum"), list): root_schema["enum"] = [root for root in root_schema["enum"] if root in allowed]
+            elif entry.name in {"browse_page", "browser_action"}:
+                schema = copy.deepcopy(entry.schema)
+                if entry.name == "browse_page":
+                    schema["description"] = "Open an external HTTP(S) URL in headless browser. Returns page content as text, html, markdown, or screenshot (base64 PNG). Local, loopback, private-network, and non-HTTP URLs are blocked for subagents. Use analyze_screenshot to inspect screenshots. Use viewport to test mobile layouts (e.g. '375x812')."
+                if entry.name == "browser_action":
+                    schema["description"] = "Perform action on current external browser page. Actions: click (selector), fill (selector + value), select (selector + value), screenshot (base64 PNG), scroll (value: up/down/top/bottom). JavaScript evaluate is unavailable to local-readonly subagents."
+                    props = schema.get("parameters", {}).get("properties", {})
+                    action_schema = props.get("action", {})
+                    if isinstance((action_enum := action_schema.get("enum")), list):
+                        action_schema["enum"] = [name for name in action_enum if name != "evaluate"]
+                    if isinstance((value_schema := props.get("value", {})), dict): value_schema["description"] = "Value for fill/select or direction for scroll"
         return {"type": "function", "function": schema}
 
     def _schemas_for_entry(self, entry: ToolEntry) -> List[Dict[str, Any]]:
@@ -1106,9 +1089,46 @@ class ToolRegistry:
                 return (
                     "⚠️ LIGHT_MODE_BLOCKED: runtime_mode=light refuses "
                     "shell commands that mutate the Ouroboros repository. "
-                    "Switch to 'advanced' or 'pro' in Settings → "
-                    "Behavior → Runtime Mode for write access."
+                    "For external deliverables, run with cwd under user_files "
+                    "(for example /Users/<you>/Desktop), root=artifact_store, "
+                    "or root=task_drive. Switch to advanced/pro only for "
+                    "reviewed Ouroboros self-modification."
                 )
+            runtime_data_scan = writeish or (
+                argv and pathlib.PurePath(argv[0]).name.lower() in {"python", "python3", "node", "ruby", "perl", "php", "sh", "bash", "zsh"}
+            )
+            if runtime_data_scan:
+                operation = "service" if str(args.get("__tool_name") or "") == "start_service" else "shell"
+                try:
+                    work_dir, _cwd_root, _allowed = resolve_shell_cwd(
+                        self._ctx,
+                        str(args.get("cwd") or ""),
+                        operation=operation,
+                    )
+                except Exception:
+                    work_dir = active_repo_dir_for(self._ctx)
+                runtime_data_targets = runtime_data_write_targets(
+                    raw_cmd,
+                    drive_root=pathlib.Path(self._ctx.drive_root),
+                    work_dir=pathlib.Path(work_dir),
+                    allowed_roots=[
+                        pathlib.Path(self._ctx.task_drive_root()),
+                        task_artifact_dir_path(
+                            pathlib.Path(self._ctx.drive_root),
+                            task_id_for_artifacts(self._ctx),
+                            create=False,
+                        ),
+                    ],
+                )
+                if runtime_data_targets:
+                    action = "write under" if writeish else "mention"
+                    return (
+                        "⚠️ LIGHT_MODE_BLOCKED: runtime_mode=light blocks process commands "
+                        f"that {action} runtime_data paths outside this task's task_drive/artifact_store. "
+                        "Use root=artifact_store for canonical deliverables, root=task_drive for "
+                        "scratch, or root=user_files for visible user files. Paths: "
+                        + ", ".join(runtime_data_targets[:5])
+                    )
 
         # Lexical defense for skill control-plane sidecar writes via shell.
         if not workspace_mode and any(
@@ -1308,6 +1328,17 @@ class ToolRegistry:
                 _mcp_is_name = None
         is_mcp = bool(_mcp_is_name and _mcp_is_name(name))
 
+        workspace_block_reason = ""
+        try:
+            workspace_block_reason = workspace_mode_block_reason(self._ctx)
+        except Exception as exc:
+            workspace_block_reason = f"workspace metadata validation failed: {type(exc).__name__}: {exc}"
+        if workspace_block_reason:
+            return (
+                "⚠️ WORKSPACE_MODE_BLOCKED: invalid external workspace metadata: "
+                f"{workspace_block_reason}. Workspace tasks must not overlap the "
+                "Ouroboros repo, runtime data, or control plane."
+            )
         workspace_mode = bool(getattr(self._ctx, "is_workspace_mode", lambda: False)())
         if workspace_mode and (is_mcp or ext_tool or not name in _WORKSPACE_ALLOWED_TOOLS):
             workspace = str(getattr(self._ctx, "workspace_root", "") or "")
@@ -1464,14 +1495,14 @@ class ToolRegistry:
             and not light_skill_scoped_str_replace
         ):
             return (
-                "⚠️ LIGHT_MODE_BLOCKED: runtime_mode=light disables "
-                "repo self-modification. Tool "
-                f"{name!r} would mutate the Ouroboros repository. "
-                "Payload edits under data/skills/{external,clawhub,ouroboroshub}/<skill>/ "
-                "(data/skills/<bucket>/<skill>/) are allowed when root=skill_payload "
-                "with bucket and skill_name, or through skill_repair constraints. "
-                "Switch to 'advanced' or 'pro' in Settings → Behavior "
-                "→ Runtime Mode to re-enable self-modification."
+                "⚠️ LIGHT_MODE_BLOCKED: runtime_mode=light blocks Ouroboros "
+                f"self-repo/control-plane mutation via {name!r}. For user-visible "
+                "deliverables use root=user_files (for example Desktop/file.html), "
+                "root=artifact_store for the canonical task artifact, or root=task_drive "
+                "for scratch. Skill payload edits remain allowed only through "
+                "root=skill_payload with bucket and skill_name "
+                "(data/skills/<bucket>/<skill>/) or skill_repair constraints. "
+                "Switch to advanced/pro only for reviewed Ouroboros self-modification."
             )
 
         protected_write_paths = []
@@ -1498,13 +1529,16 @@ class ToolRegistry:
 
         if name in _PROCESS_COMMAND_TOOLS:
             if name == "start_service" and _runtime_mode == "light" and not workspace_mode:
-                return (
-                    "⚠️ LIGHT_MODE_BLOCKED: runtime_mode=light refuses start_service "
-                    "against the Ouroboros repository because the service can mutate "
-                    "after initial tool checks. Use workspace mode or switch to "
-                    "advanced/pro for long-running repo services."
-                )
-            block_msg = self._run_shell_safety_check(_process_shell_guard_args(name, args), _runtime_mode)
+                try:
+                    _, service_cwd_root, _ = resolve_shell_cwd(self._ctx, str(args.get("cwd") or ""), operation="service")
+                except Exception:
+                    service_cwd_root = ""
+                if service_cwd_root == "active_workspace":
+                    return ("⚠️ LIGHT_MODE_BLOCKED: runtime_mode=light refuses start_service against the Ouroboros repository because long-running services can mutate after initial tool checks. For external services, set cwd under user_files, task_drive, or artifact_store; switch to advanced/pro only for reviewed Ouroboros self-modification.")
+            block_msg = self._run_shell_safety_check(
+                process_shell_guard_args(name, args, ctx=self._ctx, runtime_mode=_runtime_mode),
+                _runtime_mode,
+            )
             if block_msg:
                 return block_msg
 

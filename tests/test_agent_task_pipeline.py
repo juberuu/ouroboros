@@ -303,6 +303,74 @@ def test_store_task_result_preserves_failed_status(tmp_path):
     assert payload["result"] == "final failure reply"
 
 
+def test_store_task_result_marks_unresolved_tool_failure_failed(tmp_path):
+    from ouroboros.task_results import STATUS_FAILED
+
+    env = SimpleNamespace(drive_root=tmp_path)
+
+    pipeline._store_task_result(
+        env=env,
+        task={"id": "task-tool-failed", "type": "task", "text": "make file"},
+        text="Created the file.",
+        usage={"rounds": 2, "cost": 0.0},
+        llm_trace={
+            "tool_calls": [{
+                "tool": "run_command",
+                "args": {"cmd": "python3 -c ..."},
+                "result": "⚠️ ARTIFACT_OUTPUT_ERROR: undeclared output",
+                "is_error": True,
+                "status": "artifact_output_error",
+            }],
+            "reasoning_notes": [],
+        },
+        review_evidence={},
+    )
+
+    payload = json.loads((tmp_path / "task_results" / "task-tool-failed.json").read_text(encoding="utf-8"))
+    assert payload["status"] == STATUS_FAILED
+    assert payload["result_status"] == "failed"
+    assert payload["reason_code"] == "tool_failure"
+    assert payload["loop_outcome"]["failure"]["tool_errors"][0]["status"] == "artifact_output_error"
+
+
+def test_store_task_result_allows_recovered_tool_failure_success(tmp_path):
+    from ouroboros.task_results import STATUS_COMPLETED
+
+    env = SimpleNamespace(drive_root=tmp_path)
+
+    pipeline._store_task_result(
+        env=env,
+        task={"id": "task-tool-recovered", "type": "task", "text": "make file"},
+        text="Created the file.",
+        usage={"rounds": 3, "cost": 0.0},
+        llm_trace={
+            "tool_calls": [
+                {
+                    "tool": "edit_text",
+                    "args": {"path": "Desktop/report.html"},
+                    "result": "⚠️ EDIT_TEXT_ERROR: old_str matched 0 times",
+                    "is_error": True,
+                    "status": "edit_text_blocked",
+                },
+                {
+                    "tool": "write_file",
+                    "args": {"root": "user_files", "path": "Desktop/report.html"},
+                    "result": "OK: wrote user_files:Desktop/report.html\nARTIFACT_OUTPUTS: registered user file -> artifact_store:report.html",
+                    "is_error": False,
+                    "status": "ok",
+                },
+            ],
+            "reasoning_notes": [],
+        },
+        review_evidence={},
+    )
+
+    payload = json.loads((tmp_path / "task_results" / "task-tool-recovered.json").read_text(encoding="utf-8"))
+    assert payload["status"] == STATUS_COMPLETED
+    assert payload["result_status"] == "succeeded"
+    assert payload["loop_outcome"]["failure"] is None
+
+
 def test_collect_review_evidence_keeps_recent_attempts_task_scoped(tmp_path):
     from ouroboros.review_evidence import collect_review_evidence
     from ouroboros.review_state import AdvisoryReviewState, CommitAttemptRecord, make_repo_key, save_state

@@ -158,6 +158,85 @@ def test_loop_outcome_distinguishes_success_empty_and_provider_failure():
     assert deep_unavailable["result_status"] == RESULT_INFRA_FAILED
     assert deep_unavailable["reason_code"] == "deep_self_review_unavailable"
 
+    tool_failure = derive_loop_outcome(
+        "Created the file.",
+        {"rounds": 2},
+        {"tool_calls": [{
+            "tool": "run_command",
+            "is_error": True,
+            "status": "artifact_output_error",
+            "result": "⚠️ ARTIFACT_OUTPUT_ERROR: undeclared output",
+        }]},
+    )
+    assert tool_failure["result_status"] == RESULT_FAILED
+    assert tool_failure["reason_code"] == "tool_failure"
+    assert tool_failure["failure"]["kind"] == "tool"
+    assert tool_failure["failure"]["tool_errors"][0]["status"] == "artifact_output_error"
+
+    recovered = derive_loop_outcome(
+        "Created the file.",
+        {"rounds": 3},
+        {"tool_calls": [
+            {
+                "tool": "edit_text",
+                "args": {"root": "user_files", "path": "Desktop/report.html"},
+                "is_error": True,
+                "status": "edit_text_blocked",
+                "result": "⚠️ EDIT_TEXT_ERROR: old_str matched 0 times",
+            },
+            {
+                "tool": "write_file",
+                "args": {"root": "user_files", "path": "Desktop/report.html"},
+                "is_error": False,
+                "status": "ok",
+                "result": "OK: wrote user_files:Desktop/report.html\nARTIFACT_OUTPUTS: registered user file -> artifact_store:report.html",
+            },
+        ]},
+    )
+    assert recovered["result_status"] == RESULT_SUCCEEDED
+    assert recovered["failure"] is None
+
+    unrelated_recovery = derive_loop_outcome(
+        "Created another file.",
+        {"rounds": 3},
+        {"tool_calls": [
+            {
+                "tool": "run_command",
+                "args": {"cmd": "python3 build_report.py", "outputs": ["report.html"]},
+                "is_error": True,
+                "status": "non_zero_exit",
+                "result": "⚠️ SHELL_EXIT_ERROR: command exited with exit_code=1.",
+            },
+            {
+                "tool": "write_file",
+                "args": {"root": "user_files", "path": "Desktop/other.html"},
+                "is_error": False,
+                "status": "ok",
+                "result": "OK: wrote user_files:Desktop/other.html\nARTIFACT_OUTPUTS: registered user file -> artifact_store:other.html",
+            },
+        ]},
+    )
+    assert unrelated_recovery["result_status"] == RESULT_FAILED
+    assert unrelated_recovery["reason_code"] == "tool_failure"
+
+    cleanup_failure = derive_loop_outcome(
+        "Done",
+        {"rounds": 2},
+        {
+            "tool_calls": [],
+            "verification_events": [{
+                "kind": "services_stopped",
+                "services": [{
+                    "name": "devserver",
+                    "artifact_output_failed": True,
+                    "artifact_outputs": "⚠️ ARTIFACT_OUTPUT_ERROR:\n- missing output: report.html",
+                }],
+            }],
+        },
+    )
+    assert cleanup_failure["result_status"] == RESULT_FAILED
+    assert cleanup_failure["failure"]["kind"] == "verification"
+
 
 def test_tool_arg_sanitizer_uses_value_pattern_redactor():
     args = {

@@ -12,13 +12,16 @@ import re
 import uuid
 from typing import Any, Dict, List, Tuple
 
+from ouroboros.artifacts import artifact_store_path_block_reason, copy_file_to_task_artifacts
 from ouroboros.tools.registry import ToolContext, ToolEntry, active_repo_dir_for
 from ouroboros.tool_access import (
     decide_tool_access,
     active_tool_profile,
     normalize_root,
+    resolve_user_file_path,
     resolve_resource_path,
     resource_root_path,
+    user_files_path_block_reason,
 )
 from ouroboros.tool_capabilities import LOCAL_READONLY_SUBAGENT_MODE
 from ouroboros.utils import atomic_write_json, read_text, safe_relpath, utc_now_iso
@@ -148,6 +151,30 @@ def _list_dir(root: pathlib.Path, rel: str, max_entries: int = 500) -> List[str]
             items.append(str(entry.relative_to(root)) + suffix)
     except Exception as e:
         items.append(f"⚠️ Error listing: {e}")
+    return items
+
+
+def _list_user_files_dir(ctx: ToolContext, root: pathlib.Path, target: pathlib.Path, max_entries: int = 500) -> List[str]:
+    if not target.exists():
+        return [f"⚠️ Directory not found: {target}"]
+    if not target.is_dir():
+        return [f"⚠️ Not a directory: {target}"]
+    items: List[str] = []
+    hidden = 0
+    try:
+        for entry in sorted(target.iterdir()):
+            if user_files_path_block_reason(ctx, entry):
+                hidden += 1
+                continue
+            if len(items) >= max_entries:
+                items.append(f"...(truncated at {max_entries})")
+                break
+            suffix = "/" if entry.is_dir() else ""
+            items.append(str(entry.relative_to(root)) + suffix)
+    except Exception as e:
+        items.append(f"⚠️ Error listing: {e}")
+    if hidden:
+        items.append(f"⚠️ {hidden} hidden/control entr{'y' if hidden == 1 else 'ies'} omitted from user_files listing.")
     return items
 
 
@@ -663,7 +690,7 @@ def _local_readonly_resource_block(
         if _is_subagent_secret_repo_target(target, pathlib.Path(base)):
             return f"⚠️ {action}_BLOCKED: local_readonly_subagent cannot access repo secret or control paths."
         return ""
-    if normalized in {"runtime_data", "task_drive", "skill_payload", "artifact_store"}:
+    if normalized in {"runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files"}:
         root = pathlib.Path(base).resolve(strict=False)
         try:
             rel = pathlib.Path(target).resolve(strict=False).relative_to(root).as_posix()
@@ -684,6 +711,13 @@ def _root_display_path(root: str, path: str) -> str:
     if rel.startswith("./"):
         rel = rel[2:]
     return f"{root}:{rel or '.'}"
+
+
+def _join_write_results(results: List[str]) -> str:
+    rendered = "\n".join(results) if results else "⚠️ TOOL_ARG_ERROR: files must contain {path, content} objects."
+    if any(str(line).lstrip().startswith("⚠️") for result in results for line in str(result).splitlines()):
+        return "⚠️ WRITE_FILE_BATCH_PARTIAL_FAILURE: one or more writes failed.\n" + rendered
+    return rendered
 
 
 def _read_file(
@@ -714,6 +748,9 @@ def _read_file(
             start_line=start_line,
             display_path=_root_display_path(normalized, path),
         )
+    task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
+    if normalized == "skill_payload" and not bucket and not skill_name and task_constraint and task_constraint.mode == "skill_repair":
+        return _data_read(ctx, path, max_lines=max_lines, start_line=start_line, display_path=_root_display_path(normalized, path))
     try:
         base = resource_root_path(ctx, normalized, bucket=bucket, skill_name=skill_name)
         target = resolve_resource_path(ctx, root=normalized, path=path, bucket=bucket, skill_name=skill_name)
@@ -743,13 +780,20 @@ def _list_files(
         return _repo_list(ctx, dir=dir, max_entries=max_entries)
     if normalized == "runtime_data":
         return _data_list(ctx, dir=dir, max_entries=max_entries)
+    task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
+    if normalized == "skill_payload" and not bucket and not skill_name and task_constraint and task_constraint.mode == "skill_repair":
+        return _data_list(ctx, dir=dir, max_entries=max_entries)
     try:
         base = resource_root_path(ctx, normalized, bucket=bucket, skill_name=skill_name)
+        if normalized == "user_files":
+            target = resolve_user_file_path(ctx, dir, allow_protected_descendants=True)
+            items = _list_user_files_dir(ctx, base, target, max_entries)
+            return json.dumps(items, ensure_ascii=False, indent=2)
         items = _list_dir(base, dir, max_entries)
         if _is_local_readonly_subagent(ctx):
             if normalized == "system_repo":
                 items = _filter_subagent_secret_repo_listing(items, base)
-            elif normalized in {"task_drive", "skill_payload", "artifact_store"}:
+            elif normalized in {"task_drive", "skill_payload", "artifact_store", "user_files"}:
                 items = _filter_subagent_secret_listing(items, base)
         return json.dumps(items, ensure_ascii=False, indent=2)
     except Exception as exc:
@@ -797,7 +841,7 @@ def _write_file(
                     mode=mode,
                     display_root=normalized,
                 ))
-            return "\n".join(results) if results else "⚠️ TOOL_ARG_ERROR: files must contain {path, content} objects."
+            return _join_write_results(results)
         return _data_write(ctx, path=path, content=content, mode=mode, display_root=normalized)
     if normalized == "skill_payload":
         if files:
@@ -814,7 +858,7 @@ def _write_file(
                     skill_name=skill_name,
                     display_root=normalized,
                 ))
-            return "\n".join(results)
+            return _join_write_results(results)
         return _data_write(ctx, path=path, content=content, mode=mode, bucket=bucket, skill_name=skill_name, display_root=normalized)
     try:
         if files:
@@ -822,19 +866,39 @@ def _write_file(
             for item in files:
                 if not isinstance(item, dict):
                     continue
-                target = resolve_resource_path(ctx, root=normalized, path=str(item.get("path") or ""), bucket=bucket, skill_name=skill_name)
+                rel_path = str(item.get("path") or "")
+                target = resolve_resource_path(ctx, root=normalized, path=rel_path, bucket=bucket, skill_name=skill_name)
+                if normalized == "artifact_store":
+                    block_reason = artifact_store_path_block_reason(target)
+                    if block_reason:
+                        results.append(f"⚠️ WRITE_FILE_BLOCKED: artifact_store path blocked: {block_reason}")
+                        continue
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(str(item.get("content") or ""), encoding="utf-8")
-                results.append(f"OK: wrote {_root_display_path(normalized, str(item.get('path') or ''))} ({len(str(item.get('content') or ''))} chars)")
-            return "\n".join(results) if results else "⚠️ TOOL_ARG_ERROR: files must contain {path, content} objects."
+                result = f"OK: wrote {_root_display_path(normalized, rel_path)} ({len(str(item.get('content') or ''))} chars)"
+                if normalized == "user_files":
+                    record = copy_file_to_task_artifacts(ctx, target, kind="user_file")
+                    if record:
+                        result += f"\nARTIFACT_OUTPUTS: registered user file -> artifact_store:{record.get('name')}"
+                results.append(result)
+            return _join_write_results(results)
         target = resolve_resource_path(ctx, root=normalized, path=path, bucket=bucket, skill_name=skill_name)
+        if normalized == "artifact_store":
+            block_reason = artifact_store_path_block_reason(target)
+            if block_reason:
+                return f"⚠️ WRITE_FILE_BLOCKED: artifact_store path blocked: {block_reason}"
         target.parent.mkdir(parents=True, exist_ok=True)
         if mode == "append":
             with target.open("a", encoding="utf-8") as fh:
                 fh.write(content)
         else:
             target.write_text(content, encoding="utf-8")
-        return f"OK: wrote {_root_display_path(normalized, path)} ({len(content)} chars)"
+        result = f"OK: wrote {_root_display_path(normalized, path)} ({len(content)} chars)"
+        if normalized == "user_files":
+            record = copy_file_to_task_artifacts(ctx, target, kind="user_file")
+            if record:
+                result += f"\nARTIFACT_OUTPUTS: registered user file -> artifact_store:{record.get('name')}"
+        return result
     except Exception as exc:
         return f"⚠️ WRITE_FILE_ERROR: {type(exc).__name__}: {exc}"
 
@@ -889,12 +953,21 @@ def _edit_text(
         )
     try:
         target = resolve_resource_path(ctx, root=normalized, path=path, bucket=bucket, skill_name=skill_name)
+        if normalized == "artifact_store":
+            block_reason = artifact_store_path_block_reason(target)
+            if block_reason:
+                return f"⚠️ EDIT_TEXT_BLOCKED: artifact_store path blocked: {block_reason}"
         text = target.read_text(encoding="utf-8")
         count = text.count(old_str)
         if count != 1:
             return f"⚠️ EDIT_TEXT_ERROR: old_str matched {count} times; expected exactly 1."
         target.write_text(text.replace(old_str, new_str, 1), encoding="utf-8")
-        return f"OK: edited {_root_display_path(normalized, path)}"
+        result = f"OK: edited {_root_display_path(normalized, path)}"
+        if normalized == "user_files":
+            record = copy_file_to_task_artifacts(ctx, target, kind="user_file")
+            if record:
+                result += f"\nARTIFACT_OUTPUTS: registered user file -> artifact_store:{record.get('name')}"
+        return result
     except FileNotFoundError:
         return f"⚠️ EDIT_TEXT_ERROR: file not found: {_root_display_path(normalized, path)}"
     except Exception as exc:
@@ -1056,7 +1129,14 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
     except Exception as exc:
         return f"⚠️ SEARCH_ERROR: {type(exc).__name__}: {exc}"
     display_search_path = _root_display_path(normalized, path)
-    search_root = (root_path / safe_relpath(path)).resolve()
+    try:
+        search_root = (
+            resolve_user_file_path(ctx, path, allow_protected_descendants=True)
+            if normalized == "user_files"
+            else (root_path / safe_relpath(path)).resolve()
+        )
+    except Exception as exc:
+        return f"⚠️ SEARCH_ERROR: {type(exc).__name__}: {exc}"
     if not search_root.exists():
         return f"⚠️ SEARCH_ERROR: path not found: {display_search_path}"
     subagent_readonly = _is_local_readonly_subagent(ctx)
@@ -1080,6 +1160,11 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
     for dirpath, dirnames, filenames in os.walk(str(search_root)):
         # Prune skipped dirs in-place.
         dirnames[:] = [d for d in sorted(dirnames) if d not in _SEARCH_SKIP_DIRS]
+        if normalized == "user_files":
+            dirnames[:] = [
+                d for d in dirnames
+                if not user_files_path_block_reason(ctx, pathlib.Path(dirpath) / d)
+            ]
         if subagent_readonly:
             dirnames[:] = [
                 d for d in dirnames
@@ -1093,6 +1178,8 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
                 continue
 
             if subagent_readonly and _local_readonly_resource_block(ctx, normalized, fp, root_path, action="SEARCH"):
+                continue
+            if normalized == "user_files" and user_files_path_block_reason(ctx, fp):
                 continue
 
             if _is_search_skippable(fp):
@@ -1209,7 +1296,7 @@ def get_tools() -> List[ToolEntry]:
             ),
             "parameters": {"type": "object", "properties": {
                 "path": {"type": "string"},
-                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store"], "default": "active_workspace"},
+                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files"], "default": "active_workspace"},
                 "max_lines": {"type": "integer", "default": 2000,
                               "description": "Maximum number of lines to return (default 2000)."},
                 "start_line": {"type": "integer", "default": 1,
@@ -1223,7 +1310,7 @@ def get_tools() -> List[ToolEntry]:
             "description": "List files under a resource root directory.",
             "parameters": {"type": "object", "properties": {
                 "dir": {"type": "string", "default": "."},
-                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store"], "default": "active_workspace"},
+                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files"], "default": "active_workspace"},
                 "max_entries": {"type": "integer", "default": 500},
                 "bucket": {"type": "string", "description": "Required only for root=skill_payload."},
                 "skill_name": {"type": "string", "description": "Required only for root=skill_payload."},
@@ -1245,7 +1332,7 @@ def get_tools() -> List[ToolEntry]:
                 "files": {"type": "array", "items": {"type": "object", "properties": {
                     "path": {"type": "string"}, "content": {"type": "string"},
                 }, "required": ["path", "content"]}},
-                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store"], "default": "active_workspace"},
+                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files"], "default": "active_workspace"},
                 "mode": {"type": "string", "enum": ["overwrite", "append"], "default": "overwrite"},
                 "force": {"type": "boolean", "default": False, "description": "Bypass shrink guard for intentional active_workspace full rewrites."},
                 "bucket": {
@@ -1270,7 +1357,7 @@ def get_tools() -> List[ToolEntry]:
                 "path": {"type": "string"},
                 "old_str": {"type": "string"},
                 "new_str": {"type": "string"},
-                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store"], "default": "active_workspace"},
+                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files"], "default": "active_workspace"},
                 "bucket": {"type": "string", "enum": ["external", "clawhub", "ouroboroshub"]},
                 "skill_name": {"type": "string"},
             }, "required": ["path", "old_str", "new_str"]},
@@ -1309,7 +1396,7 @@ def get_tools() -> List[ToolEntry]:
             "parameters": {"type": "object", "properties": {
                 "query": {"type": "string", "description": "Search pattern (literal or regex)"},
                 "path": {"type": "string", "default": ".", "description": "Subdirectory to search (relative to repo root)"},
-                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store"], "default": "active_workspace"},
+                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files"], "default": "active_workspace"},
                 "bucket": {"type": "string", "description": "Required only for root=skill_payload."},
                 "skill_name": {"type": "string", "description": "Required only for root=skill_payload."},
                 "regex": {"type": "boolean", "default": False, "description": "Treat query as a regular expression"},

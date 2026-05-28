@@ -219,6 +219,16 @@ def test_grep_exit_one_with_stderr_still_surfaces_shell_error(tmp_path, fake_sub
 # ---------------------------------------------------------------------------
 
 
+def test_user_file_output_audit_extracts_windows_absolute_paths():
+    from ouroboros.tools import shell
+
+    body = r"from pathlib import Path; Path('C:\\Users\\anton\\Desktop\\out.html').write_text('x')"
+    redirect = r"echo x > C:\\Users\\anton\\Desktop\\out.html"
+
+    assert shell._EMBEDDED_OUTPUT_PATH_RE.findall(body) == [r"C:\\Users\\anton\\Desktop\\out.html"]
+    assert shell._USER_FILE_REDIRECT_RE.search(redirect).group("bare") == r"C:\\Users\\anton\\Desktop\\out.html"
+
+
 class TestGrepRegexHint:
     """``grep "A\\|B" file`` in argv mode is BSD's literal two-char trap.
 

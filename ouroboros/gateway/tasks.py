@@ -32,6 +32,7 @@ from ouroboros.task_status import (
     find_child_tasks,
     load_effective_task_result,
 )
+from ouroboros.tool_access import paths_overlap_casefold
 from ouroboros.utils import iter_jsonl_objects, utc_now_iso
 from ouroboros.workspace_preflight import (
     collect_workspace_preflight,
@@ -457,9 +458,6 @@ def _resolve_workspace_root(
     if not text:
         return None
     root = pathlib.Path(text).expanduser().resolve(strict=False)
-    if not root.exists() or not root.is_dir():
-        raise ValueError(f"workspace_root is not a directory: {text}")
-    bootstrap_process_path()
     system_repo = pathlib.Path(system_repo_dir).resolve(strict=False)
     drive = pathlib.Path(drive_root).resolve(strict=False)
     for protected_root, label in ((system_repo, "Ouroboros system repo"), (drive, "Ouroboros data drive")):
@@ -473,8 +471,13 @@ def _resolve_workspace_root(
                 overlaps = True
             except ValueError:
                 pass
+        if not overlaps and paths_overlap_casefold(root, protected_root):
+            overlaps = True
         if overlaps:
             raise ValueError(f"workspace_root must not overlap the {label}")
+    if not root.exists() or not root.is_dir():
+        raise ValueError(f"workspace_root is not a directory: {text}")
+    bootstrap_process_path()
     try:
         res = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],

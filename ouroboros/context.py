@@ -99,8 +99,11 @@ def build_runtime_section(env: Any, task: Dict[str, Any]) -> str:
         }
     if str(runtime_mode).lower() == "light":
         runtime_data["runtime_mode_rule"] = (
-            "light mode forbids Ouroboros repo mutation; scoped edits under "
-            "data/skills/{external,clawhub,ouroboroshub}/<skill>/ remain allowed"
+            "light mode forbids Ouroboros repo mutation and control-plane mutation, not user-file work; "
+            "use user_files for visible files, artifact_store for canonical deliverables, "
+            "task_drive for scratch, process outputs=[...] for generated artifacts, and "
+            "skill_payload only for explicit scoped skill-payload work/repair, not generic "
+            "artifact transport; do not use runtime_data/uploads as artifact transport"
         )
     if budget_info:
         runtime_data["budget"] = budget_info
