@@ -12,6 +12,7 @@ import logging
 
 from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage
 from ouroboros.config import get_light_model, get_task_review_mode, resolve_effort
+from ouroboros.outcomes import turn_has_reviewable_effects
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.tool_policy import initial_tool_schemas, list_non_core_tools
 from ouroboros.tools.registry import ToolRegistry
@@ -388,15 +389,26 @@ def _owner_marked_content(content: Any) -> Any:
     return prefix + str(content or "")
 
 
-def _task_acceptance_eligible(mode: str, llm_trace: Dict[str, Any]) -> bool:
+def _task_acceptance_eligible(mode: str, llm_trace: Dict[str, Any], is_direct_chat: bool) -> tuple[bool, str]:
+    """Return ``(host_should_review, trigger_reason)``.
+
+    ``required`` is effect-gated: the host enforces review only when the turn
+    produced reviewable work (commit / deliverable / repo / workspace / skill
+    write) or the task is not a direct-chat turn (queued / headless / scheduled).
+    Pure conversation with no reviewable effect is not reviewed even in
+    ``required``. ``auto`` stays LLM-first (the agent elects via the visible
+    task_acceptance_review tool); ``off`` never reviews. This gates on observable
+    runtime effects (P3 immune gate), not on message content (no P5 violation).
+    """
     if mode == "off":
-        return False
+        return False, "off"
     if mode == "required":
-        return True
-    # Auto is LLM-first: the agent decides whether to call the visible
-    # task_acceptance_review tool. Host-side heuristics would turn Auto into
-    # another deterministic gate and violate the intended review contract.
-    return False
+        if turn_has_reviewable_effects(llm_trace):
+            return True, "required_effect"
+        if not is_direct_chat:
+            return True, "required_nondirect"
+        return False, "skipped_conversation"
+    return False, "skipped_auto"
 
 
 def _run_task_acceptance_review_once(
@@ -413,7 +425,20 @@ def _run_task_acceptance_review_once(
     mode = get_task_review_mode()
     if getattr(tools._ctx, "_task_acceptance_reviewed", False):
         return False
-    if not _task_acceptance_eligible(mode, llm_trace):
+    is_direct_chat = bool(getattr(tools._ctx, "is_direct_chat", False))
+    eligible, trigger = _task_acceptance_eligible(mode, llm_trace, is_direct_chat)
+    agent_called = any(
+        isinstance(c, dict) and str(c.get("tool") or "") == "task_acceptance_review"
+        for c in (llm_trace.get("tool_calls") or [])
+    )
+    if agent_called:
+        llm_trace["review_decision"] = {"eligibility": "eligible", "trigger": "agent_called_tool"}
+    else:
+        llm_trace["review_decision"] = {
+            "eligibility": "eligible" if eligible else "not_eligible",
+            "trigger": trigger,
+        }
+    if not eligible:
         return False
     try:
         from ouroboros.review_substrate import ReviewRequest, reviewer_slots, run_review_request
@@ -456,8 +481,10 @@ def _run_task_acceptance_review_once(
         _append_or_merge_user_message(
             messages,
             "[TASK ACCEPTANCE REVIEW]\n"
-            "The following full reviewer output is advisory but must be considered before finalizing. "
-            "If findings are valid, continue fixing. If not, explicitly reject them with evidence.\n\n"
+            "The following full reviewer output is advisory. Deliver your actual answer/result to the "
+            "user, revised only if a finding is valid; if a finding is wrong, reject it with evidence. "
+            "Do NOT replace your user-facing answer with a status report about this review unless the "
+            "user explicitly asked for one.\n\n"
             f"{payload}",
         )
         llm_trace.setdefault("review_runs", []).append(result.__dict__)

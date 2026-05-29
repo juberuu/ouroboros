@@ -511,6 +511,37 @@ def test_light_mode_still_allows_read_only_tools(tmp_path, monkeypatch):
     assert "LIGHT_MODE_BLOCKED" not in result
 
 
+def test_light_mode_redirects_cognitive_memory_write(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    reg = _registry(tmp_path)
+    result = reg.execute(
+        "write_file",
+        {"root": "runtime_data", "path": "memory/identity.md", "content": "x" * 60},
+    )
+    assert "COGNITIVE_TOOL_REQUIRED" in result, result[:200]
+    assert "update_identity" in result
+    assert "LIGHT_MODE_BLOCKED" not in result
+
+
+def test_light_mode_redirects_windows_style_cognitive_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    reg = _registry(tmp_path)
+    result = reg.execute(
+        "write_file",
+        {"root": "runtime_data", "path": "memory\\identity.md", "content": "x" * 60},
+    )
+    assert "COGNITIVE_TOOL_REQUIRED" in result, result[:200]
+
+
+def test_light_mode_redirects_absolute_home_path_to_user_files(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    reg = _registry(tmp_path)
+    home_path = str(pathlib.Path.home() / "Desktop" / "ouro_root_required_test.html")
+    result = reg.execute("write_file", {"path": home_path, "content": "<html></html>"})
+    assert "ROOT_REQUIRED_USER_FILES" in result, result[:200]
+    assert "user_files" in result
+
+
 def test_light_mode_does_not_block_skill_exec_at_registry_layer(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     reg = _registry(tmp_path)

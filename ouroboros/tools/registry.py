@@ -46,7 +46,7 @@ from ouroboros.tools.shell_guards import (
     shell_writer_targets_protected,
 )
 from ouroboros.artifacts import task_artifact_dir_path, task_id_for_artifacts
-from ouroboros.tool_access import normalize_root, resolve_shell_cwd, workspace_mode_block_reason
+from ouroboros.tool_access import light_cognitive_or_root_redirect, normalize_root, resolve_shell_cwd, workspace_mode_block_reason
 from ouroboros.utils import safe_relpath
 from ouroboros.contracts.task_constraint import TaskConstraint, normalize_task_constraint, resolve_payload_path
 from ouroboros.contracts.skill_payload_policy import (
@@ -1494,7 +1494,7 @@ class ToolRegistry:
             and not workspace_mode
             and not light_skill_scoped_str_replace
         ):
-            return (
+            return light_cognitive_or_root_redirect(name, args) or (
                 "⚠️ LIGHT_MODE_BLOCKED: runtime_mode=light blocks Ouroboros "
                 f"self-repo/control-plane mutation via {name!r}. For user-visible "
                 "deliverables use root=user_files (for example Desktop/file.html), "

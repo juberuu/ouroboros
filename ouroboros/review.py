@@ -32,7 +32,10 @@ MAX_FUNCTION_LINES = 300
 # while allowing that first-class transport surface.
 # v6.5.0-rc.1 adds task-scoped artifact/user_files/root-resolution helpers
 # for light-mode external deliverables; keep the headroom narrow.
-MAX_TOTAL_FUNCTIONS = 2426
+# v6.6.0-rc.1 adds 4 helpers for effect-gated task-acceptance review and light-mode
+# cognitive/root redirects: turn_has_reviewable_effects, _user_file_basenames,
+# _extract_fenced_json, light_cognitive_or_root_redirect. Keep the headroom narrow.
+MAX_TOTAL_FUNCTIONS = 2430
 # Grandfathered modules are accepted debt until their surfaces stabilize/split.
 GRANDFATHERED_OVERSIZED_MODULES = {
     "llm.py",

@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 6.5.0-rc.4](https://img.shields.io/badge/version-6.5.0--rc.4-green.svg)](VERSION)
+[![Version 6.6.0-rc.1](https://img.shields.io/badge/version-6.6.0--rc.1-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -484,12 +484,12 @@ the contribution guide only routes to those sources.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 6.6.0-rc.1 | 2026-05-29 | **rc(review): effect-gate task-acceptance review and clarify light-mode cognitive writes.** Host-enforced `required` review fires only on turns with observable reviewable effects (commit/deliverable/workspace/self-mod) or non-direct tasks, so plain chat is never reviewed; `auto` stays LLM-first. Adds `review_eligibility`/`review_trigger` to loop outcomes, routes light-mode cognitive writes to `update_identity`/`update_scratchpad`/`knowledge_write` (`COGNITIVE_TOOL_REQUIRED`) and absolute home paths to `root=user_files` (`ROOT_REQUIRED_USER_FILES`) with recovery, parses fenced JSON-object reviewer verdicts, and makes `DEGRADED` review signals carry an honest reason. |
 | 6.5.0-rc.4 | 2026-05-28 | **rc(ci): normalize Windows process executable names.** Keeps the rc.3 scope and treats `.exe` interpreter/writer basenames as their canonical tool names so light-mode runtime-data guards run on Windows. |
 | 6.5.0-rc.3 | 2026-05-28 | **rc(ci): finish Windows runtime-data guard portability.** Keeps the rc.2 scope and fixes escaped Windows Python path literals in light-mode runtime-data process guards so full CI can build release artifacts. |
 | 6.5.0-rc.2 | 2026-05-28 | **rc(ci): harden light-mode artifact release candidate.** Keeps the rc.1 runtime scope, fixes CI smoke gates around Claude Code helper size/function counts, and makes runtime-data artifact guards portable across Windows path forms. |
 | 6.5.0-rc.1 | 2026-05-28 | **rc(runtime): repair light-mode external deliverables and artifact audit.** Adds `user_files`, makes light mode a self-repo/control-plane boundary rather than an OS sandbox, allows task/user/artifact cwd for process tools and `claude_code_edit`, registers declared external outputs into task artifacts, classifies tool blocks as semantic failures, and repairs stale running task status after infra failures. |
-| 6.4.0-rc.1 | 2026-05-28 | **rc(runtime): integrate contributor filesystem, docs, and video transport work.** Adds root-qualified filesystem output observability, keeps shell cwd diagnostics explicit, introduces a compact contributor routing guide, adds the `send_video` transport path with gateway/UI contract coverage, and updates prerelease carriers. |
-Older releases are preserved in Git tags and GitHub releases. The 6.0.0 through 6.3.0-rc.2 rows, the 5.2.0 through 5.33.0-rc.6 rows, and former `4.0.0` rows are rolled off to respect the P9 changelog cap; their full bodies remain at their git tags.
+Older releases are preserved in Git tags and GitHub releases. The 6.0.0 through 6.4.0-rc.1 rows, the 5.2.0 through 5.33.0-rc.6 rows, and former `4.0.0` rows are rolled off to respect the P9 changelog cap; their full bodies remain at their git tags.
 
 ---
 

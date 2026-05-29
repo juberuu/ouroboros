@@ -103,9 +103,11 @@ def test_task_acceptance_auto_is_llm_first_not_host_enforced():
         ]
     }
 
-    assert _task_acceptance_eligible("auto", trace) is False
-    assert _task_acceptance_eligible("required", trace) is True
-    assert _task_acceptance_eligible("off", trace) is False
+    # auto stays LLM-first (host never enforces), regardless of effects.
+    assert _task_acceptance_eligible("auto", trace, True)[0] is False
+    # required is effect-gated: this trace has a workspace write -> eligible.
+    assert _task_acceptance_eligible("required", trace, True)[0] is True
+    assert _task_acceptance_eligible("off", trace, True)[0] is False
 
 
 # ---------------------------------------------------------------------------

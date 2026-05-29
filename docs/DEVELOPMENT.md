@@ -338,6 +338,7 @@ Before every commit, verify the following:
 #### Loop / State-Machine Changes
 - [ ] Changes to `loop.py` or other task state-machine logic include adversarial tests for malformed output, false-completion prevention, replay/log durability, and failure modes — not just the happy path.
 - [ ] Audit/checkpoint rounds must not silently reuse the normal final-answer path unless that invariant is explicitly tested and documented.
+- [ ] Host-enforced task-acceptance review eligibility is derived from observable effects, not message content. `outcomes.turn_has_reviewable_effects` is the SSOT for "did this turn do reviewable work"; `_task_acceptance_eligible` consumes it for `required` mode. `auto` stays LLM-first (`return False`). Cognitive-memory updates are not reviewable effects. Keep this an effect/structured-fact gate (Bible P3), never a keyword/heuristic over the user's message (Bible P5). The `required` direct-chat exemption depends on `ToolContext.is_direct_chat` being set (from `task._is_direct_chat`); any new direct-chat entry point must set it, or greetings will be reviewed.
 
 #### Cognitive Artifact Integrity
 - [ ] Cognitive artifacts (identity.md, scratchpad, task reflections, review outputs, pattern register) must NOT use hardcoded `[:N]` truncation. If content must be shortened, include an explicit omission note (e.g. `⚠️ OMISSION NOTE: truncated at N chars`).

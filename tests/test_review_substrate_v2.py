@@ -31,6 +31,23 @@ class FencedArrayLLM:
         return {"content": body}, {"prompt_tokens": 10, "completion_tokens": 5}
 
 
+class FencedObjectLLM:
+    def chat(self, **kwargs):
+        body = (
+            "Verdict below:\n"
+            "```json\n"
+            "{\"verdict\":\"PASS\",\"findings\":[]}\n"
+            "```"
+        )
+        return {"content": body}, {"prompt_tokens": 10, "completion_tokens": 5}
+
+
+class ConcernsLLM:
+    def chat(self, **kwargs):
+        # Valid JSON, transport ok, but a non-PASS/FAIL/DEGRADED verdict.
+        return {"content": "{\"verdict\":\"CONCERNS\",\"findings\":[]}"}, {"prompt_tokens": 10, "completion_tokens": 5}
+
+
 class ErrorLLM:
     def chat(self, **kwargs):
         raise RuntimeError("provider exploded")
@@ -148,6 +165,42 @@ def test_review_substrate_parses_fenced_json_array_findings(tmp_path):
     assert result.aggregate_signal == "FAIL"
     assert result.parsed_findings[0]["item"] == "x"
     assert result.actors[0]["parsed"][0]["verdict"] == "FAIL"
+
+
+def test_review_substrate_parses_fenced_json_object_verdict(tmp_path):
+    # A fenced JSON OBJECT (not array) must parse as PASS, not a false DEGRADED.
+    result = run_review_request(
+        ReviewRequest(surface="task_acceptance", goal="verify claim", subject="done", task_id="task-obj"),
+        slots=[
+            ReviewSlot(slot_id="slot_a", model="m"),
+            ReviewSlot(slot_id="slot_b", model="m"),
+        ],
+        drive_root=tmp_path,
+        llm=FencedObjectLLM(),
+    )
+    assert result.aggregate_signal == "PASS"
+    assert result.degraded is False
+
+
+def test_review_substrate_degraded_quorum_carries_reason(tmp_path):
+    # No FAIL, no PASS quorum, no transport errors -> DEGRADED must still be honest:
+    # degraded=True with a non-empty reason (no DEGRADED/degraded=False/empty mismatch).
+    result = run_review_request(
+        ReviewRequest(
+            surface="task_acceptance", goal="verify claim", subject="done", task_id="task-quorum",
+            policy={"min_successful_slots": 2},
+        ),
+        slots=[
+            ReviewSlot(slot_id="slot_a", model="m"),
+            ReviewSlot(slot_id="slot_b", model="m"),
+        ],
+        drive_root=tmp_path,
+        llm=ConcernsLLM(),
+    )
+    assert result.aggregate_signal == "DEGRADED"
+    assert result.degraded is True
+    assert result.degraded_reasons
+    assert any("quorum_not_met" in reason for reason in result.degraded_reasons)
 
 
 def test_review_substrate_persists_error_actor_response_ref(tmp_path):

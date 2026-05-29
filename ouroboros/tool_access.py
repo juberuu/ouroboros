@@ -189,6 +189,68 @@ def paths_overlap_casefold(left: pathlib.Path, right: pathlib.Path) -> bool:
     return _path_is_relative_to_casefold(left, right) or _path_is_relative_to_casefold(right, left)
 
 
+def light_cognitive_or_root_redirect(tool_name: str, args: dict[str, Any]) -> str | None:
+    """Precise light-mode redirect for write attempts that should use a cognitive
+    tool or an explicit ``user_files`` root. Returns the message, or ``None``.
+
+    Only ``write_file``/``edit_text`` qualify. Callers invoke this inside the
+    light-mode repo-mutation block so a returned message replaces the generic
+    LIGHT_MODE_BLOCKED with actionable, non-noisy guidance.
+    """
+    if tool_name not in ("write_file", "edit_text"):
+        return None
+    paths: list[str] = []
+    primary = str(args.get("path", "") or "")
+    if primary:
+        paths.append(primary)
+    for entry in args.get("files") or []:
+        if isinstance(entry, dict) and entry.get("path"):
+            paths.append(str(entry.get("path")))
+    raw_root = str(args.get("root", "") or "active_workspace")
+    try:
+        root = normalize_root(raw_root)
+    except Exception:
+        root = "active_workspace"
+
+    if root == "runtime_data":
+        for path_text in paths:
+            # Logical resource-path components. Normalize Windows separators to the
+            # POSIX convention these tool paths use, then compare parts (not raw
+            # separators), so both memory/identity.md and memory\identity.md match.
+            parts = pathlib.PurePosixPath(str(path_text or "").replace("\\", "/")).parts
+            if len(parts) >= 2 and parts[0].lower() == "memory":
+                area = parts[1].lower()
+                if area.startswith("identity") or area.startswith("scratchpad") or area == "knowledge":
+                    return (
+                        "⚠️ COGNITIVE_TOOL_REQUIRED: cognitive memory is not written via "
+                        f"{tool_name!r}. Use the dedicated first-class tools (always available in "
+                        "light mode): update_identity for memory/identity.md, update_scratchpad for "
+                        "memory/scratchpad.md, knowledge_write for memory/knowledge/<topic>.md. They "
+                        "apply the correct structure (journaling, timestamped blocks, index "
+                        "maintenance). Read the current state before writing (Bible P12)."
+                    )
+
+    if root == "active_workspace":
+        for path_text in paths:
+            # Use pathlib semantics (no hardcoded separators): an expanded path
+            # that is absolute and under the owner home should use root=user_files.
+            # This is cross-platform (POSIX `/`, `~`, and Windows drive paths).
+            try:
+                candidate = pathlib.Path(path_text).expanduser()
+                if not candidate.is_absolute():
+                    continue
+                candidate.resolve(strict=False).relative_to(pathlib.Path.home().resolve(strict=False))
+            except (ValueError, OSError, RuntimeError):
+                continue
+            return (
+                "⚠️ ROOT_REQUIRED_USER_FILES: an absolute home path "
+                f"({path_text!r}) was given but root defaulted to 'active_workspace'. "
+                "Pass root='user_files' to write under the owner's home, e.g. "
+                "write_file(root='user_files', path='Desktop/file.html', content=...)."
+            )
+    return None
+
+
 def workspace_mode_block_reason(ctx: Any) -> str:
     mode = str(getattr(ctx, "workspace_mode", "") or "").strip()
     workspace_root = getattr(ctx, "workspace_root", None)

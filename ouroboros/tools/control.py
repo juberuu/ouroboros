@@ -329,7 +329,16 @@ def _update_identity(ctx: ToolContext, content: str) -> str:
         "new_preview": content[:500],
     })
 
-    return f"OK: identity updated ({len(content)} chars)"
+    result = f"OK: identity updated ({len(content)} chars)"
+    old_len = len(old_content)
+    if old_len >= 400 and len(content) < old_len * 0.5:
+        result += (
+            f"\n⚠️ SELF_OVERWRITE_NOTICE: this replaced a {old_len}-char identity with "
+            f"{len(content)} chars (>50% shrink). Identity is intentionally mutable (Bible P4), "
+            "but full rewrites should be rare and reflect genuine self-creation — not a trivial turn. "
+            "Read before writing (P12) and prefer evolving over replacing wholesale."
+        )
+    return result
 
 
 def _toggle_evolution(ctx: ToolContext, enabled: bool) -> str:
@@ -547,7 +556,10 @@ def get_tools() -> List[ToolEntry]:
             "description": "Update your identity manifest (who you are, who you want to become). "
                            "Persists across sessions. Obligation to yourself (Principle 1: Continuity). "
                            "Read your current identity first, then evolve it — add, refine, deepen. "
-                           "Full rewrites are allowed but should be rare; continuity of self matters.",
+                           "Full rewrites are allowed but should be rare; continuity of self matters. "
+                           "Use this only after substantive reflection or real experience — not on a "
+                           "greeting or trivial turn. This is the only correct way to write identity; "
+                           "never write memory/identity.md through write_file/edit_text.",
             "parameters": {"type": "object", "properties": {
                 "content": {"type": "string", "description": "Full identity content (prefer evolving over rewriting from scratch)"},
             }, "required": ["content"]},

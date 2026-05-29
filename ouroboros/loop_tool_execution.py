@@ -56,6 +56,8 @@ _FAILURE_PREFIXES = (
     "⚠️ ARTIFACT_OUTPUT_ERROR",
     "⚠️ CORE_PROTECTION_BLOCKED",
     "⚠️ SKILL_PAYLOAD_CONTROL_BLOCKED",
+    "⚠️ COGNITIVE_TOOL_REQUIRED",
+    "⚠️ ROOT_REQUIRED_USER_FILES",
 )
 _FAILURE_MARKERS = (
     "_BLOCKED",
@@ -210,6 +212,10 @@ def _extract_result_metadata(fn_name: str, result: Any, is_error: bool) -> Dict[
         status = "skill_payload_control_blocked"
     elif text.startswith("⚠️ LIGHT_MODE_REPO_WRITE_BLOCKED") or text.startswith("⚠️ LIGHT_MODE_BLOCKED"):
         status = "light_mode_blocked"
+    elif text.startswith("⚠️ COGNITIVE_TOOL_REQUIRED"):
+        status = "cognitive_tool_required"
+    elif text.startswith("⚠️ ROOT_REQUIRED_USER_FILES"):
+        status = "root_required_user_files"
     elif text.startswith("⚠️ WORKSPACE_"):
         status = "workspace_blocked"
     elif text.startswith("⚠️ ELEVATION_"):
@@ -240,6 +246,11 @@ def _extract_result_metadata(fn_name: str, result: Any, is_error: bool) -> Dict[
         status = "error"
 
     meta: Dict[str, Any] = {"status": status}
+    # Structured deliverable signal captured from the FULL result (before the trace
+    # preview is truncated to 700 chars) so effect detection never misses a
+    # late ARTIFACT_OUTPUTS marker (e.g. a stopped service after a long log tail).
+    if not is_error and "ARTIFACT_OUTPUTS" in text:
+        meta["artifact_registered"] = True
     exit_match = _EXIT_CODE_RE.search(text)
     if exit_match:
         try:

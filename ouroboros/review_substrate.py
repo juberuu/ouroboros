@@ -132,6 +132,30 @@ def _messages_char_count(messages: List[Dict[str, Any]]) -> int:
     return total
 
 
+def _extract_fenced_json(text: str) -> Any:
+    """Best-effort parse of a fenced/embedded JSON object or array from model output.
+
+    Reviewers often wrap their verdict in a ```json ... ``` fence; a fenced JSON
+    OBJECT (e.g. {"verdict":"PASS","findings":[]}) would otherwise fail json.loads
+    and be missed by the array-only extractor, producing a false DEGRADED signal.
+    """
+    if "```" not in text:
+        return None
+    for chunk in text.split("```"):
+        candidate = chunk.strip()
+        if candidate.startswith("json"):
+            candidate = candidate[4:].strip()
+        if not candidate:
+            continue
+        try:
+            obj = json.loads(candidate)
+        except Exception:
+            continue
+        if isinstance(obj, (dict, list)):
+            return obj
+    return None
+
+
 def _parse_findings(raw_text: str) -> tuple[Any, List[Dict[str, Any]], str]:
     text = str(raw_text or "").strip()
     parsed: Any = None
@@ -140,11 +164,13 @@ def _parse_findings(raw_text: str) -> tuple[Any, List[Dict[str, Any]], str]:
     try:
         parsed = json.loads(text)
     except Exception:
-        extracted = extract_json_array(text)
-        if extracted is None:
-            # Keep non-JSON output untruncated; reviewer raw_text is still useful.
-            return None, [], "DEGRADED"
-        parsed = extracted
+        parsed = _extract_fenced_json(text)
+        if parsed is None:
+            extracted = extract_json_array(text)
+            if extracted is None:
+                # Keep non-JSON output untruncated; reviewer raw_text is still useful.
+                return None, [], "DEGRADED"
+            parsed = extracted
     if isinstance(parsed, dict):
         signal = str(parsed.get("verdict") or parsed.get("status") or "UNKNOWN").upper()
         raw_findings = parsed.get("findings") or []
@@ -258,6 +284,12 @@ class ReviewCoordinator:
             aggregate = "PASS"
         else:
             aggregate = "DEGRADED"
+            # Honest flag: DEGRADED must always carry a reason so `degraded` matches
+            # `aggregate_signal`. Insufficient quorum is itself the reason.
+            if not degraded_reasons:
+                degraded_reasons.append(
+                    f"quorum_not_met: pass_count={pass_count} < min_successful={min_successful}"
+                )
         return ReviewRunResult(
             request=asdict(request),
             actors=[asdict(actor) for actor in actors],

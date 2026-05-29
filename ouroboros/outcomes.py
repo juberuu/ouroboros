@@ -63,6 +63,7 @@ _BLOCKING_TOOL_STATUSES = frozenset({
     "violation",
     "workspace_blocked",
     "write_file_blocked",
+    "root_required_user_files",
 })
 _RECOVERY_TOOL_NAMES = frozenset({
     "claude_code_edit",
@@ -74,6 +75,77 @@ _RECOVERY_TOOL_NAMES = frozenset({
     "write_file",
 })
 
+# Tools/roots whose successful use means the turn produced reviewable work.
+# Root-aware write tools: these take a `root` arg, so the scratch-exclusion rule
+# applies directly. claude_code_edit uses `cwd` (not `root`) and resolves its own
+# work dir, so it is NOT root-checked here; its deliverables surface via the
+# artifact_registered flag (declared outputs), and workspace/headless claude_code_edit
+# is review-eligible anyway because such tasks are not direct chat.
+_ROOT_WRITE_TOOLS = frozenset({"write_file", "edit_text"})
+_EFFECT_COMMIT_TOOLS = frozenset({"commit_reviewed", "vcs_commit_reviewed"})
+# Exclusion model: only pure scratch is exempt. Every other root is a real surface
+# (deliverable, workspace, repo, skill payload, or a light-mode skill write via
+# runtime_data). Excluding by scratch — not enumerating "deliverable" roots —
+# keeps the immune gate complete as roots evolve and errs toward reviewing work.
+_SCRATCH_ROOTS = frozenset({"task_drive"})
+_OK_TOOL_STATUSES = frozenset({"", "ok", "ok_autocorrected"})
+# Process/service tools that produce a registered deliverable when given outputs=[...].
+_EFFECT_PROCESS_TOOLS = frozenset({"run_command", "run_script", "start_service"})
+# Substantial coding tool (cwd-based, no root arg): any successful run is real
+# work. Over-counting a rare scratch edit is the safe direction for an immune
+# gate; under-counting a real repo/deliverable edit (no outputs=[...]) is not.
+_EFFECT_CODING_TOOLS = frozenset({"claude_code_edit"})
+
+
+def turn_has_reviewable_effects(llm_trace: Dict[str, Any]) -> bool:
+    """True if the turn produced real reviewable work, from a structured trace read.
+
+    Reviewable effects are a successful repo commit; a successful write_file/
+    edit_text to any non-scratch root; any successful claude_code_edit (a
+    substantial coding tool that uses cwd, not root); a successful
+    run_command/run_script/start_service that declared deliverable outputs; or any
+    successful tool that registered a canonical artifact (artifact_registered — a
+    stopped service's outputs or a user_files write). Pure scratch (root=task_drive)
+    write_file/edit_text does NOT count. Cognitive-memory updates go through
+    update_identity/update_scratchpad/knowledge_write (not write tools) and are
+    intentionally not effects; a light-mode generic cognitive write is
+    advisory-redirected and never succeeds here. This is a P3 deterministic immune
+    signal over observable runtime facts, never message-content inspection.
+    """
+    for call in llm_trace.get("tool_calls") or []:
+        if not isinstance(call, dict) or call.get("is_error"):
+            continue
+        if str(call.get("status") or "ok") not in _OK_TOOL_STATUSES:
+            continue
+        tool = str(call.get("tool") or "")
+        args = call.get("args") if isinstance(call.get("args"), dict) else {}
+        if tool in _EFFECT_COMMIT_TOOLS or tool in _EFFECT_CODING_TOOLS:
+            return True
+        if tool in _ROOT_WRITE_TOOLS and str(args.get("root") or "active_workspace") not in _SCRATCH_ROOTS:
+            return True
+        if tool in _EFFECT_PROCESS_TOOLS:
+            outputs = args.get("outputs")
+            if isinstance(outputs, list) and any(str(item or "").strip() for item in outputs):
+                return True
+        # Structured flag set from the full (untruncated) tool result at capture time;
+        # covers stopped-service outputs and user_files writes regardless of preview length.
+        if call.get("artifact_registered"):
+            return True
+    return False
+
+
+def _user_file_basenames(args: Dict[str, Any]) -> set[str]:
+    """Lowercased file basenames declared in a write call's ``path`` and ``files[]``."""
+    candidates = [args.get("path")]
+    candidates.extend(
+        (entry or {}).get("path") for entry in (args.get("files") or []) if isinstance(entry, dict)
+    )
+    return {
+        pathlib.PurePath(str(candidate or "")).name.lower()
+        for candidate in candidates
+        if str(candidate or "").strip()
+    }
+
 
 def _unresolved_tool_errors(llm_trace: Dict[str, Any]) -> List[Dict[str, Any]]:
     calls = [item for item in (llm_trace.get("tool_calls") or []) if isinstance(item, dict)]
@@ -83,7 +155,41 @@ def _unresolved_tool_errors(llm_trace: Dict[str, Any]) -> List[Dict[str, Any]]:
             continue
         tool = str(item.get("tool") or "unknown")
         status = str(item.get("status") or "error")
+        # COGNITIVE_TOOL_REQUIRED is an advisory redirect, not a task failure: the
+        # agent is told to use update_identity/update_scratchpad/knowledge_write, but
+        # a self-initiated cognitive write through the wrong tool must never fail the
+        # task (that was the original "Привет fails" regression). Skip it entirely.
+        if status == "cognitive_tool_required":
+            continue
         if status not in _BLOCKING_TOOL_STATUSES and tool not in _RECOVERY_TOOL_NAMES:
+            continue
+        # ROOT_REQUIRED_USER_FILES is a real user deliverable. It is recovered ONLY
+        # when every blocked file name (path or files[]) is later written via
+        # root=user_files. This branch is terminal: it never falls through to the
+        # generic same-target/artifact_registered recovery, which could otherwise
+        # clear it through a non-user_files write (e.g. a run_command output).
+        if status == "root_required_user_files":
+            blocked_args = item.get("args") if isinstance(item.get("args"), dict) else {}
+            blocked_names = _user_file_basenames(blocked_args)
+            recovered_names: set[str] = set()
+            for later in calls[idx + 1:]:
+                if not (isinstance(later, dict) and not later.get("is_error")):
+                    continue
+                later_args = later.get("args") if isinstance(later.get("args"), dict) else {}
+                if (
+                    str(later.get("tool") or "") in _ROOT_WRITE_TOOLS
+                    and str(later_args.get("root") or "") == "user_files"
+                    and str(later.get("status") or "ok") in _OK_TOOL_STATUSES
+                ):
+                    recovered_names |= _user_file_basenames(later_args)
+            if not (blocked_names and blocked_names <= recovered_names):
+                unresolved.append({
+                    "tool": tool,
+                    "status": status,
+                    "exit_code": item.get("exit_code"),
+                    "signal": item.get("signal"),
+                    "result": str(item.get("result") or "")[:500],
+                })
             continue
         args = item.get("args") if isinstance(item.get("args"), dict) else {}
         target_parts = []
@@ -211,9 +317,12 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
             "tool_errors": tool_errors[:20],
         }
 
+    review_decision = llm_trace.get("review_decision") if isinstance(llm_trace.get("review_decision"), dict) else {}
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "result_status": result_status,
+        "review_eligibility": str(review_decision.get("eligibility") or "not_eligible"),
+        "review_trigger": str(review_decision.get("trigger") or "not_evaluated"),
         "finish_reason": reason_code,
         "reason_code": reason_code,
         "final_text": text,

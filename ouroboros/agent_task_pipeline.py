@@ -225,6 +225,8 @@ def emit_task_results(
             "task_id": task.get("id"), "task_type": task.get("type"),
             "result_status": result_status,
             "reason_code": reason_code,
+            "review_eligibility": str(loop_outcome.get("review_eligibility") or ""),
+            "review_trigger": str(loop_outcome.get("review_trigger") or ""),
             "duration_sec": duration_sec,
             "tool_calls": n_tool_calls,
             "tool_errors": n_tool_errors,

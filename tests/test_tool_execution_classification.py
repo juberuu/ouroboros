@@ -50,10 +50,24 @@ def test_runtime_policy_blocks_are_semantic_tool_failures():
         ("run_command", "⚠️ GIT_VIA_SHELL_BLOCKED: use vcs tools.", "git_via_shell_blocked"),
         ("write_file", "⚠️ HEAL_MODE_BLOCKED: repair scope only.", "heal_mode_blocked"),
         ("read_file", "⚠️ REPO_READ_BLOCKED: protected path.", "blocked"),
+        ("write_file", "⚠️ COGNITIVE_TOOL_REQUIRED: use update_identity for memory/identity.md.", "cognitive_tool_required"),
+        ("write_file", "⚠️ ROOT_REQUIRED_USER_FILES: pass root='user_files'.", "root_required_user_files"),
     ]
     for tool, text, status in cases:
         assert _is_tool_execution_failure(True, text)
         assert _extract_result_metadata(tool, text, True)["status"] == status
+
+
+def test_artifact_registered_flag_set_from_full_result():
+    # The structured flag is captured from the full result (before the 700-char
+    # trace preview), so a late ARTIFACT_OUTPUTS marker is not lost.
+    long_tail = "log line\n" * 500
+    result = long_tail + "\nARTIFACT_OUTPUTS:\n- registered output /x -> artifact_store:x"
+    meta = _extract_result_metadata("stop_service", result, False)
+    assert meta.get("artifact_registered") is True
+    # An artifact-output ERROR (failed registration) must not set the success flag.
+    err = _extract_result_metadata("run_command", "⚠️ ARTIFACT_OUTPUT_ERROR: boom", True)
+    assert not err.get("artifact_registered")
 
 
 def test_shell_regex_autocorrect_success_is_not_tool_failure():
