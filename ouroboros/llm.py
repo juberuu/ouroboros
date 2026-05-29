@@ -12,6 +12,7 @@ import copy
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ouroboros.provider_models import normalize_anthropic_model_id, normalize_model_identity
+from ouroboros.utils import in_worker_process
 
 log = logging.getLogger(__name__)
 
@@ -587,6 +588,11 @@ class LLMClient:
         if use_local:
             return self._chat_local(messages, tools, max_tokens, tool_choice)
 
+        # Central worker policy: any LLM call from a worker process is fork-safe
+        # by default (no system proxy lookup). This covers the main agent loop,
+        # consolidator, post-task threads, and supervisor dedup without each
+        # call site having to remember no_proxy=True.
+        no_proxy = no_proxy or in_worker_process()
         target = self._resolve_remote_target(model)
         return self._chat_remote(
             target, messages, tools, reasoning_effort, max_tokens, tool_choice, temperature,
@@ -605,6 +611,7 @@ class LLMClient:
         no_proxy: bool = False,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Async remote chat; no_proxy keeps forked macOS workers off OS proxy APIs."""
+        no_proxy = no_proxy or in_worker_process()
         if tools:
             raise ValueError("chat_async does not support tool calls")
         target = self._resolve_remote_target(model)

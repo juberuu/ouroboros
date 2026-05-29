@@ -35,7 +35,14 @@ MAX_FUNCTION_LINES = 300
 # v6.6.0-rc.1 adds 4 helpers for effect-gated task-acceptance review and light-mode
 # cognitive/root redirects: turn_has_reviewable_effects, _user_file_basenames,
 # _extract_fenced_json, light_cognitive_or_root_redirect. Keep the headroom narrow.
-MAX_TOTAL_FUNCTIONS = 2430
+# v6.7.0-rc.1 adds reliability helpers for the subagent/worker fixes: worker
+# network policy (in_worker_process), monotonic status guard
+# (_is_status_regression), terminal-event/cancel emitters (_emit_task_done_terminal,
+# _emit_cancel_task_done, _drop_cancelled_pending), bundled-node resolution
+# (embedded_node_candidates, resolve_bundled_node), marketplace opener
+# (_build_opener), and the schedule pool-unavailable guard
+# (_reject_schedule_pool_unavailable). Keep the headroom narrow.
+MAX_TOTAL_FUNCTIONS = 2445
 # Grandfathered modules are accepted debt until their surfaces stabilize/split.
 GRANDFATHERED_OVERSIZED_MODULES = {
     "llm.py",

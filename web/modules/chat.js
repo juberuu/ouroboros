@@ -853,6 +853,17 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         if (newNode) record.timelineEl.replaceChild(newNode, lastEl);
     }
 
+    // Patch a specific timeline node in place (evolving subagent dashboard rows).
+    function patchTimelineItemAt(item, record) {
+        const key = String(item.lineKey || '').replace(/[^A-Za-z0-9_-]/g, '');
+        const el = key ? record.timelineEl.querySelector(`[data-live-line-key="${key}"]`) : null;
+        if (!el) return renderLiveCardTimeline(record);
+        const wrapper = document.createElement('div');
+        wrapper.innerHTML = buildTimelineItemHtml(item, record).trim();
+        const newNode = wrapper.firstElementChild;
+        if (newNode) record.timelineEl.replaceChild(newNode, el);
+    }
+
     function scheduleHistorySync() {
         if (historySyncTimer) clearTimeout(historySyncTimer);
         historySyncTimer = setTimeout(() => {
@@ -898,14 +909,34 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
 
         const syntheticKey = summary.dedupeKey || dedupeKey || `${summary.phase || 'working'}|${headline}|${summary.body || ''}`;
         const shouldRenderLine = summary.visible !== false && Boolean(headline || summary.body);
+        // Subagent dashboard rows (key prefix parent-subagent:) update IN PLACE —
+        // one evolving row per child (scheduled -> working -> done/failed) — instead
+        // of appending a new line per lifecycle event. Generic lines keep the
+        // append + last-duplicate-count behavior.
+        const inPlaceByKey = syntheticKey.startsWith('parent-subagent:');
         let timelineUpdate = 'none';
+        let patchIndex = -1;
         if (shouldRenderLine) {
-            const last = record.items[record.items.length - 1];
-            if (last && last.dedupeKey === syntheticKey) {
-                last.count += 1;
-                last.ts = ts || last.ts;
-                last.fullHeadline = summary.fullHeadline || last.fullHeadline || last.headline;
-                last.fullBody = summary.fullBody || last.fullBody || last.body;
+            const lastIdx = record.items.length - 1;
+            const existingIdx = inPlaceByKey
+                ? record.items.findIndex((it) => it.dedupeKey === syntheticKey)
+                : (lastIdx >= 0 && record.items[lastIdx].dedupeKey === syntheticKey ? lastIdx : -1);
+            if (existingIdx !== -1 && inPlaceByKey) {
+                const it = record.items[existingIdx];
+                it.phase = summary.phase || it.phase;
+                it.headline = headline || it.headline;
+                it.fullHeadline = summary.fullHeadline || headline || it.fullHeadline;
+                it.body = summary.body || '';
+                it.fullBody = summary.fullBody || summary.body || it.fullBody || '';
+                it.ts = ts || it.ts;
+                patchIndex = existingIdx;
+                timelineUpdate = 'patch-at';
+            } else if (existingIdx !== -1) {
+                const it = record.items[existingIdx];
+                it.count += 1;
+                it.ts = ts || it.ts;
+                it.fullHeadline = summary.fullHeadline || it.fullHeadline || it.headline;
+                it.fullBody = summary.fullBody || it.fullBody || it.body;
                 timelineUpdate = 'patch-last';
             } else {
                 const lineKey = `line-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -936,6 +967,8 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
             appendTimelineItem(lastItem, record);
         } else if (timelineUpdate === 'patch-last' && lastItem) {
             patchLastTimelineItem(lastItem, record);
+        } else if (timelineUpdate === 'patch-at' && patchIndex !== -1) {
+            patchTimelineItemAt(record.items[patchIndex], record);
         }
         if (!suppressDomInsert && !_syncPass1Active) insertMessageNode(record.root);
         syncLiveCardLayout(record);
@@ -1023,9 +1056,41 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         scheduleTaskUiCleanup(taskState);
     }
 
+    // child task_id -> { parentId, role }, learned from subagent lifecycle pings.
+    // Lets the child's terminal task_done (log channel) resolve the PARENT
+    // dashboard row instead of spawning a separate child card.
+    const subagentChildParents = new Map();
+    // Children whose parent row has reached a terminal phase — late non-lifecycle
+    // progress for these must NOT revive the row back to "working".
+    const subagentTerminalChildren = new Set();
+
+    const SUBAGENT_EVENT_PHASE = {
+        scheduled: 'start', running: 'working', completed: 'done',
+        failed: 'error', rejected: 'warn', cancelled: 'warn', interrupted: 'warn',
+    };
+    const SUBAGENT_EVENT_LABEL = {
+        scheduled: 'scheduled', running: 'running', completed: 'done',
+        failed: 'failed', rejected: 'rejected', cancelled: 'cancelled', interrupted: 'interrupted',
+    };
+
     function updateLiveCardFromProgressMessage(msg) {
         const taskId = msg?.task_id || activeLiveGroupId || '';
         if (!taskId) return;
+        // Subagent lifecycle pings render ONLY as an in-place row on the PARENT
+        // card — never a separate child card (that was the duplicate stack with
+        // mismatched emojis). Route and stop.
+        const lifecycleParent = String(msg?.parent_task_id || '').trim();
+        if (msg?.subagent_event && lifecycleParent && lifecycleParent !== taskId) {
+            updateParentCardFromSubagent(msg, msg.ts || new Date().toISOString());
+            return;
+        }
+        // A known subagent child's own (non-lifecycle) progress stays on the parent
+        // dashboard (Variant A) — never a standalone child card. Route the latest
+        // line to the parent row so an active child is informative, not silent.
+        if (subagentChildParents.has(taskId)) {
+            routeSubagentProgressToParent(taskId, msg);
+            return;
+        }
         // Progress messages are visible status; do not force-open completed replay.
         const taskState = getTaskUiState(taskId, true);
         if (taskState && !taskState.completed) taskState.forceCard = true;
@@ -1061,20 +1126,91 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         if (!parentId || !childId || parentId === childId) return;
         const event = String(evt.subagent_event || 'update').toLowerCase();
         const role = String(evt.subagent_role || '').trim();
-        const phase = event === 'completed' ? 'progress'
-            : ['failed', 'rejected', 'cancelled', 'interrupted'].includes(event) ? 'warn'
-                : event === 'scheduled' ? 'start'
-                    : 'working';
+        subagentChildParents.set(childId, { parentId, role });
+        // NOTE: 'interrupted' is intentionally excluded — it is retryable
+        // (written before requeue), so the child resumes and its later progress
+        // must still flow to the parent row. Only true terminals lock it.
+        if (['completed', 'failed', 'cancelled', 'rejected'].includes(event)) {
+            subagentTerminalChildren.add(childId);  // lock the row terminal
+        }
+        const phase = SUBAGENT_EVENT_PHASE[event] || 'working';
+        const label = SUBAGENT_EVENT_LABEL[event] || event;
+        const shortChild = childId.slice(0, 8);
+        const headline = role
+            ? `Subagent ${shortChild} · ${role} — ${label}`
+            : `Subagent ${shortChild} — ${label}`;
+        // Surface the child's handoff (result/trace/error) as expandable detail
+        // on its row so the parent card is the single place to read child output.
+        const detailParts = [];
+        if (evt.result) detailParts.push(`[RESULT]\n${String(evt.result)}`);
+        if (evt.trace_summary) detailParts.push(`[TRACE]\n${String(evt.trace_summary)}`);
+        if (evt.error) detailParts.push(`[ERROR]\n${String(evt.error)}`);
+        const cost = Number(evt.cost_usd || 0);
+        const metaBits = [`child=${shortChild}`];
+        if (role) metaBits.push(`role=${role}`);
+        if (cost > 0) metaBits.push(`cost=$${cost.toFixed(2)}`);
+        const key = `parent-subagent:${parentId}:${childId}`;
         forceTaskCard(parentId);
         queueTaskLiveUpdate({
             phase,
-            headline: `Subagent ${childId} ${event}`,
-            body: role ? `role=${role}` : '',
+            headline,
+            body: '',
+            fullBody: detailParts.join('\n\n'),
             visible: true,
             promote: false,
-            meta: ['parent task', `child=${childId}`, role ? `role=${role}` : ''],
-            dedupeKey: `parent-subagent:${parentId}:${childId}:${event}`,
-        }, parentId, normalizeLogTs(tsValue || new Date().toISOString()), `parent-subagent:${parentId}:${childId}:${event}`);
+            meta: metaBits,
+            dedupeKey: key,
+        }, parentId, normalizeLogTs(tsValue || new Date().toISOString()), key);
+    }
+
+    // A known child's own (non-lifecycle) progress updates the parent dashboard
+    // row in place (Variant A: keep the active child informative, no child card).
+    function routeSubagentProgressToParent(childId, msg) {
+        const info = subagentChildParents.get(childId);
+        if (!info) return;
+        if (subagentTerminalChildren.has(childId)) return;  // never revive a finished row
+        const { parentId, role } = info;
+        const shortChild = String(childId).slice(0, 8);
+        const line = String(msg?.content || msg?.text || '').trim().split('\n').filter(Boolean).pop() || '';
+        const headline = role
+            ? `Subagent ${shortChild} · ${role} — running`
+            : `Subagent ${shortChild} — running`;
+        const key = `parent-subagent:${parentId}:${childId}`;
+        forceTaskCard(parentId);
+        const meta = [`child=${shortChild}`];
+        if (role) meta.push(`role=${role}`);
+        queueTaskLiveUpdate({
+            phase: 'working',
+            headline,
+            body: line.slice(0, 200),
+            visible: true,
+            promote: false,
+            meta,
+            dedupeKey: key,
+        }, parentId, normalizeLogTs(msg?.ts || new Date().toISOString()), key);
+    }
+
+    // Resolve a child's PARENT dashboard row from the child's terminal task_done
+    // (which arrives on the log channel without subagent metadata).
+    function routeSubagentTerminalToParent(childId, evt) {
+        const info = subagentChildParents.get(childId);
+        if (!info) return false;
+        const resultStatus = String(evt.result_status || '').toLowerCase();
+        const status = String(evt.status || '').toLowerCase();
+        const failed = ['failed', 'infra_failed'].includes(resultStatus) || status === 'failed';
+        const cancelled = status === 'cancelled' || status === 'cancel_requested' || resultStatus === 'cancelled';
+        const rejected = status === 'rejected_duplicate' || resultStatus === 'rejected_duplicate';
+        const event = failed ? 'failed' : cancelled ? 'cancelled' : rejected ? 'rejected' : 'completed';
+        updateParentCardFromSubagent({
+            delegation_role: 'subagent',
+            parent_task_id: info.parentId,
+            subagent_task_id: childId,
+            subagent_role: info.role,
+            subagent_event: event,
+            result: evt.result || '',
+            error: evt.error || '',
+        }, evt.ts || evt.timestamp || new Date().toISOString());
+        return true;
     }
 
     function updateLiveCardFromLogEvent(evt) {
@@ -1082,6 +1218,14 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         const taskId = getLogTaskGroupId(evt) || activeLiveGroupId || '';
         if (!taskId) return;
         const eventType = evt.type || evt.event || '';
+        // A known subagent child's log events never create a standalone child
+        // card; only its terminal task_done resolves the parent dashboard row.
+        if (subagentChildParents.has(taskId)) {
+            if (eventType === 'task_done') {
+                routeSubagentTerminalToParent(taskId, evt);
+            }
+            return;
+        }
         if (eventType === 'tool_call_started') {
             markTaskToolCall(taskId, 1);
         } else if ((eventType === 'task_metrics_event' || eventType === 'task_eval') && Number.isFinite(Number(evt.tool_calls))) {
@@ -1289,6 +1433,33 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
                         taskId,
                     });
                 }
+                // Resolve cards whose task is already terminal on the server
+                // (crash storm / hard timeout / cancellation write a terminal
+                // status but no task_summary). Without this their progress-only
+                // cards re-inflate as "Working" forever on reload/reconnect.
+                const terminalTaskStatus = new Map();
+                for (const msg of messages) {
+                    const tid = msg.task_id || '';
+                    if (tid && msg.task_terminal_status) {
+                        terminalTaskStatus.set(tid, String(msg.task_terminal_status));
+                    }
+                }
+                for (const [tid, status] of terminalTaskStatus) {
+                    // Variant A subagents have no standalone card — their terminal
+                    // status must resolve the PARENT dashboard row, mirroring the
+                    // live task_done path. Otherwise the parent row spins forever
+                    // after a reload when a child crashed/cancelled/timed out.
+                    if (subagentChildParents.has(tid)) {
+                        routeSubagentTerminalToParent(tid, { status, result_status: status });
+                        continue;
+                    }
+                    const rec = liveCardRecords.get(tid);
+                    if (rec && !rec.finished) {
+                        insertCardIfNeeded(tid);
+                        finishLiveCard(tid, status === 'failed' ? 'error' : 'done');
+                    }
+                }
+
                 // Append disconnected visible cards after mid-task reload; skip trivial placeholders.
                 for (const [tid, rec] of liveCardRecords) {
                     if (rec && rec.root && !rec.root.isConnected && !retiredTaskIds.has(tid)) {

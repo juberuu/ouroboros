@@ -1,4 +1,4 @@
-# Ouroboros v6.6.0-rc.1 — Architecture & Reference
+# Ouroboros v6.7.0-rc.1 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -209,6 +209,15 @@ module. In packaged mode, `run --start` launches the desktop app/launcher and
 waits for `/api/health` plus `api_state.supervisor_ready`; it must not start
 `server.py` directly through `sys.executable -m`, because that bypasses the
 launcher-owned bootstrap, process record, and managed repo lifecycle.
+
+Packaged artifacts also bundle an official, notarized **Node.js LTS** runtime
+under `node-standalone/` (pruned to just `bin/node[.exe]`). The build scripts
+fetch it via `scripts/download_node_standalone.sh`/`.ps1` (SHASUMS-verified)
+before PyInstaller, and the macOS signing pass re-signs it under the hardened
+runtime so it is not code-signing-killed (SIGKILL) when launched from the
+packaged app. `platform_layer.resolve_bundled_node()` prefers this bundled node
+over a PATH (e.g. Homebrew) node for `node`-runtime skills and the `node --check`
+preflight; in dev builds without the bundle it falls back to PATH node.
 
 External workspace tasks keep `Env.repo_dir` pinned to the Ouroboros repo for
 prompts, BIBLE, architecture/development docs, skills, and review policy.
@@ -904,13 +913,13 @@ Runtime floors:
 | OUROBOROS_MODEL_CODE | google/gemini-3.5-flash | Code editing model |
 | OUROBOROS_MODEL_LIGHT | google/gemini-3.5-flash | Fast/cheap model (safety, consciousness) |
 | OUROBOROS_MODEL_FALLBACK | anthropic/claude-sonnet-4.6 | Fallback when primary fails |
-| CLAUDE_CODE_MODEL | claude-opus-4-6[1m] | Anthropic model for Claude Agent SDK advisory/review internals (values: sonnet, opus, `claude-opus-4-6[1m]`, or full model name; the `[1m]` suffix is a Claude Code selector that requests the 1M-context extended mode) |
+| CLAUDE_CODE_MODEL | opus[1m] | Anthropic model for Claude Agent SDK advisory/review internals (values: sonnet, opus, `opus[1m]`, or full model name; the `[1m]` suffix is a Claude Code selector that requests the 1M-context extended mode) |
 | OUROBOROS_MAX_WORKERS | 5 | Worker process pool size |
 | TOTAL_BUDGET | 10.0 | Total budget in USD |
 | OUROBOROS_PER_TASK_COST_USD | 20.0 | Per-task soft threshold in USD |
 | OUROBOROS_TOOL_TIMEOUT_SEC | 600 | Global tool timeout override (read live from settings.json on each tool call) |
 | OUROBOROS_WEBSEARCH_MODEL | gpt-5.2 | Official OpenAI Responses model for `web_search` when `OPENAI_BASE_URL` is empty |
-| OUROBOROS_REVIEW_MODELS | openai/gpt-5.5,google/gemini-3.5-flash,anthropic/claude-opus-4.6 | Comma-separated reviewer slots for triad/plan/task/skill review; duplicate model IDs are independent slots |
+| OUROBOROS_REVIEW_MODELS | openai/gpt-5.5,google/gemini-3.5-flash,anthropic/claude-opus-4.8 | Comma-separated reviewer slots for triad/plan/task/skill review; duplicate model IDs are independent slots |
 | OUROBOROS_SCOPE_REVIEW_MODELS | openai/gpt-5.5 | Comma-separated scope reviewer slots; falls back from legacy `OUROBOROS_SCOPE_REVIEW_MODEL` |
 | OUROBOROS_TASK_REVIEW_MODE | auto | Task result review mode: `off`, `auto`, or `required`. `auto` is agent-choice via the visible review tool (host never enforces — LLM-first). `required` is effect-gated: the host injects review before finalization only when the turn produced an observable reviewable effect (a commit; a `write_file`/`edit_text` to any non-scratch root; any `claude_code_edit`; a `run_command`/`run_script`/`start_service` with declared `outputs`; or a registered artifact) or the task is not direct chat (queued/headless/scheduled). Pure conversation with no reviewable effect (e.g. a greeting) is never reviewed even in `required`; cognitive-memory updates are not reviewable effects. Verdicts are advisory and full output is injected untruncated. The decision is recorded as `review_eligibility`/`review_trigger` in `loop_outcome` and the `task_eval` event. |
 | OUROBOROS_OBSERVABILITY_RETENTION_DAYS | unset | Deprecated audit knob for private observability manifests/blobs; forensic replay blobs are kept compressed indefinitely |

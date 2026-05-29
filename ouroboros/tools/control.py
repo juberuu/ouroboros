@@ -228,8 +228,29 @@ def _schedule_task(
 
 
 def _cancel_task(ctx: ToolContext, task_id: str) -> str:
-    ctx.pending_events.append({"type": "cancel_task", "task_id": task_id, "ts": utc_now_iso()})
-    return f"Cancel requested: {task_id}"
+    try:
+        tid = validate_task_id(task_id)
+    except ValueError as exc:
+        return f"⚠️ TOOL_ARG_ERROR (cancel_task): {exc}"
+    # Latch a cancel-intent status on disk immediately so the parent's own
+    # find_child_tasks view treats the child as terminal right away — this stops
+    # the handoff-reminder loop from re-injecting "still scheduled" every round,
+    # even before the supervisor tears the task down.
+    try:
+        from ouroboros.task_results import STATUS_CANCEL_REQUESTED
+        write_task_result(
+            ctx.drive_root, tid, STATUS_CANCEL_REQUESTED,
+            result="Cancellation requested by agent; awaiting supervisor teardown.",
+        )
+    except Exception:
+        log.debug("Failed to latch cancel_requested status for %s", tid, exc_info=True)
+    # Emit live so the supervisor processes the cancellation within one loop tick
+    # instead of at end-of-round. schedule_subagent already emits live; cancel
+    # must be symmetric, otherwise a scheduled child looks stuck until the
+    # parent's whole turn finishes.
+    emitted = _emit_control_event(ctx, {"type": "cancel_task", "task_id": tid, "ts": utc_now_iso()})
+    note = " (live)" if emitted == "live" else " (deferred to round end)"
+    return f"Cancel requested: {tid}{note}"
 
 
 def _request_deep_self_review(ctx: ToolContext, reason: str) -> str:

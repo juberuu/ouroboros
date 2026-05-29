@@ -410,7 +410,7 @@ def _run_async(coro):
 def run_edit(
     prompt: str,
     cwd: str,
-    model: str = "claude-opus-4-6[1m]",
+    model: str = "opus[1m]",
     max_turns: int = DEFAULT_CLAUDE_CODE_MAX_TURNS,
     budget: Optional[float] = None,
     system_prompt: Optional[str] = None,
@@ -432,7 +432,7 @@ def run_edit(
     ))
 
 
-def resolve_claude_code_model(default: str = "claude-opus-4-6[1m]") -> str:
+def resolve_claude_code_model(default: str = "opus[1m]") -> str:
     """Return the env/settings Claude Code model, aligned with config defaults."""
     return os.environ.get("CLAUDE_CODE_MODEL", default).strip() or default
 
@@ -440,7 +440,7 @@ def resolve_claude_code_model(default: str = "claude-opus-4-6[1m]") -> str:
 def run_readonly(
     prompt: str,
     cwd: str,
-    model: str = "claude-opus-4-6[1m]",
+    model: str = "opus[1m]",
     max_turns: int = DEFAULT_CLAUDE_CODE_MAX_TURNS,
     effort: Optional[str] = "high",
 ) -> ClaudeCodeResult:

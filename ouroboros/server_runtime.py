@@ -7,6 +7,7 @@ from typing import Awaitable, Callable
 
 from ouroboros.provider_models import (
     ANTHROPIC_DIRECT_DEFAULTS,
+    CLOUDRU_DIRECT_DEFAULTS,
     OPENAI_DIRECT_DEFAULTS,
     compute_direct_review_models_fallback,
     migrate_model_value,
@@ -28,7 +29,19 @@ _DIRECT_PROVIDER_AUTO_DEFAULTS = {
         "OUROBOROS_MODEL_LIGHT": ANTHROPIC_DIRECT_DEFAULTS["light"],
         "OUROBOROS_MODEL_FALLBACK": ANTHROPIC_DIRECT_DEFAULTS["fallback"],
     },
+    "cloudru": {
+        "OUROBOROS_MODEL": CLOUDRU_DIRECT_DEFAULTS["main"],
+        "OUROBOROS_MODEL_CODE": CLOUDRU_DIRECT_DEFAULTS["code"],
+        "OUROBOROS_MODEL_LIGHT": CLOUDRU_DIRECT_DEFAULTS["light"],
+        "OUROBOROS_MODEL_FALLBACK": CLOUDRU_DIRECT_DEFAULTS["fallback"],
+    },
 }
+# Legacy values that should be auto-replaced with a provider's direct defaults.
+# Cloud.ru intentionally has NO entry: a Cloud.ru-only user's main/code/light
+# slots match the shipped SETTINGS_DEFAULTS (google/gemini) and migrate via the
+# `current in {"", default}` check, and the review/scope slots are rebuilt from
+# the (now cloudru::) main by _normalize_direct_review_models — so no per-model
+# legacy set is needed (verified by test_apply_runtime_provider_defaults_cloudru_*).
 _DIRECT_PROVIDER_LEGACY_DEFAULTS = {
     "openai": {
         "OUROBOROS_MODEL": {"anthropic/claude-opus-4.6"},
@@ -37,8 +50,11 @@ _DIRECT_PROVIDER_LEGACY_DEFAULTS = {
         "OUROBOROS_MODEL_FALLBACK": {"anthropic/claude-sonnet-4.6"},
     },
     "anthropic": {
-        "OUROBOROS_MODEL": {"anthropic/claude-opus-4.6"},
-        "OUROBOROS_MODEL_CODE": {"anthropic/claude-opus-4.6"},
+        # Both spellings of the previous opus default so existing Anthropic-only
+        # users on claude-opus-4.6 migrate to the new claude-opus-4.8 default
+        # (agreed migration), whether stored in dot/slash or dash/colon form.
+        "OUROBOROS_MODEL": {"anthropic/claude-opus-4.6", "anthropic::claude-opus-4-6"},
+        "OUROBOROS_MODEL_CODE": {"anthropic/claude-opus-4.6", "anthropic::claude-opus-4-6"},
         "OUROBOROS_MODEL_LIGHT": {"anthropic/claude-sonnet-4.6"},
         "OUROBOROS_MODEL_FALLBACK": {"anthropic/claude-sonnet-4.6"},
     },
@@ -151,13 +167,19 @@ def _exclusive_direct_remote_provider(settings: dict) -> str:
     has_legacy_openai_base = bool(_setting_text(settings, "OPENAI_BASE_URL"))
     has_compatible = bool(_setting_text(settings, "OPENAI_COMPATIBLE_API_KEY"))
     has_cloudru = bool(_setting_text(settings, "CLOUDRU_FOUNDATION_MODELS_API_KEY"))
-    if has_openrouter or has_legacy_openai_base or has_compatible or has_cloudru:
+    # Mirror config._exclusive_direct_remote_provider_env: OpenRouter / legacy
+    # base / compatible disqualify exclusivity; among the real direct providers
+    # (OpenAI, Anthropic, Cloud.ru) return one only when exactly one is set.
+    if has_openrouter or has_legacy_openai_base or has_compatible:
         return ""
-    if has_official_openai and not has_anthropic:
-        return "openai"
-    if has_anthropic and not has_official_openai:
-        return "anthropic"
-    return ""
+    direct = [
+        name for name, present in (
+            ("openai", has_official_openai),
+            ("anthropic", has_anthropic),
+            ("cloudru", has_cloudru),
+        ) if present
+    ]
+    return direct[0] if len(direct) == 1 else ""
 
 
 def _normalize_direct_review_models(settings: dict, provider: str) -> str:

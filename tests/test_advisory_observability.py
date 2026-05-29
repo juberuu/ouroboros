@@ -31,7 +31,7 @@ def _get_advisory_module():
     "case_id,env_value,expected",
     [
         ("returns_env_value", "sonnet", "sonnet"),
-        ("falls_back_to_shipped_default", None, "claude-opus-4-6[1m]"),
+        ("falls_back_to_shipped_default", None, "opus[1m]"),
         ("strips_whitespace", "  claude-opus-4.6  ", "claude-opus-4.6"),
     ],
 )

@@ -181,7 +181,10 @@ def test_skill_preflight_fails_closed_when_file_limit_omits_payload(tmp_path, mo
     assert result["omitted_count"] > 0
 
 
-def test_skill_preflight_missing_validator_runtime_is_not_ok(tmp_path, monkeypatch):
+def test_skill_preflight_missing_validator_runtime_is_tolerated(tmp_path, monkeypatch):
+    # A missing external runtime (e.g. node not installed, or a Homebrew node
+    # code-signing-killed by macOS) is an environment gap, not a syntax verdict.
+    # Preflight must skip it rather than block; tri-model review stays authoritative.
     ctx = _make_ctx(tmp_path)
     skills_root = tmp_path / "skills"
     skills_root.mkdir()
@@ -194,7 +197,11 @@ def test_skill_preflight_missing_validator_runtime_is_not_ok(tmp_path, monkeypat
 
     result = json.loads(sp._handle_skill_preflight(ctx, skill="alpha", paths=["scripts/check.js"]))
 
-    assert result["ok"] is False
+    assert result["ok"] is True
+    assert result.get("degraded") is True
+    js = next(f for f in result["files"] if f["path"].endswith("check.js"))
+    assert js.get("skipped") is True
+    assert js.get("skip_reason") == "runtime_unavailable"
 
 
 def test_skill_preflight_validates_literal_widget_schema(tmp_path, monkeypatch):

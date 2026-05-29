@@ -209,7 +209,9 @@ def restore_pending_from_snapshot(max_age_sec: int = 900) -> int:
             return 0
         if (time.time() - ts_unix) > max_age_sec:
             return 0
+        from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, STATUS_CANCEL_REQUESTED, load_task_result
         restored = 0
+        skipped_terminal = 0
         for row in (snap.get("pending") or []):
             task = row.get("task") if isinstance(row, dict) else None
             if not isinstance(task, dict):
@@ -217,22 +219,54 @@ def restore_pending_from_snapshot(max_age_sec: int = 900) -> int:
             chat_id = task.get("chat_id")
             if not task.get("id") or chat_id is None or chat_id == "":
                 continue
+            # Do not resurrect a task that already reached a terminal/cancelled
+            # outcome on disk — restoring it would re-create a "ghost" pending
+            # entry that nothing should run.
+            try:
+                existing = load_task_result(DRIVE_ROOT, str(task.get("id")))
+                existing_status = str(existing.get("status") or "") if existing else ""
+                # Terminal OR cancel-intent — both must not be resurrected as pending.
+                if existing_status in _TRULY_TERMINAL_STATUSES or existing_status == STATUS_CANCEL_REQUESTED:
+                    skipped_terminal += 1
+                    continue
+            except Exception:
+                log.debug("Snapshot restore terminal-status check failed for %s", task.get("id"), exc_info=True)
             enqueue_task(task)
             restored += 1
-        if restored > 0:
+        if restored > 0 or skipped_terminal > 0:
             append_jsonl(
                 DRIVE_ROOT / "logs" / "supervisor.jsonl",
                 {
                     "ts": utc_now_iso(),
                     "type": "queue_restored_from_snapshot",
                     "restored_pending": restored,
+                    "skipped_terminal": skipped_terminal,
                 },
             )
+        if restored > 0:
             persist_queue_snapshot(reason="queue_restored")
         return restored
     except Exception:
         log.warning("Failed to restore pending queue from snapshot", exc_info=True)
         return 0
+
+
+def _emit_cancel_task_done(task: Optional[Dict[str, Any]], task_id: str) -> None:
+    """Emit a task_done event after a cancel so the UI live card resolves.
+    Covers both the agent-tool path (_handle_cancel_task) and the HTTP path."""
+    try:
+        from supervisor import workers
+        chat_id = int((task or {}).get("chat_id") or 0) if isinstance(task, dict) else 0
+        if chat_id:
+            workers.get_event_q().put({
+                "type": "task_done",
+                "task_id": str(task_id),
+                "chat_id": chat_id,
+                "status": "cancelled",
+                "result_status": "cancelled",
+            })
+    except Exception:
+        log.debug("Failed to emit task_done for cancelled task %s", task_id, exc_info=True)
 
 
 def cancel_task_by_id(task_id: str) -> bool:
@@ -251,6 +285,7 @@ def cancel_task_by_id(task_id: str) -> bool:
                     )
                 except Exception:
                     pass
+                _emit_cancel_task_done(t, task_id)
                 persist_queue_snapshot(reason="cancel_pending")
                 return True
 
@@ -266,6 +301,7 @@ def cancel_task_by_id(task_id: str) -> bool:
                     )
                 except Exception:
                     pass
+                _emit_cancel_task_done(task, task_id)
                 if w.proc.is_alive():
                     w.proc.terminate()
                 w.proc.join(timeout=5)
@@ -281,6 +317,26 @@ def cancel_task_by_id(task_id: str) -> bool:
                 workers.respawn_worker(w.wid)
                 persist_queue_snapshot(reason="cancel_running")
                 return True
+
+        # Cancel arrived after the task already left pending/running (e.g. the
+        # worker finished in the window between the cancel_requested latch and
+        # this teardown). Finalize a lingering cancel-intent so the task ends as
+        # terminal `cancelled`, not stuck forever at `cancel_requested`.
+        try:
+            from ouroboros.task_results import (
+                STATUS_CANCEL_REQUESTED, STATUS_CANCELLED, load_task_result, write_task_result,
+            )
+            existing = load_task_result(DRIVE_ROOT, task_id) or {}
+            if str(existing.get("status") or "") == STATUS_CANCEL_REQUESTED:
+                write_task_result(
+                    DRIVE_ROOT, task_id, STATUS_CANCELLED,
+                    result="Task cancelled (finished before supervisor teardown).",
+                )
+                _emit_cancel_task_done(existing, task_id)
+                persist_queue_snapshot(reason="cancel_finalize")
+                return True
+        except Exception:
+            log.debug("Cancel finalize-on-miss failed for %s", task_id, exc_info=True)
     return False
 
 
@@ -433,6 +489,24 @@ def enforce_task_timeouts() -> None:
                     f"🛑 Hard-timeout: task {task_id} killed after {int(runtime_sec)}s.\n"
                     f"Worker {worker_id} restarted. Retry limit exhausted, task stopped."
                 ))
+
+        # When the task is terminally stopped (no retry), emit task_done so the
+        # UI live card resolves instead of spinning forever. A retry keeps the
+        # card active under the same (subagent) id or a superseding id.
+        if not requeued:
+            try:
+                done_chat_id = int(task.get("chat_id") or 0) if isinstance(task, dict) else 0
+                if done_chat_id:
+                    workers.get_event_q().put({
+                        "type": "task_done",
+                        "task_id": str(task_id),
+                        "chat_id": done_chat_id,
+                        "status": "failed",
+                        "result_status": "infra_failed",
+                        "reason_code": "hard_timeout",
+                    })
+            except Exception:
+                log.debug("Failed to emit task_done for hard-timeout task %s", task_id, exc_info=True)
 
         persist_queue_snapshot(reason="task_hard_timeout")
 

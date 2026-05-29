@@ -236,18 +236,18 @@ def test_apply_runtime_provider_defaults_normalizes_anthropic_only_setup():
         "OUROBOROS_SCOPE_REVIEW_MODEL",
         "OUROBOROS_SCOPE_REVIEW_MODELS",
     }
-    assert normalized["OUROBOROS_MODEL"] == "anthropic::claude-opus-4-6"
-    assert normalized["OUROBOROS_MODEL_CODE"] == "anthropic::claude-opus-4-6"
+    assert normalized["OUROBOROS_MODEL"] == "anthropic::claude-opus-4-8"
+    assert normalized["OUROBOROS_MODEL_CODE"] == "anthropic::claude-opus-4-8"
     assert normalized["OUROBOROS_MODEL_LIGHT"] == "anthropic::claude-sonnet-4-6"
     assert normalized["OUROBOROS_MODEL_FALLBACK"] == "anthropic::claude-sonnet-4-6"
     # v4.39.0: `[main, light, light]` — 3 commit-triad slots, 2 unique.
     assert normalized["OUROBOROS_REVIEW_MODELS"] == (
-        "anthropic::claude-opus-4-6,"
+        "anthropic::claude-opus-4-8,"
         "anthropic::claude-sonnet-4-6,"
         "anthropic::claude-sonnet-4-6"
     )
-    assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] == "anthropic::claude-opus-4-6"
-    assert normalized["OUROBOROS_SCOPE_REVIEW_MODELS"] == "anthropic::claude-opus-4-6"
+    assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] == "anthropic::claude-opus-4-8"
+    assert normalized["OUROBOROS_SCOPE_REVIEW_MODELS"] == "anthropic::claude-opus-4-8"
 
     normalized, changed, changed_keys = apply_runtime_provider_defaults({
         "ANTHROPIC_API_KEY": "sk-ant",
@@ -262,11 +262,11 @@ def test_apply_runtime_provider_defaults_normalizes_anthropic_only_setup():
 
     assert changed
     assert "OUROBOROS_MODEL" in changed_keys
-    assert normalized["OUROBOROS_MODEL"] == "anthropic::claude-opus-4-6"
-    assert normalized["OUROBOROS_MODEL_CODE"] == "anthropic::claude-opus-4-6"
+    assert normalized["OUROBOROS_MODEL"] == "anthropic::claude-opus-4-8"
+    assert normalized["OUROBOROS_MODEL_CODE"] == "anthropic::claude-opus-4-8"
     assert normalized["OUROBOROS_MODEL_LIGHT"] == "anthropic::claude-sonnet-4-6"
     assert normalized["OUROBOROS_REVIEW_MODELS"] == (
-        "anthropic::claude-opus-4-6,"
+        "anthropic::claude-opus-4-8,"
         "anthropic::claude-sonnet-4-6,"
         "anthropic::claude-sonnet-4-6"
     )
@@ -274,7 +274,7 @@ def test_apply_runtime_provider_defaults_normalizes_anthropic_only_setup():
 
 def test_apply_runtime_provider_defaults_normalizes_anthropic_only_setup_with_shipped_defaults():
     """Fresh-install path: user starts with shipped SETTINGS_DEFAULTS (claude-opus-4.6)
-    and adds only an Anthropic key. Main/code must normalize to anthropic::claude-opus-4-6
+    and adds only an Anthropic key. Main/code must normalize to anthropic::claude-opus-4-8
     (the dash form), and REVIEW_MODELS must fall back to main × 3 for the missing triad.
     This regression-pins the post-v4.33.1 default migration path."""
     normalized, changed, changed_keys = apply_runtime_provider_defaults({
@@ -295,18 +295,18 @@ def test_apply_runtime_provider_defaults_normalizes_anthropic_only_setup_with_sh
         "OUROBOROS_SCOPE_REVIEW_MODEL",
         "OUROBOROS_SCOPE_REVIEW_MODELS",
     }
-    assert normalized["OUROBOROS_MODEL"] == "anthropic::claude-opus-4-6"
-    assert normalized["OUROBOROS_MODEL_CODE"] == "anthropic::claude-opus-4-6"
+    assert normalized["OUROBOROS_MODEL"] == "anthropic::claude-opus-4-8"
+    assert normalized["OUROBOROS_MODEL_CODE"] == "anthropic::claude-opus-4-8"
     assert normalized["OUROBOROS_MODEL_LIGHT"] == "anthropic::claude-sonnet-4-6"
     assert normalized["OUROBOROS_MODEL_FALLBACK"] == "anthropic::claude-sonnet-4-6"
     # v4.39.0: `[main, light, light]` — 3 commit-triad slots, 2 unique.
     assert normalized["OUROBOROS_REVIEW_MODELS"] == (
-        "anthropic::claude-opus-4-6,"
+        "anthropic::claude-opus-4-8,"
         "anthropic::claude-sonnet-4-6,"
         "anthropic::claude-sonnet-4-6"
     )
-    assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] == "anthropic::claude-opus-4-6"
-    assert normalized["OUROBOROS_SCOPE_REVIEW_MODELS"] == "anthropic::claude-opus-4-6"
+    assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] == "anthropic::claude-opus-4-8"
+    assert normalized["OUROBOROS_SCOPE_REVIEW_MODELS"] == "anthropic::claude-opus-4-8"
 
 
 def test_apply_runtime_provider_defaults_skips_non_official_or_custom_configs():
@@ -348,7 +348,7 @@ class TestClassifyRuntimeProviderChange:
 
     def test_direct_normalize_for_anthropic_only(self):
         before = {"ANTHROPIC_API_KEY": "sk-ant"}
-        after = {"ANTHROPIC_API_KEY": "sk-ant", "OUROBOROS_MODEL": "anthropic::claude-opus-4-6"}
+        after = {"ANTHROPIC_API_KEY": "sk-ant", "OUROBOROS_MODEL": "anthropic::claude-opus-4-8"}
         assert classify_runtime_provider_change(before, after) == "direct_normalize"
 
     def test_reverse_migrate_for_anthropic_plus_openrouter(self):
@@ -356,7 +356,7 @@ class TestClassifyRuntimeProviderChange:
         after = {
             "ANTHROPIC_API_KEY": "sk-ant",
             "OPENROUTER_API_KEY": "sk-or-v1-new",
-            "OUROBOROS_MODEL": "anthropic::claude-opus-4-6",
+            "OUROBOROS_MODEL": "anthropic::claude-opus-4-8",
         }
         assert classify_runtime_provider_change(before, after) == "reverse_migrate"
 
@@ -416,3 +416,44 @@ class TestSettingsSaveWarningContract:
         new = {"OPENAI_API_KEY": "sk-openai", "OPENROUTER_API_KEY": "sk-or-v1", "OUROBOROS_MODEL": "openai::gpt-5.5"}
         warnings = self._simulate_save_warning(old, new)
         assert warnings == []
+
+
+def test_apply_runtime_provider_defaults_cloudru_only_elevates_to_direct():
+    """A Cloud.ru-only user (no OpenRouter/OpenAI/Anthropic) must get cloudru::
+    direct routing for main/code AND for the review/scope reviewer slots, so they
+    can fully use Ouroboros (incl. passing tri-model review) with only a Cloud.ru key."""
+    from ouroboros.server_runtime import apply_runtime_provider_defaults
+
+    normalized, changed, changed_keys = apply_runtime_provider_defaults({
+        "CLOUDRU_FOUNDATION_MODELS_API_KEY": "cr-key",
+    })
+    assert changed
+    assert "OUROBOROS_MODEL" in changed_keys
+    assert normalized["OUROBOROS_MODEL"].startswith("cloudru::")
+    assert normalized["OUROBOROS_MODEL_CODE"].startswith("cloudru::")
+    assert all(m.startswith("cloudru::") for m in normalized["OUROBOROS_REVIEW_MODELS"].split(","))
+    assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"].startswith("cloudru::")
+
+
+def test_apply_runtime_provider_defaults_cloudru_migrates_populated_shipped_defaults():
+    """The realistic save path: a Cloud.ru-only user whose settings already carry
+    the shipped (non-cloudru) defaults. main/code AND every review/scope reviewer
+    slot must still migrate to cloudru:: so no slot points at a provider with no key."""
+    from ouroboros.server_runtime import apply_runtime_provider_defaults
+
+    normalized, changed, _ = apply_runtime_provider_defaults({
+        "CLOUDRU_FOUNDATION_MODELS_API_KEY": "cr-key",
+        "OUROBOROS_MODEL": "google/gemini-3.5-flash",
+        "OUROBOROS_MODEL_CODE": "google/gemini-3.5-flash",
+        "OUROBOROS_MODEL_LIGHT": "google/gemini-3.5-flash",
+        "OUROBOROS_MODEL_FALLBACK": "anthropic/claude-sonnet-4.6",
+        "OUROBOROS_REVIEW_MODELS": "openai/gpt-5.5,google/gemini-3.5-flash,anthropic/claude-opus-4.8",
+        "OUROBOROS_SCOPE_REVIEW_MODEL": "openai/gpt-5.5",
+        "OUROBOROS_SCOPE_REVIEW_MODELS": "openai/gpt-5.5",
+    })
+    assert changed
+    assert normalized["OUROBOROS_MODEL"].startswith("cloudru::")
+    assert normalized["OUROBOROS_MODEL_CODE"].startswith("cloudru::")
+    assert all(m.startswith("cloudru::") for m in normalized["OUROBOROS_REVIEW_MODELS"].split(","))
+    assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"].startswith("cloudru::")
+    assert normalized["OUROBOROS_SCOPE_REVIEW_MODELS"].startswith("cloudru::")

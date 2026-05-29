@@ -33,6 +33,8 @@ MODEL_PRICING_STATIC = {
     "anthropic/claude-opus-4-6": (5.0, 0.5, 25.0),
     "anthropic/claude-opus-4.7": (5.0, 0.5, 25.0),
     "anthropic/claude-opus-4-7": (5.0, 0.5, 25.0),
+    "anthropic/claude-opus-4.8": (5.0, 0.5, 25.0),
+    "anthropic/claude-opus-4-8": (5.0, 0.5, 25.0),
     "anthropic/claude-opus-4": (15.0, 1.5, 75.0),
     "anthropic/claude-sonnet-4": (3.0, 0.30, 15.0),
     "anthropic/claude-sonnet-4.6": (3.0, 0.30, 15.0),
@@ -59,6 +61,13 @@ MODEL_PRICING_STATIC = {
     _LEGACY_GEMINI_3_FLASH_PREVIEW: (0.15, 0.015, 0.60),
     "x-ai/grok-3-mini": (0.30, 0.075, 0.50),
     "qwen/qwen3.5-plus-02-15": (0.40, 0.04, 2.40),
+    # Cloud.ru Foundation Models default (GLM-4.7). Cloud.ru does not expose a
+    # generation-cost API and these IDs are absent from OpenRouter pricing, so a
+    # static estimate is the only cost source for cloudru-only users (P8 budget
+    # integrity). Approximate (per 1M tokens, input/cached/output); refine if
+    # Cloud.ru publishes exact rates.
+    "cloudru/zai-org/GLM-4.7": (0.50, 0.50, 2.00),
+    "cloudru::zai-org/GLM-4.7": (0.50, 0.50, 2.00),
 }
 
 _pricing_fetched = False

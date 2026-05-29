@@ -106,6 +106,31 @@ def test_schedule_task_falls_back_to_pending_events_when_live_queue_unavailable(
     assert event_queue.events == []
 
 
+def test_cancel_task_latches_cancel_requested_and_emits_live(tmp_path):
+    from ouroboros.tools.control import _cancel_task
+    from ouroboros.task_results import (
+        STATUS_CANCEL_REQUESTED, STATUS_RUNNING, load_task_result, write_task_result,
+    )
+
+    # Pre-existing running status: the latch must advance running -> cancel_requested.
+    write_task_result(tmp_path, "child42", STATUS_RUNNING, result="working")
+    event_queue = _FakeEventQueue()
+    ctx = SimpleNamespace(
+        task_depth=0, pending_events=[], event_queue=event_queue,
+        drive_root=tmp_path, task_id="parent123", task_metadata={},
+        is_direct_chat=False, is_workspace_mode=lambda: False,
+    )
+
+    result = _cancel_task(ctx, "child42")
+
+    assert "Cancel requested" in result
+    # The latch is actually written (a missing write_task_result import would
+    # silently skip this and leave the status at running).
+    assert load_task_result(tmp_path, "child42")["status"] == STATUS_CANCEL_REQUESTED
+    # And the cancel is emitted live (not buffered to round end).
+    assert any(e.get("type") == "cancel_task" and e.get("task_id") == "child42" for e in event_queue.events)
+
+
 def test_schedule_task_memory_modes_prepare_declared_drive_shape(tmp_path):
     from ouroboros.tools.control import _schedule_task
 
@@ -559,6 +584,7 @@ def test_handle_schedule_task_duplicate_writes_rejected_status(tmp_path, monkeyp
         DRIVE_ROOT = tmp_path
         PENDING = []
         RUNNING = {}
+        WORKERS = {0: SimpleNamespace(busy_task_id=None)}
 
         def load_state(self):
             return {"owner_chat_id": 1}
@@ -648,7 +674,7 @@ def test_handle_schedule_task_accepts_unique_subagent_with_lineage_and_constrain
         DRIVE_ROOT = tmp_path
         PENDING = []
         RUNNING = {}
-        WORKERS = {}
+        WORKERS = {0: SimpleNamespace(busy_task_id=None)}
 
         def load_state(self):
             return {"owner_chat_id": 1}
@@ -719,7 +745,7 @@ def test_handle_schedule_task_rejects_internal_subagent_without_child_drive_cont
         DRIVE_ROOT = tmp_path
         PENDING = []
         RUNNING = {}
-        WORKERS = {}
+        WORKERS = {0: SimpleNamespace(busy_task_id=None)}
 
         def load_state(self):
             return {"owner_chat_id": 1}
@@ -764,7 +790,7 @@ def test_handle_schedule_task_uses_event_chat_id_without_owner(tmp_path, monkeyp
         DRIVE_ROOT = tmp_path
         PENDING = []
         RUNNING = {}
-        WORKERS = {}
+        WORKERS = {0: SimpleNamespace(busy_task_id=None)}
 
         def load_state(self):
             return {}
@@ -832,7 +858,7 @@ def test_handle_schedule_task_depth_rejection_writes_failed_status(tmp_path, mon
         DRIVE_ROOT = tmp_path
         PENDING = []
         RUNNING = {}
-        WORKERS = {}
+        WORKERS = {0: SimpleNamespace(busy_task_id=None)}
 
         def load_state(self):
             return {"owner_chat_id": 1}
@@ -879,7 +905,7 @@ def test_handle_schedule_task_rejects_legacy_subagent_event_schema(tmp_path, mon
         DRIVE_ROOT = tmp_path
         PENDING = []
         RUNNING = {}
-        WORKERS = {}
+        WORKERS = {0: SimpleNamespace(busy_task_id=None)}
 
         def load_state(self):
             return {"owner_chat_id": 1}
@@ -924,7 +950,7 @@ def test_handle_schedule_task_rejects_fourth_active_subagent(tmp_path, monkeypat
         DRIVE_ROOT = tmp_path
         PENDING = [{"id": f"p{i}", "root_task_id": "root123", "delegation_role": "subagent"} for i in range(2)]
         RUNNING = {"r1": {"task": {"id": "r1", "root_task_id": "root123", "delegation_role": "subagent"}}}
-        WORKERS = {}
+        WORKERS = {0: SimpleNamespace(busy_task_id=None)}
 
         def load_state(self):
             return {"owner_chat_id": 1}
@@ -1026,6 +1052,55 @@ def test_handle_schedule_task_rejects_fourth_active_subagent(tmp_path, monkeypat
     assert load_task_result(tmp_path, "childfail")["status"] == STATUS_FAILED
     assert sent and "failed" in sent[-1][1]
     assert sent[-1][2]["progress_meta"]["subagent_event"] == "failed"
+
+
+def test_handle_schedule_task_fails_fast_when_worker_pool_unavailable(tmp_path, monkeypatch):
+    """When the worker pool is empty (e.g. disabled after a crash storm), a
+    schedule must NOT be left as a 'scheduled' ghost — it gets a terminal
+    workers_unavailable result so the parent can act."""
+    from supervisor import events as ev_module
+    from ouroboros.task_results import STATUS_FAILED
+
+    monkeypatch.setattr(ev_module, "_find_duplicate_task", lambda *args, **kwargs: None)
+    sent = []
+
+    class FakeCtx:
+        DRIVE_ROOT = tmp_path
+        PENDING = []
+        RUNNING = {}
+        WORKERS = {}  # pool disabled / not available
+
+        def load_state(self):
+            return {"owner_chat_id": 1}
+
+        def send_with_budget(self, chat_id, text, **kwargs):
+            sent.append((chat_id, text, kwargs))
+
+        def enqueue_task(self, task):
+            raise AssertionError("must not enqueue when worker pool is unavailable")
+
+        def persist_queue_snapshot(self, reason=""):
+            pass
+
+    ev_module._handle_schedule_task(
+        {
+            "type": "schedule_subagent",
+            "task_id": "ghost1",
+            "objective": "Work with no workers",
+            "expected_output": "Nothing",
+            "depth": 1,
+            "root_task_id": "rootX",
+            "delegation_role": "subagent",
+            "memory_mode": "forked",
+            "drive_root": str(tmp_path / "state" / "headless_tasks" / "ghost1" / "data"),
+            "child_drive_root": str(tmp_path / "state" / "headless_tasks" / "ghost1" / "data"),
+        },
+        FakeCtx(),
+    )
+
+    data = json.loads((tmp_path / "task_results" / "ghost1.json").read_text(encoding="utf-8"))
+    assert data["status"] == STATUS_FAILED
+    assert data.get("reason_code") == "workers_unavailable"
 
 
 def test_handle_task_done_finalizes_workspace_subagent_artifacts(tmp_path, monkeypatch):

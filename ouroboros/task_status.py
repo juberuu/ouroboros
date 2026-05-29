@@ -16,6 +16,7 @@ from ouroboros.headless import (
     ARTIFACT_STATUS_READY,
 )
 from ouroboros.task_results import (
+    STATUS_CANCEL_REQUESTED,
     STATUS_CANCELLED,
     STATUS_COMPLETED,
     STATUS_FAILED,
@@ -35,6 +36,10 @@ FINAL_STATUSES: frozenset[str] = frozenset({
     STATUS_FAILED,
     STATUS_CANCELLED,
     STATUS_REJECTED_DUPLICATE,
+    # Cancel-intent latch: the parent should treat the child as terminal as soon
+    # as cancellation is requested so the handoff-reminder loop stops; the
+    # supervisor finalizes it to STATUS_CANCELLED shortly after.
+    STATUS_CANCEL_REQUESTED,
 })
 NONTERMINAL_STATUSES: frozenset[str] = frozenset({
     STATUS_REQUESTED,

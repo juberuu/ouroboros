@@ -29,6 +29,24 @@ def set_log_sink(fn: Optional[Callable[[Dict[str, Any]], None]]) -> None:
 def utc_now_iso() -> str:
     return _dt.datetime.now(tz=_dt.timezone.utc).isoformat()
 
+
+# Worker processes set OUROBOROS_IN_WORKER=1 before importing the agent stack.
+WORKER_PROCESS_ENV = "OUROBOROS_IN_WORKER"
+
+
+def in_worker_process() -> bool:
+    """Return True inside a supervisor worker process.
+
+    Worker processes disable system proxy resolution (``trust_env=False`` /
+    ``ProxyHandler({})``) on every HTTP client they create. This is the central
+    network-transport policy that keeps workers fork-safe: the macOS
+    ``_scproxy.get_proxies`` -> ``SCDynamicStoreCopyProxies`` lookup crashes
+    (SIGSEGV) on the child side of a multi-threaded fork. It is also a clean,
+    proxy-free default for spawned workers on every platform.
+    """
+    return os.environ.get(WORKER_PROCESS_ENV) == "1"
+
+
 def emit_log_event(
     event_queue: Any,
     payload: Dict[str, Any],

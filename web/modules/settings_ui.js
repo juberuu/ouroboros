@@ -281,7 +281,7 @@ export function renderSettingsPage() {
                         <div class="form-row">
                             <div class="form-field">
                                 <label>Claude Code Model</label>
-                                <input id="s-claude-code-model" value="claude-opus-4-6[1m]" placeholder="sonnet, opus, claude-opus-4-6[1m], or full name">
+                                <input id="s-claude-code-model" value="opus[1m]" placeholder="sonnet, opus, opus[1m], or full name">
                                 <div class="settings-inline-note">Anthropic model for delegated review/edit integrations. Requires Anthropic key in Providers.</div>
                             </div>
                         </div>

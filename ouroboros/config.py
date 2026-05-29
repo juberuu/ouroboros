@@ -51,7 +51,7 @@ SETTINGS_DEFAULTS = {
     "OUROBOROS_MODEL_CODE": "google/gemini-3.5-flash",
     "OUROBOROS_MODEL_LIGHT": "google/gemini-3.5-flash",
     "OUROBOROS_MODEL_FALLBACK": "anthropic/claude-sonnet-4.6",
-    "CLAUDE_CODE_MODEL": "claude-opus-4-6[1m]",
+    "CLAUDE_CODE_MODEL": "opus[1m]",
     "OUROBOROS_MAX_WORKERS": 5,
     "TOTAL_BUDGET": 10.0,
     "OUROBOROS_PER_TASK_COST_USD": 20.0,
@@ -64,7 +64,7 @@ SETTINGS_DEFAULTS = {
     "OUROBOROS_EVO_COST_THRESHOLD": 0.10,
     "OUROBOROS_WEBSEARCH_MODEL": "gpt-5.2",
     # Pre-commit review: comma-separated provider-tagged model list
-    "OUROBOROS_REVIEW_MODELS": "openai/gpt-5.5,google/gemini-3.5-flash,anthropic/claude-opus-4.6",
+    "OUROBOROS_REVIEW_MODELS": "openai/gpt-5.5,google/gemini-3.5-flash,anthropic/claude-opus-4.8",
     # Pre-commit review enforcement: advisory | blocking
     "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
     # Optional auto-grants remain bound to the reviewed content hash.
@@ -181,13 +181,20 @@ def _exclusive_direct_remote_provider_env() -> str:
     has_legacy_base = bool(str(os.environ.get("OPENAI_BASE_URL", "") or "").strip())
     has_compatible = bool(str(os.environ.get("OPENAI_COMPATIBLE_API_KEY", "") or "").strip())
     has_cloudru = bool(str(os.environ.get("CLOUDRU_FOUNDATION_MODELS_API_KEY", "") or "").strip())
-    if has_openrouter or has_legacy_base or has_compatible or has_cloudru:
+    # OpenRouter / legacy OpenAI base / OpenAI-compatible all route through the
+    # OpenRouter-style stack, so their presence means "not an exclusive direct
+    # provider". Among the real direct providers (official OpenAI, Anthropic,
+    # Cloud.ru), return one only when exactly one is configured.
+    if has_openrouter or has_legacy_base or has_compatible:
         return ""
-    if has_openai and not has_anthropic:
-        return "openai"
-    if has_anthropic and not has_openai:
-        return "anthropic"
-    return ""
+    direct = [
+        name for name, present in (
+            ("openai", has_openai),
+            ("anthropic", has_anthropic),
+            ("cloudru", has_cloudru),
+        ) if present
+    ]
+    return direct[0] if len(direct) == 1 else ""
 
 
 def resolve_effort(task_type: str) -> str:
@@ -220,7 +227,7 @@ def resolve_effort(task_type: str) -> str:
 
 def direct_provider_review_models_fallback(provider: str) -> list[str]:
     """Return the exact review-models list a direct-provider fallback emits."""
-    if provider not in ("openai", "anthropic"):
+    if provider not in ("openai", "anthropic", "cloudru"):
         return []
     main_model = str(
         os.environ.get("OUROBOROS_MODEL", SETTINGS_DEFAULTS["OUROBOROS_MODEL"]) or ""

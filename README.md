@@ -6,11 +6,14 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 6.6.0-rc.1](https://img.shields.io/badge/version-6.6.0--rc.1-green.svg)](VERSION)
+[![OuroborosHub](https://img.shields.io/badge/OuroborosHub-skills%20marketplace-8A2BE2.svg)](https://github.com/joi-lab/OuroborosHub)
+[![Version 6.7.0-rc.1](https://img.shields.io/badge/version-6.7.0--rc.1-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
 Not a coding assistant. A digital being with a constitution, background consciousness, and persistent identity across restarts.
+
+> **[OuroborosHub](https://github.com/joi-lab/OuroborosHub)** — the community skills marketplace for Ouroboros. Browse, install, and publish reviewed skills (transport bridges like A2A/Telegram, tools, and UI widgets) straight from the app's Skills tab, or explore the catalog at [github.com/joi-lab/OuroborosHub](https://github.com/joi-lab/OuroborosHub).
 
 > **Previous version:** The original Ouroboros ran in Google Colab via Telegram and evolved through 30+ self-directed cycles in its first 24 hours. That version is available at [joi-lab/ouroboros](https://github.com/joi-lab/ouroboros). This repository is the next generation — a native desktop application for macOS, Linux, and Windows with a web UI, local model support, and a layered safety system (hardcoded sandbox plus policy-based LLM safety check).
 
@@ -174,7 +177,7 @@ Settings now exposes tabbed provider cards for:
 - **OpenAI** — official OpenAI API (use model values like `openai::gpt-5.5`)
 - **OpenAI Compatible** — any custom OpenAI-style endpoint (use `openai-compatible::...`)
 - **Cloud.ru Foundation Models** — Cloud.ru OpenAI-compatible runtime (use `cloudru::...`)
-- **Anthropic** — direct runtime routing (`anthropic::claude-opus-4.6`, etc.) plus Claude Agent SDK tools
+- **Anthropic** — direct runtime routing (`anthropic::claude-opus-4.8`, etc.) plus Claude Agent SDK tools
 
 If OpenRouter is not configured and only official OpenAI is present, untouched default model values are auto-remapped to `openai::gpt-5.5` / `openai::gpt-5.5-mini` so the first-run path does not strand the app on OpenRouter-only defaults.
 
@@ -408,7 +411,7 @@ All keys are configured through the **Settings** page in the UI or during the fi
 | Code | `google/gemini-3.5-flash` | Code editing |
 | Light | `google/gemini-3.5-flash` | Safety checks, consciousness, fast tasks |
 | Fallback | `anthropic/claude-sonnet-4.6` | When primary model fails |
-| Claude Agent SDK | `claude-opus-4-6[1m]` | Anthropic model for Claude Agent SDK advisory/review internals; the `[1m]` suffix is a Claude Code selector that requests the 1M-context extended mode |
+| Claude Agent SDK | `opus[1m]` | Anthropic model for Claude Agent SDK advisory/review internals; the `[1m]` suffix is a Claude Code selector that requests the 1M-context extended mode |
 | Scope Review | `openai/gpt-5.5` | Scope reviewer slot default; `OUROBOROS_SCOPE_REVIEW_MODELS` may configure multiple independent slots |
 | Web Search | `gpt-5.2` | OpenAI Responses API for web search |
 
@@ -484,11 +487,11 @@ the contribution guide only routes to those sources.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 6.7.0-rc.1 | 2026-05-29 | **rc(reliability): structurally close the subagent worker-crash, ghost-task, and stuck-spinner classes; provider-agnostic review; bundled Node.** macOS/Windows workers use `spawn` (Linux keeps `fork`) and a central `OUROBOROS_IN_WORKER` no-proxy policy eliminates the macOS `_scproxy` fork SIGSEGV class. A monotonic `write_task_result` lifecycle guard plus live `cancel_task` + `cancel_requested` latch prevent stale/ghost status; terminal `task_done` events on every crash/kill/timeout/cancel path (and reconnect/history reconciliation) stop the perpetual spinner. Signal crashes are terminal (no retry) for all task types. Subagent UI dedup (Variant A: parent dashboard rows, in-place updates, no duplicate child card). Cloud.ru becomes a first-class exclusive-direct provider so Ouroboros is usable with any single key; `skill_preflight` tolerates missing/killed validators and the build bundles a signed Node.js LTS for node-runtime skills. New-user defaults: review `claude-opus-4.8`, Claude Code `opus[1m]`. README OuroborosHub badge/callout. |
 | 6.6.0-rc.1 | 2026-05-29 | **rc(review): effect-gate task-acceptance review and clarify light-mode cognitive writes.** Host-enforced `required` review fires only on turns with observable reviewable effects (commit/deliverable/workspace/self-mod) or non-direct tasks, so plain chat is never reviewed; `auto` stays LLM-first. Adds `review_eligibility`/`review_trigger` to loop outcomes, routes light-mode cognitive writes to `update_identity`/`update_scratchpad`/`knowledge_write` (`COGNITIVE_TOOL_REQUIRED`) and absolute home paths to `root=user_files` (`ROOT_REQUIRED_USER_FILES`) with recovery, parses fenced JSON-object reviewer verdicts, and makes `DEGRADED` review signals carry an honest reason. |
 | 6.5.0-rc.4 | 2026-05-28 | **rc(ci): normalize Windows process executable names.** Keeps the rc.3 scope and treats `.exe` interpreter/writer basenames as their canonical tool names so light-mode runtime-data guards run on Windows. |
 | 6.5.0-rc.3 | 2026-05-28 | **rc(ci): finish Windows runtime-data guard portability.** Keeps the rc.2 scope and fixes escaped Windows Python path literals in light-mode runtime-data process guards so full CI can build release artifacts. |
 | 6.5.0-rc.2 | 2026-05-28 | **rc(ci): harden light-mode artifact release candidate.** Keeps the rc.1 runtime scope, fixes CI smoke gates around Claude Code helper size/function counts, and makes runtime-data artifact guards portable across Windows path forms. |
-| 6.5.0-rc.1 | 2026-05-28 | **rc(runtime): repair light-mode external deliverables and artifact audit.** Adds `user_files`, makes light mode a self-repo/control-plane boundary rather than an OS sandbox, allows task/user/artifact cwd for process tools and `claude_code_edit`, registers declared external outputs into task artifacts, classifies tool blocks as semantic failures, and repairs stale running task status after infra failures. |
 Older releases are preserved in Git tags and GitHub releases. The 6.0.0 through 6.4.0-rc.1 rows, the 5.2.0 through 5.33.0-rc.6 rows, and former `4.0.0` rows are rolled off to respect the P9 changelog cap; their full bodies remain at their git tags.
 
 ---

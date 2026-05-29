@@ -661,6 +661,45 @@ def _find_duplicate_task(
         return None
 
 
+def _reject_schedule_pool_unavailable(
+    ctx: Any,
+    *,
+    tid: str,
+    chat_id: int,
+    delegation_role: str,
+    parent_id: Any,
+    root_task_id: str,
+    role: str,
+    result_fields: Dict[str, Any],
+) -> None:
+    """Write a terminal workers_unavailable result instead of leaving a ghost
+    'scheduled' task when the worker pool is disabled."""
+    detail = (
+        "Subagent not scheduled: the worker pool is currently unavailable "
+        "(workers_unavailable), likely disabled after repeated worker crashes "
+        "(direct-chat mode). It was NOT left scheduled — do the work inline "
+        "yourself, or retry after /restart."
+    )
+    log.warning("Rejecting schedule for %s — worker pool unavailable", tid)
+    try:
+        write_task_result(
+            ctx.DRIVE_ROOT, tid, STATUS_FAILED, **result_fields,
+            result=detail, reason_code="workers_unavailable", cost_usd=0.0,
+        )
+    except Exception:
+        log.warning("Failed to persist workers-unavailable rejection for %s", tid, exc_info=True)
+    # The terminal result is already durable above; never let a notification
+    # failure (torn-down bus, etc.) propagate into the supervisor event loop.
+    try:
+        if chat_id:
+            if delegation_role == "subagent":
+                _send_subagent_rejection(ctx, chat_id, tid=tid, parent_id=parent_id, root_task_id=root_task_id, role=role, status=STATUS_FAILED, detail=detail)
+            else:
+                ctx.send_with_budget(chat_id, f"⚠️ Task {tid} not scheduled: worker pool unavailable.")
+    except Exception:
+        log.warning("Failed to notify workers-unavailable rejection for %s", tid, exc_info=True)
+
+
 def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
     st = ctx.load_state()
     owner_chat_id = st.get("owner_chat_id")
@@ -789,6 +828,19 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
             )
         except Exception:
             log.warning("Failed to persist no-chat-target rejection for %s", tid, exc_info=True)
+        return
+
+    # Fail fast when the worker pool is disabled (e.g. after a crash storm put
+    # the supervisor in direct-chat mode). Without this, the task is written as
+    # 'scheduled' and enqueued but nothing can ever run it — a permanent "ghost"
+    # the parent keeps polling. Give the parent a clear terminal signal instead
+    # so it can do the work inline.
+    if desc and not (getattr(ctx, "WORKERS", {}) or {}):
+        _reject_schedule_pool_unavailable(
+            ctx, tid=tid, chat_id=chat_id, delegation_role=delegation_role,
+            parent_id=parent_id, root_task_id=root_task_id, role=role,
+            result_fields=result_fields,
+        )
         return
 
     if desc:

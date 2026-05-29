@@ -65,6 +65,16 @@ _FORBIDDEN_ENV_FORWARD_KEYS = FORBIDDEN_SKILL_SETTINGS
 
 def _resolve_runtime_binary(runtime: str) -> Optional[str]:
     import sys
+    if runtime == "node":
+        # Prefer the bundled, signed node over a PATH (Homebrew) node that macOS
+        # code-signing enforcement may SIGKILL inside the packaged app.
+        try:
+            from ouroboros.platform_layer import resolve_bundled_node
+            bundled = resolve_bundled_node()
+            if bundled:
+                return bundled
+        except Exception:
+            log.debug("resolve_bundled_node failed", exc_info=True)
     candidates = _ALLOWED_RUNTIMES.get(runtime or "", ())
     for candidate in candidates:
         resolved = shutil.which(candidate)
