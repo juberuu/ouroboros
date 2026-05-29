@@ -698,13 +698,20 @@ def _patch_from_result(
         raise PatchCLIError(str(result.get("artifact_error") or "workspace patch artifact failed"))
     if artifact_status in {"pending", "finalizing"}:
         raise PatchCLIError(f"workspace patch artifact is not finalized (artifact_status={artifact_status})")
-    for artifact in result.get("artifacts") or []:
-        if isinstance(artifact, dict) and artifact.get("kind") == "workspace_patch":
-            name = str(artifact.get("name") or pathlib.Path(str(artifact.get("path") or "")).name or "workspace.patch")
-            raw = client.get_bytes(f"/api/tasks/{urllib.parse.quote(task_id)}/artifacts/{urllib.parse.quote(name)}")
-            if strict and not raw:
-                raise PatchCLIError("workspace patch artifact is empty")
-            return raw.decode("utf-8", errors="replace")
+    artifacts = [artifact for artifact in result.get("artifacts") or [] if isinstance(artifact, dict)]
+    patch_artifact = next((artifact for artifact in artifacts if artifact.get("kind") == "workspace_patch"), None)
+    if patch_artifact is None:
+        patch_artifact = next((
+            artifact
+            for artifact in artifacts
+            if str(artifact.get("name") or pathlib.Path(str(artifact.get("path") or "")).name) == "workspace.patch"
+        ), None)
+    if patch_artifact is not None:
+        name = str(patch_artifact.get("name") or pathlib.Path(str(patch_artifact.get("path") or "")).name or "workspace.patch")
+        raw = client.get_bytes(f"/api/tasks/{urllib.parse.quote(task_id)}/artifacts/{urllib.parse.quote(name)}")
+        if strict and not raw:
+            raise PatchCLIError("workspace patch artifact is empty")
+        return raw.decode("utf-8", errors="replace")
     if strict:
         raise PatchCLIError("workspace patch artifact is missing")
     return ""

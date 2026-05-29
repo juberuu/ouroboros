@@ -30,6 +30,12 @@ ARTIFACT_STATUS_READY = "ready"
 ARTIFACT_STATUS_FAILED = "failed"
 
 _FINAL_STATUSES = {"completed", "failed", "cancelled", "rejected_duplicate"}
+_ARTIFACT_LIFECYCLE_FIELDS = {
+    "artifact_status",
+    "artifact_error",
+    "artifact_bundle",
+    "artifact_finalized_at",
+}
 DEFAULT_HEADLESS_TASK_RETENTION_DAYS = 7
 _PATCH_EXCLUDE_RULES_VERSION = 1
 _TOP_LEVEL_EXCLUDE_DIRS = {".ouroboros", ".venv", "venv", "env"}
@@ -257,6 +263,16 @@ def copy_child_task_result(parent_drive_root: pathlib.Path, task: Dict[str, Any]
     child_result = load_task_result(child_drive, task_id)
     if not isinstance(child_result, dict):
         return None
+    workspace_task = _workspace_root_from_task(task) is not None
+    child_status = str(child_result.get("status") or "completed")
+    existing = load_task_result(parent_drive_root, task_id) if workspace_task and child_status in _FINAL_STATUSES else {}
+    existing_artifact_status = str((existing or {}).get("artifact_status") or "").strip().lower()
+    preserve_parent_artifacts = existing_artifact_status in {
+        ARTIFACT_STATUS_PENDING,
+        ARTIFACT_STATUS_FINALIZING,
+        ARTIFACT_STATUS_READY,
+        ARTIFACT_STATUS_FAILED,
+    }
     payload = {
         key: value
         for key, value in child_result.items()
@@ -275,11 +291,17 @@ def copy_child_task_result(parent_drive_root: pathlib.Path, task: Dict[str, Any]
             payload["artifact_bundle"] = artifact_bundle_from_result(payload)
         except Exception:
             payload.pop("artifact_bundle", None)
+    if preserve_parent_artifacts:
+        payload["artifacts"] = _merge_artifacts(
+            list((existing or {}).get("artifacts") or []),
+            list(payload.get("artifacts") or []),
+        )
+        for key in _ARTIFACT_LIFECYCLE_FIELDS:
+            if key in (existing or {}):
+                payload[key] = (existing or {}).get(key)
     payload.setdefault("headless_child_drive_root", str(child_drive))
-    child_status = str(child_result.get("status") or "completed")
-    if _workspace_root_from_task(task) is not None and child_status in _FINAL_STATUSES:
-        existing = load_task_result(parent_drive_root, task_id) or {}
-        if str(existing.get("artifact_status") or "") not in {ARTIFACT_STATUS_READY, ARTIFACT_STATUS_FAILED}:
+    if workspace_task and child_status in _FINAL_STATUSES:
+        if not preserve_parent_artifacts and existing_artifact_status not in {ARTIFACT_STATUS_READY, ARTIFACT_STATUS_FAILED}:
             payload["artifact_status"] = ARTIFACT_STATUS_FINALIZING
         payload["child_status"] = child_status
     return write_task_result(

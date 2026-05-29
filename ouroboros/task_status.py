@@ -57,6 +57,12 @@ ARTIFACT_NONTERMINAL_STATUSES: frozenset[str] = frozenset({
 HANDOFF_SNIPPET_CHARS = 240
 _TERMINAL_FAILURE_RESULT_STATUSES = frozenset({"failed", "infra_failed", "cancelled"})
 _ORPHAN_RUNNING_GRACE_SECONDS = 30.0
+_ARTIFACT_LIFECYCLE_FIELDS: frozenset[str] = frozenset({
+    "artifact_status",
+    "artifact_error",
+    "artifact_bundle",
+    "artifact_finalized_at",
+})
 
 
 def _fail_nonterminal_artifact_bundle(bundle: Dict[str, Any], message: str) -> Dict[str, Any]:
@@ -177,6 +183,16 @@ def _normalize_workspace_artifact_status(result: Dict[str, Any]) -> Dict[str, An
     return normalized
 
 
+def _parent_workspace_artifact_lifecycle_fields(result: Dict[str, Any]) -> frozenset[str]:
+    metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    if not (str(result.get("workspace_root") or "").strip() or str(metadata.get("workspace_root") or "").strip()):
+        return frozenset()
+    artifact_status = str(result.get("artifact_status") or "").strip().lower()
+    if artifact_status in ARTIFACT_TERMINAL_STATUSES or artifact_status in ARTIFACT_NONTERMINAL_STATUSES:
+        return _ARTIFACT_LIFECYCLE_FIELDS
+    return frozenset()
+
+
 def _merge_queue_status(current_status: str, queue_status: str) -> str:
     current = str(current_status or "").lower()
     queued = str(queue_status or "").lower()
@@ -260,10 +276,13 @@ def effective_task_result(drive_root: pathlib.Path, result: Dict[str, Any], *, _
             if preserve_parent_terminal or preserve_parent_retry
             else set()
         )
+        parent_authoritative_fields = parent_authoritative_fields | _parent_workspace_artifact_lifecycle_fields(result)
         for key, value in child_result.items():
             if key in {"task_id", "parent_task_id", "root_task_id", "session_id", "actor_id", "delegation_role"}:
                 continue
             if key in parent_authoritative_fields:
+                continue
+            if key == "artifacts":
                 continue
             merged[key] = value
         merged.setdefault("child_drive_root", child_text)
@@ -335,6 +354,12 @@ def effective_task_result(drive_root: pathlib.Path, result: Dict[str, Any], *, _
             merge_artifact_records,
         )
         from ouroboros.outcomes import artifact_bundle_from_result
+
+        if child_result:
+            parent_artifacts = [item for item in (result.get("artifacts") or []) if isinstance(item, dict)]
+            child_artifacts_for_merge = [item for item in (child_result.get("artifacts") or []) if isinstance(item, dict)]
+            if parent_artifacts or child_artifacts_for_merge:
+                merged["artifacts"] = merge_artifact_records(parent_artifacts, child_artifacts_for_merge)
 
         rebased_child_artifacts: List[Dict[str, Any]] = []
         if child_text:

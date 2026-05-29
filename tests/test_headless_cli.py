@@ -842,6 +842,134 @@ def test_finalize_workspace_patch_fails_when_head_changed(tmp_path):
     assert manifest["errors"][-1]["type"] == "workspace_head_changed"
 
 
+def test_effective_result_preserves_failed_workspace_artifact_status_with_child_drive(tmp_path):
+    from ouroboros.headless import copy_child_task_result
+    from ouroboros.task_results import STATUS_COMPLETED
+    from ouroboros.task_status import load_effective_task_result
+
+    parent = tmp_path / "data"
+    child = tmp_path / "child"
+    repo = tmp_path / "repo"
+    parent.mkdir()
+    child.mkdir()
+    _init_repo_with_file(repo)
+    old_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+    (repo / "tracked.txt").write_text("new\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-m", "move"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    task_id = "patchfail"
+    write_task_result(
+        child,
+        task_id,
+        STATUS_COMPLETED,
+        result="child done",
+        artifact_status=ARTIFACT_STATUS_READY,
+        artifact_bundle={"status": ARTIFACT_STATUS_READY, "artifacts": [], "errors": []},
+        ts="2026-01-01T00:00:02Z",
+    )
+    write_task_result(
+        parent,
+        task_id,
+        STATUS_COMPLETED,
+        result="child done",
+        workspace_root=str(repo),
+        child_drive_root=str(child),
+        artifact_status="finalizing",
+        child_status=STATUS_COMPLETED,
+    )
+
+    finalize_task_artifacts(
+        parent,
+        {
+            "id": task_id,
+            "workspace_root": str(repo),
+            "drive_root": str(child),
+            "metadata": {"workspace_preflight": {"git": {"head": old_head}}},
+        },
+    )
+
+    effective = load_effective_task_result(parent, task_id)
+    assert effective["artifact_status"] == ARTIFACT_STATUS_FAILED
+    assert "workspace HEAD changed" in effective["artifact_error"]
+    assert effective["artifact_bundle"]["status"] == ARTIFACT_STATUS_FAILED
+
+    copied = copy_child_task_result(parent, {"id": task_id, "workspace_root": str(repo), "drive_root": str(child)})
+    assert copied is not None
+    assert copied["artifact_status"] == ARTIFACT_STATUS_FAILED
+    assert "workspace HEAD changed" in copied["artifact_error"]
+    assert copied["artifact_bundle"]["status"] == ARTIFACT_STATUS_FAILED
+
+
+def test_effective_result_preserves_workspace_patch_kind_with_child_drive(tmp_path):
+    from ouroboros.artifacts import copy_file_to_task_artifacts
+    from ouroboros.cli import _patch_from_result
+    from ouroboros.task_results import STATUS_COMPLETED
+    from ouroboros.task_status import load_effective_task_result
+
+    parent = tmp_path / "data"
+    child = tmp_path / "child"
+    repo = tmp_path / "repo"
+    parent.mkdir()
+    child.mkdir()
+    _init_repo_with_file(repo)
+    (repo / "tracked.txt").write_text("new\n", encoding="utf-8")
+
+    task_id = "patchkind"
+    report = tmp_path / "report.html"
+    report.write_text("<h1>done</h1>", encoding="utf-8")
+    child_record = copy_file_to_task_artifacts(SimpleNamespace(drive_root=child, task_id=task_id), report, kind="user_file")
+    assert child_record is not None
+    write_task_result(
+        child,
+        task_id,
+        STATUS_COMPLETED,
+        result="child done",
+        artifacts=[child_record],
+        artifact_status=ARTIFACT_STATUS_READY,
+        ts="2026-01-01T00:00:02Z",
+    )
+    write_task_result(
+        parent,
+        task_id,
+        STATUS_COMPLETED,
+        result="child done",
+        workspace_root=str(repo),
+        child_drive_root=str(child),
+        artifacts=[child_record],
+        artifact_status="finalizing",
+        child_status=STATUS_COMPLETED,
+    )
+
+    finalize_task_artifacts(parent, {"id": task_id, "workspace_root": str(repo), "drive_root": str(child)})
+
+    effective = load_effective_task_result(parent, task_id)
+    patch_artifacts = [
+        item
+        for item in effective.get("artifacts") or []
+        if isinstance(item, dict) and item.get("name") == "workspace.patch"
+    ]
+    assert patch_artifacts
+    assert patch_artifacts[0]["kind"] == "workspace_patch"
+    assert any(item.get("kind") == "user_file" for item in effective.get("artifacts") or [] if isinstance(item, dict))
+
+    class FakeClient:
+        def __init__(self):
+            self.paths = []
+
+        def get_bytes(self, path):
+            self.paths.append(path)
+            return b"diff --git a/tracked.txt b/tracked.txt\n"
+
+    client = FakeClient()
+    assert _patch_from_result(client, task_id, effective, strict=True).startswith("diff --git")
+    assert client.paths == [f"/api/tasks/{task_id}/artifacts/workspace.patch"]
+
+
 def test_task_artifact_endpoint_serves_only_declared_artifacts(tmp_path):
     data = tmp_path / "data"
     artifact_dir = task_artifacts_dir(data, "task-artifact")
@@ -1113,6 +1241,24 @@ def test_cli_patch_downloads_http_artifact():
 
     client = FakeClient()
     result = {"artifact_status": "ready", "artifacts": [{"kind": "workspace_patch", "name": "workspace.patch"}]}
+
+    assert _patch_from_result(client, "task-1", result, strict=True).startswith("diff --git")
+    assert client.paths == ["/api/tasks/task-1/artifacts/workspace.patch"]
+
+
+def test_cli_patch_falls_back_to_workspace_patch_name():
+    from ouroboros.cli import _patch_from_result
+
+    class FakeClient:
+        def __init__(self):
+            self.paths = []
+
+        def get_bytes(self, path):
+            self.paths.append(path)
+            return b"diff --git a/a b/a\n"
+
+    client = FakeClient()
+    result = {"artifact_status": "ready", "artifacts": [{"kind": "task_artifact", "name": "workspace.patch"}]}
 
     assert _patch_from_result(client, "task-1", result, strict=True).startswith("diff --git")
     assert client.paths == ["/api/tasks/task-1/artifacts/workspace.patch"]
