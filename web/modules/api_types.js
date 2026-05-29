@@ -217,4 +217,4 @@
  * @property {string=} error
  */
 
-export const GATEWAY_CONTRACT_VERSION = '6.7.0-rc.2';
+export const GATEWAY_CONTRACT_VERSION = '6.7.0-rc.3';

@@ -286,9 +286,12 @@ def test_ui_smoke_direct_mode_groups_subagent_child_cards(direct_server_with_dat
                 )
                 card = page.locator(".chat-live-card").first
                 card_text = card.inner_text()
-                assert "Parent task started" in card_text
+                # Variant A: the single parent card hosts the child's subagent row
+                # (rendered with its role + meta pills). The collapsed view shows the
+                # latest line; the parent's own lines are visible once expanded.
                 assert "Subagent child1" in card_text   # child rendered as a parent row
                 assert "child=child1" in card_text       # row meta pill
+                assert "role=researcher" in card_text
                 assert page.locator(".chat-bubble.progress").count() == 0
 
                 # Expand the parent card + the child's subagent row to read its handoff.
