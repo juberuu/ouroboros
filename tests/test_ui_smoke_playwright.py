@@ -274,31 +274,44 @@ def test_ui_smoke_direct_mode_groups_subagent_child_cards(direct_server_with_dat
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=30_000)
                 page.wait_for_selector(".chat-live-card", timeout=30_000)
-                page.wait_for_function("() => document.querySelectorAll('.chat-live-card').length === 2", timeout=30_000)
-                texts = page.locator(".chat-live-card").all_inner_texts()
-                assert len(texts) == 2
-                assert any("parent task" in text and "child=child1" in text for text in texts)
-                assert any("Subagent child1 completed" in text and "parent=parent1" in text and "cost=$0.1250" in text for text in texts)
+                # Variant A: the subagent child does NOT get its own card — it is
+                # grouped into the PARENT dashboard card as an in-place row. So there
+                # is exactly ONE live card, containing both the parent line and the
+                # child's subagent row.
+                page.wait_for_function("() => document.querySelectorAll('.chat-live-card').length === 1", timeout=30_000)
+                page.wait_for_function(
+                    "() => { const c = document.querySelector('.chat-live-card');"
+                    " return !!c && /Subagent child1/.test(c.innerText) && /child=child1/.test(c.innerText); }",
+                    timeout=30_000,
+                )
+                card = page.locator(".chat-live-card").first
+                card_text = card.inner_text()
+                assert "Parent task started" in card_text
+                assert "Subagent child1" in card_text   # child rendered as a parent row
+                assert "child=child1" in card_text       # row meta pill
                 assert page.locator(".chat-bubble.progress").count() == 0
 
-                child_card = page.locator(".chat-live-card").filter(has_text="cost=$0.1250").first
-                child_card.locator("[data-live-summary-button]").click()
-                line_toggles = child_card.locator(".chat-live-line-toggle")
+                # Expand the parent card + the child's subagent row to read its handoff.
+                card.locator("[data-live-summary-button]").click()
+                line_toggles = card.locator(".chat-live-line-toggle")
                 if line_toggles.count():
                     line_toggles.last.click()
-                expanded_text = child_card.inner_text(timeout=5_000)
+                expanded_text = card.inner_text(timeout=5_000)
                 assert "Child result with evidence table" in expanded_text
                 assert "| source | verdict |" in expanded_text
                 assert "searched sources" in expanded_text
                 assert "compared output" in expanded_text
-                assert child_card.locator("[data-live-summary-button]").get_attribute("aria-expanded") == "true"
-                assert child_card.locator("[data-live-timeline]").get_attribute("id")
-                assert child_card.locator(".chat-live-line-toggle").last.get_attribute("aria-controls")
+                assert card.locator("[data-live-summary-button]").get_attribute("aria-expanded") == "true"
+                assert card.locator("[data-live-timeline]").get_attribute("id")
+                assert card.locator(".chat-live-line-toggle").last.get_attribute("aria-controls")
 
                 page.reload(wait_until="domcontentloaded", timeout=30_000)
-                page.wait_for_function("() => document.querySelectorAll('.chat-live-card').length === 2", timeout=30_000)
-                replay_texts = page.locator(".chat-live-card").all_inner_texts()
-                assert len(replay_texts) == 2
+                # Reload reconcile: still one parent card, child still grouped in place.
+                page.wait_for_function("() => document.querySelectorAll('.chat-live-card').length === 1", timeout=30_000)
+                replay_card = page.locator(".chat-live-card").first
+                replay_text = replay_card.inner_text()
+                assert "Subagent child1" in replay_text
+                assert "child=child1" in replay_text
                 assert page.locator(".chat-bubble.progress").count() == 0
             finally:
                 browser.close()
