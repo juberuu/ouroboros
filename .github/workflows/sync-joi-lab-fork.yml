@@ -4,9 +4,6 @@ on:
   push:
     branches:
       - main
-      - ouroboros
-      - ouroboros-stable
-      - legacy-google-colab
   workflow_dispatch:
 
 permissions:
