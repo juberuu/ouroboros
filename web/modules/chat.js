@@ -1027,7 +1027,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         } else if (timelineUpdate === 'patch-at' && patchIndex !== -1) {
             patchTimelineItemAt(record.items[patchIndex], record);
         }
-        if (!suppressDomInsert && !_syncPass1Active) insertMessageNode(record.root);
+        ensureLiveCardVisible(record, { suppressDomInsert });
         syncLiveCardLayout(record);
         hideTypingIndicatorOnly();
         const justFinished = record.finished && !wasFinished;

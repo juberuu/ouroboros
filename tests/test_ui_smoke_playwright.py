@@ -301,12 +301,14 @@ def test_ui_smoke_direct_mode_nests_subagent_child_cards(direct_server_with_data
                 child_text = child.inner_text()
                 assert "Parent task started" in parent_text
                 assert "Subagent child1" in child_text
-                assert "Final child answer should stay inside the child card." in child_text
                 assert "child=child1" in child_text
                 assert "role=researcher" in child_text
                 assert parent.get_attribute("data-finished") == "0"
                 assert child.get_attribute("data-finished") == "1"
                 assert page.locator(".chat-bubble.progress").count() == 0
+                assert page.locator(".chat-bubble").filter(
+                    has_text="Final child answer should stay inside the child card."
+                ).count() == 0
 
                 # Expand only the child card + its lifecycle line to read the handoff.
                 child.locator("[data-live-summary-button]").first.click()
@@ -314,6 +316,7 @@ def test_ui_smoke_direct_mode_nests_subagent_child_cards(direct_server_with_data
                 if line_toggles.count():
                     line_toggles.last.click()
                 expanded_text = child.inner_text(timeout=5_000)
+                assert "Final child answer should stay inside the child card." in expanded_text
                 assert "Child result with evidence table" in expanded_text
                 assert "| source | verdict |" in expanded_text
                 assert "searched sources" in expanded_text
@@ -326,13 +329,20 @@ def test_ui_smoke_direct_mode_nests_subagent_child_cards(direct_server_with_data
 
                 page.reload(wait_until="domcontentloaded", timeout=30_000)
                 page.wait_for_function("() => document.querySelectorAll('.chat-live-card').length === 2", timeout=30_000)
+                page.wait_for_function(
+                    "() => { const p = document.querySelector('.chat-live-card:not(.subagent)');"
+                    " const c = document.querySelector('.chat-live-card.subagent');"
+                    " return !!p && !!c && c.closest('.chat-subagents') && c.parentElement.closest('.chat-live-card') === p; }",
+                    timeout=30_000,
+                )
                 replay_parent = page.locator(".chat-live-card:not(.subagent)").first
                 replay_child = page.locator(".chat-live-card.subagent").first
                 assert replay_parent.get_attribute("data-finished") == "0"
                 assert replay_child.get_attribute("data-finished") == "1"
                 assert "Subagent child1" in replay_child.inner_text()
-                assert "Final child answer should stay inside the child card." in replay_child.inner_text()
                 assert "child=child1" in replay_child.inner_text()
+                replay_child.locator("[data-live-summary-button]").first.click()
+                assert "Final child answer should stay inside the child card." in replay_child.inner_text()
                 assert page.locator(".chat-bubble.progress").count() == 0
                 assert page.locator(".chat-bubble", has_text="Final child answer should stay inside the child card.").count() == 0
             finally:
