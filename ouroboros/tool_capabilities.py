@@ -9,7 +9,7 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     "start_service", "service_status", "service_logs", "stop_service",
     "vcs_status", "vcs_diff", "vcs_commit_reviewed", "commit_reviewed",
     "vcs_restore", "vcs_revert", "vcs_pull_ff", "vcs_rollback",
-    # schedule_subagent/wait/get_result remain opt-in via enable_tools.
+    "schedule_subagent", "wait_task", "wait_tasks", "get_task_result",
     "update_scratchpad", "update_identity",
     "chat_history", "recent_tasks",
     "knowledge_read", "knowledge_write", "knowledge_list",

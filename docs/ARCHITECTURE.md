@@ -1,4 +1,4 @@
-# Ouroboros v6.7.1-rc.1 — Architecture & Reference
+# Ouroboros v6.7.1 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -77,9 +77,10 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── skill_dependencies.py ← Shared dependency-spec resolution for skill payloads across manifests, sidecars, and provenance
       ├── skill_review_status.py ← Skill-review verdict aggregation SSOT (FAILs → clean/warnings/blockers/pending; hard trust-boundary items block on FAIL, bug_hunting + selected conditional safety items follow severity; enforcement maps verdicts to executable_review)
       ├── skill_review.py      ← Skill review pipeline: deterministic preflight + optional fail-open Claude Code advisory over the skill payload only (repo diff excluded, Skill Review Checklist coverage contract, scope-review effort, raw/session metadata plus parsed_items/contract_warning persisted as advisory_result) followed by the tri-model executable trust gate against the Skill Review Checklist section of docs/CHECKLISTS.md plus minimal host skill/widget context (CREATING_SKILLS.md, PluginAPI contract, extension UI validator); supports rebuttal/history/convergence evidence
-      ├── extension_loader.py  ← Phase 4 in-process loader for type: extension skills; discovers + imports plugin.py via importlib with a narrow PluginAPIImpl, tracks registrations per-skill for atomic unload
+      ├── extension_loader.py  ← Phase 4 loader for type: extension skills; imports no-dependency pure-Python extensions in-process with PluginAPIImpl, but catalogs isolated-dep/native-marker extensions through child-process proxies so plugin import cannot abort server.py; tracks registrations per-skill for atomic unload
+      ├── extension_process_runner.py ← Short-lived child-process runner for isolated-dep/native-marker extension catalog/tool/route/WS dispatch; uses scrubbed env, per-skill deps, process-group tracking, timeout/output caps, and returns graceful host errors on child crash
       ├── extension_ui_validation.py ← Host-owned widget/settings render-schema validation shared by extension loader and skill preflight
-      ├── extension_isolated_deps.py ← Per-extension bridge that exposes reviewed `.ouroboros_env` Python site-packages to in-process extensions while they are loaded
+      ├── extension_isolated_deps.py ← Per-extension bridge for legacy/forced in-process isolated-dep tests; production reviewed isolated deps are exposed only inside extension_process_runner children
       ├── skill_token.py       ← Opaque Host Service API token wrapper used by reviewed skills/companions
       ├── marketplace/         ← ClawHub + OuroborosHub marketplace package (clawhub.py registry client, ouroboroshub.py static GitHub catalog client, fetcher.py staging, adapter.py OpenClaw->Ouroboros translation, install.py orchestration, isolated_deps.py per-skill dependency prefix, provenance.py durable provenance)
       ├── skill_lifecycle_queue.py ← single FIFO lane for mutating skill lifecycle actions (install/update/review/deps/enable/disable/uninstall) with recent event snapshot for Skills UI, chat live-card progress, dedupe keys, and sync tool wrapper
@@ -381,6 +382,7 @@ finalization states.
 │   │           ├── accepted_rebuttals.json ← accepted skill-review rebuttals injected into later review prompts
 │   │           ├── deps.json    ← isolated dependency install fingerprint for skills with reviewed install specs
 │   │           ├── auth_token.json ← content-hash-bound Host Service token for reviewed live extensions
+│   │           ├── extension_calls/ ← transient per-call child-process payload/result JSON files for isolated-dep extension catalog/tool/route/WS dispatch; files are private runtime transport state and are removed after each dispatch
 │   │           └── __extension_imports/<uuid>/skill/  ← Phase 4 staged import tree for type:extension skills (created on load, removed on unload; see §13.1)
 │   ├── memory/
 │   │   ├── identity.md     ← Agent's self-description (persistent)
@@ -1272,10 +1274,11 @@ ClawHub and OuroborosHub install into the data plane, trigger review, and persis
 
 ### Extension Loader
 
-`extension_loader.py` imports reviewed `type: extension` skills in-process via a staged import tree, namespaces tools/routes/WS/UI/settings surfaces, validates declared permissions, tracks registrations per skill, and unloads atomically. Isolated deps are exposed only while the extension is loaded; `.pth` execution is not trusted.
-`_stage_extension_import_tree` creates per-load `__extension_imports/<uuid>/skill/` directories under `data/state/skills/<name>/` so imports are isolated and can be removed on unload.
+`extension_loader.py` has two reviewed `type: extension` paths. No-dependency pure-Python extensions import in-process through a staged import tree, namespace tools/routes/WS/UI/settings surfaces, validate declared permissions, track registrations per skill, and unload atomically. Extensions with reviewed isolated dependencies, plus any payload-native marker that somehow passes review, are cataloged in a short-lived `extension_process_runner` child; the host registers proxy descriptors and dispatches tool, HTTP route, and WS handler calls back through short-lived children.
+`_stage_extension_import_tree` creates per-load `__extension_imports/<uuid>/skill/` directories under `data/state/skills/<name>/` so in-process imports are isolated and can be removed on unload. Child-process dispatch uses the same staged loader inside the child, where isolated deps are allowed on `sys.path` without exposing native crashes to `server.py`.
+Child processes set `OUROBOROS_EXTENSION_PROCESS_CHILD=1` as an internal runtime marker. In that mode the child skips cross-process staged-import sweeping, cleans only its own import root on exit, and rejects PluginAPI side-effect surfaces that cannot be proxied (`send_ws_message`, event subscriptions, supervised tasks, companion processes, and unload callbacks). Isolated-dep extensions should expose tool, HTTP route, WS handler, UI tab, or settings-section proxy surfaces.
 
-Rationale: in-process extensions are powerful and therefore stricter than subprocess skills. Namespacing, review, grants, dependency isolation, and atomic unload prevent one extension from shadowing core surfaces or leaking state after disable.
+Rationale: in-process extensions are powerful and therefore stricter than subprocess skills. Namespacing, review, grants, dependency isolation, atomic unload, and child-process dispatch for isolated deps prevent one extension from shadowing core surfaces, leaking state after disable, or crashing the server with native `panic=abort`.
 
 ### Generic transport metadata and repair constraints
 

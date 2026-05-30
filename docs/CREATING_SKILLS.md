@@ -32,7 +32,7 @@ There are three skill types:
 |------|---------------|-------------|
 | `instruction` | Markdown-only `SKILL.md` (no code). | Pure prompts / playbooks for the agent. |
 | `script` | One or more scripts under `scripts/` plus a manifest. | Heavy / batch work that runs as a subprocess. |
-| `extension` | A `plugin.py` that registers tools/routes/widgets via `PluginAPI`. | Long-lived in-process capabilities, including widgets and chat-driven tools. |
+| `extension` | A `plugin.py` that registers tools/routes/widgets via `PluginAPI`. | Host-integrated capabilities, including widgets and chat-driven tools; native-risk isolated deps dispatch in short-lived child processes. |
 
 The **runtime ownership** of an installed skill is also tagged:
 
@@ -139,7 +139,10 @@ flowchart LR
   Skills UI surfaces a toggle; agents can also call `toggle_skill`.
   Self-authored provenance does not change the enablement path.
 - **Execute**: `skill_exec` runs `type: script` skills as
-  subprocess; `type: extension` runs in-process via the loader.
+  subprocess. `type: extension` skills without isolated deps normally run
+  through the in-process loader; extensions with reviewed isolated deps are
+  cataloged and dispatched in short-lived child processes so a dependency crash
+  or Rust/C abort cannot crash the server.
 
 ## Data layout for stateful skills
 
@@ -186,6 +189,20 @@ Bare `dependencies` entries are treated as Python packages. `pip`,
 executable review and only under the skill's `.ouroboros_env` directory.
 Global package-manager or arbitrary-download specs remain manual setup
 guidance.
+
+For `type: extension`, any reviewed isolated dependency env is kept out of
+`server.py`: `plugin.py` cataloging and tool/route/WS handlers run in a
+short-lived child process with the skill's payload and isolated env. Child
+crashes surface as tool errors, HTTP 502 responses, or WebSocket log messages;
+the server and WebSocket stay alive. Opaque native files shipped directly in the
+payload are still review-sensitive; if such a marker exists, the runtime also
+uses child dispatch defensively, but this guide does not make native payload
+binaries broadly acceptable.
+Out-of-process extensions may proxy tools, HTTP routes, WS handlers, UI tabs,
+and settings sections. PluginAPI side effects that require a live host object
+(`send_ws_message`, event subscriptions, supervised tasks, companion processes,
+and unload callbacks) are rejected during child cataloging until a dedicated
+host-relay contract exists.
 
 ## The `skill_preflight` tool
 

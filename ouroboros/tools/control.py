@@ -514,9 +514,12 @@ def get_tools() -> List[ToolEntry]:
             "name": "schedule_subagent",
             "description": (
                 "Schedule a live local_readonly subagent. Returns task_id for later retrieval. "
-                "Use only for genuinely parallel work. The child can inspect local repo/data/history "
+                "Use for genuinely parallel or independently reviewable work: repository exploration, "
+                "log/state forensics, external research, alternate design checks, and adversarial "
+                "validation while the parent continues. The child can inspect local repo/data/history "
                 "and web/browser surfaces, but cannot write local state, commit, enable tools, "
-                "or schedule further subagents."
+                "or schedule further subagents. Always retrieve the child handoff with get_task_result, "
+                "wait_task, or wait_tasks before relying on its findings."
             ),
             "parameters": {"type": "object", "properties": {
                 "objective": {"type": "string", "description": "Focused child objective. Be specific about scope."},

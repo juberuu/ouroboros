@@ -891,11 +891,12 @@ class ToolRegistry:
             _ext_is_live = None
             _ext_unload = None
         skill_name = str(ext_tool.get("skill") or "")
-        if skill_name and callable(_ext_is_live) and not _ext_is_live(skill_name, pathlib.Path(self._ctx.drive_root)):
+        repo_path = str(ext_tool.get("skills_repo_path") or "") or None
+        if skill_name and callable(_ext_is_live) and not _ext_is_live(skill_name, pathlib.Path(self._ctx.drive_root), repo_path=repo_path):
             if callable(_ext_unload):
                 _ext_unload(skill_name)
             return (
-                f"⚠️ EXTENSION_NOT_LIVE: extension {skill_name!r} is "
+                f"⚠️ TOOL_ERROR ({name}): extension {skill_name!r} is "
                 "not allowed to dispatch right now."
             )
         from ouroboros.safety import check_safety as _ext_check_safety
@@ -907,6 +908,19 @@ class ToolRegistry:
         )
         if not _ext_safe:
             return _ext_safety_msg
+        if ext_tool.get("out_of_process"):
+            try:
+                from ouroboros.extension_process_runner import dispatch_extension_tool_subprocess
+
+                result_str = dispatch_extension_tool_subprocess(ext_tool, self._ctx, args or {})
+            except Exception as exc:
+                return (
+                    f"⚠️ TOOL_ERROR ({name}): extension child process failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+            if _ext_safety_msg:
+                return f"{_ext_safety_msg}\n\n---\n{result_str}"
+            return result_str
         handler = ext_tool["handler"]
         try:
             result = handler(self._ctx, **(args or {}))
@@ -914,7 +928,7 @@ class ToolRegistry:
             result = handler(**(args or {}))
         except Exception as exc:
             return (
-                f"⚠️ extension tool {name!r} failed: "
+                f"⚠️ TOOL_ERROR ({name}): extension tool failed: "
                 f"{type(exc).__name__}: {exc}"
             )
         # Async extension handlers run on a helper thread to avoid same-loop deadlocks.
@@ -941,13 +955,13 @@ class ToolRegistry:
             thread.join(timeout=timeout + 2)
             if thread.is_alive():
                 return (
-                    f"⚠️ extension tool {name!r} async handler failed: "
+                    f"⚠️ TOOL_ERROR ({name}): extension async handler failed: "
                     "TimeoutError: handler exceeded timeout"
                 )
             if "error" in box:
                 exc = box["error"]
                 return (
-                    f"⚠️ extension tool {name!r} async handler failed: "
+                    f"⚠️ TOOL_ERROR ({name}): extension async handler failed: "
                     f"{type(exc).__name__}: {exc}"
                 )
             result = box.get("value", "")

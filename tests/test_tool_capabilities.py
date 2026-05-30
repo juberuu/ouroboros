@@ -268,34 +268,31 @@ def test_search_code_registered():
 
 
 # ---------------------------------------------------------------------------
-# schedule_subagent non-core classification tests
+# schedule_subagent core classification tests
 # ---------------------------------------------------------------------------
 
 
-def test_schedule_subagent_not_in_core():
-    """schedule_subagent must NOT be in CORE_TOOL_NAMES."""
+def test_schedule_subagent_in_core():
+    """schedule_subagent is core for first-class parallel delegation."""
     from ouroboros.tool_capabilities import CORE_TOOL_NAMES
-    assert "schedule_subagent" not in CORE_TOOL_NAMES, (
-        "schedule_subagent stays opt-in to prevent reflexive delegation; "
-        "use enable_tools('schedule_subagent') to activate"
-    )
+    assert "schedule_subagent" in CORE_TOOL_NAMES
 
 
-def test_wait_task_not_in_core():
-    """wait_task/wait_tasks must NOT be in CORE_TOOL_NAMES."""
+def test_wait_task_in_core():
+    """wait_task/wait_tasks are core so delegated work can be joined."""
     from ouroboros.tool_capabilities import CORE_TOOL_NAMES
-    assert "wait_task" not in CORE_TOOL_NAMES
-    assert "wait_tasks" not in CORE_TOOL_NAMES
+    assert "wait_task" in CORE_TOOL_NAMES
+    assert "wait_tasks" in CORE_TOOL_NAMES
 
 
-def test_get_task_result_not_in_core():
-    """get_task_result must NOT be in CORE_TOOL_NAMES."""
+def test_get_task_result_in_core():
+    """get_task_result is core so child handoffs can be read."""
     from ouroboros.tool_capabilities import CORE_TOOL_NAMES
-    assert "get_task_result" not in CORE_TOOL_NAMES
+    assert "get_task_result" in CORE_TOOL_NAMES
 
 
 def test_schedule_subagent_available_in_registry():
-    """schedule_subagent must still be registered (available via enable_tools)."""
+    """schedule_subagent must still be registered."""
     from ouroboros.tools.registry import ToolRegistry
     import pathlib, tempfile
     tmp = pathlib.Path(tempfile.mkdtemp())
@@ -306,17 +303,15 @@ def test_schedule_subagent_available_in_registry():
     )
 
 
-def test_schedule_subagent_not_in_initial_schemas():
-    """schedule_subagent must NOT appear in initial tool schemas (non-core)."""
+def test_schedule_subagent_in_initial_schemas():
+    """schedule_subagent appears in parent initial schemas as a core tool."""
     from ouroboros.tools.registry import ToolRegistry
     from ouroboros.tool_policy import initial_tool_schemas
     import pathlib, tempfile
     tmp = pathlib.Path(tempfile.mkdtemp())
     registry = ToolRegistry(repo_dir=tmp, drive_root=tmp)
     names = {s["function"]["name"] for s in initial_tool_schemas(registry)}
-    assert "schedule_subagent" not in names, (
-        "schedule_subagent should not be loaded by default; activate with enable_tools"
-    )
+    assert "schedule_subagent" in names
 
 
 def test_local_readonly_subagent_initial_schemas_are_allowlisted(tmp_path):

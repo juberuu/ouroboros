@@ -109,6 +109,7 @@ or Intent/Scope checklists are.
 | 11 | Changing VERSION + pyproject.toml? | Ordering matters: (1) write `VERSION` and `pyproject.toml` first; (2) then write `README.md` badge + changelog row; (3) then run `pytest`. Never interleave — updating README before VERSION means `test_version_in_readme` will catch a stale badge. |
 | 12 | Writing or editing any JS file under `web/modules/`? | Inline styles are banned. Before staging: `grep -n "\.style\." web/modules/*.js` — any hit on `.style.display`, `.style.color`, `.style.visibility`, etc. is a REVIEW_BLOCKED waiting to happen. Use CSS classes and `classList`/`hidden` attribute instead. |
 | 13 | Changing LLM output-token budgets? | Grep the whole repo for `max_tokens`, `max_completion_tokens`, `_MAX_TOKENS`, and `max_toks`. Keep `docs/ARCHITECTURE.md` §LLM output token budgets and `tests/test_max_tokens_constants.py` in sync so main-loop, VLM, summaries, compaction, skill publish, and consciousness floors cannot drift independently. |
+| 14 | Changing extension loader/dispatch or isolated deps? | Native-risk extension imports and tool/route/WS handlers must stay out-of-process. Add or run regression tests where a native-risk plugin aborts during import and the host survives, plus tool/route child-dispatch tests. Do not "fix" failures by importing native-risk plugin code in `server.py`. |
 
 Rule: read before write. Never reconstruct `VERSION`, `pyproject.toml`
 `version`, or the README badge from memory — one stale reconstruction creates
