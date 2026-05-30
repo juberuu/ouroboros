@@ -881,94 +881,10 @@ class ToolRegistry:
         return 360
 
     def _dispatch_extension_tool(self, name: str, ext_tool: Dict[str, Any], args: Optional[Dict[str, Any]]) -> str:
-        """Dispatch live extension tools through the same safety gate as built-ins."""
-        try:
-            from ouroboros.extension_loader import (
-                is_extension_live as _ext_is_live,
-                unload_extension as _ext_unload,
-            )
-        except Exception:
-            _ext_is_live = None
-            _ext_unload = None
-        skill_name = str(ext_tool.get("skill") or "")
-        repo_path = str(ext_tool.get("skills_repo_path") or "") or None
-        if skill_name and callable(_ext_is_live) and not _ext_is_live(skill_name, pathlib.Path(self._ctx.drive_root), repo_path=repo_path):
-            if callable(_ext_unload):
-                _ext_unload(skill_name)
-            return (
-                f"⚠️ TOOL_ERROR ({name}): extension {skill_name!r} is "
-                "not allowed to dispatch right now."
-            )
-        from ouroboros.safety import check_safety as _ext_check_safety
-        _ext_safe, _ext_safety_msg = _ext_check_safety(
-            name,
-            args or {},
-            messages=getattr(self._ctx, "messages", None),
-            ctx=self._ctx,
-        )
-        if not _ext_safe:
-            return _ext_safety_msg
-        if ext_tool.get("out_of_process"):
-            try:
-                from ouroboros.extension_process_runner import dispatch_extension_tool_subprocess
+        """Dispatch live extension tools through the registry's helper module."""
+        from ouroboros.tools.extension_dispatch import dispatch_extension_tool
 
-                result_str = dispatch_extension_tool_subprocess(ext_tool, self._ctx, args or {})
-            except Exception as exc:
-                return (
-                    f"⚠️ TOOL_ERROR ({name}): extension child process failed: "
-                    f"{type(exc).__name__}: {exc}"
-                )
-            if _ext_safety_msg:
-                return f"{_ext_safety_msg}\n\n---\n{result_str}"
-            return result_str
-        handler = ext_tool["handler"]
-        try:
-            result = handler(self._ctx, **(args or {}))
-        except TypeError:
-            result = handler(**(args or {}))
-        except Exception as exc:
-            return (
-                f"⚠️ TOOL_ERROR ({name}): extension tool failed: "
-                f"{type(exc).__name__}: {exc}"
-            )
-        # Async extension handlers run on a helper thread to avoid same-loop deadlocks.
-        import asyncio as _asyncio
-        import inspect as _inspect
-        import threading as _threading
-        if _inspect.iscoroutine(result):
-            box: Dict[str, Any] = {}
-            timeout = max(1, int(ext_tool.get("timeout_sec") or 60))
-            def _runner() -> None:
-                try:
-                    async def _bounded():
-                        return await _asyncio.wait_for(result, timeout=timeout)
-                    box["value"] = _asyncio.run(_bounded())
-                except Exception as exc:
-                    box["error"] = exc
-
-            thread = _threading.Thread(
-                target=_runner,
-                name=f"ext-tool-{name}-async",
-                daemon=True,
-            )
-            thread.start()
-            thread.join(timeout=timeout + 2)
-            if thread.is_alive():
-                return (
-                    f"⚠️ TOOL_ERROR ({name}): extension async handler failed: "
-                    "TimeoutError: handler exceeded timeout"
-                )
-            if "error" in box:
-                exc = box["error"]
-                return (
-                    f"⚠️ TOOL_ERROR ({name}): extension async handler failed: "
-                    f"{type(exc).__name__}: {exc}"
-                )
-            result = box.get("value", "")
-        result_str = result if isinstance(result, str) else str(result)
-        if _ext_safety_msg:
-            return f"{_ext_safety_msg}\n\n---\n{result_str}"
-        return result_str
+        return dispatch_extension_tool(self._ctx, name, ext_tool, args)
 
     def _dispatch_mcp_tool(self, name: str, args: Dict[str, Any]) -> str:
         """Run a provider-safe MCP tool after the normal safety supervisor."""

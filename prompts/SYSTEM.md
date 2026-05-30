@@ -256,6 +256,7 @@ The safety-critical set (matching
 - `prompts/SAFETY.md` -- Safety Supervisor prompt
 - `ouroboros/runtime_mode_policy.py` -- Shared protected-path policy
 - `ouroboros/tools/registry.py` -- Hardcoded sandbox (enforces the BIBLE.md / safety-file protection)
+- `ouroboros/tools/extension_dispatch.py` -- Extension tool dispatch safety/liveness helper
 
 Advanced mode may modify the evolutionary layer, but it must not directly
 modify the broader protected runtime surface defined in

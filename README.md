@@ -7,7 +7,7 @@
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![OuroborosHub](https://img.shields.io/badge/OuroborosHub-skills%20marketplace-8A2BE2.svg)](https://github.com/joi-lab/OuroborosHub)
-[![Version 6.7.1](https://img.shields.io/badge/version-6.7.1-green.svg)](VERSION)
+[![Version 6.7.2](https://img.shields.io/badge/version-6.7.2-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -487,12 +487,12 @@ the contribution guide only routes to those sources.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 6.7.2 | 2026-05-30 | **release(ci): keep extension isolation release inside gates.** Keeps the 6.7.x extension-isolation release within CI complexity gates, keeps extension child failures classified as normal `TOOL_ERROR` tool failures, and moves extension tool dispatch out of the oversized registry module path. |
 | 6.7.1 | 2026-05-30 | **release(reliability): preserve workspace patches, show nested subagents, and isolate extension crashes.** Effective task results keep parent-finalized `workspace_patch` artifacts visible for CLI patch export; chat live cards now render subagents as always-visible nested child cards without marking the parent done; delegation tools are core for parent tasks while subagents remain read-only leaves; and extension isolated deps dispatch out-of-process so native aborts return graceful errors instead of crashing the server. |
 | 6.7.0-rc.3 | 2026-05-29 | **rc(reliability): structurally close the subagent worker-crash, ghost-task, and stuck-spinner classes; provider-agnostic review; bundled Node.** macOS/Windows workers use `spawn` (Linux keeps `fork`) and a central `OUROBOROS_IN_WORKER` no-proxy policy eliminates the macOS `_scproxy` fork SIGSEGV class. A monotonic `write_task_result` lifecycle guard plus live `cancel_task` + `cancel_requested` latch prevent stale/ghost status; terminal `task_done` events on every crash/kill/timeout/cancel path (and reconnect/history reconciliation) stop the perpetual spinner. Signal crashes are terminal (no retry) for all task types. Subagent UI dedup (Variant A: parent dashboard rows, in-place updates, no duplicate child card). Cloud.ru becomes a first-class exclusive-direct provider so Ouroboros is usable with any single key; `skill_preflight` tolerates missing/killed validators and the build bundles a signed Node.js LTS for node-runtime skills. New-user defaults: review `claude-opus-4.8`, Claude Code `opus[1m]`. README OuroborosHub badge/callout. (rc.2/rc.3: gitignore the bundled `node-standalone` so the `repo.bundle` build sees a clean working tree, and update the Variant A subagent-card UI smoke test to the single grouped-card layout — verified locally with Playwright.) |
 | 6.6.0-rc.1 | 2026-05-29 | **rc(review): effect-gate task-acceptance review and clarify light-mode cognitive writes.** Host-enforced `required` review fires only on turns with observable reviewable effects (commit/deliverable/workspace/self-mod) or non-direct tasks, so plain chat is never reviewed; `auto` stays LLM-first. Adds `review_eligibility`/`review_trigger` to loop outcomes, routes light-mode cognitive writes to `update_identity`/`update_scratchpad`/`knowledge_write` (`COGNITIVE_TOOL_REQUIRED`) and absolute home paths to `root=user_files` (`ROOT_REQUIRED_USER_FILES`) with recovery, parses fenced JSON-object reviewer verdicts, and makes `DEGRADED` review signals carry an honest reason. |
 | 6.5.0-rc.4 | 2026-05-28 | **rc(ci): normalize Windows process executable names.** Keeps the rc.3 scope and treats `.exe` interpreter/writer basenames as their canonical tool names so light-mode runtime-data guards run on Windows. |
-| 6.5.0-rc.3 | 2026-05-28 | **rc(ci): finish Windows runtime-data guard portability.** Keeps the rc.2 scope and fixes escaped Windows Python path literals in light-mode runtime-data process guards so full CI can build release artifacts. |
-Older releases are preserved in Git tags and GitHub releases. The 6.0.0 through 6.5.0-rc.2 rows, the 5.2.0 through 5.33.0-rc.6 rows, and former `4.0.0` rows are rolled off to respect the P9 changelog cap; their full bodies remain at their git tags.
+Older releases are preserved in Git tags and GitHub releases. The 6.0.0 through 6.5.0-rc.3 rows, the 5.2.0 through 5.33.0-rc.6 rows, and former `4.0.0` rows are rolled off to respect the P9 changelog cap; their full bodies remain at their git tags.
 
 ---
 

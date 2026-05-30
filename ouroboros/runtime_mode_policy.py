@@ -17,6 +17,7 @@ SAFETY_CRITICAL_PATHS = frozenset({
     "BIBLE.md",
     "ouroboros/safety.py",
     "ouroboros/runtime_mode_policy.py",
+    "ouroboros/tools/extension_dispatch.py",
     "ouroboros/tools/registry.py",
     "prompts/SAFETY.md",
 })

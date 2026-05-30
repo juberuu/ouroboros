@@ -41,8 +41,9 @@ MAX_FUNCTION_LINES = 300
 # _emit_cancel_task_done, _drop_cancelled_pending), bundled-node resolution
 # (embedded_node_candidates, resolve_bundled_node), marketplace opener
 # (_build_opener), and the schedule pool-unavailable guard
-# (_reject_schedule_pool_unavailable). Keep the headroom narrow.
-MAX_TOTAL_FUNCTIONS = 2445
+# (_reject_schedule_pool_unavailable). v6.7.1 adds the out-of-process extension
+# runner and proxy validation helpers. Keep the headroom narrow.
+MAX_TOTAL_FUNCTIONS = 2485
 # Grandfathered modules are accepted debt until their surfaces stabilize/split.
 GRANDFATHERED_OVERSIZED_MODULES = {
     "llm.py",
