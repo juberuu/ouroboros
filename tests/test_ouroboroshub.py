@@ -11,7 +11,7 @@ def test_ouroboroshub_stages_under_target_root(monkeypatch, tmp_path):
     hub_root = tmp_path / "hub"
     monkeypatch.setattr(ouroboroshub, "get_ouroboroshub_skills_dir", lambda: hub_root)
     summary = ouroboroshub.HubSkillSummary(slug="demo", name="demo", version="1.0.0", files=[{"path": "SKILL.md", "sha256": "x", "size": 1}])
-    monkeypatch.setattr(ouroboroshub, "load_catalog", lambda: {"raw_base_url": "https://raw.githubusercontent.com/joi-lab/OuroborosHub/main"})
+    monkeypatch.setattr(ouroboroshub, "load_catalog", lambda: {"raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/main"})
     monkeypatch.setattr(ouroboroshub, "_summaries", lambda _catalog: [summary])
     seen = {}
 
@@ -35,7 +35,7 @@ def test_ouroboroshub_persists_catalog_dependency_specs(monkeypatch, tmp_path):
         files=[{"path": "SKILL.md", "sha256": "x", "size": 1}],
         install_specs=[{"kind": "pip", "package": "ddgs"}],
     )
-    monkeypatch.setattr(ouroboroshub, "load_catalog", lambda: {"raw_base_url": "https://raw.githubusercontent.com/joi-lab/OuroborosHub/main"})
+    monkeypatch.setattr(ouroboroshub, "load_catalog", lambda: {"raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/main"})
     monkeypatch.setattr(ouroboroshub, "_summaries", lambda _catalog: [summary])
 
     def fake_download(_summary, _raw_base, staging_dir):
@@ -60,7 +60,7 @@ def test_ouroboroshub_preserves_dict_dependency_specs(monkeypatch, tmp_path):
         files=[{"path": "SKILL.md", "sha256": "x", "size": 1}],
         install_specs={"python": ["ddgs"]},
     )
-    monkeypatch.setattr(ouroboroshub, "load_catalog", lambda: {"raw_base_url": "https://raw.githubusercontent.com/joi-lab/OuroborosHub/main"})
+    monkeypatch.setattr(ouroboroshub, "load_catalog", lambda: {"raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/main"})
     monkeypatch.setattr(ouroboroshub, "_summaries", lambda _catalog: [summary])
 
     def fake_download(_summary, _raw_base, staging_dir):

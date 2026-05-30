@@ -91,7 +91,7 @@ export function initUpdates({ mount, state }) {
         }
         if (Array.isArray(data.warnings) && data.warnings.includes('official_status_requires_check')) {
             summary.textContent = 'Click Check for updates to refresh official update status.';
-            meta.innerHTML = '<span class="evo-runtime-chip"><strong>Official repo:</strong> joi-lab/ouroboros-desktop</span>';
+            meta.innerHTML = '<span class="evo-runtime-chip"><strong>Official repo:</strong> razzant/ouroboros</span>';
             applyBtn.disabled = true;
             applyBtn.dataset.safe = '0';
             applyBtn.textContent = 'Check Required';
@@ -109,7 +109,7 @@ export function initUpdates({ mount, state }) {
             ? `Update available: ${currentVersion} (${currentSha}) -> ${latestVersion} (${latestSha})`
             : `Ouroboros is up to date at ${currentVersion} (${currentSha}).`;
         meta.innerHTML = [
-            `<span class="evo-runtime-chip"><strong>Official repo:</strong> joi-lab/ouroboros-desktop</span>`,
+            `<span class="evo-runtime-chip"><strong>Official repo:</strong> razzant/ouroboros</span>`,
             `<span class="evo-runtime-chip"><strong>Remote ref:</strong> ${escapeHtml(data.remote || 'managed')}/${escapeHtml(data.remote_branch || '')}</span>`,
             `<span class="evo-runtime-chip"><strong>Divergence:</strong> ${escapeHtml(divergenceText(data))}</span>`,
             `<span class="evo-runtime-chip"><strong>Latest:</strong> ${escapeHtml(latestMsg)}</span>`,

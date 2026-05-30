@@ -536,13 +536,13 @@ the OuroborosHub catalog:
 You can read their full source under
 `data/skills/native/<name>/` for launcher-seeded examples, under
 `data/skills/external/<name>/` for your own local skills, or by browsing
-`joi-lab/OuroborosHub` on GitHub.
+`razzant/OuroborosHub` on GitHub.
 
 ## Publishing
 
 ### OuroborosHub (official, curated)
 
-`joi-lab/OuroborosHub` is the official catalog Ouroboros installs
+`razzant/OuroborosHub` is the official catalog Ouroboros installs
 from. The normal publishing path is agent-driven:
 
 1. Finish the local skill under `data/skills/<bucket>/<slug>/`.

@@ -30,7 +30,7 @@ BRANCH_STABLE: str = "ouroboros-stable"
 MANAGED_REPO_META_NAME = "ouroboros-managed.json"
 BOOTSTRAP_PIN_MARKER_NAME = "ouroboros-bootstrap-pending"
 UPDATE_INTENT_MARKER_NAME = "ouroboros-update-intent.json"
-OFFICIAL_UPDATE_REMOTE_URL = "https://github.com/joi-lab/ouroboros-desktop"
+OFFICIAL_UPDATE_REMOTE_URL = "https://github.com/razzant/ouroboros"
 
 
 def init(repo_dir: pathlib.Path, drive_root: pathlib.Path, remote_url: str,

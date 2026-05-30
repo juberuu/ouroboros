@@ -570,7 +570,7 @@ export function renderSettingsPage() {
                             <span>Created by <strong>Anton Razzhigaev</strong> &amp; <strong>Andrew Kaznacheev</strong></span>
                             <div class="about-links">
                                 <a href="https://t.me/abstractDL" target="_blank" rel="noopener noreferrer">@abstractDL</a>
-                                <a href="https://github.com/joi-lab/ouroboros-desktop" target="_blank" rel="noopener noreferrer">GitHub</a>
+                                <a href="https://github.com/razzant/ouroboros" target="_blank" rel="noopener noreferrer">GitHub</a>
                             </div>
                         </div>
                         <div class="about-footer">Joi Lab</div>

@@ -74,7 +74,7 @@ SETTINGS_DEFAULTS = {
     # Optional extra user-managed skills checkout; Ouroboros never clones/pulls it.
     "OUROBOROS_SKILLS_REPO_PATH": "",
     "OUROBOROS_CLAWHUB_REGISTRY_URL": "https://clawhub.ai/api/v1",
-    "OUROBOROS_HUB_CATALOG_URL": "https://raw.githubusercontent.com/joi-lab/OuroborosHub/main/catalog.json",
+    "OUROBOROS_HUB_CATALOG_URL": "https://raw.githubusercontent.com/razzant/OuroborosHub/main/catalog.json",
     "MCP_ENABLED": False,
     "MCP_SERVERS": [],
     "MCP_TOOL_TIMEOUT_SEC": 60,
