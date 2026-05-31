@@ -156,6 +156,37 @@ def _update_improvement_backlog(
         return 0
 
 
+def _child_task_evidence(env: Any, task: Dict[str, Any], limit: int = 6000) -> str:
+    """Return compact evidence from child/subagent results for parent experience review."""
+    task_id = str(task.get("id") or "")
+    if not task_id:
+        return ""
+    try:
+        from ouroboros.task_results import list_task_results
+
+        rows = []
+        for item in list_task_results(env.drive_root):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("parent_task_id") or "") != task_id and str(item.get("root_task_id") or "") != task_id:
+                continue
+            rows.append({
+                "task_id": item.get("task_id") or item.get("id"),
+                "status": item.get("status"),
+                "role": item.get("role"),
+                "result_status": item.get("result_status"),
+                "cost_usd": item.get("cost_usd"),
+                "trace_summary": _truncate_with_notice(item.get("trace_summary", ""), 800),
+                "result": _truncate_with_notice(item.get("result", ""), 1600),
+            })
+        if not rows:
+            return ""
+        return _truncate_with_notice(json.dumps(rows, ensure_ascii=False, indent=2), limit)
+    except Exception:
+        log.debug("Failed to collect child task evidence", exc_info=True)
+        return ""
+
+
 def _run_post_task_processing_async(
     env: Any,
     task: Dict[str, Any],
@@ -163,6 +194,8 @@ def _run_post_task_processing_async(
     llm_trace: Dict[str, Any],
     review_evidence: Dict[str, Any],
     drive_logs: pathlib.Path,
+    *,
+    blocking: bool = False,
 ) -> None:
     """Run best-effort LLM-heavy post-task memory work off the reply path."""
     task_snapshot = json.loads(json.dumps(task, ensure_ascii=False, default=str))
@@ -193,7 +226,10 @@ def _run_post_task_processing_async(
         except Exception:
             log.warning("Async post-task processing failed", exc_info=True)
 
-    threading.Thread(target=_run, daemon=True).start()
+    if blocking:
+        _run()
+    else:
+        threading.Thread(target=_run, daemon=True).start()
 
 
 def emit_task_results(
@@ -305,7 +341,26 @@ def emit_task_results(
         # LLM-heavy memory work stays off the reply critical path.
         _run_post_task_processing_async(
             env, task, post_usage, llm_trace, review_evidence, drive_logs,
+            blocking=(
+                str(task.get("type") or "") == "evolution"
+                or bool(str(task.get("workspace_root") or "").strip())
+                or bool(str(task.get("workspace_mode") or "").strip())
+            ),
         )
+        budget_drive_root = str(task.get("budget_drive_root") or "").strip()
+        if budget_drive_root and str(pathlib.Path(budget_drive_root).resolve(strict=False)) != str(pathlib.Path(env.drive_root).resolve(strict=False)):
+            from types import SimpleNamespace
+
+            parent_env = SimpleNamespace(repo_dir=env.repo_dir, drive_root=pathlib.Path(budget_drive_root), drive_path=lambda rel: pathlib.Path(budget_drive_root) / rel)
+            _run_post_task_processing_async(
+                parent_env,
+                {**task, "drive_root": budget_drive_root, "child_drive_root": str(env.drive_root)},
+                post_usage,
+                llm_trace,
+                review_evidence,
+                pathlib.Path(budget_drive_root) / "logs",
+                blocking=True,
+            )
 
 
 def _store_task_result(env: Any, task: Dict[str, Any], text: str,
@@ -554,17 +609,24 @@ def _run_reflection(env: Any, llm: Any, task: Dict[str, Any],
         from ouroboros.reflection import (
             should_generate_reflection, generate_reflection, append_reflection,
         )
-        if should_generate_reflection(
+        task_forces_reflection = (
+            str(task.get("type") or "") in {"evolution", "deep_self_review"}
+            or bool(str(task.get("workspace_root") or "").strip())
+            or bool(str(task.get("workspace_mode") or "").strip())
+        )
+        if task_forces_reflection or should_generate_reflection(
             llm_trace,
             rounds=int(usage.get("rounds", 0)),
             cost_usd=float(usage.get("cost", 0.0)),
         ):
             trace_summary = build_trace_summary(llm_trace)
+            child_evidence = _child_task_evidence(env, task)
             try:
                 entry = generate_reflection(
                     task, llm_trace, trace_summary,
                     llm, usage,
                     review_evidence=review_evidence,
+                    child_evidence=child_evidence,
                 )
                 append_reflection(env.drive_root, entry)
                 return entry

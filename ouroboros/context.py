@@ -84,6 +84,10 @@ def build_runtime_section(env: Any, task: Dict[str, Any]) -> str:
             "session_id": task.get("session_id"),
             "actor_id": task.get("actor_id"),
             "delegation_role": task.get("delegation_role"),
+            "memory_mode": task.get("memory_mode"),
+            "drive_root": task.get("drive_root"),
+            "child_drive_root": task.get("child_drive_root"),
+            "budget_drive_root": task.get("budget_drive_root"),
         },
         "runtime_env": {"is_desktop": bool(os.environ.get("OUROBOROS_DESKTOP_MODE", "")), "platform": sys.platform},
     }

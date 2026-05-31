@@ -1117,6 +1117,7 @@ def review_skill(
             "env_from_settings": list(skill.manifest.env_from_settings),
             "requires": list(skill.manifest.requires),
             "scripts": list(skill.manifest.scripts),
+            "scheduled_tasks": list(getattr(skill.manifest, "scheduled_tasks", []) or []),
             "entry": skill.manifest.entry,
         },
         ensure_ascii=False,

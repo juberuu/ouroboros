@@ -162,6 +162,16 @@ async def api_extensions_index(request: Request) -> JSONResponse:
         return json_exception(exc)
 
 
+async def api_skill_daemons(_request: Request) -> JSONResponse:
+    """Return host-supervised extension companion process status."""
+    try:
+        from ouroboros.extension_companion import snapshot_processes
+
+        return JSONResponse({"companions": snapshot_processes()})
+    except Exception as exc:
+        return json_exception(exc)
+
+
 def _build_extensions_index(drive_root, repo_path):
     """Threaded, request-scope-free body for ``GET /api/extensions``."""
     from ouroboros.extension_loader import extension_name_prefix, runtime_state_for_loaded_skill
@@ -169,6 +179,12 @@ def _build_extensions_index(drive_root, repo_path):
     live_snapshot = snapshot()
     # Scan data plane plus optional external checkout; bootstrap copies native refs.
     skills = discover_skills(drive_root, repo_path=repo_path)
+    try:
+        from supervisor.queue import sync_skill_schedules
+
+        sync_skill_schedules(skills, drive_root=drive_root)
+    except Exception:
+        log.debug("Failed to sync skill schedules", exc_info=True)
     runtime_states = {
         s.name: runtime_state_for_loaded_skill(s, drive_root)
         for s in skills
@@ -315,6 +331,7 @@ async def api_extension_manifest(request: Request) -> JSONResponse:
                 "entry": loaded.manifest.entry,
                 "permissions": list(loaded.manifest.permissions or []),
                 "env_from_settings": list(loaded.manifest.env_from_settings or []),
+                "scheduled_tasks": list(getattr(loaded.manifest, "scheduled_tasks", []) or []),
                 "ui_tab": loaded.manifest.ui_tab,
             },
             "enabled": loaded.enabled,
@@ -609,6 +626,13 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
                 "extension_reason": "name_collision",
             }
         save_enabled(drive_root, loaded.name, enabled)
+        try:
+            from supervisor.queue import sync_skill_schedules
+            from ouroboros.skill_loader import discover_skills
+
+            sync_skill_schedules(discover_skills(drive_root, repo_path=repo_path), drive_root=drive_root)
+        except Exception:
+            log.debug("api_skill_toggle schedule sync failed", exc_info=True)
         action = None
         live_reason = "not_extension"
         if loaded.manifest.is_extension() or loaded.name in extension_loader.snapshot()["extensions"]:
@@ -819,6 +843,11 @@ async def api_skill_grants(request: Request) -> JSONResponse:
                 )
                 extension_reason = "reconcile_call_failed"
                 extension_load_error = str(exc)
+        try:
+            from supervisor.queue import sync_skill_schedules
+            sync_skill_schedules(discover_skills(drive_root, repo_path=repo_path), drive_root=drive_root)
+        except Exception:
+            log.debug("api_skill_grants schedule sync failed", exc_info=True)
         refreshed = find_skill(drive_root, loaded.name, repo_path=repo_path) or loaded
         return {
             "ok": True,
@@ -945,6 +974,11 @@ async def api_skill_delete(request: Request) -> JSONResponse:
         deleted_state = state_dir.exists()
         if deleted_state:
             shutil.rmtree(state_dir)
+        try:
+            from supervisor.queue import sync_skill_schedules
+            sync_skill_schedules(discover_skills(drive_root, repo_path=repo_path), drive_root=drive_root)
+        except Exception:
+            log.debug("api_skill_delete schedule sync failed", exc_info=True)
         if payload_dir.exists() or state_dir.exists():
             return {"error": f"failed to fully delete local skill {loaded.name!r}", "status_code": 500}
         return {
@@ -989,6 +1023,7 @@ __all__ = [
     "api_extension_module",
     "api_extension_settings_section",
     "api_extension_dispatch",
+    "api_skill_daemons",
     "api_skill_delete",
     "api_skill_toggle",
     "api_skill_review",

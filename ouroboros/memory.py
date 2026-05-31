@@ -83,7 +83,7 @@ class Memory:
             and "(empty" in text
         )
 
-    def append_scratchpad_block(self, content: str, source: str = "task") -> Dict[str, Any]:
+    def append_scratchpad_block(self, content: str, source: str = "task", metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         bp = self.scratchpad_blocks_path()
         bp.parent.mkdir(parents=True, exist_ok=True)
 
@@ -101,6 +101,8 @@ class Memory:
             raise RuntimeError(msg)
 
         new_block = {"ts": utc_now_iso(), "source": source, "content": content}
+        if metadata:
+            new_block["metadata"] = dict(metadata)
 
         fd = None
         try:
@@ -152,6 +154,9 @@ class Memory:
                 "ts": utc_now_iso(),
                 "type": "block_appended",
                 "content_len": total_chars,
+                "source": source,
+                "metadata": dict(metadata or {}),
+                "block": dict(new_block),
             })
         except Exception:
             log.debug("Failed to write scratchpad size to journal", exc_info=True)

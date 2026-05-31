@@ -7,7 +7,7 @@
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/razzant/ouroboros/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/razzant/ouroboros/releases)
 [![OuroborosHub](https://img.shields.io/badge/OuroborosHub-skills%20marketplace-8A2BE2.svg)](https://github.com/razzant/OuroborosHub)
-[![Version 6.8.0](https://img.shields.io/badge/version-6.8.0-green.svg)](VERSION)
+[![Version 6.9.0-rc.1](https://img.shields.io/badge/version-6.9.0--rc.1-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -123,6 +123,8 @@ ouroboros run "Summarize current runtime state"
 ouroboros run --workspace /path/to/project --memory-mode forked --patch-out result.patch "Fix the failing test"
 ouroboros tasks list
 ouroboros logs tail progress --task-id <task_id>
+ouroboros schedule add --name nightly-review --cron "0 2 * * *" "Run a maintenance review"
+ouroboros schedule list
 ```
 
 External workspace runs keep Ouroboros's own repo as the governance source,
@@ -134,6 +136,9 @@ worktree root; it may not overlap Ouroboros's system repo or data drive.
 through the task artifact endpoint, and fail nonzero on missing, empty, or
 failed patches. `--no-stream` waits without progress output; `--detach` returns
 the task id immediately.
+`schedule add/list/remove` manages queue-backed scheduled tasks through the same
+gateway and supervisor queue; schedules use standard 5-field cron, host-local
+timezone by default, and a single catch-up run after downtime.
 Benchmark helpers under `scripts/` expect clean, local, per-instance checkouts;
 they do not reset or commit target repositories.
 
@@ -409,7 +414,8 @@ All keys are configured through the **Settings** page in the UI or during the fi
 |------|---------|---------|
 | Main | `google/gemini-3.5-flash` | Primary reasoning |
 | Code | `google/gemini-3.5-flash` | Code editing |
-| Light | `google/gemini-3.5-flash` | Safety checks, consciousness, fast tasks |
+| Light | `google/gemini-3.5-flash` | Safety checks and fast helper tasks |
+| Consciousness | empty → Main | High-horizon background consciousness |
 | Fallback | `anthropic/claude-sonnet-4.6` | When primary model fails |
 | Claude Agent SDK | `opus[1m]` | Anthropic model for Claude Agent SDK advisory/review internals; the `[1m]` suffix is a Claude Code selector that requests the 1M-context extended mode |
 | Scope Review | `openai/gpt-5.5` | Scope reviewer slot default; `OUROBOROS_SCOPE_REVIEW_MODELS` may configure multiple independent slots |
@@ -417,7 +423,7 @@ All keys are configured through the **Settings** page in the UI or during the fi
 
 Task/chat reasoning defaults to `medium`. Scope review reasoning defaults to `high`.
 
-Models are configurable in the Settings page. Runtime model slots can target OpenRouter, official OpenAI, OpenAI-compatible endpoints, Cloud.ru, or direct Anthropic. When only official OpenAI is configured and the shipped default model values are still untouched, Ouroboros auto-remaps them to official OpenAI defaults. In **OpenAI-only** or **Anthropic-only** direct-provider mode, review-model lists are normalized automatically: the fallback shape is `[main_model, light_model, light_model]` (3 commit-triad slots) so both the commit triad and `plan_task` work out of the box. Explicit duplicate model IDs are valid reviewer slots for stochastic sampling; lower uniqueness means lower reviewer diversity, but the quorum gate counts configured slots rather than unique model IDs. Both the commit triad and `plan_task` route through the same `ouroboros/config.py::get_review_models` SSOT. (OpenAI-compatible-only and Cloud.ru-only setups do not yet get this fallback — the detector returns empty when those keys are present, so users configure review-model lists manually in that case.)
+Models are configurable in the Settings page. Runtime model slots can target OpenRouter, official OpenAI, OpenAI-compatible endpoints, Cloud.ru, or direct Anthropic. When only official OpenAI is configured and the shipped default model values are still untouched, Ouroboros auto-remaps them to official OpenAI defaults. In **OpenAI-only**, **Anthropic-only**, or **Cloud.ru-only** direct-provider mode, review-model lists are normalized automatically: the fallback shape is `[main_model, light_model, light_model]` (3 commit-triad slots) so both the commit triad and `plan_task` work out of the box. Explicit duplicate model IDs are valid reviewer slots for stochastic sampling; lower uniqueness means lower reviewer diversity, but the quorum gate counts configured slots rather than unique model IDs. Both the commit triad and `plan_task` route through the same `ouroboros/config.py::get_review_models` SSOT. OpenAI-compatible-only setups remain explicit model-selection flows because there is no single universal default model ID for arbitrary compatible endpoints.
 
 ### File Browser Start Directory
 
@@ -487,13 +493,13 @@ the contribution guide only routes to those sources.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 6.9.0-rc.1 | 2026-05-31 | **rc(evolution): make self-improvement explicit, scheduled, and continuous.** Introduces a high-horizon consciousness model slot, scope-limits background consciousness without reducing its quality, starts goal-directed Evolution Campaigns instead of empty `EVOLUTION #N` prompts, adds queue-backed cron schedules and skill schedule metadata, exposes workspace knowledge reads, makes forked memory useful beyond workspace runs, records rollback-grade memory provenance, and begins checkpointing evolution cycles for future eval curves. |
 | 6.8.0 | 2026-05-31 | **repo: consolidate the official Ouroboros home under razzant.** Retargets update metadata, package links, and the official skills catalog to the razzant repositories so new builds use the consolidated project home while preserving the historical Google Colab branch separately. |
 | 6.7.3 | 2026-05-30 | **release(ui): keep nested subagent cards stable in host smoke.** History replay now keeps subagent live cards mounted under their parent card instead of moving them to the top-level transcript, and the UI smoke regression asserts both nested placement and no duplicate final child chat bubble after reload. |
 | 6.7.2 | 2026-05-30 | **release(ci): keep extension isolation release inside gates.** Keeps the 6.7.x extension-isolation release within CI complexity gates, keeps extension child failures classified as normal `TOOL_ERROR` tool failures, and moves extension tool dispatch out of the oversized registry module path. |
 | 6.7.1 | 2026-05-30 | **release(reliability): preserve workspace patches, show nested subagents, and isolate extension crashes.** Effective task results keep parent-finalized `workspace_patch` artifacts visible for CLI patch export; chat live cards now render subagents as always-visible nested child cards without marking the parent done; delegation tools are core for parent tasks while subagents remain read-only leaves; and extension isolated deps dispatch out-of-process so native aborts return graceful errors instead of crashing the server. |
 | 6.7.0-rc.3 | 2026-05-29 | **rc(reliability): structurally close the subagent worker-crash, ghost-task, and stuck-spinner classes; provider-agnostic review; bundled Node.** macOS/Windows workers use `spawn` (Linux keeps `fork`) and a central `OUROBOROS_IN_WORKER` no-proxy policy eliminates the macOS `_scproxy` fork SIGSEGV class. A monotonic `write_task_result` lifecycle guard plus live `cancel_task` + `cancel_requested` latch prevent stale/ghost status; terminal `task_done` events on every crash/kill/timeout/cancel path (and reconnect/history reconciliation) stop the perpetual spinner. Signal crashes are terminal (no retry) for all task types. Subagent UI dedup (Variant A: parent dashboard rows, in-place updates, no duplicate child card). Cloud.ru becomes a first-class exclusive-direct provider so Ouroboros is usable with any single key; `skill_preflight` tolerates missing/killed validators and the build bundles a signed Node.js LTS for node-runtime skills. New-user defaults: review `claude-opus-4.8`, Claude Code `opus[1m]`. README OuroborosHub badge/callout. (rc.2/rc.3: gitignore the bundled `node-standalone` so the `repo.bundle` build sees a clean working tree, and update the Variant A subagent-card UI smoke test to the single grouped-card layout — verified locally with Playwright.) |
-| 6.6.0-rc.1 | 2026-05-29 | **rc(review): effect-gate task-acceptance review and clarify light-mode cognitive writes.** Host-enforced `required` review fires only on turns with observable reviewable effects (commit/deliverable/workspace/self-mod) or non-direct tasks, so plain chat is never reviewed; `auto` stays LLM-first. Adds `review_eligibility`/`review_trigger` to loop outcomes, routes light-mode cognitive writes to `update_identity`/`update_scratchpad`/`knowledge_write` (`COGNITIVE_TOOL_REQUIRED`) and absolute home paths to `root=user_files` (`ROOT_REQUIRED_USER_FILES`) with recovery, parses fenced JSON-object reviewer verdicts, and makes `DEGRADED` review signals carry an honest reason. |
-Older releases are preserved in Git tags and GitHub releases. The 6.0.0 through 6.5.0-rc.4 rows, the 5.2.0 through 5.33.0-rc.6 rows, and former `4.0.0` rows are rolled off to respect the P9 changelog cap; their full bodies remain at their git tags.
+Older releases are preserved in Git tags and GitHub releases. The 6.0.0 through 6.6.0-rc.1 rows, the 5.2.0 through 5.33.0-rc.6 rows, and former `4.0.0` rows are rolled off to respect the P9 changelog cap; their full bodies remain at their git tags.
 
 ---
 

@@ -261,6 +261,8 @@ _WORKSPACE_ALLOWED_TOOLS = frozenset({
     "vcs_diff",
     "chat_history",
     "recent_tasks",
+    "knowledge_read",
+    "knowledge_list",
     "web_search",
     "browse_page",
     "browser_action",

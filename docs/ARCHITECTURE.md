@@ -1,4 +1,4 @@
-# Ouroboros v6.8.0 — Architecture & Reference
+# Ouroboros v6.9.0-rc.1 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -38,6 +38,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── agent_task_pipeline.py  ← Task execution pipeline orchestration
       ├── extension_companion.py ← Host-supervised companion processes for transport skills
       ├── event_bus.py         ← Typed in-process event bus for skill subscriptions
+      ├── evolution_checkpoints.py ← Append-only campaign/eval checkpoint ledger for evolution progress
       ├── improvement_backlog.py ← Minimal durable advisory backlog helpers + digest formatting
       ├── loop.py              ← High-level LLM tool loop
       ├── loop_llm_call.py     ← Single-round LLM call + usage accounting
@@ -70,6 +71,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── launcher_bootstrap.py ← Bundle-to-repo bootstrap and managed sync helpers (used by launcher.py)
       ├── provider_models.py   ← Provider-specific model ID helpers, direct-provider defaults (OpenAI, Anthropic)
       ├── runtime_mode_policy.py ← Runtime-mode protected-path policy (safety-critical files, frozen contracts, release/managed invariants) shared by registry, git tools, and Claude gateway guards
+      ├── schedule_contract.py ← Schedule id, 5-field cron, and IANA timezone validation SSOT shared by gateway, manifests, and supervisor queue
       ├── reflection.py        ← Execution reflection and pattern capture
       ├── review_evidence.py   ← Structured review findings/obligations snapshot for summaries and reflections
       ├── skill_loader.py      ← Skill discovery + durable skill state (v5.8.2: walks data/skills/{native,clawhub,ouroboroshub,external}/ + optional OUROBOROS_SKILLS_REPO_PATH; persists to data/state/skills/<name>/; tags each LoadedSkill with `source` and `.self_authored.json` provenance; v5.19 computes review verdicts live from stored findings)
@@ -119,6 +121,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── logs.py          ← Read-only runtime log tail endpoint for CLI/headless clients
       │   ├── settings.py      ← /api/settings, /api/owner/*, onboarding, Claude runtime status/repair handlers
       │   ├── control.py       ← reset, command, git/update, and evolution-data handlers
+      │   ├── schedules.py     ← queue-backed cron schedule HTTP surface (list/upsert/delete)
       │   ├── files.py         ← File Browser + chat upload endpoints
       │   ├── models.py        ← model catalog + local-model lifecycle endpoints
       │   ├── extensions.py    ← extensions/skills HTTP surface (GET /api/extensions, GET /api/extensions/<skill>/manifest, ALL /api/extensions/<skill>/<rest:path>, POST /api/skills/<skill>/toggle, POST /api/skills/<skill>/delete, POST /api/skills/<skill>/review, POST /api/skills/<skill>/grants)
@@ -202,6 +205,9 @@ artifacts from the task artifact directory only. For task streaming commands
 such as `run` and `tasks watch`, stdout is
 reserved for final machine-consumable output (or JSONL when requested) while
 progress goes to stderr; status and admin wrappers may print human summaries.
+`ouroboros schedule list|add|remove` is the CLI wrapper over `/api/schedules`;
+it manages persisted 5-field cron schedules that enqueue ordinary tasks through
+the supervisor queue rather than running a separate scheduler daemon.
 
 Packaged desktop artifacts ship a tiny `bin/ouroboros` wrapper and installer
 instead of a second PyInstaller runtime. The wrapper runs the bundled
@@ -263,7 +269,10 @@ patch finalization records `artifact_status=failed` and the manifest only.
 untracked paths, git diagnostics, and artifact errors. The parent result carries `artifact_status`
 (`pending`/`finalizing`/`ready`/`failed`) so headless clients cannot observe a
 terminal workspace result before artifacts are ready or explicitly failed.
-Headless runs never auto-merge memory back into the parent drive. Swarm
+Headless runs never auto-merge memory back into the parent drive. Queued
+non-workspace tasks may also request `memory_mode=forked|empty`; in that case
+the same child-drive mechanism is used for memory isolation while the active repo
+remains the Ouroboros repo. Swarm
 readiness in v1 is implemented as live child tasks over the existing queue:
 `schedule_subagent` emits a normal `schedule_subagent` event, the supervisor enqueues it
 as a child task, and an existing worker executes it. There is no separate
@@ -279,6 +288,12 @@ authoritative. Workspace artifact tasks stay nonterminal while
 states make the effective workspace result terminal. `wait_task` performs a
 bounded wait (default 180s), and `wait_tasks` performs batch waits (default
 600s) with full per-child result, trace, and cost output preserved untruncated.
+
+Workspace tasks expose read-only knowledge access (`knowledge_read` and
+`knowledge_list`) because `workspace_task` permits runtime-data reads; mutating
+cognitive tools still stay out of the workspace allowlist. Parent memory changes
+come from the post-task experience review/import path, not directly from the
+workspace child.
 
 Live subagents run with deterministic
 `task_constraint.mode="local_readonly_subagent"`. The registry filters their
@@ -372,6 +387,9 @@ finalization states.
 │   │   ├── deep_self_review_context.json ← Last deep self-review Generated Scope Atlas manifest and model metadata
 │   │   ├── code_intel/<repo_key>/inventory.json ← Internal Code Inventory v1 facts (file hashes, dispositions, symbols/imports; no raw source cache)
 │   │   ├── evolution_metrics_cache.json ← Cached per-tag Evolution metrics (schema 1; regenerated by `/api/evolution-data` / `collect_evolution_metrics`)
+│   │   ├── evolution_campaign.json ← Active/paused Evolution Campaign objective, progress, cycle history, and budget counters
+│   │   ├── evolution_checkpoints.jsonl ← Append-only per-evolution-cycle checkpoints with git/memory hashes and status/cost facts
+│   │   ├── scheduled_tasks.json ← Queue-backed cron schedules (5-field cron, timezone, last/next run, task template)
 │   │   ├── queue_snapshot.json
 │   │   ├── extension_companions.json ← Runtime snapshot for live extension companion processes
 │   │   ├── review_continuations/ ← Per-task blocked-review continuation payloads (+ quarantined corrupt files under `corrupt/`)
@@ -397,6 +415,8 @@ finalization states.
 │   │   ├── identity_journal.jsonl    ← Identity update journal
 │   │   ├── scratchpad_journal.jsonl  ← Scratchpad block eviction journal
 │   │   ├── knowledge_journal.jsonl   ← Knowledge write journal
+│   │   ├── knowledge_history.jsonl   ← Rollback-grade knowledge write history with old/new hashes and content refs
+│   │   ├── knowledge/patterns_history.jsonl ← Append-only Pattern Register rewrite history for provenance/recovery
 │   │   ├── deep_review.md            ← Last deep self-review report (written by deep_self_review task)
 │   │   ├── registry.md              ← Source-of-truth awareness map (what data the agent has vs doesn't have)
 │   │   ├── knowledge/improvement-backlog.md ← Durable advisory backlog of concrete post-task improvements
@@ -617,6 +637,7 @@ The executable route SSOT is `ouroboros/gateway/router.py`; file-browser routes 
 | GET | `/api/extensions/{skill}/module/{entry}` | `gateway.extensions.api_extension_module` |
 | GET | `/api/extensions/{skill}/settings_section` | `gateway.extensions.api_extension_settings_section` |
 | ANY | `/api/extensions/{skill}/{rest:path}` | `gateway.extensions.api_extension_dispatch` |
+| GET | `/api/skills/daemons` | `gateway.extensions.api_skill_daemons` |
 | POST | `/api/skills/{skill}/toggle` | `gateway.extensions.api_skill_toggle` |
 | POST | `/api/skills/{skill}/delete` | `gateway.extensions.api_skill_delete` |
 | GET | `/api/skills/lifecycle-queue` | `gateway.extensions.api_skill_lifecycle_queue` |
@@ -659,6 +680,9 @@ The executable route SSOT is `ouroboros/gateway/router.py`; file-browser routes 
 | GET | `/api/tasks/{task_id}/events` | `gateway.tasks.api_task_events` |
 | GET | `/api/tasks/{task_id}/artifacts/{name}` | `gateway.tasks.api_task_artifact` |
 | POST | `/api/tasks/{task_id}/cancel` | `gateway.tasks.api_task_cancel` |
+| GET | `/api/schedules` | `gateway.schedules.api_schedules_list` |
+| POST | `/api/schedules` | `gateway.schedules.api_schedules_upsert` |
+| DELETE | `/api/schedules/{schedule_id}` | `gateway.schedules.api_schedules_delete` |
 | POST | `/api/command` | `gateway.control.api_command` |
 | POST | `/api/reset` | `gateway.control.api_reset` |
 | GET | `/api/git/log` | `gateway.control.api_git_log` |
@@ -776,6 +800,15 @@ Rationale: tool classification drift caused subtle bugs; every hardcoded set now
 Context compaction policy is deliberately asymmetric. Remote models use emergency-only compaction above ~1.2M chars because the old per-round compactor fired after `keep_recent=50` on every round, destroyed raw tool outputs, fragmented process memory, and collapsed prompt-cache hit rate. Local models compact aggressively after round 6 / >40 messages because small context windows require it. Manual pending compaction is always honored.
 
 Prompt-cache markers are provider-gated in `llm.py`. Anthropic-compatible routes keep message-block cache markers and tool-schema cache markers; OpenRouter Gemini routes keep message-block markers only; other OpenRouter, direct OpenAI/OpenAI-compatible/Cloud.ru, and local routes receive copied payloads with unsupported cache metadata removed. Ouroboros sends only `{"type": "ephemeral"}` and does not send cache TTLs. OpenRouter reasoning round-trip fields (`reasoning`, `reasoning_details`, `response_id`) are preserved only on OpenRouter payloads and stripped from direct/local provider copies so provider-specific continuity does not leak across routes.
+
+Background Consciousness is a high-horizon internal awareness loop, not a cheap helper lane. It may update memory and identity and proactively message the owner, but it does not directly execute powerful work such as subagent delegation, shell/code execution, reviews, commits, or evolution toggles. It grooms backlog and cognitive state; Evolution Campaigns execute targeted self-improvement work through the normal task/review path.
+
+Evolution Campaigns replace the old empty `EVOLUTION #N` trigger text with a
+goal-directed campaign prompt. The supervisor still schedules evolution from the
+fast idle queue path, so consecutive campaign iterations can start as soon as the
+queue is empty; only the task objective and persisted progress become explicit.
+Campaign checkpoints are appended to `data/state/evolution_checkpoints.jsonl`
+with git/memory hashes and per-cycle cost/status for future eval curves.
 
 Loop checkpoints are plain user-message self-checks by design. A prior structured-reflection mechanism (four-field contract, tools disabled, `effort=xhigh`) produced 0 valid reflections and 37 anomaly records in production: system-role injection was absorbed into the top-level prompt, high effort with no tools invalidated cache every round, and the strict parser rejected natural model output. The minimal checkpoint is intentional; do not reintroduce structured reflection without new evidence.
 
@@ -914,7 +947,8 @@ Runtime floors:
 | OUROBOROS_TRUST_NONLOCAL_BIND_WITHOUT_PASSWORD | unset | Env-only Docker/Kubernetes escape hatch. When set to `1`, Settings may save ordinary changes while a wildcard/non-localhost bind has no `OUROBOROS_NETWORK_PASSWORD`; use only behind ingress auth, VPN, private networking, or an auth proxy. |
 | OUROBOROS_MODEL | google/gemini-3.5-flash | Main reasoning model |
 | OUROBOROS_MODEL_CODE | google/gemini-3.5-flash | Code editing model |
-| OUROBOROS_MODEL_LIGHT | google/gemini-3.5-flash | Fast/cheap model (safety, consciousness) |
+| OUROBOROS_MODEL_LIGHT | google/gemini-3.5-flash | Fast/cheap model for safety, compact routing, and lightweight helper calls |
+| OUROBOROS_MODEL_CONSCIOUSNESS | "" | Background Consciousness model slot. Empty means use `OUROBOROS_MODEL`; do not silently downgrade this lane to the light model or a smaller context as a cost optimization |
 | OUROBOROS_MODEL_FALLBACK | anthropic/claude-sonnet-4.6 | Fallback when primary fails |
 | CLAUDE_CODE_MODEL | opus[1m] | Anthropic model for Claude Agent SDK advisory/review internals (values: sonnet, opus, `opus[1m]`, or full model name; the `[1m]` suffix is a Claude Code selector that requests the 1M-context extended mode) |
 | OUROBOROS_MAX_WORKERS | 5 | Worker process pool size |
@@ -941,7 +975,7 @@ Runtime floors:
 | OUROBOROS_EFFORT_EVOLUTION | high | Reasoning effort for evolution tasks |
 | OUROBOROS_EFFORT_REVIEW | medium | Reasoning effort for review tasks |
 | OUROBOROS_EFFORT_SCOPE_REVIEW | high | Reasoning effort for scope review |
-| OUROBOROS_EFFORT_CONSCIOUSNESS | low | Reasoning effort for background consciousness |
+| OUROBOROS_EFFORT_CONSCIOUSNESS | high | Reasoning effort for background consciousness |
 | OUROBOROS_RETURN_REASONING | true | OpenRouter reasoning continuity switch. Unset means return reasoning payloads by default; false-like values or an explicit empty string opt out. Direct/local routes strip OpenRouter-only reasoning fields on copied payloads. |
 | OUROBOROS_SOFT_TIMEOUT_SEC | 600 | Soft timeout warning (10 min) |
 | OUROBOROS_HARD_TIMEOUT_SEC | 1800 | Hard timeout kill (30 min) |
@@ -952,8 +986,9 @@ Runtime floors:
 | USE_LOCAL_MAIN | false | Route main model to local server |
 | USE_LOCAL_CODE | false | Route code model to local server |
 | USE_LOCAL_LIGHT | false | Route light model to local server |
+| USE_LOCAL_CONSCIOUSNESS | false | Route background consciousness model slot to local server |
 | USE_LOCAL_FALLBACK | false | Route fallback model to local server |
-| OUROBOROS_BG_MAX_ROUNDS | 5 | Max LLM rounds per consciousness cycle |
+| OUROBOROS_BG_MAX_ROUNDS | 10 | Max LLM rounds per consciousness cycle |
 | OUROBOROS_BG_WAKEUP_MIN | 30 | Min wakeup interval (seconds) |
 | OUROBOROS_BG_WAKEUP_MAX | 7200 | Max wakeup interval (seconds) |
 | OUROBOROS_EVO_COST_THRESHOLD | 0.10 | Min cost per evolution cycle |
@@ -964,7 +999,7 @@ Runtime floors:
 | GITHUB_REPO | "" | Optional. GitHub repo (owner/name) for sync |
 | OUROBOROS_FILE_BROWSER_DEFAULT | "" | Explicit Files tab root. Required for Docker/non-localhost Files access |
 
-Direct-provider review fallback (formerly OpenAI-only review fallback): when exactly one official direct provider is configured, `config.get_review_models()` can fall back to `[main, light, light]` using provider-prefixed model IDs. Current scope is OpenAI-only and Anthropic-only; `_exclusive_direct_remote_provider_env` returns empty when OpenAI-compatible or Cloud.ru keys are present. The fallback also requires `provider_models.migrate_model_value` to make the main model already start with the exclusive provider prefix, preventing cross-provider free-text models from silently entering the direct-provider path.
+Direct-provider review fallback (formerly OpenAI-only review fallback): when exactly one official direct provider is configured, `config.get_review_models()` can fall back to `[main, light, light]` using provider-prefixed model IDs. Current scope covers official OpenAI, Anthropic, and Cloud.ru; `_exclusive_direct_remote_provider_env` returns empty when OpenRouter, legacy `OPENAI_BASE_URL`, OpenAI-compatible keys, or multiple official direct providers are present. The fallback also requires `provider_models.migrate_model_value` to make the main model already start with the exclusive provider prefix, preventing cross-provider free-text models from silently entering the direct-provider path.
 
 Claude Runtime Status appears when an Anthropic key exists or when backend/runtime checks or browser-side `refreshClaudeCodeStatus` transport failure paths set an error. This keeps Claude Code advisory/edit readiness visible even when the failure is UI transport rather than SDK installation.
 
@@ -1177,7 +1212,7 @@ via `tests/test_contracts.py`.
 | `api_v1` WS/HTTP envelopes — inbound: `ChatInbound`, `CommandInbound`; outbound WS: `ChatOutbound`, `PhotoOutbound`, `VideoOutbound`, `TypingOutbound`, `LogOutbound`, `ExtensionLifecycleOutbound`; HTTP: `HealthResponse`, `StateResponse` (Phase 2 adds `runtime_mode: str` and `skills_repo_configured: bool`; v5.11.0 adds `github_token_configured: bool`), `EvolutionStateSnapshot`, `SettingsNetworkMeta`, `SettingsMeta` (`custom_secret_keys` + setup contract metadata) | `ouroboros/gateway/contracts.py` | AST scans of `supervisor/message_bus.py` chat/media envelopes, `gateway/state.py::api_state`, `gateway/state.py::api_health`, `gateway/settings.py::_build_network_meta`, and `gateway/ws.py::ws_endpoint` inbound dispatch assert no un-declared keys leak out; `tests/test_contracts.py::test_state_response_declares_phase2_runtime_mode_keys` explicitly pins the Phase 2 fields and later additive state keys |
 | `chat_id_policy` — SSOT for A2A/synthetic chat-id filtering across message bus, history, memory, and consolidation | `ouroboros/contracts/chat_id_policy.py` | `tests/test_chat_id_policy.py` pins boundaries and human/transport positive ids |
 | `PluginAPI` (Phase 4, v1.2) + `ExtensionRegistrationError` + `FORBIDDEN_EXTENSION_SETTINGS` + `VALID_EXTENSION_PERMISSIONS` + `VALID_EXTENSION_ROUTE_METHODS` — the surface every `type: extension` skill's `plugin.py::register(api)` binds against (`register_tool`, `register_route`, `register_ws_handler`, `register_ui_tab`, `register_settings_section`, `register_supervised_task`, `register_companion_process`, `subscribe_event`, `get_skill_token`, `send_ws_message`, `on_unload`, `log`, `get_settings`, `get_state_dir`, `skill_job_dir`, `get_runtime_info`). `skill_job_dir(job_id)` creates isolated `jobs/<sanitized_id>-<hash>/{assets,output,tmp}` state folders so generation skills do not overwrite their own assets across jobs. `VALID_EXTENSION_PERMISSIONS` includes host-mediated permissions (`companion_process`, `supervised_task`, `subscribe_event`, `inject_chat`) that require review/owner grants as documented in CHECKLISTS.md. | `ouroboros/contracts/plugin_api.py` | `tests/test_contracts.py::test_plugin_api_surface_is_frozen` pins the frozen method set; `tests/test_contracts.py::test_extension_route_methods_contract_matches_server_dispatch` pins the route-methods tuple; `tests/test_extension_loader.py::test_plugin_api_impl_matches_protocol` asserts the concrete `PluginAPIImpl` structurally satisfies the runtime-checkable Protocol |
-| `SkillManifest` — unified `SKILL.md` / `skill.json` format (`type: instruction \| script \| extension`) | `ouroboros/contracts/skill_manifest.py` | `parse_skill_manifest_text()` tolerates missing optional fields; `validate()` returns warnings without raising |
+| `SkillManifest` — unified `SKILL.md` / `skill.json` format (`type: instruction \| script \| extension`; v6.9 adds reviewed `scheduled_tasks` cron metadata) | `ouroboros/contracts/skill_manifest.py` | `parse_skill_manifest_text()` tolerates missing optional fields; `validate()` returns warnings without raising |
 | `schema_versions` — opt-in `_schema_version` key + `with_schema_version`/`read_schema_version` helpers | `ouroboros/contracts/schema_versions.py` | Not yet wired into existing state files; groundwork only |
 
 ### 11.2 What is NOT frozen (intentionally)

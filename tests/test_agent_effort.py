@@ -73,10 +73,10 @@ def test_review_effort_configurable():
 # Consciousness
 # ---------------------------------------------------------------------------
 
-def test_consciousness_effort_default_is_low():
-    """Default consciousness effort is 'low'."""
+def test_consciousness_effort_default_is_high():
+    """Default consciousness effort is high-horizon, not cheap helper mode."""
     with patch.dict(os.environ, {}, clear=True):
-        assert resolve_effort("consciousness") == "low"
+        assert resolve_effort("consciousness") == "high"
 
 
 def test_consciousness_effort_configurable():
@@ -94,4 +94,4 @@ def test_task_type_is_case_insensitive():
     with patch.dict(os.environ, {}, clear=True):
         assert resolve_effort("EVOLUTION") == "high"
         assert resolve_effort("Review") == "medium"
-        assert resolve_effort("CONSCIOUSNESS") == "low"
+        assert resolve_effort("CONSCIOUSNESS") == "high"

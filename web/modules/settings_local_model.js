@@ -91,7 +91,7 @@ export function bindLocalModelControls({ state }) {
                 triggerStart();
             }
 
-            ['s-local-main', 's-local-code', 's-local-light', 's-local-fallback'].forEach((id) => {
+            ['s-local-main', 's-local-code', 's-local-light', 's-local-consciousness', 's-local-fallback'].forEach((id) => {
                 const cb = document.getElementById(id);
                 const label = cb?.closest('.local-toggle');
                 if (!cb || !label) return;

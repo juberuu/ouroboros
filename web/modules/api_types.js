@@ -26,6 +26,14 @@
  */
 
 /**
+ * @typedef {Object} EvolutionDataResponse
+ * @property {Object[]} points
+ * @property {Object[]=} checkpoints
+ * @property {string} generated_at
+ * @property {boolean} cached
+ */
+
+/**
  * @typedef {Object} HealthResponse
  * @property {"ok"} status
  * @property {string} version
@@ -194,6 +202,23 @@
  */
 
 /**
+ * @typedef {Object} ScheduledTasksResponse
+ * @property {number} schema_version
+ * @property {Object[]} tasks
+ */
+
+/**
+ * @typedef {Object} ScheduleUpsertResponse
+ * @property {boolean} ok
+ * @property {Object} schedule
+ */
+
+/**
+ * @typedef {Object} ScheduleDeleteResponse
+ * @property {boolean} ok
+ */
+
+/**
  * @typedef {Object} TaskCancelResponse
  * @property {boolean} ok
  * @property {string} task_id
@@ -217,4 +242,4 @@
  * @property {string=} error
  */
 
-export const GATEWAY_CONTRACT_VERSION = '6.8.0';
+export const GATEWAY_CONTRACT_VERSION = '6.9.0-rc.1';

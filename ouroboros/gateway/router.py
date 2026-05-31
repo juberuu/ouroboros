@@ -30,6 +30,7 @@ def collect_routes(
         api_extension_module,
         api_extension_settings_section,
         api_extensions_index,
+        api_skill_daemons,
         api_skill_delete,
         api_skill_grants,
         api_skill_lifecycle_queue,
@@ -67,6 +68,11 @@ def collect_routes(
         api_local_model_stop,
         api_local_model_test,
         api_model_catalog,
+    )
+    from ouroboros.gateway.schedules import (
+        api_schedules_delete,
+        api_schedules_list,
+        api_schedules_upsert,
     )
     from ouroboros.gateway.control import (
         api_command,
@@ -124,6 +130,7 @@ def collect_routes(
         ),
         Route("/api/skills/{skill}/toggle", endpoint=api_skill_toggle, methods=["POST"]),
         Route("/api/skills/{skill}/delete", endpoint=api_skill_delete, methods=["POST"]),
+        Route("/api/skills/daemons", endpoint=api_skill_daemons, methods=["GET"]),
         Route("/api/skills/lifecycle-queue", endpoint=api_skill_lifecycle_queue, methods=["GET"]),
         Route("/api/skills/{skill}/review", endpoint=api_skill_review, methods=["POST"]),
         Route("/api/skills/{skill}/grants", endpoint=api_skill_grants, methods=["POST"]),
@@ -168,6 +175,9 @@ def collect_routes(
         Route("/api/tasks/{task_id}", endpoint=api_task_get, methods=["GET"]),
         Route("/api/tasks/{task_id}/events", endpoint=api_task_events, methods=["GET"]),
         Route("/api/tasks/{task_id}/cancel", endpoint=api_task_cancel, methods=["POST"]),
+        Route("/api/schedules", endpoint=api_schedules_list, methods=["GET"]),
+        Route("/api/schedules", endpoint=api_schedules_upsert, methods=["POST"]),
+        Route("/api/schedules/{schedule_id}", endpoint=api_schedules_delete, methods=["DELETE"]),
         Route("/api/command", endpoint=api_command, methods=["POST"]),
         Route("/api/reset", endpoint=api_reset, methods=["POST"]),
         Route("/api/git/log", endpoint=api_git_log),

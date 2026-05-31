@@ -116,6 +116,26 @@ def test_runtime_section_omits_light_rule_for_advanced(tmp_path, monkeypatch):
     assert "runtime_mode_rule" not in payload
 
 
+def test_runtime_section_includes_non_workspace_memory_boundary(tmp_path, monkeypatch):
+    env = _make_health_env(tmp_path)
+    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    section = build_runtime_section(
+        env,
+        {
+            "id": "task-1",
+            "type": "task",
+            "memory_mode": "forked",
+            "drive_root": str(tmp_path / "child"),
+            "child_drive_root": str(tmp_path / "child"),
+            "budget_drive_root": str(tmp_path / "data"),
+        },
+    )
+    payload = json.loads(section.split("\n\n", 1)[1])
+    assert payload["task"]["memory_mode"] == "forked"
+    assert payload["task"]["child_drive_root"].endswith("child")
+    assert payload["task"]["budget_drive_root"].endswith("data")
+
+
 class TestFileSizeBudgetHealthInvariant:
     def _make_env(self, tmp_path, development_text: str):
         class FakeEnv:

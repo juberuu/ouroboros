@@ -45,7 +45,7 @@ _ERROR_MARKERS = frozenset({
 REFLECTIONS_FILENAME = "task_reflections.jsonl"
 
 _REFLECTION_PROMPT_ERROR = """\
-You are reviewing a completed task execution trace for Ouroboros, a self-modifying AI agent.
+You are performing a post-task experience review for Ouroboros, a self-modifying AI agent.
 The task had errors or blocking events. Write a concise 150-250 word reflection covering:
 
 1. What was the goal?
@@ -60,7 +60,7 @@ severity and item/tag identity rather than collapsing them into a generic "revie
 """
 
 _REFLECTION_PROMPT_NONTRIVIAL = """\
-You are reviewing a completed task execution trace for Ouroboros, a self-modifying AI agent.
+You are performing a post-task experience review for Ouroboros, a self-modifying AI agent.
 The task was non-trivial (high round count or high cost) but completed without hard errors.
 Write a concise 150-250 word reflection covering:
 
@@ -90,7 +90,8 @@ Optional fields:
 Rules for candidates:
 - Only include concrete, evidence-backed follow-ups that are OUT OF SCOPE for the current task.
 - Prefer recurring process/tool/review friction over one-off noise.
-- Do not propose autonomous execution or workflow states.
+- Core/code improvements should become explicit Evolution Campaign candidates
+  or backlog items; do not assume they were already executed.
 - If nothing deserves backlog tracking, output BACKLOG_CANDIDATES_JSON: []
 - Tool arguments in logs may show `<TRUNCATED:key:Nch:sha=...>` placeholders.
   That is logging metadata, not the value passed to the tool.
@@ -111,6 +112,10 @@ Rules for candidates:
 
 {review_evidence}
 
+## Related child/subtask evidence
+
+{child_evidence}
+
 Write the reflection now. Plain text, no markdown headers except the exact final BACKLOG_CANDIDATES_JSON line.
 """
 
@@ -121,10 +126,16 @@ _REFLECTION_PROMPT_NONTRIVIAL_FULL = _REFLECTION_PROMPT_NONTRIVIAL + _REFLECTION
 def should_generate_reflection(
     llm_trace: Dict[str, Any],
     *,
+    task: Optional[Dict[str, Any]] = None,
     rounds: int = 0,
     cost_usd: float = 0.0,
 ) -> bool:
     """Return True for tool errors/blocking markers or costly many-round tasks."""
+    task = task or {}
+    if str(task.get("type") or "") in {"evolution", "deep_self_review"}:
+        return True
+    if str(task.get("workspace_root") or "").strip() or str(task.get("workspace_mode") or "").strip():
+        return True
     if rounds >= NONTRIVIAL_ROUNDS_THRESHOLD:
         return True
     if cost_usd >= NONTRIVIAL_COST_THRESHOLD:
@@ -211,6 +222,7 @@ def generate_reflection(
     llm_client: Any,
     usage_dict: Dict[str, Any],
     review_evidence: Optional[Dict[str, Any]] = None,
+    child_evidence: str = "",
 ) -> Dict[str, Any]:
     """Call the light LLM and return a JSONL-ready reflection entry."""
     from ouroboros.config import get_light_model
@@ -241,6 +253,7 @@ def generate_reflection(
         trace_summary=_truncate_with_notice(trace_summary, 2000),
         error_details=error_details,
         review_evidence=review_evidence_text,
+        child_evidence=child_evidence or "(none)",
     )
 
     light_model = get_light_model()
@@ -427,6 +440,13 @@ def _update_patterns(drive_root: pathlib.Path, entry: Dict[str, Any]) -> None:
     if not updated.startswith("#"):
         updated = "# Pattern Register\n\n" + updated
 
+    append_jsonl(drive_root / "memory" / "knowledge" / "patterns_history.jsonl", {
+        "ts": utc_now_iso(),
+        "task_id": str(entry.get("task_id") or ""),
+        "markers": list(entry.get("key_markers") or []),
+        "old_content": current,
+        "new_content": updated + "\n",
+    })
     patterns_path.write_text(updated + "\n", encoding="utf-8")
     log.info("Pattern register updated (%d chars)", len(updated))
 

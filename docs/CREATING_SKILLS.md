@@ -73,6 +73,11 @@ permissions: [net, tool, route, widget, read_settings]   # see "Permissions"
 env_from_settings: [OPENROUTER_API_KEY]                  # core keys require an owner grant
 when_to_use: User asks for the weather forecast.
 timeout_sec: 60                     # default 60, hard cap 300
+scheduled_tasks:                    # optional reviewed cron jobs
+  - name: refresh-cache
+    cron: "0 * * * *"                # 5-field cron, host-local timezone by default
+    timezone: Europe/Moscow          # optional IANA timezone override
+    description: Refresh shared weather cache hourly.
 ui_tab:                             # extension widgets (optional)
   tab_id: live
   title: Weather
@@ -203,6 +208,28 @@ and settings sections. PluginAPI side effects that require a live host object
 (`send_ws_message`, event subscriptions, supervised tasks, companion processes,
 and unload callbacks) are rejected during child cataloging until a dedicated
 host-relay contract exists.
+
+### Scheduled skill tasks and daemons
+
+Skills may declare reviewed cron jobs in `scheduled_tasks`. A scheduled task is
+not a hidden daemon: it is a reviewed schedule entry that the core supervisor
+turns into ordinary queued work using the same task queue, logs, timeout, and
+review-visible provenance as other work. The first supported syntax is standard
+5-field cron (`minute hour day month weekday`), with host-local timezone by
+default and optional per-task IANA timezone override. If Ouroboros was offline
+when a cron became due, the scheduler performs one catch-up run rather than
+replaying every missed occurrence.
+
+In v1, a skill scheduled task is an agent-visible reminder to run the reviewed
+skill task by name; the agent still chooses the correct `skill_exec` or extension
+surface at execution time. Deterministic script/route targets can be added as a
+future manifest extension once the schedule lifecycle has stabilized.
+
+Long-running processes are still represented by extension companion processes,
+not by `start_service`. `start_service` is task-scoped and is stopped when the
+owning task ends. Companions require reviewed manifest declarations and the
+`companion_process` permission; scheduled tasks require review-visible manifest
+metadata and the `supervised_task` permission.
 
 ## The `skill_preflight` tool
 

@@ -23,7 +23,8 @@ from ouroboros.utils import (
     truncate_for_log,
     utc_now_iso,
 )
-from ouroboros.config import get_light_model, resolve_effort
+from ouroboros.config import get_consciousness_model, resolve_effort
+from ouroboros.pricing import infer_provider_from_model
 from ouroboros.llm import LLMClient
 from ouroboros.memory import Memory
 from ouroboros.context import (
@@ -85,7 +86,7 @@ class BackgroundConsciousness:
 
     @property
     def _model(self) -> str:
-        return get_light_model()
+        return get_consciousness_model()
 
     def status_snapshot(self) -> Dict[str, Any]:
         return {
@@ -244,14 +245,14 @@ class BackgroundConsciousness:
             for round_idx in range(1, self._max_bg_rounds + 1):
                 if self._paused:
                     break
-                _use_local_light = os.environ.get("USE_LOCAL_LIGHT", "").lower() in ("true", "1")
+                _use_local_consciousness = os.environ.get("USE_LOCAL_CONSCIOUSNESS", "").lower() in ("true", "1")
                 self._emit_live_log(
                     "llm_round_started",
                     round=round_idx,
                     attempt=1,
                     model=model,
-                    reasoning_effort="low",
-                    use_local=bool(_use_local_light),
+                    reasoning_effort=resolve_effort("consciousness"),
+                    use_local=bool(_use_local_consciousness),
                 )
                 from ouroboros.llm_observability import chat_observed
 
@@ -265,7 +266,7 @@ class BackgroundConsciousness:
                     tools=tools,
                     reasoning_effort=resolve_effort("consciousness"),
                     max_tokens=65536,
-                    use_local=_use_local_light,
+                    use_local=_use_local_consciousness,
                 )
                 cost = float(usage.get("cost") or 0)
                 total_cost += cost
@@ -283,8 +284,9 @@ class BackgroundConsciousness:
                     break
 
                 if self._event_queue is not None:
-                    provider = "local" if _use_local_light else "openrouter"
-                    model_name = f"{model} (local)" if _use_local_light else model
+                    provider = "local" if _use_local_consciousness else str(usage.get("provider") or infer_provider_from_model(model))
+                    resolved_model = str(usage.get("resolved_model") or model)
+                    model_name = f"{model} (local)" if _use_local_consciousness else resolved_model
                     self._event_queue.put({
                         "type": "llm_usage",
                         "provider": provider,
@@ -303,7 +305,7 @@ class BackgroundConsciousness:
                     round=round_idx,
                     attempt=1,
                     model=model,
-                    reasoning_effort="low",
+                    reasoning_effort=resolve_effort("consciousness"),
                     prompt_tokens=int(usage.get("prompt_tokens") or 0),
                     completion_tokens=int(usage.get("completion_tokens") or 0),
                     cached_tokens=int(usage.get("cached_tokens") or 0),
@@ -490,11 +492,11 @@ class BackgroundConsciousness:
         return full_text
 
     _BG_TOOL_WHITELIST = frozenset({
-        "send_user_message", "schedule_subagent", "update_scratchpad",
+        "send_user_message", "update_scratchpad",
         "update_identity", "set_next_wakeup",
         "knowledge_read", "knowledge_write", "knowledge_list",
         "web_search", "read_file", "list_files",
-        "chat_history", "get_task_result", "wait_task", "wait_tasks",
+        "chat_history", "recent_tasks",
         "list_github_issues", "get_github_issue",
     })
 

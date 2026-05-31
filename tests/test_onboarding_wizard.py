@@ -49,6 +49,7 @@ def test_prepare_onboarding_settings_accepts_openai_only_setup():
     assert prepared["TOTAL_BUDGET"] == 10.0
     assert prepared["OUROBOROS_PER_TASK_COST_USD"] == 20.0
     assert prepared["OUROBOROS_REVIEW_ENFORCEMENT"] == "advisory"
+    assert prepared["OUROBOROS_MODEL_CONSCIOUSNESS"] == ""
 
 
 @pytest.mark.parametrize(("key", "value", "error"), [
@@ -110,6 +111,19 @@ def test_prepare_onboarding_settings_rejects_local_only_cloud_routing():
     payload["LOCAL_MODEL_SOURCE"] = "Qwen/Qwen2.5-7B-Instruct-GGUF"
     payload["LOCAL_MODEL_FILENAME"] = "qwen2.5-7b-instruct-q3_k_m.gguf"
     payload["LOCAL_ROUTING_MODE"] = "cloud"
+
+    prepared, error = prepare_onboarding_settings(payload, {})
+
+    assert prepared == {}
+    assert error == "Local-only setups must route at least one model to the local runtime."
+
+
+def test_prepare_onboarding_settings_rejects_consciousness_only_local_routing():
+    payload = _base_payload()
+    payload["LOCAL_MODEL_SOURCE"] = "Qwen/Qwen2.5-7B-Instruct-GGUF"
+    payload["LOCAL_MODEL_FILENAME"] = "qwen2.5-7b-instruct-q3_k_m.gguf"
+    payload["LOCAL_ROUTING_MODE"] = "cloud"
+    payload["USE_LOCAL_CONSCIOUSNESS"] = True
 
     prepared, error = prepare_onboarding_settings(payload, {})
 

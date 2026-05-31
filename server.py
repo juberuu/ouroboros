@@ -90,6 +90,7 @@ from ouroboros.server_runtime import (
     apply_runtime_provider_defaults,
     has_local_routing,
     has_supervisor_provider,
+    needs_local_model_autostart,
     setup_remote_if_configured,
     ws_heartbeat_loop,
 )
@@ -281,16 +282,28 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
             parts = lowered.split()
             action = parts[1] if len(parts) > 1 else "on"
             turn_on = action not in ("off", "stop", "0")
+            objective = ""
+            if turn_on and len(parts) > 2:
+                objective = text.split(None, 2)[2].strip()
             st2 = ctx.load_state()
             st2["evolution_mode_enabled"] = bool(turn_on)
             if turn_on:
                 st2["evolution_consecutive_failures"] = 0
             ctx.save_state(st2)
+            try:
+                from supervisor.queue import pause_evolution_campaign, start_evolution_campaign
+
+                if turn_on:
+                    start_evolution_campaign(objective, source="owner_chat")
+                else:
+                    pause_evolution_campaign("disabled via owner chat")
+            except Exception:
+                log.warning("Failed to update evolution campaign state", exc_info=True)
             if not turn_on:
                 ctx.PENDING[:] = [t for t in ctx.PENDING if str(t.get("type")) != "evolution"]
                 ctx.sort_pending()
                 ctx.persist_queue_snapshot(reason="evolve_off")
-            ctx.send_with_budget(chat_id, f"🧬 Evolution: {'ON' if turn_on else 'OFF'}")
+            ctx.send_with_budget(chat_id, f"🧬 Evolution campaign: {'ON' if turn_on else 'OFF'}")
         elif lowered.startswith("/bg"):
             parts = lowered.split()
             action = parts[1] if len(parts) > 1 else "status"
@@ -574,6 +587,11 @@ def _run_supervisor(settings: dict) -> None:
                 dispatch_event(evt, _event_ctx)
 
             enforce_task_timeouts()
+            try:
+                from supervisor.queue import check_scheduled_tasks
+                check_scheduled_tasks()
+            except Exception:
+                log.warning("Scheduled task check failed", exc_info=True)
             enqueue_evolution_task_if_needed()
             assign_tasks()
             persist_queue_snapshot(reason="main_loop")
@@ -689,7 +707,7 @@ async def lifespan(app):
     # Pin boot-time runtime-mode after env apply; save_settings compares to this owner baseline.
     from ouroboros.config import initialize_runtime_mode_baseline
     initialize_runtime_mode_baseline()
-    has_local = has_local_routing(settings)
+    has_local = needs_local_model_autostart(settings)
     lifespan_drive_root = pathlib.Path(
         app.state.drive_root
         if hasattr(app, "state") and hasattr(app.state, "drive_root")

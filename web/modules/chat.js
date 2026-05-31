@@ -754,7 +754,6 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         record.countEl.textContent = '0 notes';
         record.metaEl.innerHTML = '';
         record.timelineEl.innerHTML = '';
-        record.root.style.minHeight = '';
         record.root.dataset.finished = '0';
         setLiveCardTypingVisible(record, true);
         setLiveCardExpanded(record, false);
@@ -808,22 +807,20 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         record.summaryButtonEl?.setAttribute('aria-expanded', expanded ? 'true' : 'false');
     }
 
-    const TIMELINE_MAX_HEIGHT = 420;
-
     function syncLiveCardLayout(record) {
-        if (!record?.root || !record.summaryButtonEl) return;
+        if (!record?.root) return;
         // Hidden SPA/browser tabs report zero geometry; defer to avoid collapsed cards.
         if (!record.root.closest('.page.active') || document.hidden) {
             record._needsLayoutSync = true;
             return;
         }
         record._needsLayoutSync = false;
-        const summaryHeight = Math.ceil(record.summaryButtonEl.getBoundingClientRect().height || 0);
-        const expanded = record.root.dataset.expanded === '1';
-        const timelineHeight = expanded
-            ? Math.min(Math.ceil(record.timelineEl?.scrollHeight || 0), TIMELINE_MAX_HEIGHT)
-            : 0;
-        record.root.style.minHeight = `${Math.max(summaryHeight + timelineHeight, 0)}px`;
+        if (record.isSubagent && record.parentGroupId) {
+            const parentRecord = liveCardRecords.get(record.parentGroupId);
+            if (parentRecord?.root?.isConnected) {
+                requestAnimationFrame(() => syncLiveCardLayout(parentRecord));
+            }
+        }
     }
 
     // Re-sync cards after SPA return or browser tab visibility restore.

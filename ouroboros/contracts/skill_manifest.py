@@ -69,6 +69,7 @@ class SkillManifest:
     permissions: List[str] = field(default_factory=list)
     subscribe_events: List[str] = field(default_factory=list)
     companion_processes: List[Dict[str, Any]] = field(default_factory=list)
+    scheduled_tasks: List[Dict[str, Any]] = field(default_factory=list)
     ui_tab: Optional[Dict[str, Any]] = None
     # Human-readable body after SKILL.md frontmatter.
     body: str = ""
@@ -116,6 +117,8 @@ class SkillManifest:
             warnings.append("type=script requires at least one entry in 'scripts'")
         if self.timeout_sec <= 0:
             warnings.append("timeout_sec must be positive")
+        if self.scheduled_tasks and "supervised_task" not in self.permissions:
+            warnings.append("scheduled_tasks require the supervised_task permission")
         return warnings
 
 
@@ -184,6 +187,7 @@ def _manifest_from_mapping(data: Dict[str, Any], *, body: str) -> SkillManifest:
         "permissions",
         "subscribe_events",
         "companion_processes",
+        "scheduled_tasks",
         "ui_tab",
         "schema_version",
     }
@@ -261,6 +265,30 @@ def _manifest_from_mapping(data: Dict[str, Any], *, body: str) -> SkillManifest:
                 raise SkillManifestError(f"{runtime} companion script must be a relative reviewed path")
         companion_processes.append(dict(item))
 
+    scheduled_raw = data.get("scheduled_tasks", [])
+    if scheduled_raw in (None, ""):
+        scheduled_raw = []
+    if not isinstance(scheduled_raw, list):
+        raise SkillManifestError("'scheduled_tasks' must be a list when provided")
+    scheduled_tasks: List[Dict[str, Any]] = []
+    for item in scheduled_raw:
+        if not isinstance(item, dict):
+            raise SkillManifestError("each 'scheduled_tasks' item must be a mapping")
+        name = str(item.get("name") or "").strip()
+        if not name:
+            raise SkillManifestError("each 'scheduled_tasks' item must include name")
+        cron = str(item.get("cron") or "").strip()
+        from ouroboros.schedule_contract import cron_error, schedule_id_error, timezone_error
+
+        if err := schedule_id_error(name):
+            raise SkillManifestError(f"scheduled_tasks name is invalid: {err}")
+        if err := cron_error(cron):
+            raise SkillManifestError(f"scheduled_tasks cron expression is invalid: {err}")
+        timezone = str(item.get("timezone") or "").strip()
+        if err := timezone_error(timezone):
+            raise SkillManifestError(f"scheduled_tasks timezone is invalid: {err}")
+        scheduled_tasks.append(dict(item))
+
     schema_version = data.get("schema_version", SKILL_MANIFEST_SCHEMA_VERSION)
     try:
         schema_version_int = int(schema_version)
@@ -288,6 +316,7 @@ def _manifest_from_mapping(data: Dict[str, Any], *, body: str) -> SkillManifest:
         permissions=_string_list(data.get("permissions")),
         subscribe_events=_string_list(data.get("subscribe_events")),
         companion_processes=companion_processes,
+        scheduled_tasks=scheduled_tasks,
         ui_tab=ui_tab,
         body=body,
         raw_extra=extras,

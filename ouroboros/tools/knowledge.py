@@ -1,6 +1,7 @@
 """Persistent topic-based knowledge files with an auto-maintained index."""
 
 import json
+import hashlib
 import logging
 import re
 from pathlib import Path
@@ -184,6 +185,7 @@ def _knowledge_write(ctx: ToolContext, topic: str, content: str, mode: str = "ov
         return f"⚠️ Invalid mode '{mode}'. Use 'overwrite' or 'append'."
 
     _ensure_dir(ctx)
+    old_content = path.read_text(encoding="utf-8") if path.exists() else ""
 
     if mode == "append":
         needs_newline = False
@@ -201,6 +203,22 @@ def _knowledge_write(ctx: ToolContext, topic: str, content: str, mode: str = "ov
         path.write_text(content, encoding="utf-8")
 
     _update_index_entry(ctx, sanitized_topic)
+
+    try:
+        history_path = ctx.drive_root / "memory" / "knowledge_history.jsonl"
+        with open(history_path, "a", encoding="utf-8") as hf:
+            hf.write(json.dumps({
+                "ts": utc_now_iso(),
+                "task_id": str(getattr(ctx, "task_id", "") or ""),
+                "topic": sanitized_topic,
+                "mode": mode,
+                "old_sha256": hashlib.sha256(old_content.encode("utf-8")).hexdigest() if old_content else "",
+                "new_sha256": hashlib.sha256(path.read_text(encoding="utf-8").encode("utf-8")).hexdigest() if path.exists() else "",
+                "old_content": old_content,
+                "new_content": path.read_text(encoding="utf-8") if path.exists() else "",
+            }, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
     try:
         journal_path = ctx.drive_root / "memory" / "knowledge_journal.jsonl"

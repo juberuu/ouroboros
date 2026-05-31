@@ -7,6 +7,7 @@ import logging
 import os
 import queue
 import uuid
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -281,7 +282,15 @@ def _update_scratchpad(ctx: ToolContext, content: str) -> str:
     mem = Memory(drive_root=ctx.drive_root)
     mem.ensure_files()
     try:
-        block = mem.append_scratchpad_block(content, source="task")
+        block = mem.append_scratchpad_block(
+            content,
+            source="task",
+            metadata={
+                "task_id": str(getattr(ctx, "task_id", "") or ""),
+                "task_type": str(getattr(ctx, "current_task_type", "") or ""),
+                "delegation_role": str((getattr(ctx, "task_metadata", {}) or {}).get("delegation_role", "")) if isinstance(getattr(ctx, "task_metadata", {}), dict) else "",
+            },
+        )
     except RuntimeError as exc:
         if "LEGACY_SCRATCHPAD_REQUIRES_MANUAL_UPGRADE" in str(exc):
             return f"⚠️ {exc}"
@@ -344,8 +353,14 @@ def _update_identity(ctx: ToolContext, content: str) -> str:
 
     mem.append_identity_journal({
         "ts": utc_now_iso(),
+        "task_id": str(getattr(ctx, "task_id", "") or ""),
+        "source_type": str((getattr(ctx, "task_metadata", {}) or {}).get("delegation_role", "task")) if isinstance(getattr(ctx, "task_metadata", {}), dict) else "task",
         "old_len": len(old_content),
         "new_len": len(content),
+        "old_sha256": sha256(old_content.encode("utf-8")).hexdigest() if old_content else "",
+        "new_sha256": sha256(content.encode("utf-8")).hexdigest(),
+        "old_content": old_content,
+        "new_content": content,
         "old_preview": old_content[:500],
         "new_preview": content[:500],
     })
@@ -362,11 +377,12 @@ def _update_identity(ctx: ToolContext, content: str) -> str:
     return result
 
 
-def _toggle_evolution(ctx: ToolContext, enabled: bool) -> str:
+def _toggle_evolution(ctx: ToolContext, enabled: bool, objective: str = "") -> str:
     """Toggle evolution mode on/off via supervisor event."""
     ctx.pending_events.append({
         "type": "toggle_evolution",
         "enabled": bool(enabled),
+        "objective": str(objective or "").strip(),
         "ts": utc_now_iso(),
     })
     state_str = "ON" if enabled else "OFF"
@@ -593,6 +609,7 @@ def get_tools() -> List[ToolEntry]:
             "description": "Enable or disable evolution mode. When enabled, Ouroboros runs continuous self-improvement cycles.",
             "parameters": {"type": "object", "properties": {
                 "enabled": {"type": "boolean", "description": "true to enable, false to disable"},
+                "objective": {"type": "string", "default": "", "description": "Optional Evolution Campaign objective when enabling."},
             }, "required": ["enabled"]},
         }, _toggle_evolution),
         ToolEntry("toggle_consciousness", {

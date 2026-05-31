@@ -113,6 +113,15 @@ Not every layer is required for every operation. Simple cases (e.g., `read_file`
 - Do not add a CLI file-manager surface. Attachments, task artifacts, and logs
   are the allowed v1 file-adjacent surfaces.
 
+### Cognitive Quality
+
+- Do not lower model quality, reasoning effort, max-token budgets, or context
+  breadth for core cognitive loops (especially Background Consciousness, review,
+  and self-evolution) as an incidental cost or latency optimization.
+- If a change intentionally narrows cognitive horizon, make that owner decision
+  explicit in the plan, docs, tests, and review packet. Silent quality downgrades
+  are continuity regressions, not refactors.
+
 ---
 
 ## Module Size & Complexity
@@ -563,6 +572,10 @@ For new top-level pages, prefer `web/modules/page_header.js` over bespoke header
 Add new classes to `web/style.css` when needed.
 Before staging any `web/modules/*.js` file: `grep -n "\.style\." web/modules/*.js`
 and fix any hits.
+Legacy inline assignments that already existed before a scoped change are tracked
+debt, not an automatic release blocker, when the diff does not add or worsen that
+style usage. Prefer paying them down opportunistically instead of expanding the
+scope of unrelated UI work.
 
 ### Declarative widget UI
 
@@ -656,7 +669,8 @@ Browser-facing backend work goes through `ouroboros/gateway/`.
   `runtime_mode='pro'`.
 - Domain handlers live in sibling modules: `settings.py`, `control.py`,
   `files.py`, `models.py`, `extensions.py`, `marketplace.py`, `mcp.py`,
-  `host_service.py`, `history.py`, `tasks.py`, `logs.py`, and `state.py`.
+  `host_service.py`, `history.py`, `tasks.py`, `schedules.py`, `logs.py`,
+  and `state.py`.
 - Frontend code calls backend APIs through `web/modules/api_client.js`.
   `web/modules/api_types.js` mirrors core contracts via JSDoc so frontend
   contributors have a visible surface without TypeScript, codegen, or a build

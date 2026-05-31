@@ -413,6 +413,31 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
         # Meaningful evolution work has non-trivial cost plus at least one round.
         cost = float(evt.get("cost_usd") or 0)
         rounds = int(evt.get("total_rounds") or 0)
+        try:
+            from supervisor.queue import _read_evolution_campaign, update_evolution_campaign_after_task
+
+            update_evolution_campaign_after_task(
+                str(task_id or ""),
+                cost_usd=cost,
+                result_status=str(result_status or ""),
+                rounds=rounds,
+            )
+            try:
+                from ouroboros.evolution_checkpoints import append_evolution_checkpoint
+
+                append_evolution_checkpoint(
+                    ctx.DRIVE_ROOT,
+                    ctx.REPO_DIR,
+                    task_id=str(task_id or ""),
+                    campaign=_read_evolution_campaign(),
+                    result_status=str(result_status or ""),
+                    cost_usd=cost,
+                    rounds=rounds,
+                )
+            except Exception:
+                log.debug("Failed to append evolution checkpoint", exc_info=True)
+        except Exception:
+            log.debug("Failed to update evolution campaign state", exc_info=True)
 
         evo_cost_threshold = float(os.environ.get("OUROBOROS_EVO_COST_THRESHOLD", "0.10"))
         if cost > evo_cost_threshold and rounds >= 1:
@@ -1014,7 +1039,18 @@ def _handle_toggle_evolution(evt: Dict[str, Any], ctx: Any) -> None:
     enabled = bool(evt.get("enabled"))
     st = ctx.load_state()
     st["evolution_mode_enabled"] = enabled
+    if enabled:
+        st["evolution_consecutive_failures"] = 0
     ctx.save_state(st)
+    try:
+        from supervisor.queue import pause_evolution_campaign, start_evolution_campaign
+
+        if enabled:
+            start_evolution_campaign(str(evt.get("objective") or ""), source="agent_tool")
+        else:
+            pause_evolution_campaign("disabled via agent tool")
+    except Exception:
+        log.debug("Failed to update evolution campaign toggle state", exc_info=True)
     if not enabled:
         ctx.PENDING[:] = [t for t in ctx.PENDING if str(t.get("type")) != "evolution"]
         ctx.sort_pending()

@@ -50,6 +50,9 @@ SETTINGS_DEFAULTS = {
     "OUROBOROS_MODEL": "google/gemini-3.5-flash",
     "OUROBOROS_MODEL_CODE": "google/gemini-3.5-flash",
     "OUROBOROS_MODEL_LIGHT": "google/gemini-3.5-flash",
+    # Background consciousness is a high-horizon cognitive loop, not a cheap
+    # helper lane. Empty means "use OUROBOROS_MODEL".
+    "OUROBOROS_MODEL_CONSCIOUSNESS": "",
     "OUROBOROS_MODEL_FALLBACK": "anthropic/claude-sonnet-4.6",
     "CLAUDE_CODE_MODEL": "opus[1m]",
     "OUROBOROS_MAX_WORKERS": 5,
@@ -58,7 +61,7 @@ SETTINGS_DEFAULTS = {
     "OUROBOROS_SOFT_TIMEOUT_SEC": 600,
     "OUROBOROS_HARD_TIMEOUT_SEC": 1800,
     "OUROBOROS_TOOL_TIMEOUT_SEC": 600,
-    "OUROBOROS_BG_MAX_ROUNDS": 5,
+    "OUROBOROS_BG_MAX_ROUNDS": 10,
     "OUROBOROS_BG_WAKEUP_MIN": 30,
     "OUROBOROS_BG_WAKEUP_MAX": 7200,
     "OUROBOROS_EVO_COST_THRESHOLD": 0.10,
@@ -88,7 +91,7 @@ SETTINGS_DEFAULTS = {
     "OUROBOROS_EFFORT_EVOLUTION": "high",
     "OUROBOROS_EFFORT_REVIEW": "medium",
     "OUROBOROS_EFFORT_SCOPE_REVIEW": "high",
-    "OUROBOROS_EFFORT_CONSCIOUSNESS": "low",
+    "OUROBOROS_EFFORT_CONSCIOUSNESS": "high",
     "OUROBOROS_RETURN_REASONING": True,
     "GITHUB_TOKEN": "",
     "GITHUB_REPO": "",
@@ -102,6 +105,7 @@ SETTINGS_DEFAULTS = {
     "USE_LOCAL_MAIN": False,
     "USE_LOCAL_CODE": False,
     "USE_LOCAL_LIGHT": False,
+    "USE_LOCAL_CONSCIOUSNESS": False,
     "USE_LOCAL_FALLBACK": False,
     "OUROBOROS_FILE_BROWSER_DEFAULT": "",
 }
@@ -113,6 +117,18 @@ def get_light_model() -> str:
     return (
         str(os.environ.get("OUROBOROS_MODEL_LIGHT", "") or "").strip()
         or str(SETTINGS_DEFAULTS["OUROBOROS_MODEL_LIGHT"])
+    )
+
+
+def get_consciousness_model() -> str:
+    """Return the high-horizon background-consciousness model slot."""
+
+    configured = str(os.environ.get("OUROBOROS_MODEL_CONSCIOUSNESS", "") or "").strip()
+    if configured:
+        return configured
+    return (
+        str(os.environ.get("OUROBOROS_MODEL", "") or "").strip()
+        or str(SETTINGS_DEFAULTS["OUROBOROS_MODEL"])
     )
 
 _VALID_EFFORTS = ("none", "low", "medium", "high")
@@ -215,7 +231,7 @@ def resolve_effort(task_type: str) -> str:
         default = "high"
     elif t == "consciousness":
         key = "OUROBOROS_EFFORT_CONSCIOUSNESS"
-        default = "low"
+        default = "high"
     else:
         # Legacy INITIAL_REASONING_EFFORT is retired; use EFFORT_TASK.
         key = "OUROBOROS_EFFORT_TASK"
@@ -655,6 +671,7 @@ def apply_settings_to_env(settings: dict) -> None:
         "ANTHROPIC_API_KEY",
         "OUROBOROS_NETWORK_PASSWORD",
         "OUROBOROS_MODEL", "OUROBOROS_MODEL_CODE", "OUROBOROS_MODEL_LIGHT",
+        "OUROBOROS_MODEL_CONSCIOUSNESS",
         "OUROBOROS_MODEL_FALLBACK", "CLAUDE_CODE_MODEL",
         "TOTAL_BUDGET", "OUROBOROS_PER_TASK_COST_USD", "GITHUB_TOKEN", "GITHUB_REPO",
         "OUROBOROS_TOOL_TIMEOUT_SEC",
@@ -678,7 +695,7 @@ def apply_settings_to_env(settings: dict) -> None:
         "LOCAL_MODEL_SOURCE", "LOCAL_MODEL_FILENAME",
         "LOCAL_MODEL_PORT", "LOCAL_MODEL_N_GPU_LAYERS", "LOCAL_MODEL_CONTEXT_LENGTH",
         "LOCAL_MODEL_CHAT_FORMAT",
-        "USE_LOCAL_MAIN", "USE_LOCAL_CODE", "USE_LOCAL_LIGHT", "USE_LOCAL_FALLBACK",
+        "USE_LOCAL_MAIN", "USE_LOCAL_CODE", "USE_LOCAL_LIGHT", "USE_LOCAL_CONSCIOUSNESS", "USE_LOCAL_FALLBACK",
         "OUROBOROS_FILE_BROWSER_DEFAULT",
     ]
     for k in env_keys:

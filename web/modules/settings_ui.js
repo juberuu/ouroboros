@@ -15,6 +15,7 @@ const MODEL_CARDS = [
     ['Main', 'Primary reasoning model.', 's-model', 's-local-main', 'google/gemini-3.5-flash'],
     ['Code', 'Tool-heavy coding model.', 's-model-code', 's-local-code', 'google/gemini-3.5-flash'],
     ['Light', 'Fast summaries and lightweight tasks.', 's-model-light', 's-local-light', 'google/gemini-3.5-flash'],
+    ['Consciousness', 'High-horizon background consciousness. Empty uses Main.', 's-model-consciousness', 's-local-consciousness', ''],
     ['Fallback', 'Resilience and degraded path.', 's-model-fallback', 's-local-fallback', 'anthropic/claude-sonnet-4.6'],
 ];
 
@@ -23,7 +24,7 @@ const EFFORT_FIELDS = [
     ['s-effort-evolution', 'Evolution', 'high'],
     ['s-effort-review', 'Review', 'medium'],
     ['s-effort-scope-review', 'Scope Review', 'high'],
-    ['s-effort-consciousness', 'Consciousness', 'low'],
+    ['s-effort-consciousness', 'Consciousness', 'high'],
 ];
 
 function providerCard({ id, title, icon, hint, body, open = false }) {

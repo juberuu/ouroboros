@@ -146,8 +146,8 @@ class TestBackgroundContext(unittest.TestCase):
         self.assertIn("Reduce recurring task friction around REVIEW_BLOCKED", text)
 
 
-class TestBackgroundSubagentTools(unittest.TestCase):
-    def test_schedule_task_has_live_queue_lineage_and_result_handoff_tools(self):
+class TestBackgroundConsciousnessToolScope(unittest.TestCase):
+    def test_background_consciousness_cannot_execute_or_delegate(self):
         from ouroboros.consciousness import BackgroundConsciousness
 
         tmpdir = pathlib.Path(tempfile.mkdtemp())
@@ -165,37 +165,15 @@ class TestBackgroundSubagentTools(unittest.TestCase):
         )
 
         schema_names = {s.get("function", {}).get("name") for s in bc._tool_schemas()}
-        self.assertIn("schedule_subagent", schema_names)
-        self.assertIn("get_task_result", schema_names)
-        self.assertIn("wait_task", schema_names)
-        self.assertIn("wait_tasks", schema_names)
-
-        pending_events = []
-        result = bc._execute_tool(
-            {
-                "function": {
-                    "name": "schedule_subagent",
-                    "arguments": json.dumps({
-                        "objective": "Inspect background handoff",
-                        "expected_output": "A concise result",
-                    }),
-                }
-            },
-            pending_events,
-        )
-
-        self.assertIn("Subagent request queued", result)
-        self.assertEqual(pending_events, [])
-        queued = []
-        while not eq.empty():
-            queued.append(eq.get_nowait())
-        schedule_events = [evt for evt in queued if evt.get("type") == "schedule_subagent"]
-        self.assertEqual(len(schedule_events), 1)
-        evt = schedule_events[0]
-        self.assertEqual(evt["chat_id"], 42)
-        self.assertEqual(evt["parent_task_id"], "bg-consciousness")
-        self.assertEqual(evt["root_task_id"], "bg-consciousness")
-        self.assertEqual(evt["session_id"], "background-consciousness")
+        self.assertIn("send_user_message", schema_names)
+        self.assertIn("update_identity", schema_names)
+        self.assertIn("recent_tasks", schema_names)
+        self.assertNotIn("schedule_subagent", schema_names)
+        self.assertNotIn("get_task_result", schema_names)
+        self.assertNotIn("wait_task", schema_names)
+        self.assertNotIn("wait_tasks", schema_names)
+        self.assertNotIn("run_command", schema_names)
+        self.assertNotIn("commit_reviewed", schema_names)
 
 
 if __name__ == "__main__":

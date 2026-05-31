@@ -18,11 +18,14 @@ export function initEvolution({ ws, state, mount }) {
                         <span id="evo-bg-pill" class="evo-runtime-pill">Consciousness</span>
                     </div>
                     <div class="evo-runtime-pills evo-runtime-controls">
+                        <button id="evo-start" class="btn btn-primary btn-sm evo-refresh-btn" type="button">Start campaign</button>
+                        <button id="evo-stop" class="btn btn-default btn-sm evo-refresh-btn" type="button">Pause</button>
                         <button id="evo-refresh" class="btn btn-default btn-sm evo-refresh-btn" type="button">Refresh</button>
                         <span id="evo-status" class="status-badge">Loading...</span>
                     </div>
                 </div>
                 <div id="evo-runtime-meta" class="evo-runtime-meta"></div>
+                <div id="evo-campaign-detail" class="evo-runtime-detail"></div>
             </div>
             <div class="evo-chart-wrap">
                 <canvas id="evo-chart"></canvas>
@@ -43,9 +46,12 @@ export function initEvolution({ ws, state, mount }) {
     let loadSequence = 0;
     let chartLoaded = false;
     const refreshBtn = document.getElementById('evo-refresh');
+    const startBtn = document.getElementById('evo-start');
+    const stopBtn = document.getElementById('evo-stop');
     const statusBadge = document.getElementById('evo-status');
     const runtimeDetail = document.getElementById('evo-runtime-detail');
     const runtimeMeta = document.getElementById('evo-runtime-meta');
+    const campaignDetail = document.getElementById('evo-campaign-detail');
     const evolutionPill = document.getElementById('evo-mode-pill');
     const consciousnessPill = document.getElementById('evo-bg-pill');
     const tagsList = document.getElementById('evo-tags-list');
@@ -113,6 +119,7 @@ export function initEvolution({ ws, state, mount }) {
 
     function renderRuntimeState(runtime = {}, generatedAt = '') {
         const evolution = runtime.evolution_state || {};
+        const campaign = evolution.campaign || {};
         const consciousness = runtime.bg_consciousness_state || {};
         const evolutionStatus = evolution.status || (runtime.evolution_enabled ? 'idle_ready' : 'disabled');
         const consciousnessStatus = consciousness.status || (runtime.bg_consciousness_enabled ? 'running' : 'disabled');
@@ -130,6 +137,8 @@ export function initEvolution({ ws, state, mount }) {
 
         runtimeMeta.innerHTML = [
             runtimeChip('Cycle', evolution.cycle || 0),
+            runtimeChip('Campaign', campaign.id || ''),
+            runtimeChip('Campaign cycles', campaign.cycles_done || ''),
             runtimeChip('Queue', `${evolution.pending_count || 0} pending / ${evolution.running_count || 0} running`),
             runtimeChip('Failures', evolution.consecutive_failures || 0),
             runtimeChip('Budget left', Number.isFinite(Number(evolution.budget_remaining_usd)) ? formatUsd2(evolution.budget_remaining_usd) : ''),
@@ -138,6 +147,11 @@ export function initEvolution({ ws, state, mount }) {
             runtimeChip('Last background cycle', formatTs(consciousness.last_cycle_finished_at || consciousness.last_cycle_started_at)),
             runtimeChip('Updated', formatTs(generatedAt)),
         ].filter(Boolean).join('');
+        if (campaignDetail) {
+            const objective = campaign.objective || '';
+            const progress = campaign.progress_notes || '';
+            campaignDetail.textContent = [objective ? `Objective: ${objective}` : '', progress ? `Progress: ${progress}` : ''].filter(Boolean).join(' ');
+        }
     }
 
     function renderEmptyState(message) {
@@ -316,6 +330,23 @@ export function initEvolution({ ws, state, mount }) {
     // Refresh button + event listeners
     // -----------------------------------------------------------------------
     refreshBtn.addEventListener('click', () => {
+        loadEvolution(true);
+    });
+    startBtn?.addEventListener('click', async () => {
+        const objective = window.prompt('Evolution campaign objective (optional):', '') || '';
+        await apiFetch('/api/command', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ cmd: `/evolve on${objective.trim() ? ` ${objective.trim()}` : ''}` }),
+        });
+        loadEvolution(true);
+    });
+    stopBtn?.addEventListener('click', async () => {
+        await apiFetch('/api/command', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ cmd: '/evolve off' }),
+        });
         loadEvolution(true);
     });
 

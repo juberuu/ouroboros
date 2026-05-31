@@ -285,10 +285,21 @@ def has_local_model_source(settings: dict) -> bool:
 
 
 def has_local_routing(settings: dict) -> bool:
-    """Return True when any model slot is configured to use the local server."""
+    """Return True when a task-capable model slot is routed to local."""
     return any(
         _truthy_setting(settings.get(k))
         for k in ("USE_LOCAL_MAIN", "USE_LOCAL_CODE", "USE_LOCAL_LIGHT", "USE_LOCAL_FALLBACK")
+    )
+
+
+def needs_local_model_autostart(settings: dict) -> bool:
+    """Return True when any configured model lane needs the local server running."""
+    return any(
+        _truthy_setting(settings.get(k))
+        for k in (
+            "USE_LOCAL_MAIN", "USE_LOCAL_CODE", "USE_LOCAL_LIGHT",
+            "USE_LOCAL_CONSCIOUSNESS", "USE_LOCAL_FALLBACK",
+        )
     )
 
 

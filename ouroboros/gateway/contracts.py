@@ -205,6 +205,7 @@ class EvolutionStateSnapshot(TypedDict):
     running_count: int
     queued_task_id: str
     running_task_id: str
+    campaign: NotRequired[Dict[str, Any]]
 
 
 class StateResponse(TypedDict):
@@ -304,8 +305,23 @@ class GitLogResponse(TypedDict):
 
 class EvolutionDataResponse(TypedDict):
     points: list[Dict[str, Any]]
+    checkpoints: NotRequired[list[Dict[str, Any]]]
     generated_at: str
     cached: bool
+
+
+class ScheduledTasksResponse(TypedDict):
+    schema_version: int
+    tasks: list[Dict[str, Any]]
+
+
+class ScheduleUpsertResponse(TypedDict):
+    ok: bool
+    schedule: Dict[str, Any]
+
+
+class ScheduleDeleteResponse(TypedDict):
+    ok: bool
 
 
 class UploadResponse(TypedDict):
@@ -429,6 +445,9 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "GET /api/tasks/{task_id}/artifacts/{name}",
     "GET /api/tasks/{task_id}/events",
     "POST /api/tasks/{task_id}/cancel",
+    "GET /api/schedules",
+    "POST /api/schedules",
+    "DELETE /api/schedules/{schedule_id}",
     "POST /api/command",
     "POST /api/reset",
     "GET /api/git/log",
@@ -456,6 +475,7 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "GET /api/extensions/{skill}/module/{entry}",
     "GET /api/extensions/{skill}/settings_section",
     "ANY /api/extensions/{skill}/{rest:path}",
+    "GET /api/skills/daemons",
     "POST /api/skills/{skill}/toggle",
     "POST /api/skills/{skill}/delete",
     "GET /api/skills/lifecycle-queue",
@@ -529,6 +549,9 @@ __all__ = [
     "SkillDeleteResponse",
     "GitLogResponse",
     "EvolutionDataResponse",
+    "ScheduledTasksResponse",
+    "ScheduleUpsertResponse",
+    "ScheduleDeleteResponse",
     "UploadResponse",
     "ExtensionsIndexResponse",
     "SkillLifecycleQueueResponse",

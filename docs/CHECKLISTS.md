@@ -292,6 +292,8 @@ Scope of a skill review pack:
   skill could still ``import`` them.
 - The manifest's declared `permissions` list, for comparison against
   what the code actually does.
+- Any declared `scheduled_tasks` entries, for comparison against the code they
+  trigger and the `supervised_task` permission they require.
 
 What is **deliberately excluded** from both the content hash and the
 review pack:

@@ -793,6 +793,13 @@ def run_skill_review_lifecycle_blocking(
     except DuplicateLifecycleJobError as exc:
         return _duplicate_payload(skill_name, content_hash, exc.job)
 
+    try:
+        from supervisor.queue import sync_skill_schedules
+        from ouroboros.skill_loader import discover_skills
+
+        sync_skill_schedules(discover_skills(drive_root, repo_path=repo_path), drive_root=drive_root)
+    except Exception:
+        log.debug("skill review schedule sync failed", exc_info=True)
     return _outcome_payload(
         outcome,
         deps_status=getattr(outcome, "deps_status", "not_required"),

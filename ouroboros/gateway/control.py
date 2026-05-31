@@ -247,6 +247,7 @@ async def api_evolution_data(request: Request) -> JSONResponse:
     if not force_refresh and _evo_cache.get("ts") and now - _evo_cache["ts"] < 60:
         return JSONResponse({
             "points": _evo_cache["points"],
+            "checkpoints": _evo_cache.get("checkpoints", []),
             "generated_at": _evo_cache.get("generated_at", ""),
             "cached": True,
         })
@@ -258,11 +259,20 @@ async def api_evolution_data(request: Request) -> JSONResponse:
             )
         )
     data_points = await _evo_task
+    try:
+        from ouroboros.evolution_checkpoints import CHECKPOINTS_REL
+        from ouroboros.utils import iter_jsonl_objects
+
+        checkpoints = list(iter_jsonl_objects(request_drive_root(request) / CHECKPOINTS_REL))[-100:]
+    except Exception:
+        checkpoints = []
     _evo_cache["ts"] = time.time()
     _evo_cache["points"] = data_points
+    _evo_cache["checkpoints"] = checkpoints
     _evo_cache["generated_at"] = utc_now_iso()
     return JSONResponse({
         "points": data_points,
+        "checkpoints": checkpoints,
         "generated_at": _evo_cache["generated_at"],
         "cached": False,
     })

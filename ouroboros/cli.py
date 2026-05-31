@@ -261,7 +261,9 @@ def _evolve_command(args: argparse.Namespace) -> int:
     if args.evolve_command == "status":
         _print_json(client.request("GET", "/api/state").get("evolution_state", {}))
     elif args.evolve_command == "start":
-        _print_json(client.request("POST", "/api/command", {"cmd": "/evolve on"}))
+        objective = " ".join(getattr(args, "objective", []) or []).strip()
+        cmd = "/evolve on" + (f" {objective}" if objective else "")
+        _print_json(client.request("POST", "/api/command", {"cmd": cmd}))
     elif args.evolve_command == "stop":
         _print_json(client.request("POST", "/api/command", {"cmd": "/evolve off"}))
     else:
@@ -269,6 +271,28 @@ def _evolve_command(args: argparse.Namespace) -> int:
             _print_json(client.request("GET", "/api/state").get("evolution_state", {}))
             time.sleep(max(1.0, float(args.interval)))
     return 0
+
+
+def _schedule_command(args: argparse.Namespace) -> int:
+    client = _client(args)
+    if args.schedule_command == "list":
+        _print_json(client.request("GET", "/api/schedules"))
+        return 0
+    if args.schedule_command == "add":
+        prompt = " ".join(args.prompt).strip() or args.name
+        body = {
+            "name": args.name,
+            "description": prompt,
+            "timezone": args.timezone or "",
+            "trigger": {"type": "cron", "expr": args.cron},
+            "task": {"type": "task", "text": prompt, "description": prompt},
+        }
+        _print_json(client.request("POST", "/api/schedules", body))
+        return 0
+    if args.schedule_command == "remove":
+        _print_json(client.request("DELETE", f"/api/schedules/{urllib.parse.quote(args.schedule_id)}"))
+        return 0
+    raise CLIError(f"unknown schedule command: {args.schedule_command}")
 
 
 def _settings_get_command(args: argparse.Namespace) -> int:
@@ -440,10 +464,25 @@ def build_parser() -> argparse.ArgumentParser:
     evo_sub = evolve.add_subparsers(dest="evolve_command", required=True)
     for name in ("start", "stop", "status"):
         p = evo_sub.add_parser(name)
+        if name == "start":
+            p.add_argument("objective", nargs="*", help="Optional evolution campaign objective")
         p.set_defaults(func=_evolve_command)
     evo_watch = evo_sub.add_parser("watch")
     evo_watch.add_argument("--interval", type=float, default=5.0)
     evo_watch.set_defaults(func=_evolve_command)
+
+    schedule = subparsers.add_parser("schedule", help="manage scheduled tasks")
+    schedule_sub = schedule.add_subparsers(dest="schedule_command", required=True)
+    schedule_sub.add_parser("list").set_defaults(func=_schedule_command)
+    schedule_add = schedule_sub.add_parser("add")
+    schedule_add.add_argument("--name", required=True)
+    schedule_add.add_argument("--cron", required=True, help="5-field cron expression")
+    schedule_add.add_argument("--timezone", default="", help="Optional IANA timezone")
+    schedule_add.add_argument("prompt", nargs="*", help="Task prompt to enqueue")
+    schedule_add.set_defaults(func=_schedule_command)
+    schedule_remove = schedule_sub.add_parser("remove")
+    schedule_remove.add_argument("schedule_id")
+    schedule_remove.set_defaults(func=_schedule_command)
 
     _add_settings_parser(subparsers)
     _add_skills_parser(subparsers)

@@ -27,6 +27,7 @@ _MODEL_DEFAULTS = {
         "main": str(SETTINGS_DEFAULTS["OUROBOROS_MODEL"]),
         "code": str(SETTINGS_DEFAULTS["OUROBOROS_MODEL_CODE"]),
         "light": str(SETTINGS_DEFAULTS["OUROBOROS_MODEL_LIGHT"]),
+        "consciousness": str(SETTINGS_DEFAULTS["OUROBOROS_MODEL_CONSCIOUSNESS"]),
         "fallback": str(SETTINGS_DEFAULTS["OUROBOROS_MODEL_FALLBACK"]),
     },
     "openai": dict(OPENAI_DIRECT_DEFAULTS),
@@ -34,6 +35,8 @@ _MODEL_DEFAULTS = {
     "anthropic": dict(ANTHROPIC_DIRECT_DEFAULTS),
 }
 _MODEL_DEFAULTS["local"] = dict(_MODEL_DEFAULTS["openrouter"])
+for _profile_defaults in _MODEL_DEFAULTS.values():
+    _profile_defaults.setdefault("consciousness", "")
 
 _STEPS = _rows(("id", "title", "railCopy", "copy", "footer"), (
     ("providers", "Add your access", "Keys + local", "Fill at least one remote key or a local model source. The next step adapts to what you configured here.", "Paste only what you already have. OpenRouter, direct provider keys, and an optional local model can coexist."),
@@ -64,6 +67,7 @@ _MODEL_SLOTS = _rows(("slot", "stateKey", "settingKey", "inputId", "label", "not
     ("main", "mainModel", "OUROBOROS_MODEL", "main-model", "Main Model", "Primary reasoning and long-form work.", "s-model", "s-local-main"),
     ("code", "codeModel", "OUROBOROS_MODEL_CODE", "code-model", "Code Model", "Tool-heavy coding and edits.", "s-model-code", "s-local-code"),
     ("light", "lightModel", "OUROBOROS_MODEL_LIGHT", "light-model", "Light Model", "Fast summaries and lightweight tasks.", "s-model-light", "s-local-light"),
+    ("consciousness", "consciousnessModel", "OUROBOROS_MODEL_CONSCIOUSNESS", "consciousness-model", "Consciousness Model", "High-horizon background consciousness. Empty uses Main.", "s-model-consciousness", "s-local-consciousness"),
     ("fallback", "fallbackModel", "OUROBOROS_MODEL_FALLBACK", "fallback-model", "Fallback Model", "Fallback and resilience path.", "s-model-fallback", "s-local-fallback"),
 ))
 
@@ -79,9 +83,9 @@ _RUNTIME_MODES = _rows(("value", "label", "tone", "className", "copy"), (
 ))
 
 _LOCAL_ROUTING_MODES = _rows(("value", "buttonLabel", "label", "flags"), (
-    ("cloud", "Cloud only", "Cloud models only", (False, False, False, False)),
-    ("fallback", "Fallback local", "Fallback model local", (False, False, False, True)),
-    ("all", "All models local", "All models local", (True, True, True, True)),
+    ("cloud", "Cloud only", "Cloud models only", (False, False, False, False, False)),
+    ("fallback", "Fallback local", "Fallback model local", (False, False, False, False, True)),
+    ("all", "All models local", "All models local", (True, True, True, True, True)),
 ))
 
 _BUDGET_FIELDS = [
@@ -175,19 +179,19 @@ def derive_provider_profile(settings: dict) -> str:
 
 
 def derive_local_routing_mode(settings: dict) -> str:
-    flags = tuple(_truthy(settings.get(key)) for key in ("USE_LOCAL_MAIN", "USE_LOCAL_CODE", "USE_LOCAL_LIGHT", "USE_LOCAL_FALLBACK"))
-    if flags == (True, True, True, True):
+    flags = tuple(_truthy(settings.get(key)) for key in ("USE_LOCAL_MAIN", "USE_LOCAL_CODE", "USE_LOCAL_LIGHT", "USE_LOCAL_CONSCIOUSNESS", "USE_LOCAL_FALLBACK"))
+    if flags == (True, True, True, True, True):
         return "all"
-    return "fallback" if flags == (False, False, False, True) else "cloud"
+    return "fallback" if flags == (False, False, False, False, True) else "cloud"
 
 
-def local_routing_flags(mode: str, has_local: bool = True) -> tuple[bool, bool, bool, bool]:
+def local_routing_flags(mode: str, has_local: bool = True) -> tuple[bool, bool, bool, bool, bool]:
     if not has_local:
-        return (False, False, False, False)
+        return (False, False, False, False, False)
     for item in _LOCAL_ROUTING_MODES:
         if item["value"] == mode:
             return tuple(bool(flag) for flag in item["flags"])  # type: ignore[return-value]
-    return (False, False, False, False)
+    return (False, False, False, False, False)
 
 
 def model_defaults_for_profile(profile: str) -> dict:
@@ -292,7 +296,12 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
         return {}, f"Choose a runtime mode from {sorted(VALID_RUNTIME_MODES)}."
 
     models = {slot["settingKey"]: _string(data.get(slot["settingKey"])) for slot in _MODEL_SLOTS}
-    if not all(models.values()):
+    required_models = {
+        key: value
+        for key, value in models.items()
+        if key != "OUROBOROS_MODEL_CONSCIOUSNESS"
+    }
+    if not all(required_models.values()):
         return {}, "Confirm all four models before starting Ouroboros."
 
     parsed_budget: dict[str, float] = {}
@@ -329,6 +338,7 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
         "USE_LOCAL_MAIN": use_local[0],
         "USE_LOCAL_CODE": use_local[1],
         "USE_LOCAL_LIGHT": use_local[2],
-        "USE_LOCAL_FALLBACK": use_local[3],
+        "USE_LOCAL_CONSCIOUSNESS": use_local[3],
+        "USE_LOCAL_FALLBACK": use_local[4],
     })
     return prepared, None

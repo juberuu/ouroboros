@@ -106,7 +106,7 @@ async def api_tasks_create(request: Request) -> JSONResponse:
         return json_error(str(exc), 400)
     workspace_mode = str(body.get("workspace_mode") or ("external" if workspace_root else "")).strip()
     memory_mode = str(body.get("memory_mode") or ("forked" if workspace_root else "shared")).strip().lower()
-    if workspace_root and memory_mode not in {"forked", "empty", "shared"}:
+    if memory_mode not in {"forked", "empty", "shared"}:
         return json_error("memory_mode must be one of forked, empty, shared", 400)
     if workspace_root and memory_mode == "shared":
         return json_error("memory_mode=shared is not allowed for external workspaces; use forked or empty", 400)
@@ -125,7 +125,7 @@ async def api_tasks_create(request: Request) -> JSONResponse:
     if str(body.get("parent_task_id") or "").strip() or str(body.get("root_task_id") or "").strip():
         return json_error("parent_task_id and root_task_id are internal lineage fields; external tasks must start as roots", 400)
     metadata = {str(k): v for k, v in raw_metadata.items() if str(k) not in _RESERVED_METADATA_KEYS}
-    child_drive = prepare_task_drive(drive_root, task_id, memory_mode) if workspace_root else None
+    child_drive = prepare_task_drive(drive_root, task_id, memory_mode)
     metadata.setdefault("session_id", str(body.get("session_id") or uuid.uuid4().hex))
     metadata.setdefault("actor_id", str(body.get("actor_id") or "cli"))
     metadata.setdefault("delegation_role", "root")

@@ -8,6 +8,8 @@ uvicorn[standard]
 websockets
 huggingface_hub
 PyYAML>=6.0
+croniter
+tzdata
 pytest>=7.0
 claude-agent-sdk>=0.1.60
 # MCP (Model Context Protocol) client. The runtime guards imports so a

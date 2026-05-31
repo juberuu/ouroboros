@@ -22,16 +22,15 @@ def test_architecture_mentions_shared_log_grouping_and_direct_provider_review_fa
     assert "log_events.js" in arch
     assert "live task card" in arch
     assert "grouped task cards" in arch
-    # Post-v4.33.1: the review fallback currently applies only to OpenAI-only
-    # and Anthropic-only setups — `_exclusive_direct_remote_provider_env`
-    # early-returns "" when OpenAI-compatible or Cloud.ru keys are present.
+    # Direct-provider fallback covers official OpenAI, Anthropic, and Cloud.ru,
+    # while still excluding OpenRouter/OpenAI-compatible/mixed-provider configs.
     # Keep the generalized name ("Direct-provider review fallback") and a
     # reference to the legacy "OpenAI-only review fallback" phrase for
     # discoverability, and pin the honest scope language so the doc cannot
     # silently re-expand to claim symmetric coverage it does not have yet.
     assert "Direct-provider review fallback" in arch
     assert "OpenAI-only review fallback" in arch  # legacy name still referenced for discoverability
-    assert "Current scope is OpenAI-only and Anthropic-only" in arch
+    assert "official OpenAI, Anthropic, and Cloud.ru" in arch
     assert "_exclusive_direct_remote_provider_env" in arch
     # v4.34.0: direct-provider fallback now documents the
     # `main_model.startswith(provider_prefix)` guard in get_review_models —
@@ -45,10 +44,11 @@ def test_architecture_mentions_shared_log_grouping_and_direct_provider_review_fa
     assert "transport failure" in arch
 
 
-def test_consciousness_prompt_matches_subagent_wait_and_memory_contracts():
+def test_consciousness_prompt_matches_scope_limited_contracts():
     consciousness = _read("prompts/CONSCIOUSNESS.md")
 
-    assert "memory_mode=forked|empty" in consciousness
-    assert "memory_mode=forked|empty|shared" not in consciousness
-    assert "`shared` is disabled" in consciousness
-    assert "wait_tasks" in consciousness
+    assert "schedule subagents" in consciousness
+    assert "wait on subagents" in consciousness
+    assert "Update your scratchpad or identity" in consciousness
+    assert "Message the user proactively" in consciousness
+    assert "recent_tasks" in consciousness

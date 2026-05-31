@@ -428,7 +428,12 @@ Plan → implement → test → review → commit → restart when needed. If se
 
 ## Background consciousness
 
-Background consciousness may think and initiate, but any structural change it proposes goes through the same planning and immune-system gates as task work.
+Background consciousness is high-horizon inner awareness. It may maintain memory,
+evolve identity, groom backlog, inspect logs/code, and proactively message the
+owner. It must not silently downgrade its model/context quality for cost. It
+does not directly execute powerful work such as subagent delegation, shell/code
+execution, commits, review runs, or evolution toggles; executable structural
+change happens through visible tasks and the normal planning/immune-system gates.
 
 ## Deep review
 

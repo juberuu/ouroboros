@@ -693,6 +693,25 @@ def test_skill_manifest_is_tolerant_of_missing_fields():
     assert manifest.body.strip().startswith("# Hello World Skill")
 
 
+def test_skill_manifest_scheduled_tasks_contract():
+    text = (
+        "---\n"
+        "name: cron-skill\n"
+        "description: Cron skill\n"
+        "version: 0.1.0\n"
+        "type: extension\n"
+        "entry: plugin.py\n"
+        "permissions: [supervised_task]\n"
+        "scheduled_tasks:\n"
+        "  - name: refresh\n"
+        "    cron: \"0 * * * *\"\n"
+        "---\n"
+        "body\n"
+    )
+    manifest = parse_skill_manifest_text(text)
+    assert manifest.scheduled_tasks == [{"name": "refresh", "cron": "0 * * * *"}]
+
+
 # Removed in v5.15.x: test_skill_manifest_body_only_markdown_can_start_with_link_syntax
 # and test_skill_manifest_body_only_markdown_can_start_with_thematic_break.
 # Both pinned narrow YAML-frontmatter-vs-body-markdown edge cases that
