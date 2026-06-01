@@ -1028,6 +1028,14 @@ def main():
     global _webview_window
     port = AGENT_SERVER_PORT
 
+    # Clear any stale server process or ports before starting the new agent
+    _cleanup_recorded_server_process("preflight")
+    _kill_stale_runtime_ports(port)
+    try:
+        PORT_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+
     lifecycle_thread = threading.Thread(target=agent_lifecycle_loop, args=(port,), daemon=True)
     lifecycle_thread.start()
 
