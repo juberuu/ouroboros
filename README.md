@@ -7,7 +7,7 @@
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/razzant/ouroboros/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/razzant/ouroboros/releases)
 [![OuroborosHub](https://img.shields.io/badge/OuroborosHub-skills%20marketplace-8A2BE2.svg)](https://github.com/razzant/OuroborosHub)
-[![Version 6.9.0-rc.1](https://img.shields.io/badge/version-6.9.0--rc.1-green.svg)](VERSION)
+[![Version 6.9.0-rc.2](https://img.shields.io/badge/version-6.9.0--rc.2-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -493,6 +493,7 @@ the contribution guide only routes to those sources.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 6.9.0-rc.2 | 2026-05-31 | **rc(reliability): finish the evolution release.** Fixes the collapsed chat-bubble regression (flex-shrink on the transcript column), hard-blocks Evolution Campaigns in `light` runtime mode at every entry point while trimming redundant start messages, classifies graceful shutdown/restart so interrupted tasks are no longer mislabeled as worker crash storms, consolidates skill-schedule readiness on the execution-readiness SSOT with lifecycle resync/tombstone removal and DST-aware local timezones, adds a compact schedule digest to task/consciousness context, and closes the Experience Review loop so reflections can auto-apply provenance-preserving memory actions (identity stays candidate-only). |
 | 6.9.0-rc.1 | 2026-05-31 | **rc(evolution): make self-improvement explicit, scheduled, and continuous.** Introduces a high-horizon consciousness model slot, scope-limits background consciousness without reducing its quality, starts goal-directed Evolution Campaigns instead of empty `EVOLUTION #N` prompts, adds queue-backed cron schedules and skill schedule metadata, exposes workspace knowledge reads, makes forked memory useful beyond workspace runs, records rollback-grade memory provenance, and begins checkpointing evolution cycles for future eval curves. |
 | 6.8.0 | 2026-05-31 | **repo: consolidate the official Ouroboros home under razzant.** Retargets update metadata, package links, and the official skills catalog to the razzant repositories so new builds use the consolidated project home while preserving the historical Google Colab branch separately. |
 | 6.7.3 | 2026-05-30 | **release(ui): keep nested subagent cards stable in host smoke.** History replay now keeps subagent live cards mounted under their parent card instead of moving them to the top-level transcript, and the UI smoke regression asserts both nested placement and no duplicate final child chat bubble after reload. |

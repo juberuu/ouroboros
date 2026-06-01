@@ -690,6 +690,26 @@ def assign_tasks() -> None:
         # Drop tasks cancelled after scheduling but before assignment.
         _drop_cancelled_pending()
 
+        # Evolution is hard-blocked in light runtime mode at the assignment
+        # chokepoint too: a task restored from a snapshot or created before the
+        # mode switch must never actually run. Cancel them terminally.
+        evo_block = queue.evolution_block_reason()
+        if evo_block and any(str(t.get("type") or "") == "evolution" for t in PENDING):
+            blocked_ids = [str(t.get("id") or "") for t in PENDING if str(t.get("type") or "") == "evolution"]
+            PENDING[:] = [t for t in PENDING if str(t.get("type") or "") != "evolution"]
+            from ouroboros.task_results import STATUS_CANCELLED, write_task_result
+            for tid in blocked_ids:
+                try:
+                    write_task_result(
+                        DRIVE_ROOT, tid, STATUS_CANCELLED,
+                        result="Evolution is disabled in light runtime mode.",
+                    )
+                except Exception:
+                    log.debug("Failed to cancel light-mode evolution task %s", tid, exc_info=True)
+            if st.get("owner_chat_id"):
+                send_with_budget(int(st["owner_chat_id"]), evo_block)
+            queue.persist_queue_snapshot(reason="evolution_blocked_light")
+
         for w in WORKERS.values():
             if w.busy_task_id is None and PENDING:
                 # Find first suitable task (skip over-budget evolution tasks)

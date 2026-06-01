@@ -849,6 +849,13 @@ def _handle_toggle_skill(
             live_state = extension_loader.reconcile_extension(loaded.name, drive_root, _load_settings, retry_load_error=True)
             extension_action = live_state.get("action")
             extension_reason = str(live_state.get("reason") or "")
+        # Mirror schedule readiness immediately (parallel to the HTTP toggle path).
+        try:
+            from supervisor.queue import resync_skill_schedules
+
+            resync_skill_schedules(drive_root)
+        except Exception:
+            log.debug("toggle_skill schedule sync failed", exc_info=True)
         stale = loaded.review.is_stale_for(loaded.content_hash)
         gate = skill_review_gate(loaded.review.status, stale=stale)
         return json.dumps({"skill": loaded.name, "enabled": coerced, "review_status": loaded.review.status, "review_gate": gate, "executable_review": gate["executable_review"], "extension_action": extension_action, "extension_reason": extension_reason, "message": f"Skill {loaded.name!r} enabled={coerced}"}, ensure_ascii=False, indent=2)

@@ -1037,6 +1037,15 @@ def _handle_cancel_task(evt: Dict[str, Any], ctx: Any) -> None:
 def _handle_toggle_evolution(evt: Dict[str, Any], ctx: Any) -> None:
     """Toggle evolution mode from LLM tool call."""
     enabled = bool(evt.get("enabled"))
+    if enabled:
+        from supervisor.queue import evolution_block_reason
+
+        block = evolution_block_reason()
+        if block:
+            st = ctx.load_state()
+            if st.get("owner_chat_id"):
+                ctx.send_with_budget(int(st["owner_chat_id"]), block)
+            return
     st = ctx.load_state()
     st["evolution_mode_enabled"] = enabled
     if enabled:

@@ -1,4 +1,4 @@
-# Ouroboros v6.9.0-rc.1 — Architecture & Reference
+# Ouroboros v6.9.0-rc.2 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -208,6 +208,19 @@ progress goes to stderr; status and admin wrappers may print human summaries.
 `ouroboros schedule list|add|remove` is the CLI wrapper over `/api/schedules`;
 it manages persisted 5-field cron schedules that enqueue ordinary tasks through
 the supervisor queue rather than running a separate scheduler daemon.
+
+Skill-manifest `scheduled_tasks` are mirrored into the same table by
+`supervisor/queue.py::sync_skill_schedules`, whose enable gate is the
+`skill_readiness_for_execution()` SSOT (review/grants/deps/enablement) plus a
+`supervised_task` permission check. `resync_skill_schedules()` runs on every
+skill lifecycle change (toggle, grants, reconcile, delete, review, and
+marketplace install→review/uninstall) and on a 60 s scheduler tick; schedules
+whose source skill or `scheduled_task` no longer exists are removed, not left as
+disabled tombstones. A blank schedule timezone resolves the DST-aware system
+local zone (`TZ`/`/etc/localtime`), falling back to a fixed current offset only
+when no IANA name is found — set an explicit IANA timezone for DST-critical
+schedules. A compact active-schedule digest (capped, with an omission note) is
+injected into both normal task context and background consciousness context.
 
 Packaged desktop artifacts ship a tiny `bin/ouroboros` wrapper and installer
 instead of a second PyInstaller runtime. The wrapper runs the bundled
@@ -809,6 +822,12 @@ fast idle queue path, so consecutive campaign iterations can start as soon as th
 queue is empty; only the task objective and persisted progress become explicit.
 Campaign checkpoints are appended to `data/state/evolution_checkpoints.jsonl`
 with git/memory hashes and per-cycle cost/status for future eval curves.
+Evolution is self-modification work and is hard-blocked in `light` runtime mode
+at every entry point (`/evolve`, the Evolution UI Start button, the agent
+`toggle_evolution` tool, and the idle enqueue path), requiring `advanced`/`pro`.
+Checkpoints are surfaced through `GET /api/evolution-data` (`checkpoints`) and
+the JSONL ledger rather than the Evolution chart, which renders campaign
+cycles/progress; the digest/ledger split keeps the chart focused on tag growth.
 
 Loop checkpoints are plain user-message self-checks by design. A prior structured-reflection mechanism (four-field contract, tools disabled, `effort=xhigh`) produced 0 valid reflections and 37 anomaly records in production: system-role injection was absorbed into the top-level prompt, high effort with no tools invalidated cache every round, and the strict parser rejected natural model output. The minimal checkpoint is intentional; do not reintroduce structured reflection without new evidence.
 
@@ -868,6 +887,8 @@ oversized-context behavior cannot drift between review entry points.
 ### Planning, deep review, reflection, memory
 
 `plan_review.py` runs multi-model Atlas-backed review before large implementation plans. `deep_self_review.py` runs a direct Atlas-backed self-review without the tool loop while keeping the memory whitelist full. `reflection.py` records process lessons; `consolidator.py` compacts dialogue/scratchpad through explicit summaries; `context.py` assembles static, semi-stable, and dynamic context sections.
+
+Experience Review closes the learning loop: the reflection LLM may append a `MEMORY_ACTIONS_JSON` block whose validated actions (`scratchpad_append`, `knowledge_write`, `identity_update_candidate`) are auto-applied via `reflection.apply_memory_actions` through the existing provenance-preserving memory/knowledge paths (`Memory.append_scratchpad_block`, `knowledge._knowledge_write`). Identity is deliberately conservative — an `identity_update_candidate` is only recorded in the scratchpad for review, never auto-written to `identity.md`, so autonomous learning cannot silently drift the personality. `agent_task_pipeline._apply_reflection_memory_actions` runs this in post-task processing for both the child env and, for forked/workspace tasks, the parent (`budget_drive_root`) drive, so learnings land on the canonical drive rather than a discarded child drive.
 
 Rationale: Ouroboros learns from attempts, not just final answers. Compression must preserve what was tried, what changed, and why conclusions were reached.
 

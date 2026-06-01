@@ -979,6 +979,14 @@ body {
     gap: 8px;
 }
 
+/* The transcript is a scrolling column, so rows must keep their natural
+   height. Children with overflow:hidden (live cards, skill_review bubbles)
+   otherwise get an automatic flex min-height of 0 and are shrunk to a 1px
+   strip when the transcript overflows instead of letting the list scroll. */
+#chat-messages > * {
+    flex-shrink: 0;
+}
+
 .chat-bubble {
     padding: 10px 14px;
     border-radius: var(--radius-lg);

@@ -1,269 +1,154 @@
 #!/usr/bin/env python3
-"""Dry-run the real triad + scope reviewers against the staged diff.
+"""Standalone real triad + scope review dry-run on the STAGED diff.
 
-Development-only: no commit, no review-state mutation, full raw reviewer output.
+Recreated per AGENTS.md contract (the workspace can be rebuilt, so this file may
+disappear). It runs the actual Ouroboros review substrate against `git diff
+--cached` using the real models/prompts/settings, and prints the FULL,
+UNTRUNCATED per-reviewer triad records plus the full scope raw result. It NEVER
+commits, pushes, or mutates persisted review state, and it never hides
+`scope_review_skipped` / budget-exceeded signals.
+
+Usage (from repo/):
+    python scripts/run_external_review.py ["commit message"]
 """
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import pathlib
 import subprocess
 import sys
 import time
-from typing import Any, Dict, List
+
+REPO = pathlib.Path(__file__).resolve().parents[1]
+DATA = REPO.parent / "data"
+
+# Allow `import ouroboros` when invoked as a standalone script from any cwd.
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
 
 
-_REPO_DIR = pathlib.Path(__file__).resolve().parent.parent
-_OUROBOROS_HOME = _REPO_DIR.parent
-_DATA_DIR = _OUROBOROS_HOME / "data"
-_SETTINGS_PATH = _DATA_DIR / "settings.json"
-_SECRET_ENV_KEYS = {
-    "GITHUB_TOKEN",
-    "OUROBOROS_NETWORK_PASSWORD",
-    "OPENROUTER_API_KEY",
-    "OPENAI_API_KEY",
-    "OPENAI_COMPATIBLE_API_KEY",
-    "ANTHROPIC_API_KEY",
-    "CLOUDRU_FOUNDATION_MODELS_API_KEY",
-}
-_EXPLICIT_ENV_OVERRIDE_KEYS = {
-    "OUROBOROS_REVIEW_MODELS",
-    "OUROBOROS_SCOPE_REVIEW_MODELS",
-    "OUROBOROS_SCOPE_REVIEW_MODEL",
-}
-
-if str(_REPO_DIR) not in sys.path:
-    sys.path.insert(0, str(_REPO_DIR))
-
-
-def _load_settings_into_env() -> Dict[str, Any]:
-    """Populate env from settings.json without printing secret values."""
-    preexisting_secrets = {
-        key: os.environ.get(key, "")
-        for key in _SECRET_ENV_KEYS
-        if os.environ.get(key)
-    }
-    preexisting_overrides = {
-        key: os.environ.get(key, "")
-        for key in _EXPLICIT_ENV_OVERRIDE_KEYS
-        if os.environ.get(key)
-    }
-    if not _SETTINGS_PATH.exists():
-        sys.stderr.write(
-            f"[run_external_review] settings.json not found at {_SETTINGS_PATH}\n"
-            "Run the wizard first or set OPENROUTER_API_KEY / "
-            "OUROBOROS_REVIEW_MODELS in the environment manually.\n"
-        )
-        return {}
-    try:
-        settings = json.loads(_SETTINGS_PATH.read_text(encoding="utf-8"))
-    except Exception as exc:
-        sys.stderr.write(f"[run_external_review] Failed to parse settings.json: {exc}\n")
-        return {}
-
-    pushed: List[str] = []
-    for key, value in settings.items():
-        if value is None or value == "" or isinstance(value, (dict, list)):
-            continue
-        os.environ.setdefault(key, str(value))
-        pushed.append(key)
-
-    try:
-        from ouroboros.config import apply_settings_to_env
-        apply_settings_to_env(settings)
-        for key, value in preexisting_secrets.items():
-            if not str(settings.get(key) or "").strip():
-                os.environ[key] = value
-        for key, value in preexisting_overrides.items():
-            os.environ[key] = value
-    except Exception as exc:
-        sys.stderr.write(
-            f"[run_external_review] apply_settings_to_env failed (continuing with raw env copy): {exc}\n"
-        )
-
-    sys.stderr.write(
-        f"[run_external_review] env populated from {_SETTINGS_PATH} "
-        f"({len(pushed)} keys, including: "
-        f"{', '.join(k for k in ('OPENROUTER_API_KEY', 'OUROBOROS_REVIEW_MODELS', 'OUROBOROS_SCOPE_REVIEW_MODEL') if k in pushed)})\n"
-    )
-    return settings
-
-
-def _ensure_diff_present() -> str:
-    """Return the staged diff text the reviewers will see; abort if empty."""
-    proc = subprocess.run(
-        ["git", "diff", "--cached"],
-        cwd=_REPO_DIR,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if proc.returncode != 0:
-        sys.stderr.write(f"[run_external_review] git diff failed: {proc.stderr}\n")
-        sys.exit(2)
-    diff = proc.stdout
-    if not diff.strip():
-        sys.stderr.write(
-            "[run_external_review] No staged diff found. "
-            "``git add`` the relevant files before running this script.\n"
-        )
-        sys.exit(3)
-    return diff
-
-
-def _build_ctx() -> Any:
-    from ouroboros.tools.registry import ToolContext
-
-    ctx = ToolContext(repo_dir=_REPO_DIR, drive_root=_DATA_DIR)
-    for name, value in {
-        "_review_advisory": [],
-        "_review_iteration_count": 0,
-        "_review_history": [],
-        "_scope_review_history": {},
-        "_last_scope_model": "",
-        "_last_triad_raw_results": [],
-        "_last_scope_raw_result": {},
-        "_last_review_block_reason": "",
-        "_last_review_critical_findings": [],
-        "_current_review_tool_name": "external_review",
-    }.items():
-        setattr(ctx, name, value)
-    return ctx
-
-
-def _print_section(title: str, body: str, *, use_color: bool = True) -> None:
-    bar = "=" * 78
-    if use_color and sys.stdout.isatty():
-        head = f"\033[1;33m{title}\033[0m"
+def _load_settings_into_env() -> None:
+    """Load data/settings.json scalars into env; never print secret values."""
+    settings_path = DATA / "settings.json"
+    if settings_path.exists():
+        try:
+            data = json.loads(settings_path.read_text(encoding="utf-8"))
+        except Exception as exc:  # pragma: no cover - operator script
+            print(f"WARN: could not parse settings.json: {exc}", file=sys.stderr)
+            data = {}
+        for key, value in (data.items() if isinstance(data, dict) else []):
+            if isinstance(value, bool):
+                os.environ[key] = "1" if value else "0"
+            elif isinstance(value, (str, int, float)) and str(value) != "":
+                os.environ[key] = str(value)
     else:
-        head = title
-    print(f"\n{bar}\n{head}\n{bar}\n{body}\n")
+        print(f"WARN: settings.json not found at {settings_path}", file=sys.stderr)
 
+    # Transient provider-key fallback from ~/file1.txt (never printed/persisted).
+    def _fallback(env_name: str, prefix: str) -> None:
+        if os.environ.get(env_name, "").strip():
+            return
+        f1 = pathlib.Path.home() / "file1.txt"
+        if not f1.exists():
+            return
+        for line in f1.read_text(encoding="utf-8").splitlines():
+            if line.strip().lower().startswith(prefix + ":"):
+                os.environ[env_name] = line.split(":", 1)[1].strip()
+                break
 
-def _format_review_record(record: Dict[str, Any], sections: list[tuple[str, str]]) -> str:
-    parts = [f"{key:<13}: {record.get(key, default)}" for key, default in (
-        ("model_id", "?"), ("status", "?"), ("tokens_in", 0),
-        ("tokens_out", 0), ("cost_usd", 0.0), ("prompt_chars", 0),
-    ) if key in record or key != "prompt_chars"]
-    parts += ["", "── raw_text (verbatim, no truncation) ──", record.get("raw_text", "<empty>")]
-    for title, key in sections:
-        parts += ["", f"── {title} ──", json.dumps(record.get(key, []), indent=2, ensure_ascii=False)]
-    return "\n".join(parts)
+    _fallback("OPENROUTER_API_KEY", "openrouter")
+    _fallback("OPENAI_API_KEY", "openai")
+    _fallback("ANTHROPIC_API_KEY", "anthropic")
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--commit-message", required=True, help="Synthetic commit message for the review prompt")
-    parser.add_argument("--goal", default="", help="Optional goal/intent string passed to scope reviewer")
-    parser.add_argument("--scope", default="", help="Optional scope hint passed to scope reviewer")
-    parser.add_argument("--review-rebuttal", default="", help="Optional rebuttal text (for rerun scenarios)")
-    parser.add_argument("--review-models", default="", help="Override OUROBOROS_REVIEW_MODELS for this dry-run")
-    parser.add_argument("--scope-review-models", default="", help="Override OUROBOROS_SCOPE_REVIEW_MODELS for this dry-run")
-    parser.add_argument("--no-color", action="store_true", help="Disable ANSI colors in section headers")
-    parser.add_argument("--output", help="Also write full raw output to this file")
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Real triad+scope review dry-run on the staged diff (no commit)."
+    )
+    parser.add_argument(
+        "commit_message",
+        nargs="?",
+        default="rc(reliability): finish the evolution release (6.9.0-rc.2)",
+    )
+    parser.add_argument(
+        "--output",
+        default="",
+        help="Optional path to also write the full review output to.",
+    )
     args = parser.parse_args()
 
-    use_color = not args.no_color
     _load_settings_into_env()
-    if args.review_models:
-        os.environ["OUROBOROS_REVIEW_MODELS"] = args.review_models
-        sys.stderr.write("[run_external_review] using explicit reviewer slots override\n")
-    if args.scope_review_models:
-        os.environ["OUROBOROS_SCOPE_REVIEW_MODELS"] = args.scope_review_models
-        sys.stderr.write("[run_external_review] using explicit scope reviewer slots override\n")
-    diff = _ensure_diff_present()
-    sys.stderr.write(f"[run_external_review] diff size: {len(diff)} chars\n")
 
-    ctx = _build_ctx()
+    staged = subprocess.run(
+        ["git", "diff", "--cached"], cwd=str(REPO), capture_output=True, text=True
+    ).stdout
+    if not staged.strip():
+        print("ERROR: staged diff is empty — `git add` the changes first.", file=sys.stderr)
+        return 2
 
-    from ouroboros.tools.parallel_review import run_parallel_review, aggregate_review_verdict
+    from ouroboros.tools.registry import ToolContext
+    from ouroboros.tools.parallel_review import (
+        run_parallel_review,
+        aggregate_review_verdict,
+    )
 
-    sys.stderr.write("[run_external_review] launching triad + scope reviewers in parallel...\n")
-    commit_start = time.time()
+    ctx = ToolContext(repo_dir=REPO, drive_root=DATA)
+    commit_message = args.commit_message
+    goal = os.environ.get(
+        "REVIEW_GOAL",
+        "Ouroboros 6.9.0-rc.2: fix chat-bubble collapse regression; hard-block "
+        "evolution in light mode + reduce start noise; honest shutdown/restart "
+        "task classification; skill-schedule readiness SSOT + lifecycle resync + "
+        "tombstone removal + DST timezone + context digest; Experience Review "
+        "memory write-back; onboarding/docs/contract consistency.",
+    )
+    scope = os.environ.get(
+        "REVIEW_SCOPE",
+        "Bugfix/consistency/release completion only. No model-quality reduction, "
+        "no BIBLE edits, no backend protocol changes for the bubble fix, no "
+        "identity auto-write, no unrelated refactors.",
+    )
+
+    t0 = time.time()
     review_err, scope_result, triad_block_reason, triad_advisory = run_parallel_review(
-        ctx,
-        args.commit_message,
-        goal=args.goal,
-        scope=args.scope,
-        review_rebuttal=args.review_rebuttal,
+        ctx, commit_message, goal=goal, scope=scope
     )
-    aggregated = aggregate_review_verdict(
-        review_err,
-        scope_result,
-        triad_block_reason,
-        triad_advisory,
-        ctx,
-        args.commit_message,
-        commit_start,
-        str(_REPO_DIR),
-    )
-
-    out_buf: List[str] = []
-
-    def _emit(title: str, body: str) -> None:
-        _print_section(title, body, use_color=use_color)
-        out_buf.append(f"\n{'=' * 78}\n{title}\n{'=' * 78}\n{body}\n")
-
-    _emit(
-        "META",
-        json.dumps(
-            {
-                "commit_message": args.commit_message,
-                "goal": args.goal,
-                "scope": args.scope,
-                "diff_size_chars": len(diff),
-                "triad_block_reason": triad_block_reason,
-                "triad_advisory_count": len(triad_advisory),
-            },
-            indent=2,
-            ensure_ascii=False,
-        ),
-    )
-
-    triad_raw = list(getattr(ctx, "_last_triad_raw_results", []) or [])
-    if not triad_raw:
-        _emit("TRIAD REVIEWERS", "<empty — no actor records produced>")
-    else:
-        for idx, actor in enumerate(triad_raw):
-            _emit(
-                f"TRIAD REVIEWER {idx + 1}/{len(triad_raw)}",
-                _format_review_record(actor, [("parsed_items", "parsed_items")]),
-            )
-
-    scope_raw = getattr(ctx, "_last_scope_raw_result", {}) or {}
-    if not scope_raw:
-        _emit("SCOPE REVIEWER", "<empty — no scope record produced>")
-    else:
-        _emit(
-            "SCOPE REVIEWER",
-            _format_review_record(scope_raw, [
-                ("critical_findings", "critical_findings"),
-                ("advisory_findings", "advisory_findings"),
-            ]),
+    blocked, combined_msg, block_reason, combined_findings, scope_advisory_items = (
+        aggregate_review_verdict(
+            review_err, scope_result, triad_block_reason, triad_advisory,
+            ctx, commit_message, t0, str(REPO),
         )
-
-    if review_err:
-        _emit("TRIAD BLOCK MESSAGE (review_err)", review_err)
-
-    if scope_result is not None and getattr(scope_result, "block_message", None):
-        _emit("SCOPE BLOCK MESSAGE (scope_result.block_message)", scope_result.block_message)
-
-    _emit(
-        "AGGREGATED VERDICT",
-        json.dumps(aggregated, indent=2, ensure_ascii=False, default=str)
-        if isinstance(aggregated, (dict, list))
-        else str(aggregated),
     )
 
+    sep = "=" * 80
+    out = "\n".join([
+        sep, "TRIAD RAW RESULTS (full, untruncated)", sep,
+        json.dumps(getattr(ctx, "_last_triad_raw_results", []), indent=2, ensure_ascii=False, default=str),
+        sep, "SCOPE RAW RESULT (full, untruncated)", sep,
+        json.dumps(getattr(ctx, "_last_scope_raw_result", {}), indent=2, ensure_ascii=False, default=str),
+        sep, "AGGREGATE VERDICT", sep,
+        json.dumps({
+            "blocked": blocked,
+            "block_reason": block_reason,
+            "triad_block_reason": triad_block_reason,
+            "scope_model": getattr(ctx, "_last_scope_model", ""),
+            "scope_status": getattr(scope_result, "status", None),
+            "scope_blocked": getattr(scope_result, "blocked", None),
+            "scope_review_skipped": getattr(scope_result, "status", "") == "skipped",
+            "review_err": review_err,
+            "combined_message": combined_msg,
+            "combined_findings": combined_findings,
+            "scope_advisory_items": scope_advisory_items,
+            "triad_advisory": triad_advisory,
+            "elapsed_sec": round(time.time() - t0, 1),
+        }, indent=2, ensure_ascii=False, default=str),
+    ])
+    print(out)
     if args.output:
-        try:
-            pathlib.Path(args.output).write_text("".join(out_buf), encoding="utf-8")
-            sys.stderr.write(f"[run_external_review] full output also written to {args.output}\n")
-        except Exception as exc:
-            sys.stderr.write(f"[run_external_review] failed to write --output: {exc}\n")
-
+        pathlib.Path(args.output).write_text(out + "\n", encoding="utf-8")
     return 0
 
 

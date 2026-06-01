@@ -340,6 +340,9 @@ def test_frontend_evolution_and_consciousness_controls_are_present():
     assert "evo-stop" in evolution
     assert "/evolve on" in evolution
     assert "/evolve off" in evolution
+    # Start button is hard-disabled in light mode (self-modification gate).
+    assert "runtime.runtime_mode" in evolution
+    assert "startBtn.disabled = isLightMode" in evolution
     assert "s-model-consciousness" in settings_ui
     assert "s-local-consciousness" in settings_ui
     assert "OUROBOROS_EFFORT_CONSCIOUSNESS', 'high'" in settings
@@ -370,15 +373,27 @@ def test_evolution_checkpoint_records_and_reads(tmp_path):
     assert rows[0]["rounds"] == 3
 
 
-def test_toggle_evolution_tool_accepts_objective(tmp_path):
+def test_toggle_evolution_tool_accepts_objective(tmp_path, monkeypatch):
     from ouroboros.tools.control import _toggle_evolution
-    from types import SimpleNamespace
 
+    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
     pending = []
     result = _toggle_evolution(SimpleNamespace(pending_events=pending), True, objective="Improve cron")
 
     assert "ON" in result
     assert pending[0]["objective"] == "Improve cron"
+
+
+def test_toggle_evolution_tool_refuses_in_light_mode(monkeypatch):
+    from ouroboros.tools.control import _toggle_evolution
+
+    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "light")
+    pending = []
+    result = _toggle_evolution(SimpleNamespace(pending_events=pending), True)
+
+    # The tool's own result reflects the block; no event is queued.
+    assert "light" in result.lower()
+    assert pending == []
 
 
 def test_memory_provenance_records_old_and_new_content(tmp_path):
@@ -404,3 +419,295 @@ def test_memory_provenance_records_old_and_new_content(tmp_path):
     ]
     assert identity_history[-1]["old_content"].startswith("I am v1")
     assert identity_history[-1]["new_content"].startswith("I am v2")
+
+
+def test_evolution_block_reason_depends_on_runtime_mode(monkeypatch):
+    from supervisor import queue
+
+    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "light")
+    blocked = queue.evolution_block_reason()
+    assert blocked
+    assert "advanced" in blocked and "pro" in blocked
+
+    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    assert queue.evolution_block_reason() == ""
+    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "pro")
+    assert queue.evolution_block_reason() == ""
+
+
+def test_enqueue_evolution_blocked_in_light_mode(tmp_path, monkeypatch):
+    from supervisor import queue
+    from supervisor import state as supervisor_state
+
+    supervisor_state.init(tmp_path)
+    sent = []
+    monkeypatch.setattr(queue, "send_with_budget", lambda chat_id, text, *a, **k: sent.append(text))
+    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "light")
+    queue.init(tmp_path, 600, 1800)
+    pending = []
+    queue.init_queue_refs(pending, {}, {"value": 0})
+    queue.start_evolution_campaign("Improve", source="test")
+    st = supervisor_state.load_state()
+    st["evolution_mode_enabled"] = True
+    st["owner_chat_id"] = 1
+    supervisor_state.save_state(st)
+
+    queue.enqueue_evolution_task_if_needed()
+
+    assert pending == []
+    assert supervisor_state.load_state()["evolution_mode_enabled"] is False
+    assert queue.get_evolution_status_snapshot()["campaign"]["status"] == "paused"
+    assert any("light" in m.lower() for m in sent)
+
+
+def test_enqueue_evolution_omits_duplicate_cycle_message(tmp_path, monkeypatch):
+    from supervisor import queue
+    from supervisor import state as supervisor_state
+
+    supervisor_state.init(tmp_path)
+    monkeypatch.setattr(supervisor_state, "TOTAL_BUDGET_LIMIT", 100.0)
+    sent = []
+    monkeypatch.setattr(queue, "send_with_budget", lambda chat_id, text, *a, **k: sent.append(text))
+    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    queue.init(tmp_path, 600, 1800)
+    pending = []
+    queue.init_queue_refs(pending, {}, {"value": 0})
+    st = supervisor_state.load_state()
+    st["evolution_mode_enabled"] = True
+    st["owner_chat_id"] = 1
+    st["spent_usd"] = 0.0
+    supervisor_state.save_state(st)
+
+    queue.enqueue_evolution_task_if_needed()
+
+    assert len(pending) == 1
+    assert pending[0]["type"] == "evolution"
+    # The generic "... task started." lifecycle message is the only start bubble;
+    # the redundant "Evolution #N: <id>" enqueue bubble is gone.
+    assert not any("Evolution #" in m for m in sent)
+
+
+def test_marketplace_helper_resyncs_skill_schedules(tmp_path, monkeypatch):
+    from ouroboros.gateway import marketplace
+
+    calls = []
+    monkeypatch.setattr("supervisor.queue.resync_skill_schedules", lambda dr: calls.append(dr))
+
+    marketplace._resync_skill_schedules_quiet(tmp_path)
+
+    assert calls == [tmp_path]
+
+
+def test_skill_schedule_sync_removes_vanished_skill_schedule(tmp_path):
+    from ouroboros.contracts.skill_manifest import parse_skill_manifest_text
+    from supervisor import queue
+
+    queue.init(tmp_path, 600, 1800)
+    manifest = parse_skill_manifest_text("""---
+name: cron-demo
+description: Cron demo
+version: 0.1.0
+type: extension
+entry: plugin.py
+permissions: [supervised_task]
+scheduled_tasks:
+  - name: refresh
+    cron: "0 * * * *"
+---
+body
+""")
+    skill = SimpleNamespace(
+        name="cron-demo", manifest=manifest, enabled=True, load_error="",
+        content_hash="abc",
+        review=SimpleNamespace(status="pass", is_stale_for=lambda _h: False),
+    )
+
+    queue.sync_skill_schedules([skill])
+    assert any(t.get("source") == "skill_manifest" for t in queue.list_scheduled_tasks()["tasks"])
+
+    # Skill (or its scheduled_task) vanished → the record is removed entirely,
+    # not left as a disabled tombstone.
+    queue.sync_skill_schedules([])
+    assert queue.list_scheduled_tasks()["tasks"] == []
+
+
+def test_reflection_extract_trailing_json_parses_memory_and_backlog():
+    from ouroboros.reflection import _extract_trailing_json
+
+    text = (
+        "Reflection body here.\n"
+        'MEMORY_ACTIONS_JSON: [{"type": "scratchpad_append", "content": "note"}]\n'
+        'BACKLOG_CANDIDATES_JSON: [{"summary": "s", "evidence": "e"}]'
+    )
+    body_after_backlog, backlog = _extract_trailing_json(text, "BACKLOG_CANDIDATES_JSON:")
+    reflection_text, memory = _extract_trailing_json(body_after_backlog, "MEMORY_ACTIONS_JSON:")
+
+    assert backlog == [{"summary": "s", "evidence": "e"}]
+    assert memory == [{"type": "scratchpad_append", "content": "note"}]
+    assert reflection_text.strip() == "Reflection body here."
+
+
+def test_reflection_extract_trailing_json_is_order_independent():
+    from ouroboros.reflection import _extract_trailing_json
+
+    # Markers emitted in the reverse of the documented order must still both parse
+    # (no silent memory-action loss).
+    text = (
+        "Reflection body.\n"
+        'BACKLOG_CANDIDATES_JSON: [{"summary": "s", "evidence": "e"}]\n'
+        'MEMORY_ACTIONS_JSON: [{"type": "knowledge_write", "content": "c", "topic": "t"}]'
+    )
+    after_backlog, backlog = _extract_trailing_json(text, "BACKLOG_CANDIDATES_JSON:")
+    reflection_text, memory = _extract_trailing_json(after_backlog, "MEMORY_ACTIONS_JSON:")
+
+    assert backlog == [{"summary": "s", "evidence": "e"}]
+    assert memory == [{"type": "knowledge_write", "content": "c", "topic": "t"}]
+    assert reflection_text.strip() == "Reflection body."
+
+
+def test_reflection_validate_memory_actions_filters_types():
+    from ouroboros.reflection import _validate_memory_actions
+
+    raw = [
+        {"type": "scratchpad_append", "content": "note"},
+        {"type": "knowledge_write", "content": "fact", "topic": "facts"},
+        {"type": "knowledge_write", "content": "no topic"},
+        {"type": "identity_update_candidate", "content": "refine"},
+        {"type": "delete_everything", "content": "nope"},
+        {"type": "scratchpad_append", "content": "   "},
+    ]
+    actions = _validate_memory_actions(raw, "task1")
+
+    assert [a["type"] for a in actions] == [
+        "scratchpad_append", "knowledge_write", "identity_update_candidate",
+    ]
+    assert actions[1]["topic"] == "facts"
+    assert all(a["task_id"] == "task1" for a in actions)
+
+
+def test_apply_memory_actions_writes_to_parent_drive(tmp_path):
+    from ouroboros.reflection import apply_memory_actions
+
+    env = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path)
+    actions = [
+        {"type": "scratchpad_append", "content": "durable note", "task_id": "t1"},
+        {"type": "knowledge_write", "content": "reusable fact", "topic": "review_process", "task_id": "t1"},
+        {"type": "identity_update_candidate", "content": "I value rigor", "task_id": "t1"},
+    ]
+
+    assert apply_memory_actions(env, actions) == 3
+
+    knowledge = (tmp_path / "memory" / "knowledge" / "review_process.md").read_text(encoding="utf-8")
+    assert "reusable fact" in knowledge
+    assert (tmp_path / "memory" / "knowledge_history.jsonl").exists()
+
+    scratchpad = (tmp_path / "memory" / "scratchpad.md").read_text(encoding="utf-8")
+    assert "durable note" in scratchpad
+    assert "IDENTITY UPDATE CANDIDATE" in scratchpad
+    # Identity is never auto-written; the candidate stays in the scratchpad only.
+    identity_path = tmp_path / "memory" / "identity.md"
+    assert not identity_path.exists() or "I value rigor" not in identity_path.read_text(encoding="utf-8")
+
+
+def test_runtime_context_includes_schedule_digest(tmp_path):
+    from ouroboros.context import build_runtime_section
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(parents=True)
+    (state_dir / "scheduled_tasks.json").write_text(json.dumps({
+        "tasks": [{
+            "id": "hourly", "name": "Hourly", "enabled": True,
+            "trigger": {"type": "cron", "expr": "0 * * * *"},
+            "timezone": "Europe/Moscow", "next_run_at": "2030-01-01T00:00:00+00:00",
+        }]
+    }), encoding="utf-8")
+    env = SimpleNamespace(
+        repo_dir=tmp_path, drive_root=tmp_path,
+        drive_path=lambda rel: tmp_path / rel,
+    )
+
+    section = build_runtime_section(env, {"id": "t1", "type": "task"})
+
+    assert "scheduled_tasks" in section
+    assert "hourly" in section
+    assert "0 * * * *" in section
+
+
+def test_cli_evolve_start_refused_in_light_mode(monkeypatch):
+    from ouroboros import cli
+
+    class FakeClient:
+        def __init__(self):
+            self.posts = []
+
+        def request(self, method, path, body=None):
+            if method == "GET" and path == "/api/state":
+                return {"runtime_mode": "light"}
+            self.posts.append((method, path, body))
+            return {"status": "ok"}
+
+    fake = FakeClient()
+    monkeypatch.setattr(cli, "_client", lambda args: fake)
+    monkeypatch.setattr(cli, "_print_json", lambda *a, **k: None)
+
+    rc = cli._evolve_command(SimpleNamespace(evolve_command="start", objective=[]))
+
+    assert rc == 1
+    # Never POSTed the /evolve on command in light mode.
+    assert fake.posts == []
+
+
+def test_assign_tasks_cancels_pending_evolution_in_light_mode(tmp_path, monkeypatch):
+    import supervisor.workers as workers
+    import supervisor.queue as queue
+    from supervisor import state as supervisor_state
+    from ouroboros.task_results import load_task_result
+
+    supervisor_state.init(tmp_path)
+    monkeypatch.setattr(supervisor_state, "TOTAL_BUDGET_LIMIT", 100.0)
+    st = supervisor_state.load_state()
+    st["spent_usd"] = 0.0
+    supervisor_state.save_state(st)
+
+    orig_drive = workers.DRIVE_ROOT
+    orig_q_drive = queue.DRIVE_ROOT
+    workers.DRIVE_ROOT = tmp_path
+    queue.DRIVE_ROOT = tmp_path
+    workers.WORKERS.clear()
+    workers.RUNNING.clear()
+    workers.PENDING[:] = [{"id": "evo1", "type": "evolution", "text": "x"}]
+    queue.PENDING = workers.PENDING
+    monkeypatch.setattr(queue, "evolution_block_reason", lambda: "light blocked")
+    monkeypatch.setattr(workers, "send_with_budget", lambda *a, **k: None)
+    monkeypatch.setattr(queue, "persist_queue_snapshot", lambda reason="": None)
+
+    try:
+        workers.assign_tasks()
+    finally:
+        workers.DRIVE_ROOT = orig_drive
+        queue.DRIVE_ROOT = orig_q_drive
+        workers.PENDING[:] = []
+
+    assert all(t.get("type") != "evolution" for t in workers.PENDING)
+    assert load_task_result(tmp_path, "evo1")["status"] == "cancelled"
+
+
+def test_toggle_evolution_tool_blocked_in_light_mode(monkeypatch):
+    from supervisor import events
+
+    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "light")
+    state = {"owner_chat_id": 7}
+    sent = []
+    ctx = SimpleNamespace(
+        load_state=lambda: state,
+        save_state=lambda s: state.update(s),
+        send_with_budget=lambda chat_id, text, *a, **k: sent.append((chat_id, text)),
+        PENDING=[],
+        sort_pending=lambda: None,
+        persist_queue_snapshot=lambda **k: None,
+    )
+
+    events._handle_toggle_evolution({"enabled": True, "objective": "x"}, ctx)
+
+    assert state.get("evolution_mode_enabled") is not True
+    assert sent and "light" in sent[0][1].lower()

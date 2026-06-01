@@ -1,6 +1,23 @@
 from types import SimpleNamespace
 
 
+def test_shutdown_task_cleanup_args_never_reports_crash_storm():
+    """Graceful shutdown (requested restart or external signal) must finalize a
+    running task as cancelled/interrupted, never as a worker crash storm."""
+    import server
+
+    status_restart, reason_restart = server._shutdown_task_cleanup_args(restart_requested=True)
+    status_signal, reason_signal = server._shutdown_task_cleanup_args(restart_requested=False)
+
+    assert status_restart == "cancelled"
+    assert status_signal == "cancelled"
+    # The misleading crash-storm label must never be used for a graceful shutdown.
+    assert "crash storm" not in reason_restart.lower()
+    assert "crash storm" not in reason_signal.lower()
+    assert "restart" in reason_restart.lower()
+    assert "interrupted" in reason_signal.lower()
+
+
 def test_main_normal_exit_does_not_run_emergency_cleanup(monkeypatch):
     import server
 
@@ -80,11 +97,41 @@ def test_emergency_cleanup_kills_services_without_log_finalization(monkeypatch):
     monkeypatch.setattr("ouroboros.platform_layer.kill_process_on_port", lambda _port: None)
     monkeypatch.setattr("ouroboros.extension_companion.panic_kill_all", lambda: None)
     monkeypatch.setattr("ouroboros.gateway.host_service.host_service_port", lambda: 8767)
+    server._restart_requested.clear()
 
     server._emergency_process_cleanup(port_sweep=False)
 
     assert service_calls == [((), {"wait": False})]
     assert worker_calls == [{"force": True, "archive_service_logs": False}]
+
+
+def test_emergency_cleanup_during_restart_marks_tasks_cancelled(monkeypatch):
+    """A hung restart that reaches emergency cleanup must finalize running tasks
+    as interrupted-by-restart, never as a worker crash storm."""
+    import server
+
+    worker_calls = []
+
+    monkeypatch.setattr("ouroboros.tools.shell.kill_all_tracked_subprocesses", lambda: None)
+    monkeypatch.setattr("ouroboros.tools.services.kill_all_services", lambda *a, **k: None)
+    monkeypatch.setattr("supervisor.workers.kill_workers", lambda **kw: worker_calls.append(kw))
+    monkeypatch.setattr("multiprocessing.active_children", lambda: [])
+    monkeypatch.setattr("ouroboros.platform_layer.kill_process_on_port", lambda _port: None)
+    monkeypatch.setattr("ouroboros.extension_companion.panic_kill_all", lambda: None)
+    monkeypatch.setattr("ouroboros.gateway.host_service.host_service_port", lambda: 8767)
+    server._restart_requested.set()
+
+    try:
+        server._emergency_process_cleanup(port_sweep=False)
+    finally:
+        server._restart_requested.clear()
+
+    assert len(worker_calls) == 1
+    call = worker_calls[0]
+    assert call["force"] is True
+    assert call["archive_service_logs"] is False
+    assert call["result_status"] == "cancelled"
+    assert "crash storm" not in call["result_reason"].lower()
 
 
 def test_panic_stop_kills_services_without_log_finalization(monkeypatch, tmp_path):

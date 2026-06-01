@@ -40,7 +40,7 @@ for _profile_defaults in _MODEL_DEFAULTS.values():
 
 _STEPS = _rows(("id", "title", "railCopy", "copy", "footer"), (
     ("providers", "Add your access", "Keys + local", "Fill at least one remote key or a local model source. The next step adapts to what you configured here.", "Paste only what you already have. OpenRouter, direct provider keys, and an optional local model can coexist."),
-    ("models", "Choose models", "4 model slots", "Review the visible model defaults derived from your current setup, then edit anything you want before launch.", "Plain openai/... or anthropic/... remains router-style. Direct values use openai::... and anthropic::...."),
+    ("models", "Choose models", "5 model slots", "Review the visible model defaults derived from your current setup, then edit anything you want before launch.", "Plain openai/... or anthropic/... remains router-style. Direct values use openai::... and anthropic::...."),
     ("review_mode", "Choose review mode", "Advisory vs blocking", "Decide how strict pre-commit review should be before Ouroboros starts modifying itself.", "Pick both review enforcement and the initial runtime mode before Ouroboros starts."),
     ("budget", "Set your budget", "Session limits", "Budget is its own step because it directly shapes how far Ouroboros can go in one session and in a single task.", "Total budget is global. Per-task cost cap is a soft reminder, not a hard kill switch."),
     ("summary", "Review before launch", "Final check", "Check the final provider, model, review, and budget picture. Ouroboros will save these onboarding values before starting.", "The same onboarding values remain editable later in Settings."),

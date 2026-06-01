@@ -285,6 +285,13 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
             objective = ""
             if turn_on and len(parts) > 2:
                 objective = text.split(None, 2)[2].strip()
+            if turn_on:
+                from supervisor.queue import evolution_block_reason
+
+                block = evolution_block_reason()
+                if block:
+                    ctx.send_with_budget(chat_id, block)
+                    continue
             st2 = ctx.load_state()
             st2["evolution_mode_enabled"] = bool(turn_on)
             if turn_on:
@@ -626,7 +633,8 @@ def _handle_restart_in_supervisor(evt: Dict[str, Any], ctx: Any) -> None:
         if st.get("owner_chat_id"):
             ctx.send_with_budget(int(st["owner_chat_id"]), f"⚠️ Restart skipped: {msg}")
         return
-    ctx.kill_workers(force=True)
+    cleanup_status, cleanup_reason = _shutdown_task_cleanup_args(restart_requested=True)
+    ctx.kill_workers(force=True, result_status=cleanup_status, result_reason=cleanup_reason)
     st2 = ctx.load_state()
     st2["session_id"] = uuid.uuid4().hex
     ctx.save_state(st2)
@@ -637,6 +645,29 @@ def _handle_restart_in_supervisor(evt: Dict[str, Any], ctx: Any) -> None:
 def _request_restart_exit() -> None:
     """Signal server shutdown with restart exit code."""
     _restart_requested.set()
+
+
+def _shutdown_task_cleanup_args(restart_requested: bool) -> tuple[str, str]:
+    """Return ``(result_status, result_reason)`` for tasks torn down by a
+    graceful server shutdown.
+
+    A graceful shutdown — a requested restart (exit 42) or an external
+    stop/restart signal (SIGTERM/SIGINT) — is not a worker crash storm, so a
+    still-running task is finalized as ``cancelled`` with an honest reason
+    instead of the default crash-storm text the supervisor uses for real
+    worker deaths.
+    """
+    if restart_requested:
+        reason = (
+            "Server restarted before this task finished; the task was "
+            "interrupted by the restart, not a worker crash."
+        )
+    else:
+        reason = (
+            "Server shut down (external stop/restart signal) before this task "
+            "finished; the task was interrupted, not a worker crash."
+        )
+    return "cancelled", reason
 
 
 def _execute_panic_stop(consciousness, kill_workers_fn) -> None:
@@ -853,8 +884,25 @@ async def lifespan(app):
         except Exception:
             pass
         try:
+            restart_requested = _restart_requested.is_set()
+            # Record an explicit shutdown cause so a task interrupted by the
+            # shutdown is never later read as a worker crash storm.
+            try:
+                from ouroboros.utils import append_jsonl, utc_now_iso
+                append_jsonl(
+                    lifespan_drive_root / "logs" / "supervisor.jsonl",
+                    {
+                        "ts": utc_now_iso(),
+                        "type": "server_shutdown",
+                        "cause": "restart_requested" if restart_requested else "external_signal",
+                        "restart_exit": restart_requested,
+                    },
+                )
+            except Exception:
+                log.debug("Failed to record server_shutdown event", exc_info=True)
             from supervisor.workers import kill_workers
-            kill_workers(force=True)
+            cleanup_status, cleanup_reason = _shutdown_task_cleanup_args(restart_requested)
+            kill_workers(force=True, result_status=cleanup_status, result_reason=cleanup_reason)
         except Exception:
             pass
         try:
@@ -894,7 +942,19 @@ def _emergency_process_cleanup(*, port_sweep: bool = True) -> None:
         pass
     try:
         from supervisor.workers import kill_workers
-        kill_workers(force=True, archive_service_logs=False)
+        if _restart_requested.is_set():
+            # A restart that hung past the uvicorn shutdown timeout still reaches
+            # here; finalize running tasks as an honest interrupted-by-restart,
+            # not a worker crash storm.
+            cleanup_status, cleanup_reason = _shutdown_task_cleanup_args(True)
+            kill_workers(
+                force=True,
+                archive_service_logs=False,
+                result_status=cleanup_status,
+                result_reason=cleanup_reason,
+            )
+        else:
+            kill_workers(force=True, archive_service_logs=False)
     except Exception:
         pass
     import multiprocessing

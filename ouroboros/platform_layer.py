@@ -26,6 +26,32 @@ _SUBPROCESS_NO_WINDOW = (
 _PATH_BOOTSTRAPPED = False
 
 
+def local_zoneinfo():
+    """Best-effort DST-aware local timezone.
+
+    ``datetime.now().astimezone().tzinfo`` only yields a *fixed* current-offset
+    zone, which drifts by an hour across a DST boundary. Resolve the IANA local
+    zone (via ``TZ`` or ``/etc/localtime``) so callers stay DST-correct; fall
+    back to the fixed offset only when no IANA name can be found.
+    """
+    import datetime
+    from zoneinfo import ZoneInfo
+
+    tz_env = os.environ.get("TZ", "").strip()
+    if tz_env:
+        try:
+            return ZoneInfo(tz_env)
+        except Exception:
+            log.debug("Invalid TZ env %r for local timezone", tz_env)
+    try:
+        link = os.readlink("/etc/localtime")
+        if "zoneinfo/" in link:
+            return ZoneInfo(link.split("zoneinfo/", 1)[1])
+    except (OSError, ValueError):
+        pass
+    return datetime.datetime.now().astimezone().tzinfo or datetime.timezone.utc
+
+
 def is_container_env() -> bool:
     """Return whether explicit env or Docker sentinel indicates a container."""
     if os.environ.get("OUROBOROS_CONTAINER") == "1":

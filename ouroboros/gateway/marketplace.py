@@ -246,6 +246,18 @@ async def _apply_hub_review_and_deps(
     return status, error, deps_status
 
 
+def _resync_skill_schedules_quiet(drive_root: pathlib.Path) -> None:
+    """Mirror skill manifest schedules after a marketplace lifecycle change so a
+    removed/renamed/updated scheduled skill does not fire stale before the
+    periodic scheduler tick."""
+    try:
+        from supervisor.queue import resync_skill_schedules
+
+        resync_skill_schedules(drive_root)
+    except Exception:
+        log.debug("marketplace schedule resync failed", exc_info=True)
+
+
 def _lifecycle_options(
     success_prefix: str,
     failure_fallback: str,
@@ -319,6 +331,9 @@ async def api_marketplace_install(request: Request) -> JSONResponse:
     except Exception as exc:
         log.exception("marketplace install failed")
         return json_exception(exc)
+    # Resync regardless of ok: a deps-failure can set ok=false after the payload
+    # was already installed on disk, changing scheduled-task readiness.
+    _resync_skill_schedules_quiet(drive_root)
     payload = _serialize_install_result(result)
     return JSONResponse(payload, status_code=200 if result.ok else 400)
 
@@ -363,6 +378,9 @@ async def api_marketplace_update(request: Request) -> JSONResponse:
     except Exception as exc:
         log.exception("marketplace update failed")
         return json_exception(exc)
+    # Resync regardless of ok: an update can mutate the payload on disk even when
+    # a follow-up deps step reports ok=false, changing scheduled-task readiness.
+    _resync_skill_schedules_quiet(drive_root)
     return JSONResponse(_serialize_install_result(result), status_code=200 if result.ok else 400)
 
 
@@ -446,6 +464,10 @@ async def api_marketplace_uninstall(request: Request) -> JSONResponse:
     except Exception as exc:
         log.exception("marketplace uninstall failed")
         return json_exception(exc)
+    if result.ok:
+        # The skill is gone; drop its scheduled tasks now so the scheduler does
+        # not fire a deleted skill before the next periodic resync.
+        _resync_skill_schedules_quiet(drive_root)
     return JSONResponse(
         {
             "ok": result.ok,
@@ -528,6 +550,9 @@ async def api_ouroboroshub_install(request: Request) -> JSONResponse:
             progress_target=install_progress,
         ),
     )
+    # Resync regardless of ok: install + deps can leave the payload on disk with
+    # ok=false, changing scheduled-task readiness.
+    _resync_skill_schedules_quiet(drive_root)
     return JSONResponse(payload, status_code=200 if payload.get("ok") else 400)
 
 
@@ -657,6 +682,9 @@ async def api_ouroboroshub_update(request: Request) -> JSONResponse:
             progress_target=update_progress,
         ),
     )
+    # Resync regardless of ok: an update can mutate the payload on disk even when
+    # a follow-up deps step reports ok=false, changing scheduled-task readiness.
+    _resync_skill_schedules_quiet(drive_root)
     return JSONResponse(payload, status_code=200 if payload.get("ok") else 400)
 
 async def api_ouroboroshub_installed(request: Request) -> JSONResponse:
@@ -670,6 +698,7 @@ async def api_ouroboroshub_uninstall(request: Request) -> JSONResponse:
     err = _validate_path_param_name(sanitized)
     if err:
         return json_error(err, 400)
+    drive_root = _request_drive_root(request)
 
     async def _run_uninstall() -> Dict[str, Any]:
         result = await run_blocking_preserving_cancellation(
@@ -687,6 +716,8 @@ async def api_ouroboroshub_uninstall(request: Request) -> JSONResponse:
         runner=_run_uninstall,
         options=_lifecycle_options("Uninstalled", "uninstall failed"),
     )
+    if payload.get("ok"):
+        _resync_skill_schedules_quiet(drive_root)
     return JSONResponse(payload, status_code=200 if payload.get("ok") else 400)
 
 

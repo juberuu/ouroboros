@@ -111,6 +111,12 @@ async def api_tasks_create(request: Request) -> JSONResponse:
     if workspace_root and memory_mode == "shared":
         return json_error("memory_mode=shared is not allowed for external workspaces; use forked or empty", 400)
     task_type = str(body.get("type") or "task")
+    if task_type in {"evolution", "review", "deep_self_review"}:
+        return json_error(
+            f"task type {task_type!r} is internal-only and cannot be created via the task API "
+            "(use /evolve or /review); evolution additionally requires advanced/pro runtime mode",
+            400,
+        )
     if workspace_root and task_type != "task":
         return json_error("external workspace tasks must use type='task'", 400)
     try:

@@ -429,6 +429,62 @@ def test_ui_smoke_direct_mode_chat_scrolls_on_desktop(direct_server):
         raise
 
 
+@pytest.mark.ui_browser
+def test_ui_smoke_finished_cards_keep_height_when_transcript_overflows(direct_server):
+    """Regression: live cards / skill_review bubbles use overflow:hidden, which
+    gives them an automatic flex min-height of 0. When the transcript column
+    overflows they must NOT be shrunk to a 1px strip — the list scrolls instead.
+    (rc.1 removed the inline min-height that previously masked this collapse.)"""
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    from playwright.sync_api import Error as PlaywrightError
+    from playwright.sync_api import sync_playwright
+
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page(viewport={"width": 1280, "height": 600})
+            try:
+                page.goto(direct_server, wait_until="domcontentloaded", timeout=30_000)
+                page.wait_for_selector("#chat-messages", timeout=30_000)
+                result = page.evaluate(
+                    """() => {
+                        const messages = document.querySelector('#chat-messages');
+                        messages.replaceChildren();
+                        // Overflow the column with collapsed, overflow:hidden cards.
+                        for (let i = 0; i < 24; i += 1) {
+                            const card = document.createElement('div');
+                            card.className = 'chat-live-card';
+                            card.dataset.finished = '1';
+                            card.dataset.expanded = '0';
+                            const btn = document.createElement('div');
+                            btn.className = 'chat-live-summary-button';
+                            btn.style.minHeight = '48px';
+                            btn.textContent = `Finished card ${i}`;
+                            card.appendChild(btn);
+                            messages.appendChild(card);
+                        }
+                        const heights = [...messages.querySelectorAll('.chat-live-card')]
+                            .map((el) => Math.round(el.getBoundingClientRect().height));
+                        return {
+                            heights,
+                            scrollHeight: messages.scrollHeight,
+                            clientHeight: messages.clientHeight,
+                        };
+                    }"""
+                )
+                assert result["heights"], "no cards rendered"
+                # Without flex-shrink:0 the overflow:hidden cards collapse to ~1px.
+                assert min(result["heights"]) >= 40, result
+                # The column should scroll rather than absorb the overflow.
+                assert result["scrollHeight"] > result["clientHeight"] + 100, result
+            finally:
+                browser.close()
+    except PlaywrightError as exc:
+        if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc).lower():
+            pytest.skip(str(exc))
+        raise
+
+
 @pytest.mark.ui_browser_docker
 def test_ui_smoke_docker_mode_loads_health():
     if os.environ.get("OUROBOROS_RUN_DOCKER_UI_SMOKE") != "1":

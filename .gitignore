@@ -65,3 +65,6 @@ repo_bundle_manifest.json
 /jsonschema/
 /jsonschema_specifications/
 /certifi/
+
+# Local adversarial review evidence packets (not shipped)
+.adversarial-review/

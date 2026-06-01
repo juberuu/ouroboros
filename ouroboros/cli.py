@@ -261,6 +261,15 @@ def _evolve_command(args: argparse.Namespace) -> int:
     if args.evolve_command == "status":
         _print_json(client.request("GET", "/api/state").get("evolution_state", {}))
     elif args.evolve_command == "start":
+        # Evolution is hard-blocked in light mode; refuse synchronously here so the
+        # CLI does not report success while the server silently rejects the start.
+        runtime_mode = str(client.request("GET", "/api/state").get("runtime_mode", "") or "")
+        if runtime_mode == "light":
+            _print_json({
+                "error": "evolution requires runtime_mode 'advanced' or 'pro'; refused in 'light' mode",
+                "runtime_mode": runtime_mode,
+            })
+            return 1
         objective = " ".join(getattr(args, "objective", []) or []).strip()
         cmd = "/evolve on" + (f" {objective}" if objective else "")
         _print_json(client.request("POST", "/api/command", {"cmd": cmd}))

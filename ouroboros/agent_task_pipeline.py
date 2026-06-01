@@ -156,6 +156,28 @@ def _update_improvement_backlog(
         return 0
 
 
+def _apply_reflection_memory_actions(
+    env: Any,
+    reflection_entry: Dict[str, Any] | None,
+) -> int:
+    """Auto-apply LLM-nominated durable memory actions from the experience review.
+
+    Runs against ``env.drive_root``; for forked/workspace tasks the finalizer
+    also invokes post-task processing with the parent drive, so learnings land
+    on the canonical drive rather than a discarded child drive.
+    """
+    try:
+        actions = list((reflection_entry or {}).get("memory_actions") or [])
+        if not actions:
+            return 0
+        from ouroboros.reflection import apply_memory_actions
+
+        return apply_memory_actions(env, actions)
+    except Exception:
+        log.debug("Reflection memory action application failed", exc_info=True)
+        return 0
+
+
 def _child_task_evidence(env: Any, task: Dict[str, Any], limit: int = 6000) -> str:
     """Return compact evidence from child/subagent results for parent experience review."""
     task_id = str(task.get("id") or "")
@@ -223,6 +245,7 @@ def _run_post_task_processing_async(
                 trace_snapshot, review_evidence_snapshot,
             )
             _update_improvement_backlog(env, reflection_entry)
+            _apply_reflection_memory_actions(env, reflection_entry)
         except Exception:
             log.warning("Async post-task processing failed", exc_info=True)
 
@@ -609,13 +632,9 @@ def _run_reflection(env: Any, llm: Any, task: Dict[str, Any],
         from ouroboros.reflection import (
             should_generate_reflection, generate_reflection, append_reflection,
         )
-        task_forces_reflection = (
-            str(task.get("type") or "") in {"evolution", "deep_self_review"}
-            or bool(str(task.get("workspace_root") or "").strip())
-            or bool(str(task.get("workspace_mode") or "").strip())
-        )
-        if task_forces_reflection or should_generate_reflection(
+        if should_generate_reflection(
             llm_trace,
+            task=task,
             rounds=int(usage.get("rounds", 0)),
             cost_usd=float(usage.get("cost", 0.0)),
         ):

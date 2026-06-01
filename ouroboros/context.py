@@ -46,6 +46,39 @@ def build_user_content(task: Dict[str, Any]) -> Any:
     ]
 
 
+def _scheduled_tasks_digest(env: Any, *, limit: int = 8) -> Optional[Dict[str, Any]]:
+    """Compact digest of active cron schedules for task/consciousness context.
+
+    Keeps the agent aware of standing cron schedules without inlining the full
+    schedule table; notes how many active schedules were omitted past ``limit``.
+    """
+    try:
+        data = read_json_dict(env.drive_path("state/scheduled_tasks.json")) or {}
+    except Exception:
+        log.debug("Failed to read scheduled tasks for context digest", exc_info=True)
+        return None
+    tasks = [
+        t for t in (data.get("tasks") or [])
+        if isinstance(t, dict) and t.get("enabled", True)
+    ]
+    if not tasks:
+        return None
+    digest: List[Dict[str, Any]] = []
+    for record in tasks[:limit]:
+        trigger = record.get("trigger") if isinstance(record.get("trigger"), dict) else {}
+        digest.append({
+            "id": str(record.get("id") or ""),
+            "name": str(record.get("name") or ""),
+            "cron": str(trigger.get("expr") or record.get("cron") or ""),
+            "timezone": str(record.get("timezone") or "") or "local",
+            "next_run_at": str(record.get("next_run_at") or ""),
+        })
+    out: Dict[str, Any] = {"active": digest}
+    if len(tasks) > limit:
+        out["omitted_count"] = len(tasks) - limit
+    return out
+
+
 def build_runtime_section(env: Any, task: Dict[str, Any]) -> str:
     try:
         git_branch, git_sha = get_git_info(env.repo_dir)
@@ -111,6 +144,9 @@ def build_runtime_section(env: Any, task: Dict[str, Any]) -> str:
         )
     if budget_info:
         runtime_data["budget"] = budget_info
+    schedule_digest = _scheduled_tasks_digest(env)
+    if schedule_digest:
+        runtime_data["scheduled_tasks"] = schedule_digest
     runtime_ctx = json.dumps(runtime_data, ensure_ascii=False, indent=2)
     return "## Runtime context\n\n" + runtime_ctx
 

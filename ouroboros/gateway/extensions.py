@@ -908,6 +908,13 @@ async def api_skill_reconcile(request: Request) -> JSONResponse:
         state.get("action"),
         state.get("reason"),
     )
+    # Reconcile can flip grants/load state, so refresh schedule readiness now.
+    try:
+        from supervisor.queue import resync_skill_schedules
+
+        resync_skill_schedules(drive_root)
+    except Exception:
+        log.debug("api_skill_reconcile schedule sync failed", exc_info=True)
     return JSONResponse(
         {
             "skill": skill_name,

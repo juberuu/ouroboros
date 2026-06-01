@@ -192,7 +192,7 @@ class TestHelperFunctions:
         high_cost_usage = {"rounds": 20, "cost": 6.0}
 
         with mock.patch("ouroboros.reflection.should_generate_reflection",
-                        wraps=lambda trace, *, rounds=0, cost_usd=0.0: True) as mock_sgr, \
+                        wraps=lambda trace, *, task=None, rounds=0, cost_usd=0.0: True) as mock_sgr, \
              mock.patch("ouroboros.reflection.generate_reflection",
                         return_value={"reflection": "ok", "backlog_candidates": []}) as mock_gen, \
              mock.patch("ouroboros.reflection.append_reflection") as mock_append:

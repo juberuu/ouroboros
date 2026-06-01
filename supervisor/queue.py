@@ -219,10 +219,6 @@ def sync_skill_schedules(skills: List[Any], *, drive_root: pathlib.Path | None =
         by_id = {str(item.get("id") or ""): dict(item) for item in tasks}
         touched: list[str] = []
         changed = False
-        try:
-            from ouroboros.skill_loader import review_status_allows_execution
-        except Exception:
-            review_status_allows_execution = lambda status: False  # type: ignore[assignment]
         for skill in skills:
             manifest = getattr(skill, "manifest", None)
             for spec in list(getattr(manifest, "scheduled_tasks", []) or []):
@@ -234,19 +230,25 @@ def sync_skill_schedules(skills: List[Any], *, drive_root: pathlib.Path | None =
                     continue
                 schedule_id = schedule_slug("skill", str(getattr(skill, "name", "")), name)
                 touched.append(schedule_id)
+                # SSOT: a skill schedule is enabled only when the skill is fully
+                # ready to execute (review/grants/deps/enablement), then layered
+                # with the schedule-specific supervised_task requirement. This
+                # keeps schedule readiness identical to execution readiness.
                 try:
-                    from ouroboros.skill_loader import grant_status_for_skill
+                    from ouroboros.skill_readiness import skill_readiness_for_execution
 
-                    grants_ready = bool(grant_status_for_skill(pathlib.Path(drive_root or DRIVE_ROOT), skill).get("all_granted", True))
+                    schedule_ready = skill_readiness_for_execution(
+                        pathlib.Path(drive_root or DRIVE_ROOT), skill
+                    ).ready
                 except Exception:
-                    grants_ready = False
-                review_ready = (
-                    bool(getattr(skill, "enabled", False))
-                    and not bool(getattr(skill, "load_error", ""))
-                    and review_status_allows_execution(getattr(getattr(skill, "review", None), "status", ""))
-                    and not getattr(getattr(skill, "review", None), "is_stale_for", lambda _hash: True)(getattr(skill, "content_hash", ""))
-                    and "supervised_task" in set(getattr(manifest, "permissions", []) or [])
-                    and grants_ready
+                    log.debug(
+                        "skill schedule readiness probe failed for %s",
+                        getattr(skill, "name", ""),
+                        exc_info=True,
+                    )
+                    schedule_ready = False
+                schedule_ready = schedule_ready and (
+                    "supervised_task" in set(getattr(manifest, "permissions", []) or [])
                 )
                 record = by_id.get(schedule_id, {})
                 trigger = {"type": "cron", "expr": cron}
@@ -260,7 +262,7 @@ def sync_skill_schedules(skills: List[Any], *, drive_root: pathlib.Path | None =
                     "id": schedule_id,
                     "name": f"{getattr(skill, 'name', '')}/{name}",
                     "description": str(spec.get("description") or f"Scheduled skill task {getattr(skill, 'name', '')}/{name}"),
-                    "enabled": bool(review_ready),
+                    "enabled": bool(schedule_ready),
                     "timezone": str(spec.get("timezone") or ""),
                     "trigger": trigger,
                     "task": {
@@ -285,16 +287,35 @@ def sync_skill_schedules(skills: List[Any], *, drive_root: pathlib.Path | None =
                 if next_record != record:
                     by_id[schedule_id] = next_record
                     changed = True
+        # Drop schedules whose source skill/scheduled_task no longer exists
+        # (skill deleted, renamed, or scheduled_task removed). Leaving disabled
+        # tombstones around would accumulate stale rows in the active table.
         for schedule_id, record in list(by_id.items()):
             if str(record.get("source") or "") == "skill_manifest" and schedule_id not in touched:
-                record["enabled"] = False
-                record["updated_at"] = utc_now_iso()
-                by_id[schedule_id] = record
+                by_id.pop(schedule_id, None)
                 changed = True
         if changed:
             data["tasks"] = list(by_id.values())
             _write_scheduled_tasks(data, drive_root)
         return {"changed": changed, "skill_schedule_ids": touched}
+
+
+def resync_skill_schedules(drive_root: pathlib.Path | None = None) -> Dict[str, Any]:
+    """Discover skills and mirror their manifest schedules into the core table.
+
+    Convenience wrapper over ``sync_skill_schedules`` so skill lifecycle paths
+    (toggle/grants/reconcile/delete/review/marketplace) reflect payload, grant,
+    and enablement changes promptly instead of waiting for the periodic tick.
+    """
+    from ouroboros.config import get_skills_repo_path
+    from ouroboros.skill_loader import discover_skills
+
+    root = pathlib.Path(drive_root or DRIVE_ROOT)
+    return sync_skill_schedules(
+        discover_skills(root, repo_path=get_skills_repo_path()),
+        drive_root=root,
+    )
+
 
 def _timezone_for_schedule(record: Dict[str, Any]) -> datetime.tzinfo:
     raw = str(record.get("timezone") or "").strip()
@@ -303,7 +324,10 @@ def _timezone_for_schedule(record: Dict[str, Any]) -> datetime.tzinfo:
             return ZoneInfo(raw)
         except Exception:
             log.warning("Invalid schedule timezone %r; falling back to local time", raw)
-    return datetime.datetime.now().astimezone().tzinfo or datetime.timezone.utc
+    # Blank timezone -> DST-aware system local zone (platform-layer SSOT).
+    from ouroboros.platform_layer import local_zoneinfo
+
+    return local_zoneinfo()
 
 
 def _parse_schedule_time(value: Any, tz: datetime.tzinfo) -> Optional[datetime.datetime]:
@@ -392,13 +416,7 @@ def check_scheduled_tasks() -> None:
         if now_monotonic - _last_skill_schedule_sync >= _SKILL_SCHEDULE_SYNC_INTERVAL_SEC:
             _last_skill_schedule_sync = now_monotonic
             try:
-                from ouroboros.config import get_skills_repo_path
-                from ouroboros.skill_loader import discover_skills
-
-                sync_skill_schedules(
-                    discover_skills(DRIVE_ROOT, repo_path=get_skills_repo_path()),
-                    drive_root=DRIVE_ROOT,
-                )
+                resync_skill_schedules(DRIVE_ROOT)
             except Exception:
                 log.debug("Failed to sync skill schedules during scheduler tick", exc_info=True)
         data = _read_scheduled_tasks()
@@ -472,6 +490,26 @@ def check_scheduled_tasks() -> None:
         if changed:
             _write_scheduled_tasks(data)
             persist_queue_snapshot(reason="scheduled_tasks")
+
+def evolution_block_reason() -> str:
+    """Refusal message when evolution may not run in the current runtime mode.
+
+    Evolution campaigns are self-modification work, so they require runtime
+    mode ``advanced`` or ``pro``. In ``light`` (conversation-only) mode they are
+    hard-blocked before any campaign state, queue entry, or expensive round.
+    Returns ``""`` when evolution is allowed.
+    """
+    from ouroboros.config import get_runtime_mode
+
+    if get_runtime_mode() == "light":
+        return (
+            "🧬 Evolution campaigns are self-modification work and require runtime "
+            "mode 'advanced' or 'pro'. The runtime is in 'light' mode "
+            "(self-modification is disabled), so no campaign was started. Switch "
+            "the runtime mode in Settings to evolve."
+        )
+    return ""
+
 
 def start_evolution_campaign(objective: str = "", *, source: str = "owner") -> Dict[str, Any]:
     """Start or resume the active evolution campaign."""
@@ -1063,6 +1101,17 @@ def enqueue_evolution_task_if_needed() -> None:
     if not owner_chat_id:
         return
 
+    # Defensive net: light mode must never run evolution even if the flag was
+    # left enabled (e.g. carried across a restart into light mode). Disable and
+    # pause once; entry points already refuse new starts up front.
+    block = evolution_block_reason()
+    if block:
+        pause_evolution_campaign("blocked in light runtime mode")
+        st["evolution_mode_enabled"] = False
+        save_state(st)
+        send_with_budget(int(owner_chat_id), block)
+        return
+
     consecutive_failures = int(st.get("evolution_consecutive_failures") or 0)
     if consecutive_failures >= 3:
         pause_evolution_campaign("paused after consecutive failures")
@@ -1093,4 +1142,5 @@ def enqueue_evolution_task_if_needed() -> None:
     st["evolution_cycle"] = cycle
     st["last_evolution_task_at"] = utc_now_iso()
     save_state(st)
-    send_with_budget(int(owner_chat_id), f"🧬 Evolution #{cycle}: {tid}")
+    # The generic "Evolution task <id> started." lifecycle message (workers.py)
+    # already announces the cycle start, so no extra enqueue bubble here.

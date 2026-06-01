@@ -75,6 +75,22 @@ Be concrete — cite specific file names, tool names, decision points. No platit
 # Shared tail with {format} fields.
 _REFLECTION_PROMPT_TAIL = """
 
+Then, if this task produced durable, reusable self-knowledge worth persisting now,
+append a line:
+MEMORY_ACTIONS_JSON: [...]
+A JSON array of 0-3 objects. Each object must have:
+- type: one of "scratchpad_append", "knowledge_write", "identity_update_candidate"
+- content: concise, concrete text to persist
+Optional field:
+- topic: REQUIRED only for knowledge_write (short slug, e.g. "review_process")
+Rules for memory actions:
+- scratchpad_append: a durable working-memory note useful for near-future tasks.
+- knowledge_write: a reusable fact/procedure stored in the knowledge base under `topic`.
+- identity_update_candidate: a PROPOSED identity refinement; it is only recorded as a
+  review candidate in the scratchpad, never auto-applied to identity.md (avoid drift).
+- Persist only genuinely durable, reusable learning, not task-specific trivia.
+- If nothing deserves persisting, output MEMORY_ACTIONS_JSON: []
+
 Then, if there is at least one concrete deferred improvement worth tracking, append a final line:
 BACKLOG_CANDIDATES_JSON: [...]
 Use a JSON array of 0-3 objects. Each object must have:
@@ -116,7 +132,8 @@ Rules for candidates:
 
 {child_evidence}
 
-Write the reflection now. Plain text, no markdown headers except the exact final BACKLOG_CANDIDATES_JSON line.
+Write the reflection now. Plain text, no markdown headers except the exact final
+MEMORY_ACTIONS_JSON and BACKLOG_CANDIDATES_JSON lines.
 """
 
 _REFLECTION_PROMPT_ERROR_FULL = _REFLECTION_PROMPT_ERROR + _REFLECTION_PROMPT_TAIL
@@ -215,6 +232,66 @@ def _detect_markers(llm_trace: Dict[str, Any]) -> List[str]:
                 found.add(marker)
     return sorted(found)
 
+
+_ALLOWED_MEMORY_ACTION_TYPES = frozenset({
+    "scratchpad_append",
+    "knowledge_write",
+    "identity_update_candidate",
+})
+
+
+def _extract_trailing_json(text: str, marker: str) -> tuple[str, Optional[list]]:
+    """Peel a ``MARKER: [...]`` block out of *text* regardless of its position.
+
+    Removes only the marker and its JSON array (located via a tolerant
+    ``raw_decode``), preserving any other marker line so callers can extract
+    multiple markers in any order without silently dropping one. Returns
+    ``(remaining_text, parsed_list_or_None)``: a present-but-empty payload is
+    ``[]``; a malformed payload is ``None`` so the caller can distinguish
+    "no items" from "parse failure".
+    """
+    idx = text.rfind(marker)
+    if idx == -1:
+        return text, None
+    after = text[idx + len(marker):]
+    stripped = after.lstrip()
+    lead = len(after) - len(stripped)
+    if not stripped:
+        return text[:idx].rstrip(), []
+    try:
+        value, end = json.JSONDecoder().raw_decode(stripped)
+    except Exception:
+        log.warning("Reflection %s JSON parse failed", marker, exc_info=True)
+        return text[:idx].rstrip(), None
+    remainder = (text[:idx] + after[lead + end:]).rstrip()
+    return remainder, value if isinstance(value, list) else None
+
+
+def _validate_memory_actions(raw: Any, task_id: str) -> List[Dict[str, Any]]:
+    """Keep only well-formed, allowed-type memory actions (max 3)."""
+    out: List[Dict[str, Any]] = []
+    if not isinstance(raw, list):
+        return out
+    for item in raw[:10]:
+        if len(out) >= 3:
+            break
+        if not isinstance(item, dict):
+            continue
+        action_type = str(item.get("type") or "").strip()
+        if action_type not in _ALLOWED_MEMORY_ACTION_TYPES:
+            continue
+        content = _truncate_with_notice(item.get("content", ""), 1200).strip()
+        if not content:
+            continue
+        action: Dict[str, Any] = {"type": action_type, "content": content, "task_id": task_id}
+        if action_type == "knowledge_write":
+            topic = _truncate_with_notice(item.get("topic", ""), 80).strip()
+            if not topic:
+                continue
+            action["topic"] = topic
+        out.append(action)
+    return out
+
 def generate_reflection(
     task: Dict[str, Any],
     llm_trace: Dict[str, Any],
@@ -271,43 +348,39 @@ def generate_reflection(
             max_tokens=16384,
         )
         raw_reflection_text = (resp_msg.get("content") or "").strip()
+        task_id_str = str(task.get("id", "") or "")
 
-        _backlog_marker = "BACKLOG_CANDIDATES_JSON:"
-        if _backlog_marker in raw_reflection_text:
-            body, marker_tail = raw_reflection_text.rsplit(_backlog_marker, 1)
-            reflection_text = body.rstrip()
-            payload = marker_tail.strip()
-            backlog_candidates: List[Dict[str, Any]] = []
-            if payload:
-                try:
-                    raw_candidates = json.loads(payload)
-                except Exception:
-                    log.warning("Reflection backlog candidates JSON parse failed", exc_info=True)
-                    raw_candidates = None
-                task_id_str = str(task.get("id", "") or "")
-                if isinstance(raw_candidates, list):
-                    for raw in raw_candidates[:3]:
-                        if not isinstance(raw, dict):
-                            continue
-                        summary = _truncate_with_notice(raw.get("summary", ""), 260).strip()
-                        category = _truncate_with_notice(raw.get("category", "process"), 80).strip() or "process"
-                        source = _truncate_with_notice(raw.get("source", "execution_reflection"), 80).strip() or "execution_reflection"
-                        evidence = _truncate_with_notice(raw.get("evidence", ""), 220).strip()
-                        if not summary or not evidence:
-                            continue
-                        backlog_candidates.append({
-                            "summary": summary,
-                            "category": category,
-                            "source": source,
-                            "evidence": evidence,
-                            "context": _truncate_with_notice(raw.get("context", ""), 400).strip(),
-                            "proposed_next_step": _truncate_with_notice(raw.get("proposed_next_step", ""), 260).strip(),
-                            "task_id": _truncate_with_notice(raw.get("task_id", task_id_str), 80).strip() or task_id_str,
-                            "requires_plan_review": bool(raw.get("requires_plan_review", True)),
-                        })
-        else:
-            reflection_text = raw_reflection_text.strip()
-            backlog_candidates = []
+        # Backlog is the last trailing line; peel it first, then memory actions.
+        body_after_backlog, raw_candidates = _extract_trailing_json(
+            raw_reflection_text, "BACKLOG_CANDIDATES_JSON:"
+        )
+        reflection_text, raw_memory_actions = _extract_trailing_json(
+            body_after_backlog, "MEMORY_ACTIONS_JSON:"
+        )
+        reflection_text = reflection_text.strip()
+
+        backlog_candidates: List[Dict[str, Any]] = []
+        if isinstance(raw_candidates, list):
+            for raw in raw_candidates[:3]:
+                if not isinstance(raw, dict):
+                    continue
+                summary = _truncate_with_notice(raw.get("summary", ""), 260).strip()
+                category = _truncate_with_notice(raw.get("category", "process"), 80).strip() or "process"
+                source = _truncate_with_notice(raw.get("source", "execution_reflection"), 80).strip() or "execution_reflection"
+                evidence = _truncate_with_notice(raw.get("evidence", ""), 220).strip()
+                if not summary or not evidence:
+                    continue
+                backlog_candidates.append({
+                    "summary": summary,
+                    "category": category,
+                    "source": source,
+                    "evidence": evidence,
+                    "context": _truncate_with_notice(raw.get("context", ""), 400).strip(),
+                    "proposed_next_step": _truncate_with_notice(raw.get("proposed_next_step", ""), 260).strip(),
+                    "task_id": _truncate_with_notice(raw.get("task_id", task_id_str), 80).strip() or task_id_str,
+                    "requires_plan_review": bool(raw.get("requires_plan_review", True)),
+                })
+        memory_actions = _validate_memory_actions(raw_memory_actions, task_id_str)
 
         # Reflection runs outside the tool-event loop; update budget directly.
         if refl_usage:
@@ -320,6 +393,7 @@ def generate_reflection(
         log.warning("Reflection LLM call failed: %s", e)
         reflection_text = f"(reflection generation failed: {e})"
         backlog_candidates = []
+        memory_actions = []
 
     return {
         "ts": utc_now_iso(),
@@ -333,7 +407,57 @@ def generate_reflection(
         "review_evidence": review_evidence or {},
         "reflection": reflection_text,
         "backlog_candidates": backlog_candidates,
+        "memory_actions": memory_actions,
     }
+
+
+def apply_memory_actions(env: Any, actions: List[Dict[str, Any]]) -> int:
+    """Apply experience-review memory actions to ``env.drive_root``.
+
+    Routes through the existing provenance-preserving memory/knowledge paths.
+    Identity is intentionally conservative: an ``identity_update_candidate`` is
+    recorded in the scratchpad for review, never auto-written to identity.md, so
+    autonomous learning cannot silently drift the personality. Returns the count
+    of actions applied.
+    """
+    applied = 0
+    for action in (actions or [])[:3]:
+        atype = str(action.get("type") or "")
+        content = str(action.get("content") or "").strip()
+        if not content:
+            continue
+        try:
+            if atype == "scratchpad_append":
+                from ouroboros.memory import Memory
+
+                Memory(env.drive_root, getattr(env, "repo_dir", None)).append_scratchpad_block(
+                    content,
+                    source="experience_review",
+                    metadata={"task_id": str(action.get("task_id") or "")},
+                )
+                applied += 1
+            elif atype == "knowledge_write":
+                topic = str(action.get("topic") or "").strip()
+                if not topic:
+                    continue
+                from ouroboros.tools.knowledge import _knowledge_write
+                from ouroboros.tools.registry import ToolContext
+
+                ctx = ToolContext(repo_dir=getattr(env, "repo_dir", env.drive_root), drive_root=env.drive_root)
+                _knowledge_write(ctx, topic, content, mode="append")
+                applied += 1
+            elif atype == "identity_update_candidate":
+                from ouroboros.memory import Memory
+
+                Memory(env.drive_root, getattr(env, "repo_dir", None)).append_scratchpad_block(
+                    "IDENTITY UPDATE CANDIDATE (review before applying to identity.md):\n" + content,
+                    source="experience_review_identity_candidate",
+                    metadata={"task_id": str(action.get("task_id") or "")},
+                )
+                applied += 1
+        except Exception:
+            log.debug("Failed to apply reflection memory action %s", atype, exc_info=True)
+    return applied
 
 
 def append_reflection(drive_root: pathlib.Path, entry: Dict[str, Any]) -> None:

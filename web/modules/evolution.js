@@ -152,6 +152,14 @@ export function initEvolution({ ws, state, mount }) {
             const progress = campaign.progress_notes || '';
             campaignDetail.textContent = [objective ? `Objective: ${objective}` : '', progress ? `Progress: ${progress}` : ''].filter(Boolean).join(' ');
         }
+        // Evolution is self-modification work, so it is hard-blocked in light mode.
+        const isLightMode = String(runtime.runtime_mode || '') === 'light';
+        if (startBtn) {
+            startBtn.disabled = isLightMode;
+            startBtn.title = isLightMode
+                ? "Evolution campaigns need runtime mode 'advanced' or 'pro' (currently 'light')."
+                : '';
+        }
     }
 
     function renderEmptyState(message) {

@@ -44,6 +44,21 @@ def test_architecture_mentions_shared_log_grouping_and_direct_provider_review_fa
     assert "transport failure" in arch
 
 
+def test_architecture_documents_skill_schedule_lifecycle_and_evolution_light_block():
+    arch = _read("docs/ARCHITECTURE.md")
+
+    # v6.9 RC2: skill schedule readiness SSOT, lifecycle resync, tombstone
+    # retention, DST contract, and the evolution light-mode hard block.
+    assert "resync_skill_schedules()" in arch
+    assert "skill_readiness_for_execution()" in arch
+    assert "DST-aware system" in arch
+    assert "hard-blocked in `light` runtime mode" in arch
+    # Experience Review memory write-back data flow is documented.
+    assert "MEMORY_ACTIONS_JSON" in arch
+    assert "apply_memory_actions" in arch
+    assert "never auto-written to `identity.md`" in arch
+
+
 def test_consciousness_prompt_matches_scope_limited_contracts():
     consciousness = _read("prompts/CONSCIOUSNESS.md")
 

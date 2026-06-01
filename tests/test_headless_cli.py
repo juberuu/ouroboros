@@ -119,6 +119,31 @@ def test_task_api_enqueue_workspace_creates_child_drive(tmp_path, monkeypatch):
     assert "target workspace, not the Ouroboros system repo" in captured[0]["text"]
 
 
+def test_api_tasks_create_rejects_internal_task_types(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    data = tmp_path / "data"
+    (data / "memory").mkdir(parents=True)
+
+    monkeypatch.setattr("supervisor.queue.enqueue_task", lambda task: task)
+    monkeypatch.setattr("supervisor.queue.persist_queue_snapshot", lambda reason="": None)
+    monkeypatch.setattr("ouroboros.gateway.tasks.bootstrap_process_path", lambda: [])
+
+    app = Starlette(routes=[Route("/api/tasks", endpoint=api_tasks_create, methods=["POST"])])
+    app.state.drive_root = data
+    app.state.repo_dir = repo
+    client = TestClient(app)
+
+    for internal_type in ("evolution", "review", "deep_self_review"):
+        resp = client.post("/api/tasks", json={"description": "x", "type": internal_type})
+        assert resp.status_code == 400, (internal_type, resp.text)
+        assert "internal" in resp.json().get("error", "").lower()
+
+    # A normal task type is still accepted.
+    ok = client.post("/api/tasks", json={"description": "do normal work", "type": "task"})
+    assert ok.status_code == 200, ok.text
+
+
 def test_compose_task_text_extends_existing_headless_workspace_block(tmp_path):
     text = _compose_task_text(
         "fix\n\n[HEADLESS_WORKSPACE]\nexisting: yes\n[END_HEADLESS_WORKSPACE]",
